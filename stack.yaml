@@ -1,0 +1,8 @@
+
+resolver: lts-19.0
+
+packages:
+- .
+
+extra-deps:
+  - portaudio-0.2.4@sha256:f16a1102187ecc3f08a7510eda5b3081a8a21f2c49d7b4ab5e3cfa8666a81d63,959
