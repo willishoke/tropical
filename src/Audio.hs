@@ -1,5 +1,7 @@
 module Audio where
 
+import Runtime
+
 import qualified Data.Vector as V
 
 import Foreign.C.Types
@@ -17,22 +19,15 @@ import Sound.PortAudio.Base
 import Sound.PortAudio
 
 
+{--
 -- audio processing example from Portaudio Haskell bindings at
 -- https://github.com/sw17ch/portaudio
 
-
-data Test = Test { a :: String, b :: String } deriving (Show, Eq, Ord)
 numSeconds :: Int
 numSeconds = 5
 
-sampRate :: Double
-sampRate = 44100
-
-framesPerBuffer :: Int
-framesPerBuffer = 600
-
-tableSize :: Int
-tableSize = 200
+tablesize :: int
+tablesize = 200
 
 data SineTable = SineTable { sine :: V.Vector Float }
 data Phases = Phases { leftPhase :: Int, rightPhase :: Int }
@@ -53,7 +48,6 @@ poker out (l, r) i = do
   let newR = let x = r + 3 in (if x >= tableSize then (x - tableSize) else x)
   return (newL, newR)
 
-{--
 paTestCallback :: MVar Phases -> StreamCallback CFloat CFloat
 paTestCallback mvar _ _ frames _ out = do
   phases <- readMVar mvar
@@ -65,14 +59,5 @@ paTestCallback mvar _ _ frames _ out = do
 
 --}
 
-compute :: Ptr Runtime -> MVar () -> IO ()
-compute p m = forever $ do
-  takeMVar m -- blocks until signal received from callback
-
-
-
-mainCallback :: Ptr CFloat -> MVar () -> StreamCallback CFloat CFloat
-mainCallback buffer mvar _ _ frames _ out = do
-  copyArray out buffer frames
-  putMVar mvar ()
-  pure Continue
+-- constants for audio engine
+-- TODO: make configurable at runtime

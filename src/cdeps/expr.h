@@ -7,17 +7,6 @@ class Expression
     public:
     virtual Signal eval() = 0;
     virtual ~Expression() {}
-    private:
-    //std::string id;
-};
-
-class Variable
-{
-    ~Variable() {}
-    private:
-    std::unique_ptr<Expression> expr;
-    int id;
-    Signal value;
 };
 
 class Literal : public Expression

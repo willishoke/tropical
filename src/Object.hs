@@ -2,17 +2,31 @@
 
 module Object where
 
-newtype Freq = Freq { freq :: Double }
-newtype FM = FM { fm :: Expression}
-data Object = VCO Freq FM | Expr Expression
+import Expression
+import Foreign.Ptr
+import Control.Lens
 
-newtype Name = Name { name :: String }
+newtype Freq = Freq { freq :: Double }
+    deriving (Show)
+
+newtype FM = FM { fm :: Expr }
+    deriving (Show)
+
+data Object 
+    = VCO Freq FM 
+    | Expression Expr
+    deriving (Show)
+
+newtype Name = Name { unName :: String } 
+    deriving (Eq, Ord, Show)
+
 data ObjPtr
 data Var = Var 
     { _name :: Name
     , _this :: Ptr ObjPtr
     , _obj :: Object
     }
+    deriving (Show)
 
 makeLenses ''Var
 

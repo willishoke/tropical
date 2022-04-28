@@ -1,9 +1,11 @@
-#include <vector>
+#include <set>
 #include <cstdint>
+
+#include "obj.h"
 
 class Runtime
 {
-private:
-    std::vector<Object> objects;
-    std::vector<Expression> exprs;
+    public:
+    std::set<std::unique_ptr<Object>> objects;
+    void compute() {};
 };

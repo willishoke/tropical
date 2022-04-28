@@ -5,20 +5,21 @@ import Object
 import Text.Parsec
 import Data.Foldable
 import Control.Monad
+import Foreign.Ptr
+import Control.Lens
+
 import qualified Data.Map as Map
 
+data Ref 
+  = ObjRef String String 
+  | VarRef String
+  deriving (Show)
+
+data ParseTree = Assign Ref Expr
+  deriving (Show)
+
+
 type Parser = Parsec String ()
-
-data ParseExpr 
-  = Product Concrete Concrete
-
-eval :: Expr -> Signal
-eval e = case e of
-  Negate x -> -(eval x)
-  Ref x -> undefined
-  Times x y -> eval x * eval y
-  Plus x y -> eval x + eval y
-  Literal x -> x
 
 line :: Parser Expr
 line = spaces >> (expr <* eof)
@@ -48,47 +49,41 @@ expr :: Parser Expr
 expr = chainl1 term $ symbol '+' >> pure Plus
 
 -- parse reference of the form "object.property"
-parseObjRef :: Parser ObjRef
-objRef = do
+parseObjRef :: Parser (String, String)
+parseObjRef = do
   -- don't consume trailing whitespace!
   s1 <- many1 letter
   _ <- char '.'
   s2 <- lexeme $ many1 letter
-  pure $ ObjRef s1 s2
+  pure $ (s1, s2)
 
 -- parse reference of the form "variable"
-parseVarRef :: Parser VarRef
-varRef = do
-  i <- lexeme $ many1 letter
-  pure $ VarRef i
+parseVarRef :: Parser String
+parseVarRef = lexeme $ many1 letter
 
-parseRef :: Parser 
+assign :: Parser Var
+assign = do
+  v <- lexeme $ many1 letter
+  _ <- lexeme $ char '='
+  e <- lexeme expr <* eof
+  pure $ Var
+    { _name = Name v
+    , _this = nullPtr
+    , _obj = Expression e
+    }
 
-parseStmt :: Parser Stmt
-stmt = do
-  i <- 
-  _ <- symbol '='
-  e <- expr
-  pure $ Assign i e
-
-parseVCO :: Parser Variable
+parseVCO :: Parser Var
 parseVCO = do
-  _ <- string "vco"
+  _ <- try $ string "vco"
   _ <- space >> spaces
   varName <- (lexeme $ many1 letter) <* eof
   pure $ Var 
-    { name = varName
-    , ptr = nullPtr
-    , obj = VCO 
-      { freq = Literal 1.0
-      , fm = Literal 1.0 
-      }
+    { _name = Name varName
+    , _this = nullPtr
+    , _obj = VCO (Freq 1.0) (FM $ Literal 1.0)
     } 
 
 
-parseObj :: Parser Object
-parseObj = do
-  objType <- lexeme $ many1 letter
-  varName <- lexeme $ many1 letter
-  case objType of
-    "vco" -> pure $ VCO { freq = 1.0, fm = 1.0 }
+parseVar :: Parser Var
+parseVar = do
+  parseVCO

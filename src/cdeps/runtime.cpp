@@ -1,12 +1,34 @@
-#include <vector>
 #include "runtime.h"
-#include "expr.h"
-#include "obj.h"
 
 extern "C"
 {
-    void compute (Runtime* r)
+    void computeC(Runtime* r)
     {
-        
+       r->compute();
+    }
+}
+
+
+extern "C"
+{
+    Runtime* initRuntime()
+    {
+        return new Runtime(); 
+    }
+}
+
+extern "C"
+{
+    void deleteRuntime(Runtime* r)
+    {
+        delete r; 
+    }
+}
+
+extern "C"
+{
+    void addObject(Runtime* r, Object* obj)
+    {
+        r->objects.insert(std::unique_ptr<Object>(obj));
     }
 }

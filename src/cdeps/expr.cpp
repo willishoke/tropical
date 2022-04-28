@@ -4,37 +4,10 @@
 #include <iostream>
 #include <thread>
 #include <chrono>
-#include <semaphore>
-
-std::binary_semaphore
-	smphSignalMainToThread{0},
-	smphSignalThreadToMain{0};
- 
-void ThreadProc()
-{	
-	// wait for a signal from the main proc
-	// by attempting to decrement the semaphore
-	smphSignalMainToThread.acquire();
- 
-	// this call blocks until the semaphore's count
-	// is increased from the main proc
- 
-	std::cout << "[thread] Got the signal\n"; // response message
- 
-	// wait for 3 seconds to imitate some work
-	// being done by the thread
-	using namespace std::literals;
-	std::this_thread::sleep_for(3s);
- 
-	std::cout << "[thread] Send the signal\n"; // message
- 
-	// signal the main proc back
-	smphSignalThreadToMain.release();
-}
 
 extern "C" 
 {
-  Signal eval(Expression *expr)
+  Signal eval(Expression* expr)
   {
     return expr->eval();
   }
@@ -42,7 +15,7 @@ extern "C"
 
 extern "C" 
 {
-  Expression *makeLiteral(Signal s)
+  Expression* makeLiteral(Signal s)
   {
     return new Literal(s);
   }

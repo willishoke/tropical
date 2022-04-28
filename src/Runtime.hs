@@ -1,17 +1,29 @@
 module Runtime where
 
 import Foreign.C.Types
+import Foreign.ForeignPtr
+import Foreign.Marshal.Alloc
+import Foreign.Marshal.Array
 import Foreign.Ptr
+import Foreign.Storable
 
-import qualified Expression as Expr
+import Control.Concurrent
+import Control.Concurrent.MVar
+import Control.Monad
+
+import Sound.PortAudio
+import Sound.PortAudio.Base
+
+import Expression
 import Object
 
 import qualified Data.Set as Set
+import qualified Data.Vector as V
 
 data Buffer
 
 data Runtime = Runtime
-    { env :: Set Variable
+    { env :: Set.Set Var
     , output :: Ptr Buffer
     }
     deriving (Show)
@@ -34,9 +46,9 @@ foreign import ccall safe "eval" evalc
     :: Ptr CExpr -> IO Signal
 
 data CRuntime
-foreign import ccall unsafe "compute" computeC 
-    :: Ptr CRuntime -> IO ()
 
+foreign import ccall unsafe "computeC" computeC 
+    :: Ptr CRuntime -> IO ()
 {--
 
 setting assignments
@@ -62,3 +74,48 @@ update
     generate runtime representation, capture pointer
     update Haskell runtime
 --}
+
+type Env = Set.Set Var
+
+generateAST :: Env -> Expr -> IO (Ptr CExpr)
+generateAST env expr = case expr of
+    Literal s -> makeLiteral s
+    VarRef v -> makeExternal undefined
+    Negate expr -> do
+        x <- generateAST env expr
+        makeNegate x
+    Times e1 e2 -> do
+        x <- generateAST env e1
+        y <- generateAST env e2
+        makeTimes x y
+    Plus e1 e2 -> do
+        x <- generateAST env e1
+        y <- generateAST env e2
+        makePlus x y
+
+sampleAST :: Expr
+sampleAST = Times (Plus (Literal 3) (Literal 2)) (Literal 2)
+
+
+sampRate :: Double
+sampRate = 44100
+
+framesPerBuffer :: Int
+framesPerBuffer = 600
+
+
+-- blocks until signal received from callback
+compute :: Ptr CRuntime -> MVar () -> IO ()
+compute runtime readyFlag = forever $ do
+  computeC runtime
+  takeMVar readyFlag
+
+
+-- thin wrapper over memcpy
+-- signals to compute function when complete
+mainCallback :: Ptr CFloat -> MVar () -> StreamCallback CFloat CFloat
+mainCallback buffer mvar _ _ frames _ out = do
+  let n = fromIntegral frames
+  copyArray out buffer n
+  putMVar mvar ()
+  pure Continue
