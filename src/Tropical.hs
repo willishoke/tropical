@@ -6,59 +6,96 @@ import Expression
 import Object
 import Parser
 import Runtime
+import Audio
+import Interface
 
 import Text.Parsec
+
 import System.Console.Haskeline
+
 import Control.Concurrent
-import Control.Monad
 import Control.Monad.Trans
 import Control.Monad.State
+import Control.Lens
 
 import Foreign.Ptr
 
+import Sound.PortAudio
+
 import qualified Data.Set as Set
 
-import Sound.PortAudio.Base
-import Sound.PortAudio
 
 -- T R O P I C A L
 -- A live coding environment for audio synthesis
 
 main = do
   readyFlag <- newEmptyMVar 
-
-  let callback = Just $ mainCallback nullPtr readyFlag
+  rt <- initRuntime $ fromIntegral framesPerBuffer
+  bufferAddress <- getBufferAddress rt
+  forkIO $ compute rt readyFlag
+  let callback = Just $ mainCallback bufferAddress readyFlag
       fincallback = Just $ putStrLn "stream closed"
       inputLoop = runInputT defaultSettings loop
-
+      hRuntime = Runtime 
+        { _env = Set.empty
+        , _runtime = rt
+        }
   initialize -- initialize portaudio runtime 
   res <- openDefaultStream 0 2 sampRate (Just framesPerBuffer) callback fincallback
   case res of
     Left err -> print err
     Right strm -> do
       startStream strm
-      runStateT inputLoop Set.empty
+      runStateT inputLoop hRuntime
       stopStream strm
       closeStream strm
-      terminate
       return ()
+  terminate
+  deleteRuntime rt
+  return ()
 
 processLine
   :: String
-  -> InputT (StateT Env IO) ()
+  -> InputT (StateT Runtime IO) ()
 processLine input = 
   let x = parse line "" input 
   in case x of
     Right a -> do
       -- here is where type checking should happen
-      env <- lift get
-      crepr <- liftIO $ generateAST env a
-      --put $ Set.insert a env
+      currentRT <- lift get
+      crepr <- liftIO $ generateAST (currentRT^.env) a
+      let v = Var 
+                { _name = Name ""
+                , _this = castPtr crepr
+                , _obj = Expression a
+                }
+      lift $ put $ over env (Set.insert v) currentRT 
       evaluated <- liftIO $ evalc crepr
       outputStrLn $ show evaluated
     Left b -> outputStrLn $ show b
 
-loop :: InputT (StateT Env IO) ()
+handleInput
+  :: String
+  -> InputT (StateT Runtime IO) ()
+handleInput input = do 
+  let p = parse line "" input
+  either handleError buildAST p
+  where handleError = outputStrLn . show
+      
+buildAST = \parseResult -> do    
+  -- here is where type checking should happen
+  currentRT <- lift get
+  crepr <- liftIO $ generateAST (currentRT^.env) parseResult
+  let v = Var 
+            { _name = Name ""
+            , _this = castPtr crepr
+            , _obj = Expression parseResult
+            }
+  lift $ put $ over env (Set.insert v) currentRT 
+  evaluated <- liftIO $ evalc crepr
+  outputStrLn $ show evaluated
+
+loop :: InputT (StateT Runtime IO) ()
 loop = do
   minput <- getInputLine "🌴 "
   case minput of

@@ -1,6 +1,7 @@
 module Audio where
 
 import Runtime
+import Interface
 
 import qualified Data.Vector as V
 
@@ -61,3 +62,24 @@ paTestCallback mvar _ _ frames _ out = do
 
 -- constants for audio engine
 -- TODO: make configurable at runtime
+
+sampRate :: Double
+sampRate = 44100
+
+framesPerBuffer :: Int
+framesPerBuffer = 600
+
+-- blocks until signal received from callback
+compute :: Ptr CRuntime -> MVar () -> IO ()
+compute runtime readyFlag = forever $ do
+  computeC runtime
+  takeMVar readyFlag
+
+-- thin wrapper over memcpy
+-- signals to compute thread when complete
+mainCallback :: Ptr CFloat -> MVar () -> StreamCallback CFloat CFloat
+mainCallback buffer mvar _ _ frames _ out = do
+  let n = fromIntegral frames
+  copyArray out buffer n
+  putMVar mvar ()
+  pure Continue

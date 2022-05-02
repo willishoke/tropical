@@ -8,16 +8,55 @@ import Control.Monad
 import Foreign.Ptr
 import Control.Lens
 
-import qualified Data.Map as Map
+--import qualified Data.Map as Map
 
-data Ref 
-  = ObjRef String String 
-  | VarRef String
+data Command
+  = Listen 
+  | Assignment
   deriving (Show)
 
-data ParseTree = Assign Ref Expr
+parseRef :: Parser Ref
+parseRef = do
+  s1 <- many1 letter
+  x <- optionMaybe $ char '.' >> many1 letter
+  _ <- spaces *> (lexeme $ char '=')
+  pure $ case x of
+    Nothing -> VarID s1
+    Just s2 -> ModuleField s1 s2
+
+
+-- Assign represents any statement containing '='
+-- May not be well-formed and requires verification
+-- Examples of well-formed statements:
+-- z = 3 + y
+-- x.input = 10
+-- x = new vco
+data Assign 
+  = Assign Ref Object
   deriving (Show)
 
+
+parseAssign :: Parser Assign
+parseAssign = do
+  lhs <- parseRef
+  --m <- parseAssignModule lhs | Expression expr)
+  undefined
+
+parseAssignModule :: Ref -> Parser Assign
+parseAssignModule lhs = do
+  _ <- lexeme1 $ string "new"
+  m <- parseModule
+  pure $ Assign lhs $ Module m
+
+parseModule :: Parser Module
+parseModule = choice
+  [ parseVCO
+  ] 
+
+parseVCO :: Parser Module
+parseVCO = do
+  _ <- try $ lexeme1 $ string "vco"
+  pure $ VCO (Freq 1.0) (FM $ Literal 0.0)
 
 type Parser = Parsec String ()
 
@@ -28,11 +67,12 @@ num :: Parser Expr
 num = (Literal . read) <$> lexeme (many1 digit)
 
 unOp :: Parser (Expr -> Expr)
-unOp = (symbol '-' >> pure Negate)
+unOp = (symbol "-" >> pure Negate)
 
 lexeme = flip (<*) spaces
-symbol = lexeme . char
-parens = between (symbol '(') (symbol ')')
+lexeme1 = flip (<*) (space >> spaces)
+symbol = lexeme . string
+parens = between (symbol "(") (symbol ")")
 
 -- apply 0 to n unary operator constructors to expression 
 factor :: Parser Expr
@@ -43,47 +83,7 @@ factor = do
 
 -- parse 1 to n terms on lhs of '*'
 term :: Parser Expr
-term = chainl1 factor $ symbol '*' >> pure Times
+term = chainl1 factor $ symbol "*" >> pure Times
 
 expr :: Parser Expr
-expr = chainl1 term $ symbol '+' >> pure Plus
-
--- parse reference of the form "object.property"
-parseObjRef :: Parser (String, String)
-parseObjRef = do
-  -- don't consume trailing whitespace!
-  s1 <- many1 letter
-  _ <- char '.'
-  s2 <- lexeme $ many1 letter
-  pure $ (s1, s2)
-
--- parse reference of the form "variable"
-parseVarRef :: Parser String
-parseVarRef = lexeme $ many1 letter
-
-assign :: Parser Var
-assign = do
-  v <- lexeme $ many1 letter
-  _ <- lexeme $ char '='
-  e <- lexeme expr <* eof
-  pure $ Var
-    { _name = Name v
-    , _this = nullPtr
-    , _obj = Expression e
-    }
-
-parseVCO :: Parser Var
-parseVCO = do
-  _ <- try $ string "vco"
-  _ <- space >> spaces
-  varName <- (lexeme $ many1 letter) <* eof
-  pure $ Var 
-    { _name = Name varName
-    , _this = nullPtr
-    , _obj = VCO (Freq 1.0) (FM $ Literal 1.0)
-    } 
-
-
-parseVar :: Parser Var
-parseVar = do
-  parseVCO
+expr = chainl1 term $ symbol "+" >> pure Plus
