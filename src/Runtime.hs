@@ -1,35 +1,62 @@
 {-# LANGUAGE TemplateHaskell #-}
 
+-- This module is responsible for running the parser
+-- and analyzer and updating the runtime environment.
+
 module Runtime where
 
-import Foreign.C.Types
-import Foreign.ForeignPtr
-import Foreign.Marshal.Alloc
-import Foreign.Marshal.Array
-import Foreign.Ptr
-import Foreign.Storable
+-- Library imports
 
 import Control.Concurrent
 import Control.Concurrent.MVar
-import Control.Monad
 import Control.Lens
+import Control.Monad
+import Control.Monad.Trans
+import Control.Monad.State
+
+import qualified Data.Set as Set
+
+import Foreign.C.Types
+import Foreign.ForeignPtr
+import Foreign.Ptr
 
 import Sound.PortAudio
 import Sound.PortAudio.Base
 
-import Expression
+import System.Console.Haskeline
+
+-- Internal imports
+
+import Interface
 import Object
-import Interface 
+import Parser
 
-import Foreign.C.Types
-import Foreign.Storable
-import Foreign.ForeignPtr
-import Foreign.Marshal.Alloc
-import Foreign.Ptr
-import Foreign.Marshal.Array
+data StaticError 
+  = TypeError String
+  | Undeclared String
 
-import qualified Data.Set as Set
-import qualified Data.Vector as V
+data CompileExpr
+
+type Env = Set.Set Var
+
+resolve
+  :: Env
+  -> ParseExpr
+  -> Either StaticError CompileExpr
+resolve expr = undefined
+ 
+-- for now this is a stub (everything typechecks)
+typeCheck
+  :: CompileExpr
+  -> Either StaticError CompileExpr
+typeCheck = Right
+
+
+validateExpr
+  :: Env
+  -> ParseExpr
+  -> Either StaticError CompileExpr
+validateExpr env = resolve env >=> typeCheck
 
 data Buffer
 
@@ -67,23 +94,44 @@ update
     update Haskell runtime
 --}
 
-type Env = Set.Set Var
-
-generateAST :: Env -> Expr -> IO (Ptr CExpr)
-generateAST env expr = case expr of
+handleParse 
+  :: ParseResult 
+  -> InputT (StateT Runtime IO) ()
+handleParse (Show x) =
+  outputStrLn $ show x
+handleParse (Listen x) = undefined
+handleParse (Assign x) = undefined
+ {--
+  -- here is where type checking should happen
+  currentRT <- lift get
+  crepr <- liftIO $ generateCRepr (currentRT^.env) result 
+  let v = Var 
+            { _name = Name ""
+            , _this = castPtr crepr
+            , _obj = Expression result 
+            }
+  lift $ put $ over env (Set.insert v) currentRT 
+  evaluated <- liftIO $ evalc crepr
+  outputStrLn $ show evaluated
+--}
+generateCRepr :: Env -> Expr -> IO (Ptr CExpr)
+generateCRepr = undefined
+{--
+generateCRepr env expr = case expr of
   Literal s -> makeLiteral s
   Ref r -> makeExternal undefined
   Negate expr -> do
-    x <- generateAST env expr
+    x <- generateCRepr env expr
     makeNegate x
   Times e1 e2 -> do
-    x <- generateAST env e1
-    y <- generateAST env e2
+    x <- generateCRepr env e1
+    y <- generateCRepr env e2
     makeTimes x y
   Plus e1 e2 -> do
-    x <- generateAST env e1
-    y <- generateAST env e2
+    x <- generateCRepr env e1
+    y <- generateCRepr env e2
     makePlus x y
 
 sampleAST :: Expr
 sampleAST = Times (Plus (Literal 3) (Literal 2)) (Literal 2)
+--}

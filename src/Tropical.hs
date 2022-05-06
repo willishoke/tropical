@@ -2,7 +2,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
  
-import Expression
 import Object
 import Parser
 import Runtime
@@ -54,11 +53,12 @@ main = do
   deleteRuntime rt
   return ()
 
+{--
 processLine
   :: String
   -> InputT (StateT Runtime IO) ()
 processLine input = 
-  let x = parse line "" input 
+  let x = parse parseAny "" input 
   in case x of
     Right a -> do
       -- here is where type checking should happen
@@ -73,27 +73,15 @@ processLine input =
       evaluated <- liftIO $ evalc crepr
       outputStrLn $ show evaluated
     Left b -> outputStrLn $ show b
-
+--} 
 handleInput
   :: String
   -> InputT (StateT Runtime IO) ()
 handleInput input = do 
-  let p = parse line "" input
-  either handleError buildAST p
+  let p = parse undefined "" input
+  either handleError handleParse p
   where handleError = outputStrLn . show
-      
-buildAST = \parseResult -> do    
-  -- here is where type checking should happen
-  currentRT <- lift get
-  crepr <- liftIO $ generateAST (currentRT^.env) parseResult
-  let v = Var 
-            { _name = Name ""
-            , _this = castPtr crepr
-            , _obj = Expression parseResult
-            }
-  lift $ put $ over env (Set.insert v) currentRT 
-  evaluated <- liftIO $ evalc crepr
-  outputStrLn $ show evaluated
+
 
 loop :: InputT (StateT Runtime IO) ()
 loop = do
@@ -101,7 +89,7 @@ loop = do
   case minput of
     Nothing -> return ()
     Just "quit" -> return ()
-    Just input -> do processLine input
+    Just input -> do handleInput input
                      loop
 
 

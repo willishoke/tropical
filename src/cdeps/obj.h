@@ -1,7 +1,12 @@
+#pragma once
+
 #include <vector>
 
 #include "expr.h"
 
+// Would be nice to make this a template class
+// parameterized by inputs + outputs, but this
+// breaks dynamic binding
 class Object
 {
   public:
@@ -9,61 +14,44 @@ class Object
   Object() {}
   virtual ~Object() {}
   virtual void process() = 0;
-};
+  virtual void update() = 0;
 
-using Signal = double;
+  protected:
+
+  std::vector<double> inputs;
+  std::vector<double> outputs;
+};
 
 class VCO : public Object
 {
   public:
 
-  VCO(Signal f);
-  VCO(Signal f, Signal p);
+  VCO(double f, double p);
+
   void process() override;
+  void update() override;
+
+  enum Inputs 
+  {
+    BASE_FREQ, 
+    BASE_PHASE, 
+    FM, 
+    PM
+  };
+
+  enum Outputs
+  {
+    SIN,
+    SQR,
+    SAW,
+    TRI
+  };
 
   std::unique_ptr<Expression> fm, pm;
-  Signal base_freq, base_phase;
-  Signal sin, sqr, saw, tri;
+  double base_freq, base_phase;
+  double sin, sqr, saw, tri;
 };
 
-// Intended to be used as a singleton type,
-// instantiated once at runtime
-class Output : public Object
-{
-  public:
-  Output(unsigned int bufferSize)
-    : signal(std::make_unique<Literal>(0.0)),
-      buffer(bufferSize),
-      bufferSize(bufferSize),
-      bufferPosition(0)
-  {}
-
-  ~Output() {}
-
-  void process() override 
-  {
-    // internal representation uses double for improved precision,
-    // but output buffer expects float
-    float x = static_cast<float>(signal->eval());
-    // interleaved output
-    buffer[bufferPosition++] = x;
-    buffer[bufferPosition++] = x;
-    bufferPosition %= bufferSize;
-  }
-
-  float* getBufferAddress()
-  {
-    return buffer.data();
-  }
-
-  private:
-
-  // TODO: support for 1..n channels
-  std::unique_ptr<Expression> signal;
-  std::vector<float> buffer;
-  unsigned int bufferSize;
-  unsigned int bufferPosition;
-};
 
 // "everything is an object"
 // only top-level expression needs to store value
@@ -76,15 +64,12 @@ public:
   }
 
   ~Variable() {}
-  void process() override
-  {
-    value = expr->eval();
-  }
 
-  Signal value;
+  void process() override;
+  void update() override;
+
+  double value;
 
 private:
-  // indicates whether or not
-  bool listen;
   std::unique_ptr<Expression> expr;
 };

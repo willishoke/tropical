@@ -11,9 +11,7 @@ category:            Language
 build-type:          Simple
 
 executable tropical
-  other-modules:    Analyzer,
-                    Audio,
-                    Expression, 
+  other-modules:    Audio,
                     Interface,
                     Object,
                     Parser,
@@ -27,16 +25,13 @@ executable tropical
   cxx-sources:      src/cdeps/expr.cpp
                     src/cdeps/obj.cpp
                     src/cdeps/runtime.cpp
+                    src/cdeps/export.cpp
   cxx-options:      -std=c++20 -O3
   build-depends:    base >= 4.7,
-                    algebraic-graphs,
-                    mtl,
                     containers,
-                    vector,
                     parsec,
-                    text,
                     lens,
                     portaudio,
                     haskeline,
                     unordered-containers >= 0.2,
-                    transformers >= 0.5 && < 0.7
+                    mtl

@@ -3,8 +3,6 @@ module Audio where
 import Runtime
 import Interface
 
-import qualified Data.Vector as V
-
 import Foreign.C.Types
 import Foreign.Storable
 import Foreign.ForeignPtr
@@ -72,7 +70,7 @@ framesPerBuffer = 600
 -- blocks until signal received from callback
 compute :: Ptr CRuntime -> MVar () -> IO ()
 compute runtime readyFlag = forever $ do
-  computeC runtime
+  computeRuntime runtime
   takeMVar readyFlag
 
 -- thin wrapper over memcpy

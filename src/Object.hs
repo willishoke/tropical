@@ -2,7 +2,6 @@
 
 module Object where
 
-import Expression
 import Foreign.Ptr
 import Control.Lens
 
@@ -14,6 +13,9 @@ newtype FM = FM { fm :: Expr }
 
 data Module
   = VCO Freq FM 
+  deriving (Show)
+
+data Expr = Expr
   deriving (Show)
 
 data Object 

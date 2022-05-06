@@ -1,10 +1,15 @@
-module Interface where
-
 -- This module is responsible for providing an interface
 -- between the Haskell runtime and the C++ runtime
+-- All foreign imports live here.
+
+module Interface where
+
+-- Library imports
 
 import Foreign.C.Types
 import Foreign.Ptr
+
+-- Internal imports
 
 import Object
 
@@ -34,6 +39,9 @@ foreign import ccall safe "eval" evalc
   :: Ptr CExpr -> IO CDouble
 
 
+foreign import ccall safe "makeVCO" makeVCO
+  :: CDouble -> CDouble -> IO (Ptr CObject)
+
 -- Functions for interfacing with C++ runtime
 
 foreign import ccall unsafe "initRuntime" initRuntime
@@ -42,7 +50,7 @@ foreign import ccall unsafe "initRuntime" initRuntime
 foreign import ccall unsafe "deleteRuntime" deleteRuntime
   :: Ptr CRuntime -> IO ()
 
-foreign import ccall unsafe "computeC" computeC 
+foreign import ccall unsafe "computeC" computeRuntime
   :: Ptr CRuntime -> IO ()
 
 foreign import ccall unsafe "addObject" addObject 
@@ -50,3 +58,6 @@ foreign import ccall unsafe "addObject" addObject
 
 foreign import ccall unsafe "getBufferAddress" getBufferAddress 
   :: Ptr CRuntime -> IO (Ptr CFloat)
+
+foreign import ccall unsafe "listen" listen 
+  :: Ptr CExpr -> IO ()
