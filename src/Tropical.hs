@@ -2,7 +2,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
  
-import Object
 import Parser
 import Runtime
 import Audio
@@ -21,7 +20,7 @@ import Foreign.Ptr
 
 import Sound.PortAudio
 
-import qualified Data.Set as Set
+import qualified Data.Map as Map
 
 
 -- T R O P I C A L
@@ -29,15 +28,15 @@ import qualified Data.Set as Set
 
 main = do
   readyFlag <- newEmptyMVar 
-  rt <- initRuntime $ fromIntegral framesPerBuffer
-  bufferAddress <- getBufferAddress rt
-  forkIO $ compute rt readyFlag
+  rtPtr <- initRuntime $ fromIntegral framesPerBuffer
+  bufferAddress <- getBufferAddress rtPtr
+  forkIO $ compute rtPtr readyFlag
   let callback = Just $ mainCallback bufferAddress readyFlag
       fincallback = Just $ putStrLn "stream closed"
       inputLoop = runInputT defaultSettings loop
-      hRuntime = Runtime 
-        { _env = Set.empty
-        , _runtime = rt
+      rt = Runtime 
+        { _env = Env Map.empty
+        , _runtime = rtPtr
         }
   initialize -- initialize portaudio runtime 
   res <- openDefaultStream 0 2 sampRate (Just framesPerBuffer) callback fincallback
@@ -45,12 +44,12 @@ main = do
     Left err -> print err
     Right strm -> do
       startStream strm
-      runStateT inputLoop hRuntime
+      runStateT inputLoop rt 
       stopStream strm
       closeStream strm
       return ()
   terminate
-  deleteRuntime rt
+  deleteRuntime rtPtr
   return ()
 
 {--

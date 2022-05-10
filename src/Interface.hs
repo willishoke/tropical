@@ -9,10 +9,10 @@ module Interface where
 import Foreign.C.Types
 import Foreign.Ptr
 
--- Internal imports
 
-import Object
-
+data CExpr
+data CModule
+data CObject
 data CRuntime
 
 -- Functions for building syntax tree representations in C++
@@ -34,10 +34,8 @@ foreign import ccall safe "makeLiteral" makeLiteral
 
 -- Only used for testing, normally a CExpr should
 -- be evaluated by the C++ runtime
-
 foreign import ccall safe "eval" evalc 
   :: Ptr CExpr -> IO CDouble
-
 
 foreign import ccall safe "makeVCO" makeVCO
   :: CDouble -> CDouble -> IO (Ptr CObject)

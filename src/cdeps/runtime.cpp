@@ -46,11 +46,6 @@ void Runtime::compute()
   }
 }
 
-
-
-
-
-
 void Runtime::listen(Expression* out)
 {
   output = std::unique_ptr<Expression>(out);

@@ -13,7 +13,6 @@ build-type:          Simple
 executable tropical
   other-modules:    Audio,
                     Interface,
-                    Object,
                     Parser,
                     Runtime 
   hs-source-dirs:   src
@@ -34,4 +33,5 @@ executable tropical
                     portaudio,
                     haskeline,
                     unordered-containers >= 0.2,
-                    mtl
+                    mtl,
+                    syb

@@ -1,4 +1,7 @@
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 
 -- This module is responsible for running the parser
 -- and analyzer and updating the runtime environment.
@@ -14,7 +17,10 @@ import Control.Monad
 import Control.Monad.Trans
 import Control.Monad.State
 
-import qualified Data.Set as Set
+--import Data.Data hiding (DataType)
+--import Data.Generics.Schemes
+import qualified Data.Map as Map
+import Data.Typeable
 
 import Foreign.C.Types
 import Foreign.ForeignPtr
@@ -28,43 +34,176 @@ import System.Console.Haskeline
 -- Internal imports
 
 import Interface
-import Object
-import Parser
+import qualified Parser as P
+--import Parser
+
+
+data Literal a where 
+  BoolLit :: Bool -> Literal BoolType 
+
+instance (Show a) => Show (Literal a) where
+  show (BoolLit x) = show x
+
+
+data BinOp a where
+  Plus 
+    :: (DataType a, Additive a)
+    => Expr a
+    -> Expr a 
+    -> BinOp a
+  Times
+    :: (DataType a, Multiplicative a)
+    => Expr a
+    -> Expr a 
+    -> BinOp a
+
+data Expr a where
+  Lit
+    :: (DataType a) 
+    => Literal a 
+    -> Expr a
+
+  Ref
+    :: (DataType a) 
+    => Name
+    -> Ptr a
+    -> Expr a
+
+class Additive a
+class Multiplicative a
+class DataType a
+
+-- Types of valid Tropical expressions
+
+data RealType = RealType
+  deriving (Show)
+instance DataType RealType
+instance Additive RealType
+instance Multiplicative RealType
+
+data IntType = IntType
+  deriving (Show)
+instance DataType IntType
+instance Additive IntType
+instance Multiplicative IntType
+
+data BoolType = BoolType
+  deriving (Show)
+instance DataType BoolType
+
+-- Types for interfacing with C code
+
+data CRealLiteral = CRealLiteral
+instance DataType CRealLiteral
+
+data CIntLiteral = CIntLiteral
+instance DataType CIntLiteral
+
+data CBoolLiteral = CBoolLiteral
+instance DataType CBoolLiteral
+
+class Direction a
+data Input = Input
+instance Direction Input
+data Output = Output
+instance Direction Output
+
+data Object where 
+  Module 
+    :: Module 
+    -> Ptr CModule 
+    -> Object
+  Expression 
+    :: Expr a 
+    -> Ptr a
+    -> Object
+  --deriving (Show)
+
+-- Port has a type and belongs to an object
+-- Can be input or output
+data Port a b where
+  Port
+    :: (DataType a, Direction b)
+    => Name
+    -> (Ptr a) 
+    -> Port a b
+  --deriving (Show)
+
+data VCO =
+  VCO
+    { baseFreq :: Expr RealType
+    , fm :: Expr RealType
+    , basePhase :: Expr RealType
+    , pm :: Expr RealType
+    }
+  --deriving (Show)
+
+data Module
+  = VCOModule VCO
+  --deriving (Show)
+
 
 data StaticError 
   = TypeError String
   | Undeclared String
+  | Invalid String
 
-data CompileExpr
+instance Show StaticError where
+  show (TypeError s) = "Type error: " <> s
+  show (Undeclared s) = "Undeclared variable: " <> s
+  show (Invalid s) = "Invalid field: " <> s
 
-type Env = Set.Set Var
 
-resolve
-  :: Env
-  -> ParseExpr
-  -> Either StaticError CompileExpr
-resolve expr = undefined
- 
+newtype Name = Name { unName :: String } 
+  deriving (Eq, Ord, Show)
+
+newtype Env = Env { _objects :: Map.Map Name Object }
+
+makeLenses ''Env
+getPort = undefined
+
+resolveRef
+  :: DataType a
+  => Env
+  -> P.Ref 
+  -> Either StaticError (Expr a)
+resolveRef env ref = case ref of
+  P.VarID name ->
+    case Map.lookup (Name name) (env^.objects) of
+      Nothing -> Left $ Undeclared name
+      Just obj -> case obj of
+        Module m p -> undefined
+        Expression e p -> undefined
+  P.Port name field ->
+    case Map.lookup (Name name) (env^.objects) of
+      Nothing -> Left $ Undeclared name
+      Just obj -> case getPort obj of
+        Nothing -> Left $ Invalid name
+        Just field -> undefined
+
 -- for now this is a stub (everything typechecks)
 typeCheck
-  :: CompileExpr
-  -> Either StaticError CompileExpr
-typeCheck = Right
+  :: DataType a
+  => P.ParseExpr
+  -> Either StaticError (Expr a)
+typeCheck = undefined
 
 
 validateExpr
-  :: Env
-  -> ParseExpr
-  -> Either StaticError CompileExpr
-validateExpr env = resolve env >=> typeCheck
+  :: DataType a
+  => Env
+  -> P.ParseExpr
+  -> Either StaticError (Expr a)
+--validateExpr env = resolve env >=> typeCheck
+validateExpr = undefined 
 
 data Buffer
 
 data Runtime = Runtime
-  { _env :: Set.Set Var
+  { _env :: Env
   , _runtime :: Ptr CRuntime
   }
-  deriving (Show)
+  --deriving (Show)
 
 makeLenses ''Runtime
 
@@ -95,12 +234,12 @@ update
 --}
 
 handleParse 
-  :: ParseResult 
+  :: P.ParseResult 
   -> InputT (StateT Runtime IO) ()
-handleParse (Show x) =
-  outputStrLn $ show x
-handleParse (Listen x) = undefined
-handleParse (Assign x) = undefined
+handleParse (P.Show x) = outputStrLn $ show x
+handleParse (P.Listen x) = undefined
+handleParse (P.Assign ref expr) = undefined
+handleParse (P.Create ref obj) = undefined
  {--
   -- here is where type checking should happen
   currentRT <- lift get
@@ -114,7 +253,7 @@ handleParse (Assign x) = undefined
   evaluated <- liftIO $ evalc crepr
   outputStrLn $ show evaluated
 --}
-generateCRepr :: Env -> Expr -> IO (Ptr CExpr)
+generateCRepr :: Env -> Expr a -> IO (Ptr CExpr)
 generateCRepr = undefined
 {--
 generateCRepr env expr = case expr of
