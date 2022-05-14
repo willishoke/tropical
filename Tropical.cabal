@@ -34,4 +34,5 @@ executable tropical
                     haskeline,
                     unordered-containers >= 0.2,
                     mtl,
-                    syb
+                    syb,
+                    extra >= 1.7 && < 1.8

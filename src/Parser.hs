@@ -38,7 +38,7 @@ symbol = lexeme . string
 parens = between (symbol "(") (symbol ")")
 
 data Ref
-  = VarID String
+  = Var String
   | Port String String
   deriving (Show) 
 
@@ -50,7 +50,7 @@ data ParseModule
   deriving (Show)
 
 data ParseExpr
-  = ParseDouble Double
+  = ParseReal Double
   | ParseInt Int
   | ParseBool Bool
   | ParseRef Ref
@@ -60,7 +60,8 @@ data ParseExpr
   deriving (Show)
 
 data ParseResult
-  = Show ParseExpr
+  = Show Ref
+  | Eval ParseExpr
   | Listen ParseExpr
   | Assign Ref ParseExpr 
   | Create Ref ParseObject
@@ -82,15 +83,8 @@ ref = do
   x <- optionMaybe $ char '.' >> many1 letter
   _ <- spaces1
   pure $ case x of
-    Nothing -> VarID s1
+    Nothing -> Var s1
     Just s2 -> Port s1 s2
-
-
-assignOrCreate :: Parser ParseResult
-assignOrCreate = do
-  r <- ref
-  undefined
-  
 
 newModule :: Ref -> Parser Assignment
 newModule lhs = do
@@ -115,7 +109,7 @@ line :: Parser ParseExpr
 line = spaces >> (expr <* eof)
 
 num :: Parser ParseExpr
-num = (ParseDouble . read) <$> lexeme (many1 digit)
+num = (ParseReal . read) <$> lexeme (many1 digit)
 
 unOp :: Parser (ParseExpr -> ParseExpr)
 unOp = (symbol "-" >> pure ParseNegate)
