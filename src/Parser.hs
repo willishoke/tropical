@@ -61,7 +61,6 @@ data ParseExpr
 
 data ParseResult
   = Show Ref
-  | Eval ParseExpr
   | Listen ParseExpr
   | Assign Ref ParseExpr 
   | Create Ref ParseObject
@@ -76,6 +75,10 @@ data Assignment
   = Assignment Ref ParseExpr
   deriving (Show)
 
+
+parseResult :: Parser ParseResult
+parseResult = do
+  undefined 
 
 ref :: Parser Ref
 ref = do
