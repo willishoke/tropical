@@ -11,7 +11,8 @@ category:            Language
 build-type:          Simple
 
 executable tropical
-  other-modules:    Audio,
+  other-modules:    Analyzer,
+                    Audio,
                     Interface,
                     Parser,
                     Runtime 
@@ -32,7 +33,4 @@ executable tropical
                     lens,
                     portaudio,
                     haskeline,
-                    unordered-containers >= 0.2,
-                    mtl,
-                    syb,
-                    extra >= 1.7 && < 1.8
+                    mtl

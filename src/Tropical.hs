@@ -1,30 +1,38 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
- 
-import Text.Parsec
 
-import System.Console.Haskeline
+
+-- T R O P I C A L
+-- A live coding environment for audio synthesis
+
+
+-- External imports
 
 import Control.Concurrent
-import Control.Monad.Extra (loopM)
 import Control.Monad.Trans
 import Control.Monad.State
 import Control.Lens
+
+import qualified Data.Map as Map
 
 import Foreign.Ptr
 
 import Sound.PortAudio
 
-import qualified Data.Map as Map
+import System.Console.Haskeline
 
-import Parser
-import Runtime
+import Text.Parsec
+
+
+-- Internal imports
+
+import Analyzer
 import Audio
 import Interface
+import Parser
+import Runtime
 
--- T R O P I C A L
--- A live coding environment for audio synthesis
 
 main :: IO ()
 main = do
@@ -33,16 +41,12 @@ main = do
   bufferAddress <- getBufferAddress rtPtr
   forkIO $ compute rtPtr readyFlag
   let callback = Just $ mainCallback bufferAddress readyFlag
-      fincallback = Just $ putStrLn "stream closed"
-      rt = Runtime 
-        { _env = Env Map.empty
-        , _runtime = rtPtr
-        }
-
-    
+      finalCallback = Just $ putStrLn "stream closed"
+      frames = Just framesPerBuffer
+      rt = Runtime { _env = Env Map.empty, _runtime = rtPtr }
   -- TODO: initialize ... terminate should use bracket pattern
   initialize
-  res <- openDefaultStream 0 2 sampRate (Just framesPerBuffer) callback fincallback
+  res <- openDefaultStream 0 2 sampRate frames callback finalCallback
   case res of
     Left err -> print err
     Right strm -> do
@@ -54,6 +58,15 @@ main = do
       pure ()
   terminate
   deleteRuntime rtPtr
+
+loop :: InputT (StateT Runtime IO) ()
+loop = getInputLine "🌴 " >>= \x -> 
+  case x of
+    Nothing -> pure ()
+    Just "quit" -> pure ()
+    Just input -> do
+      handleInput input
+      loop
 
 handleInput
   :: String
@@ -67,15 +80,3 @@ handleInput input = do
       case baggage of
         Just x -> outputStrLn $ show $ x
         Nothing -> lift $ put $ rt'
-
-loop :: InputT (StateT Runtime IO) ()
-loop = getInputLine "🌴 " >>= \x -> 
-  case x of
-    Nothing -> pure ()
-    Just "quit" -> pure ()
-    Just input -> do
-      handleInput input
-      loop
-
-
--- END
