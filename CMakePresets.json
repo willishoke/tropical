@@ -1,0 +1,14 @@
+{
+  "version": 3,
+  "configurePresets": [{
+    "name": "release",
+    "binaryDir": "${sourceDir}/build",
+    "cacheVariables": {
+      "CMAKE_BUILD_TYPE": "Release"
+    }
+  }],
+  "buildPresets": [{
+    "name": "release",
+    "configurePreset": "release"
+  }]
+}
