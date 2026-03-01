@@ -6,7 +6,7 @@
 
 
 #include "../lib/RtAudio.h"
-#include "../src/Rack.hpp"
+#include "../src/Graph.hpp"
 #include <curses.h>
 #include <iostream>
 #include <cstdlib>
@@ -23,15 +23,15 @@ int fillBuffer
   unsigned int nBufferFrames,
   double streamTime, 
   RtAudioStreamStatus status, 
-  void * rack 
+  void * graph 
 )
 {
   double * buffer = (double *) outputBuffer;
-  Rack * r = (Rack *) rack;
+  Graph * r = (Graph *) graph;
   if (status)
     std::cout << "Stream underflow detected!" << std::endl;
 
-  // fill rack mixer buffer and update values
+  // fill graph mixer buffer and update values
   r->process();
 
   // write interleaved audio data
@@ -63,127 +63,127 @@ void closeStream(RtAudio & dac)
   }
 }
 
-void SQR_test(Rack & rack)
+void SQR_test(Graph & graph)
 {
-  rack.addModule("vco1", std::make_unique<VCO>(440));
+  graph.addModule("vco1", std::make_unique<VCO>(440));
 
-  rack.addOutput(std::make_pair("vco1", VCO::SQR));
+  graph.addOutput(std::make_pair("vco1", VCO::SQR));
 }
 
-void SIN_test(Rack & rack)
+void SIN_test(Graph & graph)
 {
-  rack.addModule("vco1", std::make_unique<VCO>(440));
+  graph.addModule("vco1", std::make_unique<VCO>(440));
 
-  rack.addOutput(std::make_pair("vco1", VCO::SIN));
+  graph.addOutput(std::make_pair("vco1", VCO::SIN));
 }
 
-void TRI_test(Rack & rack)
+void TRI_test(Graph & graph)
 {
-  rack.addModule("vco1", std::make_unique<VCO>(440));
+  graph.addModule("vco1", std::make_unique<VCO>(440));
 
-  rack.addOutput(std::make_pair("vco1", VCO::TRI));
+  graph.addOutput(std::make_pair("vco1", VCO::TRI));
 }
 
-void SAW_test(Rack & rack)
+void SAW_test(Graph & graph)
 {
-  rack.addModule("vco1", std::make_unique<VCO>(440));
+  graph.addModule("vco1", std::make_unique<VCO>(440));
 
-  rack.addOutput(std::make_pair("vco1", VCO::SAW));
+  graph.addOutput(std::make_pair("vco1", VCO::SAW));
 }
 
-void AM_test(Rack & rack)
+void AM_test(Graph & graph)
 {
-  rack.addModule("vco1", std::make_unique<VCO>(1000));
-  rack.addModule("vco2", std::make_unique<VCO>(200));
-  rack.addModule("vca1", std::make_unique<VCA>());
+  graph.addModule("vco1", std::make_unique<VCO>(1000));
+  graph.addModule("vco2", std::make_unique<VCO>(200));
+  graph.addModule("vca1", std::make_unique<VCA>());
 
-  rack.connect("vco1", VCO::SIN, "vca1", VCA::IN1);
-  rack.connect("vco2", VCO::SIN, "vca1", VCA::IN2);
+  graph.connect("vco1", VCO::SIN, "vca1", VCA::IN1);
+  graph.connect("vco2", VCO::SIN, "vca1", VCA::IN2);
   
-  rack.addOutput(std::make_pair("vca1", VCA::OUT));
+  graph.addOutput(std::make_pair("vca1", VCA::OUT));
 }
 
-void MUX_test(Rack & rack)
+void MUX_test(Graph & graph)
 {
-  rack.addModule("vco1", std::make_unique<VCO>(1000));
-  rack.addModule("vco2", std::make_unique<VCO>(2000));
-  rack.addModule("lfo1", std::make_unique<VCO>(100));
-  rack.addModule("mux1", std::make_unique<MUX>());
+  graph.addModule("vco1", std::make_unique<VCO>(1000));
+  graph.addModule("vco2", std::make_unique<VCO>(2000));
+  graph.addModule("lfo1", std::make_unique<VCO>(100));
+  graph.addModule("mux1", std::make_unique<MUX>());
 
-  rack.connect("vco1", VCO::SIN, "mux1", MUX::IN1);
-  rack.connect("vco2", VCO::SIN, "mux1", MUX::IN2);
-  rack.connect("lfo1", VCO::SIN, "mux1", MUX::CTRL);
+  graph.connect("vco1", VCO::SIN, "mux1", MUX::IN1);
+  graph.connect("vco2", VCO::SIN, "mux1", MUX::IN2);
+  graph.connect("lfo1", VCO::SIN, "mux1", MUX::CTRL);
   
-  rack.addOutput(std::make_pair("mux1", MUX::OUT));
+  graph.addOutput(std::make_pair("mux1", MUX::OUT));
 }
 
-void FM_test(Rack & rack)
+void FM_test(Graph & graph)
 {
-  rack.addModule("vco1", std::make_unique<VCO>(1000));
-  rack.addModule("vco2", std::make_unique<VCO>(200));
-  rack.addModule("c1", std::make_unique<CONST>(3));
+  graph.addModule("vco1", std::make_unique<VCO>(1000));
+  graph.addModule("vco2", std::make_unique<VCO>(200));
+  graph.addModule("c1", std::make_unique<CONST>(3));
 
-  rack.connect("vco2", VCO::SIN, "vco1", VCO::FM);
-  rack.connect("c1", CONST::OUT, "vco1", VCO::FM_INDEX);
+  graph.connect("vco2", VCO::SIN, "vco1", VCO::FM);
+  graph.connect("c1", CONST::OUT, "vco1", VCO::FM_INDEX);
   
-  rack.addOutput(std::make_pair("vco1", VCO::SIN));
+  graph.addOutput(std::make_pair("vco1", VCO::SIN));
 }
 
-void ENV_test(Rack & rack)
+void ENV_test(Graph & graph)
 {
-  rack.addModule("env1", std::make_unique<ENV>(1, 5));
-  rack.addModule("lfo1", std::make_unique<VCO>(200));
+  graph.addModule("env1", std::make_unique<ENV>(1, 5));
+  graph.addModule("lfo1", std::make_unique<VCO>(200));
 
-  rack.connect("lfo1", VCO::SQR, "env1", ENV::TRIG);
+  graph.connect("lfo1", VCO::SQR, "env1", ENV::TRIG);
 
-  rack.addOutput(std::make_pair("env1", ENV::OUT));
+  graph.addOutput(std::make_pair("env1", ENV::OUT));
 }
 
 /*
  * Patch with chaotic behavior
  */
-void FM_chaos(Rack & rack)
+void FM_chaos(Graph & graph)
 {
-  rack.addModule("vco1", std::make_unique<VCO>(200.1));
-  rack.addModule("vco2", std::make_unique<VCO>(300.0));
-  rack.addModule("vco3", std::make_unique<VCO>(100.01));
-  rack.addModule("vca1", std::make_unique<VCA>());
-  rack.addModule("lfo1", std::make_unique<VCO>(.01));
-  rack.addModule("lfo2", std::make_unique<VCO>(10));
-  rack.addModule("c", std::make_unique<CONST>(1.5));
+  graph.addModule("vco1", std::make_unique<VCO>(200.1));
+  graph.addModule("vco2", std::make_unique<VCO>(300.0));
+  graph.addModule("vco3", std::make_unique<VCO>(100.01));
+  graph.addModule("vca1", std::make_unique<VCA>());
+  graph.addModule("lfo1", std::make_unique<VCO>(.01));
+  graph.addModule("lfo2", std::make_unique<VCO>(10));
+  graph.addModule("c", std::make_unique<CONST>(1.5));
 
-  rack.connect("vco2", VCO::SIN, "vco1", VCO::FM);
-  rack.connect("vco3", VCO::SIN, "vco2", VCO::FM);
-  rack.connect("vco1", VCO::SIN, "vco3", VCO::FM);
-  rack.connect("lfo1", VCO::SAW, "vco3", VCO::FM);
-  rack.connect("vco1", VCO::SIN, "vca1", VCA::IN1);
-  rack.connect("lfo1", VCO::SIN, "vca1", VCA::IN2);
+  graph.connect("vco2", VCO::SIN, "vco1", VCO::FM);
+  graph.connect("vco3", VCO::SIN, "vco2", VCO::FM);
+  graph.connect("vco1", VCO::SIN, "vco3", VCO::FM);
+  graph.connect("lfo1", VCO::SAW, "vco3", VCO::FM);
+  graph.connect("vco1", VCO::SIN, "vca1", VCA::IN1);
+  graph.connect("lfo1", VCO::SIN, "vca1", VCA::IN2);
 
-  rack.connect("c", CONST::OUT, "vco3", VCO::FM_INDEX);
-  rack.connect("c", CONST::OUT, "vco1", VCO::FM_INDEX);
-  rack.connect("lfo1", VCO::SIN, "vco2", VCO::FM_INDEX);
+  graph.connect("c", CONST::OUT, "vco3", VCO::FM_INDEX);
+  graph.connect("c", CONST::OUT, "vco1", VCO::FM_INDEX);
+  graph.connect("lfo1", VCO::SIN, "vco2", VCO::FM_INDEX);
 
-  rack.addOutput(std::make_pair("vca1", VCA::OUT));
-  rack.addOutput(std::make_pair("vco2", VCO::SIN));
+  graph.addOutput(std::make_pair("vca1", VCA::OUT));
+  graph.addOutput(std::make_pair("vco2", VCO::SIN));
 }
 
 int main(int argc, char * argv[])
 {
   unsigned int bufferFrames = 2048;  
 
-  Rack rack(bufferFrames);
+  Graph graph(bufferFrames);
 
-  //SQR_test(rack);
-  //SAW_test(rack);
-  //SIN_test(rack);
-  //TRI_test(rack);
-  //FM_test(rack);
-  //AM_test(rack);
-  //MUX_test(rack);
-  //FM_chaos(rack);
+  //SQR_test(graph);
+  //SAW_test(graph);
+  //SIN_test(graph);
+  //TRI_test(graph);
+  //FM_test(graph);
+  //AM_test(graph);
+  //MUX_test(graph);
+  //FM_chaos(graph);
   // Fill single buffer, output to stdout
-  ENV_test(rack);
-  rack.process();
+  ENV_test(graph);
+  graph.process();
 
   return 0;
 }

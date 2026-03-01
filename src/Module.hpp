@@ -40,7 +40,7 @@ class Module
     unsigned int sampleRate;
 
   private:
-    friend class Rack;
+    friend class Graph;
 };
 
 

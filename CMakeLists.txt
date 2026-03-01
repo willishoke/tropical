@@ -1,10 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(egress LANGUAGES CXX)
 
-# Your executable
-add_executable(egress Main.cpp)
-target_compile_features(egress PRIVATE cxx_std_17)
-target_compile_options(egress PRIVATE -Wall -Wextra)
+option(EGRESS_BUILD_PYTHON "Build Python bindings with pybind11" ON)
 
 # RtAudio as a library target
 add_library(rtaudio STATIC lib/rtaudio/RtAudio.cpp)
@@ -16,5 +13,27 @@ target_link_libraries(rtaudio PUBLIC
     "-framework CoreFoundation"
     pthread)
 
-# Link rtaudio into your app — PUBLIC properties propagate automatically
-target_link_libraries(egress PRIVATE rtaudio ncurses)
+if(EGRESS_BUILD_PYTHON)
+    set(PYBIND11_FINDPYTHON ON)
+    find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
+
+    execute_process(
+        COMMAND ${Python3_EXECUTABLE} -m pybind11 --cmakedir
+        OUTPUT_VARIABLE PYBIND11_CMAKE_DIR
+        RESULT_VARIABLE PYBIND11_CMAKE_DIR_RESULT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+
+    if(PYBIND11_CMAKE_DIR_RESULT EQUAL 0)
+        set(pybind11_DIR "${PYBIND11_CMAKE_DIR}" CACHE PATH "pybind11 CMake config dir" FORCE)
+        find_package(pybind11 CONFIG REQUIRED PATHS "${pybind11_DIR}" NO_DEFAULT_PATH)
+    else()
+        find_package(pybind11 CONFIG REQUIRED)
+    endif()
+
+    add_library(egress MODULE src/python_bindings.cpp)
+    target_compile_features(egress PRIVATE cxx_std_17)
+    target_link_libraries(egress PRIVATE pybind11::module rtaudio)
+    target_include_directories(egress PRIVATE src)
+    set_target_properties(egress PROPERTIES PREFIX "" OUTPUT_NAME "egress")
+endif()

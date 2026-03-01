@@ -6,6 +6,9 @@ __pycache__/
 # C extensions
 *.so
 
+# local app binary (legacy frontend)
+/egress
+
 # swap files
 *.swp
 

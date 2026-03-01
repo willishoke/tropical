@@ -13,13 +13,57 @@ This project owes a giant technical debt to Andrew Belt's `VCVRack` project. Alt
 
 ## Build
 
-To build, clone the repository and run `make all`. This will yield a binary file, `egress`, that will continually generate output in real time until interrupted by the user with any keyboard input. 
+Build the Python extension with CMake:
 
-This build has been tested only on MacOS 11.2 using the `llvm` compiler. Tests can be built using `make debug`. This will yield a program that prints values to `stdout` for a single buffer length before exiting.
+### Python frontend (`pybind11`)
 
-## Rack
+A Python extension module (`egress`) is available via `pybind11`.
 
-`Rack` is responsible for storing modules and managing connections between them. It also manages mixing and stores the output buffer. Racks store modules using an associative map with a unique name as key and `unique_ptr` to a module object as value. This allows for efficient lookup and constant-time iteration through the module list. Connections are stored using an associative map, with an output module's name and output ID as keys and module name and input ID as values. `Rack` has a `process` method that will iterate through the computation graph, sending output values from one module to another. It then calls each module's `process` method and stores this value in the output buffer. Since the buffer updates occur sequentially, the connection latency between any two modules is only a single sample. 
+```bash
+cmake -S . -B build -DEGRESS_BUILD_PYTHON=ON
+cmake --build build
+```
+
+Then import from Python:
+
+```python
+import egress as eg
+
+graph = eg.Graph(2048)
+dac = eg.DAC(graph, sample_rate=44100, channels=2)
+
+osc = eg.VCO(graph, "osc", 440)
+graph.add_output("osc", eg.VCOOut.SIN)
+
+dac.start()
+# mutate graph live from a REPL while audio is running
+dac.stop()
+```
+
+Supported module wrappers (constructor auto-registers into graph):
+- `VCO(graph, name, freq_hz)`
+- `MUX(graph, name)`
+- `VCA(graph, name)`
+- `ENV(graph, name, rise_ms, fall_ms)`
+- `DELAY(graph, name, buffer_size_samples)`
+- `CONST(graph, name, value)`
+
+Lifecycle methods:
+- `destroy_module(name)`
+- `connect(from_module, from_output_id, to_module, to_input_id)`
+- `disconnect(from_module, from_output_id, to_module, to_input_id)`
+- `add_output(module_name, output_id)`
+
+Realtime output methods:
+- `dac = DAC(graph, sample_rate=44100, channels=2)`
+- `dac.start()`
+- `dac.stop()`
+
+`Graph.process()` still renders a single buffer for offline inspection or testing; realtime playback uses `DAC.start()` and `DAC.stop()`.
+
+## Graph
+
+`Graph` is responsible for storing modules and managing connections between them. It also manages mixing and stores the output buffer. Racks store modules using an associative map with a unique name as key and `unique_ptr` to a module object as value. This allows for efficient lookup and constant-time iteration through the module list. Connections are stored using an associative map, with an output module's name and output ID as keys and module name and input ID as values. `Graph` has a `process` method that will iterate through the computation graph, sending output values from one module to another. It then calls each module's `process` method and stores this value in the output buffer. Since the buffer updates occur sequentially, the connection latency between any two modules is only a single sample. 
 
 ## Modules
 
@@ -92,7 +136,7 @@ Tests can be compiled with `make debug`. The `test` directory contains Python sc
 
 ## Next Steps
 
-Several methods are still incomplete, including those to remove modules or connections. More validation checks should be added to ensure module names are valid, etc. While the syntax for declaring modules is fairly terse, it doesn't seem right to have the caller be managing memory. This should probably be accomplished by factory functions in the Rack class. Better test automation would be nice -- should be able to write a script to run all tests sequentially.
+Several methods are still incomplete, including those to remove modules or connections. More validation checks should be added to ensure module names are valid, etc. While the syntax for declaring modules is fairly terse, it doesn't seem right to have the caller be managing memory. This should probably be accomplished by factory functions in the Graph class. Better test automation would be nice -- should be able to write a script to run all tests sequentially.
  
 It would be worthwhile to test alternative implementations for storing modules and their connections. Even just using vectors might end up being more efficient due to the linear memory layout. This libarary lacks any front end implementation, but it would be relatively straightforward to augment it with a simple parser to process user input for interactive use.
 
