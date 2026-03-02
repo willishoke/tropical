@@ -29,37 +29,37 @@ Then import from Python:
 ```python
 import egress as eg
 
-graph = eg.Graph(2048)
-dac = eg.DAC(graph, sample_rate=44100, channels=2)
-
-osc = eg.VCO(graph, "osc", 440)
-graph.add_output("osc", eg.VCOOut.SIN)
+osc = eg.VCO(440)
+mod = eg.VCO(20)
+eg.connect(mod.sin, osc.fm)
+eg.add_output(osc.sin)
+dac = eg.DAC(sample_rate=44100, channels=2)
 
 dac.start()
 # mutate graph live from a REPL while audio is running
 dac.stop()
 ```
 
-Supported module wrappers (constructor auto-registers into graph):
-- `VCO(graph, name, freq_hz)`
-- `MUX(graph, name)`
-- `VCA(graph, name)`
-- `ENV(graph, name, rise_ms, fall_ms)`
-- `DELAY(graph, name, buffer_size_samples)`
-- `CONST(graph, name, value)`
+Supported module wrappers (constructor auto-registers into the default graph):
+- `VCO(freq_hz)`
+- `MUX()`
+- `VCA()`
+- `ENV(rise_ms, fall_ms)`
+- `DELAY(buffer_size_samples)`
+- `CONST(value)`
 
 Lifecycle methods:
-- `destroy_module(name)`
-- `connect(from_module, from_output_id, to_module, to_input_id)`
-- `disconnect(from_module, from_output_id, to_module, to_input_id)`
-- `add_output(module_name, output_id)`
+- `connect(output_port, input_port)`
+- `disconnect(output_port, input_port)`
+- `add_output(output_port)`
+- `graph().destroy_module(name)` (advanced/manual control)
 
 Realtime output methods:
-- `dac = DAC(graph, sample_rate=44100, channels=2)`
+- `dac = DAC(sample_rate=44100, channels=2)`
 - `dac.start()`
 - `dac.stop()`
 
-`Graph.process()` still renders a single buffer for offline inspection or testing; realtime playback uses `DAC.start()` and `DAC.stop()`.
+`graph().process()` still renders a single buffer for offline inspection or testing; realtime playback uses `DAC.start()` and `DAC.stop()`.
 
 ## Graph
 

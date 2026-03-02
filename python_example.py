@@ -2,25 +2,22 @@ import egress as eg
 
 
 def main():
-    graph = eg.Graph(buffer_length=512)
-    dac = eg.DAC(graph, sample_rate=44100, channels=2)
-
-    _osc = eg.VCO(graph, "vco1", 440)
-    _idx = eg.CONST(graph, "idx", 3.0)
-    graph.connect("idx", eg.CONSTOut.OUT, "vco1", eg.VCOIn.FM_INDEX)
-    graph.add_output("vco1", eg.VCOOut.SIN)
+    osc = eg.VCO(440)
+    idx = eg.CONST(3.0)
+    eg.connect(idx.out, osc.fm_index)
+    eg.add_output(osc.sin)
+    dac = eg.DAC(sample_rate=44100, channels=2)
 
     # Manual single-buffer render is still available:
-    graph.process()
-    print("first 8 samples:", graph.output_buffer()[:8])
+    eg.graph().process()
+    print("first 8 samples:", eg.graph().output_buffer()[:8])
 
     # Realtime output is controlled separately from the graph.
     dac.start()
     input("playing... press Enter to stop")
     dac.stop()
-
-    graph.disconnect("idx", eg.CONSTOut.OUT, "vco1", eg.VCOIn.FM_INDEX)
-    graph.destroy_module("idx")
+    eg.disconnect(idx.out, osc.fm_index)
+    eg.graph().destroy_module(idx.name)
 
 
 if __name__ == "__main__":

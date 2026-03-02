@@ -51,7 +51,7 @@ class VCO : public Module
 { 
   public:
     // invoke base class constructor
-    VCO(int freq) : Module(IN_COUNT, OUT_COUNT) 
+    VCO(double freq) : Module(IN_COUNT, OUT_COUNT) 
     {
       frequency = freq;
       core = 0.0;
