@@ -81,26 +81,35 @@ class VCO : public Module
       // apply exponential FM
       double freq = frequency * fm;
 
-      // increment core value
-      core += freq / 44100;
+      const double dt = fmin(fabs(freq) / 44100.0, 0.5);
 
-      // floating point modulus resets core when it hits 1.0
-      core = fmod(core, 1.0);
+      // increment phase and wrap to [0, 1)
+      core += freq / 44100.0;
+      while (core >= 1.0) core -= 1.0;
+      while (core < 0.0) core += 1.0;
 
-      // inverts signal if FM value is negative
-      if (fm < 0.0) core = 1.0 - core;
+      // polyBLEP band-limited saw
+      double saw = 2.0 * core - 1.0;
+      saw -= poly_blep(core, dt);
 
-      // saw is scaled and shifted version of core
-      outputs[SAW] = 10.0 * core - 5.0;
+      // polyBLEP band-limited square
+      double sqr = core < 0.5 ? 1.0 : -1.0;
+      sqr += poly_blep(core, dt);
+      double half_phase = core + 0.5;
+      if (half_phase >= 1.0) half_phase -= 1.0;
+      sqr -= poly_blep(half_phase, dt);
 
-      // tri is rectified and scaled saw
-      outputs[TRI] = 2.0 * abs(outputs[SAW]) - 5.0;
+      // triangle from integrated band-limited square
+      tri_state += sqr * dt * 4.0;
+      tri_state = fmin(1.0, fmax(-1.0, tri_state));
 
-      // scale tri to range [0.0, 1.0], apply cos, rescale
-      outputs[SIN] = -5.0 * cos(M_PI * (outputs[TRI] / 10.0 + 0.5));
+      // sine is naturally band-limited; use fast polynomial approximation
+      double sine = fast_sin_from_phase(core);
 
-      // simple step function
-      outputs[SQR] = core - 0.5 > 0.0 ? 5.0 : -5.0;
+      outputs[SAW] = 5.0 * saw;
+      outputs[TRI] = 5.0 * tri_state;
+      outputs[SIN] = 5.0 * sine;
+      outputs[SQR] = 5.0 * sqr;
       
       // invoke postprocessing routine
       Module::postprocess();
@@ -109,8 +118,46 @@ class VCO : public Module
     }
 
   private:
+    static double poly_blep(double t, double dt)
+    {
+      if (dt <= 0.0 || dt >= 1.0)
+      {
+        return 0.0;
+      }
+
+      if (t < dt)
+      {
+        t /= dt;
+        return t + t - t * t - 1.0;
+      }
+
+      if (t > 1.0 - dt)
+      {
+        t = (t - 1.0) / dt;
+        return t * t + t + t + 1.0;
+      }
+
+      return 0.0;
+    }
+
+    static double fast_sin_from_phase(double phase)
+    {
+      // Map phase [0, 1) -> x in [-pi, pi)
+      double x = (phase - 0.5) * 2.0 * M_PI;
+
+      // Fast sine approximation:
+      // y = Bx + Cx|x|, then corrective term P(y|y| - y) + y
+      constexpr double B = 4.0 / M_PI;
+      constexpr double C = -4.0 / (M_PI * M_PI);
+      constexpr double P = 0.225;
+
+      const double y = B * x + C * x * fabs(x);
+      return P * (y * fabs(y) - y) + y;
+    }
+
     double frequency;
-    double core; 
+    double core;
+    double tri_state = 0.0;
 };
 
 class MUX : public Module
