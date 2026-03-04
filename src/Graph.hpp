@@ -222,6 +222,21 @@ class Graph
       return true;
     }
 
+    std::vector<outputID> incoming_connections(const std::string & dst_module, unsigned int dst_input_id) const
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      std::vector<outputID> sources;
+      sources.reserve(control_connections_.size());
+      for (const auto & connection : control_connections_)
+      {
+        if (connection.dst_module == dst_module && connection.dst_input_id == dst_input_id)
+        {
+          sources.emplace_back(connection.src_module, connection.src_output_id);
+        }
+      }
+      return sources;
+    }
+
     unsigned int getBufferLength() const
     {
       return bufferLength_;
@@ -558,7 +573,7 @@ class Graph
     std::vector<outputID> control_mix_;
 
     // Cross-thread command queue (applied once per buffer by audio thread).
-    std::mutex pending_mutex_;
+    mutable std::mutex pending_mutex_;
     std::vector<Command> command_queue_;
 
   public:

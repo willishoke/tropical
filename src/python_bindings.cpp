@@ -98,6 +98,31 @@ class PythonGraph
       return graph_.addModule(module_name, std::make_unique<CONST>(value));
     }
 
+    bool add_lowpass(const std::string & module_name, double freq_hz, double res)
+    {
+      return graph_.addModule(module_name, std::make_unique<LOWPASS>(freq_hz, res));
+    }
+
+    bool add_highpass(const std::string & module_name, double freq_hz, double res)
+    {
+      return graph_.addModule(module_name, std::make_unique<HIGHPASS>(freq_hz, res));
+    }
+
+    bool add_bandpass(const std::string & module_name, double freq_hz, double res)
+    {
+      return graph_.addModule(module_name, std::make_unique<BANDPASS>(freq_hz, res));
+    }
+
+    bool add_notch(const std::string & module_name, double freq_hz, double res)
+    {
+      return graph_.addModule(module_name, std::make_unique<NOTCH>(freq_hz, res));
+    }
+
+    bool add_allpass(const std::string & module_name, double freq_hz, double res)
+    {
+      return graph_.addModule(module_name, std::make_unique<ALLPASS>(freq_hz, res));
+    }
+
   private:
     Graph graph_;
     std::unordered_map<std::string, uint64_t> name_counters_;
@@ -146,6 +171,18 @@ static bool disconnect_ports(const OutputPort & out, const InputPort & in)
 static bool add_output_port(const OutputPort & out)
 {
   return out.graph->add_output(out.module_name, out.output_id);
+}
+
+static std::vector<OutputPort> incoming_ports(const InputPort & in)
+{
+  std::vector<OutputPort> results;
+  const auto sources = in.graph->graph().incoming_connections(in.module_name, in.input_id);
+  results.reserve(sources.size());
+  for (const auto & source : sources)
+  {
+    results.push_back(OutputPort{in.graph, source.first, source.second});
+  }
+  return results;
 }
 
 class PyVCO
@@ -336,6 +373,161 @@ class PyCONST
     std::string name_;
 };
 
+class PyLOWPASS
+{
+  public:
+    PyLOWPASS(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("lowpass"))
+    {
+      if (!graph_->add_lowpass(name_, freq_hz, res))
+      {
+        throw std::invalid_argument("Failed to create LOWPASS '" + name_ + "'.");
+      }
+    }
+
+    PyLOWPASS(PythonGraph & graph, std::string name, double freq_hz, double res = 0.707)
+      : graph_(&graph), name_(std::move(name))
+    {
+      if (!graph_->add_lowpass(name_, freq_hz, res))
+      {
+        throw std::invalid_argument("Failed to create LOWPASS '" + name_ + "'.");
+      }
+    }
+
+    const std::string & name() const { return name_; }
+    InputPort in() const { return InputPort{graph_, name_, LOWPASS::IN}; }
+    InputPort freq() const { return InputPort{graph_, name_, LOWPASS::FREQ}; }
+    InputPort res() const { return InputPort{graph_, name_, LOWPASS::RES}; }
+    OutputPort out() const { return OutputPort{graph_, name_, LOWPASS::OUT}; }
+
+  private:
+    PythonGraph * graph_;
+    std::string name_;
+};
+
+class PyHIGHPASS
+{
+  public:
+    PyHIGHPASS(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("highpass"))
+    {
+      if (!graph_->add_highpass(name_, freq_hz, res))
+      {
+        throw std::invalid_argument("Failed to create HIGHPASS '" + name_ + "'.");
+      }
+    }
+
+    PyHIGHPASS(PythonGraph & graph, std::string name, double freq_hz, double res = 0.707)
+      : graph_(&graph), name_(std::move(name))
+    {
+      if (!graph_->add_highpass(name_, freq_hz, res))
+      {
+        throw std::invalid_argument("Failed to create HIGHPASS '" + name_ + "'.");
+      }
+    }
+
+    const std::string & name() const { return name_; }
+    InputPort in() const { return InputPort{graph_, name_, HIGHPASS::IN}; }
+    InputPort freq() const { return InputPort{graph_, name_, HIGHPASS::FREQ}; }
+    InputPort res() const { return InputPort{graph_, name_, HIGHPASS::RES}; }
+    OutputPort out() const { return OutputPort{graph_, name_, HIGHPASS::OUT}; }
+
+  private:
+    PythonGraph * graph_;
+    std::string name_;
+};
+
+class PyBANDPASS
+{
+  public:
+    PyBANDPASS(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("bandpass"))
+    {
+      if (!graph_->add_bandpass(name_, freq_hz, res))
+      {
+        throw std::invalid_argument("Failed to create BANDPASS '" + name_ + "'.");
+      }
+    }
+
+    PyBANDPASS(PythonGraph & graph, std::string name, double freq_hz, double res = 0.707)
+      : graph_(&graph), name_(std::move(name))
+    {
+      if (!graph_->add_bandpass(name_, freq_hz, res))
+      {
+        throw std::invalid_argument("Failed to create BANDPASS '" + name_ + "'.");
+      }
+    }
+
+    const std::string & name() const { return name_; }
+    InputPort in() const { return InputPort{graph_, name_, BANDPASS::IN}; }
+    InputPort freq() const { return InputPort{graph_, name_, BANDPASS::FREQ}; }
+    InputPort res() const { return InputPort{graph_, name_, BANDPASS::RES}; }
+    OutputPort out() const { return OutputPort{graph_, name_, BANDPASS::OUT}; }
+
+  private:
+    PythonGraph * graph_;
+    std::string name_;
+};
+
+class PyNOTCH
+{
+  public:
+    PyNOTCH(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("notch"))
+    {
+      if (!graph_->add_notch(name_, freq_hz, res))
+      {
+        throw std::invalid_argument("Failed to create NOTCH '" + name_ + "'.");
+      }
+    }
+
+    PyNOTCH(PythonGraph & graph, std::string name, double freq_hz, double res = 0.707)
+      : graph_(&graph), name_(std::move(name))
+    {
+      if (!graph_->add_notch(name_, freq_hz, res))
+      {
+        throw std::invalid_argument("Failed to create NOTCH '" + name_ + "'.");
+      }
+    }
+
+    const std::string & name() const { return name_; }
+    InputPort in() const { return InputPort{graph_, name_, NOTCH::IN}; }
+    InputPort freq() const { return InputPort{graph_, name_, NOTCH::FREQ}; }
+    InputPort res() const { return InputPort{graph_, name_, NOTCH::RES}; }
+    OutputPort out() const { return OutputPort{graph_, name_, NOTCH::OUT}; }
+
+  private:
+    PythonGraph * graph_;
+    std::string name_;
+};
+
+class PyALLPASS
+{
+  public:
+    PyALLPASS(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("allpass"))
+    {
+      if (!graph_->add_allpass(name_, freq_hz, res))
+      {
+        throw std::invalid_argument("Failed to create ALLPASS '" + name_ + "'.");
+      }
+    }
+
+    PyALLPASS(PythonGraph & graph, std::string name, double freq_hz, double res = 0.707)
+      : graph_(&graph), name_(std::move(name))
+    {
+      if (!graph_->add_allpass(name_, freq_hz, res))
+      {
+        throw std::invalid_argument("Failed to create ALLPASS '" + name_ + "'.");
+      }
+    }
+
+    const std::string & name() const { return name_; }
+    InputPort in() const { return InputPort{graph_, name_, ALLPASS::IN}; }
+    InputPort freq() const { return InputPort{graph_, name_, ALLPASS::FREQ}; }
+    InputPort res() const { return InputPort{graph_, name_, ALLPASS::RES}; }
+    OutputPort out() const { return OutputPort{graph_, name_, ALLPASS::OUT}; }
+
+  private:
+    PythonGraph * graph_;
+    std::string name_;
+};
+
 class PythonDAC
 {
   public:
@@ -479,6 +671,7 @@ PYBIND11_MODULE(egress, m)
   m.def("connect", &connect_ports, py::arg("out"), py::arg("in"));
   m.def("disconnect", &disconnect_ports, py::arg("out"), py::arg("in"));
   m.def("add_output", &add_output_port, py::arg("out"));
+  m.def("incoming", &incoming_ports, py::arg("in"));
 
   py::class_<PyVCO>(m, "VCO")
     .def(py::init<double>(), py::arg("frequency_hz"))
@@ -495,18 +688,18 @@ PYBIND11_MODULE(egress, m)
     .def(py::init<>())
     .def(py::init<PythonGraph &, std::string>(), py::arg("graph"), py::arg("name"))
     .def_property_readonly("name", &PyMUX::name)
-    .def_property_readonly("in1", &PyMUX::in1)
-    .def_property_readonly("in2", &PyMUX::in2)
-    .def_property_readonly("ctrl", &PyMUX::ctrl)
-    .def_property_readonly("out", &PyMUX::out);
+    .def_property_readonly("input1", &PyMUX::in1)
+    .def_property_readonly("input2", &PyMUX::in2)
+    .def_property_readonly("control", &PyMUX::ctrl)
+    .def_property_readonly("output", &PyMUX::out);
 
   py::class_<PyVCA>(m, "VCA")
     .def(py::init<>())
     .def(py::init<PythonGraph &, std::string>(), py::arg("graph"), py::arg("name"))
     .def_property_readonly("name", &PyVCA::name)
-    .def_property_readonly("in1", &PyVCA::in1)
-    .def_property_readonly("in2", &PyVCA::in2)
-    .def_property_readonly("out", &PyVCA::out);
+    .def_property_readonly("input1", &PyVCA::in1)
+    .def_property_readonly("input2", &PyVCA::in2)
+    .def_property_readonly("output", &PyVCA::out);
 
   py::class_<PyENV>(m, "ENV")
     .def(py::init<double, double>(), py::arg("rise_ms"), py::arg("fall_ms"))
@@ -515,20 +708,65 @@ PYBIND11_MODULE(egress, m)
     .def_property_readonly("trig", &PyENV::trig)
     .def_property_readonly("rise", &PyENV::rise)
     .def_property_readonly("fall", &PyENV::fall)
-    .def_property_readonly("out", &PyENV::out);
+    .def_property_readonly("output", &PyENV::out);
 
   py::class_<PyDELAY>(m, "DELAY")
     .def(py::init<double>(), py::arg("buffer_size_samples"))
     .def(py::init<PythonGraph &, std::string, double>(), py::arg("graph"), py::arg("name"), py::arg("buffer_size_samples"))
     .def_property_readonly("name", &PyDELAY::name)
-    .def_property_readonly("in_", &PyDELAY::in)
-    .def_property_readonly("out", &PyDELAY::out);
+    .def_property_readonly("input", &PyDELAY::in)
+    .def_property_readonly("output", &PyDELAY::out);
 
   py::class_<PyCONST>(m, "CONST")
     .def(py::init<double>(), py::arg("value"))
     .def(py::init<PythonGraph &, std::string, double>(), py::arg("graph"), py::arg("name"), py::arg("value"))
     .def_property_readonly("name", &PyCONST::name)
-    .def_property_readonly("out", &PyCONST::out);
+    .def_property_readonly("output", &PyCONST::out);
+
+  py::class_<PyLOWPASS>(m, "LOWPASS")
+    .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
+    .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
+    .def_property_readonly("name", &PyLOWPASS::name)
+    .def_property_readonly("input", &PyLOWPASS::in)
+    .def_property_readonly("freq", &PyLOWPASS::freq)
+    .def_property_readonly("res", &PyLOWPASS::res)
+    .def_property_readonly("output", &PyLOWPASS::out);
+
+  py::class_<PyHIGHPASS>(m, "HIGHPASS")
+    .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
+    .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
+    .def_property_readonly("name", &PyHIGHPASS::name)
+    .def_property_readonly("input", &PyHIGHPASS::in)
+    .def_property_readonly("freq", &PyHIGHPASS::freq)
+    .def_property_readonly("res", &PyHIGHPASS::res)
+    .def_property_readonly("output", &PyHIGHPASS::out);
+
+  py::class_<PyBANDPASS>(m, "BANDPASS")
+    .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
+    .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
+    .def_property_readonly("name", &PyBANDPASS::name)
+    .def_property_readonly("input", &PyBANDPASS::in)
+    .def_property_readonly("freq", &PyBANDPASS::freq)
+    .def_property_readonly("res", &PyBANDPASS::res)
+    .def_property_readonly("output", &PyBANDPASS::out);
+
+  py::class_<PyNOTCH>(m, "NOTCH")
+    .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
+    .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
+    .def_property_readonly("name", &PyNOTCH::name)
+    .def_property_readonly("input", &PyNOTCH::in)
+    .def_property_readonly("freq", &PyNOTCH::freq)
+    .def_property_readonly("res", &PyNOTCH::res)
+    .def_property_readonly("output", &PyNOTCH::out);
+
+  py::class_<PyALLPASS>(m, "ALLPASS")
+    .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
+    .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
+    .def_property_readonly("name", &PyALLPASS::name)
+    .def_property_readonly("input", &PyALLPASS::in)
+    .def_property_readonly("freq", &PyALLPASS::freq)
+    .def_property_readonly("res", &PyALLPASS::res)
+    .def_property_readonly("output", &PyALLPASS::out);
 
   py::class_<PythonDAC>(m, "DAC")
     .def(py::init<unsigned int, unsigned int>(), py::arg("sample_rate") = 44100, py::arg("channels") = 2)

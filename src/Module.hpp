@@ -317,6 +317,265 @@ class ENV: public Module
     double core;   // Value in range [0.0, 5.0]
 };
 
+class BiquadCore
+{
+  public:
+    enum class Type
+    {
+      LOWPASS,
+      HIGHPASS,
+      BANDPASS,
+      NOTCH,
+      ALLPASS
+    };
+
+    void set(Type type, double freq_hz, double res, double sample_rate = 44100.0)
+    {
+      const double nyquist = sample_rate * 0.5 - 1.0;
+      const double freq = fmin(fmax(freq_hz, 10.0), nyquist);
+      const double q_clamped = fmin(fmax(res, 0.05), 50.0);
+
+      const double omega = 2.0 * M_PI * freq / sample_rate;
+      const double sin_omega = sin(omega);
+      const double cos_omega = cos(omega);
+      const double alpha = sin_omega / (2.0 * q_clamped);
+
+      double b0 = 0.0;
+      double b1 = 0.0;
+      double b2 = 0.0;
+      double a0 = 1.0 + alpha;
+      double a1 = -2.0 * cos_omega;
+      double a2 = 1.0 - alpha;
+
+      switch (type)
+      {
+        case Type::LOWPASS:
+          b0 = (1.0 - cos_omega) * 0.5;
+          b1 = 1.0 - cos_omega;
+          b2 = (1.0 - cos_omega) * 0.5;
+          break;
+        case Type::HIGHPASS:
+          b0 = (1.0 + cos_omega) * 0.5;
+          b1 = -(1.0 + cos_omega);
+          b2 = (1.0 + cos_omega) * 0.5;
+          break;
+        case Type::BANDPASS:
+          b0 = alpha;
+          b1 = 0.0;
+          b2 = -alpha;
+          break;
+        case Type::NOTCH:
+          b0 = 1.0;
+          b1 = -2.0 * cos_omega;
+          b2 = 1.0;
+          break;
+        case Type::ALLPASS:
+          b0 = 1.0 - alpha;
+          b1 = -2.0 * cos_omega;
+          b2 = 1.0 + alpha;
+          break;
+      }
+
+      this->b0 = b0 / a0;
+      this->b1 = b1 / a0;
+      this->b2 = b2 / a0;
+      this->a1 = a1 / a0;
+      this->a2 = a2 / a0;
+    }
+
+    double process(double x)
+    {
+      const double y = b0 * x + z1;
+      z1 = b1 * x - a1 * y + z2;
+      z2 = b2 * x - a2 * y;
+      return y;
+    }
+
+  private:
+    double b0 = 1.0;
+    double b1 = 0.0;
+    double b2 = 0.0;
+    double a1 = 0.0;
+    double a2 = 0.0;
+    double z1 = 0.0;
+    double z2 = 0.0;
+};
+
+class LOWPASS : public Module
+{
+  public:
+    LOWPASS(double freq_hz, double res = 0.707)
+      : Module(IN_COUNT, OUT_COUNT), freq_hz(freq_hz), res(res) {}
+
+    enum Ins
+    {
+      IN,
+      FREQ,
+      RES,
+      IN_COUNT
+    };
+
+    enum Outs
+    {
+      OUT,
+      OUT_COUNT
+    };
+
+    void process()
+    {
+      const double center = freq_hz * pow(2.0, inputs[FREQ] / 5.0);
+      const double q_value = res + inputs[RES];
+      core.set(BiquadCore::Type::LOWPASS, center, q_value);
+      outputs[OUT] = core.process(inputs[IN]);
+      Module::postprocess();
+    }
+
+  private:
+    double freq_hz;
+    double res;
+    BiquadCore core;
+};
+
+class HIGHPASS : public Module
+{
+  public:
+    HIGHPASS(double freq_hz, double res = 0.707)
+      : Module(IN_COUNT, OUT_COUNT), freq_hz(freq_hz), res(res) {}
+
+    enum Ins
+    {
+      IN,
+      FREQ,
+      RES,
+      IN_COUNT
+    };
+
+    enum Outs
+    {
+      OUT,
+      OUT_COUNT
+    };
+
+    void process()
+    {
+      const double center = freq_hz * pow(2.0, inputs[FREQ] / 5.0);
+      const double q_value = res + inputs[RES];
+      core.set(BiquadCore::Type::HIGHPASS, center, q_value);
+      outputs[OUT] = core.process(inputs[IN]);
+      Module::postprocess();
+    }
+
+  private:
+    double freq_hz;
+    double res;
+    BiquadCore core;
+};
+
+class BANDPASS : public Module
+{
+  public:
+    BANDPASS(double freq_hz, double res = 0.707)
+      : Module(IN_COUNT, OUT_COUNT), freq_hz(freq_hz), res(res) {}
+
+    enum Ins
+    {
+      IN,
+      FREQ,
+      RES,
+      IN_COUNT
+    };
+
+    enum Outs
+    {
+      OUT,
+      OUT_COUNT
+    };
+
+    void process()
+    {
+      const double center = freq_hz * pow(2.0, inputs[FREQ] / 5.0);
+      const double q_value = res + inputs[RES];
+      core.set(BiquadCore::Type::BANDPASS, center, q_value);
+      outputs[OUT] = core.process(inputs[IN]);
+      Module::postprocess();
+    }
+
+  private:
+    double freq_hz;
+    double res;
+    BiquadCore core;
+};
+
+class NOTCH : public Module
+{
+  public:
+    NOTCH(double freq_hz, double res = 0.707)
+      : Module(IN_COUNT, OUT_COUNT), freq_hz(freq_hz), res(res) {}
+
+    enum Ins
+    {
+      IN,
+      FREQ,
+      RES,
+      IN_COUNT
+    };
+
+    enum Outs
+    {
+      OUT,
+      OUT_COUNT
+    };
+
+    void process()
+    {
+      const double center = freq_hz * pow(2.0, inputs[FREQ] / 5.0);
+      const double q_value = res + inputs[RES];
+      core.set(BiquadCore::Type::NOTCH, center, q_value);
+      outputs[OUT] = core.process(inputs[IN]);
+      Module::postprocess();
+    }
+
+  private:
+    double freq_hz;
+    double res;
+    BiquadCore core;
+};
+
+class ALLPASS : public Module
+{
+  public:
+    ALLPASS(double freq_hz, double res = 0.707)
+      : Module(IN_COUNT, OUT_COUNT), freq_hz(freq_hz), res(res) {}
+
+    enum Ins
+    {
+      IN,
+      FREQ,
+      RES,
+      IN_COUNT
+    };
+
+    enum Outs
+    {
+      OUT,
+      OUT_COUNT
+    };
+
+    void process()
+    {
+      const double center = freq_hz * pow(2.0, inputs[FREQ] / 5.0);
+      const double q_value = res + inputs[RES];
+      core.set(BiquadCore::Type::ALLPASS, center, q_value);
+      outputs[OUT] = core.process(inputs[IN]);
+      Module::postprocess();
+    }
+
+  private:
+    double freq_hz;
+    double res;
+    BiquadCore core;
+};
+
 class DELAY : public Module
 {
   public:

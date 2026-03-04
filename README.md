@@ -47,6 +47,11 @@ Supported module wrappers (constructor auto-registers into the default graph):
 - `ENV(rise_ms, fall_ms)`
 - `DELAY(buffer_size_samples)`
 - `CONST(value)`
+- `LOWPASS(freq, res=0.707)`
+- `HIGHPASS(freq, res=0.707)`
+- `BANDPASS(freq, res=0.707)`
+- `NOTCH(freq, res=0.707)`
+- `ALLPASS(freq, res=0.707)`
 
 Lifecycle methods:
 - `connect(output_port, input_port)`
