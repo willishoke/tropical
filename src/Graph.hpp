@@ -301,7 +301,14 @@ class Graph
     {
       std::vector<Command> local_commands;
       {
-        std::lock_guard<std::mutex> lock(pending_mutex_);
+        std::unique_lock<std::mutex> lock(pending_mutex_, std::try_to_lock);
+        if (!lock.owns_lock())
+        {
+          // Never block the audio thread on control-thread mutations.
+          // Commands will be applied on a later buffer boundary.
+          return;
+        }
+
         if (command_queue_.empty())
         {
           return;
