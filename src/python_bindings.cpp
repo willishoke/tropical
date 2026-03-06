@@ -98,6 +98,31 @@ class PythonGraph
       return graph_.addModule(module_name, std::make_unique<CONST>(value));
     }
 
+    bool add_add(const std::string & module_name)
+    {
+      return graph_.addModule(module_name, std::make_unique<ADD>());
+    }
+
+    bool add_sub(const std::string & module_name)
+    {
+      return graph_.addModule(module_name, std::make_unique<SUB>());
+    }
+
+    bool add_mul(const std::string & module_name)
+    {
+      return graph_.addModule(module_name, std::make_unique<MUL>());
+    }
+
+    bool add_div(const std::string & module_name)
+    {
+      return graph_.addModule(module_name, std::make_unique<DIV>());
+    }
+
+    bool add_neg(const std::string & module_name)
+    {
+      return graph_.addModule(module_name, std::make_unique<NEG>());
+    }
+
     bool add_lowpass(const std::string & module_name, double freq_hz, double res)
     {
       return graph_.addModule(module_name, std::make_unique<LOWPASS>(freq_hz, res));
@@ -123,9 +148,56 @@ class PythonGraph
       return graph_.addModule(module_name, std::make_unique<ALLPASS>(freq_hz, res));
     }
 
+    void clear_input(const std::string & module_name, unsigned int input_id)
+    {
+      clear_assigned_expression(module_name, input_id);
+
+      const auto sources = graph_.incoming_connections(module_name, input_id);
+      for (const auto & source : sources)
+      {
+        graph_.remove_connection(source.first, source.second, module_name, input_id);
+      }
+    }
+
+    void remember_assigned_expression(
+      const std::string & module_name,
+      unsigned int input_id,
+      std::vector<std::string> module_names)
+    {
+      const std::string key = assignment_key(module_name, input_id);
+      if (module_names.empty())
+      {
+        assigned_expression_modules_.erase(key);
+        return;
+      }
+
+      assigned_expression_modules_[key] = std::move(module_names);
+    }
+
   private:
+    static std::string assignment_key(const std::string & module_name, unsigned int input_id)
+    {
+      return module_name + "#" + std::to_string(input_id);
+    }
+
+    void clear_assigned_expression(const std::string & module_name, unsigned int input_id)
+    {
+      const auto it = assigned_expression_modules_.find(assignment_key(module_name, input_id));
+      if (it == assigned_expression_modules_.end())
+      {
+        return;
+      }
+
+      for (const auto & hidden_module_name : it->second)
+      {
+        graph_.remove_module(hidden_module_name);
+      }
+      assigned_expression_modules_.erase(it);
+    }
+
     Graph graph_;
     std::unordered_map<std::string, uint64_t> name_counters_;
+    std::unordered_map<std::string, std::vector<std::string>> assigned_expression_modules_;
 };
 
 static PythonGraph & default_graph()
@@ -146,6 +218,27 @@ struct InputPort
   PythonGraph * graph;
   std::string module_name;
   unsigned int input_id;
+};
+
+enum class ExprKind
+{
+  Literal,
+  Output,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Neg
+};
+
+struct SignalExpr
+{
+  ExprKind kind = ExprKind::Literal;
+  PythonGraph * graph = nullptr;
+  double literal = 0.0;
+  OutputPort output;
+  std::shared_ptr<SignalExpr> lhs;
+  std::shared_ptr<SignalExpr> rhs;
 };
 
 static void validate_same_graph(const OutputPort & out, const InputPort & in)
@@ -183,6 +276,236 @@ static std::vector<OutputPort> incoming_ports(const InputPort & in)
     results.push_back(OutputPort{in.graph, source.first, source.second});
   }
   return results;
+}
+
+static PythonGraph * merge_graphs(PythonGraph * lhs, PythonGraph * rhs)
+{
+  if (lhs != nullptr && rhs != nullptr && lhs != rhs)
+  {
+    throw std::invalid_argument("Expression operands belong to different graphs.");
+  }
+  return lhs != nullptr ? lhs : rhs;
+}
+
+static SignalExpr make_literal_expr(double value)
+{
+  SignalExpr expr;
+  expr.kind = ExprKind::Literal;
+  expr.literal = value;
+  return expr;
+}
+
+static SignalExpr make_output_expr(const OutputPort & out)
+{
+  SignalExpr expr;
+  expr.kind = ExprKind::Output;
+  expr.graph = out.graph;
+  expr.output = out;
+  return expr;
+}
+
+static SignalExpr make_unary_expr(ExprKind kind, const SignalExpr & operand)
+{
+  SignalExpr expr;
+  expr.kind = kind;
+  expr.graph = operand.graph;
+  expr.lhs = std::make_shared<SignalExpr>(operand);
+  return expr;
+}
+
+static SignalExpr make_binary_expr(ExprKind kind, const SignalExpr & lhs, const SignalExpr & rhs)
+{
+  SignalExpr expr;
+  expr.kind = kind;
+  expr.graph = merge_graphs(lhs.graph, rhs.graph);
+  expr.lhs = std::make_shared<SignalExpr>(lhs);
+  expr.rhs = std::make_shared<SignalExpr>(rhs);
+  return expr;
+}
+
+static SignalExpr coerce_expr(const py::handle & value)
+{
+  if (py::isinstance<SignalExpr>(value))
+  {
+    return value.cast<SignalExpr>();
+  }
+
+  if (py::isinstance<OutputPort>(value))
+  {
+    return make_output_expr(value.cast<OutputPort>());
+  }
+
+  if (py::isinstance<py::float_>(value) || py::isinstance<py::int_>(value))
+  {
+    return make_literal_expr(value.cast<double>());
+  }
+
+  throw std::invalid_argument("Expected an output port, arithmetic expression, numeric literal, or None.");
+}
+
+static std::string expr_kind_name(ExprKind kind)
+{
+  switch (kind)
+  {
+    case ExprKind::Literal:
+      return "literal";
+    case ExprKind::Output:
+      return "output";
+    case ExprKind::Add:
+      return "add";
+    case ExprKind::Sub:
+      return "sub";
+    case ExprKind::Mul:
+      return "mul";
+    case ExprKind::Div:
+      return "div";
+    case ExprKind::Neg:
+      return "neg";
+  }
+
+  return "expr";
+}
+
+static OutputPort materialize_expr(
+  PythonGraph & graph,
+  const SignalExpr & expr,
+  std::vector<std::string> & hidden_module_names)
+{
+  switch (expr.kind)
+  {
+    case ExprKind::Literal:
+    {
+      const std::string name = graph.next_name("__expr_const");
+      if (!graph.add_const(name, expr.literal))
+      {
+        throw std::invalid_argument("Failed to create CONST node for expression assignment.");
+      }
+      hidden_module_names.push_back(name);
+      return OutputPort{&graph, name, CONST::OUT};
+    }
+    case ExprKind::Output:
+      if (expr.output.graph != &graph)
+      {
+        throw std::invalid_argument("Expression output belongs to a different graph.");
+      }
+      return expr.output;
+    case ExprKind::Neg:
+    {
+      const OutputPort input = materialize_expr(graph, *expr.lhs, hidden_module_names);
+      const std::string name = graph.next_name("__expr_neg");
+      if (!graph.add_neg(name))
+      {
+        throw std::invalid_argument("Failed to create NEG node for expression assignment.");
+      }
+      hidden_module_names.push_back(name);
+      graph.connect(input.module_name, input.output_id, name, NEG::IN);
+      return OutputPort{&graph, name, NEG::OUT};
+    }
+    case ExprKind::Add:
+    case ExprKind::Sub:
+    case ExprKind::Mul:
+    case ExprKind::Div:
+    {
+      const OutputPort lhs = materialize_expr(graph, *expr.lhs, hidden_module_names);
+      const OutputPort rhs = materialize_expr(graph, *expr.rhs, hidden_module_names);
+
+      const std::string name = graph.next_name("__expr_" + expr_kind_name(expr.kind));
+      bool created = false;
+      unsigned int in1 = 0;
+      unsigned int in2 = 0;
+      unsigned int out = 0;
+
+      switch (expr.kind)
+      {
+        case ExprKind::Add:
+          created = graph.add_add(name);
+          in1 = ADD::IN1;
+          in2 = ADD::IN2;
+          out = ADD::OUT;
+          break;
+        case ExprKind::Sub:
+          created = graph.add_sub(name);
+          in1 = SUB::IN1;
+          in2 = SUB::IN2;
+          out = SUB::OUT;
+          break;
+        case ExprKind::Mul:
+          created = graph.add_mul(name);
+          in1 = MUL::IN1;
+          in2 = MUL::IN2;
+          out = MUL::OUT;
+          break;
+        case ExprKind::Div:
+          created = graph.add_div(name);
+          in1 = DIV::IN1;
+          in2 = DIV::IN2;
+          out = DIV::OUT;
+          break;
+        default:
+          break;
+      }
+
+      if (!created)
+      {
+        throw std::invalid_argument("Failed to create arithmetic node for expression assignment.");
+      }
+
+      hidden_module_names.push_back(name);
+      graph.connect(lhs.module_name, lhs.output_id, name, in1);
+      graph.connect(rhs.module_name, rhs.output_id, name, in2);
+      return OutputPort{&graph, name, out};
+    }
+  }
+
+  throw std::invalid_argument("Unsupported expression node.");
+}
+
+static SignalExpr add_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(ExprKind::Add, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr sub_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(ExprKind::Sub, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr mul_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(ExprKind::Mul, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr div_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(ExprKind::Div, lhs, coerce_expr(rhs));
+}
+
+static void assign_input(const InputPort & input, const py::handle & value)
+{
+  input.graph->clear_input(input.module_name, input.input_id);
+
+  if (value.is_none())
+  {
+    return;
+  }
+
+  const SignalExpr expr = coerce_expr(value);
+  if (expr.graph != nullptr && expr.graph != input.graph)
+  {
+    throw std::invalid_argument("Assigned expression belongs to a different graph.");
+  }
+
+  std::vector<std::string> hidden_module_names;
+  const OutputPort output = materialize_expr(*input.graph, expr, hidden_module_names);
+  if (!input.graph->connect(output.module_name, output.output_id, input.module_name, input.input_id))
+  {
+    throw std::invalid_argument("Failed to connect assigned expression to input.");
+  }
+
+  input.graph->remember_assigned_expression(
+    input.module_name,
+    input.input_id,
+    std::move(hidden_module_names));
 }
 
 class PyVCO
@@ -662,11 +985,32 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<OutputPort>(m, "OutputPort")
     .def_property_readonly("module_name", [](const OutputPort & p) { return p.module_name; })
-    .def_property_readonly("output_id", [](const OutputPort & p) { return p.output_id; });
+    .def_property_readonly("output_id", [](const OutputPort & p) { return p.output_id; })
+    .def("__add__", [](const OutputPort & lhs, const py::object & rhs) { return add_expr(make_output_expr(lhs), rhs); })
+    .def("__radd__", [](const OutputPort & rhs, const py::object & lhs) { return add_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__sub__", [](const OutputPort & lhs, const py::object & rhs) { return sub_expr(make_output_expr(lhs), rhs); })
+    .def("__rsub__", [](const OutputPort & rhs, const py::object & lhs) { return sub_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__mul__", [](const OutputPort & lhs, const py::object & rhs) { return mul_expr(make_output_expr(lhs), rhs); })
+    .def("__rmul__", [](const OutputPort & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__truediv__", [](const OutputPort & lhs, const py::object & rhs) { return div_expr(make_output_expr(lhs), rhs); })
+    .def("__rtruediv__", [](const OutputPort & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__neg__", [](const OutputPort & out) { return make_unary_expr(ExprKind::Neg, make_output_expr(out)); });
 
   py::class_<InputPort>(m, "InputPort")
     .def_property_readonly("module_name", [](const InputPort & p) { return p.module_name; })
-    .def_property_readonly("input_id", [](const InputPort & p) { return p.input_id; });
+    .def_property_readonly("input_id", [](const InputPort & p) { return p.input_id; })
+    .def("assign", [](const InputPort & in, const py::object & value) { assign_input(in, value); }, py::arg("value"));
+
+  py::class_<SignalExpr>(m, "SignalExpr")
+    .def("__add__", [](const SignalExpr & lhs, const py::object & rhs) { return add_expr(lhs, rhs); })
+    .def("__radd__", [](const SignalExpr & rhs, const py::object & lhs) { return add_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__sub__", [](const SignalExpr & lhs, const py::object & rhs) { return sub_expr(lhs, rhs); })
+    .def("__rsub__", [](const SignalExpr & rhs, const py::object & lhs) { return sub_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__mul__", [](const SignalExpr & lhs, const py::object & rhs) { return mul_expr(lhs, rhs); })
+    .def("__rmul__", [](const SignalExpr & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__truediv__", [](const SignalExpr & lhs, const py::object & rhs) { return div_expr(lhs, rhs); })
+    .def("__rtruediv__", [](const SignalExpr & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__neg__", [](const SignalExpr & expr) { return make_unary_expr(ExprKind::Neg, expr); });
 
   m.def("connect", &connect_ports, py::arg("out"), py::arg("in"));
   m.def("disconnect", &disconnect_ports, py::arg("out"), py::arg("in"));
@@ -681,40 +1025,40 @@ PYBIND11_MODULE(egress, m)
     .def_property_readonly("tri", &PyVCO::tri)
     .def_property_readonly("sin", &PyVCO::sin)
     .def_property_readonly("sqr", &PyVCO::sqr)
-    .def_property_readonly("fm", &PyVCO::fm)
-    .def_property_readonly("fm_index", &PyVCO::fm_index);
+    .def_property("fm", &PyVCO::fm, [](PyVCO & self, const py::object & value) { assign_input(self.fm(), value); })
+    .def_property("fm_index", &PyVCO::fm_index, [](PyVCO & self, const py::object & value) { assign_input(self.fm_index(), value); });
 
   py::class_<PyMUX>(m, "MUX")
     .def(py::init<>())
     .def(py::init<PythonGraph &, std::string>(), py::arg("graph"), py::arg("name"))
     .def_property_readonly("name", &PyMUX::name)
-    .def_property_readonly("input1", &PyMUX::in1)
-    .def_property_readonly("input2", &PyMUX::in2)
-    .def_property_readonly("control", &PyMUX::ctrl)
+    .def_property("input1", &PyMUX::in1, [](PyMUX & self, const py::object & value) { assign_input(self.in1(), value); })
+    .def_property("input2", &PyMUX::in2, [](PyMUX & self, const py::object & value) { assign_input(self.in2(), value); })
+    .def_property("control", &PyMUX::ctrl, [](PyMUX & self, const py::object & value) { assign_input(self.ctrl(), value); })
     .def_property_readonly("output", &PyMUX::out);
 
   py::class_<PyVCA>(m, "VCA")
     .def(py::init<>())
     .def(py::init<PythonGraph &, std::string>(), py::arg("graph"), py::arg("name"))
     .def_property_readonly("name", &PyVCA::name)
-    .def_property_readonly("input1", &PyVCA::in1)
-    .def_property_readonly("input2", &PyVCA::in2)
+    .def_property("input1", &PyVCA::in1, [](PyVCA & self, const py::object & value) { assign_input(self.in1(), value); })
+    .def_property("input2", &PyVCA::in2, [](PyVCA & self, const py::object & value) { assign_input(self.in2(), value); })
     .def_property_readonly("output", &PyVCA::out);
 
   py::class_<PyENV>(m, "ENV")
     .def(py::init<double, double>(), py::arg("rise_ms"), py::arg("fall_ms"))
     .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("rise_ms"), py::arg("fall_ms"))
     .def_property_readonly("name", &PyENV::name)
-    .def_property_readonly("trig", &PyENV::trig)
-    .def_property_readonly("rise", &PyENV::rise)
-    .def_property_readonly("fall", &PyENV::fall)
+    .def_property("trig", &PyENV::trig, [](PyENV & self, const py::object & value) { assign_input(self.trig(), value); })
+    .def_property("rise", &PyENV::rise, [](PyENV & self, const py::object & value) { assign_input(self.rise(), value); })
+    .def_property("fall", &PyENV::fall, [](PyENV & self, const py::object & value) { assign_input(self.fall(), value); })
     .def_property_readonly("output", &PyENV::out);
 
   py::class_<PyDELAY>(m, "DELAY")
     .def(py::init<double>(), py::arg("buffer_size_samples"))
     .def(py::init<PythonGraph &, std::string, double>(), py::arg("graph"), py::arg("name"), py::arg("buffer_size_samples"))
     .def_property_readonly("name", &PyDELAY::name)
-    .def_property_readonly("input", &PyDELAY::in)
+    .def_property("input", &PyDELAY::in, [](PyDELAY & self, const py::object & value) { assign_input(self.in(), value); })
     .def_property_readonly("output", &PyDELAY::out);
 
   py::class_<PyCONST>(m, "CONST")
@@ -727,45 +1071,45 @@ PYBIND11_MODULE(egress, m)
     .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
     .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
     .def_property_readonly("name", &PyLOWPASS::name)
-    .def_property_readonly("input", &PyLOWPASS::in)
-    .def_property_readonly("freq", &PyLOWPASS::freq)
-    .def_property_readonly("res", &PyLOWPASS::res)
+    .def_property("input", &PyLOWPASS::in, [](PyLOWPASS & self, const py::object & value) { assign_input(self.in(), value); })
+    .def_property("freq", &PyLOWPASS::freq, [](PyLOWPASS & self, const py::object & value) { assign_input(self.freq(), value); })
+    .def_property("res", &PyLOWPASS::res, [](PyLOWPASS & self, const py::object & value) { assign_input(self.res(), value); })
     .def_property_readonly("output", &PyLOWPASS::out);
 
   py::class_<PyHIGHPASS>(m, "HIGHPASS")
     .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
     .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
     .def_property_readonly("name", &PyHIGHPASS::name)
-    .def_property_readonly("input", &PyHIGHPASS::in)
-    .def_property_readonly("freq", &PyHIGHPASS::freq)
-    .def_property_readonly("res", &PyHIGHPASS::res)
+    .def_property("input", &PyHIGHPASS::in, [](PyHIGHPASS & self, const py::object & value) { assign_input(self.in(), value); })
+    .def_property("freq", &PyHIGHPASS::freq, [](PyHIGHPASS & self, const py::object & value) { assign_input(self.freq(), value); })
+    .def_property("res", &PyHIGHPASS::res, [](PyHIGHPASS & self, const py::object & value) { assign_input(self.res(), value); })
     .def_property_readonly("output", &PyHIGHPASS::out);
 
   py::class_<PyBANDPASS>(m, "BANDPASS")
     .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
     .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
     .def_property_readonly("name", &PyBANDPASS::name)
-    .def_property_readonly("input", &PyBANDPASS::in)
-    .def_property_readonly("freq", &PyBANDPASS::freq)
-    .def_property_readonly("res", &PyBANDPASS::res)
+    .def_property("input", &PyBANDPASS::in, [](PyBANDPASS & self, const py::object & value) { assign_input(self.in(), value); })
+    .def_property("freq", &PyBANDPASS::freq, [](PyBANDPASS & self, const py::object & value) { assign_input(self.freq(), value); })
+    .def_property("res", &PyBANDPASS::res, [](PyBANDPASS & self, const py::object & value) { assign_input(self.res(), value); })
     .def_property_readonly("output", &PyBANDPASS::out);
 
   py::class_<PyNOTCH>(m, "NOTCH")
     .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
     .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
     .def_property_readonly("name", &PyNOTCH::name)
-    .def_property_readonly("input", &PyNOTCH::in)
-    .def_property_readonly("freq", &PyNOTCH::freq)
-    .def_property_readonly("res", &PyNOTCH::res)
+    .def_property("input", &PyNOTCH::in, [](PyNOTCH & self, const py::object & value) { assign_input(self.in(), value); })
+    .def_property("freq", &PyNOTCH::freq, [](PyNOTCH & self, const py::object & value) { assign_input(self.freq(), value); })
+    .def_property("res", &PyNOTCH::res, [](PyNOTCH & self, const py::object & value) { assign_input(self.res(), value); })
     .def_property_readonly("output", &PyNOTCH::out);
 
   py::class_<PyALLPASS>(m, "ALLPASS")
     .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
     .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
     .def_property_readonly("name", &PyALLPASS::name)
-    .def_property_readonly("input", &PyALLPASS::in)
-    .def_property_readonly("freq", &PyALLPASS::freq)
-    .def_property_readonly("res", &PyALLPASS::res)
+    .def_property("input", &PyALLPASS::in, [](PyALLPASS & self, const py::object & value) { assign_input(self.in(), value); })
+    .def_property("freq", &PyALLPASS::freq, [](PyALLPASS & self, const py::object & value) { assign_input(self.freq(), value); })
+    .def_property("res", &PyALLPASS::res, [](PyALLPASS & self, const py::object & value) { assign_input(self.res(), value); })
     .def_property_readonly("output", &PyALLPASS::out);
 
   py::class_<PythonDAC>(m, "DAC")

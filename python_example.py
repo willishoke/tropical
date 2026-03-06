@@ -3,8 +3,12 @@ import egress as eg
 
 def main():
     osc = eg.VCO(440)
-    idx = eg.CONST(3.0)
-    eg.connect(idx.output, osc.fm_index)
+    lfo = eg.VCO(2.0)
+    lfo2 = eg.VCO(0.37)
+    lfo3 = eg.VCO(0.19)
+
+    osc.fm_index = 3.0
+    osc.fm = 0.3 * lfo.sin + 0.2 * lfo2.tri * lfo3.saw
     eg.add_output(osc.sin)
     dac = eg.DAC(sample_rate=44100, channels=2)
 
@@ -16,8 +20,7 @@ def main():
     dac.start()
     input("playing... press Enter to stop")
     dac.stop()
-    eg.disconnect(idx.output, osc.fm_index)
-    eg.graph().destroy_module(idx.name)
+    osc.fm = None
 
 
 if __name__ == "__main__":

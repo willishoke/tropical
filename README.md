@@ -13,16 +13,18 @@ This project owes a giant technical debt to Andrew Belt's `VCVRack` project. Alt
 
 ## Build
 
-Build the Python extension with CMake:
+Build the Python extension with `make`:
 
 ### Python frontend (`pybind11`)
 
 A Python extension module (`egress`) is available via `pybind11`.
 
 ```bash
-cmake -S . -B build -DEGRESS_BUILD_PYTHON=ON
-cmake --build build
+make build
+make repl
 ```
+
+`make build` configures and builds the extension. `make repl` launches Python with `build/` on `PYTHONPATH`, so `import egress` works immediately.
 
 Then import from Python:
 
@@ -31,7 +33,10 @@ import egress as eg
 
 osc = eg.VCO(440)
 mod = eg.VCO(20)
-eg.connect(mod.sin, osc.fm)
+osc.fm = mod.sin
+osc.fm_index = 3.0
+# Arithmetic expressions are compiled into hidden helper nodes.
+osc.fm = 0.3 * mod.sin + 0.2
 eg.add_output(osc.sin)
 dac = eg.DAC(sample_rate=44100, channels=2)
 
@@ -58,6 +63,14 @@ Lifecycle methods:
 - `disconnect(output_port, input_port)`
 - `add_output(output_port)`
 - `graph().destroy_module(name)` (advanced/manual control)
+
+Input assignment shortcuts:
+- `module.input = output_port`
+- `module.input = 3.0`
+- `module.input = 0.3 * lfo.sin + 0.2 * lfo2.tri * lfo3.saw`
+- `module.input = None` clears that input's current routing
+
+`input = ...` replaces the current routing for that input. `connect(...)` is still available when you want explicit fan-in behavior.
 
 Realtime output methods:
 - `dac = DAC(sample_rate=44100, channels=2)`
