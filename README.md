@@ -45,7 +45,7 @@ dac.start()
 dac.stop()
 ```
 
-Supported module wrappers (constructor auto-registers into the default graph):
+Python uses a single process-wide default graph. Module constructors auto-register into that graph:
 - `VCO(freq_hz)`
 - `MUX()`
 - `VCA()`
@@ -62,7 +62,7 @@ Lifecycle methods:
 - `connect(output_port, input_port)`
 - `disconnect(output_port, input_port)`
 - `add_output(output_port)`
-- `graph().destroy_module(name)` (advanced/manual control)
+- `graph().destroy_module(name)` (advanced/manual control on the singleton graph)
 
 Input assignment shortcuts:
 - `module.input = output_port`

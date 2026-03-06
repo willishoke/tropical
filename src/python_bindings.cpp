@@ -520,15 +520,6 @@ class PyVCO
       }
     }
 
-    PyVCO(PythonGraph & graph, std::string name, double frequency_hz)
-      : graph_(&graph), name_(std::move(name))
-    {
-      if (!graph_->add_vco(name_, frequency_hz))
-      {
-        throw std::invalid_argument("Failed to create VCO '" + name_ + "'.");
-      }
-    }
-
     const std::string & name() const { return name_; }
 
     OutputPort saw() const { return OutputPort{graph_, name_, VCO::SAW}; }
@@ -548,14 +539,6 @@ class PyMUX
 {
   public:
     PyMUX() : graph_(&default_graph()), name_(graph_->next_name("mux"))
-    {
-      if (!graph_->add_mux(name_))
-      {
-        throw std::invalid_argument("Failed to create MUX '" + name_ + "'.");
-      }
-    }
-
-    PyMUX(PythonGraph & graph, std::string name) : graph_(&graph), name_(std::move(name))
     {
       if (!graph_->add_mux(name_))
       {
@@ -586,14 +569,6 @@ class PyVCA
       }
     }
 
-    PyVCA(PythonGraph & graph, std::string name) : graph_(&graph), name_(std::move(name))
-    {
-      if (!graph_->add_vca(name_))
-      {
-        throw std::invalid_argument("Failed to create VCA '" + name_ + "'.");
-      }
-    }
-
     const std::string & name() const { return name_; }
 
     InputPort in1() const { return InputPort{graph_, name_, VCA::IN1}; }
@@ -609,15 +584,6 @@ class PyENV
 {
   public:
     PyENV(double rise_ms, double fall_ms) : graph_(&default_graph()), name_(graph_->next_name("env"))
-    {
-      if (!graph_->add_env(name_, rise_ms, fall_ms))
-      {
-        throw std::invalid_argument("Failed to create ENV '" + name_ + "'.");
-      }
-    }
-
-    PyENV(PythonGraph & graph, std::string name, double rise_ms, double fall_ms)
-      : graph_(&graph), name_(std::move(name))
     {
       if (!graph_->add_env(name_, rise_ms, fall_ms))
       {
@@ -649,15 +615,6 @@ class PyDELAY
       }
     }
 
-    PyDELAY(PythonGraph & graph, std::string name, double buffer_size_samples)
-      : graph_(&graph), name_(std::move(name))
-    {
-      if (!graph_->add_delay(name_, buffer_size_samples))
-      {
-        throw std::invalid_argument("Failed to create DELAY '" + name_ + "'.");
-      }
-    }
-
     const std::string & name() const { return name_; }
 
     InputPort in() const { return InputPort{graph_, name_, DELAY::IN}; }
@@ -679,15 +636,6 @@ class PyCONST
       }
     }
 
-    PyCONST(PythonGraph & graph, std::string name, double value)
-      : graph_(&graph), name_(std::move(name))
-    {
-      if (!graph_->add_const(name_, value))
-      {
-        throw std::invalid_argument("Failed to create CONST '" + name_ + "'.");
-      }
-    }
-
     const std::string & name() const { return name_; }
     OutputPort out() const { return OutputPort{graph_, name_, CONST::OUT}; }
 
@@ -700,15 +648,6 @@ class PyLOWPASS
 {
   public:
     PyLOWPASS(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("lowpass"))
-    {
-      if (!graph_->add_lowpass(name_, freq_hz, res))
-      {
-        throw std::invalid_argument("Failed to create LOWPASS '" + name_ + "'.");
-      }
-    }
-
-    PyLOWPASS(PythonGraph & graph, std::string name, double freq_hz, double res = 0.707)
-      : graph_(&graph), name_(std::move(name))
     {
       if (!graph_->add_lowpass(name_, freq_hz, res))
       {
@@ -738,15 +677,6 @@ class PyHIGHPASS
       }
     }
 
-    PyHIGHPASS(PythonGraph & graph, std::string name, double freq_hz, double res = 0.707)
-      : graph_(&graph), name_(std::move(name))
-    {
-      if (!graph_->add_highpass(name_, freq_hz, res))
-      {
-        throw std::invalid_argument("Failed to create HIGHPASS '" + name_ + "'.");
-      }
-    }
-
     const std::string & name() const { return name_; }
     InputPort in() const { return InputPort{graph_, name_, HIGHPASS::IN}; }
     InputPort freq() const { return InputPort{graph_, name_, HIGHPASS::FREQ}; }
@@ -762,15 +692,6 @@ class PyBANDPASS
 {
   public:
     PyBANDPASS(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("bandpass"))
-    {
-      if (!graph_->add_bandpass(name_, freq_hz, res))
-      {
-        throw std::invalid_argument("Failed to create BANDPASS '" + name_ + "'.");
-      }
-    }
-
-    PyBANDPASS(PythonGraph & graph, std::string name, double freq_hz, double res = 0.707)
-      : graph_(&graph), name_(std::move(name))
     {
       if (!graph_->add_bandpass(name_, freq_hz, res))
       {
@@ -800,15 +721,6 @@ class PyNOTCH
       }
     }
 
-    PyNOTCH(PythonGraph & graph, std::string name, double freq_hz, double res = 0.707)
-      : graph_(&graph), name_(std::move(name))
-    {
-      if (!graph_->add_notch(name_, freq_hz, res))
-      {
-        throw std::invalid_argument("Failed to create NOTCH '" + name_ + "'.");
-      }
-    }
-
     const std::string & name() const { return name_; }
     InputPort in() const { return InputPort{graph_, name_, NOTCH::IN}; }
     InputPort freq() const { return InputPort{graph_, name_, NOTCH::FREQ}; }
@@ -824,15 +736,6 @@ class PyALLPASS
 {
   public:
     PyALLPASS(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("allpass"))
-    {
-      if (!graph_->add_allpass(name_, freq_hz, res))
-      {
-        throw std::invalid_argument("Failed to create ALLPASS '" + name_ + "'.");
-      }
-    }
-
-    PyALLPASS(PythonGraph & graph, std::string name, double freq_hz, double res = 0.707)
-      : graph_(&graph), name_(std::move(name))
     {
       if (!graph_->add_allpass(name_, freq_hz, res))
       {
@@ -859,11 +762,13 @@ class PythonDAC
     {
     }
 
-    explicit PythonDAC(PythonGraph & graph, unsigned int sample_rate = 44100, unsigned int channels = 2)
+  private:
+    explicit PythonDAC(PythonGraph & graph, unsigned int sample_rate, unsigned int channels)
       : graph_(graph), sample_rate_(sample_rate), channels_(channels), running_(false)
     {
     }
 
+  public:
     ~PythonDAC()
     {
       stop();
@@ -961,7 +866,6 @@ PYBIND11_MODULE(egress, m)
   m.doc() = "Python frontend for egress graph/modules and DAC control.";
 
   py::class_<PythonGraph>(m, "Graph")
-    .def(py::init<unsigned int>(), py::arg("buffer_length"))
     .def("destroy_module", &PythonGraph::destroy_module, py::arg("module_name"))
     .def(
       "connect",
@@ -1019,7 +923,6 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyVCO>(m, "VCO")
     .def(py::init<double>(), py::arg("frequency_hz"))
-    .def(py::init<PythonGraph &, std::string, double>(), py::arg("graph"), py::arg("name"), py::arg("frequency_hz"))
     .def_property_readonly("name", &PyVCO::name)
     .def_property_readonly("saw", &PyVCO::saw)
     .def_property_readonly("tri", &PyVCO::tri)
@@ -1030,7 +933,6 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyMUX>(m, "MUX")
     .def(py::init<>())
-    .def(py::init<PythonGraph &, std::string>(), py::arg("graph"), py::arg("name"))
     .def_property_readonly("name", &PyMUX::name)
     .def_property("input1", &PyMUX::in1, [](PyMUX & self, const py::object & value) { assign_input(self.in1(), value); })
     .def_property("input2", &PyMUX::in2, [](PyMUX & self, const py::object & value) { assign_input(self.in2(), value); })
@@ -1039,7 +941,6 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyVCA>(m, "VCA")
     .def(py::init<>())
-    .def(py::init<PythonGraph &, std::string>(), py::arg("graph"), py::arg("name"))
     .def_property_readonly("name", &PyVCA::name)
     .def_property("input1", &PyVCA::in1, [](PyVCA & self, const py::object & value) { assign_input(self.in1(), value); })
     .def_property("input2", &PyVCA::in2, [](PyVCA & self, const py::object & value) { assign_input(self.in2(), value); })
@@ -1047,7 +948,6 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyENV>(m, "ENV")
     .def(py::init<double, double>(), py::arg("rise_ms"), py::arg("fall_ms"))
-    .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("rise_ms"), py::arg("fall_ms"))
     .def_property_readonly("name", &PyENV::name)
     .def_property("trig", &PyENV::trig, [](PyENV & self, const py::object & value) { assign_input(self.trig(), value); })
     .def_property("rise", &PyENV::rise, [](PyENV & self, const py::object & value) { assign_input(self.rise(), value); })
@@ -1056,20 +956,17 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyDELAY>(m, "DELAY")
     .def(py::init<double>(), py::arg("buffer_size_samples"))
-    .def(py::init<PythonGraph &, std::string, double>(), py::arg("graph"), py::arg("name"), py::arg("buffer_size_samples"))
     .def_property_readonly("name", &PyDELAY::name)
     .def_property("input", &PyDELAY::in, [](PyDELAY & self, const py::object & value) { assign_input(self.in(), value); })
     .def_property_readonly("output", &PyDELAY::out);
 
   py::class_<PyCONST>(m, "CONST")
     .def(py::init<double>(), py::arg("value"))
-    .def(py::init<PythonGraph &, std::string, double>(), py::arg("graph"), py::arg("name"), py::arg("value"))
     .def_property_readonly("name", &PyCONST::name)
     .def_property_readonly("output", &PyCONST::out);
 
   py::class_<PyLOWPASS>(m, "LOWPASS")
     .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
-    .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
     .def_property_readonly("name", &PyLOWPASS::name)
     .def_property("input", &PyLOWPASS::in, [](PyLOWPASS & self, const py::object & value) { assign_input(self.in(), value); })
     .def_property("freq", &PyLOWPASS::freq, [](PyLOWPASS & self, const py::object & value) { assign_input(self.freq(), value); })
@@ -1078,7 +975,6 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyHIGHPASS>(m, "HIGHPASS")
     .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
-    .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
     .def_property_readonly("name", &PyHIGHPASS::name)
     .def_property("input", &PyHIGHPASS::in, [](PyHIGHPASS & self, const py::object & value) { assign_input(self.in(), value); })
     .def_property("freq", &PyHIGHPASS::freq, [](PyHIGHPASS & self, const py::object & value) { assign_input(self.freq(), value); })
@@ -1087,7 +983,6 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyBANDPASS>(m, "BANDPASS")
     .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
-    .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
     .def_property_readonly("name", &PyBANDPASS::name)
     .def_property("input", &PyBANDPASS::in, [](PyBANDPASS & self, const py::object & value) { assign_input(self.in(), value); })
     .def_property("freq", &PyBANDPASS::freq, [](PyBANDPASS & self, const py::object & value) { assign_input(self.freq(), value); })
@@ -1096,7 +991,6 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyNOTCH>(m, "NOTCH")
     .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
-    .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
     .def_property_readonly("name", &PyNOTCH::name)
     .def_property("input", &PyNOTCH::in, [](PyNOTCH & self, const py::object & value) { assign_input(self.in(), value); })
     .def_property("freq", &PyNOTCH::freq, [](PyNOTCH & self, const py::object & value) { assign_input(self.freq(), value); })
@@ -1105,7 +999,6 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyALLPASS>(m, "ALLPASS")
     .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
-    .def(py::init<PythonGraph &, std::string, double, double>(), py::arg("graph"), py::arg("name"), py::arg("freq"), py::arg("res") = 0.707)
     .def_property_readonly("name", &PyALLPASS::name)
     .def_property("input", &PyALLPASS::in, [](PyALLPASS & self, const py::object & value) { assign_input(self.in(), value); })
     .def_property("freq", &PyALLPASS::freq, [](PyALLPASS & self, const py::object & value) { assign_input(self.freq(), value); })
@@ -1114,7 +1007,6 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PythonDAC>(m, "DAC")
     .def(py::init<unsigned int, unsigned int>(), py::arg("sample_rate") = 44100, py::arg("channels") = 2)
-    .def(py::init<PythonGraph &, unsigned int, unsigned int>(), py::arg("graph"), py::arg("sample_rate") = 44100, py::arg("channels") = 2)
     .def("start", &PythonDAC::start)
     .def("stop", &PythonDAC::stop)
     .def("is_running", &PythonDAC::is_running);
