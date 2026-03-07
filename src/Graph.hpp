@@ -61,7 +61,7 @@ class Graph
 
           for (unsigned int input_id = 0; input_id < slot.input_exprs.size(); ++input_id)
           {
-            slot.module->inputs[input_id] = eval_expr(slot.input_exprs[input_id]);
+            slot.module->inputs[input_id] = eval_expr(slot.input_exprs[input_id], slot.input_registers[input_id]);
           }
 
           slot.module->process();
@@ -324,23 +324,42 @@ class Graph
       unsigned int out_count;
     };
 
-    struct ActiveExpr
+    enum class ValueType : uint8_t
+    {
+      Scalar
+    };
+
+    struct ExprInstr;
+    using ExprKernel = void (*)(const Graph &, const ExprInstr &, double *);
+
+    struct ExprInstr
     {
       ExprKind kind = ExprKind::Literal;
+      ValueType value_type = ValueType::Scalar;
+      uint32_t dst = 0;
+      uint32_t src_a = 0;
+      uint32_t src_b = 0;
       double literal = 0.0;
       uint32_t ref_module_id = 0;
       unsigned int ref_output_id = 0;
-      std::shared_ptr<ActiveExpr> lhs;
-      std::shared_ptr<ActiveExpr> rhs;
+      ExprKernel kernel = nullptr;
     };
 
-    using ActiveExprPtr = std::shared_ptr<ActiveExpr>;
+    struct CompiledExpr
+    {
+      ValueType value_type = ValueType::Scalar;
+      std::vector<ExprInstr> instructions;
+      std::vector<uint32_t> dependencies;
+      uint32_t register_count = 0;
+      uint32_t result_register = 0;
+    };
 
     struct ModuleSlot
     {
       std::string name;
       mPtr module;
-      std::vector<ActiveExprPtr> input_exprs;
+      std::vector<CompiledExpr> input_exprs;
+      std::vector<std::vector<double>> input_registers;
       bool active = false;
     };
 
@@ -655,7 +674,8 @@ class Graph
         free_ids_.pop_back();
         modules_[module_id].name = std::move(module_name);
         modules_[module_id].module = std::move(module);
-        modules_[module_id].input_exprs.assign(modules_[module_id].module->inputs.size(), nullptr);
+        modules_[module_id].input_exprs.assign(modules_[module_id].module->inputs.size(), CompiledExpr{});
+        modules_[module_id].input_registers.assign(modules_[module_id].module->inputs.size(), std::vector<double>{});
         modules_[module_id].active = true;
       }
       else
@@ -664,7 +684,8 @@ class Graph
         modules_.push_back(ModuleSlot{
           std::move(module_name),
           std::move(module),
-          std::vector<ActiveExprPtr>(input_count),
+          std::vector<CompiledExpr>(input_count),
+          std::vector<std::vector<double>>(input_count),
           true});
       }
 
@@ -694,36 +715,301 @@ class Graph
 
       modules_[module_id].module.reset();
       modules_[module_id].input_exprs.clear();
+      modules_[module_id].input_registers.clear();
       modules_[module_id].name.clear();
       modules_[module_id].active = false;
       free_ids_.push_back(module_id);
     }
 
-    ActiveExprPtr compile_expr(const ExprSpecPtr & expr) const
+    static void exec_literal(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = instr.literal;
+    }
+
+    static void exec_ref(const Graph & graph, const ExprInstr & instr, double * registers)
+    {
+      if (instr.ref_module_id >= graph.modules_.size() || !graph.modules_[instr.ref_module_id].active)
+      {
+        registers[instr.dst] = 0.0;
+        return;
+      }
+
+      registers[instr.dst] = graph.modules_[instr.ref_module_id].module->outputs[instr.ref_output_id];
+    }
+
+    static void exec_add(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] + registers[instr.src_b];
+    }
+
+    static void exec_add_const(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] + instr.literal;
+    }
+
+    static void exec_sub(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] - registers[instr.src_b];
+    }
+
+    static void exec_sub_const_rhs(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] - instr.literal;
+    }
+
+    static void exec_sub_const_lhs(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = instr.literal - registers[instr.src_a];
+    }
+
+    static void exec_mul(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] * registers[instr.src_b];
+    }
+
+    static void exec_mul_const(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] * instr.literal;
+    }
+
+    static void exec_div(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      const double denominator = registers[instr.src_b];
+      registers[instr.dst] = denominator == 0.0 ? 0.0 : registers[instr.src_a] / denominator;
+    }
+
+    static void exec_neg(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = -registers[instr.src_a];
+    }
+
+    static ExprKernel kernel_for_kind(ExprKind kind)
+    {
+      switch (kind)
+      {
+        case ExprKind::Literal:
+          return &Graph::exec_literal;
+        case ExprKind::Ref:
+          return &Graph::exec_ref;
+        case ExprKind::Add:
+          return &Graph::exec_add;
+        case ExprKind::Sub:
+          return &Graph::exec_sub;
+        case ExprKind::Mul:
+          return &Graph::exec_mul;
+        case ExprKind::Div:
+          return &Graph::exec_div;
+        case ExprKind::Neg:
+          return &Graph::exec_neg;
+      }
+
+      return &Graph::exec_literal;
+    }
+
+    uint32_t compile_expr_node(
+      const ExprSpecPtr & expr,
+      CompiledExpr & compiled,
+      std::vector<uint8_t> & dependency_marks) const
     {
       if (!expr)
       {
-        return nullptr;
+        ExprInstr instr;
+        instr.kind = ExprKind::Literal;
+        instr.value_type = ValueType::Scalar;
+        instr.dst = compiled.register_count++;
+        instr.literal = 0.0;
+        instr.kernel = kernel_for_kind(instr.kind);
+        compiled.instructions.push_back(instr);
+        return instr.dst;
       }
 
-      auto compiled = std::make_shared<ActiveExpr>();
-      compiled->kind = expr->kind;
-      compiled->literal = expr->literal;
-      compiled->ref_output_id = expr->output_id;
+      if (expr->kind == ExprKind::Literal)
+      {
+        ExprInstr instr;
+        instr.kind = ExprKind::Literal;
+        instr.value_type = ValueType::Scalar;
+        instr.dst = compiled.register_count++;
+        instr.literal = expr->literal;
+        instr.kernel = kernel_for_kind(instr.kind);
+        compiled.instructions.push_back(instr);
+        return instr.dst;
+      }
 
       if (expr->kind == ExprKind::Ref)
       {
         auto it = name_to_id_.find(expr->module_name);
         if (it == name_to_id_.end())
         {
-          return nullptr;
+          ExprInstr instr;
+          instr.kind = ExprKind::Literal;
+          instr.value_type = ValueType::Scalar;
+          instr.dst = compiled.register_count++;
+          instr.literal = 0.0;
+          instr.kernel = kernel_for_kind(instr.kind);
+          compiled.instructions.push_back(instr);
+          return instr.dst;
         }
-        compiled->ref_module_id = it->second;
-        return compiled;
+
+        ExprInstr instr;
+        instr.kind = ExprKind::Ref;
+        instr.value_type = ValueType::Scalar;
+        instr.dst = compiled.register_count++;
+        instr.ref_module_id = it->second;
+        instr.ref_output_id = expr->output_id;
+        instr.kernel = kernel_for_kind(instr.kind);
+        compiled.instructions.push_back(instr);
+
+        if (it->second < dependency_marks.size() && !dependency_marks[it->second])
+        {
+          dependency_marks[it->second] = 1;
+          compiled.dependencies.push_back(it->second);
+        }
+
+        return instr.dst;
       }
 
-      compiled->lhs = compile_expr(expr->lhs);
-      compiled->rhs = compile_expr(expr->rhs);
+      if (expr->kind == ExprKind::Neg)
+      {
+        const uint32_t operand = compile_expr_node(expr->lhs, compiled, dependency_marks);
+        ExprInstr instr;
+        instr.kind = ExprKind::Neg;
+        instr.value_type = ValueType::Scalar;
+        instr.dst = compiled.register_count++;
+        instr.src_a = operand;
+        instr.kernel = kernel_for_kind(instr.kind);
+        compiled.instructions.push_back(instr);
+        return instr.dst;
+      }
+
+      if (expr->kind == ExprKind::Add)
+      {
+        if (expr->lhs && expr->lhs->kind == ExprKind::Literal)
+        {
+          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, dependency_marks);
+          ExprInstr instr;
+          instr.kind = ExprKind::Add;
+          instr.value_type = ValueType::Scalar;
+          instr.dst = compiled.register_count++;
+          instr.src_a = rhs;
+          instr.literal = expr->lhs->literal;
+          instr.kernel = &Graph::exec_add_const;
+          compiled.instructions.push_back(instr);
+          return instr.dst;
+        }
+
+        if (expr->rhs && expr->rhs->kind == ExprKind::Literal)
+        {
+          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, dependency_marks);
+          ExprInstr instr;
+          instr.kind = ExprKind::Add;
+          instr.value_type = ValueType::Scalar;
+          instr.dst = compiled.register_count++;
+          instr.src_a = lhs;
+          instr.literal = expr->rhs->literal;
+          instr.kernel = &Graph::exec_add_const;
+          compiled.instructions.push_back(instr);
+          return instr.dst;
+        }
+      }
+
+      if (expr->kind == ExprKind::Mul)
+      {
+        if (expr->lhs && expr->lhs->kind == ExprKind::Literal)
+        {
+          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, dependency_marks);
+          ExprInstr instr;
+          instr.kind = ExprKind::Mul;
+          instr.value_type = ValueType::Scalar;
+          instr.dst = compiled.register_count++;
+          instr.src_a = rhs;
+          instr.literal = expr->lhs->literal;
+          instr.kernel = &Graph::exec_mul_const;
+          compiled.instructions.push_back(instr);
+          return instr.dst;
+        }
+
+        if (expr->rhs && expr->rhs->kind == ExprKind::Literal)
+        {
+          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, dependency_marks);
+          ExprInstr instr;
+          instr.kind = ExprKind::Mul;
+          instr.value_type = ValueType::Scalar;
+          instr.dst = compiled.register_count++;
+          instr.src_a = lhs;
+          instr.literal = expr->rhs->literal;
+          instr.kernel = &Graph::exec_mul_const;
+          compiled.instructions.push_back(instr);
+          return instr.dst;
+        }
+      }
+
+      if (expr->kind == ExprKind::Sub)
+      {
+        if (expr->rhs && expr->rhs->kind == ExprKind::Literal)
+        {
+          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, dependency_marks);
+          ExprInstr instr;
+          instr.kind = ExprKind::Sub;
+          instr.value_type = ValueType::Scalar;
+          instr.dst = compiled.register_count++;
+          instr.src_a = lhs;
+          instr.literal = expr->rhs->literal;
+          instr.kernel = &Graph::exec_sub_const_rhs;
+          compiled.instructions.push_back(instr);
+          return instr.dst;
+        }
+
+        if (expr->lhs && expr->lhs->kind == ExprKind::Literal)
+        {
+          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, dependency_marks);
+          ExprInstr instr;
+          instr.kind = ExprKind::Sub;
+          instr.value_type = ValueType::Scalar;
+          instr.dst = compiled.register_count++;
+          instr.src_a = rhs;
+          instr.literal = expr->lhs->literal;
+          instr.kernel = &Graph::exec_sub_const_lhs;
+          compiled.instructions.push_back(instr);
+          return instr.dst;
+        }
+      }
+
+      if (expr->kind == ExprKind::Div)
+      {
+        if (expr->rhs && expr->rhs->kind == ExprKind::Literal)
+        {
+          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, dependency_marks);
+          ExprInstr instr;
+          instr.kind = ExprKind::Mul;
+          instr.value_type = ValueType::Scalar;
+          instr.dst = compiled.register_count++;
+          instr.src_a = lhs;
+          instr.literal = expr->rhs->literal == 0.0 ? 0.0 : 1.0 / expr->rhs->literal;
+          instr.kernel = &Graph::exec_mul_const;
+          compiled.instructions.push_back(instr);
+          return instr.dst;
+        }
+      }
+
+      const uint32_t lhs = compile_expr_node(expr->lhs, compiled, dependency_marks);
+      const uint32_t rhs = compile_expr_node(expr->rhs, compiled, dependency_marks);
+
+      ExprInstr instr;
+      instr.kind = expr->kind;
+      instr.value_type = ValueType::Scalar;
+      instr.dst = compiled.register_count++;
+      instr.src_a = lhs;
+      instr.src_b = rhs;
+      instr.kernel = kernel_for_kind(instr.kind);
+      compiled.instructions.push_back(instr);
+      return instr.dst;
+    }
+
+    CompiledExpr compile_expr(const ExprSpecPtr & expr) const
+    {
+      CompiledExpr compiled;
+      std::vector<uint8_t> dependency_marks(modules_.size(), 0);
+      compiled.result_register = compile_expr_node(expr, compiled, dependency_marks);
       return compiled;
     }
 
@@ -742,6 +1028,7 @@ class Graph
       }
 
       slot.input_exprs[input_id] = compile_expr(expr);
+      slot.input_registers[input_id].assign(slot.input_exprs[input_id].register_count, 0.0);
     }
 
     void apply_add_output(const std::string & module_name, unsigned int output_id)
@@ -754,54 +1041,24 @@ class Graph
       mix_.push_back(MixTap{it->second, output_id});
     }
 
-    double eval_expr(const ActiveExprPtr & expr) const
+    double eval_expr(const CompiledExpr & expr, std::vector<double> & registers) const
     {
-      if (!expr)
+      if (expr.instructions.empty())
       {
         return 0.0;
       }
 
-      switch (expr->kind)
+      if (registers.size() < expr.register_count)
       {
-        case ExprKind::Literal:
-          return expr->literal;
-        case ExprKind::Ref:
-          if (expr->ref_module_id >= modules_.size() || !modules_[expr->ref_module_id].active)
-          {
-            return 0.0;
-          }
-          return modules_[expr->ref_module_id].module->outputs[expr->ref_output_id];
-        case ExprKind::Add:
-          return eval_expr(expr->lhs) + eval_expr(expr->rhs);
-        case ExprKind::Sub:
-          return eval_expr(expr->lhs) - eval_expr(expr->rhs);
-        case ExprKind::Mul:
-          return eval_expr(expr->lhs) * eval_expr(expr->rhs);
-        case ExprKind::Div:
-        {
-          const double rhs = eval_expr(expr->rhs);
-          return rhs == 0.0 ? 0.0 : eval_expr(expr->lhs) / rhs;
-        }
-        case ExprKind::Neg:
-          return -eval_expr(expr->lhs);
+        registers.resize(expr.register_count, 0.0);
       }
 
-      return 0.0;
-    }
+      for (const auto & instr : expr.instructions)
+      {
+        instr.kernel(*this, instr, registers.data());
+      }
 
-    void collect_module_refs(const ActiveExprPtr & expr, std::vector<uint32_t> & refs) const
-    {
-      if (!expr)
-      {
-        return;
-      }
-      if (expr->kind == ExprKind::Ref)
-      {
-        refs.push_back(expr->ref_module_id);
-        return;
-      }
-      collect_module_refs(expr->lhs, refs);
-      collect_module_refs(expr->rhs, refs);
+      return registers[expr.result_register];
     }
 
     void rebuild_execution_order()
@@ -820,12 +1077,9 @@ class Graph
         }
 
         active_ids.push_back(id);
-        std::vector<uint32_t> refs;
         for (const auto & expr : modules_[id].input_exprs)
         {
-          refs.clear();
-          collect_module_refs(expr, refs);
-          for (uint32_t src_id : refs)
+          for (uint32_t src_id : expr.dependencies)
           {
             if (src_id >= modules_.size() || !modules_[src_id].active || src_id == id)
             {
