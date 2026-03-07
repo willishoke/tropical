@@ -35,8 +35,8 @@ osc = eg.VCO(440)
 mod = eg.VCO(20)
 osc.fm = mod.sin
 osc.fm_index = 3.0
-# Arithmetic expressions are compiled into hidden helper nodes.
 osc.fm = 0.3 * mod.sin + 0.2
+osc.fm += 0.1 * mod.saw
 eg.add_output(osc.sin)
 dac = eg.DAC(sample_rate=44100, channels=2)
 
@@ -68,9 +68,10 @@ Input assignment shortcuts:
 - `module.input = output_port`
 - `module.input = 3.0`
 - `module.input = 0.3 * lfo.sin + 0.2 * lfo2.tri * lfo3.saw`
+- `module.input += expr`
 - `module.input = None` clears that input's current routing
 
-`input = ...` replaces the current routing for that input. `connect(...)` is still available when you want explicit fan-in behavior.
+Each input stores a single canonical expression tree. `input = ...` replaces that tree. `input += expr` and `connect(...)` append additional signal into the input sum.
 
 Realtime output methods:
 - `dac = DAC(sample_rate=44100, channels=2)`
@@ -81,7 +82,7 @@ Realtime output methods:
 
 ## Graph
 
-`Graph` is responsible for storing modules and managing connections between them. It also manages mixing and stores the output buffer. Racks store modules using an associative map with a unique name as key and `unique_ptr` to a module object as value. This allows for efficient lookup and constant-time iteration through the module list. Connections are stored using an associative map, with an output module's name and output ID as keys and module name and input ID as values. `Graph` has a `process` method that will iterate through the computation graph, sending output values from one module to another. It then calls each module's `process` method and stores this value in the output buffer. Since the buffer updates occur sequentially, the connection latency between any two modules is only a single sample. 
+`Graph` stores modules, per-input expression trees, output taps, and the output buffer. Each input is represented by a single expression tree whose leaves are literals or references to module outputs. `Graph::process()` evaluates those input expressions sample-by-sample, processes modules in dependency order, and mixes selected outputs into the output buffer. Since evaluation and processing proceed sequentially, the latency between connected modules is a single sample.
 
 ## Modules
 

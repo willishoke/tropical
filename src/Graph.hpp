@@ -14,13 +14,32 @@ using inputID = std::pair<std::string, unsigned int>;
 using outputID = std::pair<std::string, unsigned int>;
 using mPtr = std::unique_ptr<Module>;
 
-/*
- * Graph stores modules and routes signals between them.
- * The audio thread owns active DSP state and applies pending edits once per buffer.
- */
 class Graph
 {
   public:
+    enum class ExprKind
+    {
+      Literal,
+      Ref,
+      Add,
+      Sub,
+      Mul,
+      Div,
+      Neg
+    };
+
+    struct ExprSpec
+    {
+      ExprKind kind = ExprKind::Literal;
+      double literal = 0.0;
+      std::string module_name;
+      unsigned int output_id = 0;
+      std::shared_ptr<ExprSpec> lhs;
+      std::shared_ptr<ExprSpec> rhs;
+    };
+
+    using ExprSpecPtr = std::shared_ptr<ExprSpec>;
+
     explicit Graph(unsigned int bufferLength)
       : bufferLength_(bufferLength), outputBuffer(bufferLength, 0.0)
     {
@@ -30,19 +49,22 @@ class Graph
     {
       apply_pending_commands();
 
-      for (unsigned int i = 0; i < bufferLength_; ++i)
+      for (unsigned int sample = 0; sample < bufferLength_; ++sample)
       {
-        // Fan-in mixing: each destination input accumulates all routed source outputs.
-        for (const auto & route : routes_)
-        {
-          Module * src = modules_[route.src_module_id].module.get();
-          Module * dst = modules_[route.dst_module_id].module.get();
-          dst->inputs[route.dst_input_id] += src->outputs[route.src_output_id];
-        }
-
         for (uint32_t module_id : execution_order_)
         {
-          modules_[module_id].module->process();
+          auto & slot = modules_[module_id];
+          if (!slot.active)
+          {
+            continue;
+          }
+
+          for (unsigned int input_id = 0; input_id < slot.input_exprs.size(); ++input_id)
+          {
+            slot.module->inputs[input_id] = eval_expr(slot.input_exprs[input_id]);
+          }
+
+          slot.module->process();
         }
 
         double mixed = 0.0;
@@ -50,7 +72,7 @@ class Graph
         {
           mixed += modules_[tap.module_id].module->outputs[tap.output_id] / 20.0;
         }
-        outputBuffer[i] = mixed;
+        outputBuffer[sample] = mixed;
       }
     }
 
@@ -71,12 +93,62 @@ class Graph
       }
 
       control_modules_.emplace(name, ModuleShape{in_count, out_count});
+      control_input_exprs_.emplace(name, std::vector<ExprSpecPtr>(in_count));
 
       Command command;
       command.type = CommandType::AddModule;
       command.module_name = std::move(name);
       command.module = std::move(new_module);
       command_queue_.push_back(std::move(command));
+      return true;
+    }
+
+    bool remove_module(const std::string & module_name)
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      if (control_modules_.find(module_name) == control_modules_.end())
+      {
+        return false;
+      }
+
+      control_modules_.erase(module_name);
+      control_input_exprs_.erase(module_name);
+
+      control_mix_.erase(
+        std::remove_if(
+          control_mix_.begin(),
+          control_mix_.end(),
+          [&module_name](const outputID & out)
+          {
+            return out.first == module_name;
+          }),
+        control_mix_.end());
+
+      std::vector<std::pair<std::string, unsigned int>> updated_inputs;
+      for (auto & [name, inputs] : control_input_exprs_)
+      {
+        for (unsigned int input_id = 0; input_id < inputs.size(); ++input_id)
+        {
+          bool removed_any = false;
+          const ExprSpecPtr updated = replace_refs_with_zero(inputs[input_id], module_name, 0, true, removed_any);
+          if (removed_any)
+          {
+            inputs[input_id] = simplify_expr(updated);
+            updated_inputs.emplace_back(name, input_id);
+          }
+        }
+      }
+
+      Command remove_command;
+      remove_command.type = CommandType::RemoveModule;
+      remove_command.module_name = module_name;
+      command_queue_.push_back(std::move(remove_command));
+
+      for (const auto & [name, input_id] : updated_inputs)
+      {
+        queue_set_input_expr(name, input_id, control_input_exprs_[name][input_id]);
+      }
+
       return true;
     }
 
@@ -121,26 +193,15 @@ class Graph
         return false;
       }
 
-      if (src_output_id >= src_it->second.out_count)
+      if (src_output_id >= src_it->second.out_count || dst_input_id >= dst_it->second.in_count)
       {
         return false;
       }
 
-      if (dst_input_id >= dst_it->second.in_count)
-      {
-        return false;
-      }
-
-      control_connections_.push_back(ConnectionDesc{
-        std::move(src_module), src_output_id, std::move(dst_module), dst_input_id});
-
-      Command command;
-      command.type = CommandType::Connect;
-      command.module_name = control_connections_.back().src_module;
-      command.src_output_id = src_output_id;
-      command.other_module_name = control_connections_.back().dst_module;
-      command.dst_input_id = dst_input_id;
-      command_queue_.push_back(std::move(command));
+      ExprSpecPtr ref = make_ref_expr(src_module, src_output_id);
+      ExprSpecPtr & current = control_input_exprs_[dst_module][dst_input_id];
+      current = simplify_expr(append_expr(current, ref));
+      queue_set_input_expr(dst_module, dst_input_id, current);
       return true;
     }
 
@@ -151,89 +212,71 @@ class Graph
       unsigned int dst_input_id)
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
-
-      bool removed = false;
-      for (auto it = control_connections_.begin(); it != control_connections_.end(); )
-      {
-        const bool matches = it->src_module == src_module &&
-                             it->src_output_id == src_output_id &&
-                             it->dst_module == dst_module &&
-                             it->dst_input_id == dst_input_id;
-        if (matches)
-        {
-          it = control_connections_.erase(it);
-          removed = true;
-        }
-        else
-        {
-          ++it;
-        }
-      }
-
-      if (!removed)
+      auto dst_inputs_it = control_input_exprs_.find(dst_module);
+      if (dst_inputs_it == control_input_exprs_.end() || dst_input_id >= dst_inputs_it->second.size())
       {
         return false;
       }
 
-      Command command;
-      command.type = CommandType::RemoveConnection;
-      command.module_name = std::move(src_module);
-      command.src_output_id = src_output_id;
-      command.other_module_name = std::move(dst_module);
-      command.dst_input_id = dst_input_id;
-      command_queue_.push_back(std::move(command));
+      bool removed_any = false;
+      ExprSpecPtr updated = replace_refs_with_zero(
+        dst_inputs_it->second[dst_input_id],
+        src_module,
+        src_output_id,
+        false,
+        removed_any);
+
+      if (!removed_any)
+      {
+        return false;
+      }
+
+      dst_inputs_it->second[dst_input_id] = simplify_expr(updated);
+      queue_set_input_expr(dst_module, dst_input_id, dst_inputs_it->second[dst_input_id]);
       return true;
     }
 
-    bool remove_module(const std::string & module_name)
+    bool set_input_expr(const std::string & module_name, unsigned int input_id, ExprSpecPtr expr)
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
-      if (control_modules_.find(module_name) == control_modules_.end())
+      auto module_it = control_modules_.find(module_name);
+      if (module_it == control_modules_.end() || input_id >= module_it->second.in_count)
       {
         return false;
       }
 
-      control_modules_.erase(module_name);
+      if (!validate_expr_refs(expr))
+      {
+        return false;
+      }
 
-      control_connections_.erase(
-        std::remove_if(
-          control_connections_.begin(),
-          control_connections_.end(),
-          [&module_name](const ConnectionDesc & c)
-          {
-            return c.src_module == module_name || c.dst_module == module_name;
-          }),
-        control_connections_.end());
-
-      control_mix_.erase(
-        std::remove_if(
-          control_mix_.begin(),
-          control_mix_.end(),
-          [&module_name](const outputID & out)
-          {
-            return out.first == module_name;
-          }),
-        control_mix_.end());
-
-      Command command;
-      command.type = CommandType::RemoveModule;
-      command.module_name = module_name;
-      command_queue_.push_back(std::move(command));
+      control_input_exprs_[module_name][input_id] = simplify_expr(expr);
+      queue_set_input_expr(module_name, input_id, control_input_exprs_[module_name][input_id]);
       return true;
+    }
+
+    ExprSpecPtr get_input_expr(const std::string & module_name, unsigned int input_id) const
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      auto module_it = control_input_exprs_.find(module_name);
+      if (module_it == control_input_exprs_.end() || input_id >= module_it->second.size())
+      {
+        return nullptr;
+      }
+      return module_it->second[input_id];
     }
 
     std::vector<outputID> incoming_connections(const std::string & dst_module, unsigned int dst_input_id) const
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
       std::vector<outputID> sources;
-      sources.reserve(control_connections_.size());
-      for (const auto & connection : control_connections_)
+      auto module_it = control_input_exprs_.find(dst_module);
+      if (module_it == control_input_exprs_.end() || dst_input_id >= module_it->second.size())
       {
-        if (connection.dst_module == dst_module && connection.dst_input_id == dst_input_id)
-        {
-          sources.emplace_back(connection.src_module, connection.src_output_id);
-        }
+        return sources;
       }
+
+      collect_refs(module_it->second[dst_input_id], sources);
       return sources;
     }
 
@@ -242,6 +285,38 @@ class Graph
       return bufferLength_;
     }
 
+    static ExprSpecPtr literal_expr(double value)
+    {
+      auto expr = std::make_shared<ExprSpec>();
+      expr->kind = ExprKind::Literal;
+      expr->literal = value;
+      return expr;
+    }
+
+    static ExprSpecPtr ref_expr(std::string module_name, unsigned int output_id)
+    {
+      return make_ref_expr(std::move(module_name), output_id);
+    }
+
+    static ExprSpecPtr unary_expr(ExprKind kind, ExprSpecPtr operand)
+    {
+      auto expr = std::make_shared<ExprSpec>();
+      expr->kind = kind;
+      expr->lhs = std::move(operand);
+      return expr;
+    }
+
+    static ExprSpecPtr binary_expr(ExprKind kind, ExprSpecPtr lhs, ExprSpecPtr rhs)
+    {
+      auto expr = std::make_shared<ExprSpec>();
+      expr->kind = kind;
+      expr->lhs = std::move(lhs);
+      expr->rhs = std::move(rhs);
+      return expr;
+    }
+
+    std::vector<double> outputBuffer;
+
   private:
     struct ModuleShape
     {
@@ -249,27 +324,24 @@ class Graph
       unsigned int out_count;
     };
 
-    struct ConnectionDesc
+    struct ActiveExpr
     {
-      std::string src_module;
-      unsigned int src_output_id;
-      std::string dst_module;
-      unsigned int dst_input_id;
+      ExprKind kind = ExprKind::Literal;
+      double literal = 0.0;
+      uint32_t ref_module_id = 0;
+      unsigned int ref_output_id = 0;
+      std::shared_ptr<ActiveExpr> lhs;
+      std::shared_ptr<ActiveExpr> rhs;
     };
+
+    using ActiveExprPtr = std::shared_ptr<ActiveExpr>;
 
     struct ModuleSlot
     {
       std::string name;
       mPtr module;
+      std::vector<ActiveExprPtr> input_exprs;
       bool active = false;
-    };
-
-    struct Route
-    {
-      uint32_t src_module_id;
-      unsigned int src_output_id;
-      uint32_t dst_module_id;
-      unsigned int dst_input_id;
     };
 
     struct MixTap
@@ -282,8 +354,7 @@ class Graph
     {
       AddModule,
       RemoveModule,
-      Connect,
-      RemoveConnection,
+      SetInputExpr,
       AddOutput
     };
 
@@ -291,11 +362,236 @@ class Graph
     {
       CommandType type{};
       std::string module_name;
-      std::string other_module_name;
       unsigned int src_output_id = 0;
       unsigned int dst_input_id = 0;
+      ExprSpecPtr expr;
       mPtr module;
     };
+
+    static ExprSpecPtr make_ref_expr(std::string module_name, unsigned int output_id)
+    {
+      auto expr = std::make_shared<ExprSpec>();
+      expr->kind = ExprKind::Ref;
+      expr->module_name = std::move(module_name);
+      expr->output_id = output_id;
+      return expr;
+    }
+
+    static bool is_zero_expr(const ExprSpecPtr & expr)
+    {
+      return expr != nullptr && expr->kind == ExprKind::Literal && expr->literal == 0.0;
+    }
+
+    static bool is_one_expr(const ExprSpecPtr & expr)
+    {
+      return expr != nullptr && expr->kind == ExprKind::Literal && expr->literal == 1.0;
+    }
+
+    static ExprSpecPtr append_expr(const ExprSpecPtr & lhs, const ExprSpecPtr & rhs)
+    {
+      if (!lhs)
+      {
+        return rhs;
+      }
+      if (!rhs)
+      {
+        return lhs;
+      }
+      return binary_expr(ExprKind::Add, lhs, rhs);
+    }
+
+    static ExprSpecPtr simplify_expr(const ExprSpecPtr & expr)
+    {
+      if (!expr)
+      {
+        return nullptr;
+      }
+
+      switch (expr->kind)
+      {
+        case ExprKind::Literal:
+        case ExprKind::Ref:
+          return expr;
+        case ExprKind::Neg:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          if (!lhs || is_zero_expr(lhs))
+          {
+            return nullptr;
+          }
+          if (lhs->kind == ExprKind::Literal)
+          {
+            return literal_expr(-lhs->literal);
+          }
+          return unary_expr(ExprKind::Neg, lhs);
+        }
+        case ExprKind::Add:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          ExprSpecPtr rhs = simplify_expr(expr->rhs);
+          if (!lhs || is_zero_expr(lhs))
+          {
+            return rhs;
+          }
+          if (!rhs || is_zero_expr(rhs))
+          {
+            return lhs;
+          }
+          if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
+          {
+            return literal_expr(lhs->literal + rhs->literal);
+          }
+          return binary_expr(ExprKind::Add, lhs, rhs);
+        }
+        case ExprKind::Sub:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          ExprSpecPtr rhs = simplify_expr(expr->rhs);
+          if (!rhs || is_zero_expr(rhs))
+          {
+            return lhs;
+          }
+          if (!lhs || is_zero_expr(lhs))
+          {
+            return simplify_expr(unary_expr(ExprKind::Neg, rhs));
+          }
+          if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
+          {
+            return literal_expr(lhs->literal - rhs->literal);
+          }
+          return binary_expr(ExprKind::Sub, lhs, rhs);
+        }
+        case ExprKind::Mul:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          ExprSpecPtr rhs = simplify_expr(expr->rhs);
+          if (!lhs || !rhs || is_zero_expr(lhs) || is_zero_expr(rhs))
+          {
+            return nullptr;
+          }
+          if (is_one_expr(lhs))
+          {
+            return rhs;
+          }
+          if (is_one_expr(rhs))
+          {
+            return lhs;
+          }
+          if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
+          {
+            return literal_expr(lhs->literal * rhs->literal);
+          }
+          return binary_expr(ExprKind::Mul, lhs, rhs);
+        }
+        case ExprKind::Div:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          ExprSpecPtr rhs = simplify_expr(expr->rhs);
+          if (!lhs || is_zero_expr(lhs))
+          {
+            return nullptr;
+          }
+          if (!rhs)
+          {
+            return nullptr;
+          }
+          if (is_one_expr(rhs))
+          {
+            return lhs;
+          }
+          if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal && rhs->literal != 0.0)
+          {
+            return literal_expr(lhs->literal / rhs->literal);
+          }
+          return binary_expr(ExprKind::Div, lhs, rhs);
+        }
+      }
+
+      return expr;
+    }
+
+    static ExprSpecPtr replace_refs_with_zero(
+      const ExprSpecPtr & expr,
+      const std::string & module_name,
+      unsigned int output_id,
+      bool remove_all_outputs,
+      bool & removed_any)
+    {
+      if (!expr)
+      {
+        return nullptr;
+      }
+
+      if (expr->kind == ExprKind::Ref)
+      {
+        const bool matches = expr->module_name == module_name &&
+                             (remove_all_outputs || expr->output_id == output_id);
+        if (matches)
+        {
+          removed_any = true;
+          return nullptr;
+        }
+        return expr;
+      }
+
+      if (expr->kind == ExprKind::Literal)
+      {
+        return expr;
+      }
+
+      ExprSpecPtr lhs = replace_refs_with_zero(expr->lhs, module_name, output_id, remove_all_outputs, removed_any);
+      ExprSpecPtr rhs = replace_refs_with_zero(expr->rhs, module_name, output_id, remove_all_outputs, removed_any);
+
+      if (expr->kind == ExprKind::Neg)
+      {
+        return simplify_expr(unary_expr(ExprKind::Neg, lhs));
+      }
+
+      return simplify_expr(binary_expr(expr->kind, lhs, rhs));
+    }
+
+    static void collect_refs(const ExprSpecPtr & expr, std::vector<outputID> & refs)
+    {
+      if (!expr)
+      {
+        return;
+      }
+
+      if (expr->kind == ExprKind::Ref)
+      {
+        refs.emplace_back(expr->module_name, expr->output_id);
+        return;
+      }
+
+      collect_refs(expr->lhs, refs);
+      collect_refs(expr->rhs, refs);
+    }
+
+    bool validate_expr_refs(const ExprSpecPtr & expr) const
+    {
+      if (!expr)
+      {
+        return true;
+      }
+
+      if (expr->kind == ExprKind::Ref)
+      {
+        auto it = control_modules_.find(expr->module_name);
+        return it != control_modules_.end() && expr->output_id < it->second.out_count;
+      }
+
+      return validate_expr_refs(expr->lhs) && validate_expr_refs(expr->rhs);
+    }
+
+    void queue_set_input_expr(const std::string & module_name, unsigned int input_id, const ExprSpecPtr & expr)
+    {
+      Command command;
+      command.type = CommandType::SetInputExpr;
+      command.module_name = module_name;
+      command.dst_input_id = input_id;
+      command.expr = expr;
+      command_queue_.push_back(std::move(command));
+    }
 
     void apply_pending_commands()
     {
@@ -304,8 +600,6 @@ class Graph
         std::unique_lock<std::mutex> lock(pending_mutex_, std::try_to_lock);
         if (!lock.owns_lock())
         {
-          // Never block the audio thread on control-thread mutations.
-          // Commands will be applied on a later buffer boundary.
           return;
         }
 
@@ -329,20 +623,8 @@ class Graph
             apply_remove_module(command.module_name);
             needs_order_rebuild = true;
             break;
-          case CommandType::Connect:
-            apply_connect(
-              command.module_name,
-              command.src_output_id,
-              command.other_module_name,
-              command.dst_input_id);
-            needs_order_rebuild = true;
-            break;
-          case CommandType::RemoveConnection:
-            apply_remove_connection(
-              command.module_name,
-              command.src_output_id,
-              command.other_module_name,
-              command.dst_input_id);
+          case CommandType::SetInputExpr:
+            apply_set_input_expr(command.module_name, command.dst_input_id, command.expr);
             needs_order_rebuild = true;
             break;
           case CommandType::AddOutput:
@@ -359,15 +641,12 @@ class Graph
 
     void apply_add_module(std::string module_name, mPtr module)
     {
-      if (!module)
+      if (!module || name_to_id_.find(module_name) != name_to_id_.end())
       {
         return;
       }
 
-      if (name_to_id_.find(module_name) != name_to_id_.end())
-      {
-        return;
-      }
+      const std::size_t input_count = module->inputs.size();
 
       uint32_t module_id = 0;
       if (!free_ids_.empty())
@@ -376,12 +655,17 @@ class Graph
         free_ids_.pop_back();
         modules_[module_id].name = std::move(module_name);
         modules_[module_id].module = std::move(module);
+        modules_[module_id].input_exprs.assign(modules_[module_id].module->inputs.size(), nullptr);
         modules_[module_id].active = true;
       }
       else
       {
         module_id = static_cast<uint32_t>(modules_.size());
-        modules_.push_back(ModuleSlot{std::move(module_name), std::move(module), true});
+        modules_.push_back(ModuleSlot{
+          std::move(module_name),
+          std::move(module),
+          std::vector<ActiveExprPtr>(input_count),
+          true});
       }
 
       name_to_id_[modules_[module_id].name] = module_id;
@@ -389,24 +673,14 @@ class Graph
 
     void apply_remove_module(const std::string & module_name)
     {
-      auto name_it = name_to_id_.find(module_name);
-      if (name_it == name_to_id_.end())
+      auto it = name_to_id_.find(module_name);
+      if (it == name_to_id_.end())
       {
         return;
       }
 
-      const uint32_t module_id = name_it->second;
-      name_to_id_.erase(name_it);
-
-      routes_.erase(
-        std::remove_if(
-          routes_.begin(),
-          routes_.end(),
-          [module_id](const Route & r)
-          {
-            return r.src_module_id == module_id || r.dst_module_id == module_id;
-          }),
-        routes_.end());
+      const uint32_t module_id = it->second;
+      name_to_id_.erase(it);
 
       mix_.erase(
         std::remove_if(
@@ -419,92 +693,148 @@ class Graph
         mix_.end());
 
       modules_[module_id].module.reset();
-      modules_[module_id].active = false;
+      modules_[module_id].input_exprs.clear();
       modules_[module_id].name.clear();
+      modules_[module_id].active = false;
       free_ids_.push_back(module_id);
     }
 
-    void apply_connect(
-      const std::string & src_module,
-      unsigned int src_output_id,
-      const std::string & dst_module,
-      unsigned int dst_input_id)
+    ActiveExprPtr compile_expr(const ExprSpecPtr & expr) const
     {
-      auto src_it = name_to_id_.find(src_module);
-      auto dst_it = name_to_id_.find(dst_module);
-      if (src_it == name_to_id_.end() || dst_it == name_to_id_.end())
+      if (!expr)
       {
-        return;
+        return nullptr;
       }
 
-      routes_.push_back(Route{src_it->second, src_output_id, dst_it->second, dst_input_id});
+      auto compiled = std::make_shared<ActiveExpr>();
+      compiled->kind = expr->kind;
+      compiled->literal = expr->literal;
+      compiled->ref_output_id = expr->output_id;
+
+      if (expr->kind == ExprKind::Ref)
+      {
+        auto it = name_to_id_.find(expr->module_name);
+        if (it == name_to_id_.end())
+        {
+          return nullptr;
+        }
+        compiled->ref_module_id = it->second;
+        return compiled;
+      }
+
+      compiled->lhs = compile_expr(expr->lhs);
+      compiled->rhs = compile_expr(expr->rhs);
+      return compiled;
     }
 
-    void apply_remove_connection(
-      const std::string & src_module,
-      unsigned int src_output_id,
-      const std::string & dst_module,
-      unsigned int dst_input_id)
+    void apply_set_input_expr(const std::string & module_name, unsigned int input_id, const ExprSpecPtr & expr)
     {
-      auto src_it = name_to_id_.find(src_module);
-      auto dst_it = name_to_id_.find(dst_module);
-      if (src_it == name_to_id_.end() || dst_it == name_to_id_.end())
+      auto it = name_to_id_.find(module_name);
+      if (it == name_to_id_.end())
       {
         return;
       }
 
-      const uint32_t src_id = src_it->second;
-      const uint32_t dst_id = dst_it->second;
+      auto & slot = modules_[it->second];
+      if (!slot.active || input_id >= slot.input_exprs.size())
+      {
+        return;
+      }
 
-      routes_.erase(
-        std::remove_if(
-          routes_.begin(),
-          routes_.end(),
-          [src_id, src_output_id, dst_id, dst_input_id](const Route & r)
-          {
-            return r.src_module_id == src_id &&
-                   r.src_output_id == src_output_id &&
-                   r.dst_module_id == dst_id &&
-                   r.dst_input_id == dst_input_id;
-          }),
-        routes_.end());
+      slot.input_exprs[input_id] = compile_expr(expr);
     }
 
     void apply_add_output(const std::string & module_name, unsigned int output_id)
     {
-      auto name_it = name_to_id_.find(module_name);
-      if (name_it == name_to_id_.end())
+      auto it = name_to_id_.find(module_name);
+      if (it == name_to_id_.end())
       {
         return;
       }
+      mix_.push_back(MixTap{it->second, output_id});
+    }
 
-      mix_.push_back(MixTap{name_it->second, output_id});
+    double eval_expr(const ActiveExprPtr & expr) const
+    {
+      if (!expr)
+      {
+        return 0.0;
+      }
+
+      switch (expr->kind)
+      {
+        case ExprKind::Literal:
+          return expr->literal;
+        case ExprKind::Ref:
+          if (expr->ref_module_id >= modules_.size() || !modules_[expr->ref_module_id].active)
+          {
+            return 0.0;
+          }
+          return modules_[expr->ref_module_id].module->outputs[expr->ref_output_id];
+        case ExprKind::Add:
+          return eval_expr(expr->lhs) + eval_expr(expr->rhs);
+        case ExprKind::Sub:
+          return eval_expr(expr->lhs) - eval_expr(expr->rhs);
+        case ExprKind::Mul:
+          return eval_expr(expr->lhs) * eval_expr(expr->rhs);
+        case ExprKind::Div:
+        {
+          const double rhs = eval_expr(expr->rhs);
+          return rhs == 0.0 ? 0.0 : eval_expr(expr->lhs) / rhs;
+        }
+        case ExprKind::Neg:
+          return -eval_expr(expr->lhs);
+      }
+
+      return 0.0;
+    }
+
+    void collect_module_refs(const ActiveExprPtr & expr, std::vector<uint32_t> & refs) const
+    {
+      if (!expr)
+      {
+        return;
+      }
+      if (expr->kind == ExprKind::Ref)
+      {
+        refs.push_back(expr->ref_module_id);
+        return;
+      }
+      collect_module_refs(expr->lhs, refs);
+      collect_module_refs(expr->rhs, refs);
     }
 
     void rebuild_execution_order()
     {
-      const std::size_t module_count = modules_.size();
-      std::vector<unsigned int> indegree(module_count, 0);
-      std::vector<std::vector<uint32_t>> adjacency(module_count);
+      const std::size_t count = modules_.size();
+      std::vector<unsigned int> indegree(count, 0);
+      std::vector<std::vector<uint32_t>> adjacency(count);
       std::vector<uint32_t> active_ids;
-      active_ids.reserve(module_count);
+      active_ids.reserve(count);
 
       for (uint32_t id = 0; id < modules_.size(); ++id)
       {
-        if (modules_[id].active)
-        {
-          active_ids.push_back(id);
-        }
-      }
-
-      for (const auto & route : routes_)
-      {
-        if (!modules_[route.src_module_id].active || !modules_[route.dst_module_id].active)
+        if (!modules_[id].active)
         {
           continue;
         }
-        adjacency[route.src_module_id].push_back(route.dst_module_id);
-        ++indegree[route.dst_module_id];
+
+        active_ids.push_back(id);
+        std::vector<uint32_t> refs;
+        for (const auto & expr : modules_[id].input_exprs)
+        {
+          refs.clear();
+          collect_module_refs(expr, refs);
+          for (uint32_t src_id : refs)
+          {
+            if (src_id >= modules_.size() || !modules_[src_id].active || src_id == id)
+            {
+              continue;
+            }
+            adjacency[src_id].push_back(id);
+            ++indegree[id];
+          }
+        }
       }
 
       std::deque<uint32_t> ready;
@@ -518,10 +848,9 @@ class Graph
 
       std::vector<uint32_t> ordered;
       ordered.reserve(active_ids.size());
-
       while (!ready.empty())
       {
-        uint32_t id = ready.front();
+        const uint32_t id = ready.front();
         ready.pop_front();
         ordered.push_back(id);
 
@@ -540,11 +869,9 @@ class Graph
         return;
       }
 
-      // Cycle fallback: preserve previous order for active modules, then append the rest.
-      std::vector<uint8_t> seen(module_count, 0);
+      std::vector<uint8_t> seen(count, 0);
       std::vector<uint32_t> fallback;
       fallback.reserve(active_ids.size());
-
       for (uint32_t id : execution_order_)
       {
         if (id < modules_.size() && modules_[id].active && !seen[id])
@@ -558,7 +885,6 @@ class Graph
         if (!seen[id])
         {
           fallback.push_back(id);
-          seen[id] = 1;
         }
       }
       execution_order_ = std::move(fallback);
@@ -566,24 +892,16 @@ class Graph
 
     unsigned int bufferLength_ = 0;
 
-    // Audio-thread-owned active state (cache-friendly contiguous traversal).
     std::vector<ModuleSlot> modules_;
     std::unordered_map<std::string, uint32_t> name_to_id_;
     std::vector<uint32_t> execution_order_;
-    std::vector<Route> routes_;
     std::vector<MixTap> mix_;
     std::vector<uint32_t> free_ids_;
 
-    // Control-thread mirror state for immediate validation.
     std::unordered_map<std::string, ModuleShape> control_modules_;
-    std::vector<ConnectionDesc> control_connections_;
+    std::unordered_map<std::string, std::vector<ExprSpecPtr>> control_input_exprs_;
     std::vector<outputID> control_mix_;
 
-    // Cross-thread command queue (applied once per buffer by audio thread).
     mutable std::mutex pending_mutex_;
     std::vector<Command> command_queue_;
-
-  public:
-    // Public for existing callback and Python API compatibility.
-    std::vector<double> outputBuffer;
 };

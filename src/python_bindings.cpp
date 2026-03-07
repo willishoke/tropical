@@ -98,31 +98,6 @@ class PythonGraph
       return graph_.addModule(module_name, std::make_unique<CONST>(value));
     }
 
-    bool add_add(const std::string & module_name)
-    {
-      return graph_.addModule(module_name, std::make_unique<ADD>());
-    }
-
-    bool add_sub(const std::string & module_name)
-    {
-      return graph_.addModule(module_name, std::make_unique<SUB>());
-    }
-
-    bool add_mul(const std::string & module_name)
-    {
-      return graph_.addModule(module_name, std::make_unique<MUL>());
-    }
-
-    bool add_div(const std::string & module_name)
-    {
-      return graph_.addModule(module_name, std::make_unique<DIV>());
-    }
-
-    bool add_neg(const std::string & module_name)
-    {
-      return graph_.addModule(module_name, std::make_unique<NEG>());
-    }
-
     bool add_lowpass(const std::string & module_name, double freq_hz, double res)
     {
       return graph_.addModule(module_name, std::make_unique<LOWPASS>(freq_hz, res));
@@ -148,56 +123,9 @@ class PythonGraph
       return graph_.addModule(module_name, std::make_unique<ALLPASS>(freq_hz, res));
     }
 
-    void clear_input(const std::string & module_name, unsigned int input_id)
-    {
-      clear_assigned_expression(module_name, input_id);
-
-      const auto sources = graph_.incoming_connections(module_name, input_id);
-      for (const auto & source : sources)
-      {
-        graph_.remove_connection(source.first, source.second, module_name, input_id);
-      }
-    }
-
-    void remember_assigned_expression(
-      const std::string & module_name,
-      unsigned int input_id,
-      std::vector<std::string> module_names)
-    {
-      const std::string key = assignment_key(module_name, input_id);
-      if (module_names.empty())
-      {
-        assigned_expression_modules_.erase(key);
-        return;
-      }
-
-      assigned_expression_modules_[key] = std::move(module_names);
-    }
-
   private:
-    static std::string assignment_key(const std::string & module_name, unsigned int input_id)
-    {
-      return module_name + "#" + std::to_string(input_id);
-    }
-
-    void clear_assigned_expression(const std::string & module_name, unsigned int input_id)
-    {
-      const auto it = assigned_expression_modules_.find(assignment_key(module_name, input_id));
-      if (it == assigned_expression_modules_.end())
-      {
-        return;
-      }
-
-      for (const auto & hidden_module_name : it->second)
-      {
-        graph_.remove_module(hidden_module_name);
-      }
-      assigned_expression_modules_.erase(it);
-    }
-
     Graph graph_;
     std::unordered_map<std::string, uint64_t> name_counters_;
-    std::unordered_map<std::string, std::vector<std::string>> assigned_expression_modules_;
 };
 
 static PythonGraph & default_graph()
@@ -208,56 +136,156 @@ static PythonGraph & default_graph()
 
 struct OutputPort
 {
-  PythonGraph * graph;
+  PythonGraph * graph = nullptr;
   std::string module_name;
-  unsigned int output_id;
+  unsigned int output_id = 0;
 };
 
 struct InputPort
 {
-  PythonGraph * graph;
+  PythonGraph * graph = nullptr;
   std::string module_name;
-  unsigned int input_id;
-};
-
-enum class ExprKind
-{
-  Literal,
-  Output,
-  Add,
-  Sub,
-  Mul,
-  Div,
-  Neg
+  unsigned int input_id = 0;
 };
 
 struct SignalExpr
 {
-  ExprKind kind = ExprKind::Literal;
   PythonGraph * graph = nullptr;
-  double literal = 0.0;
-  OutputPort output;
-  std::shared_ptr<SignalExpr> lhs;
-  std::shared_ptr<SignalExpr> rhs;
+  Graph::ExprSpecPtr spec;
 };
 
-static void validate_same_graph(const OutputPort & out, const InputPort & in)
+static PythonGraph * merge_graphs(PythonGraph * lhs, PythonGraph * rhs)
+{
+  if (lhs != nullptr && rhs != nullptr && lhs != rhs)
+  {
+    throw std::invalid_argument("Expression operands belong to different graphs.");
+  }
+  return lhs != nullptr ? lhs : rhs;
+}
+
+static SignalExpr make_signal_expr(PythonGraph * graph, Graph::ExprSpecPtr spec)
+{
+  SignalExpr expr;
+  expr.graph = graph;
+  expr.spec = std::move(spec);
+  return expr;
+}
+
+static SignalExpr make_literal_expr(double value)
+{
+  return make_signal_expr(nullptr, Graph::literal_expr(value));
+}
+
+static SignalExpr make_output_expr(const OutputPort & out)
+{
+  return make_signal_expr(out.graph, Graph::ref_expr(out.module_name, out.output_id));
+}
+
+static SignalExpr current_input_expr(const InputPort & input)
+{
+  auto spec = input.graph->graph().get_input_expr(input.module_name, input.input_id);
+  if (!spec)
+  {
+    spec = Graph::literal_expr(0.0);
+  }
+  return make_signal_expr(input.graph, std::move(spec));
+}
+
+static SignalExpr coerce_expr(const py::handle & value)
+{
+  if (py::isinstance<SignalExpr>(value))
+  {
+    return value.cast<SignalExpr>();
+  }
+
+  if (py::isinstance<OutputPort>(value))
+  {
+    return make_output_expr(value.cast<OutputPort>());
+  }
+
+  if (py::isinstance<InputPort>(value))
+  {
+    return current_input_expr(value.cast<InputPort>());
+  }
+
+  if (py::isinstance<py::float_>(value) || py::isinstance<py::int_>(value))
+  {
+    return make_literal_expr(value.cast<double>());
+  }
+
+  throw std::invalid_argument("Expected an output port, input expression, arithmetic expression, or numeric literal.");
+}
+
+static SignalExpr make_unary_expr(Graph::ExprKind kind, const SignalExpr & operand)
+{
+  return make_signal_expr(operand.graph, Graph::unary_expr(kind, operand.spec));
+}
+
+static SignalExpr make_binary_expr(Graph::ExprKind kind, const SignalExpr & lhs, const SignalExpr & rhs)
+{
+  return make_signal_expr(merge_graphs(lhs.graph, rhs.graph), Graph::binary_expr(kind, lhs.spec, rhs.spec));
+}
+
+static SignalExpr add_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::Add, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr sub_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::Sub, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr mul_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::Mul, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr div_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::Div, lhs, coerce_expr(rhs));
+}
+
+static void assign_input_expr(const InputPort & input, Graph::ExprSpecPtr expr)
+{
+  if (!input.graph->graph().set_input_expr(input.module_name, input.input_id, std::move(expr)))
+  {
+    throw std::invalid_argument("Failed to assign expression to input.");
+  }
+}
+
+static void assign_input(const InputPort & input, const py::handle & value)
+{
+  if (value.is_none())
+  {
+    assign_input_expr(input, nullptr);
+    return;
+  }
+
+  const SignalExpr expr = coerce_expr(value);
+  if (expr.graph != nullptr && expr.graph != input.graph)
+  {
+    throw std::invalid_argument("Assigned expression belongs to a different graph.");
+  }
+
+  assign_input_expr(input, expr.spec);
+}
+
+static bool connect_ports(const OutputPort & out, const InputPort & in)
 {
   if (out.graph != in.graph)
   {
     throw std::invalid_argument("Ports belong to different graphs.");
   }
-}
-
-static bool connect_ports(const OutputPort & out, const InputPort & in)
-{
-  validate_same_graph(out, in);
   return out.graph->connect(out.module_name, out.output_id, in.module_name, in.input_id);
 }
 
 static bool disconnect_ports(const OutputPort & out, const InputPort & in)
 {
-  validate_same_graph(out, in);
+  if (out.graph != in.graph)
+  {
+    throw std::invalid_argument("Ports belong to different graphs.");
+  }
   return out.graph->disconnect(out.module_name, out.output_id, in.module_name, in.input_id);
 }
 
@@ -278,234 +306,24 @@ static std::vector<OutputPort> incoming_ports(const InputPort & in)
   return results;
 }
 
-static PythonGraph * merge_graphs(PythonGraph * lhs, PythonGraph * rhs)
+static py::object input_iadd(const InputPort & input, const py::handle & rhs)
 {
-  if (lhs != nullptr && rhs != nullptr && lhs != rhs)
-  {
-    throw std::invalid_argument("Expression operands belong to different graphs.");
-  }
-  return lhs != nullptr ? lhs : rhs;
+  return py::cast(add_expr(current_input_expr(input), rhs));
 }
 
-static SignalExpr make_literal_expr(double value)
+static py::object input_isub(const InputPort & input, const py::handle & rhs)
 {
-  SignalExpr expr;
-  expr.kind = ExprKind::Literal;
-  expr.literal = value;
-  return expr;
+  return py::cast(sub_expr(current_input_expr(input), rhs));
 }
 
-static SignalExpr make_output_expr(const OutputPort & out)
+static py::object input_imul(const InputPort & input, const py::handle & rhs)
 {
-  SignalExpr expr;
-  expr.kind = ExprKind::Output;
-  expr.graph = out.graph;
-  expr.output = out;
-  return expr;
+  return py::cast(mul_expr(current_input_expr(input), rhs));
 }
 
-static SignalExpr make_unary_expr(ExprKind kind, const SignalExpr & operand)
+static py::object input_idiv(const InputPort & input, const py::handle & rhs)
 {
-  SignalExpr expr;
-  expr.kind = kind;
-  expr.graph = operand.graph;
-  expr.lhs = std::make_shared<SignalExpr>(operand);
-  return expr;
-}
-
-static SignalExpr make_binary_expr(ExprKind kind, const SignalExpr & lhs, const SignalExpr & rhs)
-{
-  SignalExpr expr;
-  expr.kind = kind;
-  expr.graph = merge_graphs(lhs.graph, rhs.graph);
-  expr.lhs = std::make_shared<SignalExpr>(lhs);
-  expr.rhs = std::make_shared<SignalExpr>(rhs);
-  return expr;
-}
-
-static SignalExpr coerce_expr(const py::handle & value)
-{
-  if (py::isinstance<SignalExpr>(value))
-  {
-    return value.cast<SignalExpr>();
-  }
-
-  if (py::isinstance<OutputPort>(value))
-  {
-    return make_output_expr(value.cast<OutputPort>());
-  }
-
-  if (py::isinstance<py::float_>(value) || py::isinstance<py::int_>(value))
-  {
-    return make_literal_expr(value.cast<double>());
-  }
-
-  throw std::invalid_argument("Expected an output port, arithmetic expression, numeric literal, or None.");
-}
-
-static std::string expr_kind_name(ExprKind kind)
-{
-  switch (kind)
-  {
-    case ExprKind::Literal:
-      return "literal";
-    case ExprKind::Output:
-      return "output";
-    case ExprKind::Add:
-      return "add";
-    case ExprKind::Sub:
-      return "sub";
-    case ExprKind::Mul:
-      return "mul";
-    case ExprKind::Div:
-      return "div";
-    case ExprKind::Neg:
-      return "neg";
-  }
-
-  return "expr";
-}
-
-static OutputPort materialize_expr(
-  PythonGraph & graph,
-  const SignalExpr & expr,
-  std::vector<std::string> & hidden_module_names)
-{
-  switch (expr.kind)
-  {
-    case ExprKind::Literal:
-    {
-      const std::string name = graph.next_name("__expr_const");
-      if (!graph.add_const(name, expr.literal))
-      {
-        throw std::invalid_argument("Failed to create CONST node for expression assignment.");
-      }
-      hidden_module_names.push_back(name);
-      return OutputPort{&graph, name, CONST::OUT};
-    }
-    case ExprKind::Output:
-      if (expr.output.graph != &graph)
-      {
-        throw std::invalid_argument("Expression output belongs to a different graph.");
-      }
-      return expr.output;
-    case ExprKind::Neg:
-    {
-      const OutputPort input = materialize_expr(graph, *expr.lhs, hidden_module_names);
-      const std::string name = graph.next_name("__expr_neg");
-      if (!graph.add_neg(name))
-      {
-        throw std::invalid_argument("Failed to create NEG node for expression assignment.");
-      }
-      hidden_module_names.push_back(name);
-      graph.connect(input.module_name, input.output_id, name, NEG::IN);
-      return OutputPort{&graph, name, NEG::OUT};
-    }
-    case ExprKind::Add:
-    case ExprKind::Sub:
-    case ExprKind::Mul:
-    case ExprKind::Div:
-    {
-      const OutputPort lhs = materialize_expr(graph, *expr.lhs, hidden_module_names);
-      const OutputPort rhs = materialize_expr(graph, *expr.rhs, hidden_module_names);
-
-      const std::string name = graph.next_name("__expr_" + expr_kind_name(expr.kind));
-      bool created = false;
-      unsigned int in1 = 0;
-      unsigned int in2 = 0;
-      unsigned int out = 0;
-
-      switch (expr.kind)
-      {
-        case ExprKind::Add:
-          created = graph.add_add(name);
-          in1 = ADD::IN1;
-          in2 = ADD::IN2;
-          out = ADD::OUT;
-          break;
-        case ExprKind::Sub:
-          created = graph.add_sub(name);
-          in1 = SUB::IN1;
-          in2 = SUB::IN2;
-          out = SUB::OUT;
-          break;
-        case ExprKind::Mul:
-          created = graph.add_mul(name);
-          in1 = MUL::IN1;
-          in2 = MUL::IN2;
-          out = MUL::OUT;
-          break;
-        case ExprKind::Div:
-          created = graph.add_div(name);
-          in1 = DIV::IN1;
-          in2 = DIV::IN2;
-          out = DIV::OUT;
-          break;
-        default:
-          break;
-      }
-
-      if (!created)
-      {
-        throw std::invalid_argument("Failed to create arithmetic node for expression assignment.");
-      }
-
-      hidden_module_names.push_back(name);
-      graph.connect(lhs.module_name, lhs.output_id, name, in1);
-      graph.connect(rhs.module_name, rhs.output_id, name, in2);
-      return OutputPort{&graph, name, out};
-    }
-  }
-
-  throw std::invalid_argument("Unsupported expression node.");
-}
-
-static SignalExpr add_expr(const SignalExpr & lhs, const py::handle & rhs)
-{
-  return make_binary_expr(ExprKind::Add, lhs, coerce_expr(rhs));
-}
-
-static SignalExpr sub_expr(const SignalExpr & lhs, const py::handle & rhs)
-{
-  return make_binary_expr(ExprKind::Sub, lhs, coerce_expr(rhs));
-}
-
-static SignalExpr mul_expr(const SignalExpr & lhs, const py::handle & rhs)
-{
-  return make_binary_expr(ExprKind::Mul, lhs, coerce_expr(rhs));
-}
-
-static SignalExpr div_expr(const SignalExpr & lhs, const py::handle & rhs)
-{
-  return make_binary_expr(ExprKind::Div, lhs, coerce_expr(rhs));
-}
-
-static void assign_input(const InputPort & input, const py::handle & value)
-{
-  input.graph->clear_input(input.module_name, input.input_id);
-
-  if (value.is_none())
-  {
-    return;
-  }
-
-  const SignalExpr expr = coerce_expr(value);
-  if (expr.graph != nullptr && expr.graph != input.graph)
-  {
-    throw std::invalid_argument("Assigned expression belongs to a different graph.");
-  }
-
-  std::vector<std::string> hidden_module_names;
-  const OutputPort output = materialize_expr(*input.graph, expr, hidden_module_names);
-  if (!input.graph->connect(output.module_name, output.output_id, input.module_name, input.input_id))
-  {
-    throw std::invalid_argument("Failed to connect assigned expression to input.");
-  }
-
-  input.graph->remember_assigned_expression(
-    input.module_name,
-    input.input_id,
-    std::move(hidden_module_names));
+  return py::cast(div_expr(current_input_expr(input), rhs));
 }
 
 class PyVCO
@@ -887,6 +705,17 @@ PYBIND11_MODULE(egress, m)
 
   m.def("graph", []() -> PythonGraph & { return default_graph(); }, py::return_value_policy::reference);
 
+  py::class_<SignalExpr>(m, "SignalExpr")
+    .def("__add__", [](const SignalExpr & lhs, const py::object & rhs) { return add_expr(lhs, rhs); })
+    .def("__radd__", [](const SignalExpr & rhs, const py::object & lhs) { return add_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__sub__", [](const SignalExpr & lhs, const py::object & rhs) { return sub_expr(lhs, rhs); })
+    .def("__rsub__", [](const SignalExpr & rhs, const py::object & lhs) { return sub_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__mul__", [](const SignalExpr & lhs, const py::object & rhs) { return mul_expr(lhs, rhs); })
+    .def("__rmul__", [](const SignalExpr & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__truediv__", [](const SignalExpr & lhs, const py::object & rhs) { return div_expr(lhs, rhs); })
+    .def("__rtruediv__", [](const SignalExpr & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__neg__", [](const SignalExpr & expr) { return make_unary_expr(Graph::ExprKind::Neg, expr); });
+
   py::class_<OutputPort>(m, "OutputPort")
     .def_property_readonly("module_name", [](const OutputPort & p) { return p.module_name; })
     .def_property_readonly("output_id", [](const OutputPort & p) { return p.output_id; })
@@ -898,23 +727,26 @@ PYBIND11_MODULE(egress, m)
     .def("__rmul__", [](const OutputPort & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__truediv__", [](const OutputPort & lhs, const py::object & rhs) { return div_expr(make_output_expr(lhs), rhs); })
     .def("__rtruediv__", [](const OutputPort & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(rhs)); })
-    .def("__neg__", [](const OutputPort & out) { return make_unary_expr(ExprKind::Neg, make_output_expr(out)); });
+    .def("__neg__", [](const OutputPort & out) { return make_unary_expr(Graph::ExprKind::Neg, make_output_expr(out)); });
 
   py::class_<InputPort>(m, "InputPort")
     .def_property_readonly("module_name", [](const InputPort & p) { return p.module_name; })
     .def_property_readonly("input_id", [](const InputPort & p) { return p.input_id; })
-    .def("assign", [](const InputPort & in, const py::object & value) { assign_input(in, value); }, py::arg("value"));
-
-  py::class_<SignalExpr>(m, "SignalExpr")
-    .def("__add__", [](const SignalExpr & lhs, const py::object & rhs) { return add_expr(lhs, rhs); })
-    .def("__radd__", [](const SignalExpr & rhs, const py::object & lhs) { return add_expr(coerce_expr(lhs), py::cast(rhs)); })
-    .def("__sub__", [](const SignalExpr & lhs, const py::object & rhs) { return sub_expr(lhs, rhs); })
-    .def("__rsub__", [](const SignalExpr & rhs, const py::object & lhs) { return sub_expr(coerce_expr(lhs), py::cast(rhs)); })
-    .def("__mul__", [](const SignalExpr & lhs, const py::object & rhs) { return mul_expr(lhs, rhs); })
-    .def("__rmul__", [](const SignalExpr & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(rhs)); })
-    .def("__truediv__", [](const SignalExpr & lhs, const py::object & rhs) { return div_expr(lhs, rhs); })
-    .def("__rtruediv__", [](const SignalExpr & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(rhs)); })
-    .def("__neg__", [](const SignalExpr & expr) { return make_unary_expr(ExprKind::Neg, expr); });
+    .def_property_readonly("expr", [](const InputPort & p) { return current_input_expr(p); })
+    .def("assign", [](const InputPort & in, const py::object & value) { assign_input(in, value); }, py::arg("value"))
+    .def("__add__", [](const InputPort & lhs, const py::object & rhs) { return add_expr(current_input_expr(lhs), rhs); })
+    .def("__radd__", [](const InputPort & rhs, const py::object & lhs) { return add_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__sub__", [](const InputPort & lhs, const py::object & rhs) { return sub_expr(current_input_expr(lhs), rhs); })
+    .def("__rsub__", [](const InputPort & rhs, const py::object & lhs) { return sub_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__mul__", [](const InputPort & lhs, const py::object & rhs) { return mul_expr(current_input_expr(lhs), rhs); })
+    .def("__rmul__", [](const InputPort & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__truediv__", [](const InputPort & lhs, const py::object & rhs) { return div_expr(current_input_expr(lhs), rhs); })
+    .def("__rtruediv__", [](const InputPort & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__iadd__", [](const InputPort & lhs, const py::object & rhs) { return input_iadd(lhs, rhs); })
+    .def("__isub__", [](const InputPort & lhs, const py::object & rhs) { return input_isub(lhs, rhs); })
+    .def("__imul__", [](const InputPort & lhs, const py::object & rhs) { return input_imul(lhs, rhs); })
+    .def("__itruediv__", [](const InputPort & lhs, const py::object & rhs) { return input_idiv(lhs, rhs); })
+    .def("__neg__", [](const InputPort & p) { return make_unary_expr(Graph::ExprKind::Neg, current_input_expr(p)); });
 
   m.def("connect", &connect_ports, py::arg("out"), py::arg("in"));
   m.def("disconnect", &disconnect_ports, py::arg("out"), py::arg("in"));
