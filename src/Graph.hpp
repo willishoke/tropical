@@ -1,10 +1,12 @@
 #include "Module.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -25,7 +27,16 @@ class Graph
       Sub,
       Mul,
       Div,
+      Mod,
+      FloorDiv,
+      BitAnd,
+      BitOr,
+      BitXor,
+      LShift,
+      RShift,
       Neg
+      ,
+      BitNot
     };
 
     struct ExprSpec
@@ -444,6 +455,19 @@ class Graph
           }
           return unary_expr(ExprKind::Neg, lhs);
         }
+        case ExprKind::BitNot:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          if (!lhs)
+          {
+            return nullptr;
+          }
+          if (lhs->kind == ExprKind::Literal)
+          {
+            return literal_expr(static_cast<double>(~to_int64(lhs->literal)));
+          }
+          return unary_expr(ExprKind::BitNot, lhs);
+        }
         case ExprKind::Add:
         {
           ExprSpecPtr lhs = simplify_expr(expr->lhs);
@@ -524,6 +548,44 @@ class Graph
           }
           return binary_expr(ExprKind::Div, lhs, rhs);
         }
+        case ExprKind::Mod:
+        case ExprKind::FloorDiv:
+        case ExprKind::BitAnd:
+        case ExprKind::BitOr:
+        case ExprKind::BitXor:
+        case ExprKind::LShift:
+        case ExprKind::RShift:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          ExprSpecPtr rhs = simplify_expr(expr->rhs);
+          if (!lhs || !rhs)
+          {
+            return nullptr;
+          }
+          if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
+          {
+            switch (expr->kind)
+            {
+              case ExprKind::Mod:
+                return literal_expr(rhs->literal == 0.0 ? 0.0 : std::fmod(lhs->literal, rhs->literal));
+              case ExprKind::FloorDiv:
+                return literal_expr(rhs->literal == 0.0 ? 0.0 : std::floor(lhs->literal / rhs->literal));
+              case ExprKind::BitAnd:
+                return literal_expr(static_cast<double>(to_int64(lhs->literal) & to_int64(rhs->literal)));
+              case ExprKind::BitOr:
+                return literal_expr(static_cast<double>(to_int64(lhs->literal) | to_int64(rhs->literal)));
+              case ExprKind::BitXor:
+                return literal_expr(static_cast<double>(to_int64(lhs->literal) ^ to_int64(rhs->literal)));
+              case ExprKind::LShift:
+                return literal_expr(static_cast<double>(to_int64(lhs->literal) << normalize_shift(rhs->literal)));
+              case ExprKind::RShift:
+                return literal_expr(static_cast<double>(to_int64(lhs->literal) >> normalize_shift(rhs->literal)));
+              default:
+                break;
+            }
+          }
+          return binary_expr(expr->kind, lhs, rhs);
+        }
       }
 
       return expr;
@@ -564,6 +626,11 @@ class Graph
       if (expr->kind == ExprKind::Neg)
       {
         return simplify_expr(unary_expr(ExprKind::Neg, lhs));
+      }
+
+      if (expr->kind == ExprKind::BitNot)
+      {
+        return simplify_expr(unary_expr(ExprKind::BitNot, lhs));
       }
 
       return simplify_expr(binary_expr(expr->kind, lhs, rhs));
@@ -778,9 +845,83 @@ class Graph
       registers[instr.dst] = denominator == 0.0 ? 0.0 : registers[instr.src_a] / denominator;
     }
 
+    static void exec_div_const_lhs(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      const double denominator = registers[instr.src_a];
+      if (denominator == 0.0)
+      {
+        registers[instr.dst] = instr.literal < 0.0 ? -std::numeric_limits<double>::infinity()
+                                                   : std::numeric_limits<double>::infinity();
+        return;
+      }
+
+      registers[instr.dst] = instr.literal / denominator;
+    }
+
     static void exec_neg(const Graph &, const ExprInstr & instr, double * registers)
     {
       registers[instr.dst] = -registers[instr.src_a];
+    }
+
+    static void exec_mod(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      const double denominator = registers[instr.src_b];
+      registers[instr.dst] = denominator == 0.0 ? 0.0 : std::fmod(registers[instr.src_a], denominator);
+    }
+
+    static void exec_floor_div(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      const double denominator = registers[instr.src_b];
+      registers[instr.dst] = denominator == 0.0 ? 0.0 : std::floor(registers[instr.src_a] / denominator);
+    }
+
+    static void exec_bit_and(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = static_cast<double>(to_int64(registers[instr.src_a]) & to_int64(registers[instr.src_b]));
+    }
+
+    static void exec_bit_or(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = static_cast<double>(to_int64(registers[instr.src_a]) | to_int64(registers[instr.src_b]));
+    }
+
+    static void exec_bit_xor(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = static_cast<double>(to_int64(registers[instr.src_a]) ^ to_int64(registers[instr.src_b]));
+    }
+
+    static void exec_lshift(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = static_cast<double>(to_int64(registers[instr.src_a]) << normalize_shift(registers[instr.src_b]));
+    }
+
+    static void exec_rshift(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = static_cast<double>(to_int64(registers[instr.src_a]) >> normalize_shift(registers[instr.src_b]));
+    }
+
+    static void exec_bit_not(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = static_cast<double>(~to_int64(registers[instr.src_a]));
+    }
+
+    static int64_t to_int64(double value)
+    {
+      return static_cast<int64_t>(value);
+    }
+
+    static int normalize_shift(double value)
+    {
+      int64_t shift = to_int64(value);
+      if (shift < 0)
+      {
+        return 0;
+      }
+      if (shift > 63)
+      {
+        return 63;
+      }
+      return static_cast<int>(shift);
     }
 
     static ExprKernel kernel_for_kind(ExprKind kind)
@@ -799,8 +940,24 @@ class Graph
           return &Graph::exec_mul;
         case ExprKind::Div:
           return &Graph::exec_div;
+        case ExprKind::Mod:
+          return &Graph::exec_mod;
+        case ExprKind::FloorDiv:
+          return &Graph::exec_floor_div;
+        case ExprKind::BitAnd:
+          return &Graph::exec_bit_and;
+        case ExprKind::BitOr:
+          return &Graph::exec_bit_or;
+        case ExprKind::BitXor:
+          return &Graph::exec_bit_xor;
+        case ExprKind::LShift:
+          return &Graph::exec_lshift;
+        case ExprKind::RShift:
+          return &Graph::exec_rshift;
         case ExprKind::Neg:
           return &Graph::exec_neg;
+        case ExprKind::BitNot:
+          return &Graph::exec_bit_not;
       }
 
       return &Graph::exec_literal;
@@ -868,11 +1025,11 @@ class Graph
         return instr.dst;
       }
 
-      if (expr->kind == ExprKind::Neg)
+      if (expr->kind == ExprKind::Neg || expr->kind == ExprKind::BitNot)
       {
         const uint32_t operand = compile_expr_node(expr->lhs, compiled, dependency_marks);
         ExprInstr instr;
-        instr.kind = ExprKind::Neg;
+        instr.kind = expr->kind;
         instr.value_type = ValueType::Scalar;
         instr.dst = compiled.register_count++;
         instr.src_a = operand;
@@ -986,6 +1143,20 @@ class Graph
           instr.src_a = lhs;
           instr.literal = expr->rhs->literal == 0.0 ? 0.0 : 1.0 / expr->rhs->literal;
           instr.kernel = &Graph::exec_mul_const;
+          compiled.instructions.push_back(instr);
+          return instr.dst;
+        }
+
+        if (expr->lhs && expr->lhs->kind == ExprKind::Literal)
+        {
+          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, dependency_marks);
+          ExprInstr instr;
+          instr.kind = ExprKind::Div;
+          instr.value_type = ValueType::Scalar;
+          instr.dst = compiled.register_count++;
+          instr.src_a = rhs;
+          instr.literal = expr->lhs->literal;
+          instr.kernel = &Graph::exec_div_const_lhs;
           compiled.instructions.push_back(instr);
           return instr.dst;
         }

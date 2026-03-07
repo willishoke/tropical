@@ -246,6 +246,41 @@ static SignalExpr div_expr(const SignalExpr & lhs, const py::handle & rhs)
   return make_binary_expr(Graph::ExprKind::Div, lhs, coerce_expr(rhs));
 }
 
+static SignalExpr mod_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::Mod, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr floor_div_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::FloorDiv, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr bit_and_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::BitAnd, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr bit_or_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::BitOr, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr bit_xor_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::BitXor, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr lshift_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::LShift, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr rshift_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::RShift, lhs, coerce_expr(rhs));
+}
+
 static void assign_input_expr(const InputPort & input, Graph::ExprSpecPtr expr)
 {
   if (!input.graph->graph().set_input_expr(input.module_name, input.input_id, std::move(expr)))
@@ -324,6 +359,41 @@ static py::object input_imul(const InputPort & input, const py::handle & rhs)
 static py::object input_idiv(const InputPort & input, const py::handle & rhs)
 {
   return py::cast(div_expr(current_input_expr(input), rhs));
+}
+
+static py::object input_imod(const InputPort & input, const py::handle & rhs)
+{
+  return py::cast(mod_expr(current_input_expr(input), rhs));
+}
+
+static py::object input_ifloor_div(const InputPort & input, const py::handle & rhs)
+{
+  return py::cast(floor_div_expr(current_input_expr(input), rhs));
+}
+
+static py::object input_iand(const InputPort & input, const py::handle & rhs)
+{
+  return py::cast(bit_and_expr(current_input_expr(input), rhs));
+}
+
+static py::object input_ior(const InputPort & input, const py::handle & rhs)
+{
+  return py::cast(bit_or_expr(current_input_expr(input), rhs));
+}
+
+static py::object input_ixor(const InputPort & input, const py::handle & rhs)
+{
+  return py::cast(bit_xor_expr(current_input_expr(input), rhs));
+}
+
+static py::object input_ilshift(const InputPort & input, const py::handle & rhs)
+{
+  return py::cast(lshift_expr(current_input_expr(input), rhs));
+}
+
+static py::object input_irshift(const InputPort & input, const py::handle & rhs)
+{
+  return py::cast(rshift_expr(current_input_expr(input), rhs));
 }
 
 class PyVCO
@@ -714,7 +784,22 @@ PYBIND11_MODULE(egress, m)
     .def("__rmul__", [](const SignalExpr & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__truediv__", [](const SignalExpr & lhs, const py::object & rhs) { return div_expr(lhs, rhs); })
     .def("__rtruediv__", [](const SignalExpr & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(rhs)); })
-    .def("__neg__", [](const SignalExpr & expr) { return make_unary_expr(Graph::ExprKind::Neg, expr); });
+    .def("__floordiv__", [](const SignalExpr & lhs, const py::object & rhs) { return floor_div_expr(lhs, rhs); })
+    .def("__rfloordiv__", [](const SignalExpr & rhs, const py::object & lhs) { return floor_div_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__mod__", [](const SignalExpr & lhs, const py::object & rhs) { return mod_expr(lhs, rhs); })
+    .def("__rmod__", [](const SignalExpr & rhs, const py::object & lhs) { return mod_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__and__", [](const SignalExpr & lhs, const py::object & rhs) { return bit_and_expr(lhs, rhs); })
+    .def("__rand__", [](const SignalExpr & rhs, const py::object & lhs) { return bit_and_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__or__", [](const SignalExpr & lhs, const py::object & rhs) { return bit_or_expr(lhs, rhs); })
+    .def("__ror__", [](const SignalExpr & rhs, const py::object & lhs) { return bit_or_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__xor__", [](const SignalExpr & lhs, const py::object & rhs) { return bit_xor_expr(lhs, rhs); })
+    .def("__rxor__", [](const SignalExpr & rhs, const py::object & lhs) { return bit_xor_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__lshift__", [](const SignalExpr & lhs, const py::object & rhs) { return lshift_expr(lhs, rhs); })
+    .def("__rlshift__", [](const SignalExpr & rhs, const py::object & lhs) { return lshift_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__rshift__", [](const SignalExpr & lhs, const py::object & rhs) { return rshift_expr(lhs, rhs); })
+    .def("__rrshift__", [](const SignalExpr & rhs, const py::object & lhs) { return rshift_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__neg__", [](const SignalExpr & expr) { return make_unary_expr(Graph::ExprKind::Neg, expr); })
+    .def("__invert__", [](const SignalExpr & expr) { return make_unary_expr(Graph::ExprKind::BitNot, expr); });
 
   py::class_<OutputPort>(m, "OutputPort")
     .def_property_readonly("module_name", [](const OutputPort & p) { return p.module_name; })
@@ -727,7 +812,22 @@ PYBIND11_MODULE(egress, m)
     .def("__rmul__", [](const OutputPort & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__truediv__", [](const OutputPort & lhs, const py::object & rhs) { return div_expr(make_output_expr(lhs), rhs); })
     .def("__rtruediv__", [](const OutputPort & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(rhs)); })
-    .def("__neg__", [](const OutputPort & out) { return make_unary_expr(Graph::ExprKind::Neg, make_output_expr(out)); });
+    .def("__floordiv__", [](const OutputPort & lhs, const py::object & rhs) { return floor_div_expr(make_output_expr(lhs), rhs); })
+    .def("__rfloordiv__", [](const OutputPort & rhs, const py::object & lhs) { return floor_div_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__mod__", [](const OutputPort & lhs, const py::object & rhs) { return mod_expr(make_output_expr(lhs), rhs); })
+    .def("__rmod__", [](const OutputPort & rhs, const py::object & lhs) { return mod_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__and__", [](const OutputPort & lhs, const py::object & rhs) { return bit_and_expr(make_output_expr(lhs), rhs); })
+    .def("__rand__", [](const OutputPort & rhs, const py::object & lhs) { return bit_and_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__or__", [](const OutputPort & lhs, const py::object & rhs) { return bit_or_expr(make_output_expr(lhs), rhs); })
+    .def("__ror__", [](const OutputPort & rhs, const py::object & lhs) { return bit_or_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__xor__", [](const OutputPort & lhs, const py::object & rhs) { return bit_xor_expr(make_output_expr(lhs), rhs); })
+    .def("__rxor__", [](const OutputPort & rhs, const py::object & lhs) { return bit_xor_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__lshift__", [](const OutputPort & lhs, const py::object & rhs) { return lshift_expr(make_output_expr(lhs), rhs); })
+    .def("__rlshift__", [](const OutputPort & rhs, const py::object & lhs) { return lshift_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__rshift__", [](const OutputPort & lhs, const py::object & rhs) { return rshift_expr(make_output_expr(lhs), rhs); })
+    .def("__rrshift__", [](const OutputPort & rhs, const py::object & lhs) { return rshift_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__neg__", [](const OutputPort & out) { return make_unary_expr(Graph::ExprKind::Neg, make_output_expr(out)); })
+    .def("__invert__", [](const OutputPort & out) { return make_unary_expr(Graph::ExprKind::BitNot, make_output_expr(out)); });
 
   py::class_<InputPort>(m, "InputPort")
     .def_property_readonly("module_name", [](const InputPort & p) { return p.module_name; })
@@ -742,11 +842,33 @@ PYBIND11_MODULE(egress, m)
     .def("__rmul__", [](const InputPort & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
     .def("__truediv__", [](const InputPort & lhs, const py::object & rhs) { return div_expr(current_input_expr(lhs), rhs); })
     .def("__rtruediv__", [](const InputPort & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__floordiv__", [](const InputPort & lhs, const py::object & rhs) { return floor_div_expr(current_input_expr(lhs), rhs); })
+    .def("__rfloordiv__", [](const InputPort & rhs, const py::object & lhs) { return floor_div_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__mod__", [](const InputPort & lhs, const py::object & rhs) { return mod_expr(current_input_expr(lhs), rhs); })
+    .def("__rmod__", [](const InputPort & rhs, const py::object & lhs) { return mod_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__and__", [](const InputPort & lhs, const py::object & rhs) { return bit_and_expr(current_input_expr(lhs), rhs); })
+    .def("__rand__", [](const InputPort & rhs, const py::object & lhs) { return bit_and_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__or__", [](const InputPort & lhs, const py::object & rhs) { return bit_or_expr(current_input_expr(lhs), rhs); })
+    .def("__ror__", [](const InputPort & rhs, const py::object & lhs) { return bit_or_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__xor__", [](const InputPort & lhs, const py::object & rhs) { return bit_xor_expr(current_input_expr(lhs), rhs); })
+    .def("__rxor__", [](const InputPort & rhs, const py::object & lhs) { return bit_xor_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__lshift__", [](const InputPort & lhs, const py::object & rhs) { return lshift_expr(current_input_expr(lhs), rhs); })
+    .def("__rlshift__", [](const InputPort & rhs, const py::object & lhs) { return lshift_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__rshift__", [](const InputPort & lhs, const py::object & rhs) { return rshift_expr(current_input_expr(lhs), rhs); })
+    .def("__rrshift__", [](const InputPort & rhs, const py::object & lhs) { return rshift_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
     .def("__iadd__", [](const InputPort & lhs, const py::object & rhs) { return input_iadd(lhs, rhs); })
     .def("__isub__", [](const InputPort & lhs, const py::object & rhs) { return input_isub(lhs, rhs); })
     .def("__imul__", [](const InputPort & lhs, const py::object & rhs) { return input_imul(lhs, rhs); })
     .def("__itruediv__", [](const InputPort & lhs, const py::object & rhs) { return input_idiv(lhs, rhs); })
-    .def("__neg__", [](const InputPort & p) { return make_unary_expr(Graph::ExprKind::Neg, current_input_expr(p)); });
+    .def("__ifloordiv__", [](const InputPort & lhs, const py::object & rhs) { return input_ifloor_div(lhs, rhs); })
+    .def("__imod__", [](const InputPort & lhs, const py::object & rhs) { return input_imod(lhs, rhs); })
+    .def("__iand__", [](const InputPort & lhs, const py::object & rhs) { return input_iand(lhs, rhs); })
+    .def("__ior__", [](const InputPort & lhs, const py::object & rhs) { return input_ior(lhs, rhs); })
+    .def("__ixor__", [](const InputPort & lhs, const py::object & rhs) { return input_ixor(lhs, rhs); })
+    .def("__ilshift__", [](const InputPort & lhs, const py::object & rhs) { return input_ilshift(lhs, rhs); })
+    .def("__irshift__", [](const InputPort & lhs, const py::object & rhs) { return input_irshift(lhs, rhs); })
+    .def("__neg__", [](const InputPort & p) { return make_unary_expr(Graph::ExprKind::Neg, current_input_expr(p)); })
+    .def("__invert__", [](const InputPort & p) { return make_unary_expr(Graph::ExprKind::BitNot, current_input_expr(p)); });
 
   m.def("connect", &connect_ports, py::arg("out"), py::arg("in"));
   m.def("disconnect", &disconnect_ports, py::arg("out"), py::arg("in"));
