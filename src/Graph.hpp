@@ -1,3 +1,4 @@
+#include "Expr.hpp"
 #include "Module.hpp"
 
 #include <algorithm>
@@ -19,69 +20,11 @@ using mPtr = std::unique_ptr<Module>;
 class Graph
 {
   public:
-    enum class ValueType : uint8_t
-    {
-      Int,
-      Float,
-      Bool,
-      Array
-    };
-
-    struct Value
-    {
-      ValueType type = ValueType::Float;
-      int64_t int_value = 0;
-      double float_value = 0.0;
-      bool bool_value = false;
-      std::vector<Value> array_items;
-    };
-
-    enum class ExprKind
-    {
-      Literal,
-      Ref,
-      InputValue,
-      RegisterValue,
-      SampleRate,
-      SampleIndex,
-      ArrayPack,
-      Index,
-      Not,
-      Less,
-      LessEqual,
-      Greater,
-      GreaterEqual,
-      Equal,
-      NotEqual,
-      Add,
-      Sub,
-      Mul,
-      Div,
-      Mod,
-      FloorDiv,
-      BitAnd,
-      BitOr,
-      BitXor,
-      LShift,
-      RShift,
-      Sin,
-      Neg,
-      BitNot
-    };
-
-    struct ExprSpec
-    {
-      ExprKind kind = ExprKind::Literal;
-      Value literal;
-      std::string module_name;
-      unsigned int output_id = 0;
-      unsigned int slot_id = 0;
-      std::shared_ptr<ExprSpec> lhs;
-      std::shared_ptr<ExprSpec> rhs;
-      std::vector<std::shared_ptr<ExprSpec>> args;
-    };
-
-    using ExprSpecPtr = std::shared_ptr<ExprSpec>;
+    using ValueType = egress_expr::ValueType;
+    using Value = egress_expr::Value;
+    using ExprKind = egress_expr::ExprKind;
+    using ExprSpec = egress_expr::ExprSpec;
+    using ExprSpecPtr = egress_expr::ExprSpecPtr;
 
     explicit Graph(unsigned int bufferLength)
       : bufferLength_(bufferLength), outputBuffer(bufferLength, 0.0)
@@ -241,7 +184,7 @@ class Graph
         return false;
       }
 
-      ExprSpecPtr ref = make_ref_expr(src_module, src_output_id);
+      ExprSpecPtr ref = ref_expr(src_module, src_output_id);
       ExprSpecPtr & current = control_input_exprs_[dst_module][dst_input_id];
       current = simplify_expr(append_expr(current, ref));
       queue_set_input_expr(dst_module, dst_input_id, current);
@@ -330,114 +273,87 @@ class Graph
 
     static ExprSpecPtr literal_expr(Value value)
     {
-      auto expr = std::make_shared<ExprSpec>();
-      expr->kind = ExprKind::Literal;
-      expr->literal = std::move(value);
-      return expr;
+      return egress_expr::literal_expr(std::move(value));
     }
 
     static ExprSpecPtr literal_expr(double value)
     {
-      return literal_expr(float_value(value));
+      return egress_expr::literal_expr(value);
     }
 
     static ExprSpecPtr literal_expr(int64_t value)
     {
-      return literal_expr(int_value(value));
+      return egress_expr::literal_expr(value);
     }
 
     static ExprSpecPtr literal_expr(bool value)
     {
-      return literal_expr(bool_value(value));
+      return egress_expr::literal_expr(value);
     }
 
     static Value int_literal_value(int64_t value)
     {
-      return int_value(value);
+      return egress_expr::int_value(value);
     }
 
     static Value float_literal_value(double value)
     {
-      return float_value(value);
+      return egress_expr::float_value(value);
     }
 
     static Value bool_literal_value(bool value)
     {
-      return bool_value(value);
+      return egress_expr::bool_value(value);
     }
 
     static Value array_literal_value(std::vector<Value> items)
     {
-      return array_value(std::move(items));
+      return egress_expr::array_value(std::move(items));
     }
 
     static ExprSpecPtr ref_expr(std::string module_name, unsigned int output_id)
     {
-      return make_ref_expr(std::move(module_name), output_id);
+      return egress_expr::ref_expr(std::move(module_name), output_id);
     }
 
     static ExprSpecPtr input_value_expr(unsigned int input_id)
     {
-      auto expr = std::make_shared<ExprSpec>();
-      expr->kind = ExprKind::InputValue;
-      expr->slot_id = input_id;
-      return expr;
+      return egress_expr::input_value_expr(input_id);
     }
 
     static ExprSpecPtr register_value_expr(unsigned int register_id)
     {
-      auto expr = std::make_shared<ExprSpec>();
-      expr->kind = ExprKind::RegisterValue;
-      expr->slot_id = register_id;
-      return expr;
+      return egress_expr::register_value_expr(register_id);
     }
 
     static ExprSpecPtr sample_rate_expr()
     {
-      auto expr = std::make_shared<ExprSpec>();
-      expr->kind = ExprKind::SampleRate;
-      return expr;
+      return egress_expr::sample_rate_expr();
     }
 
     static ExprSpecPtr sample_index_expr()
     {
-      auto expr = std::make_shared<ExprSpec>();
-      expr->kind = ExprKind::SampleIndex;
-      return expr;
+      return egress_expr::sample_index_expr();
     }
 
     static ExprSpecPtr unary_expr(ExprKind kind, ExprSpecPtr operand)
     {
-      auto expr = std::make_shared<ExprSpec>();
-      expr->kind = kind;
-      expr->lhs = std::move(operand);
-      return expr;
+      return egress_expr::unary_expr(kind, std::move(operand));
     }
 
     static ExprSpecPtr binary_expr(ExprKind kind, ExprSpecPtr lhs, ExprSpecPtr rhs)
     {
-      auto expr = std::make_shared<ExprSpec>();
-      expr->kind = kind;
-      expr->lhs = std::move(lhs);
-      expr->rhs = std::move(rhs);
-      return expr;
+      return egress_expr::binary_expr(kind, std::move(lhs), std::move(rhs));
     }
 
     static ExprSpecPtr array_pack_expr(std::vector<ExprSpecPtr> items)
     {
-      auto expr = std::make_shared<ExprSpec>();
-      expr->kind = ExprKind::ArrayPack;
-      expr->args = std::move(items);
-      return expr;
+      return egress_expr::array_pack_expr(std::move(items));
     }
 
     static ExprSpecPtr index_expr(ExprSpecPtr array_expr, ExprSpecPtr index_expr)
     {
-      auto expr = std::make_shared<ExprSpec>();
-      expr->kind = ExprKind::Index;
-      expr->lhs = std::move(array_expr);
-      expr->rhs = std::move(index_expr);
-      return expr;
+      return egress_expr::index_expr(std::move(array_expr), std::move(index_expr));
     }
 
     std::vector<double> outputBuffer;
@@ -507,188 +423,61 @@ class Graph
       mPtr module;
     };
 
-    static ExprSpecPtr make_ref_expr(std::string module_name, unsigned int output_id)
-    {
-      auto expr = std::make_shared<ExprSpec>();
-      expr->kind = ExprKind::Ref;
-      expr->module_name = std::move(module_name);
-      expr->output_id = output_id;
-      return expr;
-    }
-
     static Value int_value(int64_t value)
     {
-      Value result;
-      result.type = ValueType::Int;
-      result.int_value = value;
-      result.float_value = static_cast<double>(value);
-      result.bool_value = value != 0;
-      return result;
+      return egress_expr::int_value(value);
     }
 
     static Value float_value(double value)
     {
-      Value result;
-      result.type = ValueType::Float;
-      result.int_value = static_cast<int64_t>(value);
-      result.float_value = value;
-      result.bool_value = value != 0.0;
-      return result;
+      return egress_expr::float_value(value);
     }
 
     static Value bool_value(bool value)
     {
-      Value result;
-      result.type = ValueType::Bool;
-      result.int_value = value ? 1 : 0;
-      result.float_value = value ? 1.0 : 0.0;
-      result.bool_value = value;
-      return result;
+      return egress_expr::bool_value(value);
     }
 
     static Value array_value(std::vector<Value> items)
     {
-      Value result;
-      result.type = ValueType::Array;
-      result.array_items = std::move(items);
-      result.int_value = static_cast<int64_t>(result.array_items.size());
-      result.float_value = static_cast<double>(result.array_items.size());
-      result.bool_value = !result.array_items.empty();
-      return result;
+      return egress_expr::array_value(std::move(items));
     }
 
     static bool is_truthy(const Value & value)
     {
-      switch (value.type)
-      {
-        case ValueType::Bool:
-          return value.bool_value;
-        case ValueType::Int:
-          return value.int_value != 0;
-        case ValueType::Float:
-          return value.float_value != 0.0;
-        case ValueType::Array:
-          throw std::invalid_argument("Array truthiness is ambiguous.");
-      }
-      return false;
+      return egress_expr::is_truthy(value);
     }
 
     static double to_float64(const Value & value)
     {
-      switch (value.type)
-      {
-        case ValueType::Bool:
-          return value.bool_value ? 1.0 : 0.0;
-        case ValueType::Int:
-          return static_cast<double>(value.int_value);
-        case ValueType::Float:
-          return value.float_value;
-        case ValueType::Array:
-          throw std::invalid_argument("Expected scalar float-compatible value, got array.");
-      }
-      return 0.0;
+      return egress_expr::to_float64(value);
     }
 
     static int64_t to_int64(const Value & value)
     {
-      switch (value.type)
-      {
-        case ValueType::Bool:
-          return value.bool_value ? 1 : 0;
-        case ValueType::Int:
-          return value.int_value;
-        case ValueType::Float:
-          return static_cast<int64_t>(value.float_value);
-        case ValueType::Array:
-          throw std::invalid_argument("Expected scalar int-compatible value, got array.");
-      }
-      return 0;
+      return egress_expr::to_int64(value);
     }
 
     static ValueType arithmetic_type(const Value & lhs, const Value & rhs)
     {
-      return lhs.type == ValueType::Float || rhs.type == ValueType::Float ? ValueType::Float : ValueType::Int;
+      return egress_expr::arithmetic_type(lhs, rhs);
     }
 
     static bool is_array(const Value & value)
     {
-      return value.type == ValueType::Array;
+      return egress_expr::is_array(value);
     }
 
     template <typename Func>
     static Value map_unary(const Value & value, Func func)
     {
-      if (is_array(value))
-      {
-        std::vector<Value> items;
-        items.reserve(value.array_items.size());
-        for (const Value & item : value.array_items)
-        {
-          if (is_array(item))
-          {
-            throw std::invalid_argument("Nested arrays are not supported.");
-          }
-          items.push_back(func(item));
-        }
-        return array_value(std::move(items));
-      }
-      return func(value);
+      return egress_expr::map_unary(value, func);
     }
 
     template <typename Func>
     static Value map_binary(const Value & lhs, const Value & rhs, Func func)
     {
-      if (is_array(lhs) && is_array(rhs))
-      {
-        if (lhs.array_items.size() != rhs.array_items.size())
-        {
-          throw std::invalid_argument("Array shapes do not match.");
-        }
-
-        std::vector<Value> items;
-        items.reserve(lhs.array_items.size());
-        for (std::size_t i = 0; i < lhs.array_items.size(); ++i)
-        {
-          if (is_array(lhs.array_items[i]) || is_array(rhs.array_items[i]))
-          {
-            throw std::invalid_argument("Nested arrays are not supported.");
-          }
-          items.push_back(func(lhs.array_items[i], rhs.array_items[i]));
-        }
-        return array_value(std::move(items));
-      }
-
-      if (is_array(lhs))
-      {
-        std::vector<Value> items;
-        items.reserve(lhs.array_items.size());
-        for (const Value & item : lhs.array_items)
-        {
-          if (is_array(item))
-          {
-            throw std::invalid_argument("Nested arrays are not supported.");
-          }
-          items.push_back(func(item, rhs));
-        }
-        return array_value(std::move(items));
-      }
-
-      if (is_array(rhs))
-      {
-        std::vector<Value> items;
-        items.reserve(rhs.array_items.size());
-        for (const Value & item : rhs.array_items)
-        {
-          if (is_array(item))
-          {
-            throw std::invalid_argument("Nested arrays are not supported.");
-          }
-          items.push_back(func(lhs, item));
-        }
-        return array_value(std::move(items));
-      }
-
-      return func(lhs, rhs);
+      return egress_expr::map_binary(lhs, rhs, func);
     }
 
     static bool is_zero_expr(const ExprSpecPtr & expr)
