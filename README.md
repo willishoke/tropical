@@ -113,6 +113,21 @@ Shift = eg.define_stateful_module(
 
 Arrays are currently limited to stateful-module expressions and registers. Graph ports and ordinary module inputs/outputs remain scalar.
 
+You can also collect reusable user-defined modules in ordinary Python source files. For example, [`module_library.py`](/Users/willishoke/egress/module_library.py) defines a 16-stage phaser:
+
+```python
+import egress as eg
+import module_library as modlib
+
+osc = eg.VCO(220.0)
+Phaser16 = modlib.phaser16()
+phaser = Phaser16()
+phaser.input = osc.sin
+phaser.feedback = 0.65
+phaser.lfo_speed = 0.2
+eg.add_output(phaser.output)
+```
+
 Each input stores a single canonical expression tree. `input = ...` replaces that tree. `input += expr` and `connect(...)` append additional signal into the input sum.
 
 Realtime output methods:
