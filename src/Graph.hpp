@@ -1,4 +1,5 @@
 #include "Expr.hpp"
+#include "ExprEval.hpp"
 #include "Module.hpp"
 
 #include <algorithm>
@@ -13,19 +14,34 @@
 #include <utility>
 #include <vector>
 
+namespace expr = egress_expr;
+namespace expr_eval = egress_expr_eval;
+
 using inputID = std::pair<std::string, unsigned int>;
 using outputID = std::pair<std::string, unsigned int>;
 using mPtr = std::unique_ptr<Module>;
+using ExprValueType = expr::ValueType;
+using ExprValue = expr::Value;
+using ExprKind = expr::ExprKind;
+using ExprSpec = expr::ExprSpec;
+using ExprSpecPtr = expr::ExprSpecPtr;
+using ValueType = ExprValueType;
+using Value = ExprValue;
+using expr::arithmetic_type;
+using expr::array_value;
+using expr::bool_value;
+using expr::float_value;
+using expr::int_value;
+using expr::is_array;
+using expr::is_truthy;
+using expr::map_binary;
+using expr::map_unary;
+using expr::to_float64;
+using expr::to_int64;
 
 class Graph
 {
   public:
-    using ValueType = egress_expr::ValueType;
-    using Value = egress_expr::Value;
-    using ExprKind = egress_expr::ExprKind;
-    using ExprSpec = egress_expr::ExprSpec;
-    using ExprSpecPtr = egress_expr::ExprSpecPtr;
-
     explicit Graph(unsigned int bufferLength)
       : bufferLength_(bufferLength), outputBuffer(bufferLength, 0.0)
     {
@@ -184,7 +200,7 @@ class Graph
         return false;
       }
 
-      ExprSpecPtr ref = ref_expr(src_module, src_output_id);
+      ExprSpecPtr ref = expr::ref_expr(src_module, src_output_id);
       ExprSpecPtr & current = control_input_exprs_[dst_module][dst_input_id];
       current = simplify_expr(append_expr(current, ref));
       queue_set_input_expr(dst_module, dst_input_id, current);
@@ -271,91 +287,6 @@ class Graph
       return bufferLength_;
     }
 
-    static ExprSpecPtr literal_expr(Value value)
-    {
-      return egress_expr::literal_expr(std::move(value));
-    }
-
-    static ExprSpecPtr literal_expr(double value)
-    {
-      return egress_expr::literal_expr(value);
-    }
-
-    static ExprSpecPtr literal_expr(int64_t value)
-    {
-      return egress_expr::literal_expr(value);
-    }
-
-    static ExprSpecPtr literal_expr(bool value)
-    {
-      return egress_expr::literal_expr(value);
-    }
-
-    static Value int_literal_value(int64_t value)
-    {
-      return egress_expr::int_value(value);
-    }
-
-    static Value float_literal_value(double value)
-    {
-      return egress_expr::float_value(value);
-    }
-
-    static Value bool_literal_value(bool value)
-    {
-      return egress_expr::bool_value(value);
-    }
-
-    static Value array_literal_value(std::vector<Value> items)
-    {
-      return egress_expr::array_value(std::move(items));
-    }
-
-    static ExprSpecPtr ref_expr(std::string module_name, unsigned int output_id)
-    {
-      return egress_expr::ref_expr(std::move(module_name), output_id);
-    }
-
-    static ExprSpecPtr input_value_expr(unsigned int input_id)
-    {
-      return egress_expr::input_value_expr(input_id);
-    }
-
-    static ExprSpecPtr register_value_expr(unsigned int register_id)
-    {
-      return egress_expr::register_value_expr(register_id);
-    }
-
-    static ExprSpecPtr sample_rate_expr()
-    {
-      return egress_expr::sample_rate_expr();
-    }
-
-    static ExprSpecPtr sample_index_expr()
-    {
-      return egress_expr::sample_index_expr();
-    }
-
-    static ExprSpecPtr unary_expr(ExprKind kind, ExprSpecPtr operand)
-    {
-      return egress_expr::unary_expr(kind, std::move(operand));
-    }
-
-    static ExprSpecPtr binary_expr(ExprKind kind, ExprSpecPtr lhs, ExprSpecPtr rhs)
-    {
-      return egress_expr::binary_expr(kind, std::move(lhs), std::move(rhs));
-    }
-
-    static ExprSpecPtr array_pack_expr(std::vector<ExprSpecPtr> items)
-    {
-      return egress_expr::array_pack_expr(std::move(items));
-    }
-
-    static ExprSpecPtr index_expr(ExprSpecPtr array_expr, ExprSpecPtr index_expr)
-    {
-      return egress_expr::index_expr(std::move(array_expr), std::move(index_expr));
-    }
-
     std::vector<double> outputBuffer;
 
   private:
@@ -423,63 +354,6 @@ class Graph
       mPtr module;
     };
 
-    static Value int_value(int64_t value)
-    {
-      return egress_expr::int_value(value);
-    }
-
-    static Value float_value(double value)
-    {
-      return egress_expr::float_value(value);
-    }
-
-    static Value bool_value(bool value)
-    {
-      return egress_expr::bool_value(value);
-    }
-
-    static Value array_value(std::vector<Value> items)
-    {
-      return egress_expr::array_value(std::move(items));
-    }
-
-    static bool is_truthy(const Value & value)
-    {
-      return egress_expr::is_truthy(value);
-    }
-
-    static double to_float64(const Value & value)
-    {
-      return egress_expr::to_float64(value);
-    }
-
-    static int64_t to_int64(const Value & value)
-    {
-      return egress_expr::to_int64(value);
-    }
-
-    static ValueType arithmetic_type(const Value & lhs, const Value & rhs)
-    {
-      return egress_expr::arithmetic_type(lhs, rhs);
-    }
-
-    static bool is_array(const Value & value)
-    {
-      return egress_expr::is_array(value);
-    }
-
-    template <typename Func>
-    static Value map_unary(const Value & value, Func func)
-    {
-      return egress_expr::map_unary(value, func);
-    }
-
-    template <typename Func>
-    static Value map_binary(const Value & lhs, const Value & rhs, Func func)
-    {
-      return egress_expr::map_binary(lhs, rhs, func);
-    }
-
     static bool is_zero_expr(const ExprSpecPtr & expr)
     {
       return expr != nullptr &&
@@ -507,7 +381,7 @@ class Graph
       {
         return lhs;
       }
-      return binary_expr(ExprKind::Add, lhs, rhs);
+      return expr::binary_expr(ExprKind::Add, lhs, rhs);
     }
 
     static ExprSpecPtr simplify_expr(const ExprSpecPtr & expr)
@@ -528,7 +402,7 @@ class Graph
         case ExprKind::ArrayPack:
           return expr;
         case ExprKind::Index:
-          return binary_expr(ExprKind::Index, simplify_expr(expr->lhs), simplify_expr(expr->rhs));
+          return expr::binary_expr(ExprKind::Index, simplify_expr(expr->lhs), simplify_expr(expr->rhs));
         case ExprKind::Neg:
         {
           ExprSpecPtr lhs = simplify_expr(expr->lhs);
@@ -540,24 +414,24 @@ class Graph
           {
             if (lhs->literal.type == ValueType::Float)
             {
-              return literal_expr(-lhs->literal.float_value);
+              return expr::literal_expr(-lhs->literal.float_value);
             }
-            return literal_expr(-to_int64(lhs->literal));
+            return expr::literal_expr(-to_int64(lhs->literal));
           }
-          return unary_expr(ExprKind::Neg, lhs);
+          return expr::unary_expr(ExprKind::Neg, lhs);
         }
         case ExprKind::Not:
         {
           ExprSpecPtr lhs = simplify_expr(expr->lhs);
           if (!lhs)
           {
-            return literal_expr(true);
+            return expr::literal_expr(true);
           }
           if (lhs->kind == ExprKind::Literal)
           {
-            return literal_expr(map_unary(lhs->literal, [](const Value & value) { return bool_value(!is_truthy(value)); }));
+            return expr::literal_expr(expr_eval::not_value(lhs->literal));
           }
-          return unary_expr(ExprKind::Not, lhs);
+          return expr::unary_expr(ExprKind::Not, lhs);
         }
         case ExprKind::BitNot:
         {
@@ -568,9 +442,9 @@ class Graph
           }
           if (lhs->kind == ExprKind::Literal)
           {
-            return literal_expr(~to_int64(lhs->literal));
+            return expr::literal_expr(~to_int64(lhs->literal));
           }
-          return unary_expr(ExprKind::BitNot, lhs);
+          return expr::unary_expr(ExprKind::BitNot, lhs);
         }
         case ExprKind::Sin:
         {
@@ -581,9 +455,9 @@ class Graph
           }
           if (lhs->kind == ExprKind::Literal)
           {
-            return literal_expr(std::sin(to_float64(lhs->literal)));
+            return expr::literal_expr(std::sin(to_float64(lhs->literal)));
           }
-          return unary_expr(ExprKind::Sin, lhs);
+          return expr::unary_expr(ExprKind::Sin, lhs);
         }
         case ExprKind::Less:
         case ExprKind::LessEqual:
@@ -596,43 +470,33 @@ class Graph
           ExprSpecPtr rhs = simplify_expr(expr->rhs);
           if (!lhs)
           {
-            lhs = literal_expr(0.0);
+            lhs = expr::literal_expr(0.0);
           }
           if (!rhs)
           {
-            rhs = literal_expr(0.0);
+            rhs = expr::literal_expr(0.0);
           }
           if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
           {
-            return literal_expr(map_binary(lhs->literal, rhs->literal, [expr](const Value & left, const Value & right) {
-              bool result = false;
-              switch (expr->kind)
-              {
-                case ExprKind::Less:
-                  result = to_float64(left) < to_float64(right);
-                  break;
-                case ExprKind::LessEqual:
-                  result = to_float64(left) <= to_float64(right);
-                  break;
-                case ExprKind::Greater:
-                  result = to_float64(left) > to_float64(right);
-                  break;
-                case ExprKind::GreaterEqual:
-                  result = to_float64(left) >= to_float64(right);
-                  break;
-                case ExprKind::Equal:
-                  result = to_float64(left) == to_float64(right);
-                  break;
-                case ExprKind::NotEqual:
-                  result = to_float64(left) != to_float64(right);
-                  break;
-                default:
-                  break;
-              }
-              return bool_value(result);
-            }));
+            switch (expr->kind)
+            {
+              case ExprKind::Less:
+                return expr::literal_expr(expr_eval::less_values(lhs->literal, rhs->literal));
+              case ExprKind::LessEqual:
+                return expr::literal_expr(expr_eval::less_equal_values(lhs->literal, rhs->literal));
+              case ExprKind::Greater:
+                return expr::literal_expr(expr_eval::greater_values(lhs->literal, rhs->literal));
+              case ExprKind::GreaterEqual:
+                return expr::literal_expr(expr_eval::greater_equal_values(lhs->literal, rhs->literal));
+              case ExprKind::Equal:
+                return expr::literal_expr(expr_eval::equal_values(lhs->literal, rhs->literal));
+              case ExprKind::NotEqual:
+                return expr::literal_expr(expr_eval::not_equal_values(lhs->literal, rhs->literal));
+              default:
+                break;
+            }
           }
-          return binary_expr(expr->kind, lhs, rhs);
+          return expr::binary_expr(expr->kind, lhs, rhs);
         }
         case ExprKind::Add:
         {
@@ -648,11 +512,9 @@ class Graph
           }
           if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
           {
-            return literal_expr(map_binary(lhs->literal, rhs->literal, [](const Value & left, const Value & right) {
-              return add_values(left, right);
-            }));
+            return expr::literal_expr(expr_eval::add_values(lhs->literal, rhs->literal));
           }
-          return binary_expr(ExprKind::Add, lhs, rhs);
+          return expr::binary_expr(ExprKind::Add, lhs, rhs);
         }
         case ExprKind::Sub:
         {
@@ -664,15 +526,13 @@ class Graph
           }
           if (!lhs || is_zero_expr(lhs))
           {
-            return simplify_expr(unary_expr(ExprKind::Neg, rhs));
+            return simplify_expr(expr::unary_expr(ExprKind::Neg, rhs));
           }
           if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
           {
-            return literal_expr(map_binary(lhs->literal, rhs->literal, [](const Value & left, const Value & right) {
-              return sub_values(left, right);
-            }));
+            return expr::literal_expr(expr_eval::sub_values(lhs->literal, rhs->literal));
           }
-          return binary_expr(ExprKind::Sub, lhs, rhs);
+          return expr::binary_expr(ExprKind::Sub, lhs, rhs);
         }
         case ExprKind::Mul:
         {
@@ -692,11 +552,9 @@ class Graph
           }
           if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
           {
-            return literal_expr(map_binary(lhs->literal, rhs->literal, [](const Value & left, const Value & right) {
-              return mul_values(left, right);
-            }));
+            return expr::literal_expr(expr_eval::mul_values(lhs->literal, rhs->literal));
           }
-          return binary_expr(ExprKind::Mul, lhs, rhs);
+          return expr::binary_expr(ExprKind::Mul, lhs, rhs);
         }
         case ExprKind::Div:
         {
@@ -716,11 +574,9 @@ class Graph
           }
           if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
           {
-            return literal_expr(map_binary(lhs->literal, rhs->literal, [](const Value & left, const Value & right) {
-              return div_values(left, right);
-            }));
+            return expr::literal_expr(expr_eval::div_values(lhs->literal, rhs->literal));
           }
-          return binary_expr(ExprKind::Div, lhs, rhs);
+          return expr::binary_expr(ExprKind::Div, lhs, rhs);
         }
         case ExprKind::Mod:
         case ExprKind::FloorDiv:
@@ -738,33 +594,27 @@ class Graph
           }
           if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
           {
-            return literal_expr(map_binary(lhs->literal, rhs->literal, [expr](const Value & left, const Value & right) {
-              switch (expr->kind)
-              {
-                case ExprKind::Mod:
-                  if (arithmetic_type(left, right) == ValueType::Float)
-                  {
-                    return to_float64(right) == 0.0 ? float_value(0.0) : float_value(std::fmod(to_float64(left), to_float64(right)));
-                  }
-                  return to_int64(right) == 0 ? int_value(0) : int_value(to_int64(left) % to_int64(right));
-                case ExprKind::FloorDiv:
-                  return to_float64(right) == 0.0 ? float_value(0.0) : float_value(std::floor(to_float64(left) / to_float64(right)));
-                case ExprKind::BitAnd:
-                  return int_value(to_int64(left) & to_int64(right));
-                case ExprKind::BitOr:
-                  return int_value(to_int64(left) | to_int64(right));
-                case ExprKind::BitXor:
-                  return int_value(to_int64(left) ^ to_int64(right));
-                case ExprKind::LShift:
-                  return int_value(to_int64(left) << normalize_shift(right));
-                case ExprKind::RShift:
-                  return int_value(to_int64(left) >> normalize_shift(right));
-                default:
-                  return float_value(0.0);
-              }
-            }));
+            switch (expr->kind)
+            {
+              case ExprKind::Mod:
+                return expr::literal_expr(expr_eval::mod_values(lhs->literal, rhs->literal));
+              case ExprKind::FloorDiv:
+                return expr::literal_expr(expr_eval::floor_div_values(lhs->literal, rhs->literal));
+              case ExprKind::BitAnd:
+                return expr::literal_expr(expr_eval::bit_and_values(lhs->literal, rhs->literal));
+              case ExprKind::BitOr:
+                return expr::literal_expr(expr_eval::bit_or_values(lhs->literal, rhs->literal));
+              case ExprKind::BitXor:
+                return expr::literal_expr(expr_eval::bit_xor_values(lhs->literal, rhs->literal));
+              case ExprKind::LShift:
+                return expr::literal_expr(expr_eval::lshift_values(lhs->literal, rhs->literal));
+              case ExprKind::RShift:
+                return expr::literal_expr(expr_eval::rshift_values(lhs->literal, rhs->literal));
+              default:
+                break;
+            }
           }
-          return binary_expr(expr->kind, lhs, rhs);
+          return expr::binary_expr(expr->kind, lhs, rhs);
         }
       }
 
@@ -808,7 +658,7 @@ class Graph
         {
           items.push_back(replace_refs_with_zero(arg, module_name, output_id, remove_all_outputs, removed_any));
         }
-        return array_pack_expr(std::move(items));
+        return expr::array_pack_expr(std::move(items));
       }
 
       if (expr->kind == ExprKind::InputValue ||
@@ -824,25 +674,25 @@ class Graph
 
       if (expr->kind == ExprKind::Neg)
       {
-        return simplify_expr(unary_expr(ExprKind::Neg, lhs));
+        return simplify_expr(expr::unary_expr(ExprKind::Neg, lhs));
       }
 
       if (expr->kind == ExprKind::Not)
       {
-        return simplify_expr(unary_expr(ExprKind::Not, lhs));
+        return simplify_expr(expr::unary_expr(ExprKind::Not, lhs));
       }
 
       if (expr->kind == ExprKind::BitNot)
       {
-        return simplify_expr(unary_expr(ExprKind::BitNot, lhs));
+        return simplify_expr(expr::unary_expr(ExprKind::BitNot, lhs));
       }
 
       if (expr->kind == ExprKind::Sin)
       {
-        return simplify_expr(unary_expr(ExprKind::Sin, lhs));
+        return simplify_expr(expr::unary_expr(ExprKind::Sin, lhs));
       }
 
-      return simplify_expr(binary_expr(expr->kind, lhs, rhs));
+      return simplify_expr(expr::binary_expr(expr->kind, lhs, rhs));
     }
 
     static void collect_refs(const ExprSpecPtr & expr, std::vector<outputID> & refs)
@@ -1040,227 +890,134 @@ class Graph
       registers[instr.dst] = float_value(graph.modules_[instr.ref_module_id].module->outputs[instr.ref_output_id]);
     }
 
-    static Value add_values(const Value & lhs, const Value & rhs)
-    {
-      return map_binary(lhs, rhs, [](const Value & left, const Value & right) {
-        if (arithmetic_type(left, right) == ValueType::Float)
-        {
-          return float_value(to_float64(left) + to_float64(right));
-        }
-        return int_value(to_int64(left) + to_int64(right));
-      });
-    }
-
-    static Value sub_values(const Value & lhs, const Value & rhs)
-    {
-      return map_binary(lhs, rhs, [](const Value & left, const Value & right) {
-        if (arithmetic_type(left, right) == ValueType::Float)
-        {
-          return float_value(to_float64(left) - to_float64(right));
-        }
-        return int_value(to_int64(left) - to_int64(right));
-      });
-    }
-
-    static Value mul_values(const Value & lhs, const Value & rhs)
-    {
-      return map_binary(lhs, rhs, [](const Value & left, const Value & right) {
-        if (arithmetic_type(left, right) == ValueType::Float)
-        {
-          return float_value(to_float64(left) * to_float64(right));
-        }
-        return int_value(to_int64(left) * to_int64(right));
-      });
-    }
-
-    static Value div_values(const Value & lhs, const Value & rhs)
-    {
-      return map_binary(lhs, rhs, [](const Value & left, const Value & right) {
-        const double denominator = to_float64(right);
-        return denominator == 0.0 ? float_value(0.0) : float_value(to_float64(left) / denominator);
-      });
-    }
-
     static void exec_add(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = add_values(registers[instr.src_a], registers[instr.src_b]);
+      registers[instr.dst] = expr_eval::add_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_add_const(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = add_values(registers[instr.src_a], instr.literal);
+      registers[instr.dst] = expr_eval::add_values(registers[instr.src_a], instr.literal);
     }
 
     static void exec_sub(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = sub_values(registers[instr.src_a], registers[instr.src_b]);
+      registers[instr.dst] = expr_eval::sub_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_sub_const_rhs(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = sub_values(registers[instr.src_a], instr.literal);
+      registers[instr.dst] = expr_eval::sub_values(registers[instr.src_a], instr.literal);
     }
 
     static void exec_sub_const_lhs(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = sub_values(instr.literal, registers[instr.src_a]);
+      registers[instr.dst] = expr_eval::sub_values(instr.literal, registers[instr.src_a]);
     }
 
     static void exec_mul(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = mul_values(registers[instr.src_a], registers[instr.src_b]);
+      registers[instr.dst] = expr_eval::mul_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_mul_const(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = mul_values(registers[instr.src_a], instr.literal);
+      registers[instr.dst] = expr_eval::mul_values(registers[instr.src_a], instr.literal);
     }
 
     static void exec_div(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = div_values(registers[instr.src_a], registers[instr.src_b]);
+      registers[instr.dst] = expr_eval::div_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_div_const_lhs(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = div_values(instr.literal, registers[instr.src_a]);
+      registers[instr.dst] = expr_eval::div_values(instr.literal, registers[instr.src_a]);
     }
 
     static void exec_neg(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      if (registers[instr.src_a].type == ValueType::Float)
-      {
-        registers[instr.dst] = float_value(-to_float64(registers[instr.src_a]));
-      }
-      else
-      {
-        registers[instr.dst] = int_value(-to_int64(registers[instr.src_a]));
-      }
-    }
-
-    static double fast_sin(double x)
-    {
-      constexpr double pi = 3.14159265358979323846;
-      constexpr double two_pi = 2.0 * pi;
-      constexpr double half_pi = 0.5 * pi;
-      constexpr double B = 4.0 / pi;
-      constexpr double C = -4.0 / (pi * pi);
-      constexpr double P = 0.225;
-
-      x = std::fmod(x + pi, two_pi);
-      if (x < 0.0)
-      {
-        x += two_pi;
-      }
-      x -= pi;
-
-      const double y = B * x + C * x * std::fabs(x);
-      return P * (y * std::fabs(y) - y) + y;
+      registers[instr.dst] = expr_eval::neg_value(registers[instr.src_a]);
     }
 
     static void exec_sin(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = float_value(fast_sin(to_float64(registers[instr.src_a])));
+      registers[instr.dst] = expr_eval::sin_value(registers[instr.src_a]);
     }
 
     static void exec_mod(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      if (arithmetic_type(registers[instr.src_a], registers[instr.src_b]) == ValueType::Float)
-      {
-        const double denominator = to_float64(registers[instr.src_b]);
-        registers[instr.dst] = denominator == 0.0 ? float_value(0.0)
-                                                  : float_value(std::fmod(to_float64(registers[instr.src_a]), denominator));
-        return;
-      }
-
-      const int64_t denominator = to_int64(registers[instr.src_b]);
-      registers[instr.dst] = denominator == 0 ? int_value(0) : int_value(to_int64(registers[instr.src_a]) % denominator);
+      registers[instr.dst] = expr_eval::mod_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_floor_div(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      const double denominator = to_float64(registers[instr.src_b]);
-      registers[instr.dst] = denominator == 0.0 ? float_value(0.0)
-                                                : float_value(std::floor(to_float64(registers[instr.src_a]) / denominator));
+      registers[instr.dst] = expr_eval::floor_div_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_bit_and(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = int_value(to_int64(registers[instr.src_a]) & to_int64(registers[instr.src_b]));
+      registers[instr.dst] = expr_eval::bit_and_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_bit_or(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = int_value(to_int64(registers[instr.src_a]) | to_int64(registers[instr.src_b]));
+      registers[instr.dst] = expr_eval::bit_or_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_bit_xor(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = int_value(to_int64(registers[instr.src_a]) ^ to_int64(registers[instr.src_b]));
+      registers[instr.dst] = expr_eval::bit_xor_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_lshift(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = int_value(to_int64(registers[instr.src_a]) << normalize_shift(registers[instr.src_b]));
+      registers[instr.dst] = expr_eval::lshift_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_rshift(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = int_value(to_int64(registers[instr.src_a]) >> normalize_shift(registers[instr.src_b]));
+      registers[instr.dst] = expr_eval::rshift_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_not(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = bool_value(!is_truthy(registers[instr.src_a]));
+      registers[instr.dst] = expr_eval::not_value(registers[instr.src_a]);
     }
 
     static void exec_bit_not(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = int_value(~to_int64(registers[instr.src_a]));
+      registers[instr.dst] = expr_eval::bit_not_value(registers[instr.src_a]);
     }
 
     static void exec_less(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = bool_value(to_float64(registers[instr.src_a]) < to_float64(registers[instr.src_b]));
+      registers[instr.dst] = expr_eval::less_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_less_equal(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = bool_value(to_float64(registers[instr.src_a]) <= to_float64(registers[instr.src_b]));
+      registers[instr.dst] = expr_eval::less_equal_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_greater(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = bool_value(to_float64(registers[instr.src_a]) > to_float64(registers[instr.src_b]));
+      registers[instr.dst] = expr_eval::greater_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_greater_equal(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = bool_value(to_float64(registers[instr.src_a]) >= to_float64(registers[instr.src_b]));
+      registers[instr.dst] = expr_eval::greater_equal_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_equal(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = bool_value(to_float64(registers[instr.src_a]) == to_float64(registers[instr.src_b]));
+      registers[instr.dst] = expr_eval::equal_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static void exec_not_equal(const Graph &, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = bool_value(to_float64(registers[instr.src_a]) != to_float64(registers[instr.src_b]));
-    }
-
-    static int normalize_shift(const Value & value)
-    {
-      int64_t shift = to_int64(value);
-      if (shift < 0)
-      {
-        return 0;
-      }
-      if (shift > 63)
-      {
-        return 63;
-      }
-      return static_cast<int>(shift);
+      registers[instr.dst] = expr_eval::not_equal_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
     static ExprKernel kernel_for_kind(ExprKind kind)
@@ -1686,9 +1443,9 @@ class UserDefinedModule : public Module
   public:
     UserDefinedModule(
       unsigned int input_count,
-      std::vector<Graph::ExprSpecPtr> output_exprs,
-      std::vector<Graph::ExprSpecPtr> register_exprs,
-      std::vector<Graph::Value> initial_registers,
+      std::vector<ExprSpecPtr> output_exprs,
+      std::vector<ExprSpecPtr> register_exprs,
+      std::vector<Value> initial_registers,
       double sample_rate)
       : Module(input_count, static_cast<unsigned int>(output_exprs.size())),
         input_count_(input_count),
@@ -1697,7 +1454,7 @@ class UserDefinedModule : public Module
         sample_rate_(sample_rate)
     {
       program_ = compile_program(output_exprs, register_exprs);
-      temps_.assign(program_.register_count, Graph::float_value(0.0));
+      temps_.assign(program_.register_count, expr::float_value(0.0));
     }
 
     void process() override
@@ -1706,7 +1463,7 @@ class UserDefinedModule : public Module
 
       for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
       {
-        outputs[output_id] = Graph::to_float64(temps_[program_.output_targets[output_id]]);
+        outputs[output_id] = expr::to_float64(temps_[program_.output_targets[output_id]]);
       }
 
       for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
@@ -1745,12 +1502,12 @@ class UserDefinedModule : public Module
   private:
     struct Instr
     {
-      Graph::ExprKind kind = Graph::ExprKind::Literal;
+      ExprKind kind = ExprKind::Literal;
       uint32_t dst = 0;
       uint32_t src_a = 0;
       uint32_t src_b = 0;
       unsigned int slot_id = 0;
-      Graph::Value literal;
+      Value literal;
       std::vector<uint32_t> args;
     };
 
@@ -1762,36 +1519,36 @@ class UserDefinedModule : public Module
       uint32_t register_count = 0;
     };
 
-    static bool is_local_unary(Graph::ExprKind kind)
+    static bool is_local_unary(ExprKind kind)
     {
-      return kind == Graph::ExprKind::Neg ||
-             kind == Graph::ExprKind::Not ||
-             kind == Graph::ExprKind::BitNot ||
-             kind == Graph::ExprKind::Sin;
+      return kind == ExprKind::Neg ||
+             kind == ExprKind::Not ||
+             kind == ExprKind::BitNot ||
+             kind == ExprKind::Sin;
     }
 
-    static bool is_local_binary(Graph::ExprKind kind)
+    static bool is_local_binary(ExprKind kind)
     {
       switch (kind)
       {
-        case Graph::ExprKind::Less:
-        case Graph::ExprKind::LessEqual:
-        case Graph::ExprKind::Greater:
-        case Graph::ExprKind::GreaterEqual:
-        case Graph::ExprKind::Equal:
-        case Graph::ExprKind::NotEqual:
-        case Graph::ExprKind::Add:
-        case Graph::ExprKind::Sub:
-        case Graph::ExprKind::Mul:
-        case Graph::ExprKind::Div:
-        case Graph::ExprKind::Mod:
-        case Graph::ExprKind::FloorDiv:
-        case Graph::ExprKind::BitAnd:
-        case Graph::ExprKind::BitOr:
-        case Graph::ExprKind::BitXor:
-        case Graph::ExprKind::LShift:
-        case Graph::ExprKind::RShift:
-        case Graph::ExprKind::Index:
+        case ExprKind::Less:
+        case ExprKind::LessEqual:
+        case ExprKind::Greater:
+        case ExprKind::GreaterEqual:
+        case ExprKind::Equal:
+        case ExprKind::NotEqual:
+        case ExprKind::Add:
+        case ExprKind::Sub:
+        case ExprKind::Mul:
+        case ExprKind::Div:
+        case ExprKind::Mod:
+        case ExprKind::FloorDiv:
+        case ExprKind::BitAnd:
+        case ExprKind::BitOr:
+        case ExprKind::BitXor:
+        case ExprKind::LShift:
+        case ExprKind::RShift:
+        case ExprKind::Index:
           return true;
         default:
           return false;
@@ -1799,14 +1556,14 @@ class UserDefinedModule : public Module
     }
 
     CompiledProgram compile_program(
-      const std::vector<Graph::ExprSpecPtr> & output_exprs,
-      const std::vector<Graph::ExprSpecPtr> & register_exprs)
+      const std::vector<ExprSpecPtr> & output_exprs,
+      const std::vector<ExprSpecPtr> & register_exprs)
     {
       CompiledProgram compiled;
       compiled.output_targets.reserve(output_exprs.size());
       compiled.register_targets.assign(register_exprs.size(), -1);
 
-      std::unordered_map<const Graph::ExprSpec *, uint32_t> memo;
+      std::unordered_map<const ExprSpec *, uint32_t> memo;
       for (const auto & expr : output_exprs)
       {
         compiled.output_targets.push_back(compile_expr_node(expr, compiled, memo));
@@ -1822,16 +1579,16 @@ class UserDefinedModule : public Module
     }
 
     uint32_t compile_expr_node(
-      const Graph::ExprSpecPtr & expr,
+      const ExprSpecPtr & expr,
       CompiledProgram & compiled,
-      std::unordered_map<const Graph::ExprSpec *, uint32_t> & memo)
+      std::unordered_map<const ExprSpec *, uint32_t> & memo)
     {
       if (!expr)
       {
-        static const Graph::ExprSpec zero_expr = [] {
-          Graph::ExprSpec expr;
-          expr.kind = Graph::ExprKind::Literal;
-          expr.literal = Graph::float_value(0.0);
+        static const ExprSpec zero_expr = [] {
+          ExprSpec expr;
+          expr.kind = ExprKind::Literal;
+          expr.literal = expr::float_value(0.0);
           return expr;
         }();
         auto it = memo.find(&zero_expr);
@@ -1841,9 +1598,9 @@ class UserDefinedModule : public Module
         }
 
         Instr instr;
-        instr.kind = Graph::ExprKind::Literal;
+        instr.kind = ExprKind::Literal;
         instr.dst = compiled.register_count++;
-        instr.literal = Graph::float_value(0.0);
+        instr.literal = expr::float_value(0.0);
         compiled.instructions.push_back(std::move(instr));
         memo.emplace(&zero_expr, compiled.instructions.back().dst);
         return compiled.instructions.back().dst;
@@ -1861,17 +1618,17 @@ class UserDefinedModule : public Module
 
       switch (expr->kind)
       {
-        case Graph::ExprKind::Literal:
+        case ExprKind::Literal:
           instr.literal = expr->literal;
           break;
-        case Graph::ExprKind::InputValue:
-        case Graph::ExprKind::RegisterValue:
+        case ExprKind::InputValue:
+        case ExprKind::RegisterValue:
           instr.slot_id = expr->slot_id;
           break;
-        case Graph::ExprKind::SampleRate:
-        case Graph::ExprKind::SampleIndex:
+        case ExprKind::SampleRate:
+        case ExprKind::SampleIndex:
           break;
-        case Graph::ExprKind::ArrayPack:
+        case ExprKind::ArrayPack:
           instr.args.reserve(expr->args.size());
           for (const auto & arg : expr->args)
           {
@@ -1900,7 +1657,7 @@ class UserDefinedModule : public Module
       return compiled.instructions.back().dst;
     }
 
-    void eval_program(const CompiledProgram & expr, std::vector<Graph::Value> & temps) const
+    void eval_program(const CompiledProgram & expr, std::vector<Value> & temps) const
     {
       if (expr.instructions.empty())
       {
@@ -1909,55 +1666,55 @@ class UserDefinedModule : public Module
 
       if (temps.size() < expr.register_count)
       {
-        temps.resize(expr.register_count, Graph::float_value(0.0));
+        temps.resize(expr.register_count, expr::float_value(0.0));
       }
 
       for (const Instr & instr : expr.instructions)
       {
         switch (instr.kind)
         {
-          case Graph::ExprKind::Literal:
+          case ExprKind::Literal:
             temps[instr.dst] = instr.literal;
             break;
-          case Graph::ExprKind::InputValue:
+          case ExprKind::InputValue:
             temps[instr.dst] = instr.slot_id < inputs.size()
-                                 ? Graph::float_value(inputs[instr.slot_id])
-                                 : Graph::float_value(0.0);
+                                 ? expr::float_value(inputs[instr.slot_id])
+                                 : expr::float_value(0.0);
             break;
-          case Graph::ExprKind::RegisterValue:
+          case ExprKind::RegisterValue:
             temps[instr.dst] = instr.slot_id < registers_.size()
                                  ? registers_[instr.slot_id]
-                                 : Graph::float_value(0.0);
+                                 : expr::float_value(0.0);
             break;
-          case Graph::ExprKind::SampleRate:
-            temps[instr.dst] = Graph::float_value(sample_rate_);
+          case ExprKind::SampleRate:
+            temps[instr.dst] = expr::float_value(sample_rate_);
             break;
-          case Graph::ExprKind::SampleIndex:
-            temps[instr.dst] = Graph::int_value(static_cast<int64_t>(sample_index_));
+          case ExprKind::SampleIndex:
+            temps[instr.dst] = expr::int_value(static_cast<int64_t>(sample_index_));
             break;
-          case Graph::ExprKind::ArrayPack:
+          case ExprKind::ArrayPack:
           {
-            std::vector<Graph::Value> items;
+            std::vector<Value> items;
             items.reserve(instr.args.size());
             for (uint32_t src : instr.args)
             {
-              if (Graph::is_array(temps[src]))
+              if (expr::is_array(temps[src]))
               {
                 throw std::invalid_argument("Nested arrays are not supported.");
               }
               items.push_back(temps[src]);
             }
-            temps[instr.dst] = Graph::array_value(std::move(items));
+            temps[instr.dst] = expr::array_value(std::move(items));
             break;
           }
-          case Graph::ExprKind::Index:
+          case ExprKind::Index:
           {
-            const Graph::Value & array_value = temps[instr.src_a];
-            if (!Graph::is_array(array_value))
+            const Value & array_value = temps[instr.src_a];
+            if (!expr::is_array(array_value))
             {
               throw std::invalid_argument("Indexing requires an array value.");
             }
-            const int64_t index = Graph::to_int64(temps[instr.src_b]);
+            const int64_t index = expr::to_int64(temps[instr.src_b]);
             if (index < 0 || static_cast<std::size_t>(index) >= array_value.array_items.size())
             {
               throw std::out_of_range("Array index out of range.");
@@ -1965,116 +1722,71 @@ class UserDefinedModule : public Module
             temps[instr.dst] = array_value.array_items[static_cast<std::size_t>(index)];
             break;
           }
-          case Graph::ExprKind::Not:
-            temps[instr.dst] = Graph::map_unary(temps[instr.src_a], [](const Graph::Value & value) {
-              return Graph::bool_value(!Graph::is_truthy(value));
-            });
+          case ExprKind::Not:
+            temps[instr.dst] = expr_eval::not_value(temps[instr.src_a]);
             break;
-          case Graph::ExprKind::Less:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              return Graph::bool_value(Graph::to_float64(lhs) < Graph::to_float64(rhs));
-            });
+          case ExprKind::Less:
+            temps[instr.dst] = expr_eval::less_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::LessEqual:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              return Graph::bool_value(Graph::to_float64(lhs) <= Graph::to_float64(rhs));
-            });
+          case ExprKind::LessEqual:
+            temps[instr.dst] = expr_eval::less_equal_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::Greater:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              return Graph::bool_value(Graph::to_float64(lhs) > Graph::to_float64(rhs));
-            });
+          case ExprKind::Greater:
+            temps[instr.dst] = expr_eval::greater_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::GreaterEqual:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              return Graph::bool_value(Graph::to_float64(lhs) >= Graph::to_float64(rhs));
-            });
+          case ExprKind::GreaterEqual:
+            temps[instr.dst] = expr_eval::greater_equal_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::Equal:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              return Graph::bool_value(Graph::to_float64(lhs) == Graph::to_float64(rhs));
-            });
+          case ExprKind::Equal:
+            temps[instr.dst] = expr_eval::equal_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::NotEqual:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              return Graph::bool_value(Graph::to_float64(lhs) != Graph::to_float64(rhs));
-            });
+          case ExprKind::NotEqual:
+            temps[instr.dst] = expr_eval::not_equal_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::Add:
-            temps[instr.dst] = Graph::add_values(temps[instr.src_a], temps[instr.src_b]);
+          case ExprKind::Add:
+            temps[instr.dst] = expr_eval::add_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::Sub:
-            temps[instr.dst] = Graph::sub_values(temps[instr.src_a], temps[instr.src_b]);
+          case ExprKind::Sub:
+            temps[instr.dst] = expr_eval::sub_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::Mul:
-            temps[instr.dst] = Graph::mul_values(temps[instr.src_a], temps[instr.src_b]);
+          case ExprKind::Mul:
+            temps[instr.dst] = expr_eval::mul_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::Div:
-            temps[instr.dst] = Graph::div_values(temps[instr.src_a], temps[instr.src_b]);
+          case ExprKind::Div:
+            temps[instr.dst] = expr_eval::div_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::Mod:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              if (Graph::arithmetic_type(lhs, rhs) == Graph::ValueType::Float)
-              {
-                const double denom = Graph::to_float64(rhs);
-                return denom == 0.0 ? Graph::float_value(0.0) : Graph::float_value(std::fmod(Graph::to_float64(lhs), denom));
-              }
-              const int64_t denom = Graph::to_int64(rhs);
-              return denom == 0 ? Graph::int_value(0) : Graph::int_value(Graph::to_int64(lhs) % denom);
-            });
+          case ExprKind::Mod:
+            temps[instr.dst] = expr_eval::mod_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::FloorDiv:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              const double denom = Graph::to_float64(rhs);
-              return denom == 0.0 ? Graph::float_value(0.0) : Graph::float_value(std::floor(Graph::to_float64(lhs) / denom));
-            });
+          case ExprKind::FloorDiv:
+            temps[instr.dst] = expr_eval::floor_div_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::BitAnd:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              return Graph::int_value(Graph::to_int64(lhs) & Graph::to_int64(rhs));
-            });
+          case ExprKind::BitAnd:
+            temps[instr.dst] = expr_eval::bit_and_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::BitOr:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              return Graph::int_value(Graph::to_int64(lhs) | Graph::to_int64(rhs));
-            });
+          case ExprKind::BitOr:
+            temps[instr.dst] = expr_eval::bit_or_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::BitXor:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              return Graph::int_value(Graph::to_int64(lhs) ^ Graph::to_int64(rhs));
-            });
+          case ExprKind::BitXor:
+            temps[instr.dst] = expr_eval::bit_xor_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::LShift:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              return Graph::int_value(Graph::to_int64(lhs) << Graph::normalize_shift(rhs));
-            });
+          case ExprKind::LShift:
+            temps[instr.dst] = expr_eval::lshift_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::RShift:
-            temps[instr.dst] = Graph::map_binary(temps[instr.src_a], temps[instr.src_b], [](const Graph::Value & lhs, const Graph::Value & rhs) {
-              return Graph::int_value(Graph::to_int64(lhs) >> Graph::normalize_shift(rhs));
-            });
+          case ExprKind::RShift:
+            temps[instr.dst] = expr_eval::rshift_values(temps[instr.src_a], temps[instr.src_b]);
             break;
-          case Graph::ExprKind::Sin:
-            temps[instr.dst] = Graph::map_unary(temps[instr.src_a], [](const Graph::Value & value) {
-              return Graph::float_value(std::sin(Graph::to_float64(value)));
-            });
+          case ExprKind::Sin:
+            temps[instr.dst] = expr_eval::sin_value(temps[instr.src_a]);
             break;
-          case Graph::ExprKind::Neg:
-            temps[instr.dst] = Graph::map_unary(temps[instr.src_a], [](const Graph::Value & value) {
-              if (value.type == Graph::ValueType::Float)
-              {
-                return Graph::float_value(-Graph::to_float64(value));
-              }
-              return Graph::int_value(-Graph::to_int64(value));
-            });
+          case ExprKind::Neg:
+            temps[instr.dst] = expr_eval::neg_value(temps[instr.src_a]);
             break;
-          case Graph::ExprKind::BitNot:
-            temps[instr.dst] = Graph::map_unary(temps[instr.src_a], [](const Graph::Value & value) {
-              return Graph::int_value(~Graph::to_int64(value));
-            });
+          case ExprKind::BitNot:
+            temps[instr.dst] = expr_eval::bit_not_value(temps[instr.src_a]);
             break;
-          case Graph::ExprKind::Ref:
-            temps[instr.dst] = Graph::float_value(0.0);
+          case ExprKind::Ref:
+            temps[instr.dst] = expr::float_value(0.0);
             break;
         }
       }
@@ -2082,9 +1794,9 @@ class UserDefinedModule : public Module
 
     unsigned int input_count_ = 0;
     CompiledProgram program_;
-    std::vector<Graph::Value> temps_;
-    std::vector<Graph::Value> registers_;
-    std::vector<Graph::Value> next_registers_;
+    std::vector<Value> temps_;
+    std::vector<Value> registers_;
+    std::vector<Value> next_registers_;
     double sample_rate_ = 44100.0;
     uint64_t sample_index_ = 0;
 };
