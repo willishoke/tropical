@@ -23,6 +23,16 @@ class Graph
     {
       Literal,
       Ref,
+      InputValue,
+      RegisterValue,
+      SampleRate,
+      SampleIndex,
+      Less,
+      LessEqual,
+      Greater,
+      GreaterEqual,
+      Equal,
+      NotEqual,
       Add,
       Sub,
       Mul,
@@ -34,8 +44,8 @@ class Graph
       BitXor,
       LShift,
       RShift,
-      Neg
-      ,
+      Sin,
+      Neg,
       BitNot
     };
 
@@ -45,6 +55,7 @@ class Graph
       double literal = 0.0;
       std::string module_name;
       unsigned int output_id = 0;
+      unsigned int slot_id = 0;
       std::shared_ptr<ExprSpec> lhs;
       std::shared_ptr<ExprSpec> rhs;
     };
@@ -309,6 +320,36 @@ class Graph
       return make_ref_expr(std::move(module_name), output_id);
     }
 
+    static ExprSpecPtr input_value_expr(unsigned int input_id)
+    {
+      auto expr = std::make_shared<ExprSpec>();
+      expr->kind = ExprKind::InputValue;
+      expr->slot_id = input_id;
+      return expr;
+    }
+
+    static ExprSpecPtr register_value_expr(unsigned int register_id)
+    {
+      auto expr = std::make_shared<ExprSpec>();
+      expr->kind = ExprKind::RegisterValue;
+      expr->slot_id = register_id;
+      return expr;
+    }
+
+    static ExprSpecPtr sample_rate_expr()
+    {
+      auto expr = std::make_shared<ExprSpec>();
+      expr->kind = ExprKind::SampleRate;
+      return expr;
+    }
+
+    static ExprSpecPtr sample_index_expr()
+    {
+      auto expr = std::make_shared<ExprSpec>();
+      expr->kind = ExprKind::SampleIndex;
+      return expr;
+    }
+
     static ExprSpecPtr unary_expr(ExprKind kind, ExprSpecPtr operand)
     {
       auto expr = std::make_shared<ExprSpec>();
@@ -441,6 +482,10 @@ class Graph
       {
         case ExprKind::Literal:
         case ExprKind::Ref:
+        case ExprKind::InputValue:
+        case ExprKind::RegisterValue:
+        case ExprKind::SampleRate:
+        case ExprKind::SampleIndex:
           return expr;
         case ExprKind::Neg:
         {
@@ -467,6 +512,66 @@ class Graph
             return literal_expr(static_cast<double>(~to_int64(lhs->literal)));
           }
           return unary_expr(ExprKind::BitNot, lhs);
+        }
+        case ExprKind::Sin:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          if (!lhs)
+          {
+            return nullptr;
+          }
+          if (lhs->kind == ExprKind::Literal)
+          {
+            return literal_expr(std::sin(lhs->literal));
+          }
+          return unary_expr(ExprKind::Sin, lhs);
+        }
+        case ExprKind::Less:
+        case ExprKind::LessEqual:
+        case ExprKind::Greater:
+        case ExprKind::GreaterEqual:
+        case ExprKind::Equal:
+        case ExprKind::NotEqual:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          ExprSpecPtr rhs = simplify_expr(expr->rhs);
+          if (!lhs)
+          {
+            lhs = literal_expr(0.0);
+          }
+          if (!rhs)
+          {
+            rhs = literal_expr(0.0);
+          }
+          if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
+          {
+            bool result = false;
+            switch (expr->kind)
+            {
+              case ExprKind::Less:
+                result = lhs->literal < rhs->literal;
+                break;
+              case ExprKind::LessEqual:
+                result = lhs->literal <= rhs->literal;
+                break;
+              case ExprKind::Greater:
+                result = lhs->literal > rhs->literal;
+                break;
+              case ExprKind::GreaterEqual:
+                result = lhs->literal >= rhs->literal;
+                break;
+              case ExprKind::Equal:
+                result = lhs->literal == rhs->literal;
+                break;
+              case ExprKind::NotEqual:
+                result = lhs->literal != rhs->literal;
+                break;
+              default:
+                break;
+            }
+            return literal_expr(result ? 1.0 : 0.0);
+          }
+          return binary_expr(expr->kind, lhs, rhs);
         }
         case ExprKind::Add:
         {
@@ -620,6 +725,14 @@ class Graph
         return expr;
       }
 
+      if (expr->kind == ExprKind::InputValue ||
+          expr->kind == ExprKind::RegisterValue ||
+          expr->kind == ExprKind::SampleRate ||
+          expr->kind == ExprKind::SampleIndex)
+      {
+        return expr;
+      }
+
       ExprSpecPtr lhs = replace_refs_with_zero(expr->lhs, module_name, output_id, remove_all_outputs, removed_any);
       ExprSpecPtr rhs = replace_refs_with_zero(expr->rhs, module_name, output_id, remove_all_outputs, removed_any);
 
@@ -631,6 +744,11 @@ class Graph
       if (expr->kind == ExprKind::BitNot)
       {
         return simplify_expr(unary_expr(ExprKind::BitNot, lhs));
+      }
+
+      if (expr->kind == ExprKind::Sin)
+      {
+        return simplify_expr(unary_expr(ExprKind::Sin, lhs));
       }
 
       return simplify_expr(binary_expr(expr->kind, lhs, rhs));
@@ -664,6 +782,14 @@ class Graph
       {
         auto it = control_modules_.find(expr->module_name);
         return it != control_modules_.end() && expr->output_id < it->second.out_count;
+      }
+
+      if (expr->kind == ExprKind::InputValue ||
+          expr->kind == ExprKind::RegisterValue ||
+          expr->kind == ExprKind::SampleRate ||
+          expr->kind == ExprKind::SampleIndex)
+      {
+        return false;
       }
 
       return validate_expr_refs(expr->lhs) && validate_expr_refs(expr->rhs);
@@ -863,6 +989,31 @@ class Graph
       registers[instr.dst] = -registers[instr.src_a];
     }
 
+    static double fast_sin(double x)
+    {
+      constexpr double pi = 3.14159265358979323846;
+      constexpr double two_pi = 2.0 * pi;
+      constexpr double half_pi = 0.5 * pi;
+      constexpr double B = 4.0 / pi;
+      constexpr double C = -4.0 / (pi * pi);
+      constexpr double P = 0.225;
+
+      x = std::fmod(x + pi, two_pi);
+      if (x < 0.0)
+      {
+        x += two_pi;
+      }
+      x -= pi;
+
+      const double y = B * x + C * x * std::fabs(x);
+      return P * (y * std::fabs(y) - y) + y;
+    }
+
+    static void exec_sin(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = fast_sin(registers[instr.src_a]);
+    }
+
     static void exec_mod(const Graph &, const ExprInstr & instr, double * registers)
     {
       const double denominator = registers[instr.src_b];
@@ -905,6 +1056,36 @@ class Graph
       registers[instr.dst] = static_cast<double>(~to_int64(registers[instr.src_a]));
     }
 
+    static void exec_less(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] < registers[instr.src_b] ? 1.0 : 0.0;
+    }
+
+    static void exec_less_equal(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] <= registers[instr.src_b] ? 1.0 : 0.0;
+    }
+
+    static void exec_greater(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] > registers[instr.src_b] ? 1.0 : 0.0;
+    }
+
+    static void exec_greater_equal(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] >= registers[instr.src_b] ? 1.0 : 0.0;
+    }
+
+    static void exec_equal(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] == registers[instr.src_b] ? 1.0 : 0.0;
+    }
+
+    static void exec_not_equal(const Graph &, const ExprInstr & instr, double * registers)
+    {
+      registers[instr.dst] = registers[instr.src_a] != registers[instr.src_b] ? 1.0 : 0.0;
+    }
+
     static int64_t to_int64(double value)
     {
       return static_cast<int64_t>(value);
@@ -932,6 +1113,23 @@ class Graph
           return &Graph::exec_literal;
         case ExprKind::Ref:
           return &Graph::exec_ref;
+        case ExprKind::InputValue:
+        case ExprKind::RegisterValue:
+        case ExprKind::SampleRate:
+        case ExprKind::SampleIndex:
+          return &Graph::exec_literal;
+        case ExprKind::Less:
+          return &Graph::exec_less;
+        case ExprKind::LessEqual:
+          return &Graph::exec_less_equal;
+        case ExprKind::Greater:
+          return &Graph::exec_greater;
+        case ExprKind::GreaterEqual:
+          return &Graph::exec_greater_equal;
+        case ExprKind::Equal:
+          return &Graph::exec_equal;
+        case ExprKind::NotEqual:
+          return &Graph::exec_not_equal;
         case ExprKind::Add:
           return &Graph::exec_add;
         case ExprKind::Sub:
@@ -954,6 +1152,8 @@ class Graph
           return &Graph::exec_lshift;
         case ExprKind::RShift:
           return &Graph::exec_rshift;
+        case ExprKind::Sin:
+          return &Graph::exec_sin;
         case ExprKind::Neg:
           return &Graph::exec_neg;
         case ExprKind::BitNot:
@@ -1025,7 +1225,7 @@ class Graph
         return instr.dst;
       }
 
-      if (expr->kind == ExprKind::Neg || expr->kind == ExprKind::BitNot)
+      if (expr->kind == ExprKind::Neg || expr->kind == ExprKind::BitNot || expr->kind == ExprKind::Sin)
       {
         const uint32_t operand = compile_expr_node(expr->lhs, compiled, dependency_marks);
         ExprInstr instr;
@@ -1329,4 +1529,163 @@ class Graph
 
     mutable std::mutex pending_mutex_;
     std::vector<Command> command_queue_;
+};
+
+class UserDefinedModule : public Module
+{
+  public:
+    UserDefinedModule(
+      unsigned int input_count,
+      std::vector<Graph::ExprSpecPtr> output_exprs,
+      std::vector<Graph::ExprSpecPtr> register_exprs,
+      std::vector<double> initial_registers,
+      double sample_rate)
+      : Module(input_count, static_cast<unsigned int>(output_exprs.size())),
+        input_count_(input_count),
+        output_exprs_(std::move(output_exprs)),
+        register_exprs_(std::move(register_exprs)),
+        registers_(std::move(initial_registers)),
+        next_registers_(registers_),
+        sample_rate_(sample_rate)
+    {
+    }
+
+    void process() override
+    {
+      for (unsigned int output_id = 0; output_id < output_exprs_.size(); ++output_id)
+      {
+        outputs[output_id] = eval_expr(output_exprs_[output_id]);
+      }
+
+      next_registers_ = registers_;
+      for (unsigned int register_id = 0; register_id < register_exprs_.size(); ++register_id)
+      {
+        if (register_exprs_[register_id])
+        {
+          next_registers_[register_id] = eval_expr(register_exprs_[register_id]);
+        }
+      }
+
+      registers_.swap(next_registers_);
+      ++sample_index_;
+      Module::postprocess();
+    }
+
+    unsigned int input_count() const
+    {
+      return input_count_;
+    }
+
+    unsigned int output_count() const
+    {
+      return static_cast<unsigned int>(output_exprs_.size());
+    }
+
+    unsigned int register_count() const
+    {
+      return static_cast<unsigned int>(registers_.size());
+    }
+
+  private:
+    double eval_expr(const Graph::ExprSpecPtr & expr) const
+    {
+      if (!expr)
+      {
+        return 0.0;
+      }
+
+      switch (expr->kind)
+      {
+        case Graph::ExprKind::Literal:
+          return expr->literal;
+        case Graph::ExprKind::InputValue:
+          return expr->slot_id < inputs.size() ? inputs[expr->slot_id] : 0.0;
+        case Graph::ExprKind::RegisterValue:
+          return expr->slot_id < registers_.size() ? registers_[expr->slot_id] : 0.0;
+        case Graph::ExprKind::SampleRate:
+          return sample_rate_;
+        case Graph::ExprKind::SampleIndex:
+          return static_cast<double>(sample_index_);
+        case Graph::ExprKind::Less:
+          return eval_expr(expr->lhs) < eval_expr(expr->rhs) ? 1.0 : 0.0;
+        case Graph::ExprKind::LessEqual:
+          return eval_expr(expr->lhs) <= eval_expr(expr->rhs) ? 1.0 : 0.0;
+        case Graph::ExprKind::Greater:
+          return eval_expr(expr->lhs) > eval_expr(expr->rhs) ? 1.0 : 0.0;
+        case Graph::ExprKind::GreaterEqual:
+          return eval_expr(expr->lhs) >= eval_expr(expr->rhs) ? 1.0 : 0.0;
+        case Graph::ExprKind::Equal:
+          return eval_expr(expr->lhs) == eval_expr(expr->rhs) ? 1.0 : 0.0;
+        case Graph::ExprKind::NotEqual:
+          return eval_expr(expr->lhs) != eval_expr(expr->rhs) ? 1.0 : 0.0;
+        case Graph::ExprKind::Add:
+          return eval_expr(expr->lhs) + eval_expr(expr->rhs);
+        case Graph::ExprKind::Sub:
+          return eval_expr(expr->lhs) - eval_expr(expr->rhs);
+        case Graph::ExprKind::Mul:
+          return eval_expr(expr->lhs) * eval_expr(expr->rhs);
+        case Graph::ExprKind::Div:
+        {
+          const double rhs = eval_expr(expr->rhs);
+          return rhs == 0.0 ? 0.0 : eval_expr(expr->lhs) / rhs;
+        }
+        case Graph::ExprKind::Mod:
+        {
+          const double rhs = eval_expr(expr->rhs);
+          return rhs == 0.0 ? 0.0 : std::fmod(eval_expr(expr->lhs), rhs);
+        }
+        case Graph::ExprKind::FloorDiv:
+        {
+          const double rhs = eval_expr(expr->rhs);
+          return rhs == 0.0 ? 0.0 : std::floor(eval_expr(expr->lhs) / rhs);
+        }
+        case Graph::ExprKind::BitAnd:
+          return static_cast<double>(to_int64(eval_expr(expr->lhs)) & to_int64(eval_expr(expr->rhs)));
+        case Graph::ExprKind::BitOr:
+          return static_cast<double>(to_int64(eval_expr(expr->lhs)) | to_int64(eval_expr(expr->rhs)));
+        case Graph::ExprKind::BitXor:
+          return static_cast<double>(to_int64(eval_expr(expr->lhs)) ^ to_int64(eval_expr(expr->rhs)));
+        case Graph::ExprKind::LShift:
+          return static_cast<double>(to_int64(eval_expr(expr->lhs)) << normalize_shift(eval_expr(expr->rhs)));
+        case Graph::ExprKind::RShift:
+          return static_cast<double>(to_int64(eval_expr(expr->lhs)) >> normalize_shift(eval_expr(expr->rhs)));
+        case Graph::ExprKind::Sin:
+          return std::sin(eval_expr(expr->lhs));
+        case Graph::ExprKind::Neg:
+          return -eval_expr(expr->lhs);
+        case Graph::ExprKind::BitNot:
+          return static_cast<double>(~to_int64(eval_expr(expr->lhs)));
+        case Graph::ExprKind::Ref:
+          return 0.0;
+      }
+
+      return 0.0;
+    }
+
+    static int64_t to_int64(double value)
+    {
+      return static_cast<int64_t>(value);
+    }
+
+    static int normalize_shift(double value)
+    {
+      int64_t shift = to_int64(value);
+      if (shift < 0)
+      {
+        return 0;
+      }
+      if (shift > 63)
+      {
+        return 63;
+      }
+      return static_cast<int>(shift);
+    }
+
+    unsigned int input_count_ = 0;
+    std::vector<Graph::ExprSpecPtr> output_exprs_;
+    std::vector<Graph::ExprSpecPtr> register_exprs_;
+    std::vector<double> registers_;
+    std::vector<double> next_registers_;
+    double sample_rate_ = 44100.0;
+    uint64_t sample_index_ = 0;
 };

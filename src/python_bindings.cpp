@@ -2,10 +2,12 @@
 
 #include "../lib/rtaudio/RtAudio.h"
 
+#include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -123,6 +125,24 @@ class PythonGraph
       return graph_.addModule(module_name, std::make_unique<ALLPASS>(freq_hz, res));
     }
 
+    bool add_user_defined_module(
+      const std::string & module_name,
+      unsigned int input_count,
+      std::vector<Graph::ExprSpecPtr> output_exprs,
+      std::vector<Graph::ExprSpecPtr> register_exprs,
+      std::vector<double> initial_registers,
+      double sample_rate)
+    {
+      return graph_.addModule(
+        module_name,
+        std::make_unique<UserDefinedModule>(
+          input_count,
+          std::move(output_exprs),
+          std::move(register_exprs),
+          std::move(initial_registers),
+          sample_rate));
+    }
+
   private:
     Graph graph_;
     std::unordered_map<std::string, uint64_t> name_counters_;
@@ -152,6 +172,138 @@ struct SignalExpr
 {
   PythonGraph * graph = nullptr;
   Graph::ExprSpecPtr spec;
+};
+
+static void assign_input(const InputPort & input, const py::handle & value);
+
+struct SymbolMap
+{
+  enum class Kind
+  {
+    Input,
+    Register
+  };
+
+  Kind kind = Kind::Input;
+  std::unordered_map<std::string, unsigned int> slots;
+};
+
+struct StatefulModuleDefinition
+{
+  std::string type_name;
+  std::vector<std::string> input_names;
+  std::vector<std::string> output_names;
+  std::vector<std::string> register_names;
+  std::vector<double> initial_registers;
+  std::vector<Graph::ExprSpecPtr> output_exprs;
+  std::vector<Graph::ExprSpecPtr> register_exprs;
+  double sample_rate = 44100.0;
+};
+
+class PyStatefulModuleInstance
+{
+  public:
+    PyStatefulModuleInstance(std::shared_ptr<StatefulModuleDefinition> definition, PythonGraph & graph)
+      : definition_(std::move(definition)), graph_(&graph), name_(graph_->next_name(definition_->type_name))
+    {
+      if (!graph_->add_user_defined_module(
+            name_,
+            static_cast<unsigned int>(definition_->input_names.size()),
+            definition_->output_exprs,
+            definition_->register_exprs,
+            definition_->initial_registers,
+            definition_->sample_rate))
+      {
+        throw std::invalid_argument("Failed to create module '" + name_ + "'.");
+      }
+    }
+
+    const std::string & name() const { return name_; }
+
+    InputPort get_input(const std::string & attr) const
+    {
+      return InputPort{graph_, name_, lookup(definition_->input_names, attr, "input")};
+    }
+
+    OutputPort get_output(const std::string & attr) const
+    {
+      return OutputPort{graph_, name_, lookup(definition_->output_names, attr, "output")};
+    }
+
+    py::object getattr(const std::string & attr) const
+    {
+      for (unsigned int i = 0; i < definition_->input_names.size(); ++i)
+      {
+        if (definition_->input_names[i] == attr)
+        {
+          return py::cast(InputPort{graph_, name_, i});
+        }
+      }
+
+      for (unsigned int i = 0; i < definition_->output_names.size(); ++i)
+      {
+        if (definition_->output_names[i] == attr)
+        {
+          return py::cast(OutputPort{graph_, name_, i});
+        }
+      }
+
+      throw py::attribute_error("Unknown attribute '" + attr + "'.");
+    }
+
+    void setattr(const std::string & attr, const py::object & value) const
+    {
+      for (unsigned int i = 0; i < definition_->input_names.size(); ++i)
+      {
+        if (definition_->input_names[i] == attr)
+        {
+          assign_input(InputPort{graph_, name_, i}, value);
+          return;
+        }
+      }
+
+      throw py::attribute_error("Cannot assign attribute '" + attr + "'.");
+    }
+
+  private:
+    static unsigned int lookup(
+      const std::vector<std::string> & names,
+      const std::string & attr,
+      const char * kind)
+    {
+      for (unsigned int i = 0; i < names.size(); ++i)
+      {
+        if (names[i] == attr)
+        {
+          return i;
+        }
+      }
+
+      throw std::invalid_argument("Unknown " + std::string(kind) + " '" + attr + "'.");
+    }
+
+    std::shared_ptr<StatefulModuleDefinition> definition_;
+    PythonGraph * graph_ = nullptr;
+    std::string name_;
+};
+
+class PyStatefulModuleType
+{
+  public:
+    explicit PyStatefulModuleType(std::shared_ptr<StatefulModuleDefinition> definition)
+      : definition_(std::move(definition))
+    {
+    }
+
+    const std::string & name() const { return definition_->type_name; }
+
+    PyStatefulModuleInstance instantiate() const
+    {
+      return PyStatefulModuleInstance(definition_, default_graph());
+    }
+
+  private:
+    std::shared_ptr<StatefulModuleDefinition> definition_;
 };
 
 static PythonGraph * merge_graphs(PythonGraph * lhs, PythonGraph * rhs)
@@ -279,6 +431,202 @@ static SignalExpr lshift_expr(const SignalExpr & lhs, const py::handle & rhs)
 static SignalExpr rshift_expr(const SignalExpr & lhs, const py::handle & rhs)
 {
   return make_binary_expr(Graph::ExprKind::RShift, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr sin_expr(const py::handle & value)
+{
+  return make_unary_expr(Graph::ExprKind::Sin, coerce_expr(value));
+}
+
+static SignalExpr less_expr(const py::handle & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::Less, coerce_expr(lhs), coerce_expr(rhs));
+}
+
+static SignalExpr less_equal_expr(const py::handle & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::LessEqual, coerce_expr(lhs), coerce_expr(rhs));
+}
+
+static SignalExpr greater_expr(const py::handle & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::Greater, coerce_expr(lhs), coerce_expr(rhs));
+}
+
+static SignalExpr greater_equal_expr(const py::handle & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::GreaterEqual, coerce_expr(lhs), coerce_expr(rhs));
+}
+
+static SignalExpr equal_expr(const py::handle & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::Equal, coerce_expr(lhs), coerce_expr(rhs));
+}
+
+static SignalExpr not_equal_expr(const py::handle & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(Graph::ExprKind::NotEqual, coerce_expr(lhs), coerce_expr(rhs));
+}
+
+static SignalExpr symbol_expr(SymbolMap::Kind kind, unsigned int slot_id)
+{
+  if (kind == SymbolMap::Kind::Input)
+  {
+    return make_signal_expr(nullptr, Graph::input_value_expr(slot_id));
+  }
+  return make_signal_expr(nullptr, Graph::register_value_expr(slot_id));
+}
+
+static SignalExpr sample_rate_expr()
+{
+  return make_signal_expr(nullptr, Graph::sample_rate_expr());
+}
+
+static SignalExpr sample_index_expr()
+{
+  return make_signal_expr(nullptr, Graph::sample_index_expr());
+}
+
+static py::dict require_dict(const py::handle & value, const char * label)
+{
+  if (!py::isinstance<py::dict>(value))
+  {
+    throw std::invalid_argument(std::string(label) + " must be a dict.");
+  }
+  return value.cast<py::dict>();
+}
+
+static std::vector<std::string> require_names(const py::iterable & values, const char * label)
+{
+  std::vector<std::string> names;
+  std::unordered_set<std::string> seen;
+
+  for (const py::handle & value : values)
+  {
+    if (!py::isinstance<py::str>(value))
+    {
+      throw std::invalid_argument(std::string(label) + " must contain only strings.");
+    }
+
+    const std::string name = value.cast<std::string>();
+    if (!seen.insert(name).second)
+    {
+      throw std::invalid_argument("Duplicate name '" + name + "' in " + label + ".");
+    }
+    names.push_back(name);
+  }
+
+  return names;
+}
+
+static std::shared_ptr<StatefulModuleDefinition> define_stateful_module_impl(
+  const std::string & name,
+  const py::iterable & inputs,
+  const py::iterable & outputs,
+  const py::dict & regs,
+  const py::function & process,
+  double sample_rate)
+{
+  auto definition = std::make_shared<StatefulModuleDefinition>();
+  definition->type_name = name;
+  definition->input_names = require_names(inputs, "inputs");
+  definition->output_names = require_names(outputs, "outputs");
+  definition->sample_rate = sample_rate;
+
+  SymbolMap input_symbols;
+  input_symbols.kind = SymbolMap::Kind::Input;
+  for (unsigned int i = 0; i < definition->input_names.size(); ++i)
+  {
+    input_symbols.slots.emplace(definition->input_names[i], i);
+  }
+
+  SymbolMap register_symbols;
+  register_symbols.kind = SymbolMap::Kind::Register;
+  definition->register_exprs.assign(regs.size(), nullptr);
+  definition->register_names.reserve(regs.size());
+  definition->initial_registers.reserve(regs.size());
+
+  unsigned int register_id = 0;
+  for (const auto & item : regs)
+  {
+    const py::handle key = item.first;
+    const py::handle value = item.second;
+    if (!py::isinstance<py::str>(key))
+    {
+      throw std::invalid_argument("regs keys must be strings.");
+    }
+    if (!py::isinstance<py::float_>(value) && !py::isinstance<py::int_>(value))
+    {
+      throw std::invalid_argument("regs values must be numeric.");
+    }
+
+    const std::string reg_name = key.cast<std::string>();
+    if (!register_symbols.slots.emplace(reg_name, register_id).second)
+    {
+      throw std::invalid_argument("Duplicate register '" + reg_name + "'.");
+    }
+
+    definition->register_names.push_back(reg_name);
+    definition->initial_registers.push_back(value.cast<double>());
+    ++register_id;
+  }
+
+  py::object result = process(py::cast(input_symbols), py::cast(register_symbols));
+  if (!py::isinstance<py::tuple>(result))
+  {
+    throw std::invalid_argument("process must return a tuple: (outputs, next_regs).");
+  }
+
+  py::tuple returned = result.cast<py::tuple>();
+  if (returned.size() != 2)
+  {
+    throw std::invalid_argument("process must return exactly two dicts: (outputs, next_regs).");
+  }
+
+  const py::dict output_values = require_dict(returned[0], "process outputs");
+  const py::dict register_values = require_dict(returned[1], "process next_regs");
+
+  definition->output_exprs.assign(definition->output_names.size(), nullptr);
+  std::unordered_set<std::string> assigned_outputs;
+  for (const auto & item : output_values)
+  {
+    const std::string output_name = py::cast<std::string>(item.first);
+    auto it = std::find(definition->output_names.begin(), definition->output_names.end(), output_name);
+    if (it == definition->output_names.end())
+    {
+      throw std::invalid_argument("Unknown output '" + output_name + "'.");
+    }
+    if (!assigned_outputs.insert(output_name).second)
+    {
+      throw std::invalid_argument("Output '" + output_name + "' assigned more than once.");
+    }
+
+    const SignalExpr expr = coerce_expr(item.second);
+    if (expr.graph != nullptr)
+    {
+      throw std::invalid_argument("Stateful module expressions cannot capture graph ports.");
+    }
+    definition->output_exprs[static_cast<std::size_t>(std::distance(definition->output_names.begin(), it))] = expr.spec;
+  }
+
+  for (const auto & item : register_values)
+  {
+    const std::string reg_name = py::cast<std::string>(item.first);
+    auto it = register_symbols.slots.find(reg_name);
+    if (it == register_symbols.slots.end())
+    {
+      throw std::invalid_argument("Unknown register '" + reg_name + "'.");
+    }
+
+    const SignalExpr expr = coerce_expr(item.second);
+    if (expr.graph != nullptr)
+    {
+      throw std::invalid_argument("Stateful module expressions cannot capture graph ports.");
+    }
+    definition->register_exprs[it->second] = expr.spec;
+  }
+
+  return definition;
 }
 
 static void assign_input_expr(const InputPort & input, Graph::ExprSpecPtr expr)
@@ -798,6 +1146,12 @@ PYBIND11_MODULE(egress, m)
     .def("__rlshift__", [](const SignalExpr & rhs, const py::object & lhs) { return lshift_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__rshift__", [](const SignalExpr & lhs, const py::object & rhs) { return rshift_expr(lhs, rhs); })
     .def("__rrshift__", [](const SignalExpr & rhs, const py::object & lhs) { return rshift_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__lt__", [](const SignalExpr & lhs, const py::object & rhs) { return less_expr(py::cast(lhs), rhs); })
+    .def("__le__", [](const SignalExpr & lhs, const py::object & rhs) { return less_equal_expr(py::cast(lhs), rhs); })
+    .def("__gt__", [](const SignalExpr & lhs, const py::object & rhs) { return greater_expr(py::cast(lhs), rhs); })
+    .def("__ge__", [](const SignalExpr & lhs, const py::object & rhs) { return greater_equal_expr(py::cast(lhs), rhs); })
+    .def("__eq__", [](const SignalExpr & lhs, const py::object & rhs) { return equal_expr(py::cast(lhs), rhs); })
+    .def("__ne__", [](const SignalExpr & lhs, const py::object & rhs) { return not_equal_expr(py::cast(lhs), rhs); })
     .def("__neg__", [](const SignalExpr & expr) { return make_unary_expr(Graph::ExprKind::Neg, expr); })
     .def("__invert__", [](const SignalExpr & expr) { return make_unary_expr(Graph::ExprKind::BitNot, expr); });
 
@@ -826,6 +1180,12 @@ PYBIND11_MODULE(egress, m)
     .def("__rlshift__", [](const OutputPort & rhs, const py::object & lhs) { return lshift_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__rshift__", [](const OutputPort & lhs, const py::object & rhs) { return rshift_expr(make_output_expr(lhs), rhs); })
     .def("__rrshift__", [](const OutputPort & rhs, const py::object & lhs) { return rshift_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__lt__", [](const OutputPort & lhs, const py::object & rhs) { return less_expr(py::cast(make_output_expr(lhs)), rhs); })
+    .def("__le__", [](const OutputPort & lhs, const py::object & rhs) { return less_equal_expr(py::cast(make_output_expr(lhs)), rhs); })
+    .def("__gt__", [](const OutputPort & lhs, const py::object & rhs) { return greater_expr(py::cast(make_output_expr(lhs)), rhs); })
+    .def("__ge__", [](const OutputPort & lhs, const py::object & rhs) { return greater_equal_expr(py::cast(make_output_expr(lhs)), rhs); })
+    .def("__eq__", [](const OutputPort & lhs, const py::object & rhs) { return equal_expr(py::cast(make_output_expr(lhs)), rhs); })
+    .def("__ne__", [](const OutputPort & lhs, const py::object & rhs) { return not_equal_expr(py::cast(make_output_expr(lhs)), rhs); })
     .def("__neg__", [](const OutputPort & out) { return make_unary_expr(Graph::ExprKind::Neg, make_output_expr(out)); })
     .def("__invert__", [](const OutputPort & out) { return make_unary_expr(Graph::ExprKind::BitNot, make_output_expr(out)); });
 
@@ -856,6 +1216,12 @@ PYBIND11_MODULE(egress, m)
     .def("__rlshift__", [](const InputPort & rhs, const py::object & lhs) { return lshift_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
     .def("__rshift__", [](const InputPort & lhs, const py::object & rhs) { return rshift_expr(current_input_expr(lhs), rhs); })
     .def("__rrshift__", [](const InputPort & rhs, const py::object & lhs) { return rshift_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__lt__", [](const InputPort & lhs, const py::object & rhs) { return less_expr(py::cast(current_input_expr(lhs)), rhs); })
+    .def("__le__", [](const InputPort & lhs, const py::object & rhs) { return less_equal_expr(py::cast(current_input_expr(lhs)), rhs); })
+    .def("__gt__", [](const InputPort & lhs, const py::object & rhs) { return greater_expr(py::cast(current_input_expr(lhs)), rhs); })
+    .def("__ge__", [](const InputPort & lhs, const py::object & rhs) { return greater_equal_expr(py::cast(current_input_expr(lhs)), rhs); })
+    .def("__eq__", [](const InputPort & lhs, const py::object & rhs) { return equal_expr(py::cast(current_input_expr(lhs)), rhs); })
+    .def("__ne__", [](const InputPort & lhs, const py::object & rhs) { return not_equal_expr(py::cast(current_input_expr(lhs)), rhs); })
     .def("__iadd__", [](const InputPort & lhs, const py::object & rhs) { return input_iadd(lhs, rhs); })
     .def("__isub__", [](const InputPort & lhs, const py::object & rhs) { return input_isub(lhs, rhs); })
     .def("__imul__", [](const InputPort & lhs, const py::object & rhs) { return input_imul(lhs, rhs); })
@@ -870,10 +1236,51 @@ PYBIND11_MODULE(egress, m)
     .def("__neg__", [](const InputPort & p) { return make_unary_expr(Graph::ExprKind::Neg, current_input_expr(p)); })
     .def("__invert__", [](const InputPort & p) { return make_unary_expr(Graph::ExprKind::BitNot, current_input_expr(p)); });
 
+  py::class_<SymbolMap>(m, "_SymbolMap")
+    .def("__getitem__", [](const SymbolMap & symbols, const std::string & name) {
+      auto it = symbols.slots.find(name);
+      if (it == symbols.slots.end())
+      {
+        throw py::key_error("Unknown symbol '" + name + "'.");
+      }
+      return symbol_expr(symbols.kind, it->second);
+    });
+
+  py::class_<PyStatefulModuleInstance>(m, "StatefulModule")
+    .def_property_readonly("name", &PyStatefulModuleInstance::name)
+    .def("get_input", &PyStatefulModuleInstance::get_input, py::arg("name"))
+    .def("get_output", &PyStatefulModuleInstance::get_output, py::arg("name"))
+    .def("__getattr__", &PyStatefulModuleInstance::getattr, py::arg("name"))
+    .def("__setattr__", &PyStatefulModuleInstance::setattr, py::arg("name"), py::arg("value"));
+
+  py::class_<PyStatefulModuleType>(m, "StatefulModuleType")
+    .def_property_readonly("name", &PyStatefulModuleType::name)
+    .def("__call__", &PyStatefulModuleType::instantiate);
+
   m.def("connect", &connect_ports, py::arg("out"), py::arg("in"));
   m.def("disconnect", &disconnect_ports, py::arg("out"), py::arg("in"));
   m.def("add_output", &add_output_port, py::arg("out"));
   m.def("incoming", &incoming_ports, py::arg("in"));
+  m.def("sin", [](const py::object & value) { return sin_expr(value); }, py::arg("value"));
+  m.def("sample_rate", []() { return sample_rate_expr(); });
+  m.def("sample_index", []() { return sample_index_expr(); });
+  m.def(
+    "define_stateful_module",
+    [](const std::string & name,
+       const py::iterable & inputs,
+       const py::iterable & outputs,
+       const py::dict & regs,
+       const py::function & process,
+       double sample_rate)
+    {
+      return PyStatefulModuleType(define_stateful_module_impl(name, inputs, outputs, regs, process, sample_rate));
+    },
+    py::arg("name"),
+    py::arg("inputs"),
+    py::arg("outputs"),
+    py::arg("regs"),
+    py::arg("process"),
+    py::arg("sample_rate") = 44100.0);
 
   py::class_<PyVCO>(m, "VCO")
     .def(py::init<double>(), py::arg("frequency_hz"))

@@ -71,6 +71,29 @@ Input assignment shortcuts:
 - `module.input += expr`
 - `module.input = None` clears that input's current routing
 
+Stateful user-defined modules can be declared from Python by returning output expressions and next-register expressions from a pure definition function:
+
+```python
+import egress as eg
+
+Delay1 = eg.define_stateful_module(
+    name="Delay1",
+    inputs=["input"],
+    outputs=["output"],
+    regs={"z": 0.0},
+    process=lambda inp, reg: (
+        {"output": reg["z"]},
+        {"z": inp["input"]},
+    ),
+)
+
+delay = Delay1()
+delay.input = lfo.sin
+eg.add_output(delay.output)
+```
+
+`reg[...]` reads the current register bank for the sample. Returned register assignments become visible on the next sample, so the example above behaves as a one-sample delay. Built-in symbolic values are available as `eg.sample_index()` and `eg.sample_rate()`.
+
 Each input stores a single canonical expression tree. `input = ...` replaces that tree. `input += expr` and `connect(...)` append additional signal into the input sum.
 
 Realtime output methods:
