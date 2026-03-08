@@ -94,6 +94,25 @@ eg.add_output(delay.output)
 
 `reg[...]` reads the current register bank for the sample. Returned register assignments become visible on the next sample, so the example above behaves as a one-sample delay. Built-in symbolic values are available as `eg.sample_index()` and `eg.sample_rate()`.
 
+Expression trees now preserve simple scalar types: `bool`, `int`, and `float`. Arithmetic follows Python-style numeric promotion for those scalar types, so `3 + 3.0` produces a floating-point result. Comparisons return symbolic booleans that render as `1.0` / `0.0` when fed into module inputs or outputs. Python's `not` operator is not overloadable for symbolic expressions, so use `eg.logical_not(expr)` instead.
+
+Stateful module registers may also hold static 1-D arrays of scalar values. Use Python lists / tuples for register initialization and `eg.array([...])` when constructing a new array expression inside `process`. Arithmetic between arrays and scalars broadcasts elementwise, and array indexing is explicit:
+
+```python
+Shift = eg.define_stateful_module(
+    name="Shift",
+    inputs=["input"],
+    outputs=["tap"],
+    regs={"buf": [0.0, 0.0, 0.0]},
+    process=lambda inp, reg: (
+        {"tap": reg["buf"][0]},
+        {"buf": eg.array([reg["buf"][1], reg["buf"][2], inp["input"]])},
+    ),
+)
+```
+
+Arrays are currently limited to stateful-module expressions and registers. Graph ports and ordinary module inputs/outputs remain scalar.
+
 Each input stores a single canonical expression tree. `input = ...` replaces that tree. `input += expr` and `connect(...)` append additional signal into the input sum.
 
 Realtime output methods:

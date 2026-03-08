@@ -130,7 +130,7 @@ class PythonGraph
       unsigned int input_count,
       std::vector<Graph::ExprSpecPtr> output_exprs,
       std::vector<Graph::ExprSpecPtr> register_exprs,
-      std::vector<double> initial_registers,
+      std::vector<Graph::Value> initial_registers,
       double sample_rate)
     {
       return graph_.addModule(
@@ -194,7 +194,7 @@ struct StatefulModuleDefinition
   std::vector<std::string> input_names;
   std::vector<std::string> output_names;
   std::vector<std::string> register_names;
-  std::vector<double> initial_registers;
+  std::vector<Graph::Value> initial_registers;
   std::vector<Graph::ExprSpecPtr> output_exprs;
   std::vector<Graph::ExprSpecPtr> register_exprs;
   double sample_rate = 44100.0;
@@ -328,6 +328,18 @@ static SignalExpr make_literal_expr(double value)
   return make_signal_expr(nullptr, Graph::literal_expr(value));
 }
 
+static SignalExpr make_literal_expr(int64_t value)
+{
+  return make_signal_expr(nullptr, Graph::literal_expr(value));
+}
+
+static SignalExpr make_literal_expr(bool value)
+{
+  return make_signal_expr(nullptr, Graph::literal_expr(value));
+}
+
+static SignalExpr make_array_expr(const py::iterable & values);
+
 static SignalExpr make_output_expr(const OutputPort & out)
 {
   return make_signal_expr(out.graph, Graph::ref_expr(out.module_name, out.output_id));
@@ -360,7 +372,22 @@ static SignalExpr coerce_expr(const py::handle & value)
     return current_input_expr(value.cast<InputPort>());
   }
 
-  if (py::isinstance<py::float_>(value) || py::isinstance<py::int_>(value))
+  if (py::isinstance<py::bool_>(value))
+  {
+    return make_literal_expr(value.cast<bool>());
+  }
+
+  if (py::isinstance<py::list>(value) || py::isinstance<py::tuple>(value))
+  {
+    return make_array_expr(value.cast<py::iterable>());
+  }
+
+  if (py::isinstance<py::int_>(value))
+  {
+    return make_literal_expr(value.cast<int64_t>());
+  }
+
+  if (py::isinstance<py::float_>(value))
   {
     return make_literal_expr(value.cast<double>());
   }
@@ -438,6 +465,20 @@ static SignalExpr sin_expr(const py::handle & value)
   return make_unary_expr(Graph::ExprKind::Sin, coerce_expr(value));
 }
 
+static SignalExpr logical_not_expr(const py::handle & value)
+{
+  return make_unary_expr(Graph::ExprKind::Not, coerce_expr(value));
+}
+
+static SignalExpr index_expr(const SignalExpr & value, const py::handle & index)
+{
+  if (!py::isinstance<py::int_>(index))
+  {
+    throw std::invalid_argument("Array indices must be integers.");
+  }
+  return make_signal_expr(value.graph, Graph::index_expr(value.spec, Graph::literal_expr(index.cast<int64_t>())));
+}
+
 static SignalExpr less_expr(const py::handle & lhs, const py::handle & rhs)
 {
   return make_binary_expr(Graph::ExprKind::Less, coerce_expr(lhs), coerce_expr(rhs));
@@ -485,6 +526,53 @@ static SignalExpr sample_rate_expr()
 static SignalExpr sample_index_expr()
 {
   return make_signal_expr(nullptr, Graph::sample_index_expr());
+}
+
+static SignalExpr make_array_expr(const py::iterable & values)
+{
+  std::vector<Graph::ExprSpecPtr> items;
+  for (const py::handle & value : values)
+  {
+    const SignalExpr expr = coerce_expr(value);
+    if (expr.graph != nullptr)
+    {
+      throw std::invalid_argument("Array literals cannot capture graph ports.");
+    }
+    items.push_back(expr.spec);
+  }
+  return make_signal_expr(nullptr, Graph::array_pack_expr(std::move(items)));
+}
+
+static Graph::Value scalar_value_from_py(const py::handle & value)
+{
+  if (py::isinstance<py::bool_>(value))
+  {
+    return Graph::bool_literal_value(value.cast<bool>());
+  }
+  if (py::isinstance<py::int_>(value))
+  {
+    return Graph::int_literal_value(value.cast<int64_t>());
+  }
+  if (py::isinstance<py::float_>(value))
+  {
+    return Graph::float_literal_value(value.cast<double>());
+  }
+  throw std::invalid_argument("Expected bool, int, or float.");
+}
+
+static Graph::Value value_from_py(const py::handle & value)
+{
+  if (py::isinstance<py::list>(value) || py::isinstance<py::tuple>(value))
+  {
+    std::vector<Graph::Value> items;
+    for (const py::handle & item : value.cast<py::iterable>())
+    {
+      const Graph::Value scalar = scalar_value_from_py(item);
+      items.push_back(scalar);
+    }
+    return Graph::array_literal_value(std::move(items));
+  }
+  return scalar_value_from_py(value);
 }
 
 static py::dict require_dict(const py::handle & value, const char * label)
@@ -555,9 +643,13 @@ static std::shared_ptr<StatefulModuleDefinition> define_stateful_module_impl(
     {
       throw std::invalid_argument("regs keys must be strings.");
     }
-    if (!py::isinstance<py::float_>(value) && !py::isinstance<py::int_>(value))
+    if (!py::isinstance<py::bool_>(value) &&
+        !py::isinstance<py::float_>(value) &&
+        !py::isinstance<py::int_>(value) &&
+        !py::isinstance<py::list>(value) &&
+        !py::isinstance<py::tuple>(value))
     {
-      throw std::invalid_argument("regs values must be numeric.");
+      throw std::invalid_argument("regs values must be bool, int, float, or 1-D arrays of those scalars.");
     }
 
     const std::string reg_name = key.cast<std::string>();
@@ -567,7 +659,7 @@ static std::shared_ptr<StatefulModuleDefinition> define_stateful_module_impl(
     }
 
     definition->register_names.push_back(reg_name);
-    definition->initial_registers.push_back(value.cast<double>());
+    definition->initial_registers.push_back(value_from_py(value));
     ++register_id;
   }
 
@@ -1152,6 +1244,10 @@ PYBIND11_MODULE(egress, m)
     .def("__ge__", [](const SignalExpr & lhs, const py::object & rhs) { return greater_equal_expr(py::cast(lhs), rhs); })
     .def("__eq__", [](const SignalExpr & lhs, const py::object & rhs) { return equal_expr(py::cast(lhs), rhs); })
     .def("__ne__", [](const SignalExpr & lhs, const py::object & rhs) { return not_equal_expr(py::cast(lhs), rhs); })
+    .def("__getitem__", [](const SignalExpr & value, const py::object & index) { return index_expr(value, index); })
+    .def("__bool__", [](const SignalExpr &) -> bool {
+      throw py::type_error("Symbolic expressions do not have Python truthiness; use eg.logical_not(...) or comparisons.");
+    })
     .def("__neg__", [](const SignalExpr & expr) { return make_unary_expr(Graph::ExprKind::Neg, expr); })
     .def("__invert__", [](const SignalExpr & expr) { return make_unary_expr(Graph::ExprKind::BitNot, expr); });
 
@@ -1186,6 +1282,9 @@ PYBIND11_MODULE(egress, m)
     .def("__ge__", [](const OutputPort & lhs, const py::object & rhs) { return greater_equal_expr(py::cast(make_output_expr(lhs)), rhs); })
     .def("__eq__", [](const OutputPort & lhs, const py::object & rhs) { return equal_expr(py::cast(make_output_expr(lhs)), rhs); })
     .def("__ne__", [](const OutputPort & lhs, const py::object & rhs) { return not_equal_expr(py::cast(make_output_expr(lhs)), rhs); })
+    .def("__bool__", [](const OutputPort &) -> bool {
+      throw py::type_error("Ports do not have Python truthiness; use eg.logical_not(...) or comparisons.");
+    })
     .def("__neg__", [](const OutputPort & out) { return make_unary_expr(Graph::ExprKind::Neg, make_output_expr(out)); })
     .def("__invert__", [](const OutputPort & out) { return make_unary_expr(Graph::ExprKind::BitNot, make_output_expr(out)); });
 
@@ -1222,6 +1321,9 @@ PYBIND11_MODULE(egress, m)
     .def("__ge__", [](const InputPort & lhs, const py::object & rhs) { return greater_equal_expr(py::cast(current_input_expr(lhs)), rhs); })
     .def("__eq__", [](const InputPort & lhs, const py::object & rhs) { return equal_expr(py::cast(current_input_expr(lhs)), rhs); })
     .def("__ne__", [](const InputPort & lhs, const py::object & rhs) { return not_equal_expr(py::cast(current_input_expr(lhs)), rhs); })
+    .def("__bool__", [](const InputPort &) -> bool {
+      throw py::type_error("Ports do not have Python truthiness; use eg.logical_not(...) or comparisons.");
+    })
     .def("__iadd__", [](const InputPort & lhs, const py::object & rhs) { return input_iadd(lhs, rhs); })
     .def("__isub__", [](const InputPort & lhs, const py::object & rhs) { return input_isub(lhs, rhs); })
     .def("__imul__", [](const InputPort & lhs, const py::object & rhs) { return input_imul(lhs, rhs); })
@@ -1262,6 +1364,8 @@ PYBIND11_MODULE(egress, m)
   m.def("add_output", &add_output_port, py::arg("out"));
   m.def("incoming", &incoming_ports, py::arg("in"));
   m.def("sin", [](const py::object & value) { return sin_expr(value); }, py::arg("value"));
+  m.def("array", [](const py::iterable & values) { return make_array_expr(values); }, py::arg("values"));
+  m.def("logical_not", [](const py::object & value) { return logical_not_expr(value); }, py::arg("value"));
   m.def("sample_rate", []() { return sample_rate_expr(); });
   m.def("sample_index", []() { return sample_index_expr(); });
   m.def(
