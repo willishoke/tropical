@@ -3,6 +3,8 @@
 #include "Module.hpp"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <deque>
@@ -10,6 +12,7 @@
 #include <mutex>
 #include <limits>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -45,37 +48,65 @@ class Graph
     explicit Graph(unsigned int bufferLength)
       : bufferLength_(bufferLength), outputBuffer(bufferLength, 0.0)
     {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      runtimes_[0] = build_runtime_locked();
+      runtimes_[1] = build_runtime_locked();
     }
 
     void process()
     {
-      apply_pending_commands();
+      const uint32_t runtime_index = active_runtime_index_.load(std::memory_order_acquire);
+      audio_runtime_index_.store(runtime_index, std::memory_order_release);
+      audio_processing_.store(true, std::memory_order_release);
+
+      RuntimeState & runtime = runtimes_[runtime_index];
 
       for (unsigned int sample = 0; sample < bufferLength_; ++sample)
       {
-        for (uint32_t module_id : execution_order_)
+        for (auto & slot : runtime.modules)
         {
-          auto & slot = modules_[module_id];
-          if (!slot.active)
+          if (!slot.module)
           {
             continue;
           }
 
           for (unsigned int input_id = 0; input_id < slot.input_exprs.size(); ++input_id)
           {
-            slot.module->inputs[input_id] = eval_expr(slot.input_exprs[input_id], slot.input_registers[input_id]);
+            slot.module->inputs[input_id] = eval_expr(runtime, slot.input_exprs[input_id], slot.input_registers[input_id]);
           }
 
           slot.module->process();
         }
 
         double mixed = 0.0;
-        for (const auto & tap : mix_)
+        for (const auto & tap : runtime.mix)
         {
-          mixed += modules_[tap.module_id].module->outputs[tap.output_id] / 20.0;
+          if (tap.module_id >= runtime.modules.size())
+          {
+            continue;
+          }
+
+          const auto & slot = runtime.modules[tap.module_id];
+          if (tap.output_id >= slot.module->outputs.size())
+          {
+            continue;
+          }
+
+          mixed += slot.module->outputs[tap.output_id] / 20.0;
         }
         outputBuffer[sample] = mixed;
+
+        for (auto & slot : runtime.modules)
+        {
+          if (!slot.module)
+          {
+            continue;
+          }
+          slot.module->prev_outputs.swap(slot.module->outputs);
+        }
       }
+
+      audio_processing_.store(false, std::memory_order_release);
     }
 
     bool addModule(std::string name, mPtr new_module)
@@ -94,14 +125,14 @@ class Graph
         return false;
       }
 
-      control_modules_.emplace(name, ModuleShape{in_count, out_count});
-      control_input_exprs_.emplace(name, std::vector<ExprSpecPtr>(in_count));
+      ControlModule module;
+      module.module = std::shared_ptr<Module>(std::move(new_module));
+      module.in_count = in_count;
+      module.out_count = out_count;
+      module.input_exprs.assign(in_count, nullptr);
 
-      Command command;
-      command.type = CommandType::AddModule;
-      command.module_name = std::move(name);
-      command.module = std::move(new_module);
-      command_queue_.push_back(std::move(command));
+      control_modules_.emplace(std::move(name), std::move(module));
+      rebuild_and_publish_runtime_locked();
       return true;
     }
 
@@ -114,7 +145,6 @@ class Graph
       }
 
       control_modules_.erase(module_name);
-      control_input_exprs_.erase(module_name);
 
       control_mix_.erase(
         std::remove_if(
@@ -127,29 +157,22 @@ class Graph
         control_mix_.end());
 
       std::vector<std::pair<std::string, unsigned int>> updated_inputs;
-      for (auto & [name, inputs] : control_input_exprs_)
+      for (auto & [name, module] : control_modules_)
       {
-        for (unsigned int input_id = 0; input_id < inputs.size(); ++input_id)
+        for (unsigned int input_id = 0; input_id < module.input_exprs.size(); ++input_id)
         {
           bool removed_any = false;
-          const ExprSpecPtr updated = replace_refs_with_zero(inputs[input_id], module_name, 0, true, removed_any);
+          const ExprSpecPtr updated = replace_refs_with_zero(module.input_exprs[input_id], module_name, 0, true, removed_any);
           if (removed_any)
           {
-            inputs[input_id] = simplify_expr(updated);
+            module.input_exprs[input_id] = simplify_expr(updated);
             updated_inputs.emplace_back(name, input_id);
           }
         }
       }
 
-      Command remove_command;
-      remove_command.type = CommandType::RemoveModule;
-      remove_command.module_name = module_name;
-      command_queue_.push_back(std::move(remove_command));
-
-      for (const auto & [name, input_id] : updated_inputs)
-      {
-        queue_set_input_expr(name, input_id, control_input_exprs_[name][input_id]);
-      }
+      (void)updated_inputs;
+      rebuild_and_publish_runtime_locked();
 
       return true;
     }
@@ -172,12 +195,7 @@ class Graph
       }
 
       control_mix_.push_back(output);
-
-      Command command;
-      command.type = CommandType::AddOutput;
-      command.module_name = module_name;
-      command.src_output_id = output_id;
-      command_queue_.push_back(std::move(command));
+      rebuild_and_publish_runtime_locked();
       return true;
     }
 
@@ -201,9 +219,9 @@ class Graph
       }
 
       ExprSpecPtr ref = expr::ref_expr(src_module, src_output_id);
-      ExprSpecPtr & current = control_input_exprs_[dst_module][dst_input_id];
+      ExprSpecPtr & current = control_modules_[dst_module].input_exprs[dst_input_id];
       current = simplify_expr(append_expr(current, ref));
-      queue_set_input_expr(dst_module, dst_input_id, current);
+      rebuild_and_publish_runtime_locked();
       return true;
     }
 
@@ -214,15 +232,15 @@ class Graph
       unsigned int dst_input_id)
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
-      auto dst_inputs_it = control_input_exprs_.find(dst_module);
-      if (dst_inputs_it == control_input_exprs_.end() || dst_input_id >= dst_inputs_it->second.size())
+      auto dst_module_it = control_modules_.find(dst_module);
+      if (dst_module_it == control_modules_.end() || dst_input_id >= dst_module_it->second.input_exprs.size())
       {
         return false;
       }
 
       bool removed_any = false;
       ExprSpecPtr updated = replace_refs_with_zero(
-        dst_inputs_it->second[dst_input_id],
+        dst_module_it->second.input_exprs[dst_input_id],
         src_module,
         src_output_id,
         false,
@@ -233,8 +251,8 @@ class Graph
         return false;
       }
 
-      dst_inputs_it->second[dst_input_id] = simplify_expr(updated);
-      queue_set_input_expr(dst_module, dst_input_id, dst_inputs_it->second[dst_input_id]);
+      dst_module_it->second.input_exprs[dst_input_id] = simplify_expr(updated);
+      rebuild_and_publish_runtime_locked();
       return true;
     }
 
@@ -252,33 +270,33 @@ class Graph
         return false;
       }
 
-      control_input_exprs_[module_name][input_id] = simplify_expr(expr);
-      queue_set_input_expr(module_name, input_id, control_input_exprs_[module_name][input_id]);
+      control_modules_[module_name].input_exprs[input_id] = simplify_expr(expr);
+      rebuild_and_publish_runtime_locked();
       return true;
     }
 
     ExprSpecPtr get_input_expr(const std::string & module_name, unsigned int input_id) const
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
-      auto module_it = control_input_exprs_.find(module_name);
-      if (module_it == control_input_exprs_.end() || input_id >= module_it->second.size())
+      auto module_it = control_modules_.find(module_name);
+      if (module_it == control_modules_.end() || input_id >= module_it->second.input_exprs.size())
       {
         return nullptr;
       }
-      return module_it->second[input_id];
+      return module_it->second.input_exprs[input_id];
     }
 
     std::vector<outputID> incoming_connections(const std::string & dst_module, unsigned int dst_input_id) const
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
       std::vector<outputID> sources;
-      auto module_it = control_input_exprs_.find(dst_module);
-      if (module_it == control_input_exprs_.end() || dst_input_id >= module_it->second.size())
+      auto module_it = control_modules_.find(dst_module);
+      if (module_it == control_modules_.end() || dst_input_id >= module_it->second.input_exprs.size())
       {
         return sources;
       }
 
-      collect_refs(module_it->second[dst_input_id], sources);
+      collect_refs(module_it->second.input_exprs[dst_input_id], sources);
       return sources;
     }
 
@@ -298,8 +316,17 @@ class Graph
       unsigned int out_count;
     };
 
+    struct ControlModule
+    {
+      std::shared_ptr<Module> module;
+      unsigned int in_count = 0;
+      unsigned int out_count = 0;
+      std::vector<ExprSpecPtr> input_exprs;
+    };
+
     struct ExprInstr;
-    using ExprKernel = void (*)(const Graph &, const ExprInstr &, Value *);
+    struct RuntimeState;
+    using ExprKernel = void (*)(const RuntimeState &, const ExprInstr &, Value *);
 
     struct ExprInstr
     {
@@ -316,7 +343,6 @@ class Graph
     struct CompiledExpr
     {
       std::vector<ExprInstr> instructions;
-      std::vector<uint32_t> dependencies;
       uint32_t register_count = 0;
       uint32_t result_register = 0;
     };
@@ -324,10 +350,9 @@ class Graph
     struct ModuleSlot
     {
       std::string name;
-      mPtr module;
+      std::shared_ptr<Module> module;
       std::vector<CompiledExpr> input_exprs;
       std::vector<std::vector<Value>> input_registers;
-      bool active = false;
     };
 
     struct MixTap
@@ -336,22 +361,11 @@ class Graph
       unsigned int output_id;
     };
 
-    enum class CommandType
+    struct RuntimeState
     {
-      AddModule,
-      RemoveModule,
-      SetInputExpr,
-      AddOutput
-    };
-
-    struct Command
-    {
-      CommandType type{};
-      std::string module_name;
-      unsigned int src_output_id = 0;
-      unsigned int dst_input_id = 0;
-      ExprSpecPtr expr;
-      mPtr module;
+      std::vector<ModuleSlot> modules;
+      std::unordered_map<std::string, uint32_t> name_to_id;
+      std::vector<MixTap> mix;
     };
 
     static bool is_zero_expr(const ExprSpecPtr & expr)
@@ -755,267 +769,235 @@ class Graph
       return validate_expr_refs(expr->lhs) && validate_expr_refs(expr->rhs);
     }
 
-    void queue_set_input_expr(const std::string & module_name, unsigned int input_id, const ExprSpecPtr & expr)
+    void wait_for_runtime_available(uint32_t runtime_index) const
     {
-      Command command;
-      command.type = CommandType::SetInputExpr;
-      command.module_name = module_name;
-      command.dst_input_id = input_id;
-      command.expr = expr;
-      command_queue_.push_back(std::move(command));
+      while (audio_processing_.load(std::memory_order_acquire) &&
+             audio_runtime_index_.load(std::memory_order_acquire) == runtime_index)
+      {
+        std::this_thread::yield();
+      }
     }
 
-    void apply_pending_commands()
+    RuntimeState build_runtime_locked() const
     {
-      std::vector<Command> local_commands;
-      {
-        std::unique_lock<std::mutex> lock(pending_mutex_, std::try_to_lock);
-        if (!lock.owns_lock())
-        {
-          return;
-        }
+      RuntimeState runtime;
+      runtime.modules.reserve(control_modules_.size());
+      runtime.name_to_id.reserve(control_modules_.size());
 
-        if (command_queue_.empty())
-        {
-          return;
-        }
-        local_commands.swap(command_queue_);
+      for (const auto & [name, module] : control_modules_)
+      {
+        const uint32_t module_id = static_cast<uint32_t>(runtime.modules.size());
+        runtime.name_to_id.emplace(name, module_id);
+
+        ModuleSlot slot;
+        slot.name = name;
+        slot.module = module.module;
+        slot.input_exprs.resize(module.in_count);
+        slot.input_registers.resize(module.in_count);
+        runtime.modules.push_back(std::move(slot));
       }
 
-      bool needs_order_rebuild = false;
-      for (auto & command : local_commands)
+      for (const auto & [name, module] : control_modules_)
       {
-        switch (command.type)
+        auto id_it = runtime.name_to_id.find(name);
+        if (id_it == runtime.name_to_id.end())
         {
-          case CommandType::AddModule:
-            apply_add_module(command.module_name, std::move(command.module));
-            needs_order_rebuild = true;
-            break;
-          case CommandType::RemoveModule:
-            apply_remove_module(command.module_name);
-            needs_order_rebuild = true;
-            break;
-          case CommandType::SetInputExpr:
-            apply_set_input_expr(command.module_name, command.dst_input_id, command.expr);
-            needs_order_rebuild = true;
-            break;
-          case CommandType::AddOutput:
-            apply_add_output(command.module_name, command.src_output_id);
-            break;
+          continue;
+        }
+
+        ModuleSlot & slot = runtime.modules[id_it->second];
+        const unsigned int input_limit = std::min(
+          static_cast<unsigned int>(slot.input_exprs.size()),
+          static_cast<unsigned int>(module.input_exprs.size()));
+
+        for (unsigned int input_id = 0; input_id < input_limit; ++input_id)
+        {
+          slot.input_exprs[input_id] = compile_expr(module.input_exprs[input_id], runtime);
+          slot.input_registers[input_id].assign(slot.input_exprs[input_id].register_count, float_value(0.0));
         }
       }
 
-      if (needs_order_rebuild)
+      runtime.mix.reserve(control_mix_.size());
+      for (const auto & tap : control_mix_)
       {
-        rebuild_execution_order();
+        auto it = runtime.name_to_id.find(tap.first);
+        if (it == runtime.name_to_id.end())
+        {
+          continue;
+        }
+
+        const uint32_t module_id = it->second;
+        if (module_id >= runtime.modules.size() ||
+            !runtime.modules[module_id].module ||
+            tap.second >= runtime.modules[module_id].module->outputs.size())
+        {
+          continue;
+        }
+
+        runtime.mix.push_back(MixTap{module_id, tap.second});
       }
+
+      return runtime;
     }
 
-    void apply_add_module(std::string module_name, mPtr module)
+    void rebuild_and_publish_runtime_locked()
     {
-      if (!module || name_to_id_.find(module_name) != name_to_id_.end())
-      {
-        return;
-      }
-
-      const std::size_t input_count = module->inputs.size();
-
-      uint32_t module_id = 0;
-      if (!free_ids_.empty())
-      {
-        module_id = free_ids_.back();
-        free_ids_.pop_back();
-        modules_[module_id].name = std::move(module_name);
-        modules_[module_id].module = std::move(module);
-        modules_[module_id].input_exprs.assign(modules_[module_id].module->inputs.size(), CompiledExpr{});
-        modules_[module_id].input_registers.assign(modules_[module_id].module->inputs.size(), std::vector<Value>{});
-        modules_[module_id].active = true;
-      }
-      else
-      {
-        module_id = static_cast<uint32_t>(modules_.size());
-        modules_.push_back(ModuleSlot{
-          std::move(module_name),
-          std::move(module),
-          std::vector<CompiledExpr>(input_count),
-          std::vector<std::vector<Value>>(input_count),
-          true});
-      }
-
-      name_to_id_[modules_[module_id].name] = module_id;
+      const uint32_t active = active_runtime_index_.load(std::memory_order_acquire);
+      const uint32_t inactive = 1U - active;
+      wait_for_runtime_available(inactive);
+      runtimes_[inactive] = build_runtime_locked();
+      active_runtime_index_.store(inactive, std::memory_order_release);
     }
 
-    void apply_remove_module(const std::string & module_name)
-    {
-      auto it = name_to_id_.find(module_name);
-      if (it == name_to_id_.end())
-      {
-        return;
-      }
-
-      const uint32_t module_id = it->second;
-      name_to_id_.erase(it);
-
-      mix_.erase(
-        std::remove_if(
-          mix_.begin(),
-          mix_.end(),
-          [module_id](const MixTap & tap)
-          {
-            return tap.module_id == module_id;
-          }),
-        mix_.end());
-
-      modules_[module_id].module.reset();
-      modules_[module_id].input_exprs.clear();
-      modules_[module_id].input_registers.clear();
-      modules_[module_id].name.clear();
-      modules_[module_id].active = false;
-      free_ids_.push_back(module_id);
-    }
-
-    static void exec_literal(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_literal(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = instr.literal;
     }
 
-    static void exec_ref(const Graph & graph, const ExprInstr & instr, Value * registers)
+    static void exec_ref(const RuntimeState & runtime, const ExprInstr & instr, Value * registers)
     {
-      if (instr.ref_module_id >= graph.modules_.size() || !graph.modules_[instr.ref_module_id].active)
+      if (instr.ref_module_id >= runtime.modules.size())
       {
         registers[instr.dst] = float_value(0.0);
         return;
       }
 
-      registers[instr.dst] = float_value(graph.modules_[instr.ref_module_id].module->outputs[instr.ref_output_id]);
+      const auto & slot = runtime.modules[instr.ref_module_id];
+      if (!slot.module || instr.ref_output_id >= slot.module->prev_outputs.size())
+      {
+        registers[instr.dst] = float_value(0.0);
+        return;
+      }
+
+      registers[instr.dst] = float_value(slot.module->prev_outputs[instr.ref_output_id]);
     }
 
-    static void exec_add(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_add(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::add_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_add_const(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_add_const(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::add_values(registers[instr.src_a], instr.literal);
     }
 
-    static void exec_sub(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_sub(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::sub_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_sub_const_rhs(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_sub_const_rhs(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::sub_values(registers[instr.src_a], instr.literal);
     }
 
-    static void exec_sub_const_lhs(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_sub_const_lhs(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::sub_values(instr.literal, registers[instr.src_a]);
     }
 
-    static void exec_mul(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_mul(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::mul_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_mul_const(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_mul_const(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::mul_values(registers[instr.src_a], instr.literal);
     }
 
-    static void exec_div(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_div(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::div_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_div_const_lhs(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_div_const_lhs(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::div_values(instr.literal, registers[instr.src_a]);
     }
 
-    static void exec_neg(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_neg(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::neg_value(registers[instr.src_a]);
     }
 
-    static void exec_sin(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_sin(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::sin_value(registers[instr.src_a]);
     }
 
-    static void exec_mod(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_mod(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::mod_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_floor_div(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_floor_div(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::floor_div_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_bit_and(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_bit_and(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::bit_and_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_bit_or(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_bit_or(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::bit_or_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_bit_xor(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_bit_xor(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::bit_xor_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_lshift(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_lshift(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::lshift_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_rshift(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_rshift(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::rshift_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_not(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_not(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::not_value(registers[instr.src_a]);
     }
 
-    static void exec_bit_not(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_bit_not(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::bit_not_value(registers[instr.src_a]);
     }
 
-    static void exec_less(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_less(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::less_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_less_equal(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_less_equal(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::less_equal_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_greater(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_greater(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::greater_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_greater_equal(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_greater_equal(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::greater_equal_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_equal(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_equal(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::equal_values(registers[instr.src_a], registers[instr.src_b]);
     }
 
-    static void exec_not_equal(const Graph &, const ExprInstr & instr, Value * registers)
+    static void exec_not_equal(const RuntimeState &, const ExprInstr & instr, Value * registers)
     {
       registers[instr.dst] = expr_eval::not_equal_values(registers[instr.src_a], registers[instr.src_b]);
     }
@@ -1085,7 +1067,7 @@ class Graph
     uint32_t compile_expr_node(
       const ExprSpecPtr & expr,
       CompiledExpr & compiled,
-      std::vector<uint8_t> & dependency_marks) const
+      const RuntimeState & runtime) const
     {
       if (!expr)
       {
@@ -1111,8 +1093,8 @@ class Graph
 
       if (expr->kind == ExprKind::Ref)
       {
-        auto it = name_to_id_.find(expr->module_name);
-        if (it == name_to_id_.end())
+        auto it = runtime.name_to_id.find(expr->module_name);
+        if (it == runtime.name_to_id.end())
         {
           ExprInstr instr;
           instr.kind = ExprKind::Literal;
@@ -1131,18 +1113,12 @@ class Graph
         instr.kernel = kernel_for_kind(instr.kind);
         compiled.instructions.push_back(instr);
 
-        if (it->second < dependency_marks.size() && !dependency_marks[it->second])
-        {
-          dependency_marks[it->second] = 1;
-          compiled.dependencies.push_back(it->second);
-        }
-
         return instr.dst;
       }
 
       if (expr->kind == ExprKind::Neg || expr->kind == ExprKind::Not || expr->kind == ExprKind::BitNot || expr->kind == ExprKind::Sin)
       {
-        const uint32_t operand = compile_expr_node(expr->lhs, compiled, dependency_marks);
+        const uint32_t operand = compile_expr_node(expr->lhs, compiled, runtime);
         ExprInstr instr;
         instr.kind = expr->kind;
         instr.dst = compiled.register_count++;
@@ -1156,7 +1132,7 @@ class Graph
       {
         if (expr->lhs && expr->lhs->kind == ExprKind::Literal)
         {
-          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, dependency_marks);
+          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, runtime);
           ExprInstr instr;
           instr.kind = ExprKind::Add;
           instr.dst = compiled.register_count++;
@@ -1169,7 +1145,7 @@ class Graph
 
         if (expr->rhs && expr->rhs->kind == ExprKind::Literal)
         {
-          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, dependency_marks);
+          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, runtime);
           ExprInstr instr;
           instr.kind = ExprKind::Add;
           instr.dst = compiled.register_count++;
@@ -1185,7 +1161,7 @@ class Graph
       {
         if (expr->lhs && expr->lhs->kind == ExprKind::Literal)
         {
-          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, dependency_marks);
+          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, runtime);
           ExprInstr instr;
           instr.kind = ExprKind::Mul;
           instr.dst = compiled.register_count++;
@@ -1198,7 +1174,7 @@ class Graph
 
         if (expr->rhs && expr->rhs->kind == ExprKind::Literal)
         {
-          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, dependency_marks);
+          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, runtime);
           ExprInstr instr;
           instr.kind = ExprKind::Mul;
           instr.dst = compiled.register_count++;
@@ -1214,7 +1190,7 @@ class Graph
       {
         if (expr->rhs && expr->rhs->kind == ExprKind::Literal)
         {
-          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, dependency_marks);
+          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, runtime);
           ExprInstr instr;
           instr.kind = ExprKind::Sub;
           instr.dst = compiled.register_count++;
@@ -1227,7 +1203,7 @@ class Graph
 
         if (expr->lhs && expr->lhs->kind == ExprKind::Literal)
         {
-          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, dependency_marks);
+          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, runtime);
           ExprInstr instr;
           instr.kind = ExprKind::Sub;
           instr.dst = compiled.register_count++;
@@ -1243,7 +1219,7 @@ class Graph
       {
         if (expr->rhs && expr->rhs->kind == ExprKind::Literal)
         {
-          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, dependency_marks);
+          const uint32_t lhs = compile_expr_node(expr->lhs, compiled, runtime);
           ExprInstr instr;
           instr.kind = ExprKind::Mul;
           instr.dst = compiled.register_count++;
@@ -1258,7 +1234,7 @@ class Graph
 
         if (expr->lhs && expr->lhs->kind == ExprKind::Literal)
         {
-          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, dependency_marks);
+          const uint32_t rhs = compile_expr_node(expr->rhs, compiled, runtime);
           ExprInstr instr;
           instr.kind = ExprKind::Div;
           instr.dst = compiled.register_count++;
@@ -1270,8 +1246,8 @@ class Graph
         }
       }
 
-      const uint32_t lhs = compile_expr_node(expr->lhs, compiled, dependency_marks);
-      const uint32_t rhs = compile_expr_node(expr->rhs, compiled, dependency_marks);
+      const uint32_t lhs = compile_expr_node(expr->lhs, compiled, runtime);
+      const uint32_t rhs = compile_expr_node(expr->rhs, compiled, runtime);
 
       ExprInstr instr;
       instr.kind = expr->kind;
@@ -1283,43 +1259,14 @@ class Graph
       return instr.dst;
     }
 
-    CompiledExpr compile_expr(const ExprSpecPtr & expr) const
+    CompiledExpr compile_expr(const ExprSpecPtr & expr, const RuntimeState & runtime) const
     {
       CompiledExpr compiled;
-      std::vector<uint8_t> dependency_marks(modules_.size(), 0);
-      compiled.result_register = compile_expr_node(expr, compiled, dependency_marks);
+      compiled.result_register = compile_expr_node(expr, compiled, runtime);
       return compiled;
     }
 
-    void apply_set_input_expr(const std::string & module_name, unsigned int input_id, const ExprSpecPtr & expr)
-    {
-      auto it = name_to_id_.find(module_name);
-      if (it == name_to_id_.end())
-      {
-        return;
-      }
-
-      auto & slot = modules_[it->second];
-      if (!slot.active || input_id >= slot.input_exprs.size())
-      {
-        return;
-      }
-
-      slot.input_exprs[input_id] = compile_expr(expr);
-      slot.input_registers[input_id].assign(slot.input_exprs[input_id].register_count, float_value(0.0));
-    }
-
-    void apply_add_output(const std::string & module_name, unsigned int output_id)
-    {
-      auto it = name_to_id_.find(module_name);
-      if (it == name_to_id_.end())
-      {
-        return;
-      }
-      mix_.push_back(MixTap{it->second, output_id});
-    }
-
-    double eval_expr(const CompiledExpr & expr, std::vector<Value> & registers) const
+    double eval_expr(const RuntimeState & runtime, const CompiledExpr & expr, std::vector<Value> & registers) const
     {
       if (expr.instructions.empty())
       {
@@ -1333,109 +1280,23 @@ class Graph
 
       for (const auto & instr : expr.instructions)
       {
-        instr.kernel(*this, instr, registers.data());
+        instr.kernel(runtime, instr, registers.data());
       }
 
       return to_float64(registers[expr.result_register]);
     }
 
-    void rebuild_execution_order()
-    {
-      const std::size_t count = modules_.size();
-      std::vector<unsigned int> indegree(count, 0);
-      std::vector<std::vector<uint32_t>> adjacency(count);
-      std::vector<uint32_t> active_ids;
-      active_ids.reserve(count);
-
-      for (uint32_t id = 0; id < modules_.size(); ++id)
-      {
-        if (!modules_[id].active)
-        {
-          continue;
-        }
-
-        active_ids.push_back(id);
-        for (const auto & expr : modules_[id].input_exprs)
-        {
-          for (uint32_t src_id : expr.dependencies)
-          {
-            if (src_id >= modules_.size() || !modules_[src_id].active || src_id == id)
-            {
-              continue;
-            }
-            adjacency[src_id].push_back(id);
-            ++indegree[id];
-          }
-        }
-      }
-
-      std::deque<uint32_t> ready;
-      for (uint32_t id : active_ids)
-      {
-        if (indegree[id] == 0)
-        {
-          ready.push_back(id);
-        }
-      }
-
-      std::vector<uint32_t> ordered;
-      ordered.reserve(active_ids.size());
-      while (!ready.empty())
-      {
-        const uint32_t id = ready.front();
-        ready.pop_front();
-        ordered.push_back(id);
-
-        for (uint32_t dst_id : adjacency[id])
-        {
-          if (--indegree[dst_id] == 0)
-          {
-            ready.push_back(dst_id);
-          }
-        }
-      }
-
-      if (ordered.size() == active_ids.size())
-      {
-        execution_order_ = std::move(ordered);
-        return;
-      }
-
-      std::vector<uint8_t> seen(count, 0);
-      std::vector<uint32_t> fallback;
-      fallback.reserve(active_ids.size());
-      for (uint32_t id : execution_order_)
-      {
-        if (id < modules_.size() && modules_[id].active && !seen[id])
-        {
-          fallback.push_back(id);
-          seen[id] = 1;
-        }
-      }
-      for (uint32_t id : active_ids)
-      {
-        if (!seen[id])
-        {
-          fallback.push_back(id);
-        }
-      }
-      execution_order_ = std::move(fallback);
-    }
-
     unsigned int bufferLength_ = 0;
 
-    std::vector<ModuleSlot> modules_;
-    std::unordered_map<std::string, uint32_t> name_to_id_;
-    std::vector<uint32_t> execution_order_;
-    std::vector<MixTap> mix_;
-    std::vector<uint32_t> free_ids_;
+    std::array<RuntimeState, 2> runtimes_;
+    std::atomic<uint32_t> active_runtime_index_{0};
+    std::atomic<uint32_t> audio_runtime_index_{0};
+    std::atomic<bool> audio_processing_{false};
 
-    std::unordered_map<std::string, ModuleShape> control_modules_;
-    std::unordered_map<std::string, std::vector<ExprSpecPtr>> control_input_exprs_;
+    std::unordered_map<std::string, ControlModule> control_modules_;
     std::vector<outputID> control_mix_;
 
     mutable std::mutex pending_mutex_;
-    std::vector<Command> command_queue_;
 };
 
 class UserDefinedModule : public Module

@@ -13,6 +13,7 @@ class Module
     {
       this->inputs.resize(inSize);
       this->outputs.resize(outSize);
+      this->prev_outputs.resize(outSize, 0.0);
 
     }
 
@@ -38,6 +39,7 @@ class Module
   protected:
     std::vector<Signal> inputs;
     std::vector<Signal> outputs;
+    std::vector<Signal> prev_outputs;
     unsigned int sampleRate;
 
   private:
