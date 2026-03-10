@@ -1,8 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
-project(egress LANGUAGES CXX)
+project(egress LANGUAGES C CXX)
 
 option(EGRESS_BUILD_PYTHON "Build Python bindings with pybind11" ON)
 option(EGRESS_PROFILE "Enable profiling counters and timing instrumentation" OFF)
+option(EGRESS_LLVM_ORC_JIT "Enable LLVM ORC JIT backend in C++ runtime" OFF)
 
 # RtAudio as a library target
 add_library(rtaudio STATIC lib/rtaudio/RtAudio.cpp)
@@ -33,6 +34,27 @@ if(EGRESS_BUILD_PYTHON)
     endif()
 
     add_library(egress MODULE src/python_bindings.cpp)
+    if(EGRESS_LLVM_ORC_JIT)
+        find_package(LLVM CONFIG REQUIRED)
+        if(LLVM_PACKAGE_VERSION VERSION_LESS 15)
+            message(FATAL_ERROR "EGRESS_LLVM_ORC_JIT requires LLVM >= 15; found ${LLVM_PACKAGE_VERSION}")
+        endif()
+        message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION}")
+
+        target_sources(egress PRIVATE src/OrcJitEngine.cpp)
+        target_include_directories(egress PRIVATE ${LLVM_INCLUDE_DIRS})
+        target_compile_definitions(egress PRIVATE ${LLVM_DEFINITIONS} EGRESS_LLVM_ORC_JIT=1)
+
+        llvm_map_components_to_libnames(LLVM_ORC_JIT_LIBS
+            Core
+            OrcJIT
+            ExecutionEngine
+            native
+            nativecodegen
+            Support)
+        target_link_libraries(egress PRIVATE ${LLVM_ORC_JIT_LIBS})
+    endif()
+
     target_compile_features(egress PRIVATE cxx_std_17)
     if(EGRESS_PROFILE)
         target_compile_definitions(egress PRIVATE EGRESS_PROFILE=1)

@@ -1,6 +1,7 @@
 #include "Expr.hpp"
 #include "ExprEval.hpp"
 #include "Module.hpp"
+#include "OrcJitEngine.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1432,10 +1433,44 @@ class UserDefinedModule : public Module
     {
       program_ = compile_program(output_exprs, register_exprs);
       temps_.assign(program_.register_count, expr::float_value(0.0));
+
+#ifdef EGRESS_LLVM_ORC_JIT
+      initialize_numeric_jit();
+#endif
     }
 
     void process() override
     {
+#ifdef EGRESS_LLVM_ORC_JIT
+      if (jit_kernel_)
+      {
+        jit_kernel_(inputs.data(), numeric_registers_.data(), numeric_temps_.data(), sample_rate_, sample_index_);
+
+        for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
+        {
+          outputs[output_id] = numeric_temps_[program_.output_targets[output_id]];
+        }
+
+        for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
+        {
+          const int32_t target = program_.register_targets[register_id];
+          if (target >= 0)
+          {
+            numeric_next_registers_[register_id] = numeric_temps_[static_cast<std::size_t>(target)];
+          }
+          else
+          {
+            numeric_next_registers_[register_id] = numeric_registers_[register_id];
+          }
+        }
+
+        numeric_registers_.swap(numeric_next_registers_);
+        ++sample_index_;
+        Module::postprocess();
+        return;
+      }
+#endif
+
       eval_program(program_, temps_);
 
       for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
@@ -1776,4 +1811,147 @@ class UserDefinedModule : public Module
     std::vector<Value> next_registers_;
     double sample_rate_ = 44100.0;
     uint64_t sample_index_ = 0;
+  #ifdef EGRESS_LLVM_ORC_JIT
+    egress_jit::NumericKernelFn jit_kernel_ = nullptr;
+    std::vector<double> numeric_temps_;
+    std::vector<double> numeric_registers_;
+    std::vector<double> numeric_next_registers_;
+    std::string jit_status_;
+
+    bool supports_numeric_jit_expr_kind(ExprKind kind) const
+    {
+      switch (kind)
+      {
+        case ExprKind::Literal:
+        case ExprKind::InputValue:
+        case ExprKind::RegisterValue:
+        case ExprKind::SampleRate:
+        case ExprKind::SampleIndex:
+        case ExprKind::Add:
+        case ExprKind::Sub:
+        case ExprKind::Mul:
+        case ExprKind::Div:
+        case ExprKind::Sin:
+        case ExprKind::Neg:
+          return true;
+        default:
+          return false;
+      }
+    }
+
+    bool build_numeric_program(egress_jit::NumericProgram & numeric_program)
+    {
+      if (program_.register_count == 0)
+      {
+        return false;
+      }
+
+      numeric_program.instructions.reserve(program_.instructions.size());
+      numeric_program.register_count = program_.register_count;
+
+      for (const Value & reg : registers_)
+      {
+        if (reg.type == ValueType::Array)
+        {
+          return false;
+        }
+      }
+
+      for (const Instr & instr : program_.instructions)
+      {
+        if (!supports_numeric_jit_expr_kind(instr.kind))
+        {
+          return false;
+        }
+
+        egress_jit::NumericInstr jit_instr;
+        jit_instr.dst = instr.dst;
+        jit_instr.src_a = instr.src_a;
+        jit_instr.src_b = instr.src_b;
+        jit_instr.slot_id = instr.slot_id;
+
+        switch (instr.kind)
+        {
+          case ExprKind::Literal:
+            if (instr.literal.type == ValueType::Array)
+            {
+              return false;
+            }
+            jit_instr.op = egress_jit::NumericOp::Literal;
+            jit_instr.literal = to_float64(instr.literal);
+            break;
+          case ExprKind::InputValue:
+            jit_instr.op = egress_jit::NumericOp::InputValue;
+            break;
+          case ExprKind::RegisterValue:
+            jit_instr.op = egress_jit::NumericOp::RegisterValue;
+            break;
+          case ExprKind::SampleRate:
+            jit_instr.op = egress_jit::NumericOp::SampleRate;
+            break;
+          case ExprKind::SampleIndex:
+            jit_instr.op = egress_jit::NumericOp::SampleIndex;
+            break;
+          case ExprKind::Add:
+            jit_instr.op = egress_jit::NumericOp::Add;
+            break;
+          case ExprKind::Sub:
+            jit_instr.op = egress_jit::NumericOp::Sub;
+            break;
+          case ExprKind::Mul:
+            jit_instr.op = egress_jit::NumericOp::Mul;
+            break;
+          case ExprKind::Div:
+            jit_instr.op = egress_jit::NumericOp::Div;
+            break;
+          case ExprKind::Sin:
+            jit_instr.op = egress_jit::NumericOp::Sin;
+            break;
+          case ExprKind::Neg:
+            jit_instr.op = egress_jit::NumericOp::Neg;
+            break;
+          default:
+            return false;
+        }
+
+        numeric_program.instructions.push_back(jit_instr);
+      }
+
+      return true;
+    }
+
+    void initialize_numeric_jit()
+    {
+      auto & jit = egress_jit::OrcJitEngine::instance();
+      if (!jit.available())
+      {
+        jit_status_ = jit.init_error();
+        return;
+      }
+
+      egress_jit::NumericProgram numeric_program;
+      if (!build_numeric_program(numeric_program))
+      {
+        jit_status_ = "numeric compatibility check failed";
+        return;
+      }
+
+      auto kernel_or_err = jit.compile_numeric_program(numeric_program, "egress_udm_kernel");
+      if (!kernel_or_err)
+      {
+        jit_status_ = llvm::toString(kernel_or_err.takeError());
+        return;
+      }
+
+      jit_kernel_ = *kernel_or_err;
+      numeric_temps_.assign(program_.register_count, 0.0);
+      numeric_registers_.resize(registers_.size(), 0.0);
+      numeric_next_registers_.resize(registers_.size(), 0.0);
+      for (unsigned int i = 0; i < registers_.size(); ++i)
+      {
+        numeric_registers_[i] = to_float64(registers_[i]);
+      }
+      jit_status_ = "numeric JIT active";
+    }
+  #endif
 };

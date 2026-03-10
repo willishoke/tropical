@@ -18,7 +18,9 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+build-jit/
 build-profile/
+build-jit-profile/
 develop-eggs/
 dist/
 downloads/
