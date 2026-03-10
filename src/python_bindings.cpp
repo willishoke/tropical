@@ -3,6 +3,11 @@
 #include "../lib/rtaudio/RtAudio.h"
 
 #include <algorithm>
+#include <cstdint>
+#ifdef EGRESS_PROFILE
+#include <atomic>
+#include <chrono>
+#endif
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -63,6 +68,54 @@ class PythonGraph
     Graph & graph()
     {
       return graph_;
+    }
+
+    py::dict profile_stats() const
+    {
+      const auto stats = graph_.profile_stats();
+      py::dict result;
+      result["enabled"] = stats.enabled;
+      result["callback_count"] = stats.callback_count;
+      result["avg_callback_ms"] = stats.avg_callback_ms;
+      result["max_callback_ms"] = stats.max_callback_ms;
+
+      py::list modules;
+      for (const auto & module : stats.modules)
+      {
+        py::dict row;
+        row["module_name"] = module.module_name;
+        row["call_count"] = module.call_count;
+        row["avg_call_ms"] = module.avg_call_ms;
+        row["max_call_ms"] = module.max_call_ms;
+        modules.append(std::move(row));
+      }
+
+      py::list sorted_modules;
+      std::vector<py::dict> module_rows;
+      module_rows.reserve(py::len(modules));
+      for (const auto & item : modules)
+      {
+        module_rows.push_back(py::reinterpret_borrow<py::dict>(item));
+      }
+      std::sort(
+        module_rows.begin(),
+        module_rows.end(),
+        [](const py::dict & a, const py::dict & b)
+        {
+          return py::float_(a["max_call_ms"]).cast<double>() > py::float_(b["max_call_ms"]).cast<double>();
+        });
+      for (auto & row : module_rows)
+      {
+        sorted_modules.append(std::move(row));
+      }
+
+      result["modules"] = std::move(sorted_modules);
+      return result;
+    }
+
+    void reset_profile_stats()
+    {
+      graph_.reset_profile_stats();
     }
 
     std::string next_name(const std::string & prefix)
@@ -1156,17 +1209,67 @@ class PythonDAC
       return running_;
     }
 
+    py::dict callback_timing_stats() const
+    {
+#ifdef EGRESS_PROFILE
+      const uint64_t callbacks = callback_count_.load(std::memory_order_relaxed);
+      const uint64_t total_ns = total_callback_ns_.load(std::memory_order_relaxed);
+      const uint64_t max_ns = max_callback_ns_.load(std::memory_order_relaxed);
+      const uint64_t overruns = overrun_count_.load(std::memory_order_relaxed);
+
+      py::dict stats;
+      stats["enabled"] = true;
+      stats["callback_count"] = callbacks;
+      stats["avg_callback_ms"] = callbacks == 0 ? 0.0 : (static_cast<double>(total_ns) / static_cast<double>(callbacks)) / 1e6;
+      stats["max_callback_ms"] = static_cast<double>(max_ns) / 1e6;
+      stats["overrun_count"] = overruns;
+      return stats;
+#else
+      py::dict stats;
+      stats["enabled"] = false;
+      stats["callback_count"] = 0;
+      stats["avg_callback_ms"] = 0.0;
+      stats["max_callback_ms"] = 0.0;
+      stats["overrun_count"] = 0;
+      return stats;
+#endif
+    }
+
+    void reset_callback_timing_stats()
+    {
+#ifdef EGRESS_PROFILE
+      callback_count_.store(0, std::memory_order_relaxed);
+      total_callback_ns_.store(0, std::memory_order_relaxed);
+      max_callback_ns_.store(0, std::memory_order_relaxed);
+      overrun_count_.store(0, std::memory_order_relaxed);
+#endif
+    }
+
   private:
+#ifdef EGRESS_PROFILE
+    static void update_max_callback_ns(std::atomic<uint64_t> & dst, uint64_t candidate)
+    {
+      uint64_t current = dst.load(std::memory_order_relaxed);
+      while (current < candidate && !dst.compare_exchange_weak(current, candidate, std::memory_order_relaxed))
+      {
+      }
+    }
+#endif
+
     static int fill_buffer(
       void * output_buffer,
       void *,
       unsigned int n_buffer_frames,
       double,
-      RtAudioStreamStatus,
+      RtAudioStreamStatus status,
       void * user_data)
     {
       auto * self = static_cast<PythonDAC *>(user_data);
       auto * out = static_cast<double *>(output_buffer);
+
+    #ifdef EGRESS_PROFILE
+      const auto callback_start = std::chrono::steady_clock::now();
+    #endif
 
       self->graph_.graph().process();
       const auto & source = self->graph_.graph().outputBuffer;
@@ -1180,6 +1283,25 @@ class PythonDAC
         }
       }
 
+#ifdef EGRESS_PROFILE
+      const auto callback_end = std::chrono::steady_clock::now();
+      const uint64_t elapsed_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(callback_end - callback_start).count());
+
+      self->callback_count_.fetch_add(1, std::memory_order_relaxed);
+      self->total_callback_ns_.fetch_add(elapsed_ns, std::memory_order_relaxed);
+      update_max_callback_ns(self->max_callback_ns_, elapsed_ns);
+
+      const uint64_t budget_ns = static_cast<uint64_t>(
+        (static_cast<double>(n_buffer_frames) * 1e9) / static_cast<double>(self->sample_rate_));
+      if (elapsed_ns > budget_ns || status != 0)
+      {
+        self->overrun_count_.fetch_add(1, std::memory_order_relaxed);
+      }
+#else
+      (void)status;
+#endif
+
       return 0;
     }
 
@@ -1188,6 +1310,12 @@ class PythonDAC
     unsigned int sample_rate_;
     unsigned int channels_;
     bool running_;
+  #ifdef EGRESS_PROFILE
+    std::atomic<uint64_t> callback_count_{0};
+    std::atomic<uint64_t> total_callback_ns_{0};
+    std::atomic<uint64_t> max_callback_ns_{0};
+    std::atomic<uint64_t> overrun_count_{0};
+  #endif
 };
 
 PYBIND11_MODULE(egress, m)
@@ -1212,7 +1340,9 @@ PYBIND11_MODULE(egress, m)
       py::arg("to_input_id"))
     .def("add_output", &PythonGraph::add_output, py::arg("module_name"), py::arg("output_id"))
     .def("process", &PythonGraph::process)
-    .def("output_buffer", &PythonGraph::output_buffer);
+    .def("output_buffer", &PythonGraph::output_buffer)
+    .def("profile_stats", &PythonGraph::profile_stats)
+    .def("reset_profile_stats", &PythonGraph::reset_profile_stats);
 
   m.def("graph", []() -> PythonGraph & { return default_graph(); }, py::return_value_policy::reference);
 
@@ -1475,7 +1605,9 @@ PYBIND11_MODULE(egress, m)
     .def(py::init<unsigned int, unsigned int>(), py::arg("sample_rate") = 44100, py::arg("channels") = 2)
     .def("start", &PythonDAC::start)
     .def("stop", &PythonDAC::stop)
-    .def("is_running", &PythonDAC::is_running);
+    .def("is_running", &PythonDAC::is_running)
+    .def("callback_timing_stats", &PythonDAC::callback_timing_stats)
+    .def("reset_callback_timing_stats", &PythonDAC::reset_callback_timing_stats);
 
   py::enum_<VCO::Ins>(m, "VCOIn")
     .value("FM", VCO::Ins::FM)

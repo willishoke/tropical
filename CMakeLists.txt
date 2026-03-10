@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(egress LANGUAGES CXX)
 
 option(EGRESS_BUILD_PYTHON "Build Python bindings with pybind11" ON)
+option(EGRESS_PROFILE "Enable profiling counters and timing instrumentation" OFF)
 
 # RtAudio as a library target
 add_library(rtaudio STATIC lib/rtaudio/RtAudio.cpp)
@@ -33,6 +34,9 @@ if(EGRESS_BUILD_PYTHON)
 
     add_library(egress MODULE src/python_bindings.cpp)
     target_compile_features(egress PRIVATE cxx_std_17)
+    if(EGRESS_PROFILE)
+        target_compile_definitions(egress PRIVATE EGRESS_PROFILE=1)
+    endif()
     target_link_libraries(egress PRIVATE pybind11::module rtaudio)
     target_include_directories(egress PRIVATE src)
     set_target_properties(egress PROPERTIES PREFIX "" OUTPUT_NAME "egress")

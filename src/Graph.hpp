@@ -8,6 +8,9 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#ifdef EGRESS_PROFILE
+#include <chrono>
+#endif
 #include <memory>
 #include <mutex>
 #include <limits>
@@ -45,6 +48,23 @@ using expr::to_int64;
 class Graph
 {
   public:
+    struct ModuleProfileStats
+    {
+      std::string module_name;
+      uint64_t call_count = 0;
+      double avg_call_ms = 0.0;
+      double max_call_ms = 0.0;
+    };
+
+    struct ProfileStats
+    {
+      bool enabled = false;
+      uint64_t callback_count = 0;
+      double avg_callback_ms = 0.0;
+      double max_callback_ms = 0.0;
+      std::vector<ModuleProfileStats> modules;
+    };
+
     explicit Graph(unsigned int bufferLength)
       : bufferLength_(bufferLength), outputBuffer(bufferLength, 0.0)
     {
@@ -55,6 +75,18 @@ class Graph
 
     void process()
     {
+#ifdef EGRESS_PROFILE
+      const auto callback_start = std::chrono::steady_clock::now();
+      struct LocalModuleStats
+      {
+        uint64_t call_count = 0;
+        uint64_t total_ns = 0;
+        uint64_t max_ns = 0;
+      };
+      std::unordered_map<std::string, LocalModuleStats> local_module_stats;
+      local_module_stats.reserve(16);
+#endif
+
       const uint32_t runtime_index = active_runtime_index_.load(std::memory_order_acquire);
       audio_runtime_index_.store(runtime_index, std::memory_order_release);
       audio_processing_.store(true, std::memory_order_release);
@@ -70,12 +102,26 @@ class Graph
             continue;
           }
 
-          for (unsigned int input_id = 0; input_id < slot.input_exprs.size(); ++input_id)
-          {
-            slot.module->inputs[input_id] = eval_expr(runtime, slot.input_exprs[input_id], slot.input_registers[input_id]);
-          }
+#ifdef EGRESS_PROFILE
+          const auto module_start = std::chrono::steady_clock::now();
+#endif
+
+          eval_input_program(runtime, slot.input_program, slot.input_registers, slot.module->inputs);
 
           slot.module->process();
+
+#ifdef EGRESS_PROFILE
+          const auto module_end = std::chrono::steady_clock::now();
+          const uint64_t module_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(module_end - module_start).count());
+          auto & stats = local_module_stats[slot.name];
+          ++stats.call_count;
+          stats.total_ns += module_ns;
+          if (module_ns > stats.max_ns)
+          {
+            stats.max_ns = module_ns;
+          }
+#endif
         }
 
         double mixed = 0.0;
@@ -107,6 +153,69 @@ class Graph
       }
 
       audio_processing_.store(false, std::memory_order_release);
+
+#ifdef EGRESS_PROFILE
+      const auto callback_end = std::chrono::steady_clock::now();
+      const uint64_t callback_ns = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(callback_end - callback_start).count());
+      profile_callback_count_.fetch_add(1, std::memory_order_relaxed);
+      profile_total_callback_ns_.fetch_add(callback_ns, std::memory_order_relaxed);
+      update_atomic_max(profile_max_callback_ns_, callback_ns);
+
+      std::lock_guard<std::mutex> lock(profile_mutex_);
+      for (const auto & [name, stats] : local_module_stats)
+      {
+        auto & dst = module_profile_stats_[name];
+        dst.call_count += stats.call_count;
+        dst.total_ns += stats.total_ns;
+        if (stats.max_ns > dst.max_ns)
+        {
+          dst.max_ns = stats.max_ns;
+        }
+      }
+#endif
+    }
+
+    ProfileStats profile_stats() const
+    {
+      ProfileStats stats;
+#ifdef EGRESS_PROFILE
+      stats.enabled = true;
+      const uint64_t callback_count = profile_callback_count_.load(std::memory_order_relaxed);
+      const uint64_t total_ns = profile_total_callback_ns_.load(std::memory_order_relaxed);
+      const uint64_t max_ns = profile_max_callback_ns_.load(std::memory_order_relaxed);
+
+      stats.callback_count = callback_count;
+      stats.avg_callback_ms = callback_count == 0 ? 0.0 : (static_cast<double>(total_ns) / static_cast<double>(callback_count)) / 1e6;
+      stats.max_callback_ms = static_cast<double>(max_ns) / 1e6;
+
+      std::lock_guard<std::mutex> lock(profile_mutex_);
+      stats.modules.reserve(module_profile_stats_.size());
+      for (const auto & [name, module_stats] : module_profile_stats_)
+      {
+        ModuleProfileStats module;
+        module.module_name = name;
+        module.call_count = module_stats.call_count;
+        module.avg_call_ms = module.call_count == 0
+                               ? 0.0
+                               : (static_cast<double>(module_stats.total_ns) / static_cast<double>(module.call_count)) / 1e6;
+        module.max_call_ms = static_cast<double>(module_stats.max_ns) / 1e6;
+        stats.modules.push_back(std::move(module));
+      }
+#endif
+      return stats;
+    }
+
+    void reset_profile_stats()
+    {
+#ifdef EGRESS_PROFILE
+      profile_callback_count_.store(0, std::memory_order_relaxed);
+      profile_total_callback_ns_.store(0, std::memory_order_relaxed);
+      profile_max_callback_ns_.store(0, std::memory_order_relaxed);
+
+      std::lock_guard<std::mutex> lock(profile_mutex_);
+      module_profile_stats_.clear();
+#endif
     }
 
     bool addModule(std::string name, mPtr new_module)
@@ -324,35 +433,65 @@ class Graph
       std::vector<ExprSpecPtr> input_exprs;
     };
 
+    enum class OpCode
+    {
+      Literal,
+      Ref,
+      Add,
+      AddConst,
+      Sub,
+      SubConstRhs,
+      SubConstLhs,
+      Mul,
+      MulConst,
+      Div,
+      DivConstLhs,
+      Mod,
+      FloorDiv,
+      BitAnd,
+      BitOr,
+      BitXor,
+      LShift,
+      RShift,
+      Neg,
+      Not,
+      BitNot,
+      Sin,
+      Less,
+      LessEqual,
+      Greater,
+      GreaterEqual,
+      Equal,
+      NotEqual
+    };
+
     struct ExprInstr;
     struct RuntimeState;
-    using ExprKernel = void (*)(const RuntimeState &, const ExprInstr &, Value *);
 
     struct ExprInstr
     {
-      ExprKind kind = ExprKind::Literal;
+      OpCode opcode = OpCode::Literal;
       uint32_t dst = 0;
       uint32_t src_a = 0;
       uint32_t src_b = 0;
       Value literal;
       uint32_t ref_module_id = 0;
       unsigned int ref_output_id = 0;
-      ExprKernel kernel = nullptr;
     };
 
-    struct CompiledExpr
+    struct CompiledInputProgram
     {
       std::vector<ExprInstr> instructions;
       uint32_t register_count = 0;
-      uint32_t result_register = 0;
+      std::vector<uint32_t> result_registers;
     };
 
     struct ModuleSlot
     {
       std::string name;
       std::shared_ptr<Module> module;
-      std::vector<CompiledExpr> input_exprs;
-      std::vector<std::vector<Value>> input_registers;
+      CompiledInputProgram input_program;
+      std::vector<Value> input_registers;
     };
 
     struct MixTap
@@ -367,6 +506,23 @@ class Graph
       std::unordered_map<std::string, uint32_t> name_to_id;
       std::vector<MixTap> mix;
     };
+
+#ifdef EGRESS_PROFILE
+    struct ModuleTimingCounters
+    {
+      uint64_t call_count = 0;
+      uint64_t total_ns = 0;
+      uint64_t max_ns = 0;
+    };
+
+    static void update_atomic_max(std::atomic<uint64_t> & dst, uint64_t candidate)
+    {
+      uint64_t current = dst.load(std::memory_order_relaxed);
+      while (current < candidate && !dst.compare_exchange_weak(current, candidate, std::memory_order_relaxed))
+      {
+      }
+    }
+#endif
 
     static bool is_zero_expr(const ExprSpecPtr & expr)
     {
@@ -792,8 +948,7 @@ class Graph
         ModuleSlot slot;
         slot.name = name;
         slot.module = module.module;
-        slot.input_exprs.resize(module.in_count);
-        slot.input_registers.resize(module.in_count);
+        slot.input_program.result_registers.resize(module.in_count, 0);
         runtime.modules.push_back(std::move(slot));
       }
 
@@ -806,15 +961,9 @@ class Graph
         }
 
         ModuleSlot & slot = runtime.modules[id_it->second];
-        const unsigned int input_limit = std::min(
-          static_cast<unsigned int>(slot.input_exprs.size()),
-          static_cast<unsigned int>(module.input_exprs.size()));
-
-        for (unsigned int input_id = 0; input_id < input_limit; ++input_id)
-        {
-          slot.input_exprs[input_id] = compile_expr(module.input_exprs[input_id], runtime);
-          slot.input_registers[input_id].assign(slot.input_exprs[input_id].register_count, float_value(0.0));
-        }
+        const unsigned int input_count = static_cast<unsigned int>(slot.input_program.result_registers.size());
+        slot.input_program = compile_input_program(module.input_exprs, input_count, runtime);
+        slot.input_registers.assign(slot.input_program.register_count, float_value(0.0));
       }
 
       runtime.mix.reserve(control_mix_.size());
@@ -849,233 +998,121 @@ class Graph
       active_runtime_index_.store(inactive, std::memory_order_release);
     }
 
-    static void exec_literal(const RuntimeState &, const ExprInstr & instr, Value * registers)
+    static void eval_instruction(const RuntimeState & runtime, const ExprInstr & instr, Value * registers)
     {
-      registers[instr.dst] = instr.literal;
-    }
-
-    static void exec_ref(const RuntimeState & runtime, const ExprInstr & instr, Value * registers)
-    {
-      if (instr.ref_module_id >= runtime.modules.size())
+      switch (instr.opcode)
       {
-        registers[instr.dst] = float_value(0.0);
-        return;
+        case OpCode::Literal:
+          registers[instr.dst] = instr.literal;
+          break;
+        case OpCode::Ref:
+        {
+          if (instr.ref_module_id >= runtime.modules.size())
+          {
+            registers[instr.dst] = float_value(0.0);
+            break;
+          }
+          const auto & slot = runtime.modules[instr.ref_module_id];
+          if (!slot.module || instr.ref_output_id >= slot.module->prev_outputs.size())
+          {
+            registers[instr.dst] = float_value(0.0);
+            break;
+          }
+          registers[instr.dst] = float_value(slot.module->prev_outputs[instr.ref_output_id]);
+          break;
+        }
+        case OpCode::Add:
+          registers[instr.dst] = expr_eval::add_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::AddConst:
+          registers[instr.dst] = expr_eval::add_values(registers[instr.src_a], instr.literal);
+          break;
+        case OpCode::Sub:
+          registers[instr.dst] = expr_eval::sub_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::SubConstRhs:
+          registers[instr.dst] = expr_eval::sub_values(registers[instr.src_a], instr.literal);
+          break;
+        case OpCode::SubConstLhs:
+          registers[instr.dst] = expr_eval::sub_values(instr.literal, registers[instr.src_a]);
+          break;
+        case OpCode::Mul:
+          registers[instr.dst] = expr_eval::mul_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::MulConst:
+          registers[instr.dst] = expr_eval::mul_values(registers[instr.src_a], instr.literal);
+          break;
+        case OpCode::Div:
+          registers[instr.dst] = expr_eval::div_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::DivConstLhs:
+          registers[instr.dst] = expr_eval::div_values(instr.literal, registers[instr.src_a]);
+          break;
+        case OpCode::Mod:
+          registers[instr.dst] = expr_eval::mod_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::FloorDiv:
+          registers[instr.dst] = expr_eval::floor_div_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::BitAnd:
+          registers[instr.dst] = expr_eval::bit_and_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::BitOr:
+          registers[instr.dst] = expr_eval::bit_or_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::BitXor:
+          registers[instr.dst] = expr_eval::bit_xor_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::LShift:
+          registers[instr.dst] = expr_eval::lshift_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::RShift:
+          registers[instr.dst] = expr_eval::rshift_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::Neg:
+          registers[instr.dst] = expr_eval::neg_value(registers[instr.src_a]);
+          break;
+        case OpCode::Not:
+          registers[instr.dst] = expr_eval::not_value(registers[instr.src_a]);
+          break;
+        case OpCode::BitNot:
+          registers[instr.dst] = expr_eval::bit_not_value(registers[instr.src_a]);
+          break;
+        case OpCode::Sin:
+          registers[instr.dst] = expr_eval::sin_value(registers[instr.src_a]);
+          break;
+        case OpCode::Less:
+          registers[instr.dst] = expr_eval::less_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::LessEqual:
+          registers[instr.dst] = expr_eval::less_equal_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::Greater:
+          registers[instr.dst] = expr_eval::greater_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::GreaterEqual:
+          registers[instr.dst] = expr_eval::greater_equal_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::Equal:
+          registers[instr.dst] = expr_eval::equal_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::NotEqual:
+          registers[instr.dst] = expr_eval::not_equal_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
       }
-
-      const auto & slot = runtime.modules[instr.ref_module_id];
-      if (!slot.module || instr.ref_output_id >= slot.module->prev_outputs.size())
-      {
-        registers[instr.dst] = float_value(0.0);
-        return;
-      }
-
-      registers[instr.dst] = float_value(slot.module->prev_outputs[instr.ref_output_id]);
-    }
-
-    static void exec_add(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::add_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_add_const(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::add_values(registers[instr.src_a], instr.literal);
-    }
-
-    static void exec_sub(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::sub_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_sub_const_rhs(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::sub_values(registers[instr.src_a], instr.literal);
-    }
-
-    static void exec_sub_const_lhs(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::sub_values(instr.literal, registers[instr.src_a]);
-    }
-
-    static void exec_mul(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::mul_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_mul_const(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::mul_values(registers[instr.src_a], instr.literal);
-    }
-
-    static void exec_div(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::div_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_div_const_lhs(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::div_values(instr.literal, registers[instr.src_a]);
-    }
-
-    static void exec_neg(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::neg_value(registers[instr.src_a]);
-    }
-
-    static void exec_sin(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::sin_value(registers[instr.src_a]);
-    }
-
-    static void exec_mod(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::mod_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_floor_div(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::floor_div_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_bit_and(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::bit_and_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_bit_or(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::bit_or_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_bit_xor(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::bit_xor_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_lshift(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::lshift_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_rshift(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::rshift_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_not(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::not_value(registers[instr.src_a]);
-    }
-
-    static void exec_bit_not(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::bit_not_value(registers[instr.src_a]);
-    }
-
-    static void exec_less(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::less_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_less_equal(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::less_equal_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_greater(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::greater_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_greater_equal(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::greater_equal_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_equal(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::equal_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static void exec_not_equal(const RuntimeState &, const ExprInstr & instr, Value * registers)
-    {
-      registers[instr.dst] = expr_eval::not_equal_values(registers[instr.src_a], registers[instr.src_b]);
-    }
-
-    static ExprKernel kernel_for_kind(ExprKind kind)
-    {
-      switch (kind)
-      {
-        case ExprKind::Literal:
-          return &Graph::exec_literal;
-        case ExprKind::Ref:
-          return &Graph::exec_ref;
-        case ExprKind::InputValue:
-        case ExprKind::RegisterValue:
-        case ExprKind::SampleRate:
-        case ExprKind::SampleIndex:
-        case ExprKind::ArrayPack:
-        case ExprKind::Index:
-          return &Graph::exec_literal;
-        case ExprKind::Not:
-          return &Graph::exec_not;
-        case ExprKind::Less:
-          return &Graph::exec_less;
-        case ExprKind::LessEqual:
-          return &Graph::exec_less_equal;
-        case ExprKind::Greater:
-          return &Graph::exec_greater;
-        case ExprKind::GreaterEqual:
-          return &Graph::exec_greater_equal;
-        case ExprKind::Equal:
-          return &Graph::exec_equal;
-        case ExprKind::NotEqual:
-          return &Graph::exec_not_equal;
-        case ExprKind::Add:
-          return &Graph::exec_add;
-        case ExprKind::Sub:
-          return &Graph::exec_sub;
-        case ExprKind::Mul:
-          return &Graph::exec_mul;
-        case ExprKind::Div:
-          return &Graph::exec_div;
-        case ExprKind::Mod:
-          return &Graph::exec_mod;
-        case ExprKind::FloorDiv:
-          return &Graph::exec_floor_div;
-        case ExprKind::BitAnd:
-          return &Graph::exec_bit_and;
-        case ExprKind::BitOr:
-          return &Graph::exec_bit_or;
-        case ExprKind::BitXor:
-          return &Graph::exec_bit_xor;
-        case ExprKind::LShift:
-          return &Graph::exec_lshift;
-        case ExprKind::RShift:
-          return &Graph::exec_rshift;
-        case ExprKind::Sin:
-          return &Graph::exec_sin;
-        case ExprKind::Neg:
-          return &Graph::exec_neg;
-        case ExprKind::BitNot:
-          return &Graph::exec_bit_not;
-      }
-
-      return &Graph::exec_literal;
     }
 
     uint32_t compile_expr_node(
       const ExprSpecPtr & expr,
-      CompiledExpr & compiled,
+      CompiledInputProgram & compiled,
       const RuntimeState & runtime) const
     {
       if (!expr)
       {
         ExprInstr instr;
-        instr.kind = ExprKind::Literal;
+        instr.opcode = OpCode::Literal;
         instr.dst = compiled.register_count++;
         instr.literal = float_value(0.0);
-        instr.kernel = kernel_for_kind(instr.kind);
         compiled.instructions.push_back(instr);
         return instr.dst;
       }
@@ -1083,10 +1120,9 @@ class Graph
       if (expr->kind == ExprKind::Literal)
       {
         ExprInstr instr;
-        instr.kind = ExprKind::Literal;
+        instr.opcode = OpCode::Literal;
         instr.dst = compiled.register_count++;
         instr.literal = expr->literal;
-        instr.kernel = kernel_for_kind(instr.kind);
         compiled.instructions.push_back(instr);
         return instr.dst;
       }
@@ -1097,20 +1133,18 @@ class Graph
         if (it == runtime.name_to_id.end())
         {
           ExprInstr instr;
-          instr.kind = ExprKind::Literal;
+          instr.opcode = OpCode::Literal;
           instr.dst = compiled.register_count++;
           instr.literal = float_value(0.0);
-          instr.kernel = kernel_for_kind(instr.kind);
           compiled.instructions.push_back(instr);
           return instr.dst;
         }
 
         ExprInstr instr;
-        instr.kind = ExprKind::Ref;
+        instr.opcode = OpCode::Ref;
         instr.dst = compiled.register_count++;
         instr.ref_module_id = it->second;
         instr.ref_output_id = expr->output_id;
-        instr.kernel = kernel_for_kind(instr.kind);
         compiled.instructions.push_back(instr);
 
         return instr.dst;
@@ -1120,10 +1154,11 @@ class Graph
       {
         const uint32_t operand = compile_expr_node(expr->lhs, compiled, runtime);
         ExprInstr instr;
-        instr.kind = expr->kind;
+        instr.opcode = expr->kind == ExprKind::Neg
+                         ? OpCode::Neg
+                         : (expr->kind == ExprKind::Not ? OpCode::Not : (expr->kind == ExprKind::BitNot ? OpCode::BitNot : OpCode::Sin));
         instr.dst = compiled.register_count++;
         instr.src_a = operand;
-        instr.kernel = kernel_for_kind(instr.kind);
         compiled.instructions.push_back(instr);
         return instr.dst;
       }
@@ -1134,11 +1169,10 @@ class Graph
         {
           const uint32_t rhs = compile_expr_node(expr->rhs, compiled, runtime);
           ExprInstr instr;
-          instr.kind = ExprKind::Add;
+          instr.opcode = OpCode::AddConst;
           instr.dst = compiled.register_count++;
           instr.src_a = rhs;
           instr.literal = expr->lhs->literal;
-          instr.kernel = &Graph::exec_add_const;
           compiled.instructions.push_back(instr);
           return instr.dst;
         }
@@ -1147,11 +1181,10 @@ class Graph
         {
           const uint32_t lhs = compile_expr_node(expr->lhs, compiled, runtime);
           ExprInstr instr;
-          instr.kind = ExprKind::Add;
+          instr.opcode = OpCode::AddConst;
           instr.dst = compiled.register_count++;
           instr.src_a = lhs;
           instr.literal = expr->rhs->literal;
-          instr.kernel = &Graph::exec_add_const;
           compiled.instructions.push_back(instr);
           return instr.dst;
         }
@@ -1163,11 +1196,10 @@ class Graph
         {
           const uint32_t rhs = compile_expr_node(expr->rhs, compiled, runtime);
           ExprInstr instr;
-          instr.kind = ExprKind::Mul;
+          instr.opcode = OpCode::MulConst;
           instr.dst = compiled.register_count++;
           instr.src_a = rhs;
           instr.literal = expr->lhs->literal;
-          instr.kernel = &Graph::exec_mul_const;
           compiled.instructions.push_back(instr);
           return instr.dst;
         }
@@ -1176,11 +1208,10 @@ class Graph
         {
           const uint32_t lhs = compile_expr_node(expr->lhs, compiled, runtime);
           ExprInstr instr;
-          instr.kind = ExprKind::Mul;
+          instr.opcode = OpCode::MulConst;
           instr.dst = compiled.register_count++;
           instr.src_a = lhs;
           instr.literal = expr->rhs->literal;
-          instr.kernel = &Graph::exec_mul_const;
           compiled.instructions.push_back(instr);
           return instr.dst;
         }
@@ -1192,11 +1223,10 @@ class Graph
         {
           const uint32_t lhs = compile_expr_node(expr->lhs, compiled, runtime);
           ExprInstr instr;
-          instr.kind = ExprKind::Sub;
+          instr.opcode = OpCode::SubConstRhs;
           instr.dst = compiled.register_count++;
           instr.src_a = lhs;
           instr.literal = expr->rhs->literal;
-          instr.kernel = &Graph::exec_sub_const_rhs;
           compiled.instructions.push_back(instr);
           return instr.dst;
         }
@@ -1205,11 +1235,10 @@ class Graph
         {
           const uint32_t rhs = compile_expr_node(expr->rhs, compiled, runtime);
           ExprInstr instr;
-          instr.kind = ExprKind::Sub;
+          instr.opcode = OpCode::SubConstLhs;
           instr.dst = compiled.register_count++;
           instr.src_a = rhs;
           instr.literal = expr->lhs->literal;
-          instr.kernel = &Graph::exec_sub_const_lhs;
           compiled.instructions.push_back(instr);
           return instr.dst;
         }
@@ -1221,13 +1250,12 @@ class Graph
         {
           const uint32_t lhs = compile_expr_node(expr->lhs, compiled, runtime);
           ExprInstr instr;
-          instr.kind = ExprKind::Mul;
+          instr.opcode = OpCode::MulConst;
           instr.dst = compiled.register_count++;
           instr.src_a = lhs;
           instr.literal = to_float64(expr->rhs->literal) == 0.0
                             ? float_value(0.0)
                             : float_value(1.0 / to_float64(expr->rhs->literal));
-          instr.kernel = &Graph::exec_mul_const;
           compiled.instructions.push_back(instr);
           return instr.dst;
         }
@@ -1236,11 +1264,10 @@ class Graph
         {
           const uint32_t rhs = compile_expr_node(expr->rhs, compiled, runtime);
           ExprInstr instr;
-          instr.kind = ExprKind::Div;
+          instr.opcode = OpCode::DivConstLhs;
           instr.dst = compiled.register_count++;
           instr.src_a = rhs;
           instr.literal = expr->lhs->literal;
-          instr.kernel = &Graph::exec_div_const_lhs;
           compiled.instructions.push_back(instr);
           return instr.dst;
         }
@@ -1250,40 +1277,121 @@ class Graph
       const uint32_t rhs = compile_expr_node(expr->rhs, compiled, runtime);
 
       ExprInstr instr;
-      instr.kind = expr->kind;
+      switch (expr->kind)
+      {
+        case ExprKind::Add:
+          instr.opcode = OpCode::Add;
+          break;
+        case ExprKind::Sub:
+          instr.opcode = OpCode::Sub;
+          break;
+        case ExprKind::Mul:
+          instr.opcode = OpCode::Mul;
+          break;
+        case ExprKind::Div:
+          instr.opcode = OpCode::Div;
+          break;
+        case ExprKind::Mod:
+          instr.opcode = OpCode::Mod;
+          break;
+        case ExprKind::FloorDiv:
+          instr.opcode = OpCode::FloorDiv;
+          break;
+        case ExprKind::BitAnd:
+          instr.opcode = OpCode::BitAnd;
+          break;
+        case ExprKind::BitOr:
+          instr.opcode = OpCode::BitOr;
+          break;
+        case ExprKind::BitXor:
+          instr.opcode = OpCode::BitXor;
+          break;
+        case ExprKind::LShift:
+          instr.opcode = OpCode::LShift;
+          break;
+        case ExprKind::RShift:
+          instr.opcode = OpCode::RShift;
+          break;
+        case ExprKind::Less:
+          instr.opcode = OpCode::Less;
+          break;
+        case ExprKind::LessEqual:
+          instr.opcode = OpCode::LessEqual;
+          break;
+        case ExprKind::Greater:
+          instr.opcode = OpCode::Greater;
+          break;
+        case ExprKind::GreaterEqual:
+          instr.opcode = OpCode::GreaterEqual;
+          break;
+        case ExprKind::Equal:
+          instr.opcode = OpCode::Equal;
+          break;
+        case ExprKind::NotEqual:
+          instr.opcode = OpCode::NotEqual;
+          break;
+        default:
+          instr.opcode = OpCode::Literal;
+          instr.literal = float_value(0.0);
+          break;
+      }
       instr.dst = compiled.register_count++;
       instr.src_a = lhs;
       instr.src_b = rhs;
-      instr.kernel = kernel_for_kind(instr.kind);
       compiled.instructions.push_back(instr);
       return instr.dst;
     }
 
-    CompiledExpr compile_expr(const ExprSpecPtr & expr, const RuntimeState & runtime) const
+    CompiledInputProgram compile_input_program(
+      const std::vector<ExprSpecPtr> & exprs,
+      unsigned int input_count,
+      const RuntimeState & runtime) const
     {
-      CompiledExpr compiled;
-      compiled.result_register = compile_expr_node(expr, compiled, runtime);
+      CompiledInputProgram compiled;
+      compiled.result_registers.assign(input_count, 0);
+
+      for (unsigned int input_id = 0; input_id < input_count; ++input_id)
+      {
+        const ExprSpecPtr expr = input_id < exprs.size() ? exprs[input_id] : nullptr;
+        compiled.result_registers[input_id] = compile_expr_node(expr, compiled, runtime);
+      }
+
       return compiled;
     }
 
-    double eval_expr(const RuntimeState & runtime, const CompiledExpr & expr, std::vector<Value> & registers) const
+    void eval_input_program(
+      const RuntimeState & runtime,
+      const CompiledInputProgram & program,
+      std::vector<Value> & registers,
+      std::vector<Signal> & inputs) const
     {
-      if (expr.instructions.empty())
+      if (program.instructions.empty())
       {
-        return 0.0;
+        for (auto & input : inputs)
+        {
+          input = 0.0;
+        }
+        return;
       }
 
-      if (registers.size() < expr.register_count)
+      if (registers.size() < program.register_count)
       {
-        registers.resize(expr.register_count, float_value(0.0));
+        registers.resize(program.register_count, float_value(0.0));
       }
 
-      for (const auto & instr : expr.instructions)
+      for (const auto & instr : program.instructions)
       {
-        instr.kernel(runtime, instr, registers.data());
+        eval_instruction(runtime, instr, registers.data());
       }
 
-      return to_float64(registers[expr.result_register]);
+      const unsigned int input_limit = std::min(
+        static_cast<unsigned int>(inputs.size()),
+        static_cast<unsigned int>(program.result_registers.size()));
+
+      for (unsigned int input_id = 0; input_id < input_limit; ++input_id)
+      {
+        inputs[input_id] = to_float64(registers[program.result_registers[input_id]]);
+      }
     }
 
     unsigned int bufferLength_ = 0;
@@ -1297,6 +1405,14 @@ class Graph
     std::vector<outputID> control_mix_;
 
     mutable std::mutex pending_mutex_;
+
+  #ifdef EGRESS_PROFILE
+    std::atomic<uint64_t> profile_callback_count_{0};
+    std::atomic<uint64_t> profile_total_callback_ns_{0};
+    std::atomic<uint64_t> profile_max_callback_ns_{0};
+    mutable std::mutex profile_mutex_;
+    std::unordered_map<std::string, ModuleTimingCounters> module_profile_stats_;
+  #endif
 };
 
 class UserDefinedModule : public Module
