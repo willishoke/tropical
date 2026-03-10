@@ -526,11 +526,8 @@ static SignalExpr logical_not_expr(const py::handle & value)
 
 static SignalExpr index_expr(const SignalExpr & value, const py::handle & index)
 {
-  if (!py::isinstance<py::int_>(index))
-  {
-    throw std::invalid_argument("Array indices must be integers.");
-  }
-  return make_signal_expr(value.graph, expr::index_expr(value.spec, expr::literal_expr(index.cast<int64_t>())));
+  const SignalExpr idx = coerce_expr(index);
+  return make_signal_expr(merge_graphs(value.graph, idx.graph), expr::index_expr(value.spec, idx.spec));
 }
 
 static SignalExpr less_expr(const py::handle & lhs, const py::handle & rhs)

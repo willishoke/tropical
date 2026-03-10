@@ -21,12 +21,28 @@ enum class NumericOp : uint8_t
   RegisterValue,
   SampleRate,
   SampleIndex,
+  Not,
+  Less,
+  LessEqual,
+  Greater,
+  GreaterEqual,
+  Equal,
+  NotEqual,
   Add,
   Sub,
   Mul,
   Div,
+  Mod,
+  FloorDiv,
+  BitAnd,
+  BitOr,
+  BitXor,
+  LShift,
+  RShift,
+  IndexArray,
   Sin,
-  Neg
+  Neg,
+  BitNot
 };
 
 struct NumericInstr
@@ -45,7 +61,14 @@ struct NumericProgram
   uint32_t register_count = 0;
 };
 
-using NumericKernelFn = void (*)(const double * inputs, const double * registers, double * temps, double sample_rate, uint64_t sample_index);
+using NumericKernelFn = void (*)(
+  const double * inputs,
+  const double * registers,
+  const double * const * arrays,
+  const uint64_t * array_sizes,
+  double * temps,
+  double sample_rate,
+  uint64_t sample_index);
 
 #ifdef EGRESS_LLVM_ORC_JIT
 class OrcJitEngine

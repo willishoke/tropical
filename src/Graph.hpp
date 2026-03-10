@@ -1444,7 +1444,14 @@ class UserDefinedModule : public Module
 #ifdef EGRESS_LLVM_ORC_JIT
       if (jit_kernel_)
       {
-        jit_kernel_(inputs.data(), numeric_registers_.data(), numeric_temps_.data(), sample_rate_, sample_index_);
+        jit_kernel_(
+          inputs.data(),
+          numeric_registers_.data(),
+          numeric_array_ptrs_.data(),
+          numeric_array_sizes_.data(),
+          numeric_temps_.data(),
+          sample_rate_,
+          sample_index_);
 
         for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
         {
@@ -1816,6 +1823,11 @@ class UserDefinedModule : public Module
     std::vector<double> numeric_temps_;
     std::vector<double> numeric_registers_;
     std::vector<double> numeric_next_registers_;
+    std::vector<std::vector<double>> numeric_array_storage_;
+    std::vector<const double *> numeric_array_ptrs_;
+    std::vector<uint64_t> numeric_array_sizes_;
+    std::vector<bool> register_scalar_mask_;
+    std::vector<uint32_t> register_array_slot_;
     std::string jit_status_;
 
     bool supports_numeric_jit_expr_kind(ExprKind kind) const
@@ -1827,16 +1839,70 @@ class UserDefinedModule : public Module
         case ExprKind::RegisterValue:
         case ExprKind::SampleRate:
         case ExprKind::SampleIndex:
+        case ExprKind::Not:
+        case ExprKind::Less:
+        case ExprKind::LessEqual:
+        case ExprKind::Greater:
+        case ExprKind::GreaterEqual:
+        case ExprKind::Equal:
+        case ExprKind::NotEqual:
         case ExprKind::Add:
         case ExprKind::Sub:
         case ExprKind::Mul:
         case ExprKind::Div:
+        case ExprKind::Mod:
+        case ExprKind::FloorDiv:
+        case ExprKind::BitAnd:
+        case ExprKind::BitOr:
+        case ExprKind::BitXor:
+        case ExprKind::LShift:
+        case ExprKind::RShift:
+        case ExprKind::Index:
         case ExprKind::Sin:
         case ExprKind::Neg:
+        case ExprKind::BitNot:
+        case ExprKind::ArrayPack:
           return true;
         default:
           return false;
       }
+    }
+
+    struct NumericRegInfo
+    {
+      bool is_scalar = true;
+      uint32_t array_slot = 0;
+      bool scalar_is_constant = false;
+      double scalar_constant = 0.0;
+    };
+
+    static bool value_to_scalar_double(const Value & value, double & out)
+    {
+      if (value.type == ValueType::Array)
+      {
+        return false;
+      }
+      out = to_float64(value);
+      return true;
+    }
+
+    bool add_array_values_to_jit_table(const std::vector<Value> & values, uint32_t & out_slot)
+    {
+      std::vector<double> numeric_values;
+      numeric_values.reserve(values.size());
+      for (const Value & item : values)
+      {
+        double scalar = 0.0;
+        if (!value_to_scalar_double(item, scalar))
+        {
+          return false;
+        }
+        numeric_values.push_back(scalar);
+      }
+
+      out_slot = static_cast<uint32_t>(numeric_array_storage_.size());
+      numeric_array_storage_.push_back(std::move(numeric_values));
+      return true;
     }
 
     bool build_numeric_program(egress_jit::NumericProgram & numeric_program)
@@ -1846,14 +1912,26 @@ class UserDefinedModule : public Module
         return false;
       }
 
-      numeric_program.instructions.reserve(program_.instructions.size());
+      numeric_program.instructions.clear();
       numeric_program.register_count = program_.register_count;
+      numeric_array_storage_.clear();
+      register_scalar_mask_.assign(registers_.size(), true);
+      register_array_slot_.assign(registers_.size(), 0);
 
-      for (const Value & reg : registers_)
+      std::vector<NumericRegInfo> reg_info(program_.register_count);
+
+      for (unsigned int reg_slot = 0; reg_slot < registers_.size(); ++reg_slot)
       {
+        const Value & reg = registers_[reg_slot];
         if (reg.type == ValueType::Array)
         {
-          return false;
+          uint32_t array_slot = 0;
+          if (!add_array_values_to_jit_table(reg.array_items, array_slot))
+          {
+            return false;
+          }
+          register_scalar_mask_[reg_slot] = false;
+          register_array_slot_[reg_slot] = array_slot;
         }
       }
 
@@ -1870,51 +1948,228 @@ class UserDefinedModule : public Module
         jit_instr.src_b = instr.src_b;
         jit_instr.slot_id = instr.slot_id;
 
+        bool emit_instruction = true;
+
         switch (instr.kind)
         {
           case ExprKind::Literal:
+          {
             if (instr.literal.type == ValueType::Array)
+            {
+              uint32_t array_slot = 0;
+              if (!add_array_values_to_jit_table(instr.literal.array_items, array_slot))
+              {
+                return false;
+              }
+              reg_info[instr.dst].is_scalar = false;
+              reg_info[instr.dst].array_slot = array_slot;
+              emit_instruction = false;
+            }
+            else
+            {
+              jit_instr.op = egress_jit::NumericOp::Literal;
+              jit_instr.literal = to_float64(instr.literal);
+              reg_info[instr.dst].is_scalar = true;
+              reg_info[instr.dst].scalar_is_constant = true;
+              reg_info[instr.dst].scalar_constant = jit_instr.literal;
+            }
+            break;
+          }
+          case ExprKind::InputValue:
+            jit_instr.op = egress_jit::NumericOp::InputValue;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::RegisterValue:
+            if (instr.slot_id >= register_scalar_mask_.size())
             {
               return false;
             }
-            jit_instr.op = egress_jit::NumericOp::Literal;
-            jit_instr.literal = to_float64(instr.literal);
-            break;
-          case ExprKind::InputValue:
-            jit_instr.op = egress_jit::NumericOp::InputValue;
-            break;
-          case ExprKind::RegisterValue:
-            jit_instr.op = egress_jit::NumericOp::RegisterValue;
+            if (!register_scalar_mask_[instr.slot_id])
+            {
+              reg_info[instr.dst].is_scalar = false;
+              reg_info[instr.dst].array_slot = register_array_slot_[instr.slot_id];
+              emit_instruction = false;
+            }
+            else
+            {
+              jit_instr.op = egress_jit::NumericOp::RegisterValue;
+              reg_info[instr.dst].is_scalar = true;
+            }
             break;
           case ExprKind::SampleRate:
             jit_instr.op = egress_jit::NumericOp::SampleRate;
+            reg_info[instr.dst].is_scalar = true;
             break;
           case ExprKind::SampleIndex:
             jit_instr.op = egress_jit::NumericOp::SampleIndex;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::ArrayPack:
+          {
+            std::vector<Value> packed_values;
+            packed_values.reserve(instr.args.size());
+            for (uint32_t src : instr.args)
+            {
+              if (src >= reg_info.size() || !reg_info[src].is_scalar || !reg_info[src].scalar_is_constant)
+              {
+                return false;
+              }
+              packed_values.push_back(float_value(reg_info[src].scalar_constant));
+            }
+            uint32_t array_slot = 0;
+            if (!add_array_values_to_jit_table(packed_values, array_slot))
+            {
+              return false;
+            }
+            reg_info[instr.dst].is_scalar = false;
+            reg_info[instr.dst].array_slot = array_slot;
+            emit_instruction = false;
+            break;
+          }
+          case ExprKind::Index:
+            if (instr.src_a >= reg_info.size() || instr.src_b >= reg_info.size())
+            {
+              return false;
+            }
+            if (reg_info[instr.src_a].is_scalar || !reg_info[instr.src_b].is_scalar)
+            {
+              return false;
+            }
+            jit_instr.op = egress_jit::NumericOp::IndexArray;
+            jit_instr.src_a = instr.src_b;
+            jit_instr.slot_id = reg_info[instr.src_a].array_slot;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::Not:
+            jit_instr.op = egress_jit::NumericOp::Not;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::Less:
+            jit_instr.op = egress_jit::NumericOp::Less;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::LessEqual:
+            jit_instr.op = egress_jit::NumericOp::LessEqual;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::Greater:
+            jit_instr.op = egress_jit::NumericOp::Greater;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::GreaterEqual:
+            jit_instr.op = egress_jit::NumericOp::GreaterEqual;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::Equal:
+            jit_instr.op = egress_jit::NumericOp::Equal;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::NotEqual:
+            jit_instr.op = egress_jit::NumericOp::NotEqual;
+            reg_info[instr.dst].is_scalar = true;
             break;
           case ExprKind::Add:
             jit_instr.op = egress_jit::NumericOp::Add;
+            reg_info[instr.dst].is_scalar = true;
             break;
           case ExprKind::Sub:
             jit_instr.op = egress_jit::NumericOp::Sub;
+            reg_info[instr.dst].is_scalar = true;
             break;
           case ExprKind::Mul:
             jit_instr.op = egress_jit::NumericOp::Mul;
+            reg_info[instr.dst].is_scalar = true;
             break;
           case ExprKind::Div:
             jit_instr.op = egress_jit::NumericOp::Div;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::Mod:
+            jit_instr.op = egress_jit::NumericOp::Mod;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::FloorDiv:
+            jit_instr.op = egress_jit::NumericOp::FloorDiv;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::BitAnd:
+            jit_instr.op = egress_jit::NumericOp::BitAnd;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::BitOr:
+            jit_instr.op = egress_jit::NumericOp::BitOr;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::BitXor:
+            jit_instr.op = egress_jit::NumericOp::BitXor;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::LShift:
+            jit_instr.op = egress_jit::NumericOp::LShift;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::RShift:
+            jit_instr.op = egress_jit::NumericOp::RShift;
+            reg_info[instr.dst].is_scalar = true;
             break;
           case ExprKind::Sin:
             jit_instr.op = egress_jit::NumericOp::Sin;
+            reg_info[instr.dst].is_scalar = true;
             break;
           case ExprKind::Neg:
             jit_instr.op = egress_jit::NumericOp::Neg;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::BitNot:
+            jit_instr.op = egress_jit::NumericOp::BitNot;
+            reg_info[instr.dst].is_scalar = true;
             break;
           default:
             return false;
         }
 
-        numeric_program.instructions.push_back(jit_instr);
+        if (emit_instruction)
+        {
+          if (instr.kind != ExprKind::Literal &&
+              instr.kind != ExprKind::InputValue &&
+              instr.kind != ExprKind::RegisterValue &&
+              instr.kind != ExprKind::SampleRate &&
+              instr.kind != ExprKind::SampleIndex &&
+              instr.kind != ExprKind::Index)
+          {
+            if (instr.src_a >= reg_info.size() || !reg_info[instr.src_a].is_scalar)
+            {
+              return false;
+            }
+            if (is_local_binary(instr.kind))
+            {
+              if (instr.src_b >= reg_info.size() || !reg_info[instr.src_b].is_scalar)
+              {
+                return false;
+              }
+            }
+          }
+
+          reg_info[instr.dst].scalar_is_constant = false;
+          reg_info[instr.dst].scalar_constant = 0.0;
+          numeric_program.instructions.push_back(jit_instr);
+        }
+      }
+
+      for (uint32_t output_reg : program_.output_targets)
+      {
+        if (output_reg >= reg_info.size() || !reg_info[output_reg].is_scalar)
+        {
+          return false;
+        }
+      }
+
+      for (unsigned int reg_slot = 0; reg_slot < program_.register_targets.size(); ++reg_slot)
+      {
+        if (!register_scalar_mask_[reg_slot] && program_.register_targets[reg_slot] >= 0)
+        {
+          return false;
+        }
       }
 
       return true;
@@ -1947,9 +2202,16 @@ class UserDefinedModule : public Module
       numeric_temps_.assign(program_.register_count, 0.0);
       numeric_registers_.resize(registers_.size(), 0.0);
       numeric_next_registers_.resize(registers_.size(), 0.0);
+      numeric_array_ptrs_.resize(numeric_array_storage_.size(), nullptr);
+      numeric_array_sizes_.resize(numeric_array_storage_.size(), 0);
+      for (std::size_t i = 0; i < numeric_array_storage_.size(); ++i)
+      {
+        numeric_array_ptrs_[i] = numeric_array_storage_[i].empty() ? nullptr : numeric_array_storage_[i].data();
+        numeric_array_sizes_[i] = static_cast<uint64_t>(numeric_array_storage_[i].size());
+      }
       for (unsigned int i = 0; i < registers_.size(); ++i)
       {
-        numeric_registers_[i] = to_float64(registers_[i]);
+        numeric_registers_[i] = register_scalar_mask_[i] ? to_float64(registers_[i]) : 0.0;
       }
       jit_status_ = "numeric JIT active";
     }

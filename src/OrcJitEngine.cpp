@@ -108,11 +108,13 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
   llvm::Type * void_ty = builder.getVoidTy();
   llvm::Type * f64_ty = builder.getDoubleTy();
   llvm::Type * i64_ty = builder.getInt64Ty();
-  llvm::Type * f64_ptr_ty = builder.getDoubleTy()->getPointerTo();
+  llvm::Type * f64_ptr_ty = llvm::PointerType::get(*context, 0);
+  llvm::Type * f64_ptr_ptr_ty = llvm::PointerType::get(*context, 0);
+  llvm::Type * i64_ptr_ty = llvm::PointerType::get(*context, 0);
 
   llvm::FunctionType * fn_ty = llvm::FunctionType::get(
     void_ty,
-    {f64_ptr_ty, f64_ptr_ty, f64_ptr_ty, f64_ty, i64_ty},
+    {f64_ptr_ty, f64_ptr_ty, f64_ptr_ptr_ty, i64_ptr_ty, f64_ptr_ty, f64_ty, i64_ty},
     false);
 
   static std::atomic<uint64_t> function_counter{0};
@@ -125,6 +127,10 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
   inputs_arg->setName("inputs");
   llvm::Value * regs_arg = &*arg_it++;
   regs_arg->setName("registers");
+  llvm::Value * arrays_arg = &*arg_it++;
+  arrays_arg->setName("arrays");
+  llvm::Value * array_sizes_arg = &*arg_it++;
+  array_sizes_arg->setName("array_sizes");
   llvm::Value * temps_arg = &*arg_it++;
   temps_arg->setName("temps");
   llvm::Value * sample_rate_arg = &*arg_it++;
@@ -147,7 +153,10 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
     builder.CreateStore(value, gep_f64(temps_arg, index));
   };
 
-  llvm::Function * llvm_sin = llvm::Intrinsic::getDeclaration(module.get(), llvm::Intrinsic::sin, {f64_ty});
+  llvm::FunctionCallee llvm_sin = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::sin, {f64_ty});
+  llvm::FunctionCallee llvm_fmod = module->getOrInsertFunction(
+    "fmod",
+    llvm::FunctionType::get(f64_ty, {f64_ty, f64_ty}, false));
 
   for (const auto & instr : program.instructions)
   {
@@ -169,6 +178,49 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       case NumericOp::SampleIndex:
         result = builder.CreateSIToFP(sample_index_arg, f64_ty);
         break;
+      case NumericOp::Not:
+      {
+        llvm::Value * value = load_temp(instr.src_a);
+        llvm::Value * truthy = builder.CreateFCmpUNE(value, llvm::ConstantFP::get(f64_ty, 0.0));
+        result = builder.CreateSelect(truthy, llvm::ConstantFP::get(f64_ty, 0.0), llvm::ConstantFP::get(f64_ty, 1.0));
+        break;
+      }
+      case NumericOp::Less:
+      {
+        llvm::Value * cmp = builder.CreateFCmpOLT(load_temp(instr.src_a), load_temp(instr.src_b));
+        result = builder.CreateUIToFP(cmp, f64_ty);
+        break;
+      }
+      case NumericOp::LessEqual:
+      {
+        llvm::Value * cmp = builder.CreateFCmpOLE(load_temp(instr.src_a), load_temp(instr.src_b));
+        result = builder.CreateUIToFP(cmp, f64_ty);
+        break;
+      }
+      case NumericOp::Greater:
+      {
+        llvm::Value * cmp = builder.CreateFCmpOGT(load_temp(instr.src_a), load_temp(instr.src_b));
+        result = builder.CreateUIToFP(cmp, f64_ty);
+        break;
+      }
+      case NumericOp::GreaterEqual:
+      {
+        llvm::Value * cmp = builder.CreateFCmpOGE(load_temp(instr.src_a), load_temp(instr.src_b));
+        result = builder.CreateUIToFP(cmp, f64_ty);
+        break;
+      }
+      case NumericOp::Equal:
+      {
+        llvm::Value * cmp = builder.CreateFCmpOEQ(load_temp(instr.src_a), load_temp(instr.src_b));
+        result = builder.CreateUIToFP(cmp, f64_ty);
+        break;
+      }
+      case NumericOp::NotEqual:
+      {
+        llvm::Value * cmp = builder.CreateFCmpUNE(load_temp(instr.src_a), load_temp(instr.src_b));
+        result = builder.CreateUIToFP(cmp, f64_ty);
+        break;
+      }
       case NumericOp::Add:
         result = builder.CreateFAdd(load_temp(instr.src_a), load_temp(instr.src_b));
         break;
@@ -187,12 +239,95 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         result = builder.CreateSelect(is_zero, llvm::ConstantFP::get(f64_ty, 0.0), div_value);
         break;
       }
+      case NumericOp::Mod:
+      {
+        llvm::Value * lhs = load_temp(instr.src_a);
+        llvm::Value * rhs = load_temp(instr.src_b);
+        llvm::Value * is_zero = builder.CreateFCmpOEQ(rhs, llvm::ConstantFP::get(f64_ty, 0.0));
+        llvm::Value * mod_value = builder.CreateCall(llvm_fmod, {lhs, rhs});
+        result = builder.CreateSelect(is_zero, llvm::ConstantFP::get(f64_ty, 0.0), mod_value);
+        break;
+      }
+      case NumericOp::FloorDiv:
+      {
+        llvm::Value * lhs = load_temp(instr.src_a);
+        llvm::Value * rhs = load_temp(instr.src_b);
+        llvm::Value * is_zero = builder.CreateFCmpOEQ(rhs, llvm::ConstantFP::get(f64_ty, 0.0));
+        llvm::Value * div_value = builder.CreateFDiv(lhs, rhs);
+        llvm::Value * floor_value = builder.CreateUnaryIntrinsic(llvm::Intrinsic::floor, div_value);
+        result = builder.CreateSelect(is_zero, llvm::ConstantFP::get(f64_ty, 0.0), floor_value);
+        break;
+      }
+      case NumericOp::BitAnd:
+      {
+        llvm::Value * lhs = builder.CreateFPToSI(load_temp(instr.src_a), i64_ty);
+        llvm::Value * rhs = builder.CreateFPToSI(load_temp(instr.src_b), i64_ty);
+        result = builder.CreateSIToFP(builder.CreateAnd(lhs, rhs), f64_ty);
+        break;
+      }
+      case NumericOp::BitOr:
+      {
+        llvm::Value * lhs = builder.CreateFPToSI(load_temp(instr.src_a), i64_ty);
+        llvm::Value * rhs = builder.CreateFPToSI(load_temp(instr.src_b), i64_ty);
+        result = builder.CreateSIToFP(builder.CreateOr(lhs, rhs), f64_ty);
+        break;
+      }
+      case NumericOp::BitXor:
+      {
+        llvm::Value * lhs = builder.CreateFPToSI(load_temp(instr.src_a), i64_ty);
+        llvm::Value * rhs = builder.CreateFPToSI(load_temp(instr.src_b), i64_ty);
+        result = builder.CreateSIToFP(builder.CreateXor(lhs, rhs), f64_ty);
+        break;
+      }
+      case NumericOp::LShift:
+      case NumericOp::RShift:
+      {
+        llvm::Value * lhs = builder.CreateFPToSI(load_temp(instr.src_a), i64_ty);
+        llvm::Value * shift_raw = builder.CreateFPToSI(load_temp(instr.src_b), i64_ty);
+        llvm::Value * shift_non_negative = builder.CreateSelect(
+          builder.CreateICmpSLT(shift_raw, builder.getInt64(0)),
+          builder.getInt64(0),
+          shift_raw);
+        llvm::Value * shift_clamped = builder.CreateSelect(
+          builder.CreateICmpSGT(shift_non_negative, builder.getInt64(63)),
+          builder.getInt64(63),
+          shift_non_negative);
+        llvm::Value * shift_amount = shift_clamped;
+        llvm::Value * shifted = instr.op == NumericOp::LShift
+                                  ? builder.CreateShl(lhs, shift_amount)
+                                  : builder.CreateAShr(lhs, shift_amount);
+        result = builder.CreateSIToFP(shifted, f64_ty);
+        break;
+      }
+      case NumericOp::IndexArray:
+      {
+        llvm::Value * array_slot_ptr = builder.CreateInBoundsGEP(i64_ty, array_sizes_arg, builder.getInt64(instr.slot_id));
+        llvm::Value * array_size = builder.CreateLoad(i64_ty, array_slot_ptr);
+
+        llvm::Value * raw_index = builder.CreateFPToSI(load_temp(instr.src_a), i64_ty);
+        llvm::Value * is_negative = builder.CreateICmpSLT(raw_index, builder.getInt64(0));
+        llvm::Value * in_range_upper = builder.CreateICmpULT(raw_index, array_size);
+        llvm::Value * in_range = builder.CreateAnd(builder.CreateNot(is_negative), in_range_upper);
+
+        llvm::Value * array_ptr_slot = builder.CreateInBoundsGEP(f64_ptr_ty, arrays_arg, builder.getInt64(instr.slot_id));
+        llvm::Value * array_ptr = builder.CreateLoad(f64_ptr_ty, array_ptr_slot);
+        llvm::Value * elem_ptr = builder.CreateInBoundsGEP(f64_ty, array_ptr, raw_index);
+        llvm::Value * elem_value = builder.CreateLoad(f64_ty, elem_ptr);
+        result = builder.CreateSelect(in_range, elem_value, llvm::ConstantFP::get(f64_ty, 0.0));
+        break;
+      }
       case NumericOp::Sin:
         result = builder.CreateCall(llvm_sin, {load_temp(instr.src_a)});
         break;
       case NumericOp::Neg:
         result = builder.CreateFNeg(load_temp(instr.src_a));
         break;
+      case NumericOp::BitNot:
+      {
+        llvm::Value * value = builder.CreateFPToSI(load_temp(instr.src_a), i64_ty);
+        result = builder.CreateSIToFP(builder.CreateNot(value), f64_ty);
+        break;
+      }
     }
 
     if (!result)
