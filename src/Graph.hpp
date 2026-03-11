@@ -94,62 +94,168 @@ class Graph
 
       RuntimeState & runtime = runtimes_[runtime_index];
 
-      for (unsigned int sample = 0; sample < bufferLength_; ++sample)
+      bool used_graph_jit = false;
+#ifdef EGRESS_LLVM_ORC_JIT
+      if (runtime.graph_jit_executable && runtime.graph_jit_single_udm && runtime.graph_jit_single_udm_kernel)
       {
-        for (auto & slot : runtime.modules)
+        const uint32_t * output_targets_ptr = runtime.graph_jit_udm_output_targets.empty()
+                                        ? nullptr
+                                        : runtime.graph_jit_udm_output_targets.data();
+        const uint32_t * mix_output_ids_ptr = runtime.graph_jit_udm_mix_output_ids.empty()
+                                        ? nullptr
+                                        : runtime.graph_jit_udm_mix_output_ids.data();
+        runtime.graph_jit_single_udm_kernel(
+          outputBuffer.data(),
+          static_cast<uint64_t>(bufferLength_),
+          runtime.graph_jit_udm_kernel_addr,
+          runtime.graph_jit_udm_inputs.data(),
+          runtime.graph_jit_udm_registers_ptr,
+          runtime.graph_jit_udm_next_registers_ptr,
+          runtime.graph_jit_udm_arrays_ptr,
+          runtime.graph_jit_udm_array_sizes_ptr,
+          runtime.graph_jit_udm_temps_ptr,
+          runtime.graph_jit_udm_register_targets.data(),
+          static_cast<uint64_t>(runtime.graph_jit_udm_register_targets.size()),
+          output_targets_ptr,
+          static_cast<uint64_t>(runtime.graph_jit_udm_output_targets.size()),
+          runtime.graph_jit_udm_temp_count,
+          mix_output_ids_ptr,
+          static_cast<uint64_t>(runtime.graph_jit_udm_mix_output_ids.size()),
+          runtime.graph_jit_udm_sample_rate,
+          runtime.graph_jit_udm_sample_index_ptr);
+        used_graph_jit = true;
+      }
+      else if (runtime.graph_jit_executable && runtime.graph_jit_direct_udm)
+      {
+        for (unsigned int sample = 0; sample < bufferLength_; ++sample)
         {
-          if (!slot.module)
+          for (auto & slot : runtime.modules)
           {
-            continue;
-          }
+            if (!slot.module)
+            {
+              continue;
+            }
 
 #ifdef EGRESS_PROFILE
-          const auto module_start = std::chrono::steady_clock::now();
+            const auto module_start = std::chrono::steady_clock::now();
 #endif
 
-          eval_input_program(runtime, slot.input_program, slot.input_registers, slot.module->inputs);
+            eval_input_program(runtime, slot.input_program, slot.input_registers, slot.module->inputs);
 
-          slot.module->process();
+            if (!slot.module->process_graph_jit_step())
+            {
+              slot.module->process();
+            }
 
 #ifdef EGRESS_PROFILE
-          const auto module_end = std::chrono::steady_clock::now();
-          const uint64_t module_ns = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(module_end - module_start).count());
-          auto & stats = local_module_stats[slot.name];
-          ++stats.call_count;
-          stats.total_ns += module_ns;
-          if (module_ns > stats.max_ns)
-          {
-            stats.max_ns = module_ns;
-          }
+            const auto module_end = std::chrono::steady_clock::now();
+            const uint64_t module_ns = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(module_end - module_start).count());
+            auto & stats = local_module_stats[slot.name];
+            ++stats.call_count;
+            stats.total_ns += module_ns;
+            if (module_ns > stats.max_ns)
+            {
+              stats.max_ns = module_ns;
+            }
 #endif
+          }
+
+          double mixed = 0.0;
+          for (const auto & tap : runtime.mix)
+          {
+            if (tap.module_id >= runtime.modules.size())
+            {
+              continue;
+            }
+
+            const auto & slot = runtime.modules[tap.module_id];
+            if (tap.output_id >= slot.module->outputs.size())
+            {
+              continue;
+            }
+
+            mixed += slot.module->outputs[tap.output_id] / 20.0;
+          }
+          outputBuffer[sample] = mixed;
+
+          for (auto & slot : runtime.modules)
+          {
+            if (!slot.module)
+            {
+              continue;
+            }
+            slot.module->prev_outputs.swap(slot.module->outputs);
+          }
         }
+        used_graph_jit = true;
+      }
+      else if (runtime.graph_jit_executable && runtime.graph_jit_kernel)
+      {
+        runtime.graph_jit_kernel(outputBuffer.data(), static_cast<uint64_t>(bufferLength_));
+        used_graph_jit = true;
+      }
+#endif
 
-        double mixed = 0.0;
-        for (const auto & tap : runtime.mix)
+      if (!used_graph_jit)
+      {
+        for (unsigned int sample = 0; sample < bufferLength_; ++sample)
         {
-          if (tap.module_id >= runtime.modules.size())
+          for (auto & slot : runtime.modules)
           {
-            continue;
+            if (!slot.module)
+            {
+              continue;
+            }
+
+#ifdef EGRESS_PROFILE
+            const auto module_start = std::chrono::steady_clock::now();
+#endif
+
+            eval_input_program(runtime, slot.input_program, slot.input_registers, slot.module->inputs);
+
+            slot.module->process();
+
+#ifdef EGRESS_PROFILE
+            const auto module_end = std::chrono::steady_clock::now();
+            const uint64_t module_ns = static_cast<uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(module_end - module_start).count());
+            auto & stats = local_module_stats[slot.name];
+            ++stats.call_count;
+            stats.total_ns += module_ns;
+            if (module_ns > stats.max_ns)
+            {
+              stats.max_ns = module_ns;
+            }
+#endif
           }
 
-          const auto & slot = runtime.modules[tap.module_id];
-          if (tap.output_id >= slot.module->outputs.size())
+          double mixed = 0.0;
+          for (const auto & tap : runtime.mix)
           {
-            continue;
+            if (tap.module_id >= runtime.modules.size())
+            {
+              continue;
+            }
+
+            const auto & slot = runtime.modules[tap.module_id];
+            if (tap.output_id >= slot.module->outputs.size())
+            {
+              continue;
+            }
+
+            mixed += slot.module->outputs[tap.output_id] / 20.0;
           }
+          outputBuffer[sample] = mixed;
 
-          mixed += slot.module->outputs[tap.output_id] / 20.0;
-        }
-        outputBuffer[sample] = mixed;
-
-        for (auto & slot : runtime.modules)
-        {
-          if (!slot.module)
+          for (auto & slot : runtime.modules)
           {
-            continue;
+            if (!slot.module)
+            {
+              continue;
+            }
+            slot.module->prev_outputs.swap(slot.module->outputs);
           }
-          slot.module->prev_outputs.swap(slot.module->outputs);
         }
       }
 
@@ -218,6 +324,16 @@ class Graph
       module_profile_stats_.clear();
 #endif
     }
+
+  std::string graph_jit_status() const
+  {
+#ifdef EGRESS_LLVM_ORC_JIT
+    const uint32_t runtime_index = active_runtime_index_.load(std::memory_order_acquire);
+    return runtimes_[runtime_index].graph_jit_status;
+#else
+    return "graph JIT disabled (build flag off)";
+#endif
+  }
 
     bool addModule(std::string name, mPtr new_module)
     {
@@ -506,6 +622,28 @@ class Graph
       std::vector<ModuleSlot> modules;
       std::unordered_map<std::string, uint32_t> name_to_id;
       std::vector<MixTap> mix;
+#ifdef EGRESS_LLVM_ORC_JIT
+      egress_jit::GraphKernelFn graph_jit_kernel = nullptr;
+  egress_jit::SingleUdmGraphKernelFn graph_jit_single_udm_kernel = nullptr;
+      bool graph_jit_executable = false;
+      bool graph_jit_candidate = false;
+  bool graph_jit_direct_udm = false;
+  bool graph_jit_single_udm = false;
+  uint64_t graph_jit_udm_kernel_addr = 0;
+  const double * const * graph_jit_udm_arrays_ptr = nullptr;
+  const uint64_t * graph_jit_udm_array_sizes_ptr = nullptr;
+  double * graph_jit_udm_registers_ptr = nullptr;
+  double * graph_jit_udm_next_registers_ptr = nullptr;
+  double * graph_jit_udm_temps_ptr = nullptr;
+  uint64_t * graph_jit_udm_sample_index_ptr = nullptr;
+  double graph_jit_udm_sample_rate = 44100.0;
+  std::vector<double> graph_jit_udm_inputs;
+  std::vector<int32_t> graph_jit_udm_register_targets;
+  std::vector<uint32_t> graph_jit_udm_output_targets;
+  std::vector<uint32_t> graph_jit_udm_mix_output_ids;
+  uint64_t graph_jit_udm_temp_count = 0;
+      std::string graph_jit_status;
+#endif
     };
 
 #ifdef EGRESS_PROFILE
@@ -987,8 +1125,126 @@ class Graph
         runtime.mix.push_back(MixTap{module_id, tap.second});
       }
 
+#ifdef EGRESS_LLVM_ORC_JIT
+      initialize_runtime_graph_jit(runtime);
+#endif
+
       return runtime;
     }
+
+#ifdef EGRESS_LLVM_ORC_JIT
+    void initialize_runtime_graph_jit(RuntimeState & runtime) const
+    {
+      auto & jit = egress_jit::OrcJitEngine::instance();
+      if (!jit.available())
+      {
+        runtime.graph_jit_status = jit.init_error();
+        return;
+      }
+
+      for (const auto & slot : runtime.modules)
+      {
+        if (!slot.module || !slot.module->supports_graph_jit_candidate())
+        {
+          runtime.graph_jit_status = "graph contains non-JIT-capable modules";
+          return;
+        }
+      }
+
+      runtime.graph_jit_candidate = true;
+
+      if (!runtime.modules.empty())
+      {
+        constexpr bool kEnableExperimentalSingleUdmGraphKernel = false;
+        if (kEnableExperimentalSingleUdmGraphKernel && runtime.modules.size() == 1)
+        {
+          Module * mod = runtime.modules[0].module.get();
+          if (mod && !input_program_has_ref(runtime.modules[0].input_program))
+          {
+            auto single_kernel_or_err = jit.compile_single_udm_graph_kernel("egress_graph_single_udm");
+            if (single_kernel_or_err)
+            {
+              eval_input_program(
+                runtime,
+                runtime.modules[0].input_program,
+                runtime.modules[0].input_registers,
+                runtime.modules[0].module->inputs);
+
+              const uint64_t module_kernel_addr = mod->graph_jit_numeric_kernel_addr();
+              if (module_kernel_addr != 0)
+              {
+                const uint64_t temp_count = mod->graph_jit_temp_count();
+                const auto & reg_targets = mod->graph_jit_register_targets();
+                const auto & out_targets = mod->graph_jit_output_targets();
+
+                runtime.graph_jit_single_udm_kernel = *single_kernel_or_err;
+                runtime.graph_jit_udm_kernel_addr = module_kernel_addr;
+                runtime.graph_jit_udm_arrays_ptr = mod->graph_jit_array_ptr_table();
+                runtime.graph_jit_udm_array_sizes_ptr = mod->graph_jit_array_sizes();
+                runtime.graph_jit_udm_registers_ptr = mod->graph_jit_registers_mut();
+                runtime.graph_jit_udm_next_registers_ptr = mod->graph_jit_next_registers_mut();
+                runtime.graph_jit_udm_temps_ptr = mod->graph_jit_temps_mut();
+                runtime.graph_jit_udm_sample_index_ptr = mod->graph_jit_sample_index_mut();
+                runtime.graph_jit_udm_sample_rate = mod->graph_jit_sample_rate();
+                runtime.graph_jit_udm_inputs.assign(runtime.modules[0].module->inputs.begin(), runtime.modules[0].module->inputs.end());
+                runtime.graph_jit_udm_register_targets = reg_targets;
+                runtime.graph_jit_udm_output_targets = out_targets;
+                runtime.graph_jit_udm_mix_output_ids.clear();
+                for (const auto & tap : runtime.mix)
+                {
+                  runtime.graph_jit_udm_mix_output_ids.push_back(static_cast<uint32_t>(tap.output_id));
+                }
+                runtime.graph_jit_udm_temp_count = temp_count;
+
+                if (runtime.graph_jit_udm_registers_ptr == nullptr ||
+                    runtime.graph_jit_udm_next_registers_ptr == nullptr ||
+                    runtime.graph_jit_udm_temps_ptr == nullptr ||
+                    runtime.graph_jit_udm_sample_index_ptr == nullptr)
+                {
+                  runtime.graph_jit_status = "single-UDM fused kernel unavailable (null module state pointers)";
+                }
+                else if (runtime.graph_jit_udm_temp_count == 0)
+                {
+                  runtime.graph_jit_status = "single-UDM fused kernel unavailable (empty temp state)";
+                }
+                else if (runtime.graph_jit_udm_register_targets.size() > runtime.graph_jit_udm_temp_count)
+                {
+                  runtime.graph_jit_status = "single-UDM fused kernel unavailable (register targets exceed temp state)";
+                }
+                else
+                {
+                  runtime.graph_jit_executable = true;
+                  runtime.graph_jit_single_udm = true;
+                  runtime.graph_jit_status = "graph fused single-UDM kernel active";
+                  return;
+                }
+              }
+              else
+              {
+                runtime.graph_jit_status = "single-UDM fused kernel unavailable (module numeric kernel missing)";
+              }
+            }
+          }
+        }
+
+        runtime.graph_jit_executable = true;
+        runtime.graph_jit_direct_udm = true;
+        runtime.graph_jit_status = "graph direct-JIT scheduler active";
+        return;
+      }
+
+      auto kernel_or_err = jit.compile_graph_stub("egress_graph_kernel");
+      if (!kernel_or_err)
+      {
+        runtime.graph_jit_status = llvm::toString(kernel_or_err.takeError());
+        return;
+      }
+
+      runtime.graph_jit_kernel = *kernel_or_err;
+      runtime.graph_jit_executable = true;
+      runtime.graph_jit_status = "graph JIT active (empty-graph stub)";
+    }
+#endif
 
     void rebuild_and_publish_runtime_locked()
     {
@@ -1395,6 +1651,20 @@ class Graph
       }
     }
 
+#ifdef EGRESS_LLVM_ORC_JIT
+    static bool input_program_has_ref(const CompiledInputProgram & program)
+    {
+      for (const auto & instr : program.instructions)
+      {
+        if (instr.opcode == OpCode::Ref)
+        {
+          return true;
+        }
+      }
+      return false;
+    }
+#endif
+
     unsigned int bufferLength_ = 0;
 
     std::array<RuntimeState, 2> runtimes_;
@@ -1441,6 +1711,48 @@ class UserDefinedModule : public Module
 
     void process() override
     {
+      if (process_numeric_jit_step())
+      {
+        return;
+      }
+
+#ifdef EGRESS_LLVM_ORC_JIT
+      // If JIT is enabled but the program is incompatible, fall back to interpreter below.
+#endif
+
+      eval_program(program_, temps_);
+
+      for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
+      {
+        outputs[output_id] = expr::to_float64(temps_[program_.output_targets[output_id]]);
+      }
+
+      for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
+      {
+        const int32_t target = program_.register_targets[register_id];
+        if (target >= 0)
+        {
+          next_registers_[register_id] = temps_[static_cast<std::size_t>(target)];
+        }
+        else
+        {
+          next_registers_[register_id] = registers_[register_id];
+        }
+      }
+
+      registers_.swap(next_registers_);
+      ++sample_index_;
+      Module::postprocess();
+    }
+
+    bool process_graph_jit_step() override
+    {
+      return process_numeric_jit_step();
+    }
+
+  private:
+    bool process_numeric_jit_step()
+    {
 #ifdef EGRESS_LLVM_ORC_JIT
       if (jit_kernel_)
       {
@@ -1474,33 +1786,11 @@ class UserDefinedModule : public Module
         numeric_registers_.swap(numeric_next_registers_);
         ++sample_index_;
         Module::postprocess();
-        return;
+        return true;
       }
 #endif
 
-      eval_program(program_, temps_);
-
-      for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
-      {
-        outputs[output_id] = expr::to_float64(temps_[program_.output_targets[output_id]]);
-      }
-
-      for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
-      {
-        const int32_t target = program_.register_targets[register_id];
-        if (target >= 0)
-        {
-          next_registers_[register_id] = temps_[static_cast<std::size_t>(target)];
-        }
-        else
-        {
-          next_registers_[register_id] = registers_[register_id];
-        }
-      }
-
-      registers_.swap(next_registers_);
-      ++sample_index_;
-      Module::postprocess();
+      return false;
     }
 
     unsigned int input_count() const
@@ -1517,6 +1807,72 @@ class UserDefinedModule : public Module
     {
       return static_cast<unsigned int>(registers_.size());
     }
+
+    bool supports_graph_jit_candidate() const override
+    {
+#ifdef EGRESS_LLVM_ORC_JIT
+      return true;
+#else
+      return false;
+#endif
+    }
+
+#ifdef EGRESS_LLVM_ORC_JIT
+    uint64_t graph_jit_numeric_kernel_addr() const override
+    {
+      return reinterpret_cast<uint64_t>(jit_kernel_);
+    }
+
+    const double * const * graph_jit_array_ptr_table() const override
+    {
+      return numeric_array_ptrs_.data();
+    }
+
+    const uint64_t * graph_jit_array_sizes() const override
+    {
+      return numeric_array_sizes_.data();
+    }
+
+    double * graph_jit_registers_mut() override
+    {
+      return numeric_registers_.data();
+    }
+
+    double * graph_jit_next_registers_mut() override
+    {
+      return numeric_next_registers_.data();
+    }
+
+    double * graph_jit_temps_mut() override
+    {
+      return numeric_temps_.data();
+    }
+
+    uint64_t * graph_jit_sample_index_mut() override
+    {
+      return &sample_index_;
+    }
+
+    double graph_jit_sample_rate() const override
+    {
+      return sample_rate_;
+    }
+
+    const std::vector<int32_t> & graph_jit_register_targets() const override
+    {
+      return program_.register_targets;
+    }
+
+    const std::vector<uint32_t> & graph_jit_output_targets() const override
+    {
+      return program_.output_targets;
+    }
+
+    uint64_t graph_jit_temp_count() const override
+    {
+      return static_cast<uint64_t>(numeric_temps_.size());
+    }
+#endif
 
   private:
     struct Instr

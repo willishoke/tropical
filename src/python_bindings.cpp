@@ -118,6 +118,11 @@ class PythonGraph
       graph_.reset_profile_stats();
     }
 
+    std::string graph_jit_status() const
+    {
+      return graph_.graph_jit_status();
+    }
+
     std::string next_name(const std::string & prefix)
     {
       const auto id = ++name_counters_[prefix];
@@ -1339,7 +1344,8 @@ PYBIND11_MODULE(egress, m)
     .def("process", &PythonGraph::process)
     .def("output_buffer", &PythonGraph::output_buffer)
     .def("profile_stats", &PythonGraph::profile_stats)
-    .def("reset_profile_stats", &PythonGraph::reset_profile_stats);
+    .def("reset_profile_stats", &PythonGraph::reset_profile_stats)
+    .def("graph_jit_status", &PythonGraph::graph_jit_status);
 
   m.def("graph", []() -> PythonGraph & { return default_graph(); }, py::return_value_policy::reference);
 

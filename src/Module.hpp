@@ -1,4 +1,5 @@
 #include <math.h>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,76 @@ class Module
     }
 
     virtual void process() = 0;
+
+    // Indicates whether a module can participate in graph-level JIT compilation.
+    virtual bool supports_graph_jit_candidate() const
+    {
+      return false;
+    }
+
+    // Runs a single-sample fast-path step used by graph-level JIT scheduling.
+    // Returns true if the step was handled, false to request normal process().
+    virtual bool process_graph_jit_step()
+    {
+      return false;
+    }
+
+    virtual uint64_t graph_jit_numeric_kernel_addr() const
+    {
+      return 0;
+    }
+
+    virtual const double * const * graph_jit_array_ptr_table() const
+    {
+      return nullptr;
+    }
+
+    virtual const uint64_t * graph_jit_array_sizes() const
+    {
+      return nullptr;
+    }
+
+    virtual double * graph_jit_registers_mut()
+    {
+      return nullptr;
+    }
+
+    virtual double * graph_jit_next_registers_mut()
+    {
+      return nullptr;
+    }
+
+    virtual double * graph_jit_temps_mut()
+    {
+      return nullptr;
+    }
+
+    virtual uint64_t * graph_jit_sample_index_mut()
+    {
+      return nullptr;
+    }
+
+    virtual double graph_jit_sample_rate() const
+    {
+      return 44100.0;
+    }
+
+    virtual const std::vector<int32_t> & graph_jit_register_targets() const
+    {
+      static const std::vector<int32_t> empty;
+      return empty;
+    }
+
+    virtual const std::vector<uint32_t> & graph_jit_output_targets() const
+    {
+      static const std::vector<uint32_t> empty;
+      return empty;
+    }
+
+    virtual uint64_t graph_jit_temp_count() const
+    {
+      return 0;
+    }
 
     void postprocess()
     {
