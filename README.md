@@ -4,7 +4,7 @@
 
 ## Intro
 
-`egress` is a an object-oriented C++ library for realtime emulation of analog synthesis. It is built to be lean, efficient, and portable, although it is currently only tested on MacOS. No external libraries are required. Sample rates down to 64 samples / second have been tested. Sample implementations are provided for voltage controlled oscillators (`VCO`), four-quadrant multipliers (`VCA`), and two-way analog multiplexers (`MUX`). A full suite of tests demonstrates functionality of each of the modules, showing waveform outputs for each of the VCO outputs and demonstrating basic exponential FM and linear AM.
+`egress` is a C++ library with a Python frontend for realtime signal-graph synthesis. The current Python API is centered on user-defined modules: you describe a module in Python by returning symbolic output expressions and next-register values, and `egress` evaluates that graph sample-by-sample. It is built to be lean and portable, although it is currently only tested on macOS.
 
 ![demo](./img/testchaos.png)
 
@@ -31,13 +31,24 @@ Then import from Python:
 ```python
 import egress as eg
 
-osc = eg.VCO(440)
-mod = eg.VCO(20)
-osc.fm = mod.sin
-osc.fm_index = 3.0
-osc.fm = 0.3 * mod.sin + 0.2
-osc.fm += 0.1 * mod.saw
-eg.add_output(osc.sin)
+Osc = eg.define_module(
+    name="Osc",
+    inputs=["freq", "amp"],
+    outputs=["out"],
+    regs={},
+    process=lambda inp, reg: (
+        {
+            "out": inp["amp"]
+            * eg.sin(6.283185307179586 * eg.sample_index() * inp["freq"] / eg.sample_rate())
+        },
+        {},
+    ),
+)
+
+osc = Osc()
+osc.freq = 440.0
+osc.amp = 5.0
+eg.add_output(osc.out)
 dac = eg.DAC(sample_rate=44100, channels=2)
 
 dac.start()
@@ -45,18 +56,7 @@ dac.start()
 dac.stop()
 ```
 
-Python uses a single process-wide default graph. Module constructors auto-register into that graph:
-- `VCO(freq_hz)`
-- `MUX()`
-- `VCA()`
-- `ENV(rise_ms, fall_ms)`
-- `DELAY(buffer_size_samples)`
-- `CONST(value)`
-- `LOWPASS(freq, res=0.707)`
-- `HIGHPASS(freq, res=0.707)`
-- `BANDPASS(freq, res=0.707)`
-- `NOTCH(freq, res=0.707)`
-- `ALLPASS(freq, res=0.707)`
+Python uses a single process-wide default graph. Module instances auto-register into that graph when they are created.
 
 Lifecycle methods:
 - `connect(output_port, input_port)`
@@ -71,12 +71,12 @@ Input assignment shortcuts:
 - `module.input += expr`
 - `module.input = None` clears that input's current routing
 
-Stateful user-defined modules can be declared from Python by returning output expressions and next-register expressions from a pure definition function:
+User-defined modules can be declared from Python by returning output expressions and next-register expressions from a pure definition function:
 
 ```python
 import egress as eg
 
-Delay1 = eg.define_stateful_module(
+Delay1 = eg.define_module(
     name="Delay1",
     inputs=["input"],
     outputs=["output"],
@@ -96,10 +96,12 @@ eg.add_output(delay.output)
 
 Expression trees now preserve simple scalar types: `bool`, `int`, and `float`. Arithmetic follows Python-style numeric promotion for those scalar types, so `3 + 3.0` produces a floating-point result. Comparisons return symbolic booleans that render as `1.0` / `0.0` when fed into module inputs or outputs. Python's `not` operator is not overloadable for symbolic expressions, so use `eg.logical_not(expr)` instead.
 
-Stateful module registers may also hold static 1-D arrays of scalar values. Use Python lists / tuples for register initialization and `eg.array([...])` when constructing a new array expression inside `process`. Arithmetic between arrays and scalars broadcasts elementwise, and array indexing is explicit:
+Exponentiation is now a first-class symbolic operation as well. Use either `lhs ** rhs` or `eg.pow(lhs, rhs)` inside pure functions and module definitions.
+
+Module registers may also hold static 1-D arrays of scalar values. Use Python lists / tuples for register initialization and `eg.array([...])` when constructing a new array expression inside `process`. Arithmetic between arrays and scalars broadcasts elementwise, and array indexing is explicit:
 
 ```python
-Shift = eg.define_stateful_module(
+Shift = eg.define_module(
     name="Shift",
     inputs=["input"],
     outputs=["tap"],
@@ -111,15 +113,19 @@ Shift = eg.define_stateful_module(
 )
 ```
 
-Arrays are currently limited to stateful-module expressions and registers. Graph ports and ordinary module inputs/outputs remain scalar.
+Arrays are currently limited to module expressions and registers. Graph inputs and outputs remain scalar.
 
-You can also collect reusable user-defined modules in ordinary Python source files. For example, [`module_library.py`](/Users/willishoke/egress/module_library.py) defines a 16-stage phaser:
+You can also collect reusable user-defined modules in ordinary Python source files. For example, [module_library.py](/Users/willishoke/egress/module_library.py) defines a polyBLEP-style VCO plus both compact and 16-stage phasers:
 
 ```python
 import egress as eg
 import module_library as modlib
 
-osc = eg.VCO(220.0)
+Osc = modlib.vco()
+osc = Osc()
+osc.freq = 220.0
+osc.fm = 0.0
+osc.fm_index = 5.0
 Phaser16 = modlib.phaser16()
 phaser = Phaser16()
 phaser.input = osc.sin
@@ -141,70 +147,7 @@ Realtime output methods:
 
 `Graph` stores modules, per-input expression trees, output taps, and the output buffer. Each input is represented by a single expression tree whose leaves are literals or references to module outputs. `Graph::process()` evaluates those input expressions sample-by-sample, processes modules in dependency order, and mixes selected outputs into the output buffer. Since evaluation and processing proceed sequentially, the latency between connected modules is a single sample.
 
-## Modules
-
-`Module` is a base class that manages inputs, outputs, and postprocessing. Each time a module has finished processing, it should invoke the base class `postprocess` method to reset to default input values. All outputs are clipped to the range [-10.0, 10.0]. It is assumed that most signals are bipolar and in range [-5.0, 5.0]. Each subclass of `Module` should declare an enumeration specifying its inputs and outputs.
-
-### VCO
-#### A voltage controlled saw-core FM oscillator
-
-`VCO` is a standard oscillator, with outputs for `saw`, `tri`, `sin`, and `sqr` waves. The oscillator follows the typical 1V / octave standard, so a value of `1.0` present at the `FM` input will result in a tone exactly 1 octave above the fundamental. An optional `FM_INDEX` parameter allows dynamic scaling of FM values. The constructor for `VCO` takes a single value specifying the intial frequency. All tests were run with a wave at 440hz for 2048 samples.
-
-Inputs: `FM`, `FM_INDEX`
-
-Outputs: 
-
-`SIN`
-
-![sine](./img/testsin.png)
-
-`SQR`
-
-![square](./img/testsqr.png)
-
-`SAW`
-
-![sawtooth](./img/testsaw.png)
-
-`TRI`
-
-![triangle](./img/testtri.png)
-
-#### Frequency Modulation
-
-FM was tested with a base freqency of 1000hz, a modulation frequency of 200hz, and an FM index of 3.
-
-![fm](./img/testfm.png)
-
-
-### VCA
-#### Voltage controlled amplifier
-
-`VCA` takes two inputs, `IN1` and `IN2`, and outputs `OUT`. The output voltage is downscaled by a factor of 5 to accomodate +/-5V control signals.
-
-Amplitude modulation was tested with a base frequency of 1000hz and a modulation frequency of 200hz at 2048 samples.
-
-![vca](./img/testam.png)
-
-
-### MUX
-#### Voltage controlled analog multiplexer
-
-`MUX` takes three inputs, `IN1`, `IN2`, and `CTRL`. The input presented at `OUT1` is chosen based on the polarity of the control signal.
-
-`MUX` was tested by generating three waveforms, one at 1000hz, one at 2000hz, and a third at 100hz. The third waveform was used as the control input to switch between the two outputs.
-
-![MUX](./img/testmux.png)
-
-
-### CONST
-#### Constant value
-
-`CONST` takes no inputs. It can be used to provide an offset value -- i.e., for changing an FM modulation index.
-
-
-### DELAY
-#### Under development
+Modules expose named inputs and outputs plus an optional register bank. After each sample, the runtime applies the register updates returned by `process(...)` and resets inputs to their default values for the next sample. Output signals are clipped to the range `[-10.0, 10.0]`; in practice most patches are expected to stay in the bipolar `[-5.0, 5.0]` range.
 
 ## Testing
 

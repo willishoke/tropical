@@ -154,6 +154,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
   };
 
   llvm::FunctionCallee llvm_sin = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::sin, {f64_ty});
+  llvm::FunctionCallee llvm_pow = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::pow, {f64_ty});
   llvm::FunctionCallee llvm_fmod = module->getOrInsertFunction(
     "fmod",
     llvm::FunctionType::get(f64_ty, {f64_ty, f64_ty}, false));
@@ -239,6 +240,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         result = builder.CreateSelect(is_zero, llvm::ConstantFP::get(f64_ty, 0.0), div_value);
         break;
       }
+      case NumericOp::Pow:
+        result = builder.CreateCall(llvm_pow, {load_temp(instr.src_a), load_temp(instr.src_b)});
+        break;
       case NumericOp::Mod:
       {
         llvm::Value * lhs = load_temp(instr.src_a);

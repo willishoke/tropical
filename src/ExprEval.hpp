@@ -63,6 +63,13 @@ inline expr::Value div_values(const expr::Value & lhs, const expr::Value & rhs)
   });
 }
 
+inline expr::Value pow_values(const expr::Value & lhs, const expr::Value & rhs)
+{
+  return expr::map_binary(lhs, rhs, [](const expr::Value & left, const expr::Value & right) {
+    return expr::float_value(std::pow(expr::to_float64(left), expr::to_float64(right)));
+  });
+}
+
 inline expr::Value mod_values(const expr::Value & lhs, const expr::Value & rhs)
 {
   return expr::map_binary(lhs, rhs, [](const expr::Value & left, const expr::Value & right) {
@@ -188,29 +195,10 @@ inline expr::Value not_equal_values(const expr::Value & lhs, const expr::Value &
   });
 }
 
-inline double fast_sin(double x)
-{
-  constexpr double pi = 3.14159265358979323846;
-  constexpr double two_pi = 2.0 * pi;
-  constexpr double B = 4.0 / pi;
-  constexpr double C = -4.0 / (pi * pi);
-  constexpr double P = 0.225;
-
-  x = std::fmod(x + pi, two_pi);
-  if (x < 0.0)
-  {
-    x += two_pi;
-  }
-  x -= pi;
-
-  const double y = B * x + C * x * std::fabs(x);
-  return P * (y * std::fabs(y) - y) + y;
-}
-
 inline expr::Value sin_value(const expr::Value & value)
 {
   return expr::map_unary(value, [](const expr::Value & item) {
-    return expr::float_value(fast_sin(expr::to_float64(item)));
+    return expr::float_value(std::sin(expr::to_float64(item)));
   });
 }
 }

@@ -124,62 +124,7 @@ class PythonGraph
       return prefix + std::to_string(id);
     }
 
-    bool add_vco(const std::string & module_name, double frequency_hz)
-    {
-      return graph_.addModule(module_name, std::make_unique<VCO>(frequency_hz));
-    }
-
-    bool add_mux(const std::string & module_name)
-    {
-      return graph_.addModule(module_name, std::make_unique<MUX>());
-    }
-
-    bool add_vca(const std::string & module_name)
-    {
-      return graph_.addModule(module_name, std::make_unique<VCA>());
-    }
-
-    bool add_env(const std::string & module_name, double rise_ms, double fall_ms)
-    {
-      return graph_.addModule(module_name, std::make_unique<ENV>(rise_ms, fall_ms));
-    }
-
-    bool add_delay(const std::string & module_name, double buffer_size_samples)
-    {
-      return graph_.addModule(module_name, std::make_unique<DELAY>(buffer_size_samples));
-    }
-
-    bool add_const(const std::string & module_name, double value)
-    {
-      return graph_.addModule(module_name, std::make_unique<CONST>(value));
-    }
-
-    bool add_lowpass(const std::string & module_name, double freq_hz, double res)
-    {
-      return graph_.addModule(module_name, std::make_unique<LOWPASS>(freq_hz, res));
-    }
-
-    bool add_highpass(const std::string & module_name, double freq_hz, double res)
-    {
-      return graph_.addModule(module_name, std::make_unique<HIGHPASS>(freq_hz, res));
-    }
-
-    bool add_bandpass(const std::string & module_name, double freq_hz, double res)
-    {
-      return graph_.addModule(module_name, std::make_unique<BANDPASS>(freq_hz, res));
-    }
-
-    bool add_notch(const std::string & module_name, double freq_hz, double res)
-    {
-      return graph_.addModule(module_name, std::make_unique<NOTCH>(freq_hz, res));
-    }
-
-    bool add_allpass(const std::string & module_name, double freq_hz, double res)
-    {
-      return graph_.addModule(module_name, std::make_unique<ALLPASS>(freq_hz, res));
-    }
-
-    bool add_user_defined_module(
+    bool add_module(
       const std::string & module_name,
       unsigned int input_count,
       std::vector<expr::ExprSpecPtr> output_exprs,
@@ -189,7 +134,7 @@ class PythonGraph
     {
       return graph_.addModule(
         module_name,
-        std::make_unique<UserDefinedModule>(
+        std::make_unique<Module>(
           input_count,
           std::move(output_exprs),
           std::move(register_exprs),
@@ -229,6 +174,9 @@ struct SignalExpr
 };
 
 static void assign_input(const InputPort & input, const py::handle & value);
+static PythonGraph * merge_graphs(PythonGraph * lhs, PythonGraph * rhs);
+static SignalExpr make_signal_expr(PythonGraph * graph, expr::ExprSpecPtr spec);
+static SignalExpr coerce_expr(const py::handle & value);
 
 struct SymbolMap
 {
@@ -242,7 +190,7 @@ struct SymbolMap
   std::unordered_map<std::string, unsigned int> slots;
 };
 
-struct StatefulModuleDefinition
+struct ModuleDefinition
 {
   std::string type_name;
   std::vector<std::string> input_names;
@@ -254,13 +202,20 @@ struct StatefulModuleDefinition
   double sample_rate = 44100.0;
 };
 
-class PyStatefulModuleInstance
+struct PureFunctionDefinition
+{
+  std::vector<std::string> input_names;
+  std::vector<std::string> output_names;
+  std::vector<expr::ExprSpecPtr> output_exprs;
+};
+
+class PyModuleInstance
 {
   public:
-    PyStatefulModuleInstance(std::shared_ptr<StatefulModuleDefinition> definition, PythonGraph & graph)
+    PyModuleInstance(std::shared_ptr<ModuleDefinition> definition, PythonGraph & graph)
       : definition_(std::move(definition)), graph_(&graph), name_(graph_->next_name(definition_->type_name))
     {
-      if (!graph_->add_user_defined_module(
+      if (!graph_->add_module(
             name_,
             static_cast<unsigned int>(definition_->input_names.size()),
             definition_->output_exprs,
@@ -319,6 +274,24 @@ class PyStatefulModuleInstance
       throw py::attribute_error("Cannot assign attribute '" + attr + "'.");
     }
 
+#ifdef EGRESS_PROFILE
+    py::dict compile_stats() const
+    {
+      const auto stats = graph_->graph().module_compile_stats(name_);
+      if (!stats.found)
+      {
+        throw py::key_error("Unknown module '" + name_ + "'.");
+      }
+
+      py::dict result;
+      result["instruction_count"] = stats.instruction_count;
+      result["register_count"] = stats.register_count;
+      result["numeric_jit_instruction_count"] = stats.numeric_jit_instruction_count;
+      result["jit_status"] = stats.jit_status;
+      return result;
+    }
+#endif
+
   private:
     static unsigned int lookup(
       const std::vector<std::string> & names,
@@ -336,28 +309,78 @@ class PyStatefulModuleInstance
       throw std::invalid_argument("Unknown " + std::string(kind) + " '" + attr + "'.");
     }
 
-    std::shared_ptr<StatefulModuleDefinition> definition_;
+    std::shared_ptr<ModuleDefinition> definition_;
     PythonGraph * graph_ = nullptr;
     std::string name_;
 };
 
-class PyStatefulModuleType
+class PyModuleType
 {
   public:
-    explicit PyStatefulModuleType(std::shared_ptr<StatefulModuleDefinition> definition)
+    explicit PyModuleType(std::shared_ptr<ModuleDefinition> definition)
       : definition_(std::move(definition))
     {
     }
 
     const std::string & name() const { return definition_->type_name; }
 
-    PyStatefulModuleInstance instantiate() const
+    PyModuleInstance instantiate() const
     {
-      return PyStatefulModuleInstance(definition_, default_graph());
+      return PyModuleInstance(definition_, default_graph());
     }
 
   private:
-    std::shared_ptr<StatefulModuleDefinition> definition_;
+    std::shared_ptr<ModuleDefinition> definition_;
+};
+
+class PyPureFunctionType
+{
+  public:
+    explicit PyPureFunctionType(std::shared_ptr<PureFunctionDefinition> definition)
+      : definition_(std::move(definition))
+    {
+    }
+
+    py::object call(const py::args & args) const
+    {
+      if (args.size() != definition_->input_names.size())
+      {
+        throw std::invalid_argument("Pure function expects " + std::to_string(definition_->input_names.size()) +
+                                    " arguments.");
+      }
+
+      PythonGraph * graph = nullptr;
+      std::vector<expr::ExprSpecPtr> call_args;
+      call_args.reserve(args.size());
+
+      for (const py::handle & arg : args)
+      {
+        const SignalExpr expr = coerce_expr(arg);
+        graph = merge_graphs(graph, expr.graph);
+        call_args.push_back(expr.spec);
+      }
+
+      if (definition_->output_exprs.size() == 1)
+      {
+        auto fn = expr::function_expr(static_cast<unsigned int>(definition_->input_names.size()),
+                                      definition_->output_exprs[0]);
+        auto call_expr = expr::call_expr(std::move(fn), call_args);
+        return py::cast(make_signal_expr(graph, std::move(call_expr)));
+      }
+
+      py::tuple outputs(definition_->output_exprs.size());
+      for (std::size_t i = 0; i < definition_->output_exprs.size(); ++i)
+      {
+        auto fn = expr::function_expr(static_cast<unsigned int>(definition_->input_names.size()),
+                                      definition_->output_exprs[i]);
+        auto call_expr = expr::call_expr(std::move(fn), call_args);
+        outputs[i] = py::cast(make_signal_expr(graph, std::move(call_expr)));
+      }
+      return outputs;
+    }
+
+  private:
+    std::shared_ptr<PureFunctionDefinition> definition_;
 };
 
 static PythonGraph * merge_graphs(PythonGraph * lhs, PythonGraph * rhs)
@@ -477,6 +500,11 @@ static SignalExpr mul_expr(const SignalExpr & lhs, const py::handle & rhs)
 static SignalExpr div_expr(const SignalExpr & lhs, const py::handle & rhs)
 {
   return make_binary_expr(ExprKind::Div, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr pow_expr(const SignalExpr & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(ExprKind::Pow, lhs, coerce_expr(rhs));
 }
 
 static SignalExpr mod_expr(const SignalExpr & lhs, const py::handle & rhs)
@@ -658,7 +686,7 @@ static std::vector<std::string> require_names(const py::iterable & values, const
   return names;
 }
 
-static std::shared_ptr<StatefulModuleDefinition> define_stateful_module_impl(
+static std::shared_ptr<ModuleDefinition> define_module_impl(
   const std::string & name,
   const py::iterable & inputs,
   const py::iterable & outputs,
@@ -666,7 +694,7 @@ static std::shared_ptr<StatefulModuleDefinition> define_stateful_module_impl(
   const py::function & process,
   double sample_rate)
 {
-  auto definition = std::make_shared<StatefulModuleDefinition>();
+  auto definition = std::make_shared<ModuleDefinition>();
   definition->type_name = name;
   definition->input_names = require_names(inputs, "inputs");
   definition->output_names = require_names(outputs, "outputs");
@@ -747,7 +775,7 @@ static std::shared_ptr<StatefulModuleDefinition> define_stateful_module_impl(
     const SignalExpr expr = coerce_expr(item.second);
     if (expr.graph != nullptr)
     {
-      throw std::invalid_argument("Stateful module expressions cannot capture graph ports.");
+      throw std::invalid_argument("Module expressions cannot capture graph ports.");
     }
     definition->output_exprs[static_cast<std::size_t>(std::distance(definition->output_names.begin(), it))] = expr.spec;
   }
@@ -764,9 +792,58 @@ static std::shared_ptr<StatefulModuleDefinition> define_stateful_module_impl(
     const SignalExpr expr = coerce_expr(item.second);
     if (expr.graph != nullptr)
     {
-      throw std::invalid_argument("Stateful module expressions cannot capture graph ports.");
+      throw std::invalid_argument("Module expressions cannot capture graph ports.");
     }
     definition->register_exprs[it->second] = expr.spec;
+  }
+
+  return definition;
+}
+
+static std::shared_ptr<PureFunctionDefinition> define_pure_function_impl(
+  const py::iterable & inputs,
+  const py::iterable & outputs,
+  const py::function & process)
+{
+  auto definition = std::make_shared<PureFunctionDefinition>();
+  definition->input_names = require_names(inputs, "inputs");
+  definition->output_names = require_names(outputs, "outputs");
+
+  SymbolMap input_symbols;
+  input_symbols.kind = SymbolMap::Kind::Input;
+  for (unsigned int i = 0; i < definition->input_names.size(); ++i)
+  {
+    input_symbols.slots.emplace(definition->input_names[i], i);
+  }
+
+  py::object result = process(py::cast(input_symbols));
+  if (!py::isinstance<py::dict>(result))
+  {
+    throw std::invalid_argument("process must return a dict of outputs.");
+  }
+
+  const py::dict output_values = require_dict(result, "process outputs");
+  definition->output_exprs.assign(definition->output_names.size(), nullptr);
+  std::unordered_set<std::string> assigned_outputs;
+  for (const auto & item : output_values)
+  {
+    const std::string output_name = py::cast<std::string>(item.first);
+    auto it = std::find(definition->output_names.begin(), definition->output_names.end(), output_name);
+    if (it == definition->output_names.end())
+    {
+      throw std::invalid_argument("Unknown output '" + output_name + "'.");
+    }
+    if (!assigned_outputs.insert(output_name).second)
+    {
+      throw std::invalid_argument("Output '" + output_name + "' assigned more than once.");
+    }
+
+    const SignalExpr expr = coerce_expr(item.second);
+    if (expr.graph != nullptr)
+    {
+      throw std::invalid_argument("Pure function expressions cannot capture graph ports.");
+    }
+    definition->output_exprs[static_cast<std::size_t>(std::distance(definition->output_names.begin(), it))] = expr.spec;
   }
 
   return definition;
@@ -886,252 +963,6 @@ static py::object input_irshift(const InputPort & input, const py::handle & rhs)
 {
   return py::cast(rshift_expr(current_input_expr(input), rhs));
 }
-
-class PyVCO
-{
-  public:
-    explicit PyVCO(double frequency_hz)
-      : graph_(&default_graph()), name_(graph_->next_name("vco"))
-    {
-      if (!graph_->add_vco(name_, frequency_hz))
-      {
-        throw std::invalid_argument("Failed to create VCO '" + name_ + "'.");
-      }
-    }
-
-    const std::string & name() const { return name_; }
-
-    OutputPort saw() const { return OutputPort{graph_, name_, VCO::SAW}; }
-    OutputPort tri() const { return OutputPort{graph_, name_, VCO::TRI}; }
-    OutputPort sin() const { return OutputPort{graph_, name_, VCO::SIN}; }
-    OutputPort sqr() const { return OutputPort{graph_, name_, VCO::SQR}; }
-
-    InputPort fm() const { return InputPort{graph_, name_, VCO::FM}; }
-    InputPort fm_index() const { return InputPort{graph_, name_, VCO::FM_INDEX}; }
-
-  private:
-    PythonGraph * graph_;
-    std::string name_;
-};
-
-class PyMUX
-{
-  public:
-    PyMUX() : graph_(&default_graph()), name_(graph_->next_name("mux"))
-    {
-      if (!graph_->add_mux(name_))
-      {
-        throw std::invalid_argument("Failed to create MUX '" + name_ + "'.");
-      }
-    }
-
-    const std::string & name() const { return name_; }
-
-    InputPort in1() const { return InputPort{graph_, name_, MUX::IN1}; }
-    InputPort in2() const { return InputPort{graph_, name_, MUX::IN2}; }
-    InputPort ctrl() const { return InputPort{graph_, name_, MUX::CTRL}; }
-    OutputPort out() const { return OutputPort{graph_, name_, MUX::OUT}; }
-
-  private:
-    PythonGraph * graph_;
-    std::string name_;
-};
-
-class PyVCA
-{
-  public:
-    PyVCA() : graph_(&default_graph()), name_(graph_->next_name("vca"))
-    {
-      if (!graph_->add_vca(name_))
-      {
-        throw std::invalid_argument("Failed to create VCA '" + name_ + "'.");
-      }
-    }
-
-    const std::string & name() const { return name_; }
-
-    InputPort in1() const { return InputPort{graph_, name_, VCA::IN1}; }
-    InputPort in2() const { return InputPort{graph_, name_, VCA::IN2}; }
-    OutputPort out() const { return OutputPort{graph_, name_, VCA::OUT}; }
-
-  private:
-    PythonGraph * graph_;
-    std::string name_;
-};
-
-class PyENV
-{
-  public:
-    PyENV(double rise_ms, double fall_ms) : graph_(&default_graph()), name_(graph_->next_name("env"))
-    {
-      if (!graph_->add_env(name_, rise_ms, fall_ms))
-      {
-        throw std::invalid_argument("Failed to create ENV '" + name_ + "'.");
-      }
-    }
-
-    const std::string & name() const { return name_; }
-
-    InputPort trig() const { return InputPort{graph_, name_, ENV::TRIG}; }
-    InputPort rise() const { return InputPort{graph_, name_, ENV::RISE}; }
-    InputPort fall() const { return InputPort{graph_, name_, ENV::FALL}; }
-    OutputPort out() const { return OutputPort{graph_, name_, ENV::OUT}; }
-
-  private:
-    PythonGraph * graph_;
-    std::string name_;
-};
-
-class PyDELAY
-{
-  public:
-    explicit PyDELAY(double buffer_size_samples)
-      : graph_(&default_graph()), name_(graph_->next_name("delay"))
-    {
-      if (!graph_->add_delay(name_, buffer_size_samples))
-      {
-        throw std::invalid_argument("Failed to create DELAY '" + name_ + "'.");
-      }
-    }
-
-    const std::string & name() const { return name_; }
-
-    InputPort in() const { return InputPort{graph_, name_, DELAY::IN}; }
-    OutputPort out() const { return OutputPort{graph_, name_, DELAY::OUT}; }
-
-  private:
-    PythonGraph * graph_;
-    std::string name_;
-};
-
-class PyCONST
-{
-  public:
-    explicit PyCONST(double value) : graph_(&default_graph()), name_(graph_->next_name("const"))
-    {
-      if (!graph_->add_const(name_, value))
-      {
-        throw std::invalid_argument("Failed to create CONST '" + name_ + "'.");
-      }
-    }
-
-    const std::string & name() const { return name_; }
-    OutputPort out() const { return OutputPort{graph_, name_, CONST::OUT}; }
-
-  private:
-    PythonGraph * graph_;
-    std::string name_;
-};
-
-class PyLOWPASS
-{
-  public:
-    PyLOWPASS(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("lowpass"))
-    {
-      if (!graph_->add_lowpass(name_, freq_hz, res))
-      {
-        throw std::invalid_argument("Failed to create LOWPASS '" + name_ + "'.");
-      }
-    }
-
-    const std::string & name() const { return name_; }
-    InputPort in() const { return InputPort{graph_, name_, LOWPASS::IN}; }
-    InputPort freq() const { return InputPort{graph_, name_, LOWPASS::FREQ}; }
-    InputPort res() const { return InputPort{graph_, name_, LOWPASS::RES}; }
-    OutputPort out() const { return OutputPort{graph_, name_, LOWPASS::OUT}; }
-
-  private:
-    PythonGraph * graph_;
-    std::string name_;
-};
-
-class PyHIGHPASS
-{
-  public:
-    PyHIGHPASS(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("highpass"))
-    {
-      if (!graph_->add_highpass(name_, freq_hz, res))
-      {
-        throw std::invalid_argument("Failed to create HIGHPASS '" + name_ + "'.");
-      }
-    }
-
-    const std::string & name() const { return name_; }
-    InputPort in() const { return InputPort{graph_, name_, HIGHPASS::IN}; }
-    InputPort freq() const { return InputPort{graph_, name_, HIGHPASS::FREQ}; }
-    InputPort res() const { return InputPort{graph_, name_, HIGHPASS::RES}; }
-    OutputPort out() const { return OutputPort{graph_, name_, HIGHPASS::OUT}; }
-
-  private:
-    PythonGraph * graph_;
-    std::string name_;
-};
-
-class PyBANDPASS
-{
-  public:
-    PyBANDPASS(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("bandpass"))
-    {
-      if (!graph_->add_bandpass(name_, freq_hz, res))
-      {
-        throw std::invalid_argument("Failed to create BANDPASS '" + name_ + "'.");
-      }
-    }
-
-    const std::string & name() const { return name_; }
-    InputPort in() const { return InputPort{graph_, name_, BANDPASS::IN}; }
-    InputPort freq() const { return InputPort{graph_, name_, BANDPASS::FREQ}; }
-    InputPort res() const { return InputPort{graph_, name_, BANDPASS::RES}; }
-    OutputPort out() const { return OutputPort{graph_, name_, BANDPASS::OUT}; }
-
-  private:
-    PythonGraph * graph_;
-    std::string name_;
-};
-
-class PyNOTCH
-{
-  public:
-    PyNOTCH(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("notch"))
-    {
-      if (!graph_->add_notch(name_, freq_hz, res))
-      {
-        throw std::invalid_argument("Failed to create NOTCH '" + name_ + "'.");
-      }
-    }
-
-    const std::string & name() const { return name_; }
-    InputPort in() const { return InputPort{graph_, name_, NOTCH::IN}; }
-    InputPort freq() const { return InputPort{graph_, name_, NOTCH::FREQ}; }
-    InputPort res() const { return InputPort{graph_, name_, NOTCH::RES}; }
-    OutputPort out() const { return OutputPort{graph_, name_, NOTCH::OUT}; }
-
-  private:
-    PythonGraph * graph_;
-    std::string name_;
-};
-
-class PyALLPASS
-{
-  public:
-    PyALLPASS(double freq_hz, double res = 0.707) : graph_(&default_graph()), name_(graph_->next_name("allpass"))
-    {
-      if (!graph_->add_allpass(name_, freq_hz, res))
-      {
-        throw std::invalid_argument("Failed to create ALLPASS '" + name_ + "'.");
-      }
-    }
-
-    const std::string & name() const { return name_; }
-    InputPort in() const { return InputPort{graph_, name_, ALLPASS::IN}; }
-    InputPort freq() const { return InputPort{graph_, name_, ALLPASS::FREQ}; }
-    InputPort res() const { return InputPort{graph_, name_, ALLPASS::RES}; }
-    OutputPort out() const { return OutputPort{graph_, name_, ALLPASS::OUT}; }
-
-  private:
-    PythonGraph * graph_;
-    std::string name_;
-};
 
 class PythonDAC
 {
@@ -1352,6 +1183,8 @@ PYBIND11_MODULE(egress, m)
     .def("__rmul__", [](const SignalExpr & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__truediv__", [](const SignalExpr & lhs, const py::object & rhs) { return div_expr(lhs, rhs); })
     .def("__rtruediv__", [](const SignalExpr & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__pow__", [](const SignalExpr & lhs, const py::object & rhs) { return pow_expr(lhs, rhs); })
+    .def("__rpow__", [](const SignalExpr & rhs, const py::object & lhs) { return pow_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__floordiv__", [](const SignalExpr & lhs, const py::object & rhs) { return floor_div_expr(lhs, rhs); })
     .def("__rfloordiv__", [](const SignalExpr & rhs, const py::object & lhs) { return floor_div_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__mod__", [](const SignalExpr & lhs, const py::object & rhs) { return mod_expr(lhs, rhs); })
@@ -1390,6 +1223,8 @@ PYBIND11_MODULE(egress, m)
     .def("__rmul__", [](const OutputPort & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__truediv__", [](const OutputPort & lhs, const py::object & rhs) { return div_expr(make_output_expr(lhs), rhs); })
     .def("__rtruediv__", [](const OutputPort & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__pow__", [](const OutputPort & lhs, const py::object & rhs) { return pow_expr(make_output_expr(lhs), rhs); })
+    .def("__rpow__", [](const OutputPort & rhs, const py::object & lhs) { return pow_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__floordiv__", [](const OutputPort & lhs, const py::object & rhs) { return floor_div_expr(make_output_expr(lhs), rhs); })
     .def("__rfloordiv__", [](const OutputPort & rhs, const py::object & lhs) { return floor_div_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__mod__", [](const OutputPort & lhs, const py::object & rhs) { return mod_expr(make_output_expr(lhs), rhs); })
@@ -1429,6 +1264,8 @@ PYBIND11_MODULE(egress, m)
     .def("__rmul__", [](const InputPort & rhs, const py::object & lhs) { return mul_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
     .def("__truediv__", [](const InputPort & lhs, const py::object & rhs) { return div_expr(current_input_expr(lhs), rhs); })
     .def("__rtruediv__", [](const InputPort & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__pow__", [](const InputPort & lhs, const py::object & rhs) { return pow_expr(current_input_expr(lhs), rhs); })
+    .def("__rpow__", [](const InputPort & rhs, const py::object & lhs) { return pow_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
     .def("__floordiv__", [](const InputPort & lhs, const py::object & rhs) { return floor_div_expr(current_input_expr(lhs), rhs); })
     .def("__rfloordiv__", [](const InputPort & rhs, const py::object & lhs) { return floor_div_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
     .def("__mod__", [](const InputPort & lhs, const py::object & rhs) { return mod_expr(current_input_expr(lhs), rhs); })
@@ -1476,28 +1313,36 @@ PYBIND11_MODULE(egress, m)
       return symbol_expr(symbols.kind, it->second);
     });
 
-  py::class_<PyStatefulModuleInstance>(m, "StatefulModule")
-    .def_property_readonly("name", &PyStatefulModuleInstance::name)
-    .def("get_input", &PyStatefulModuleInstance::get_input, py::arg("name"))
-    .def("get_output", &PyStatefulModuleInstance::get_output, py::arg("name"))
-    .def("__getattr__", &PyStatefulModuleInstance::getattr, py::arg("name"))
-    .def("__setattr__", &PyStatefulModuleInstance::setattr, py::arg("name"), py::arg("value"));
+  py::class_<PyModuleInstance>(m, "Module")
+    .def_property_readonly("name", &PyModuleInstance::name)
+    .def("get_input", &PyModuleInstance::get_input, py::arg("name"))
+    .def("get_output", &PyModuleInstance::get_output, py::arg("name"))
+    .def("__getattr__", &PyModuleInstance::getattr, py::arg("name"))
+    .def("__setattr__", &PyModuleInstance::setattr, py::arg("name"), py::arg("value"))
+  #ifdef EGRESS_PROFILE
+    .def_property_readonly("compile_stats", &PyModuleInstance::compile_stats)
+  #endif
+    ;
 
-  py::class_<PyStatefulModuleType>(m, "StatefulModuleType")
-    .def_property_readonly("name", &PyStatefulModuleType::name)
-    .def("__call__", &PyStatefulModuleType::instantiate);
+  py::class_<PyModuleType>(m, "ModuleType")
+    .def_property_readonly("name", &PyModuleType::name)
+    .def("__call__", &PyModuleType::instantiate);
+
+  py::class_<PyPureFunctionType>(m, "PureFunction")
+    .def("__call__", &PyPureFunctionType::call);
 
   m.def("connect", &connect_ports, py::arg("out"), py::arg("in"));
   m.def("disconnect", &disconnect_ports, py::arg("out"), py::arg("in"));
   m.def("add_output", &add_output_port, py::arg("out"));
   m.def("incoming", &incoming_ports, py::arg("in"));
   m.def("sin", [](const py::object & value) { return sin_expr(value); }, py::arg("value"));
+  m.def("pow", [](const py::object & lhs, const py::object & rhs) { return pow_expr(coerce_expr(lhs), rhs); }, py::arg("lhs"), py::arg("rhs"));
   m.def("array", [](const py::iterable & values) { return make_array_expr(values); }, py::arg("values"));
   m.def("logical_not", [](const py::object & value) { return logical_not_expr(value); }, py::arg("value"));
   m.def("sample_rate", []() { return sample_rate_expr(); });
   m.def("sample_index", []() { return sample_index_expr(); });
   m.def(
-    "define_stateful_module",
+    "define_module",
     [](const std::string & name,
        const py::iterable & inputs,
        const py::iterable & outputs,
@@ -1505,7 +1350,7 @@ PYBIND11_MODULE(egress, m)
        const py::function & process,
        double sample_rate)
     {
-      return PyStatefulModuleType(define_stateful_module_impl(name, inputs, outputs, regs, process, sample_rate));
+      return PyModuleType(define_module_impl(name, inputs, outputs, regs, process, sample_rate));
     },
     py::arg("name"),
     py::arg("inputs"),
@@ -1514,89 +1359,17 @@ PYBIND11_MODULE(egress, m)
     py::arg("process"),
     py::arg("sample_rate") = 44100.0);
 
-  py::class_<PyVCO>(m, "VCO")
-    .def(py::init<double>(), py::arg("frequency_hz"))
-    .def_property_readonly("name", &PyVCO::name)
-    .def_property_readonly("saw", &PyVCO::saw)
-    .def_property_readonly("tri", &PyVCO::tri)
-    .def_property_readonly("sin", &PyVCO::sin)
-    .def_property_readonly("sqr", &PyVCO::sqr)
-    .def_property("fm", &PyVCO::fm, [](PyVCO & self, const py::object & value) { assign_input(self.fm(), value); })
-    .def_property("fm_index", &PyVCO::fm_index, [](PyVCO & self, const py::object & value) { assign_input(self.fm_index(), value); });
-
-  py::class_<PyMUX>(m, "MUX")
-    .def(py::init<>())
-    .def_property_readonly("name", &PyMUX::name)
-    .def_property("input1", &PyMUX::in1, [](PyMUX & self, const py::object & value) { assign_input(self.in1(), value); })
-    .def_property("input2", &PyMUX::in2, [](PyMUX & self, const py::object & value) { assign_input(self.in2(), value); })
-    .def_property("control", &PyMUX::ctrl, [](PyMUX & self, const py::object & value) { assign_input(self.ctrl(), value); })
-    .def_property_readonly("output", &PyMUX::out);
-
-  py::class_<PyVCA>(m, "VCA")
-    .def(py::init<>())
-    .def_property_readonly("name", &PyVCA::name)
-    .def_property("input1", &PyVCA::in1, [](PyVCA & self, const py::object & value) { assign_input(self.in1(), value); })
-    .def_property("input2", &PyVCA::in2, [](PyVCA & self, const py::object & value) { assign_input(self.in2(), value); })
-    .def_property_readonly("output", &PyVCA::out);
-
-  py::class_<PyENV>(m, "ENV")
-    .def(py::init<double, double>(), py::arg("rise_ms"), py::arg("fall_ms"))
-    .def_property_readonly("name", &PyENV::name)
-    .def_property("trig", &PyENV::trig, [](PyENV & self, const py::object & value) { assign_input(self.trig(), value); })
-    .def_property("rise", &PyENV::rise, [](PyENV & self, const py::object & value) { assign_input(self.rise(), value); })
-    .def_property("fall", &PyENV::fall, [](PyENV & self, const py::object & value) { assign_input(self.fall(), value); })
-    .def_property_readonly("output", &PyENV::out);
-
-  py::class_<PyDELAY>(m, "DELAY")
-    .def(py::init<double>(), py::arg("buffer_size_samples"))
-    .def_property_readonly("name", &PyDELAY::name)
-    .def_property("input", &PyDELAY::in, [](PyDELAY & self, const py::object & value) { assign_input(self.in(), value); })
-    .def_property_readonly("output", &PyDELAY::out);
-
-  py::class_<PyCONST>(m, "CONST")
-    .def(py::init<double>(), py::arg("value"))
-    .def_property_readonly("name", &PyCONST::name)
-    .def_property_readonly("output", &PyCONST::out);
-
-  py::class_<PyLOWPASS>(m, "LOWPASS")
-    .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
-    .def_property_readonly("name", &PyLOWPASS::name)
-    .def_property("input", &PyLOWPASS::in, [](PyLOWPASS & self, const py::object & value) { assign_input(self.in(), value); })
-    .def_property("freq", &PyLOWPASS::freq, [](PyLOWPASS & self, const py::object & value) { assign_input(self.freq(), value); })
-    .def_property("res", &PyLOWPASS::res, [](PyLOWPASS & self, const py::object & value) { assign_input(self.res(), value); })
-    .def_property_readonly("output", &PyLOWPASS::out);
-
-  py::class_<PyHIGHPASS>(m, "HIGHPASS")
-    .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
-    .def_property_readonly("name", &PyHIGHPASS::name)
-    .def_property("input", &PyHIGHPASS::in, [](PyHIGHPASS & self, const py::object & value) { assign_input(self.in(), value); })
-    .def_property("freq", &PyHIGHPASS::freq, [](PyHIGHPASS & self, const py::object & value) { assign_input(self.freq(), value); })
-    .def_property("res", &PyHIGHPASS::res, [](PyHIGHPASS & self, const py::object & value) { assign_input(self.res(), value); })
-    .def_property_readonly("output", &PyHIGHPASS::out);
-
-  py::class_<PyBANDPASS>(m, "BANDPASS")
-    .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
-    .def_property_readonly("name", &PyBANDPASS::name)
-    .def_property("input", &PyBANDPASS::in, [](PyBANDPASS & self, const py::object & value) { assign_input(self.in(), value); })
-    .def_property("freq", &PyBANDPASS::freq, [](PyBANDPASS & self, const py::object & value) { assign_input(self.freq(), value); })
-    .def_property("res", &PyBANDPASS::res, [](PyBANDPASS & self, const py::object & value) { assign_input(self.res(), value); })
-    .def_property_readonly("output", &PyBANDPASS::out);
-
-  py::class_<PyNOTCH>(m, "NOTCH")
-    .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
-    .def_property_readonly("name", &PyNOTCH::name)
-    .def_property("input", &PyNOTCH::in, [](PyNOTCH & self, const py::object & value) { assign_input(self.in(), value); })
-    .def_property("freq", &PyNOTCH::freq, [](PyNOTCH & self, const py::object & value) { assign_input(self.freq(), value); })
-    .def_property("res", &PyNOTCH::res, [](PyNOTCH & self, const py::object & value) { assign_input(self.res(), value); })
-    .def_property_readonly("output", &PyNOTCH::out);
-
-  py::class_<PyALLPASS>(m, "ALLPASS")
-    .def(py::init<double, double>(), py::arg("freq"), py::arg("res") = 0.707)
-    .def_property_readonly("name", &PyALLPASS::name)
-    .def_property("input", &PyALLPASS::in, [](PyALLPASS & self, const py::object & value) { assign_input(self.in(), value); })
-    .def_property("freq", &PyALLPASS::freq, [](PyALLPASS & self, const py::object & value) { assign_input(self.freq(), value); })
-    .def_property("res", &PyALLPASS::res, [](PyALLPASS & self, const py::object & value) { assign_input(self.res(), value); })
-    .def_property_readonly("output", &PyALLPASS::out);
+  m.def(
+    "define_pure_function",
+    [](const py::iterable & inputs,
+       const py::iterable & outputs,
+       const py::function & process)
+    {
+      return PyPureFunctionType(define_pure_function_impl(inputs, outputs, process));
+    },
+    py::arg("inputs"),
+    py::arg("outputs"),
+    py::arg("process"));
 
   py::class_<PythonDAC>(m, "DAC")
     .def(py::init<unsigned int, unsigned int>(), py::arg("sample_rate") = 44100, py::arg("channels") = 2)
@@ -1606,15 +1379,4 @@ PYBIND11_MODULE(egress, m)
     .def("callback_timing_stats", &PythonDAC::callback_timing_stats)
     .def("reset_callback_timing_stats", &PythonDAC::reset_callback_timing_stats);
 
-  py::enum_<VCO::Ins>(m, "VCOIn")
-    .value("FM", VCO::Ins::FM)
-    .value("FM_INDEX", VCO::Ins::FM_INDEX)
-    .value("IN_COUNT", VCO::Ins::IN_COUNT);
-
-  py::enum_<VCO::Outs>(m, "VCOOut")
-    .value("SAW", VCO::Outs::SAW)
-    .value("TRI", VCO::Outs::TRI)
-    .value("SIN", VCO::Outs::SIN)
-    .value("SQR", VCO::Outs::SQR)
-    .value("OUT_COUNT", VCO::Outs::OUT_COUNT);
 }

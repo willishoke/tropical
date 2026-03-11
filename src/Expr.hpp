@@ -35,6 +35,8 @@ enum class ExprKind
   RegisterValue,
   SampleRate,
   SampleIndex,
+  Function,
+  Call,
   ArrayPack,
   Index,
   Not,
@@ -48,6 +50,7 @@ enum class ExprKind
   Sub,
   Mul,
   Div,
+  Pow,
   Mod,
   FloorDiv,
   BitAnd,
@@ -67,6 +70,7 @@ struct ExprSpec
   std::string module_name;
   unsigned int output_id = 0;
   unsigned int slot_id = 0;
+  unsigned int param_count = 0;
   std::shared_ptr<ExprSpec> lhs;
   std::shared_ptr<ExprSpec> rhs;
   std::vector<std::shared_ptr<ExprSpec>> args;
@@ -308,6 +312,24 @@ inline ExprSpecPtr sample_index_expr()
 {
   auto expr = std::make_shared<ExprSpec>();
   expr->kind = ExprKind::SampleIndex;
+  return expr;
+}
+
+inline ExprSpecPtr function_expr(unsigned int param_count, ExprSpecPtr body)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::Function;
+  expr->param_count = param_count;
+  expr->lhs = std::move(body);
+  return expr;
+}
+
+inline ExprSpecPtr call_expr(ExprSpecPtr callee, std::vector<ExprSpecPtr> args)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::Call;
+  expr->lhs = std::move(callee);
+  expr->args = std::move(args);
   return expr;
 }
 

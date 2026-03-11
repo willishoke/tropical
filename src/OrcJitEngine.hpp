@@ -32,6 +32,7 @@ enum class NumericOp : uint8_t
   Sub,
   Mul,
   Div,
+  Pow,
   Mod,
   FloorDiv,
   BitAnd,
