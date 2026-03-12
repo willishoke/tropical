@@ -130,6 +130,7 @@ class PythonGraph
       std::vector<expr::ExprSpecPtr> output_exprs,
       std::vector<expr::ExprSpecPtr> register_exprs,
       std::vector<expr::Value> initial_registers,
+      std::vector<Module::RegisterArraySpec> register_array_specs,
       double sample_rate)
     {
       return graph_.addModule(
@@ -139,6 +140,7 @@ class PythonGraph
           std::move(output_exprs),
           std::move(register_exprs),
           std::move(initial_registers),
+          std::move(register_array_specs),
           sample_rate));
     }
 
@@ -199,6 +201,7 @@ struct ModuleDefinition
   std::vector<expr::Value> initial_registers;
   std::vector<expr::ExprSpecPtr> output_exprs;
   std::vector<expr::ExprSpecPtr> register_exprs;
+  std::vector<Module::RegisterArraySpec> register_array_specs;
   double sample_rate = 44100.0;
 };
 
@@ -221,6 +224,7 @@ class PyModuleInstance
             definition_->output_exprs,
             definition_->register_exprs,
             definition_->initial_registers,
+            definition_->register_array_specs,
             definition_->sample_rate))
       {
         throw std::invalid_argument("Failed to create module '" + name_ + "'.");
@@ -630,16 +634,14 @@ static SignalExpr sample_index_expr()
 static SignalExpr make_array_expr(const py::iterable & values)
 {
   std::vector<expr::ExprSpecPtr> items;
+  PythonGraph * graph = nullptr;
   for (const py::handle & value : values)
   {
     const SignalExpr expr = coerce_expr(value);
-    if (expr.graph != nullptr)
-    {
-      throw std::invalid_argument("Array literals cannot capture graph ports.");
-    }
+    graph = merge_graphs(graph, expr.graph);
     items.push_back(expr.spec);
   }
-  return make_signal_expr(nullptr, expr::array_pack_expr(std::move(items)));
+  return make_signal_expr(graph, expr::array_pack_expr(std::move(items)));
 }
 
 static expr::Value scalar_value_from_py(const py::handle & value)
@@ -672,6 +674,46 @@ static expr::Value value_from_py(const py::handle & value)
     return expr::array_value(std::move(items));
   }
   return scalar_value_from_py(value);
+}
+
+static bool is_array_state_spec(const py::handle & value)
+{
+  if (!py::isinstance<py::dict>(value))
+  {
+    return false;
+  }
+
+  const py::dict dict = value.cast<py::dict>();
+  if (!dict.contains("__egress_array_state__"))
+  {
+    return false;
+  }
+
+  return py::cast<bool>(dict["__egress_array_state__"]);
+}
+
+static unsigned int require_input_id(
+  const std::vector<std::string> & input_names,
+  const py::dict & spec)
+{
+  if (!spec.contains("input"))
+  {
+    throw std::invalid_argument("array_state spec must include 'input'.");
+  }
+
+  if (!py::isinstance<py::str>(spec["input"]))
+  {
+    throw std::invalid_argument("array_state 'input' must be a string.");
+  }
+
+  const std::string input_name = py::cast<std::string>(spec["input"]);
+  auto it = std::find(input_names.begin(), input_names.end(), input_name);
+  if (it == input_names.end())
+  {
+    throw std::invalid_argument("Unknown input '" + input_name + "'.");
+  }
+
+  return static_cast<unsigned int>(std::distance(input_names.begin(), it));
 }
 
 static py::dict require_dict(const py::handle & value, const char * label)
@@ -732,6 +774,7 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
   definition->register_exprs.assign(regs.size(), nullptr);
   definition->register_names.reserve(regs.size());
   definition->initial_registers.reserve(regs.size());
+  definition->register_array_specs.reserve(regs.size());
 
   unsigned int register_id = 0;
   for (const auto & item : regs)
@@ -746,9 +789,11 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
         !py::isinstance<py::float_>(value) &&
         !py::isinstance<py::int_>(value) &&
         !py::isinstance<py::list>(value) &&
-        !py::isinstance<py::tuple>(value))
+        !py::isinstance<py::tuple>(value) &&
+        !is_array_state_spec(value))
     {
-      throw std::invalid_argument("regs values must be bool, int, float, or 1-D arrays of those scalars.");
+      throw std::invalid_argument(
+        "regs values must be bool, int, float, 1-D arrays of those scalars, or array_state specs.");
     }
 
     const std::string reg_name = key.cast<std::string>();
@@ -758,7 +803,29 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
     }
 
     definition->register_names.push_back(reg_name);
-    definition->initial_registers.push_back(value_from_py(value));
+
+    Module::RegisterArraySpec array_spec;
+    if (is_array_state_spec(value))
+    {
+      const py::dict spec = value.cast<py::dict>();
+      array_spec.enabled = true;
+      array_spec.source_input_id = require_input_id(definition->input_names, spec);
+      if (spec.contains("init"))
+      {
+        array_spec.init_value = scalar_value_from_py(spec["init"]);
+      }
+      else
+      {
+        array_spec.init_value = expr::float_value(0.0);
+      }
+      definition->initial_registers.push_back(expr::array_value({}));
+    }
+    else
+    {
+      definition->initial_registers.push_back(value_from_py(value));
+    }
+
+    definition->register_array_specs.push_back(std::move(array_spec));
     ++register_id;
   }
 
@@ -1266,6 +1333,9 @@ PYBIND11_MODULE(egress, m)
     .def("__ge__", [](const OutputPort & lhs, const py::object & rhs) { return greater_equal_expr(py::cast(make_output_expr(lhs)), rhs); })
     .def("__eq__", [](const OutputPort & lhs, const py::object & rhs) { return equal_expr(py::cast(make_output_expr(lhs)), rhs); })
     .def("__ne__", [](const OutputPort & lhs, const py::object & rhs) { return not_equal_expr(py::cast(make_output_expr(lhs)), rhs); })
+    .def("__getitem__", [](const OutputPort & value, const py::object & index) {
+      return index_expr(make_output_expr(value), index);
+    })
     .def("__bool__", [](const OutputPort &) -> bool {
       throw py::type_error("Ports do not have Python truthiness; use eg.logical_not(...) or comparisons.");
     })
@@ -1353,6 +1423,26 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyPureFunctionType>(m, "PureFunction")
     .def("__call__", &PyPureFunctionType::call);
+
+  m.def(
+    "array_state",
+    [](const std::string & input, const py::object & init)
+    {
+      if (!init.is_none())
+      {
+        (void)scalar_value_from_py(init);
+      }
+      py::dict spec;
+      spec["__egress_array_state__"] = true;
+      spec["input"] = input;
+      if (!init.is_none())
+      {
+        spec["init"] = init;
+      }
+      return spec;
+    },
+    py::arg("input"),
+    py::arg("init") = py::float_(0.0));
 
   m.def("connect", &connect_ports, py::arg("out"), py::arg("in"));
   m.def("disconnect", &disconnect_ports, py::arg("out"), py::arg("in"));

@@ -134,3 +134,31 @@ def phaser(name="Phaser"):
 
 def phaser16(name="Phaser16"):
     return _phaser(stage_count=16, name=name)
+
+
+def clock(name="Clock"):
+    def process(inp, reg):
+        base_phase = (eg.sample_index() * inp["freq"] / eg.sample_rate()) % 1.0
+        base_phase = (base_phase + 1.0) % 1.0
+        output = (base_phase < 0.5) * 1.0
+
+        ratio_phase = (eg.sample_index() * inp["freq"] * inp["ratios_in"] / eg.sample_rate()) % 1.0
+        ratio_phase = (ratio_phase + 1.0) % 1.0
+        ratios_out = (ratio_phase < 0.5) * 1.0
+
+        return (
+            {
+                "output": output,
+                "ratios_out": ratios_out,
+            },
+            {},
+        )
+
+    return eg.define_module(
+        name=name,
+        inputs=["freq", "ratios_in"],
+        outputs=["output", "ratios_out"],
+        regs={},
+        process=process,
+        sample_rate=44100.0,
+    )

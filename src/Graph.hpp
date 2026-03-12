@@ -495,6 +495,13 @@ class Module
     };
 #endif
 
+    struct RegisterArraySpec
+    {
+      bool enabled = false;
+      unsigned int source_input_id = 0;
+      Value init_value;
+    };
+
     virtual ~Module() = default;
 
     Module(
@@ -502,30 +509,55 @@ class Module
       std::vector<ExprSpecPtr> output_exprs,
       std::vector<ExprSpecPtr> register_exprs,
       std::vector<Value> initial_registers,
+      std::vector<RegisterArraySpec> register_array_specs,
       double sample_rate)
-      : inputs(input_count, 0.0),
-        outputs(output_exprs.size(), 0.0),
-        prev_outputs(output_exprs.size(), 0.0),
+      : inputs(input_count, expr::float_value(0.0)),
+        outputs(output_exprs.size(), expr::float_value(0.0)),
+        prev_outputs(output_exprs.size(), expr::float_value(0.0)),
         input_count_(input_count),
         registers_(std::move(initial_registers)),
         next_registers_(registers_),
+        register_array_specs_(std::move(register_array_specs)),
         sample_rate_(sample_rate)
     {
+      has_dynamic_registers_ = false;
+      for (const auto & spec : register_array_specs_)
+      {
+        if (spec.enabled)
+        {
+          has_dynamic_registers_ = true;
+          break;
+        }
+      }
+
       program_ = compile_program(output_exprs, register_exprs);
       temps_.assign(program_.register_count, expr::float_value(0.0));
 
 #ifdef EGRESS_LLVM_ORC_JIT
-      initialize_numeric_jit();
+      if (!has_dynamic_registers_)
+      {
+        initialize_numeric_jit();
+      }
 #endif
     }
 
     void process()
     {
+      resize_array_registers_to_inputs();
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (jit_kernel_)
+      if (jit_kernel_ && inputs_are_scalar())
       {
+        if (numeric_inputs_.size() < inputs.size())
+        {
+          numeric_inputs_.assign(inputs.size(), 0.0);
+        }
+        for (unsigned int i = 0; i < inputs.size(); ++i)
+        {
+          numeric_inputs_[i] = expr::to_float64(inputs[i]);
+        }
+
         jit_kernel_(
-          inputs.data(),
+          numeric_inputs_.data(),
           numeric_registers_.data(),
           numeric_array_ptrs_.data(),
           numeric_array_sizes_.data(),
@@ -535,7 +567,7 @@ class Module
 
         for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
         {
-          outputs[output_id] = numeric_temps_[program_.output_targets[output_id]];
+          outputs[output_id] = expr::float_value(numeric_temps_[program_.output_targets[output_id]]);
         }
 
         for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
@@ -562,7 +594,7 @@ class Module
 
       for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
       {
-        outputs[output_id] = expr::to_float64(temps_[program_.output_targets[output_id]]);
+        outputs[output_id] = temps_[program_.output_targets[output_id]];
       }
 
       for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
@@ -619,22 +651,98 @@ class Module
     {
       for (auto & in : inputs)
       {
-        in = 0.0;
+        in = expr::float_value(0.0);
       }
 
       for (auto & out : outputs)
       {
-        out = fmin(out, 10.0);
-        out = fmax(out, -10.0);
+        clamp_output_value(out);
       }
     }
 
-    std::vector<Signal> inputs;
-    std::vector<Signal> outputs;
-    std::vector<Signal> prev_outputs;
+    std::vector<Value> inputs;
+    std::vector<Value> outputs;
+    std::vector<Value> prev_outputs;
 
   private:
     friend class Graph;
+
+    static void clamp_output_value(Value & value)
+    {
+      if (value.type == ValueType::Array)
+      {
+        for (auto & item : value.array_items)
+        {
+          clamp_output_value(item);
+        }
+        return;
+      }
+      const double clamped = std::fmax(-10.0, std::fmin(10.0, expr::to_float64(value)));
+      value = expr::float_value(clamped);
+    }
+
+    bool inputs_are_scalar() const
+    {
+      for (const auto & input : inputs)
+      {
+        if (input.type == ValueType::Array)
+        {
+          return false;
+        }
+      }
+      return true;
+    }
+
+    void resize_array_registers_to_inputs()
+    {
+      if (!has_dynamic_registers_)
+      {
+        return;
+      }
+
+      for (unsigned int reg_id = 0; reg_id < register_array_specs_.size(); ++reg_id)
+      {
+        const RegisterArraySpec & spec = register_array_specs_[reg_id];
+        if (!spec.enabled)
+        {
+          continue;
+        }
+
+        if (spec.source_input_id >= inputs.size())
+        {
+          throw std::invalid_argument("Array register spec references unknown input id.");
+        }
+
+        const Value & input = inputs[spec.source_input_id];
+        if (input.type != ValueType::Array)
+        {
+          throw std::invalid_argument("Array register requires array-valued input.");
+        }
+
+        const std::size_t desired = input.array_items.size();
+        Value & reg = registers_[reg_id];
+        bool resized = false;
+
+        if (reg.type != ValueType::Array)
+        {
+          std::vector<Value> items(desired, spec.init_value);
+          reg = expr::array_value(std::move(items));
+          resized = true;
+        }
+        else if (reg.array_items.size() != desired)
+        {
+          std::vector<Value> items = reg.array_items;
+          items.resize(desired, spec.init_value);
+          reg = expr::array_value(std::move(items));
+          resized = true;
+        }
+
+        if (resized)
+        {
+          next_registers_[reg_id] = reg;
+        }
+      }
+    }
 
     struct Instr
     {
@@ -831,7 +939,7 @@ class Module
             break;
           case ExprKind::InputValue:
             temps[instr.dst] = instr.slot_id < inputs.size()
-                                 ? expr::float_value(inputs[instr.slot_id])
+                                 ? inputs[instr.slot_id]
                                  : expr::float_value(0.0);
             break;
           case ExprKind::RegisterValue:
@@ -865,7 +973,8 @@ class Module
             const Value & array_value = temps[instr.src_a];
             if (!expr::is_array(array_value))
             {
-              throw std::invalid_argument("Indexing requires an array value.");
+              temps[instr.dst] = expr::float_value(0.0);
+              break;
             }
             const int64_t index = expr::to_int64(temps[instr.src_b]);
             if (index < 0 || static_cast<std::size_t>(index) >= array_value.array_items.size())
@@ -962,10 +1071,13 @@ class Module
     std::vector<Value> temps_;
     std::vector<Value> registers_;
     std::vector<Value> next_registers_;
+    std::vector<RegisterArraySpec> register_array_specs_;
+    bool has_dynamic_registers_ = false;
     double sample_rate_ = 44100.0;
     uint64_t sample_index_ = 0;
 #ifdef EGRESS_LLVM_ORC_JIT
     egress_jit::NumericKernelFn jit_kernel_ = nullptr;
+    std::vector<double> numeric_inputs_;
     std::vector<double> numeric_temps_;
     std::vector<double> numeric_registers_;
     std::vector<double> numeric_next_registers_;
@@ -1504,7 +1616,7 @@ class Graph
             continue;
           }
 
-          mixed += slot.module->outputs[tap.output_id] / 20.0;
+          mixed += expr::to_float64(slot.module->outputs[tap.output_id]) / 20.0;
         }
         outputBuffer[sample] = mixed;
 
@@ -1824,6 +1936,8 @@ class Graph
     {
       Literal,
       Ref,
+      ArrayPack,
+      Index,
       Add,
       AddConst,
       Sub,
@@ -1866,6 +1980,7 @@ class Graph
       uint32_t src_a = 0;
       uint32_t src_b = 0;
       uint32_t src_c = 0;
+      std::vector<uint32_t> args;
       Value literal;
       uint32_t ref_module_id = 0;
       unsigned int ref_output_id = 0;
@@ -2446,7 +2561,7 @@ class Graph
 
       if (expr->kind == ExprKind::Literal)
       {
-        return expr->literal.type != ValueType::Array;
+        return true;
       }
 
       if (expr->kind == ExprKind::Function)
@@ -2477,9 +2592,22 @@ class Graph
                validate_expr_refs(expr->args.empty() ? nullptr : expr->args.front(), allow_input_values);
       }
 
-      if (expr->kind == ExprKind::ArrayPack || expr->kind == ExprKind::Index)
+      if (expr->kind == ExprKind::ArrayPack)
       {
-        return false;
+        for (const auto & item : expr->args)
+        {
+          if (!validate_expr_refs(item, allow_input_values))
+          {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      if (expr->kind == ExprKind::Index)
+      {
+        return validate_expr_refs(expr->lhs, allow_input_values) &&
+               validate_expr_refs(expr->rhs, allow_input_values);
       }
 
       if (expr->kind == ExprKind::InputValue ||
@@ -2586,7 +2714,38 @@ class Graph
             registers[instr.dst] = float_value(0.0);
             break;
           }
-          registers[instr.dst] = float_value(slot.module->prev_outputs[instr.ref_output_id]);
+          registers[instr.dst] = slot.module->prev_outputs[instr.ref_output_id];
+          break;
+        }
+        case OpCode::ArrayPack:
+        {
+          std::vector<Value> items;
+          items.reserve(instr.args.size());
+          for (uint32_t src : instr.args)
+          {
+            if (expr::is_array(registers[src]))
+            {
+              throw std::invalid_argument("Nested arrays are not supported.");
+            }
+            items.push_back(registers[src]);
+          }
+          registers[instr.dst] = expr::array_value(std::move(items));
+          break;
+        }
+        case OpCode::Index:
+        {
+          const Value & array_value = registers[instr.src_a];
+          if (!expr::is_array(array_value))
+          {
+            registers[instr.dst] = float_value(0.0);
+            break;
+          }
+          const int64_t index = expr::to_int64(registers[instr.src_b]);
+          if (index < 0 || static_cast<std::size_t>(index) >= array_value.array_items.size())
+          {
+            throw std::out_of_range("Array index out of range.");
+          }
+          registers[instr.dst] = array_value.array_items[static_cast<std::size_t>(index)];
           break;
         }
         case OpCode::Add:
@@ -2727,6 +2886,31 @@ class Graph
         instr.ref_output_id = expr->output_id;
         compiled.instructions.push_back(instr);
 
+        return instr.dst;
+      }
+
+      if (expr->kind == ExprKind::ArrayPack)
+      {
+        ExprInstr instr;
+        instr.opcode = OpCode::ArrayPack;
+        instr.dst = compiled.register_count++;
+        instr.args.reserve(expr->args.size());
+        for (const auto & arg : expr->args)
+        {
+          instr.args.push_back(compile_expr_node(arg, compiled, runtime));
+        }
+        compiled.instructions.push_back(instr);
+        return instr.dst;
+      }
+
+      if (expr->kind == ExprKind::Index)
+      {
+        ExprInstr instr;
+        instr.opcode = OpCode::Index;
+        instr.dst = compiled.register_count++;
+        instr.src_a = compile_expr_node(expr->lhs, compiled, runtime);
+        instr.src_b = compile_expr_node(expr->rhs, compiled, runtime);
+        compiled.instructions.push_back(instr);
         return instr.dst;
       }
 
@@ -2970,13 +3154,13 @@ class Graph
       const RuntimeState & runtime,
       const CompiledInputProgram & program,
       std::vector<Value> & registers,
-      std::vector<Signal> & inputs) const
+      std::vector<Value> & inputs) const
     {
       if (program.instructions.empty())
       {
         for (auto & input : inputs)
         {
-          input = 0.0;
+          input = float_value(0.0);
         }
         return;
       }
@@ -2997,7 +3181,7 @@ class Graph
 
       for (unsigned int input_id = 0; input_id < input_limit; ++input_id)
       {
-        inputs[input_id] = to_float64(registers[program.result_registers[input_id]]);
+        inputs[input_id] = registers[program.result_registers[input_id]];
       }
     }
 
@@ -3021,4 +3205,3 @@ class Graph
     std::unordered_map<std::string, ModuleTimingCounters> module_profile_stats_;
   #endif
 };
-
