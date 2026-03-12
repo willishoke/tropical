@@ -547,6 +547,26 @@ static SignalExpr sin_expr(const py::handle & value)
   return make_unary_expr(ExprKind::Sin, coerce_expr(value));
 }
 
+static SignalExpr abs_expr(const py::handle & value)
+{
+  return make_unary_expr(ExprKind::Abs, coerce_expr(value));
+}
+
+static SignalExpr log_expr(const py::handle & value)
+{
+  return make_unary_expr(ExprKind::Log, coerce_expr(value));
+}
+
+static SignalExpr clamp_expr(const py::handle & value, const py::handle & min_value, const py::handle & max_value)
+{
+  const SignalExpr signal = coerce_expr(value);
+  const SignalExpr min_signal = coerce_expr(min_value);
+  const SignalExpr max_signal = coerce_expr(max_value);
+  return make_signal_expr(
+    merge_graphs(merge_graphs(signal.graph, min_signal.graph), max_signal.graph),
+    expr::clamp_expr(signal.spec, min_signal.spec, max_signal.spec));
+}
+
 static SignalExpr logical_not_expr(const py::handle & value)
 {
   return make_unary_expr(ExprKind::Not, coerce_expr(value));
@@ -1209,6 +1229,7 @@ PYBIND11_MODULE(egress, m)
     .def("__bool__", [](const SignalExpr &) -> bool {
       throw py::type_error("Symbolic expressions do not have Python truthiness; use eg.logical_not(...) or comparisons.");
     })
+    .def("__abs__", [](const SignalExpr & expr) { return make_unary_expr(ExprKind::Abs, expr); })
     .def("__neg__", [](const SignalExpr & expr) { return make_unary_expr(ExprKind::Neg, expr); })
     .def("__invert__", [](const SignalExpr & expr) { return make_unary_expr(ExprKind::BitNot, expr); });
 
@@ -1248,6 +1269,7 @@ PYBIND11_MODULE(egress, m)
     .def("__bool__", [](const OutputPort &) -> bool {
       throw py::type_error("Ports do not have Python truthiness; use eg.logical_not(...) or comparisons.");
     })
+    .def("__abs__", [](const OutputPort & out) { return make_unary_expr(ExprKind::Abs, make_output_expr(out)); })
     .def("__neg__", [](const OutputPort & out) { return make_unary_expr(ExprKind::Neg, make_output_expr(out)); })
     .def("__invert__", [](const OutputPort & out) { return make_unary_expr(ExprKind::BitNot, make_output_expr(out)); });
 
@@ -1300,6 +1322,7 @@ PYBIND11_MODULE(egress, m)
     .def("__ixor__", [](const InputPort & lhs, const py::object & rhs) { return input_ixor(lhs, rhs); })
     .def("__ilshift__", [](const InputPort & lhs, const py::object & rhs) { return input_ilshift(lhs, rhs); })
     .def("__irshift__", [](const InputPort & lhs, const py::object & rhs) { return input_irshift(lhs, rhs); })
+    .def("__abs__", [](const InputPort & p) { return make_unary_expr(ExprKind::Abs, current_input_expr(p)); })
     .def("__neg__", [](const InputPort & p) { return make_unary_expr(ExprKind::Neg, current_input_expr(p)); })
     .def("__invert__", [](const InputPort & p) { return make_unary_expr(ExprKind::BitNot, current_input_expr(p)); });
 
@@ -1335,6 +1358,17 @@ PYBIND11_MODULE(egress, m)
   m.def("disconnect", &disconnect_ports, py::arg("out"), py::arg("in"));
   m.def("add_output", &add_output_port, py::arg("out"));
   m.def("incoming", &incoming_ports, py::arg("in"));
+  m.def("abs", [](const py::object & value) { return abs_expr(value); }, py::arg("value"));
+  m.def(
+    "clamp",
+    [](const py::object & value, const py::object & min_value, const py::object & max_value)
+    {
+      return clamp_expr(value, min_value, max_value);
+    },
+    py::arg("value"),
+    py::arg("min_value"),
+    py::arg("max_value"));
+  m.def("log", [](const py::object & value) { return log_expr(value); }, py::arg("value"));
   m.def("sin", [](const py::object & value) { return sin_expr(value); }, py::arg("value"));
   m.def("pow", [](const py::object & lhs, const py::object & rhs) { return pow_expr(coerce_expr(lhs), rhs); }, py::arg("lhs"), py::arg("rhs"));
   m.def("array", [](const py::iterable & values) { return make_array_expr(values); }, py::arg("values"));

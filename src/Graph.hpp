@@ -122,6 +122,11 @@ namespace egress_expr_inline
           seed = hash_mix(seed, structural_hash(arg, cache));
         }
         break;
+      case ExprKind::Clamp:
+        seed = hash_mix(seed, structural_hash(expr->lhs, cache));
+        seed = hash_mix(seed, structural_hash(expr->rhs, cache));
+        seed = hash_mix(seed, structural_hash(expr->args.empty() ? nullptr : expr->args.front(), cache));
+        break;
       case ExprKind::ArrayPack:
       {
         seed = hash_mix(seed, std::hash<std::size_t>{}(expr->args.size()));
@@ -238,6 +243,10 @@ namespace egress_expr_inline
           }
         }
         return true;
+      case ExprKind::Clamp:
+        return structural_equal(lhs->lhs, rhs->lhs) &&
+               structural_equal(lhs->rhs, rhs->rhs) &&
+               structural_equal(lhs->args.empty() ? nullptr : lhs->args.front(), rhs->args.empty() ? nullptr : rhs->args.front());
       case ExprKind::ArrayPack:
       {
         if (lhs->args.size() != rhs->args.size())
@@ -291,6 +300,10 @@ namespace egress_expr_inline
           }
         }
         return true;
+      case ExprKind::Clamp:
+        return is_pure_function_body(expr->lhs, param_count) &&
+               is_pure_function_body(expr->rhs, param_count) &&
+               is_pure_function_body(expr->args.empty() ? nullptr : expr->args.front(), param_count);
       case ExprKind::ArrayPack:
         for (const auto & arg : expr->args)
         {
@@ -353,15 +366,22 @@ namespace egress_expr_inline
         }
         return expr::array_pack_expr(std::move(items));
       }
+      case ExprKind::Clamp:
+        return expr::clamp_expr(
+          clone_with_subst(expr->lhs, args),
+          clone_with_subst(expr->rhs, args),
+          clone_with_subst(expr->args.empty() ? nullptr : expr->args.front(), args));
       case ExprKind::Index:
         return expr::index_expr(clone_with_subst(expr->lhs, args), clone_with_subst(expr->rhs, args));
       default:
         break;
     }
 
-    if (expr->kind == ExprKind::Neg ||
+    if (expr->kind == ExprKind::Abs ||
+        expr->kind == ExprKind::Neg ||
         expr->kind == ExprKind::Not ||
         expr->kind == ExprKind::BitNot ||
+        expr->kind == ExprKind::Log ||
         expr->kind == ExprKind::Sin)
     {
       return expr::unary_expr(expr->kind, clone_with_subst(expr->lhs, args));
@@ -427,15 +447,22 @@ namespace egress_expr_inline
         }
         return expr::array_pack_expr(std::move(items));
       }
+      case ExprKind::Clamp:
+        return expr::clamp_expr(
+          inline_functions(expr->lhs, inline_depth),
+          inline_functions(expr->rhs, inline_depth),
+          inline_functions(expr->args.empty() ? nullptr : expr->args.front(), inline_depth));
       case ExprKind::Index:
         return expr::index_expr(inline_functions(expr->lhs, inline_depth), inline_functions(expr->rhs, inline_depth));
       default:
         break;
     }
 
-    if (expr->kind == ExprKind::Neg ||
+    if (expr->kind == ExprKind::Abs ||
+        expr->kind == ExprKind::Neg ||
         expr->kind == ExprKind::Not ||
         expr->kind == ExprKind::BitNot ||
+        expr->kind == ExprKind::Log ||
         expr->kind == ExprKind::Sin)
     {
       return expr::unary_expr(expr->kind, inline_functions(expr->lhs, inline_depth));
@@ -615,6 +642,7 @@ class Module
       uint32_t dst = 0;
       uint32_t src_a = 0;
       uint32_t src_b = 0;
+      uint32_t src_c = 0;
       unsigned int slot_id = 0;
       Value literal;
       std::vector<uint32_t> args;
@@ -630,10 +658,17 @@ class Module
 
     static bool is_local_unary(ExprKind kind)
     {
-      return kind == ExprKind::Neg ||
+      return kind == ExprKind::Abs ||
+             kind == ExprKind::Neg ||
              kind == ExprKind::Not ||
              kind == ExprKind::BitNot ||
+             kind == ExprKind::Log ||
              kind == ExprKind::Sin;
+    }
+
+    static bool is_local_ternary(ExprKind kind)
+    {
+      return kind == ExprKind::Clamp;
     }
 
     static bool is_local_binary(ExprKind kind)
@@ -749,6 +784,12 @@ class Module
           {
             instr.src_a = compile_expr_node(expr->lhs, compiled, memo, hash_cache);
           }
+          else if (is_local_ternary(expr->kind))
+          {
+            instr.src_a = compile_expr_node(expr->lhs, compiled, memo, hash_cache);
+            instr.src_b = compile_expr_node(expr->rhs, compiled, memo, hash_cache);
+            instr.src_c = compile_expr_node(expr->args.empty() ? nullptr : expr->args.front(), compiled, memo, hash_cache);
+          }
           else if (is_local_binary(expr->kind))
           {
             instr.src_a = compile_expr_node(expr->lhs, compiled, memo, hash_cache);
@@ -834,6 +875,9 @@ class Module
             temps[instr.dst] = array_value.array_items[static_cast<std::size_t>(index)];
             break;
           }
+          case ExprKind::Abs:
+            temps[instr.dst] = expr_eval::abs_value(temps[instr.src_a]);
+            break;
           case ExprKind::Not:
             temps[instr.dst] = expr_eval::not_value(temps[instr.src_a]);
             break;
@@ -890,6 +934,12 @@ class Module
             break;
           case ExprKind::RShift:
             temps[instr.dst] = expr_eval::rshift_values(temps[instr.src_a], temps[instr.src_b]);
+            break;
+          case ExprKind::Clamp:
+            temps[instr.dst] = expr_eval::clamp_values(temps[instr.src_a], temps[instr.src_b], temps[instr.src_c]);
+            break;
+          case ExprKind::Log:
+            temps[instr.dst] = expr_eval::log_value(temps[instr.src_a]);
             break;
           case ExprKind::Sin:
             temps[instr.dst] = expr_eval::sin_value(temps[instr.src_a]);
@@ -957,7 +1007,10 @@ class Module
         case ExprKind::BitXor:
         case ExprKind::LShift:
         case ExprKind::RShift:
+        case ExprKind::Abs:
+        case ExprKind::Clamp:
         case ExprKind::Index:
+        case ExprKind::Log:
         case ExprKind::Sin:
         case ExprKind::Neg:
         case ExprKind::BitNot:
@@ -1046,6 +1099,7 @@ class Module
         jit_instr.dst = instr.dst;
         jit_instr.src_a = instr.src_a;
         jit_instr.src_b = instr.src_b;
+        jit_instr.src_c = instr.src_c;
         jit_instr.slot_id = instr.slot_id;
 
         bool emit_instruction = true;
@@ -1216,6 +1270,18 @@ class Module
             jit_instr.op = egress_jit::NumericOp::RShift;
             reg_info[instr.dst].is_scalar = true;
             break;
+          case ExprKind::Abs:
+            jit_instr.op = egress_jit::NumericOp::Abs;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::Clamp:
+            jit_instr.op = egress_jit::NumericOp::Clamp;
+            reg_info[instr.dst].is_scalar = true;
+            break;
+          case ExprKind::Log:
+            jit_instr.op = egress_jit::NumericOp::Log;
+            reg_info[instr.dst].is_scalar = true;
+            break;
           case ExprKind::Sin:
             jit_instr.op = egress_jit::NumericOp::Sin;
             reg_info[instr.dst].is_scalar = true;
@@ -1248,6 +1314,14 @@ class Module
             if (is_local_binary(instr.kind))
             {
               if (instr.src_b >= reg_info.size() || !reg_info[instr.src_b].is_scalar)
+              {
+                return false;
+              }
+            }
+            if (is_local_ternary(instr.kind))
+            {
+              if (instr.src_b >= reg_info.size() || !reg_info[instr.src_b].is_scalar ||
+                  instr.src_c >= reg_info.size() || !reg_info[instr.src_c].is_scalar)
               {
                 return false;
               }
@@ -1767,6 +1841,9 @@ class Graph
       BitXor,
       LShift,
       RShift,
+      Abs,
+      Clamp,
+      Log,
       Neg,
       Not,
       BitNot,
@@ -1788,6 +1865,7 @@ class Graph
       uint32_t dst = 0;
       uint32_t src_a = 0;
       uint32_t src_b = 0;
+      uint32_t src_c = 0;
       Value literal;
       uint32_t ref_module_id = 0;
       unsigned int ref_output_id = 0;
@@ -1885,6 +1963,29 @@ class Graph
         case ExprKind::SampleIndex:
         case ExprKind::ArrayPack:
           return expr;
+        case ExprKind::Clamp:
+        {
+          ExprSpecPtr value = simplify_expr(expr->lhs);
+          ExprSpecPtr min_value = simplify_expr(expr->rhs);
+          ExprSpecPtr max_value = simplify_expr(expr->args.empty() ? nullptr : expr->args.front());
+          if (!value)
+          {
+            value = expr::literal_expr(0.0);
+          }
+          if (!min_value)
+          {
+            min_value = expr::literal_expr(0.0);
+          }
+          if (!max_value)
+          {
+            max_value = expr::literal_expr(0.0);
+          }
+          if (value->kind == ExprKind::Literal && min_value->kind == ExprKind::Literal && max_value->kind == ExprKind::Literal)
+          {
+            return expr::literal_expr(expr_eval::clamp_values(value->literal, min_value->literal, max_value->literal));
+          }
+          return expr::clamp_expr(value, min_value, max_value);
+        }
         case ExprKind::Function:
           return expr::function_expr(expr->param_count, simplify_expr(expr->lhs));
         case ExprKind::Call:
@@ -1916,6 +2017,19 @@ class Graph
           }
           return expr::unary_expr(ExprKind::Neg, lhs);
         }
+        case ExprKind::Abs:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          if (!lhs || is_zero_expr(lhs))
+          {
+            return nullptr;
+          }
+          if (lhs->kind == ExprKind::Literal)
+          {
+            return expr::literal_expr(expr_eval::abs_value(lhs->literal));
+          }
+          return expr::unary_expr(ExprKind::Abs, lhs);
+        }
         case ExprKind::Not:
         {
           ExprSpecPtr lhs = simplify_expr(expr->lhs);
@@ -1941,6 +2055,19 @@ class Graph
             return expr::literal_expr(~to_int64(lhs->literal));
           }
           return expr::unary_expr(ExprKind::BitNot, lhs);
+        }
+        case ExprKind::Log:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          if (!lhs)
+          {
+            return expr::literal_expr(expr_eval::log_value(expr::float_value(0.0)));
+          }
+          if (lhs->kind == ExprKind::Literal)
+          {
+            return expr::literal_expr(expr_eval::log_value(lhs->literal));
+          }
+          return expr::unary_expr(ExprKind::Log, lhs);
         }
         case ExprKind::Sin:
         {
@@ -2179,6 +2306,14 @@ class Graph
         return expr::array_pack_expr(std::move(items));
       }
 
+      if (expr->kind == ExprKind::Clamp)
+      {
+        return simplify_expr(expr::clamp_expr(
+          replace_refs_with_zero(expr->lhs, module_name, output_id, remove_all_outputs, removed_any),
+          replace_refs_with_zero(expr->rhs, module_name, output_id, remove_all_outputs, removed_any),
+          replace_refs_with_zero(expr->args.empty() ? nullptr : expr->args.front(), module_name, output_id, remove_all_outputs, removed_any)));
+      }
+
       if (expr->kind == ExprKind::Function)
       {
         return expr::function_expr(
@@ -2210,6 +2345,11 @@ class Graph
       ExprSpecPtr lhs = replace_refs_with_zero(expr->lhs, module_name, output_id, remove_all_outputs, removed_any);
       ExprSpecPtr rhs = replace_refs_with_zero(expr->rhs, module_name, output_id, remove_all_outputs, removed_any);
 
+      if (expr->kind == ExprKind::Abs)
+      {
+        return simplify_expr(expr::unary_expr(ExprKind::Abs, lhs));
+      }
+
       if (expr->kind == ExprKind::Neg)
       {
         return simplify_expr(expr::unary_expr(ExprKind::Neg, lhs));
@@ -2223,6 +2363,11 @@ class Graph
       if (expr->kind == ExprKind::BitNot)
       {
         return simplify_expr(expr::unary_expr(ExprKind::BitNot, lhs));
+      }
+
+      if (expr->kind == ExprKind::Log)
+      {
+        return simplify_expr(expr::unary_expr(ExprKind::Log, lhs));
       }
 
       if (expr->kind == ExprKind::Sin)
@@ -2271,6 +2416,17 @@ class Graph
         return;
       }
 
+      if (expr->kind == ExprKind::Clamp)
+      {
+        collect_refs(expr->lhs, refs);
+        collect_refs(expr->rhs, refs);
+        if (!expr->args.empty())
+        {
+          collect_refs(expr->args.front(), refs);
+        }
+        return;
+      }
+
       collect_refs(expr->lhs, refs);
       collect_refs(expr->rhs, refs);
     }
@@ -2312,6 +2468,13 @@ class Graph
           }
         }
         return true;
+      }
+
+      if (expr->kind == ExprKind::Clamp)
+      {
+        return validate_expr_refs(expr->lhs, allow_input_values) &&
+               validate_expr_refs(expr->rhs, allow_input_values) &&
+               validate_expr_refs(expr->args.empty() ? nullptr : expr->args.front(), allow_input_values);
       }
 
       if (expr->kind == ExprKind::ArrayPack || expr->kind == ExprKind::Index)
@@ -2474,6 +2637,15 @@ class Graph
         case OpCode::RShift:
           registers[instr.dst] = expr_eval::rshift_values(registers[instr.src_a], registers[instr.src_b]);
           break;
+        case OpCode::Abs:
+          registers[instr.dst] = expr_eval::abs_value(registers[instr.src_a]);
+          break;
+        case OpCode::Clamp:
+          registers[instr.dst] = expr_eval::clamp_values(registers[instr.src_a], registers[instr.src_b], registers[instr.src_c]);
+          break;
+        case OpCode::Log:
+          registers[instr.dst] = expr_eval::log_value(registers[instr.src_a]);
+          break;
         case OpCode::Neg:
           registers[instr.dst] = expr_eval::neg_value(registers[instr.src_a]);
           break;
@@ -2558,15 +2730,38 @@ class Graph
         return instr.dst;
       }
 
-      if (expr->kind == ExprKind::Neg || expr->kind == ExprKind::Not || expr->kind == ExprKind::BitNot || expr->kind == ExprKind::Sin)
+      if (expr->kind == ExprKind::Abs ||
+          expr->kind == ExprKind::Neg ||
+          expr->kind == ExprKind::Not ||
+          expr->kind == ExprKind::BitNot ||
+          expr->kind == ExprKind::Log ||
+          expr->kind == ExprKind::Sin)
       {
         const uint32_t operand = compile_expr_node(expr->lhs, compiled, runtime);
         ExprInstr instr;
-        instr.opcode = expr->kind == ExprKind::Neg
-                         ? OpCode::Neg
-                         : (expr->kind == ExprKind::Not ? OpCode::Not : (expr->kind == ExprKind::BitNot ? OpCode::BitNot : OpCode::Sin));
+        instr.opcode = expr->kind == ExprKind::Abs
+                         ? OpCode::Abs
+                         : (expr->kind == ExprKind::Neg
+                              ? OpCode::Neg
+                              : (expr->kind == ExprKind::Not
+                                   ? OpCode::Not
+                                   : (expr->kind == ExprKind::BitNot
+                                        ? OpCode::BitNot
+                                        : (expr->kind == ExprKind::Log ? OpCode::Log : OpCode::Sin))));
         instr.dst = compiled.register_count++;
         instr.src_a = operand;
+        compiled.instructions.push_back(instr);
+        return instr.dst;
+      }
+
+      if (expr->kind == ExprKind::Clamp)
+      {
+        ExprInstr instr;
+        instr.opcode = OpCode::Clamp;
+        instr.dst = compiled.register_count++;
+        instr.src_a = compile_expr_node(expr->lhs, compiled, runtime);
+        instr.src_b = compile_expr_node(expr->rhs, compiled, runtime);
+        instr.src_c = compile_expr_node(expr->args.empty() ? nullptr : expr->args.front(), compiled, runtime);
         compiled.instructions.push_back(instr);
         return instr.dst;
       }

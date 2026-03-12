@@ -155,6 +155,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
 
   llvm::FunctionCallee llvm_sin = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::sin, {f64_ty});
   llvm::FunctionCallee llvm_pow = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::pow, {f64_ty});
+  llvm::FunctionCallee llvm_log = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::log, {f64_ty});
   llvm::FunctionCallee llvm_fmod = module->getOrInsertFunction(
     "fmod",
     llvm::FunctionType::get(f64_ty, {f64_ty, f64_ty}, false));
@@ -303,6 +304,27 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         result = builder.CreateSIToFP(shifted, f64_ty);
         break;
       }
+      case NumericOp::Abs:
+        result = builder.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, load_temp(instr.src_a));
+        break;
+      case NumericOp::Clamp:
+      {
+        llvm::Value * value = load_temp(instr.src_a);
+        llvm::Value * min_value = load_temp(instr.src_b);
+        llvm::Value * max_value = load_temp(instr.src_c);
+        llvm::Value * lower_bounded = builder.CreateSelect(
+          builder.CreateFCmpOLT(value, min_value),
+          min_value,
+          value);
+        result = builder.CreateSelect(
+          builder.CreateFCmpOGT(lower_bounded, max_value),
+          max_value,
+          lower_bounded);
+        break;
+      }
+      case NumericOp::Log:
+        result = builder.CreateCall(llvm_log, {load_temp(instr.src_a)});
+        break;
       case NumericOp::IndexArray:
       {
         llvm::Value * array_slot_ptr = builder.CreateInBoundsGEP(i64_ty, array_sizes_arg, builder.getInt64(instr.slot_id));

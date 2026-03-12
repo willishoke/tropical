@@ -40,6 +40,9 @@ enum class NumericOp : uint8_t
   BitXor,
   LShift,
   RShift,
+  Abs,
+  Clamp,
+  Log,
   IndexArray,
   Sin,
   Neg,
@@ -52,6 +55,7 @@ struct NumericInstr
   uint32_t dst = 0;
   uint32_t src_a = 0;
   uint32_t src_b = 0;
+  uint32_t src_c = 0;
   uint32_t slot_id = 0;
   double literal = 0.0;
 };

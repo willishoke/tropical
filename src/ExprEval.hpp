@@ -2,7 +2,9 @@
 
 #include "Expr.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace egress_expr_eval
 {
@@ -135,6 +137,17 @@ inline expr::Value not_value(const expr::Value & value)
   });
 }
 
+inline expr::Value abs_value(const expr::Value & value)
+{
+  return expr::map_unary(value, [](const expr::Value & item) {
+    if (item.type == expr::ValueType::Float)
+    {
+      return expr::float_value(std::fabs(expr::to_float64(item)));
+    }
+    return expr::int_value(std::llabs(expr::to_int64(item)));
+  });
+}
+
 inline expr::Value neg_value(const expr::Value & value)
 {
   return expr::map_unary(value, [](const expr::Value & item) {
@@ -150,6 +163,24 @@ inline expr::Value bit_not_value(const expr::Value & value)
 {
   return expr::map_unary(value, [](const expr::Value & item) {
     return expr::int_value(~expr::to_int64(item));
+  });
+}
+
+inline expr::Value clamp_values(const expr::Value & value, const expr::Value & min_value, const expr::Value & max_value)
+{
+  return expr::map_ternary(value, min_value, max_value, [](const expr::Value & item, const expr::Value & lo, const expr::Value & hi) {
+    if (expr::arithmetic_type(item, lo) == expr::ValueType::Float || expr::arithmetic_type(item, hi) == expr::ValueType::Float)
+    {
+      const double item_value = expr::to_float64(item);
+      const double min_scalar = expr::to_float64(lo);
+      const double max_scalar = expr::to_float64(hi);
+      return expr::float_value(std::fmin(std::fmax(item_value, min_scalar), max_scalar));
+    }
+
+    const int64_t item_value = expr::to_int64(item);
+    const int64_t min_scalar = expr::to_int64(lo);
+    const int64_t max_scalar = expr::to_int64(hi);
+    return expr::int_value(std::min(std::max(item_value, min_scalar), max_scalar));
   });
 }
 
@@ -199,6 +230,13 @@ inline expr::Value sin_value(const expr::Value & value)
 {
   return expr::map_unary(value, [](const expr::Value & item) {
     return expr::float_value(std::sin(expr::to_float64(item)));
+  });
+}
+
+inline expr::Value log_value(const expr::Value & value)
+{
+  return expr::map_unary(value, [](const expr::Value & item) {
+    return expr::float_value(std::log(expr::to_float64(item)));
   });
 }
 }

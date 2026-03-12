@@ -58,6 +58,9 @@ enum class ExprKind
   BitXor,
   LShift,
   RShift,
+  Abs,
+  Clamp,
+  Log,
   Sin,
   Neg,
   BitNot
@@ -253,6 +256,56 @@ inline Value map_binary(const Value & lhs, const Value & rhs, Func func)
   return func(lhs, rhs);
 }
 
+template <typename Func>
+inline Value map_ternary(const Value & first, const Value & second, const Value & third, Func func)
+{
+  std::size_t array_size = 0;
+  bool have_array = false;
+
+  for (const Value * value : {&first, &second, &third})
+  {
+    if (!is_array(*value))
+    {
+      continue;
+    }
+
+    if (!have_array)
+    {
+      array_size = value->array_items.size();
+      have_array = true;
+      continue;
+    }
+
+    if (value->array_items.size() != array_size)
+    {
+      throw std::invalid_argument("Array shapes do not match.");
+    }
+  }
+
+  if (!have_array)
+  {
+    return func(first, second, third);
+  }
+
+  std::vector<Value> items;
+  items.reserve(array_size);
+  for (std::size_t i = 0; i < array_size; ++i)
+  {
+    const Value * first_item = is_array(first) ? &first.array_items[i] : &first;
+    const Value * second_item = is_array(second) ? &second.array_items[i] : &second;
+    const Value * third_item = is_array(third) ? &third.array_items[i] : &third;
+
+    if (is_array(*first_item) || is_array(*second_item) || is_array(*third_item))
+    {
+      throw std::invalid_argument("Nested arrays are not supported.");
+    }
+
+    items.push_back(func(*first_item, *second_item, *third_item));
+  }
+
+  return array_value(std::move(items));
+}
+
 inline ExprSpecPtr literal_expr(Value value)
 {
   auto expr = std::make_shared<ExprSpec>();
@@ -364,6 +417,16 @@ inline ExprSpecPtr index_expr(ExprSpecPtr array_expr, ExprSpecPtr index_expr)
   expr->kind = ExprKind::Index;
   expr->lhs = std::move(array_expr);
   expr->rhs = std::move(index_expr);
+  return expr;
+}
+
+inline ExprSpecPtr clamp_expr(ExprSpecPtr value_expr, ExprSpecPtr min_expr, ExprSpecPtr max_expr)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::Clamp;
+  expr->lhs = std::move(value_expr);
+  expr->rhs = std::move(min_expr);
+  expr->args.push_back(std::move(max_expr));
   return expr;
 }
 }  // namespace egress_expr
