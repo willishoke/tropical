@@ -1,15 +1,10 @@
 # egress
 
-### Willis Hoke
-
 ## Intro
 
-`egress` is a C++ library with a Python frontend for realtime signal-graph synthesis. The current Python API is centered on user-defined modules: you describe a module in Python by returning symbolic output expressions and next-register values, and `egress` evaluates that graph sample-by-sample. It is built to be lean and portable, although it is currently only tested on macOS.
+`egress` is a C++ library with a Python frontend for realtime audio synthesis. Modules can be defined in Python using built-in or user-defined operations, and connections defined using straightforward expression syntax. JIT compilation for module definitions ensures blazing-fast realtime execution with native support for audio playback. It is built to be fast and portable, although it is currently only tested on macOS.
 
 ![demo](./img/testchaos.png)
-
-
-This project owes a giant technical debt to Andrew Belt's `VCVRack` project. Although the architecture is different, it served as an inspiration throughout the development process.
 
 ## Build
 
@@ -173,12 +168,6 @@ Modules expose named inputs and outputs plus an optional register bank. After ea
 ## Testing
 
 Tests can be compiled with `make debug`. The `test` directory contains Python scripts for visualizing test outputs.
-
-## Next Steps
-
-Several methods are still incomplete, including those to remove modules or connections. More validation checks should be added to ensure module names are valid, etc. While the syntax for declaring modules is fairly terse, it doesn't seem right to have the caller be managing memory. This should probably be accomplished by factory functions in the Graph class. Better test automation would be nice -- should be able to write a script to run all tests sequentially.
- 
-It would be worthwhile to test alternative implementations for storing modules and their connections. Even just using vectors might end up being more efficient due to the linear memory layout. This libarary lacks any front end implementation, but it would be relatively straightforward to augment it with a simple parser to process user input for interactive use.
 
 ## License
 
