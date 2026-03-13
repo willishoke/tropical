@@ -19,6 +19,37 @@ PrimitiveProbe = eg.define_module(
 )
 
 
+AllpassStage = eg.define_stateful_function(
+    inputs=["x", "a"],
+    outputs=["y"],
+    regs={"x_prev": 0.0, "y_prev": 0.0},
+    process=lambda inp, reg: (
+        {
+            "y": -inp["a"] * inp["x"] + reg["x_prev"] + inp["a"] * reg["y_prev"],
+        },
+        {
+            "x_prev": inp["x"],
+            "y_prev": -inp["a"] * inp["x"] + reg["x_prev"] + inp["a"] * reg["y_prev"],
+        },
+    ),
+)
+
+
+StatefulProbe = eg.define_module(
+    name="StatefulProbe",
+    inputs=["x", "a"],
+    outputs=["single", "cascade"],
+    regs={},
+    process=lambda inp, reg: (
+        {
+            "single": AllpassStage(inp["x"], inp["a"]),
+            "cascade": AllpassStage(AllpassStage(inp["x"], inp["a"]), inp["a"]),
+        },
+        {},
+    ),
+)
+
+
 def main():
     probe = PrimitiveProbe()
     probe.x = -3.5
@@ -43,6 +74,23 @@ def main():
     assert stats["numeric_jit_instruction_count"] > 0
 
     print("primitive-ok", round(buf[0], 6), stats["numeric_jit_instruction_count"], stats["jit_status"])
+
+    stateful = StatefulProbe()
+    stateful.x = 1.0
+    stateful.a = 0.5
+
+    eg.add_output(stateful.single)
+    eg.add_output(stateful.cascade)
+    eg.graph().process()
+
+    stateful_buf = eg.graph().output_buffer()
+    expected_stateful = expected + (-0.25 / 20.0)
+    assert math.isclose(stateful_buf[0], expected_stateful, rel_tol=1e-9, abs_tol=1e-9)
+
+    eg.graph().process()
+    stateful_buf = eg.graph().output_buffer()
+    expected_mix = expected + (2.0 / 20.0)
+    assert math.isclose(stateful_buf[0], expected_mix, rel_tol=1e-9, abs_tol=1e-9)
 
 
 if __name__ == "__main__":

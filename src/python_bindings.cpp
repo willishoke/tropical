@@ -212,6 +212,154 @@ struct PureFunctionDefinition
   std::vector<expr::ExprSpecPtr> output_exprs;
 };
 
+struct StatefulFunctionDefinition
+{
+  std::vector<std::string> input_names;
+  std::vector<std::string> output_names;
+  std::vector<std::string> register_names;
+  std::vector<expr::Value> initial_registers;
+  std::vector<expr::ExprSpecPtr> output_exprs;
+  std::vector<expr::ExprSpecPtr> register_exprs;
+  std::vector<Module::RegisterArraySpec> register_array_specs;
+};
+
+struct DefinitionBuildContext
+{
+  std::vector<std::string> register_names;
+  std::vector<expr::Value> initial_registers;
+  std::vector<expr::ExprSpecPtr> register_exprs;
+  std::vector<Module::RegisterArraySpec> register_array_specs;
+  std::size_t hidden_counter = 0;
+
+  unsigned int append_register(
+    std::string name,
+    expr::Value initial_value,
+    Module::RegisterArraySpec array_spec)
+  {
+    const unsigned int slot = static_cast<unsigned int>(register_names.size());
+    register_names.push_back(std::move(name));
+    initial_registers.push_back(std::move(initial_value));
+    register_exprs.push_back(nullptr);
+    register_array_specs.push_back(std::move(array_spec));
+    return slot;
+  }
+
+  unsigned int append_hidden_register(
+    const std::string & base_name,
+    const expr::Value & initial_value,
+    const Module::RegisterArraySpec & array_spec)
+  {
+    const std::string hidden_name = "__stateful_" + std::to_string(hidden_counter++) + "_" + base_name;
+    return append_register(hidden_name, initial_value, array_spec);
+  }
+};
+
+static thread_local DefinitionBuildContext * current_definition_context_ = nullptr;
+
+class ScopedDefinitionBuildContext
+{
+  public:
+    explicit ScopedDefinitionBuildContext(DefinitionBuildContext * context)
+      : previous_(current_definition_context_)
+    {
+      current_definition_context_ = context;
+    }
+
+    ~ScopedDefinitionBuildContext()
+    {
+      current_definition_context_ = previous_;
+    }
+
+  private:
+    DefinitionBuildContext * previous_ = nullptr;
+};
+
+static expr::ExprSpecPtr clone_with_input_and_register_subst(
+  const expr::ExprSpecPtr & expr,
+  const std::vector<expr::ExprSpecPtr> & input_args,
+  const std::vector<unsigned int> & register_slots)
+{
+  if (!expr)
+  {
+    return nullptr;
+  }
+
+  switch (expr->kind)
+  {
+    case ExprKind::Literal:
+    case ExprKind::Ref:
+    case ExprKind::SampleRate:
+    case ExprKind::SampleIndex:
+      return expr;
+    case ExprKind::InputValue:
+      if (expr->slot_id >= input_args.size())
+      {
+        throw std::invalid_argument("Stateful function argument index out of range.");
+      }
+      return input_args[expr->slot_id];
+    case ExprKind::RegisterValue:
+      if (expr->slot_id >= register_slots.size())
+      {
+        throw std::invalid_argument("Stateful function register index out of range.");
+      }
+      return expr::register_value_expr(register_slots[expr->slot_id]);
+    case ExprKind::Function:
+      return expr::function_expr(
+        expr->param_count,
+        clone_with_input_and_register_subst(expr->lhs, input_args, register_slots));
+    case ExprKind::Call:
+    {
+      std::vector<expr::ExprSpecPtr> args;
+      args.reserve(expr->args.size());
+      for (const auto & arg : expr->args)
+      {
+        args.push_back(clone_with_input_and_register_subst(arg, input_args, register_slots));
+      }
+      return expr::call_expr(
+        clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
+        std::move(args));
+    }
+    case ExprKind::ArrayPack:
+    {
+      std::vector<expr::ExprSpecPtr> items;
+      items.reserve(expr->args.size());
+      for (const auto & arg : expr->args)
+      {
+        items.push_back(clone_with_input_and_register_subst(arg, input_args, register_slots));
+      }
+      return expr::array_pack_expr(std::move(items));
+    }
+    case ExprKind::Clamp:
+      return expr::clamp_expr(
+        clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
+        clone_with_input_and_register_subst(expr->rhs, input_args, register_slots),
+        clone_with_input_and_register_subst(expr->args.empty() ? nullptr : expr->args.front(), input_args, register_slots));
+    case ExprKind::Index:
+      return expr::index_expr(
+        clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
+        clone_with_input_and_register_subst(expr->rhs, input_args, register_slots));
+    default:
+      break;
+  }
+
+  if (expr->kind == ExprKind::Abs ||
+      expr->kind == ExprKind::Neg ||
+      expr->kind == ExprKind::Not ||
+      expr->kind == ExprKind::BitNot ||
+      expr->kind == ExprKind::Log ||
+      expr->kind == ExprKind::Sin)
+  {
+    return expr::unary_expr(
+      expr->kind,
+      clone_with_input_and_register_subst(expr->lhs, input_args, register_slots));
+  }
+
+  return expr::binary_expr(
+    expr->kind,
+    clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
+    clone_with_input_and_register_subst(expr->rhs, input_args, register_slots));
+}
+
 class PyModuleInstance
 {
   public:
@@ -385,6 +533,86 @@ class PyPureFunctionType
 
   private:
     std::shared_ptr<PureFunctionDefinition> definition_;
+};
+
+class PyStatefulFunctionType
+{
+  public:
+    explicit PyStatefulFunctionType(std::shared_ptr<StatefulFunctionDefinition> definition)
+      : definition_(std::move(definition))
+    {
+    }
+
+    py::object call(const py::args & args) const
+    {
+      if (current_definition_context_ == nullptr)
+      {
+        throw std::invalid_argument(
+          "Stateful functions may only be called inside define_module or define_stateful_function process bodies.");
+      }
+
+      if (args.size() != definition_->input_names.size())
+      {
+        throw std::invalid_argument(
+          "Stateful function expects " + std::to_string(definition_->input_names.size()) + " arguments.");
+      }
+
+      std::vector<expr::ExprSpecPtr> call_args;
+      call_args.reserve(args.size());
+      for (const py::handle & arg : args)
+      {
+        const SignalExpr signal = coerce_expr(arg);
+        if (signal.graph != nullptr)
+        {
+          throw std::invalid_argument("Stateful function arguments cannot capture graph ports.");
+        }
+        call_args.push_back(signal.spec);
+      }
+
+      std::vector<unsigned int> register_slots;
+      register_slots.reserve(definition_->register_names.size());
+      for (std::size_t i = 0; i < definition_->register_names.size(); ++i)
+      {
+        const Module::RegisterArraySpec & array_spec = definition_->register_array_specs[i];
+        if (array_spec.enabled)
+        {
+          throw std::invalid_argument("Dynamic array_state is not supported in define_stateful_function yet.");
+        }
+        register_slots.push_back(current_definition_context_->append_hidden_register(
+          definition_->register_names[i],
+          definition_->initial_registers[i],
+          array_spec));
+      }
+
+      for (std::size_t i = 0; i < definition_->register_exprs.size(); ++i)
+      {
+        if (!definition_->register_exprs[i])
+        {
+          continue;
+        }
+        current_definition_context_->register_exprs[register_slots[i]] =
+          clone_with_input_and_register_subst(definition_->register_exprs[i], call_args, register_slots);
+      }
+
+      if (definition_->output_exprs.size() == 1)
+      {
+        return py::cast(make_signal_expr(
+          nullptr,
+          clone_with_input_and_register_subst(definition_->output_exprs[0], call_args, register_slots)));
+      }
+
+      py::tuple outputs(definition_->output_exprs.size());
+      for (std::size_t i = 0; i < definition_->output_exprs.size(); ++i)
+      {
+        outputs[i] = py::cast(make_signal_expr(
+          nullptr,
+          clone_with_input_and_register_subst(definition_->output_exprs[i], call_args, register_slots)));
+      }
+      return outputs;
+    }
+
+  private:
+    std::shared_ptr<StatefulFunctionDefinition> definition_;
 };
 
 static PythonGraph * merge_graphs(PythonGraph * lhs, PythonGraph * rhs)
@@ -762,6 +990,8 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
   definition->output_names = require_names(outputs, "outputs");
   definition->sample_rate = sample_rate;
 
+  DefinitionBuildContext build_context;
+
   SymbolMap input_symbols;
   input_symbols.kind = SymbolMap::Kind::Input;
   for (unsigned int i = 0; i < definition->input_names.size(); ++i)
@@ -771,10 +1001,6 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
 
   SymbolMap register_symbols;
   register_symbols.kind = SymbolMap::Kind::Register;
-  definition->register_exprs.assign(regs.size(), nullptr);
-  definition->register_names.reserve(regs.size());
-  definition->initial_registers.reserve(regs.size());
-  definition->register_array_specs.reserve(regs.size());
 
   unsigned int register_id = 0;
   for (const auto & item : regs)
@@ -802,9 +1028,8 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
       throw std::invalid_argument("Duplicate register '" + reg_name + "'.");
     }
 
-    definition->register_names.push_back(reg_name);
-
     Module::RegisterArraySpec array_spec;
+    expr::Value initial_value;
     if (is_array_state_spec(value))
     {
       const py::dict spec = value.cast<py::dict>();
@@ -818,18 +1043,22 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
       {
         array_spec.init_value = expr::float_value(0.0);
       }
-      definition->initial_registers.push_back(expr::array_value({}));
+      initial_value = expr::array_value({});
     }
     else
     {
-      definition->initial_registers.push_back(value_from_py(value));
+      initial_value = value_from_py(value);
     }
 
-    definition->register_array_specs.push_back(std::move(array_spec));
+    build_context.append_register(reg_name, std::move(initial_value), std::move(array_spec));
     ++register_id;
   }
 
-  py::object result = process(py::cast(input_symbols), py::cast(register_symbols));
+  py::object result;
+  {
+    ScopedDefinitionBuildContext scoped_context(&build_context);
+    result = process(py::cast(input_symbols), py::cast(register_symbols));
+  }
   if (!py::isinstance<py::tuple>(result))
   {
     throw std::invalid_argument("process must return a tuple: (outputs, next_regs).");
@@ -845,6 +1074,7 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
   const py::dict register_values = require_dict(returned[1], "process next_regs");
 
   definition->output_exprs.assign(definition->output_names.size(), nullptr);
+  definition->register_exprs = build_context.register_exprs;
   std::unordered_set<std::string> assigned_outputs;
   for (const auto & item : output_values)
   {
@@ -884,6 +1114,128 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
     definition->register_exprs[it->second] = expr.spec;
   }
 
+  definition->register_names = std::move(build_context.register_names);
+  definition->initial_registers = std::move(build_context.initial_registers);
+  definition->register_array_specs = std::move(build_context.register_array_specs);
+
+  return definition;
+}
+
+static std::shared_ptr<StatefulFunctionDefinition> define_stateful_function_impl(
+  const py::iterable & inputs,
+  const py::iterable & outputs,
+  const py::dict & regs,
+  const py::function & process)
+{
+  auto definition = std::make_shared<StatefulFunctionDefinition>();
+  definition->input_names = require_names(inputs, "inputs");
+  definition->output_names = require_names(outputs, "outputs");
+
+  DefinitionBuildContext build_context;
+
+  SymbolMap input_symbols;
+  input_symbols.kind = SymbolMap::Kind::Input;
+  for (unsigned int i = 0; i < definition->input_names.size(); ++i)
+  {
+    input_symbols.slots.emplace(definition->input_names[i], i);
+  }
+
+  SymbolMap register_symbols;
+  register_symbols.kind = SymbolMap::Kind::Register;
+
+  unsigned int register_id = 0;
+  for (const auto & item : regs)
+  {
+    const py::handle key = item.first;
+    const py::handle value = item.second;
+    if (!py::isinstance<py::str>(key))
+    {
+      throw std::invalid_argument("regs keys must be strings.");
+    }
+    if (!py::isinstance<py::bool_>(value) &&
+        !py::isinstance<py::float_>(value) &&
+        !py::isinstance<py::int_>(value) &&
+        !py::isinstance<py::list>(value) &&
+        !py::isinstance<py::tuple>(value))
+    {
+      throw std::invalid_argument(
+        "stateful regs values must be bool, int, float, or static 1-D arrays of those scalars.");
+    }
+
+    const std::string reg_name = key.cast<std::string>();
+    if (!register_symbols.slots.emplace(reg_name, register_id).second)
+    {
+      throw std::invalid_argument("Duplicate register '" + reg_name + "'.");
+    }
+
+    build_context.append_register(reg_name, value_from_py(value), Module::RegisterArraySpec{});
+    ++register_id;
+  }
+
+  py::object result;
+  {
+    ScopedDefinitionBuildContext scoped_context(&build_context);
+    result = process(py::cast(input_symbols), py::cast(register_symbols));
+  }
+  if (!py::isinstance<py::tuple>(result))
+  {
+    throw std::invalid_argument("process must return a tuple: (outputs, next_regs).");
+  }
+
+  py::tuple returned = result.cast<py::tuple>();
+  if (returned.size() != 2)
+  {
+    throw std::invalid_argument("process must return exactly two dicts: (outputs, next_regs).");
+  }
+
+  const py::dict output_values = require_dict(returned[0], "process outputs");
+  const py::dict register_values = require_dict(returned[1], "process next_regs");
+
+  definition->output_exprs.assign(definition->output_names.size(), nullptr);
+  definition->register_exprs = build_context.register_exprs;
+
+  std::unordered_set<std::string> assigned_outputs;
+  for (const auto & item : output_values)
+  {
+    const std::string output_name = py::cast<std::string>(item.first);
+    auto it = std::find(definition->output_names.begin(), definition->output_names.end(), output_name);
+    if (it == definition->output_names.end())
+    {
+      throw std::invalid_argument("Unknown output '" + output_name + "'.");
+    }
+    if (!assigned_outputs.insert(output_name).second)
+    {
+      throw std::invalid_argument("Output '" + output_name + "' assigned more than once.");
+    }
+
+    const SignalExpr expr = coerce_expr(item.second);
+    if (expr.graph != nullptr)
+    {
+      throw std::invalid_argument("Stateful function expressions cannot capture graph ports.");
+    }
+    definition->output_exprs[static_cast<std::size_t>(std::distance(definition->output_names.begin(), it))] = expr.spec;
+  }
+
+  for (const auto & item : register_values)
+  {
+    const std::string reg_name = py::cast<std::string>(item.first);
+    auto it = register_symbols.slots.find(reg_name);
+    if (it == register_symbols.slots.end())
+    {
+      throw std::invalid_argument("Unknown register '" + reg_name + "'.");
+    }
+
+    const SignalExpr expr = coerce_expr(item.second);
+    if (expr.graph != nullptr)
+    {
+      throw std::invalid_argument("Stateful function expressions cannot capture graph ports.");
+    }
+    definition->register_exprs[it->second] = expr.spec;
+  }
+
+  definition->register_names = std::move(build_context.register_names);
+  definition->initial_registers = std::move(build_context.initial_registers);
+  definition->register_array_specs = std::move(build_context.register_array_specs);
   return definition;
 }
 
@@ -1424,6 +1776,9 @@ PYBIND11_MODULE(egress, m)
   py::class_<PyPureFunctionType>(m, "PureFunction")
     .def("__call__", &PyPureFunctionType::call);
 
+  py::class_<PyStatefulFunctionType>(m, "StatefulFunction")
+    .def("__call__", &PyStatefulFunctionType::call);
+
   m.def(
     "array_state",
     [](const std::string & input, const py::object & init)
@@ -1493,6 +1848,20 @@ PYBIND11_MODULE(egress, m)
     },
     py::arg("inputs"),
     py::arg("outputs"),
+    py::arg("process"));
+
+  m.def(
+    "define_stateful_function",
+    [](const py::iterable & inputs,
+       const py::iterable & outputs,
+       const py::dict & regs,
+       const py::function & process)
+    {
+      return PyStatefulFunctionType(define_stateful_function_impl(inputs, outputs, regs, process));
+    },
+    py::arg("inputs"),
+    py::arg("outputs"),
+    py::arg("regs"),
     py::arg("process"));
 
   py::class_<PythonDAC>(m, "DAC")

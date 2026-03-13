@@ -98,6 +98,27 @@ Expression trees now preserve simple scalar types: `bool`, `int`, and `float`. A
 
 Exponentiation is now a first-class symbolic operation as well. Use either `lhs ** rhs` or `eg.pow(lhs, rhs)` inside pure functions and module definitions.
 
+For reusable stateful building blocks inside a module definition, use `eg.define_stateful_function(...)`. A stateful function looks like a small module definition with `inputs`, `outputs`, `regs`, and a `(outputs, next_regs)` return value, but calling it inside `define_module(...)` or another stateful function does not create a runtime graph node. Instead it expands into the enclosing module's register bank and expression tree, so chained calls remain same-sample and only explicit register updates introduce delay.
+
+```python
+Allpass = eg.define_stateful_function(
+    inputs=["x", "a"],
+    outputs=["y"],
+    regs={"x_prev": 0.0, "y_prev": 0.0},
+    process=lambda inp, reg: (
+        {
+            "y": -inp["a"] * inp["x"] + reg["x_prev"] + inp["a"] * reg["y_prev"],
+        },
+        {
+            "x_prev": inp["x"],
+            "y_prev": -inp["a"] * inp["x"] + reg["x_prev"] + inp["a"] * reg["y_prev"],
+        },
+    ),
+)
+```
+
+The initial implementation is conservative: scalar and static 1-D array registers are supported, but dynamic `array_state(...)` registers are not yet supported inside `define_stateful_function(...)`.
+
 Module registers may also hold static 1-D arrays of scalar values. Use Python lists / tuples for register initialization and `eg.array([...])` when constructing a new array expression inside `process`. Arithmetic between arrays and scalars broadcasts elementwise, and array indexing is explicit:
 
 ```python
