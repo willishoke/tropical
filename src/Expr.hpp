@@ -15,7 +15,8 @@ enum class ValueType : uint8_t
   Int,
   Float,
   Bool,
-  Array
+  Array,
+  Matrix
 };
 
 struct Value
@@ -25,6 +26,9 @@ struct Value
   double float_value = 0.0;
   bool bool_value = false;
   std::vector<Value> array_items;
+  std::vector<Value> matrix_items;
+  std::size_t matrix_rows = 0;
+  std::size_t matrix_cols = 0;
 };
 
 enum class ExprKind
@@ -50,6 +54,7 @@ enum class ExprKind
   Sub,
   Mul,
   Div,
+  MatMul,
   Pow,
   Mod,
   FloorDiv,
@@ -122,6 +127,23 @@ inline Value array_value(std::vector<Value> items)
   return result;
 }
 
+inline Value matrix_value(std::size_t rows, std::size_t cols, std::vector<Value> items)
+{
+  if (rows * cols != items.size())
+  {
+    throw std::invalid_argument("Matrix size does not match item count.");
+  }
+  Value result;
+  result.type = ValueType::Matrix;
+  result.matrix_rows = rows;
+  result.matrix_cols = cols;
+  result.matrix_items = std::move(items);
+  result.int_value = static_cast<int64_t>(rows);
+  result.float_value = static_cast<double>(cols);
+  result.bool_value = rows != 0 && cols != 0;
+  return result;
+}
+
 inline bool is_truthy(const Value & value)
 {
   switch (value.type)
@@ -134,6 +156,8 @@ inline bool is_truthy(const Value & value)
       return value.float_value != 0.0;
     case ValueType::Array:
       throw std::invalid_argument("Array truthiness is ambiguous.");
+    case ValueType::Matrix:
+      throw std::invalid_argument("Matrix truthiness is ambiguous.");
   }
   return false;
 }
@@ -150,6 +174,8 @@ inline double to_float64(const Value & value)
       return value.float_value;
     case ValueType::Array:
       throw std::invalid_argument("Expected scalar float-compatible value, got array.");
+    case ValueType::Matrix:
+      throw std::invalid_argument("Expected scalar float-compatible value, got matrix.");
   }
   return 0.0;
 }
@@ -166,6 +192,8 @@ inline int64_t to_int64(const Value & value)
       return static_cast<int64_t>(value.float_value);
     case ValueType::Array:
       throw std::invalid_argument("Expected scalar int-compatible value, got array.");
+    case ValueType::Matrix:
+      throw std::invalid_argument("Expected scalar int-compatible value, got matrix.");
   }
   return 0;
 }
@@ -180,6 +208,31 @@ inline bool is_array(const Value & value)
   return value.type == ValueType::Array;
 }
 
+inline bool is_matrix(const Value & value)
+{
+  return value.type == ValueType::Matrix;
+}
+
+inline Value array_from_matrix_row(const Value & value, std::size_t row)
+{
+  if (!is_matrix(value))
+  {
+    throw std::invalid_argument("Expected matrix value.");
+  }
+  if (row >= value.matrix_rows)
+  {
+    throw std::out_of_range("Matrix row out of range.");
+  }
+  std::vector<Value> items;
+  items.reserve(value.matrix_cols);
+  const std::size_t offset = row * value.matrix_cols;
+  for (std::size_t c = 0; c < value.matrix_cols; ++c)
+  {
+    items.push_back(value.matrix_items[offset + c]);
+  }
+  return array_value(std::move(items));
+}
+
 template <typename Func>
 inline Value map_unary(const Value & value, Func func)
 {
@@ -189,7 +242,7 @@ inline Value map_unary(const Value & value, Func func)
     items.reserve(value.array_items.size());
     for (const Value & item : value.array_items)
     {
-      if (is_array(item))
+      if (is_array(item) || is_matrix(item))
       {
         throw std::invalid_argument("Nested arrays are not supported.");
       }
@@ -197,12 +250,31 @@ inline Value map_unary(const Value & value, Func func)
     }
     return array_value(std::move(items));
   }
+  if (is_matrix(value))
+  {
+    std::vector<Value> items;
+    items.reserve(value.matrix_items.size());
+    for (const Value & item : value.matrix_items)
+    {
+      if (is_array(item) || is_matrix(item))
+      {
+        throw std::invalid_argument("Nested matrices are not supported.");
+      }
+      items.push_back(func(item));
+    }
+    return matrix_value(value.matrix_rows, value.matrix_cols, std::move(items));
+  }
   return func(value);
 }
 
 template <typename Func>
 inline Value map_binary(const Value & lhs, const Value & rhs, Func func)
 {
+  if ((is_matrix(lhs) && is_array(rhs)) || (is_array(lhs) && is_matrix(rhs)))
+  {
+    throw std::invalid_argument("Matrix and array operations are not supported.");
+  }
+
   if (is_array(lhs) && is_array(rhs))
   {
     if (lhs.array_items.size() != rhs.array_items.size())
@@ -214,7 +286,8 @@ inline Value map_binary(const Value & lhs, const Value & rhs, Func func)
     items.reserve(lhs.array_items.size());
     for (std::size_t i = 0; i < lhs.array_items.size(); ++i)
     {
-      if (is_array(lhs.array_items[i]) || is_array(rhs.array_items[i]))
+      if (is_array(lhs.array_items[i]) || is_matrix(lhs.array_items[i]) ||
+          is_array(rhs.array_items[i]) || is_matrix(rhs.array_items[i]))
       {
         throw std::invalid_argument("Nested arrays are not supported.");
       }
@@ -223,13 +296,64 @@ inline Value map_binary(const Value & lhs, const Value & rhs, Func func)
     return array_value(std::move(items));
   }
 
+  if (is_matrix(lhs) && is_matrix(rhs))
+  {
+    if (lhs.matrix_rows != rhs.matrix_rows || lhs.matrix_cols != rhs.matrix_cols)
+    {
+      throw std::invalid_argument("Matrix shapes do not match.");
+    }
+
+    std::vector<Value> items;
+    items.reserve(lhs.matrix_items.size());
+    for (std::size_t i = 0; i < lhs.matrix_items.size(); ++i)
+    {
+      if (is_array(lhs.matrix_items[i]) || is_matrix(lhs.matrix_items[i]) ||
+          is_array(rhs.matrix_items[i]) || is_matrix(rhs.matrix_items[i]))
+      {
+        throw std::invalid_argument("Nested matrices are not supported.");
+      }
+      items.push_back(func(lhs.matrix_items[i], rhs.matrix_items[i]));
+    }
+    return matrix_value(lhs.matrix_rows, lhs.matrix_cols, std::move(items));
+  }
+
+  if (is_matrix(lhs))
+  {
+    std::vector<Value> items;
+    items.reserve(lhs.matrix_items.size());
+    for (const Value & item : lhs.matrix_items)
+    {
+      if (is_array(item) || is_matrix(item))
+      {
+        throw std::invalid_argument("Nested matrices are not supported.");
+      }
+      items.push_back(func(item, rhs));
+    }
+    return matrix_value(lhs.matrix_rows, lhs.matrix_cols, std::move(items));
+  }
+
+  if (is_matrix(rhs))
+  {
+    std::vector<Value> items;
+    items.reserve(rhs.matrix_items.size());
+    for (const Value & item : rhs.matrix_items)
+    {
+      if (is_array(item) || is_matrix(item))
+      {
+        throw std::invalid_argument("Nested matrices are not supported.");
+      }
+      items.push_back(func(lhs, item));
+    }
+    return matrix_value(rhs.matrix_rows, rhs.matrix_cols, std::move(items));
+  }
+
   if (is_array(lhs))
   {
     std::vector<Value> items;
     items.reserve(lhs.array_items.size());
     for (const Value & item : lhs.array_items)
     {
-      if (is_array(item))
+      if (is_array(item) || is_matrix(item))
       {
         throw std::invalid_argument("Nested arrays are not supported.");
       }
@@ -244,7 +368,7 @@ inline Value map_binary(const Value & lhs, const Value & rhs, Func func)
     items.reserve(rhs.array_items.size());
     for (const Value & item : rhs.array_items)
     {
-      if (is_array(item))
+      if (is_array(item) || is_matrix(item))
       {
         throw std::invalid_argument("Nested arrays are not supported.");
       }
@@ -259,6 +383,60 @@ inline Value map_binary(const Value & lhs, const Value & rhs, Func func)
 template <typename Func>
 inline Value map_ternary(const Value & first, const Value & second, const Value & third, Func func)
 {
+  std::size_t matrix_rows = 0;
+  std::size_t matrix_cols = 0;
+  bool have_matrix = false;
+
+  for (const Value * value : {&first, &second, &third})
+  {
+    if (!is_matrix(*value))
+    {
+      continue;
+    }
+
+    if (!have_matrix)
+    {
+      matrix_rows = value->matrix_rows;
+      matrix_cols = value->matrix_cols;
+      have_matrix = true;
+      continue;
+    }
+
+    if (value->matrix_rows != matrix_rows || value->matrix_cols != matrix_cols)
+    {
+      throw std::invalid_argument("Matrix shapes do not match.");
+    }
+  }
+
+  if (have_matrix && (is_array(first) || is_array(second) || is_array(third)))
+  {
+    throw std::invalid_argument("Matrix and array operations are not supported.");
+  }
+
+  if (have_matrix)
+  {
+    const std::size_t item_count = matrix_rows * matrix_cols;
+    std::vector<Value> items;
+    items.reserve(item_count);
+    for (std::size_t i = 0; i < item_count; ++i)
+    {
+      const Value * first_item = is_matrix(first) ? &first.matrix_items[i] : &first;
+      const Value * second_item = is_matrix(second) ? &second.matrix_items[i] : &second;
+      const Value * third_item = is_matrix(third) ? &third.matrix_items[i] : &third;
+
+      if (is_array(*first_item) || is_matrix(*first_item) ||
+          is_array(*second_item) || is_matrix(*second_item) ||
+          is_array(*third_item) || is_matrix(*third_item))
+      {
+        throw std::invalid_argument("Nested matrices are not supported.");
+      }
+
+      items.push_back(func(*first_item, *second_item, *third_item));
+    }
+
+    return matrix_value(matrix_rows, matrix_cols, std::move(items));
+  }
+
   std::size_t array_size = 0;
   bool have_array = false;
 
@@ -295,7 +473,9 @@ inline Value map_ternary(const Value & first, const Value & second, const Value 
     const Value * second_item = is_array(second) ? &second.array_items[i] : &second;
     const Value * third_item = is_array(third) ? &third.array_items[i] : &third;
 
-    if (is_array(*first_item) || is_array(*second_item) || is_array(*third_item))
+    if (is_array(*first_item) || is_matrix(*first_item) ||
+        is_array(*second_item) || is_matrix(*second_item) ||
+        is_array(*third_item) || is_matrix(*third_item))
     {
       throw std::invalid_argument("Nested arrays are not supported.");
     }

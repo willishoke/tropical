@@ -179,6 +179,8 @@ static void assign_input(const InputPort & input, const py::handle & value);
 static PythonGraph * merge_graphs(PythonGraph * lhs, PythonGraph * rhs);
 static SignalExpr make_signal_expr(PythonGraph * graph, expr::ExprSpecPtr spec);
 static SignalExpr coerce_expr(const py::handle & value);
+static bool is_matrix_literal(const py::handle & value);
+static expr::Value matrix_value_from_py(const py::handle & value);
 
 struct SymbolMap
 {
@@ -676,6 +678,7 @@ static SignalExpr make_literal_expr(bool value)
 }
 
 static SignalExpr make_array_expr(const py::iterable & values);
+static SignalExpr make_matrix_expr(const py::handle & value);
 
 static SignalExpr make_output_expr(const OutputPort & out)
 {
@@ -716,6 +719,10 @@ static SignalExpr coerce_expr(const py::handle & value)
 
   if (py::isinstance<py::list>(value) || py::isinstance<py::tuple>(value))
   {
+    if (is_matrix_literal(value))
+    {
+      return make_matrix_expr(value);
+    }
     return make_array_expr(value.cast<py::iterable>());
   }
 
@@ -770,6 +777,11 @@ static SignalExpr pow_expr(const SignalExpr & lhs, const py::handle & rhs)
 static SignalExpr mod_expr(const SignalExpr & lhs, const py::handle & rhs)
 {
   return make_binary_expr(ExprKind::Mod, lhs, coerce_expr(rhs));
+}
+
+static SignalExpr matmul_expr(const py::handle & lhs, const py::handle & rhs)
+{
+  return make_binary_expr(ExprKind::MatMul, coerce_expr(lhs), coerce_expr(rhs));
 }
 
 static SignalExpr floor_div_expr(const SignalExpr & lhs, const py::handle & rhs)
@@ -895,9 +907,23 @@ static SignalExpr make_array_expr(const py::iterable & values)
   {
     const SignalExpr expr = coerce_expr(value);
     graph = merge_graphs(graph, expr.graph);
+    if (expr.spec && expr.spec->kind == ExprKind::ArrayPack)
+    {
+      throw std::invalid_argument("Nested arrays are not supported.");
+    }
+    if (expr.spec && expr.spec->kind == ExprKind::Literal && expr.spec->literal.type == expr::ValueType::Matrix)
+    {
+      throw std::invalid_argument("Matrix literals cannot be nested inside arrays.");
+    }
     items.push_back(expr.spec);
   }
   return make_signal_expr(graph, expr::array_pack_expr(std::move(items)));
+}
+
+static SignalExpr make_matrix_expr(const py::handle & value)
+{
+  const expr::Value matrix = matrix_value_from_py(value);
+  return make_signal_expr(nullptr, expr::literal_expr(matrix));
 }
 
 static expr::Value scalar_value_from_py(const py::handle & value)
@@ -917,10 +943,69 @@ static expr::Value scalar_value_from_py(const py::handle & value)
   throw std::invalid_argument("Expected bool, int, or float.");
 }
 
+static bool is_matrix_literal(const py::handle & value)
+{
+  if (!py::isinstance<py::list>(value) && !py::isinstance<py::tuple>(value))
+  {
+    return false;
+  }
+
+  for (const py::handle & item : value.cast<py::iterable>())
+  {
+    return py::isinstance<py::list>(item) || py::isinstance<py::tuple>(item);
+  }
+
+  return false;
+}
+
+static expr::Value matrix_value_from_py(const py::handle & value)
+{
+  if (!py::isinstance<py::list>(value) && !py::isinstance<py::tuple>(value))
+  {
+    throw std::invalid_argument("Expected a list of rows for matrix literal.");
+  }
+
+  std::vector<expr::Value> items;
+  std::size_t rows = 0;
+  std::size_t cols = 0;
+
+  for (const py::handle & row : value.cast<py::iterable>())
+  {
+    if (!py::isinstance<py::list>(row) && !py::isinstance<py::tuple>(row))
+    {
+      throw std::invalid_argument("Matrix rows must be lists or tuples.");
+    }
+
+    std::vector<expr::Value> row_items;
+    for (const py::handle & item : row.cast<py::iterable>())
+    {
+      row_items.push_back(scalar_value_from_py(item));
+    }
+
+    if (rows == 0)
+    {
+      cols = row_items.size();
+    }
+    else if (row_items.size() != cols)
+    {
+      throw std::invalid_argument("Matrix rows must all be the same length.");
+    }
+
+    items.insert(items.end(), row_items.begin(), row_items.end());
+    ++rows;
+  }
+
+  return expr::matrix_value(rows, cols, std::move(items));
+}
+
 static expr::Value value_from_py(const py::handle & value)
 {
   if (py::isinstance<py::list>(value) || py::isinstance<py::tuple>(value))
   {
+    if (is_matrix_literal(value))
+    {
+      return matrix_value_from_py(value);
+    }
     std::vector<expr::Value> items;
     for (const py::handle & item : value.cast<py::iterable>())
     {
@@ -1047,7 +1132,7 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
         !is_array_state_spec(value))
     {
       throw std::invalid_argument(
-        "regs values must be bool, int, float, 1-D arrays of those scalars, or array_state specs.");
+        "regs values must be bool, int, float, 1-D arrays, matrices, or array_state specs.");
     }
 
     const std::string reg_name = key.cast<std::string>();
@@ -1652,6 +1737,8 @@ PYBIND11_MODULE(egress, m)
     .def("__rtruediv__", [](const SignalExpr & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__pow__", [](const SignalExpr & lhs, const py::object & rhs) { return pow_expr(lhs, rhs); })
     .def("__rpow__", [](const SignalExpr & rhs, const py::object & lhs) { return pow_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__matmul__", [](const SignalExpr & lhs, const py::object & rhs) { return matmul_expr(py::cast(lhs), rhs); })
+    .def("__rmatmul__", [](const SignalExpr & rhs, const py::object & lhs) { return matmul_expr(lhs, py::cast(rhs)); })
     .def("__floordiv__", [](const SignalExpr & lhs, const py::object & rhs) { return floor_div_expr(lhs, rhs); })
     .def("__rfloordiv__", [](const SignalExpr & rhs, const py::object & lhs) { return floor_div_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__mod__", [](const SignalExpr & lhs, const py::object & rhs) { return mod_expr(lhs, rhs); })
@@ -1693,6 +1780,8 @@ PYBIND11_MODULE(egress, m)
     .def("__rtruediv__", [](const OutputPort & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__pow__", [](const OutputPort & lhs, const py::object & rhs) { return pow_expr(make_output_expr(lhs), rhs); })
     .def("__rpow__", [](const OutputPort & rhs, const py::object & lhs) { return pow_expr(coerce_expr(lhs), py::cast(rhs)); })
+    .def("__matmul__", [](const OutputPort & lhs, const py::object & rhs) { return matmul_expr(py::cast(make_output_expr(lhs)), rhs); })
+    .def("__rmatmul__", [](const OutputPort & rhs, const py::object & lhs) { return matmul_expr(lhs, py::cast(make_output_expr(rhs))); })
     .def("__floordiv__", [](const OutputPort & lhs, const py::object & rhs) { return floor_div_expr(make_output_expr(lhs), rhs); })
     .def("__rfloordiv__", [](const OutputPort & rhs, const py::object & lhs) { return floor_div_expr(coerce_expr(lhs), py::cast(rhs)); })
     .def("__mod__", [](const OutputPort & lhs, const py::object & rhs) { return mod_expr(make_output_expr(lhs), rhs); })
@@ -1738,6 +1827,8 @@ PYBIND11_MODULE(egress, m)
     .def("__rtruediv__", [](const InputPort & rhs, const py::object & lhs) { return div_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
     .def("__pow__", [](const InputPort & lhs, const py::object & rhs) { return pow_expr(current_input_expr(lhs), rhs); })
     .def("__rpow__", [](const InputPort & rhs, const py::object & lhs) { return pow_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
+    .def("__matmul__", [](const InputPort & lhs, const py::object & rhs) { return matmul_expr(py::cast(current_input_expr(lhs)), rhs); })
+    .def("__rmatmul__", [](const InputPort & rhs, const py::object & lhs) { return matmul_expr(lhs, py::cast(current_input_expr(rhs))); })
     .def("__floordiv__", [](const InputPort & lhs, const py::object & rhs) { return floor_div_expr(current_input_expr(lhs), rhs); })
     .def("__rfloordiv__", [](const InputPort & rhs, const py::object & lhs) { return floor_div_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
     .def("__mod__", [](const InputPort & lhs, const py::object & rhs) { return mod_expr(current_input_expr(lhs), rhs); })
@@ -1844,6 +1935,9 @@ PYBIND11_MODULE(egress, m)
   m.def("sin", [](const py::object & value) { return sin_expr(value); }, py::arg("value"));
   m.def("pow", [](const py::object & lhs, const py::object & rhs) { return pow_expr(coerce_expr(lhs), rhs); }, py::arg("lhs"), py::arg("rhs"));
   m.def("array", [](const py::iterable & values) { return make_array_expr(values); }, py::arg("values"));
+  m.def("matrix", [](const py::object & rows) { return make_matrix_expr(rows); }, py::arg("rows"));
+  m.def("matmul", [](const py::object & lhs, const py::object & rhs) { return matmul_expr(lhs, rhs); },
+        py::arg("lhs"), py::arg("rhs"));
   m.def("logical_not", [](const py::object & value) { return logical_not_expr(value); }, py::arg("value"));
   m.def("sample_rate", []() { return sample_rate_expr(); });
   m.def("sample_index", []() { return sample_index_expr(); });

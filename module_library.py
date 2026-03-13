@@ -60,6 +60,24 @@ def _define_allpass_stage():
 _allpass_stage = _define_allpass_stage()
 
 
+def _define_fdn(size=4, name="FDN"):
+    def process(inp, reg):
+        feedback = eg.matmul(inp["matrix"], reg["state"])
+        y = inp["x"] + feedback
+        next_state = y * inp["decay"]
+        return (
+            {"y": y},
+            {"state": next_state},
+        )
+
+    return eg.define_stateful_function(
+        inputs=["x", "matrix", "decay"],
+        outputs=["y"],
+        regs={"state": [0.0] * size},
+        process=process,
+    )
+
+
 def vco(name="VCO"):
     def process(inp, reg):
         fm_ratio = eg.pow(2.0, inp["fm_index"] * inp["fm"] / 5.0)
@@ -167,6 +185,47 @@ def clock(name="Clock"):
         name=name,
         inputs=["freq", "ratios_in"],
         outputs=["output", "ratios_out"],
+        regs={},
+        process=process,
+        sample_rate=44100.0,
+    )
+
+
+def reverb(name="Reverb"):
+    fdn = _define_fdn(size=4, name=f"{name}_FDN")
+    matrix = eg.matrix(
+        [
+            [0.5, 0.5, 0.5, 0.5],
+            [0.5, -0.5, 0.5, -0.5],
+            [0.5, 0.5, -0.5, -0.5],
+            [0.5, -0.5, -0.5, 0.5],
+        ]
+    )
+
+    def process(inp, reg):
+        x = inp["input"]
+        x = _allpass_stage(x, 0.7)
+        x = _allpass_stage(x, 0.6)
+        x = _allpass_stage(x, 0.5)
+        x = _allpass_stage(x, 0.4)
+
+        drive = eg.array([0.5, -0.5, 0.5, -0.5]) * x
+        decay = eg.clamp(inp["decay"], 0.0, 0.99)
+        y = fdn(drive, matrix, decay)
+
+        wet = y[0] + y[1] + y[2] + y[3]
+        mix = eg.clamp(inp["mix"], 0.0, 1.0)
+        output = (1.0 - mix) * inp["input"] + mix * wet
+
+        return (
+            {"output": output},
+            {},
+        )
+
+    return eg.define_module(
+        name=name,
+        inputs=["input", "mix", "decay"],
+        outputs=["output"],
         regs={},
         process=process,
         sample_rate=44100.0,

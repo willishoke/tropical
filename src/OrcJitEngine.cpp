@@ -153,6 +153,192 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
     builder.CreateStore(value, gep_f64(temps_arg, index));
   };
 
+  auto load_array_ptr = [&](uint32_t slot) -> llvm::Value * {
+    llvm::Value * array_ptr_slot = builder.CreateInBoundsGEP(f64_ptr_ty, arrays_arg, builder.getInt64(slot));
+    return builder.CreateLoad(f64_ptr_ty, array_ptr_slot);
+  };
+
+  auto load_array_size = [&](uint32_t slot) -> llvm::Value * {
+    llvm::Value * array_size_slot = builder.CreateInBoundsGEP(i64_ty, array_sizes_arg, builder.getInt64(slot));
+    return builder.CreateLoad(i64_ty, array_size_slot);
+  };
+
+  llvm::Value * zero_f64 = llvm::ConstantFP::get(f64_ty, 0.0);
+
+  enum class ArrayBinaryOp
+  {
+    Add,
+    Sub,
+    Mul,
+    Div
+  };
+
+  auto emit_array_binary_op = [&](llvm::Value * dst_ptr,
+                                  llvm::Value * lhs_ptr,
+                                  llvm::Value * rhs_ptr,
+                                  llvm::Value * size,
+                                  ArrayBinaryOp op) {
+    llvm::BasicBlock * loop_cond = llvm::BasicBlock::Create(*context, "array_loop_cond", fn);
+    llvm::BasicBlock * loop_body = llvm::BasicBlock::Create(*context, "array_loop_body", fn);
+    llvm::BasicBlock * loop_end = llvm::BasicBlock::Create(*context, "array_loop_end", fn);
+
+    llvm::Value * index_ptr = builder.CreateAlloca(i64_ty, nullptr, "array_idx");
+    builder.CreateStore(builder.getInt64(0), index_ptr);
+    builder.CreateBr(loop_cond);
+
+    builder.SetInsertPoint(loop_cond);
+    llvm::Value * idx = builder.CreateLoad(i64_ty, index_ptr);
+    llvm::Value * cond = builder.CreateICmpULT(idx, size);
+    builder.CreateCondBr(cond, loop_body, loop_end);
+
+    builder.SetInsertPoint(loop_body);
+    llvm::Value * lhs_elem_ptr = builder.CreateInBoundsGEP(f64_ty, lhs_ptr, idx);
+    llvm::Value * rhs_elem_ptr = builder.CreateInBoundsGEP(f64_ty, rhs_ptr, idx);
+    llvm::Value * lhs_val = builder.CreateLoad(f64_ty, lhs_elem_ptr);
+    llvm::Value * rhs_val = builder.CreateLoad(f64_ty, rhs_elem_ptr);
+    llvm::Value * result = zero_f64;
+    switch (op)
+    {
+      case ArrayBinaryOp::Add:
+        result = builder.CreateFAdd(lhs_val, rhs_val);
+        break;
+      case ArrayBinaryOp::Sub:
+        result = builder.CreateFSub(lhs_val, rhs_val);
+        break;
+      case ArrayBinaryOp::Mul:
+        result = builder.CreateFMul(lhs_val, rhs_val);
+        break;
+      case ArrayBinaryOp::Div:
+      {
+        llvm::Value * is_zero = builder.CreateFCmpOEQ(rhs_val, zero_f64);
+        llvm::Value * div_value = builder.CreateFDiv(lhs_val, rhs_val);
+        result = builder.CreateSelect(is_zero, zero_f64, div_value);
+        break;
+      }
+    }
+    llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(f64_ty, dst_ptr, idx);
+    builder.CreateStore(result, dst_elem_ptr);
+    llvm::Value * next_idx = builder.CreateAdd(idx, builder.getInt64(1));
+    builder.CreateStore(next_idx, index_ptr);
+    builder.CreateBr(loop_cond);
+
+    builder.SetInsertPoint(loop_end);
+  };
+
+  auto emit_array_scalar_op = [&](llvm::Value * dst_ptr,
+                                  llvm::Value * lhs_ptr,
+                                  llvm::Value * scalar,
+                                  llvm::Value * size,
+                                  ArrayBinaryOp op) {
+    llvm::BasicBlock * loop_cond = llvm::BasicBlock::Create(*context, "array_scalar_cond", fn);
+    llvm::BasicBlock * loop_body = llvm::BasicBlock::Create(*context, "array_scalar_body", fn);
+    llvm::BasicBlock * loop_end = llvm::BasicBlock::Create(*context, "array_scalar_end", fn);
+
+    llvm::Value * index_ptr = builder.CreateAlloca(i64_ty, nullptr, "array_scalar_idx");
+    builder.CreateStore(builder.getInt64(0), index_ptr);
+    builder.CreateBr(loop_cond);
+
+    builder.SetInsertPoint(loop_cond);
+    llvm::Value * idx = builder.CreateLoad(i64_ty, index_ptr);
+    llvm::Value * cond = builder.CreateICmpULT(idx, size);
+    builder.CreateCondBr(cond, loop_body, loop_end);
+
+    builder.SetInsertPoint(loop_body);
+    llvm::Value * lhs_elem_ptr = builder.CreateInBoundsGEP(f64_ty, lhs_ptr, idx);
+    llvm::Value * lhs_val = builder.CreateLoad(f64_ty, lhs_elem_ptr);
+    llvm::Value * result = zero_f64;
+    switch (op)
+    {
+      case ArrayBinaryOp::Add:
+        result = builder.CreateFAdd(lhs_val, scalar);
+        break;
+      case ArrayBinaryOp::Sub:
+        result = builder.CreateFSub(lhs_val, scalar);
+        break;
+      case ArrayBinaryOp::Mul:
+        result = builder.CreateFMul(lhs_val, scalar);
+        break;
+      case ArrayBinaryOp::Div:
+      {
+        llvm::Value * is_zero = builder.CreateFCmpOEQ(scalar, zero_f64);
+        llvm::Value * div_value = builder.CreateFDiv(lhs_val, scalar);
+        result = builder.CreateSelect(is_zero, zero_f64, div_value);
+        break;
+      }
+    }
+    llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(f64_ty, dst_ptr, idx);
+    builder.CreateStore(result, dst_elem_ptr);
+    llvm::Value * next_idx = builder.CreateAdd(idx, builder.getInt64(1));
+    builder.CreateStore(next_idx, index_ptr);
+    builder.CreateBr(loop_cond);
+
+    builder.SetInsertPoint(loop_end);
+  };
+
+  auto emit_matmul = [&](llvm::Value * dst_ptr,
+                         llvm::Value * matrix_ptr,
+                         llvm::Value * vector_ptr,
+                         uint32_t rows,
+                         uint32_t cols) {
+    llvm::Value * row_ptr = builder.CreateAlloca(i64_ty, nullptr, "matmul_row");
+    llvm::Value * col_ptr = builder.CreateAlloca(i64_ty, nullptr, "matmul_col");
+    llvm::Value * sum_ptr = builder.CreateAlloca(f64_ty, nullptr, "matmul_sum");
+
+    llvm::Value * rows_val = builder.getInt64(rows);
+    llvm::Value * cols_val = builder.getInt64(cols);
+
+    llvm::BasicBlock * outer_cond = llvm::BasicBlock::Create(*context, "matmul_outer_cond", fn);
+    llvm::BasicBlock * outer_body = llvm::BasicBlock::Create(*context, "matmul_outer_body", fn);
+    llvm::BasicBlock * outer_end = llvm::BasicBlock::Create(*context, "matmul_outer_end", fn);
+
+    llvm::BasicBlock * inner_cond = llvm::BasicBlock::Create(*context, "matmul_inner_cond", fn);
+    llvm::BasicBlock * inner_body = llvm::BasicBlock::Create(*context, "matmul_inner_body", fn);
+    llvm::BasicBlock * inner_end = llvm::BasicBlock::Create(*context, "matmul_inner_end", fn);
+
+    builder.CreateStore(builder.getInt64(0), row_ptr);
+    builder.CreateBr(outer_cond);
+
+    builder.SetInsertPoint(outer_cond);
+    llvm::Value * row = builder.CreateLoad(i64_ty, row_ptr);
+    llvm::Value * row_cond = builder.CreateICmpULT(row, rows_val);
+    builder.CreateCondBr(row_cond, outer_body, outer_end);
+
+    builder.SetInsertPoint(outer_body);
+    builder.CreateStore(builder.getInt64(0), col_ptr);
+    builder.CreateStore(zero_f64, sum_ptr);
+    builder.CreateBr(inner_cond);
+
+    builder.SetInsertPoint(inner_cond);
+    llvm::Value * col = builder.CreateLoad(i64_ty, col_ptr);
+    llvm::Value * col_cond = builder.CreateICmpULT(col, cols_val);
+    builder.CreateCondBr(col_cond, inner_body, inner_end);
+
+    builder.SetInsertPoint(inner_body);
+    llvm::Value * row_offset = builder.CreateMul(row, cols_val);
+    llvm::Value * index = builder.CreateAdd(row_offset, col);
+    llvm::Value * matrix_elem_ptr = builder.CreateInBoundsGEP(f64_ty, matrix_ptr, index);
+    llvm::Value * matrix_val = builder.CreateLoad(f64_ty, matrix_elem_ptr);
+    llvm::Value * vector_elem_ptr = builder.CreateInBoundsGEP(f64_ty, vector_ptr, col);
+    llvm::Value * vector_val = builder.CreateLoad(f64_ty, vector_elem_ptr);
+    llvm::Value * sum_val = builder.CreateLoad(f64_ty, sum_ptr);
+    llvm::Value * product = builder.CreateFMul(matrix_val, vector_val);
+    llvm::Value * next_sum = builder.CreateFAdd(sum_val, product);
+    builder.CreateStore(next_sum, sum_ptr);
+    llvm::Value * next_col = builder.CreateAdd(col, builder.getInt64(1));
+    builder.CreateStore(next_col, col_ptr);
+    builder.CreateBr(inner_cond);
+
+    builder.SetInsertPoint(inner_end);
+    llvm::Value * final_sum = builder.CreateLoad(f64_ty, sum_ptr);
+    llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(f64_ty, dst_ptr, row);
+    builder.CreateStore(final_sum, dst_elem_ptr);
+    llvm::Value * next_row = builder.CreateAdd(row, builder.getInt64(1));
+    builder.CreateStore(next_row, row_ptr);
+    builder.CreateBr(outer_cond);
+
+    builder.SetInsertPoint(outer_end);
+  };
+
   llvm::FunctionCallee llvm_sin = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::sin, {f64_ty});
   llvm::FunctionCallee llvm_pow = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::pow, {f64_ty});
   llvm::FunctionCallee llvm_log = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::log, {f64_ty});
@@ -163,6 +349,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
   for (const auto & instr : program.instructions)
   {
     llvm::Value * result = nullptr;
+    bool writes_temp = true;
     switch (instr.op)
     {
       case NumericOp::Literal:
@@ -226,12 +413,62 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       case NumericOp::Add:
         result = builder.CreateFAdd(load_temp(instr.src_a), load_temp(instr.src_b));
         break;
+      case NumericOp::ArrayAdd:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * rhs_ptr = load_array_ptr(instr.src_b);
+        llvm::Value * size = load_array_size(instr.dst);
+        emit_array_binary_op(dst_ptr, lhs_ptr, rhs_ptr, size, ArrayBinaryOp::Add);
+        writes_temp = false;
+        break;
+      }
+      case NumericOp::ArrayAddScalar:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * size = load_array_size(instr.dst);
+        llvm::Value * scalar = load_temp(instr.src_b);
+        emit_array_scalar_op(dst_ptr, lhs_ptr, scalar, size, ArrayBinaryOp::Add);
+        writes_temp = false;
+        break;
+      }
       case NumericOp::Sub:
         result = builder.CreateFSub(load_temp(instr.src_a), load_temp(instr.src_b));
         break;
+      case NumericOp::ArraySub:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * rhs_ptr = load_array_ptr(instr.src_b);
+        llvm::Value * size = load_array_size(instr.dst);
+        emit_array_binary_op(dst_ptr, lhs_ptr, rhs_ptr, size, ArrayBinaryOp::Sub);
+        writes_temp = false;
+        break;
+      }
       case NumericOp::Mul:
         result = builder.CreateFMul(load_temp(instr.src_a), load_temp(instr.src_b));
         break;
+      case NumericOp::ArrayMul:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * rhs_ptr = load_array_ptr(instr.src_b);
+        llvm::Value * size = load_array_size(instr.dst);
+        emit_array_binary_op(dst_ptr, lhs_ptr, rhs_ptr, size, ArrayBinaryOp::Mul);
+        writes_temp = false;
+        break;
+      }
+      case NumericOp::ArrayMulScalar:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * size = load_array_size(instr.dst);
+        llvm::Value * scalar = load_temp(instr.src_b);
+        emit_array_scalar_op(dst_ptr, lhs_ptr, scalar, size, ArrayBinaryOp::Mul);
+        writes_temp = false;
+        break;
+      }
       case NumericOp::Div:
       {
         llvm::Value * lhs = load_temp(instr.src_a);
@@ -239,6 +476,25 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         llvm::Value * is_zero = builder.CreateFCmpOEQ(rhs, llvm::ConstantFP::get(f64_ty, 0.0));
         llvm::Value * div_value = builder.CreateFDiv(lhs, rhs);
         result = builder.CreateSelect(is_zero, llvm::ConstantFP::get(f64_ty, 0.0), div_value);
+        break;
+      }
+      case NumericOp::ArrayDiv:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * rhs_ptr = load_array_ptr(instr.src_b);
+        llvm::Value * size = load_array_size(instr.dst);
+        emit_array_binary_op(dst_ptr, lhs_ptr, rhs_ptr, size, ArrayBinaryOp::Div);
+        writes_temp = false;
+        break;
+      }
+      case NumericOp::MatMul:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * matrix_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * vector_ptr = load_array_ptr(instr.src_b);
+        emit_matmul(dst_ptr, matrix_ptr, vector_ptr, instr.src_c, instr.slot_id);
+        writes_temp = false;
         break;
       }
       case NumericOp::Pow:
@@ -356,14 +612,17 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
     }
 
-    if (!result)
+    if (writes_temp && !result)
     {
       return llvm::make_error<llvm::StringError>(
         "Failed to lower numeric instruction to LLVM IR",
         llvm::inconvertibleErrorCode());
     }
 
-    store_temp(instr.dst, result);
+    if (writes_temp)
+    {
+      store_temp(instr.dst, result);
+    }
   }
 
   builder.CreateRetVoid();

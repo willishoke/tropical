@@ -226,6 +226,69 @@ inline expr::Value not_equal_values(const expr::Value & lhs, const expr::Value &
   });
 }
 
+inline expr::Value matmul_values(const expr::Value & lhs, const expr::Value & rhs)
+{
+  if (expr::is_matrix(lhs) && expr::is_matrix(rhs))
+  {
+    if (lhs.matrix_cols != rhs.matrix_rows)
+    {
+      throw std::invalid_argument("Matrix shapes do not align for multiplication.");
+    }
+
+    const std::size_t rows = lhs.matrix_rows;
+    const std::size_t cols = rhs.matrix_cols;
+    const std::size_t inner = lhs.matrix_cols;
+    std::vector<expr::Value> items;
+    items.reserve(rows * cols);
+
+    for (std::size_t r = 0; r < rows; ++r)
+    {
+      for (std::size_t c = 0; c < cols; ++c)
+      {
+        double acc = 0.0;
+        for (std::size_t k = 0; k < inner; ++k)
+        {
+          const expr::Value & left = lhs.matrix_items[r * inner + k];
+          const expr::Value & right = rhs.matrix_items[k * cols + c];
+          acc += expr::to_float64(left) * expr::to_float64(right);
+        }
+        items.push_back(expr::float_value(acc));
+      }
+    }
+
+    return expr::matrix_value(rows, cols, std::move(items));
+  }
+
+  if (expr::is_matrix(lhs) && expr::is_array(rhs))
+  {
+    if (lhs.matrix_cols != rhs.array_items.size())
+    {
+      throw std::invalid_argument("Matrix and vector shapes do not align for multiplication.");
+    }
+
+    const std::size_t rows = lhs.matrix_rows;
+    const std::size_t cols = lhs.matrix_cols;
+    std::vector<expr::Value> items;
+    items.reserve(rows);
+
+    for (std::size_t r = 0; r < rows; ++r)
+    {
+      double acc = 0.0;
+      for (std::size_t c = 0; c < cols; ++c)
+      {
+        const expr::Value & left = lhs.matrix_items[r * cols + c];
+        const expr::Value & right = rhs.array_items[c];
+        acc += expr::to_float64(left) * expr::to_float64(right);
+      }
+      items.push_back(expr::float_value(acc));
+    }
+
+    return expr::array_value(std::move(items));
+  }
+
+  throw std::invalid_argument("MatMul requires matrix * vector or matrix * matrix.");
+}
+
 inline expr::Value sin_value(const expr::Value & value)
 {
   return expr::map_unary(value, [](const expr::Value & item) {

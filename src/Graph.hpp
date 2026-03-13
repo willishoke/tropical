@@ -44,6 +44,7 @@ using expr::bool_value;
 using expr::float_value;
 using expr::int_value;
 using expr::is_array;
+using expr::is_matrix;
 using expr::is_truthy;
 using expr::map_binary;
 using expr::map_unary;
@@ -73,6 +74,14 @@ namespace egress_expr_inline
       case ValueType::Array:
         seed = hash_mix(seed, std::hash<std::size_t>{}(value.array_items.size()));
         for (const Value & item : value.array_items)
+        {
+          seed = hash_mix(seed, hash_value(item));
+        }
+        return seed;
+      case ValueType::Matrix:
+        seed = hash_mix(seed, std::hash<std::size_t>{}(value.matrix_rows));
+        seed = hash_mix(seed, std::hash<std::size_t>{}(value.matrix_cols));
+        for (const Value & item : value.matrix_items)
         {
           seed = hash_mix(seed, hash_value(item));
         }
@@ -177,6 +186,23 @@ namespace egress_expr_inline
           }
         }
         return true;
+      case ValueType::Matrix:
+        if (lhs.matrix_rows != rhs.matrix_rows || lhs.matrix_cols != rhs.matrix_cols)
+        {
+          return false;
+        }
+        if (lhs.matrix_items.size() != rhs.matrix_items.size())
+        {
+          return false;
+        }
+        for (std::size_t i = 0; i < lhs.matrix_items.size(); ++i)
+        {
+          if (!value_equal(lhs.matrix_items[i], rhs.matrix_items[i]))
+          {
+            return false;
+          }
+        }
+        return true;
     }
 
     return false;
@@ -216,6 +242,21 @@ namespace egress_expr_inline
             for (std::size_t i = 0; i < lhs->literal.array_items.size(); ++i)
             {
               if (!value_equal(lhs->literal.array_items[i], rhs->literal.array_items[i]))
+              {
+                return false;
+              }
+            }
+            return true;
+          case ValueType::Matrix:
+            if (lhs->literal.matrix_rows != rhs->literal.matrix_rows ||
+                lhs->literal.matrix_cols != rhs->literal.matrix_cols ||
+                lhs->literal.matrix_items.size() != rhs->literal.matrix_items.size())
+            {
+              return false;
+            }
+            for (std::size_t i = 0; i < lhs->literal.matrix_items.size(); ++i)
+            {
+              if (!value_equal(lhs->literal.matrix_items[i], rhs->literal.matrix_items[i]))
               {
                 return false;
               }
@@ -573,9 +614,16 @@ class Module
         for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
         {
           const int32_t target = program_.register_targets[register_id];
-          if (target >= 0)
+          if (register_scalar_mask_[register_id])
           {
-            numeric_next_registers_[register_id] = numeric_temps_[static_cast<std::size_t>(target)];
+            if (target >= 0)
+            {
+              numeric_next_registers_[register_id] = numeric_temps_[static_cast<std::size_t>(target)];
+            }
+            else
+            {
+              numeric_next_registers_[register_id] = numeric_registers_[register_id];
+            }
           }
           else
           {
@@ -584,6 +632,37 @@ class Module
         }
 
         numeric_registers_.swap(numeric_next_registers_);
+
+        for (unsigned int register_id = 0; register_id < array_register_targets_.size(); ++register_id)
+        {
+          if (register_scalar_mask_[register_id])
+          {
+            continue;
+          }
+          const int32_t src_slot = array_register_targets_[register_id];
+          if (src_slot < 0)
+          {
+            continue;
+          }
+          const uint32_t dst_slot = register_array_slot_[register_id];
+          if (dst_slot >= numeric_array_storage_.size() ||
+              static_cast<std::size_t>(src_slot) >= numeric_array_storage_.size())
+          {
+            continue;
+          }
+          if (dst_slot == static_cast<uint32_t>(src_slot))
+          {
+            continue;
+          }
+          auto & dst = numeric_array_storage_[dst_slot];
+          const auto & src = numeric_array_storage_[static_cast<std::size_t>(src_slot)];
+          if (dst.size() != src.size())
+          {
+            continue;
+          }
+          std::copy(src.begin(), src.end(), dst.begin());
+        }
+
         ++sample_index_;
         postprocess();
         return;
@@ -677,6 +756,14 @@ class Module
         }
         return;
       }
+      if (value.type == ValueType::Matrix)
+      {
+        for (auto & item : value.matrix_items)
+        {
+          clamp_output_value(item);
+        }
+        return;
+      }
       const double clamped = std::fmax(-10.0, std::fmin(10.0, expr::to_float64(value)));
       value = expr::float_value(clamped);
     }
@@ -685,7 +772,7 @@ class Module
     {
       for (const auto & input : inputs)
       {
-        if (input.type == ValueType::Array)
+        if (input.type == ValueType::Array || input.type == ValueType::Matrix)
         {
           return false;
         }
@@ -793,6 +880,7 @@ class Module
         case ExprKind::Sub:
         case ExprKind::Mul:
         case ExprKind::Div:
+        case ExprKind::MatMul:
         case ExprKind::Pow:
         case ExprKind::Mod:
         case ExprKind::FloorDiv:
@@ -959,7 +1047,7 @@ class Module
             items.reserve(instr.args.size());
             for (uint32_t src : instr.args)
             {
-              if (expr::is_array(temps[src]))
+              if (expr::is_array(temps[src]) || expr::is_matrix(temps[src]))
               {
                 throw std::invalid_argument("Nested arrays are not supported.");
               }
@@ -971,17 +1059,26 @@ class Module
           case ExprKind::Index:
           {
             const Value & array_value = temps[instr.src_a];
-            if (!expr::is_array(array_value))
-            {
-              temps[instr.dst] = expr::float_value(0.0);
-              break;
-            }
             const int64_t index = expr::to_int64(temps[instr.src_b]);
-            if (index < 0 || static_cast<std::size_t>(index) >= array_value.array_items.size())
+            if (index < 0)
             {
               throw std::out_of_range("Array index out of range.");
             }
-            temps[instr.dst] = array_value.array_items[static_cast<std::size_t>(index)];
+            if (expr::is_array(array_value))
+            {
+              if (static_cast<std::size_t>(index) >= array_value.array_items.size())
+              {
+                throw std::out_of_range("Array index out of range.");
+              }
+              temps[instr.dst] = array_value.array_items[static_cast<std::size_t>(index)];
+              break;
+            }
+            if (expr::is_matrix(array_value))
+            {
+              temps[instr.dst] = expr::array_from_matrix_row(array_value, static_cast<std::size_t>(index));
+              break;
+            }
+            temps[instr.dst] = expr::float_value(0.0);
             break;
           }
           case ExprKind::Abs:
@@ -1016,6 +1113,9 @@ class Module
             break;
           case ExprKind::Mul:
             temps[instr.dst] = expr_eval::mul_values(temps[instr.src_a], temps[instr.src_b]);
+            break;
+          case ExprKind::MatMul:
+            temps[instr.dst] = expr_eval::matmul_values(temps[instr.src_a], temps[instr.src_b]);
             break;
           case ExprKind::Div:
             temps[instr.dst] = expr_eval::div_values(temps[instr.src_a], temps[instr.src_b]);
@@ -1082,10 +1182,11 @@ class Module
     std::vector<double> numeric_registers_;
     std::vector<double> numeric_next_registers_;
     std::vector<std::vector<double>> numeric_array_storage_;
-    std::vector<const double *> numeric_array_ptrs_;
+    std::vector<double *> numeric_array_ptrs_;
     std::vector<uint64_t> numeric_array_sizes_;
     std::vector<bool> register_scalar_mask_;
     std::vector<uint32_t> register_array_slot_;
+    std::vector<int32_t> array_register_targets_;
     std::string jit_status_;
   #ifdef EGRESS_PROFILE
     uint64_t numeric_jit_instruction_count_ = 0;
@@ -1111,6 +1212,7 @@ class Module
         case ExprKind::Sub:
         case ExprKind::Mul:
         case ExprKind::Div:
+        case ExprKind::MatMul:
         case ExprKind::Pow:
         case ExprKind::Mod:
         case ExprKind::FloorDiv:
@@ -1133,17 +1235,27 @@ class Module
       }
     }
 
+    enum class NumericValueKind
+    {
+      Scalar,
+      Array,
+      Matrix
+    };
+
     struct NumericRegInfo
     {
-      bool is_scalar = true;
+      NumericValueKind kind = NumericValueKind::Scalar;
       uint32_t array_slot = 0;
+      uint32_t array_size = 0;
+      uint32_t matrix_rows = 0;
+      uint32_t matrix_cols = 0;
       bool scalar_is_constant = false;
       double scalar_constant = 0.0;
     };
 
     static bool value_to_scalar_double(const Value & value, double & out)
     {
-      if (value.type == ValueType::Array)
+      if (value.type == ValueType::Array || value.type == ValueType::Matrix)
       {
         return false;
       }
@@ -1170,6 +1282,22 @@ class Module
       return true;
     }
 
+    bool add_matrix_values_to_jit_table(const Value & value, uint32_t & out_slot)
+    {
+      if (value.type != ValueType::Matrix)
+      {
+        return false;
+      }
+      return add_array_values_to_jit_table(value.matrix_items, out_slot);
+    }
+
+    uint32_t allocate_array_slot_with_size(std::size_t size)
+    {
+      uint32_t slot = static_cast<uint32_t>(numeric_array_storage_.size());
+      numeric_array_storage_.push_back(std::vector<double>(size, 0.0));
+      return slot;
+    }
+
     bool build_numeric_program(egress_jit::NumericProgram & numeric_program)
     {
       if (program_.register_count == 0)
@@ -1182,6 +1310,7 @@ class Module
       numeric_array_storage_.clear();
       register_scalar_mask_.assign(registers_.size(), true);
       register_array_slot_.assign(registers_.size(), 0);
+      array_register_targets_.assign(registers_.size(), -1);
 
       std::vector<NumericRegInfo> reg_info(program_.register_count);
 
@@ -1197,6 +1326,10 @@ class Module
           }
           register_scalar_mask_[reg_slot] = false;
           register_array_slot_[reg_slot] = array_slot;
+        }
+        else if (reg.type == ValueType::Matrix)
+        {
+          return false;
         }
       }
 
@@ -1215,6 +1348,7 @@ class Module
         jit_instr.slot_id = instr.slot_id;
 
         bool emit_instruction = true;
+        bool require_scalar_inputs = true;
 
         switch (instr.kind)
         {
@@ -1227,15 +1361,30 @@ class Module
               {
                 return false;
               }
-              reg_info[instr.dst].is_scalar = false;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
               reg_info[instr.dst].array_slot = array_slot;
+              reg_info[instr.dst].array_size = static_cast<uint32_t>(instr.literal.array_items.size());
+              emit_instruction = false;
+            }
+            else if (instr.literal.type == ValueType::Matrix)
+            {
+              uint32_t array_slot = 0;
+              if (!add_matrix_values_to_jit_table(instr.literal, array_slot))
+              {
+                return false;
+              }
+              reg_info[instr.dst].kind = NumericValueKind::Matrix;
+              reg_info[instr.dst].array_slot = array_slot;
+              reg_info[instr.dst].array_size = static_cast<uint32_t>(instr.literal.matrix_items.size());
+              reg_info[instr.dst].matrix_rows = static_cast<uint32_t>(instr.literal.matrix_rows);
+              reg_info[instr.dst].matrix_cols = static_cast<uint32_t>(instr.literal.matrix_cols);
               emit_instruction = false;
             }
             else
             {
               jit_instr.op = egress_jit::NumericOp::Literal;
               jit_instr.literal = to_float64(instr.literal);
-              reg_info[instr.dst].is_scalar = true;
+              reg_info[instr.dst].kind = NumericValueKind::Scalar;
               reg_info[instr.dst].scalar_is_constant = true;
               reg_info[instr.dst].scalar_constant = jit_instr.literal;
             }
@@ -1243,7 +1392,7 @@ class Module
           }
           case ExprKind::InputValue:
             jit_instr.op = egress_jit::NumericOp::InputValue;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::RegisterValue:
             if (instr.slot_id >= register_scalar_mask_.size())
@@ -1252,23 +1401,24 @@ class Module
             }
             if (!register_scalar_mask_[instr.slot_id])
             {
-              reg_info[instr.dst].is_scalar = false;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
               reg_info[instr.dst].array_slot = register_array_slot_[instr.slot_id];
+              reg_info[instr.dst].array_size = static_cast<uint32_t>(numeric_array_storage_[register_array_slot_[instr.slot_id]].size());
               emit_instruction = false;
             }
             else
             {
               jit_instr.op = egress_jit::NumericOp::RegisterValue;
-              reg_info[instr.dst].is_scalar = true;
+              reg_info[instr.dst].kind = NumericValueKind::Scalar;
             }
             break;
           case ExprKind::SampleRate:
             jit_instr.op = egress_jit::NumericOp::SampleRate;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::SampleIndex:
             jit_instr.op = egress_jit::NumericOp::SampleIndex;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::ArrayPack:
           {
@@ -1276,7 +1426,9 @@ class Module
             packed_values.reserve(instr.args.size());
             for (uint32_t src : instr.args)
             {
-              if (src >= reg_info.size() || !reg_info[src].is_scalar || !reg_info[src].scalar_is_constant)
+              if (src >= reg_info.size() ||
+                  reg_info[src].kind != NumericValueKind::Scalar ||
+                  !reg_info[src].scalar_is_constant)
               {
                 return false;
               }
@@ -1287,8 +1439,9 @@ class Module
             {
               return false;
             }
-            reg_info[instr.dst].is_scalar = false;
+            reg_info[instr.dst].kind = NumericValueKind::Array;
             reg_info[instr.dst].array_slot = array_slot;
+            reg_info[instr.dst].array_size = static_cast<uint32_t>(packed_values.size());
             emit_instruction = false;
             break;
           }
@@ -1297,114 +1450,296 @@ class Module
             {
               return false;
             }
-            if (reg_info[instr.src_a].is_scalar || !reg_info[instr.src_b].is_scalar)
+            if (reg_info[instr.src_a].kind == NumericValueKind::Scalar ||
+                reg_info[instr.src_b].kind != NumericValueKind::Scalar)
+            {
+              return false;
+            }
+            if (reg_info[instr.src_a].kind == NumericValueKind::Matrix)
             {
               return false;
             }
             jit_instr.op = egress_jit::NumericOp::IndexArray;
             jit_instr.src_a = instr.src_b;
             jit_instr.slot_id = reg_info[instr.src_a].array_slot;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Not:
             jit_instr.op = egress_jit::NumericOp::Not;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Less:
             jit_instr.op = egress_jit::NumericOp::Less;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::LessEqual:
             jit_instr.op = egress_jit::NumericOp::LessEqual;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Greater:
             jit_instr.op = egress_jit::NumericOp::Greater;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::GreaterEqual:
             jit_instr.op = egress_jit::NumericOp::GreaterEqual;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Equal:
             jit_instr.op = egress_jit::NumericOp::Equal;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::NotEqual:
             jit_instr.op = egress_jit::NumericOp::NotEqual;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Add:
+          {
+            const NumericRegInfo & lhs = reg_info[instr.src_a];
+            const NumericRegInfo & rhs = reg_info[instr.src_b];
+            if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Array)
+            {
+              if (lhs.array_size != rhs.array_size)
+              {
+                return false;
+              }
+              const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+              jit_instr.op = egress_jit::NumericOp::ArrayAdd;
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = lhs.array_slot;
+              jit_instr.src_b = rhs.array_slot;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = lhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
+            if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
+            {
+              const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+              jit_instr.op = egress_jit::NumericOp::ArrayAddScalar;
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = lhs.array_slot;
+              jit_instr.src_b = instr.src_b;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = lhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
+            if (lhs.kind == NumericValueKind::Scalar && rhs.kind == NumericValueKind::Array)
+            {
+              const uint32_t dst_slot = allocate_array_slot_with_size(rhs.array_size);
+              jit_instr.op = egress_jit::NumericOp::ArrayAddScalar;
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = rhs.array_slot;
+              jit_instr.src_b = instr.src_a;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = rhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
+            if (lhs.kind != NumericValueKind::Scalar || rhs.kind != NumericValueKind::Scalar)
+            {
+              return false;
+            }
             jit_instr.op = egress_jit::NumericOp::Add;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
+          }
           case ExprKind::Sub:
+          {
+            const NumericRegInfo & lhs = reg_info[instr.src_a];
+            const NumericRegInfo & rhs = reg_info[instr.src_b];
+            if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Array)
+            {
+              if (lhs.array_size != rhs.array_size)
+              {
+                return false;
+              }
+              const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+              jit_instr.op = egress_jit::NumericOp::ArraySub;
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = lhs.array_slot;
+              jit_instr.src_b = rhs.array_slot;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = lhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
+            if (lhs.kind != NumericValueKind::Scalar || rhs.kind != NumericValueKind::Scalar)
+            {
+              return false;
+            }
             jit_instr.op = egress_jit::NumericOp::Sub;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
+          }
           case ExprKind::Mul:
+          {
+            const NumericRegInfo & lhs = reg_info[instr.src_a];
+            const NumericRegInfo & rhs = reg_info[instr.src_b];
+            if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Array)
+            {
+              if (lhs.array_size != rhs.array_size)
+              {
+                return false;
+              }
+              const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+              jit_instr.op = egress_jit::NumericOp::ArrayMul;
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = lhs.array_slot;
+              jit_instr.src_b = rhs.array_slot;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = lhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
+            if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
+            {
+              const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+              jit_instr.op = egress_jit::NumericOp::ArrayMulScalar;
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = lhs.array_slot;
+              jit_instr.src_b = instr.src_b;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = lhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
+            if (lhs.kind == NumericValueKind::Scalar && rhs.kind == NumericValueKind::Array)
+            {
+              const uint32_t dst_slot = allocate_array_slot_with_size(rhs.array_size);
+              jit_instr.op = egress_jit::NumericOp::ArrayMulScalar;
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = rhs.array_slot;
+              jit_instr.src_b = instr.src_a;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = rhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
+            if (lhs.kind != NumericValueKind::Scalar || rhs.kind != NumericValueKind::Scalar)
+            {
+              return false;
+            }
             jit_instr.op = egress_jit::NumericOp::Mul;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
+          }
           case ExprKind::Div:
+          {
+            const NumericRegInfo & lhs = reg_info[instr.src_a];
+            const NumericRegInfo & rhs = reg_info[instr.src_b];
+            if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Array)
+            {
+              if (lhs.array_size != rhs.array_size)
+              {
+                return false;
+              }
+              const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+              jit_instr.op = egress_jit::NumericOp::ArrayDiv;
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = lhs.array_slot;
+              jit_instr.src_b = rhs.array_slot;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = lhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
+            if (lhs.kind != NumericValueKind::Scalar || rhs.kind != NumericValueKind::Scalar)
+            {
+              return false;
+            }
             jit_instr.op = egress_jit::NumericOp::Div;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
+          }
+          case ExprKind::MatMul:
+          {
+            const NumericRegInfo & lhs = reg_info[instr.src_a];
+            const NumericRegInfo & rhs = reg_info[instr.src_b];
+            if (lhs.kind != NumericValueKind::Matrix || rhs.kind != NumericValueKind::Array)
+            {
+              return false;
+            }
+            if (lhs.matrix_cols != rhs.array_size)
+            {
+              return false;
+            }
+            const uint32_t dst_slot = allocate_array_slot_with_size(lhs.matrix_rows);
+            jit_instr.op = egress_jit::NumericOp::MatMul;
+            jit_instr.dst = dst_slot;
+            jit_instr.src_a = lhs.array_slot;
+            jit_instr.src_b = rhs.array_slot;
+            jit_instr.src_c = lhs.matrix_rows;
+            jit_instr.slot_id = lhs.matrix_cols;
+            reg_info[instr.dst].kind = NumericValueKind::Array;
+            reg_info[instr.dst].array_slot = dst_slot;
+            reg_info[instr.dst].array_size = lhs.matrix_rows;
+            require_scalar_inputs = false;
+            break;
+          }
           case ExprKind::Pow:
             jit_instr.op = egress_jit::NumericOp::Pow;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Mod:
             jit_instr.op = egress_jit::NumericOp::Mod;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::FloorDiv:
             jit_instr.op = egress_jit::NumericOp::FloorDiv;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::BitAnd:
             jit_instr.op = egress_jit::NumericOp::BitAnd;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::BitOr:
             jit_instr.op = egress_jit::NumericOp::BitOr;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::BitXor:
             jit_instr.op = egress_jit::NumericOp::BitXor;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::LShift:
             jit_instr.op = egress_jit::NumericOp::LShift;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::RShift:
             jit_instr.op = egress_jit::NumericOp::RShift;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Abs:
             jit_instr.op = egress_jit::NumericOp::Abs;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Clamp:
             jit_instr.op = egress_jit::NumericOp::Clamp;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Log:
             jit_instr.op = egress_jit::NumericOp::Log;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Sin:
             jit_instr.op = egress_jit::NumericOp::Sin;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Neg:
             jit_instr.op = egress_jit::NumericOp::Neg;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::BitNot:
             jit_instr.op = egress_jit::NumericOp::BitNot;
-            reg_info[instr.dst].is_scalar = true;
+            reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           default:
             return false;
@@ -1412,43 +1747,52 @@ class Module
 
         if (emit_instruction)
         {
-          if (instr.kind != ExprKind::Literal &&
+          const bool preserve_constant =
+            instr.kind == ExprKind::Literal &&
+            reg_info[instr.dst].kind == NumericValueKind::Scalar &&
+            reg_info[instr.dst].scalar_is_constant;
+
+          if (require_scalar_inputs &&
+              instr.kind != ExprKind::Literal &&
               instr.kind != ExprKind::InputValue &&
               instr.kind != ExprKind::RegisterValue &&
               instr.kind != ExprKind::SampleRate &&
               instr.kind != ExprKind::SampleIndex &&
               instr.kind != ExprKind::Index)
           {
-            if (instr.src_a >= reg_info.size() || !reg_info[instr.src_a].is_scalar)
+            if (instr.src_a >= reg_info.size() || reg_info[instr.src_a].kind != NumericValueKind::Scalar)
             {
               return false;
             }
             if (is_local_binary(instr.kind))
             {
-              if (instr.src_b >= reg_info.size() || !reg_info[instr.src_b].is_scalar)
+              if (instr.src_b >= reg_info.size() || reg_info[instr.src_b].kind != NumericValueKind::Scalar)
               {
                 return false;
               }
             }
             if (is_local_ternary(instr.kind))
             {
-              if (instr.src_b >= reg_info.size() || !reg_info[instr.src_b].is_scalar ||
-                  instr.src_c >= reg_info.size() || !reg_info[instr.src_c].is_scalar)
+              if (instr.src_b >= reg_info.size() || reg_info[instr.src_b].kind != NumericValueKind::Scalar ||
+                  instr.src_c >= reg_info.size() || reg_info[instr.src_c].kind != NumericValueKind::Scalar)
               {
                 return false;
               }
             }
           }
 
-          reg_info[instr.dst].scalar_is_constant = false;
-          reg_info[instr.dst].scalar_constant = 0.0;
+          if (!preserve_constant)
+          {
+            reg_info[instr.dst].scalar_is_constant = false;
+            reg_info[instr.dst].scalar_constant = 0.0;
+          }
           numeric_program.instructions.push_back(jit_instr);
         }
       }
 
       for (uint32_t output_reg : program_.output_targets)
       {
-        if (output_reg >= reg_info.size() || !reg_info[output_reg].is_scalar)
+        if (output_reg >= reg_info.size() || reg_info[output_reg].kind != NumericValueKind::Scalar)
         {
           return false;
         }
@@ -1456,10 +1800,42 @@ class Module
 
       for (unsigned int reg_slot = 0; reg_slot < program_.register_targets.size(); ++reg_slot)
       {
-        if (!register_scalar_mask_[reg_slot] && program_.register_targets[reg_slot] >= 0)
+        const int32_t target = program_.register_targets[reg_slot];
+        if (target < 0)
+        {
+          continue;
+        }
+
+        if (static_cast<std::size_t>(target) >= reg_info.size())
         {
           return false;
         }
+
+        if (register_scalar_mask_[reg_slot])
+        {
+          if (reg_info[target].kind != NumericValueKind::Scalar)
+          {
+            return false;
+          }
+          continue;
+        }
+
+        if (reg_info[target].kind != NumericValueKind::Array)
+        {
+          return false;
+        }
+
+        const uint32_t dst_slot = register_array_slot_[reg_slot];
+        if (dst_slot >= numeric_array_storage_.size())
+        {
+          return false;
+        }
+        if (numeric_array_storage_[dst_slot].size() != reg_info[target].array_size)
+        {
+          return false;
+        }
+
+        array_register_targets_[reg_slot] = static_cast<int32_t>(reg_info[target].array_slot);
       }
 
       return true;
@@ -1946,6 +2322,7 @@ class Graph
       Mul,
       MulConst,
       Div,
+      MatMul,
       Pow,
       DivConstLhs,
       Mod,
@@ -2036,6 +2413,7 @@ class Graph
       return expr != nullptr &&
              expr->kind == ExprKind::Literal &&
              expr->literal.type != ValueType::Array &&
+             expr->literal.type != ValueType::Matrix &&
              !is_truthy(expr->literal);
     }
 
@@ -2043,6 +2421,7 @@ class Graph
     {
       return expr != nullptr && expr->kind == ExprKind::Literal &&
              expr->literal.type != ValueType::Array &&
+             expr->literal.type != ValueType::Matrix &&
              ((expr->literal.type == ValueType::Bool && expr->literal.bool_value) ||
               (expr->literal.type == ValueType::Int && expr->literal.int_value == 1) ||
               (expr->literal.type == ValueType::Float && expr->literal.float_value == 1.0));
@@ -2293,6 +2672,20 @@ class Graph
             return expr::literal_expr(expr_eval::mul_values(lhs->literal, rhs->literal));
           }
           return expr::binary_expr(ExprKind::Mul, lhs, rhs);
+        }
+        case ExprKind::MatMul:
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          ExprSpecPtr rhs = simplify_expr(expr->rhs);
+          if (!lhs || !rhs)
+          {
+            return nullptr;
+          }
+          if (lhs->kind == ExprKind::Literal && rhs->kind == ExprKind::Literal)
+          {
+            return expr::literal_expr(expr_eval::matmul_values(lhs->literal, rhs->literal));
+          }
+          return expr::binary_expr(ExprKind::MatMul, lhs, rhs);
         }
         case ExprKind::Div:
         {
@@ -2723,7 +3116,7 @@ class Graph
           items.reserve(instr.args.size());
           for (uint32_t src : instr.args)
           {
-            if (expr::is_array(registers[src]))
+            if (expr::is_array(registers[src]) || expr::is_matrix(registers[src]))
             {
               throw std::invalid_argument("Nested arrays are not supported.");
             }
@@ -2735,17 +3128,26 @@ class Graph
         case OpCode::Index:
         {
           const Value & array_value = registers[instr.src_a];
-          if (!expr::is_array(array_value))
-          {
-            registers[instr.dst] = float_value(0.0);
-            break;
-          }
           const int64_t index = expr::to_int64(registers[instr.src_b]);
-          if (index < 0 || static_cast<std::size_t>(index) >= array_value.array_items.size())
+          if (index < 0)
           {
             throw std::out_of_range("Array index out of range.");
           }
-          registers[instr.dst] = array_value.array_items[static_cast<std::size_t>(index)];
+          if (expr::is_array(array_value))
+          {
+            if (static_cast<std::size_t>(index) >= array_value.array_items.size())
+            {
+              throw std::out_of_range("Array index out of range.");
+            }
+            registers[instr.dst] = array_value.array_items[static_cast<std::size_t>(index)];
+            break;
+          }
+          if (expr::is_matrix(array_value))
+          {
+            registers[instr.dst] = expr::array_from_matrix_row(array_value, static_cast<std::size_t>(index));
+            break;
+          }
+          registers[instr.dst] = float_value(0.0);
           break;
         }
         case OpCode::Add:
@@ -2771,6 +3173,9 @@ class Graph
           break;
         case OpCode::Div:
           registers[instr.dst] = expr_eval::div_values(registers[instr.src_a], registers[instr.src_b]);
+          break;
+        case OpCode::MatMul:
+          registers[instr.dst] = expr_eval::matmul_values(registers[instr.src_a], registers[instr.src_b]);
           break;
         case OpCode::DivConstLhs:
           registers[instr.dst] = expr_eval::div_values(instr.literal, registers[instr.src_a]);
@@ -3077,6 +3482,9 @@ class Graph
           break;
         case ExprKind::Div:
           instr.opcode = OpCode::Div;
+          break;
+        case ExprKind::MatMul:
+          instr.opcode = OpCode::MatMul;
           break;
         case ExprKind::Pow:
           instr.opcode = OpCode::Pow;
