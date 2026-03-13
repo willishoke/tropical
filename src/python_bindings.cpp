@@ -426,6 +426,34 @@ class PyModuleInstance
       throw py::attribute_error("Cannot assign attribute '" + attr + "'.");
     }
 
+    py::list dir() const
+    {
+      std::unordered_set<std::string> names;
+      names.insert("name");
+#ifdef EGRESS_PROFILE
+      names.insert("compile_stats");
+#endif
+
+      for (const auto & input_name : definition_->input_names)
+      {
+        names.insert(input_name);
+      }
+      for (const auto & output_name : definition_->output_names)
+      {
+        names.insert(output_name);
+      }
+
+      std::vector<std::string> sorted(names.begin(), names.end());
+      std::sort(sorted.begin(), sorted.end());
+
+      py::list result;
+      for (const auto & name : sorted)
+      {
+        result.append(name);
+      }
+      return result;
+    }
+
 #ifdef EGRESS_PROFILE
     py::dict compile_stats() const
     {
@@ -1760,13 +1788,12 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyModuleInstance>(m, "Module")
     .def_property_readonly("name", &PyModuleInstance::name)
-    .def("get_input", &PyModuleInstance::get_input, py::arg("name"))
-    .def("get_output", &PyModuleInstance::get_output, py::arg("name"))
     .def("__getattr__", &PyModuleInstance::getattr, py::arg("name"))
     .def("__setattr__", &PyModuleInstance::setattr, py::arg("name"), py::arg("value"))
-  #ifdef EGRESS_PROFILE
+    .def("__dir__", &PyModuleInstance::dir)
+#ifdef EGRESS_PROFILE
     .def_property_readonly("compile_stats", &PyModuleInstance::compile_stats)
-  #endif
+#endif
     ;
 
   py::class_<PyModuleType>(m, "ModuleType")
