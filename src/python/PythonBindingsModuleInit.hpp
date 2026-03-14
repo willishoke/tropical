@@ -207,9 +207,6 @@ PYBIND11_MODULE(egress, m)
   py::class_<PyPureFunctionType>(m, "PureFunction")
     .def("__call__", &PyPureFunctionType::call);
 
-  py::class_<PyStatefulFunctionType>(m, "StatefulFunction")
-    .def("__call__", &PyStatefulFunctionType::call);
-
   m.def(
     "array_state",
     [](const std::string & input, const py::object & init)
@@ -301,20 +298,6 @@ PYBIND11_MODULE(egress, m)
     },
     py::arg("inputs"),
     py::arg("outputs"),
-    py::arg("process"));
-
-  m.def(
-    "define_stateful_function",
-    [](const py::iterable & inputs,
-       const py::iterable & outputs,
-       const py::dict & regs,
-       const py::function & process)
-    {
-      return PyStatefulFunctionType(define_stateful_function_impl(inputs, outputs, regs, process));
-    },
-    py::arg("inputs"),
-    py::arg("outputs"),
-    py::arg("regs"),
     py::arg("process"));
 
   py::class_<PythonDAC>(m, "DAC")

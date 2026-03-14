@@ -19,7 +19,8 @@ PrimitiveProbe = eg.define_module(
 )
 
 
-AllpassStage = eg.define_stateful_function(
+AllpassStage = eg.define_module(
+    name="AllpassStage",
     inputs=["x", "a"],
     outputs=["y"],
     regs={"x_prev": 0.0, "y_prev": 0.0},
@@ -33,24 +34,6 @@ AllpassStage = eg.define_stateful_function(
         },
     ),
 )
-
-
-AllpassModule = eg.define_module(
-    name="AllpassModule",
-    inputs=["x", "a"],
-    outputs=["y"],
-    regs={"x_prev": 0.0, "y_prev": 0.0},
-    process=lambda inp, reg: (
-        {
-            "y": -inp["a"] * inp["x"] + reg["x_prev"] + inp["a"] * reg["y_prev"],
-        },
-        {
-            "x_prev": inp["x"],
-            "y_prev": -inp["a"] * inp["x"] + reg["x_prev"] + inp["a"] * reg["y_prev"],
-        },
-    ),
-)
-
 
 StatefulProbe = eg.define_module(
     name="StatefulProbe",
@@ -74,8 +57,8 @@ ModuleComposeProbe = eg.define_module(
     regs={},
     process=lambda inp, reg: (
         {
-            "single": AllpassModule(inp["x"], inp["a"]),
-            "cascade": AllpassModule(AllpassModule(inp["x"], inp["a"]), inp["a"]),
+            "single": AllpassStage(inp["x"], inp["a"]),
+            "cascade": AllpassStage(AllpassStage(inp["x"], inp["a"]), inp["a"]),
         },
         {},
     ),

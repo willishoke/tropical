@@ -33,9 +33,11 @@ struct ModuleDefinition
   std::vector<expr::ExprSpecPtr> output_exprs;
   std::vector<expr::ExprSpecPtr> register_exprs;
   std::vector<Module::CompositeUpdateSpec> composite_update_specs;
+  std::vector<Module::NestedModuleSpec> nested_module_specs;
   std::vector<Module::RegisterArraySpec> register_array_specs;
   std::shared_ptr<egress_composition::CompositeModuleSpec> composite_spec;
   std::shared_ptr<egress_composition::LoweredCompositeModule> lowered_composite;
+  std::vector<uint32_t> composite_schedule;
   double sample_rate = 44100.0;
 };
 
@@ -44,20 +46,6 @@ struct PureFunctionDefinition
   std::vector<std::string> input_names;
   std::vector<std::string> output_names;
   std::vector<expr::ExprSpecPtr> output_exprs;
-};
-
-struct StatefulFunctionDefinition
-{
-  std::vector<std::string> input_names;
-  std::vector<std::string> output_names;
-  std::vector<std::string> register_names;
-  std::vector<expr::Value> initial_registers;
-  std::vector<expr::ExprSpecPtr> output_exprs;
-  std::vector<expr::ExprSpecPtr> register_exprs;
-  std::vector<Module::CompositeUpdateSpec> composite_update_specs;
-  std::vector<Module::RegisterArraySpec> register_array_specs;
-  std::shared_ptr<egress_composition::CompositeModuleSpec> composite_spec;
-  std::shared_ptr<egress_composition::LoweredCompositeModule> lowered_composite;
 };
 
 struct DefinitionBuildContext
@@ -72,10 +60,12 @@ struct DefinitionBuildContext
   std::vector<expr::Value> initial_registers;
   std::vector<expr::ExprSpecPtr> register_exprs;
   std::vector<PendingCompositeUpdateSpec> composite_update_specs;
+  std::vector<Module::NestedModuleSpec> nested_module_specs;
   std::vector<Module::RegisterArraySpec> register_array_specs;
   std::shared_ptr<egress_composition::CompositeModuleSpec> composite_spec;
   uint32_t input_boundary_id = 0;
   uint32_t output_boundary_id = 0;
+  double sample_rate = 44100.0;
   std::size_t hidden_counter = 0;
 
   unsigned int append_register(
@@ -294,6 +284,12 @@ static std::vector<Module::CompositeUpdateSpec> finalize_composite_updates(
   return finalized;
 }
 
+static std::vector<Module::NestedModuleSpec> finalize_nested_modules(
+  const DefinitionBuildContext & build_context)
+{
+  return build_context.nested_module_specs;
+}
+
 static uint32_t add_composite_call_node(
   const std::string & label,
   egress_composition::NodeKind kind,
@@ -332,97 +328,6 @@ static uint32_t add_composite_call_node(
   return node_id;
 }
 
-static py::object inline_stateful_body(
-  const std::vector<std::string> & input_names,
-  const std::vector<std::string> & output_names,
-  const std::vector<std::string> & register_names,
-  const std::vector<expr::Value> & initial_registers,
-  const std::vector<expr::ExprSpecPtr> & output_exprs,
-  const std::vector<expr::ExprSpecPtr> & register_exprs,
-  const std::vector<Module::RegisterArraySpec> & register_array_specs,
-  const std::vector<expr::ExprSpecPtr> & call_args,
-  const std::vector<std::vector<egress_composition::PortRef>> & arg_sources,
-  const char * label,
-  const std::string & composite_label,
-  egress_composition::NodeKind composite_kind)
-{
-  if (current_definition_context_ == nullptr)
-  {
-    throw std::invalid_argument(
-      std::string(label) + " may only be called inside define_module or define_stateful_function process bodies.");
-  }
-
-  if (call_args.size() != input_names.size())
-  {
-    throw std::invalid_argument(
-      std::string(label) + " expects " + std::to_string(input_names.size()) + " arguments.");
-  }
-
-  const uint32_t call_node_id = add_composite_call_node(
-    composite_label,
-    composite_kind,
-    static_cast<uint32_t>(input_names.size()),
-    static_cast<uint32_t>(output_names.size()),
-    call_args,
-    &arg_sources);
-
-  std::vector<unsigned int> register_slots;
-  register_slots.reserve(register_names.size());
-  for (std::size_t i = 0; i < register_names.size(); ++i)
-  {
-    const Module::RegisterArraySpec & array_spec = register_array_specs[i];
-    if (array_spec.enabled)
-    {
-      throw std::invalid_argument(
-        std::string("Dynamic array_state is not supported in ") + label + " yet.");
-    }
-    register_slots.push_back(current_definition_context_->append_hidden_register(
-      register_names[i],
-      initial_registers[i],
-      array_spec));
-  }
-
-  std::vector<std::pair<uint32_t, expr::ExprSpecPtr>> register_updates;
-  register_updates.reserve(register_exprs.size());
-  for (std::size_t i = 0; i < register_exprs.size(); ++i)
-  {
-    if (!register_exprs[i])
-    {
-      continue;
-    }
-    register_updates.push_back(std::make_pair(
-      register_slots[i],
-      clone_with_input_and_register_subst(register_exprs[i], call_args, register_slots)));
-  }
-  if (!register_updates.empty())
-  {
-    current_definition_context_->add_composite_update(composite_label, std::move(register_updates));
-  }
-
-  if (output_exprs.size() == 1)
-  {
-    return py::cast(make_signal_expr(
-      nullptr,
-      clone_with_input_and_register_subst(output_exprs[0], call_args, register_slots),
-      call_node_id == std::numeric_limits<uint32_t>::max()
-        ? std::vector<egress_composition::PortRef>{}
-        : std::vector<egress_composition::PortRef>{egress_composition::PortRef{call_node_id, 0}}));
-  }
-
-  py::tuple outputs(output_exprs.size());
-  for (std::size_t i = 0; i < output_exprs.size(); ++i)
-  {
-    outputs[i] = py::cast(make_signal_expr(
-      nullptr,
-      clone_with_input_and_register_subst(output_exprs[i], call_args, register_slots),
-      call_node_id == std::numeric_limits<uint32_t>::max()
-        ? std::vector<egress_composition::PortRef>{}
-        : std::vector<egress_composition::PortRef>{
-            egress_composition::PortRef{call_node_id, static_cast<uint32_t>(i)}}));
-  }
-  return outputs;
-}
-
 static std::vector<SignalExpr> require_local_call_args(
   const py::args & args,
   const char * label)
@@ -455,6 +360,8 @@ class PyModuleInstance
             definition_->initial_registers,
             definition_->register_array_specs,
             definition_->composite_update_specs,
+            definition_->nested_module_specs,
+            definition_->composite_schedule,
             definition_->sample_rate))
       {
         throw std::invalid_argument("Failed to create module '" + name_ + "'.");
@@ -566,6 +473,8 @@ class PyModuleInstance
       result["instruction_count"] = stats.instruction_count;
       result["register_count"] = stats.register_count;
       result["numeric_jit_instruction_count"] = stats.numeric_jit_instruction_count;
+      result["composite_update_count"] = stats.composite_update_count;
+      result["nested_module_count"] = stats.nested_module_count;
       result["jit_status"] = stats.jit_status;
       return result;
     }
@@ -633,6 +542,7 @@ class PyModuleType
       result["edge_count"] = static_cast<uint64_t>(definition_->composite_spec->edges.size());
       result["same_tick_edge_count"] = same_tick_edges;
       result["delayed_edge_count"] = delayed_edges;
+      result["nested_module_count"] = static_cast<uint64_t>(definition_->nested_module_specs.size());
       result["same_tick_schedule_size"] = definition_->lowered_composite != nullptr
                                             ? static_cast<uint64_t>(definition_->lowered_composite->same_tick_schedule.size())
                                             : uint64_t(0);
@@ -660,7 +570,7 @@ class PyModuleType
         if (!args.empty())
         {
           throw std::invalid_argument(
-            "Module types only accept signal arguments inside define_module or define_stateful_function process bodies.");
+            "Module types only accept signal arguments inside define_module process bodies.");
         }
         return py::cast(instantiate());
       }
@@ -683,8 +593,8 @@ class PyModuleType
         call_args.push_back(make_signal_expr(nullptr, default_expr));
       }
 
-      std::vector<expr::ExprSpecPtr> arg_specs;
       std::vector<std::vector<egress_composition::PortRef>> arg_sources;
+      std::vector<expr::ExprSpecPtr> arg_specs;
       arg_specs.reserve(call_args.size());
       arg_sources.reserve(call_args.size());
       for (const auto & arg : call_args)
@@ -693,19 +603,62 @@ class PyModuleType
         arg_sources.push_back(arg.sources);
       }
 
-      return inline_stateful_body(
-        definition_->input_names,
-        definition_->output_names,
-        definition_->register_names,
-        definition_->initial_registers,
-        definition_->output_exprs,
-        definition_->register_exprs,
-        definition_->register_array_specs,
-        arg_specs,
-        arg_sources,
-        "Module call",
+      const uint32_t call_node_id = add_composite_call_node(
         definition_->type_name,
-        egress_composition::NodeKind::ModuleCall);
+        egress_composition::NodeKind::ModuleCall,
+        static_cast<uint32_t>(definition_->input_names.size()),
+        static_cast<uint32_t>(definition_->output_names.size()),
+        arg_specs,
+        &arg_sources);
+
+      std::vector<unsigned int> output_register_slots;
+      output_register_slots.reserve(definition_->output_names.size());
+      for (std::size_t output_id = 0; output_id < definition_->output_names.size(); ++output_id)
+      {
+        output_register_slots.push_back(current_definition_context_->append_hidden_register(
+          definition_->type_name + "_out" + std::to_string(output_id),
+          expr::float_value(0.0),
+          Module::RegisterArraySpec{}));
+      }
+
+      Module::NestedModuleSpec nested_spec;
+      nested_spec.node_id = call_node_id;
+      nested_spec.label = definition_->type_name;
+      nested_spec.input_count = static_cast<unsigned int>(definition_->input_names.size());
+      nested_spec.input_exprs = arg_specs;
+      nested_spec.output_register_slots = output_register_slots;
+      nested_spec.output_exprs = definition_->output_exprs;
+      nested_spec.register_exprs = definition_->register_exprs;
+      nested_spec.initial_registers = definition_->initial_registers;
+      nested_spec.register_array_specs = definition_->register_array_specs;
+      nested_spec.composite_update_specs = definition_->composite_update_specs;
+      nested_spec.nested_module_specs = definition_->nested_module_specs;
+      nested_spec.composite_schedule = definition_->composite_schedule;
+      nested_spec.sample_rate = definition_->sample_rate;
+      current_definition_context_->nested_module_specs.push_back(std::move(nested_spec));
+
+      if (definition_->output_names.size() == 1)
+      {
+        return py::cast(make_signal_expr(
+          nullptr,
+          expr::register_value_expr(output_register_slots[0]),
+          call_node_id == std::numeric_limits<uint32_t>::max()
+            ? std::vector<egress_composition::PortRef>{}
+            : std::vector<egress_composition::PortRef>{egress_composition::PortRef{call_node_id, 0}}));
+      }
+
+      py::tuple outputs(definition_->output_names.size());
+      for (std::size_t output_id = 0; output_id < definition_->output_names.size(); ++output_id)
+      {
+        outputs[output_id] = py::cast(make_signal_expr(
+          nullptr,
+          expr::register_value_expr(output_register_slots[output_id]),
+          call_node_id == std::numeric_limits<uint32_t>::max()
+            ? std::vector<egress_composition::PortRef>{}
+            : std::vector<egress_composition::PortRef>{
+                egress_composition::PortRef{call_node_id, static_cast<uint32_t>(output_id)}}));
+      }
+      return outputs;
     }
 
   private:
@@ -760,46 +713,6 @@ class PyPureFunctionType
 
   private:
     std::shared_ptr<PureFunctionDefinition> definition_;
-};
-
-class PyStatefulFunctionType
-{
-  public:
-    explicit PyStatefulFunctionType(std::shared_ptr<StatefulFunctionDefinition> definition)
-      : definition_(std::move(definition))
-    {
-    }
-
-    py::object call(const py::args & args) const
-    {
-      const std::vector<SignalExpr> call_signals = require_local_call_args(args, "Stateful function");
-      std::vector<expr::ExprSpecPtr> call_args;
-      std::vector<std::vector<egress_composition::PortRef>> arg_sources;
-      call_args.reserve(call_signals.size());
-      arg_sources.reserve(call_signals.size());
-      for (const auto & signal : call_signals)
-      {
-        call_args.push_back(signal.spec);
-        arg_sources.push_back(signal.sources);
-      }
-
-      return inline_stateful_body(
-        definition_->input_names,
-        definition_->output_names,
-        definition_->register_names,
-        definition_->initial_registers,
-        definition_->output_exprs,
-        definition_->register_exprs,
-        definition_->register_array_specs,
-        call_args,
-        arg_sources,
-        "Stateful function",
-        "stateful",
-        egress_composition::NodeKind::StatefulFunctionCall);
-    }
-
-  private:
-    std::shared_ptr<StatefulFunctionDefinition> definition_;
 };
 
 static PythonGraph * merge_graphs(PythonGraph * lhs, PythonGraph * rhs)
@@ -1089,7 +1002,7 @@ static SignalExpr delay_expr(const py::handle & value, const py::handle & init)
   if (current_definition_context_ == nullptr)
   {
     throw std::invalid_argument(
-      "eg.delay(...) may only be called inside define_module or define_stateful_function process bodies.");
+      "eg.delay(...) may only be called inside define_module process bodies.");
   }
 
   const SignalExpr signal = coerce_expr(value);

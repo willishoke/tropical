@@ -4,7 +4,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
 {
   resize_array_registers_to_inputs();
 #ifdef EGRESS_LLVM_ORC_JIT
-  if (!has_dynamic_registers_ && !has_composite_updates_)
+  if (!has_dynamic_registers_ && !has_composite_updates_ && !has_nested_modules_)
   {
     ensure_numeric_jit_current();
   }
@@ -122,6 +122,35 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   }
 #endif
 
+  for (uint32_t node_id : composite_schedule_)
+  {
+    auto nested_it = nested_module_lookup_.find(node_id);
+    if (nested_it == nested_module_lookup_.end())
+    {
+      continue;
+    }
+
+    NestedModuleRuntime & nested = nested_modules_[nested_it->second];
+    eval_program(nested.input_program, nested.input_temps);
+    for (unsigned int input_id = 0; input_id < nested.input_program.output_targets.size(); ++input_id)
+    {
+      nested.module->inputs[input_id] = nested.input_temps[nested.input_program.output_targets[input_id]];
+    }
+    nested.module->process();
+    for (unsigned int output_id = 0;
+         output_id < nested.output_register_slots.size() && output_id < nested.module->outputs.size();
+         ++output_id)
+    {
+      const unsigned int register_slot = nested.output_register_slots[output_id];
+      if (register_slot >= registers_.size())
+      {
+        continue;
+      }
+      registers_[register_slot] = nested.module->outputs[output_id];
+      next_registers_[register_slot] = nested.module->outputs[output_id];
+    }
+  }
+
   eval_program(program_, temps_);
 
   for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
@@ -185,10 +214,12 @@ Module::CompileStats Module::compile_stats() const
     stats.instruction_count += static_cast<uint64_t>(composite_update_program.instructions.size());
   }
   stats.register_count = static_cast<uint64_t>(program_.register_count);
+  stats.composite_update_count = static_cast<uint64_t>(composite_update_programs_.size());
+  stats.nested_module_count = static_cast<uint64_t>(nested_modules_.size());
 #ifdef EGRESS_LLVM_ORC_JIT
   stats.numeric_jit_instruction_count = numeric_jit_instruction_count_;
   stats.jit_status = jit_status_;
-#else
+  #else
   stats.jit_status = "LLVM ORC JIT disabled";
 #endif
   return stats;

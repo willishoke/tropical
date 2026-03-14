@@ -29,6 +29,8 @@ class Module
       uint64_t instruction_count = 0;
       uint64_t register_count = 0;
       uint64_t numeric_jit_instruction_count = 0;
+      uint64_t composite_update_count = 0;
+      uint64_t nested_module_count = 0;
       std::string jit_status;
     };
 #endif
@@ -46,6 +48,23 @@ class Module
       std::vector<ExprSpecPtr> register_exprs;
     };
 
+    struct NestedModuleSpec
+    {
+      uint32_t node_id = 0;
+      std::string label;
+      unsigned int input_count = 0;
+      std::vector<ExprSpecPtr> input_exprs;
+      std::vector<unsigned int> output_register_slots;
+      std::vector<ExprSpecPtr> output_exprs;
+      std::vector<ExprSpecPtr> register_exprs;
+      std::vector<Value> initial_registers;
+      std::vector<RegisterArraySpec> register_array_specs;
+      std::vector<CompositeUpdateSpec> composite_update_specs;
+      std::vector<NestedModuleSpec> nested_module_specs;
+      std::vector<uint32_t> composite_schedule;
+      double sample_rate = 44100.0;
+    };
+
     virtual ~Module() = default;
 
     Module(
@@ -55,6 +74,8 @@ class Module
       std::vector<Value> initial_registers,
       std::vector<RegisterArraySpec> register_array_specs,
       std::vector<CompositeUpdateSpec> composite_update_specs,
+      std::vector<NestedModuleSpec> nested_module_specs,
+      std::vector<uint32_t> composite_schedule,
       double sample_rate)
       : inputs(input_count, expr::float_value(0.0)),
         outputs(output_exprs.size(), expr::float_value(0.0)),
@@ -80,17 +101,39 @@ class Module
       {
         composite_update_programs_.push_back(compile_program({}, composite_update_spec.register_exprs));
       }
+      composite_schedule_ = std::move(composite_schedule);
+      for (auto & nested_module_spec : nested_module_specs)
+      {
+        NestedModuleRuntime runtime;
+        runtime.node_id = nested_module_spec.node_id;
+        runtime.input_program = compile_program(nested_module_spec.input_exprs, {});
+        runtime.input_temps.assign(runtime.input_program.register_count, expr::float_value(0.0));
+        runtime.output_register_slots = std::move(nested_module_spec.output_register_slots);
+        runtime.module = std::make_unique<Module>(
+          nested_module_spec.input_count,
+          std::move(nested_module_spec.output_exprs),
+          std::move(nested_module_spec.register_exprs),
+          std::move(nested_module_spec.initial_registers),
+          std::move(nested_module_spec.register_array_specs),
+          std::move(nested_module_spec.composite_update_specs),
+          std::move(nested_module_spec.nested_module_specs),
+          std::move(nested_module_spec.composite_schedule),
+          nested_module_spec.sample_rate);
+        nested_module_lookup_[runtime.node_id] = nested_modules_.size();
+        nested_modules_.push_back(std::move(runtime));
+      }
       temps_.assign(program_.register_count, expr::float_value(0.0));
       has_composite_updates_ = !composite_update_programs_.empty();
+      has_nested_modules_ = !nested_modules_.empty();
 
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_ && !has_composite_updates_)
+      if (!has_dynamic_registers_ && !has_composite_updates_ && !has_nested_modules_)
       {
         initialize_numeric_jit(inputs);
       }
-      else if (has_composite_updates_)
+      else if (has_composite_updates_ || has_nested_modules_)
       {
-        jit_status_ = "numeric JIT disabled for composite updates";
+        jit_status_ = "numeric JIT disabled for composite runtime";
       }
 #endif
     }
@@ -125,6 +168,15 @@ class Module
     using NumericValueKind = egress_module_detail::NumericValueKind;
     using NumericRegInfo = egress_module_detail::NumericRegInfo;
 
+    struct NestedModuleRuntime
+    {
+      uint32_t node_id = 0;
+      CompiledProgram input_program;
+      std::vector<Value> input_temps;
+      std::vector<unsigned int> output_register_slots;
+      std::unique_ptr<Module> module;
+    };
+
     static double clamp_output_scalar(double value);
 
     static void clamp_output_value(Value & value);
@@ -149,9 +201,13 @@ class Module
     std::vector<Value> registers_;
     std::vector<Value> next_registers_;
     std::vector<CompiledProgram> composite_update_programs_;
+    std::vector<NestedModuleRuntime> nested_modules_;
+    std::unordered_map<uint32_t, std::size_t> nested_module_lookup_;
+    std::vector<uint32_t> composite_schedule_;
     std::vector<RegisterArraySpec> register_array_specs_;
     bool has_dynamic_registers_ = false;
     bool has_composite_updates_ = false;
+    bool has_nested_modules_ = false;
     double sample_rate_ = 44100.0;
     uint64_t sample_index_ = 0;
 #ifdef EGRESS_LLVM_ORC_JIT

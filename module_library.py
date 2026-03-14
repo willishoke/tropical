@@ -49,7 +49,8 @@ def _define_allpass_stage():
             },
         )
 
-    return eg.define_stateful_function(
+    return eg.define_module(
+        name="AllpassStage",
         inputs=["x", "a"],
         outputs=["y"],
         regs={"x_prev": 0.0, "y_prev": 0.0},
@@ -70,7 +71,8 @@ def _define_fdn(size=4, name="FDN"):
             {"state": next_state},
         )
 
-    return eg.define_stateful_function(
+    return eg.define_module(
+        name=name,
         inputs=["x", "matrix", "decay"],
         outputs=["y"],
         regs={"state": [0.0] * size},

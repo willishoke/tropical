@@ -20,7 +20,6 @@ enum class NodeKind : uint8_t
   InputBoundary,
   OutputBoundary,
   ModuleCall,
-  StatefulFunctionCall,
   Delay
 };
 

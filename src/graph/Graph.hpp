@@ -28,6 +28,8 @@ class Graph
       uint64_t instruction_count = 0;
       uint64_t register_count = 0;
       uint64_t numeric_jit_instruction_count = 0;
+      uint64_t composite_update_count = 0;
+      uint64_t nested_module_count = 0;
       std::string jit_status;
     };
 #endif
@@ -334,6 +336,8 @@ class Graph
       result.instruction_count = stats.instruction_count;
       result.register_count = stats.register_count;
       result.numeric_jit_instruction_count = stats.numeric_jit_instruction_count;
+      result.composite_update_count = stats.composite_update_count;
+      result.nested_module_count = stats.nested_module_count;
       result.jit_status = stats.jit_status;
       return result;
     }
@@ -603,7 +607,8 @@ class Graph
       module_it->second.module->inputs = std::move(input_values);
 #ifdef EGRESS_LLVM_ORC_JIT
       if (!module_it->second.module->has_dynamic_registers_ &&
-          !module_it->second.module->has_composite_updates_)
+          !module_it->second.module->has_composite_updates_ &&
+          !module_it->second.module->has_nested_modules_)
       {
         module_it->second.module->ensure_numeric_jit_current();
       }
