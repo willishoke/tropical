@@ -289,6 +289,34 @@ inline expr::Value matmul_values(const expr::Value & lhs, const expr::Value & rh
   throw std::invalid_argument("MatMul requires matrix * vector or matrix * matrix.");
 }
 
+inline expr::Value array_set_value(const expr::Value & array, const expr::Value & index, const expr::Value & value)
+{
+  if (!expr::is_array(array))
+  {
+    throw std::invalid_argument("ArraySet requires an array value.");
+  }
+  if (expr::is_array(value) || expr::is_matrix(value))
+  {
+    throw std::invalid_argument("ArraySet requires a scalar replacement value.");
+  }
+
+  const int64_t raw_index = expr::to_int64(index);
+  if (raw_index < 0)
+  {
+    throw std::out_of_range("Array index out of range.");
+  }
+
+  const std::size_t item_index = static_cast<std::size_t>(raw_index);
+  if (item_index >= array.array_items.size())
+  {
+    throw std::out_of_range("Array index out of range.");
+  }
+
+  std::vector<expr::Value> items = array.array_items;
+  items[item_index] = value;
+  return expr::array_value(std::move(items));
+}
+
 inline expr::Value sin_value(const expr::Value & value)
 {
   return expr::map_unary(value, [](const expr::Value & item) {

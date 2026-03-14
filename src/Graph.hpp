@@ -136,6 +136,11 @@ namespace egress_expr_inline
         seed = hash_mix(seed, structural_hash(expr->rhs, cache));
         seed = hash_mix(seed, structural_hash(expr->args.empty() ? nullptr : expr->args.front(), cache));
         break;
+      case ExprKind::ArraySet:
+        seed = hash_mix(seed, structural_hash(expr->lhs, cache));
+        seed = hash_mix(seed, structural_hash(expr->rhs, cache));
+        seed = hash_mix(seed, structural_hash(expr->args.empty() ? nullptr : expr->args.front(), cache));
+        break;
       case ExprKind::ArrayPack:
       {
         seed = hash_mix(seed, std::hash<std::size_t>{}(expr->args.size()));
@@ -288,6 +293,10 @@ namespace egress_expr_inline
         return structural_equal(lhs->lhs, rhs->lhs) &&
                structural_equal(lhs->rhs, rhs->rhs) &&
                structural_equal(lhs->args.empty() ? nullptr : lhs->args.front(), rhs->args.empty() ? nullptr : rhs->args.front());
+      case ExprKind::ArraySet:
+        return structural_equal(lhs->lhs, rhs->lhs) &&
+               structural_equal(lhs->rhs, rhs->rhs) &&
+               structural_equal(lhs->args.empty() ? nullptr : lhs->args.front(), rhs->args.empty() ? nullptr : rhs->args.front());
       case ExprKind::ArrayPack:
       {
         if (lhs->args.size() != rhs->args.size())
@@ -342,6 +351,10 @@ namespace egress_expr_inline
         }
         return true;
       case ExprKind::Clamp:
+        return is_pure_function_body(expr->lhs, param_count) &&
+               is_pure_function_body(expr->rhs, param_count) &&
+               is_pure_function_body(expr->args.empty() ? nullptr : expr->args.front(), param_count);
+      case ExprKind::ArraySet:
         return is_pure_function_body(expr->lhs, param_count) &&
                is_pure_function_body(expr->rhs, param_count) &&
                is_pure_function_body(expr->args.empty() ? nullptr : expr->args.front(), param_count);
@@ -409,6 +422,11 @@ namespace egress_expr_inline
       }
       case ExprKind::Clamp:
         return expr::clamp_expr(
+          clone_with_subst(expr->lhs, args),
+          clone_with_subst(expr->rhs, args),
+          clone_with_subst(expr->args.empty() ? nullptr : expr->args.front(), args));
+      case ExprKind::ArraySet:
+        return expr::array_set_expr(
           clone_with_subst(expr->lhs, args),
           clone_with_subst(expr->rhs, args),
           clone_with_subst(expr->args.empty() ? nullptr : expr->args.front(), args));
@@ -490,6 +508,11 @@ namespace egress_expr_inline
       }
       case ExprKind::Clamp:
         return expr::clamp_expr(
+          inline_functions(expr->lhs, inline_depth),
+          inline_functions(expr->rhs, inline_depth),
+          inline_functions(expr->args.empty() ? nullptr : expr->args.front(), inline_depth));
+      case ExprKind::ArraySet:
+        return expr::array_set_expr(
           inline_functions(expr->lhs, inline_depth),
           inline_functions(expr->rhs, inline_depth),
           inline_functions(expr->args.empty() ? nullptr : expr->args.front(), inline_depth));
@@ -577,95 +600,130 @@ class Module
 #ifdef EGRESS_LLVM_ORC_JIT
       if (!has_dynamic_registers_)
       {
-        initialize_numeric_jit();
+        initialize_numeric_jit(inputs);
       }
 #endif
     }
 
-    void process()
+    void process(const std::vector<bool> * output_materialize_mask = nullptr)
     {
       resize_array_registers_to_inputs();
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (jit_kernel_ && inputs_are_scalar())
+      if (!has_dynamic_registers_)
       {
-        if (numeric_inputs_.size() < inputs.size())
-        {
-          numeric_inputs_.assign(inputs.size(), 0.0);
-        }
-        for (unsigned int i = 0; i < inputs.size(); ++i)
-        {
-          numeric_inputs_[i] = expr::to_float64(inputs[i]);
-        }
+        ensure_numeric_jit_current();
+      }
 
-        jit_kernel_(
-          numeric_inputs_.data(),
-          numeric_registers_.data(),
-          numeric_array_ptrs_.data(),
-          numeric_array_sizes_.data(),
-          numeric_temps_.data(),
-          sample_rate_,
-          sample_index_);
-
-        for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
+      if (jit_kernel_)
+      {
+        if (!sync_numeric_inputs_from_values())
         {
-          outputs[output_id] = expr::float_value(numeric_temps_[program_.output_targets[output_id]]);
+          jit_status_ = "numeric input sync failed";
+          jit_kernel_ = nullptr;
         }
-
-        for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
+        else
         {
-          const int32_t target = program_.register_targets[register_id];
-          if (register_scalar_mask_[register_id])
+          jit_kernel_(
+            numeric_inputs_.data(),
+            numeric_registers_.data(),
+            numeric_array_ptrs_.data(),
+            numeric_array_sizes_.data(),
+            numeric_temps_.data(),
+            sample_rate_,
+            sample_index_);
+
+          for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
           {
-            if (target >= 0)
+            if (output_materialize_mask != nullptr &&
+                output_id < output_materialize_mask->size() &&
+                !(*output_materialize_mask)[output_id] &&
+                output_id < numeric_output_info_.size())
             {
-              numeric_next_registers_[register_id] = numeric_temps_[static_cast<std::size_t>(target)];
+              const NumericValueKind output_kind = static_cast<NumericValueKind>(numeric_output_info_[output_id].kind);
+              if (output_kind == NumericValueKind::Array || output_kind == NumericValueKind::Matrix)
+              {
+                continue;
+              }
+            }
+            assign_numeric_value_to(
+              outputs[output_id],
+              numeric_output_info_[output_id],
+              program_.output_targets[output_id],
+              numeric_temps_,
+              numeric_array_storage_);
+          }
+
+          for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
+          {
+            const int32_t target = program_.register_targets[register_id];
+            if (register_scalar_mask_[register_id])
+            {
+              if (target >= 0)
+              {
+                numeric_next_registers_[register_id] = numeric_temps_[static_cast<std::size_t>(target)];
+              }
+              else
+              {
+                numeric_next_registers_[register_id] = numeric_registers_[register_id];
+              }
             }
             else
             {
               numeric_next_registers_[register_id] = numeric_registers_[register_id];
             }
           }
-          else
+
+          numeric_registers_.swap(numeric_next_registers_);
+
+          for (unsigned int register_id = 0; register_id < array_register_targets_.size(); ++register_id)
           {
-            numeric_next_registers_[register_id] = numeric_registers_[register_id];
+            if (register_scalar_mask_[register_id])
+            {
+              continue;
+            }
+            const int32_t src_slot = array_register_targets_[register_id];
+            if (src_slot < 0)
+            {
+              continue;
+            }
+            const uint32_t dst_slot = register_array_slot_[register_id];
+            if (dst_slot >= numeric_array_storage_.size() ||
+                static_cast<std::size_t>(src_slot) >= numeric_array_storage_.size())
+            {
+              continue;
+            }
+            if (dst_slot == static_cast<uint32_t>(src_slot))
+            {
+              continue;
+            }
+            auto & dst = numeric_array_storage_[dst_slot];
+            auto & src = numeric_array_storage_[static_cast<std::size_t>(src_slot)];
+            if (dst.size() != src.size())
+            {
+              continue;
+            }
+            if (register_id < array_register_can_swap_.size() && array_register_can_swap_[register_id])
+            {
+              dst.swap(src);
+              if (dst_slot < numeric_array_ptrs_.size())
+              {
+                numeric_array_ptrs_[dst_slot] = dst.empty() ? nullptr : dst.data();
+                numeric_array_sizes_[dst_slot] = static_cast<uint64_t>(dst.size());
+              }
+              if (static_cast<std::size_t>(src_slot) < numeric_array_ptrs_.size())
+              {
+                numeric_array_ptrs_[static_cast<std::size_t>(src_slot)] = src.empty() ? nullptr : src.data();
+                numeric_array_sizes_[static_cast<std::size_t>(src_slot)] = static_cast<uint64_t>(src.size());
+              }
+              continue;
+            }
+            std::copy(src.begin(), src.end(), dst.begin());
           }
+
+          ++sample_index_;
+          postprocess();
+          return;
         }
-
-        numeric_registers_.swap(numeric_next_registers_);
-
-        for (unsigned int register_id = 0; register_id < array_register_targets_.size(); ++register_id)
-        {
-          if (register_scalar_mask_[register_id])
-          {
-            continue;
-          }
-          const int32_t src_slot = array_register_targets_[register_id];
-          if (src_slot < 0)
-          {
-            continue;
-          }
-          const uint32_t dst_slot = register_array_slot_[register_id];
-          if (dst_slot >= numeric_array_storage_.size() ||
-              static_cast<std::size_t>(src_slot) >= numeric_array_storage_.size())
-          {
-            continue;
-          }
-          if (dst_slot == static_cast<uint32_t>(src_slot))
-          {
-            continue;
-          }
-          auto & dst = numeric_array_storage_[dst_slot];
-          const auto & src = numeric_array_storage_[static_cast<std::size_t>(src_slot)];
-          if (dst.size() != src.size())
-          {
-            continue;
-          }
-          std::copy(src.begin(), src.end(), dst.begin());
-        }
-
-        ++sample_index_;
-        postprocess();
-        return;
       }
 #endif
 
@@ -726,12 +784,17 @@ class Module
     #endif
 
   protected:
-    void postprocess()
+    void reset_inputs_after_process()
     {
       for (auto & in : inputs)
       {
         in = expr::float_value(0.0);
       }
+    }
+
+    void postprocess()
+    {
+      reset_inputs_after_process();
 
       for (auto & out : outputs)
       {
@@ -745,6 +808,11 @@ class Module
 
   private:
     friend class Graph;
+
+    static double clamp_output_scalar(double value)
+    {
+      return std::fmax(-10.0, std::fmin(10.0, value));
+    }
 
     static void clamp_output_value(Value & value)
     {
@@ -764,20 +832,8 @@ class Module
         }
         return;
       }
-      const double clamped = std::fmax(-10.0, std::fmin(10.0, expr::to_float64(value)));
+      const double clamped = clamp_output_scalar(expr::to_float64(value));
       value = expr::float_value(clamped);
-    }
-
-    bool inputs_are_scalar() const
-    {
-      for (const auto & input : inputs)
-      {
-        if (input.type == ValueType::Array || input.type == ValueType::Matrix)
-        {
-          return false;
-        }
-      }
-      return true;
     }
 
     void resize_array_registers_to_inputs()
@@ -863,7 +919,7 @@ class Module
 
     static bool is_local_ternary(ExprKind kind)
     {
-      return kind == ExprKind::Clamp;
+      return kind == ExprKind::Clamp || kind == ExprKind::ArraySet;
     }
 
     static bool is_local_binary(ExprKind kind)
@@ -1081,6 +1137,12 @@ class Module
             temps[instr.dst] = expr::float_value(0.0);
             break;
           }
+          case ExprKind::ArraySet:
+            temps[instr.dst] = expr_eval::array_set_value(
+              temps[instr.src_a],
+              temps[instr.src_b],
+              temps[instr.src_c]);
+            break;
           case ExprKind::Abs:
             temps[instr.dst] = expr_eval::abs_value(temps[instr.src_a]);
             break;
@@ -1166,6 +1228,21 @@ class Module
       }
     }
 
+    struct NumericInputInfo
+    {
+      bool is_scalar = true;
+      uint32_t array_slot = 0;
+      uint32_t array_size = 0;
+    };
+
+    struct NumericOutputInfo
+    {
+      uint8_t kind = 0;
+      uint32_t array_slot = 0;
+      uint32_t matrix_rows = 0;
+      uint32_t matrix_cols = 0;
+    };
+
     unsigned int input_count_ = 0;
     CompiledProgram program_;
     std::vector<Value> temps_;
@@ -1187,6 +1264,9 @@ class Module
     std::vector<bool> register_scalar_mask_;
     std::vector<uint32_t> register_array_slot_;
     std::vector<int32_t> array_register_targets_;
+    std::vector<bool> array_register_can_swap_;
+    std::vector<NumericInputInfo> numeric_input_info_;
+    std::vector<NumericOutputInfo> numeric_output_info_;
     std::string jit_status_;
   #ifdef EGRESS_PROFILE
     uint64_t numeric_jit_instruction_count_ = 0;
@@ -1253,6 +1333,65 @@ class Module
       double scalar_constant = 0.0;
     };
 
+    static void assign_scalar_numeric_value(Value & dst, double value)
+    {
+      const double clamped = clamp_output_scalar(value);
+      dst.type = ValueType::Float;
+      dst.int_value = static_cast<int64_t>(clamped);
+      dst.float_value = clamped;
+      dst.bool_value = clamped != 0.0;
+      dst.array_items.clear();
+      dst.matrix_items.clear();
+      dst.matrix_rows = 0;
+      dst.matrix_cols = 0;
+    }
+
+    static void assign_numeric_value_to(
+      Value & dst,
+      const NumericOutputInfo & info,
+      uint32_t scalar_register,
+      const std::vector<double> & numeric_temps,
+      const std::vector<std::vector<double>> & numeric_array_storage)
+    {
+      switch (static_cast<NumericValueKind>(info.kind))
+      {
+        case NumericValueKind::Scalar:
+          assign_scalar_numeric_value(dst, numeric_temps[scalar_register]);
+          return;
+        case NumericValueKind::Array:
+        {
+          const auto & values = numeric_array_storage[info.array_slot];
+          if (dst.type != ValueType::Array || dst.array_items.size() != values.size())
+          {
+            std::vector<Value> items(values.size(), expr::float_value(0.0));
+            dst = expr::array_value(std::move(items));
+          }
+          for (std::size_t i = 0; i < values.size(); ++i)
+          {
+            assign_scalar_numeric_value(dst.array_items[i], values[i]);
+          }
+          return;
+        }
+        case NumericValueKind::Matrix:
+        {
+          const auto & values = numeric_array_storage[info.array_slot];
+          if (dst.type != ValueType::Matrix ||
+              dst.matrix_rows != info.matrix_rows ||
+              dst.matrix_cols != info.matrix_cols ||
+              dst.matrix_items.size() != values.size())
+          {
+            std::vector<Value> items(values.size(), expr::float_value(0.0));
+            dst = expr::matrix_value(info.matrix_rows, info.matrix_cols, std::move(items));
+          }
+          for (std::size_t i = 0; i < values.size(); ++i)
+          {
+            assign_scalar_numeric_value(dst.matrix_items[i], values[i]);
+          }
+          return;
+        }
+      }
+    }
+
     static bool value_to_scalar_double(const Value & value, double & out)
     {
       if (value.type == ValueType::Array || value.type == ValueType::Matrix)
@@ -1298,7 +1437,125 @@ class Module
       return slot;
     }
 
-    bool build_numeric_program(egress_jit::NumericProgram & numeric_program)
+    bool configure_numeric_inputs_for_jit(const std::vector<Value> & current_inputs)
+    {
+      numeric_input_info_.assign(current_inputs.size(), NumericInputInfo{});
+
+      for (unsigned int input_id = 0; input_id < current_inputs.size(); ++input_id)
+      {
+        const Value & input = current_inputs[input_id];
+        if (input.type == ValueType::Matrix)
+        {
+          return false;
+        }
+        if (input.type != ValueType::Array)
+        {
+          continue;
+        }
+
+        uint32_t array_slot = 0;
+        if (!add_array_values_to_jit_table(input.array_items, array_slot))
+        {
+          return false;
+        }
+
+        NumericInputInfo & info = numeric_input_info_[input_id];
+        info.is_scalar = false;
+        info.array_slot = array_slot;
+        info.array_size = static_cast<uint32_t>(input.array_items.size());
+      }
+
+      return true;
+    }
+
+    bool numeric_input_layout_matches(const std::vector<Value> & current_inputs) const
+    {
+      if (numeric_input_info_.size() != current_inputs.size())
+      {
+        return false;
+      }
+
+      for (unsigned int input_id = 0; input_id < current_inputs.size(); ++input_id)
+      {
+        const Value & input = current_inputs[input_id];
+        const NumericInputInfo & info = numeric_input_info_[input_id];
+        if (input.type == ValueType::Matrix)
+        {
+          return false;
+        }
+        if (input.type == ValueType::Array)
+        {
+          if (info.is_scalar || info.array_size != input.array_items.size())
+          {
+            return false;
+          }
+          continue;
+        }
+        if (!info.is_scalar)
+        {
+          return false;
+        }
+      }
+
+      return true;
+    }
+
+    bool sync_numeric_inputs_from_values()
+    {
+      if (numeric_inputs_.size() < inputs.size())
+      {
+        numeric_inputs_.assign(inputs.size(), 0.0);
+      }
+
+      if (numeric_input_info_.size() != inputs.size())
+      {
+        return false;
+      }
+
+      for (unsigned int input_id = 0; input_id < inputs.size(); ++input_id)
+      {
+        const Value & input = inputs[input_id];
+        const NumericInputInfo & info = numeric_input_info_[input_id];
+        if (info.is_scalar)
+        {
+          if (input.type == ValueType::Array || input.type == ValueType::Matrix)
+          {
+            return false;
+          }
+          numeric_inputs_[input_id] = expr::to_float64(input);
+          continue;
+        }
+
+        if (input.type != ValueType::Array || input.array_items.size() != info.array_size)
+        {
+          return false;
+        }
+        if (info.array_slot >= numeric_array_storage_.size())
+        {
+          return false;
+        }
+
+        auto & dst = numeric_array_storage_[info.array_slot];
+        if (dst.size() != info.array_size)
+        {
+          return false;
+        }
+
+        for (unsigned int item_id = 0; item_id < input.array_items.size(); ++item_id)
+        {
+          double scalar = 0.0;
+          if (!value_to_scalar_double(input.array_items[item_id], scalar))
+          {
+            return false;
+          }
+          dst[item_id] = scalar;
+        }
+      }
+
+      return true;
+    }
+
+    bool build_numeric_program(const std::vector<Value> & current_inputs, egress_jit::NumericProgram & numeric_program)
     {
       if (program_.register_count == 0)
       {
@@ -1311,6 +1568,13 @@ class Module
       register_scalar_mask_.assign(registers_.size(), true);
       register_array_slot_.assign(registers_.size(), 0);
       array_register_targets_.assign(registers_.size(), -1);
+      array_register_can_swap_.assign(registers_.size(), false);
+      numeric_output_info_.clear();
+
+      if (!configure_numeric_inputs_for_jit(current_inputs))
+      {
+        return false;
+      }
 
       std::vector<NumericRegInfo> reg_info(program_.register_count);
 
@@ -1391,8 +1655,22 @@ class Module
             break;
           }
           case ExprKind::InputValue:
-            jit_instr.op = egress_jit::NumericOp::InputValue;
-            reg_info[instr.dst].kind = NumericValueKind::Scalar;
+            if (instr.slot_id >= numeric_input_info_.size())
+            {
+              return false;
+            }
+            if (numeric_input_info_[instr.slot_id].is_scalar)
+            {
+              jit_instr.op = egress_jit::NumericOp::InputValue;
+              reg_info[instr.dst].kind = NumericValueKind::Scalar;
+            }
+            else
+            {
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = numeric_input_info_[instr.slot_id].array_slot;
+              reg_info[instr.dst].array_size = numeric_input_info_[instr.slot_id].array_size;
+              emit_instruction = false;
+            }
             break;
           case ExprKind::RegisterValue:
             if (instr.slot_id >= register_scalar_mask_.size())
@@ -1422,27 +1700,45 @@ class Module
             break;
           case ExprKind::ArrayPack:
           {
+            bool all_constant = true;
             std::vector<Value> packed_values;
             packed_values.reserve(instr.args.size());
             for (uint32_t src : instr.args)
             {
               if (src >= reg_info.size() ||
-                  reg_info[src].kind != NumericValueKind::Scalar ||
-                  !reg_info[src].scalar_is_constant)
+                  reg_info[src].kind != NumericValueKind::Scalar)
               {
                 return false;
               }
+              if (!reg_info[src].scalar_is_constant)
+              {
+                all_constant = false;
+              }
               packed_values.push_back(float_value(reg_info[src].scalar_constant));
             }
+
+            const uint32_t array_size = static_cast<uint32_t>(instr.args.size());
             uint32_t array_slot = 0;
-            if (!add_array_values_to_jit_table(packed_values, array_slot))
+            if (all_constant)
             {
-              return false;
+              if (!add_array_values_to_jit_table(packed_values, array_slot))
+              {
+                return false;
+              }
+              emit_instruction = false;
             }
+            else
+            {
+              array_slot = allocate_array_slot_with_size(array_size);
+              jit_instr.op = egress_jit::NumericOp::ArrayPack;
+              jit_instr.dst = array_slot;
+              jit_instr.args = instr.args;
+              require_scalar_inputs = false;
+            }
+
             reg_info[instr.dst].kind = NumericValueKind::Array;
             reg_info[instr.dst].array_slot = array_slot;
-            reg_info[instr.dst].array_size = static_cast<uint32_t>(packed_values.size());
-            emit_instruction = false;
+            reg_info[instr.dst].array_size = array_size;
             break;
           }
           case ExprKind::Index:
@@ -1469,29 +1765,79 @@ class Module
             reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Less:
-            jit_instr.op = egress_jit::NumericOp::Less;
-            reg_info[instr.dst].kind = NumericValueKind::Scalar;
-            break;
           case ExprKind::LessEqual:
-            jit_instr.op = egress_jit::NumericOp::LessEqual;
-            reg_info[instr.dst].kind = NumericValueKind::Scalar;
-            break;
           case ExprKind::Greater:
-            jit_instr.op = egress_jit::NumericOp::Greater;
-            reg_info[instr.dst].kind = NumericValueKind::Scalar;
-            break;
           case ExprKind::GreaterEqual:
-            jit_instr.op = egress_jit::NumericOp::GreaterEqual;
-            reg_info[instr.dst].kind = NumericValueKind::Scalar;
-            break;
           case ExprKind::Equal:
-            jit_instr.op = egress_jit::NumericOp::Equal;
-            reg_info[instr.dst].kind = NumericValueKind::Scalar;
-            break;
           case ExprKind::NotEqual:
-            jit_instr.op = egress_jit::NumericOp::NotEqual;
+          {
+            const NumericRegInfo & lhs = reg_info[instr.src_a];
+            const NumericRegInfo & rhs = reg_info[instr.src_b];
+            if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
+            {
+              const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+              switch (instr.kind)
+              {
+                case ExprKind::Less:
+                  jit_instr.op = egress_jit::NumericOp::ArrayLessScalar;
+                  break;
+                case ExprKind::LessEqual:
+                  jit_instr.op = egress_jit::NumericOp::ArrayLessEqualScalar;
+                  break;
+                case ExprKind::Greater:
+                  jit_instr.op = egress_jit::NumericOp::ArrayGreaterScalar;
+                  break;
+                case ExprKind::GreaterEqual:
+                  jit_instr.op = egress_jit::NumericOp::ArrayGreaterEqualScalar;
+                  break;
+                case ExprKind::Equal:
+                  jit_instr.op = egress_jit::NumericOp::ArrayEqualScalar;
+                  break;
+                case ExprKind::NotEqual:
+                  jit_instr.op = egress_jit::NumericOp::ArrayNotEqualScalar;
+                  break;
+                default:
+                  break;
+              }
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = lhs.array_slot;
+              jit_instr.src_b = instr.src_b;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = lhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
+            if (lhs.kind != NumericValueKind::Scalar || rhs.kind != NumericValueKind::Scalar)
+            {
+              return false;
+            }
+            switch (instr.kind)
+            {
+              case ExprKind::Less:
+                jit_instr.op = egress_jit::NumericOp::Less;
+                break;
+              case ExprKind::LessEqual:
+                jit_instr.op = egress_jit::NumericOp::LessEqual;
+                break;
+              case ExprKind::Greater:
+                jit_instr.op = egress_jit::NumericOp::Greater;
+                break;
+              case ExprKind::GreaterEqual:
+                jit_instr.op = egress_jit::NumericOp::GreaterEqual;
+                break;
+              case ExprKind::Equal:
+                jit_instr.op = egress_jit::NumericOp::Equal;
+                break;
+              case ExprKind::NotEqual:
+                jit_instr.op = egress_jit::NumericOp::NotEqual;
+                break;
+              default:
+                break;
+            }
             reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
+          }
           case ExprKind::Add:
           {
             const NumericRegInfo & lhs = reg_info[instr.src_a];
@@ -1536,6 +1882,19 @@ class Module
               reg_info[instr.dst].kind = NumericValueKind::Array;
               reg_info[instr.dst].array_slot = dst_slot;
               reg_info[instr.dst].array_size = rhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
+            if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
+            {
+              const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+              jit_instr.op = egress_jit::NumericOp::ArrayDivScalar;
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = lhs.array_slot;
+              jit_instr.src_b = instr.src_b;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = lhs.array_size;
               require_scalar_inputs = false;
               break;
             }
@@ -1652,6 +2011,19 @@ class Module
               require_scalar_inputs = false;
               break;
             }
+            if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
+            {
+              const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+              jit_instr.op = egress_jit::NumericOp::ArrayDivScalar;
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = lhs.array_slot;
+              jit_instr.src_b = instr.src_b;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = lhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
             if (lhs.kind != NumericValueKind::Scalar || rhs.kind != NumericValueKind::Scalar)
             {
               return false;
@@ -1690,9 +2062,30 @@ class Module
             reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
           case ExprKind::Mod:
+          {
+            const NumericRegInfo & lhs = reg_info[instr.src_a];
+            const NumericRegInfo & rhs = reg_info[instr.src_b];
+            if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
+            {
+              const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+              jit_instr.op = egress_jit::NumericOp::ArrayModScalar;
+              jit_instr.dst = dst_slot;
+              jit_instr.src_a = lhs.array_slot;
+              jit_instr.src_b = instr.src_b;
+              reg_info[instr.dst].kind = NumericValueKind::Array;
+              reg_info[instr.dst].array_slot = dst_slot;
+              reg_info[instr.dst].array_size = lhs.array_size;
+              require_scalar_inputs = false;
+              break;
+            }
+            if (lhs.kind != NumericValueKind::Scalar || rhs.kind != NumericValueKind::Scalar)
+            {
+              return false;
+            }
             jit_instr.op = egress_jit::NumericOp::Mod;
             reg_info[instr.dst].kind = NumericValueKind::Scalar;
             break;
+          }
           case ExprKind::FloorDiv:
             jit_instr.op = egress_jit::NumericOp::FloorDiv;
             reg_info[instr.dst].kind = NumericValueKind::Scalar;
@@ -1790,12 +2183,19 @@ class Module
         }
       }
 
+      numeric_output_info_.reserve(program_.output_targets.size());
       for (uint32_t output_reg : program_.output_targets)
       {
-        if (output_reg >= reg_info.size() || reg_info[output_reg].kind != NumericValueKind::Scalar)
+        if (output_reg >= reg_info.size())
         {
           return false;
         }
+        NumericOutputInfo output_info;
+        output_info.kind = static_cast<uint8_t>(reg_info[output_reg].kind);
+        output_info.array_slot = reg_info[output_reg].array_slot;
+        output_info.matrix_rows = reg_info[output_reg].matrix_rows;
+        output_info.matrix_cols = reg_info[output_reg].matrix_cols;
+        numeric_output_info_.push_back(output_info);
       }
 
       for (unsigned int reg_slot = 0; reg_slot < program_.register_targets.size(); ++reg_slot)
@@ -1838,11 +2238,49 @@ class Module
         array_register_targets_[reg_slot] = static_cast<int32_t>(reg_info[target].array_slot);
       }
 
+      std::vector<uint32_t> array_target_use_counts(numeric_array_storage_.size(), 0);
+      for (unsigned int reg_slot = 0; reg_slot < array_register_targets_.size(); ++reg_slot)
+      {
+        const int32_t src_slot = array_register_targets_[reg_slot];
+        if (src_slot < 0)
+        {
+          continue;
+        }
+        if (static_cast<std::size_t>(src_slot) >= array_target_use_counts.size())
+        {
+          return false;
+        }
+        ++array_target_use_counts[static_cast<std::size_t>(src_slot)];
+      }
+
+      for (unsigned int reg_slot = 0; reg_slot < array_register_targets_.size(); ++reg_slot)
+      {
+        const int32_t src_slot = array_register_targets_[reg_slot];
+        if (src_slot < 0 || register_scalar_mask_[reg_slot])
+        {
+          continue;
+        }
+        const uint32_t dst_slot = register_array_slot_[reg_slot];
+        if (dst_slot >= numeric_array_storage_.size() ||
+            static_cast<std::size_t>(src_slot) >= numeric_array_storage_.size())
+        {
+          return false;
+        }
+        array_register_can_swap_[reg_slot] =
+          dst_slot != static_cast<uint32_t>(src_slot) &&
+          array_target_use_counts[static_cast<std::size_t>(src_slot)] == 1;
+      }
+
       return true;
     }
 
-    void initialize_numeric_jit()
+        void initialize_numeric_jit(const std::vector<Value> & current_inputs)
     {
+      jit_kernel_ = nullptr;
+    #ifdef EGRESS_PROFILE
+      numeric_jit_instruction_count_ = 0;
+    #endif
+
       auto & jit = egress_jit::OrcJitEngine::instance();
       if (!jit.available())
       {
@@ -1851,7 +2289,7 @@ class Module
       }
 
       egress_jit::NumericProgram numeric_program;
-      if (!build_numeric_program(numeric_program))
+      if (!build_numeric_program(current_inputs, numeric_program))
       {
         jit_status_ = "numeric compatibility check failed";
         return;
@@ -1884,6 +2322,16 @@ class Module
         numeric_registers_[i] = register_scalar_mask_[i] ? to_float64(registers_[i]) : 0.0;
       }
       jit_status_ = "numeric JIT active";
+    }
+
+    void ensure_numeric_jit_current()
+    {
+      if (numeric_input_layout_matches(inputs))
+      {
+        return;
+      }
+
+      initialize_numeric_jit(inputs);
     }
 #endif
 };
@@ -1962,7 +2410,7 @@ class Graph
 
           eval_input_program(runtime, slot.input_program, slot.input_registers, slot.module->inputs);
 
-          slot.module->process();
+          slot.module->process(&slot.output_materialize_mask);
 
 #ifdef EGRESS_PROFILE
           const auto module_end = std::chrono::steady_clock::now();
@@ -1994,6 +2442,21 @@ class Graph
 
           mixed += expr::to_float64(slot.module->outputs[tap.output_id]) / 20.0;
         }
+        for (auto & mix_expr : runtime.mix_exprs)
+        {
+          if (mix_expr.registers.size() < mix_expr.program.register_count)
+          {
+            mix_expr.registers.resize(mix_expr.program.register_count, float_value(0.0));
+          }
+          for (const auto & instr : mix_expr.program.instructions)
+          {
+            eval_mix_instruction(runtime, instr, mix_expr.registers.data());
+          }
+          if (mix_expr.result_register < mix_expr.registers.size())
+          {
+            mixed += expr::to_float64(mix_expr.registers[mix_expr.result_register]) / 20.0;
+          }
+        }
         outputBuffer[sample] = mixed;
 
         for (auto & slot : runtime.modules)
@@ -2002,6 +2465,56 @@ class Graph
           {
             continue;
           }
+
+          for (unsigned int output_id = 0; output_id < slot.indexed_output_indices.size(); ++output_id)
+          {
+            const auto & indices = slot.indexed_output_indices[output_id];
+            auto & cached_values = slot.indexed_prev_output_values[output_id];
+            if (indices.empty() || cached_values.size() != indices.size())
+            {
+              continue;
+            }
+
+#ifdef EGRESS_LLVM_ORC_JIT
+            const bool can_read_numeric_output =
+              slot.module->jit_kernel_ != nullptr &&
+              output_id < slot.module->numeric_output_info_.size() &&
+              static_cast<Module::NumericValueKind>(slot.module->numeric_output_info_[output_id].kind) == Module::NumericValueKind::Array &&
+              slot.module->numeric_output_info_[output_id].array_slot < slot.module->numeric_array_storage_.size();
+            if (can_read_numeric_output)
+            {
+              const auto & values = slot.module->numeric_array_storage_[slot.module->numeric_output_info_[output_id].array_slot];
+              for (std::size_t index_id = 0; index_id < indices.size(); ++index_id)
+              {
+                const int64_t raw_index = indices[index_id];
+                if (raw_index < 0 || static_cast<std::size_t>(raw_index) >= values.size())
+                {
+                  continue;
+                }
+                cached_values[index_id] = expr::float_value(Module::clamp_output_scalar(values[static_cast<std::size_t>(raw_index)]));
+              }
+              continue;
+            }
+#endif
+
+            if (output_id < slot.module->outputs.size())
+            {
+              const Value & output = slot.module->outputs[output_id];
+              if (expr::is_array(output))
+              {
+                for (std::size_t index_id = 0; index_id < indices.size(); ++index_id)
+                {
+                  const int64_t raw_index = indices[index_id];
+                  if (raw_index < 0 || static_cast<std::size_t>(raw_index) >= output.array_items.size())
+                  {
+                    continue;
+                  }
+                  cached_values[index_id] = output.array_items[static_cast<std::size_t>(raw_index)];
+                }
+              }
+            }
+          }
+
           slot.module->prev_outputs.swap(slot.module->outputs);
         }
       }
@@ -2139,8 +2652,11 @@ class Graph
             return out.first == module_name;
           }),
         control_mix_.end());
-
-      std::vector<std::pair<std::string, unsigned int>> updated_inputs;
+      for (auto & mix_expr : control_mix_exprs_)
+      {
+        bool removed_any = false;
+        mix_expr = simplify_expr(replace_refs_with_zero(mix_expr, module_name, 0, true, removed_any));
+      }
       for (auto & [name, module] : control_modules_)
       {
         for (unsigned int input_id = 0; input_id < module.input_exprs.size(); ++input_id)
@@ -2150,12 +2666,9 @@ class Graph
           if (removed_any)
           {
             module.input_exprs[input_id] = simplify_expr(updated);
-            updated_inputs.emplace_back(name, input_id);
           }
         }
       }
-
-      (void)updated_inputs;
       rebuild_and_publish_runtime_locked();
 
       return true;
@@ -2179,6 +2692,24 @@ class Graph
       }
 
       control_mix_.push_back(output);
+      rebuild_and_publish_runtime_locked();
+      return true;
+    }
+
+    bool addOutputExpr(const ExprSpecPtr & expr)
+    {
+      if (!expr)
+      {
+        return false;
+      }
+
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      if (!validate_expr_refs(expr, false))
+      {
+        return false;
+      }
+
+      control_mix_exprs_.push_back(simplify_expr(expr));
       rebuild_and_publish_runtime_locked();
       return true;
     }
@@ -2270,6 +2801,41 @@ class Graph
       return module_it->second.input_exprs[input_id];
     }
 
+    bool prime_module_inputs_if_local(const std::string & module_name)
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      auto module_it = control_modules_.find(module_name);
+      if (module_it == control_modules_.end() || !module_it->second.module)
+      {
+        return false;
+      }
+
+      for (const auto & input_expr : module_it->second.input_exprs)
+      {
+        std::vector<outputID> refs;
+        collect_refs(input_expr, refs);
+        if (!refs.empty())
+        {
+          return false;
+        }
+      }
+
+      RuntimeState runtime;
+      const unsigned int input_count = static_cast<unsigned int>(module_it->second.input_exprs.size());
+      const CompiledInputProgram input_program = compile_input_program(module_it->second.input_exprs, input_count, runtime);
+      std::vector<Value> input_registers(input_program.register_count, float_value(0.0));
+      std::vector<Value> input_values(input_count, float_value(0.0));
+      eval_input_program(runtime, input_program, input_registers, input_values);
+      module_it->second.module->inputs = std::move(input_values);
+#ifdef EGRESS_LLVM_ORC_JIT
+      if (!module_it->second.module->has_dynamic_registers_)
+      {
+        module_it->second.module->ensure_numeric_jit_current();
+      }
+#endif
+      return true;
+    }
+
     std::vector<outputID> incoming_connections(const std::string & dst_module, unsigned int dst_input_id) const
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -2312,8 +2878,10 @@ class Graph
     {
       Literal,
       Ref,
+      RefIndex,
       ArrayPack,
       Index,
+      ArraySet,
       Add,
       AddConst,
       Sub,
@@ -2361,6 +2929,7 @@ class Graph
       Value literal;
       uint32_t ref_module_id = 0;
       unsigned int ref_output_id = 0;
+      int64_t ref_index = -1;
     };
 
     struct CompiledInputProgram
@@ -2376,6 +2945,9 @@ class Graph
       std::shared_ptr<Module> module;
       CompiledInputProgram input_program;
       std::vector<Value> input_registers;
+      std::vector<bool> output_materialize_mask;
+      std::vector<std::vector<int64_t>> indexed_output_indices;
+      std::vector<std::vector<Value>> indexed_prev_output_values;
     };
 
     struct MixTap
@@ -2384,11 +2956,19 @@ class Graph
       unsigned int output_id;
     };
 
+    struct MixExpr
+    {
+      CompiledInputProgram program;
+      std::vector<Value> registers;
+      uint32_t result_register = 0;
+    };
+
     struct RuntimeState
     {
       std::vector<ModuleSlot> modules;
       std::unordered_map<std::string, uint32_t> name_to_id;
       std::vector<MixTap> mix;
+      std::vector<MixExpr> mix_exprs;
     };
 
 #ifdef EGRESS_PROFILE
@@ -2455,8 +3035,104 @@ class Graph
         case ExprKind::RegisterValue:
         case ExprKind::SampleRate:
         case ExprKind::SampleIndex:
-        case ExprKind::ArrayPack:
           return expr;
+        case ExprKind::ArrayPack:
+        {
+          std::vector<ExprSpecPtr> items;
+          items.reserve(expr->args.size());
+          bool all_literal = true;
+          std::vector<Value> literal_items;
+          literal_items.reserve(expr->args.size());
+          for (const auto & arg : expr->args)
+          {
+            ExprSpecPtr item = simplify_expr(arg);
+            if (!item)
+            {
+              item = expr::literal_expr(0.0);
+            }
+            if (item->kind != ExprKind::Literal ||
+                item->literal.type == ValueType::Array ||
+                item->literal.type == ValueType::Matrix)
+            {
+              all_literal = false;
+            }
+            else
+            {
+              literal_items.push_back(item->literal);
+            }
+            items.push_back(std::move(item));
+          }
+          if (all_literal)
+          {
+            return expr::literal_expr(expr::array_value(std::move(literal_items)));
+          }
+          return expr::array_pack_expr(std::move(items));
+        }
+        case ExprKind::ArraySet:
+        {
+          ExprSpecPtr array_expr = simplify_expr(expr->lhs);
+          ExprSpecPtr index_expr = simplify_expr(expr->rhs);
+          ExprSpecPtr value_expr = simplify_expr(expr->args.empty() ? nullptr : expr->args.front());
+          if (!array_expr)
+          {
+            array_expr = expr::literal_expr(0.0);
+          }
+          if (!index_expr)
+          {
+            index_expr = expr::literal_expr(static_cast<int64_t>(0));
+          }
+          if (!value_expr)
+          {
+            value_expr = expr::literal_expr(0.0);
+          }
+          if (array_expr->kind == ExprKind::Literal &&
+              index_expr->kind == ExprKind::Literal &&
+              value_expr->kind == ExprKind::Literal)
+          {
+            return expr::literal_expr(expr_eval::array_set_value(
+              array_expr->literal,
+              index_expr->literal,
+              value_expr->literal));
+          }
+          if (index_expr->kind == ExprKind::Literal)
+          {
+            const int64_t raw_index = expr::to_int64(index_expr->literal);
+            if (raw_index >= 0)
+            {
+              const std::size_t item_index = static_cast<std::size_t>(raw_index);
+              if (array_expr->kind == ExprKind::Literal && expr::is_array(array_expr->literal))
+              {
+                if (item_index < array_expr->literal.array_items.size())
+                {
+                  std::vector<ExprSpecPtr> items;
+                  items.reserve(array_expr->literal.array_items.size());
+                  for (const auto & item : array_expr->literal.array_items)
+                  {
+                    items.push_back(expr::literal_expr(item));
+                  }
+                  items[item_index] = value_expr;
+                  return simplify_expr(expr::array_pack_expr(std::move(items)));
+                }
+              }
+            }
+          }
+          if (array_expr->kind == ExprKind::ArrayPack &&
+              index_expr->kind == ExprKind::Literal)
+          {
+            const int64_t raw_index = expr::to_int64(index_expr->literal);
+            if (raw_index >= 0)
+            {
+              const std::size_t item_index = static_cast<std::size_t>(raw_index);
+              if (item_index < array_expr->args.size())
+              {
+                std::vector<ExprSpecPtr> items = array_expr->args;
+                items[item_index] = value_expr;
+                return simplify_expr(expr::array_pack_expr(std::move(items)));
+              }
+            }
+          }
+          return expr::array_set_expr(array_expr, index_expr, value_expr);
+        }
         case ExprKind::Clamp:
         {
           ExprSpecPtr value = simplify_expr(expr->lhs);
@@ -2493,7 +3169,33 @@ class Graph
           return expr::call_expr(simplify_expr(expr->lhs), std::move(args));
         }
         case ExprKind::Index:
-          return expr::binary_expr(ExprKind::Index, simplify_expr(expr->lhs), simplify_expr(expr->rhs));
+        {
+          ExprSpecPtr lhs = simplify_expr(expr->lhs);
+          ExprSpecPtr rhs = simplify_expr(expr->rhs);
+          if (!lhs)
+          {
+            lhs = expr::literal_expr(0.0);
+          }
+          if (!rhs)
+          {
+            rhs = expr::literal_expr(static_cast<int64_t>(0));
+          }
+          if (lhs->kind == ExprKind::Literal &&
+              rhs->kind == ExprKind::Literal &&
+              expr::is_array(lhs->literal))
+          {
+            const int64_t raw_index = expr::to_int64(rhs->literal);
+            if (raw_index >= 0)
+            {
+              const std::size_t item_index = static_cast<std::size_t>(raw_index);
+              if (item_index < lhs->literal.array_items.size())
+              {
+                return expr::literal_expr(lhs->literal.array_items[item_index]);
+              }
+            }
+          }
+          return expr::binary_expr(ExprKind::Index, lhs, rhs);
+        }
         case ExprKind::Neg:
         {
           ExprSpecPtr lhs = simplify_expr(expr->lhs);
@@ -2814,6 +3516,14 @@ class Graph
         return expr::array_pack_expr(std::move(items));
       }
 
+      if (expr->kind == ExprKind::ArraySet)
+      {
+        return simplify_expr(expr::array_set_expr(
+          replace_refs_with_zero(expr->lhs, module_name, output_id, remove_all_outputs, removed_any),
+          replace_refs_with_zero(expr->rhs, module_name, output_id, remove_all_outputs, removed_any),
+          replace_refs_with_zero(expr->args.empty() ? nullptr : expr->args.front(), module_name, output_id, remove_all_outputs, removed_any)));
+      }
+
       if (expr->kind == ExprKind::Clamp)
       {
         return simplify_expr(expr::clamp_expr(
@@ -2924,6 +3634,17 @@ class Graph
         return;
       }
 
+      if (expr->kind == ExprKind::ArraySet)
+      {
+        collect_refs(expr->lhs, refs);
+        collect_refs(expr->rhs, refs);
+        if (!expr->args.empty())
+        {
+          collect_refs(expr->args.front(), refs);
+        }
+        return;
+      }
+
       if (expr->kind == ExprKind::Clamp)
       {
         collect_refs(expr->lhs, refs);
@@ -3003,6 +3724,13 @@ class Graph
                validate_expr_refs(expr->rhs, allow_input_values);
       }
 
+      if (expr->kind == ExprKind::ArraySet)
+      {
+        return validate_expr_refs(expr->lhs, allow_input_values) &&
+               validate_expr_refs(expr->rhs, allow_input_values) &&
+               validate_expr_refs(expr->args.empty() ? nullptr : expr->args.front(), allow_input_values);
+      }
+
       if (expr->kind == ExprKind::InputValue ||
           expr->kind == ExprKind::RegisterValue ||
           expr->kind == ExprKind::SampleRate ||
@@ -3053,6 +3781,51 @@ class Graph
         const unsigned int input_count = static_cast<unsigned int>(slot.input_program.result_registers.size());
         slot.input_program = compile_input_program(module.input_exprs, input_count, runtime);
         slot.input_registers.assign(slot.input_program.register_count, float_value(0.0));
+        slot.output_materialize_mask.assign(module.out_count, false);
+        slot.indexed_output_indices.assign(module.out_count, {});
+        slot.indexed_prev_output_values.assign(module.out_count, {});
+      }
+
+      for (auto & consumer_slot : runtime.modules)
+      {
+        for (auto & instr : consumer_slot.input_program.instructions)
+        {
+          if (instr.ref_module_id >= runtime.modules.size())
+          {
+            continue;
+          }
+
+          ModuleSlot & source_slot = runtime.modules[instr.ref_module_id];
+          if (instr.ref_output_id >= source_slot.output_materialize_mask.size())
+          {
+            continue;
+          }
+
+          if (instr.opcode == OpCode::Ref)
+          {
+            source_slot.output_materialize_mask[instr.ref_output_id] = true;
+            continue;
+          }
+
+          if (instr.opcode != OpCode::RefIndex || instr.ref_index < 0)
+          {
+            continue;
+          }
+          auto & indices = source_slot.indexed_output_indices[instr.ref_output_id];
+          auto it = std::find(indices.begin(), indices.end(), instr.ref_index);
+          uint32_t cache_slot = 0;
+          if (it == indices.end())
+          {
+            cache_slot = static_cast<uint32_t>(indices.size());
+            indices.push_back(instr.ref_index);
+            source_slot.indexed_prev_output_values[instr.ref_output_id].push_back(float_value(0.0));
+          }
+          else
+          {
+            cache_slot = static_cast<uint32_t>(std::distance(indices.begin(), it));
+          }
+          instr.src_a = cache_slot;
+        }
       }
 
       runtime.mix.reserve(control_mix_.size());
@@ -3072,7 +3845,61 @@ class Graph
           continue;
         }
 
+        runtime.modules[module_id].output_materialize_mask[tap.second] = true;
         runtime.mix.push_back(MixTap{module_id, tap.second});
+      }
+
+      runtime.mix_exprs.reserve(control_mix_exprs_.size());
+      for (const auto & mix_expr_spec : control_mix_exprs_)
+      {
+        MixExpr mix_expr;
+        ExprSpecPtr inlined = egress_expr_inline::inline_functions(mix_expr_spec);
+        mix_expr.result_register = compile_expr_node(inlined, mix_expr.program, runtime);
+        mix_expr.registers.assign(mix_expr.program.register_count, float_value(0.0));
+        runtime.mix_exprs.push_back(std::move(mix_expr));
+      }
+
+      for (auto & mix_expr : runtime.mix_exprs)
+      {
+        for (auto & instr : mix_expr.program.instructions)
+        {
+          if (instr.ref_module_id >= runtime.modules.size())
+          {
+            continue;
+          }
+
+          ModuleSlot & source_slot = runtime.modules[instr.ref_module_id];
+          if (instr.ref_output_id >= source_slot.output_materialize_mask.size())
+          {
+            continue;
+          }
+
+          if (instr.opcode == OpCode::Ref)
+          {
+            source_slot.output_materialize_mask[instr.ref_output_id] = true;
+            continue;
+          }
+
+          if (instr.opcode != OpCode::RefIndex || instr.ref_index < 0)
+          {
+            continue;
+          }
+
+          auto & indices = source_slot.indexed_output_indices[instr.ref_output_id];
+          auto it = std::find(indices.begin(), indices.end(), instr.ref_index);
+          uint32_t cache_slot = 0;
+          if (it == indices.end())
+          {
+            cache_slot = static_cast<uint32_t>(indices.size());
+            indices.push_back(instr.ref_index);
+            source_slot.indexed_prev_output_values[instr.ref_output_id].push_back(float_value(0.0));
+          }
+          else
+          {
+            cache_slot = static_cast<uint32_t>(std::distance(indices.begin(), it));
+          }
+          instr.src_a = cache_slot;
+        }
       }
 
       return runtime;
@@ -3108,6 +3935,44 @@ class Graph
             break;
           }
           registers[instr.dst] = slot.module->prev_outputs[instr.ref_output_id];
+          break;
+        }
+        case OpCode::RefIndex:
+        {
+          if (instr.ref_module_id >= runtime.modules.size())
+          {
+            registers[instr.dst] = float_value(0.0);
+            break;
+          }
+          const auto & slot = runtime.modules[instr.ref_module_id];
+          if (!slot.module || instr.ref_output_id >= slot.module->prev_outputs.size() || instr.ref_index < 0)
+          {
+            registers[instr.dst] = float_value(0.0);
+            break;
+          }
+          if (instr.ref_output_id < slot.indexed_prev_output_values.size() &&
+              instr.src_a < slot.indexed_prev_output_values[instr.ref_output_id].size())
+          {
+            registers[instr.dst] = slot.indexed_prev_output_values[instr.ref_output_id][instr.src_a];
+            break;
+          }
+          const Value & output = slot.module->prev_outputs[instr.ref_output_id];
+          const std::size_t item_index = static_cast<std::size_t>(instr.ref_index);
+          if (expr::is_array(output))
+          {
+            if (item_index >= output.array_items.size())
+            {
+              throw std::out_of_range("Array index out of range.");
+            }
+            registers[instr.dst] = output.array_items[item_index];
+            break;
+          }
+          if (expr::is_matrix(output))
+          {
+            registers[instr.dst] = expr::array_from_matrix_row(output, item_index);
+            break;
+          }
+          registers[instr.dst] = float_value(0.0);
           break;
         }
         case OpCode::ArrayPack:
@@ -3150,6 +4015,12 @@ class Graph
           registers[instr.dst] = float_value(0.0);
           break;
         }
+        case OpCode::ArraySet:
+          registers[instr.dst] = expr_eval::array_set_value(
+            registers[instr.src_a],
+            registers[instr.src_b],
+            registers[instr.src_c]);
+          break;
         case OpCode::Add:
           registers[instr.dst] = expr_eval::add_values(registers[instr.src_a], registers[instr.src_b]);
           break;
@@ -3246,6 +4117,81 @@ class Graph
       }
     }
 
+    static void eval_mix_instruction(const RuntimeState & runtime, const ExprInstr & instr, Value * registers)
+    {
+      switch (instr.opcode)
+      {
+        case OpCode::Ref:
+        {
+          if (instr.ref_module_id >= runtime.modules.size())
+          {
+            registers[instr.dst] = float_value(0.0);
+            break;
+          }
+          const auto & slot = runtime.modules[instr.ref_module_id];
+          if (!slot.module || instr.ref_output_id >= slot.module->outputs.size())
+          {
+            registers[instr.dst] = float_value(0.0);
+            break;
+          }
+          registers[instr.dst] = slot.module->outputs[instr.ref_output_id];
+          break;
+        }
+        case OpCode::RefIndex:
+        {
+          if (instr.ref_module_id >= runtime.modules.size())
+          {
+            registers[instr.dst] = float_value(0.0);
+            break;
+          }
+          const auto & slot = runtime.modules[instr.ref_module_id];
+          if (!slot.module || instr.ref_output_id >= slot.module->outputs.size() || instr.ref_index < 0)
+          {
+            registers[instr.dst] = float_value(0.0);
+            break;
+          }
+#ifdef EGRESS_LLVM_ORC_JIT
+          const bool can_read_numeric_output =
+            slot.module->jit_kernel_ != nullptr &&
+            instr.ref_output_id < slot.module->numeric_output_info_.size() &&
+            static_cast<Module::NumericValueKind>(slot.module->numeric_output_info_[instr.ref_output_id].kind) == Module::NumericValueKind::Array &&
+            slot.module->numeric_output_info_[instr.ref_output_id].array_slot < slot.module->numeric_array_storage_.size();
+          if (can_read_numeric_output)
+          {
+            const auto & values = slot.module->numeric_array_storage_[slot.module->numeric_output_info_[instr.ref_output_id].array_slot];
+            if (static_cast<std::size_t>(instr.ref_index) >= values.size())
+            {
+              throw std::out_of_range("Array index out of range.");
+            }
+            registers[instr.dst] = expr::float_value(Module::clamp_output_scalar(values[static_cast<std::size_t>(instr.ref_index)]));
+            break;
+          }
+#endif
+          const Value & output = slot.module->outputs[instr.ref_output_id];
+          const std::size_t item_index = static_cast<std::size_t>(instr.ref_index);
+          if (expr::is_array(output))
+          {
+            if (item_index >= output.array_items.size())
+            {
+              throw std::out_of_range("Array index out of range.");
+            }
+            registers[instr.dst] = output.array_items[item_index];
+            break;
+          }
+          if (expr::is_matrix(output))
+          {
+            registers[instr.dst] = expr::array_from_matrix_row(output, item_index);
+            break;
+          }
+          registers[instr.dst] = float_value(0.0);
+          break;
+        }
+        default:
+          eval_instruction(runtime, instr, registers);
+          break;
+      }
+    }
+
     uint32_t compile_expr_node(
       const ExprSpecPtr & expr,
       CompiledInputProgram & compiled,
@@ -3310,11 +4256,47 @@ class Graph
 
       if (expr->kind == ExprKind::Index)
       {
+        if (expr->lhs && expr->lhs->kind == ExprKind::Ref &&
+            expr->rhs && expr->rhs->kind == ExprKind::Literal &&
+            expr->rhs->literal.type != ValueType::Array &&
+            expr->rhs->literal.type != ValueType::Matrix)
+        {
+          const int64_t raw_index = expr::to_int64(expr->rhs->literal);
+          if (raw_index >= 0)
+          {
+            auto it = runtime.name_to_id.find(expr->lhs->module_name);
+            if (it != runtime.name_to_id.end())
+            {
+              ExprInstr instr;
+              instr.opcode = OpCode::RefIndex;
+              instr.dst = compiled.register_count++;
+              instr.ref_module_id = it->second;
+              instr.ref_output_id = expr->lhs->output_id;
+              instr.ref_index = raw_index;
+              instr.src_a = std::numeric_limits<uint32_t>::max();
+              compiled.instructions.push_back(instr);
+              return instr.dst;
+            }
+          }
+        }
+
         ExprInstr instr;
         instr.opcode = OpCode::Index;
         instr.dst = compiled.register_count++;
         instr.src_a = compile_expr_node(expr->lhs, compiled, runtime);
         instr.src_b = compile_expr_node(expr->rhs, compiled, runtime);
+        compiled.instructions.push_back(instr);
+        return instr.dst;
+      }
+
+      if (expr->kind == ExprKind::ArraySet)
+      {
+        ExprInstr instr;
+        instr.opcode = OpCode::ArraySet;
+        instr.dst = compiled.register_count++;
+        instr.src_a = compile_expr_node(expr->lhs, compiled, runtime);
+        instr.src_b = compile_expr_node(expr->rhs, compiled, runtime);
+        instr.src_c = compile_expr_node(expr->args.empty() ? nullptr : expr->args.front(), compiled, runtime);
         compiled.instructions.push_back(instr);
         return instr.dst;
       }
@@ -3602,6 +4584,7 @@ class Graph
 
     std::unordered_map<std::string, ControlModule> control_modules_;
     std::vector<outputID> control_mix_;
+    std::vector<ExprSpecPtr> control_mix_exprs_;
 
     mutable std::mutex pending_mutex_;
 

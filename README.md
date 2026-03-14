@@ -134,7 +134,9 @@ Shift = eg.define_module(
 )
 ```
 
-Arrays are currently limited to module expressions and registers. Graph inputs and outputs remain scalar.
+Array-valued module inputs are supported, including on the numeric JIT path. Graph outputs remain scalar.
+
+Array expressions also support indexed reads and updates. On the expression side you can write `eg.array_set(arr, idx, value)`, and on graph inputs you can use Python indexing sugar such as `wg.in[0] = clock.out[0]` to rebuild a single array lane without replacing the entire input expression manually.
 
 You can also collect reusable user-defined modules in ordinary Python source files. For example, [module_library.py](/Users/willishoke/egress/module_library.py) defines a polyBLEP-style VCO plus both compact and 16-stage phasers:
 

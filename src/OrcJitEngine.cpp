@@ -164,6 +164,12 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
   };
 
   llvm::Value * zero_f64 = llvm::ConstantFP::get(f64_ty, 0.0);
+  llvm::FunctionCallee llvm_sin = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::sin, {f64_ty});
+  llvm::FunctionCallee llvm_pow = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::pow, {f64_ty});
+  llvm::FunctionCallee llvm_log = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::log, {f64_ty});
+  llvm::FunctionCallee llvm_fmod = module->getOrInsertFunction(
+    "fmod",
+    llvm::FunctionType::get(f64_ty, {f64_ty, f64_ty}, false));
 
   enum class ArrayBinaryOp
   {
@@ -171,6 +177,16 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
     Sub,
     Mul,
     Div
+  };
+
+  enum class ArrayScalarCompareOp
+  {
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Equal,
+    NotEqual
   };
 
   auto emit_array_binary_op = [&](llvm::Value * dst_ptr,
@@ -275,6 +291,91 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
     builder.SetInsertPoint(loop_end);
   };
 
+  auto emit_array_scalar_compare_op = [&](llvm::Value * dst_ptr,
+                                          llvm::Value * lhs_ptr,
+                                          llvm::Value * scalar,
+                                          llvm::Value * size,
+                                          ArrayScalarCompareOp op) {
+    llvm::BasicBlock * loop_cond = llvm::BasicBlock::Create(*context, "array_compare_cond", fn);
+    llvm::BasicBlock * loop_body = llvm::BasicBlock::Create(*context, "array_compare_body", fn);
+    llvm::BasicBlock * loop_end = llvm::BasicBlock::Create(*context, "array_compare_end", fn);
+
+    llvm::Value * index_ptr = builder.CreateAlloca(i64_ty, nullptr, "array_compare_idx");
+    builder.CreateStore(builder.getInt64(0), index_ptr);
+    builder.CreateBr(loop_cond);
+
+    builder.SetInsertPoint(loop_cond);
+    llvm::Value * idx = builder.CreateLoad(i64_ty, index_ptr);
+    llvm::Value * cond = builder.CreateICmpULT(idx, size);
+    builder.CreateCondBr(cond, loop_body, loop_end);
+
+    builder.SetInsertPoint(loop_body);
+    llvm::Value * lhs_elem_ptr = builder.CreateInBoundsGEP(f64_ty, lhs_ptr, idx);
+    llvm::Value * lhs_val = builder.CreateLoad(f64_ty, lhs_elem_ptr);
+    llvm::Value * cmp = nullptr;
+    switch (op)
+    {
+      case ArrayScalarCompareOp::Less:
+        cmp = builder.CreateFCmpOLT(lhs_val, scalar);
+        break;
+      case ArrayScalarCompareOp::LessEqual:
+        cmp = builder.CreateFCmpOLE(lhs_val, scalar);
+        break;
+      case ArrayScalarCompareOp::Greater:
+        cmp = builder.CreateFCmpOGT(lhs_val, scalar);
+        break;
+      case ArrayScalarCompareOp::GreaterEqual:
+        cmp = builder.CreateFCmpOGE(lhs_val, scalar);
+        break;
+      case ArrayScalarCompareOp::Equal:
+        cmp = builder.CreateFCmpOEQ(lhs_val, scalar);
+        break;
+      case ArrayScalarCompareOp::NotEqual:
+        cmp = builder.CreateFCmpUNE(lhs_val, scalar);
+        break;
+    }
+    llvm::Value * result = builder.CreateUIToFP(cmp, f64_ty);
+    llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(f64_ty, dst_ptr, idx);
+    builder.CreateStore(result, dst_elem_ptr);
+    llvm::Value * next_idx = builder.CreateAdd(idx, builder.getInt64(1));
+    builder.CreateStore(next_idx, index_ptr);
+    builder.CreateBr(loop_cond);
+
+    builder.SetInsertPoint(loop_end);
+  };
+
+  auto emit_array_scalar_mod_op = [&](llvm::Value * dst_ptr,
+                                      llvm::Value * lhs_ptr,
+                                      llvm::Value * scalar,
+                                      llvm::Value * size) {
+    llvm::BasicBlock * loop_cond = llvm::BasicBlock::Create(*context, "array_mod_cond", fn);
+    llvm::BasicBlock * loop_body = llvm::BasicBlock::Create(*context, "array_mod_body", fn);
+    llvm::BasicBlock * loop_end = llvm::BasicBlock::Create(*context, "array_mod_end", fn);
+
+    llvm::Value * index_ptr = builder.CreateAlloca(i64_ty, nullptr, "array_mod_idx");
+    builder.CreateStore(builder.getInt64(0), index_ptr);
+    builder.CreateBr(loop_cond);
+
+    builder.SetInsertPoint(loop_cond);
+    llvm::Value * idx = builder.CreateLoad(i64_ty, index_ptr);
+    llvm::Value * cond = builder.CreateICmpULT(idx, size);
+    builder.CreateCondBr(cond, loop_body, loop_end);
+
+    builder.SetInsertPoint(loop_body);
+    llvm::Value * lhs_elem_ptr = builder.CreateInBoundsGEP(f64_ty, lhs_ptr, idx);
+    llvm::Value * lhs_val = builder.CreateLoad(f64_ty, lhs_elem_ptr);
+    llvm::Value * is_zero = builder.CreateFCmpOEQ(scalar, zero_f64);
+    llvm::Value * mod_value = builder.CreateCall(llvm_fmod, {lhs_val, scalar});
+    llvm::Value * result = builder.CreateSelect(is_zero, zero_f64, mod_value);
+    llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(f64_ty, dst_ptr, idx);
+    builder.CreateStore(result, dst_elem_ptr);
+    llvm::Value * next_idx = builder.CreateAdd(idx, builder.getInt64(1));
+    builder.CreateStore(next_idx, index_ptr);
+    builder.CreateBr(loop_cond);
+
+    builder.SetInsertPoint(loop_end);
+  };
+
   auto emit_matmul = [&](llvm::Value * dst_ptr,
                          llvm::Value * matrix_ptr,
                          llvm::Value * vector_ptr,
@@ -339,13 +440,6 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
     builder.SetInsertPoint(outer_end);
   };
 
-  llvm::FunctionCallee llvm_sin = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::sin, {f64_ty});
-  llvm::FunctionCallee llvm_pow = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::pow, {f64_ty});
-  llvm::FunctionCallee llvm_log = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::log, {f64_ty});
-  llvm::FunctionCallee llvm_fmod = module->getOrInsertFunction(
-    "fmod",
-    llvm::FunctionType::get(f64_ty, {f64_ty, f64_ty}, false));
-
   for (const auto & instr : program.instructions)
   {
     llvm::Value * result = nullptr;
@@ -408,6 +502,77 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       {
         llvm::Value * cmp = builder.CreateFCmpUNE(load_temp(instr.src_a), load_temp(instr.src_b));
         result = builder.CreateUIToFP(cmp, f64_ty);
+        break;
+      }
+      case NumericOp::ArrayLessScalar:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * size = load_array_size(instr.dst);
+        llvm::Value * scalar = load_temp(instr.src_b);
+        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::Less);
+        writes_temp = false;
+        break;
+      }
+      case NumericOp::ArrayLessEqualScalar:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * size = load_array_size(instr.dst);
+        llvm::Value * scalar = load_temp(instr.src_b);
+        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::LessEqual);
+        writes_temp = false;
+        break;
+      }
+      case NumericOp::ArrayGreaterScalar:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * size = load_array_size(instr.dst);
+        llvm::Value * scalar = load_temp(instr.src_b);
+        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::Greater);
+        writes_temp = false;
+        break;
+      }
+      case NumericOp::ArrayGreaterEqualScalar:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * size = load_array_size(instr.dst);
+        llvm::Value * scalar = load_temp(instr.src_b);
+        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::GreaterEqual);
+        writes_temp = false;
+        break;
+      }
+      case NumericOp::ArrayEqualScalar:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * size = load_array_size(instr.dst);
+        llvm::Value * scalar = load_temp(instr.src_b);
+        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::Equal);
+        writes_temp = false;
+        break;
+      }
+      case NumericOp::ArrayNotEqualScalar:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * size = load_array_size(instr.dst);
+        llvm::Value * scalar = load_temp(instr.src_b);
+        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::NotEqual);
+        writes_temp = false;
+        break;
+      }
+      case NumericOp::ArrayPack:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        for (std::size_t i = 0; i < instr.args.size(); ++i)
+        {
+          llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(f64_ty, dst_ptr, builder.getInt64(static_cast<uint64_t>(i)));
+          builder.CreateStore(load_temp(instr.args[i]), dst_elem_ptr);
+        }
+        writes_temp = false;
         break;
       }
       case NumericOp::Add:
@@ -485,6 +650,26 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         llvm::Value * rhs_ptr = load_array_ptr(instr.src_b);
         llvm::Value * size = load_array_size(instr.dst);
         emit_array_binary_op(dst_ptr, lhs_ptr, rhs_ptr, size, ArrayBinaryOp::Div);
+        writes_temp = false;
+        break;
+      }
+      case NumericOp::ArrayDivScalar:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * size = load_array_size(instr.dst);
+        llvm::Value * scalar = load_temp(instr.src_b);
+        emit_array_scalar_op(dst_ptr, lhs_ptr, scalar, size, ArrayBinaryOp::Div);
+        writes_temp = false;
+        break;
+      }
+      case NumericOp::ArrayModScalar:
+      {
+        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
+        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
+        llvm::Value * size = load_array_size(instr.dst);
+        llvm::Value * scalar = load_temp(instr.src_b);
+        emit_array_scalar_mod_op(dst_ptr, lhs_ptr, scalar, size);
         writes_temp = false;
         break;
       }

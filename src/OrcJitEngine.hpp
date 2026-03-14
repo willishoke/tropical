@@ -28,6 +28,13 @@ enum class NumericOp : uint8_t
   GreaterEqual,
   Equal,
   NotEqual,
+  ArrayLessScalar,
+  ArrayLessEqualScalar,
+  ArrayGreaterScalar,
+  ArrayGreaterEqualScalar,
+  ArrayEqualScalar,
+  ArrayNotEqualScalar,
+  ArrayPack,
   Add,
   ArrayAdd,
   ArrayAddScalar,
@@ -38,6 +45,8 @@ enum class NumericOp : uint8_t
   ArrayMulScalar,
   Div,
   ArrayDiv,
+  ArrayDivScalar,
+  ArrayModScalar,
   MatMul,
   Pow,
   Mod,
@@ -65,6 +74,7 @@ struct NumericInstr
   uint32_t src_c = 0;
   uint32_t slot_id = 0;
   double literal = 0.0;
+  std::vector<uint32_t> args;
 };
 
 struct NumericProgram

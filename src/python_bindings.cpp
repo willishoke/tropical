@@ -55,6 +55,11 @@ class PythonGraph
       return graph_.addOutput(std::make_pair(module_name, output_id));
     }
 
+    bool add_output_expr(const expr::ExprSpecPtr & spec)
+    {
+      return graph_.addOutputExpr(spec);
+    }
+
     void process()
     {
       graph_.process();
@@ -201,6 +206,7 @@ struct ModuleDefinition
   std::vector<std::string> output_names;
   std::vector<std::string> register_names;
   std::vector<expr::Value> initial_registers;
+  std::vector<expr::ExprSpecPtr> input_defaults;
   std::vector<expr::ExprSpecPtr> output_exprs;
   std::vector<expr::ExprSpecPtr> register_exprs;
   std::vector<Module::RegisterArraySpec> register_array_specs;
@@ -336,6 +342,11 @@ static expr::ExprSpecPtr clone_with_input_and_register_subst(
         clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
         clone_with_input_and_register_subst(expr->rhs, input_args, register_slots),
         clone_with_input_and_register_subst(expr->args.empty() ? nullptr : expr->args.front(), input_args, register_slots));
+    case ExprKind::ArraySet:
+      return expr::array_set_expr(
+        clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
+        clone_with_input_and_register_subst(expr->rhs, input_args, register_slots),
+        clone_with_input_and_register_subst(expr->args.empty() ? nullptr : expr->args.front(), input_args, register_slots));
     case ExprKind::Index:
       return expr::index_expr(
         clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
@@ -379,6 +390,23 @@ class PyModuleInstance
       {
         throw std::invalid_argument("Failed to create module '" + name_ + "'.");
       }
+
+      for (std::size_t i = 0; i < definition_->input_defaults.size(); ++i)
+      {
+        if (!definition_->input_defaults[i])
+        {
+          continue;
+        }
+        if (!graph_->graph().set_input_expr(
+              name_,
+              static_cast<unsigned int>(i),
+              definition_->input_defaults[i]))
+        {
+          throw std::invalid_argument("Failed to set default input '" + definition_->input_names[i] + "'.");
+        }
+      }
+
+      graph_->graph().prime_module_inputs_if_local(name_);
     }
 
     const std::string & name() const { return name_; }
@@ -850,6 +878,15 @@ static SignalExpr index_expr(const SignalExpr & value, const py::handle & index)
   return make_signal_expr(merge_graphs(value.graph, idx.graph), expr::index_expr(value.spec, idx.spec));
 }
 
+static SignalExpr array_set_expr(const SignalExpr & array, const py::handle & index, const py::handle & value)
+{
+  const SignalExpr idx = coerce_expr(index);
+  const SignalExpr replacement = coerce_expr(value);
+  return make_signal_expr(
+    merge_graphs(merge_graphs(array.graph, idx.graph), replacement.graph),
+    expr::array_set_expr(array.spec, idx.spec, replacement.spec));
+}
+
 static SignalExpr less_expr(const py::handle & lhs, const py::handle & rhs)
 {
   return make_binary_expr(ExprKind::Less, coerce_expr(lhs), coerce_expr(rhs));
@@ -1095,13 +1132,50 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
   const py::iterable & outputs,
   const py::dict & regs,
   const py::function & process,
-  double sample_rate)
+  double sample_rate,
+  const py::object & input_defaults)
 {
   auto definition = std::make_shared<ModuleDefinition>();
   definition->type_name = name;
   definition->input_names = require_names(inputs, "inputs");
   definition->output_names = require_names(outputs, "outputs");
   definition->sample_rate = sample_rate;
+  definition->input_defaults.assign(definition->input_names.size(), nullptr);
+
+  if (!input_defaults.is_none())
+  {
+    const py::dict defaults_dict = require_dict(input_defaults, "input_defaults");
+    for (const auto & item : defaults_dict)
+    {
+      const py::handle key = item.first;
+      const py::handle value = item.second;
+      if (!py::isinstance<py::str>(key))
+      {
+        throw std::invalid_argument("input_defaults keys must be strings.");
+      }
+
+      const std::string input_name = key.cast<std::string>();
+      auto it = std::find(definition->input_names.begin(), definition->input_names.end(), input_name);
+      if (it == definition->input_names.end())
+      {
+        throw std::invalid_argument("Unknown input '" + input_name + "' in input_defaults.");
+      }
+
+      if (value.is_none())
+      {
+        definition->input_defaults[static_cast<std::size_t>(std::distance(definition->input_names.begin(), it))] = nullptr;
+        continue;
+      }
+
+      const SignalExpr expr = coerce_expr(value);
+      if (expr.graph != nullptr)
+      {
+        throw std::invalid_argument("input_defaults cannot capture graph ports.");
+      }
+
+      definition->input_defaults[static_cast<std::size_t>(std::distance(definition->input_names.begin(), it))] = expr.spec;
+    }
+  }
 
   DefinitionBuildContext build_context;
 
@@ -1426,6 +1500,18 @@ static void assign_input(const InputPort & input, const py::handle & value)
   assign_input_expr(input, expr.spec);
 }
 
+static void assign_input_index(const InputPort & input, const py::handle & index, const py::handle & value)
+{
+  auto base = input.graph->graph().get_input_expr(input.module_name, input.input_id);
+  if (!base)
+  {
+    throw std::invalid_argument("Indexed assignment requires an existing input expression; assign the array first.");
+  }
+
+  const SignalExpr updated = array_set_expr(make_signal_expr(input.graph, std::move(base)), index, value);
+  assign_input_expr(input, updated.spec);
+}
+
 static bool connect_ports(const OutputPort & out, const InputPort & in)
 {
   if (out.graph != in.graph)
@@ -1447,6 +1533,15 @@ static bool disconnect_ports(const OutputPort & out, const InputPort & in)
 static bool add_output_port(const OutputPort & out)
 {
   return out.graph->add_output(out.module_name, out.output_id);
+}
+
+static bool add_output_expr(const SignalExpr & expr)
+{
+  if (expr.graph == nullptr)
+  {
+    throw std::invalid_argument("Graph outputs must reference a graph expression.");
+  }
+  return expr.graph->add_output_expr(expr.spec);
 }
 
 static std::vector<OutputPort> incoming_ports(const InputPort & in)
@@ -1817,6 +1912,7 @@ PYBIND11_MODULE(egress, m)
     .def_property_readonly("input_id", [](const InputPort & p) { return p.input_id; })
     .def_property_readonly("expr", [](const InputPort & p) { return current_input_expr(p); })
     .def("assign", [](const InputPort & in, const py::object & value) { assign_input(in, value); }, py::arg("value"))
+    .def("assign_index", [](const InputPort & in, const py::object & index, const py::object & value) { assign_input_index(in, index, value); }, py::arg("index"), py::arg("value"))
     .def("__add__", [](const InputPort & lhs, const py::object & rhs) { return add_expr(current_input_expr(lhs), rhs); })
     .def("__radd__", [](const InputPort & rhs, const py::object & lhs) { return add_expr(coerce_expr(lhs), py::cast(current_input_expr(rhs))); })
     .def("__sub__", [](const InputPort & lhs, const py::object & rhs) { return sub_expr(current_input_expr(lhs), rhs); })
@@ -1849,6 +1945,12 @@ PYBIND11_MODULE(egress, m)
     .def("__ge__", [](const InputPort & lhs, const py::object & rhs) { return greater_equal_expr(py::cast(current_input_expr(lhs)), rhs); })
     .def("__eq__", [](const InputPort & lhs, const py::object & rhs) { return equal_expr(py::cast(current_input_expr(lhs)), rhs); })
     .def("__ne__", [](const InputPort & lhs, const py::object & rhs) { return not_equal_expr(py::cast(current_input_expr(lhs)), rhs); })
+    .def("__getitem__", [](const InputPort & value, const py::object & index) {
+      return index_expr(current_input_expr(value), index);
+    })
+    .def("__setitem__", [](const InputPort & value, const py::object & index, const py::object & replacement) {
+      assign_input_index(value, index, replacement);
+    })
     .def("__bool__", [](const InputPort &) -> bool {
       throw py::type_error("Ports do not have Python truthiness; use eg.logical_not(...) or comparisons.");
     })
@@ -1919,7 +2021,13 @@ PYBIND11_MODULE(egress, m)
 
   m.def("connect", &connect_ports, py::arg("out"), py::arg("in"));
   m.def("disconnect", &disconnect_ports, py::arg("out"), py::arg("in"));
-  m.def("add_output", &add_output_port, py::arg("out"));
+  m.def("add_output", [](const py::object & out) {
+    if (py::isinstance<OutputPort>(out))
+    {
+      return add_output_port(out.cast<OutputPort>());
+    }
+    return add_output_expr(out.cast<SignalExpr>());
+  }, py::arg("out"));
   m.def("incoming", &incoming_ports, py::arg("in"));
   m.def("abs", [](const py::object & value) { return abs_expr(value); }, py::arg("value"));
   m.def(
@@ -1935,6 +2043,9 @@ PYBIND11_MODULE(egress, m)
   m.def("sin", [](const py::object & value) { return sin_expr(value); }, py::arg("value"));
   m.def("pow", [](const py::object & lhs, const py::object & rhs) { return pow_expr(coerce_expr(lhs), rhs); }, py::arg("lhs"), py::arg("rhs"));
   m.def("array", [](const py::iterable & values) { return make_array_expr(values); }, py::arg("values"));
+  m.def("array_set", [](const py::object & array, const py::object & index, const py::object & value) {
+    return array_set_expr(coerce_expr(array), index, value);
+  }, py::arg("array"), py::arg("index"), py::arg("value"));
   m.def("matrix", [](const py::object & rows) { return make_matrix_expr(rows); }, py::arg("rows"));
   m.def("matmul", [](const py::object & lhs, const py::object & rhs) { return matmul_expr(lhs, rhs); },
         py::arg("lhs"), py::arg("rhs"));
@@ -1948,16 +2059,18 @@ PYBIND11_MODULE(egress, m)
        const py::iterable & outputs,
        const py::dict & regs,
        const py::function & process,
-       double sample_rate)
+       double sample_rate,
+       const py::object & input_defaults)
     {
-      return PyModuleType(define_module_impl(name, inputs, outputs, regs, process, sample_rate));
+      return PyModuleType(define_module_impl(name, inputs, outputs, regs, process, sample_rate, input_defaults));
     },
     py::arg("name"),
     py::arg("inputs"),
     py::arg("outputs"),
     py::arg("regs"),
     py::arg("process"),
-    py::arg("sample_rate") = 44100.0);
+    py::arg("sample_rate") = 44100.0,
+    py::arg("input_defaults") = py::none());
 
   m.def(
     "define_pure_function",

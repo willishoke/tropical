@@ -43,6 +43,7 @@ enum class ExprKind
   Call,
   ArrayPack,
   Index,
+  ArraySet,
   Not,
   Less,
   LessEqual,
@@ -597,6 +598,16 @@ inline ExprSpecPtr index_expr(ExprSpecPtr array_expr, ExprSpecPtr index_expr)
   expr->kind = ExprKind::Index;
   expr->lhs = std::move(array_expr);
   expr->rhs = std::move(index_expr);
+  return expr;
+}
+
+inline ExprSpecPtr array_set_expr(ExprSpecPtr array_expr, ExprSpecPtr index_expr, ExprSpecPtr value_expr)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::ArraySet;
+  expr->lhs = std::move(array_expr);
+  expr->rhs = std::move(index_expr);
+  expr->args.push_back(std::move(value_expr));
   return expr;
 }
 
