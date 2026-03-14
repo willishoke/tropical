@@ -93,7 +93,7 @@ Expression trees now preserve simple scalar types: `bool`, `int`, and `float`. A
 
 Exponentiation is now a first-class symbolic operation as well. Use either `lhs ** rhs` or `eg.pow(lhs, rhs)` inside pure functions and module definitions.
 
-For reusable stateful building blocks inside a module definition, use `eg.define_stateful_function(...)`. A stateful function looks like a small module definition with `inputs`, `outputs`, `regs`, and a `(outputs, next_regs)` return value, but calling it inside `define_module(...)` or another stateful function does not create a runtime graph node. Instead it expands into the enclosing module's register bank and expression tree, so chained calls remain same-sample and only explicit register updates introduce delay.
+For reusable stateful building blocks inside a module definition, you can either use `eg.define_stateful_function(...)` or call an ordinary `eg.define_module(...)` definition directly from another module body. In both cases the call does not create a runtime graph node. Instead it expands into the enclosing module's register bank and expression tree, so chained calls remain same-sample and only explicit register updates introduce delay.
 
 ```python
 Allpass = eg.define_stateful_function(
@@ -113,6 +113,23 @@ Allpass = eg.define_stateful_function(
 ```
 
 The initial implementation is conservative: scalar and static 1-D array registers are supported, but dynamic `array_state(...)` registers are not yet supported inside `define_stateful_function(...)`.
+
+The same restriction currently applies to same-tick module calls inside another module body.
+
+For an explicit one-sample boundary inside a module body, use `eg.delay(expr, init=...)`. This allocates a hidden state cell in the enclosing module and returns the previous sample's value, which makes delayed composition explicit even when chaining module calls inline.
+
+```python
+Diff = eg.define_module(
+    name="Diff",
+    inputs=["x"],
+    outputs=["dx"],
+    regs={},
+    process=lambda inp, reg: (
+        {"dx": inp["x"] - eg.delay(inp["x"], init=0.0)},
+        {},
+    ),
+)
+```
 
 Module registers may also hold static 1-D arrays of scalar values. Use Python lists / tuples for register initialization and `eg.array([...])` when constructing a new array expression inside `process`. Arithmetic between arrays and scalars broadcasts elementwise, and array indexing is explicit:
 

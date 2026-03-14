@@ -35,6 +35,23 @@ AllpassStage = eg.define_stateful_function(
 )
 
 
+AllpassModule = eg.define_module(
+    name="AllpassModule",
+    inputs=["x", "a"],
+    outputs=["y"],
+    regs={"x_prev": 0.0, "y_prev": 0.0},
+    process=lambda inp, reg: (
+        {
+            "y": -inp["a"] * inp["x"] + reg["x_prev"] + inp["a"] * reg["y_prev"],
+        },
+        {
+            "x_prev": inp["x"],
+            "y_prev": -inp["a"] * inp["x"] + reg["x_prev"] + inp["a"] * reg["y_prev"],
+        },
+    ),
+)
+
+
 StatefulProbe = eg.define_module(
     name="StatefulProbe",
     inputs=["x", "a"],
@@ -44,6 +61,49 @@ StatefulProbe = eg.define_module(
         {
             "single": AllpassStage(inp["x"], inp["a"]),
             "cascade": AllpassStage(AllpassStage(inp["x"], inp["a"]), inp["a"]),
+        },
+        {},
+    ),
+)
+
+
+ModuleComposeProbe = eg.define_module(
+    name="ModuleComposeProbe",
+    inputs=["x", "a"],
+    outputs=["single", "cascade"],
+    regs={},
+    process=lambda inp, reg: (
+        {
+            "single": AllpassModule(inp["x"], inp["a"]),
+            "cascade": AllpassModule(AllpassModule(inp["x"], inp["a"]), inp["a"]),
+        },
+        {},
+    ),
+)
+
+
+Gain2 = eg.define_module(
+    name="Gain2",
+    inputs=["x"],
+    outputs=["y"],
+    regs={},
+    process=lambda inp, reg: (
+        {"y": inp["x"] * 2.0},
+        {},
+    ),
+)
+
+
+DelayComposeProbe = eg.define_module(
+    name="DelayComposeProbe",
+    inputs=["x"],
+    outputs=["current", "delayed", "cascade"],
+    regs={},
+    process=lambda inp, reg: (
+        {
+            "current": Gain2(inp["x"]),
+            "delayed": eg.delay(Gain2(inp["x"])),
+            "cascade": Gain2(eg.delay(Gain2(inp["x"]))),
         },
         {},
     ),
@@ -165,6 +225,40 @@ def main():
     eg.graph().destroy_module(probe.name)
     eg.graph().destroy_module(stateful.name)
     eg.graph().destroy_module(array_probe.name)
+
+    module_compose = ModuleComposeProbe()
+    module_compose.x = 1.0
+    module_compose.a = 0.5
+
+    eg.add_output(module_compose.single)
+    eg.add_output(module_compose.cascade)
+    eg.graph().process()
+
+    module_buf = eg.graph().output_buffer()
+    assert math.isclose(module_buf[0], -0.25 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+
+    eg.graph().process()
+    module_buf = eg.graph().output_buffer()
+    assert math.isclose(module_buf[0], 2.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+
+    eg.graph().destroy_module(module_compose.name)
+
+    delay_probe = DelayComposeProbe()
+    delay_probe.x = 2.0
+
+    eg.add_output(delay_probe.current)
+    eg.add_output(delay_probe.delayed)
+    eg.add_output(delay_probe.cascade)
+    eg.graph().process()
+
+    delay_buf = eg.graph().output_buffer()
+    assert math.isclose(delay_buf[0], 4.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+
+    eg.graph().process()
+    delay_buf = eg.graph().output_buffer()
+    assert math.isclose(delay_buf[0], 16.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+
+    eg.graph().destroy_module(delay_probe.name)
 
     source = IndexedArraySource()
     source.x = 1.5

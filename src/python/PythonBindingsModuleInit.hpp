@@ -201,7 +201,7 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyModuleType>(m, "ModuleType")
     .def_property_readonly("name", &PyModuleType::name)
-    .def("__call__", &PyModuleType::instantiate);
+    .def("__call__", &PyModuleType::call);
 
   py::class_<PyPureFunctionType>(m, "PureFunction")
     .def("__call__", &PyPureFunctionType::call);
@@ -262,6 +262,14 @@ PYBIND11_MODULE(egress, m)
   m.def("logical_not", [](const py::object & value) { return logical_not_expr(value); }, py::arg("value"));
   m.def("sample_rate", []() { return sample_rate_expr(); });
   m.def("sample_index", []() { return sample_index_expr(); });
+  m.def(
+    "delay",
+    [](const py::object & value, const py::object & init)
+    {
+      return delay_expr(value, init);
+    },
+    py::arg("value"),
+    py::arg("init") = py::none());
   m.def(
     "define_module",
     [](const std::string & name,

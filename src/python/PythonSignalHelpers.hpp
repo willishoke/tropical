@@ -5,6 +5,7 @@ static SignalExpr make_signal_expr(PythonGraph * graph, expr::ExprSpecPtr spec);
 static SignalExpr coerce_expr(const py::handle & value);
 static bool is_matrix_literal(const py::handle & value);
 static expr::Value matrix_value_from_py(const py::handle & value);
+static expr::Value value_from_py(const py::handle & value);
 
 struct SymbolMap
 {
@@ -78,6 +79,14 @@ struct DefinitionBuildContext
   {
     const std::string hidden_name = "__stateful_" + std::to_string(hidden_counter++) + "_" + base_name;
     return append_register(hidden_name, initial_value, array_spec);
+  }
+
+  unsigned int append_hidden_delay_register(const expr::Value & initial_value)
+  {
+    return append_register(
+      "__delay_" + std::to_string(hidden_counter++),
+      initial_value,
+      Module::RegisterArraySpec{});
   }
 };
 
@@ -190,6 +199,90 @@ static expr::ExprSpecPtr clone_with_input_and_register_subst(
     expr->kind,
     clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
     clone_with_input_and_register_subst(expr->rhs, input_args, register_slots));
+}
+
+static py::object inline_stateful_body(
+  const std::vector<std::string> & input_names,
+  const std::vector<std::string> & output_names,
+  const std::vector<std::string> & register_names,
+  const std::vector<expr::Value> & initial_registers,
+  const std::vector<expr::ExprSpecPtr> & output_exprs,
+  const std::vector<expr::ExprSpecPtr> & register_exprs,
+  const std::vector<Module::RegisterArraySpec> & register_array_specs,
+  const std::vector<expr::ExprSpecPtr> & call_args,
+  const char * label)
+{
+  if (current_definition_context_ == nullptr)
+  {
+    throw std::invalid_argument(
+      std::string(label) + " may only be called inside define_module or define_stateful_function process bodies.");
+  }
+
+  if (call_args.size() != input_names.size())
+  {
+    throw std::invalid_argument(
+      std::string(label) + " expects " + std::to_string(input_names.size()) + " arguments.");
+  }
+
+  std::vector<unsigned int> register_slots;
+  register_slots.reserve(register_names.size());
+  for (std::size_t i = 0; i < register_names.size(); ++i)
+  {
+    const Module::RegisterArraySpec & array_spec = register_array_specs[i];
+    if (array_spec.enabled)
+    {
+      throw std::invalid_argument(
+        std::string("Dynamic array_state is not supported in ") + label + " yet.");
+    }
+    register_slots.push_back(current_definition_context_->append_hidden_register(
+      register_names[i],
+      initial_registers[i],
+      array_spec));
+  }
+
+  for (std::size_t i = 0; i < register_exprs.size(); ++i)
+  {
+    if (!register_exprs[i])
+    {
+      continue;
+    }
+    current_definition_context_->register_exprs[register_slots[i]] =
+      clone_with_input_and_register_subst(register_exprs[i], call_args, register_slots);
+  }
+
+  if (output_exprs.size() == 1)
+  {
+    return py::cast(make_signal_expr(
+      nullptr,
+      clone_with_input_and_register_subst(output_exprs[0], call_args, register_slots)));
+  }
+
+  py::tuple outputs(output_exprs.size());
+  for (std::size_t i = 0; i < output_exprs.size(); ++i)
+  {
+    outputs[i] = py::cast(make_signal_expr(
+      nullptr,
+      clone_with_input_and_register_subst(output_exprs[i], call_args, register_slots)));
+  }
+  return outputs;
+}
+
+static std::vector<expr::ExprSpecPtr> require_local_call_args(
+  const py::args & args,
+  const char * label)
+{
+  std::vector<expr::ExprSpecPtr> call_args;
+  call_args.reserve(args.size());
+  for (const py::handle & arg : args)
+  {
+    const SignalExpr signal = coerce_expr(arg);
+    if (signal.graph != nullptr)
+    {
+      throw std::invalid_argument(std::string(label) + " arguments cannot capture graph ports.");
+    }
+    call_args.push_back(signal.spec);
+  }
+  return call_args;
 }
 
 class PyModuleInstance
@@ -358,6 +451,48 @@ class PyModuleType
       return PyModuleInstance(definition_, default_graph());
     }
 
+    py::object call(const py::args & args) const
+    {
+      if (current_definition_context_ == nullptr)
+      {
+        if (!args.empty())
+        {
+          throw std::invalid_argument(
+            "Module types only accept signal arguments inside define_module or define_stateful_function process bodies.");
+        }
+        return py::cast(instantiate());
+      }
+
+      if (args.size() > definition_->input_names.size())
+      {
+        throw std::invalid_argument(
+          "Module call expects at most " + std::to_string(definition_->input_names.size()) + " arguments.");
+      }
+
+      std::vector<expr::ExprSpecPtr> call_args = require_local_call_args(args, "Module call");
+      for (std::size_t i = call_args.size(); i < definition_->input_names.size(); ++i)
+      {
+        const expr::ExprSpecPtr & default_expr = definition_->input_defaults[i];
+        if (!default_expr)
+        {
+          throw std::invalid_argument(
+            "Missing argument for module input '" + definition_->input_names[i] + "'.");
+        }
+        call_args.push_back(default_expr);
+      }
+
+      return inline_stateful_body(
+        definition_->input_names,
+        definition_->output_names,
+        definition_->register_names,
+        definition_->initial_registers,
+        definition_->output_exprs,
+        definition_->register_exprs,
+        definition_->register_array_specs,
+        call_args,
+        "Module call");
+    }
+
   private:
     std::shared_ptr<ModuleDefinition> definition_;
 };
@@ -422,70 +557,16 @@ class PyStatefulFunctionType
 
     py::object call(const py::args & args) const
     {
-      if (current_definition_context_ == nullptr)
-      {
-        throw std::invalid_argument(
-          "Stateful functions may only be called inside define_module or define_stateful_function process bodies.");
-      }
-
-      if (args.size() != definition_->input_names.size())
-      {
-        throw std::invalid_argument(
-          "Stateful function expects " + std::to_string(definition_->input_names.size()) + " arguments.");
-      }
-
-      std::vector<expr::ExprSpecPtr> call_args;
-      call_args.reserve(args.size());
-      for (const py::handle & arg : args)
-      {
-        const SignalExpr signal = coerce_expr(arg);
-        if (signal.graph != nullptr)
-        {
-          throw std::invalid_argument("Stateful function arguments cannot capture graph ports.");
-        }
-        call_args.push_back(signal.spec);
-      }
-
-      std::vector<unsigned int> register_slots;
-      register_slots.reserve(definition_->register_names.size());
-      for (std::size_t i = 0; i < definition_->register_names.size(); ++i)
-      {
-        const Module::RegisterArraySpec & array_spec = definition_->register_array_specs[i];
-        if (array_spec.enabled)
-        {
-          throw std::invalid_argument("Dynamic array_state is not supported in define_stateful_function yet.");
-        }
-        register_slots.push_back(current_definition_context_->append_hidden_register(
-          definition_->register_names[i],
-          definition_->initial_registers[i],
-          array_spec));
-      }
-
-      for (std::size_t i = 0; i < definition_->register_exprs.size(); ++i)
-      {
-        if (!definition_->register_exprs[i])
-        {
-          continue;
-        }
-        current_definition_context_->register_exprs[register_slots[i]] =
-          clone_with_input_and_register_subst(definition_->register_exprs[i], call_args, register_slots);
-      }
-
-      if (definition_->output_exprs.size() == 1)
-      {
-        return py::cast(make_signal_expr(
-          nullptr,
-          clone_with_input_and_register_subst(definition_->output_exprs[0], call_args, register_slots)));
-      }
-
-      py::tuple outputs(definition_->output_exprs.size());
-      for (std::size_t i = 0; i < definition_->output_exprs.size(); ++i)
-      {
-        outputs[i] = py::cast(make_signal_expr(
-          nullptr,
-          clone_with_input_and_register_subst(definition_->output_exprs[i], call_args, register_slots)));
-      }
-      return outputs;
+      return inline_stateful_body(
+        definition_->input_names,
+        definition_->output_names,
+        definition_->register_names,
+        definition_->initial_registers,
+        definition_->output_exprs,
+        definition_->register_exprs,
+        definition_->register_array_specs,
+        require_local_call_args(args, "Stateful function"),
+        "Stateful function");
     }
 
   private:
@@ -753,6 +834,26 @@ static SignalExpr sample_rate_expr()
 static SignalExpr sample_index_expr()
 {
   return make_signal_expr(nullptr, expr::sample_index_expr());
+}
+
+static SignalExpr delay_expr(const py::handle & value, const py::handle & init)
+{
+  if (current_definition_context_ == nullptr)
+  {
+    throw std::invalid_argument(
+      "eg.delay(...) may only be called inside define_module or define_stateful_function process bodies.");
+  }
+
+  const SignalExpr signal = coerce_expr(value);
+  if (signal.graph != nullptr)
+  {
+    throw std::invalid_argument("eg.delay(...) cannot capture graph ports.");
+  }
+
+  const expr::Value initial_value = init.is_none() ? expr::float_value(0.0) : value_from_py(init);
+  const unsigned int delay_slot = current_definition_context_->append_hidden_delay_register(initial_value);
+  current_definition_context_->register_exprs[delay_slot] = signal.spec;
+  return make_signal_expr(nullptr, expr::register_value_expr(delay_slot));
 }
 
 static SignalExpr make_array_expr(const py::iterable & values)
