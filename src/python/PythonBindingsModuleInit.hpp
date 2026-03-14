@@ -21,8 +21,11 @@ PYBIND11_MODULE(egress, m)
       py::arg("to_module"),
       py::arg("to_input_id"))
     .def("add_output", &PythonGraph::add_output, py::arg("module_name"), py::arg("output_id"))
+    .def("add_output_tap", &PythonGraph::add_output_tap, py::arg("module_name"), py::arg("output_id"))
+    .def("remove_output_tap", &PythonGraph::remove_output_tap, py::arg("tap_id"))
     .def("process", &PythonGraph::process)
     .def("output_buffer", &PythonGraph::output_buffer)
+    .def("output_tap_buffer", &PythonGraph::output_tap_buffer, py::arg("tap_id"))
     .def("profile_stats", &PythonGraph::profile_stats)
     .def("reset_profile_stats", &PythonGraph::reset_profile_stats);
 

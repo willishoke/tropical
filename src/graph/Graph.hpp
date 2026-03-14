@@ -76,6 +76,18 @@ class Graph
       audio_processing_.store(true, std::memory_order_release);
 
       RuntimeState & runtime = runtimes_[runtime_index];
+      std::vector<uint32_t> tap_write_indices;
+      tap_write_indices.reserve(runtime.taps.size());
+      for (const auto & tap : runtime.taps)
+      {
+        if (!tap.valid)
+        {
+          tap_write_indices.push_back(0);
+          continue;
+        }
+        const uint32_t readable = tap.buffer.readable.load(std::memory_order_acquire);
+        tap_write_indices.push_back(1U - readable);
+      }
 
       for (unsigned int sample = 0; sample < bufferLength_; ++sample)
       {
@@ -106,6 +118,32 @@ class Graph
             stats.max_ns = module_ns;
           }
 #endif
+        }
+
+        if (!runtime.taps.empty())
+        {
+          for (std::size_t tap_id = 0; tap_id < runtime.taps.size(); ++tap_id)
+          {
+            auto & tap = runtime.taps[tap_id];
+            if (!tap.valid || tap.module_id >= runtime.modules.size())
+            {
+              continue;
+            }
+            const auto & slot = runtime.modules[tap.module_id];
+            if (!slot.module || tap.output_id >= slot.module->outputs.size())
+            {
+              continue;
+            }
+            const Value & output = slot.module->outputs[tap.output_id];
+            if (expr::is_array(output) || expr::is_matrix(output))
+            {
+              tap.buffer.buffers[tap_write_indices[tap_id]][sample] = 0.0;
+            }
+            else
+            {
+              tap.buffer.buffers[tap_write_indices[tap_id]][sample] = expr::to_float64(output);
+            }
+          }
         }
 
         double mixed = 0.0;
@@ -198,6 +236,19 @@ class Graph
           }
 
           slot.module->prev_outputs.swap(slot.module->outputs);
+        }
+      }
+
+      if (!runtime.taps.empty())
+      {
+        for (std::size_t tap_id = 0; tap_id < runtime.taps.size(); ++tap_id)
+        {
+          auto & tap = runtime.taps[tap_id];
+          if (!tap.valid)
+          {
+            continue;
+          }
+          tap.buffer.readable.store(tap_write_indices[tap_id], std::memory_order_release);
         }
       }
 
@@ -394,6 +445,47 @@ class Graph
       control_mix_exprs_.push_back(simplify_expr(expr));
       rebuild_and_publish_runtime_locked();
       return true;
+    }
+
+    std::size_t addOutputTap(const std::string & module_name, unsigned int output_id)
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      ControlTap tap;
+      tap.active = true;
+      tap.output = std::make_pair(module_name, output_id);
+      control_taps_.push_back(std::move(tap));
+      const std::size_t tap_id = control_taps_.size() - 1;
+      rebuild_and_publish_runtime_locked();
+      return tap_id;
+    }
+
+    bool removeOutputTap(std::size_t tap_id)
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      if (tap_id >= control_taps_.size())
+      {
+        return false;
+      }
+      control_taps_[tap_id].active = false;
+      rebuild_and_publish_runtime_locked();
+      return true;
+    }
+
+    std::vector<double> outputTapBuffer(std::size_t tap_id) const
+    {
+      const uint32_t runtime_index = active_runtime_index_.load(std::memory_order_acquire);
+      const RuntimeState & runtime = runtimes_[runtime_index];
+      if (tap_id >= runtime.taps.size())
+      {
+        return {};
+      }
+      const auto & tap = runtime.taps[tap_id];
+      if (!tap.valid)
+      {
+        return {};
+      }
+      const uint32_t readable = tap.buffer.readable.load(std::memory_order_acquire);
+      return tap.buffer.buffers[readable];
     }
 
     bool connect(
@@ -672,6 +764,12 @@ class Graph
     std::unordered_map<std::string, ControlModule> control_modules_;
     std::vector<outputID> control_mix_;
     std::vector<ExprSpecPtr> control_mix_exprs_;
+    struct ControlTap
+    {
+      bool active = false;
+      outputID output;
+    };
+    std::vector<ControlTap> control_taps_;
 
     mutable std::mutex pending_mutex_;
 

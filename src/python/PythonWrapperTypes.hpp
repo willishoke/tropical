@@ -38,6 +38,21 @@ class PythonGraph
       return graph_.addOutputExpr(spec);
     }
 
+    std::size_t add_output_tap(const std::string & module_name, unsigned int output_id)
+    {
+      return graph_.addOutputTap(module_name, output_id);
+    }
+
+    bool remove_output_tap(std::size_t tap_id)
+    {
+      return graph_.removeOutputTap(tap_id);
+    }
+
+    std::vector<double> output_tap_buffer(std::size_t tap_id) const
+    {
+      return graph_.outputTapBuffer(tap_id);
+    }
+
     void process()
     {
       graph_.process();

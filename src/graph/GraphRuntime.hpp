@@ -2,6 +2,7 @@
 
 #include "graph/GraphTypes.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -111,12 +112,53 @@ struct MixExpr
   uint32_t result_register = 0;
 };
 
+struct TapBuffer
+{
+  std::array<std::vector<double>, 2> buffers;
+  std::atomic<uint32_t> readable{0};
+
+  TapBuffer() = default;
+  TapBuffer(const TapBuffer &) = delete;
+  TapBuffer & operator=(const TapBuffer &) = delete;
+
+  TapBuffer(TapBuffer && other) noexcept
+    : buffers(std::move(other.buffers))
+  {
+    readable.store(other.readable.load(std::memory_order_relaxed), std::memory_order_relaxed);
+  }
+
+  TapBuffer & operator=(TapBuffer && other) noexcept
+  {
+    if (this != &other)
+    {
+      buffers = std::move(other.buffers);
+      readable.store(other.readable.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+    return *this;
+  }
+};
+
+struct OutputTap
+{
+  uint32_t module_id = 0;
+  unsigned int output_id = 0;
+  bool valid = false;
+  TapBuffer buffer;
+
+  OutputTap() = default;
+  OutputTap(const OutputTap &) = delete;
+  OutputTap & operator=(const OutputTap &) = delete;
+  OutputTap(OutputTap &&) noexcept = default;
+  OutputTap & operator=(OutputTap &&) noexcept = default;
+};
+
 struct RuntimeState
 {
   std::vector<ModuleSlot> modules;
   std::unordered_map<std::string, uint32_t> name_to_id;
   std::vector<MixTap> mix;
   std::vector<MixExpr> mix_exprs;
+  std::vector<OutputTap> taps;
 };
 
 #ifdef EGRESS_PROFILE

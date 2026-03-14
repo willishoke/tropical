@@ -160,6 +160,41 @@ Graph::RuntimeState Graph::build_runtime_locked() const
     }
   }
 
+  runtime.taps.reserve(control_taps_.size());
+  for (const auto & tap_spec : control_taps_)
+  {
+    egress_graph_detail::OutputTap tap;
+    tap.buffer.buffers[0].assign(bufferLength_, 0.0);
+    tap.buffer.buffers[1].assign(bufferLength_, 0.0);
+    if (!tap_spec.active)
+    {
+      runtime.taps.push_back(std::move(tap));
+      continue;
+    }
+
+    const auto it = runtime.name_to_id.find(tap_spec.output.first);
+    if (it == runtime.name_to_id.end())
+    {
+      runtime.taps.push_back(std::move(tap));
+      continue;
+    }
+
+    const uint32_t module_id = it->second;
+    if (module_id >= runtime.modules.size() ||
+        !runtime.modules[module_id].module ||
+        tap_spec.output.second >= runtime.modules[module_id].module->outputs.size())
+    {
+      runtime.taps.push_back(std::move(tap));
+      continue;
+    }
+
+    runtime.modules[module_id].output_materialize_mask[tap_spec.output.second] = true;
+    tap.module_id = module_id;
+    tap.output_id = tap_spec.output.second;
+    tap.valid = true;
+    runtime.taps.push_back(std::move(tap));
+  }
+
   return runtime;
 }
 
