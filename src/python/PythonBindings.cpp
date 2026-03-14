@@ -1,4 +1,5 @@
 #include "graph/Graph.hpp"
+#include "graph/CompositeModule.hpp"
 
 #include "../lib/rtaudio/RtAudio.h"
 

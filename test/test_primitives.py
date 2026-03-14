@@ -155,6 +155,20 @@ IndexedArraySink = eg.define_module(
 
 
 def main():
+    compose_stats = ModuleComposeProbe.composition_stats
+    assert compose_stats["node_count"] >= 4
+    assert compose_stats["same_tick_edge_count"] >= 3
+    assert compose_stats["delayed_edge_count"] == 0
+    assert compose_stats["same_tick_schedule_size"] == compose_stats["node_count"]
+    assert compose_stats["delayed_node_count"] == 0
+
+    delay_stats = DelayComposeProbe.composition_stats
+    assert delay_stats["node_count"] >= 5
+    assert delay_stats["same_tick_edge_count"] >= 3
+    assert delay_stats["delayed_edge_count"] >= 1
+    assert delay_stats["same_tick_schedule_size"] == delay_stats["node_count"]
+    assert delay_stats["delayed_node_count"] >= 1
+
     probe = PrimitiveProbe()
     probe.x = -3.5
     probe.lo = -1.0

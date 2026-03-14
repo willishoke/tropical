@@ -215,6 +215,10 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
   }
 
   DefinitionBuildContext build_context;
+  build_context.initialize_composite_spec(
+    name,
+    static_cast<uint32_t>(definition->input_names.size()),
+    static_cast<uint32_t>(definition->output_names.size()));
 
   SymbolMap input_symbols;
   input_symbols.kind = SymbolMap::Kind::Input;
@@ -318,7 +322,18 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
     {
       throw std::invalid_argument("Module expressions cannot capture graph ports.");
     }
-    definition->output_exprs[static_cast<std::size_t>(std::distance(definition->output_names.begin(), it))] = expr.spec;
+    const uint32_t output_id = static_cast<uint32_t>(std::distance(definition->output_names.begin(), it));
+    definition->output_exprs[static_cast<std::size_t>(output_id)] = expr.spec;
+    if (build_context.composite_spec)
+    {
+      for (const auto & source : expr.sources)
+      {
+        build_context.composite_spec->add_edge(
+          source,
+          egress_composition::PortRef{build_context.output_boundary_id, output_id},
+          egress_composition::ConnectionTiming::SameTick);
+      }
+    }
   }
 
   for (const auto & item : register_values)
@@ -341,6 +356,18 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
   definition->register_names = std::move(build_context.register_names);
   definition->initial_registers = std::move(build_context.initial_registers);
   definition->register_array_specs = std::move(build_context.register_array_specs);
+  definition->composite_spec = build_context.composite_spec;
+
+  if (definition->composite_spec)
+  {
+    const auto validation = egress_composition::validate_same_tick_acyclic(*definition->composite_spec);
+    if (!validation.ok)
+    {
+      throw std::invalid_argument(validation.message);
+    }
+    definition->lowered_composite = std::make_shared<egress_composition::LoweredCompositeModule>(
+      egress_composition::lower_composite_module(*definition->composite_spec));
+  }
 
   return definition;
 }
@@ -356,6 +383,10 @@ static std::shared_ptr<StatefulFunctionDefinition> define_stateful_function_impl
   definition->output_names = require_names(outputs, "outputs");
 
   DefinitionBuildContext build_context;
+  build_context.initialize_composite_spec(
+    "stateful_function",
+    static_cast<uint32_t>(definition->input_names.size()),
+    static_cast<uint32_t>(definition->output_names.size()));
 
   SymbolMap input_symbols;
   input_symbols.kind = SymbolMap::Kind::Input;
@@ -437,7 +468,18 @@ static std::shared_ptr<StatefulFunctionDefinition> define_stateful_function_impl
     {
       throw std::invalid_argument("Stateful function expressions cannot capture graph ports.");
     }
-    definition->output_exprs[static_cast<std::size_t>(std::distance(definition->output_names.begin(), it))] = expr.spec;
+    const uint32_t output_id = static_cast<uint32_t>(std::distance(definition->output_names.begin(), it));
+    definition->output_exprs[static_cast<std::size_t>(output_id)] = expr.spec;
+    if (build_context.composite_spec)
+    {
+      for (const auto & source : expr.sources)
+      {
+        build_context.composite_spec->add_edge(
+          source,
+          egress_composition::PortRef{build_context.output_boundary_id, output_id},
+          egress_composition::ConnectionTiming::SameTick);
+      }
+    }
   }
 
   for (const auto & item : register_values)
@@ -460,6 +502,17 @@ static std::shared_ptr<StatefulFunctionDefinition> define_stateful_function_impl
   definition->register_names = std::move(build_context.register_names);
   definition->initial_registers = std::move(build_context.initial_registers);
   definition->register_array_specs = std::move(build_context.register_array_specs);
+  definition->composite_spec = build_context.composite_spec;
+  if (definition->composite_spec)
+  {
+    const auto validation = egress_composition::validate_same_tick_acyclic(*definition->composite_spec);
+    if (!validation.ok)
+    {
+      throw std::invalid_argument(validation.message);
+    }
+    definition->lowered_composite = std::make_shared<egress_composition::LoweredCompositeModule>(
+      egress_composition::lower_composite_module(*definition->composite_spec));
+  }
   return definition;
 }
 

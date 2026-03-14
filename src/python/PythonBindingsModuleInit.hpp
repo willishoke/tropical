@@ -201,6 +201,7 @@ PYBIND11_MODULE(egress, m)
 
   py::class_<PyModuleType>(m, "ModuleType")
     .def_property_readonly("name", &PyModuleType::name)
+    .def_property_readonly("composition_stats", &PyModuleType::composition_stats)
     .def("__call__", &PyModuleType::call);
 
   py::class_<PyPureFunctionType>(m, "PureFunction")

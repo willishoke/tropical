@@ -1,7 +1,10 @@
 #pragma once
 
 static PythonGraph * merge_graphs(PythonGraph * lhs, PythonGraph * rhs);
-static SignalExpr make_signal_expr(PythonGraph * graph, expr::ExprSpecPtr spec);
+static SignalExpr make_signal_expr(
+  PythonGraph * graph,
+  expr::ExprSpecPtr spec,
+  std::vector<egress_composition::PortRef> sources = {});
 static SignalExpr coerce_expr(const py::handle & value);
 static bool is_matrix_literal(const py::handle & value);
 static expr::Value matrix_value_from_py(const py::handle & value);
@@ -30,6 +33,8 @@ struct ModuleDefinition
   std::vector<expr::ExprSpecPtr> output_exprs;
   std::vector<expr::ExprSpecPtr> register_exprs;
   std::vector<Module::RegisterArraySpec> register_array_specs;
+  std::shared_ptr<egress_composition::CompositeModuleSpec> composite_spec;
+  std::shared_ptr<egress_composition::LoweredCompositeModule> lowered_composite;
   double sample_rate = 44100.0;
 };
 
@@ -49,6 +54,8 @@ struct StatefulFunctionDefinition
   std::vector<expr::ExprSpecPtr> output_exprs;
   std::vector<expr::ExprSpecPtr> register_exprs;
   std::vector<Module::RegisterArraySpec> register_array_specs;
+  std::shared_ptr<egress_composition::CompositeModuleSpec> composite_spec;
+  std::shared_ptr<egress_composition::LoweredCompositeModule> lowered_composite;
 };
 
 struct DefinitionBuildContext
@@ -57,6 +64,9 @@ struct DefinitionBuildContext
   std::vector<expr::Value> initial_registers;
   std::vector<expr::ExprSpecPtr> register_exprs;
   std::vector<Module::RegisterArraySpec> register_array_specs;
+  std::shared_ptr<egress_composition::CompositeModuleSpec> composite_spec;
+  uint32_t input_boundary_id = 0;
+  uint32_t output_boundary_id = 0;
   std::size_t hidden_counter = 0;
 
   unsigned int append_register(
@@ -87,6 +97,23 @@ struct DefinitionBuildContext
       "__delay_" + std::to_string(hidden_counter++),
       initial_value,
       Module::RegisterArraySpec{});
+  }
+
+  void initialize_composite_spec(const std::string & label, uint32_t input_count, uint32_t output_count)
+  {
+    composite_spec = std::make_shared<egress_composition::CompositeModuleSpec>();
+    input_boundary_id = composite_spec->add_node(
+      egress_composition::NodeKind::InputBoundary,
+      label + ":inputs",
+      0,
+      input_count);
+    output_boundary_id = composite_spec->add_node(
+      egress_composition::NodeKind::OutputBoundary,
+      label + ":outputs",
+      output_count,
+      0);
+    composite_spec->input_boundary_id = input_boundary_id;
+    composite_spec->output_boundary_id = output_boundary_id;
   }
 };
 
@@ -201,6 +228,69 @@ static expr::ExprSpecPtr clone_with_input_and_register_subst(
     clone_with_input_and_register_subst(expr->rhs, input_args, register_slots));
 }
 
+static std::vector<egress_composition::PortRef> dedupe_sources(
+  std::vector<egress_composition::PortRef> sources)
+{
+  std::vector<egress_composition::PortRef> unique;
+  unique.reserve(sources.size());
+  for (const auto & source : sources)
+  {
+    const auto it = std::find(unique.begin(), unique.end(), source);
+    if (it == unique.end())
+    {
+      unique.push_back(source);
+    }
+  }
+  return unique;
+}
+
+static std::vector<egress_composition::PortRef> merge_sources(
+  const std::vector<egress_composition::PortRef> & lhs,
+  const std::vector<egress_composition::PortRef> & rhs)
+{
+  std::vector<egress_composition::PortRef> merged = lhs;
+  merged.insert(merged.end(), rhs.begin(), rhs.end());
+  return dedupe_sources(std::move(merged));
+}
+
+static uint32_t add_composite_call_node(
+  const std::string & label,
+  egress_composition::NodeKind kind,
+  uint32_t input_count,
+  uint32_t output_count,
+  const std::vector<expr::ExprSpecPtr> & call_args,
+  const std::vector<std::vector<egress_composition::PortRef>> * arg_sources = nullptr)
+{
+  if (current_definition_context_ == nullptr || !current_definition_context_->composite_spec)
+  {
+    return std::numeric_limits<uint32_t>::max();
+  }
+
+  const uint32_t node_id = current_definition_context_->composite_spec->add_node(
+    kind,
+    label,
+    input_count,
+    output_count);
+
+  if (!arg_sources)
+  {
+    return node_id;
+  }
+
+  for (std::size_t input_id = 0; input_id < arg_sources->size() && input_id < call_args.size(); ++input_id)
+  {
+    for (const auto & source : (*arg_sources)[input_id])
+    {
+      current_definition_context_->composite_spec->add_edge(
+        source,
+        egress_composition::PortRef{node_id, static_cast<uint32_t>(input_id)},
+        egress_composition::ConnectionTiming::SameTick);
+    }
+  }
+
+  return node_id;
+}
+
 static py::object inline_stateful_body(
   const std::vector<std::string> & input_names,
   const std::vector<std::string> & output_names,
@@ -210,7 +300,10 @@ static py::object inline_stateful_body(
   const std::vector<expr::ExprSpecPtr> & register_exprs,
   const std::vector<Module::RegisterArraySpec> & register_array_specs,
   const std::vector<expr::ExprSpecPtr> & call_args,
-  const char * label)
+  const std::vector<std::vector<egress_composition::PortRef>> & arg_sources,
+  const char * label,
+  const std::string & composite_label,
+  egress_composition::NodeKind composite_kind)
 {
   if (current_definition_context_ == nullptr)
   {
@@ -223,6 +316,14 @@ static py::object inline_stateful_body(
     throw std::invalid_argument(
       std::string(label) + " expects " + std::to_string(input_names.size()) + " arguments.");
   }
+
+  const uint32_t call_node_id = add_composite_call_node(
+    composite_label,
+    composite_kind,
+    static_cast<uint32_t>(input_names.size()),
+    static_cast<uint32_t>(output_names.size()),
+    call_args,
+    &arg_sources);
 
   std::vector<unsigned int> register_slots;
   register_slots.reserve(register_names.size());
@@ -254,7 +355,10 @@ static py::object inline_stateful_body(
   {
     return py::cast(make_signal_expr(
       nullptr,
-      clone_with_input_and_register_subst(output_exprs[0], call_args, register_slots)));
+      clone_with_input_and_register_subst(output_exprs[0], call_args, register_slots),
+      call_node_id == std::numeric_limits<uint32_t>::max()
+        ? std::vector<egress_composition::PortRef>{}
+        : std::vector<egress_composition::PortRef>{egress_composition::PortRef{call_node_id, 0}}));
   }
 
   py::tuple outputs(output_exprs.size());
@@ -262,16 +366,20 @@ static py::object inline_stateful_body(
   {
     outputs[i] = py::cast(make_signal_expr(
       nullptr,
-      clone_with_input_and_register_subst(output_exprs[i], call_args, register_slots)));
+      clone_with_input_and_register_subst(output_exprs[i], call_args, register_slots),
+      call_node_id == std::numeric_limits<uint32_t>::max()
+        ? std::vector<egress_composition::PortRef>{}
+        : std::vector<egress_composition::PortRef>{
+            egress_composition::PortRef{call_node_id, static_cast<uint32_t>(i)}}));
   }
   return outputs;
 }
 
-static std::vector<expr::ExprSpecPtr> require_local_call_args(
+static std::vector<SignalExpr> require_local_call_args(
   const py::args & args,
   const char * label)
 {
-  std::vector<expr::ExprSpecPtr> call_args;
+  std::vector<SignalExpr> call_args;
   call_args.reserve(args.size());
   for (const py::handle & arg : args)
   {
@@ -280,7 +388,7 @@ static std::vector<expr::ExprSpecPtr> require_local_call_args(
     {
       throw std::invalid_argument(std::string(label) + " arguments cannot capture graph ports.");
     }
-    call_args.push_back(signal.spec);
+    call_args.push_back(signal);
   }
   return call_args;
 }
@@ -446,6 +554,45 @@ class PyModuleType
 
     const std::string & name() const { return definition_->type_name; }
 
+    py::dict composition_stats() const
+    {
+      py::dict result;
+      if (!definition_->composite_spec)
+      {
+        result["node_count"] = 0;
+        result["edge_count"] = 0;
+        result["same_tick_edge_count"] = 0;
+        result["delayed_edge_count"] = 0;
+        return result;
+      }
+
+      uint64_t same_tick_edges = 0;
+      uint64_t delayed_edges = 0;
+      for (const auto & edge : definition_->composite_spec->edges)
+      {
+        if (edge.timing == egress_composition::ConnectionTiming::SameTick)
+        {
+          ++same_tick_edges;
+        }
+        else
+        {
+          ++delayed_edges;
+        }
+      }
+
+      result["node_count"] = static_cast<uint64_t>(definition_->composite_spec->nodes.size());
+      result["edge_count"] = static_cast<uint64_t>(definition_->composite_spec->edges.size());
+      result["same_tick_edge_count"] = same_tick_edges;
+      result["delayed_edge_count"] = delayed_edges;
+      result["same_tick_schedule_size"] = definition_->lowered_composite != nullptr
+                                            ? static_cast<uint64_t>(definition_->lowered_composite->same_tick_schedule.size())
+                                            : uint64_t(0);
+      result["delayed_node_count"] = definition_->lowered_composite != nullptr
+                                       ? static_cast<uint64_t>(definition_->lowered_composite->delayed_node_count)
+                                       : uint64_t(0);
+      return result;
+    }
+
     PyModuleInstance instantiate() const
     {
       return PyModuleInstance(definition_, default_graph());
@@ -469,7 +616,7 @@ class PyModuleType
           "Module call expects at most " + std::to_string(definition_->input_names.size()) + " arguments.");
       }
 
-      std::vector<expr::ExprSpecPtr> call_args = require_local_call_args(args, "Module call");
+      std::vector<SignalExpr> call_args = require_local_call_args(args, "Module call");
       for (std::size_t i = call_args.size(); i < definition_->input_names.size(); ++i)
       {
         const expr::ExprSpecPtr & default_expr = definition_->input_defaults[i];
@@ -478,7 +625,17 @@ class PyModuleType
           throw std::invalid_argument(
             "Missing argument for module input '" + definition_->input_names[i] + "'.");
         }
-        call_args.push_back(default_expr);
+        call_args.push_back(make_signal_expr(nullptr, default_expr));
+      }
+
+      std::vector<expr::ExprSpecPtr> arg_specs;
+      std::vector<std::vector<egress_composition::PortRef>> arg_sources;
+      arg_specs.reserve(call_args.size());
+      arg_sources.reserve(call_args.size());
+      for (const auto & arg : call_args)
+      {
+        arg_specs.push_back(arg.spec);
+        arg_sources.push_back(arg.sources);
       }
 
       return inline_stateful_body(
@@ -489,8 +646,11 @@ class PyModuleType
         definition_->output_exprs,
         definition_->register_exprs,
         definition_->register_array_specs,
-        call_args,
-        "Module call");
+        arg_specs,
+        arg_sources,
+        "Module call",
+        definition_->type_name,
+        egress_composition::NodeKind::ModuleCall);
     }
 
   private:
@@ -557,6 +717,17 @@ class PyStatefulFunctionType
 
     py::object call(const py::args & args) const
     {
+      const std::vector<SignalExpr> call_signals = require_local_call_args(args, "Stateful function");
+      std::vector<expr::ExprSpecPtr> call_args;
+      std::vector<std::vector<egress_composition::PortRef>> arg_sources;
+      call_args.reserve(call_signals.size());
+      arg_sources.reserve(call_signals.size());
+      for (const auto & signal : call_signals)
+      {
+        call_args.push_back(signal.spec);
+        arg_sources.push_back(signal.sources);
+      }
+
       return inline_stateful_body(
         definition_->input_names,
         definition_->output_names,
@@ -565,8 +736,11 @@ class PyStatefulFunctionType
         definition_->output_exprs,
         definition_->register_exprs,
         definition_->register_array_specs,
-        require_local_call_args(args, "Stateful function"),
-        "Stateful function");
+        call_args,
+        arg_sources,
+        "Stateful function",
+        "stateful",
+        egress_composition::NodeKind::StatefulFunctionCall);
     }
 
   private:
@@ -582,11 +756,15 @@ static PythonGraph * merge_graphs(PythonGraph * lhs, PythonGraph * rhs)
   return lhs != nullptr ? lhs : rhs;
 }
 
-static SignalExpr make_signal_expr(PythonGraph * graph, expr::ExprSpecPtr spec)
+static SignalExpr make_signal_expr(
+  PythonGraph * graph,
+  expr::ExprSpecPtr spec,
+  std::vector<egress_composition::PortRef> sources)
 {
   SignalExpr expr;
   expr.graph = graph;
   expr.spec = std::move(spec);
+  expr.sources = dedupe_sources(std::move(sources));
   return expr;
 }
 
@@ -669,12 +847,15 @@ static SignalExpr coerce_expr(const py::handle & value)
 
 static SignalExpr make_unary_expr(ExprKind kind, const SignalExpr & operand)
 {
-  return make_signal_expr(operand.graph, expr::unary_expr(kind, operand.spec));
+  return make_signal_expr(operand.graph, expr::unary_expr(kind, operand.spec), operand.sources);
 }
 
 static SignalExpr make_binary_expr(ExprKind kind, const SignalExpr & lhs, const SignalExpr & rhs)
 {
-  return make_signal_expr(merge_graphs(lhs.graph, rhs.graph), expr::binary_expr(kind, lhs.spec, rhs.spec));
+  return make_signal_expr(
+    merge_graphs(lhs.graph, rhs.graph),
+    expr::binary_expr(kind, lhs.spec, rhs.spec),
+    merge_sources(lhs.sources, rhs.sources));
 }
 
 static SignalExpr add_expr(const SignalExpr & lhs, const py::handle & rhs)
@@ -764,7 +945,8 @@ static SignalExpr clamp_expr(const py::handle & value, const py::handle & min_va
   const SignalExpr max_signal = coerce_expr(max_value);
   return make_signal_expr(
     merge_graphs(merge_graphs(signal.graph, min_signal.graph), max_signal.graph),
-    expr::clamp_expr(signal.spec, min_signal.spec, max_signal.spec));
+    expr::clamp_expr(signal.spec, min_signal.spec, max_signal.spec),
+    merge_sources(merge_sources(signal.sources, min_signal.sources), max_signal.sources));
 }
 
 static SignalExpr logical_not_expr(const py::handle & value)
@@ -775,7 +957,10 @@ static SignalExpr logical_not_expr(const py::handle & value)
 static SignalExpr index_expr(const SignalExpr & value, const py::handle & index)
 {
   const SignalExpr idx = coerce_expr(index);
-  return make_signal_expr(merge_graphs(value.graph, idx.graph), expr::index_expr(value.spec, idx.spec));
+  return make_signal_expr(
+    merge_graphs(value.graph, idx.graph),
+    expr::index_expr(value.spec, idx.spec),
+    merge_sources(value.sources, idx.sources));
 }
 
 static SignalExpr array_set_expr(const SignalExpr & array, const py::handle & index, const py::handle & value)
@@ -784,7 +969,8 @@ static SignalExpr array_set_expr(const SignalExpr & array, const py::handle & in
   const SignalExpr replacement = coerce_expr(value);
   return make_signal_expr(
     merge_graphs(merge_graphs(array.graph, idx.graph), replacement.graph),
-    expr::array_set_expr(array.spec, idx.spec, replacement.spec));
+    expr::array_set_expr(array.spec, idx.spec, replacement.spec),
+    merge_sources(merge_sources(array.sources, idx.sources), replacement.sources));
 }
 
 static SignalExpr less_expr(const py::handle & lhs, const py::handle & rhs)
@@ -821,7 +1007,14 @@ static SignalExpr symbol_expr(SymbolMap::Kind kind, unsigned int slot_id)
 {
   if (kind == SymbolMap::Kind::Input)
   {
-    return make_signal_expr(nullptr, expr::input_value_expr(slot_id));
+    std::vector<egress_composition::PortRef> sources;
+    if (current_definition_context_ != nullptr && current_definition_context_->composite_spec)
+    {
+      sources.push_back(egress_composition::PortRef{
+        current_definition_context_->input_boundary_id,
+        slot_id});
+    }
+    return make_signal_expr(nullptr, expr::input_value_expr(slot_id), std::move(sources));
   }
   return make_signal_expr(nullptr, expr::register_value_expr(slot_id));
 }
@@ -853,13 +1046,35 @@ static SignalExpr delay_expr(const py::handle & value, const py::handle & init)
   const expr::Value initial_value = init.is_none() ? expr::float_value(0.0) : value_from_py(init);
   const unsigned int delay_slot = current_definition_context_->append_hidden_delay_register(initial_value);
   current_definition_context_->register_exprs[delay_slot] = signal.spec;
-  return make_signal_expr(nullptr, expr::register_value_expr(delay_slot));
+  uint32_t delay_node_id = std::numeric_limits<uint32_t>::max();
+  if (current_definition_context_->composite_spec)
+  {
+    delay_node_id = current_definition_context_->composite_spec->add_node(
+      egress_composition::NodeKind::Delay,
+      "delay",
+      1,
+      1);
+    for (const auto & source : signal.sources)
+    {
+      current_definition_context_->composite_spec->add_edge(
+        source,
+        egress_composition::PortRef{delay_node_id, 0},
+        egress_composition::ConnectionTiming::Delayed);
+    }
+  }
+  return make_signal_expr(
+    nullptr,
+    expr::register_value_expr(delay_slot),
+    delay_node_id == std::numeric_limits<uint32_t>::max()
+      ? std::vector<egress_composition::PortRef>{}
+      : std::vector<egress_composition::PortRef>{egress_composition::PortRef{delay_node_id, 0}});
 }
 
 static SignalExpr make_array_expr(const py::iterable & values)
 {
   std::vector<expr::ExprSpecPtr> items;
   PythonGraph * graph = nullptr;
+  std::vector<egress_composition::PortRef> sources;
   for (const py::handle & value : values)
   {
     const SignalExpr expr = coerce_expr(value);
@@ -873,8 +1088,9 @@ static SignalExpr make_array_expr(const py::iterable & values)
       throw std::invalid_argument("Matrix literals cannot be nested inside arrays.");
     }
     items.push_back(expr.spec);
+    sources = merge_sources(sources, expr.sources);
   }
-  return make_signal_expr(graph, expr::array_pack_expr(std::move(items)));
+  return make_signal_expr(graph, expr::array_pack_expr(std::move(items)), std::move(sources));
 }
 
 static SignalExpr make_matrix_expr(const py::handle & value)

@@ -171,6 +171,7 @@ struct SignalExpr
 {
   PythonGraph * graph = nullptr;
   expr::ExprSpecPtr spec;
+  std::vector<egress_composition::PortRef> sources;
 };
 
 static void assign_input(const InputPort & input, const py::handle & value);
