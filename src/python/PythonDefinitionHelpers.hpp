@@ -370,6 +370,7 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
     definition->lowered_composite = std::make_shared<egress_composition::LoweredCompositeModule>(
       egress_composition::lower_composite_module(*definition->composite_spec));
     definition->composite_schedule = definition->lowered_composite->same_tick_schedule;
+    definition->output_boundary_id = definition->composite_spec->output_boundary_id;
   }
 
   definition->nested_module_specs = finalize_nested_modules(build_context);

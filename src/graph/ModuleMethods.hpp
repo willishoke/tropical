@@ -122,8 +122,21 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   }
 #endif
 
+  bool composite_outputs_materialized = false;
   for (uint32_t node_id : composite_schedule_)
   {
+    if ((has_composite_updates_ || has_nested_modules_) &&
+        node_id == composite_output_boundary_id_)
+    {
+      eval_program(composite_output_program_, temps_);
+      for (unsigned int output_id = 0; output_id < composite_output_program_.output_targets.size(); ++output_id)
+      {
+        outputs[output_id] = temps_[composite_output_program_.output_targets[output_id]];
+      }
+      composite_outputs_materialized = true;
+      continue;
+    }
+
     auto nested_it = nested_module_lookup_.find(node_id);
     if (nested_it == nested_module_lookup_.end())
     {
@@ -139,16 +152,24 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     nested.module->process();
   }
 
-  eval_program(program_, temps_);
+  const CompiledProgram & output_program =
+    (has_composite_updates_ || has_nested_modules_) ? composite_output_program_ : program_;
+  const CompiledProgram & register_program =
+    (has_composite_updates_ || has_nested_modules_) ? composite_register_program_ : program_;
 
-  for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
+  if (!(has_composite_updates_ || has_nested_modules_) || !composite_outputs_materialized)
   {
-    outputs[output_id] = temps_[program_.output_targets[output_id]];
+    eval_program(output_program, temps_);
+    for (unsigned int output_id = 0; output_id < output_program.output_targets.size(); ++output_id)
+    {
+      outputs[output_id] = temps_[output_program.output_targets[output_id]];
+    }
   }
 
-  for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
+  eval_program(register_program, temps_);
+  for (unsigned int register_id = 0; register_id < register_program.register_targets.size(); ++register_id)
   {
-    const int32_t target = program_.register_targets[register_id];
+    const int32_t target = register_program.register_targets[register_id];
     if (target >= 0)
     {
       next_registers_[register_id] = temps_[static_cast<std::size_t>(target)];
@@ -184,7 +205,7 @@ unsigned int Module::input_count() const
 
 unsigned int Module::output_count() const
 {
-  return static_cast<unsigned int>(program_.output_targets.size());
+  return static_cast<unsigned int>(outputs.size());
 }
 
 unsigned int Module::register_count() const
@@ -196,12 +217,22 @@ unsigned int Module::register_count() const
 Module::CompileStats Module::compile_stats() const
 {
   CompileStats stats;
-  stats.instruction_count = static_cast<uint64_t>(program_.instructions.size());
+  if (has_composite_updates_ || has_nested_modules_)
+  {
+    stats.instruction_count = static_cast<uint64_t>(composite_output_program_.instructions.size()) +
+                              static_cast<uint64_t>(composite_register_program_.instructions.size());
+    stats.register_count = static_cast<uint64_t>(
+      std::max(composite_output_program_.register_count, composite_register_program_.register_count));
+  }
+  else
+  {
+    stats.instruction_count = static_cast<uint64_t>(program_.instructions.size());
+    stats.register_count = static_cast<uint64_t>(program_.register_count);
+  }
   for (const auto & composite_update_program : composite_update_programs_)
   {
     stats.instruction_count += static_cast<uint64_t>(composite_update_program.instructions.size());
   }
-  stats.register_count = static_cast<uint64_t>(program_.register_count);
   stats.composite_update_count = static_cast<uint64_t>(composite_update_programs_.size());
   stats.nested_module_count = static_cast<uint64_t>(nested_modules_.size());
 #ifdef EGRESS_LLVM_ORC_JIT

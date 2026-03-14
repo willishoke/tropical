@@ -38,6 +38,7 @@ struct ModuleDefinition
   std::shared_ptr<egress_composition::CompositeModuleSpec> composite_spec;
   std::shared_ptr<egress_composition::LoweredCompositeModule> lowered_composite;
   std::vector<uint32_t> composite_schedule;
+  uint32_t output_boundary_id = std::numeric_limits<uint32_t>::max();
   double sample_rate = 44100.0;
 };
 
@@ -363,6 +364,7 @@ class PyModuleInstance
             definition_->composite_update_specs,
             definition_->nested_module_specs,
             definition_->composite_schedule,
+            definition_->output_boundary_id,
             definition_->sample_rate))
       {
         throw std::invalid_argument("Failed to create module '" + name_ + "'.");
@@ -624,6 +626,7 @@ class PyModuleType
       nested_spec.composite_update_specs = definition_->composite_update_specs;
       nested_spec.nested_module_specs = definition_->nested_module_specs;
       nested_spec.composite_schedule = definition_->composite_schedule;
+      nested_spec.output_boundary_id = definition_->output_boundary_id;
       nested_spec.sample_rate = definition_->sample_rate;
       current_definition_context_->nested_module_specs.push_back(std::move(nested_spec));
 

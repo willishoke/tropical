@@ -132,6 +132,7 @@ class PythonGraph
       std::vector<Module::CompositeUpdateSpec> composite_update_specs,
       std::vector<Module::NestedModuleSpec> nested_module_specs,
       std::vector<uint32_t> composite_schedule,
+      uint32_t output_boundary_id,
       double sample_rate)
     {
       return graph_.addModule(
@@ -145,6 +146,7 @@ class PythonGraph
           std::move(composite_update_specs),
           std::move(nested_module_specs),
           std::move(composite_schedule),
+          output_boundary_id,
           sample_rate));
     }
 
