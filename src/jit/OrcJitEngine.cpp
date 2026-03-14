@@ -1,4 +1,4 @@
-#include "OrcJitEngine.hpp"
+#include "jit/OrcJitEngine.hpp"
 
 #ifdef EGRESS_LLVM_ORC_JIT
 #include <llvm/IR/IRBuilder.h>

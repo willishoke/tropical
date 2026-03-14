@@ -33,7 +33,12 @@ if(EGRESS_BUILD_PYTHON)
         find_package(pybind11 CONFIG REQUIRED)
     endif()
 
-    add_library(egress MODULE src/python_bindings.cpp)
+    add_library(egress MODULE
+        src/python/PythonBindings.cpp
+        src/graph/Graph.cpp
+        src/graph/Module.cpp
+        src/expr/ExprStructural.cpp
+        src/expr/ExprRewrite.cpp)
     if(EGRESS_LLVM_ORC_JIT)
         find_package(LLVM CONFIG REQUIRED)
         if(LLVM_PACKAGE_VERSION VERSION_LESS 15)
@@ -41,7 +46,7 @@ if(EGRESS_BUILD_PYTHON)
         endif()
         message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION}")
 
-        target_sources(egress PRIVATE src/OrcJitEngine.cpp)
+        target_sources(egress PRIVATE src/jit/OrcJitEngine.cpp)
         target_include_directories(egress PRIVATE ${LLVM_INCLUDE_DIRS})
         target_compile_definitions(egress PRIVATE ${LLVM_DEFINITIONS} EGRESS_LLVM_ORC_JIT=1)
 

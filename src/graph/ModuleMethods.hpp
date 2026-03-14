@@ -1,0 +1,551 @@
+#pragma once
+
+void Module::process(const std::vector<bool> * output_materialize_mask)
+{
+  resize_array_registers_to_inputs();
+#ifdef EGRESS_LLVM_ORC_JIT
+  if (!has_dynamic_registers_)
+  {
+    ensure_numeric_jit_current();
+  }
+
+  if (jit_kernel_)
+  {
+    if (!sync_numeric_inputs_from_values())
+    {
+      jit_status_ = "numeric input sync failed";
+      jit_kernel_ = nullptr;
+    }
+    else
+    {
+      jit_kernel_(
+        numeric_inputs_.data(),
+        numeric_registers_.data(),
+        numeric_array_ptrs_.data(),
+        numeric_array_sizes_.data(),
+        numeric_temps_.data(),
+        sample_rate_,
+        sample_index_);
+
+      for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
+      {
+        if (output_materialize_mask != nullptr &&
+            output_id < output_materialize_mask->size() &&
+            !(*output_materialize_mask)[output_id] &&
+            output_id < numeric_output_info_.size())
+        {
+          const NumericValueKind output_kind = static_cast<NumericValueKind>(numeric_output_info_[output_id].kind);
+          if (output_kind == NumericValueKind::Array || output_kind == NumericValueKind::Matrix)
+          {
+            continue;
+          }
+        }
+        assign_numeric_value_to(
+          outputs[output_id],
+          numeric_output_info_[output_id],
+          program_.output_targets[output_id],
+          numeric_temps_,
+          numeric_array_storage_);
+      }
+
+      for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
+      {
+        const int32_t target = program_.register_targets[register_id];
+        if (register_scalar_mask_[register_id])
+        {
+          if (target >= 0)
+          {
+            numeric_next_registers_[register_id] = numeric_temps_[static_cast<std::size_t>(target)];
+          }
+          else
+          {
+            numeric_next_registers_[register_id] = numeric_registers_[register_id];
+          }
+        }
+        else
+        {
+          numeric_next_registers_[register_id] = numeric_registers_[register_id];
+        }
+      }
+
+      numeric_registers_.swap(numeric_next_registers_);
+
+      for (unsigned int register_id = 0; register_id < array_register_targets_.size(); ++register_id)
+      {
+        if (register_scalar_mask_[register_id])
+        {
+          continue;
+        }
+        const int32_t src_slot = array_register_targets_[register_id];
+        if (src_slot < 0)
+        {
+          continue;
+        }
+        const uint32_t dst_slot = register_array_slot_[register_id];
+        if (dst_slot >= numeric_array_storage_.size() ||
+            static_cast<std::size_t>(src_slot) >= numeric_array_storage_.size())
+        {
+          continue;
+        }
+        if (dst_slot == static_cast<uint32_t>(src_slot))
+        {
+          continue;
+        }
+        auto & dst = numeric_array_storage_[dst_slot];
+        auto & src = numeric_array_storage_[static_cast<std::size_t>(src_slot)];
+        if (dst.size() != src.size())
+        {
+          continue;
+        }
+        if (register_id < array_register_can_swap_.size() && array_register_can_swap_[register_id])
+        {
+          dst.swap(src);
+          if (dst_slot < numeric_array_ptrs_.size())
+          {
+            numeric_array_ptrs_[dst_slot] = dst.empty() ? nullptr : dst.data();
+            numeric_array_sizes_[dst_slot] = static_cast<uint64_t>(dst.size());
+          }
+          if (static_cast<std::size_t>(src_slot) < numeric_array_ptrs_.size())
+          {
+            numeric_array_ptrs_[static_cast<std::size_t>(src_slot)] = src.empty() ? nullptr : src.data();
+            numeric_array_sizes_[static_cast<std::size_t>(src_slot)] = static_cast<uint64_t>(src.size());
+          }
+          continue;
+        }
+        std::copy(src.begin(), src.end(), dst.begin());
+      }
+
+      ++sample_index_;
+      postprocess();
+      return;
+    }
+  }
+#endif
+
+  eval_program(program_, temps_);
+
+  for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
+  {
+    outputs[output_id] = temps_[program_.output_targets[output_id]];
+  }
+
+  for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
+  {
+    const int32_t target = program_.register_targets[register_id];
+    if (target >= 0)
+    {
+      next_registers_[register_id] = temps_[static_cast<std::size_t>(target)];
+    }
+    else
+    {
+      next_registers_[register_id] = registers_[register_id];
+    }
+  }
+
+  registers_.swap(next_registers_);
+  ++sample_index_;
+  postprocess();
+}
+
+unsigned int Module::input_count() const
+{
+  return input_count_;
+}
+
+unsigned int Module::output_count() const
+{
+  return static_cast<unsigned int>(program_.output_targets.size());
+}
+
+unsigned int Module::register_count() const
+{
+  return static_cast<unsigned int>(registers_.size());
+}
+
+#ifdef EGRESS_PROFILE
+Module::CompileStats Module::compile_stats() const
+{
+  CompileStats stats;
+  stats.instruction_count = static_cast<uint64_t>(program_.instructions.size());
+  stats.register_count = static_cast<uint64_t>(program_.register_count);
+#ifdef EGRESS_LLVM_ORC_JIT
+  stats.numeric_jit_instruction_count = numeric_jit_instruction_count_;
+  stats.jit_status = jit_status_;
+#else
+  stats.jit_status = "LLVM ORC JIT disabled";
+#endif
+  return stats;
+}
+#endif
+
+void Module::reset_inputs_after_process()
+{
+  for (auto & in : inputs)
+  {
+    in = expr::float_value(0.0);
+  }
+}
+
+void Module::postprocess()
+{
+  reset_inputs_after_process();
+
+  for (auto & out : outputs)
+  {
+    clamp_output_value(out);
+  }
+}
+
+double Module::clamp_output_scalar(double value)
+{
+  return std::fmax(-10.0, std::fmin(10.0, value));
+}
+
+void Module::clamp_output_value(Value & value)
+{
+  if (value.type == ValueType::Array)
+  {
+    for (auto & item : value.array_items)
+    {
+      clamp_output_value(item);
+    }
+    return;
+  }
+  if (value.type == ValueType::Matrix)
+  {
+    for (auto & item : value.matrix_items)
+    {
+      clamp_output_value(item);
+    }
+    return;
+  }
+  const double clamped = clamp_output_scalar(expr::to_float64(value));
+  value = expr::float_value(clamped);
+}
+
+void Module::resize_array_registers_to_inputs()
+{
+  if (!has_dynamic_registers_)
+  {
+    return;
+  }
+
+  for (unsigned int reg_id = 0; reg_id < register_array_specs_.size(); ++reg_id)
+  {
+    const RegisterArraySpec & spec = register_array_specs_[reg_id];
+    if (!spec.enabled)
+    {
+      continue;
+    }
+
+    if (spec.source_input_id >= inputs.size())
+    {
+      throw std::invalid_argument("Array register spec references unknown input id.");
+    }
+
+    const Value & input = inputs[spec.source_input_id];
+    if (input.type != ValueType::Array)
+    {
+      throw std::invalid_argument("Array register requires array-valued input.");
+    }
+
+    const std::size_t desired = input.array_items.size();
+    Value & reg = registers_[reg_id];
+    bool resized = false;
+
+    if (reg.type != ValueType::Array)
+    {
+      std::vector<Value> items(desired, spec.init_value);
+      reg = expr::array_value(std::move(items));
+      resized = true;
+    }
+    else if (reg.array_items.size() != desired)
+    {
+      std::vector<Value> items = reg.array_items;
+      items.resize(desired, spec.init_value);
+      reg = expr::array_value(std::move(items));
+      resized = true;
+    }
+
+    if (resized)
+    {
+      next_registers_[reg_id] = reg;
+    }
+  }
+}
+
+Module::CompiledProgram Module::compile_program(
+  const std::vector<ExprSpecPtr> & output_exprs,
+  const std::vector<ExprSpecPtr> & register_exprs)
+{
+  CompiledProgram compiled;
+  compiled.output_targets.reserve(output_exprs.size());
+  compiled.register_targets.assign(register_exprs.size(), -1);
+
+  std::unordered_map<std::size_t, std::vector<std::pair<ExprSpecPtr, uint32_t>>> memo;
+  std::unordered_map<const ExprSpec *, std::size_t> hash_cache;
+  for (const auto & expr : output_exprs)
+  {
+    ExprSpecPtr inlined = egress_expr_inline::inline_functions(expr);
+    compiled.output_targets.push_back(compile_expr_node(inlined, compiled, memo, hash_cache));
+  }
+  for (unsigned int i = 0; i < register_exprs.size(); ++i)
+  {
+    if (register_exprs[i])
+    {
+      ExprSpecPtr inlined = egress_expr_inline::inline_functions(register_exprs[i]);
+      compiled.register_targets[i] = static_cast<int32_t>(compile_expr_node(inlined, compiled, memo, hash_cache));
+    }
+  }
+  return compiled;
+}
+
+uint32_t Module::compile_expr_node(
+  const ExprSpecPtr & expr,
+  CompiledProgram & compiled,
+  std::unordered_map<std::size_t, std::vector<std::pair<ExprSpecPtr, uint32_t>>> & memo,
+  std::unordered_map<const ExprSpec *, std::size_t> & hash_cache)
+{
+  const std::size_t hash = egress_expr_inline::structural_hash(expr, hash_cache);
+  auto memo_it = memo.find(hash);
+  if (memo_it != memo.end())
+  {
+    for (const auto & candidate : memo_it->second)
+    {
+      if (egress_expr_inline::structural_equal(expr, candidate.first))
+      {
+        return candidate.second;
+      }
+    }
+  }
+
+  if (!expr)
+  {
+    Instr instr;
+    instr.kind = ExprKind::Literal;
+    instr.dst = compiled.register_count++;
+    instr.literal = expr::float_value(0.0);
+    compiled.instructions.push_back(std::move(instr));
+    memo[hash].push_back(std::make_pair(expr, compiled.instructions.back().dst));
+    return compiled.instructions.back().dst;
+  }
+
+  Instr instr;
+  instr.kind = expr->kind;
+  instr.dst = compiled.register_count++;
+
+  switch (expr->kind)
+  {
+    case ExprKind::Literal:
+      instr.literal = expr->literal;
+      break;
+    case ExprKind::InputValue:
+    case ExprKind::RegisterValue:
+      instr.slot_id = expr->slot_id;
+      break;
+    case ExprKind::SampleRate:
+    case ExprKind::SampleIndex:
+      break;
+    case ExprKind::ArrayPack:
+      instr.args.reserve(expr->args.size());
+      for (const auto & arg : expr->args)
+      {
+        instr.args.push_back(compile_expr_node(arg, compiled, memo, hash_cache));
+      }
+      break;
+    default:
+      if (egress_module_detail::is_local_unary(expr->kind))
+      {
+        instr.src_a = compile_expr_node(expr->lhs, compiled, memo, hash_cache);
+      }
+      else if (egress_module_detail::is_local_ternary(expr->kind))
+      {
+        instr.src_a = compile_expr_node(expr->lhs, compiled, memo, hash_cache);
+        instr.src_b = compile_expr_node(expr->rhs, compiled, memo, hash_cache);
+        instr.src_c = compile_expr_node(expr->args.empty() ? nullptr : expr->args.front(), compiled, memo, hash_cache);
+      }
+      else if (egress_module_detail::is_local_binary(expr->kind))
+      {
+        instr.src_a = compile_expr_node(expr->lhs, compiled, memo, hash_cache);
+        instr.src_b = compile_expr_node(expr->rhs, compiled, memo, hash_cache);
+      }
+      else
+      {
+        throw std::invalid_argument("Unsupported module expression kind.");
+      }
+      break;
+  }
+
+  compiled.instructions.push_back(std::move(instr));
+  memo[hash].push_back(std::make_pair(expr, compiled.instructions.back().dst));
+  return compiled.instructions.back().dst;
+}
+
+void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & temps) const
+{
+  if (expr.instructions.empty())
+  {
+    return;
+  }
+
+  if (temps.size() < expr.register_count)
+  {
+    temps.resize(expr.register_count, expr::float_value(0.0));
+  }
+
+  for (const Instr & instr : expr.instructions)
+  {
+    switch (instr.kind)
+    {
+      case ExprKind::Function:
+      case ExprKind::Call:
+        throw std::invalid_argument("Function values must be inlined before evaluation.");
+      case ExprKind::Literal:
+        temps[instr.dst] = instr.literal;
+        break;
+      case ExprKind::InputValue:
+        temps[instr.dst] = instr.slot_id < inputs.size()
+                             ? inputs[instr.slot_id]
+                             : expr::float_value(0.0);
+        break;
+      case ExprKind::RegisterValue:
+        temps[instr.dst] = instr.slot_id < registers_.size()
+                             ? registers_[instr.slot_id]
+                             : expr::float_value(0.0);
+        break;
+      case ExprKind::SampleRate:
+        temps[instr.dst] = expr::float_value(sample_rate_);
+        break;
+      case ExprKind::SampleIndex:
+        temps[instr.dst] = expr::int_value(static_cast<int64_t>(sample_index_));
+        break;
+      case ExprKind::ArrayPack:
+      {
+        std::vector<Value> items;
+        items.reserve(instr.args.size());
+        for (uint32_t src : instr.args)
+        {
+          if (expr::is_array(temps[src]) || expr::is_matrix(temps[src]))
+          {
+            throw std::invalid_argument("Nested arrays are not supported.");
+          }
+          items.push_back(temps[src]);
+        }
+        temps[instr.dst] = expr::array_value(std::move(items));
+        break;
+      }
+      case ExprKind::Index:
+      {
+        const Value & array_value = temps[instr.src_a];
+        const int64_t index = expr::to_int64(temps[instr.src_b]);
+        if (index < 0)
+        {
+          throw std::out_of_range("Array index out of range.");
+        }
+        if (expr::is_array(array_value))
+        {
+          if (static_cast<std::size_t>(index) >= array_value.array_items.size())
+          {
+            throw std::out_of_range("Array index out of range.");
+          }
+          temps[instr.dst] = array_value.array_items[static_cast<std::size_t>(index)];
+          break;
+        }
+        if (expr::is_matrix(array_value))
+        {
+          temps[instr.dst] = expr::array_from_matrix_row(array_value, static_cast<std::size_t>(index));
+          break;
+        }
+        temps[instr.dst] = expr::float_value(0.0);
+        break;
+      }
+      case ExprKind::ArraySet:
+        temps[instr.dst] = expr_eval::array_set_value(
+          temps[instr.src_a],
+          temps[instr.src_b],
+          temps[instr.src_c]);
+        break;
+      case ExprKind::Abs:
+        temps[instr.dst] = expr_eval::abs_value(temps[instr.src_a]);
+        break;
+      case ExprKind::Not:
+        temps[instr.dst] = expr_eval::not_value(temps[instr.src_a]);
+        break;
+      case ExprKind::Less:
+        temps[instr.dst] = expr_eval::less_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::LessEqual:
+        temps[instr.dst] = expr_eval::less_equal_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::Greater:
+        temps[instr.dst] = expr_eval::greater_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::GreaterEqual:
+        temps[instr.dst] = expr_eval::greater_equal_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::Equal:
+        temps[instr.dst] = expr_eval::equal_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::NotEqual:
+        temps[instr.dst] = expr_eval::not_equal_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::Add:
+        temps[instr.dst] = expr_eval::add_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::Sub:
+        temps[instr.dst] = expr_eval::sub_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::Mul:
+        temps[instr.dst] = expr_eval::mul_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::MatMul:
+        temps[instr.dst] = expr_eval::matmul_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::Div:
+        temps[instr.dst] = expr_eval::div_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::Pow:
+        temps[instr.dst] = expr_eval::pow_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::Mod:
+        temps[instr.dst] = expr_eval::mod_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::FloorDiv:
+        temps[instr.dst] = expr_eval::floor_div_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::BitAnd:
+        temps[instr.dst] = expr_eval::bit_and_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::BitOr:
+        temps[instr.dst] = expr_eval::bit_or_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::BitXor:
+        temps[instr.dst] = expr_eval::bit_xor_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::LShift:
+        temps[instr.dst] = expr_eval::lshift_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::RShift:
+        temps[instr.dst] = expr_eval::rshift_values(temps[instr.src_a], temps[instr.src_b]);
+        break;
+      case ExprKind::Clamp:
+        temps[instr.dst] = expr_eval::clamp_values(temps[instr.src_a], temps[instr.src_b], temps[instr.src_c]);
+        break;
+      case ExprKind::Log:
+        temps[instr.dst] = expr_eval::log_value(temps[instr.src_a]);
+        break;
+      case ExprKind::Sin:
+        temps[instr.dst] = expr_eval::sin_value(temps[instr.src_a]);
+        break;
+      case ExprKind::Neg:
+        temps[instr.dst] = expr_eval::neg_value(temps[instr.src_a]);
+        break;
+      case ExprKind::BitNot:
+        temps[instr.dst] = expr_eval::bit_not_value(temps[instr.src_a]);
+        break;
+      case ExprKind::Ref:
+        temps[instr.dst] = expr::float_value(0.0);
+        break;
+    }
+  }
+}
