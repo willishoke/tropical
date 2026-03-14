@@ -353,6 +353,7 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
     definition->register_exprs[it->second] = expr.spec;
   }
 
+  definition->composite_update_specs = finalize_composite_updates(build_context);
   definition->register_names = std::move(build_context.register_names);
   definition->initial_registers = std::move(build_context.initial_registers);
   definition->register_array_specs = std::move(build_context.register_array_specs);
@@ -499,6 +500,7 @@ static std::shared_ptr<StatefulFunctionDefinition> define_stateful_function_impl
     definition->register_exprs[it->second] = expr.spec;
   }
 
+  definition->composite_update_specs = finalize_composite_updates(build_context);
   definition->register_names = std::move(build_context.register_names);
   definition->initial_registers = std::move(build_context.initial_registers);
   definition->register_array_specs = std::move(build_context.register_array_specs);

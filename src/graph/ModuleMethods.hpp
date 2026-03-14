@@ -4,7 +4,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
 {
   resize_array_registers_to_inputs();
 #ifdef EGRESS_LLVM_ORC_JIT
-  if (!has_dynamic_registers_)
+  if (!has_dynamic_registers_ && !has_composite_updates_)
   {
     ensure_numeric_jit_current();
   }
@@ -142,6 +142,19 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     }
   }
 
+  for (const auto & composite_update_program : composite_update_programs_)
+  {
+    eval_program(composite_update_program, temps_);
+    for (unsigned int register_id = 0; register_id < composite_update_program.register_targets.size(); ++register_id)
+    {
+      const int32_t target = composite_update_program.register_targets[register_id];
+      if (target >= 0)
+      {
+        next_registers_[register_id] = temps_[static_cast<std::size_t>(target)];
+      }
+    }
+  }
+
   registers_.swap(next_registers_);
   ++sample_index_;
   postprocess();
@@ -167,6 +180,10 @@ Module::CompileStats Module::compile_stats() const
 {
   CompileStats stats;
   stats.instruction_count = static_cast<uint64_t>(program_.instructions.size());
+  for (const auto & composite_update_program : composite_update_programs_)
+  {
+    stats.instruction_count += static_cast<uint64_t>(composite_update_program.instructions.size());
+  }
   stats.register_count = static_cast<uint64_t>(program_.register_count);
 #ifdef EGRESS_LLVM_ORC_JIT
   stats.numeric_jit_instruction_count = numeric_jit_instruction_count_;

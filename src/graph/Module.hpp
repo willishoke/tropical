@@ -40,6 +40,12 @@ class Module
       Value init_value;
     };
 
+    struct CompositeUpdateSpec
+    {
+      std::string label;
+      std::vector<ExprSpecPtr> register_exprs;
+    };
+
     virtual ~Module() = default;
 
     Module(
@@ -48,6 +54,7 @@ class Module
       std::vector<ExprSpecPtr> register_exprs,
       std::vector<Value> initial_registers,
       std::vector<RegisterArraySpec> register_array_specs,
+      std::vector<CompositeUpdateSpec> composite_update_specs,
       double sample_rate)
       : inputs(input_count, expr::float_value(0.0)),
         outputs(output_exprs.size(), expr::float_value(0.0)),
@@ -69,12 +76,21 @@ class Module
       }
 
       program_ = compile_program(output_exprs, register_exprs);
+      for (const auto & composite_update_spec : composite_update_specs)
+      {
+        composite_update_programs_.push_back(compile_program({}, composite_update_spec.register_exprs));
+      }
       temps_.assign(program_.register_count, expr::float_value(0.0));
+      has_composite_updates_ = !composite_update_programs_.empty();
 
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_)
+      if (!has_dynamic_registers_ && !has_composite_updates_)
       {
         initialize_numeric_jit(inputs);
+      }
+      else if (has_composite_updates_)
+      {
+        jit_status_ = "numeric JIT disabled for composite updates";
       }
 #endif
     }
@@ -132,8 +148,10 @@ class Module
     std::vector<Value> temps_;
     std::vector<Value> registers_;
     std::vector<Value> next_registers_;
+    std::vector<CompiledProgram> composite_update_programs_;
     std::vector<RegisterArraySpec> register_array_specs_;
     bool has_dynamic_registers_ = false;
+    bool has_composite_updates_ = false;
     double sample_rate_ = 44100.0;
     uint64_t sample_index_ = 0;
 #ifdef EGRESS_LLVM_ORC_JIT

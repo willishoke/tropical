@@ -80,7 +80,24 @@ struct ValidationResult
 
 struct LoweredCompositeModule
 {
+  struct ScheduledNode
+  {
+    uint32_t node_id = 0;
+    NodeKind kind = NodeKind::ModuleCall;
+    std::string label;
+  };
+
+  struct DelayedEdgeState
+  {
+    uint32_t edge_id = 0;
+    PortRef src;
+    PortRef dst;
+    uint32_t state_slot = 0;
+  };
+
   std::vector<uint32_t> same_tick_schedule;
+  std::vector<ScheduledNode> scheduled_nodes;
+  std::vector<DelayedEdgeState> delayed_edges;
   uint32_t delayed_node_count = 0;
 };
 
@@ -149,12 +166,31 @@ inline LoweredCompositeModule lower_composite_module(const CompositeModuleSpec &
 
   LoweredCompositeModule lowered;
   lowered.same_tick_schedule = validation.same_tick_topology;
-  for (const auto & node : spec.nodes)
+  lowered.scheduled_nodes.reserve(validation.same_tick_topology.size());
+  for (uint32_t node_id : validation.same_tick_topology)
   {
+    const auto & node = spec.nodes[node_id];
+    lowered.scheduled_nodes.push_back(LoweredCompositeModule::ScheduledNode{
+      node.id,
+      node.kind,
+      node.label});
     if (node.kind == NodeKind::Delay)
     {
       ++lowered.delayed_node_count;
     }
+  }
+  for (uint32_t edge_id = 0; edge_id < spec.edges.size(); ++edge_id)
+  {
+    const auto & edge = spec.edges[edge_id];
+    if (edge.timing != ConnectionTiming::Delayed)
+    {
+      continue;
+    }
+    lowered.delayed_edges.push_back(LoweredCompositeModule::DelayedEdgeState{
+      edge_id,
+      edge.src,
+      edge.dst,
+      static_cast<uint32_t>(lowered.delayed_edges.size())});
   }
   return lowered;
 }

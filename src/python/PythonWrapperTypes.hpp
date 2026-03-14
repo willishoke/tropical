@@ -129,6 +129,7 @@ class PythonGraph
       std::vector<expr::ExprSpecPtr> register_exprs,
       std::vector<expr::Value> initial_registers,
       std::vector<Module::RegisterArraySpec> register_array_specs,
+      std::vector<Module::CompositeUpdateSpec> composite_update_specs,
       double sample_rate)
     {
       return graph_.addModule(
@@ -139,6 +140,7 @@ class PythonGraph
           std::move(register_exprs),
           std::move(initial_registers),
           std::move(register_array_specs),
+          std::move(composite_update_specs),
           sample_rate));
     }
 
