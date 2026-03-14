@@ -3,13 +3,14 @@
 void Module::process(const std::vector<bool> * output_materialize_mask)
 {
   resize_array_registers_to_inputs();
+  const bool use_composite_programs = has_nested_modules_ || has_delay_states_;
 #ifdef EGRESS_LLVM_ORC_JIT
-  if (!has_dynamic_registers_ && !has_nested_modules_ && !has_delay_states_)
+  if (!has_dynamic_registers_)
   {
     ensure_numeric_jit_current();
   }
 
-  if (jit_kernel_)
+  if (!use_composite_programs && jit_kernel_)
   {
     if (!sync_numeric_inputs_from_values())
     {
@@ -121,17 +122,36 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     }
   }
 #endif
-
-  const bool use_composite_programs = has_nested_modules_ || has_delay_states_;
   bool composite_outputs_materialized = false;
   for (uint32_t node_id : composite_schedule_)
   {
     if (use_composite_programs && node_id == composite_output_boundary_id_)
     {
-      eval_program(composite_output_program_, temps_);
-      for (unsigned int output_id = 0; output_id < composite_output_program_.output_targets.size(); ++output_id)
+ #ifdef EGRESS_LLVM_ORC_JIT
+      bool used_jit_outputs = false;
+      if (!has_dynamic_registers_)
       {
-        outputs[output_id] = temps_[composite_output_program_.output_targets[output_id]];
+        ensure_numeric_jit_state_current(
+          composite_output_jit_,
+          composite_output_program_,
+          inputs,
+          static_cast<unsigned int>(inputs.size()),
+          "egress_udm_composite_output");
+        if (composite_output_jit_.kernel != nullptr &&
+            run_numeric_jit_state(composite_output_jit_, inputs))
+        {
+          materialize_numeric_outputs(composite_output_jit_, composite_output_program_, outputs, output_materialize_mask);
+          used_jit_outputs = true;
+        }
+      }
+      if (!used_jit_outputs)
+ #endif
+      {
+        eval_program(composite_output_program_, temps_);
+        for (unsigned int output_id = 0; output_id < composite_output_program_.output_targets.size(); ++output_id)
+        {
+          outputs[output_id] = temps_[composite_output_program_.output_targets[output_id]];
+        }
       }
       composite_outputs_materialized = true;
       continue;
@@ -144,10 +164,33 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     }
 
     NestedModuleRuntime & nested = nested_modules_[nested_it->second];
+#ifdef EGRESS_LLVM_ORC_JIT
+    bool used_jit_inputs = false;
+    if (!has_dynamic_registers_ &&
+        nested_it->second < nested_input_jit_states_.size() &&
+        nested_input_jit_states_[nested_it->second])
+    {
+      NumericJitState & input_jit = *nested_input_jit_states_[nested_it->second];
+      ensure_numeric_jit_state_current(
+        input_jit,
+        nested.input_program,
+        inputs,
+        static_cast<unsigned int>(inputs.size()),
+        "egress_udm_nested_input");
+      if (run_numeric_jit_state(input_jit, inputs))
+      {
+        materialize_numeric_outputs(input_jit, nested.input_program, nested.module->inputs);
+        used_jit_inputs = true;
+      }
+    }
+    if (!used_jit_inputs)
+#endif
+    {
     eval_program(nested.input_program, nested.input_temps);
     for (unsigned int input_id = 0; input_id < nested.input_program.output_targets.size(); ++input_id)
     {
       nested.module->inputs[input_id] = nested.input_temps[nested.input_program.output_targets[input_id]];
+    }
     }
     nested.module->process();
   }
@@ -170,32 +213,73 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     throw std::invalid_argument("Composite module schedule did not materialize the output boundary.");
   }
 
-  eval_program(register_program, temps_);
-  for (unsigned int register_id = 0; register_id < register_program.register_targets.size(); ++register_id)
+#ifdef EGRESS_LLVM_ORC_JIT
+  if (use_composite_programs &&
+      !has_dynamic_registers_ &&
+      (ensure_numeric_jit_state_current(
+         composite_register_jit_,
+         composite_register_program_,
+         inputs,
+         static_cast<unsigned int>(inputs.size()),
+         "egress_udm_composite_register"),
+       composite_register_jit_.kernel != nullptr) &&
+      run_numeric_jit_state(composite_register_jit_, inputs))
   {
-    const int32_t target = register_program.register_targets[register_id];
-    if (target >= 0)
+    apply_numeric_register_targets(composite_register_jit_, register_program);
+  }
+  else
+#endif
+  {
+    eval_program(register_program, temps_);
+    for (unsigned int register_id = 0; register_id < register_program.register_targets.size(); ++register_id)
     {
-      next_registers_[register_id] = temps_[static_cast<std::size_t>(target)];
+      const int32_t target = register_program.register_targets[register_id];
+      if (target >= 0)
+      {
+        next_registers_[register_id] = temps_[static_cast<std::size_t>(target)];
+      }
+      else
+      {
+        next_registers_[register_id] = registers_[register_id];
+      }
     }
-    else
-    {
-      next_registers_[register_id] = registers_[register_id];
-    }
+    registers_.swap(next_registers_);
   }
 
   if (!delay_update_program_.output_targets.empty())
   {
-    eval_program(delay_update_program_, temps_);
-    next_delay_states_ = delay_states_;
-    for (unsigned int delay_id = 0; delay_id < delay_update_program_.output_targets.size(); ++delay_id)
+#ifdef EGRESS_LLVM_ORC_JIT
+    if (!has_dynamic_registers_ &&
+        (ensure_numeric_jit_state_current(
+           delay_update_jit_,
+           delay_update_program_,
+           inputs,
+           static_cast<unsigned int>(inputs.size()),
+           "egress_udm_delay_update"),
+         delay_update_jit_.kernel != nullptr) &&
+        run_numeric_jit_state(delay_update_jit_, inputs))
     {
-      next_delay_states_[delay_id] = temps_[delay_update_program_.output_targets[delay_id]];
+      next_delay_states_ = delay_states_;
+      materialize_numeric_outputs(delay_update_jit_, delay_update_program_, next_delay_states_);
+      delay_states_.swap(next_delay_states_);
     }
-    delay_states_.swap(next_delay_states_);
+    else
+#endif
+    {
+      eval_program(delay_update_program_, temps_);
+      next_delay_states_ = delay_states_;
+      for (unsigned int delay_id = 0; delay_id < delay_update_program_.output_targets.size(); ++delay_id)
+      {
+        next_delay_states_[delay_id] = temps_[delay_update_program_.output_targets[delay_id]];
+      }
+      delay_states_.swap(next_delay_states_);
+    }
   }
 
-  registers_.swap(next_registers_);
+  if (!use_composite_programs || has_dynamic_registers_)
+  {
+    registers_.swap(next_registers_);
+  }
   ++sample_index_;
   postprocess();
 }
@@ -237,6 +321,25 @@ Module::CompileStats Module::compile_stats() const
   stats.nested_module_count = static_cast<uint64_t>(nested_modules_.size());
 #ifdef EGRESS_LLVM_ORC_JIT
   stats.numeric_jit_instruction_count = numeric_jit_instruction_count_;
+  if (composite_output_jit_.kernel != nullptr)
+  {
+    stats.numeric_jit_instruction_count += composite_output_jit_.instruction_count;
+  }
+  if (composite_register_jit_.kernel != nullptr)
+  {
+    stats.numeric_jit_instruction_count += composite_register_jit_.instruction_count;
+  }
+  if (delay_update_jit_.kernel != nullptr)
+  {
+    stats.numeric_jit_instruction_count += delay_update_jit_.instruction_count;
+  }
+  for (const auto & state : nested_input_jit_states_)
+  {
+    if (state && state->kernel != nullptr)
+    {
+      stats.numeric_jit_instruction_count += state->instruction_count;
+    }
+  }
   stats.jit_status = jit_status_;
   #else
   stats.jit_status = "LLVM ORC JIT disabled";

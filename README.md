@@ -113,7 +113,7 @@ Allpass = eg.define_module(
 )
 ```
 
-The initial implementation is conservative: scalar and static 1-D array registers are supported, but dynamic `array_state(...)` registers are not yet supported inside same-tick module calls inside another module body.
+Composite modules built from nested module calls and explicit delays now participate in the numeric JIT when their state is scalar or static 1-D array based. Dynamic `array_state(...)` registers are still not supported inside same-tick module calls inside another module body.
 
 For an explicit one-sample boundary inside a module body, use `eg.delay(expr, init=...)`. This creates compiler-managed composite delay state for that connection and returns the previous sample's value, which makes delayed composition explicit even when chaining module calls inline.
 

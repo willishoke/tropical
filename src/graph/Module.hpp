@@ -154,13 +154,13 @@ class Module
       temps_.assign(temp_register_count, expr::float_value(0.0));
 
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_ && !has_nested_modules_ && !has_delay_states_)
+      if (!has_dynamic_registers_)
       {
         initialize_numeric_jit(inputs);
       }
-      else if (has_nested_modules_ || has_delay_states_)
+      else
       {
-        jit_status_ = "numeric JIT disabled for composite execution";
+        jit_status_ = "numeric JIT disabled for dynamic array_state registers";
       }
 #endif
     }
@@ -246,8 +246,6 @@ class Module
     egress_jit::NumericKernelFn jit_kernel_ = nullptr;
     std::vector<double> numeric_inputs_;
     std::vector<double> numeric_temps_;
-    std::vector<double> numeric_registers_;
-    std::vector<double> numeric_next_registers_;
     std::vector<std::vector<double>> numeric_array_storage_;
     std::vector<double *> numeric_array_ptrs_;
     std::vector<uint64_t> numeric_array_sizes_;
@@ -257,6 +255,52 @@ class Module
     std::vector<bool> array_register_can_swap_;
     std::vector<NumericInputInfo> numeric_input_info_;
     std::vector<NumericOutputInfo> numeric_output_info_;
+    enum class NumericSyntheticInputKind : uint8_t
+    {
+      NestedOutput,
+      DelayState
+    };
+
+    struct NumericSyntheticInput
+    {
+      NumericSyntheticInputKind kind = NumericSyntheticInputKind::NestedOutput;
+      uint32_t slot_id = 0;
+      uint32_t output_id = 0;
+      uint32_t input_slot = 0;
+    };
+
+    struct PreparedNumericJitProgram
+    {
+      CompiledProgram program;
+      std::vector<NumericSyntheticInput> synthetic_inputs;
+    };
+
+    struct NumericJitState
+    {
+      egress_jit::NumericKernelFn kernel = nullptr;
+      PreparedNumericJitProgram prepared;
+      std::vector<NumericInputInfo> input_info;
+      std::vector<NumericOutputInfo> output_info;
+      std::vector<double> inputs;
+      std::vector<double> temps;
+      std::vector<std::vector<double>> array_storage;
+      std::vector<double *> array_ptrs;
+      std::vector<uint64_t> array_sizes;
+      std::vector<bool> register_scalar_mask;
+      std::vector<uint32_t> register_array_slot;
+      std::vector<int32_t> array_register_targets;
+      std::vector<bool> array_register_can_swap;
+  #ifdef EGRESS_PROFILE
+      uint64_t instruction_count = 0;
+  #endif
+    };
+
+    std::vector<double> numeric_registers_;
+    std::vector<double> numeric_next_registers_;
+    NumericJitState composite_output_jit_;
+    NumericJitState composite_register_jit_;
+    NumericJitState delay_update_jit_;
+    std::vector<std::unique_ptr<NumericJitState>> nested_input_jit_states_;
     std::string jit_status_;
   #ifdef EGRESS_PROFILE
     uint64_t numeric_jit_instruction_count_ = 0;
@@ -281,13 +325,88 @@ class Module
 
     uint32_t allocate_array_slot_with_size(std::size_t size);
 
+    static bool add_array_values_to_jit_table(
+      std::vector<std::vector<double>> & array_storage,
+      const std::vector<Value> & values,
+      uint32_t & out_slot);
+
+    static bool add_matrix_values_to_jit_table(
+      std::vector<std::vector<double>> & array_storage,
+      const Value & value,
+      uint32_t & out_slot);
+
+    static uint32_t allocate_array_slot_with_size(
+      std::vector<std::vector<double>> & array_storage,
+      std::size_t size);
+
     bool configure_numeric_inputs_for_jit(const std::vector<Value> & current_inputs);
 
     bool numeric_input_layout_matches(const std::vector<Value> & current_inputs) const;
 
     bool sync_numeric_inputs_from_values();
 
-    bool build_numeric_program(const std::vector<Value> & current_inputs, egress_jit::NumericProgram & numeric_program);
+    bool prepare_numeric_jit_program(
+      const CompiledProgram & source_program,
+      unsigned int base_input_count,
+      PreparedNumericJitProgram & prepared) const;
+
+    std::vector<Value> build_numeric_jit_inputs(
+      const std::vector<Value> & current_inputs,
+      const PreparedNumericJitProgram & prepared) const;
+
+    bool configure_numeric_inputs_for_jit(
+      NumericJitState & state,
+      const std::vector<Value> & current_inputs);
+
+    bool numeric_input_layout_matches(
+      const NumericJitState & state,
+      const std::vector<Value> & current_inputs) const;
+
+    bool sync_numeric_inputs_from_values(
+      NumericJitState & state,
+      const std::vector<Value> & current_inputs);
+
+    bool sync_numeric_register_arrays_from_values(NumericJitState & state);
+
+    bool build_numeric_program(
+      const std::vector<Value> & current_inputs,
+      egress_jit::NumericProgram & numeric_program);
+
+    bool build_numeric_program(
+      const CompiledProgram & compiled_program,
+      NumericJitState & state,
+      const std::vector<Value> & current_inputs,
+      egress_jit::NumericProgram & numeric_program);
+
+    void initialize_numeric_jit_state(
+      NumericJitState & state,
+      const CompiledProgram & source_program,
+      const std::vector<Value> & current_inputs,
+      unsigned int base_input_count,
+      const std::string & symbol_prefix);
+
+    void ensure_numeric_jit_state_current(
+      NumericJitState & state,
+      const CompiledProgram & source_program,
+      const std::vector<Value> & current_inputs,
+      unsigned int base_input_count,
+      const std::string & symbol_prefix);
+
+    bool run_numeric_jit_state(
+      NumericJitState & state,
+      const std::vector<Value> & current_inputs);
+
+    void materialize_numeric_outputs(
+      const NumericJitState & state,
+      const CompiledProgram & compiled_program,
+      std::vector<Value> & destinations,
+      const std::vector<bool> * materialize_mask = nullptr);
+
+    void apply_numeric_register_targets(
+      NumericJitState & state,
+      const CompiledProgram & compiled_program);
+
+    void sync_value_registers_from_numeric_state(const NumericJitState & state);
 
     void initialize_numeric_jit(const std::vector<Value> & current_inputs);
 

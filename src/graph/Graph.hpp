@@ -604,9 +604,7 @@ class Graph
       eval_input_program(runtime, input_program, input_registers, input_values);
       module_it->second.module->inputs = std::move(input_values);
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (!module_it->second.module->has_dynamic_registers_ &&
-          !module_it->second.module->has_nested_modules_ &&
-          !module_it->second.module->has_delay_states_)
+      if (!module_it->second.module->has_dynamic_registers_)
       {
         module_it->second.module->ensure_numeric_jit_current();
       }
