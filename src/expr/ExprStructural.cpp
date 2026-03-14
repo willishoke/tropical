@@ -115,6 +115,7 @@ bool is_pure_function_body(const ExprSpecPtr & expr_spec, unsigned int param_cou
     case ExprKind::Ref:
     case ExprKind::RegisterValue:
     case ExprKind::NestedValue:
+    case ExprKind::DelayValue:
     case ExprKind::SampleIndex:
       return false;
     case ExprKind::InputValue:
@@ -180,6 +181,7 @@ ExprSpecPtr clone_with_subst(
     case ExprKind::Ref:
     case ExprKind::RegisterValue:
     case ExprKind::NestedValue:
+    case ExprKind::DelayValue:
     case ExprKind::SampleRate:
     case ExprKind::SampleIndex:
       return expr_spec;
@@ -268,6 +270,7 @@ std::size_t structural_hash(
     case ExprKind::InputValue:
     case ExprKind::RegisterValue:
     case ExprKind::NestedValue:
+    case ExprKind::DelayValue:
       seed = hash_mix(seed, std::hash<unsigned int>{}(expr_spec->slot_id));
       if (expr_spec->kind == ExprKind::NestedValue)
       {
@@ -381,6 +384,8 @@ bool structural_equal(const ExprSpecPtr & lhs, const ExprSpecPtr & rhs)
       return lhs->slot_id == rhs->slot_id;
     case ExprKind::NestedValue:
       return lhs->slot_id == rhs->slot_id && lhs->output_id == rhs->output_id;
+    case ExprKind::DelayValue:
+      return lhs->slot_id == rhs->slot_id;
     case ExprKind::Function:
       return lhs->param_count == rhs->param_count && structural_equal(lhs->lhs, rhs->lhs);
     case ExprKind::Call:
@@ -515,6 +520,7 @@ ExprSpecPtr inline_functions(const ExprSpecPtr & expr_spec, unsigned int inline_
       expr_spec->kind == ExprKind::InputValue ||
       expr_spec->kind == ExprKind::RegisterValue ||
       expr_spec->kind == ExprKind::NestedValue ||
+      expr_spec->kind == ExprKind::DelayValue ||
       expr_spec->kind == ExprKind::SampleRate ||
       expr_spec->kind == ExprKind::SampleIndex)
   {

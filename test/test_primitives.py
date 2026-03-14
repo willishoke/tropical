@@ -177,6 +177,7 @@ def main():
     assert stats["instruction_count"] > 0
     assert stats["jit_status"] == "numeric JIT active"
     assert stats["numeric_jit_instruction_count"] > 0
+    assert "composite_update_count" not in stats
 
     print("primitive-ok", round(buf[0], 6), stats["numeric_jit_instruction_count"], stats["jit_status"])
 
@@ -238,6 +239,11 @@ def main():
     module_buf = eg.graph().output_buffer()
     assert math.isclose(module_buf[0], -0.25 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
 
+    module_stats = module_compose.compile_stats
+    assert module_stats["jit_status"] == "numeric JIT disabled for composite execution"
+    assert module_stats["nested_module_count"] >= 2
+    assert "composite_update_count" not in module_stats
+
     eg.graph().process()
     module_buf = eg.graph().output_buffer()
     assert math.isclose(module_buf[0], 2.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
@@ -254,6 +260,11 @@ def main():
 
     delay_buf = eg.graph().output_buffer()
     assert math.isclose(delay_buf[0], 4.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+
+    delay_compile_stats = delay_probe.compile_stats
+    assert delay_compile_stats["jit_status"] == "numeric JIT disabled for composite execution"
+    assert delay_compile_stats["numeric_jit_instruction_count"] == 0
+    assert "composite_update_count" not in delay_compile_stats
 
     eg.graph().process()
     delay_buf = eg.graph().output_buffer()

@@ -93,7 +93,7 @@ Expression trees now preserve simple scalar types: `bool`, `int`, and `float`. A
 
 Exponentiation is now a first-class symbolic operation as well. Use either `lhs ** rhs` or `eg.pow(lhs, rhs)` inside pure functions and module definitions.
 
-For reusable stateful building blocks inside a module definition, define an ordinary `eg.define_module(...)` and call it directly from another module body. The call does not create a top-level runtime graph node; instead it becomes a local child module inside the enclosing module, so chained calls remain same-sample unless you add an explicit `eg.delay(...)`.
+For reusable stateful building blocks inside a module definition, define an ordinary `eg.define_module(...)` and call it directly from another module body. The call does not create a top-level runtime graph node; instead it becomes a local child module inside the enclosing module. User-declared `regs={...}` remain module-owned state, while composition-introduced state such as explicit delays is stored in compiler-managed composite state.
 
 ```python
 Allpass = eg.define_module(
@@ -115,7 +115,7 @@ Allpass = eg.define_module(
 
 The initial implementation is conservative: scalar and static 1-D array registers are supported, but dynamic `array_state(...)` registers are not yet supported inside same-tick module calls inside another module body.
 
-For an explicit one-sample boundary inside a module body, use `eg.delay(expr, init=...)`. This allocates a hidden state cell in the enclosing module and returns the previous sample's value, which makes delayed composition explicit even when chaining module calls inline.
+For an explicit one-sample boundary inside a module body, use `eg.delay(expr, init=...)`. This creates compiler-managed composite delay state for that connection and returns the previous sample's value, which makes delayed composition explicit even when chaining module calls inline.
 
 ```python
 Diff = eg.define_module(

@@ -32,7 +32,7 @@ struct ModuleDefinition
   std::vector<expr::ExprSpecPtr> input_defaults;
   std::vector<expr::ExprSpecPtr> output_exprs;
   std::vector<expr::ExprSpecPtr> register_exprs;
-  std::vector<Module::CompositeUpdateSpec> composite_update_specs;
+  std::vector<Module::DelayStateSpec> delay_state_specs;
   std::vector<Module::NestedModuleSpec> nested_module_specs;
   std::vector<Module::RegisterArraySpec> register_array_specs;
   std::shared_ptr<egress_composition::CompositeModuleSpec> composite_spec;
@@ -51,16 +51,10 @@ struct PureFunctionDefinition
 
 struct DefinitionBuildContext
 {
-  struct PendingCompositeUpdateSpec
-  {
-    std::string label;
-    std::vector<std::pair<uint32_t, expr::ExprSpecPtr>> register_updates;
-  };
-
   std::vector<std::string> register_names;
   std::vector<expr::Value> initial_registers;
   std::vector<expr::ExprSpecPtr> register_exprs;
-  std::vector<PendingCompositeUpdateSpec> composite_update_specs;
+  std::vector<Module::DelayStateSpec> delay_state_specs;
   std::vector<Module::NestedModuleSpec> nested_module_specs;
   std::vector<Module::RegisterArraySpec> register_array_specs;
   std::shared_ptr<egress_composition::CompositeModuleSpec> composite_spec;
@@ -82,30 +76,12 @@ struct DefinitionBuildContext
     return slot;
   }
 
-  unsigned int append_hidden_register(
-    const std::string & base_name,
-    const expr::Value & initial_value,
-    const Module::RegisterArraySpec & array_spec)
+  void add_delay_state(uint32_t node_id, expr::Value initial_value, expr::ExprSpecPtr update_expr)
   {
-    const std::string hidden_name = "__stateful_" + std::to_string(hidden_counter++) + "_" + base_name;
-    return append_register(hidden_name, initial_value, array_spec);
-  }
-
-  unsigned int append_hidden_delay_register(const expr::Value & initial_value)
-  {
-    return append_register(
-      "__delay_" + std::to_string(hidden_counter++),
-      initial_value,
-      Module::RegisterArraySpec{});
-  }
-
-  void add_composite_update(
-    std::string label,
-    std::vector<std::pair<uint32_t, expr::ExprSpecPtr>> register_updates)
-  {
-    composite_update_specs.push_back(PendingCompositeUpdateSpec{
-      std::move(label),
-      std::move(register_updates)});
+    delay_state_specs.push_back(Module::DelayStateSpec{
+      node_id,
+      std::move(initial_value),
+      std::move(update_expr)});
   }
 
   void initialize_composite_spec(const std::string & label, uint32_t input_count, uint32_t output_count)
@@ -146,98 +122,6 @@ class ScopedDefinitionBuildContext
     DefinitionBuildContext * previous_ = nullptr;
 };
 
-static expr::ExprSpecPtr clone_with_input_and_register_subst(
-  const expr::ExprSpecPtr & expr,
-  const std::vector<expr::ExprSpecPtr> & input_args,
-  const std::vector<unsigned int> & register_slots)
-{
-  if (!expr)
-  {
-    return nullptr;
-  }
-
-  switch (expr->kind)
-  {
-    case ExprKind::Literal:
-    case ExprKind::Ref:
-    case ExprKind::NestedValue:
-    case ExprKind::SampleRate:
-    case ExprKind::SampleIndex:
-      return expr;
-    case ExprKind::InputValue:
-      if (expr->slot_id >= input_args.size())
-      {
-        throw std::invalid_argument("Stateful function argument index out of range.");
-      }
-      return input_args[expr->slot_id];
-    case ExprKind::RegisterValue:
-      if (expr->slot_id >= register_slots.size())
-      {
-        throw std::invalid_argument("Stateful function register index out of range.");
-      }
-      return expr::register_value_expr(register_slots[expr->slot_id]);
-    case ExprKind::Function:
-      return expr::function_expr(
-        expr->param_count,
-        clone_with_input_and_register_subst(expr->lhs, input_args, register_slots));
-    case ExprKind::Call:
-    {
-      std::vector<expr::ExprSpecPtr> args;
-      args.reserve(expr->args.size());
-      for (const auto & arg : expr->args)
-      {
-        args.push_back(clone_with_input_and_register_subst(arg, input_args, register_slots));
-      }
-      return expr::call_expr(
-        clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
-        std::move(args));
-    }
-    case ExprKind::ArrayPack:
-    {
-      std::vector<expr::ExprSpecPtr> items;
-      items.reserve(expr->args.size());
-      for (const auto & arg : expr->args)
-      {
-        items.push_back(clone_with_input_and_register_subst(arg, input_args, register_slots));
-      }
-      return expr::array_pack_expr(std::move(items));
-    }
-    case ExprKind::Clamp:
-      return expr::clamp_expr(
-        clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
-        clone_with_input_and_register_subst(expr->rhs, input_args, register_slots),
-        clone_with_input_and_register_subst(expr->args.empty() ? nullptr : expr->args.front(), input_args, register_slots));
-    case ExprKind::ArraySet:
-      return expr::array_set_expr(
-        clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
-        clone_with_input_and_register_subst(expr->rhs, input_args, register_slots),
-        clone_with_input_and_register_subst(expr->args.empty() ? nullptr : expr->args.front(), input_args, register_slots));
-    case ExprKind::Index:
-      return expr::index_expr(
-        clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
-        clone_with_input_and_register_subst(expr->rhs, input_args, register_slots));
-    default:
-      break;
-  }
-
-  if (expr->kind == ExprKind::Abs ||
-      expr->kind == ExprKind::Neg ||
-      expr->kind == ExprKind::Not ||
-      expr->kind == ExprKind::BitNot ||
-      expr->kind == ExprKind::Log ||
-      expr->kind == ExprKind::Sin)
-  {
-    return expr::unary_expr(
-      expr->kind,
-      clone_with_input_and_register_subst(expr->lhs, input_args, register_slots));
-  }
-
-  return expr::binary_expr(
-    expr->kind,
-    clone_with_input_and_register_subst(expr->lhs, input_args, register_slots),
-    clone_with_input_and_register_subst(expr->rhs, input_args, register_slots));
-}
-
 static std::vector<egress_composition::PortRef> dedupe_sources(
   std::vector<egress_composition::PortRef> sources)
 {
@@ -263,33 +147,16 @@ static std::vector<egress_composition::PortRef> merge_sources(
   return dedupe_sources(std::move(merged));
 }
 
-static std::vector<Module::CompositeUpdateSpec> finalize_composite_updates(
-  const DefinitionBuildContext & build_context)
-{
-  std::vector<Module::CompositeUpdateSpec> finalized;
-  finalized.reserve(build_context.composite_update_specs.size());
-  for (const auto & pending : build_context.composite_update_specs)
-  {
-    Module::CompositeUpdateSpec spec;
-    spec.label = pending.label;
-    spec.register_exprs.assign(build_context.register_names.size(), nullptr);
-    for (const auto & update : pending.register_updates)
-    {
-      if (update.first >= spec.register_exprs.size())
-      {
-        throw std::invalid_argument("Composite update register slot out of range.");
-      }
-      spec.register_exprs[update.first] = update.second;
-    }
-    finalized.push_back(std::move(spec));
-  }
-  return finalized;
-}
-
 static std::vector<Module::NestedModuleSpec> finalize_nested_modules(
   const DefinitionBuildContext & build_context)
 {
   return build_context.nested_module_specs;
+}
+
+static std::vector<Module::DelayStateSpec> finalize_delay_states(
+  const DefinitionBuildContext & build_context)
+{
+  return build_context.delay_state_specs;
 }
 
 static uint32_t add_composite_call_node(
@@ -361,7 +228,7 @@ class PyModuleInstance
             definition_->register_exprs,
             definition_->initial_registers,
             definition_->register_array_specs,
-            definition_->composite_update_specs,
+            definition_->delay_state_specs,
             definition_->nested_module_specs,
             definition_->composite_schedule,
             definition_->output_boundary_id,
@@ -476,7 +343,6 @@ class PyModuleInstance
       result["instruction_count"] = stats.instruction_count;
       result["register_count"] = stats.register_count;
       result["numeric_jit_instruction_count"] = stats.numeric_jit_instruction_count;
-      result["composite_update_count"] = stats.composite_update_count;
       result["nested_module_count"] = stats.nested_module_count;
       result["jit_status"] = stats.jit_status;
       return result;
@@ -623,7 +489,7 @@ class PyModuleType
       nested_spec.register_exprs = definition_->register_exprs;
       nested_spec.initial_registers = definition_->initial_registers;
       nested_spec.register_array_specs = definition_->register_array_specs;
-      nested_spec.composite_update_specs = definition_->composite_update_specs;
+      nested_spec.delay_state_specs = definition_->delay_state_specs;
       nested_spec.nested_module_specs = definition_->nested_module_specs;
       nested_spec.composite_schedule = definition_->composite_schedule;
       nested_spec.output_boundary_id = definition_->output_boundary_id;
@@ -1005,10 +871,6 @@ static SignalExpr delay_expr(const py::handle & value, const py::handle & init)
   }
 
   const expr::Value initial_value = init.is_none() ? expr::float_value(0.0) : value_from_py(init);
-  const unsigned int delay_slot = current_definition_context_->append_hidden_delay_register(initial_value);
-  current_definition_context_->add_composite_update(
-    "delay",
-    {std::make_pair(delay_slot, signal.spec)});
   uint32_t delay_node_id = std::numeric_limits<uint32_t>::max();
   if (current_definition_context_->composite_spec)
   {
@@ -1025,9 +887,10 @@ static SignalExpr delay_expr(const py::handle & value, const py::handle & init)
         egress_composition::ConnectionTiming::Delayed);
     }
   }
+  current_definition_context_->add_delay_state(delay_node_id, initial_value, signal.spec);
   return make_signal_expr(
     nullptr,
-    expr::register_value_expr(delay_slot),
+    expr::delay_value_expr(delay_node_id),
     delay_node_id == std::numeric_limits<uint32_t>::max()
       ? std::vector<egress_composition::PortRef>{}
       : std::vector<egress_composition::PortRef>{egress_composition::PortRef{delay_node_id, 0}});

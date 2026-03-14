@@ -29,7 +29,6 @@ class Module
       uint64_t instruction_count = 0;
       uint64_t register_count = 0;
       uint64_t numeric_jit_instruction_count = 0;
-      uint64_t composite_update_count = 0;
       uint64_t nested_module_count = 0;
       std::string jit_status;
     };
@@ -42,10 +41,11 @@ class Module
       Value init_value;
     };
 
-    struct CompositeUpdateSpec
+    struct DelayStateSpec
     {
-      std::string label;
-      std::vector<ExprSpecPtr> register_exprs;
+      uint32_t node_id = 0;
+      Value initial_value;
+      ExprSpecPtr update_expr;
     };
 
     struct NestedModuleSpec
@@ -58,7 +58,7 @@ class Module
       std::vector<ExprSpecPtr> register_exprs;
       std::vector<Value> initial_registers;
       std::vector<RegisterArraySpec> register_array_specs;
-      std::vector<CompositeUpdateSpec> composite_update_specs;
+      std::vector<DelayStateSpec> delay_state_specs;
       std::vector<NestedModuleSpec> nested_module_specs;
       std::vector<uint32_t> composite_schedule;
       uint32_t output_boundary_id = std::numeric_limits<uint32_t>::max();
@@ -73,7 +73,7 @@ class Module
       std::vector<ExprSpecPtr> register_exprs,
       std::vector<Value> initial_registers,
       std::vector<RegisterArraySpec> register_array_specs,
-      std::vector<CompositeUpdateSpec> composite_update_specs,
+      std::vector<DelayStateSpec> delay_state_specs,
       std::vector<NestedModuleSpec> nested_module_specs,
       std::vector<uint32_t> composite_schedule,
       uint32_t output_boundary_id,
@@ -99,9 +99,20 @@ class Module
       }
 
       program_ = compile_program(output_exprs, register_exprs);
-      for (const auto & composite_update_spec : composite_update_specs)
+      std::vector<ExprSpecPtr> delay_update_exprs;
+      delay_update_exprs.reserve(delay_state_specs.size());
+      delay_states_.reserve(delay_state_specs.size());
+      next_delay_states_.reserve(delay_state_specs.size());
+      for (const auto & delay_state_spec : delay_state_specs)
       {
-        composite_update_programs_.push_back(compile_program({}, composite_update_spec.register_exprs));
+        delay_state_lookup_[delay_state_spec.node_id] = delay_states_.size();
+        delay_states_.push_back(delay_state_spec.initial_value);
+        next_delay_states_.push_back(delay_state_spec.initial_value);
+        delay_update_exprs.push_back(delay_state_spec.update_expr);
+      }
+      if (!delay_update_exprs.empty())
+      {
+        delay_update_program_ = compile_program(delay_update_exprs, {});
       }
       composite_schedule_ = std::move(composite_schedule);
       for (auto & nested_module_spec : nested_module_specs)
@@ -116,7 +127,7 @@ class Module
           std::move(nested_module_spec.register_exprs),
           std::move(nested_module_spec.initial_registers),
           std::move(nested_module_spec.register_array_specs),
-          std::move(nested_module_spec.composite_update_specs),
+          std::move(nested_module_spec.delay_state_specs),
           std::move(nested_module_spec.nested_module_specs),
           std::move(nested_module_spec.composite_schedule),
           nested_module_spec.output_boundary_id,
@@ -124,26 +135,32 @@ class Module
         nested_module_lookup_[runtime.node_id] = nested_modules_.size();
         nested_modules_.push_back(std::move(runtime));
       }
-      has_composite_updates_ = !composite_update_programs_.empty();
       has_nested_modules_ = !nested_modules_.empty();
-      if (has_composite_updates_ || has_nested_modules_)
+      has_delay_states_ = !delay_states_.empty();
+      if (has_nested_modules_ || has_delay_states_)
       {
+        if (composite_output_boundary_id_ == std::numeric_limits<uint32_t>::max())
+        {
+          throw std::invalid_argument("Composite runtime requires a valid output boundary node.");
+        }
         composite_output_program_ = compile_program(output_exprs, {});
         composite_register_program_ = compile_program({}, register_exprs);
       }
       const uint32_t temp_register_count = std::max(
         program_.register_count,
-        std::max(composite_output_program_.register_count, composite_register_program_.register_count));
+        std::max(
+          composite_output_program_.register_count,
+          std::max(composite_register_program_.register_count, delay_update_program_.register_count)));
       temps_.assign(temp_register_count, expr::float_value(0.0));
 
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_ && !has_composite_updates_ && !has_nested_modules_)
+      if (!has_dynamic_registers_ && !has_nested_modules_ && !has_delay_states_)
       {
         initialize_numeric_jit(inputs);
       }
-      else if (has_composite_updates_ || has_nested_modules_)
+      else if (has_nested_modules_ || has_delay_states_)
       {
-        jit_status_ = "numeric JIT disabled for composite runtime";
+        jit_status_ = "numeric JIT disabled for composite execution";
       }
 #endif
     }
@@ -208,18 +225,21 @@ class Module
     CompiledProgram program_;
     CompiledProgram composite_output_program_;
     CompiledProgram composite_register_program_;
+    CompiledProgram delay_update_program_;
     std::vector<Value> temps_;
     std::vector<Value> registers_;
     std::vector<Value> next_registers_;
-    std::vector<CompiledProgram> composite_update_programs_;
+    std::vector<Value> delay_states_;
+    std::vector<Value> next_delay_states_;
     std::vector<NestedModuleRuntime> nested_modules_;
     std::unordered_map<uint32_t, std::size_t> nested_module_lookup_;
+    std::unordered_map<uint32_t, std::size_t> delay_state_lookup_;
     std::vector<uint32_t> composite_schedule_;
     uint32_t composite_output_boundary_id_ = std::numeric_limits<uint32_t>::max();
     std::vector<RegisterArraySpec> register_array_specs_;
     bool has_dynamic_registers_ = false;
-    bool has_composite_updates_ = false;
     bool has_nested_modules_ = false;
+    bool has_delay_states_ = false;
     double sample_rate_ = 44100.0;
     uint64_t sample_index_ = 0;
 #ifdef EGRESS_LLVM_ORC_JIT

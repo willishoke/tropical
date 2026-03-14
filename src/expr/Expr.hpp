@@ -38,6 +38,7 @@ enum class ExprKind
   InputValue,
   RegisterValue,
   NestedValue,
+  DelayValue,
   SampleRate,
   SampleIndex,
   Function,
@@ -542,6 +543,14 @@ inline ExprSpecPtr nested_value_expr(unsigned int node_id, unsigned int output_i
   expr->kind = ExprKind::NestedValue;
   expr->slot_id = node_id;
   expr->output_id = output_id;
+  return expr;
+}
+
+inline ExprSpecPtr delay_value_expr(unsigned int node_id)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::DelayValue;
+  expr->slot_id = node_id;
   return expr;
 }
 

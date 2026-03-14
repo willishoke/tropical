@@ -10,6 +10,7 @@ bool Module::supports_numeric_jit_expr_kind(ExprKind kind) const
     case ExprKind::InputValue:
     case ExprKind::RegisterValue:
     case ExprKind::NestedValue:
+    case ExprKind::DelayValue:
     case ExprKind::SampleRate:
     case ExprKind::SampleIndex:
     case ExprKind::Not:

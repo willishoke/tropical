@@ -4,7 +4,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
 {
   resize_array_registers_to_inputs();
 #ifdef EGRESS_LLVM_ORC_JIT
-  if (!has_dynamic_registers_ && !has_composite_updates_ && !has_nested_modules_)
+  if (!has_dynamic_registers_ && !has_nested_modules_ && !has_delay_states_)
   {
     ensure_numeric_jit_current();
   }
@@ -122,11 +122,11 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   }
 #endif
 
+  const bool use_composite_programs = has_nested_modules_ || has_delay_states_;
   bool composite_outputs_materialized = false;
   for (uint32_t node_id : composite_schedule_)
   {
-    if ((has_composite_updates_ || has_nested_modules_) &&
-        node_id == composite_output_boundary_id_)
+    if (use_composite_programs && node_id == composite_output_boundary_id_)
     {
       eval_program(composite_output_program_, temps_);
       for (unsigned int output_id = 0; output_id < composite_output_program_.output_targets.size(); ++output_id)
@@ -153,17 +153,21 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   }
 
   const CompiledProgram & output_program =
-    (has_composite_updates_ || has_nested_modules_) ? composite_output_program_ : program_;
+    use_composite_programs ? composite_output_program_ : program_;
   const CompiledProgram & register_program =
-    (has_composite_updates_ || has_nested_modules_) ? composite_register_program_ : program_;
+    use_composite_programs ? composite_register_program_ : program_;
 
-  if (!(has_composite_updates_ || has_nested_modules_) || !composite_outputs_materialized)
+  if (!use_composite_programs)
   {
     eval_program(output_program, temps_);
     for (unsigned int output_id = 0; output_id < output_program.output_targets.size(); ++output_id)
     {
       outputs[output_id] = temps_[output_program.output_targets[output_id]];
     }
+  }
+  else if (!composite_outputs_materialized)
+  {
+    throw std::invalid_argument("Composite module schedule did not materialize the output boundary.");
   }
 
   eval_program(register_program, temps_);
@@ -180,17 +184,15 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     }
   }
 
-  for (const auto & composite_update_program : composite_update_programs_)
+  if (!delay_update_program_.output_targets.empty())
   {
-    eval_program(composite_update_program, temps_);
-    for (unsigned int register_id = 0; register_id < composite_update_program.register_targets.size(); ++register_id)
+    eval_program(delay_update_program_, temps_);
+    next_delay_states_ = delay_states_;
+    for (unsigned int delay_id = 0; delay_id < delay_update_program_.output_targets.size(); ++delay_id)
     {
-      const int32_t target = composite_update_program.register_targets[register_id];
-      if (target >= 0)
-      {
-        next_registers_[register_id] = temps_[static_cast<std::size_t>(target)];
-      }
+      next_delay_states_[delay_id] = temps_[delay_update_program_.output_targets[delay_id]];
     }
+    delay_states_.swap(next_delay_states_);
   }
 
   registers_.swap(next_registers_);
@@ -217,23 +219,21 @@ unsigned int Module::register_count() const
 Module::CompileStats Module::compile_stats() const
 {
   CompileStats stats;
-  if (has_composite_updates_ || has_nested_modules_)
+  if (has_nested_modules_ || has_delay_states_)
   {
     stats.instruction_count = static_cast<uint64_t>(composite_output_program_.instructions.size()) +
                               static_cast<uint64_t>(composite_register_program_.instructions.size());
     stats.register_count = static_cast<uint64_t>(
-      std::max(composite_output_program_.register_count, composite_register_program_.register_count));
+      std::max(
+        composite_output_program_.register_count,
+        std::max(composite_register_program_.register_count, delay_update_program_.register_count)));
   }
   else
   {
     stats.instruction_count = static_cast<uint64_t>(program_.instructions.size());
-    stats.register_count = static_cast<uint64_t>(program_.register_count);
+    stats.register_count = static_cast<uint64_t>(std::max(program_.register_count, delay_update_program_.register_count));
   }
-  for (const auto & composite_update_program : composite_update_programs_)
-  {
-    stats.instruction_count += static_cast<uint64_t>(composite_update_program.instructions.size());
-  }
-  stats.composite_update_count = static_cast<uint64_t>(composite_update_programs_.size());
+  stats.instruction_count += static_cast<uint64_t>(delay_update_program_.instructions.size());
   stats.nested_module_count = static_cast<uint64_t>(nested_modules_.size());
 #ifdef EGRESS_LLVM_ORC_JIT
   stats.numeric_jit_instruction_count = numeric_jit_instruction_count_;
@@ -414,6 +414,9 @@ uint32_t Module::compile_expr_node(
       instr.slot_id = expr->slot_id;
       instr.output_id = expr->output_id;
       break;
+    case ExprKind::DelayValue:
+      instr.slot_id = expr->slot_id;
+      break;
     case ExprKind::SampleRate:
     case ExprKind::SampleIndex:
       break;
@@ -495,6 +498,14 @@ void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & tem
         const NestedModuleRuntime & nested = nested_modules_[nested_it->second];
         temps[instr.dst] = instr.output_id < nested.module->outputs.size()
                              ? nested.module->outputs[instr.output_id]
+                             : expr::float_value(0.0);
+        break;
+      }
+      case ExprKind::DelayValue:
+      {
+        const auto delay_it = delay_state_lookup_.find(instr.slot_id);
+        temps[instr.dst] = delay_it != delay_state_lookup_.end()
+                             ? delay_states_[delay_it->second]
                              : expr::float_value(0.0);
         break;
       }
