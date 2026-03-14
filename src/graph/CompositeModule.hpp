@@ -100,27 +100,89 @@ struct LoweredCompositeModule
   uint32_t delayed_node_count = 0;
 };
 
-inline ValidationResult validate_same_tick_acyclic(const CompositeModuleSpec & spec)
+inline ValidationResult validate_composite_module(const CompositeModuleSpec & spec)
 {
   ValidationResult result;
   result.same_tick_topology.reserve(spec.nodes.size());
 
   std::vector<uint32_t> indegree(spec.nodes.size(), 0);
   std::vector<std::vector<uint32_t>> outgoing(spec.nodes.size());
+  std::vector<uint32_t> delayed_incoming(spec.nodes.size(), 0);
+  std::vector<uint32_t> same_tick_incoming(spec.nodes.size(), 0);
   for (const auto & edge : spec.edges)
   {
-    if (edge.timing != ConnectionTiming::SameTick)
-    {
-      continue;
-    }
     if (edge.src.node_id >= spec.nodes.size() || edge.dst.node_id >= spec.nodes.size())
     {
       result.ok = false;
       result.message = "Composite module spec contains an out-of-range node reference.";
       return result;
     }
+    const auto & src_node = spec.nodes[edge.src.node_id];
+    const auto & dst_node = spec.nodes[edge.dst.node_id];
+    if (edge.src.port_id >= src_node.output_count)
+    {
+      result.ok = false;
+      result.message = "Composite module spec contains an out-of-range source port reference.";
+      return result;
+    }
+    if (edge.dst.port_id >= dst_node.input_count)
+    {
+      result.ok = false;
+      result.message = "Composite module spec contains an out-of-range destination port reference.";
+      return result;
+    }
+    if (edge.timing == ConnectionTiming::Delayed)
+    {
+      ++delayed_incoming[edge.dst.node_id];
+      if (dst_node.kind != NodeKind::Delay)
+      {
+        result.ok = false;
+        result.message = "Delayed edges must terminate at delay nodes.";
+        return result;
+      }
+      if (edge.dst.port_id != 0)
+      {
+        result.ok = false;
+        result.message = "Delay nodes accept delayed input only on port 0.";
+        return result;
+      }
+      if (src_node.kind == NodeKind::Delay)
+      {
+        result.ok = false;
+        result.message = "Delay nodes cannot feed other delay nodes through delayed edges.";
+        return result;
+      }
+      continue;
+    }
+    ++same_tick_incoming[edge.dst.node_id];
+    if (dst_node.kind == NodeKind::Delay)
+    {
+      result.ok = false;
+      result.message = "Delay nodes cannot receive same-tick inputs; use eg.delay(...) to create delayed edges.";
+      return result;
+    }
     outgoing[edge.src.node_id].push_back(edge.dst.node_id);
     ++indegree[edge.dst.node_id];
+  }
+
+  for (const auto & node : spec.nodes)
+  {
+    if (node.kind != NodeKind::Delay)
+    {
+      continue;
+    }
+    if (same_tick_incoming[node.id] != 0)
+    {
+      result.ok = false;
+      result.message = "Delay nodes may only receive delayed inputs.";
+      return result;
+    }
+    if (delayed_incoming[node.id] != 1)
+    {
+      result.ok = false;
+      result.message = "Each delay node must have exactly one delayed input.";
+      return result;
+    }
   }
 
   std::queue<uint32_t> ready;
@@ -155,9 +217,14 @@ inline ValidationResult validate_same_tick_acyclic(const CompositeModuleSpec & s
   return result;
 }
 
+inline ValidationResult validate_same_tick_acyclic(const CompositeModuleSpec & spec)
+{
+  return validate_composite_module(spec);
+}
+
 inline LoweredCompositeModule lower_composite_module(const CompositeModuleSpec & spec)
 {
-  const ValidationResult validation = validate_same_tick_acyclic(spec);
+  const ValidationResult validation = validate_composite_module(spec);
   if (!validation.ok)
   {
     throw std::invalid_argument(validation.message);

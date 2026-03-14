@@ -54,7 +54,6 @@ class Module
       std::string label;
       unsigned int input_count = 0;
       std::vector<ExprSpecPtr> input_exprs;
-      std::vector<unsigned int> output_register_slots;
       std::vector<ExprSpecPtr> output_exprs;
       std::vector<ExprSpecPtr> register_exprs;
       std::vector<Value> initial_registers;
@@ -108,7 +107,6 @@ class Module
         runtime.node_id = nested_module_spec.node_id;
         runtime.input_program = compile_program(nested_module_spec.input_exprs, {});
         runtime.input_temps.assign(runtime.input_program.register_count, expr::float_value(0.0));
-        runtime.output_register_slots = std::move(nested_module_spec.output_register_slots);
         runtime.module = std::make_unique<Module>(
           nested_module_spec.input_count,
           std::move(nested_module_spec.output_exprs),
@@ -173,7 +171,6 @@ class Module
       uint32_t node_id = 0;
       CompiledProgram input_program;
       std::vector<Value> input_temps;
-      std::vector<unsigned int> output_register_slots;
       std::unique_ptr<Module> module;
     };
 

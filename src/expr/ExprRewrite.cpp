@@ -64,6 +64,7 @@ ExprSpecPtr simplify_expr(const ExprSpecPtr & expr_spec)
     case ExprKind::Ref:
     case ExprKind::InputValue:
     case ExprKind::RegisterValue:
+    case ExprKind::NestedValue:
     case ExprKind::SampleRate:
     case ExprKind::SampleIndex:
       return expr_spec;
@@ -585,6 +586,7 @@ ExprSpecPtr replace_refs_with_zero(
 
   if (expr_spec->kind == ExprKind::InputValue ||
       expr_spec->kind == ExprKind::RegisterValue ||
+      expr_spec->kind == ExprKind::NestedValue ||
       expr_spec->kind == ExprKind::SampleRate ||
       expr_spec->kind == ExprKind::SampleIndex)
   {

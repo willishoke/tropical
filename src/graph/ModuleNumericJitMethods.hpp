@@ -9,6 +9,7 @@ bool Module::supports_numeric_jit_expr_kind(ExprKind kind) const
     case ExprKind::Literal:
     case ExprKind::InputValue:
     case ExprKind::RegisterValue:
+    case ExprKind::NestedValue:
     case ExprKind::SampleRate:
     case ExprKind::SampleIndex:
     case ExprKind::Not:

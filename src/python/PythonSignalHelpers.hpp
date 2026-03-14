@@ -159,6 +159,7 @@ static expr::ExprSpecPtr clone_with_input_and_register_subst(
   {
     case ExprKind::Literal:
     case ExprKind::Ref:
+    case ExprKind::NestedValue:
     case ExprKind::SampleRate:
     case ExprKind::SampleIndex:
       return expr;
@@ -611,22 +612,11 @@ class PyModuleType
         arg_specs,
         &arg_sources);
 
-      std::vector<unsigned int> output_register_slots;
-      output_register_slots.reserve(definition_->output_names.size());
-      for (std::size_t output_id = 0; output_id < definition_->output_names.size(); ++output_id)
-      {
-        output_register_slots.push_back(current_definition_context_->append_hidden_register(
-          definition_->type_name + "_out" + std::to_string(output_id),
-          expr::float_value(0.0),
-          Module::RegisterArraySpec{}));
-      }
-
       Module::NestedModuleSpec nested_spec;
       nested_spec.node_id = call_node_id;
       nested_spec.label = definition_->type_name;
       nested_spec.input_count = static_cast<unsigned int>(definition_->input_names.size());
       nested_spec.input_exprs = arg_specs;
-      nested_spec.output_register_slots = output_register_slots;
       nested_spec.output_exprs = definition_->output_exprs;
       nested_spec.register_exprs = definition_->register_exprs;
       nested_spec.initial_registers = definition_->initial_registers;
@@ -641,7 +631,7 @@ class PyModuleType
       {
         return py::cast(make_signal_expr(
           nullptr,
-          expr::register_value_expr(output_register_slots[0]),
+          expr::nested_value_expr(call_node_id, 0),
           call_node_id == std::numeric_limits<uint32_t>::max()
             ? std::vector<egress_composition::PortRef>{}
             : std::vector<egress_composition::PortRef>{egress_composition::PortRef{call_node_id, 0}}));
@@ -652,7 +642,7 @@ class PyModuleType
       {
         outputs[output_id] = py::cast(make_signal_expr(
           nullptr,
-          expr::register_value_expr(output_register_slots[output_id]),
+          expr::nested_value_expr(call_node_id, static_cast<unsigned int>(output_id)),
           call_node_id == std::numeric_limits<uint32_t>::max()
             ? std::vector<egress_composition::PortRef>{}
             : std::vector<egress_composition::PortRef>{

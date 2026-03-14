@@ -37,6 +37,7 @@ enum class ExprKind
   Ref,
   InputValue,
   RegisterValue,
+  NestedValue,
   SampleRate,
   SampleIndex,
   Function,
@@ -532,6 +533,15 @@ inline ExprSpecPtr register_value_expr(unsigned int register_id)
   auto expr = std::make_shared<ExprSpec>();
   expr->kind = ExprKind::RegisterValue;
   expr->slot_id = register_id;
+  return expr;
+}
+
+inline ExprSpecPtr nested_value_expr(unsigned int node_id, unsigned int output_id)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::NestedValue;
+  expr->slot_id = node_id;
+  expr->output_id = output_id;
   return expr;
 }
 

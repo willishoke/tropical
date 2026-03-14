@@ -137,18 +137,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       nested.module->inputs[input_id] = nested.input_temps[nested.input_program.output_targets[input_id]];
     }
     nested.module->process();
-    for (unsigned int output_id = 0;
-         output_id < nested.output_register_slots.size() && output_id < nested.module->outputs.size();
-         ++output_id)
-    {
-      const unsigned int register_slot = nested.output_register_slots[output_id];
-      if (register_slot >= registers_.size())
-      {
-        continue;
-      }
-      registers_[register_slot] = nested.module->outputs[output_id];
-      next_registers_[register_slot] = nested.module->outputs[output_id];
-    }
   }
 
   eval_program(program_, temps_);
@@ -391,6 +379,10 @@ uint32_t Module::compile_expr_node(
     case ExprKind::RegisterValue:
       instr.slot_id = expr->slot_id;
       break;
+    case ExprKind::NestedValue:
+      instr.slot_id = expr->slot_id;
+      instr.output_id = expr->output_id;
+      break;
     case ExprKind::SampleRate:
     case ExprKind::SampleIndex:
       break;
@@ -461,6 +453,20 @@ void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & tem
                              ? registers_[instr.slot_id]
                              : expr::float_value(0.0);
         break;
+      case ExprKind::NestedValue:
+      {
+        const auto nested_it = nested_module_lookup_.find(instr.slot_id);
+        if (nested_it == nested_module_lookup_.end())
+        {
+          temps[instr.dst] = expr::float_value(0.0);
+          break;
+        }
+        const NestedModuleRuntime & nested = nested_modules_[nested_it->second];
+        temps[instr.dst] = instr.output_id < nested.module->outputs.size()
+                             ? nested.module->outputs[instr.output_id]
+                             : expr::float_value(0.0);
+        break;
+      }
       case ExprKind::SampleRate:
         temps[instr.dst] = expr::float_value(sample_rate_);
         break;

@@ -362,7 +362,7 @@ static std::shared_ptr<ModuleDefinition> define_module_impl(
 
   if (definition->composite_spec)
   {
-    const auto validation = egress_composition::validate_same_tick_acyclic(*definition->composite_spec);
+    const auto validation = egress_composition::validate_composite_module(*definition->composite_spec);
     if (!validation.ok)
     {
       throw std::invalid_argument(validation.message);

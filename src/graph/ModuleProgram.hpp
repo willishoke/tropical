@@ -17,6 +17,7 @@ struct Instr
   uint32_t src_b = 0;
   uint32_t src_c = 0;
   unsigned int slot_id = 0;
+  unsigned int output_id = 0;
   Value literal;
   std::vector<uint32_t> args;
 };
