@@ -58,6 +58,11 @@ class PythonGraph
       graph_.process();
     }
 
+    void prime_numeric_jit()
+    {
+      graph_.prime_numeric_jit();
+    }
+
     void set_worker_count(unsigned int worker_count)
     {
       graph_.set_worker_count(worker_count);

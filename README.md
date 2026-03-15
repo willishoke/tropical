@@ -57,6 +57,7 @@ Lifecycle methods:
 - `connect(output_port, input_port)`
 - `disconnect(output_port, input_port)`
 - `add_output(output_port)`
+- `graph().prime_numeric_jit()` (prewarms current numeric JIT kernels using the graph's current input wiring before realtime start)
 - `graph().set_worker_count(n)` (opt-in graph-level parallelism; `1` keeps single-threaded execution)
 - `graph().destroy_module(name)` (advanced/manual control on the singleton graph)
 
@@ -176,7 +177,7 @@ Realtime output methods:
 - `dac.start()`
 - `dac.stop()`
 
-`graph().process()` still renders a single buffer for offline inspection or testing; realtime playback uses `DAC.start()` and `DAC.stop()`.
+`graph().process()` still renders a single buffer for offline inspection or testing; realtime playback uses `DAC.start()` and `DAC.stop()`. `DAC.start()` now prewarms numeric JIT kernels against the current graph inputs before opening the audio stream so first-use ORC compilation stays off the realtime callback path.
 
 ## Graph
 

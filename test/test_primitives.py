@@ -327,6 +327,8 @@ def main():
 
     graph.destroy_module(direct_source.name)
 
+    graph.prime_numeric_jit()
+
     graph.set_worker_count(2)
     assert graph.worker_count() == 2
 

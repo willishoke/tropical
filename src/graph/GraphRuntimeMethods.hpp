@@ -87,51 +87,9 @@ Graph::RuntimeState Graph::build_runtime_locked() const
     const unsigned int input_count = static_cast<unsigned int>(slot.input_program.result_registers.size());
     slot.input_program = compile_input_program(module.input_exprs, input_count, runtime);
     slot.input_registers.assign(slot.input_program.register_count, float_value(0.0));
-    slot.output_materialize_mask.assign(module.out_count, false);
+    slot.output_materialize_mask.assign(module.out_count, true);
     slot.indexed_output_indices.assign(module.out_count, {});
     slot.indexed_prev_output_values.assign(module.out_count, {});
-  }
-
-  for (auto & consumer_slot : runtime.modules)
-  {
-    for (auto & instr : consumer_slot.input_program.instructions)
-    {
-      if (instr.ref_module_id >= runtime.modules.size())
-      {
-        continue;
-      }
-
-      ModuleSlot & source_slot = runtime.modules[instr.ref_module_id];
-      if (instr.ref_output_id >= source_slot.output_materialize_mask.size())
-      {
-        continue;
-      }
-
-      if (instr.opcode == OpCode::Ref)
-      {
-        source_slot.output_materialize_mask[instr.ref_output_id] = true;
-        continue;
-      }
-
-      if (instr.opcode != OpCode::RefIndex || instr.ref_index < 0)
-      {
-        continue;
-      }
-      auto & indices = source_slot.indexed_output_indices[instr.ref_output_id];
-      auto it = std::find(indices.begin(), indices.end(), instr.ref_index);
-      uint32_t cache_slot = 0;
-      if (it == indices.end())
-      {
-        cache_slot = static_cast<uint32_t>(indices.size());
-        indices.push_back(instr.ref_index);
-        source_slot.indexed_prev_output_values[instr.ref_output_id].push_back(float_value(0.0));
-      }
-      else
-      {
-        cache_slot = static_cast<uint32_t>(std::distance(indices.begin(), it));
-      }
-      instr.src_a = cache_slot;
-    }
   }
 
   runtime.mix.reserve(control_mix_.size());
@@ -151,7 +109,6 @@ Graph::RuntimeState Graph::build_runtime_locked() const
       continue;
     }
 
-    runtime.modules[module_id].output_materialize_mask[tap.second] = true;
     runtime.mix.push_back(MixTap{module_id, tap.second});
   }
 
@@ -165,48 +122,7 @@ Graph::RuntimeState Graph::build_runtime_locked() const
     runtime.mix_exprs.push_back(std::move(mix_expr));
   }
 
-  for (auto & mix_expr : runtime.mix_exprs)
-  {
-    for (auto & instr : mix_expr.program.instructions)
-    {
-      if (instr.ref_module_id >= runtime.modules.size())
-      {
-        continue;
-      }
-
-      ModuleSlot & source_slot = runtime.modules[instr.ref_module_id];
-      if (instr.ref_output_id >= source_slot.output_materialize_mask.size())
-      {
-        continue;
-      }
-
-      if (instr.opcode == OpCode::Ref)
-      {
-        source_slot.output_materialize_mask[instr.ref_output_id] = true;
-        continue;
-      }
-
-      if (instr.opcode != OpCode::RefIndex || instr.ref_index < 0)
-      {
-        continue;
-      }
-
-      auto & indices = source_slot.indexed_output_indices[instr.ref_output_id];
-      auto it = std::find(indices.begin(), indices.end(), instr.ref_index);
-      uint32_t cache_slot = 0;
-      if (it == indices.end())
-      {
-        cache_slot = static_cast<uint32_t>(indices.size());
-        indices.push_back(instr.ref_index);
-        source_slot.indexed_prev_output_values[instr.ref_output_id].push_back(float_value(0.0));
-      }
-      else
-      {
-        cache_slot = static_cast<uint32_t>(std::distance(indices.begin(), it));
-      }
-      instr.src_a = cache_slot;
-    }
-  }
+  refresh_runtime_ref_metadata(runtime);
 
   runtime.taps.reserve(control_taps_.size());
   for (const auto & tap_spec : control_taps_)
@@ -244,6 +160,85 @@ Graph::RuntimeState Graph::build_runtime_locked() const
   }
 
   return runtime;
+}
+
+void Graph::refresh_runtime_ref_metadata(RuntimeState & runtime) const
+{
+  for (auto & slot : runtime.modules)
+  {
+    if (!slot.module)
+    {
+      continue;
+    }
+    slot.output_materialize_mask.assign(slot.module->outputs.size(), true);
+    slot.indexed_output_indices.assign(slot.module->outputs.size(), {});
+    slot.indexed_prev_output_values.assign(slot.module->outputs.size(), {});
+  }
+
+  auto refresh_program = [&](auto & program)
+  {
+    for (auto & instr : program.instructions)
+    {
+      if (instr.ref_module_id >= runtime.modules.size())
+      {
+        continue;
+      }
+
+      ModuleSlot & source_slot = runtime.modules[instr.ref_module_id];
+      if (instr.ref_output_id >= source_slot.indexed_output_indices.size())
+      {
+        continue;
+      }
+
+      if (instr.opcode != OpCode::RefIndex || instr.ref_index < 0)
+      {
+        continue;
+      }
+
+      auto & indices = source_slot.indexed_output_indices[instr.ref_output_id];
+      auto it = std::find(indices.begin(), indices.end(), instr.ref_index);
+      uint32_t cache_slot = 0;
+      if (it == indices.end())
+      {
+        cache_slot = static_cast<uint32_t>(indices.size());
+        indices.push_back(instr.ref_index);
+        source_slot.indexed_prev_output_values[instr.ref_output_id].push_back(float_value(0.0));
+      }
+      else
+      {
+        cache_slot = static_cast<uint32_t>(std::distance(indices.begin(), it));
+      }
+      instr.src_a = cache_slot;
+    }
+  };
+
+  for (auto & consumer_slot : runtime.modules)
+  {
+    refresh_program(consumer_slot.input_program);
+  }
+  for (auto & mix_expr : runtime.mix_exprs)
+  {
+    refresh_program(mix_expr.program);
+  }
+}
+
+bool Graph::recompile_module_inputs_in_runtime(
+  RuntimeState & runtime,
+  const std::string & module_name,
+  const std::vector<ExprSpecPtr> & exprs) const
+{
+  auto runtime_id_it = runtime.name_to_id.find(module_name);
+  if (runtime_id_it == runtime.name_to_id.end() || runtime_id_it->second >= runtime.modules.size())
+  {
+    return false;
+  }
+
+  ModuleSlot & slot = runtime.modules[runtime_id_it->second];
+  const unsigned int input_count = static_cast<unsigned int>(exprs.size());
+  slot.input_program = compile_input_program(exprs, input_count, runtime);
+  slot.input_registers.assign(slot.input_program.register_count, float_value(0.0));
+  refresh_runtime_ref_metadata(runtime);
+  return true;
 }
 
 void Graph::rebuild_and_publish_runtime_locked()

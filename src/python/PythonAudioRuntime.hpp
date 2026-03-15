@@ -37,6 +37,7 @@ class PythonDAC
       out_params.nChannels = channels_;
       out_params.firstChannel = 0;
 
+      graph_.graph().prime_numeric_jit();
       unsigned int buffer_frames = graph_.graph().getBufferLength();
 
       audio_.openStream(
