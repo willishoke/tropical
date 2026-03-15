@@ -59,6 +59,7 @@ Lifecycle methods:
 - `add_output(output_port)`
 - `graph().prime_numeric_jit()` (prewarms current numeric JIT kernels using the graph's current input wiring before realtime start)
 - `graph().set_worker_count(n)` (opt-in graph-level parallelism; `1` keeps single-threaded execution)
+- `graph().set_fusion_enabled(True/False)` (opt-in graph-level fused input/mix expression kernels; off by default because small graphs may run slower)
 - `graph().destroy_module(name)` (advanced/manual control on the singleton graph)
 
 Input assignment shortcuts:

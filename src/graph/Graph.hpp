@@ -108,6 +108,16 @@ class Graph
       return worker_count_;
     }
 
+    void set_fusion_enabled(bool enabled)
+    {
+      fusion_enabled_ = enabled;
+    }
+
+    bool fusion_enabled() const
+    {
+      return fusion_enabled_;
+    }
+
     void process()
     {
 #ifdef EGRESS_PROFILE
@@ -137,23 +147,26 @@ class Graph
 
       for (unsigned int sample = 0; sample < bufferLength_; ++sample)
       {
+        const bool use_fused_inputs = run_fused_input_kernel(runtime);
         parallel_next_module_index_.store(0, std::memory_order_relaxed);
         if (worker_count_ > 1 && runtime.modules.size() > 1)
         {
 #ifdef EGRESS_PROFILE
-          start_parallel_module_batch(runtime, &local_module_stats);
+          start_parallel_module_batch(runtime, use_fused_inputs, &local_module_stats);
 #else
-          start_parallel_module_batch(runtime);
+          start_parallel_module_batch(runtime, use_fused_inputs);
 #endif
         }
         else
         {
 #ifdef EGRESS_PROFILE
-          execute_parallel_module_work(runtime, &local_module_stats);
+          execute_parallel_module_work(runtime, use_fused_inputs, &local_module_stats);
 #else
-          execute_parallel_module_work(runtime);
+          execute_parallel_module_work(runtime, use_fused_inputs);
 #endif
         }
+
+        sync_fused_current_outputs(runtime);
 
         if (!runtime.taps.empty())
         {
@@ -197,25 +210,29 @@ class Graph
 
           mixed += expr::to_float64(slot.module->outputs[tap.output_id]) / 20.0;
         }
-        for (auto & mix_expr : runtime.mix_exprs)
+        if (!run_fused_mix_kernel(runtime, mixed))
         {
-          if (mix_expr.registers.size() < mix_expr.program.register_count)
+          for (auto & mix_expr : runtime.mix_exprs)
           {
-            mix_expr.registers.resize(mix_expr.program.register_count, float_value(0.0));
-          }
-          for (const auto & instr : mix_expr.program.instructions)
-          {
-            eval_mix_instruction(runtime, instr, mix_expr.registers.data());
-          }
-          if (mix_expr.result_register < mix_expr.registers.size())
-          {
-            mixed += expr::to_float64(mix_expr.registers[mix_expr.result_register]) / 20.0;
+            if (mix_expr.registers.size() < mix_expr.program.register_count)
+            {
+              mix_expr.registers.resize(mix_expr.program.register_count, float_value(0.0));
+            }
+            for (const auto & instr : mix_expr.program.instructions)
+            {
+              eval_mix_instruction(runtime, instr, mix_expr.registers.data());
+            }
+            if (mix_expr.result_register < mix_expr.registers.size())
+            {
+              mixed += expr::to_float64(mix_expr.registers[mix_expr.result_register]) / 20.0;
+            }
           }
         }
         outputBuffer[sample] = mixed;
 
-        for (auto & slot : runtime.modules)
+        for (std::size_t module_id = 0; module_id < runtime.modules.size(); ++module_id)
         {
+          auto & slot = runtime.modules[module_id];
           if (!slot.module)
           {
             continue;
@@ -248,6 +265,16 @@ class Graph
                 }
                 cached_values[index_id] = expr::float_value(Module::clamp_output_scalar(values[static_cast<std::size_t>(raw_index)]));
               }
+              if (runtime.fused_graph != nullptr &&
+                  module_id < runtime.fused_graph->module_output_spans.size())
+              {
+                const auto & span = runtime.fused_graph->module_output_spans[module_id];
+                const uint32_t source_slot = span.first_output_slot + output_id;
+                if (source_slot < runtime.fused_graph->indexed_prev_values.size())
+                {
+                  runtime.fused_graph->indexed_prev_values[source_slot] = cached_values;
+                }
+              }
               continue;
             }
 #endif
@@ -268,11 +295,23 @@ class Graph
                 }
               }
             }
+
+            if (runtime.fused_graph != nullptr &&
+                module_id < runtime.fused_graph->module_output_spans.size())
+            {
+              const auto & span = runtime.fused_graph->module_output_spans[module_id];
+              const uint32_t source_slot = span.first_output_slot + output_id;
+              if (source_slot < runtime.fused_graph->indexed_prev_values.size())
+              {
+                runtime.fused_graph->indexed_prev_values[source_slot] = cached_values;
+              }
+            }
           }
 
           slot.module->prev_outputs.swap(slot.module->outputs);
         }
 
+        sync_fused_prev_outputs(runtime);
         advance_module_sample_indices(runtime);
       }
 
@@ -724,6 +763,7 @@ class Graph
     using MixTap = egress_graph_detail::MixTap;
     using MixExpr = egress_graph_detail::MixExpr;
     using RuntimeState = egress_graph_detail::RuntimeState;
+    using FusedGraphState = egress_graph_detail::FusedGraphState;
 #ifdef EGRESS_PROFILE
     using ModuleTimingCounters = egress_graph_detail::ModuleTimingCounters;
     using ProcessModuleTiming = egress_graph_detail::ProcessModuleTiming;
@@ -819,10 +859,33 @@ class Graph
 
     void refresh_runtime_ref_metadata(RuntimeState & runtime) const;
 
+    void rebuild_fused_graph_state(RuntimeState & runtime) const;
+
+    void sync_fused_current_outputs(RuntimeState & runtime) const;
+
+    void sync_fused_prev_outputs(RuntimeState & runtime) const;
+
+    bool run_fused_input_kernel(RuntimeState & runtime) const;
+
+    bool run_fused_mix_kernel(RuntimeState & runtime, double & mixed) const;
+
     bool recompile_module_inputs_in_runtime(
       RuntimeState & runtime,
       const std::string & module_name,
       const std::vector<ExprSpecPtr> & exprs) const;
+
+    std::unique_ptr<FusedGraphState> build_fused_graph_state(const RuntimeState & runtime) const;
+
+    static uint64_t fused_source_output_key(uint32_t module_id, unsigned int output_id)
+    {
+      return (static_cast<uint64_t>(module_id) << 32) | static_cast<uint64_t>(output_id);
+    }
+
+    static bool supports_fused_numeric_opcode(OpCode opcode);
+
+    static bool is_fused_numeric_candidate(const CompiledInputProgram & program);
+
+    static bool program_uses_current_outputs(const CompiledInputProgram & program);
 
     static void eval_instruction(const RuntimeState & runtime, const ExprInstr & instr, Value * registers);
 
@@ -895,9 +958,12 @@ class Graph
     }
 
 #ifdef EGRESS_PROFILE
-    void execute_parallel_module_work(RuntimeState & runtime, std::vector<ProcessModuleTiming> * local_stats)
+    void execute_parallel_module_work(
+      RuntimeState & runtime,
+      bool use_fused_inputs,
+      std::vector<ProcessModuleTiming> * local_stats)
 #else
-    void execute_parallel_module_work(RuntimeState & runtime)
+    void execute_parallel_module_work(RuntimeState & runtime, bool use_fused_inputs)
 #endif
     {
       while (true)
@@ -917,7 +983,10 @@ class Graph
 #ifdef EGRESS_PROFILE
         const auto module_start = std::chrono::steady_clock::now();
 #endif
-        eval_input_program(runtime, slot.input_program, slot.input_registers, slot.module->inputs);
+        if (!use_fused_inputs)
+        {
+          eval_input_program(runtime, slot.input_program, slot.input_registers, slot.module->inputs);
+        }
         slot.module->process(&slot.output_materialize_mask);
 #ifdef EGRESS_PROFILE
         if (local_stats != nullptr)
@@ -938,9 +1007,12 @@ class Graph
     }
 
 #ifdef EGRESS_PROFILE
-    void start_parallel_module_batch(RuntimeState & runtime, std::vector<ProcessModuleTiming> * local_stats)
+    void start_parallel_module_batch(
+      RuntimeState & runtime,
+      bool use_fused_inputs,
+      std::vector<ProcessModuleTiming> * local_stats)
 #else
-    void start_parallel_module_batch(RuntimeState & runtime)
+    void start_parallel_module_batch(RuntimeState & runtime, bool use_fused_inputs)
 #endif
     {
       std::unique_lock<std::mutex> lock(worker_mutex_);
@@ -948,9 +1020,9 @@ class Graph
       {
         lock.unlock();
 #ifdef EGRESS_PROFILE
-        execute_parallel_module_work(runtime, local_stats);
+        execute_parallel_module_work(runtime, use_fused_inputs, local_stats);
 #else
-        execute_parallel_module_work(runtime);
+        execute_parallel_module_work(runtime, use_fused_inputs);
 #endif
         return;
       }
@@ -971,9 +1043,9 @@ class Graph
       {
         lock.unlock();
 #ifdef EGRESS_PROFILE
-        execute_parallel_module_work(runtime, local_stats);
+        execute_parallel_module_work(runtime, use_fused_inputs, local_stats);
 #else
-        execute_parallel_module_work(runtime);
+        execute_parallel_module_work(runtime, use_fused_inputs);
 #endif
         return;
       }
@@ -981,6 +1053,7 @@ class Graph
       parallel_runtime_ = &runtime;
       parallel_helper_slots_ = desired_helpers;
       parallel_active_participants_ = 1;
+      parallel_use_fused_inputs_ = use_fused_inputs;
 #ifdef EGRESS_PROFILE
       parallel_local_stats_ = local_stats;
 #endif
@@ -992,9 +1065,9 @@ class Graph
       lock.unlock();
 
 #ifdef EGRESS_PROFILE
-      execute_parallel_module_work(runtime, local_stats);
+      execute_parallel_module_work(runtime, use_fused_inputs, local_stats);
 #else
-      execute_parallel_module_work(runtime);
+      execute_parallel_module_work(runtime, use_fused_inputs);
 #endif
 
       if (!finish_parallel_batch_participant(generation, false))
@@ -1045,9 +1118,9 @@ class Graph
         if (runtime != nullptr)
         {
 #ifdef EGRESS_PROFILE
-          execute_parallel_module_work(*runtime, local_stats);
+          execute_parallel_module_work(*runtime, parallel_use_fused_inputs_, local_stats);
 #else
-          execute_parallel_module_work(*runtime);
+          execute_parallel_module_work(*runtime, parallel_use_fused_inputs_);
 #endif
         }
 
@@ -1077,6 +1150,7 @@ class Graph
       parallel_helper_slots_ = 0;
       parallel_active_participants_ = 0;
       parallel_completed_generation_ = parallel_generation_;
+      parallel_use_fused_inputs_ = false;
 #ifdef EGRESS_PROFILE
       parallel_local_stats_ = nullptr;
 #endif
@@ -1110,7 +1184,9 @@ class Graph
     uint32_t parallel_active_participants_ = 0;
     uint64_t parallel_completed_generation_ = 0;
     uint32_t parallel_helper_slots_ = 0;
+    bool parallel_use_fused_inputs_ = false;
     unsigned int worker_count_ = 1;
+    bool fusion_enabled_ = false;
     std::atomic<bool> worker_shutdown_{false};
 
   #ifdef EGRESS_PROFILE

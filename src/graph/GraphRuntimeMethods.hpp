@@ -159,7 +159,247 @@ Graph::RuntimeState Graph::build_runtime_locked() const
     runtime.taps.push_back(std::move(tap));
   }
 
+  rebuild_fused_graph_state(runtime);
   return runtime;
+}
+
+void Graph::rebuild_fused_graph_state(RuntimeState & runtime) const
+{
+  runtime.fused_graph = build_fused_graph_state(runtime);
+}
+
+void Graph::sync_fused_current_outputs(RuntimeState & runtime) const
+{
+  auto * fused = runtime.fused_graph.get();
+  if (fused == nullptr)
+  {
+    return;
+  }
+
+  for (uint32_t module_id = 0; module_id < runtime.modules.size(); ++module_id)
+  {
+    const auto & slot = runtime.modules[module_id];
+    if (!slot.module || module_id >= fused->module_output_spans.size())
+    {
+      continue;
+    }
+
+    const auto & span = fused->module_output_spans[module_id];
+    for (uint32_t offset = 0; offset < span.output_count; ++offset)
+    {
+      const uint32_t source_slot = span.first_output_slot + offset;
+      if (source_slot >= fused->current_outputs.size() ||
+          offset >= slot.module->outputs.size())
+      {
+        continue;
+      }
+      fused->current_outputs[source_slot] = slot.module->outputs[offset];
+    }
+  }
+}
+
+void Graph::sync_fused_prev_outputs(RuntimeState & runtime) const
+{
+  auto * fused = runtime.fused_graph.get();
+  if (fused == nullptr)
+  {
+    return;
+  }
+
+  for (uint32_t module_id = 0; module_id < runtime.modules.size(); ++module_id)
+  {
+    const auto & slot = runtime.modules[module_id];
+    if (!slot.module || module_id >= fused->module_output_spans.size())
+    {
+      continue;
+    }
+
+    const auto & span = fused->module_output_spans[module_id];
+    for (uint32_t offset = 0; offset < span.output_count; ++offset)
+    {
+      const uint32_t source_slot = span.first_output_slot + offset;
+      if (source_slot >= fused->prev_outputs.size() ||
+          offset >= slot.module->prev_outputs.size())
+      {
+        continue;
+      }
+      fused->prev_outputs[source_slot] = slot.module->prev_outputs[offset];
+    }
+  }
+}
+
+bool Graph::run_fused_input_kernel(RuntimeState & runtime) const
+{
+#ifndef EGRESS_LLVM_ORC_JIT
+  (void)runtime;
+  return false;
+#else
+  auto * fused = runtime.fused_graph.get();
+  if (!fusion_enabled_ ||
+      fused == nullptr ||
+      !fused->input_kernel.available ||
+      fused->input_kernel.kernel == nullptr)
+  {
+    return false;
+  }
+
+  for (std::size_t source_slot = 0; source_slot < fused->source_outputs.size(); ++source_slot)
+  {
+    if (source_slot >= fused->prev_outputs.size())
+    {
+      continue;
+    }
+    const Value & value = fused->prev_outputs[source_slot];
+    fused->input_kernel.scalar_inputs[source_slot] =
+      (value.type == ValueType::Array || value.type == ValueType::Matrix) ? 0.0 : expr::to_float64(value);
+  }
+
+  for (const auto & [source_slot, array_slot] : fused->input_kernel.source_array_slots)
+  {
+    if (source_slot >= fused->prev_outputs.size() ||
+        array_slot >= fused->input_kernel.array_storage.size())
+    {
+      continue;
+    }
+    const Value & value = fused->prev_outputs[source_slot];
+    if (!expr::is_array(value))
+    {
+      continue;
+    }
+    auto & dst = fused->input_kernel.array_storage[array_slot];
+    if (dst.size() != value.array_items.size())
+    {
+      dst.assign(value.array_items.size(), 0.0);
+      fused->input_kernel.array_ptrs[array_slot] = dst.empty() ? nullptr : dst.data();
+      fused->input_kernel.array_sizes[array_slot] = static_cast<uint64_t>(dst.size());
+    }
+    for (std::size_t item_id = 0; item_id < value.array_items.size(); ++item_id)
+    {
+      dst[item_id] = expr::to_float64(value.array_items[item_id]);
+    }
+  }
+
+  fused->input_kernel.kernel(
+    fused->input_kernel.scalar_inputs.data(),
+    nullptr,
+    fused->input_kernel.array_ptrs.data(),
+    fused->input_kernel.array_sizes.data(),
+    fused->input_kernel.temps.data(),
+    44100.0,
+    0);
+
+  for (const auto & binding : fused->input_kernel.input_bindings)
+  {
+    if (binding.module_id >= runtime.modules.size())
+    {
+      continue;
+    }
+    auto & slot = runtime.modules[binding.module_id];
+    if (!slot.module || binding.input_id >= slot.module->inputs.size())
+    {
+      continue;
+    }
+
+    if (binding.value.kind == egress_graph_detail::FusedGraphValueKind::Scalar)
+    {
+      if (binding.value.scalar_register >= fused->input_kernel.temps.size())
+      {
+        continue;
+      }
+      slot.module->inputs[binding.input_id] =
+        expr::float_value(fused->input_kernel.temps[binding.value.scalar_register]);
+      continue;
+    }
+
+    if (binding.value.array_slot >= fused->input_kernel.array_storage.size())
+    {
+      continue;
+    }
+    const auto & src = fused->input_kernel.array_storage[binding.value.array_slot];
+    std::vector<Value> items(src.size(), expr::float_value(0.0));
+    for (std::size_t item_id = 0; item_id < src.size(); ++item_id)
+    {
+      items[item_id] = expr::float_value(src[item_id]);
+    }
+    slot.module->inputs[binding.input_id] = expr::array_value(std::move(items));
+  }
+
+  return true;
+#endif
+}
+
+bool Graph::run_fused_mix_kernel(RuntimeState & runtime, double & mixed) const
+{
+#ifndef EGRESS_LLVM_ORC_JIT
+  (void)runtime;
+  (void)mixed;
+  return false;
+#else
+  auto * fused = runtime.fused_graph.get();
+  if (!fusion_enabled_ ||
+      fused == nullptr ||
+      !fused->mix_kernel.available ||
+      fused->mix_kernel.kernel == nullptr)
+  {
+    return false;
+  }
+
+  for (std::size_t source_slot = 0; source_slot < fused->source_outputs.size(); ++source_slot)
+  {
+    if (source_slot >= fused->current_outputs.size())
+    {
+      continue;
+    }
+    const Value & value = fused->current_outputs[source_slot];
+    fused->mix_kernel.scalar_inputs[source_slot] =
+      (value.type == ValueType::Array || value.type == ValueType::Matrix) ? 0.0 : expr::to_float64(value);
+  }
+
+  for (const auto & [source_slot, array_slot] : fused->mix_kernel.source_array_slots)
+  {
+    if (source_slot >= fused->current_outputs.size() ||
+        array_slot >= fused->mix_kernel.array_storage.size())
+    {
+      continue;
+    }
+    const Value & value = fused->current_outputs[source_slot];
+    if (!expr::is_array(value))
+    {
+      continue;
+    }
+    auto & dst = fused->mix_kernel.array_storage[array_slot];
+    if (dst.size() != value.array_items.size())
+    {
+      dst.assign(value.array_items.size(), 0.0);
+      fused->mix_kernel.array_ptrs[array_slot] = dst.empty() ? nullptr : dst.data();
+      fused->mix_kernel.array_sizes[array_slot] = static_cast<uint64_t>(dst.size());
+    }
+    for (std::size_t item_id = 0; item_id < value.array_items.size(); ++item_id)
+    {
+      dst[item_id] = expr::to_float64(value.array_items[item_id]);
+    }
+  }
+
+  fused->mix_kernel.kernel(
+    fused->mix_kernel.scalar_inputs.data(),
+    nullptr,
+    fused->mix_kernel.array_ptrs.data(),
+    fused->mix_kernel.array_sizes.data(),
+    fused->mix_kernel.temps.data(),
+    44100.0,
+    0);
+
+  for (const auto & binding : fused->mix_kernel.mix_bindings)
+  {
+    if (binding.value.kind != egress_graph_detail::FusedGraphValueKind::Scalar ||
+        binding.value.scalar_register >= fused->mix_kernel.temps.size())
+    {
+      continue;
+    }
+    mixed += fused->mix_kernel.temps[binding.value.scalar_register] / 20.0;
+  }
+  return true;
+#endif
 }
 
 void Graph::refresh_runtime_ref_metadata(RuntimeState & runtime) const
@@ -238,7 +478,913 @@ bool Graph::recompile_module_inputs_in_runtime(
   slot.input_program = compile_input_program(exprs, input_count, runtime);
   slot.input_registers.assign(slot.input_program.register_count, float_value(0.0));
   refresh_runtime_ref_metadata(runtime);
+  rebuild_fused_graph_state(runtime);
   return true;
+}
+
+std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const RuntimeState & runtime) const
+{
+  auto fused = std::make_unique<FusedGraphState>();
+  fused->module_output_spans.resize(runtime.modules.size());
+
+#ifndef EGRESS_LLVM_ORC_JIT
+  fused->candidate_reason = "graph fusion requires LLVM ORC JIT";
+  return fused;
+#endif
+
+  auto mark_ineligible = [&](const std::string & reason)
+  {
+    fused->numeric_candidate = false;
+    fused->candidate_reason = reason;
+  };
+
+  for (uint32_t module_id = 0; module_id < runtime.modules.size(); ++module_id)
+  {
+    const auto & slot = runtime.modules[module_id];
+    auto & span = fused->module_output_spans[module_id];
+    span.first_output_slot = static_cast<uint32_t>(fused->source_outputs.size());
+    if (!slot.module)
+    {
+      continue;
+    }
+
+    span.output_count = static_cast<uint32_t>(slot.module->outputs.size());
+    for (unsigned int output_id = 0; output_id < slot.module->outputs.size(); ++output_id)
+    {
+      const uint32_t source_slot = static_cast<uint32_t>(fused->source_outputs.size());
+      egress_graph_detail::FusedGraphSourceOutput output;
+      output.module_id = module_id;
+      output.output_id = output_id;
+      output.materialized =
+        output_id < slot.output_materialize_mask.size() ? slot.output_materialize_mask[output_id] : true;
+      fused->source_outputs.push_back(output);
+      fused->source_output_lookup.emplace(fused_source_output_key(module_id, output_id), source_slot);
+      fused->current_outputs.push_back(
+        output_id < slot.module->outputs.size() ? slot.module->outputs[output_id] : float_value(0.0));
+      fused->prev_outputs.push_back(
+        output_id < slot.module->prev_outputs.size() ? slot.module->prev_outputs[output_id] : float_value(0.0));
+      fused->indexed_prev_indices.push_back(
+        output_id < slot.indexed_output_indices.size() ? slot.indexed_output_indices[output_id] : std::vector<int64_t>{});
+      fused->indexed_prev_values.push_back(
+        output_id < slot.indexed_prev_output_values.size() ? slot.indexed_prev_output_values[output_id] : std::vector<Value>{});
+    }
+
+    if (slot.module->has_dynamic_registers_)
+    {
+      mark_ineligible("graph fusion disabled for dynamic array_state registers");
+      return fused;
+    }
+
+    if (!is_fused_numeric_candidate(slot.input_program))
+    {
+      mark_ineligible("graph fusion disabled by non-numeric top-level input expression");
+      return fused;
+    }
+  }
+
+  fused->mix_source_output_slots.reserve(runtime.mix.size());
+  for (const auto & tap : runtime.mix)
+  {
+    const auto it = fused->source_output_lookup.find(fused_source_output_key(tap.module_id, tap.output_id));
+    fused->mix_source_output_slots.push_back(
+      it == fused->source_output_lookup.end() ? std::numeric_limits<uint32_t>::max() : it->second);
+  }
+
+  fused->tap_source_output_slots.reserve(runtime.taps.size());
+  for (const auto & tap : runtime.taps)
+  {
+    if (!tap.valid)
+    {
+      fused->tap_source_output_slots.push_back(std::numeric_limits<uint32_t>::max());
+      continue;
+    }
+    const auto it = fused->source_output_lookup.find(fused_source_output_key(tap.module_id, tap.output_id));
+    fused->tap_source_output_slots.push_back(
+      it == fused->source_output_lookup.end() ? std::numeric_limits<uint32_t>::max() : it->second);
+  }
+
+  for (const auto & mix_expr : runtime.mix_exprs)
+  {
+    if (!is_fused_numeric_candidate(mix_expr.program))
+    {
+      mark_ineligible("graph fusion disabled by non-numeric mix expression");
+      return fused;
+    }
+  }
+
+  if (runtime.modules.empty())
+  {
+    mark_ineligible("graph fusion requires at least one module");
+    return fused;
+  }
+
+ #ifdef EGRESS_LLVM_ORC_JIT
+  auto build_expression_kernel = [&](
+                                   const std::vector<const CompiledInputProgram *> & programs,
+                                   bool use_prev_outputs,
+                                   egress_graph_detail::FusedGraphKernelState & kernel_state,
+                                   auto bind_result) -> bool
+  {
+    kernel_state = egress_graph_detail::FusedGraphKernelState{};
+    if (programs.empty())
+    {
+      kernel_state.status = "empty";
+      return true;
+    }
+
+    struct LoweredRegInfo
+    {
+      egress_graph_detail::FusedGraphValueKind kind =
+        egress_graph_detail::FusedGraphValueKind::Scalar;
+      uint32_t scalar_register = 0;
+      uint32_t array_slot = 0;
+      uint32_t array_size = 0;
+      bool scalar_constant = false;
+      double constant_value = 0.0;
+    };
+
+    auto make_scalar_ref = [](uint32_t reg, bool is_const = false, double constant = 0.0)
+    {
+      LoweredRegInfo info;
+      info.kind = egress_graph_detail::FusedGraphValueKind::Scalar;
+      info.scalar_register = reg;
+      info.scalar_constant = is_const;
+      info.constant_value = constant;
+      return info;
+    };
+
+    auto make_array_ref = [](uint32_t slot, uint32_t size)
+    {
+      LoweredRegInfo info;
+      info.kind = egress_graph_detail::FusedGraphValueKind::Array;
+      info.array_slot = slot;
+      info.array_size = size;
+      return info;
+    };
+
+    auto append_array_values = [&](const std::vector<Value> & values) -> uint32_t
+    {
+      const uint32_t slot = static_cast<uint32_t>(kernel_state.array_storage.size());
+      kernel_state.array_storage.emplace_back();
+      auto & dst = kernel_state.array_storage.back();
+      dst.reserve(values.size());
+      for (const auto & item : values)
+      {
+        dst.push_back(expr::to_float64(item));
+      }
+      return slot;
+    };
+
+    auto allocate_array_slot = [&](uint32_t size) -> uint32_t
+    {
+      const uint32_t slot = static_cast<uint32_t>(kernel_state.array_storage.size());
+      kernel_state.array_storage.emplace_back(size, 0.0);
+      return slot;
+    };
+
+    auto ensure_source_array_slot = [&](uint32_t source_slot) -> uint32_t
+    {
+      const auto existing = kernel_state.source_array_slots.find(source_slot);
+      if (existing != kernel_state.source_array_slots.end())
+      {
+        return existing->second;
+      }
+
+      if (source_slot >= (use_prev_outputs ? fused->prev_outputs.size() : fused->current_outputs.size()))
+      {
+        return std::numeric_limits<uint32_t>::max();
+      }
+
+      const Value & value =
+        use_prev_outputs ? fused->prev_outputs[source_slot] : fused->current_outputs[source_slot];
+      if (!expr::is_array(value))
+      {
+        return std::numeric_limits<uint32_t>::max();
+      }
+
+      const uint32_t slot = append_array_values(value.array_items);
+      kernel_state.source_array_slots.emplace(source_slot, slot);
+      return slot;
+    };
+
+    auto emit_constant_temp = [&](double constant) -> uint32_t
+    {
+      const uint32_t reg = kernel_state.program.register_count++;
+      egress_jit::NumericInstr literal;
+      literal.op = egress_jit::NumericOp::Literal;
+      literal.dst = reg;
+      literal.literal = constant;
+      kernel_state.program.instructions.push_back(std::move(literal));
+      return reg;
+    };
+
+    auto lower_literal = [&](const Value & literal, uint32_t dst_reg, LoweredRegInfo & out) -> bool
+    {
+      if (literal.type == ValueType::Matrix)
+      {
+        return false;
+      }
+      if (literal.type == ValueType::Array)
+      {
+        out = make_array_ref(append_array_values(literal.array_items),
+                             static_cast<uint32_t>(literal.array_items.size()));
+        return true;
+      }
+
+      egress_jit::NumericInstr instr;
+      instr.op = egress_jit::NumericOp::Literal;
+      instr.dst = dst_reg;
+      instr.literal = expr::to_float64(literal);
+      kernel_state.program.instructions.push_back(std::move(instr));
+      out = make_scalar_ref(dst_reg, true, expr::to_float64(literal));
+      return true;
+    };
+
+    auto lower_binary_scalar = [&](egress_jit::NumericOp op, uint32_t dst_reg, const LoweredRegInfo & lhs, const LoweredRegInfo & rhs)
+    {
+      egress_jit::NumericInstr instr;
+      instr.op = op;
+      instr.dst = dst_reg;
+      instr.src_a = lhs.scalar_register;
+      instr.src_b = rhs.scalar_register;
+      kernel_state.program.instructions.push_back(std::move(instr));
+    };
+
+    kernel_state.program.instructions.clear();
+    kernel_state.program.register_count = 0;
+
+    for (std::size_t program_index = 0; program_index < programs.size(); ++program_index)
+    {
+      const CompiledInputProgram * program = programs[program_index];
+      if (program == nullptr)
+      {
+        continue;
+      }
+      const uint32_t reg_base = kernel_state.program.register_count;
+      kernel_state.program.register_count += program->register_count;
+      std::vector<LoweredRegInfo> reg_info(program->register_count);
+
+      for (const auto & instr : program->instructions)
+      {
+        if (instr.dst >= reg_info.size())
+        {
+          return false;
+        }
+
+        LoweredRegInfo result = make_scalar_ref(reg_base + instr.dst);
+        const uint32_t dst_reg = reg_base + instr.dst;
+        const auto load_const_rhs = [&](const Value & literal) {
+          return make_scalar_ref(emit_constant_temp(expr::to_float64(literal)), true, expr::to_float64(literal));
+        };
+
+        switch (instr.opcode)
+        {
+          case OpCode::Literal:
+            if (!lower_literal(instr.literal, dst_reg, result))
+            {
+              return false;
+            }
+            break;
+          case OpCode::Ref:
+          {
+            const uint32_t source_slot = fused_source_output_key(instr.ref_module_id, instr.ref_output_id);
+            const auto it = fused->source_output_lookup.find(source_slot);
+            if (it == fused->source_output_lookup.end())
+            {
+              if (!lower_literal(float_value(0.0), dst_reg, result))
+              {
+                return false;
+              }
+              break;
+            }
+
+            const Value & source_value =
+              use_prev_outputs ? fused->prev_outputs[it->second] : fused->current_outputs[it->second];
+            if (source_value.type == ValueType::Matrix)
+            {
+              return false;
+            }
+            if (source_value.type == ValueType::Array)
+            {
+              const uint32_t array_slot = ensure_source_array_slot(it->second);
+              if (array_slot == std::numeric_limits<uint32_t>::max())
+              {
+                return false;
+              }
+              result = make_array_ref(array_slot, static_cast<uint32_t>(source_value.array_items.size()));
+              break;
+            }
+
+            egress_jit::NumericInstr numeric_instr;
+            numeric_instr.op = egress_jit::NumericOp::InputValue;
+            numeric_instr.dst = dst_reg;
+            numeric_instr.slot_id = it->second;
+            kernel_state.program.instructions.push_back(std::move(numeric_instr));
+            result = make_scalar_ref(dst_reg);
+            break;
+          }
+          case OpCode::RefIndex:
+          {
+            const auto source_it =
+              fused->source_output_lookup.find(fused_source_output_key(instr.ref_module_id, instr.ref_output_id));
+            if (source_it == fused->source_output_lookup.end() || instr.ref_index < 0)
+            {
+              if (!lower_literal(float_value(0.0), dst_reg, result))
+              {
+                return false;
+              }
+              break;
+            }
+
+            const Value & source_value =
+              use_prev_outputs ? fused->prev_outputs[source_it->second] : fused->current_outputs[source_it->second];
+            if (!expr::is_array(source_value))
+            {
+              return false;
+            }
+
+            const uint32_t array_slot = ensure_source_array_slot(source_it->second);
+            if (array_slot == std::numeric_limits<uint32_t>::max())
+            {
+              return false;
+            }
+            egress_jit::NumericInstr numeric_instr;
+            numeric_instr.op = egress_jit::NumericOp::IndexArray;
+            numeric_instr.dst = dst_reg;
+            numeric_instr.src_a = emit_constant_temp(static_cast<double>(instr.ref_index));
+            numeric_instr.slot_id = array_slot;
+            kernel_state.program.instructions.push_back(std::move(numeric_instr));
+            result = make_scalar_ref(dst_reg);
+            break;
+          }
+          case OpCode::ArrayPack:
+          {
+            bool all_constant = true;
+            std::vector<Value> packed_values;
+            packed_values.reserve(instr.args.size());
+            for (uint32_t arg : instr.args)
+            {
+              if (arg >= reg_info.size() ||
+                  reg_info[arg].kind != egress_graph_detail::FusedGraphValueKind::Scalar)
+              {
+                return false;
+              }
+              all_constant = all_constant && reg_info[arg].scalar_constant;
+              packed_values.push_back(float_value(reg_info[arg].constant_value));
+            }
+
+            if (all_constant)
+            {
+              result = make_array_ref(append_array_values(packed_values),
+                                      static_cast<uint32_t>(packed_values.size()));
+              break;
+            }
+
+            const uint32_t array_slot = allocate_array_slot(static_cast<uint32_t>(instr.args.size()));
+            egress_jit::NumericInstr numeric_instr;
+            numeric_instr.op = egress_jit::NumericOp::ArrayPack;
+            numeric_instr.dst = array_slot;
+            for (uint32_t arg : instr.args)
+            {
+              numeric_instr.args.push_back(reg_info[arg].scalar_register);
+            }
+            kernel_state.program.instructions.push_back(std::move(numeric_instr));
+            result = make_array_ref(array_slot, static_cast<uint32_t>(instr.args.size()));
+            break;
+          }
+          case OpCode::Index:
+          {
+            if (instr.src_a >= reg_info.size() || instr.src_b >= reg_info.size())
+            {
+              return false;
+            }
+            if (reg_info[instr.src_a].kind != egress_graph_detail::FusedGraphValueKind::Array ||
+                reg_info[instr.src_b].kind != egress_graph_detail::FusedGraphValueKind::Scalar)
+            {
+              return false;
+            }
+            egress_jit::NumericInstr numeric_instr;
+            numeric_instr.op = egress_jit::NumericOp::IndexArray;
+            numeric_instr.dst = dst_reg;
+            numeric_instr.src_a = reg_info[instr.src_b].scalar_register;
+            numeric_instr.slot_id = reg_info[instr.src_a].array_slot;
+            kernel_state.program.instructions.push_back(std::move(numeric_instr));
+            result = make_scalar_ref(dst_reg);
+            break;
+          }
+          case OpCode::Add:
+          case OpCode::Sub:
+          case OpCode::Mul:
+          case OpCode::Div:
+          case OpCode::Mod:
+          {
+            if (instr.src_a >= reg_info.size() || instr.src_b >= reg_info.size())
+            {
+              return false;
+            }
+            const auto & lhs = reg_info[instr.src_a];
+            const auto & rhs = reg_info[instr.src_b];
+            if (lhs.kind == egress_graph_detail::FusedGraphValueKind::Array ||
+                rhs.kind == egress_graph_detail::FusedGraphValueKind::Array)
+            {
+              egress_jit::NumericOp array_op = egress_jit::NumericOp::Add;
+              if (instr.opcode == OpCode::Add)
+              {
+                if (lhs.kind == egress_graph_detail::FusedGraphValueKind::Array &&
+                    rhs.kind == egress_graph_detail::FusedGraphValueKind::Array)
+                {
+                  if (lhs.array_size != rhs.array_size)
+                  {
+                    return false;
+                  }
+                  array_op = egress_jit::NumericOp::ArrayAdd;
+                }
+                else if (lhs.kind == egress_graph_detail::FusedGraphValueKind::Array)
+                {
+                  array_op = egress_jit::NumericOp::ArrayAddScalar;
+                }
+                else if (rhs.kind == egress_graph_detail::FusedGraphValueKind::Array)
+                {
+                  array_op = egress_jit::NumericOp::ArrayAddScalar;
+                }
+                else
+                {
+                  return false;
+                }
+              }
+              else if (instr.opcode == OpCode::Sub)
+              {
+                if (lhs.kind == egress_graph_detail::FusedGraphValueKind::Array &&
+                    rhs.kind == egress_graph_detail::FusedGraphValueKind::Array &&
+                    lhs.array_size == rhs.array_size)
+                {
+                  array_op = egress_jit::NumericOp::ArraySub;
+                }
+                else
+                {
+                  return false;
+                }
+              }
+              else if (instr.opcode == OpCode::Mul)
+              {
+                if (lhs.kind == egress_graph_detail::FusedGraphValueKind::Array &&
+                    rhs.kind == egress_graph_detail::FusedGraphValueKind::Array)
+                {
+                  if (lhs.array_size != rhs.array_size)
+                  {
+                    return false;
+                  }
+                  array_op = egress_jit::NumericOp::ArrayMul;
+                }
+                else if (lhs.kind == egress_graph_detail::FusedGraphValueKind::Array)
+                {
+                  array_op = egress_jit::NumericOp::ArrayMulScalar;
+                }
+                else if (rhs.kind == egress_graph_detail::FusedGraphValueKind::Array)
+                {
+                  array_op = egress_jit::NumericOp::ArrayMulScalar;
+                }
+                else
+                {
+                  return false;
+                }
+              }
+              else if (instr.opcode == OpCode::Div)
+              {
+                if (lhs.kind == egress_graph_detail::FusedGraphValueKind::Array &&
+                    rhs.kind == egress_graph_detail::FusedGraphValueKind::Array)
+                {
+                  if (lhs.array_size != rhs.array_size)
+                  {
+                    return false;
+                  }
+                  array_op = egress_jit::NumericOp::ArrayDiv;
+                }
+                else if (lhs.kind == egress_graph_detail::FusedGraphValueKind::Array &&
+                         rhs.kind == egress_graph_detail::FusedGraphValueKind::Scalar)
+                {
+                  array_op = egress_jit::NumericOp::ArrayDivScalar;
+                }
+                else
+                {
+                  return false;
+                }
+              }
+              else if (instr.opcode == OpCode::Mod)
+              {
+                if (lhs.kind == egress_graph_detail::FusedGraphValueKind::Array &&
+                    rhs.kind == egress_graph_detail::FusedGraphValueKind::Scalar)
+                {
+                  array_op = egress_jit::NumericOp::ArrayModScalar;
+                }
+                else
+                {
+                  return false;
+                }
+              }
+
+              const uint32_t dst_slot = allocate_array_slot(
+                lhs.kind == egress_graph_detail::FusedGraphValueKind::Array ? lhs.array_size : rhs.array_size);
+              egress_jit::NumericInstr numeric_instr;
+              numeric_instr.op = array_op;
+              numeric_instr.dst = dst_slot;
+              if (lhs.kind == egress_graph_detail::FusedGraphValueKind::Array)
+              {
+                numeric_instr.src_a = lhs.array_slot;
+                numeric_instr.src_b =
+                  rhs.kind == egress_graph_detail::FusedGraphValueKind::Array ? rhs.array_slot : rhs.scalar_register;
+              }
+              else
+              {
+                numeric_instr.src_a = rhs.array_slot;
+                numeric_instr.src_b = lhs.scalar_register;
+              }
+              kernel_state.program.instructions.push_back(std::move(numeric_instr));
+              result = make_array_ref(dst_slot,
+                                      lhs.kind == egress_graph_detail::FusedGraphValueKind::Array ? lhs.array_size : rhs.array_size);
+              break;
+            }
+
+            switch (instr.opcode)
+            {
+              case OpCode::Add: lower_binary_scalar(egress_jit::NumericOp::Add, dst_reg, lhs, rhs); break;
+              case OpCode::Sub: lower_binary_scalar(egress_jit::NumericOp::Sub, dst_reg, lhs, rhs); break;
+              case OpCode::Mul: lower_binary_scalar(egress_jit::NumericOp::Mul, dst_reg, lhs, rhs); break;
+              case OpCode::Div: lower_binary_scalar(egress_jit::NumericOp::Div, dst_reg, lhs, rhs); break;
+              case OpCode::Mod: lower_binary_scalar(egress_jit::NumericOp::Mod, dst_reg, lhs, rhs); break;
+              default: break;
+            }
+            result = make_scalar_ref(dst_reg);
+            break;
+          }
+          case OpCode::AddConst:
+          case OpCode::MulConst:
+          case OpCode::SubConstRhs:
+          case OpCode::SubConstLhs:
+          case OpCode::DivConstLhs:
+          {
+            if (instr.src_a >= reg_info.size())
+            {
+              return false;
+            }
+            const auto & src = reg_info[instr.src_a];
+            const auto lit = load_const_rhs(instr.literal);
+            if (instr.opcode == OpCode::AddConst)
+            {
+              if (src.kind == egress_graph_detail::FusedGraphValueKind::Array)
+              {
+                const uint32_t dst_slot = allocate_array_slot(src.array_size);
+                egress_jit::NumericInstr numeric_instr;
+                numeric_instr.op = egress_jit::NumericOp::ArrayAddScalar;
+                numeric_instr.dst = dst_slot;
+                numeric_instr.src_a = src.array_slot;
+                numeric_instr.src_b = lit.scalar_register;
+                kernel_state.program.instructions.push_back(std::move(numeric_instr));
+                result = make_array_ref(dst_slot, src.array_size);
+                break;
+              }
+              lower_binary_scalar(egress_jit::NumericOp::Add, dst_reg, src, lit);
+              result = make_scalar_ref(dst_reg);
+              break;
+            }
+            if (instr.opcode == OpCode::MulConst)
+            {
+              if (src.kind == egress_graph_detail::FusedGraphValueKind::Array)
+              {
+                const uint32_t dst_slot = allocate_array_slot(src.array_size);
+                egress_jit::NumericInstr numeric_instr;
+                numeric_instr.op = egress_jit::NumericOp::ArrayMulScalar;
+                numeric_instr.dst = dst_slot;
+                numeric_instr.src_a = src.array_slot;
+                numeric_instr.src_b = lit.scalar_register;
+                kernel_state.program.instructions.push_back(std::move(numeric_instr));
+                result = make_array_ref(dst_slot, src.array_size);
+                break;
+              }
+              lower_binary_scalar(egress_jit::NumericOp::Mul, dst_reg, src, lit);
+              result = make_scalar_ref(dst_reg);
+              break;
+            }
+            if (src.kind != egress_graph_detail::FusedGraphValueKind::Scalar)
+            {
+              return false;
+            }
+            if (instr.opcode == OpCode::SubConstRhs)
+            {
+              lower_binary_scalar(egress_jit::NumericOp::Sub, dst_reg, src, lit);
+            }
+            else if (instr.opcode == OpCode::SubConstLhs)
+            {
+              lower_binary_scalar(egress_jit::NumericOp::Sub, dst_reg, lit, src);
+            }
+            else
+            {
+              lower_binary_scalar(egress_jit::NumericOp::Div, dst_reg, lit, src);
+            }
+            result = make_scalar_ref(dst_reg);
+            break;
+          }
+          case OpCode::Pow:
+          case OpCode::FloorDiv:
+          case OpCode::BitAnd:
+          case OpCode::BitOr:
+          case OpCode::BitXor:
+          case OpCode::LShift:
+          case OpCode::RShift:
+          case OpCode::Less:
+          case OpCode::LessEqual:
+          case OpCode::Greater:
+          case OpCode::GreaterEqual:
+          case OpCode::Equal:
+          case OpCode::NotEqual:
+          {
+            if (instr.src_a >= reg_info.size() || instr.src_b >= reg_info.size())
+            {
+              return false;
+            }
+            const auto & lhs = reg_info[instr.src_a];
+            const auto & rhs = reg_info[instr.src_b];
+            if (lhs.kind != egress_graph_detail::FusedGraphValueKind::Scalar ||
+                rhs.kind != egress_graph_detail::FusedGraphValueKind::Scalar)
+            {
+              return false;
+            }
+            egress_jit::NumericOp op = egress_jit::NumericOp::Pow;
+            switch (instr.opcode)
+            {
+              case OpCode::Pow: op = egress_jit::NumericOp::Pow; break;
+              case OpCode::FloorDiv: op = egress_jit::NumericOp::FloorDiv; break;
+              case OpCode::BitAnd: op = egress_jit::NumericOp::BitAnd; break;
+              case OpCode::BitOr: op = egress_jit::NumericOp::BitOr; break;
+              case OpCode::BitXor: op = egress_jit::NumericOp::BitXor; break;
+              case OpCode::LShift: op = egress_jit::NumericOp::LShift; break;
+              case OpCode::RShift: op = egress_jit::NumericOp::RShift; break;
+              case OpCode::Less: op = egress_jit::NumericOp::Less; break;
+              case OpCode::LessEqual: op = egress_jit::NumericOp::LessEqual; break;
+              case OpCode::Greater: op = egress_jit::NumericOp::Greater; break;
+              case OpCode::GreaterEqual: op = egress_jit::NumericOp::GreaterEqual; break;
+              case OpCode::Equal: op = egress_jit::NumericOp::Equal; break;
+              case OpCode::NotEqual: op = egress_jit::NumericOp::NotEqual; break;
+              default: break;
+            }
+            lower_binary_scalar(op, dst_reg, lhs, rhs);
+            result = make_scalar_ref(dst_reg);
+            break;
+          }
+          case OpCode::Abs:
+          case OpCode::Log:
+          case OpCode::Neg:
+          case OpCode::Not:
+          case OpCode::BitNot:
+          case OpCode::Sin:
+          {
+            if (instr.src_a >= reg_info.size() ||
+                reg_info[instr.src_a].kind != egress_graph_detail::FusedGraphValueKind::Scalar)
+            {
+              return false;
+            }
+            egress_jit::NumericInstr numeric_instr;
+            switch (instr.opcode)
+            {
+              case OpCode::Abs: numeric_instr.op = egress_jit::NumericOp::Abs; break;
+              case OpCode::Log: numeric_instr.op = egress_jit::NumericOp::Log; break;
+              case OpCode::Neg: numeric_instr.op = egress_jit::NumericOp::Neg; break;
+              case OpCode::Not: numeric_instr.op = egress_jit::NumericOp::Not; break;
+              case OpCode::BitNot: numeric_instr.op = egress_jit::NumericOp::BitNot; break;
+              case OpCode::Sin: numeric_instr.op = egress_jit::NumericOp::Sin; break;
+              default: break;
+            }
+            numeric_instr.dst = dst_reg;
+            numeric_instr.src_a = reg_info[instr.src_a].scalar_register;
+            kernel_state.program.instructions.push_back(std::move(numeric_instr));
+            result = make_scalar_ref(dst_reg);
+            break;
+          }
+          case OpCode::Clamp:
+          {
+            if (instr.src_a >= reg_info.size() ||
+                instr.src_b >= reg_info.size() ||
+                instr.src_c >= reg_info.size())
+            {
+              return false;
+            }
+            const auto & value = reg_info[instr.src_a];
+            const auto & lo = reg_info[instr.src_b];
+            const auto & hi = reg_info[instr.src_c];
+            if (value.kind != egress_graph_detail::FusedGraphValueKind::Scalar ||
+                lo.kind != egress_graph_detail::FusedGraphValueKind::Scalar ||
+                hi.kind != egress_graph_detail::FusedGraphValueKind::Scalar)
+            {
+              return false;
+            }
+            egress_jit::NumericInstr numeric_instr;
+            numeric_instr.op = egress_jit::NumericOp::Clamp;
+            numeric_instr.dst = dst_reg;
+            numeric_instr.src_a = value.scalar_register;
+            numeric_instr.src_b = lo.scalar_register;
+            numeric_instr.src_c = hi.scalar_register;
+            kernel_state.program.instructions.push_back(std::move(numeric_instr));
+            result = make_scalar_ref(dst_reg);
+            break;
+          }
+          case OpCode::MatMul:
+          case OpCode::ArraySet:
+            return false;
+        }
+
+        reg_info[instr.dst] = result;
+      }
+
+      if (!bind_result(program_index, *program, reg_info))
+      {
+        return false;
+      }
+    }
+
+    auto & jit = egress_jit::OrcJitEngine::instance();
+    if (!jit.available())
+    {
+      kernel_state.status = jit.init_error();
+      return false;
+    }
+    auto kernel_or_err = jit.compile_numeric_program(kernel_state.program,
+                                                     use_prev_outputs ? "egress_graph_inputs" : "egress_graph_mix");
+    if (!kernel_or_err)
+    {
+      kernel_state.status = llvm::toString(kernel_or_err.takeError());
+      return false;
+    }
+    kernel_state.kernel = *kernel_or_err;
+    kernel_state.available = true;
+    kernel_state.status = "numeric JIT active";
+    kernel_state.scalar_inputs.assign(fused->source_outputs.size(), 0.0);
+    kernel_state.temps.assign(kernel_state.program.register_count, 0.0);
+    kernel_state.array_ptrs.resize(kernel_state.array_storage.size(), nullptr);
+    kernel_state.array_sizes.resize(kernel_state.array_storage.size(), 0);
+    for (std::size_t array_id = 0; array_id < kernel_state.array_storage.size(); ++array_id)
+    {
+      kernel_state.array_ptrs[array_id] =
+        kernel_state.array_storage[array_id].empty() ? nullptr : kernel_state.array_storage[array_id].data();
+      kernel_state.array_sizes[array_id] = static_cast<uint64_t>(kernel_state.array_storage[array_id].size());
+    }
+    return true;
+  };
+
+  std::vector<const CompiledInputProgram *> input_programs;
+  std::vector<uint32_t> input_program_module_ids;
+  input_programs.reserve(runtime.modules.size());
+  input_program_module_ids.reserve(runtime.modules.size());
+  for (uint32_t module_id = 0; module_id < runtime.modules.size(); ++module_id)
+  {
+    const auto & slot = runtime.modules[module_id];
+    if (!slot.module)
+    {
+      continue;
+    }
+    input_programs.push_back(&slot.input_program);
+    input_program_module_ids.push_back(module_id);
+  }
+  if (!build_expression_kernel(
+        input_programs,
+        true,
+        fused->input_kernel,
+        [&](std::size_t program_index, const CompiledInputProgram & program, const auto & reg_info) {
+          if (program_index >= input_program_module_ids.size())
+          {
+            return false;
+          }
+          const uint32_t module_id = input_program_module_ids[program_index];
+          for (unsigned int input_id = 0; input_id < program.result_registers.size(); ++input_id)
+          {
+            const uint32_t result_reg = program.result_registers[input_id];
+            if (result_reg >= reg_info.size())
+            {
+              return false;
+            }
+            egress_graph_detail::FusedGraphInputBinding binding;
+            binding.module_id = module_id;
+            binding.input_id = input_id;
+            binding.value.kind = reg_info[result_reg].kind;
+            binding.value.scalar_register = reg_info[result_reg].scalar_register;
+            binding.value.array_slot = reg_info[result_reg].array_slot;
+            binding.value.array_size = reg_info[result_reg].array_size;
+            fused->input_kernel.input_bindings.push_back(std::move(binding));
+          }
+          return true;
+        }))
+  {
+    mark_ineligible("graph fusion input kernel build failed");
+    return fused;
+  }
+
+  std::vector<const CompiledInputProgram *> mix_programs;
+  mix_programs.reserve(runtime.mix_exprs.size());
+  for (const auto & mix_expr : runtime.mix_exprs)
+  {
+    mix_programs.push_back(&mix_expr.program);
+  }
+  if (!build_expression_kernel(
+        mix_programs,
+        false,
+        fused->mix_kernel,
+        [&](std::size_t, const CompiledInputProgram & program, const auto & reg_info) {
+          if (program.result_registers.empty())
+          {
+            return true;
+          }
+          const uint32_t result_reg = program.result_registers.front();
+          if (result_reg >= reg_info.size() ||
+              reg_info[result_reg].kind != egress_graph_detail::FusedGraphValueKind::Scalar)
+          {
+            return false;
+          }
+          egress_graph_detail::FusedGraphMixBinding binding;
+          binding.value.kind = reg_info[result_reg].kind;
+          binding.value.scalar_register = reg_info[result_reg].scalar_register;
+          binding.value.array_slot = reg_info[result_reg].array_slot;
+          binding.value.array_size = reg_info[result_reg].array_size;
+          fused->mix_kernel.mix_bindings.push_back(std::move(binding));
+          return true;
+        }))
+  {
+    fused->mix_kernel = egress_graph_detail::FusedGraphKernelState{};
+  }
+ #endif
+
+  fused->numeric_candidate = true;
+  fused->candidate_reason = "graph-level lowering candidate";
+  return fused;
+}
+
+bool Graph::supports_fused_numeric_opcode(OpCode opcode)
+{
+  switch (opcode)
+  {
+    case OpCode::Literal:
+    case OpCode::Ref:
+    case OpCode::RefIndex:
+    case OpCode::ArrayPack:
+    case OpCode::Index:
+    case OpCode::Add:
+    case OpCode::AddConst:
+    case OpCode::Sub:
+    case OpCode::SubConstRhs:
+    case OpCode::SubConstLhs:
+    case OpCode::Mul:
+    case OpCode::MulConst:
+    case OpCode::Div:
+    case OpCode::DivConstLhs:
+    case OpCode::MatMul:
+    case OpCode::Pow:
+    case OpCode::Mod:
+    case OpCode::FloorDiv:
+    case OpCode::BitAnd:
+    case OpCode::BitOr:
+    case OpCode::BitXor:
+    case OpCode::LShift:
+    case OpCode::RShift:
+    case OpCode::Abs:
+    case OpCode::Clamp:
+    case OpCode::Log:
+    case OpCode::Neg:
+    case OpCode::Not:
+    case OpCode::BitNot:
+    case OpCode::Sin:
+    case OpCode::Less:
+    case OpCode::LessEqual:
+    case OpCode::Greater:
+    case OpCode::GreaterEqual:
+    case OpCode::Equal:
+    case OpCode::NotEqual:
+      return true;
+    case OpCode::ArraySet:
+      return false;
+  }
+  return false;
+}
+
+bool Graph::is_fused_numeric_candidate(const CompiledInputProgram & program)
+{
+  for (const auto & instr : program.instructions)
+  {
+    if (!supports_fused_numeric_opcode(instr.opcode))
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool Graph::program_uses_current_outputs(const CompiledInputProgram & program)
+{
+  for (const auto & instr : program.instructions)
+  {
+    if (instr.opcode == OpCode::Ref || instr.opcode == OpCode::RefIndex)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 void Graph::rebuild_and_publish_runtime_locked()
@@ -252,6 +1398,18 @@ void Graph::rebuild_and_publish_runtime_locked()
 
 void Graph::eval_instruction(const RuntimeState & runtime, const ExprInstr & instr, Value * registers)
 {
+  auto get_fused_source_slot = [&](uint32_t module_id, unsigned int output_id) -> uint32_t
+  {
+    if (runtime.fused_graph == nullptr)
+    {
+      return std::numeric_limits<uint32_t>::max();
+    }
+    const auto it = runtime.fused_graph->source_output_lookup.find(fused_source_output_key(module_id, output_id));
+    return it == runtime.fused_graph->source_output_lookup.end()
+      ? std::numeric_limits<uint32_t>::max()
+      : it->second;
+  };
+
   switch (instr.opcode)
   {
     case OpCode::Literal:
@@ -265,6 +1423,13 @@ void Graph::eval_instruction(const RuntimeState & runtime, const ExprInstr & ins
         break;
       }
       const auto & slot = runtime.modules[instr.ref_module_id];
+      const uint32_t source_slot = get_fused_source_slot(instr.ref_module_id, instr.ref_output_id);
+      if (runtime.fused_graph != nullptr &&
+          source_slot < runtime.fused_graph->prev_outputs.size())
+      {
+        registers[instr.dst] = runtime.fused_graph->prev_outputs[source_slot];
+        break;
+      }
       if (!slot.module || instr.ref_output_id >= slot.module->prev_outputs.size())
       {
         registers[instr.dst] = float_value(0.0);
@@ -281,18 +1446,32 @@ void Graph::eval_instruction(const RuntimeState & runtime, const ExprInstr & ins
         break;
       }
       const auto & slot = runtime.modules[instr.ref_module_id];
+      const uint32_t source_slot = get_fused_source_slot(instr.ref_module_id, instr.ref_output_id);
+      if (runtime.fused_graph != nullptr &&
+          source_slot < runtime.fused_graph->indexed_prev_values.size() &&
+          instr.src_a < runtime.fused_graph->indexed_prev_values[source_slot].size())
+      {
+        registers[instr.dst] = runtime.fused_graph->indexed_prev_values[source_slot][instr.src_a];
+        break;
+      }
       if (!slot.module || instr.ref_output_id >= slot.module->prev_outputs.size() || instr.ref_index < 0)
       {
         registers[instr.dst] = float_value(0.0);
         break;
       }
       if (instr.ref_output_id < slot.indexed_prev_output_values.size() &&
-          instr.src_a < slot.indexed_prev_output_values[instr.ref_output_id].size())
+           instr.src_a < slot.indexed_prev_output_values[instr.ref_output_id].size())
       {
         registers[instr.dst] = slot.indexed_prev_output_values[instr.ref_output_id][instr.src_a];
         break;
       }
-      const Value & output = slot.module->prev_outputs[instr.ref_output_id];
+      const Value * output_ptr = &slot.module->prev_outputs[instr.ref_output_id];
+      if (runtime.fused_graph != nullptr &&
+          source_slot < runtime.fused_graph->prev_outputs.size())
+      {
+        output_ptr = &runtime.fused_graph->prev_outputs[source_slot];
+      }
+      const Value & output = *output_ptr;
       const std::size_t item_index = static_cast<std::size_t>(instr.ref_index);
       if (expr::is_array(output))
       {
@@ -455,6 +1634,18 @@ void Graph::eval_instruction(const RuntimeState & runtime, const ExprInstr & ins
 
 void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr & instr, Value * registers)
 {
+  auto get_fused_source_slot = [&](uint32_t module_id, unsigned int output_id) -> uint32_t
+  {
+    if (runtime.fused_graph == nullptr)
+    {
+      return std::numeric_limits<uint32_t>::max();
+    }
+    const auto it = runtime.fused_graph->source_output_lookup.find(fused_source_output_key(module_id, output_id));
+    return it == runtime.fused_graph->source_output_lookup.end()
+      ? std::numeric_limits<uint32_t>::max()
+      : it->second;
+  };
+
   switch (instr.opcode)
   {
     case OpCode::Ref:
@@ -465,6 +1656,13 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
         break;
       }
       const auto & slot = runtime.modules[instr.ref_module_id];
+      const uint32_t source_slot = get_fused_source_slot(instr.ref_module_id, instr.ref_output_id);
+      if (runtime.fused_graph != nullptr &&
+          source_slot < runtime.fused_graph->current_outputs.size())
+      {
+        registers[instr.dst] = runtime.fused_graph->current_outputs[source_slot];
+        break;
+      }
       if (!slot.module || instr.ref_output_id >= slot.module->outputs.size())
       {
         registers[instr.dst] = float_value(0.0);
@@ -481,6 +1679,27 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
         break;
       }
       const auto & slot = runtime.modules[instr.ref_module_id];
+      const uint32_t source_slot = get_fused_source_slot(instr.ref_module_id, instr.ref_output_id);
+      if (runtime.fused_graph != nullptr &&
+          source_slot < runtime.fused_graph->current_outputs.size())
+      {
+        const Value & output = runtime.fused_graph->current_outputs[source_slot];
+        const std::size_t item_index = static_cast<std::size_t>(instr.ref_index);
+        if (expr::is_array(output))
+        {
+          if (item_index >= output.array_items.size())
+          {
+            throw std::out_of_range("Array index out of range.");
+          }
+          registers[instr.dst] = output.array_items[item_index];
+          break;
+        }
+        if (expr::is_matrix(output))
+        {
+          registers[instr.dst] = expr::array_from_matrix_row(output, item_index);
+          break;
+        }
+      }
       if (!slot.module || instr.ref_output_id >= slot.module->outputs.size() || instr.ref_index < 0)
       {
         registers[instr.dst] = float_value(0.0);

@@ -1,11 +1,13 @@
 #pragma once
 
 #include "graph/GraphTypes.hpp"
+#include "jit/OrcJitEngine.hpp"
 
 #include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <memory>
 #include <string>
@@ -155,6 +157,91 @@ struct OutputTap
   OutputTap & operator=(OutputTap &&) noexcept = default;
 };
 
+struct FusedGraphModuleSpan
+{
+  uint32_t first_output_slot = 0;
+  uint32_t output_count = 0;
+};
+
+struct FusedGraphSourceOutput
+{
+  uint32_t module_id = 0;
+  unsigned int output_id = 0;
+  bool materialized = true;
+};
+
+enum class FusedGraphValueKind : uint8_t
+{
+  Scalar,
+  Array
+};
+
+struct FusedGraphValueRef
+{
+  FusedGraphValueKind kind = FusedGraphValueKind::Scalar;
+  uint32_t scalar_register = 0;
+  uint32_t array_slot = 0;
+  uint32_t array_size = 0;
+};
+
+struct FusedGraphInputBinding
+{
+  uint32_t module_id = 0;
+  unsigned int input_id = 0;
+  FusedGraphValueRef value;
+};
+
+struct FusedGraphMixBinding
+{
+  FusedGraphValueRef value;
+};
+
+struct FusedGraphKernelState
+{
+  bool available = false;
+  std::string status;
+  std::vector<double> scalar_inputs;
+  std::vector<double> temps;
+  std::vector<std::vector<double>> array_storage;
+  std::vector<double *> array_ptrs;
+  std::vector<uint64_t> array_sizes;
+  std::unordered_map<uint32_t, uint32_t> source_array_slots;
+  std::vector<FusedGraphInputBinding> input_bindings;
+  std::vector<FusedGraphMixBinding> mix_bindings;
+
+#ifdef EGRESS_LLVM_ORC_JIT
+  egress_jit::NumericProgram program;
+  egress_jit::NumericKernelFn kernel = nullptr;
+#endif
+};
+
+struct FusedGraphState
+{
+  bool numeric_candidate = false;
+  std::string candidate_reason;
+  std::vector<FusedGraphModuleSpan> module_output_spans;
+  std::vector<FusedGraphSourceOutput> source_outputs;
+  std::unordered_map<uint64_t, uint32_t> source_output_lookup;
+  std::vector<Value> current_outputs;
+  std::vector<Value> prev_outputs;
+  std::vector<std::vector<int64_t>> indexed_prev_indices;
+  std::vector<std::vector<Value>> indexed_prev_values;
+  std::vector<uint32_t> mix_source_output_slots;
+  std::vector<uint32_t> tap_source_output_slots;
+  FusedGraphKernelState input_kernel;
+  FusedGraphKernelState mix_kernel;
+
+#ifdef EGRESS_LLVM_ORC_JIT
+  egress_jit::NumericProgram program;
+  egress_jit::NumericKernelFn kernel = nullptr;
+  std::vector<double> inputs;
+  std::vector<double> temps;
+  std::vector<std::vector<double>> array_storage;
+  std::vector<double *> array_ptrs;
+  std::vector<uint64_t> array_sizes;
+#endif
+};
+
 struct RuntimeState
 {
   std::vector<ModuleSlot> modules;
@@ -162,6 +249,7 @@ struct RuntimeState
   std::vector<MixTap> mix;
   std::vector<MixExpr> mix_exprs;
   std::vector<OutputTap> taps;
+  std::unique_ptr<FusedGraphState> fused_graph;
 };
 
 #ifdef EGRESS_PROFILE

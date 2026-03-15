@@ -368,6 +368,33 @@ def main():
     graph.set_worker_count(1)
     assert graph.worker_count() == 1
 
+    assert graph.fusion_enabled() is False
+    graph.set_fusion_enabled(True)
+    assert graph.fusion_enabled() is True
+
+    fusion_source = IndexedArraySource()
+    fusion_source.x = 2.0
+    fusion_sink = IndexedArraySink()
+    fusion_sink.weights = [0.0, 4.0, 5.0]
+    fusion_sink.weights[0] = fusion_source.pair[1]
+    graph.add_output(fusion_sink.lane0.module_name, fusion_sink.lane0.output_id)
+    graph.process()
+    fusion_buf = graph.output_buffer()
+    assert math.isclose(fusion_buf[0], 0.0, rel_tol=1e-9, abs_tol=1e-9)
+    graph.process()
+    fusion_buf = graph.output_buffer()
+    assert math.isclose(fusion_buf[0], 4.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+    graph.destroy_module(fusion_source.name)
+    graph.destroy_module(fusion_sink.name)
+
+    mix_source = IndexedArraySource()
+    mix_source.x = 3.0
+    eg.add_output(mix_source.pair[1] + 1.0)
+    graph.process()
+    mix_buf = graph.output_buffer()
+    assert math.isclose(mix_buf[0], 7.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+    graph.destroy_module(mix_source.name)
+
 
 if __name__ == "__main__":
     main()

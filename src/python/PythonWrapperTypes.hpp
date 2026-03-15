@@ -68,6 +68,16 @@ class PythonGraph
       graph_.set_worker_count(worker_count);
     }
 
+    void set_fusion_enabled(bool enabled)
+    {
+      graph_.set_fusion_enabled(enabled);
+    }
+
+    bool fusion_enabled() const
+    {
+      return graph_.fusion_enabled();
+    }
+
     unsigned int worker_count() const
     {
       return graph_.worker_count();
