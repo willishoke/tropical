@@ -109,6 +109,34 @@ ArrayInputProbe = eg.define_module(
 )
 
 
+ArraySum = eg.define_module(
+    name="ArraySum",
+    inputs=["weights"],
+    outputs=["sum"],
+    regs={},
+    process=lambda inp, reg: (
+        {
+            "sum": inp["weights"][0] + inp["weights"][1] + inp["weights"][2],
+        },
+        {},
+    ),
+)
+
+
+ArrayComposeProbe = eg.define_module(
+    name="ArrayComposeProbe",
+    inputs=["x"],
+    outputs=["sum"],
+    regs={},
+    process=lambda inp, reg: (
+        {
+            "sum": ArraySum(eg.array([inp["x"], inp["x"] * 2.0, inp["x"] * 3.0])),
+        },
+        {},
+    ),
+)
+
+
 IndexedArraySource = eg.define_module(
     name="IndexedArraySource",
     inputs=["x"],
@@ -239,6 +267,37 @@ def main():
     array_stats = array_probe.compile_stats
     assert array_stats["jit_status"] == "numeric JIT active"
 
+    typed_array_probe = ArrayInputProbe()
+    typed_array_probe.x = 2.0
+    typed_array_tap = graph.add_output_tap(typed_array_probe.mixed.module_name, typed_array_probe.mixed.output_id)
+
+    typed_array_probe.weights = [1, 2, 3]
+    graph.process()
+    typed_array_buf = graph.output_tap_buffer(typed_array_tap)
+    assert math.isclose(typed_array_buf[0], 10.0, rel_tol=1e-9, abs_tol=1e-9)
+
+    typed_array_probe.weights = [True, False, True]
+    graph.process()
+    typed_array_buf = graph.output_tap_buffer(typed_array_tap)
+    assert math.isclose(typed_array_buf[0], 4.0, rel_tol=1e-9, abs_tol=1e-9)
+
+    typed_array_probe.weights = [0.5, 1.5, 2.5]
+    graph.process()
+    typed_array_buf = graph.output_tap_buffer(typed_array_tap)
+    assert math.isclose(typed_array_buf[0], 9.0, rel_tol=1e-9, abs_tol=1e-9)
+
+    typed_array_probe.weights = [True, 2, 3.5]
+    graph.process()
+    typed_array_buf = graph.output_tap_buffer(typed_array_tap)
+    assert math.isclose(typed_array_buf[0], 10.0, rel_tol=1e-9, abs_tol=1e-9)
+
+    typed_array_stats = typed_array_probe.compile_stats
+    assert typed_array_stats["jit_status"] == "numeric JIT active"
+    assert typed_array_stats["numeric_jit_instruction_count"] > 0
+
+    graph.remove_output_tap(typed_array_tap)
+    graph.destroy_module(typed_array_probe.name)
+
     graph.destroy_module(probe.name)
     graph.destroy_module(stateful.name)
     graph.destroy_module(array_probe.name)
@@ -260,11 +319,36 @@ def main():
     assert module_stats["numeric_jit_instruction_count"] > 0
     assert "composite_update_count" not in module_stats
 
+    graph.reset_profile_stats()
     graph.process()
     module_buf = graph.output_buffer()
     assert math.isclose(module_buf[0], 2.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+    module_runtime = module_compose.runtime_stats
+    assert module_runtime["materialized_scalar_outputs"] == 2 * len(module_buf)
 
     graph.destroy_module(module_compose.name)
+
+    array_compose = ArrayComposeProbe()
+    array_compose.x = 1.0
+    graph.add_output(array_compose.sum.module_name, array_compose.sum.output_id)
+    graph.process()
+
+    array_compose_buf = graph.output_buffer()
+    assert math.isclose(array_compose_buf[0], 6.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+
+    array_compose_stats = array_compose.compile_stats
+    assert array_compose_stats["jit_status"] == "numeric JIT active"
+    assert array_compose_stats["nested_module_count"] >= 1
+
+    graph.reset_profile_stats()
+    graph.process()
+    array_compose_buf = graph.output_buffer()
+    assert math.isclose(array_compose_buf[0], 6.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+    array_compose_runtime = array_compose.runtime_stats
+    assert array_compose_runtime["materialized_array_outputs"] == 0
+    assert array_compose_runtime["materialized_scalar_outputs"] == len(array_compose_buf)
+
+    graph.destroy_module(array_compose.name)
 
     delay_probe = DelayComposeProbe()
     delay_probe.x = 2.0
@@ -365,10 +449,44 @@ def main():
     graph.remove_output_tap(sink_tap)
     graph.destroy_module(parallel_source.name)
     graph.destroy_module(parallel_sink.name)
+
+    prev_array_source = IndexedArraySource()
+    prev_array_source.x = 2.0
+    prev_array_sink = IndexedArraySink()
+    prev_array_sink.weights = prev_array_source.pair
+    prev_array_tap = graph.add_output_tap(prev_array_sink.lane2.module_name, prev_array_sink.lane2.output_id)
+    graph.reset_profile_stats()
+    graph.process()
+    prev_array_buf = graph.output_tap_buffer(prev_array_tap)
+    assert math.isclose(prev_array_buf[0], 0.0, rel_tol=1e-9, abs_tol=1e-9)
+    graph.process()
+    prev_array_buf = graph.output_tap_buffer(prev_array_tap)
+    assert math.isclose(prev_array_buf[0], 6.0, rel_tol=1e-9, abs_tol=1e-9)
+    prev_array_boxing = graph.profile_stats()["boxing"]
+    assert prev_array_boxing["fused_current_output_sync"]["output_copy_count"] == 0
+    assert prev_array_boxing["fused_prev_output_sync"]["output_copy_count"] == 0
+    graph.remove_output_tap(prev_array_tap)
+    graph.destroy_module(prev_array_source.name)
+    graph.destroy_module(prev_array_sink.name)
+
     graph.set_worker_count(1)
     assert graph.worker_count() == 1
 
     assert graph.fusion_enabled() is False
+
+    graph.reset_profile_stats()
+    auto_fused_source = Gain2()
+    auto_fused_source.x = 2.0
+    graph.add_output(auto_fused_source.y.module_name, auto_fused_source.y.output_id)
+    graph.prime_numeric_jit()
+    graph.process()
+    graph.process()
+    auto_fused_profile = graph.profile_stats()
+    assert auto_fused_profile["fused_input_use_count"] > 0
+    assert auto_fused_profile["fused_body_use_count"] > 0
+    assert auto_fused_profile["modules"] == []
+    graph.destroy_module(auto_fused_source.name)
+
     graph.set_fusion_enabled(True)
     assert graph.fusion_enabled() is True
 

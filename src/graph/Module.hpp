@@ -247,6 +247,8 @@ class Module
 
     void eval_program(const CompiledProgram & expr, std::vector<Value> & temps) const;
 
+    const Value & materialize_output_value(unsigned int output_id, bool previous = false);
+
     unsigned int input_count_ = 0;
     CompiledProgram program_;
     CompiledProgram composite_output_program_;
@@ -271,6 +273,8 @@ class Module
 #ifdef EGRESS_LLVM_ORC_JIT
     egress_jit::NumericKernelFn jit_kernel_ = nullptr;
     std::vector<double> numeric_inputs_;
+    bool numeric_input_override_active_ = false;
+    std::vector<double> numeric_input_scalar_override_;
     std::vector<double> numeric_temps_;
     std::vector<std::vector<double>> numeric_array_storage_;
     std::vector<double *> numeric_array_ptrs_;
@@ -334,10 +338,19 @@ class Module
 
     std::vector<double> numeric_registers_;
     std::vector<double> numeric_next_registers_;
+    std::vector<std::vector<double>> numeric_register_arrays_;
+    bool value_registers_dirty_ = false;
     std::vector<bool> numeric_output_scalar_mask_;
     std::vector<double> numeric_output_scalars_;
     std::vector<bool> numeric_prev_output_scalar_mask_;
     std::vector<double> numeric_prev_output_scalars_;
+    std::vector<bool> numeric_prev_output_array_mask_;
+    std::vector<std::vector<double>> numeric_prev_output_arrays_;
+    std::vector<bool> numeric_delay_scalar_mask_;
+    std::vector<double> numeric_delay_scalars_;
+    std::vector<bool> numeric_delay_array_mask_;
+    std::vector<std::vector<double>> numeric_delay_arrays_;
+    bool value_delay_states_dirty_ = false;
     CompositeBodyJitState composite_body_jit_;
     NumericJitState composite_output_jit_;
     NumericJitState composite_register_jit_;
@@ -395,9 +408,11 @@ class Module
 
     bool try_get_numeric_output_ref(unsigned int output_id, NumericValueRef & out) const;
 
-    const std::vector<double> * try_get_numeric_output_array_values(unsigned int output_id) const;
+    const std::vector<double> * try_get_numeric_output_array_values(unsigned int output_id, bool previous = false) const;
 
     bool try_get_numeric_scalar_output(unsigned int output_id, bool previous, double & out) const;
+
+    void capture_numeric_prev_array_outputs();
 
     void capture_numeric_scalar_outputs(
       const CompiledProgram & compiled_program,
@@ -408,6 +423,8 @@ class Module
 
     static bool value_to_scalar_double(const Value & value, double & out);
 
+    bool add_array_value_to_jit_table(const Value & value, uint32_t & out_slot);
+
     bool add_array_values_to_jit_table(const std::vector<Value> & values, uint32_t & out_slot);
 
     bool add_matrix_values_to_jit_table(const Value & value, uint32_t & out_slot);
@@ -417,6 +434,11 @@ class Module
     static bool add_array_values_to_jit_table(
       std::vector<std::vector<double>> & array_storage,
       const std::vector<Value> & values,
+      uint32_t & out_slot);
+
+    static bool add_array_value_to_jit_table(
+      std::vector<std::vector<double>> & array_storage,
+      const Value & value,
       uint32_t & out_slot);
 
     static bool add_matrix_values_to_jit_table(
@@ -433,6 +455,23 @@ class Module
     bool numeric_input_layout_matches(const std::vector<Value> & current_inputs) const;
 
     bool sync_numeric_inputs_from_values();
+
+    bool try_set_direct_numeric_inputs(
+      const NumericJitState & state,
+      const CompiledProgram & compiled_program);
+
+    void ensure_value_registers_current();
+
+    void ensure_value_delay_states_current();
+
+    bool try_get_numeric_delay_scalar(unsigned int delay_id, double & out) const;
+
+    const std::vector<double> * try_get_numeric_delay_array(unsigned int delay_id) const;
+
+    bool update_numeric_delay_states_from_outputs(
+      const NumericJitState & state,
+      const CompiledProgram & compiled_program,
+      std::size_t start_output_id = 0);
 
     bool prepare_numeric_jit_program(
       const CompiledProgram & source_program,

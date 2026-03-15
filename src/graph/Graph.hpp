@@ -63,6 +63,14 @@ class Graph
       uint64_t callback_count = 0;
       double avg_callback_ms = 0.0;
       double max_callback_ms = 0.0;
+      bool primitive_body_available = false;
+      bool primitive_body_covers_all_modules = false;
+      bool input_kernel_available = false;
+      uint64_t fused_input_use_count = 0;
+      uint64_t fused_body_use_count = 0;
+      std::string fusion_candidate_reason;
+      std::string primitive_body_status;
+      std::string input_kernel_status;
       std::vector<ModuleProfileStats> modules;
     #ifdef EGRESS_PROFILE
       FusedSyncStats fused_current_output_sync;
@@ -172,6 +180,16 @@ class Graph
           runtime.fused_graph != nullptr && runtime.fused_graph->primitive_body_available;
         const bool use_fused_inputs = run_fused_input_kernel(runtime, can_use_fused_body);
         const bool used_fused_body = can_use_fused_body && use_fused_inputs && run_fused_primitive_body_kernel(runtime);
+#ifdef EGRESS_PROFILE
+        if (use_fused_inputs)
+        {
+          profile_fused_input_use_count_.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (used_fused_body)
+        {
+          profile_fused_body_use_count_.fetch_add(1, std::memory_order_relaxed);
+        }
+#endif
         const bool body_covers_all_modules =
           used_fused_body &&
           runtime.fused_graph != nullptr &&
@@ -228,7 +246,7 @@ class Graph
               continue;
             }
 #endif
-            const Value & output = slot.module->outputs[tap.output_id];
+            const Value & output = slot.module->materialize_output_value(tap.output_id, false);
             if (expr::is_array(output) || expr::is_matrix(output))
             {
               tap.buffer.buffers[tap_write_indices[tap_id]][sample] = 0.0;
@@ -264,7 +282,7 @@ class Graph
             continue;
           }
 #endif
-          mixed += expr::to_float64(slot.module->outputs[tap.output_id]) / 20.0;
+          mixed += expr::to_float64(slot.module->materialize_output_value(tap.output_id, false)) / 20.0;
         }
         if (!run_fused_mix_kernel(runtime, mixed))
         {
@@ -333,7 +351,7 @@ class Graph
 
             if (output_id < slot.module->outputs.size())
             {
-              const Value & output = slot.module->outputs[output_id];
+              const Value & output = slot.module->materialize_output_value(output_id, false);
               if (expr::is_array(output))
               {
                 for (std::size_t index_id = 0; index_id < indices.size(); ++index_id)
@@ -362,6 +380,7 @@ class Graph
 
           slot.module->prev_outputs.swap(slot.module->outputs);
   #ifdef EGRESS_LLVM_ORC_JIT
+          slot.module->capture_numeric_prev_array_outputs();
           slot.module->numeric_prev_output_scalar_mask_.swap(slot.module->numeric_output_scalar_mask_);
           slot.module->numeric_prev_output_scalars_.swap(slot.module->numeric_output_scalars_);
   #endif
@@ -451,6 +470,22 @@ class Graph
       stats.callback_count = callback_count;
       stats.avg_callback_ms = callback_count == 0 ? 0.0 : (static_cast<double>(total_ns) / static_cast<double>(callback_count)) / 1e6;
       stats.max_callback_ms = static_cast<double>(max_ns) / 1e6;
+      const uint32_t runtime_index = active_runtime_index_.load(std::memory_order_acquire);
+      if (runtime_index < 2)
+      {
+        const auto & runtime = runtimes_[runtime_index];
+        if (runtime.fused_graph)
+        {
+          stats.primitive_body_available = runtime.fused_graph->primitive_body_available;
+          stats.primitive_body_covers_all_modules = runtime.fused_graph->primitive_body_covers_all_modules;
+          stats.input_kernel_available = runtime.fused_graph->input_kernel.available;
+          stats.fused_input_use_count = profile_fused_input_use_count_.load(std::memory_order_relaxed);
+          stats.fused_body_use_count = profile_fused_body_use_count_.load(std::memory_order_relaxed);
+          stats.fusion_candidate_reason = runtime.fused_graph->candidate_reason;
+          stats.primitive_body_status = runtime.fused_graph->primitive_body_status;
+          stats.input_kernel_status = runtime.fused_graph->input_kernel.status;
+        }
+      }
       stats.fused_current_output_sync.call_count =
         profile_fused_current_sync_call_count_.load(std::memory_order_relaxed);
       stats.fused_current_output_sync.total_ms =
@@ -499,6 +534,8 @@ class Graph
       profile_fused_prev_sync_total_ns_.store(0, std::memory_order_relaxed);
       profile_fused_prev_sync_max_ns_.store(0, std::memory_order_relaxed);
       profile_fused_prev_sync_output_copy_count_.store(0, std::memory_order_relaxed);
+      profile_fused_input_use_count_.store(0, std::memory_order_relaxed);
+      profile_fused_body_use_count_.store(0, std::memory_order_relaxed);
 
       {
         std::lock_guard<std::mutex> lock(profile_mutex_);
@@ -1448,6 +1485,8 @@ class Graph
     mutable std::atomic<uint64_t> profile_fused_prev_sync_total_ns_{0};
     mutable std::atomic<uint64_t> profile_fused_prev_sync_max_ns_{0};
     mutable std::atomic<uint64_t> profile_fused_prev_sync_output_copy_count_{0};
+    mutable std::atomic<uint64_t> profile_fused_input_use_count_{0};
+    mutable std::atomic<uint64_t> profile_fused_body_use_count_{0};
     mutable std::mutex profile_mutex_;
     std::unordered_map<std::string, ModuleTimingCounters> module_profile_stats_;
   #endif

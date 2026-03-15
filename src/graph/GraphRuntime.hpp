@@ -180,6 +180,7 @@ struct FusedGraphInputBinding
   uint32_t module_id = 0;
   unsigned int input_id = 0;
   uint32_t fused_input_slot = std::numeric_limits<uint32_t>::max();
+  uint32_t fused_input_array_slot = std::numeric_limits<uint32_t>::max();
   FusedGraphValueRef value;
 };
 
@@ -193,8 +194,16 @@ struct FusedPrimitiveBodyModule
   uint32_t module_id = 0;
   uint32_t input_base = 0;
   uint32_t register_base = 0;
+  uint32_t array_base = 0;
+  uint32_t array_slot_count = 0;
   std::vector<uint32_t> output_registers;
+  std::vector<egress_module_detail::NumericInputInfo> input_info;
+  std::vector<egress_module_detail::NumericOutputInfo> output_info;
+  std::vector<bool> register_scalar_mask;
+  std::vector<uint32_t> register_array_slot;
   std::vector<int32_t> register_targets;
+  std::vector<int32_t> array_register_targets;
+  std::vector<bool> array_register_can_swap;
 };
 
 struct FusedGraphKernelState
@@ -207,6 +216,7 @@ struct FusedGraphKernelState
   std::vector<double *> array_ptrs;
   std::vector<uint64_t> array_sizes;
   std::unordered_map<uint32_t, uint32_t> source_array_slots;
+  std::unordered_map<uint64_t, uint32_t> indexed_prev_scalar_slots;
   std::vector<FusedGraphInputBinding> input_bindings;
   std::vector<FusedGraphMixBinding> mix_bindings;
 

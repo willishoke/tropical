@@ -2,6 +2,70 @@
 
 #ifdef EGRESS_LLVM_ORC_JIT
 
+namespace
+{
+inline bool copy_numeric_scalar_values(
+  const std::vector<Value> & values,
+  AggregateScalarType aggregate_scalar_type,
+  std::vector<double> & dst)
+{
+  if (aggregate_scalar_type == AggregateScalarType::NonScalar)
+  {
+    return false;
+  }
+  if (dst.size() != values.size())
+  {
+    return false;
+  }
+
+  for (std::size_t item_id = 0; item_id < values.size(); ++item_id)
+  {
+    const Value & item = values[item_id];
+    if (aggregate_scalar_type == AggregateScalarType::Bool)
+    {
+      dst[item_id] = item.bool_value ? 1.0 : 0.0;
+      continue;
+    }
+    if (aggregate_scalar_type == AggregateScalarType::Int)
+    {
+      dst[item_id] = static_cast<double>(item.int_value);
+      continue;
+    }
+    if (aggregate_scalar_type == AggregateScalarType::Float)
+    {
+      dst[item_id] = item.float_value;
+      continue;
+    }
+
+    if (item.type == ValueType::Array || item.type == ValueType::Matrix)
+    {
+      return false;
+    }
+    dst[item_id] = expr::to_float64(item);
+  }
+
+  return true;
+}
+
+inline bool copy_numeric_aggregate_value(const Value & value, std::vector<double> & dst)
+{
+  if (!expr::aggregate_has_numeric_scalars(value))
+  {
+    return false;
+  }
+
+  if (value.type == ValueType::Array)
+  {
+    return copy_numeric_scalar_values(value.array_items, value.aggregate_scalar_type, dst);
+  }
+  if (value.type == ValueType::Matrix)
+  {
+    return copy_numeric_scalar_values(value.matrix_items, value.aggregate_scalar_type, dst);
+  }
+  return false;
+}
+}
+
 bool Module::supports_numeric_jit_expr_kind(ExprKind kind) const
 {
   switch (kind)
@@ -58,6 +122,7 @@ void Module::assign_scalar_numeric_value(Value & dst, double value)
   dst.matrix_items.clear();
   dst.matrix_rows = 0;
   dst.matrix_cols = 0;
+  dst.aggregate_scalar_type = AggregateScalarType::None;
 }
 
 void Module::assign_numeric_value_to(
@@ -84,6 +149,7 @@ void Module::assign_numeric_value_to(
       {
         assign_scalar_numeric_value(dst.array_items[i], values[i]);
       }
+      dst.aggregate_scalar_type = AggregateScalarType::Float;
       return;
     }
     case NumericValueKind::Matrix:
@@ -101,6 +167,7 @@ void Module::assign_numeric_value_to(
       {
         assign_scalar_numeric_value(dst.matrix_items[i], values[i]);
       }
+      dst.aggregate_scalar_type = AggregateScalarType::Float;
       return;
     }
   }
@@ -154,8 +221,19 @@ bool Module::try_get_numeric_output_ref(unsigned int output_id, NumericValueRef 
   return true;
 }
 
-const std::vector<double> * Module::try_get_numeric_output_array_values(unsigned int output_id) const
+const std::vector<double> * Module::try_get_numeric_output_array_values(unsigned int output_id, bool previous) const
 {
+  if (previous)
+  {
+    if (output_id >= numeric_prev_output_array_mask_.size() ||
+        output_id >= numeric_prev_output_arrays_.size() ||
+        !numeric_prev_output_array_mask_[output_id])
+    {
+      return nullptr;
+    }
+    return &numeric_prev_output_arrays_[output_id];
+  }
+
   NumericValueRef ref;
   if (!try_get_numeric_output_ref(output_id, ref) ||
       ref.kind != NumericValueKind::Array ||
@@ -178,6 +256,83 @@ bool Module::try_get_numeric_scalar_output(unsigned int output_id, bool previous
   }
   out = scalar_values[output_id];
   return true;
+}
+
+const Value & Module::materialize_output_value(unsigned int output_id, bool previous)
+{
+  auto & destinations = previous ? prev_outputs : outputs;
+  if (output_id >= destinations.size())
+  {
+    static Value zero = expr::float_value(0.0);
+    return zero;
+  }
+
+  if (!previous)
+  {
+    NumericValueRef ref;
+    if (try_get_numeric_output_ref(output_id, ref) &&
+        output_id < numeric_output_info_.size() &&
+        output_id < program_.output_targets.size())
+    {
+      assign_numeric_value_to(
+        destinations[output_id],
+        numeric_output_info_[output_id],
+        program_.output_targets[output_id],
+        numeric_temps_,
+        numeric_array_storage_);
+      return destinations[output_id];
+    }
+  }
+  else
+  {
+    double scalar = 0.0;
+    if (try_get_numeric_scalar_output(output_id, true, scalar))
+    {
+      assign_scalar_numeric_value(destinations[output_id], scalar);
+      return destinations[output_id];
+    }
+    const auto * values = try_get_numeric_output_array_values(output_id, true);
+    if (values != nullptr)
+    {
+      std::vector<Value> items(values->size(), expr::float_value(0.0));
+      for (std::size_t item_id = 0; item_id < values->size(); ++item_id)
+      {
+        assign_scalar_numeric_value(items[item_id], (*values)[item_id]);
+      }
+      destinations[output_id] = expr::array_value(std::move(items));
+      return destinations[output_id];
+    }
+  }
+
+  return destinations[output_id];
+}
+
+void Module::capture_numeric_prev_array_outputs()
+{
+  if (numeric_prev_output_array_mask_.size() != outputs.size())
+  {
+    numeric_prev_output_array_mask_.assign(outputs.size(), false);
+    numeric_prev_output_arrays_.assign(outputs.size(), {});
+  }
+
+  for (unsigned int output_id = 0; output_id < outputs.size(); ++output_id)
+  {
+    NumericValueRef ref;
+    if (!try_get_numeric_output_ref(output_id, ref) ||
+        ref.kind != NumericValueKind::Array ||
+        ref.array_slot >= numeric_array_storage_.size())
+    {
+      numeric_prev_output_array_mask_[output_id] = false;
+      if (output_id < numeric_prev_output_arrays_.size())
+      {
+        numeric_prev_output_arrays_[output_id].clear();
+      }
+      continue;
+    }
+
+    numeric_prev_output_array_mask_[output_id] = true;
+    numeric_prev_output_arrays_[output_id] = numeric_array_storage_[ref.array_slot];
+  }
 }
 
 void Module::capture_numeric_scalar_outputs(
@@ -234,6 +389,11 @@ bool Module::add_array_values_to_jit_table(const std::vector<Value> & values, ui
   return add_array_values_to_jit_table(numeric_array_storage_, values, out_slot);
 }
 
+bool Module::add_array_value_to_jit_table(const Value & value, uint32_t & out_slot)
+{
+  return add_array_value_to_jit_table(numeric_array_storage_, value, out_slot);
+}
+
 bool Module::add_array_values_to_jit_table(
   std::vector<std::vector<double>> & array_storage,
   const std::vector<Value> & values,
@@ -241,14 +401,36 @@ bool Module::add_array_values_to_jit_table(
 {
   std::vector<double> numeric_values;
   numeric_values.reserve(values.size());
-  for (const Value & item : values)
+  const AggregateScalarType aggregate_scalar_type = expr::infer_aggregate_scalar_type(values);
+  if (aggregate_scalar_type == AggregateScalarType::NonScalar)
   {
-    double scalar = 0.0;
-    if (!value_to_scalar_double(item, scalar))
-    {
-      return false;
-    }
-    numeric_values.push_back(scalar);
+    return false;
+  }
+  numeric_values.resize(values.size(), 0.0);
+  if (!copy_numeric_scalar_values(values, aggregate_scalar_type, numeric_values))
+  {
+    return false;
+  }
+
+  out_slot = static_cast<uint32_t>(array_storage.size());
+  array_storage.push_back(std::move(numeric_values));
+  return true;
+}
+
+bool Module::add_array_value_to_jit_table(
+  std::vector<std::vector<double>> & array_storage,
+  const Value & value,
+  uint32_t & out_slot)
+{
+  if (value.type != ValueType::Array || !expr::aggregate_has_numeric_scalars(value))
+  {
+    return false;
+  }
+
+  std::vector<double> numeric_values(value.array_items.size(), 0.0);
+  if (!copy_numeric_aggregate_value(value, numeric_values))
+  {
+    return false;
   }
 
   out_slot = static_cast<uint32_t>(array_storage.size());
@@ -270,7 +452,20 @@ bool Module::add_matrix_values_to_jit_table(
   {
     return false;
   }
-  return add_array_values_to_jit_table(array_storage, value.matrix_items, out_slot);
+  if (!expr::aggregate_has_numeric_scalars(value))
+  {
+    return false;
+  }
+
+  std::vector<double> numeric_values(value.matrix_items.size(), 0.0);
+  if (!copy_numeric_aggregate_value(value, numeric_values))
+  {
+    return false;
+  }
+
+  out_slot = static_cast<uint32_t>(array_storage.size());
+  array_storage.push_back(std::move(numeric_values));
+  return true;
 }
 
 uint32_t Module::allocate_array_slot_with_size(std::size_t size)
@@ -304,7 +499,7 @@ bool Module::configure_numeric_inputs_for_jit(const std::vector<Value> & current
     }
 
     uint32_t array_slot = 0;
-    if (!add_array_values_to_jit_table(input.array_items, array_slot))
+    if (!add_array_value_to_jit_table(input, array_slot))
     {
       return false;
     }
@@ -365,6 +560,39 @@ bool Module::sync_numeric_inputs_from_values()
     return false;
   }
 
+  if (numeric_input_override_active_)
+  {
+    if (numeric_input_scalar_override_.size() < inputs.size())
+    {
+      numeric_input_override_active_ = false;
+      return false;
+    }
+    for (unsigned int input_id = 0; input_id < inputs.size(); ++input_id)
+    {
+      if (!numeric_input_info_[input_id].is_scalar)
+      {
+        const NumericInputInfo & info = numeric_input_info_[input_id];
+        if (info.array_slot >= numeric_array_storage_.size() ||
+            info.array_slot >= numeric_array_ptrs_.size() ||
+            info.array_slot >= numeric_array_sizes_.size() ||
+            numeric_array_storage_[info.array_slot].size() != info.array_size)
+        {
+          numeric_input_override_active_ = false;
+          return false;
+        }
+        continue;
+      }
+      numeric_inputs_[input_id] = numeric_input_scalar_override_[input_id];
+    }
+    numeric_input_override_active_ = false;
+#ifdef EGRESS_PROFILE
+    record_numeric_input_sync_profile(
+      static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sync_start).count()));
+#endif
+    return true;
+  }
+
   for (unsigned int input_id = 0; input_id < inputs.size(); ++input_id)
   {
     const Value & input = inputs[input_id];
@@ -394,14 +622,9 @@ bool Module::sync_numeric_inputs_from_values()
       return false;
     }
 
-    for (unsigned int item_id = 0; item_id < input.array_items.size(); ++item_id)
+    if (!copy_numeric_aggregate_value(input, dst))
     {
-      double scalar = 0.0;
-      if (!value_to_scalar_double(input.array_items[item_id], scalar))
-      {
-        return false;
-      }
-      dst[item_id] = scalar;
+      return false;
     }
   }
 
@@ -410,6 +633,72 @@ bool Module::sync_numeric_inputs_from_values()
     static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sync_start).count()));
 #endif
+  return true;
+}
+
+bool Module::try_set_direct_numeric_inputs(
+  const NumericJitState & state,
+  const CompiledProgram & compiled_program)
+{
+  if (jit_kernel_ == nullptr ||
+      numeric_input_info_.size() != inputs.size() ||
+      compiled_program.output_targets.size() != inputs.size() ||
+      state.output_info.size() < inputs.size())
+  {
+    return false;
+  }
+
+  if (numeric_input_scalar_override_.size() < inputs.size())
+  {
+    numeric_input_scalar_override_.assign(inputs.size(), 0.0);
+  }
+
+  for (unsigned int input_id = 0; input_id < inputs.size(); ++input_id)
+  {
+    const NumericInputInfo & dst_info = numeric_input_info_[input_id];
+    const NumericOutputInfo & src_info = state.output_info[input_id];
+    const NumericValueKind src_kind = static_cast<NumericValueKind>(src_info.kind);
+    if (dst_info.is_scalar)
+    {
+      if (src_kind != NumericValueKind::Scalar)
+      {
+        numeric_input_override_active_ = false;
+        return false;
+      }
+      const uint32_t src_reg = compiled_program.output_targets[input_id];
+      if (src_reg >= state.temps.size())
+      {
+        numeric_input_override_active_ = false;
+        return false;
+      }
+      numeric_input_scalar_override_[input_id] = state.temps[src_reg];
+      continue;
+    }
+
+    if (src_kind != NumericValueKind::Array ||
+        src_info.array_slot >= state.array_storage.size() ||
+        dst_info.array_slot >= numeric_array_storage_.size() ||
+        dst_info.array_slot >= numeric_array_ptrs_.size() ||
+        dst_info.array_slot >= numeric_array_sizes_.size())
+    {
+      numeric_input_override_active_ = false;
+      return false;
+    }
+
+    const auto & src_values = state.array_storage[src_info.array_slot];
+    if (src_values.size() != dst_info.array_size)
+    {
+      numeric_input_override_active_ = false;
+      return false;
+    }
+
+    auto & dst_values = numeric_array_storage_[dst_info.array_slot];
+    dst_values = src_values;
+    numeric_array_ptrs_[dst_info.array_slot] = dst_values.empty() ? nullptr : dst_values.data();
+    numeric_array_sizes_[dst_info.array_slot] = static_cast<uint64_t>(dst_values.size());
+  }
+
+  numeric_input_override_active_ = true;
   return true;
 }
 
@@ -432,7 +721,7 @@ bool Module::configure_numeric_inputs_for_jit(
     }
 
     uint32_t array_slot = 0;
-    if (!add_array_values_to_jit_table(state.array_storage, input.array_items, array_slot))
+    if (!add_array_value_to_jit_table(state.array_storage, input, array_slot))
     {
       return false;
     }
@@ -558,22 +847,173 @@ bool Module::sync_numeric_register_arrays_from_values(NumericJitState & state)
     {
       return false;
     }
-    const Value & reg = registers_[reg_id];
-    if (reg.type != ValueType::Array || reg.array_items.size() != state.array_storage[array_slot].size())
+    if (reg_id >= numeric_register_arrays_.size())
     {
       return false;
     }
+    const auto & reg_values = numeric_register_arrays_[reg_id];
     auto & dst = state.array_storage[array_slot];
-    for (unsigned int item_id = 0; item_id < reg.array_items.size(); ++item_id)
+    if (reg_values.size() != dst.size())
     {
-      double scalar = 0.0;
-      if (!value_to_scalar_double(reg.array_items[item_id], scalar))
+      return false;
+    }
+    std::copy(reg_values.begin(), reg_values.end(), dst.begin());
+  }
+  return true;
+}
+
+void Module::ensure_value_registers_current()
+{
+  if (registers_.size() < numeric_registers_.size())
+  {
+    registers_.resize(numeric_registers_.size(), expr::float_value(0.0));
+  }
+  if (next_registers_.size() < registers_.size())
+  {
+    next_registers_.resize(registers_.size(), expr::float_value(0.0));
+  }
+  for (unsigned int register_id = 0; register_id < registers_.size(); ++register_id)
+  {
+    if (register_id < register_scalar_mask_.size() && !register_scalar_mask_[register_id])
+    {
+      const std::size_t item_count =
+        register_id < numeric_register_arrays_.size() ? numeric_register_arrays_[register_id].size() : 0;
+      std::vector<Value> items(item_count, expr::float_value(0.0));
+      if (register_id < numeric_register_arrays_.size())
+      {
+        for (std::size_t item_id = 0; item_id < numeric_register_arrays_[register_id].size(); ++item_id)
+        {
+          assign_scalar_numeric_value(items[item_id], numeric_register_arrays_[register_id][item_id]);
+        }
+      }
+      registers_[register_id] = expr::array_value(std::move(items));
+      next_registers_[register_id] = registers_[register_id];
+      continue;
+    }
+
+    if (register_id < numeric_registers_.size())
+    {
+      assign_scalar_numeric_value(registers_[register_id], numeric_registers_[register_id]);
+      next_registers_[register_id] = registers_[register_id];
+    }
+  }
+  value_registers_dirty_ = false;
+}
+
+void Module::ensure_value_delay_states_current()
+{
+  if (delay_states_.size() < numeric_delay_scalars_.size())
+  {
+    delay_states_.resize(numeric_delay_scalars_.size(), expr::float_value(0.0));
+  }
+  if (next_delay_states_.size() < delay_states_.size())
+  {
+    next_delay_states_.resize(delay_states_.size(), expr::float_value(0.0));
+  }
+  for (unsigned int delay_id = 0; delay_id < delay_states_.size(); ++delay_id)
+  {
+    if (delay_id < numeric_delay_scalar_mask_.size() && numeric_delay_scalar_mask_[delay_id])
+    {
+      assign_scalar_numeric_value(delay_states_[delay_id], numeric_delay_scalars_[delay_id]);
+      next_delay_states_[delay_id] = delay_states_[delay_id];
+      continue;
+    }
+    if (delay_id < numeric_delay_array_mask_.size() && numeric_delay_array_mask_[delay_id])
+    {
+      const auto & src = numeric_delay_arrays_[delay_id];
+      std::vector<Value> items(src.size(), expr::float_value(0.0));
+      for (std::size_t item_id = 0; item_id < src.size(); ++item_id)
+      {
+        assign_scalar_numeric_value(items[item_id], src[item_id]);
+      }
+      delay_states_[delay_id] = expr::array_value(std::move(items));
+      next_delay_states_[delay_id] = delay_states_[delay_id];
+    }
+  }
+  value_delay_states_dirty_ = false;
+}
+
+bool Module::try_get_numeric_delay_scalar(unsigned int delay_id, double & out) const
+{
+  if (delay_id >= numeric_delay_scalar_mask_.size() ||
+      delay_id >= numeric_delay_scalars_.size() ||
+      !numeric_delay_scalar_mask_[delay_id])
+  {
+    return false;
+  }
+  out = numeric_delay_scalars_[delay_id];
+  return true;
+}
+
+const std::vector<double> * Module::try_get_numeric_delay_array(unsigned int delay_id) const
+{
+  if (delay_id >= numeric_delay_array_mask_.size() ||
+      delay_id >= numeric_delay_arrays_.size() ||
+      !numeric_delay_array_mask_[delay_id])
+  {
+    return nullptr;
+  }
+  return &numeric_delay_arrays_[delay_id];
+}
+
+bool Module::update_numeric_delay_states_from_outputs(
+  const NumericJitState & state,
+  const CompiledProgram & compiled_program,
+  std::size_t start_output_id)
+{
+  const std::size_t available =
+    std::min(state.output_info.size(), compiled_program.output_targets.size());
+  if (start_output_id > available)
+  {
+    return false;
+  }
+  const std::size_t delay_count = available - start_output_id;
+  if (numeric_delay_scalar_mask_.size() != delay_count)
+  {
+    numeric_delay_scalar_mask_.assign(delay_count, false);
+    numeric_delay_scalars_.assign(delay_count, 0.0);
+    numeric_delay_array_mask_.assign(delay_count, false);
+    numeric_delay_arrays_.assign(delay_count, {});
+  }
+
+  for (std::size_t delay_id = 0; delay_id < delay_count; ++delay_id)
+  {
+    const std::size_t output_id = start_output_id + delay_id;
+    const auto kind = static_cast<NumericValueKind>(state.output_info[output_id].kind);
+    numeric_delay_scalar_mask_[delay_id] = false;
+    numeric_delay_array_mask_[delay_id] = false;
+    if (kind == NumericValueKind::Scalar)
+    {
+      const uint32_t reg = compiled_program.output_targets[output_id];
+      if (reg >= state.temps.size())
       {
         return false;
       }
-      dst[item_id] = scalar;
+      numeric_delay_scalar_mask_[delay_id] = true;
+      numeric_delay_scalars_[delay_id] = clamp_output_scalar(state.temps[reg]);
+      numeric_delay_arrays_[delay_id].clear();
+      continue;
     }
+    if (kind == NumericValueKind::Array)
+    {
+      const uint32_t array_slot = state.output_info[output_id].array_slot;
+      if (array_slot >= state.array_storage.size())
+      {
+        return false;
+      }
+      numeric_delay_array_mask_[delay_id] = true;
+      auto & dst = numeric_delay_arrays_[delay_id];
+      dst = state.array_storage[array_slot];
+      for (double & value : dst)
+      {
+        value = clamp_output_scalar(value);
+      }
+      continue;
+    }
+    return false;
   }
+
+  value_delay_states_dirty_ = true;
   return true;
 }
 
@@ -647,10 +1087,29 @@ std::vector<Value> Module::build_numeric_jit_inputs(
       case NumericSyntheticInputKind::DelayState:
       {
         const auto delay_it = delay_state_lookup_.find(input.slot_id);
-        values.push_back(
-          delay_it != delay_state_lookup_.end()
-            ? delay_states_[delay_it->second]
-            : expr::float_value(0.0));
+        if (delay_it == delay_state_lookup_.end())
+        {
+          values.push_back(expr::float_value(0.0));
+          break;
+        }
+        const std::size_t delay_id = delay_it->second;
+        double scalar = 0.0;
+        if (try_get_numeric_delay_scalar(static_cast<unsigned int>(delay_id), scalar))
+        {
+          values.push_back(expr::float_value(scalar));
+          break;
+        }
+        if (const auto * array_values = try_get_numeric_delay_array(static_cast<unsigned int>(delay_id)))
+        {
+          std::vector<Value> items(array_values->size(), expr::float_value(0.0));
+          for (std::size_t item_id = 0; item_id < array_values->size(); ++item_id)
+          {
+            assign_scalar_numeric_value(items[item_id], (*array_values)[item_id]);
+          }
+          values.push_back(expr::array_value(std::move(items)));
+          break;
+        }
+        values.push_back(delay_states_[delay_id]);
         break;
       }
     }
@@ -687,7 +1146,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
     if (reg.type == ValueType::Array)
     {
       uint32_t array_slot = 0;
-      if (!add_array_values_to_jit_table(reg.array_items, array_slot))
+      if (!add_array_value_to_jit_table(reg, array_slot))
       {
         return false;
       }
@@ -724,7 +1183,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         if (instr.literal.type == ValueType::Array)
         {
           uint32_t array_slot = 0;
-          if (!add_array_values_to_jit_table(instr.literal.array_items, array_slot))
+          if (!add_array_value_to_jit_table(instr.literal, array_slot))
           {
             return false;
           }
@@ -1433,6 +1892,10 @@ void Module::initialize_numeric_jit_state(
   unsigned int base_input_count,
   const std::string & symbol_prefix)
 {
+  if (value_registers_dirty_)
+  {
+    ensure_value_registers_current();
+  }
   state = NumericJitState{};
   if (!prepare_numeric_jit_program(source_program, base_input_count, state.prepared))
   {
@@ -1707,14 +2170,21 @@ bool Module::run_composite_body_jit(const std::vector<bool> * output_materialize
 
   if (composite_body_jit_.delay_output_count > 0)
   {
-    next_delay_states_ = delay_states_;
-    materialize_numeric_outputs_range(
-      composite_body_jit_.state,
-      composite_body_jit_.program,
-      composite_body_jit_.output_count,
-      composite_body_jit_.delay_output_count,
-      next_delay_states_);
-    delay_states_.swap(next_delay_states_);
+    if (!update_numeric_delay_states_from_outputs(
+          composite_body_jit_.state,
+          composite_body_jit_.program,
+          composite_body_jit_.output_count))
+    {
+      next_delay_states_ = delay_states_;
+      materialize_numeric_outputs_range(
+        composite_body_jit_.state,
+        composite_body_jit_.program,
+        composite_body_jit_.output_count,
+        composite_body_jit_.delay_output_count,
+        next_delay_states_);
+      delay_states_.swap(next_delay_states_);
+      value_delay_states_dirty_ = false;
+    }
   }
 
   return true;
@@ -1906,7 +2376,27 @@ void Module::apply_numeric_register_targets(
     std::copy(src.begin(), src.end(), dst.begin());
   }
 
-  sync_value_registers_from_numeric_state(state);
+  if (numeric_register_arrays_.size() < compiled_program.register_targets.size())
+  {
+    numeric_register_arrays_.resize(compiled_program.register_targets.size());
+  }
+  for (unsigned int register_id = 0; register_id < compiled_program.register_targets.size(); ++register_id)
+  {
+    if (register_id < state.register_scalar_mask.size() && !state.register_scalar_mask[register_id])
+    {
+      if (register_id >= state.register_array_slot.size())
+      {
+        continue;
+      }
+      const uint32_t array_slot = state.register_array_slot[register_id];
+      if (array_slot >= state.array_storage.size())
+      {
+        continue;
+      }
+      numeric_register_arrays_[register_id] = state.array_storage[array_slot];
+    }
+  }
+  value_registers_dirty_ = true;
 }
 
 void Module::sync_value_registers_from_numeric_state(const NumericJitState & state)
@@ -1954,10 +2444,15 @@ void Module::sync_value_registers_from_numeric_state(const NumericJitState & sta
     materialized_scalar_registers,
     materialized_array_registers);
 #endif
+  value_registers_dirty_ = false;
 }
 
 void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
 {
+  if (value_registers_dirty_)
+  {
+    ensure_value_registers_current();
+  }
   jit_kernel_ = nullptr;
 #ifdef EGRESS_PROFILE
   numeric_jit_instruction_count_ = 0;
@@ -2009,12 +2504,53 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
 
   numeric_registers_.resize(registers_.size(), 0.0);
   numeric_next_registers_.resize(registers_.size(), 0.0);
+  numeric_register_arrays_.resize(registers_.size());
   for (unsigned int i = 0; i < registers_.size(); ++i)
   {
     const bool scalar_register =
       i >= register_scalar_mask_.size() || register_scalar_mask_[i];
     numeric_registers_[i] = scalar_register ? to_float64(registers_[i]) : 0.0;
+    if (!scalar_register &&
+        i < register_array_slot_.size() &&
+        register_array_slot_[i] < numeric_array_storage_.size())
+    {
+      numeric_register_arrays_[i] = numeric_array_storage_[register_array_slot_[i]];
+    }
+    else if (i < numeric_register_arrays_.size())
+    {
+      numeric_register_arrays_[i].clear();
+    }
   }
+  value_registers_dirty_ = false;
+
+  numeric_delay_scalar_mask_.assign(delay_states_.size(), false);
+  numeric_delay_scalars_.assign(delay_states_.size(), 0.0);
+  numeric_delay_array_mask_.assign(delay_states_.size(), false);
+  numeric_delay_arrays_.assign(delay_states_.size(), {});
+  for (unsigned int i = 0; i < delay_states_.size(); ++i)
+  {
+    double scalar = 0.0;
+    if (value_to_scalar_double(delay_states_[i], scalar))
+    {
+      numeric_delay_scalar_mask_[i] = true;
+      numeric_delay_scalars_[i] = clamp_output_scalar(scalar);
+      continue;
+    }
+    if (delay_states_[i].type == ValueType::Array)
+    {
+      std::vector<double> values(delay_states_[i].array_items.size(), 0.0);
+      if (copy_numeric_aggregate_value(delay_states_[i], values))
+      {
+        for (double & value : values)
+        {
+          value = clamp_output_scalar(value);
+        }
+        numeric_delay_array_mask_[i] = true;
+        numeric_delay_arrays_[i] = std::move(values);
+      }
+    }
+  }
+  value_delay_states_dirty_ = false;
 
   if (!has_nested_modules_ && !has_delay_states_)
   {

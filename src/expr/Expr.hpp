@@ -19,6 +19,16 @@ enum class ValueType : uint8_t
   Matrix
 };
 
+enum class AggregateScalarType : uint8_t
+{
+  None,
+  Bool,
+  Int,
+  Float,
+  MixedNumeric,
+  NonScalar
+};
+
 struct Value
 {
   ValueType type = ValueType::Float;
@@ -29,6 +39,7 @@ struct Value
   std::vector<Value> matrix_items;
   std::size_t matrix_rows = 0;
   std::size_t matrix_cols = 0;
+  AggregateScalarType aggregate_scalar_type = AggregateScalarType::None;
 };
 
 enum class ExprKind
@@ -119,6 +130,55 @@ inline Value bool_value(bool value)
   return result;
 }
 
+inline AggregateScalarType scalar_type_from_value_type(ValueType type)
+{
+  switch (type)
+  {
+    case ValueType::Bool:
+      return AggregateScalarType::Bool;
+    case ValueType::Int:
+      return AggregateScalarType::Int;
+    case ValueType::Float:
+      return AggregateScalarType::Float;
+    case ValueType::Array:
+    case ValueType::Matrix:
+      return AggregateScalarType::NonScalar;
+  }
+  return AggregateScalarType::NonScalar;
+}
+
+inline AggregateScalarType infer_aggregate_scalar_type(const std::vector<Value> & items)
+{
+  AggregateScalarType result = AggregateScalarType::None;
+  for (const Value & item : items)
+  {
+    const AggregateScalarType item_type = scalar_type_from_value_type(item.type);
+    if (item_type == AggregateScalarType::NonScalar)
+    {
+      return AggregateScalarType::NonScalar;
+    }
+    if (result == AggregateScalarType::None)
+    {
+      result = item_type;
+      continue;
+    }
+    if (result != item_type)
+    {
+      result = AggregateScalarType::MixedNumeric;
+    }
+  }
+  return result;
+}
+
+inline bool aggregate_has_numeric_scalars(const Value & value)
+{
+  if (value.type != ValueType::Array && value.type != ValueType::Matrix)
+  {
+    return false;
+  }
+  return value.aggregate_scalar_type != AggregateScalarType::NonScalar;
+}
+
 inline Value array_value(std::vector<Value> items)
 {
   Value result;
@@ -127,6 +187,7 @@ inline Value array_value(std::vector<Value> items)
   result.int_value = static_cast<int64_t>(result.array_items.size());
   result.float_value = static_cast<double>(result.array_items.size());
   result.bool_value = !result.array_items.empty();
+  result.aggregate_scalar_type = infer_aggregate_scalar_type(result.array_items);
   return result;
 }
 
@@ -144,6 +205,7 @@ inline Value matrix_value(std::size_t rows, std::size_t cols, std::vector<Value>
   result.int_value = static_cast<int64_t>(rows);
   result.float_value = static_cast<double>(cols);
   result.bool_value = rows != 0 && cols != 0;
+  result.aggregate_scalar_type = infer_aggregate_scalar_type(result.matrix_items);
   return result;
 }
 

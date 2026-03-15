@@ -101,6 +101,14 @@ class PythonGraph
       result["callback_count"] = stats.callback_count;
       result["avg_callback_ms"] = stats.avg_callback_ms;
       result["max_callback_ms"] = stats.max_callback_ms;
+      result["primitive_body_available"] = stats.primitive_body_available;
+      result["primitive_body_covers_all_modules"] = stats.primitive_body_covers_all_modules;
+      result["input_kernel_available"] = stats.input_kernel_available;
+      result["fused_input_use_count"] = stats.fused_input_use_count;
+      result["fused_body_use_count"] = stats.fused_body_use_count;
+      result["fusion_candidate_reason"] = stats.fusion_candidate_reason;
+      result["primitive_body_status"] = stats.primitive_body_status;
+      result["input_kernel_status"] = stats.input_kernel_status;
 
       py::list modules;
       for (const auto & module : stats.modules)

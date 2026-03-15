@@ -273,7 +273,12 @@ bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_
   return false;
 #else
   auto * fused = runtime.fused_graph.get();
-  if (!fusion_enabled_ ||
+  const bool allow_without_fusion_flag =
+    allow_primitive_body_inputs &&
+    fused != nullptr &&
+    fused->primitive_body_available &&
+    fused->kernel != nullptr;
+  if ((!fusion_enabled_ && !allow_without_fusion_flag) ||
       fused == nullptr ||
       !fused->input_kernel.available ||
       fused->input_kernel.kernel == nullptr)
@@ -283,6 +288,18 @@ bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_
 
   for (std::size_t source_slot = 0; source_slot < fused->source_outputs.size(); ++source_slot)
   {
+    const auto & source = fused->source_outputs[source_slot];
+    if (source.module_id < runtime.modules.size())
+    {
+      const auto & slot = runtime.modules[source.module_id];
+      double numeric_scalar = 0.0;
+      if (slot.module != nullptr &&
+          slot.module->try_get_numeric_scalar_output(source.output_id, true, numeric_scalar))
+      {
+        fused->input_kernel.scalar_inputs[source_slot] = numeric_scalar;
+        continue;
+      }
+    }
     if (source_slot >= fused->prev_outputs.size())
     {
       continue;
@@ -292,10 +309,48 @@ bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_
       (value.type == ValueType::Array || value.type == ValueType::Matrix) ? 0.0 : expr::to_float64(value);
   }
 
+  for (const auto & [key, scalar_slot] : fused->input_kernel.indexed_prev_scalar_slots)
+  {
+    const uint32_t source_slot = static_cast<uint32_t>(key >> 32);
+    const uint32_t cache_slot = static_cast<uint32_t>(key & 0xffffffffu);
+    if (scalar_slot >= fused->input_kernel.scalar_inputs.size() ||
+        source_slot >= fused->indexed_prev_values.size() ||
+        cache_slot >= fused->indexed_prev_values[source_slot].size())
+    {
+      continue;
+    }
+    fused->input_kernel.scalar_inputs[scalar_slot] =
+      expr::to_float64(fused->indexed_prev_values[source_slot][cache_slot]);
+  }
+
   for (const auto & [source_slot, array_slot] : fused->input_kernel.source_array_slots)
   {
-    if (source_slot >= fused->prev_outputs.size() ||
-        array_slot >= fused->input_kernel.array_storage.size())
+    if (array_slot >= fused->input_kernel.array_storage.size())
+    {
+      continue;
+    }
+    auto & dst = fused->input_kernel.array_storage[array_slot];
+    const auto & source = fused->source_outputs[source_slot];
+    if (source.module_id < runtime.modules.size())
+    {
+      const auto & slot = runtime.modules[source.module_id];
+      if (slot.module != nullptr)
+      {
+        const auto * numeric_values = slot.module->try_get_numeric_output_array_values(source.output_id, true);
+        if (numeric_values != nullptr)
+        {
+          if (dst.size() != numeric_values->size())
+          {
+            dst.assign(numeric_values->size(), 0.0);
+            fused->input_kernel.array_ptrs[array_slot] = dst.empty() ? nullptr : dst.data();
+            fused->input_kernel.array_sizes[array_slot] = static_cast<uint64_t>(dst.size());
+          }
+          std::copy(numeric_values->begin(), numeric_values->end(), dst.begin());
+          continue;
+        }
+      }
+    }
+    if (source_slot >= fused->prev_outputs.size())
     {
       continue;
     }
@@ -304,7 +359,6 @@ bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_
     {
       continue;
     }
-    auto & dst = fused->input_kernel.array_storage[array_slot];
     if (dst.size() != value.array_items.size())
     {
       dst.assign(value.array_items.size(), 0.0);
@@ -362,6 +416,19 @@ bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_
       continue;
     }
     const auto & src = fused->input_kernel.array_storage[binding.value.array_slot];
+    if (allow_primitive_body_inputs &&
+        binding.fused_input_array_slot != std::numeric_limits<uint32_t>::max() &&
+        binding.fused_input_array_slot < fused->array_storage.size())
+    {
+      auto & dst = fused->array_storage[binding.fused_input_array_slot];
+      dst = src;
+      if (binding.fused_input_array_slot < fused->array_ptrs.size())
+      {
+        fused->array_ptrs[binding.fused_input_array_slot] = dst.empty() ? nullptr : dst.data();
+        fused->array_sizes[binding.fused_input_array_slot] = static_cast<uint64_t>(dst.size());
+      }
+      continue;
+    }
     std::vector<Value> items(src.size(), expr::float_value(0.0));
     for (std::size_t item_id = 0; item_id < src.size(); ++item_id)
     {
@@ -381,13 +448,17 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
   return false;
 #else
   auto * fused = runtime.fused_graph.get();
-  if (!fusion_enabled_ ||
-      fused == nullptr ||
+  if (fused == nullptr ||
       !fused->primitive_body_available ||
       fused->kernel == nullptr)
   {
     return false;
   }
+  auto fail = [&](const std::string & reason) -> bool
+  {
+    fused->primitive_body_status = reason;
+    return false;
+  };
 
   uint64_t sample_index = 0;
   bool have_sample_index = false;
@@ -400,7 +471,7 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
     const auto & slot = runtime.modules[binding.module_id];
     if (!slot.module)
     {
-      return false;
+      return fail("primitive body runtime missing module");
     }
     if (!have_sample_index)
     {
@@ -410,7 +481,7 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
     }
     if (slot.module->sample_index_ != sample_index)
     {
-      return false;
+      return fail("primitive body runtime sample index mismatch");
     }
   }
 
@@ -427,32 +498,73 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
   {
     if (binding.module_id >= runtime.modules.size())
     {
-      return false;
+      return fail("primitive body runtime invalid module id");
     }
     auto & slot = runtime.modules[binding.module_id];
     if (!slot.module)
     {
-      return false;
+      return fail("primitive body runtime missing output module");
     }
     Module & module = *slot.module;
 
+    if (module.numeric_output_scalar_mask_.size() != module.outputs.size())
+    {
+      module.numeric_output_scalar_mask_.assign(module.outputs.size(), false);
+      module.numeric_output_scalars_.assign(module.outputs.size(), 0.0);
+    }
+    else
+    {
+      std::fill(module.numeric_output_scalar_mask_.begin(), module.numeric_output_scalar_mask_.end(), false);
+    }
+
     for (unsigned int output_id = 0; output_id < binding.output_registers.size(); ++output_id)
     {
-      const uint32_t output_reg = binding.output_registers[output_id];
-      if (output_reg >= fused->temps.size() || output_id >= module.outputs.size())
+      if (output_id >= module.outputs.size() || output_id >= binding.output_info.size())
       {
-        return false;
+        return fail("primitive body runtime output metadata mismatch");
       }
-      const double clamped = Module::clamp_output_scalar(fused->temps[output_reg]);
-      module.outputs[output_id] = expr::float_value(clamped);
-      if (binding.module_id < fused->module_output_spans.size())
+      const auto output_kind =
+        static_cast<egress_module_detail::NumericValueKind>(binding.output_info[output_id].kind);
+      if (output_kind == egress_module_detail::NumericValueKind::Scalar)
       {
-        const auto & span = fused->module_output_spans[binding.module_id];
-        const uint32_t source_slot = span.first_output_slot + output_id;
-        if (source_slot < fused->current_outputs.size())
+        const uint32_t output_reg = binding.output_registers[output_id];
+        if (output_reg >= fused->temps.size())
         {
-          fused->current_outputs[source_slot] = module.outputs[output_id];
+          return fail("primitive body runtime scalar output register out of range");
         }
+        const double clamped = Module::clamp_output_scalar(fused->temps[output_reg]);
+        module.numeric_output_scalar_mask_[output_id] = true;
+        module.numeric_output_scalars_[output_id] = clamped;
+      }
+      else if (output_kind == egress_module_detail::NumericValueKind::Array)
+      {
+        const uint32_t global_array_slot = binding.array_base + binding.output_info[output_id].array_slot;
+        if (global_array_slot >= fused->array_storage.size())
+        {
+          return fail("primitive body runtime array output slot out of range");
+        }
+        if (binding.output_info[output_id].array_slot >= module.numeric_array_storage_.size())
+        {
+          return fail("primitive body runtime module array output slot missing");
+        }
+        module.numeric_array_storage_[binding.output_info[output_id].array_slot] =
+          fused->array_storage[global_array_slot];
+        if (binding.output_info[output_id].array_slot < module.numeric_array_ptrs_.size())
+        {
+          auto & dst = module.numeric_array_storage_[binding.output_info[output_id].array_slot];
+          module.numeric_array_ptrs_[binding.output_info[output_id].array_slot] = dst.empty() ? nullptr : dst.data();
+          module.numeric_array_sizes_[binding.output_info[output_id].array_slot] = static_cast<uint64_t>(dst.size());
+        }
+      }
+
+      if (output_id >= slot.output_materialize_mask.size() || slot.output_materialize_mask[output_id])
+      {
+        Module::assign_numeric_value_to(
+          module.outputs[output_id],
+          binding.output_info[output_id],
+          binding.output_registers[output_id],
+          fused->temps,
+          fused->array_storage);
       }
     }
 
@@ -472,13 +584,22 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
     {
       module.next_registers_.resize(binding.register_targets.size(), expr::float_value(0.0));
     }
+    if (module.numeric_register_arrays_.size() < binding.register_targets.size())
+    {
+      module.numeric_register_arrays_.resize(binding.register_targets.size());
+    }
 
     for (unsigned int register_id = 0; register_id < binding.register_targets.size(); ++register_id)
     {
+      if (register_id < binding.register_scalar_mask.size() &&
+          !binding.register_scalar_mask[register_id])
+      {
+        continue;
+      }
       const uint32_t fused_register_id = binding.register_base + register_id;
       if (fused_register_id >= fused->registers.size())
       {
-        return false;
+        return fail("primitive body runtime scalar register out of range");
       }
       const int32_t target = binding.register_targets[register_id];
       const double next_value =
@@ -488,13 +609,75 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
       fused->registers[fused_register_id] = next_value;
       module.numeric_registers_[register_id] = next_value;
       module.numeric_next_registers_[register_id] = next_value;
-      module.registers_[register_id] = expr::float_value(next_value);
-      module.next_registers_[register_id] = module.registers_[register_id];
     }
 
+    for (unsigned int register_id = 0; register_id < binding.array_register_targets.size(); ++register_id)
+    {
+      if (register_id >= binding.register_scalar_mask.size() || binding.register_scalar_mask[register_id])
+      {
+        continue;
+      }
+      const int32_t src_slot = binding.array_register_targets[register_id];
+      if (src_slot < 0)
+      {
+        continue;
+      }
+      const uint32_t dst_slot = binding.array_base + binding.register_array_slot[register_id];
+      const uint32_t global_src_slot = binding.array_base + static_cast<uint32_t>(src_slot);
+      if (dst_slot >= fused->array_storage.size() || global_src_slot >= fused->array_storage.size())
+      {
+        return fail("primitive body runtime array register slot out of range");
+      }
+      auto & dst = fused->array_storage[dst_slot];
+      auto & src = fused->array_storage[global_src_slot];
+      if (dst.size() != src.size())
+      {
+        return fail("primitive body runtime array register size mismatch");
+      }
+      if (register_id < binding.array_register_can_swap.size() && binding.array_register_can_swap[register_id])
+      {
+        dst.swap(src);
+        fused->array_ptrs[dst_slot] = dst.empty() ? nullptr : dst.data();
+        fused->array_sizes[dst_slot] = static_cast<uint64_t>(dst.size());
+        fused->array_ptrs[global_src_slot] = src.empty() ? nullptr : src.data();
+        fused->array_sizes[global_src_slot] = static_cast<uint64_t>(src.size());
+      }
+      else
+      {
+        std::copy(src.begin(), src.end(), dst.begin());
+      }
+    }
+
+    for (unsigned int register_id = 0; register_id < binding.register_array_slot.size(); ++register_id)
+    {
+      if (register_id >= binding.register_scalar_mask.size() || binding.register_scalar_mask[register_id])
+      {
+        continue;
+      }
+      const uint32_t local_array_slot = binding.register_array_slot[register_id];
+      const uint32_t global_array_slot = binding.array_base + local_array_slot;
+      if (global_array_slot >= fused->array_storage.size() ||
+          local_array_slot >= module.numeric_array_storage_.size() ||
+          register_id >= module.registers_.size() ||
+          register_id >= module.next_registers_.size())
+      {
+        return fail("primitive body runtime local array register sync mismatch");
+      }
+      module.numeric_array_storage_[local_array_slot] = fused->array_storage[global_array_slot];
+      if (local_array_slot < module.numeric_array_ptrs_.size())
+      {
+        auto & values = module.numeric_array_storage_[local_array_slot];
+        module.numeric_array_ptrs_[local_array_slot] = values.empty() ? nullptr : values.data();
+        module.numeric_array_sizes_[local_array_slot] = static_cast<uint64_t>(values.size());
+      }
+      module.numeric_register_arrays_[register_id] = module.numeric_array_storage_[local_array_slot];
+    }
+
+    module.value_registers_dirty_ = true;
     module.reset_inputs_after_process();
   }
 
+  fused->primitive_body_status = "numeric JIT active";
   return true;
 #endif
 }
@@ -517,6 +700,18 @@ bool Graph::run_fused_mix_kernel(RuntimeState & runtime, double & mixed) const
 
   for (std::size_t source_slot = 0; source_slot < fused->source_outputs.size(); ++source_slot)
   {
+    const auto & source = fused->source_outputs[source_slot];
+    if (source.module_id < runtime.modules.size())
+    {
+      const auto & slot = runtime.modules[source.module_id];
+      double numeric_scalar = 0.0;
+      if (slot.module != nullptr &&
+          slot.module->try_get_numeric_scalar_output(source.output_id, false, numeric_scalar))
+      {
+        fused->mix_kernel.scalar_inputs[source_slot] = numeric_scalar;
+        continue;
+      }
+    }
     if (source_slot >= fused->current_outputs.size())
     {
       continue;
@@ -528,8 +723,40 @@ bool Graph::run_fused_mix_kernel(RuntimeState & runtime, double & mixed) const
 
   for (const auto & [source_slot, array_slot] : fused->mix_kernel.source_array_slots)
   {
-    if (source_slot >= fused->current_outputs.size() ||
-        array_slot >= fused->mix_kernel.array_storage.size())
+    if (array_slot >= fused->mix_kernel.array_storage.size())
+    {
+      continue;
+    }
+    auto & dst = fused->mix_kernel.array_storage[array_slot];
+
+    if (source_slot < fused->source_outputs.size())
+    {
+      const auto & source = fused->source_outputs[source_slot];
+      if (source.module_id < runtime.modules.size())
+      {
+        const auto & slot = runtime.modules[source.module_id];
+        if (slot.module != nullptr)
+        {
+          const auto * numeric_values = slot.module->try_get_numeric_output_array_values(source.output_id);
+          if (numeric_values != nullptr)
+          {
+            if (dst.size() != numeric_values->size())
+            {
+              dst.assign(numeric_values->size(), 0.0);
+              fused->mix_kernel.array_ptrs[array_slot] = dst.empty() ? nullptr : dst.data();
+              fused->mix_kernel.array_sizes[array_slot] = static_cast<uint64_t>(dst.size());
+            }
+            for (std::size_t item_id = 0; item_id < numeric_values->size(); ++item_id)
+            {
+              dst[item_id] = (*numeric_values)[item_id];
+            }
+            continue;
+          }
+        }
+      }
+    }
+
+    if (source_slot >= fused->current_outputs.size())
     {
       continue;
     }
@@ -538,7 +765,6 @@ bool Graph::run_fused_mix_kernel(RuntimeState & runtime, double & mixed) const
     {
       continue;
     }
-    auto & dst = fused->mix_kernel.array_storage[array_slot];
     if (dst.size() != value.array_items.size())
     {
       dst.assign(value.array_items.size(), 0.0);
@@ -640,6 +866,42 @@ void Graph::refresh_runtime_ref_metadata(RuntimeState & runtime) const
       }
 
       ModuleSlot & source_slot = runtime.modules[instr.ref_module_id];
+#ifdef EGRESS_LLVM_ORC_JIT
+      if (source_slot.module != nullptr)
+      {
+        if (previous_outputs)
+        {
+          if (instr.opcode == OpCode::Ref)
+          {
+            egress_module_detail::NumericValueRef ref;
+            if (source_slot.module->try_get_numeric_output_ref(instr.ref_output_id, ref) &&
+                (ref.kind == egress_module_detail::NumericValueKind::Scalar ||
+                 ref.kind == egress_module_detail::NumericValueKind::Array))
+            {
+              continue;
+            }
+          }
+        }
+        else
+        {
+          if (instr.opcode == OpCode::Ref)
+          {
+            egress_module_detail::NumericValueRef ref;
+            if (source_slot.module->try_get_numeric_output_ref(instr.ref_output_id, ref) &&
+                (ref.kind == egress_module_detail::NumericValueKind::Scalar ||
+                 ref.kind == egress_module_detail::NumericValueKind::Array))
+            {
+              continue;
+            }
+          }
+          else if (instr.opcode == OpCode::RefIndex &&
+                   source_slot.module->try_get_numeric_output_array_values(instr.ref_output_id) != nullptr)
+          {
+            continue;
+          }
+        }
+      }
+#endif
       auto & mask = previous_outputs ? source_slot.output_prev_materialize_mask : source_slot.output_materialize_mask;
       if (instr.ref_output_id >= mask.size())
       {
@@ -792,6 +1054,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
   }
 
   std::vector<uint32_t> primitive_input_base_by_module(runtime.modules.size(), std::numeric_limits<uint32_t>::max());
+  std::vector<std::vector<uint32_t>> primitive_array_input_slots_by_module(runtime.modules.size());
 
  #ifdef EGRESS_LLVM_ORC_JIT
   auto mark_primitive_body_unavailable = [&](const std::string & reason)
@@ -817,15 +1080,30 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
 
   mark_primitive_body_unavailable("primitive body fusion unavailable");
 
-  auto supports_scalar_body_op = [](egress_jit::NumericOp op)
+  auto translate_body_instruction =
+    [&](const egress_jit::NumericInstr & instr,
+        uint32_t input_base,
+        uint32_t register_base,
+        uint32_t array_base,
+        uint32_t reg_base,
+        egress_jit::NumericInstr & out) -> bool
   {
-    switch (op)
+    out = instr;
+    switch (instr.op)
     {
       case egress_jit::NumericOp::Literal:
-      case egress_jit::NumericOp::InputValue:
-      case egress_jit::NumericOp::RegisterValue:
       case egress_jit::NumericOp::SampleRate:
       case egress_jit::NumericOp::SampleIndex:
+        out.dst += reg_base;
+        return true;
+      case egress_jit::NumericOp::InputValue:
+        out.dst += reg_base;
+        out.slot_id = input_base + instr.slot_id;
+        return true;
+      case egress_jit::NumericOp::RegisterValue:
+        out.dst += reg_base;
+        out.slot_id = register_base + instr.slot_id;
+        return true;
       case egress_jit::NumericOp::Not:
       case egress_jit::NumericOp::Less:
       case egress_jit::NumericOp::LessEqual:
@@ -833,6 +1111,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
       case egress_jit::NumericOp::GreaterEqual:
       case egress_jit::NumericOp::Equal:
       case egress_jit::NumericOp::NotEqual:
+      case egress_jit::NumericOp::Abs:
       case egress_jit::NumericOp::Add:
       case egress_jit::NumericOp::Sub:
       case egress_jit::NumericOp::Mul:
@@ -845,60 +1124,62 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
       case egress_jit::NumericOp::BitXor:
       case egress_jit::NumericOp::LShift:
       case egress_jit::NumericOp::RShift:
-      case egress_jit::NumericOp::Abs:
-      case egress_jit::NumericOp::Clamp:
       case egress_jit::NumericOp::Log:
+      case egress_jit::NumericOp::IndexArray:
       case egress_jit::NumericOp::Sin:
       case egress_jit::NumericOp::Neg:
       case egress_jit::NumericOp::BitNot:
-        return true;
-      default:
-        return false;
-    }
-  };
-
-  auto translate_scalar_body_instruction =
-    [&](const egress_jit::NumericInstr & instr,
-        uint32_t input_base,
-        uint32_t register_base,
-        uint32_t reg_base,
-        egress_jit::NumericInstr & out) -> bool
-  {
-    if (!supports_scalar_body_op(instr.op))
-    {
-      return false;
-    }
-    out = instr;
-    out.dst += reg_base;
-    switch (instr.op)
-    {
-      case egress_jit::NumericOp::Literal:
-      case egress_jit::NumericOp::SampleRate:
-      case egress_jit::NumericOp::SampleIndex:
-        return true;
-      case egress_jit::NumericOp::InputValue:
-        out.slot_id = input_base + instr.slot_id;
-        return true;
-      case egress_jit::NumericOp::RegisterValue:
-        out.slot_id = register_base + instr.slot_id;
-        return true;
-      case egress_jit::NumericOp::Not:
-      case egress_jit::NumericOp::Abs:
-      case egress_jit::NumericOp::Log:
-      case egress_jit::NumericOp::Sin:
-      case egress_jit::NumericOp::Neg:
-      case egress_jit::NumericOp::BitNot:
+        out.dst += reg_base;
         out.src_a += reg_base;
+        if (instr.op == egress_jit::NumericOp::IndexArray)
+        {
+          out.slot_id += array_base;
+        }
         return true;
       case egress_jit::NumericOp::Clamp:
+        out.dst += reg_base;
         out.src_a += reg_base;
         out.src_b += reg_base;
         out.src_c += reg_base;
         return true;
-      default:
-        out.src_a += reg_base;
+      case egress_jit::NumericOp::ArrayLessScalar:
+      case egress_jit::NumericOp::ArrayLessEqualScalar:
+      case egress_jit::NumericOp::ArrayGreaterScalar:
+      case egress_jit::NumericOp::ArrayGreaterEqualScalar:
+      case egress_jit::NumericOp::ArrayEqualScalar:
+      case egress_jit::NumericOp::ArrayNotEqualScalar:
+      case egress_jit::NumericOp::ArrayAddScalar:
+      case egress_jit::NumericOp::ArrayMulScalar:
+      case egress_jit::NumericOp::ArrayDivScalar:
+      case egress_jit::NumericOp::ArrayModScalar:
+        out.dst += array_base;
+        out.src_a += array_base;
         out.src_b += reg_base;
         return true;
+      case egress_jit::NumericOp::ArrayPack:
+        out.dst += array_base;
+        for (auto & arg : out.args)
+        {
+          arg += reg_base;
+        }
+        return true;
+      case egress_jit::NumericOp::ArrayAdd:
+      case egress_jit::NumericOp::ArraySub:
+      case egress_jit::NumericOp::ArrayMul:
+      case egress_jit::NumericOp::ArrayDiv:
+        out.dst += array_base;
+        out.src_a += reg_base;
+        out.src_b += reg_base;
+        out.src_a += (array_base - reg_base);
+        out.src_b += (array_base - reg_base);
+        return true;
+      case egress_jit::NumericOp::MatMul:
+        out.dst += array_base;
+        out.src_a += array_base;
+        out.src_b += array_base;
+        return true;
+      default:
+        return false;
     }
   };
 
@@ -917,8 +1198,10 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
     fused->inputs.clear();
     fused->registers.clear();
     fused->temps.clear();
+    fused->array_storage.clear();
+    fused->array_ptrs.clear();
+    fused->array_sizes.clear();
     uint32_t active_module_count = 0;
-
     for (uint32_t module_id = 0; module_id < runtime.modules.size(); ++module_id)
     {
       const auto & slot = runtime.modules[module_id];
@@ -956,47 +1239,15 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
 
       Module::NumericJitState state;
       egress_jit::NumericProgram module_program;
-      std::vector<Value> placeholder_inputs(module.inputs.size(), expr::float_value(0.0));
       const Module::CompiledProgram compiled_program = module.program_;
-      if (!module.build_numeric_program(compiled_program, state, placeholder_inputs, module_program))
+      if (!module.build_numeric_program(compiled_program, state, module.inputs, module_program))
       {
         continue;
-      }
-
-      if (!state.array_storage.empty())
-      {
-        continue;
-      }
-
-      for (const auto & info : state.input_info)
-      {
-        if (!info.is_scalar)
-        {
-          primitive_body_ok = false;
-          break;
-        }
-      }
-      if (!primitive_body_ok)
-      {
-        break;
-      }
-
-      for (const bool is_scalar : state.register_scalar_mask)
-      {
-        if (!is_scalar)
-        {
-          primitive_body_ok = false;
-          break;
-        }
-      }
-      if (!primitive_body_ok)
-      {
-        break;
       }
 
       for (const auto & output_info : state.output_info)
       {
-        if (static_cast<Module::NumericValueKind>(output_info.kind) != Module::NumericValueKind::Scalar)
+        if (static_cast<Module::NumericValueKind>(output_info.kind) == Module::NumericValueKind::Matrix)
         {
           primitive_body_ok = false;
           break;
@@ -1009,20 +1260,41 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
 
       const uint32_t input_base = static_cast<uint32_t>(fused->inputs.size());
       const uint32_t register_base = static_cast<uint32_t>(fused->registers.size());
+      const uint32_t array_base = static_cast<uint32_t>(fused->array_storage.size());
       const uint32_t reg_base = fused->program.register_count;
 
       primitive_input_base_by_module[module_id] = input_base;
       fused->inputs.resize(fused->inputs.size() + module.inputs.size(), 0.0);
-      fused->registers.reserve(fused->registers.size() + module.registers_.size());
-      for (const auto & reg : module.registers_)
+      fused->registers.resize(fused->registers.size() + module.registers_.size(), 0.0);
+      for (std::size_t reg_id = 0; reg_id < module.registers_.size(); ++reg_id)
       {
-        fused->registers.push_back(expr::to_float64(reg));
+        if (reg_id < state.register_scalar_mask.size() && state.register_scalar_mask[reg_id])
+        {
+          fused->registers[register_base + reg_id] = expr::to_float64(module.registers_[reg_id]);
+        }
       }
+      primitive_array_input_slots_by_module[module_id].assign(module.inputs.size(), std::numeric_limits<uint32_t>::max());
+      for (unsigned int input_id = 0; input_id < state.input_info.size(); ++input_id)
+      {
+        if (!state.input_info[input_id].is_scalar)
+        {
+          primitive_array_input_slots_by_module[module_id][input_id] = array_base + state.input_info[input_id].array_slot;
+        }
+      }
+      fused->array_storage.insert(fused->array_storage.end(), state.array_storage.begin(), state.array_storage.end());
 
       egress_graph_detail::FusedPrimitiveBodyModule binding;
       binding.module_id = module_id;
       binding.input_base = input_base;
       binding.register_base = register_base;
+      binding.array_base = array_base;
+      binding.array_slot_count = static_cast<uint32_t>(state.array_storage.size());
+      binding.input_info = state.input_info;
+      binding.output_info = state.output_info;
+      binding.register_scalar_mask = state.register_scalar_mask;
+      binding.register_array_slot = state.register_array_slot;
+      binding.array_register_targets = state.array_register_targets;
+      binding.array_register_can_swap = state.array_register_can_swap;
       binding.output_registers.reserve(module.program_.output_targets.size());
       for (uint32_t output_reg : module.program_.output_targets)
       {
@@ -1037,7 +1309,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
       for (const auto & instr : module_program.instructions)
       {
         egress_jit::NumericInstr translated;
-        if (!translate_scalar_body_instruction(instr, input_base, register_base, reg_base, translated))
+        if (!translate_body_instruction(instr, input_base, register_base, array_base, reg_base, translated))
         {
           primitive_body_ok = false;
           break;
@@ -1069,6 +1341,14 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
         fused->primitive_body_status = "numeric JIT active";
         fused->primitive_body_sample_rate = expected_sample_rate;
         fused->temps.assign(fused->program.register_count, 0.0);
+        fused->array_ptrs.resize(fused->array_storage.size(), nullptr);
+        fused->array_sizes.resize(fused->array_storage.size(), 0);
+        for (std::size_t array_id = 0; array_id < fused->array_storage.size(); ++array_id)
+        {
+          fused->array_ptrs[array_id] =
+            fused->array_storage[array_id].empty() ? nullptr : fused->array_storage[array_id].data();
+          fused->array_sizes[array_id] = static_cast<uint64_t>(fused->array_storage[array_id].size());
+        }
         fused->primitive_body_covers_all_modules =
           fused->primitive_body_modules.size() == active_module_count;
       }
@@ -1300,6 +1580,30 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
               use_prev_outputs ? fused->prev_outputs[source_it->second] : fused->current_outputs[source_it->second];
             if (!expr::is_array(source_value))
             {
+              if (use_prev_outputs)
+              {
+                const uint64_t scalar_key =
+                  (static_cast<uint64_t>(source_it->second) << 32) | static_cast<uint64_t>(instr.src_a);
+                auto existing = kernel_state.indexed_prev_scalar_slots.find(scalar_key);
+                uint32_t scalar_slot = 0;
+                if (existing != kernel_state.indexed_prev_scalar_slots.end())
+                {
+                  scalar_slot = existing->second;
+                }
+                else
+                {
+                  scalar_slot = static_cast<uint32_t>(kernel_state.scalar_inputs.size());
+                  kernel_state.indexed_prev_scalar_slots.emplace(scalar_key, scalar_slot);
+                  kernel_state.scalar_inputs.push_back(0.0);
+                }
+                egress_jit::NumericInstr numeric_instr;
+                numeric_instr.op = egress_jit::NumericOp::InputValue;
+                numeric_instr.dst = dst_reg;
+                numeric_instr.slot_id = scalar_slot;
+                kernel_state.program.instructions.push_back(std::move(numeric_instr));
+                result = make_scalar_ref(dst_reg);
+                break;
+              }
               return false;
             }
 
@@ -1350,6 +1654,57 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
             }
             kernel_state.program.instructions.push_back(std::move(numeric_instr));
             result = make_array_ref(array_slot, static_cast<uint32_t>(instr.args.size()));
+            break;
+          }
+          case OpCode::ArraySet:
+          {
+            if (instr.src_a >= reg_info.size() ||
+                instr.src_b >= reg_info.size() ||
+                instr.src_c >= reg_info.size())
+            {
+              return false;
+            }
+            const auto & array_value = reg_info[instr.src_a];
+            const auto & index_value = reg_info[instr.src_b];
+            const auto & item_value = reg_info[instr.src_c];
+            if (array_value.kind != egress_graph_detail::FusedGraphValueKind::Array ||
+                index_value.kind != egress_graph_detail::FusedGraphValueKind::Scalar ||
+                item_value.kind != egress_graph_detail::FusedGraphValueKind::Scalar ||
+                !index_value.scalar_constant)
+            {
+              return false;
+            }
+            const int64_t array_index = static_cast<int64_t>(index_value.constant_value);
+            if (array_index < 0 || static_cast<uint32_t>(array_index) >= array_value.array_size)
+            {
+              return false;
+            }
+
+            const uint32_t array_slot = allocate_array_slot(array_value.array_size);
+            egress_jit::NumericInstr pack_instr;
+            pack_instr.op = egress_jit::NumericOp::ArrayPack;
+            pack_instr.dst = array_slot;
+            pack_instr.args.reserve(array_value.array_size);
+
+            for (uint32_t item_index = 0; item_index < array_value.array_size; ++item_index)
+            {
+              if (item_index == static_cast<uint32_t>(array_index))
+              {
+                pack_instr.args.push_back(item_value.scalar_register);
+                continue;
+              }
+              const uint32_t item_reg = kernel_state.program.register_count++;
+              egress_jit::NumericInstr index_instr;
+              index_instr.op = egress_jit::NumericOp::IndexArray;
+              index_instr.dst = item_reg;
+              index_instr.src_a = emit_constant_temp(static_cast<double>(item_index));
+              index_instr.slot_id = array_value.array_slot;
+              kernel_state.program.instructions.push_back(std::move(index_instr));
+              pack_instr.args.push_back(item_reg);
+            }
+
+            kernel_state.program.instructions.push_back(std::move(pack_instr));
+            result = make_array_ref(array_slot, array_value.array_size);
             break;
           }
           case OpCode::Index:
@@ -1688,7 +2043,6 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
             break;
           }
           case OpCode::MatMul:
-          case OpCode::ArraySet:
             return false;
         }
 
@@ -1717,7 +2071,10 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
     kernel_state.kernel = *kernel_or_err;
     kernel_state.available = true;
     kernel_state.status = "numeric JIT active";
-    kernel_state.scalar_inputs.assign(fused->source_outputs.size(), 0.0);
+    if (kernel_state.scalar_inputs.size() < fused->source_outputs.size())
+    {
+      kernel_state.scalar_inputs.resize(fused->source_outputs.size(), 0.0);
+    }
     kernel_state.temps.assign(kernel_state.program.register_count, 0.0);
     kernel_state.array_ptrs.resize(kernel_state.array_storage.size(), nullptr);
     kernel_state.array_sizes.resize(kernel_state.array_storage.size(), 0);
@@ -1770,13 +2127,26 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
               const uint32_t base = primitive_input_base_by_module[module_id];
               if (base != std::numeric_limits<uint32_t>::max())
               {
-                if (reg_info[result_reg].kind != egress_graph_detail::FusedGraphValueKind::Scalar)
+                if (reg_info[result_reg].kind == egress_graph_detail::FusedGraphValueKind::Scalar)
                 {
-                  primitive_body_inputs_ok = false;
+                  binding.fused_input_slot = base + input_id;
+                }
+                else if (input_id < primitive_array_input_slots_by_module[module_id].size())
+                {
+                  const uint32_t array_slot = primitive_array_input_slots_by_module[module_id][input_id];
+                  if (array_slot == std::numeric_limits<uint32_t>::max() ||
+                      reg_info[result_reg].kind != egress_graph_detail::FusedGraphValueKind::Array)
+                  {
+                    primitive_body_inputs_ok = false;
+                  }
+                  else
+                  {
+                    binding.fused_input_array_slot = array_slot;
+                  }
                 }
                 else
                 {
-                  binding.fused_input_slot = base + input_id;
+                  primitive_body_inputs_ok = false;
                 }
               }
             }
@@ -1878,7 +2248,7 @@ bool Graph::supports_fused_numeric_opcode(OpCode opcode)
     case OpCode::NotEqual:
       return true;
     case OpCode::ArraySet:
-      return false;
+      return true;
   }
   return false;
 }
@@ -1944,6 +2314,28 @@ void Graph::eval_instruction(const RuntimeState & runtime, const ExprInstr & ins
       }
       const auto & slot = runtime.modules[instr.ref_module_id];
       const uint32_t source_slot = get_fused_source_slot(instr.ref_module_id, instr.ref_output_id);
+#ifdef EGRESS_LLVM_ORC_JIT
+      if (slot.module != nullptr)
+      {
+        double scalar = 0.0;
+        if (slot.module->try_get_numeric_scalar_output(instr.ref_output_id, true, scalar))
+        {
+          registers[instr.dst] = float_value(scalar);
+          break;
+        }
+        const auto * numeric_values = slot.module->try_get_numeric_output_array_values(instr.ref_output_id, true);
+        if (numeric_values != nullptr)
+        {
+          std::vector<Value> items(numeric_values->size(), float_value(0.0));
+          for (std::size_t item_id = 0; item_id < numeric_values->size(); ++item_id)
+          {
+            items[item_id] = float_value((*numeric_values)[item_id]);
+          }
+          registers[instr.dst] = array_value(std::move(items));
+          break;
+        }
+      }
+#endif
       if (runtime.fused_graph != nullptr &&
           source_slot < runtime.fused_graph->prev_outputs.size())
       {
@@ -1955,7 +2347,7 @@ void Graph::eval_instruction(const RuntimeState & runtime, const ExprInstr & ins
         registers[instr.dst] = float_value(0.0);
         break;
       }
-      registers[instr.dst] = slot.module->prev_outputs[instr.ref_output_id];
+      registers[instr.dst] = slot.module->materialize_output_value(instr.ref_output_id, true);
       break;
     }
     case OpCode::RefIndex:
@@ -1985,7 +2377,7 @@ void Graph::eval_instruction(const RuntimeState & runtime, const ExprInstr & ins
         registers[instr.dst] = slot.indexed_prev_output_values[instr.ref_output_id][instr.src_a];
         break;
       }
-      const Value * output_ptr = &slot.module->prev_outputs[instr.ref_output_id];
+      const Value * output_ptr = &slot.module->materialize_output_value(instr.ref_output_id, true);
       if (runtime.fused_graph != nullptr &&
           source_slot < runtime.fused_graph->prev_outputs.size())
       {
@@ -2176,6 +2568,17 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
         break;
       }
       const auto & slot = runtime.modules[instr.ref_module_id];
+#ifdef EGRESS_LLVM_ORC_JIT
+      if (slot.module != nullptr)
+      {
+        double numeric_scalar = 0.0;
+        if (slot.module->try_get_numeric_scalar_output(instr.ref_output_id, false, numeric_scalar))
+        {
+          registers[instr.dst] = float_value(numeric_scalar);
+          break;
+        }
+      }
+#endif
       const uint32_t source_slot = get_fused_source_slot(instr.ref_module_id, instr.ref_output_id);
       if (runtime.fused_graph != nullptr &&
           source_slot < runtime.fused_graph->current_outputs.size())
@@ -2188,7 +2591,7 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
         registers[instr.dst] = float_value(0.0);
         break;
       }
-      registers[instr.dst] = slot.module->outputs[instr.ref_output_id];
+      registers[instr.dst] = slot.module->materialize_output_value(instr.ref_output_id, false);
       break;
     }
     case OpCode::RefIndex:
@@ -2199,6 +2602,22 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
         break;
       }
       const auto & slot = runtime.modules[instr.ref_module_id];
+#ifdef EGRESS_LLVM_ORC_JIT
+      if (slot.module != nullptr && instr.ref_index >= 0)
+      {
+        const auto * numeric_values = slot.module->try_get_numeric_output_array_values(instr.ref_output_id);
+        if (numeric_values != nullptr)
+        {
+          if (static_cast<std::size_t>(instr.ref_index) >= numeric_values->size())
+          {
+            throw std::out_of_range("Array index out of range.");
+          }
+          registers[instr.dst] =
+            expr::float_value(Module::clamp_output_scalar((*numeric_values)[static_cast<std::size_t>(instr.ref_index)]));
+          break;
+        }
+      }
+#endif
       const uint32_t source_slot = get_fused_source_slot(instr.ref_module_id, instr.ref_output_id);
       if (runtime.fused_graph != nullptr &&
           source_slot < runtime.fused_graph->current_outputs.size())
@@ -2238,7 +2657,7 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
         break;
       }
 #endif
-      const Value & output = slot.module->outputs[instr.ref_output_id];
+      const Value & output = slot.module->materialize_output_value(instr.ref_output_id, false);
       const std::size_t item_index = static_cast<std::size_t>(instr.ref_index);
       if (expr::is_array(output))
       {

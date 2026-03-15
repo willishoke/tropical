@@ -18,7 +18,10 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
 #ifdef EGRESS_LLVM_ORC_JIT
   if (!has_dynamic_registers_)
   {
-    ensure_numeric_jit_current();
+    if (!numeric_input_override_active_)
+    {
+      ensure_numeric_jit_current();
+    }
   }
 
   if (!use_composite_programs && jit_kernel_)
@@ -147,11 +150,20 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
             numeric_array_ptrs_[static_cast<std::size_t>(src_slot)] = src.empty() ? nullptr : src.data();
             numeric_array_sizes_[static_cast<std::size_t>(src_slot)] = static_cast<uint64_t>(src.size());
           }
+          if (register_id < numeric_register_arrays_.size())
+          {
+            numeric_register_arrays_[register_id] = dst;
+          }
           continue;
         }
         std::copy(src.begin(), src.end(), dst.begin());
+        if (register_id < numeric_register_arrays_.size())
+        {
+          numeric_register_arrays_[register_id] = dst;
+        }
       }
 
+      value_registers_dirty_ = true;
       postprocess();
       return;
     }
@@ -195,8 +207,14 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         }
       }
       if (!used_jit_outputs)
- #endif
+#endif
       {
+#ifdef EGRESS_LLVM_ORC_JIT
+        if (value_registers_dirty_)
+        {
+          ensure_value_registers_current();
+        }
+#endif
         eval_program(composite_output_program_, temps_);
         for (unsigned int output_id = 0; output_id < composite_output_program_.output_targets.size(); ++output_id)
         {
@@ -229,13 +247,26 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         "egress_udm_nested_input");
       if (run_numeric_jit_state(input_jit, inputs))
       {
-        materialize_numeric_outputs(input_jit, nested.input_program, nested.module->inputs);
-        used_jit_inputs = true;
+        if (nested.module->try_set_direct_numeric_inputs(input_jit, nested.input_program))
+        {
+          used_jit_inputs = true;
+        }
+        else
+        {
+          materialize_numeric_outputs(input_jit, nested.input_program, nested.module->inputs);
+          used_jit_inputs = true;
+        }
       }
     }
     if (!used_jit_inputs)
 #endif
     {
+#ifdef EGRESS_LLVM_ORC_JIT
+    if (value_registers_dirty_)
+    {
+      ensure_value_registers_current();
+    }
+#endif
     eval_program(nested.input_program, nested.input_temps);
     for (unsigned int input_id = 0; input_id < nested.input_program.output_targets.size(); ++input_id)
     {
@@ -252,6 +283,12 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
 
   if (!use_composite_programs)
   {
+#ifdef EGRESS_LLVM_ORC_JIT
+    if (value_registers_dirty_)
+    {
+      ensure_value_registers_current();
+    }
+#endif
     eval_program(output_program, temps_);
     for (unsigned int output_id = 0; output_id < output_program.output_targets.size(); ++output_id)
     {
@@ -281,6 +318,12 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   else
 #endif
   {
+#ifdef EGRESS_LLVM_ORC_JIT
+    if (value_registers_dirty_)
+    {
+      ensure_value_registers_current();
+    }
+#endif
     eval_program(register_program, temps_);
     for (unsigned int register_id = 0; register_id < register_program.register_targets.size(); ++register_id)
     {
@@ -313,16 +356,26 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
            inputs,
            static_cast<unsigned int>(inputs.size()),
            "egress_udm_delay_update"),
-         delay_update_jit_.kernel != nullptr) &&
+          delay_update_jit_.kernel != nullptr) &&
         run_numeric_jit_state(delay_update_jit_, inputs))
     {
-      next_delay_states_ = delay_states_;
-      materialize_numeric_outputs(delay_update_jit_, delay_update_program_, next_delay_states_);
-      delay_states_.swap(next_delay_states_);
+      if (!update_numeric_delay_states_from_outputs(delay_update_jit_, delay_update_program_))
+      {
+        next_delay_states_ = delay_states_;
+        materialize_numeric_outputs(delay_update_jit_, delay_update_program_, next_delay_states_);
+        delay_states_.swap(next_delay_states_);
+        value_delay_states_dirty_ = false;
+      }
     }
       else
 #endif
       {
+#ifdef EGRESS_LLVM_ORC_JIT
+        if (value_registers_dirty_)
+        {
+          ensure_value_registers_current();
+        }
+#endif
         eval_program(delay_update_program_, temps_);
         next_delay_states_ = delay_states_;
         for (unsigned int delay_id = 0; delay_id < delay_update_program_.output_targets.size(); ++delay_id)
@@ -330,6 +383,9 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
           next_delay_states_[delay_id] = temps_[delay_update_program_.output_targets[delay_id]];
         }
         delay_states_.swap(next_delay_states_);
+#ifdef EGRESS_LLVM_ORC_JIT
+        value_delay_states_dirty_ = false;
+#endif
       }
     }
   }
@@ -506,6 +562,9 @@ void Module::reset_runtime_stats()
 
 void Module::reset_inputs_after_process()
 {
+#ifdef EGRESS_LLVM_ORC_JIT
+  numeric_input_override_active_ = false;
+#endif
   for (auto & in : inputs)
   {
     in = expr::float_value(0.0);
@@ -763,9 +822,30 @@ void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & tem
       case ExprKind::DelayValue:
       {
         const auto delay_it = delay_state_lookup_.find(instr.slot_id);
-        temps[instr.dst] = delay_it != delay_state_lookup_.end()
-                             ? delay_states_[delay_it->second]
-                             : expr::float_value(0.0);
+        if (delay_it == delay_state_lookup_.end())
+        {
+          temps[instr.dst] = expr::float_value(0.0);
+          break;
+        }
+#ifdef EGRESS_LLVM_ORC_JIT
+        double scalar = 0.0;
+        if (try_get_numeric_delay_scalar(static_cast<unsigned int>(delay_it->second), scalar))
+        {
+          temps[instr.dst] = expr::float_value(scalar);
+          break;
+        }
+        if (const auto * values = try_get_numeric_delay_array(static_cast<unsigned int>(delay_it->second)))
+        {
+          std::vector<Value> items(values->size(), expr::float_value(0.0));
+          for (std::size_t item_id = 0; item_id < values->size(); ++item_id)
+          {
+            assign_scalar_numeric_value(items[item_id], (*values)[item_id]);
+          }
+          temps[instr.dst] = expr::array_value(std::move(items));
+          break;
+        }
+#endif
+        temps[instr.dst] = delay_states_[delay_it->second];
         break;
       }
       case ExprKind::SampleRate:
