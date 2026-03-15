@@ -228,7 +228,7 @@ void Graph::sync_fused_prev_outputs(RuntimeState & runtime) const
   }
 }
 
-bool Graph::run_fused_input_kernel(RuntimeState & runtime) const
+bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_body_inputs) const
 {
 #ifndef EGRESS_LLVM_ORC_JIT
   (void)runtime;
@@ -306,8 +306,16 @@ bool Graph::run_fused_input_kernel(RuntimeState & runtime) const
       {
         continue;
       }
+      const double scalar = fused->input_kernel.temps[binding.value.scalar_register];
+      if (allow_primitive_body_inputs &&
+          binding.fused_input_slot != std::numeric_limits<uint32_t>::max() &&
+          binding.fused_input_slot < fused->inputs.size())
+      {
+        fused->inputs[binding.fused_input_slot] = scalar;
+        continue;
+      }
       slot.module->inputs[binding.input_id] =
-        expr::float_value(fused->input_kernel.temps[binding.value.scalar_register]);
+        expr::float_value(scalar);
       continue;
     }
 
@@ -322,6 +330,131 @@ bool Graph::run_fused_input_kernel(RuntimeState & runtime) const
       items[item_id] = expr::float_value(src[item_id]);
     }
     slot.module->inputs[binding.input_id] = expr::array_value(std::move(items));
+  }
+
+  return true;
+#endif
+}
+
+bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
+{
+#ifndef EGRESS_LLVM_ORC_JIT
+  (void)runtime;
+  return false;
+#else
+  auto * fused = runtime.fused_graph.get();
+  if (!fusion_enabled_ ||
+      fused == nullptr ||
+      !fused->primitive_body_available ||
+      fused->kernel == nullptr)
+  {
+    return false;
+  }
+
+  uint64_t sample_index = 0;
+  bool have_sample_index = false;
+  for (const auto & binding : fused->primitive_body_modules)
+  {
+    if (binding.module_id >= runtime.modules.size())
+    {
+      continue;
+    }
+    const auto & slot = runtime.modules[binding.module_id];
+    if (!slot.module)
+    {
+      return false;
+    }
+    if (!have_sample_index)
+    {
+      sample_index = slot.module->sample_index_;
+      have_sample_index = true;
+      continue;
+    }
+    if (slot.module->sample_index_ != sample_index)
+    {
+      return false;
+    }
+  }
+
+  fused->kernel(
+    fused->inputs.empty() ? nullptr : fused->inputs.data(),
+    fused->registers.empty() ? nullptr : fused->registers.data(),
+    fused->array_ptrs.empty() ? nullptr : fused->array_ptrs.data(),
+    fused->array_sizes.empty() ? nullptr : fused->array_sizes.data(),
+    fused->temps.empty() ? nullptr : fused->temps.data(),
+    fused->primitive_body_sample_rate,
+    sample_index);
+
+  for (const auto & binding : fused->primitive_body_modules)
+  {
+    if (binding.module_id >= runtime.modules.size())
+    {
+      return false;
+    }
+    auto & slot = runtime.modules[binding.module_id];
+    if (!slot.module)
+    {
+      return false;
+    }
+    Module & module = *slot.module;
+
+    for (unsigned int output_id = 0; output_id < binding.output_registers.size(); ++output_id)
+    {
+      const uint32_t output_reg = binding.output_registers[output_id];
+      if (output_reg >= fused->temps.size() || output_id >= module.outputs.size())
+      {
+        return false;
+      }
+      const double clamped = Module::clamp_output_scalar(fused->temps[output_reg]);
+      module.outputs[output_id] = expr::float_value(clamped);
+      if (binding.module_id < fused->module_output_spans.size())
+      {
+        const auto & span = fused->module_output_spans[binding.module_id];
+        const uint32_t source_slot = span.first_output_slot + output_id;
+        if (source_slot < fused->current_outputs.size())
+        {
+          fused->current_outputs[source_slot] = module.outputs[output_id];
+        }
+      }
+    }
+
+    if (module.numeric_registers_.size() < binding.register_targets.size())
+    {
+      module.numeric_registers_.resize(binding.register_targets.size(), 0.0);
+    }
+    if (module.numeric_next_registers_.size() < binding.register_targets.size())
+    {
+      module.numeric_next_registers_.resize(binding.register_targets.size(), 0.0);
+    }
+    if (module.registers_.size() < binding.register_targets.size())
+    {
+      module.registers_.resize(binding.register_targets.size(), expr::float_value(0.0));
+    }
+    if (module.next_registers_.size() < binding.register_targets.size())
+    {
+      module.next_registers_.resize(binding.register_targets.size(), expr::float_value(0.0));
+    }
+
+    for (unsigned int register_id = 0; register_id < binding.register_targets.size(); ++register_id)
+    {
+      const uint32_t fused_register_id = binding.register_base + register_id;
+      if (fused_register_id >= fused->registers.size())
+      {
+        return false;
+      }
+      const int32_t target = binding.register_targets[register_id];
+      const double next_value =
+        target >= 0 && static_cast<std::size_t>(target) < fused->temps.size()
+          ? fused->temps[static_cast<std::size_t>(target)]
+          : fused->registers[fused_register_id];
+      fused->registers[fused_register_id] = next_value;
+      module.numeric_registers_[register_id] = next_value;
+      module.numeric_next_registers_[register_id] = next_value;
+      module.registers_[register_id] = expr::float_value(next_value);
+      module.next_registers_[register_id] = module.registers_[register_id];
+    }
+
+    module.reset_inputs_after_process();
   }
 
   return true;
@@ -540,6 +673,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
       mark_ineligible("graph fusion disabled by non-numeric top-level input expression");
       return fused;
     }
+
   }
 
   fused->mix_source_output_slots.reserve(runtime.mix.size());
@@ -578,7 +712,294 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
     return fused;
   }
 
+  std::vector<uint32_t> primitive_input_base_by_module(runtime.modules.size(), std::numeric_limits<uint32_t>::max());
+
  #ifdef EGRESS_LLVM_ORC_JIT
+  auto mark_primitive_body_unavailable = [&](const std::string & reason)
+  {
+    fused->primitive_body_available = false;
+    fused->primitive_body_status = reason;
+    fused->primitive_body_modules.clear();
+    fused->primitive_body_module_mask.assign(runtime.modules.size(), false);
+    fused->primitive_body_covers_all_modules = false;
+    fused->program = egress_jit::NumericProgram{};
+    fused->kernel = nullptr;
+    fused->inputs.clear();
+    fused->registers.clear();
+    fused->temps.clear();
+    fused->array_storage.clear();
+    fused->array_ptrs.clear();
+    fused->array_sizes.clear();
+    std::fill(
+      primitive_input_base_by_module.begin(),
+      primitive_input_base_by_module.end(),
+      std::numeric_limits<uint32_t>::max());
+  };
+
+  mark_primitive_body_unavailable("primitive body fusion unavailable");
+
+  auto supports_scalar_body_op = [](egress_jit::NumericOp op)
+  {
+    switch (op)
+    {
+      case egress_jit::NumericOp::Literal:
+      case egress_jit::NumericOp::InputValue:
+      case egress_jit::NumericOp::RegisterValue:
+      case egress_jit::NumericOp::SampleRate:
+      case egress_jit::NumericOp::SampleIndex:
+      case egress_jit::NumericOp::Not:
+      case egress_jit::NumericOp::Less:
+      case egress_jit::NumericOp::LessEqual:
+      case egress_jit::NumericOp::Greater:
+      case egress_jit::NumericOp::GreaterEqual:
+      case egress_jit::NumericOp::Equal:
+      case egress_jit::NumericOp::NotEqual:
+      case egress_jit::NumericOp::Add:
+      case egress_jit::NumericOp::Sub:
+      case egress_jit::NumericOp::Mul:
+      case egress_jit::NumericOp::Div:
+      case egress_jit::NumericOp::Pow:
+      case egress_jit::NumericOp::Mod:
+      case egress_jit::NumericOp::FloorDiv:
+      case egress_jit::NumericOp::BitAnd:
+      case egress_jit::NumericOp::BitOr:
+      case egress_jit::NumericOp::BitXor:
+      case egress_jit::NumericOp::LShift:
+      case egress_jit::NumericOp::RShift:
+      case egress_jit::NumericOp::Abs:
+      case egress_jit::NumericOp::Clamp:
+      case egress_jit::NumericOp::Log:
+      case egress_jit::NumericOp::Sin:
+      case egress_jit::NumericOp::Neg:
+      case egress_jit::NumericOp::BitNot:
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  auto translate_scalar_body_instruction =
+    [&](const egress_jit::NumericInstr & instr,
+        uint32_t input_base,
+        uint32_t register_base,
+        uint32_t reg_base,
+        egress_jit::NumericInstr & out) -> bool
+  {
+    if (!supports_scalar_body_op(instr.op))
+    {
+      return false;
+    }
+    out = instr;
+    out.dst += reg_base;
+    switch (instr.op)
+    {
+      case egress_jit::NumericOp::Literal:
+      case egress_jit::NumericOp::SampleRate:
+      case egress_jit::NumericOp::SampleIndex:
+        return true;
+      case egress_jit::NumericOp::InputValue:
+        out.slot_id = input_base + instr.slot_id;
+        return true;
+      case egress_jit::NumericOp::RegisterValue:
+        out.slot_id = register_base + instr.slot_id;
+        return true;
+      case egress_jit::NumericOp::Not:
+      case egress_jit::NumericOp::Abs:
+      case egress_jit::NumericOp::Log:
+      case egress_jit::NumericOp::Sin:
+      case egress_jit::NumericOp::Neg:
+      case egress_jit::NumericOp::BitNot:
+        out.src_a += reg_base;
+        return true;
+      case egress_jit::NumericOp::Clamp:
+        out.src_a += reg_base;
+        out.src_b += reg_base;
+        out.src_c += reg_base;
+        return true;
+      default:
+        out.src_a += reg_base;
+        out.src_b += reg_base;
+        return true;
+    }
+  };
+
+  {
+    bool primitive_body_ok = true;
+    uint64_t expected_sample_index = 0;
+    bool have_sample_index = false;
+    double expected_sample_rate = 44100.0;
+    bool have_sample_rate = false;
+
+    fused->program.instructions.clear();
+    fused->program.register_count = 0;
+    fused->primitive_body_modules.clear();
+    fused->primitive_body_module_mask.assign(runtime.modules.size(), false);
+    fused->primitive_body_covers_all_modules = false;
+    fused->inputs.clear();
+    fused->registers.clear();
+    fused->temps.clear();
+    uint32_t active_module_count = 0;
+
+    for (uint32_t module_id = 0; module_id < runtime.modules.size(); ++module_id)
+    {
+      const auto & slot = runtime.modules[module_id];
+      if (!slot.module)
+      {
+        continue;
+      }
+      ++active_module_count;
+
+      Module & module = *slot.module;
+      if (module.has_nested_modules_ || module.has_delay_states_ || module.has_dynamic_registers_)
+      {
+        continue;
+      }
+
+      if (!have_sample_index)
+      {
+        expected_sample_index = module.sample_index_;
+        have_sample_index = true;
+      }
+      else if (module.sample_index_ != expected_sample_index)
+      {
+        continue;
+      }
+
+      if (!have_sample_rate)
+      {
+        expected_sample_rate = module.sample_rate_;
+        have_sample_rate = true;
+      }
+      else if (module.sample_rate_ != expected_sample_rate)
+      {
+        continue;
+      }
+
+      Module::NumericJitState state;
+      egress_jit::NumericProgram module_program;
+      std::vector<Value> placeholder_inputs(module.inputs.size(), expr::float_value(0.0));
+      const Module::CompiledProgram compiled_program = module.program_;
+      if (!module.build_numeric_program(compiled_program, state, placeholder_inputs, module_program))
+      {
+        continue;
+      }
+
+      if (!state.array_storage.empty())
+      {
+        continue;
+      }
+
+      for (const auto & info : state.input_info)
+      {
+        if (!info.is_scalar)
+        {
+          primitive_body_ok = false;
+          break;
+        }
+      }
+      if (!primitive_body_ok)
+      {
+        break;
+      }
+
+      for (const bool is_scalar : state.register_scalar_mask)
+      {
+        if (!is_scalar)
+        {
+          primitive_body_ok = false;
+          break;
+        }
+      }
+      if (!primitive_body_ok)
+      {
+        break;
+      }
+
+      for (const auto & output_info : state.output_info)
+      {
+        if (static_cast<Module::NumericValueKind>(output_info.kind) != Module::NumericValueKind::Scalar)
+        {
+          primitive_body_ok = false;
+          break;
+        }
+      }
+      if (!primitive_body_ok)
+      {
+        break;
+      }
+
+      const uint32_t input_base = static_cast<uint32_t>(fused->inputs.size());
+      const uint32_t register_base = static_cast<uint32_t>(fused->registers.size());
+      const uint32_t reg_base = fused->program.register_count;
+
+      primitive_input_base_by_module[module_id] = input_base;
+      fused->inputs.resize(fused->inputs.size() + module.inputs.size(), 0.0);
+      fused->registers.reserve(fused->registers.size() + module.registers_.size());
+      for (const auto & reg : module.registers_)
+      {
+        fused->registers.push_back(expr::to_float64(reg));
+      }
+
+      egress_graph_detail::FusedPrimitiveBodyModule binding;
+      binding.module_id = module_id;
+      binding.input_base = input_base;
+      binding.register_base = register_base;
+      binding.output_registers.reserve(module.program_.output_targets.size());
+      for (uint32_t output_reg : module.program_.output_targets)
+      {
+        binding.output_registers.push_back(reg_base + output_reg);
+      }
+      binding.register_targets.reserve(module.program_.register_targets.size());
+      for (int32_t target : module.program_.register_targets)
+      {
+        binding.register_targets.push_back(target >= 0 ? static_cast<int32_t>(reg_base + static_cast<uint32_t>(target)) : -1);
+      }
+
+      for (const auto & instr : module_program.instructions)
+      {
+        egress_jit::NumericInstr translated;
+        if (!translate_scalar_body_instruction(instr, input_base, register_base, reg_base, translated))
+        {
+          primitive_body_ok = false;
+          break;
+        }
+        fused->program.instructions.push_back(std::move(translated));
+      }
+      if (!primitive_body_ok)
+      {
+        break;
+      }
+
+      fused->program.register_count += module_program.register_count;
+      fused->primitive_body_module_mask[module_id] = true;
+      fused->primitive_body_modules.push_back(std::move(binding));
+    }
+
+    if (primitive_body_ok && !fused->primitive_body_modules.empty())
+    {
+      auto & jit = egress_jit::OrcJitEngine::instance();
+      auto kernel_or_err = jit.compile_numeric_program(fused->program, "egress_graph_primitive_body");
+      if (!kernel_or_err)
+      {
+        mark_primitive_body_unavailable(llvm::toString(kernel_or_err.takeError()));
+      }
+      else
+      {
+        fused->kernel = *kernel_or_err;
+        fused->primitive_body_available = true;
+        fused->primitive_body_status = "numeric JIT active";
+        fused->primitive_body_sample_rate = expected_sample_rate;
+        fused->temps.assign(fused->program.register_count, 0.0);
+        fused->primitive_body_covers_all_modules =
+          fused->primitive_body_modules.size() == active_module_count;
+      }
+    }
+    else
+    {
+      mark_primitive_body_unavailable("no eligible primitive modules for body fusion");
+    }
+  }
+
   auto build_expression_kernel = [&](
                                    const std::vector<const CompiledInputProgram *> & programs,
                                    bool use_prev_outputs,
@@ -1230,6 +1651,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
     return true;
   };
 
+  bool primitive_body_inputs_ok = true;
   std::vector<const CompiledInputProgram *> input_programs;
   std::vector<uint32_t> input_program_module_ids;
   input_programs.reserve(runtime.modules.size());
@@ -1264,6 +1686,21 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
             egress_graph_detail::FusedGraphInputBinding binding;
             binding.module_id = module_id;
             binding.input_id = input_id;
+            if (module_id < primitive_input_base_by_module.size())
+            {
+              const uint32_t base = primitive_input_base_by_module[module_id];
+              if (base != std::numeric_limits<uint32_t>::max())
+              {
+                if (reg_info[result_reg].kind != egress_graph_detail::FusedGraphValueKind::Scalar)
+                {
+                  primitive_body_inputs_ok = false;
+                }
+                else
+                {
+                  binding.fused_input_slot = base + input_id;
+                }
+              }
+            }
             binding.value.kind = reg_info[result_reg].kind;
             binding.value.scalar_register = reg_info[result_reg].scalar_register;
             binding.value.array_slot = reg_info[result_reg].array_slot;
@@ -1275,6 +1712,10 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
   {
     mark_ineligible("graph fusion input kernel build failed");
     return fused;
+  }
+  if (!primitive_body_inputs_ok)
+  {
+    mark_primitive_body_unavailable("primitive body fusion requires scalar top-level input bindings");
   }
 
   std::vector<const CompiledInputProgram *> mix_programs;

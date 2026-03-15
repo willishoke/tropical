@@ -188,12 +188,22 @@ struct FusedGraphInputBinding
 {
   uint32_t module_id = 0;
   unsigned int input_id = 0;
+  uint32_t fused_input_slot = std::numeric_limits<uint32_t>::max();
   FusedGraphValueRef value;
 };
 
 struct FusedGraphMixBinding
 {
   FusedGraphValueRef value;
+};
+
+struct FusedPrimitiveBodyModule
+{
+  uint32_t module_id = 0;
+  uint32_t input_base = 0;
+  uint32_t register_base = 0;
+  std::vector<uint32_t> output_registers;
+  std::vector<int32_t> register_targets;
 };
 
 struct FusedGraphKernelState
@@ -228,6 +238,12 @@ struct FusedGraphState
   std::vector<std::vector<Value>> indexed_prev_values;
   std::vector<uint32_t> mix_source_output_slots;
   std::vector<uint32_t> tap_source_output_slots;
+  std::vector<FusedPrimitiveBodyModule> primitive_body_modules;
+  std::vector<bool> primitive_body_module_mask;
+  bool primitive_body_covers_all_modules = false;
+  bool primitive_body_available = false;
+  std::string primitive_body_status;
+  double primitive_body_sample_rate = 44100.0;
   FusedGraphKernelState input_kernel;
   FusedGraphKernelState mix_kernel;
 
@@ -235,6 +251,7 @@ struct FusedGraphState
   egress_jit::NumericProgram program;
   egress_jit::NumericKernelFn kernel = nullptr;
   std::vector<double> inputs;
+  std::vector<double> registers;
   std::vector<double> temps;
   std::vector<std::vector<double>> array_storage;
   std::vector<double *> array_ptrs;

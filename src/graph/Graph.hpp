@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <pthread.h>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -147,23 +148,38 @@ class Graph
 
       for (unsigned int sample = 0; sample < bufferLength_; ++sample)
       {
-        const bool use_fused_inputs = run_fused_input_kernel(runtime);
-        parallel_next_module_index_.store(0, std::memory_order_relaxed);
-        if (worker_count_ > 1 && runtime.modules.size() > 1)
+        const bool can_use_fused_body =
+          runtime.fused_graph != nullptr && runtime.fused_graph->primitive_body_available;
+        const bool use_fused_inputs = run_fused_input_kernel(runtime, can_use_fused_body);
+        const bool used_fused_body = can_use_fused_body && use_fused_inputs && run_fused_primitive_body_kernel(runtime);
+        const bool body_covers_all_modules =
+          used_fused_body &&
+          runtime.fused_graph != nullptr &&
+          runtime.fused_graph->primitive_body_covers_all_modules;
+        const bool module_use_fused_inputs = use_fused_inputs && !used_fused_body;
+        if (use_fused_inputs && can_use_fused_body && !used_fused_body)
         {
-#ifdef EGRESS_PROFILE
-          start_parallel_module_batch(runtime, use_fused_inputs, &local_module_stats);
-#else
-          start_parallel_module_batch(runtime, use_fused_inputs);
-#endif
+          run_fused_input_kernel(runtime, false);
         }
-        else
+        if (!body_covers_all_modules)
         {
+          parallel_next_module_index_.store(0, std::memory_order_relaxed);
+          if (worker_count_ > 1 && runtime.modules.size() > 1)
+          {
 #ifdef EGRESS_PROFILE
-          execute_parallel_module_work(runtime, use_fused_inputs, &local_module_stats);
+            start_parallel_module_batch(runtime, module_use_fused_inputs, &local_module_stats);
 #else
-          execute_parallel_module_work(runtime, use_fused_inputs);
+            start_parallel_module_batch(runtime, module_use_fused_inputs);
 #endif
+          }
+          else
+          {
+#ifdef EGRESS_PROFILE
+            execute_parallel_module_work(runtime, module_use_fused_inputs, &local_module_stats);
+#else
+            execute_parallel_module_work(runtime, module_use_fused_inputs);
+#endif
+          }
         }
 
         sync_fused_current_outputs(runtime);
@@ -865,7 +881,9 @@ class Graph
 
     void sync_fused_prev_outputs(RuntimeState & runtime) const;
 
-    bool run_fused_input_kernel(RuntimeState & runtime) const;
+    bool run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_body_inputs) const;
+
+    bool run_fused_primitive_body_kernel(RuntimeState & runtime) const;
 
     bool run_fused_mix_kernel(RuntimeState & runtime, double & mixed) const;
 
@@ -908,6 +926,95 @@ class Graph
       std::vector<Value> & inputs) const;
 
     static uint64_t estimate_module_execution_cost(const Module & module);
+
+    struct WorkerThreadPolicy
+    {
+      bool has_sched_params = false;
+      int sched_policy = 0;
+      sched_param sched_params{};
+#ifdef __APPLE__
+      bool has_qos_class = false;
+      qos_class_t qos_class = QOS_CLASS_UNSPECIFIED;
+      int qos_relative_priority = 0;
+#endif
+    };
+
+    static bool worker_thread_policy_equals(
+      const WorkerThreadPolicy & lhs,
+      const WorkerThreadPolicy & rhs)
+    {
+      if (lhs.has_sched_params != rhs.has_sched_params)
+      {
+        return false;
+      }
+      if (lhs.has_sched_params &&
+          (lhs.sched_policy != rhs.sched_policy ||
+           lhs.sched_params.sched_priority != rhs.sched_params.sched_priority))
+      {
+        return false;
+      }
+#ifdef __APPLE__
+      if (lhs.has_qos_class != rhs.has_qos_class)
+      {
+        return false;
+      }
+      if (lhs.has_qos_class &&
+          (lhs.qos_class != rhs.qos_class ||
+           lhs.qos_relative_priority != rhs.qos_relative_priority))
+      {
+        return false;
+      }
+#endif
+      return true;
+    }
+
+    static WorkerThreadPolicy capture_current_worker_thread_policy()
+    {
+      WorkerThreadPolicy policy;
+      pthread_t current = pthread_self();
+      if (pthread_getschedparam(current, &policy.sched_policy, &policy.sched_params) == 0)
+      {
+        policy.has_sched_params = true;
+      }
+#ifdef __APPLE__
+      qos_class_t qos_class = QOS_CLASS_UNSPECIFIED;
+      int relative_priority = 0;
+      if (pthread_get_qos_class_np(current, &qos_class, &relative_priority) == 0 &&
+          qos_class != QOS_CLASS_UNSPECIFIED)
+      {
+        policy.has_qos_class = true;
+        policy.qos_class = qos_class;
+        policy.qos_relative_priority = relative_priority;
+      }
+#endif
+      return policy;
+    }
+
+    void refresh_worker_thread_policy_locked()
+    {
+      const WorkerThreadPolicy desired = capture_current_worker_thread_policy();
+      if (worker_thread_policy_generation_ > 0 &&
+          worker_thread_policy_equals(worker_thread_policy_, desired))
+      {
+        return;
+      }
+      worker_thread_policy_ = desired;
+      ++worker_thread_policy_generation_;
+    }
+
+    static void apply_worker_thread_policy(const WorkerThreadPolicy & policy)
+    {
+#ifdef __APPLE__
+      if (policy.has_qos_class)
+      {
+        pthread_set_qos_class_self_np(policy.qos_class, policy.qos_relative_priority);
+      }
+#endif
+      if (policy.has_sched_params)
+      {
+        pthread_setschedparam(pthread_self(), policy.sched_policy, &policy.sched_params);
+      }
+    }
 
     void advance_module_sample_indices(RuntimeState & runtime) const
     {
@@ -983,6 +1090,13 @@ class Graph
 #ifdef EGRESS_PROFILE
         const auto module_start = std::chrono::steady_clock::now();
 #endif
+        if (use_fused_inputs &&
+            runtime.fused_graph != nullptr &&
+            slot_id < runtime.fused_graph->primitive_body_module_mask.size() &&
+            runtime.fused_graph->primitive_body_module_mask[slot_id])
+        {
+          continue;
+        }
         if (!use_fused_inputs)
         {
           eval_input_program(runtime, slot.input_program, slot.input_registers, slot.module->inputs);
@@ -1016,6 +1130,7 @@ class Graph
 #endif
     {
       std::unique_lock<std::mutex> lock(worker_mutex_);
+      refresh_worker_thread_policy_locked();
       if (worker_threads_.empty())
       {
         lock.unlock();
@@ -1088,6 +1203,7 @@ class Graph
     void worker_main()
     {
       uint64_t seen_generation = 0;
+      uint64_t seen_policy_generation = 0;
       while (true)
       {
         if (!wait_for_next_parallel_epoch(seen_generation))
@@ -1110,10 +1226,18 @@ class Graph
         --parallel_helper_slots_;
         ++parallel_active_participants_;
         RuntimeState * runtime = parallel_runtime_;
+        const uint64_t policy_generation = worker_thread_policy_generation_;
+        const WorkerThreadPolicy policy = worker_thread_policy_;
 #ifdef EGRESS_PROFILE
         auto * local_stats = parallel_local_stats_;
 #endif
         lock.unlock();
+
+        if (policy_generation != seen_policy_generation)
+        {
+          apply_worker_thread_policy(policy);
+          seen_policy_generation = policy_generation;
+        }
 
         if (runtime != nullptr)
         {
@@ -1188,6 +1312,8 @@ class Graph
     unsigned int worker_count_ = 1;
     bool fusion_enabled_ = false;
     std::atomic<bool> worker_shutdown_{false};
+    WorkerThreadPolicy worker_thread_policy_{};
+    uint64_t worker_thread_policy_generation_ = 0;
 
   #ifdef EGRESS_PROFILE
     std::vector<ProcessModuleTiming> * parallel_local_stats_ = nullptr;

@@ -122,11 +122,22 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   }
 #endif
   bool composite_outputs_materialized = false;
+  bool used_composite_body_jit = false;
   for (uint32_t node_id : composite_schedule_)
   {
     if (use_composite_programs && node_id == composite_output_boundary_id_)
     {
  #ifdef EGRESS_LLVM_ORC_JIT
+      if (!has_dynamic_registers_)
+      {
+        ensure_composite_body_jit_current();
+        if (run_composite_body_jit(output_materialize_mask))
+        {
+          composite_outputs_materialized = true;
+          used_composite_body_jit = true;
+          continue;
+        }
+      }
       bool used_jit_outputs = false;
       if (!has_dynamic_registers_)
       {
@@ -213,7 +224,8 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   }
 
 #ifdef EGRESS_LLVM_ORC_JIT
-  if (use_composite_programs &&
+  if (!used_composite_body_jit &&
+      use_composite_programs &&
       !has_dynamic_registers_ &&
       (ensure_numeric_jit_state_current(
          composite_register_jit_,
@@ -247,8 +259,14 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
 
   if (!delay_update_program_.output_targets.empty())
   {
+    if (used_composite_body_jit)
+    {
+      // Delay states were already advanced by the fused composite body kernel.
+    }
+    else
+    {
 #ifdef EGRESS_LLVM_ORC_JIT
-    if (!has_dynamic_registers_ &&
+      if (!has_dynamic_registers_ &&
         (ensure_numeric_jit_state_current(
            delay_update_jit_,
            delay_update_program_,
@@ -262,16 +280,17 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       materialize_numeric_outputs(delay_update_jit_, delay_update_program_, next_delay_states_);
       delay_states_.swap(next_delay_states_);
     }
-    else
+      else
 #endif
-    {
-      eval_program(delay_update_program_, temps_);
-      next_delay_states_ = delay_states_;
-      for (unsigned int delay_id = 0; delay_id < delay_update_program_.output_targets.size(); ++delay_id)
       {
-        next_delay_states_[delay_id] = temps_[delay_update_program_.output_targets[delay_id]];
+        eval_program(delay_update_program_, temps_);
+        next_delay_states_ = delay_states_;
+        for (unsigned int delay_id = 0; delay_id < delay_update_program_.output_targets.size(); ++delay_id)
+        {
+          next_delay_states_[delay_id] = temps_[delay_update_program_.output_targets[delay_id]];
+        }
+        delay_states_.swap(next_delay_states_);
       }
-      delay_states_.swap(next_delay_states_);
     }
   }
 
@@ -331,6 +350,10 @@ Module::CompileStats Module::compile_stats() const
   stats.nested_module_count = static_cast<uint64_t>(nested_modules_.size());
 #ifdef EGRESS_LLVM_ORC_JIT
   stats.numeric_jit_instruction_count = numeric_jit_instruction_count_;
+  if (composite_body_jit_.state.kernel != nullptr)
+  {
+    stats.numeric_jit_instruction_count += composite_body_jit_.instruction_count;
+  }
   if (composite_output_jit_.kernel != nullptr)
   {
     stats.numeric_jit_instruction_count += composite_output_jit_.instruction_count;

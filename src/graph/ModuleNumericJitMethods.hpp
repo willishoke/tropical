@@ -1358,6 +1358,171 @@ void Module::ensure_numeric_jit_state_current(
   initialize_numeric_jit_state(state, source_program, current_inputs, base_input_count, symbol_prefix);
 }
 
+bool Module::prepare_composite_body_jit_program(CompositeBodyJitState & state) const
+{
+  if ((!has_nested_modules_ && !has_delay_states_) ||
+      composite_schedule_.empty() ||
+      composite_schedule_.back() != composite_output_boundary_id_)
+  {
+    return false;
+  }
+
+  state = CompositeBodyJitState{};
+  state.output_count = static_cast<uint32_t>(composite_output_program_.output_targets.size());
+  state.delay_output_count = static_cast<uint32_t>(delay_update_program_.output_targets.size());
+
+  auto synthetic_index_for = [&](NumericSyntheticInputKind kind, uint32_t slot_id, uint32_t output_id) {
+    for (const auto & input : state.state.prepared.synthetic_inputs)
+    {
+      if (input.kind == kind && input.slot_id == slot_id && input.output_id == output_id)
+      {
+        return input.input_slot;
+      }
+    }
+    const uint32_t input_slot = static_cast<uint32_t>(input_count_ + state.state.prepared.synthetic_inputs.size());
+    state.state.prepared.synthetic_inputs.push_back(NumericSyntheticInput{kind, slot_id, output_id, input_slot});
+    return input_slot;
+  };
+
+  auto append_program = [&](const CompiledProgram & source_program, bool append_outputs, bool append_registers)
+  {
+    const uint32_t reg_base = state.program.register_count;
+    state.program.register_count += source_program.register_count;
+    for (const auto & instr : source_program.instructions)
+    {
+      Instr translated = instr;
+      translated.dst += reg_base;
+      translated.src_a += reg_base;
+      translated.src_b += reg_base;
+      translated.src_c += reg_base;
+      for (auto & arg : translated.args)
+      {
+        arg += reg_base;
+      }
+      switch (translated.kind)
+      {
+        case ExprKind::NestedValue:
+          translated.kind = ExprKind::InputValue;
+          translated.slot_id = synthetic_index_for(
+            NumericSyntheticInputKind::NestedOutput,
+            instr.slot_id,
+            instr.output_id);
+          translated.output_id = 0;
+          break;
+        case ExprKind::DelayValue:
+          translated.kind = ExprKind::InputValue;
+          translated.slot_id = synthetic_index_for(
+            NumericSyntheticInputKind::DelayState,
+            instr.slot_id,
+            0);
+          break;
+        default:
+          break;
+      }
+      state.program.instructions.push_back(std::move(translated));
+    }
+
+    if (append_outputs)
+    {
+      for (uint32_t target : source_program.output_targets)
+      {
+        state.program.output_targets.push_back(reg_base + target);
+      }
+    }
+    if (append_registers)
+    {
+      for (int32_t target : source_program.register_targets)
+      {
+        state.program.register_targets.push_back(target >= 0 ? static_cast<int32_t>(reg_base + static_cast<uint32_t>(target)) : -1);
+      }
+    }
+  };
+
+  append_program(composite_output_program_, true, false);
+  append_program(delay_update_program_, true, false);
+  append_program(composite_register_program_, false, true);
+  state.state.prepared.program = state.program;
+  return true;
+}
+
+void Module::initialize_composite_body_jit(const std::vector<Value> & current_inputs)
+{
+  composite_body_jit_ = CompositeBodyJitState{};
+  if (!prepare_composite_body_jit_program(composite_body_jit_))
+  {
+    return;
+  }
+
+  std::vector<Value> jit_inputs = build_numeric_jit_inputs(current_inputs, composite_body_jit_.state.prepared);
+  egress_jit::NumericProgram numeric_program;
+  if (!build_numeric_program(composite_body_jit_.state.prepared.program, composite_body_jit_.state, jit_inputs, numeric_program))
+  {
+    composite_body_jit_ = CompositeBodyJitState{};
+    return;
+  }
+
+  const std::size_t fused_output_count =
+    static_cast<std::size_t>(composite_body_jit_.output_count + composite_body_jit_.delay_output_count);
+  if (composite_body_jit_.state.output_info.size() < fused_output_count)
+  {
+    composite_body_jit_ = CompositeBodyJitState{};
+    return;
+  }
+  for (std::size_t output_id = 0; output_id < fused_output_count; ++output_id)
+  {
+    if (static_cast<NumericValueKind>(composite_body_jit_.state.output_info[output_id].kind) != NumericValueKind::Scalar)
+    {
+      composite_body_jit_ = CompositeBodyJitState{};
+      return;
+    }
+  }
+  for (bool scalar_register : composite_body_jit_.state.register_scalar_mask)
+  {
+    if (!scalar_register)
+    {
+      composite_body_jit_ = CompositeBodyJitState{};
+      return;
+    }
+  }
+
+  auto & jit = egress_jit::OrcJitEngine::instance();
+  auto kernel_or_err = jit.compile_numeric_program(numeric_program, "egress_udm_composite_body");
+  if (!kernel_or_err)
+  {
+    composite_body_jit_ = CompositeBodyJitState{};
+    return;
+  }
+
+  composite_body_jit_.state.kernel = *kernel_or_err;
+  composite_body_jit_.state.temps.assign(composite_body_jit_.state.prepared.program.register_count, 0.0);
+  composite_body_jit_.state.inputs.assign(jit_inputs.size(), 0.0);
+  composite_body_jit_.state.array_ptrs.resize(composite_body_jit_.state.array_storage.size(), nullptr);
+  composite_body_jit_.state.array_sizes.resize(composite_body_jit_.state.array_storage.size(), 0);
+  for (std::size_t i = 0; i < composite_body_jit_.state.array_storage.size(); ++i)
+  {
+    composite_body_jit_.state.array_ptrs[i] =
+      composite_body_jit_.state.array_storage[i].empty() ? nullptr : composite_body_jit_.state.array_storage[i].data();
+    composite_body_jit_.state.array_sizes[i] =
+      static_cast<uint64_t>(composite_body_jit_.state.array_storage[i].size());
+  }
+#ifdef EGRESS_PROFILE
+  composite_body_jit_.instruction_count = static_cast<uint64_t>(numeric_program.instructions.size());
+#endif
+}
+
+void Module::ensure_composite_body_jit_current()
+{
+  if (composite_body_jit_.state.kernel != nullptr)
+  {
+    const std::vector<Value> jit_inputs = build_numeric_jit_inputs(inputs, composite_body_jit_.state.prepared);
+    if (numeric_input_layout_matches(composite_body_jit_.state, jit_inputs))
+    {
+      return;
+    }
+  }
+  initialize_composite_body_jit(inputs);
+}
+
 bool Module::run_numeric_jit_state(
   NumericJitState & state,
   const std::vector<Value> & current_inputs)
@@ -1387,6 +1552,39 @@ bool Module::run_numeric_jit_state(
   return true;
 }
 
+bool Module::run_composite_body_jit(const std::vector<bool> * output_materialize_mask)
+{
+  if (composite_body_jit_.state.kernel == nullptr ||
+      !run_numeric_jit_state(composite_body_jit_.state, inputs))
+  {
+    return false;
+  }
+
+  materialize_numeric_outputs_range(
+    composite_body_jit_.state,
+    composite_body_jit_.program,
+    0,
+    composite_body_jit_.output_count,
+    outputs,
+    output_materialize_mask);
+
+  apply_numeric_register_targets(composite_body_jit_.state, composite_body_jit_.program);
+
+  if (composite_body_jit_.delay_output_count > 0)
+  {
+    next_delay_states_ = delay_states_;
+    materialize_numeric_outputs_range(
+      composite_body_jit_.state,
+      composite_body_jit_.program,
+      composite_body_jit_.output_count,
+      composite_body_jit_.delay_output_count,
+      next_delay_states_);
+    delay_states_.swap(next_delay_states_);
+  }
+
+  return true;
+}
+
 void Module::materialize_numeric_outputs(
   const NumericJitState & state,
   const CompiledProgram & compiled_program,
@@ -1411,6 +1609,40 @@ void Module::materialize_numeric_outputs(
       destinations[output_id],
       state.output_info[output_id],
       compiled_program.output_targets[output_id],
+      state.temps,
+      state.array_storage);
+  }
+}
+
+void Module::materialize_numeric_outputs_range(
+  const NumericJitState & state,
+  const CompiledProgram & compiled_program,
+  std::size_t start_output_id,
+  std::size_t output_count,
+  std::vector<Value> & destinations,
+  const std::vector<bool> * materialize_mask)
+{
+  for (std::size_t output_index = 0; output_index < output_count; ++output_index)
+  {
+    const std::size_t compiled_output_id = start_output_id + output_index;
+    if (compiled_output_id >= compiled_program.output_targets.size() ||
+        compiled_output_id >= state.output_info.size() ||
+        output_index >= destinations.size())
+    {
+      continue;
+    }
+    if (materialize_mask != nullptr &&
+        output_index < materialize_mask->size() &&
+        !(*materialize_mask)[output_index] &&
+        static_cast<NumericValueKind>(state.output_info[compiled_output_id].kind) != NumericValueKind::Scalar)
+    {
+      continue;
+    }
+
+    assign_numeric_value_to(
+      destinations[output_index],
+      state.output_info[compiled_output_id],
+      compiled_program.output_targets[compiled_output_id],
       state.temps,
       state.array_storage);
   }
@@ -1584,6 +1816,7 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
   composite_register_jit_ = NumericJitState{};
   delay_update_jit_ = NumericJitState{};
   composite_output_jit_ = NumericJitState{};
+  composite_body_jit_ = CompositeBodyJitState{};
   nested_input_jit_states_.clear();
   nested_input_jit_states_.reserve(nested_modules_.size());
   for (std::size_t nested_id = 0; nested_id < nested_modules_.size(); ++nested_id)
@@ -1593,6 +1826,7 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
 
   if (!has_nested_modules_)
   {
+    initialize_composite_body_jit(current_inputs);
     ensure_numeric_jit_state_current(
       composite_output_jit_,
       composite_output_program_,

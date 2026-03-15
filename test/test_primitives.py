@@ -279,7 +279,7 @@ def main():
 
     delay_compile_stats = delay_probe.compile_stats
     assert delay_compile_stats["jit_status"] == "numeric JIT active"
-    assert delay_compile_stats["numeric_jit_instruction_count"] > 0
+    assert delay_compile_stats["numeric_jit_instruction_count"] >= 9
     assert "composite_update_count" not in delay_compile_stats
 
     graph.process()
@@ -371,6 +371,34 @@ def main():
     assert graph.fusion_enabled() is False
     graph.set_fusion_enabled(True)
     assert graph.fusion_enabled() is True
+
+    fused_source = Gain2()
+    fused_source.x = 2.0
+    fused_sink = Gain2()
+    fused_sink.x = fused_source.y
+    graph.add_output(fused_sink.y.module_name, fused_sink.y.output_id)
+    graph.process()
+    fused_buf = graph.output_buffer()
+    assert math.isclose(fused_buf[0], 0.0, rel_tol=1e-9, abs_tol=1e-9)
+    graph.process()
+    fused_buf = graph.output_buffer()
+    assert math.isclose(fused_buf[0], 8.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+    graph.destroy_module(fused_source.name)
+    graph.destroy_module(fused_sink.name)
+
+    mixed_fusion_source = Gain2()
+    mixed_fusion_source.x = 2.0
+    mixed_fusion_sink = DelayComposeProbe()
+    mixed_fusion_sink.x = mixed_fusion_source.y
+    graph.add_output(mixed_fusion_sink.current.module_name, mixed_fusion_sink.current.output_id)
+    graph.process()
+    mixed_buf = graph.output_buffer()
+    assert math.isclose(mixed_buf[0], 0.0, rel_tol=1e-9, abs_tol=1e-9)
+    graph.process()
+    mixed_buf = graph.output_buffer()
+    assert math.isclose(mixed_buf[0], 8.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+    graph.destroy_module(mixed_fusion_source.name)
+    graph.destroy_module(mixed_fusion_sink.name)
 
     fusion_source = IndexedArraySource()
     fusion_source.x = 2.0

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 #include <queue>
@@ -232,6 +233,17 @@ inline LoweredCompositeModule lower_composite_module(const CompositeModuleSpec &
 
   LoweredCompositeModule lowered;
   lowered.same_tick_schedule = validation.same_tick_topology;
+  const auto boundary_it = std::find(
+    lowered.same_tick_schedule.begin(),
+    lowered.same_tick_schedule.end(),
+    spec.output_boundary_id);
+  if (boundary_it != lowered.same_tick_schedule.end() &&
+      boundary_it + 1 != lowered.same_tick_schedule.end())
+  {
+    const uint32_t boundary_id = *boundary_it;
+    lowered.same_tick_schedule.erase(boundary_it);
+    lowered.same_tick_schedule.push_back(boundary_id);
+  }
   lowered.scheduled_nodes.reserve(validation.same_tick_topology.size());
   for (uint32_t node_id : validation.same_tick_topology)
   {

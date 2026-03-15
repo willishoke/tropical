@@ -294,11 +294,23 @@ class Module
       std::vector<bool> array_register_can_swap;
   #ifdef EGRESS_PROFILE
       uint64_t instruction_count = 0;
-  #endif
+   #endif
+    };
+
+    struct CompositeBodyJitState
+    {
+      NumericJitState state;
+      CompiledProgram program;
+      uint32_t output_count = 0;
+      uint32_t delay_output_count = 0;
+    #ifdef EGRESS_PROFILE
+      uint64_t instruction_count = 0;
+    #endif
     };
 
     std::vector<double> numeric_registers_;
     std::vector<double> numeric_next_registers_;
+    CompositeBodyJitState composite_body_jit_;
     NumericJitState composite_output_jit_;
     NumericJitState composite_register_jit_;
     NumericJitState delay_update_jit_;
@@ -398,9 +410,25 @@ class Module
       NumericJitState & state,
       const std::vector<Value> & current_inputs);
 
+    bool prepare_composite_body_jit_program(CompositeBodyJitState & state) const;
+
+    void initialize_composite_body_jit(const std::vector<Value> & current_inputs);
+
+    void ensure_composite_body_jit_current();
+
+    bool run_composite_body_jit(const std::vector<bool> * output_materialize_mask);
+
     void materialize_numeric_outputs(
       const NumericJitState & state,
       const CompiledProgram & compiled_program,
+      std::vector<Value> & destinations,
+      const std::vector<bool> * materialize_mask = nullptr);
+
+    void materialize_numeric_outputs_range(
+      const NumericJitState & state,
+      const CompiledProgram & compiled_program,
+      std::size_t start_output_id,
+      std::size_t output_count,
       std::vector<Value> & destinations,
       const std::vector<bool> * materialize_mask = nullptr);
 
