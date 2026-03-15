@@ -9,14 +9,60 @@ void Graph::wait_for_runtime_available(uint32_t runtime_index) const
   }
 }
 
+uint64_t Graph::estimate_module_execution_cost(const Module & module)
+{
+  uint64_t cost = static_cast<uint64_t>(module.program_.instructions.size()) +
+                  static_cast<uint64_t>(module.composite_output_program_.instructions.size()) +
+                  static_cast<uint64_t>(module.composite_register_program_.instructions.size()) +
+                  static_cast<uint64_t>(module.delay_update_program_.instructions.size()) +
+                  static_cast<uint64_t>(module.inputs.size()) +
+                  static_cast<uint64_t>(module.outputs.size()) +
+                  static_cast<uint64_t>(module.registers_.size());
+
+  for (const auto & nested : module.nested_modules_)
+  {
+    if (nested.module)
+    {
+      cost += estimate_module_execution_cost(*nested.module);
+      cost += static_cast<uint64_t>(nested.input_program.instructions.size());
+    }
+  }
+
+  return std::max<uint64_t>(cost, 1);
+}
+
 Graph::RuntimeState Graph::build_runtime_locked() const
 {
   RuntimeState runtime;
   runtime.modules.reserve(control_modules_.size());
   runtime.name_to_id.reserve(control_modules_.size());
 
-  for (const auto & [name, module] : control_modules_)
+  std::vector<const std::pair<const std::string, ControlModule> *> ordered_modules;
+  ordered_modules.reserve(control_modules_.size());
+  for (const auto & entry : control_modules_)
   {
+    ordered_modules.push_back(&entry);
+  }
+  std::sort(
+    ordered_modules.begin(),
+    ordered_modules.end(),
+    [](const auto * lhs, const auto * rhs)
+    {
+      const uint64_t lhs_cost =
+        lhs->second.module ? estimate_module_execution_cost(*lhs->second.module) : uint64_t(0);
+      const uint64_t rhs_cost =
+        rhs->second.module ? estimate_module_execution_cost(*rhs->second.module) : uint64_t(0);
+      if (lhs_cost != rhs_cost)
+      {
+        return lhs_cost > rhs_cost;
+      }
+      return lhs->first < rhs->first;
+    });
+
+  for (const auto * entry : ordered_modules)
+  {
+    const auto & name = entry->first;
+    const auto & module = entry->second;
     const uint32_t module_id = static_cast<uint32_t>(runtime.modules.size());
     runtime.name_to_id.emplace(name, module_id);
 
@@ -27,8 +73,10 @@ Graph::RuntimeState Graph::build_runtime_locked() const
     runtime.modules.push_back(std::move(slot));
   }
 
-  for (const auto & [name, module] : control_modules_)
+  for (const auto * entry : ordered_modules)
   {
+    const auto & name = entry->first;
+    const auto & module = entry->second;
     auto id_it = runtime.name_to_id.find(name);
     if (id_it == runtime.name_to_id.end())
     {

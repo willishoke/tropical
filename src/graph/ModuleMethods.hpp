@@ -116,7 +116,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         std::copy(src.begin(), src.end(), dst.begin());
       }
 
-      ++sample_index_;
       postprocess();
       return;
     }
@@ -280,8 +279,19 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   {
     registers_.swap(next_registers_);
   }
-  ++sample_index_;
   postprocess();
+}
+
+void Module::advance_sample_index_tree()
+{
+  ++sample_index_;
+  for (auto & nested : nested_modules_)
+  {
+    if (nested.module)
+    {
+      nested.module->advance_sample_index_tree();
+    }
+  }
 }
 
 unsigned int Module::input_count() const

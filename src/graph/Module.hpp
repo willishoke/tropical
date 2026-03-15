@@ -188,6 +188,8 @@ class Module
 
   private:
     friend class Graph;
+    void advance_sample_index_tree();
+
     using Instr = egress_module_detail::Instr;
     using CompiledProgram = egress_module_detail::CompiledProgram;
     using NumericInputInfo = egress_module_detail::NumericInputInfo;

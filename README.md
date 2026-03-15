@@ -57,6 +57,7 @@ Lifecycle methods:
 - `connect(output_port, input_port)`
 - `disconnect(output_port, input_port)`
 - `add_output(output_port)`
+- `graph().set_worker_count(n)` (opt-in graph-level parallelism; `1` keeps single-threaded execution)
 - `graph().destroy_module(name)` (advanced/manual control on the singleton graph)
 
 Input assignment shortcuts:
@@ -179,7 +180,7 @@ Realtime output methods:
 
 ## Graph
 
-`Graph` stores modules, per-input expression trees, output taps, and the output buffer. Each input is represented by a single expression tree whose leaves are literals or references to module outputs. `Graph::process()` evaluates those input expressions sample-by-sample, processes modules in dependency order, and mixes selected outputs into the output buffer. Since evaluation and processing proceed sequentially, the latency between connected modules is a single sample.
+`Graph` stores modules, per-input expression trees, output taps, and the output buffer. Each input is represented by a single expression tree whose leaves are literals or references to module outputs. `Graph::process()` evaluates those input expressions sample-by-sample, processes modules, and mixes selected outputs into the output buffer. Top-level module references always read previous-sample outputs, so connected modules still have a single-sample boundary even when graph-level worker threads are enabled via `graph().set_worker_count(...)`.
 
 Modules expose named inputs and outputs plus an optional register bank. After each sample, the runtime applies the register updates returned by `process(...)` and resets inputs to their default values for the next sample. Output signals are clipped to the range `[-10.0, 10.0]`; in practice most patches are expected to stay in the bipolar `[-5.0, 5.0]` range.
 

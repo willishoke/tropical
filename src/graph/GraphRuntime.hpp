@@ -4,9 +4,12 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -163,6 +166,13 @@ struct RuntimeState
 
 #ifdef EGRESS_PROFILE
 struct ModuleTimingCounters
+{
+  uint64_t call_count = 0;
+  uint64_t total_ns = 0;
+  uint64_t max_ns = 0;
+};
+
+struct ProcessModuleTiming
 {
   uint64_t call_count = 0;
   uint64_t total_ns = 0;

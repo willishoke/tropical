@@ -5,9 +5,8 @@
 
 #include <algorithm>
 #include <atomic>
-#ifdef EGRESS_PROFILE
 #include <chrono>
-#endif
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -58,18 +57,61 @@ class Graph
       runtimes_[1] = build_runtime_locked();
     }
 
+    ~Graph()
+    {
+      std::vector<std::thread> threads_to_join;
+      {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        stop_worker_pool_locked(threads_to_join);
+      }
+      for (auto & worker : threads_to_join)
+      {
+        if (worker.joinable())
+        {
+          worker.join();
+        }
+      }
+    }
+
+    void set_worker_count(unsigned int worker_count)
+    {
+      const unsigned int normalized = std::max(1U, worker_count);
+      std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+      wait_for_runtime_available(0);
+      wait_for_runtime_available(1);
+      std::vector<std::thread> threads_to_join;
+      {
+        std::lock_guard<std::mutex> lock(worker_mutex_);
+        if (worker_count_ == normalized)
+        {
+          return;
+        }
+
+        stop_worker_pool_locked(threads_to_join);
+        worker_count_ = normalized;
+        if (worker_count_ > 1)
+        {
+          start_worker_pool_locked(worker_count_ - 1);
+        }
+      }
+      for (auto & worker : threads_to_join)
+      {
+        if (worker.joinable())
+        {
+          worker.join();
+        }
+      }
+    }
+
+    unsigned int worker_count() const
+    {
+      return worker_count_;
+    }
+
     void process()
     {
 #ifdef EGRESS_PROFILE
       const auto callback_start = std::chrono::steady_clock::now();
-      struct LocalModuleStats
-      {
-        uint64_t call_count = 0;
-        uint64_t total_ns = 0;
-        uint64_t max_ns = 0;
-      };
-      std::unordered_map<std::string, LocalModuleStats> local_module_stats;
-      local_module_stats.reserve(16);
 #endif
 
       const uint32_t runtime_index = active_runtime_index_.load(std::memory_order_acquire);
@@ -77,6 +119,9 @@ class Graph
       audio_processing_.store(true, std::memory_order_release);
 
       RuntimeState & runtime = runtimes_[runtime_index];
+#ifdef EGRESS_PROFILE
+      std::vector<ProcessModuleTiming> local_module_stats(runtime.modules.size());
+#endif
       std::vector<uint32_t> tap_write_indices;
       tap_write_indices.reserve(runtime.taps.size());
       for (const auto & tap : runtime.taps)
@@ -92,32 +137,21 @@ class Graph
 
       for (unsigned int sample = 0; sample < bufferLength_; ++sample)
       {
-        for (auto & slot : runtime.modules)
+        parallel_next_module_index_.store(0, std::memory_order_relaxed);
+        if (worker_count_ > 1 && runtime.modules.size() > 1)
         {
-          if (!slot.module)
-          {
-            continue;
-          }
-
 #ifdef EGRESS_PROFILE
-          const auto module_start = std::chrono::steady_clock::now();
+          start_parallel_module_batch(runtime, &local_module_stats);
+#else
+          start_parallel_module_batch(runtime);
 #endif
-
-          eval_input_program(runtime, slot.input_program, slot.input_registers, slot.module->inputs);
-
-          slot.module->process(&slot.output_materialize_mask);
-
+        }
+        else
+        {
 #ifdef EGRESS_PROFILE
-          const auto module_end = std::chrono::steady_clock::now();
-          const uint64_t module_ns = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(module_end - module_start).count());
-          auto & stats = local_module_stats[slot.name];
-          ++stats.call_count;
-          stats.total_ns += module_ns;
-          if (module_ns > stats.max_ns)
-          {
-            stats.max_ns = module_ns;
-          }
+          execute_parallel_module_work(runtime, &local_module_stats);
+#else
+          execute_parallel_module_work(runtime);
 #endif
         }
 
@@ -238,6 +272,8 @@ class Graph
 
           slot.module->prev_outputs.swap(slot.module->outputs);
         }
+
+        advance_module_sample_indices(runtime);
       }
 
       if (!runtime.taps.empty())
@@ -264,9 +300,15 @@ class Graph
       egress_graph_detail::update_atomic_max(profile_max_callback_ns_, callback_ns);
 
       std::lock_guard<std::mutex> lock(profile_mutex_);
-      for (const auto & [name, stats] : local_module_stats)
+      for (std::size_t module_id = 0; module_id < runtime.modules.size(); ++module_id)
       {
-        auto & dst = module_profile_stats_[name];
+        const auto & slot = runtime.modules[module_id];
+        const auto & stats = local_module_stats[module_id];
+        if (!slot.module || stats.call_count == 0)
+        {
+          continue;
+        }
+        auto & dst = module_profile_stats_[slot.name];
         dst.call_count += stats.call_count;
         dst.total_ns += stats.total_ns;
         if (stats.max_ns > dst.max_ns)
@@ -646,6 +688,7 @@ class Graph
     using RuntimeState = egress_graph_detail::RuntimeState;
 #ifdef EGRESS_PROFILE
     using ModuleTimingCounters = egress_graph_detail::ModuleTimingCounters;
+    using ProcessModuleTiming = egress_graph_detail::ProcessModuleTiming;
 #endif
 
     bool validate_expr_refs(const ExprSpecPtr & expr, bool allow_input_values) const
@@ -756,6 +799,237 @@ class Graph
       std::vector<Value> & registers,
       std::vector<Value> & inputs) const;
 
+    static uint64_t estimate_module_execution_cost(const Module & module);
+
+    void advance_module_sample_indices(RuntimeState & runtime) const
+    {
+      for (auto & slot : runtime.modules)
+      {
+        if (slot.module)
+        {
+          slot.module->advance_sample_index_tree();
+        }
+      }
+    }
+
+    bool wait_for_next_parallel_epoch(uint64_t seen_generation)
+    {
+      for (unsigned int spin_count = 0; spin_count < 32; ++spin_count)
+      {
+        if (worker_shutdown_.load(std::memory_order_acquire))
+        {
+          return false;
+        }
+        if (parallel_generation_.load(std::memory_order_acquire) != seen_generation)
+        {
+          return true;
+        }
+        std::this_thread::yield();
+      }
+
+      for (unsigned int sleep_count = 0; sleep_count < 8; ++sleep_count)
+      {
+        if (worker_shutdown_.load(std::memory_order_acquire))
+        {
+          return false;
+        }
+        if (parallel_generation_.load(std::memory_order_acquire) != seen_generation)
+        {
+          return true;
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
+      }
+
+      std::unique_lock<std::mutex> lock(worker_mutex_);
+      worker_cv_.wait(lock, [this, seen_generation] {
+        return worker_shutdown_.load(std::memory_order_acquire) ||
+               parallel_generation_.load(std::memory_order_acquire) != seen_generation;
+      });
+      return !worker_shutdown_.load(std::memory_order_acquire);
+    }
+
+#ifdef EGRESS_PROFILE
+    void execute_parallel_module_work(RuntimeState & runtime, std::vector<ProcessModuleTiming> * local_stats)
+#else
+    void execute_parallel_module_work(RuntimeState & runtime)
+#endif
+    {
+      while (true)
+      {
+        const uint32_t slot_id = parallel_next_module_index_.fetch_add(1, std::memory_order_relaxed);
+        if (slot_id >= runtime.modules.size())
+        {
+          break;
+        }
+
+        auto & slot = runtime.modules[slot_id];
+        if (!slot.module)
+        {
+          continue;
+        }
+
+#ifdef EGRESS_PROFILE
+        const auto module_start = std::chrono::steady_clock::now();
+#endif
+        eval_input_program(runtime, slot.input_program, slot.input_registers, slot.module->inputs);
+        slot.module->process(&slot.output_materialize_mask);
+#ifdef EGRESS_PROFILE
+        if (local_stats != nullptr)
+        {
+          const auto module_end = std::chrono::steady_clock::now();
+          const uint64_t module_ns = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(module_end - module_start).count());
+          auto & stats = (*local_stats)[slot_id];
+          ++stats.call_count;
+          stats.total_ns += module_ns;
+          if (module_ns > stats.max_ns)
+          {
+            stats.max_ns = module_ns;
+          }
+        }
+#endif
+      }
+    }
+
+#ifdef EGRESS_PROFILE
+    void start_parallel_module_batch(RuntimeState & runtime, std::vector<ProcessModuleTiming> * local_stats)
+#else
+    void start_parallel_module_batch(RuntimeState & runtime)
+#endif
+    {
+      std::unique_lock<std::mutex> lock(worker_mutex_);
+      if (worker_threads_.empty())
+      {
+        lock.unlock();
+#ifdef EGRESS_PROFILE
+        execute_parallel_module_work(runtime, local_stats);
+#else
+        execute_parallel_module_work(runtime);
+#endif
+        return;
+      }
+
+      uint32_t active_modules = 0;
+      for (const auto & slot : runtime.modules)
+      {
+        if (slot.module)
+        {
+          ++active_modules;
+        }
+      }
+      const uint32_t desired_helpers =
+        active_modules > 0
+          ? std::min<uint32_t>(static_cast<uint32_t>(worker_threads_.size()), active_modules - 1)
+          : 0;
+      if (desired_helpers == 0)
+      {
+        lock.unlock();
+#ifdef EGRESS_PROFILE
+        execute_parallel_module_work(runtime, local_stats);
+#else
+        execute_parallel_module_work(runtime);
+#endif
+        return;
+      }
+
+      parallel_runtime_ = &runtime;
+      parallel_pending_workers_ = desired_helpers;
+      parallel_helper_slots_ = desired_helpers;
+#ifdef EGRESS_PROFILE
+      parallel_local_stats_ = local_stats;
+#endif
+      parallel_generation_.fetch_add(1, std::memory_order_release);
+      for (uint32_t helper_id = 0; helper_id < desired_helpers; ++helper_id)
+      {
+        worker_cv_.notify_one();
+      }
+      lock.unlock();
+
+#ifdef EGRESS_PROFILE
+      execute_parallel_module_work(runtime, local_stats);
+#else
+      execute_parallel_module_work(runtime);
+#endif
+
+      lock.lock();
+      worker_done_cv_.wait(lock, [this] { return parallel_pending_workers_ == 0; });
+      parallel_runtime_ = nullptr;
+#ifdef EGRESS_PROFILE
+      parallel_local_stats_ = nullptr;
+#endif
+    }
+
+    void worker_main()
+    {
+      uint64_t seen_generation = parallel_generation_.load(std::memory_order_acquire);
+      while (true)
+      {
+        if (!wait_for_next_parallel_epoch(seen_generation))
+        {
+          return;
+        }
+        std::unique_lock<std::mutex> lock(worker_mutex_);
+        if (worker_shutdown_.load(std::memory_order_acquire))
+        {
+          return;
+        }
+
+        seen_generation = parallel_generation_.load(std::memory_order_acquire);
+        if (parallel_helper_slots_ == 0)
+        {
+          continue;
+        }
+        --parallel_helper_slots_;
+        RuntimeState * runtime = parallel_runtime_;
+#ifdef EGRESS_PROFILE
+        auto * local_stats = parallel_local_stats_;
+#endif
+        lock.unlock();
+
+        if (runtime != nullptr)
+        {
+#ifdef EGRESS_PROFILE
+          execute_parallel_module_work(*runtime, local_stats);
+#else
+          execute_parallel_module_work(*runtime);
+#endif
+        }
+
+        lock.lock();
+        if (parallel_pending_workers_ > 0)
+        {
+          --parallel_pending_workers_;
+          if (parallel_pending_workers_ == 0)
+          {
+            worker_done_cv_.notify_one();
+          }
+        }
+      }
+    }
+
+    void start_worker_pool_locked(unsigned int helper_count)
+    {
+      worker_shutdown_.store(false, std::memory_order_release);
+      worker_threads_.reserve(helper_count);
+      for (unsigned int i = 0; i < helper_count; ++i)
+      {
+        worker_threads_.emplace_back([this] { worker_main(); });
+      }
+    }
+
+    void stop_worker_pool_locked(std::vector<std::thread> & threads_to_join)
+    {
+      worker_shutdown_.store(true, std::memory_order_release);
+      worker_cv_.notify_all();
+      threads_to_join.swap(worker_threads_);
+      parallel_runtime_ = nullptr;
+      parallel_pending_workers_ = 0;
+      parallel_helper_slots_ = 0;
+#ifdef EGRESS_PROFILE
+      parallel_local_stats_ = nullptr;
+#endif
+    }
+
     unsigned int bufferLength_ = 0;
 
     std::array<RuntimeState, 2> runtimes_;
@@ -774,8 +1048,20 @@ class Graph
     std::vector<ControlTap> control_taps_;
 
     mutable std::mutex pending_mutex_;
+    std::atomic<uint32_t> parallel_next_module_index_{0};
+    mutable std::mutex worker_mutex_;
+    std::condition_variable worker_cv_;
+    std::condition_variable worker_done_cv_;
+    std::vector<std::thread> worker_threads_;
+    RuntimeState * parallel_runtime_ = nullptr;
+    std::atomic<uint64_t> parallel_generation_{0};
+    uint32_t parallel_pending_workers_ = 0;
+    uint32_t parallel_helper_slots_ = 0;
+    unsigned int worker_count_ = 1;
+    std::atomic<bool> worker_shutdown_{false};
 
   #ifdef EGRESS_PROFILE
+    std::vector<ProcessModuleTiming> * parallel_local_stats_ = nullptr;
     std::atomic<uint64_t> profile_callback_count_{0};
     std::atomic<uint64_t> profile_total_callback_ns_{0};
     std::atomic<uint64_t> profile_max_callback_ns_{0};

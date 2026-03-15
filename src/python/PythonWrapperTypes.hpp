@@ -58,6 +58,16 @@ class PythonGraph
       graph_.process();
     }
 
+    void set_worker_count(unsigned int worker_count)
+    {
+      graph_.set_worker_count(worker_count);
+    }
+
+    unsigned int worker_count() const
+    {
+      return graph_.worker_count();
+    }
+
     std::vector<double> output_buffer() const
     {
       return graph_.outputBuffer;

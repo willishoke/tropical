@@ -137,7 +137,22 @@ IndexedArraySink = eg.define_module(
 )
 
 
+SampleIndexProbe = eg.define_module(
+    name="SampleIndexProbe",
+    inputs=[],
+    outputs=["idx"],
+    regs={},
+    process=lambda inp, reg: (
+        {"idx": eg.sample_index() / 1024.0},
+        {},
+    ),
+)
+
+
 def main():
+    graph = eg.graph()
+    assert graph.worker_count() == 1
+
     compose_stats = ModuleComposeProbe.composition_stats
     assert compose_stats["node_count"] >= 4
     assert compose_stats["same_tick_edge_count"] >= 3
@@ -162,12 +177,12 @@ def main():
     probe.hi = 1.0
     probe.z = math.e ** 2.0
 
-    eg.add_output(probe.abs_out)
-    eg.add_output(probe.clamp_out)
-    eg.add_output(probe.log_out)
+    graph.add_output(probe.abs_out.module_name, probe.abs_out.output_id)
+    graph.add_output(probe.clamp_out.module_name, probe.clamp_out.output_id)
+    graph.add_output(probe.log_out.module_name, probe.log_out.output_id)
 
-    eg.graph().process()
-    buf = eg.graph().output_buffer()
+    graph.process()
+    buf = graph.output_buffer()
     expected = (3.5 + -1.0 + 2.0) / 20.0
 
     assert len(buf) == 1024
@@ -185,16 +200,16 @@ def main():
     stateful.x = 1.0
     stateful.a = 0.5
 
-    eg.add_output(stateful.single)
-    eg.add_output(stateful.cascade)
-    eg.graph().process()
+    graph.add_output(stateful.single.module_name, stateful.single.output_id)
+    graph.add_output(stateful.cascade.module_name, stateful.cascade.output_id)
+    graph.process()
 
-    stateful_buf = eg.graph().output_buffer()
+    stateful_buf = graph.output_buffer()
     expected_stateful = expected + (-0.25 / 20.0)
     assert math.isclose(stateful_buf[0], expected_stateful, rel_tol=1e-9, abs_tol=1e-9)
 
-    eg.graph().process()
-    stateful_buf = eg.graph().output_buffer()
+    graph.process()
+    stateful_buf = graph.output_buffer()
     expected_mix = expected + (2.0 / 20.0)
     assert math.isclose(stateful_buf[0], expected_mix, rel_tol=1e-9, abs_tol=1e-9)
 
@@ -202,10 +217,10 @@ def main():
     array_probe.x = 0.5
     array_probe.weights = [2.0, 4.0, 6.0]
 
-    eg.add_output(array_probe.mixed)
-    eg.graph().process()
+    graph.add_output(array_probe.mixed.module_name, array_probe.mixed.output_id)
+    graph.process()
 
-    array_buf = eg.graph().output_buffer()
+    array_buf = graph.output_buffer()
     expected_array_mix = expected_mix + (6.0 / 20.0)
     assert math.isclose(array_buf[0], expected_array_mix, rel_tol=1e-9, abs_tol=1e-9)
 
@@ -216,27 +231,27 @@ def main():
     array_probe.x = 1.0
     array_probe.weights = [1.0, 1.0, 1.0, 10.0]
 
-    eg.graph().process()
-    array_buf = eg.graph().output_buffer()
+    graph.process()
+    array_buf = graph.output_buffer()
     expected_array_mix = expected_mix + (3.0 / 20.0)
     assert math.isclose(array_buf[0], expected_array_mix, rel_tol=1e-9, abs_tol=1e-9)
 
     array_stats = array_probe.compile_stats
     assert array_stats["jit_status"] == "numeric JIT active"
 
-    eg.graph().destroy_module(probe.name)
-    eg.graph().destroy_module(stateful.name)
-    eg.graph().destroy_module(array_probe.name)
+    graph.destroy_module(probe.name)
+    graph.destroy_module(stateful.name)
+    graph.destroy_module(array_probe.name)
 
     module_compose = ModuleComposeProbe()
     module_compose.x = 1.0
     module_compose.a = 0.5
 
-    eg.add_output(module_compose.single)
-    eg.add_output(module_compose.cascade)
-    eg.graph().process()
+    graph.add_output(module_compose.single.module_name, module_compose.single.output_id)
+    graph.add_output(module_compose.cascade.module_name, module_compose.cascade.output_id)
+    graph.process()
 
-    module_buf = eg.graph().output_buffer()
+    module_buf = graph.output_buffer()
     assert math.isclose(module_buf[0], -0.25 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
 
     module_stats = module_compose.compile_stats
@@ -245,21 +260,21 @@ def main():
     assert module_stats["numeric_jit_instruction_count"] > 0
     assert "composite_update_count" not in module_stats
 
-    eg.graph().process()
-    module_buf = eg.graph().output_buffer()
+    graph.process()
+    module_buf = graph.output_buffer()
     assert math.isclose(module_buf[0], 2.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
 
-    eg.graph().destroy_module(module_compose.name)
+    graph.destroy_module(module_compose.name)
 
     delay_probe = DelayComposeProbe()
     delay_probe.x = 2.0
 
-    eg.add_output(delay_probe.current)
-    eg.add_output(delay_probe.delayed)
-    eg.add_output(delay_probe.cascade)
-    eg.graph().process()
+    graph.add_output(delay_probe.current.module_name, delay_probe.current.output_id)
+    graph.add_output(delay_probe.delayed.module_name, delay_probe.delayed.output_id)
+    graph.add_output(delay_probe.cascade.module_name, delay_probe.cascade.output_id)
+    graph.process()
 
-    delay_buf = eg.graph().output_buffer()
+    delay_buf = graph.output_buffer()
     assert math.isclose(delay_buf[0], 4.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
 
     delay_compile_stats = delay_probe.compile_stats
@@ -267,11 +282,11 @@ def main():
     assert delay_compile_stats["numeric_jit_instruction_count"] > 0
     assert "composite_update_count" not in delay_compile_stats
 
-    eg.graph().process()
-    delay_buf = eg.graph().output_buffer()
+    graph.process()
+    delay_buf = graph.output_buffer()
     assert math.isclose(delay_buf[0], 16.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
 
-    eg.graph().destroy_module(delay_probe.name)
+    graph.destroy_module(delay_probe.name)
 
     source = IndexedArraySource()
     source.x = 1.5
@@ -284,31 +299,72 @@ def main():
     sink.weights = [0.0, 4.0, 5.0]
     sink.weights[0] = source.pair[1]
 
-    eg.add_output(sink.lane0)
-    eg.add_output(sink.lane1)
-    eg.add_output(sink.lane2)
-    eg.graph().process()
+    graph.add_output(sink.lane0.module_name, sink.lane0.output_id)
+    graph.add_output(sink.lane1.module_name, sink.lane1.output_id)
+    graph.add_output(sink.lane2.module_name, sink.lane2.output_id)
+    graph.process()
 
-    indexed_buf = eg.graph().output_buffer()
+    indexed_buf = graph.output_buffer()
     assert math.isclose(indexed_buf[0], 9.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
 
-    eg.graph().process()
-    indexed_buf = eg.graph().output_buffer()
+    graph.process()
+    indexed_buf = graph.output_buffer()
     assert math.isclose(indexed_buf[0], 12.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
 
-    eg.graph().destroy_module(source.name)
-    eg.graph().destroy_module(sink.name)
+    graph.destroy_module(source.name)
+    graph.destroy_module(sink.name)
 
     direct_source = IndexedArraySource()
     direct_source.x = 2.0
     eg.add_output(direct_source.pair[2])
-    eg.graph().process()
-    direct_buf = eg.graph().output_buffer()
+    graph.process()
+    direct_buf = graph.output_buffer()
     assert math.isclose(direct_buf[0], 6.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
 
-    eg.graph().process()
-    direct_buf = eg.graph().output_buffer()
+    graph.process()
+    direct_buf = graph.output_buffer()
     assert math.isclose(direct_buf[0], 6.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
+
+    graph.destroy_module(direct_source.name)
+
+    graph.set_worker_count(2)
+    assert graph.worker_count() == 2
+
+    index_a = SampleIndexProbe()
+    index_b = SampleIndexProbe()
+    tap_a = graph.add_output_tap(index_a.idx.module_name, index_a.idx.output_id)
+    tap_b = graph.add_output_tap(index_b.idx.module_name, index_b.idx.output_id)
+    graph.process()
+    index_a_buf = graph.output_tap_buffer(tap_a)
+    index_b_buf = graph.output_tap_buffer(tap_b)
+    assert all(math.isclose(index_a_buf[i], float(i) / 1024.0, rel_tol=1e-9, abs_tol=1e-9) for i in range(8))
+    assert index_a_buf[:8] == index_b_buf[:8]
+
+    graph.process()
+    index_a_buf = graph.output_tap_buffer(tap_a)
+    assert all(math.isclose(index_a_buf[i], 1.0 + (float(i) / 1024.0), rel_tol=1e-9, abs_tol=1e-9) for i in range(8))
+    graph.remove_output_tap(tap_a)
+    graph.remove_output_tap(tap_b)
+    graph.destroy_module(index_a.name)
+    graph.destroy_module(index_b.name)
+
+    parallel_source = IndexedArraySource()
+    parallel_source.x = 2.0
+    parallel_sink = IndexedArraySink()
+    parallel_sink.weights = [0.0, 0.0, 0.0]
+    parallel_sink.weights[0] = parallel_source.pair[2]
+    sink_tap = graph.add_output_tap(parallel_sink.lane0.module_name, parallel_sink.lane0.output_id)
+    graph.process()
+    sink_buf = graph.output_tap_buffer(sink_tap)
+    assert math.isclose(sink_buf[0], 0.0, rel_tol=1e-9, abs_tol=1e-9)
+    graph.process()
+    sink_buf = graph.output_tap_buffer(sink_tap)
+    assert math.isclose(sink_buf[0], 6.0, rel_tol=1e-9, abs_tol=1e-9)
+    graph.remove_output_tap(sink_tap)
+    graph.destroy_module(parallel_source.name)
+    graph.destroy_module(parallel_sink.name)
+    graph.set_worker_count(1)
+    assert graph.worker_count() == 1
 
 
 if __name__ == "__main__":
