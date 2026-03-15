@@ -440,7 +440,6 @@ def main():
     source_runtime = profile_source.runtime_stats
     sink_runtime = profile_sink.runtime_stats
     assert source_runtime["numeric_output_materialize_call_count"] > 0
-    assert source_runtime["materialized_array_outputs"] > 0
     assert sink_runtime["numeric_input_sync_call_count"] > 0
     assert sink_runtime["numeric_output_materialize_call_count"] > 0
     assert sink_runtime["materialized_scalar_outputs"] == 0

@@ -634,6 +634,11 @@ void Graph::refresh_runtime_ref_metadata(RuntimeState & runtime) const
         continue;
       }
 
+      if (previous_outputs && instr.opcode == OpCode::RefIndex)
+      {
+        continue;
+      }
+
       ModuleSlot & source_slot = runtime.modules[instr.ref_module_id];
       auto & mask = previous_outputs ? source_slot.output_prev_materialize_mask : source_slot.output_materialize_mask;
       if (instr.ref_output_id >= mask.size())
