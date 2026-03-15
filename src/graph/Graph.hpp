@@ -218,6 +218,16 @@ class Graph
             {
               continue;
             }
+#ifdef EGRESS_LLVM_ORC_JIT
+            double numeric_scalar = 0.0;
+            if (tap.output_id < slot.output_materialize_mask.size() &&
+                !slot.output_materialize_mask[tap.output_id] &&
+                slot.module->try_get_numeric_scalar_output(tap.output_id, false, numeric_scalar))
+            {
+              tap.buffer.buffers[tap_write_indices[tap_id]][sample] = numeric_scalar;
+              continue;
+            }
+#endif
             const Value & output = slot.module->outputs[tap.output_id];
             if (expr::is_array(output) || expr::is_matrix(output))
             {
@@ -244,6 +254,16 @@ class Graph
             continue;
           }
 
+#ifdef EGRESS_LLVM_ORC_JIT
+          double numeric_scalar = 0.0;
+          if (tap.output_id < slot.output_materialize_mask.size() &&
+              !slot.output_materialize_mask[tap.output_id] &&
+              slot.module->try_get_numeric_scalar_output(tap.output_id, false, numeric_scalar))
+          {
+            mixed += numeric_scalar / 20.0;
+            continue;
+          }
+#endif
           mixed += expr::to_float64(slot.module->outputs[tap.output_id]) / 20.0;
         }
         if (!run_fused_mix_kernel(runtime, mixed))
@@ -341,6 +361,10 @@ class Graph
           }
 
           slot.module->prev_outputs.swap(slot.module->outputs);
+  #ifdef EGRESS_LLVM_ORC_JIT
+          slot.module->numeric_prev_output_scalar_mask_.swap(slot.module->numeric_output_scalar_mask_);
+          slot.module->numeric_prev_output_scalars_.swap(slot.module->numeric_output_scalars_);
+  #endif
         }
 
         sync_fused_prev_outputs(runtime);

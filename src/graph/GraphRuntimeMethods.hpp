@@ -87,7 +87,8 @@ Graph::RuntimeState Graph::build_runtime_locked() const
     const unsigned int input_count = static_cast<unsigned int>(slot.input_program.result_registers.size());
     slot.input_program = compile_input_program(module.input_exprs, input_count, runtime);
     slot.input_registers.assign(slot.input_program.register_count, float_value(0.0));
-    slot.output_materialize_mask.assign(module.out_count, true);
+    slot.output_materialize_mask.assign(module.out_count, false);
+    slot.output_prev_materialize_mask.assign(module.out_count, false);
     slot.indexed_output_indices.assign(module.out_count, {});
     slot.indexed_prev_output_values.assign(module.out_count, {});
   }
@@ -152,7 +153,6 @@ Graph::RuntimeState Graph::build_runtime_locked() const
       continue;
     }
 
-    runtime.modules[module_id].output_materialize_mask[tap_spec.output.second] = true;
     tap.module_id = module_id;
     tap.output_id = tap_spec.output.second;
     tap.valid = true;
@@ -197,6 +197,11 @@ void Graph::sync_fused_current_outputs(RuntimeState & runtime) const
       {
         continue;
       }
+      if (offset < slot.output_materialize_mask.size() &&
+          !slot.output_materialize_mask[offset])
+      {
+        continue;
+      }
       fused->current_outputs[source_slot] = slot.module->outputs[offset];
 #ifdef EGRESS_PROFILE
       ++output_copy_count;
@@ -238,6 +243,11 @@ void Graph::sync_fused_prev_outputs(RuntimeState & runtime) const
       const uint32_t source_slot = span.first_output_slot + offset;
       if (source_slot >= fused->prev_outputs.size() ||
           offset >= slot.module->prev_outputs.size())
+      {
+        continue;
+      }
+      if (offset < slot.output_prev_materialize_mask.size() &&
+          !slot.output_prev_materialize_mask[offset])
       {
         continue;
       }
@@ -571,7 +581,8 @@ void Graph::refresh_runtime_ref_metadata(RuntimeState & runtime) const
     {
       continue;
     }
-    slot.output_materialize_mask.assign(slot.module->outputs.size(), true);
+    slot.output_materialize_mask.assign(slot.module->outputs.size(), false);
+    slot.output_prev_materialize_mask.assign(slot.module->outputs.size(), false);
     slot.indexed_output_indices.assign(slot.module->outputs.size(), {});
     slot.indexed_prev_output_values.assign(slot.module->outputs.size(), {});
   }
@@ -613,13 +624,48 @@ void Graph::refresh_runtime_ref_metadata(RuntimeState & runtime) const
     }
   };
 
+  auto mark_output_materialization = [&](const auto & program, bool previous_outputs)
+  {
+    for (const auto & instr : program.instructions)
+    {
+      if ((instr.opcode != OpCode::Ref && instr.opcode != OpCode::RefIndex) ||
+          instr.ref_module_id >= runtime.modules.size())
+      {
+        continue;
+      }
+
+      ModuleSlot & source_slot = runtime.modules[instr.ref_module_id];
+      auto & mask = previous_outputs ? source_slot.output_prev_materialize_mask : source_slot.output_materialize_mask;
+      if (instr.ref_output_id >= mask.size())
+      {
+        continue;
+      }
+      mask[instr.ref_output_id] = true;
+    }
+  };
+
   for (auto & consumer_slot : runtime.modules)
   {
     refresh_program(consumer_slot.input_program);
+    mark_output_materialization(consumer_slot.input_program, true);
   }
   for (auto & mix_expr : runtime.mix_exprs)
   {
     refresh_program(mix_expr.program);
+    mark_output_materialization(mix_expr.program, false);
+  }
+
+  for (auto & slot : runtime.modules)
+  {
+    if (slot.output_materialize_mask.size() != slot.output_prev_materialize_mask.size())
+    {
+      continue;
+    }
+    for (std::size_t output_id = 0; output_id < slot.output_materialize_mask.size(); ++output_id)
+    {
+      slot.output_materialize_mask[output_id] =
+        slot.output_materialize_mask[output_id] || slot.output_prev_materialize_mask[output_id];
+    }
   }
 }
 

@@ -443,7 +443,7 @@ def main():
     assert source_runtime["materialized_array_outputs"] > 0
     assert sink_runtime["numeric_input_sync_call_count"] > 0
     assert sink_runtime["numeric_output_materialize_call_count"] > 0
-    assert sink_runtime["materialized_scalar_outputs"] > 0
+    assert sink_runtime["materialized_scalar_outputs"] == 0
     graph.remove_output_tap(profile_tap)
     graph.destroy_module(profile_source.name)
     graph.destroy_module(profile_sink.name)

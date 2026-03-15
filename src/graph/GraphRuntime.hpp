@@ -101,6 +101,7 @@ struct ModuleSlot
   CompiledInputProgram input_program;
   std::vector<Value> input_registers;
   std::vector<bool> output_materialize_mask;
+  std::vector<bool> output_prev_materialize_mask;
   std::vector<std::vector<int64_t>> indexed_output_indices;
   std::vector<std::vector<Value>> indexed_prev_output_values;
 };

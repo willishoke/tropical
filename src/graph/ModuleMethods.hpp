@@ -5,6 +5,17 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   resize_array_registers_to_inputs();
   const bool use_composite_programs = has_nested_modules_ || has_delay_states_;
 #ifdef EGRESS_LLVM_ORC_JIT
+  if (numeric_output_scalar_mask_.size() != outputs.size())
+  {
+    numeric_output_scalar_mask_.assign(outputs.size(), false);
+    numeric_output_scalars_.assign(outputs.size(), 0.0);
+  }
+  else
+  {
+    std::fill(numeric_output_scalar_mask_.begin(), numeric_output_scalar_mask_.end(), false);
+  }
+#endif
+#ifdef EGRESS_LLVM_ORC_JIT
   if (!has_dynamic_registers_)
   {
     ensure_numeric_jit_current();
@@ -27,6 +38,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         numeric_temps_.data(),
         sample_rate_,
         sample_index_);
+      capture_numeric_scalar_outputs(program_, numeric_output_info_, numeric_temps_);
 
 #ifdef EGRESS_PROFILE
       const auto materialize_start = std::chrono::steady_clock::now();
@@ -38,14 +50,9 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       {
         if (output_materialize_mask != nullptr &&
             output_id < output_materialize_mask->size() &&
-            !(*output_materialize_mask)[output_id] &&
-            output_id < numeric_output_info_.size())
+            !(*output_materialize_mask)[output_id])
         {
-          const NumericValueKind output_kind = static_cast<NumericValueKind>(numeric_output_info_[output_id].kind);
-          if (output_kind == NumericValueKind::Array || output_kind == NumericValueKind::Matrix)
-          {
-            continue;
-          }
+          continue;
         }
 #ifdef EGRESS_PROFILE
         switch (static_cast<NumericValueKind>(numeric_output_info_[output_id].kind))
@@ -179,6 +186,10 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         if (composite_output_jit_.kernel != nullptr &&
             run_numeric_jit_state(composite_output_jit_, inputs))
         {
+          capture_numeric_scalar_outputs(
+            composite_output_program_,
+            composite_output_jit_.output_info,
+            composite_output_jit_.temps);
           materialize_numeric_outputs(composite_output_jit_, composite_output_program_, outputs, output_materialize_mask);
           used_jit_outputs = true;
         }

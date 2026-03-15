@@ -334,6 +334,10 @@ class Module
 
     std::vector<double> numeric_registers_;
     std::vector<double> numeric_next_registers_;
+    std::vector<bool> numeric_output_scalar_mask_;
+    std::vector<double> numeric_output_scalars_;
+    std::vector<bool> numeric_prev_output_scalar_mask_;
+    std::vector<double> numeric_prev_output_scalars_;
     CompositeBodyJitState composite_body_jit_;
     NumericJitState composite_output_jit_;
     NumericJitState composite_register_jit_;
@@ -392,6 +396,15 @@ class Module
     bool try_get_numeric_output_ref(unsigned int output_id, NumericValueRef & out) const;
 
     const std::vector<double> * try_get_numeric_output_array_values(unsigned int output_id) const;
+
+    bool try_get_numeric_scalar_output(unsigned int output_id, bool previous, double & out) const;
+
+    void capture_numeric_scalar_outputs(
+      const CompiledProgram & compiled_program,
+      const std::vector<NumericOutputInfo> & output_info,
+      const std::vector<double> & temps,
+      std::size_t start_output_id = 0,
+      std::size_t output_count = std::numeric_limits<std::size_t>::max());
 
     static bool value_to_scalar_double(const Value & value, double & out);
 

@@ -166,6 +166,59 @@ const std::vector<double> * Module::try_get_numeric_output_array_values(unsigned
   return &numeric_array_storage_[ref.array_slot];
 }
 
+bool Module::try_get_numeric_scalar_output(unsigned int output_id, bool previous, double & out) const
+{
+  const auto & scalar_mask = previous ? numeric_prev_output_scalar_mask_ : numeric_output_scalar_mask_;
+  const auto & scalar_values = previous ? numeric_prev_output_scalars_ : numeric_output_scalars_;
+  if (output_id >= scalar_mask.size() ||
+      output_id >= scalar_values.size() ||
+      !scalar_mask[output_id])
+  {
+    return false;
+  }
+  out = scalar_values[output_id];
+  return true;
+}
+
+void Module::capture_numeric_scalar_outputs(
+  const CompiledProgram & compiled_program,
+  const std::vector<NumericOutputInfo> & output_info,
+  const std::vector<double> & temps,
+  std::size_t start_output_id,
+  std::size_t output_count)
+{
+  const std::size_t available = std::min(compiled_program.output_targets.size(), output_info.size());
+  if (start_output_id >= available)
+  {
+    return;
+  }
+  const std::size_t end_output_id =
+    output_count == std::numeric_limits<std::size_t>::max()
+      ? available
+      : std::min(available, start_output_id + output_count);
+  if (numeric_output_scalar_mask_.size() < available)
+  {
+    numeric_output_scalar_mask_.assign(available, false);
+    numeric_output_scalars_.assign(available, 0.0);
+  }
+  for (std::size_t output_id = start_output_id; output_id < end_output_id; ++output_id)
+  {
+    if (static_cast<NumericValueKind>(output_info[output_id].kind) != NumericValueKind::Scalar)
+    {
+      numeric_output_scalar_mask_[output_id] = false;
+      continue;
+    }
+    const uint32_t scalar_register = compiled_program.output_targets[output_id];
+    if (scalar_register >= temps.size())
+    {
+      numeric_output_scalar_mask_[output_id] = false;
+      continue;
+    }
+    numeric_output_scalar_mask_[output_id] = true;
+    numeric_output_scalars_[output_id] = Module::clamp_output_scalar(temps[scalar_register]);
+  }
+}
+
 bool Module::value_to_scalar_double(const Value & value, double & out)
 {
   if (value.type == ValueType::Array || value.type == ValueType::Matrix)
@@ -1636,6 +1689,12 @@ bool Module::run_composite_body_jit(const std::vector<bool> * output_materialize
     return false;
   }
 
+  capture_numeric_scalar_outputs(
+    composite_body_jit_.program,
+    composite_body_jit_.state.output_info,
+    composite_body_jit_.state.temps,
+    0,
+    composite_body_jit_.output_count);
   materialize_numeric_outputs_range(
     composite_body_jit_.state,
     composite_body_jit_.program,
