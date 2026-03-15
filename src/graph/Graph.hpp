@@ -31,6 +31,12 @@ class Graph
       uint64_t nested_module_count = 0;
       std::string jit_status;
     };
+
+    struct ModuleRuntimeStats
+    {
+      bool found = false;
+      Module::RuntimeStats stats;
+    };
 #endif
 
     struct ModuleProfileStats
@@ -43,11 +49,25 @@ class Graph
 
     struct ProfileStats
     {
+    #ifdef EGRESS_PROFILE
+      struct FusedSyncStats
+      {
+        uint64_t call_count = 0;
+        double total_ms = 0.0;
+        double max_ms = 0.0;
+        uint64_t output_copy_count = 0;
+      };
+    #endif
+
       bool enabled = false;
       uint64_t callback_count = 0;
       double avg_callback_ms = 0.0;
       double max_callback_ms = 0.0;
       std::vector<ModuleProfileStats> modules;
+    #ifdef EGRESS_PROFILE
+      FusedSyncStats fused_current_output_sync;
+      FusedSyncStats fused_prev_output_sync;
+    #endif
     };
 
     explicit Graph(unsigned int bufferLength)
@@ -264,22 +284,18 @@ class Graph
             }
 
 #ifdef EGRESS_LLVM_ORC_JIT
-            const bool can_read_numeric_output =
-              slot.module->jit_kernel_ != nullptr &&
-              output_id < slot.module->numeric_output_info_.size() &&
-              static_cast<Module::NumericValueKind>(slot.module->numeric_output_info_[output_id].kind) == Module::NumericValueKind::Array &&
-              slot.module->numeric_output_info_[output_id].array_slot < slot.module->numeric_array_storage_.size();
-            if (can_read_numeric_output)
+            const auto * numeric_values = slot.module->try_get_numeric_output_array_values(output_id);
+            if (numeric_values != nullptr)
             {
-              const auto & values = slot.module->numeric_array_storage_[slot.module->numeric_output_info_[output_id].array_slot];
               for (std::size_t index_id = 0; index_id < indices.size(); ++index_id)
               {
                 const int64_t raw_index = indices[index_id];
-                if (raw_index < 0 || static_cast<std::size_t>(raw_index) >= values.size())
+                if (raw_index < 0 || static_cast<std::size_t>(raw_index) >= numeric_values->size())
                 {
                   continue;
                 }
-                cached_values[index_id] = expr::float_value(Module::clamp_output_scalar(values[static_cast<std::size_t>(raw_index)]));
+                cached_values[index_id] =
+                  expr::float_value(Module::clamp_output_scalar((*numeric_values)[static_cast<std::size_t>(raw_index)]));
               }
               if (runtime.fused_graph != nullptr &&
                   module_id < runtime.fused_graph->module_output_spans.size())
@@ -411,6 +427,22 @@ class Graph
       stats.callback_count = callback_count;
       stats.avg_callback_ms = callback_count == 0 ? 0.0 : (static_cast<double>(total_ns) / static_cast<double>(callback_count)) / 1e6;
       stats.max_callback_ms = static_cast<double>(max_ns) / 1e6;
+      stats.fused_current_output_sync.call_count =
+        profile_fused_current_sync_call_count_.load(std::memory_order_relaxed);
+      stats.fused_current_output_sync.total_ms =
+        static_cast<double>(profile_fused_current_sync_total_ns_.load(std::memory_order_relaxed)) / 1e6;
+      stats.fused_current_output_sync.max_ms =
+        static_cast<double>(profile_fused_current_sync_max_ns_.load(std::memory_order_relaxed)) / 1e6;
+      stats.fused_current_output_sync.output_copy_count =
+        profile_fused_current_sync_output_copy_count_.load(std::memory_order_relaxed);
+      stats.fused_prev_output_sync.call_count =
+        profile_fused_prev_sync_call_count_.load(std::memory_order_relaxed);
+      stats.fused_prev_output_sync.total_ms =
+        static_cast<double>(profile_fused_prev_sync_total_ns_.load(std::memory_order_relaxed)) / 1e6;
+      stats.fused_prev_output_sync.max_ms =
+        static_cast<double>(profile_fused_prev_sync_max_ns_.load(std::memory_order_relaxed)) / 1e6;
+      stats.fused_prev_output_sync.output_copy_count =
+        profile_fused_prev_sync_output_copy_count_.load(std::memory_order_relaxed);
 
       std::lock_guard<std::mutex> lock(profile_mutex_);
       stats.modules.reserve(module_profile_stats_.size());
@@ -435,9 +467,29 @@ class Graph
       profile_callback_count_.store(0, std::memory_order_relaxed);
       profile_total_callback_ns_.store(0, std::memory_order_relaxed);
       profile_max_callback_ns_.store(0, std::memory_order_relaxed);
+      profile_fused_current_sync_call_count_.store(0, std::memory_order_relaxed);
+      profile_fused_current_sync_total_ns_.store(0, std::memory_order_relaxed);
+      profile_fused_current_sync_max_ns_.store(0, std::memory_order_relaxed);
+      profile_fused_current_sync_output_copy_count_.store(0, std::memory_order_relaxed);
+      profile_fused_prev_sync_call_count_.store(0, std::memory_order_relaxed);
+      profile_fused_prev_sync_total_ns_.store(0, std::memory_order_relaxed);
+      profile_fused_prev_sync_max_ns_.store(0, std::memory_order_relaxed);
+      profile_fused_prev_sync_output_copy_count_.store(0, std::memory_order_relaxed);
 
-      std::lock_guard<std::mutex> lock(profile_mutex_);
-      module_profile_stats_.clear();
+      {
+        std::lock_guard<std::mutex> lock(profile_mutex_);
+        module_profile_stats_.clear();
+      }
+
+      std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+      for (auto & [name, module] : control_modules_)
+      {
+        (void)name;
+        if (module.module)
+        {
+          module.module->reset_runtime_stats();
+        }
+      }
 #endif
     }
 
@@ -459,6 +511,21 @@ class Graph
       result.numeric_jit_instruction_count = stats.numeric_jit_instruction_count;
       result.nested_module_count = stats.nested_module_count;
       result.jit_status = stats.jit_status;
+      return result;
+    }
+
+    ModuleRuntimeStats module_runtime_stats(const std::string & module_name) const
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      ModuleRuntimeStats result;
+      auto it = control_modules_.find(module_name);
+      if (it == control_modules_.end() || !it->second.module)
+      {
+        return result;
+      }
+
+      result.found = true;
+      result.stats = it->second.module->runtime_stats();
       return result;
     }
 #endif
@@ -1316,10 +1383,47 @@ class Graph
     uint64_t worker_thread_policy_generation_ = 0;
 
   #ifdef EGRESS_PROFILE
+    static void update_profile_max(std::atomic<uint64_t> & dst, uint64_t candidate)
+    {
+      uint64_t current = dst.load(std::memory_order_relaxed);
+      while (current < candidate &&
+             !dst.compare_exchange_weak(current, candidate, std::memory_order_relaxed))
+      {
+      }
+    }
+
+    void record_fused_sync_profile(
+      bool previous_outputs,
+      uint64_t elapsed_ns,
+      uint64_t output_copy_count) const
+    {
+      if (previous_outputs)
+      {
+        profile_fused_prev_sync_call_count_.fetch_add(1, std::memory_order_relaxed);
+        profile_fused_prev_sync_total_ns_.fetch_add(elapsed_ns, std::memory_order_relaxed);
+        update_profile_max(profile_fused_prev_sync_max_ns_, elapsed_ns);
+        profile_fused_prev_sync_output_copy_count_.fetch_add(output_copy_count, std::memory_order_relaxed);
+        return;
+      }
+
+      profile_fused_current_sync_call_count_.fetch_add(1, std::memory_order_relaxed);
+      profile_fused_current_sync_total_ns_.fetch_add(elapsed_ns, std::memory_order_relaxed);
+      update_profile_max(profile_fused_current_sync_max_ns_, elapsed_ns);
+      profile_fused_current_sync_output_copy_count_.fetch_add(output_copy_count, std::memory_order_relaxed);
+    }
+
     std::vector<ProcessModuleTiming> * parallel_local_stats_ = nullptr;
     std::atomic<uint64_t> profile_callback_count_{0};
     std::atomic<uint64_t> profile_total_callback_ns_{0};
     std::atomic<uint64_t> profile_max_callback_ns_{0};
+    mutable std::atomic<uint64_t> profile_fused_current_sync_call_count_{0};
+    mutable std::atomic<uint64_t> profile_fused_current_sync_total_ns_{0};
+    mutable std::atomic<uint64_t> profile_fused_current_sync_max_ns_{0};
+    mutable std::atomic<uint64_t> profile_fused_current_sync_output_copy_count_{0};
+    mutable std::atomic<uint64_t> profile_fused_prev_sync_call_count_{0};
+    mutable std::atomic<uint64_t> profile_fused_prev_sync_total_ns_{0};
+    mutable std::atomic<uint64_t> profile_fused_prev_sync_max_ns_{0};
+    mutable std::atomic<uint64_t> profile_fused_prev_sync_output_copy_count_{0};
     mutable std::mutex profile_mutex_;
     std::unordered_map<std::string, ModuleTimingCounters> module_profile_stats_;
   #endif

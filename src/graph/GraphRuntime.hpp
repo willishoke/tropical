@@ -1,6 +1,7 @@
 #pragma once
 
 #include "graph/GraphTypes.hpp"
+#include "graph/ModuleNumericJit.hpp"
 #include "jit/OrcJitEngine.hpp"
 
 #include <array>
@@ -170,19 +171,8 @@ struct FusedGraphSourceOutput
   bool materialized = true;
 };
 
-enum class FusedGraphValueKind : uint8_t
-{
-  Scalar,
-  Array
-};
-
-struct FusedGraphValueRef
-{
-  FusedGraphValueKind kind = FusedGraphValueKind::Scalar;
-  uint32_t scalar_register = 0;
-  uint32_t array_slot = 0;
-  uint32_t array_size = 0;
-};
+using FusedGraphValueKind = egress_module_detail::NumericValueKind;
+using FusedGraphValueRef = egress_module_detail::NumericValueRef;
 
 struct FusedGraphInputBinding
 {

@@ -423,6 +423,31 @@ def main():
     assert math.isclose(mix_buf[0], 7.0 / 20.0, rel_tol=1e-9, abs_tol=1e-9)
     graph.destroy_module(mix_source.name)
 
+    graph.reset_profile_stats()
+    graph.set_fusion_enabled(True)
+    profile_source = IndexedArraySource()
+    profile_source.x = 2.0
+    profile_sink = IndexedArraySink()
+    profile_sink.weights = [0.0, 0.0, 0.0]
+    profile_sink.weights[0] = profile_source.pair[1]
+    profile_tap = graph.add_output_tap(profile_sink.lane0.module_name, profile_sink.lane0.output_id)
+    graph.prime_numeric_jit()
+    graph.process()
+    graph.process()
+    boxing = graph.profile_stats()["boxing"]
+    assert boxing["fused_current_output_sync"]["call_count"] > 0
+    assert boxing["fused_prev_output_sync"]["call_count"] > 0
+    source_runtime = profile_source.runtime_stats
+    sink_runtime = profile_sink.runtime_stats
+    assert source_runtime["numeric_output_materialize_call_count"] > 0
+    assert source_runtime["materialized_array_outputs"] > 0
+    assert sink_runtime["numeric_input_sync_call_count"] > 0
+    assert sink_runtime["numeric_output_materialize_call_count"] > 0
+    assert sink_runtime["materialized_scalar_outputs"] > 0
+    graph.remove_output_tap(profile_tap)
+    graph.destroy_module(profile_source.name)
+    graph.destroy_module(profile_sink.name)
+
 
 if __name__ == "__main__":
     main()

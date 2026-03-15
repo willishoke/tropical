@@ -308,6 +308,7 @@ class PyModuleInstance
       names.insert("name");
 #ifdef EGRESS_PROFILE
       names.insert("compile_stats");
+      names.insert("runtime_stats");
 #endif
 
       for (const auto & input_name : definition_->input_names)
@@ -345,6 +346,34 @@ class PyModuleInstance
       result["numeric_jit_instruction_count"] = stats.numeric_jit_instruction_count;
       result["nested_module_count"] = stats.nested_module_count;
       result["jit_status"] = stats.jit_status;
+      return result;
+    }
+
+    py::dict runtime_stats() const
+    {
+      const auto runtime = graph_->graph().module_runtime_stats(name_);
+      if (!runtime.found)
+      {
+        throw py::key_error("Unknown module '" + name_ + "'.");
+      }
+
+      py::dict result;
+      result["numeric_input_sync_call_count"] = runtime.stats.numeric_input_sync_call_count;
+      result["numeric_input_sync_total_ms"] = static_cast<double>(runtime.stats.numeric_input_sync_total_ns) / 1e6;
+      result["numeric_input_sync_max_ms"] = static_cast<double>(runtime.stats.numeric_input_sync_max_ns) / 1e6;
+      result["numeric_output_materialize_call_count"] = runtime.stats.numeric_output_materialize_call_count;
+      result["numeric_output_materialize_total_ms"] =
+        static_cast<double>(runtime.stats.numeric_output_materialize_total_ns) / 1e6;
+      result["numeric_output_materialize_max_ms"] =
+        static_cast<double>(runtime.stats.numeric_output_materialize_max_ns) / 1e6;
+      result["materialized_scalar_outputs"] = runtime.stats.materialized_scalar_outputs;
+      result["materialized_array_outputs"] = runtime.stats.materialized_array_outputs;
+      result["materialized_matrix_outputs"] = runtime.stats.materialized_matrix_outputs;
+      result["numeric_register_sync_call_count"] = runtime.stats.numeric_register_sync_call_count;
+      result["numeric_register_sync_total_ms"] = static_cast<double>(runtime.stats.numeric_register_sync_total_ns) / 1e6;
+      result["numeric_register_sync_max_ms"] = static_cast<double>(runtime.stats.numeric_register_sync_max_ns) / 1e6;
+      result["materialized_scalar_registers"] = runtime.stats.materialized_scalar_registers;
+      result["materialized_array_registers"] = runtime.stats.materialized_array_registers;
       return result;
     }
 #endif

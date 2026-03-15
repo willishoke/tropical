@@ -201,6 +201,7 @@ PYBIND11_MODULE(egress, m)
     .def("__dir__", &PyModuleInstance::dir)
 #ifdef EGRESS_PROFILE
     .def_property_readonly("compile_stats", &PyModuleInstance::compile_stats)
+    .def_property_readonly("runtime_stats", &PyModuleInstance::runtime_stats)
 #endif
     ;
 

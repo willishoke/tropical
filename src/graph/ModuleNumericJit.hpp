@@ -28,6 +28,16 @@ enum class NumericValueKind
   Matrix
 };
 
+struct NumericValueRef
+{
+  NumericValueKind kind = NumericValueKind::Scalar;
+  uint32_t scalar_register = 0;
+  uint32_t array_slot = 0;
+  uint32_t array_size = 0;
+  uint32_t matrix_rows = 0;
+  uint32_t matrix_cols = 0;
+};
+
 struct NumericRegInfo
 {
   NumericValueKind kind = NumericValueKind::Scalar;

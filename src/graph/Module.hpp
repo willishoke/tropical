@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -31,6 +32,24 @@ class Module
       uint64_t numeric_jit_instruction_count = 0;
       uint64_t nested_module_count = 0;
       std::string jit_status;
+    };
+
+    struct RuntimeStats
+    {
+      uint64_t numeric_input_sync_call_count = 0;
+      uint64_t numeric_input_sync_total_ns = 0;
+      uint64_t numeric_input_sync_max_ns = 0;
+      uint64_t numeric_output_materialize_call_count = 0;
+      uint64_t numeric_output_materialize_total_ns = 0;
+      uint64_t numeric_output_materialize_max_ns = 0;
+      uint64_t materialized_scalar_outputs = 0;
+      uint64_t materialized_array_outputs = 0;
+      uint64_t materialized_matrix_outputs = 0;
+      uint64_t numeric_register_sync_call_count = 0;
+      uint64_t numeric_register_sync_total_ns = 0;
+      uint64_t numeric_register_sync_max_ns = 0;
+      uint64_t materialized_scalar_registers = 0;
+      uint64_t materialized_array_registers = 0;
     };
 #endif
 
@@ -175,6 +194,10 @@ class Module
 
   #ifdef EGRESS_PROFILE
     CompileStats compile_stats() const;
+
+    RuntimeStats runtime_stats() const;
+
+    void reset_runtime_stats();
   #endif
 
   protected:
@@ -195,6 +218,7 @@ class Module
     using NumericInputInfo = egress_module_detail::NumericInputInfo;
     using NumericOutputInfo = egress_module_detail::NumericOutputInfo;
     using NumericValueKind = egress_module_detail::NumericValueKind;
+    using NumericValueRef = egress_module_detail::NumericValueRef;
     using NumericRegInfo = egress_module_detail::NumericRegInfo;
 
     struct NestedModuleRuntime
@@ -318,6 +342,36 @@ class Module
     std::string jit_status_;
   #ifdef EGRESS_PROFILE
     uint64_t numeric_jit_instruction_count_ = 0;
+
+    static void update_profile_max(std::atomic<uint64_t> & dst, uint64_t candidate);
+
+    void record_numeric_input_sync_profile(uint64_t elapsed_ns);
+
+    void record_numeric_output_materialize_profile(
+      uint64_t elapsed_ns,
+      uint64_t scalar_count,
+      uint64_t array_count,
+      uint64_t matrix_count);
+
+    void record_numeric_register_sync_profile(
+      uint64_t elapsed_ns,
+      uint64_t scalar_count,
+      uint64_t array_count);
+
+    std::atomic<uint64_t> profile_numeric_input_sync_call_count_{0};
+    std::atomic<uint64_t> profile_numeric_input_sync_total_ns_{0};
+    std::atomic<uint64_t> profile_numeric_input_sync_max_ns_{0};
+    std::atomic<uint64_t> profile_numeric_output_materialize_call_count_{0};
+    std::atomic<uint64_t> profile_numeric_output_materialize_total_ns_{0};
+    std::atomic<uint64_t> profile_numeric_output_materialize_max_ns_{0};
+    std::atomic<uint64_t> profile_materialized_scalar_outputs_{0};
+    std::atomic<uint64_t> profile_materialized_array_outputs_{0};
+    std::atomic<uint64_t> profile_materialized_matrix_outputs_{0};
+    std::atomic<uint64_t> profile_numeric_register_sync_call_count_{0};
+    std::atomic<uint64_t> profile_numeric_register_sync_total_ns_{0};
+    std::atomic<uint64_t> profile_numeric_register_sync_max_ns_{0};
+    std::atomic<uint64_t> profile_materialized_scalar_registers_{0};
+    std::atomic<uint64_t> profile_materialized_array_registers_{0};
   #endif
 
     bool supports_numeric_jit_expr_kind(ExprKind kind) const;
@@ -330,6 +384,14 @@ class Module
       uint32_t scalar_register,
       const std::vector<double> & numeric_temps,
       const std::vector<std::vector<double>> & numeric_array_storage);
+
+    static NumericValueRef make_numeric_value_ref(
+      const NumericOutputInfo & info,
+      uint32_t scalar_register);
+
+    bool try_get_numeric_output_ref(unsigned int output_id, NumericValueRef & out) const;
+
+    const std::vector<double> * try_get_numeric_output_array_values(unsigned int output_id) const;
 
     static bool value_to_scalar_double(const Value & value, double & out);
 

@@ -106,6 +106,66 @@ void Module::assign_numeric_value_to(
   }
 }
 
+Module::NumericValueRef Module::make_numeric_value_ref(
+  const NumericOutputInfo & info,
+  uint32_t scalar_register)
+{
+  NumericValueRef ref;
+  ref.kind = static_cast<NumericValueKind>(info.kind);
+  ref.scalar_register = scalar_register;
+  ref.array_slot = info.array_slot;
+  switch (ref.kind)
+  {
+    case NumericValueKind::Scalar:
+      return ref;
+    case NumericValueKind::Array:
+      if (info.array_slot < std::numeric_limits<uint32_t>::max())
+      {
+        ref.array_size = 0;
+      }
+      return ref;
+    case NumericValueKind::Matrix:
+      ref.matrix_rows = info.matrix_rows;
+      ref.matrix_cols = info.matrix_cols;
+      ref.array_size = info.matrix_rows * info.matrix_cols;
+      return ref;
+  }
+  return ref;
+}
+
+bool Module::try_get_numeric_output_ref(unsigned int output_id, NumericValueRef & out) const
+{
+  if (jit_kernel_ == nullptr ||
+      output_id >= numeric_output_info_.size() ||
+      output_id >= program_.output_targets.size())
+  {
+    return false;
+  }
+
+  out = make_numeric_value_ref(numeric_output_info_[output_id], program_.output_targets[output_id]);
+  if (out.kind == NumericValueKind::Array || out.kind == NumericValueKind::Matrix)
+  {
+    if (out.array_slot >= numeric_array_storage_.size())
+    {
+      return false;
+    }
+    out.array_size = static_cast<uint32_t>(numeric_array_storage_[out.array_slot].size());
+  }
+  return true;
+}
+
+const std::vector<double> * Module::try_get_numeric_output_array_values(unsigned int output_id) const
+{
+  NumericValueRef ref;
+  if (!try_get_numeric_output_ref(output_id, ref) ||
+      ref.kind != NumericValueKind::Array ||
+      ref.array_slot >= numeric_array_storage_.size())
+  {
+    return nullptr;
+  }
+  return &numeric_array_storage_[ref.array_slot];
+}
+
 bool Module::value_to_scalar_double(const Value & value, double & out)
 {
   if (value.type == ValueType::Array || value.type == ValueType::Matrix)
@@ -239,6 +299,9 @@ bool Module::numeric_input_layout_matches(const std::vector<Value> & current_inp
 
 bool Module::sync_numeric_inputs_from_values()
 {
+#ifdef EGRESS_PROFILE
+  const auto sync_start = std::chrono::steady_clock::now();
+#endif
   if (numeric_inputs_.size() < inputs.size())
   {
     numeric_inputs_.assign(inputs.size(), 0.0);
@@ -289,6 +352,11 @@ bool Module::sync_numeric_inputs_from_values()
     }
   }
 
+#ifdef EGRESS_PROFILE
+  record_numeric_input_sync_profile(
+    static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sync_start).count()));
+#endif
   return true;
 }
 
@@ -363,6 +431,9 @@ bool Module::sync_numeric_inputs_from_values(
   NumericJitState & state,
   const std::vector<Value> & current_inputs)
 {
+#ifdef EGRESS_PROFILE
+  const auto sync_start = std::chrono::steady_clock::now();
+#endif
   if (state.inputs.size() < current_inputs.size())
   {
     state.inputs.assign(current_inputs.size(), 0.0);
@@ -413,6 +484,11 @@ bool Module::sync_numeric_inputs_from_values(
     }
   }
 
+#ifdef EGRESS_PROFILE
+  record_numeric_input_sync_profile(
+    static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sync_start).count()));
+#endif
   return true;
 }
 
@@ -1591,6 +1667,12 @@ void Module::materialize_numeric_outputs(
   std::vector<Value> & destinations,
   const std::vector<bool> * materialize_mask)
 {
+#ifdef EGRESS_PROFILE
+  const auto materialize_start = std::chrono::steady_clock::now();
+  uint64_t materialized_scalar_outputs = 0;
+  uint64_t materialized_array_outputs = 0;
+  uint64_t materialized_matrix_outputs = 0;
+#endif
   for (unsigned int output_id = 0; output_id < compiled_program.output_targets.size(); ++output_id)
   {
     if (materialize_mask != nullptr &&
@@ -1605,6 +1687,20 @@ void Module::materialize_numeric_outputs(
       }
     }
 
+#ifdef EGRESS_PROFILE
+    switch (static_cast<NumericValueKind>(state.output_info[output_id].kind))
+    {
+      case NumericValueKind::Scalar:
+        ++materialized_scalar_outputs;
+        break;
+      case NumericValueKind::Array:
+        ++materialized_array_outputs;
+        break;
+      case NumericValueKind::Matrix:
+        ++materialized_matrix_outputs;
+        break;
+    }
+#endif
     assign_numeric_value_to(
       destinations[output_id],
       state.output_info[output_id],
@@ -1612,6 +1708,14 @@ void Module::materialize_numeric_outputs(
       state.temps,
       state.array_storage);
   }
+#ifdef EGRESS_PROFILE
+  record_numeric_output_materialize_profile(
+    static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - materialize_start).count()),
+    materialized_scalar_outputs,
+    materialized_array_outputs,
+    materialized_matrix_outputs);
+#endif
 }
 
 void Module::materialize_numeric_outputs_range(
@@ -1622,6 +1726,12 @@ void Module::materialize_numeric_outputs_range(
   std::vector<Value> & destinations,
   const std::vector<bool> * materialize_mask)
 {
+#ifdef EGRESS_PROFILE
+  const auto materialize_start = std::chrono::steady_clock::now();
+  uint64_t materialized_scalar_outputs = 0;
+  uint64_t materialized_array_outputs = 0;
+  uint64_t materialized_matrix_outputs = 0;
+#endif
   for (std::size_t output_index = 0; output_index < output_count; ++output_index)
   {
     const std::size_t compiled_output_id = start_output_id + output_index;
@@ -1639,6 +1749,20 @@ void Module::materialize_numeric_outputs_range(
       continue;
     }
 
+#ifdef EGRESS_PROFILE
+    switch (static_cast<NumericValueKind>(state.output_info[compiled_output_id].kind))
+    {
+      case NumericValueKind::Scalar:
+        ++materialized_scalar_outputs;
+        break;
+      case NumericValueKind::Array:
+        ++materialized_array_outputs;
+        break;
+      case NumericValueKind::Matrix:
+        ++materialized_matrix_outputs;
+        break;
+    }
+#endif
     assign_numeric_value_to(
       destinations[output_index],
       state.output_info[compiled_output_id],
@@ -1646,6 +1770,14 @@ void Module::materialize_numeric_outputs_range(
       state.temps,
       state.array_storage);
   }
+#ifdef EGRESS_PROFILE
+  record_numeric_output_materialize_profile(
+    static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - materialize_start).count()),
+    materialized_scalar_outputs,
+    materialized_array_outputs,
+    materialized_matrix_outputs);
+#endif
 }
 
 void Module::apply_numeric_register_targets(
@@ -1720,12 +1852,20 @@ void Module::apply_numeric_register_targets(
 
 void Module::sync_value_registers_from_numeric_state(const NumericJitState & state)
 {
+#ifdef EGRESS_PROFILE
+  const auto sync_start = std::chrono::steady_clock::now();
+  uint64_t materialized_scalar_registers = 0;
+  uint64_t materialized_array_registers = 0;
+#endif
   for (unsigned int register_id = 0; register_id < registers_.size(); ++register_id)
   {
     if (register_id < state.register_scalar_mask.size() && state.register_scalar_mask[register_id])
     {
       assign_scalar_numeric_value(registers_[register_id], numeric_registers_[register_id]);
       next_registers_[register_id] = registers_[register_id];
+#ifdef EGRESS_PROFILE
+      ++materialized_scalar_registers;
+#endif
       continue;
     }
     if (register_id >= state.register_array_slot.size())
@@ -1744,7 +1884,17 @@ void Module::sync_value_registers_from_numeric_state(const NumericJitState & sta
     }
     registers_[register_id] = expr::array_value(std::move(items));
     next_registers_[register_id] = registers_[register_id];
+#ifdef EGRESS_PROFILE
+    ++materialized_array_registers;
+#endif
   }
+#ifdef EGRESS_PROFILE
+  record_numeric_register_sync_profile(
+    static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sync_start).count()),
+    materialized_scalar_registers,
+    materialized_array_registers);
+#endif
 }
 
 void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)

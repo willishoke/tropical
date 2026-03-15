@@ -176,6 +176,10 @@ void Graph::sync_fused_current_outputs(RuntimeState & runtime) const
     return;
   }
 
+#ifdef EGRESS_PROFILE
+  const auto sync_start = std::chrono::steady_clock::now();
+  uint64_t output_copy_count = 0;
+#endif
   for (uint32_t module_id = 0; module_id < runtime.modules.size(); ++module_id)
   {
     const auto & slot = runtime.modules[module_id];
@@ -194,8 +198,18 @@ void Graph::sync_fused_current_outputs(RuntimeState & runtime) const
         continue;
       }
       fused->current_outputs[source_slot] = slot.module->outputs[offset];
+#ifdef EGRESS_PROFILE
+      ++output_copy_count;
+#endif
     }
   }
+#ifdef EGRESS_PROFILE
+  record_fused_sync_profile(
+    false,
+    static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sync_start).count()),
+    output_copy_count);
+#endif
 }
 
 void Graph::sync_fused_prev_outputs(RuntimeState & runtime) const
@@ -206,6 +220,10 @@ void Graph::sync_fused_prev_outputs(RuntimeState & runtime) const
     return;
   }
 
+#ifdef EGRESS_PROFILE
+  const auto sync_start = std::chrono::steady_clock::now();
+  uint64_t output_copy_count = 0;
+#endif
   for (uint32_t module_id = 0; module_id < runtime.modules.size(); ++module_id)
   {
     const auto & slot = runtime.modules[module_id];
@@ -224,8 +242,18 @@ void Graph::sync_fused_prev_outputs(RuntimeState & runtime) const
         continue;
       }
       fused->prev_outputs[source_slot] = slot.module->prev_outputs[offset];
+#ifdef EGRESS_PROFILE
+      ++output_copy_count;
+#endif
     }
   }
+#ifdef EGRESS_PROFILE
+  record_fused_sync_profile(
+    true,
+    static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - sync_start).count()),
+    output_copy_count);
+#endif
 }
 
 bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_body_inputs) const
@@ -2147,19 +2175,15 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
         break;
       }
 #ifdef EGRESS_LLVM_ORC_JIT
-      const bool can_read_numeric_output =
-        slot.module->jit_kernel_ != nullptr &&
-        instr.ref_output_id < slot.module->numeric_output_info_.size() &&
-        static_cast<Module::NumericValueKind>(slot.module->numeric_output_info_[instr.ref_output_id].kind) == Module::NumericValueKind::Array &&
-        slot.module->numeric_output_info_[instr.ref_output_id].array_slot < slot.module->numeric_array_storage_.size();
-      if (can_read_numeric_output)
+      const auto * numeric_values = slot.module->try_get_numeric_output_array_values(instr.ref_output_id);
+      if (numeric_values != nullptr)
       {
-        const auto & values = slot.module->numeric_array_storage_[slot.module->numeric_output_info_[instr.ref_output_id].array_slot];
-        if (static_cast<std::size_t>(instr.ref_index) >= values.size())
+        if (static_cast<std::size_t>(instr.ref_index) >= numeric_values->size())
         {
           throw std::out_of_range("Array index out of range.");
         }
-        registers[instr.dst] = expr::float_value(Module::clamp_output_scalar(values[static_cast<std::size_t>(instr.ref_index)]));
+        registers[instr.dst] =
+          expr::float_value(Module::clamp_output_scalar((*numeric_values)[static_cast<std::size_t>(instr.ref_index)]));
         break;
       }
 #endif

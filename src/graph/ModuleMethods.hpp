@@ -28,6 +28,12 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         sample_rate_,
         sample_index_);
 
+#ifdef EGRESS_PROFILE
+      const auto materialize_start = std::chrono::steady_clock::now();
+      uint64_t materialized_scalar_outputs = 0;
+      uint64_t materialized_array_outputs = 0;
+      uint64_t materialized_matrix_outputs = 0;
+#endif
       for (unsigned int output_id = 0; output_id < program_.output_targets.size(); ++output_id)
       {
         if (output_materialize_mask != nullptr &&
@@ -41,6 +47,20 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
             continue;
           }
         }
+#ifdef EGRESS_PROFILE
+        switch (static_cast<NumericValueKind>(numeric_output_info_[output_id].kind))
+        {
+          case NumericValueKind::Scalar:
+            ++materialized_scalar_outputs;
+            break;
+          case NumericValueKind::Array:
+            ++materialized_array_outputs;
+            break;
+          case NumericValueKind::Matrix:
+            ++materialized_matrix_outputs;
+            break;
+        }
+#endif
         assign_numeric_value_to(
           outputs[output_id],
           numeric_output_info_[output_id],
@@ -48,6 +68,15 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
           numeric_temps_,
           numeric_array_storage_);
       }
+#ifdef EGRESS_PROFILE
+      record_numeric_output_materialize_profile(
+        static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - materialize_start)
+            .count()),
+        materialized_scalar_outputs,
+        materialized_array_outputs,
+        materialized_matrix_outputs);
+#endif
 
       for (unsigned int register_id = 0; register_id < program_.register_targets.size(); ++register_id)
       {
@@ -378,6 +407,89 @@ Module::CompileStats Module::compile_stats() const
   stats.jit_status = "LLVM ORC JIT disabled";
 #endif
   return stats;
+}
+
+void Module::update_profile_max(std::atomic<uint64_t> & dst, uint64_t candidate)
+{
+  uint64_t current = dst.load(std::memory_order_relaxed);
+  while (current < candidate &&
+         !dst.compare_exchange_weak(current, candidate, std::memory_order_relaxed))
+  {
+  }
+}
+
+void Module::record_numeric_input_sync_profile(uint64_t elapsed_ns)
+{
+  profile_numeric_input_sync_call_count_.fetch_add(1, std::memory_order_relaxed);
+  profile_numeric_input_sync_total_ns_.fetch_add(elapsed_ns, std::memory_order_relaxed);
+  update_profile_max(profile_numeric_input_sync_max_ns_, elapsed_ns);
+}
+
+void Module::record_numeric_output_materialize_profile(
+  uint64_t elapsed_ns,
+  uint64_t scalar_count,
+  uint64_t array_count,
+  uint64_t matrix_count)
+{
+  profile_numeric_output_materialize_call_count_.fetch_add(1, std::memory_order_relaxed);
+  profile_numeric_output_materialize_total_ns_.fetch_add(elapsed_ns, std::memory_order_relaxed);
+  update_profile_max(profile_numeric_output_materialize_max_ns_, elapsed_ns);
+  profile_materialized_scalar_outputs_.fetch_add(scalar_count, std::memory_order_relaxed);
+  profile_materialized_array_outputs_.fetch_add(array_count, std::memory_order_relaxed);
+  profile_materialized_matrix_outputs_.fetch_add(matrix_count, std::memory_order_relaxed);
+}
+
+void Module::record_numeric_register_sync_profile(
+  uint64_t elapsed_ns,
+  uint64_t scalar_count,
+  uint64_t array_count)
+{
+  profile_numeric_register_sync_call_count_.fetch_add(1, std::memory_order_relaxed);
+  profile_numeric_register_sync_total_ns_.fetch_add(elapsed_ns, std::memory_order_relaxed);
+  update_profile_max(profile_numeric_register_sync_max_ns_, elapsed_ns);
+  profile_materialized_scalar_registers_.fetch_add(scalar_count, std::memory_order_relaxed);
+  profile_materialized_array_registers_.fetch_add(array_count, std::memory_order_relaxed);
+}
+
+Module::RuntimeStats Module::runtime_stats() const
+{
+  RuntimeStats stats;
+  stats.numeric_input_sync_call_count = profile_numeric_input_sync_call_count_.load(std::memory_order_relaxed);
+  stats.numeric_input_sync_total_ns = profile_numeric_input_sync_total_ns_.load(std::memory_order_relaxed);
+  stats.numeric_input_sync_max_ns = profile_numeric_input_sync_max_ns_.load(std::memory_order_relaxed);
+  stats.numeric_output_materialize_call_count =
+    profile_numeric_output_materialize_call_count_.load(std::memory_order_relaxed);
+  stats.numeric_output_materialize_total_ns =
+    profile_numeric_output_materialize_total_ns_.load(std::memory_order_relaxed);
+  stats.numeric_output_materialize_max_ns =
+    profile_numeric_output_materialize_max_ns_.load(std::memory_order_relaxed);
+  stats.materialized_scalar_outputs = profile_materialized_scalar_outputs_.load(std::memory_order_relaxed);
+  stats.materialized_array_outputs = profile_materialized_array_outputs_.load(std::memory_order_relaxed);
+  stats.materialized_matrix_outputs = profile_materialized_matrix_outputs_.load(std::memory_order_relaxed);
+  stats.numeric_register_sync_call_count = profile_numeric_register_sync_call_count_.load(std::memory_order_relaxed);
+  stats.numeric_register_sync_total_ns = profile_numeric_register_sync_total_ns_.load(std::memory_order_relaxed);
+  stats.numeric_register_sync_max_ns = profile_numeric_register_sync_max_ns_.load(std::memory_order_relaxed);
+  stats.materialized_scalar_registers = profile_materialized_scalar_registers_.load(std::memory_order_relaxed);
+  stats.materialized_array_registers = profile_materialized_array_registers_.load(std::memory_order_relaxed);
+  return stats;
+}
+
+void Module::reset_runtime_stats()
+{
+  profile_numeric_input_sync_call_count_.store(0, std::memory_order_relaxed);
+  profile_numeric_input_sync_total_ns_.store(0, std::memory_order_relaxed);
+  profile_numeric_input_sync_max_ns_.store(0, std::memory_order_relaxed);
+  profile_numeric_output_materialize_call_count_.store(0, std::memory_order_relaxed);
+  profile_numeric_output_materialize_total_ns_.store(0, std::memory_order_relaxed);
+  profile_numeric_output_materialize_max_ns_.store(0, std::memory_order_relaxed);
+  profile_materialized_scalar_outputs_.store(0, std::memory_order_relaxed);
+  profile_materialized_array_outputs_.store(0, std::memory_order_relaxed);
+  profile_materialized_matrix_outputs_.store(0, std::memory_order_relaxed);
+  profile_numeric_register_sync_call_count_.store(0, std::memory_order_relaxed);
+  profile_numeric_register_sync_total_ns_.store(0, std::memory_order_relaxed);
+  profile_numeric_register_sync_max_ns_.store(0, std::memory_order_relaxed);
+  profile_materialized_scalar_registers_.store(0, std::memory_order_relaxed);
+  profile_materialized_array_registers_.store(0, std::memory_order_relaxed);
 }
 #endif
 

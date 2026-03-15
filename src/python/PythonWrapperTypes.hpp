@@ -133,6 +133,23 @@ class PythonGraph
       }
 
       result["modules"] = std::move(sorted_modules);
+#ifdef EGRESS_PROFILE
+      py::dict boxing;
+      py::dict fused_current_output_sync;
+      fused_current_output_sync["call_count"] = stats.fused_current_output_sync.call_count;
+      fused_current_output_sync["total_ms"] = stats.fused_current_output_sync.total_ms;
+      fused_current_output_sync["max_ms"] = stats.fused_current_output_sync.max_ms;
+      fused_current_output_sync["output_copy_count"] = stats.fused_current_output_sync.output_copy_count;
+      boxing["fused_current_output_sync"] = std::move(fused_current_output_sync);
+
+      py::dict fused_prev_output_sync;
+      fused_prev_output_sync["call_count"] = stats.fused_prev_output_sync.call_count;
+      fused_prev_output_sync["total_ms"] = stats.fused_prev_output_sync.total_ms;
+      fused_prev_output_sync["max_ms"] = stats.fused_prev_output_sync.max_ms;
+      fused_prev_output_sync["output_copy_count"] = stats.fused_prev_output_sync.output_copy_count;
+      boxing["fused_prev_output_sync"] = std::move(fused_prev_output_sync);
+      result["boxing"] = std::move(boxing);
+#endif
       return result;
     }
 
