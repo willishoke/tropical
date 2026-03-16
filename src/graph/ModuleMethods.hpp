@@ -337,7 +337,12 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         next_registers_[register_id] = registers_[register_id];
       }
     }
-    registers_.swap(next_registers_);
+    // Only swap here for composite modules; non-composite modules are swapped
+    // by the unconditional swap at the end of process() (line ~395).
+    if (use_composite_programs)
+    {
+      registers_.swap(next_registers_);
+    }
   }
 
   if (!delay_update_program_.output_targets.empty())
