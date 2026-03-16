@@ -337,6 +337,343 @@ def reverb(name="Reverb"):
     )
 
 
+def _define_poly_blamp():
+    """
+    PolyBLAMP residual — integral of PolyBLEP — corrects first-derivative
+    (slope/kink) discontinuities such as the corners of a linear ramp.
+
+    Inputs : t   – phase in [0, 1)
+             dt  – phase increment (normalized frequency)
+    Output : value – correction to subtract from a linear ramp
+
+    Left  half: applied near t=0      (start of ramp)
+    Right half: applied near t=1-dt   (end of ramp)
+    """
+    def process(inp):
+        t  = inp["t"]
+        dt = inp["dt"]
+        valid = (dt > 0.0) * (dt < 1.0)
+
+        # --- Near the start of the ramp (t in [0, dt)) ---
+        u = t / dt
+        # Integral of the polyBLEP left residual:  u^2 - u^3/3 - u  (zero at u=0 and u=1)
+        left = u * u - u * u * u / 3.0 - u
+
+        # --- Near the end of the ramp (t in (1-dt, 1]) ---
+        v = (1.0 - t) / dt
+        right = -(v * v - v * v * v / 3.0 - v)
+
+        left_mask  = t < dt
+        right_mask = (1.0 - t) < dt
+
+        return {"value": valid * (left_mask * left + right_mask * right)}
+
+    return eg.define_pure_function(inputs=["t", "dt"], outputs=["value"], process=process)
+
+
+_poly_blamp = _define_poly_blamp()
+
+
+def ad_envelope(name="ADEnvelope"):
+    """
+    Attack-Decay envelope generator with PolyBLAMP anti-kink smoothing.
+
+    A rising linear ramp over 'attack' seconds, then a falling linear ramp
+    over 'decay' seconds.  PolyBLAMP residuals are subtracted at the three
+    corners (start of attack, attack→decay joint, end of decay) to suppress
+    the high-frequency content that would otherwise result from the abrupt
+    slope changes.
+
+    Inputs
+    ------
+    gate    : rising edge (> 0.5) triggers the envelope; re-trigger resets it
+    attack  : attack time in seconds
+    decay   : decay time in seconds
+
+    Output
+    ------
+    env : envelope value in [0, 1]
+    """
+    def process(inp, reg):
+        sr      = eg.sample_rate()
+        attack  = eg.clamp(inp["attack"], 1e-4, 10.0)
+        decay   = eg.clamp(inp["decay"],  1e-4, 10.0)
+        gate    = inp["gate"]
+
+        # Rising-edge detection
+        prev_gate = eg.delay(gate, init=0.0)
+        trig = (gate > 0.5) * (prev_gate <= 0.5)
+
+        stage = reg["stage"]   # 0 = idle, 1 = attack, 2 = decay
+        phase = reg["phase"]   # 0..1 within current stage
+
+        in_attack = (stage > 0.5) * (stage < 1.5)   # stage == 1
+        in_decay  =  stage > 1.5                     # stage == 2
+
+        dt_a = 1.0 / (attack * sr)
+        dt_d = 1.0 / (decay  * sr)
+        dt   = in_attack * dt_a + in_decay * dt_d
+
+        new_phase = phase + dt
+
+        a_to_d  = in_attack * (new_phase >= 1.0)
+        d_done  = in_decay  * (new_phase >= 1.0)
+
+        # --- Next stage ---
+        # gate_rise always restarts attack; otherwise advance the state machine
+        next_stage = (
+            trig * 1.0
+            + (1.0 - trig) * (
+                in_attack * (1.0 - a_to_d) * 1.0
+                + a_to_d * 2.0
+                + in_decay * (1.0 - d_done) * 2.0
+                # d_done → idle (0)
+            )
+        )
+
+        # --- Next phase ---
+        # On trigger: reset to 0
+        # On attack→decay: carry overshoot into decay stage
+        # On decay done / idle: 0
+        next_phase = (
+            trig * 0.0
+            + (1.0 - trig) * (
+                a_to_d * eg.clamp(new_phase - 1.0, 0.0, 1.0)
+                + (1.0 - a_to_d) * (1.0 - d_done) * eg.clamp(new_phase, 0.0, 1.0)
+            )
+        )
+
+        # --- Raw envelope value ---
+        # Use current (pre-increment) phase so the blamp at phase=0 is visible
+        raw_env = in_attack * phase + in_decay * (1.0 - phase)
+
+        # --- PolyBLAMP corrections ---
+        # 1. Start of attack: slope jumps from 0 to dt_a
+        blamp_start = _poly_blamp(phase, dt_a)
+        # 2. End of attack / start of decay: slope jumps from dt_a to -dt_d
+        #    Apply to both the tail of attack (near phase=1) and head of decay (near phase=0)
+        blamp_atk_end = _poly_blamp(1.0 - phase, dt_a)
+        blamp_dec_start = _poly_blamp(phase, dt_d)
+        # 3. End of decay: slope jumps from -dt_d to 0
+        blamp_end = _poly_blamp(1.0 - phase, dt_d)
+
+        env = (
+            raw_env
+            - in_attack * dt_a * blamp_start
+            + in_attack * dt_a * blamp_atk_end
+            + in_decay  * dt_d * blamp_dec_start
+            - in_decay  * dt_d * blamp_end
+        )
+
+        return (
+            {"env": eg.clamp(env, 0.0, 1.0)},
+            {"stage": next_stage, "phase": next_phase},
+        )
+
+    return eg.define_module(
+        name=name,
+        inputs=["gate", "attack", "decay"],
+        outputs=["env"],
+        regs={"stage": 0.0, "phase": 0.0},
+        process=process,
+        sample_rate=44100.0,
+        input_defaults={"gate": 0.0, "attack": 0.01, "decay": 0.3},
+    )
+
+
+def compressor(name="Compressor"):
+    """
+    Feed-forward compressor with a dedicated sidechain input.
+
+    A full-wave peak detector (with separate attack/release ballistics) feeds
+    an RMS-style level estimator.  Gain reduction is computed in dB, smoothed
+    with the same ballistics, then applied as a linear gain to the main input.
+
+    Inputs
+    ------
+    input       : audio signal to be gain-reduced
+    sidechain   : control signal for level detection (patch to input for
+                  normal compression, or to a separate signal for ducking)
+    threshold   : threshold in dBFS (e.g. -12.0)
+    ratio       : compression ratio (1 = no compression, ∞ = limiting)
+    attack_ms   : attack  time in milliseconds
+    release_ms  : release time in milliseconds
+    makeup      : linear makeup gain applied after compression
+
+    Outputs
+    -------
+    output : gain-reduced (and made-up) audio
+    gr     : instantaneous gain reduction in dB (≤ 0, useful for metering)
+    """
+    _LOG10E = 0.4342944819309   # log10(e) = 1/ln(10)
+    _20_LN10_INV = 8.68588963807  # 20 / ln(10)  for dBFS conversion
+
+    def process(inp, reg):
+        sr = eg.sample_rate()
+
+        threshold  = inp["threshold"]
+        ratio      = eg.clamp(inp["ratio"], 1.0, 1000.0)
+        attack_ms  = eg.clamp(inp["attack_ms"],  0.01, 2000.0)
+        release_ms = eg.clamp(inp["release_ms"], 1.0,  10000.0)
+        makeup     = inp["makeup"]
+
+        # --- Level detection (peak follower on sidechain) ---
+        sc = eg.abs(inp["sidechain"])
+        prev_env = reg["env"]
+
+        atk_coeff = eg.pow(10.0, -_LOG10E / eg.clamp(attack_ms  * 0.001 * sr, 1.0, 1e8))
+        rel_coeff = eg.pow(10.0, -_LOG10E / eg.clamp(release_ms * 0.001 * sr, 1.0, 1e8))
+
+        # Attack on rising signal, release on falling
+        rising  = sc > prev_env
+        new_env = (
+            rising       * (atk_coeff * prev_env + (1.0 - atk_coeff) * sc)
+            + (1.0 - rising) * (rel_coeff * prev_env + (1.0 - rel_coeff) * sc)
+        )
+
+        # --- Gain computer (static curve) ---
+        # level_db = 20*log10(env) = (20/ln10) * ln(env)
+        level_db   = _20_LN10_INV * eg.log(eg.clamp(new_env, 1e-9, 1e9))
+        over_db    = level_db - threshold
+        # GR is 0 below threshold, negative above (slope = 1/ratio - 1)
+        gr_db      = (over_db > 0.0) * over_db * (1.0 / ratio - 1.0)
+
+        # --- Smooth gain reduction with attack/release ---
+        prev_gr = reg["gr"]
+        # GR becoming more negative = attack; returning to 0 = release
+        gr_attack  = gr_db < prev_gr
+        smooth_gr  = (
+            gr_attack        * (atk_coeff * prev_gr + (1.0 - atk_coeff) * gr_db)
+            + (1.0 - gr_attack) * (rel_coeff * prev_gr + (1.0 - rel_coeff) * gr_db)
+        )
+
+        # --- Apply gain ---
+        gain   = eg.pow(10.0, smooth_gr / 20.0)  # GR dB → linear
+        output = inp["input"] * gain * makeup
+
+        return (
+            {"output": output, "gr": smooth_gr},
+            {"env": new_env, "gr": smooth_gr},
+        )
+
+    return eg.define_module(
+        name=name,
+        inputs=["input", "sidechain", "threshold", "ratio", "attack_ms", "release_ms", "makeup"],
+        outputs=["output", "gr"],
+        regs={"env": 0.0, "gr": 0.0},
+        process=process,
+        sample_rate=44100.0,
+        input_defaults={
+            "input":      0.0,
+            "sidechain":  0.0,
+            "threshold": -12.0,
+            "ratio":       4.0,
+            "attack_ms":  10.0,
+            "release_ms": 100.0,
+            "makeup":      1.0,
+        },
+    )
+
+
+def bass_drum(name="BassDrum"):
+    """
+    Simple analogue-style bass drum voice.
+
+    An impulse excites a 2-pole resonant state-variable lowpass filter
+    (Zavalishin TPT design — unconditionally stable).  A pitch envelope
+    sweeps the cutoff frequency downward from (freq × (1 + punch × 4)) to
+    freq, giving the characteristic transient 'thump'.  An amplitude envelope
+    controls the overall level.
+
+    Inputs
+    ------
+    gate   : rising edge (> 0.5) fires the drum
+    freq   : fundamental / resting pitch in Hz  (default 60 Hz)
+    punch  : pitch-sweep depth 0..1             (default 0.5)
+    decay  : amplitude decay time in seconds    (default 0.35)
+    tone   : filter resonance Q                 (default 8.0)
+
+    Output
+    ------
+    output : mono audio signal, peak ≈ ±5 V
+    """
+    _PI = 3.14159265358979
+
+    def process(inp, reg):
+        sr = eg.sample_rate()
+
+        freq  = eg.clamp(inp["freq"],  20.0, 500.0)
+        punch = eg.clamp(inp["punch"],  0.0,   1.0)
+        decay = eg.clamp(inp["decay"], 0.01,   4.0)
+        tone  = eg.clamp(inp["tone"],  0.5,   50.0)
+
+        # --- Trigger detection ---
+        gate      = inp["gate"]
+        prev_gate = eg.delay(gate, init=0.0)
+        trig      = (gate > 0.5) * (prev_gate <= 0.5)
+
+        # --- Amplitude envelope (instant attack, exponential decay) ---
+        amp_env   = reg["amp_env"]
+        amp_coeff = eg.pow(10.0, -0.4342944819 / eg.clamp(decay * sr, 1.0, 1e8))
+        new_amp   = trig * 1.0 + (1.0 - trig) * amp_coeff * amp_env
+
+        # --- Pitch envelope (fast exponential decay, ~40 ms) ---
+        pitch_env   = reg["pitch_env"]
+        pitch_tau   = 0.040 * sr   # 40 ms time constant
+        pitch_coeff = eg.pow(10.0, -0.4342944819 / eg.clamp(pitch_tau, 1.0, 1e8))
+        new_pitch   = trig * 1.0 + (1.0 - trig) * pitch_coeff * pitch_env
+
+        # Instantaneous cutoff: high at onset, settles to base freq
+        fc = freq * (1.0 + punch * 4.0 * new_pitch)
+
+        # --- Zavalishin TPT State Variable Filter (resonant LPF) ---
+        # g = tan(π·fc/fs) ≈ π·fc/fs for fc ≪ fs/2 (valid for bass)
+        # R = 1/(2Q)  (damping factor)
+        g = eg.clamp(_PI * fc / sr, 0.0, 0.98)
+        R = 0.5 / tone
+
+        # On trigger: reset integrator states to produce maximum LP amplitude
+        # immediately, rather than exciting via an impulse (which has negligible
+        # LP output for low fc because the LP gain ∝ g²).
+        # ic2 = 2.0 seeds the LP integrator at full amplitude; the filter then
+        # rings at fc, decaying at the rate set by R (and the amp_env above).
+        ic1 = trig * 0.0 + (1.0 - trig) * reg["ic1"]
+        ic2 = trig * 2.0 + (1.0 - trig) * reg["ic2"]
+
+        denom = 1.0 + 2.0 * R * g + g * g
+        v3   = (0.0 - ic2 - (2.0 * R + g) * ic1) / denom   # HP output
+        v1   = g * v3
+        y_bp = v1 + ic1
+        v2   = g * y_bp
+        y_lp = v2 + ic2
+
+        new_ic1 = y_bp + v1
+        new_ic2 = y_lp + v2
+
+        # Scale by 0.5 to compensate for ic2=2.0 seed
+        output = new_amp * eg.clamp(y_lp * 0.5, -1.0, 1.0) * 5.0
+
+        return (
+            {"output": output},
+            {
+                "amp_env":   new_amp,
+                "pitch_env": new_pitch,
+                "ic1":       new_ic1,
+                "ic2":       new_ic2,
+            },
+        )
+
+    return eg.define_module(
+        name=name,
+        inputs=["gate", "freq", "punch", "decay", "tone"],
+        outputs=["output"],
+        regs={"amp_env": 0.0, "pitch_env": 0.0, "ic1": 0.0, "ic2": 0.0},
+        process=process,
+        sample_rate=44100.0,
+        input_defaults={"gate": 0.0, "freq": 60.0, "punch": 0.5, "decay": 0.35, "tone": 8.0},
+    )
+
+
 def topo_waveguide(nx=4, ny=4, name="TopoWaveguide"):
     nx = max(1, int(nx))
     ny = max(1, int(ny))
