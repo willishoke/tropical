@@ -783,6 +783,29 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         result = builder.CreateSelect(in_range, elem_value, llvm::ConstantFP::get(f64_ty, 0.0));
         break;
       }
+      case NumericOp::SetArrayElement:
+      {
+        // Conditionally write value to array[index]; aliases dst to same slot (in-place).
+        llvm::Value * array_size = load_array_size(instr.slot_id);
+        llvm::Value * raw_index = builder.CreateFPToSI(load_temp(instr.src_a), i64_ty);
+        llvm::Value * is_negative = builder.CreateICmpSLT(raw_index, builder.getInt64(0));
+        llvm::Value * in_range_upper = builder.CreateICmpULT(raw_index, array_size);
+        llvm::Value * in_range = builder.CreateAnd(builder.CreateNot(is_negative), in_range_upper);
+
+        llvm::BasicBlock * write_bb = llvm::BasicBlock::Create(*context, "set_arr_write", fn);
+        llvm::BasicBlock * merge_bb = llvm::BasicBlock::Create(*context, "set_arr_merge", fn);
+        builder.CreateCondBr(in_range, write_bb, merge_bb);
+
+        builder.SetInsertPoint(write_bb);
+        llvm::Value * array_ptr = load_array_ptr(instr.slot_id);
+        llvm::Value * elem_ptr = builder.CreateInBoundsGEP(f64_ty, array_ptr, raw_index);
+        builder.CreateStore(load_temp(instr.src_b), elem_ptr);
+        builder.CreateBr(merge_bb);
+
+        builder.SetInsertPoint(merge_bb);
+        writes_temp = false;
+        break;
+      }
       case NumericOp::Sin:
         result = builder.CreateCall(llvm_sin, {load_temp(instr.src_a)});
         break;

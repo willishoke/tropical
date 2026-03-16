@@ -277,6 +277,10 @@ class ModuleType:
         for delay_node_id, init_h, update_h in d["delay_spec_handles"]:
             _b.egress_nested_spec_add_delay_state(nested_h, init_h, update_h)
 
+        # Add inner nested modules (e.g. delay lines inside comb filters)
+        for _, inner_nested_h in d.get("nested_spec_handles", []):
+            _b.egress_nested_spec_add_nested(nested_h, inner_nested_h)
+
         # Register with context
         ctx.nested_modules.append((node_id, nested_h))
 

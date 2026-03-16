@@ -60,6 +60,7 @@ enum class NumericOp : uint8_t
   Clamp,
   Log,
   IndexArray,
+  SetArrayElement,
   Sin,
   Neg,
   BitNot

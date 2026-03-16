@@ -100,6 +100,7 @@ bool Module::supports_numeric_jit_expr_kind(ExprKind kind) const
     case ExprKind::Abs:
     case ExprKind::Clamp:
     case ExprKind::Index:
+    case ExprKind::ArraySet:
     case ExprKind::Log:
     case ExprKind::Sin:
     case ExprKind::Neg:
@@ -1322,6 +1323,28 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         jit_instr.slot_id = reg_info[instr.src_a].array_slot;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
         break;
+      case ExprKind::ArraySet:
+        // src_a = array, src_b = index (scalar), src_c = value (scalar)
+        if (instr.src_a >= reg_info.size() || instr.src_b >= reg_info.size() || instr.src_c >= reg_info.size())
+        {
+          return false;
+        }
+        if (reg_info[instr.src_a].kind != NumericValueKind::Array ||
+            reg_info[instr.src_b].kind != NumericValueKind::Scalar ||
+            reg_info[instr.src_c].kind != NumericValueKind::Scalar)
+        {
+          return false;
+        }
+        jit_instr.op = egress_jit::NumericOp::SetArrayElement;
+        jit_instr.slot_id = reg_info[instr.src_a].array_slot;
+        jit_instr.src_a = instr.src_b;  // index
+        jit_instr.src_b = instr.src_c;  // value
+        // dst aliases the same array slot (in-place write; reads precede writes in the program)
+        reg_info[instr.dst].kind = NumericValueKind::Array;
+        reg_info[instr.dst].array_slot = reg_info[instr.src_a].array_slot;
+        reg_info[instr.dst].array_size = reg_info[instr.src_a].array_size;
+        require_scalar_inputs = false;
+        break;
       case ExprKind::Not:
         jit_instr.op = egress_jit::NumericOp::Not;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
@@ -1713,7 +1736,8 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
           instr.kind != ExprKind::RegisterValue &&
           instr.kind != ExprKind::SampleRate &&
           instr.kind != ExprKind::SampleIndex &&
-          instr.kind != ExprKind::Index)
+          instr.kind != ExprKind::Index &&
+          instr.kind != ExprKind::ArraySet)
       {
         if (instr.src_a >= reg_info.size() || reg_info[instr.src_a].kind != NumericValueKind::Scalar)
         {

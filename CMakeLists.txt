@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 project(egress LANGUAGES C CXX)
 
+# Default to RelWithDebInfo (-O2 -g -DNDEBUG): optimized but with debug symbols
+# for profiling tools (Instruments, perf, etc.).  Override with e.g.
+# -DCMAKE_BUILD_TYPE=Release for maximum throughput or =Debug for debugging.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type" FORCE)
+endif()
+
 option(EGRESS_BUILD_PYTHON "Build ctypes-based Python package support (installs egress/ package)" ON)
 option(EGRESS_PROFILE "Enable profiling counters and timing instrumentation" OFF)
 option(EGRESS_LLVM_ORC_JIT "Enable LLVM ORC JIT backend in C++ runtime" OFF)

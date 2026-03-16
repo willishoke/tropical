@@ -196,30 +196,129 @@ def clock(name="Clock"):
     )
 
 
-def reverb(name="Reverb"):
-    fdn = _define_fdn(size=4, name=f"{name}_FDN")
-    matrix = eg.matrix(
-        [
-            [0.5, 0.5, 0.5, 0.5],
-            [0.5, -0.5, 0.5, -0.5],
-            [0.5, 0.5, -0.5, -0.5],
-            [0.5, -0.5, -0.5, 0.5],
-        ]
+def delay_line(delay_len, name="Delay"):
+    """
+    Fixed-length delay line.
+
+    Implemented as a circular buffer register: on each tick, the slot at
+    (sample_index % delay_len) is read (returning the value written
+    delay_len ticks ago) then overwritten with the current input.
+
+    Inputs : x – scalar input
+    Output : y – input delayed by delay_len samples
+    """
+    def process(inp, reg):
+        buf = reg["buf"]
+        write_idx = eg.sample_index() % delay_len
+        y = buf[write_idx]
+        new_buf = eg.array_set(buf, write_idx, inp["x"])
+        return (
+            {"y": y},
+            {"buf": new_buf},
+        )
+
+    return eg.define_module(
+        name=name,
+        inputs=["x"],
+        outputs=["y"],
+        regs={"buf": [0.0] * delay_len},
+        process=process,
+        sample_rate=44100.0,
+        input_defaults={"x": 0.0},
     )
 
+
+def _define_comb_filter(delay_len, name="CombFilter"):
+    """
+    Single comb filter with a one-pole lowpass in the feedback loop.
+    Delay buffer is stored directly as a register to avoid nested module
+    overhead and keep the module eligible for JIT compilation.
+
+    Inputs : x     – scalar input
+             decay – feedback gain (controls RT60)
+             damp  – lowpass coefficient [0..1]; 0 = bright, 1 = dark
+    Output : y     – comb filter output
+    """
     def process(inp, reg):
-        x = inp["input"]
-        x = _allpass_stage(x, 0.7)
-        x = _allpass_stage(x, 0.6)
-        x = _allpass_stage(x, 0.5)
-        x = _allpass_stage(x, 0.4)
+        x        = inp["x"]
+        decay    = eg.clamp(inp["decay"], 0.0, 0.98)
+        damp     = eg.clamp(inp["damp"],  0.0, 0.99)
+        lpf_prev = reg["lpf"]
+        buf      = reg["buf"]
 
-        drive = eg.array([0.5, -0.5, 0.5, -0.5]) * x
+        write_idx = eg.sample_index() % delay_len
+        state     = buf[write_idx]
+        new_buf   = eg.array_set(buf, write_idx, x + decay * lpf_prev)
+
+        # Update one-pole LPF in the feedback path for next tick
+        lpf_out = (1.0 - damp) * state + damp * lpf_prev
+
+        return (
+            {"y": state},
+            {"lpf": lpf_out, "buf": new_buf},
+        )
+
+    return eg.define_module(
+        name=name,
+        inputs=["x", "decay", "damp"],
+        outputs=["y"],
+        regs={"lpf": 0.0, "buf": [0.0] * delay_len},
+        process=process,
+        sample_rate=44100.0,
+        input_defaults={"x": 0.0, "decay": 0.84, "damp": 0.4},
+    )
+
+
+def reverb(name="Reverb"):
+    """
+    Freeverb-inspired reverb.
+
+    Architecture (loosely modelled on Schroeder / Freeverb):
+      1. Input diffusion  : 2 cascaded allpass stages
+      2. Comb bank        : 4 parallel comb filters with proper delay lines
+      3. Output diffusion : 4 cascaded allpass stages
+      4. Wet/dry mix
+
+    Parameters
+    ----------
+    mix    : 0..1   wet/dry blend
+    decay  : 0..1   feedback gain (room size feel; try 0.8–0.95)
+    damp   : 0..1   high-frequency damping (0 = bright, 1 = very dark/warm)
+    """
+    # Freeverb-style comb delay lengths (samples at 44100 Hz, ~32–37 ms each).
+    # Different lengths decorrelate the channels and give the reverb its colour.
+    _COMB_DELAYS = [1557, 1617, 1491, 1422]
+    comb_filters = [
+        _define_comb_filter(d, f"{name}_Comb{i}")
+        for i, d in enumerate(_COMB_DELAYS)
+    ]
+
+    # Allpass coefficients — slightly detuned to break up flutter
+    _AP_IN   = [0.70, 0.65]
+    _AP_OUT  = [0.60, 0.55, 0.50, 0.45]
+
+    def process(inp, reg):
+        x    = inp["input"]
+        mix  = eg.clamp(inp["mix"],   0.0, 1.0)
         decay = eg.clamp(inp["decay"], 0.0, 0.99)
-        y = fdn(drive, matrix, decay)
+        damp  = eg.clamp(inp["damp"],  0.0, 1.0)
 
-        wet = y[0] + y[1] + y[2] + y[3]
-        mix = eg.clamp(inp["mix"], 0.0, 1.0)
+        # --- 1. Input diffusion ---
+        diff = x
+        for a in _AP_IN:
+            diff = _allpass_stage(diff, a)
+
+        # --- 2. Parallel comb bank ---
+        wet = 0.0
+        for cf in comb_filters:
+            wet = wet + cf(diff, decay, damp)
+        wet = wet * 0.25
+
+        # --- 3. Output diffusion ---
+        for a in _AP_OUT:
+            wet = _allpass_stage(wet, a)
+
+        # --- 4. Wet/dry blend ---
         output = (1.0 - mix) * inp["input"] + mix * wet
 
         return (
@@ -229,12 +328,12 @@ def reverb(name="Reverb"):
 
     return eg.define_module(
         name=name,
-        inputs=["input", "mix", "decay"],
+        inputs=["input", "mix", "decay", "damp"],
         outputs=["output"],
         regs={},
         process=process,
         sample_rate=44100.0,
-        input_defaults={"input": 0.0, "mix": 0.35, "decay": 0.85},
+        input_defaults={"input": 0.0, "mix": 0.35, "decay": 0.84, "damp": 0.4},
     )
 
 
