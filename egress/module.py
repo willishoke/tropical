@@ -1,10 +1,9 @@
 """
 define_module / define_pure_function DSL — pure Python.
 
-These functions mirror the pybind11 define_module_impl / define_pure_function_impl
-logic.  They build SymbolMaps, call the user's process function, capture
-SignalExpr outputs, then call the egress_module_spec_* C API to construct the
-module spec.  The result is a ModuleType whose instances can be added to a Graph.
+Builds SymbolMaps, calls the user's process function, captures SignalExpr
+outputs, then calls the egress_module_spec_* C API to construct the module
+spec.  The result is a ModuleType whose instances can be added to a Graph.
 """
 
 import ctypes

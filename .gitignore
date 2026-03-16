@@ -6,9 +6,6 @@ __pycache__/
 # C extensions
 *.so
 
-# legacy pybind11 app binary backup
-/egress.pybind11_backup
-
 # compiled shared library artifacts inside the Python package
 egress/libegress.dylib
 egress/libegress.so

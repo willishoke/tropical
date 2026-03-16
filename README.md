@@ -10,10 +10,6 @@
 
 Build the Python extension with `make`:
 
-### Python frontend (`pybind11`)
-
-A Python extension module (`egress`) is available via `pybind11`.
-
 ```bash
 make build
 make repl
