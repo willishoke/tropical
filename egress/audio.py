@@ -49,3 +49,26 @@ class DAC:
     def is_running(self) -> bool:
         """True if the audio stream is currently active."""
         return bool(_b.egress_dac_is_running(self._h))
+
+    def callback_stats(self) -> dict:
+        """
+        Return a dict of real-time callback diagnostics:
+          callback_count  -- total callbacks timed (excludes warmup buffers)
+          avg_callback_ms -- mean callback wall-clock time in ms
+          max_callback_ms -- worst-case callback wall-clock time in ms
+          underrun_count  -- non-zero RtAudioStreamStatus events (driver underruns)
+          overrun_count   -- callbacks that exceeded the buffer time budget
+        """
+        s = _b.EgressDacStats()
+        _b.egress_dac_get_stats(self._h, s)
+        return {
+            "callback_count":  s.callback_count,
+            "avg_callback_ms": s.avg_callback_ms,
+            "max_callback_ms": s.max_callback_ms,
+            "underrun_count":  s.underrun_count,
+            "overrun_count":   s.overrun_count,
+        }
+
+    def reset_stats(self) -> None:
+        """Reset all callback diagnostic counters."""
+        _b.egress_dac_reset_stats(self._h)

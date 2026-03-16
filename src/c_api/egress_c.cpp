@@ -3,13 +3,11 @@
 #include "expr/Expr.hpp"
 #include "graph/Graph.hpp"
 #include "graph/Module.hpp"
-#include "../lib/rtaudio/RtAudio.h"
+#include "dac/EgressDAC.hpp"
 
-#include <atomic>
 #include <cstdint>
 #include <limits>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -123,93 +121,6 @@ static Module::NestedModuleSpec nested_spec_from_builder(const EgressNestedSpecB
     ns.delay_state_specs, ns.nested_module_specs);
   return ns;
 }
-
-// DAC implementation
-struct EgressDAC
-{
-  Graph* graph;
-  RtAudio audio;
-  unsigned int sample_rate;
-  unsigned int channels;
-  bool running = false;
-
-  EgressDAC(Graph* g, unsigned int sr, unsigned int ch)
-    : graph(g), sample_rate(sr), channels(ch)
-  {
-  }
-
-  ~EgressDAC() { stop(); }
-
-  void start()
-  {
-    if (running)
-    {
-      return;
-    }
-    if (audio.getDeviceCount() < 1)
-    {
-      throw std::runtime_error("No audio output devices found.");
-    }
-
-    RtAudio::StreamParameters out_params;
-    out_params.deviceId = audio.getDefaultOutputDevice();
-    out_params.nChannels = channels;
-    out_params.firstChannel = 0;
-
-    graph->prime_numeric_jit();
-    unsigned int buffer_frames = graph->getBufferLength();
-
-    audio.openStream(
-      &out_params,
-      nullptr,
-      RTAUDIO_FLOAT64,
-      sample_rate,
-      &buffer_frames,
-      &EgressDAC::fill_buffer,
-      this);
-
-    audio.startStream();
-    running = true;
-  }
-
-  void stop()
-  {
-    if (!audio.isStreamOpen())
-    {
-      running = false;
-      return;
-    }
-    if (audio.isStreamRunning())
-    {
-      audio.stopStream();
-    }
-    audio.closeStream();
-    running = false;
-  }
-
-  static int fill_buffer(
-    void* output_buffer,
-    void*,
-    unsigned int n_buffer_frames,
-    double,
-    RtAudioStreamStatus,
-    void* user_data)
-  {
-    auto* self = static_cast<EgressDAC*>(user_data);
-    self->graph->process();
-    const auto & source = self->graph->outputBuffer;
-    auto* out = static_cast<double*>(output_buffer);
-    for (unsigned int i = 0; i < n_buffer_frames; ++i)
-    {
-      const double sample = i < source.size() ? source[i] : 0.0;
-      for (unsigned int c = 0; c < self->channels; ++c)
-      {
-        *out++ = sample;
-      }
-    }
-    return 0;
-  }
-};
 
 // Helper: cast ExprKind int to enum
 static expr::ExprKind kind_from_int(int kind)
@@ -888,6 +799,22 @@ void egress_dac_stop(egress_dac_t d)
 bool egress_dac_is_running(egress_dac_t d)
 {
   return static_cast<EgressDAC*>(d)->running;
+}
+
+void egress_dac_get_stats(egress_dac_t d, egress_dac_stats_t* out)
+{
+  if (!d || !out) return;
+  const auto s    = static_cast<EgressDAC*>(d)->stats();
+  out->callback_count  = s.callback_count;
+  out->avg_callback_ms = s.avg_callback_ms;
+  out->max_callback_ms = s.max_callback_ms;
+  out->underrun_count  = s.underrun_count;
+  out->overrun_count   = s.overrun_count;
+}
+
+void egress_dac_reset_stats(egress_dac_t d)
+{
+  if (d) static_cast<EgressDAC*>(d)->reset_stats();
 }
 
 } // extern "C"

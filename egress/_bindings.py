@@ -26,7 +26,7 @@ def _find_lib():
             return candidate
 
     # 3. Common build subdirectories
-    for build_dir in ("build", "build-jit", "build-profile", "build-jit-profile"):
+    for build_dir in ("build", "build-jit-profile", "build-jit-ctypes", "build-jit", "build-profile", "build-ctypes"):
         candidate_dir = os.path.join(parent, build_dir)
         for name in ("libegress.dylib", "libegress.so"):
             candidate = os.path.join(candidate_dir, name)
@@ -158,6 +158,18 @@ egress_dac_free       = _fn("egress_dac_free",       None, _c)
 egress_dac_start      = _fn("egress_dac_start",      None, _c)
 egress_dac_stop       = _fn("egress_dac_stop",       None, _c)
 egress_dac_is_running = _fn("egress_dac_is_running", _b,   _c)
+
+class EgressDacStats(ctypes.Structure):
+    _fields_ = [
+        ("callback_count",  ctypes.c_uint64),
+        ("avg_callback_ms", ctypes.c_double),
+        ("max_callback_ms", ctypes.c_double),
+        ("underrun_count",  ctypes.c_uint64),
+        ("overrun_count",   ctypes.c_uint64),
+    ]
+
+egress_dac_get_stats   = _fn("egress_dac_get_stats",   None, _c, ctypes.POINTER(EgressDacStats))
+egress_dac_reset_stats = _fn("egress_dac_reset_stats", None, _c)
 
 # ---------- ExprKind constants ----------
 EXPR_LITERAL        = 0

@@ -1,3 +1,4 @@
+#pragma once
 #include "graph/GraphTypes.hpp"
 #include "expr/ExprStructural.hpp"
 #include "graph/GraphRuntime.hpp"
@@ -390,6 +391,39 @@ class Graph
         advance_module_sample_indices(runtime);
       }
 
+      // Apply output gain envelope (fade-in / fade-out) to the completed buffer.
+      {
+        int fi = fade_in_remaining_.load(std::memory_order_relaxed);
+        int fo = fade_out_remaining_.load(std::memory_order_relaxed);
+        if (fi > 0 || fo != -1)
+        {
+          for (unsigned int s = 0; s < bufferLength_; ++s)
+          {
+            if (fi > 0)
+            {
+              const double t = 1.0 - static_cast<double>(fi) / kFadeSamples_;
+              outputBuffer[s] *= t * t * (3.0 - 2.0 * t);
+              --fi;
+            }
+            if (fo != -1)
+            {
+              if (fo > 0)
+              {
+                const double t = static_cast<double>(fo) / kFadeSamples_;
+                outputBuffer[s] *= t * t * (3.0 - 2.0 * t);
+                --fo;
+              }
+              else
+              {
+                outputBuffer[s] = 0.0;  // fade complete — hold at silence
+              }
+            }
+          }
+          fade_in_remaining_.store(fi, std::memory_order_relaxed);
+          fade_out_remaining_.store(fo, std::memory_order_relaxed);
+        }
+      }
+
       if (!runtime.taps.empty())
       {
         for (std::size_t tap_id = 0; tap_id < runtime.taps.size(); ++tap_id)
@@ -431,6 +465,30 @@ class Graph
         }
       }
 #endif
+    }
+
+    // Signal a fade-in: outputBuffer will be smoothstep-scaled from 0→1
+    // over the next `samples` samples. Called by the DAC before startStream.
+    void begin_fade_in(int samples = 2048)
+    {
+      fade_out_remaining_.store(-1, std::memory_order_relaxed);
+      fade_in_remaining_.store(samples, std::memory_order_relaxed);
+    }
+
+    // Signal a fade-out: outputBuffer will be smoothstep-scaled from 1→0
+    // over the next `samples` samples, then held at silence. Called by the
+    // DAC before stopStream.
+    void begin_fade_out(int samples = 2048)
+    {
+      fade_out_remaining_.store(samples, std::memory_order_release);
+    }
+
+    // Returns true once the fade-out has completed and the engine is holding
+    // at silence (fade_out_remaining_ == 0).  Poll this after begin_fade_out()
+    // to know when it is safe to call stopStream() without an audible click.
+    bool is_fade_out_complete() const
+    {
+      return fade_out_remaining_.load(std::memory_order_acquire) == 0;
     }
 
     void prime_numeric_jit()
@@ -1490,4 +1548,8 @@ class Graph
     mutable std::mutex profile_mutex_;
     std::unordered_map<std::string, ModuleTimingCounters> module_profile_stats_;
   #endif
+
+    static constexpr int kFadeSamples_ = 2048;
+    std::atomic<int> fade_in_remaining_{0};
+    std::atomic<int> fade_out_remaining_{-1};  // -1 = inactive; 0 = hold at silence
 };

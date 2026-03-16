@@ -1,5 +1,9 @@
 #pragma once
 
+#ifdef EGRESS_PROFILE
+#include <chrono>
+#endif
+
 class PythonDAC
 {
   public:
@@ -32,12 +36,17 @@ class PythonDAC
         throw std::runtime_error("No audio output devices found.");
       }
 
+      graph_.graph().prime_numeric_jit();
+      for (int i = 0; i < kPrimeCycles_; ++i)
+        graph_.graph().process();
+
+      graph_.graph().begin_fade_in();
+
       RtAudio::StreamParameters out_params;
       out_params.deviceId = audio_.getDefaultOutputDevice();
       out_params.nChannels = channels_;
       out_params.firstChannel = 0;
 
-      graph_.graph().prime_numeric_jit();
       unsigned int buffer_frames = graph_.graph().getBufferLength();
 
       audio_.openStream(
@@ -63,6 +72,23 @@ class PythonDAC
 
       if (audio_.isStreamRunning())
       {
+        graph_.graph().begin_fade_out();
+
+        // Poll until the engine confirms it is holding at silence, then wait
+        // one extra buffer period for that zeroed buffer to drain through the
+        // driver.  A generous timeout guards against a stalled audio thread.
+        const int buf_ms = (static_cast<int>(graph_.graph().getBufferLength()) * 1000)
+                           / static_cast<int>(sample_rate_);
+        const int timeout_ms = (2048 * 1000) / static_cast<int>(sample_rate_)
+                               + 4 * buf_ms + 50;
+        const auto deadline = std::chrono::steady_clock::now()
+                              + std::chrono::milliseconds(timeout_ms);
+        while (!graph_.graph().is_fade_out_complete()
+               && std::chrono::steady_clock::now() < deadline)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(buf_ms + 5));
         audio_.stopStream();
       }
       audio_.closeStream();
@@ -111,6 +137,8 @@ class PythonDAC
     }
 
   private:
+    static constexpr int kPrimeCycles_ = 4;
+
 #ifdef EGRESS_PROFILE
     static void update_max_callback_ns(std::atomic<uint64_t> & dst, uint64_t candidate)
     {

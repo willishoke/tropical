@@ -154,6 +154,17 @@ void         egress_dac_start(egress_dac_t);
 void         egress_dac_stop(egress_dac_t);
 bool         egress_dac_is_running(egress_dac_t);
 
+typedef struct {
+  uint64_t callback_count;
+  double   avg_callback_ms;
+  double   max_callback_ms;
+  uint64_t underrun_count;  /* non-zero RtAudioStreamStatus reported by driver */
+  uint64_t overrun_count;   /* callbacks that exceeded their time budget */
+} egress_dac_stats_t;
+
+void egress_dac_get_stats(egress_dac_t, egress_dac_stats_t* out);
+void egress_dac_reset_stats(egress_dac_t);
+
 #ifdef __cplusplus
 }
 #endif

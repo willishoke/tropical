@@ -53,3 +53,9 @@ set_target_properties(egress_core PROPERTIES OUTPUT_NAME "egress")
 # Install the public C header
 install(FILES src/c_api/egress_c.h DESTINATION include)
 install(TARGETS egress_core DESTINATION lib)
+
+# Fade-logic unit test (no audio hardware required)
+add_executable(test_fade test/test_fade.cpp)
+target_compile_features(test_fade PRIVATE cxx_std_17)
+target_link_libraries(test_fade PRIVATE egress_core)
+target_include_directories(test_fade PRIVATE src)

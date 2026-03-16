@@ -26,6 +26,7 @@ build/
 build-jit/
 build-profile/
 build-jit-profile/
+build-ctypes/
 develop-eggs/
 dist/
 downloads/
