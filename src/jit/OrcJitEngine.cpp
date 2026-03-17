@@ -763,6 +763,15 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
           lower_bounded);
         break;
       }
+      case NumericOp::Select:
+      {
+        llvm::Value * cond     = load_temp(instr.src_a);
+        llvm::Value * then_val = load_temp(instr.src_b);
+        llvm::Value * else_val = load_temp(instr.src_c);
+        llvm::Value * cond_bool = builder.CreateFCmpUNE(cond, llvm::ConstantFP::get(double_type, 0.0));
+        result = builder.CreateSelect(cond_bool, then_val, else_val);
+        break;
+      }
       case NumericOp::Log:
         result = builder.CreateCall(llvm_log, {load_temp(instr.src_a)});
         break;

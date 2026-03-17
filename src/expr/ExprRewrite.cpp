@@ -190,6 +190,20 @@ ExprSpecPtr simplify_expr(const ExprSpecPtr & expr_spec)
       }
       return expr::clamp_expr(value, min_value, max_value);
     }
+    case ExprKind::Select:
+    {
+      ExprSpecPtr cond = simplify_expr(expr_spec->lhs);
+      ExprSpecPtr then_val = simplify_expr(expr_spec->rhs);
+      ExprSpecPtr else_val = simplify_expr(expr_spec->args.empty() ? nullptr : expr_spec->args.front());
+      if (!cond)  { cond = expr::literal_expr(0.0); }
+      if (!then_val) { then_val = expr::literal_expr(0.0); }
+      if (!else_val) { else_val = expr::literal_expr(0.0); }
+      if (cond->kind == ExprKind::Literal && then_val->kind == ExprKind::Literal && else_val->kind == ExprKind::Literal)
+      {
+        return expr::literal_expr(expr_eval::select_values(cond->literal, then_val->literal, else_val->literal));
+      }
+      return expr::select_expr(cond, then_val, else_val);
+    }
     case ExprKind::Function:
       return expr::function_expr(expr_spec->param_count, simplify_expr(expr_spec->lhs));
     case ExprKind::Call:

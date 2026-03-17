@@ -159,6 +159,13 @@ def clamp(value, lo, hi):
     h = _b.check(_b.egress_expr_clamp(v._h, l._h, h_hi._h), "clamp")
     return SignalExpr._from_handle(h)
 
+def select(cond, then_val, else_val):
+    c = _coerce(cond)
+    t = _coerce(then_val)
+    e = _coerce(else_val)
+    h = _b.check(_b.egress_expr_select(c._h, t._h, e._h), "select")
+    return SignalExpr._from_handle(h)
+
 def pow_(lhs, rhs):
     return _binary(_b.EXPR_POW, lhs, rhs)
 

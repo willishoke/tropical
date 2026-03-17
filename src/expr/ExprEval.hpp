@@ -184,6 +184,14 @@ inline expr::Value clamp_values(const expr::Value & value, const expr::Value & m
   });
 }
 
+inline expr::Value select_values(const expr::Value & cond, const expr::Value & then_val, const expr::Value & else_val)
+{
+  return expr::map_ternary(cond, then_val, else_val,
+    [](const expr::Value & c, const expr::Value & t, const expr::Value & e) {
+      return expr::is_truthy(c) ? t : e;
+    });
+}
+
 inline expr::Value less_values(const expr::Value & lhs, const expr::Value & rhs)
 {
   return expr::map_binary(lhs, rhs, [](const expr::Value & left, const expr::Value & right) {

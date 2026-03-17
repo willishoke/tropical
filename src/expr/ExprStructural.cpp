@@ -139,6 +139,10 @@ bool is_pure_function_body(const ExprSpecPtr & expr_spec, unsigned int param_cou
       return is_pure_function_body(expr_spec->lhs, param_count) &&
              is_pure_function_body(expr_spec->rhs, param_count) &&
              is_pure_function_body(expr_spec->args.empty() ? nullptr : expr_spec->args.front(), param_count);
+    case ExprKind::Select:
+      return is_pure_function_body(expr_spec->lhs, param_count) &&
+             is_pure_function_body(expr_spec->rhs, param_count) &&
+             is_pure_function_body(expr_spec->args.empty() ? nullptr : expr_spec->args.front(), param_count);
     case ExprKind::ArraySet:
       return is_pure_function_body(expr_spec->lhs, param_count) &&
              is_pure_function_body(expr_spec->rhs, param_count) &&
@@ -209,6 +213,11 @@ ExprSpecPtr clone_with_subst(
     }
     case ExprKind::Clamp:
       return expr::clamp_expr(
+        clone_with_subst(expr_spec->lhs, args),
+        clone_with_subst(expr_spec->rhs, args),
+        clone_with_subst(expr_spec->args.empty() ? nullptr : expr_spec->args.front(), args));
+    case ExprKind::Select:
+      return expr::select_expr(
         clone_with_subst(expr_spec->lhs, args),
         clone_with_subst(expr_spec->rhs, args),
         clone_with_subst(expr_spec->args.empty() ? nullptr : expr_spec->args.front(), args));
@@ -294,6 +303,11 @@ std::size_t structural_hash(
       }
       break;
     case ExprKind::Clamp:
+      seed = hash_mix(seed, structural_hash(expr_spec->lhs, cache));
+      seed = hash_mix(seed, structural_hash(expr_spec->rhs, cache));
+      seed = hash_mix(seed, structural_hash(expr_spec->args.empty() ? nullptr : expr_spec->args.front(), cache));
+      break;
+    case ExprKind::Select:
       seed = hash_mix(seed, structural_hash(expr_spec->lhs, cache));
       seed = hash_mix(seed, structural_hash(expr_spec->rhs, cache));
       seed = hash_mix(seed, structural_hash(expr_spec->args.empty() ? nullptr : expr_spec->args.front(), cache));
@@ -412,6 +426,10 @@ bool structural_equal(const ExprSpecPtr & lhs, const ExprSpecPtr & rhs)
       return structural_equal(lhs->lhs, rhs->lhs) &&
              structural_equal(lhs->rhs, rhs->rhs) &&
              structural_equal(lhs->args.empty() ? nullptr : lhs->args.front(), rhs->args.empty() ? nullptr : rhs->args.front());
+    case ExprKind::Select:
+      return structural_equal(lhs->lhs, rhs->lhs) &&
+             structural_equal(lhs->rhs, rhs->rhs) &&
+             structural_equal(lhs->args.empty() ? nullptr : lhs->args.front(), rhs->args.empty() ? nullptr : rhs->args.front());
     case ExprKind::ArraySet:
       return structural_equal(lhs->lhs, rhs->lhs) &&
              structural_equal(lhs->rhs, rhs->rhs) &&
@@ -498,6 +516,11 @@ ExprSpecPtr inline_functions(const ExprSpecPtr & expr_spec, unsigned int inline_
     }
     case ExprKind::Clamp:
       return expr::clamp_expr(
+        inline_functions(expr_spec->lhs, inline_depth),
+        inline_functions(expr_spec->rhs, inline_depth),
+        inline_functions(expr_spec->args.empty() ? nullptr : expr_spec->args.front(), inline_depth));
+    case ExprKind::Select:
+      return expr::select_expr(
         inline_functions(expr_spec->lhs, inline_depth),
         inline_functions(expr_spec->rhs, inline_depth),
         inline_functions(expr_spec->args.empty() ? nullptr : expr_spec->args.front(), inline_depth));

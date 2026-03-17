@@ -99,7 +99,8 @@ enum class ExprKind
   Sin,
   Neg,
   BitNot,
-  SmoothedParam
+  SmoothedParam,
+  Select
 };
 
 struct ExprSpec
@@ -718,6 +719,16 @@ inline ExprSpecPtr clamp_expr(ExprSpecPtr value_expr, ExprSpecPtr min_expr, Expr
   expr->lhs = std::move(value_expr);
   expr->rhs = std::move(min_expr);
   expr->args.push_back(std::move(max_expr));
+  return expr;
+}
+
+inline ExprSpecPtr select_expr(ExprSpecPtr cond_expr, ExprSpecPtr then_expr, ExprSpecPtr else_expr)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::Select;
+  expr->lhs = std::move(cond_expr);
+  expr->rhs = std::move(then_expr);
+  expr->args.push_back(std::move(else_expr));
   return expr;
 }
 

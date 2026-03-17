@@ -44,7 +44,7 @@ inline bool is_local_unary(ExprKind kind)
 
 inline bool is_local_ternary(ExprKind kind)
 {
-  return kind == ExprKind::Clamp || kind == ExprKind::ArraySet;
+  return kind == ExprKind::Clamp || kind == ExprKind::ArraySet || kind == ExprKind::Select;
 }
 
 inline bool is_local_binary(ExprKind kind)

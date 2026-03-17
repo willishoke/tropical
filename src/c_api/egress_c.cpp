@@ -354,6 +354,17 @@ egress_expr_t egress_expr_clamp(egress_expr_t v, egress_expr_t lo, egress_expr_t
   catch (const std::exception & e) { set_error(e.what()); return nullptr; }
 }
 
+egress_expr_t egress_expr_select(egress_expr_t cond, egress_expr_t then_expr, egress_expr_t else_expr)
+{
+  try {
+    return new EgressExpr{expr::select_expr(
+      static_cast<EgressExpr*>(cond)->spec,
+      static_cast<EgressExpr*>(then_expr)->spec,
+      static_cast<EgressExpr*>(else_expr)->spec)};
+  }
+  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
+}
+
 egress_expr_t egress_expr_array_pack(const egress_expr_t* items, size_t n)
 {
   try

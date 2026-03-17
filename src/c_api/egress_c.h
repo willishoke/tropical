@@ -58,6 +58,7 @@ typedef void* egress_param_t;
 #define EGRESS_EXPR_NEG           37
 #define EGRESS_EXPR_BIT_NOT       38
 #define EGRESS_EXPR_SMOOTHED_PARAM 39
+#define EGRESS_EXPR_SELECT        40
 
 /* Error handling — thread-local; valid until next call on this thread */
 const char* egress_last_error(void);
@@ -87,6 +88,7 @@ egress_expr_t egress_expr_sample_index(void);
 egress_expr_t egress_expr_unary(int kind, egress_expr_t operand);
 egress_expr_t egress_expr_binary(int kind, egress_expr_t lhs, egress_expr_t rhs);
 egress_expr_t egress_expr_clamp(egress_expr_t v, egress_expr_t lo, egress_expr_t hi);
+egress_expr_t egress_expr_select(egress_expr_t cond, egress_expr_t then_expr, egress_expr_t else_expr);
 egress_expr_t egress_expr_array_pack(const egress_expr_t* items, size_t n);
 egress_expr_t egress_expr_index(egress_expr_t arr, egress_expr_t idx);
 egress_expr_t egress_expr_array_set(egress_expr_t arr, egress_expr_t idx, egress_expr_t val);

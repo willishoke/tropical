@@ -36,6 +36,7 @@ from .expr import (
     abs_ as abs,
     logical_not,
     clamp,
+    select,
     pow_ as pow,
     matmul,
     array,
@@ -100,7 +101,7 @@ def add_output(port_or_expr, graph=None):
 __all__ = [
     "Graph",
     "SignalExpr",
-    "sin", "log", "abs", "logical_not", "clamp", "pow", "matmul",
+    "sin", "log", "abs", "logical_not", "clamp", "select", "pow", "matmul",
     "array", "matrix", "array_set",
     "sample_rate", "sample_index",
     "define_module", "define_pure_function",

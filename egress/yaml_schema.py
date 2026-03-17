@@ -19,7 +19,7 @@ from . import _bindings as _b
 from .expr import (
     SignalExpr, _coerce,
     input_expr, register_expr, nested_output_expr, delay_value_expr,
-    clamp, array, array_set,
+    clamp, select, array, array_set,
     sample_rate as sample_rate_expr,
     sample_index as sample_index_expr,
 )
@@ -147,6 +147,12 @@ def _build_expr(node: dict, lctx: _LoadContext) -> SignalExpr:
         lo = _build_expr(args[1], lctx)
         hi = _build_expr(args[2], lctx)
         return clamp(v, lo, hi)
+
+    if op == "select":
+        cond = _build_expr(args[0], lctx)
+        then_val = _build_expr(args[1], lctx)
+        else_val = _build_expr(args[2], lctx)
+        return select(cond, then_val, else_val)
 
     if op == "index":
         arr_e = _build_expr(args[0], lctx)

@@ -99,6 +99,7 @@ bool Module::supports_numeric_jit_expr_kind(ExprKind kind) const
     case ExprKind::RShift:
     case ExprKind::Abs:
     case ExprKind::Clamp:
+    case ExprKind::Select:
     case ExprKind::Index:
     case ExprKind::ArraySet:
     case ExprKind::Log:
@@ -1701,6 +1702,10 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         break;
       case ExprKind::Clamp:
         jit_instr.op = egress_jit::NumericOp::Clamp;
+        reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        break;
+      case ExprKind::Select:
+        jit_instr.op = egress_jit::NumericOp::Select;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
         break;
       case ExprKind::Log:

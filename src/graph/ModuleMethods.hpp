@@ -981,6 +981,9 @@ void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & tem
       case ExprKind::Clamp:
         temps[instr.dst] = expr_eval::clamp_values(temps[instr.src_a], temps[instr.src_b], temps[instr.src_c]);
         break;
+      case ExprKind::Select:
+        temps[instr.dst] = expr_eval::select_values(temps[instr.src_a], temps[instr.src_b], temps[instr.src_c]);
+        break;
       case ExprKind::Log:
         temps[instr.dst] = expr_eval::log_value(temps[instr.src_a]);
         break;

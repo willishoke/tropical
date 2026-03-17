@@ -58,6 +58,7 @@ enum class NumericOp : uint8_t
   RShift,
   Abs,
   Clamp,
+  Select,
   Log,
   IndexArray,
   SetArrayElement,

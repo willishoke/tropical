@@ -93,6 +93,7 @@ egress_expr_sample_index   = _fn("egress_expr_sample_index",   _c)
 egress_expr_unary          = _fn("egress_expr_unary",          _c, _int, _c)
 egress_expr_binary         = _fn("egress_expr_binary",         _c, _int, _c, _c)
 egress_expr_clamp          = _fn("egress_expr_clamp",          _c, _c, _c, _c)
+egress_expr_select         = _fn("egress_expr_select",         _c, _c, _c, _c)
 egress_expr_array_pack     = _fn("egress_expr_array_pack",     _c, ctypes.POINTER(_c), _sz)
 egress_expr_index          = _fn("egress_expr_index",          _c, _c, _c)
 egress_expr_array_set      = _fn("egress_expr_array_set",      _c, _c, _c, _c)
@@ -219,6 +220,7 @@ EXPR_SIN            = 36
 EXPR_NEG            = 37
 EXPR_BIT_NOT        = 38
 EXPR_SMOOTHED_PARAM = 39
+EXPR_SELECT         = 40
 
 
 # ---------- Helpers ----------
