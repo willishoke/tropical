@@ -1,5 +1,5 @@
 import egress as eg
-import module_library as modlib
+import egress.module_library as modlib
 
 
 VCO = modlib.vco()

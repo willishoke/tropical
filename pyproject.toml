@@ -1,0 +1,25 @@
+[build-system]
+requires = ["scikit-build-core>=0.9"]
+build-backend = "scikit-build-core.build"
+
+[project]
+name = "egress"
+version = "0.1.0"
+description = "DSP graph synthesis library with JIT-compiled signal processing"
+requires-python = ">=3.9"
+dependencies = ["ruamel.yaml>=0.15"]
+readme = "README.md"
+license = {file = "LICENSE"}
+
+[tool.scikit-build]
+cmake.build-type = "Release"
+wheel.packages = ["egress"]
+
+[tool.scikit-build.cmake.define]
+EGRESS_BUILD_PYTHON = "ON"
+# Requires LLVM >= 15 built with static libraries:
+# -DLLVM_BUILD_LLVM_DYLIB=OFF -DLLVM_LINK_LLVM_DYLIB=OFF
+# Point CMake at it via -DLLVM_DIR or the LLVM_DIR env var.
+EGRESS_LLVM_ORC_JIT = "ON"
+EGRESS_LLVM_STATIC = "ON"
+LLVM_DIR = {env = "LLVM_DIR", default = "/opt/homebrew/opt/llvm/lib/cmake/llvm"}

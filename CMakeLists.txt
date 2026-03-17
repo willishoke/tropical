@@ -11,6 +11,7 @@ endif()
 option(EGRESS_BUILD_PYTHON "Build ctypes-based Python package support (installs egress/ package)" ON)
 option(EGRESS_PROFILE "Enable profiling counters and timing instrumentation" OFF)
 option(EGRESS_LLVM_ORC_JIT "Enable LLVM ORC JIT backend in C++ runtime" OFF)
+option(EGRESS_LLVM_STATIC "Link LLVM statically into libegress for self-contained wheel distribution" OFF)
 
 # RtAudio library target
 add_library(rtaudio STATIC lib/rtaudio/RtAudio.cpp)
@@ -47,6 +48,21 @@ if(EGRESS_LLVM_ORC_JIT)
     llvm_map_components_to_libnames(LLVM_ORC_JIT_LIBS
         Core OrcJIT ExecutionEngine native nativecodegen Support)
     target_link_libraries(egress_core PRIVATE ${LLVM_ORC_JIT_LIBS})
+
+    if(EGRESS_LLVM_STATIC)
+        # Hide LLVM symbols so they don't leak out of libegress and conflict
+        # with any other LLVM loaded in the same process.
+        if(APPLE)
+            target_link_options(egress_core PRIVATE
+                -Wl,-dead_strip
+                -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/cmake/egress_exports.txt)
+        elseif(UNIX)
+            target_link_options(egress_core PRIVATE
+                -Wl,--gc-sections
+                -Wl,--exclude-libs,ALL
+                -Wl,--version-script,${CMAKE_CURRENT_SOURCE_DIR}/cmake/egress.map)
+        endif()
+    endif()
 endif()
 
 target_compile_features(egress_core PRIVATE cxx_std_17)
@@ -59,7 +75,13 @@ set_target_properties(egress_core PROPERTIES OUTPUT_NAME "egress")
 
 # Install the public C header
 install(FILES src/c_api/egress_c.h DESTINATION include)
-install(TARGETS egress_core DESTINATION lib)
+if(EGRESS_BUILD_PYTHON)
+    # Place libegress adjacent to the Python package so _bindings.py finds it
+    # via its path-1 lookup (next to the egress/ dir in site-packages).
+    install(TARGETS egress_core DESTINATION egress)
+else()
+    install(TARGETS egress_core DESTINATION lib)
+endif()
 
 # Fade-logic unit test (no audio hardware required)
 add_executable(test_fade test/test_fade.cpp)

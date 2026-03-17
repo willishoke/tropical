@@ -26,7 +26,7 @@ Run:
 """
 
 import egress as eg
-import module_library as modlib
+import egress.module_library as modlib
 
 SAMPLE_RATE = 44100
 
