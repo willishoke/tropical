@@ -23,9 +23,12 @@ __all__ = [
 
 
 def _coerce(value):
-    """Convert a Python scalar or SignalExpr to a SignalExpr."""
+    """Convert a Python scalar, Param, or SignalExpr to a SignalExpr."""
     if isinstance(value, SignalExpr):
         return value
+    # Avoid circular import: check by class name for Param
+    if type(value).__name__ == "Param" and hasattr(value, "_as_expr"):
+        return value._as_expr()
     if isinstance(value, bool):
         return SignalExpr._from_handle(_b.check(
             _b.egress_expr_literal_bool(value), "literal_bool"))
@@ -39,7 +42,7 @@ def _coerce(value):
         return array(value)
     raise TypeError(
         f"Cannot coerce {type(value).__name__} to SignalExpr; "
-        "expected SignalExpr, bool, int, float, or list/tuple."
+        "expected SignalExpr, Param, bool, int, float, or list/tuple."
     )
 
 

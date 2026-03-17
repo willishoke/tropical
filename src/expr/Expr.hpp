@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -10,6 +11,21 @@
 
 namespace egress_expr
 {
+
+// ControlParam: lock-free parameter for control-rate values.
+// Written from UI/control thread, read per-sample by the DSP evaluator.
+// One-pole lowpass smoothing (time_const in seconds) is applied automatically.
+struct ControlParam
+{
+  std::atomic<double> value;
+  double time_const;
+
+  ControlParam(double init, double tc) : value(init), time_const(tc) {}
+
+  // Non-copyable (std::atomic is non-copyable)
+  ControlParam(const ControlParam &) = delete;
+  ControlParam & operator=(const ControlParam &) = delete;
+};
 enum class ValueType : uint8_t
 {
   Int,
@@ -82,7 +98,8 @@ enum class ExprKind
   Log,
   Sin,
   Neg,
-  BitNot
+  BitNot,
+  SmoothedParam
 };
 
 struct ExprSpec
@@ -96,6 +113,8 @@ struct ExprSpec
   std::shared_ptr<ExprSpec> lhs;
   std::shared_ptr<ExprSpec> rhs;
   std::vector<std::shared_ptr<ExprSpec>> args;
+  // For SmoothedParam: raw non-owning pointer; EgressParam/Param object must outlive module
+  ControlParam * control_param = nullptr;
 };
 
 using ExprSpecPtr = std::shared_ptr<ExprSpec>;
@@ -699,6 +718,16 @@ inline ExprSpecPtr clamp_expr(ExprSpecPtr value_expr, ExprSpecPtr min_expr, Expr
   expr->lhs = std::move(value_expr);
   expr->rhs = std::move(min_expr);
   expr->args.push_back(std::move(max_expr));
+  return expr;
+}
+
+// Creates a SmoothedParam expression. The ControlParam pointer is non-owning;
+// the caller (EgressParam) must ensure lifetime extends past any module using this expr.
+inline ExprSpecPtr smoothed_param_expr(ControlParam * param)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::SmoothedParam;
+  expr->control_param = param;
   return expr;
 }
 }  // namespace egress_expr

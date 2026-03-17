@@ -100,6 +100,13 @@ egress_expr_function       = _fn("egress_expr_function",       _c, _u, _c)
 egress_expr_call           = _fn("egress_expr_call",           _c, _c, ctypes.POINTER(_c), _sz)
 egress_expr_free           = _fn("egress_expr_free",           None, _c)
 
+# ---------- ControlParam API ----------
+egress_param_new  = _fn("egress_param_new",  _c,   _d, _d)
+egress_param_free = _fn("egress_param_free", None, _c)
+egress_param_set  = _fn("egress_param_set",  None, _c, _d)
+egress_param_get  = _fn("egress_param_get",  _d,   _c)
+egress_expr_param = _fn("egress_expr_param", _c,   _c)
+
 # ---------- Module spec builder API ----------
 egress_module_spec_new                = _fn("egress_module_spec_new",                _c, _u, _d)
 egress_module_spec_add_output         = _fn("egress_module_spec_add_output",         None, _c, _c)
@@ -211,6 +218,7 @@ EXPR_LOG            = 35
 EXPR_SIN            = 36
 EXPR_NEG            = 37
 EXPR_BIT_NOT        = 38
+EXPR_SMOOTHED_PARAM = 39
 
 
 # ---------- Helpers ----------

@@ -117,6 +117,31 @@ class Module
         }
       }
 
+      // Pre-walk expression trees to find SmoothedParam nodes and allocate anonymous registers.
+      // Anonymous registers are appended after user-defined registers in registers_/next_registers_.
+      user_register_count_ = static_cast<uint32_t>(registers_.size());
+      {
+        uint32_t next_anon_idx = 0;
+        for (const auto & e : output_exprs) walk_expr_for_params(e, param_anon_reg_map_, next_anon_idx);
+        for (const auto & e : register_exprs) walk_expr_for_params(e, param_anon_reg_map_, next_anon_idx);
+        for (const auto & ds : delay_state_specs) walk_expr_for_params(ds.update_expr, param_anon_reg_map_, next_anon_idx);
+        has_smoothed_params_ = !param_anon_reg_map_.empty();
+        if (has_smoothed_params_)
+        {
+          // Build sorted list so register slots are assigned deterministically
+          std::vector<std::pair<uint32_t, egress_expr::ControlParam *>> sorted_anon;
+          sorted_anon.reserve(param_anon_reg_map_.size());
+          for (const auto & kv : param_anon_reg_map_) sorted_anon.push_back({kv.second, kv.first});
+          std::sort(sorted_anon.begin(), sorted_anon.end());
+          for (const auto & [idx, p] : sorted_anon)
+          {
+            const double init = p->value.load(std::memory_order_relaxed);
+            registers_.push_back(egress_expr::float_value(init));
+            next_registers_.push_back(egress_expr::float_value(init));
+          }
+        }
+      }
+
       program_ = compile_program(output_exprs, register_exprs);
       std::vector<ExprSpecPtr> delay_update_exprs;
       delay_update_exprs.reserve(delay_state_specs.size());
@@ -173,9 +198,13 @@ class Module
       temps_.assign(temp_register_count, expr::float_value(0.0));
 
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_)
+      if (!has_dynamic_registers_ && !has_smoothed_params_)
       {
         initialize_numeric_jit(inputs);
+      }
+      else if (has_smoothed_params_)
+      {
+        jit_status_ = "numeric JIT disabled for SmoothedParam (one-pole smoother)";
       }
       else
       {
@@ -245,11 +274,38 @@ class Module
       std::unordered_map<std::size_t, std::vector<std::pair<ExprSpecPtr, uint32_t>>> & memo,
       std::unordered_map<const ExprSpec *, std::size_t> & hash_cache);
 
-    void eval_program(const CompiledProgram & expr, std::vector<Value> & temps) const;
+    void eval_program(const CompiledProgram & expr, std::vector<Value> & temps);
 
     const Value & materialize_output_value(unsigned int output_id, bool previous = false);
 
+    // Walk an expression tree and collect unique ControlParam pointers.
+    // Assigns each a sequential anonymous register index (0-based) in map.
+    static void walk_expr_for_params(
+      const ExprSpecPtr & expr,
+      std::unordered_map<egress_expr::ControlParam *, uint32_t> & map,
+      uint32_t & next_idx)
+    {
+      if (!expr) return;
+      if (expr->kind == ExprKind::SmoothedParam)
+      {
+        if (expr->control_param && map.find(expr->control_param) == map.end())
+        {
+          map[expr->control_param] = next_idx++;
+        }
+        return;
+      }
+      walk_expr_for_params(expr->lhs, map, next_idx);
+      walk_expr_for_params(expr->rhs, map, next_idx);
+      for (const auto & arg : expr->args)
+      {
+        walk_expr_for_params(arg, map, next_idx);
+      }
+    }
+
     unsigned int input_count_ = 0;
+    uint32_t user_register_count_ = 0;
+    std::unordered_map<egress_expr::ControlParam *, uint32_t> param_anon_reg_map_;
+    bool has_smoothed_params_ = false;
     CompiledProgram program_;
     CompiledProgram composite_output_program_;
     CompiledProgram composite_register_program_;

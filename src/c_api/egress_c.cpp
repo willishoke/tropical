@@ -33,6 +33,16 @@ struct EgressExpr
   ExprSpecPtr spec;
 };
 
+struct EgressParam
+{
+  expr::ControlParam * param;
+  EgressParam(double init, double tc) : param(new expr::ControlParam(init, tc)) {}
+  ~EgressParam() { delete param; }
+  // Non-copyable
+  EgressParam(const EgressParam &) = delete;
+  EgressParam & operator=(const EgressParam &) = delete;
+};
+
 struct EgressValue
 {
   Value value;
@@ -199,6 +209,47 @@ int64_t egress_value_to_int(egress_value_t v)
 void egress_value_free(egress_value_t v)
 {
   delete static_cast<EgressValue*>(v);
+}
+
+// ---------- ControlParam API ----------
+
+egress_param_t egress_param_new(double init_value, double time_const)
+{
+  try { return new EgressParam(init_value, time_const); }
+  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
+}
+
+void egress_param_free(egress_param_t p)
+{
+  delete static_cast<EgressParam *>(p);
+}
+
+void egress_param_set(egress_param_t p, double value)
+{
+  if (p)
+  {
+    static_cast<EgressParam *>(p)->param->value.store(value, std::memory_order_relaxed);
+  }
+}
+
+double egress_param_get(egress_param_t p)
+{
+  if (!p) return 0.0;
+  return static_cast<EgressParam *>(p)->param->value.load(std::memory_order_relaxed);
+}
+
+egress_expr_t egress_expr_param(egress_param_t p)
+{
+  try
+  {
+    if (!p)
+    {
+      set_error("egress_expr_param: null param handle");
+      return nullptr;
+    }
+    return new EgressExpr{expr::smoothed_param_expr(static_cast<EgressParam *>(p)->param)};
+  }
+  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
 }
 
 // ---------- Expression factory API ----------

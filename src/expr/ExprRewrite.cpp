@@ -68,6 +68,7 @@ ExprSpecPtr simplify_expr(const ExprSpecPtr & expr_spec)
     case ExprKind::DelayValue:
     case ExprKind::SampleRate:
     case ExprKind::SampleIndex:
+    case ExprKind::SmoothedParam:
       return expr_spec;
     case ExprKind::ArrayPack:
     {

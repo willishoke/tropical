@@ -55,6 +55,7 @@ from .module import (
     _InputPort,
 )
 from .audio import DAC
+from .param import Param
 
 
 def connect(out, inp):
@@ -106,4 +107,5 @@ __all__ = [
     "ModuleType", "PureFunction",
     "DAC",
     "connect", "disconnect", "add_output",
+    "Param",
 ]

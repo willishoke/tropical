@@ -277,6 +277,10 @@ std::size_t structural_hash(
         seed = hash_mix(seed, std::hash<unsigned int>{}(expr_spec->output_id));
       }
       break;
+    case ExprKind::SmoothedParam:
+      // Use the pointer address as the hash — each ControlParam is unique
+      seed = hash_mix(seed, std::hash<const void *>{}(expr_spec->control_param));
+      break;
     case ExprKind::Function:
       seed = hash_mix(seed, std::hash<unsigned int>{}(expr_spec->param_count));
       seed = hash_mix(seed, structural_hash(expr_spec->lhs, cache));
@@ -386,6 +390,9 @@ bool structural_equal(const ExprSpecPtr & lhs, const ExprSpecPtr & rhs)
       return lhs->slot_id == rhs->slot_id && lhs->output_id == rhs->output_id;
     case ExprKind::DelayValue:
       return lhs->slot_id == rhs->slot_id;
+    case ExprKind::SmoothedParam:
+      // Two SmoothedParam nodes are equal only if they reference the same ControlParam
+      return lhs->control_param == rhs->control_param;
     case ExprKind::Function:
       return lhs->param_count == rhs->param_count && structural_equal(lhs->lhs, rhs->lhs);
     case ExprKind::Call:
@@ -522,7 +529,8 @@ ExprSpecPtr inline_functions(const ExprSpecPtr & expr_spec, unsigned int inline_
       expr_spec->kind == ExprKind::NestedValue ||
       expr_spec->kind == ExprKind::DelayValue ||
       expr_spec->kind == ExprKind::SampleRate ||
-      expr_spec->kind == ExprKind::SampleIndex)
+      expr_spec->kind == ExprKind::SampleIndex ||
+      expr_spec->kind == ExprKind::SmoothedParam)
   {
     return expr_spec;
   }

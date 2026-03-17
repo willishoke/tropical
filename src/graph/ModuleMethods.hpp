@@ -750,6 +750,16 @@ uint32_t Module::compile_expr_node(
         instr.args.push_back(compile_expr_node(arg, compiled, memo, hash_cache));
       }
       break;
+    case ExprKind::SmoothedParam:
+    {
+      // Assign the anonymous register slot (user_register_count_ + anon_index)
+      const auto it = param_anon_reg_map_.find(expr->control_param);
+      instr.slot_id = (it != param_anon_reg_map_.end())
+        ? (user_register_count_ + it->second)
+        : 0;
+      instr.control_param = expr->control_param;
+      break;
+    }
     default:
       if (egress_module_detail::is_local_unary(expr->kind))
       {
@@ -778,7 +788,7 @@ uint32_t Module::compile_expr_node(
   return compiled.instructions.back().dst;
 }
 
-void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & temps) const
+void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & temps)
 {
   if (expr.instructions.empty())
   {
@@ -986,6 +996,35 @@ void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & tem
       case ExprKind::Ref:
         temps[instr.dst] = expr::float_value(0.0);
         break;
+      case ExprKind::SmoothedParam:
+      {
+        // One-pole lowpass smoother: y[n] = y[n-1] + coeff * (target - y[n-1])
+        // coeff = 1 - exp(-1 / (time_const * sample_rate))
+        // The anonymous register at slot_id stores the current smoothed value.
+        // Writing to next_registers_ here is safe: the slot is beyond user register range
+        // and the register swap at end of process() will persist the updated state.
+        if (instr.control_param && instr.slot_id < registers_.size())
+        {
+          const double target = instr.control_param->value.load(std::memory_order_relaxed);
+          const double current = egress_expr::to_float64(registers_[instr.slot_id]);
+          const double tc = instr.control_param->time_const;
+          const double coeff = (tc > 0.0)
+            ? 1.0 - std::exp(-1.0 / (tc * sample_rate_))
+            : 1.0;
+          const double new_val = current + coeff * (target - current);
+          temps[instr.dst] = egress_expr::float_value(new_val);
+          // Side-effect: advance smoother state (written to next_registers_, swapped end of process())
+          if (instr.slot_id < next_registers_.size())
+          {
+            next_registers_[instr.slot_id] = egress_expr::float_value(new_val);
+          }
+        }
+        else
+        {
+          temps[instr.dst] = egress_expr::float_value(0.0);
+        }
+        break;
+      }
     }
   }
 }

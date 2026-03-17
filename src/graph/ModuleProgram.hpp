@@ -20,6 +20,8 @@ struct Instr
   unsigned int output_id = 0;
   Value literal;
   std::vector<uint32_t> args;
+  // For SmoothedParam: raw non-owning pointer to the control parameter
+  egress_expr::ControlParam * control_param = nullptr;
 };
 
 struct CompiledProgram

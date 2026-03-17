@@ -15,6 +15,7 @@ typedef void* egress_value_t;
 typedef void* egress_module_spec_t;
 typedef void* egress_nested_spec_t;
 typedef void* egress_dac_t;
+typedef void* egress_param_t;
 
 /* ExprKind integer constants — match ExprKind enum order in Expr.hpp */
 #define EGRESS_EXPR_LITERAL       0
@@ -56,6 +57,7 @@ typedef void* egress_dac_t;
 #define EGRESS_EXPR_SIN           36
 #define EGRESS_EXPR_NEG           37
 #define EGRESS_EXPR_BIT_NOT       38
+#define EGRESS_EXPR_SMOOTHED_PARAM 39
 
 /* Error handling — thread-local; valid until next call on this thread */
 const char* egress_last_error(void);
@@ -91,6 +93,19 @@ egress_expr_t egress_expr_array_set(egress_expr_t arr, egress_expr_t idx, egress
 egress_expr_t egress_expr_function(unsigned int param_count, egress_expr_t body);
 egress_expr_t egress_expr_call(egress_expr_t callee, const egress_expr_t* args, size_t n);
 void          egress_expr_free(egress_expr_t);
+
+/* ---------- ControlParam API ---------- */
+/* Create a smoothed parameter. init_value is the starting value; time_const is the
+   one-pole lowpass time constant in seconds (e.g. 0.01 = ~10ms ramp). */
+egress_param_t egress_param_new(double init_value, double time_const);
+void           egress_param_free(egress_param_t);
+/* Thread-safe write (atomic store) — call from UI/control thread */
+void           egress_param_set(egress_param_t, double value);
+/* Thread-safe read (atomic load) */
+double         egress_param_get(egress_param_t);
+/* Create a SmoothedParam expression that can be used in module outputs/registers.
+   The Param must outlive all modules that reference the returned expression. */
+egress_expr_t  egress_expr_param(egress_param_t);
 
 /* ---------- Module spec builder API ---------- */
 egress_module_spec_t egress_module_spec_new(unsigned int input_count, double sample_rate);
