@@ -113,6 +113,10 @@ def _build_expr(node: dict, lctx: _LoadContext) -> SignalExpr:
         p = lctx.param_registry[node["name"]]
         return p._as_expr()
 
+    if op == "trigger_param":
+        p = lctx.param_registry[node["name"]]
+        return p._as_expr()
+
     if op == "sample_rate":
         return sample_rate_expr()
 

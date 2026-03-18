@@ -106,7 +106,9 @@ egress_param_new  = _fn("egress_param_new",  _c,   _d, _d)
 egress_param_free = _fn("egress_param_free", None, _c)
 egress_param_set  = _fn("egress_param_set",  None, _c, _d)
 egress_param_get  = _fn("egress_param_get",  _d,   _c)
-egress_expr_param = _fn("egress_expr_param", _c,   _c)
+egress_expr_param         = _fn("egress_expr_param",         _c, _c)
+egress_param_new_trigger  = _fn("egress_param_new_trigger",  _c)
+egress_expr_trigger_param = _fn("egress_expr_trigger_param", _c, _c)
 
 # ---------- Module spec builder API ----------
 egress_module_spec_new                = _fn("egress_module_spec_new",                _c, _u, _d)
@@ -221,6 +223,7 @@ EXPR_NEG            = 37
 EXPR_BIT_NOT        = 38
 EXPR_SMOOTHED_PARAM = 39
 EXPR_SELECT         = 40
+EXPR_TRIGGER_PARAM  = 41
 
 
 # ---------- Helpers ----------

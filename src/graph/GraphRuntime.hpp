@@ -268,6 +268,9 @@ struct RuntimeState
   std::vector<MixExpr> mix_exprs;
   std::vector<OutputTap> taps;
   std::unique_ptr<FusedGraphState> fused_graph;
+  // All TriggerParam ControlParam pointers across all modules.
+  // The Graph snapshots these once per sample before module processing.
+  std::vector<egress_expr::ControlParam *> trigger_params;
 };
 
 #ifdef EGRESS_PROFILE

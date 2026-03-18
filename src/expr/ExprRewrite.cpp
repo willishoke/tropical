@@ -69,6 +69,7 @@ ExprSpecPtr simplify_expr(const ExprSpecPtr & expr_spec)
     case ExprKind::SampleRate:
     case ExprKind::SampleIndex:
     case ExprKind::SmoothedParam:
+    case ExprKind::TriggerParam:
       return expr_spec;
     case ExprKind::ArrayPack:
     {
@@ -605,7 +606,9 @@ ExprSpecPtr replace_refs_with_zero(
       expr_spec->kind == ExprKind::NestedValue ||
       expr_spec->kind == ExprKind::DelayValue ||
       expr_spec->kind == ExprKind::SampleRate ||
-      expr_spec->kind == ExprKind::SampleIndex)
+      expr_spec->kind == ExprKind::SampleIndex ||
+      expr_spec->kind == ExprKind::SmoothedParam ||
+      expr_spec->kind == ExprKind::TriggerParam)
   {
     return expr_spec;
   }

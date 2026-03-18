@@ -59,6 +59,7 @@ typedef void* egress_param_t;
 #define EGRESS_EXPR_BIT_NOT       38
 #define EGRESS_EXPR_SMOOTHED_PARAM 39
 #define EGRESS_EXPR_SELECT        40
+#define EGRESS_EXPR_TRIGGER_PARAM 41
 
 /* Error handling — thread-local; valid until next call on this thread */
 const char* egress_last_error(void);
@@ -108,6 +109,12 @@ double         egress_param_get(egress_param_t);
 /* Create a SmoothedParam expression that can be used in module outputs/registers.
    The Param must outlive all modules that reference the returned expression. */
 egress_expr_t  egress_expr_param(egress_param_t);
+
+/* Create a trigger parameter. Fires once per frame: set value to 1.0 from the UI
+   thread; the DSP evaluator reads and atomically clears it each frame.
+   The Param must outlive all modules that reference the returned expression. */
+egress_param_t egress_param_new_trigger(void);
+egress_expr_t  egress_expr_trigger_param(egress_param_t);
 
 /* ---------- Module spec builder API ---------- */
 egress_module_spec_t egress_module_spec_new(unsigned int input_count, double sample_rate);

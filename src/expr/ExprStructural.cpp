@@ -287,6 +287,7 @@ std::size_t structural_hash(
       }
       break;
     case ExprKind::SmoothedParam:
+    case ExprKind::TriggerParam:
       // Use the pointer address as the hash — each ControlParam is unique
       seed = hash_mix(seed, std::hash<const void *>{}(expr_spec->control_param));
       break;
@@ -405,7 +406,8 @@ bool structural_equal(const ExprSpecPtr & lhs, const ExprSpecPtr & rhs)
     case ExprKind::DelayValue:
       return lhs->slot_id == rhs->slot_id;
     case ExprKind::SmoothedParam:
-      // Two SmoothedParam nodes are equal only if they reference the same ControlParam
+    case ExprKind::TriggerParam:
+      // Two param nodes are equal only if they reference the same ControlParam
       return lhs->control_param == rhs->control_param;
     case ExprKind::Function:
       return lhs->param_count == rhs->param_count && structural_equal(lhs->lhs, rhs->lhs);
@@ -553,7 +555,8 @@ ExprSpecPtr inline_functions(const ExprSpecPtr & expr_spec, unsigned int inline_
       expr_spec->kind == ExprKind::DelayValue ||
       expr_spec->kind == ExprKind::SampleRate ||
       expr_spec->kind == ExprKind::SampleIndex ||
-      expr_spec->kind == ExprKind::SmoothedParam)
+      expr_spec->kind == ExprKind::SmoothedParam ||
+      expr_spec->kind == ExprKind::TriggerParam)
   {
     return expr_spec;
   }

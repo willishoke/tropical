@@ -23,11 +23,11 @@ __all__ = [
 
 
 def _coerce(value):
-    """Convert a Python scalar, Param, or SignalExpr to a SignalExpr."""
+    """Convert a Python scalar, Param, Trigger, or SignalExpr to a SignalExpr."""
     if isinstance(value, SignalExpr):
         return value
-    # Avoid circular import: check by class name for Param
-    if type(value).__name__ == "Param" and hasattr(value, "_as_expr"):
+    # Avoid circular import: check by class name for Param/Trigger
+    if type(value).__name__ in ("Param", "Trigger") and hasattr(value, "_as_expr"):
         return value._as_expr()
     if isinstance(value, bool):
         return SignalExpr._from_handle(_b.check(
