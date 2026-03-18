@@ -22,12 +22,15 @@ Or as a context manager::
         ...
 """
 
+import logging
 import socket
 import struct
 import threading
 from typing import Callable, Optional, Tuple
 
 from .param import Param
+
+log = logging.getLogger(__name__)
 
 __all__ = ["UDPParamListener", "parse_text", "parse_osc"]
 
@@ -80,7 +83,8 @@ def parse_osc(data: bytes) -> Optional[Tuple[str, float]]:
         else:
             return None
         return address, float(value)
-    except Exception:
+    except Exception as exc:
+        log.debug("parse_osc: discarding malformed datagram: %s", exc)
         return None
 
 
@@ -123,6 +127,16 @@ class UDPParamListener:
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._bound_port: Optional[int] = None
+
+    @property
+    def port(self) -> Optional[int]:
+        """The port the socket is actually bound to.
+
+        Returns None before start() is called. If the listener was constructed
+        with port=0, this reflects the OS-assigned ephemeral port.
+        """
+        return self._bound_port
 
     @staticmethod
     def _normalise(address: str) -> str:
@@ -177,10 +191,11 @@ class UDPParamListener:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._sock.bind((self._host, self._port))
+        self._bound_port = self._sock.getsockname()[1]
         self._sock.settimeout(0.1)
         self._running = True
         self._thread = threading.Thread(
-            target=self._recv_loop, daemon=True, name=f"egress-udp-{self._port}"
+            target=self._recv_loop, daemon=True, name=f"egress-udp-{self._bound_port}"
         )
         self._thread.start()
 
@@ -192,10 +207,17 @@ class UDPParamListener:
         self._running = False
         if self._thread is not None:
             self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                log.warning(
+                    "UDPParamListener: receiver thread did not stop within 2s "
+                    "(port=%s); it may still hold the socket.",
+                    self._bound_port,
+                )
             self._thread = None
         if self._sock is not None:
             self._sock.close()
             self._sock = None
+        self._bound_port = None
 
     def _recv_loop(self) -> None:
         while self._running:
