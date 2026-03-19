@@ -1,0 +1,178 @@
+schema_version: 1
+name: Phaser
+sample_rate: 44100.0
+inputs: [input, feedback, lfo_speed]
+outputs: [output, lfo]
+input_defaults:
+  input: 0.0
+  feedback: 0.4
+  lfo_speed: 0.2
+
+registers:
+  - name: fb
+    init: 0.0
+    update:
+      op: nested_output
+      nested_id: stage4
+      output_index: 0
+
+nested_modules:
+  - id: stage1
+    type: AllpassStage
+    input_exprs:
+      # x = input + feedback * reg["fb"]
+      - op: add
+        args:
+          - op: input
+            name: input
+          - op: mul
+            args:
+              - op: input
+                name: feedback
+              - op: register
+                name: fb
+      # a = 0.6 + 0.35 * sin(TWO_PI * sample_index * lfo_speed / sample_rate)
+      - op: add
+        args:
+          - op: literal
+            value: 0.6
+          - op: mul
+            args:
+              - op: literal
+                value: 0.35
+              - op: sin
+                args:
+                  - op: div
+                    args:
+                      - op: mul
+                        args:
+                          - op: mul
+                            args:
+                              - op: literal
+                                value: 6.283185307179586
+                              - op: sample_index
+                          - op: input
+                            name: lfo_speed
+                      - op: sample_rate
+
+  - id: stage2
+    type: AllpassStage
+    input_exprs:
+      - op: nested_output
+        nested_id: stage1
+        output_index: 0
+      - op: add
+        args:
+          - op: literal
+            value: 0.6
+          - op: mul
+            args:
+              - op: literal
+                value: 0.35
+              - op: sin
+                args:
+                  - op: div
+                    args:
+                      - op: mul
+                        args:
+                          - op: mul
+                            args:
+                              - op: literal
+                                value: 6.283185307179586
+                              - op: sample_index
+                          - op: input
+                            name: lfo_speed
+                      - op: sample_rate
+
+  - id: stage3
+    type: AllpassStage
+    input_exprs:
+      - op: nested_output
+        nested_id: stage2
+        output_index: 0
+      - op: add
+        args:
+          - op: literal
+            value: 0.6
+          - op: mul
+            args:
+              - op: literal
+                value: 0.35
+              - op: sin
+                args:
+                  - op: div
+                    args:
+                      - op: mul
+                        args:
+                          - op: mul
+                            args:
+                              - op: literal
+                                value: 6.283185307179586
+                              - op: sample_index
+                          - op: input
+                            name: lfo_speed
+                      - op: sample_rate
+
+  - id: stage4
+    type: AllpassStage
+    input_exprs:
+      - op: nested_output
+        nested_id: stage3
+        output_index: 0
+      - op: add
+        args:
+          - op: literal
+            value: 0.6
+          - op: mul
+            args:
+              - op: literal
+                value: 0.35
+              - op: sin
+                args:
+                  - op: div
+                    args:
+                      - op: mul
+                        args:
+                          - op: mul
+                            args:
+                              - op: literal
+                                value: 6.283185307179586
+                              - op: sample_index
+                          - op: input
+                            name: lfo_speed
+                      - op: sample_rate
+
+output_exprs:
+  output:
+    # 0.5 * input + 0.5 * stage4_output
+    op: add
+    args:
+      - op: mul
+        args:
+          - op: literal
+            value: 0.5
+          - op: input
+            name: input
+      - op: mul
+        args:
+          - op: literal
+            value: 0.5
+          - op: nested_output
+            nested_id: stage4
+            output_index: 0
+
+  lfo:
+    op: sin
+    args:
+      - op: div
+        args:
+          - op: mul
+            args:
+              - op: mul
+                args:
+                  - op: literal
+                    value: 6.283185307179586
+                  - op: sample_index
+              - op: input
+                name: lfo_speed
+          - op: sample_rate

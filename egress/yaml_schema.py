@@ -23,6 +23,14 @@ from .expr import (
     sample_rate as sample_rate_expr,
     sample_index as sample_index_expr,
 )
+
+def _parse_input_default(v) -> SignalExpr:
+    """Parse a YAML input_defaults value: scalar or {items: [...]} for arrays."""
+    if isinstance(v, (int, float)):
+        return _coerce(float(v))
+    if isinstance(v, dict) and "items" in v:
+        return array([_coerce(float(x)) for x in v["items"]])
+    raise ValueError(f"Unsupported input_default value: {v!r}")
 from .module import (
     ModuleType, _BuildContext,
     _value_handle,
@@ -30,6 +38,7 @@ from .module import (
 
 __all__ = [
     "load_module_from_yaml",
+    "save_module_to_yaml",
     "load_patch_from_yaml",
     "save_patch_to_yaml",
 ]
@@ -419,13 +428,19 @@ def load_module_from_yaml(
         _live_value_handles.append(init_h)
         delay_spec_tuples.append((node_id, init_h, update_expr._h))
 
+    # Parse input_defaults from YAML (scalar or {items:[...]} for arrays)
+    parsed_input_defaults: List[Optional[SignalExpr]] = [None] * len(input_names)
+    for k, v in data.get("input_defaults", {}).items():
+        if k in input_names:
+            parsed_input_defaults[input_names.index(k)] = _parse_input_default(v)
+
     definition = {
         "type_name": name,
         "input_names": input_names,
         "output_names": output_names,
         "register_names": all_reg_names,
         "sample_rate": sample_rate,
-        "input_defaults": [None] * len(input_names),
+        "input_defaults": parsed_input_defaults,
         "output_expr_handles": [e._h for e in output_exprs],
         "register_specs": reg_spec_tuples,
         "delay_spec_handles": delay_spec_tuples,
@@ -438,7 +453,30 @@ def load_module_from_yaml(
         "_live_extra": _extra_live,
     }
 
-    return ModuleType(definition)
+    result = ModuleType(definition)
+    result._yaml_source = data
+    return result
+
+
+# ---- Module saver ----
+
+def save_module_to_yaml(module_type) -> str:
+    """
+    Serialize a ModuleType back to a YAML string.
+
+    Only works for modules loaded via load_module_from_yaml().
+    Raises ValueError for modules defined via the Python DSL.
+    """
+    if module_type._yaml_source is None:
+        raise ValueError(
+            "Cannot save this module: it was defined via the Python DSL and has "
+            "no stored YAML source. Only modules loaded from load_module_from_yaml() "
+            "can be round-tripped with save_module_to_yaml()."
+        )
+    _yaml = _make_yaml()
+    buf = io.StringIO()
+    _yaml.dump(module_type._yaml_source, buf)
+    return buf.getvalue()
 
 
 # ---- Patch loader ----

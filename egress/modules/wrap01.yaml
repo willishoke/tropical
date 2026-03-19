@@ -1,0 +1,22 @@
+schema_version: 1
+name: Wrap01
+sample_rate: 44100.0
+inputs: [x]
+outputs: [value]
+
+output_exprs:
+  value:
+    op: mod
+    args:
+      - op: add
+        args:
+          - op: mod
+            args:
+              - op: input
+                name: x
+              - op: literal
+                value: 1.0
+          - op: literal
+            value: 1.0
+      - op: literal
+        value: 1.0

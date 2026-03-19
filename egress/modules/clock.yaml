@@ -1,0 +1,79 @@
+schema_version: 1
+name: Clock
+sample_rate: 44100.0
+inputs: [freq, ratios_in]
+outputs: [output, ratios_out]
+input_defaults:
+  freq: 1.0
+  ratios_in:
+    items: [1.0]
+
+# base_phase  = ((sample_index * freq / sample_rate) % 1.0 + 1.0) % 1.0
+# output      = (base_phase < 0.5) * 1.0
+# ratio_phase = ((sample_index * freq * ratios_in / sample_rate) % 1.0 + 1.0) % 1.0
+# ratios_out  = (ratio_phase < 0.5) * 1.0
+
+output_exprs:
+  output:
+    op: mul
+    args:
+      - op: less
+        args:
+          - op: mod
+            args:
+              - op: add
+                args:
+                  - op: mod
+                    args:
+                      - op: div
+                        args:
+                          - op: mul
+                            args:
+                              - op: sample_index
+                              - op: input
+                                name: freq
+                          - op: sample_rate
+                      - op: literal
+                        value: 1.0
+                  - op: literal
+                    value: 1.0
+              - op: literal
+                value: 1.0
+          - op: literal
+            value: 0.5
+      - op: literal
+        value: 1.0
+
+  ratios_out:
+    op: mul
+    args:
+      - op: less
+        args:
+          - op: mod
+            args:
+              - op: add
+                args:
+                  - op: mod
+                    args:
+                      - op: div
+                        args:
+                          - op: mul
+                            args:
+                              - op: mul
+                                args:
+                                  - op: sample_index
+                                  - op: input
+                                    name: freq
+                              - op: input
+                                name: ratios_in
+                          - op: sample_rate
+                      - op: literal
+                        value: 1.0
+                  - op: literal
+                    value: 1.0
+              - op: literal
+                value: 1.0
+          - op: literal
+            value: 0.5
+      - op: literal
+        value: 1.0

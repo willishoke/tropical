@@ -184,6 +184,7 @@ class ModuleType:
         """
         self._def = definition
         self._graph = graph  # default graph for top-level instantiation
+        self._yaml_source = None  # set by load_module_from_yaml for round-trip
 
     @property
     def name(self) -> str:

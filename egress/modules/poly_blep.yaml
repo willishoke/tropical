@@ -1,0 +1,163 @@
+schema_version: 1
+name: PolyBlep
+sample_rate: 44100.0
+inputs: [t, dt]
+outputs: [value]
+
+# left_t  = t / dt          (used 4x, inlined each time)
+# right_t = (t - 1.0) / dt  (used 4x, inlined each time)
+# left    = left_t + left_t - left_t * left_t - 1.0
+# right   = right_t * right_t + right_t + right_t + 1.0
+# valid   = (dt > 0.0) * (dt < 1.0)
+# left_mask  = t < dt
+# right_mask = (t >= dt) * (t > (1.0 - dt))
+# value = valid * (left_mask * left + right_mask * right)
+
+output_exprs:
+  value:
+    op: mul
+    args:
+      # valid = (dt > 0.0) * (dt < 1.0)
+      - op: mul
+        args:
+          - op: greater
+            args:
+              - op: input
+                name: dt
+              - op: literal
+                value: 0.0
+          - op: less
+            args:
+              - op: input
+                name: dt
+              - op: literal
+                value: 1.0
+      # left_mask * left + right_mask * right
+      - op: add
+        args:
+          # left_mask * left
+          - op: mul
+            args:
+              # left_mask = t < dt
+              - op: less
+                args:
+                  - op: input
+                    name: t
+                  - op: input
+                    name: dt
+              # left = left_t + left_t - left_t * left_t - 1.0
+              #      where left_t = t / dt
+              - op: sub
+                args:
+                  - op: sub
+                    args:
+                      - op: add
+                        args:
+                          # left_t
+                          - op: div
+                            args:
+                              - op: input
+                                name: t
+                              - op: input
+                                name: dt
+                          # left_t
+                          - op: div
+                            args:
+                              - op: input
+                                name: t
+                              - op: input
+                                name: dt
+                      # left_t * left_t
+                      - op: mul
+                        args:
+                          - op: div
+                            args:
+                              - op: input
+                                name: t
+                              - op: input
+                                name: dt
+                          - op: div
+                            args:
+                              - op: input
+                                name: t
+                              - op: input
+                                name: dt
+                  - op: literal
+                    value: 1.0
+          # right_mask * right
+          - op: mul
+            args:
+              # right_mask = (t >= dt) * (t > (1.0 - dt))
+              - op: mul
+                args:
+                  - op: greater_equal
+                    args:
+                      - op: input
+                        name: t
+                      - op: input
+                        name: dt
+                  - op: greater
+                    args:
+                      - op: input
+                        name: t
+                      - op: sub
+                        args:
+                          - op: literal
+                            value: 1.0
+                          - op: input
+                            name: dt
+              # right = right_t * right_t + right_t + right_t + 1.0
+              #       where right_t = (t - 1.0) / dt
+              - op: add
+                args:
+                  - op: add
+                    args:
+                      - op: add
+                        args:
+                          # right_t * right_t
+                          - op: mul
+                            args:
+                              - op: div
+                                args:
+                                  - op: sub
+                                    args:
+                                      - op: input
+                                        name: t
+                                      - op: literal
+                                        value: 1.0
+                                  - op: input
+                                    name: dt
+                              - op: div
+                                args:
+                                  - op: sub
+                                    args:
+                                      - op: input
+                                        name: t
+                                      - op: literal
+                                        value: 1.0
+                                  - op: input
+                                    name: dt
+                          # right_t
+                          - op: div
+                            args:
+                              - op: sub
+                                args:
+                                  - op: input
+                                    name: t
+                                  - op: literal
+                                    value: 1.0
+                              - op: input
+                                name: dt
+                      # right_t
+                      - op: div
+                        args:
+                          - op: sub
+                            args:
+                              - op: input
+                                name: t
+                              - op: literal
+                                value: 1.0
+                          - op: input
+                            name: dt
+                  - op: literal
+                    value: 1.0

@@ -1,0 +1,1037 @@
+schema_version: 1
+name: ADEnvelope
+sample_rate: 44100.0
+inputs:
+- gate
+- attack
+- decay
+outputs:
+- env
+input_defaults:
+  gate: 0.0
+  attack: 0.01
+  decay: 0.3
+registers:
+- name: stage
+  init: 0.0
+  update:
+    op: add
+    args:
+    - op: mul
+      args:
+      - op: mul
+        args:
+        - op: greater
+          args:
+          - op: input
+            name: gate
+          - op: literal
+            value: 0.5
+        - op: less_equal
+          args:
+          - op: delay
+            id: gate_delay
+          - op: literal
+            value: 0.5
+      - op: literal
+        value: 1.0
+    - op: mul
+      args:
+      - op: sub
+        args:
+        - op: literal
+          value: 1.0
+        - op: mul
+          args:
+          - op: greater
+            args:
+            - op: input
+              name: gate
+            - op: literal
+              value: 0.5
+          - op: less_equal
+            args:
+            - op: delay
+              id: gate_delay
+            - op: literal
+              value: 0.5
+      - op: add
+        args:
+        - op: add
+          args:
+          - op: mul
+            args:
+            - op: mul
+              args:
+              - op: mul
+                args:
+                - op: greater
+                  args:
+                  - op: register
+                    name: stage
+                  - op: literal
+                    value: 0.5
+                - op: less
+                  args:
+                  - op: register
+                    name: stage
+                  - op: literal
+                    value: 1.5
+              - op: sub
+                args:
+                - op: literal
+                  value: 1.0
+                - op: mul
+                  args:
+                  - op: mul
+                    args:
+                    - op: greater
+                      args:
+                      - op: register
+                        name: stage
+                      - op: literal
+                        value: 0.5
+                    - op: less
+                      args:
+                      - op: register
+                        name: stage
+                      - op: literal
+                        value: 1.5
+                  - op: greater_equal
+                    args:
+                    - op: add
+                      args:
+                      - op: register
+                        name: phase
+                      - op: add
+                        args:
+                        - op: mul
+                          args:
+                          - op: mul
+                            args:
+                            - op: greater
+                              args:
+                              - op: register
+                                name: stage
+                              - op: literal
+                                value: 0.5
+                            - op: less
+                              args:
+                              - op: register
+                                name: stage
+                              - op: literal
+                                value: 1.5
+                          - op: div
+                            args:
+                            - op: literal
+                              value: 1.0
+                            - op: mul
+                              args:
+                              - op: clamp
+                                args:
+                                - op: input
+                                  name: attack
+                                - op: literal
+                                  value: 0.0001
+                                - op: literal
+                                  value: 10.0
+                              - op: sample_rate
+                        - op: mul
+                          args:
+                          - op: greater
+                            args:
+                            - op: register
+                              name: stage
+                            - op: literal
+                              value: 1.5
+                          - op: div
+                            args:
+                            - op: literal
+                              value: 1.0
+                            - op: mul
+                              args:
+                              - op: clamp
+                                args:
+                                - op: input
+                                  name: decay
+                                - op: literal
+                                  value: 0.0001
+                                - op: literal
+                                  value: 10.0
+                              - op: sample_rate
+                    - op: literal
+                      value: 1.0
+            - op: literal
+              value: 1.0
+          - op: mul
+            args:
+            - op: mul
+              args:
+              - op: mul
+                args:
+                - op: greater
+                  args:
+                  - op: register
+                    name: stage
+                  - op: literal
+                    value: 0.5
+                - op: less
+                  args:
+                  - op: register
+                    name: stage
+                  - op: literal
+                    value: 1.5
+              - op: greater_equal
+                args:
+                - op: add
+                  args:
+                  - op: register
+                    name: phase
+                  - op: add
+                    args:
+                    - op: mul
+                      args:
+                      - op: mul
+                        args:
+                        - op: greater
+                          args:
+                          - op: register
+                            name: stage
+                          - op: literal
+                            value: 0.5
+                        - op: less
+                          args:
+                          - op: register
+                            name: stage
+                          - op: literal
+                            value: 1.5
+                      - op: div
+                        args:
+                        - op: literal
+                          value: 1.0
+                        - op: mul
+                          args:
+                          - op: clamp
+                            args:
+                            - op: input
+                              name: attack
+                            - op: literal
+                              value: 0.0001
+                            - op: literal
+                              value: 10.0
+                          - op: sample_rate
+                    - op: mul
+                      args:
+                      - op: greater
+                        args:
+                        - op: register
+                          name: stage
+                        - op: literal
+                          value: 1.5
+                      - op: div
+                        args:
+                        - op: literal
+                          value: 1.0
+                        - op: mul
+                          args:
+                          - op: clamp
+                            args:
+                            - op: input
+                              name: decay
+                            - op: literal
+                              value: 0.0001
+                            - op: literal
+                              value: 10.0
+                          - op: sample_rate
+                - op: literal
+                  value: 1.0
+            - op: literal
+              value: 2.0
+        - op: mul
+          args:
+          - op: mul
+            args:
+            - op: greater
+              args:
+              - op: register
+                name: stage
+              - op: literal
+                value: 1.5
+            - op: sub
+              args:
+              - op: literal
+                value: 1.0
+              - op: mul
+                args:
+                - op: greater
+                  args:
+                  - op: register
+                    name: stage
+                  - op: literal
+                    value: 1.5
+                - op: greater_equal
+                  args:
+                  - op: add
+                    args:
+                    - op: register
+                      name: phase
+                    - op: add
+                      args:
+                      - op: mul
+                        args:
+                        - op: mul
+                          args:
+                          - op: greater
+                            args:
+                            - op: register
+                              name: stage
+                            - op: literal
+                              value: 0.5
+                          - op: less
+                            args:
+                            - op: register
+                              name: stage
+                            - op: literal
+                              value: 1.5
+                        - op: div
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: attack
+                              - op: literal
+                                value: 0.0001
+                              - op: literal
+                                value: 10.0
+                            - op: sample_rate
+                      - op: mul
+                        args:
+                        - op: greater
+                          args:
+                          - op: register
+                            name: stage
+                          - op: literal
+                            value: 1.5
+                        - op: div
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: decay
+                              - op: literal
+                                value: 0.0001
+                              - op: literal
+                                value: 10.0
+                            - op: sample_rate
+                  - op: literal
+                    value: 1.0
+          - op: literal
+            value: 2.0
+- name: phase
+  init: 0.0
+  update:
+    op: add
+    args:
+    - op: mul
+      args:
+      - op: mul
+        args:
+        - op: greater
+          args:
+          - op: input
+            name: gate
+          - op: literal
+            value: 0.5
+        - op: less_equal
+          args:
+          - op: delay
+            id: gate_delay
+          - op: literal
+            value: 0.5
+      - op: literal
+        value: 0.0
+    - op: mul
+      args:
+      - op: sub
+        args:
+        - op: literal
+          value: 1.0
+        - op: mul
+          args:
+          - op: greater
+            args:
+            - op: input
+              name: gate
+            - op: literal
+              value: 0.5
+          - op: less_equal
+            args:
+            - op: delay
+              id: gate_delay
+            - op: literal
+              value: 0.5
+      - op: add
+        args:
+        - op: mul
+          args:
+          - op: mul
+            args:
+            - op: mul
+              args:
+              - op: greater
+                args:
+                - op: register
+                  name: stage
+                - op: literal
+                  value: 0.5
+              - op: less
+                args:
+                - op: register
+                  name: stage
+                - op: literal
+                  value: 1.5
+            - op: greater_equal
+              args:
+              - op: add
+                args:
+                - op: register
+                  name: phase
+                - op: add
+                  args:
+                  - op: mul
+                    args:
+                    - op: mul
+                      args:
+                      - op: greater
+                        args:
+                        - op: register
+                          name: stage
+                        - op: literal
+                          value: 0.5
+                      - op: less
+                        args:
+                        - op: register
+                          name: stage
+                        - op: literal
+                          value: 1.5
+                    - op: div
+                      args:
+                      - op: literal
+                        value: 1.0
+                      - op: mul
+                        args:
+                        - op: clamp
+                          args:
+                          - op: input
+                            name: attack
+                          - op: literal
+                            value: 0.0001
+                          - op: literal
+                            value: 10.0
+                        - op: sample_rate
+                  - op: mul
+                    args:
+                    - op: greater
+                      args:
+                      - op: register
+                        name: stage
+                      - op: literal
+                        value: 1.5
+                    - op: div
+                      args:
+                      - op: literal
+                        value: 1.0
+                      - op: mul
+                        args:
+                        - op: clamp
+                          args:
+                          - op: input
+                            name: decay
+                          - op: literal
+                            value: 0.0001
+                          - op: literal
+                            value: 10.0
+                        - op: sample_rate
+              - op: literal
+                value: 1.0
+          - op: clamp
+            args:
+            - op: sub
+              args:
+              - op: add
+                args:
+                - op: register
+                  name: phase
+                - op: add
+                  args:
+                  - op: mul
+                    args:
+                    - op: mul
+                      args:
+                      - op: greater
+                        args:
+                        - op: register
+                          name: stage
+                        - op: literal
+                          value: 0.5
+                      - op: less
+                        args:
+                        - op: register
+                          name: stage
+                        - op: literal
+                          value: 1.5
+                    - op: div
+                      args:
+                      - op: literal
+                        value: 1.0
+                      - op: mul
+                        args:
+                        - op: clamp
+                          args:
+                          - op: input
+                            name: attack
+                          - op: literal
+                            value: 0.0001
+                          - op: literal
+                            value: 10.0
+                        - op: sample_rate
+                  - op: mul
+                    args:
+                    - op: greater
+                      args:
+                      - op: register
+                        name: stage
+                      - op: literal
+                        value: 1.5
+                    - op: div
+                      args:
+                      - op: literal
+                        value: 1.0
+                      - op: mul
+                        args:
+                        - op: clamp
+                          args:
+                          - op: input
+                            name: decay
+                          - op: literal
+                            value: 0.0001
+                          - op: literal
+                            value: 10.0
+                        - op: sample_rate
+              - op: literal
+                value: 1.0
+            - op: literal
+              value: 0.0
+            - op: literal
+              value: 1.0
+        - op: mul
+          args:
+          - op: mul
+            args:
+            - op: sub
+              args:
+              - op: literal
+                value: 1.0
+              - op: mul
+                args:
+                - op: mul
+                  args:
+                  - op: greater
+                    args:
+                    - op: register
+                      name: stage
+                    - op: literal
+                      value: 0.5
+                  - op: less
+                    args:
+                    - op: register
+                      name: stage
+                    - op: literal
+                      value: 1.5
+                - op: greater_equal
+                  args:
+                  - op: add
+                    args:
+                    - op: register
+                      name: phase
+                    - op: add
+                      args:
+                      - op: mul
+                        args:
+                        - op: mul
+                          args:
+                          - op: greater
+                            args:
+                            - op: register
+                              name: stage
+                            - op: literal
+                              value: 0.5
+                          - op: less
+                            args:
+                            - op: register
+                              name: stage
+                            - op: literal
+                              value: 1.5
+                        - op: div
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: attack
+                              - op: literal
+                                value: 0.0001
+                              - op: literal
+                                value: 10.0
+                            - op: sample_rate
+                      - op: mul
+                        args:
+                        - op: greater
+                          args:
+                          - op: register
+                            name: stage
+                          - op: literal
+                            value: 1.5
+                        - op: div
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: decay
+                              - op: literal
+                                value: 0.0001
+                              - op: literal
+                                value: 10.0
+                            - op: sample_rate
+                  - op: literal
+                    value: 1.0
+            - op: sub
+              args:
+              - op: literal
+                value: 1.0
+              - op: mul
+                args:
+                - op: greater
+                  args:
+                  - op: register
+                    name: stage
+                  - op: literal
+                    value: 1.5
+                - op: greater_equal
+                  args:
+                  - op: add
+                    args:
+                    - op: register
+                      name: phase
+                    - op: add
+                      args:
+                      - op: mul
+                        args:
+                        - op: mul
+                          args:
+                          - op: greater
+                            args:
+                            - op: register
+                              name: stage
+                            - op: literal
+                              value: 0.5
+                          - op: less
+                            args:
+                            - op: register
+                              name: stage
+                            - op: literal
+                              value: 1.5
+                        - op: div
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: attack
+                              - op: literal
+                                value: 0.0001
+                              - op: literal
+                                value: 10.0
+                            - op: sample_rate
+                      - op: mul
+                        args:
+                        - op: greater
+                          args:
+                          - op: register
+                            name: stage
+                          - op: literal
+                            value: 1.5
+                        - op: div
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: decay
+                              - op: literal
+                                value: 0.0001
+                              - op: literal
+                                value: 10.0
+                            - op: sample_rate
+                  - op: literal
+                    value: 1.0
+          - op: clamp
+            args:
+            - op: add
+              args:
+              - op: register
+                name: phase
+              - op: add
+                args:
+                - op: mul
+                  args:
+                  - op: mul
+                    args:
+                    - op: greater
+                      args:
+                      - op: register
+                        name: stage
+                      - op: literal
+                        value: 0.5
+                    - op: less
+                      args:
+                      - op: register
+                        name: stage
+                      - op: literal
+                        value: 1.5
+                  - op: div
+                    args:
+                    - op: literal
+                      value: 1.0
+                    - op: mul
+                      args:
+                      - op: clamp
+                        args:
+                        - op: input
+                          name: attack
+                        - op: literal
+                          value: 0.0001
+                        - op: literal
+                          value: 10.0
+                      - op: sample_rate
+                - op: mul
+                  args:
+                  - op: greater
+                    args:
+                    - op: register
+                      name: stage
+                    - op: literal
+                      value: 1.5
+                  - op: div
+                    args:
+                    - op: literal
+                      value: 1.0
+                    - op: mul
+                      args:
+                      - op: clamp
+                        args:
+                        - op: input
+                          name: decay
+                        - op: literal
+                          value: 0.0001
+                        - op: literal
+                          value: 10.0
+                      - op: sample_rate
+            - op: literal
+              value: 0.0
+            - op: literal
+              value: 1.0
+delay_states:
+- id: gate_delay
+  init: 0.0
+  update:
+    op: input
+    name: gate
+nested_modules:
+- id: b1
+  type: PolyBlamp
+  input_exprs:
+  - op: register
+    name: phase
+  - op: div
+    args:
+    - op: literal
+      value: 1.0
+    - op: mul
+      args:
+      - op: clamp
+        args:
+        - op: input
+          name: attack
+        - op: literal
+          value: 0.0001
+        - op: literal
+          value: 10.0
+      - op: sample_rate
+- id: b2
+  type: PolyBlamp
+  input_exprs:
+  - op: sub
+    args:
+    - op: literal
+      value: 1.0
+    - op: register
+      name: phase
+  - op: div
+    args:
+    - op: literal
+      value: 1.0
+    - op: mul
+      args:
+      - op: clamp
+        args:
+        - op: input
+          name: attack
+        - op: literal
+          value: 0.0001
+        - op: literal
+          value: 10.0
+      - op: sample_rate
+- id: b3
+  type: PolyBlamp
+  input_exprs:
+  - op: register
+    name: phase
+  - op: div
+    args:
+    - op: literal
+      value: 1.0
+    - op: mul
+      args:
+      - op: clamp
+        args:
+        - op: input
+          name: decay
+        - op: literal
+          value: 0.0001
+        - op: literal
+          value: 10.0
+      - op: sample_rate
+- id: b4
+  type: PolyBlamp
+  input_exprs:
+  - op: sub
+    args:
+    - op: literal
+      value: 1.0
+    - op: register
+      name: phase
+  - op: div
+    args:
+    - op: literal
+      value: 1.0
+    - op: mul
+      args:
+      - op: clamp
+        args:
+        - op: input
+          name: decay
+        - op: literal
+          value: 0.0001
+        - op: literal
+          value: 10.0
+      - op: sample_rate
+output_exprs:
+  env:
+    op: clamp
+    args:
+    - op: sub
+      args:
+      - op: add
+        args:
+        - op: add
+          args:
+          - op: sub
+            args:
+            - op: add
+              args:
+              - op: mul
+                args:
+                - op: mul
+                  args:
+                  - op: greater
+                    args:
+                    - op: register
+                      name: stage
+                    - op: literal
+                      value: 0.5
+                  - op: less
+                    args:
+                    - op: register
+                      name: stage
+                    - op: literal
+                      value: 1.5
+                - op: register
+                  name: phase
+              - op: mul
+                args:
+                - op: greater
+                  args:
+                  - op: register
+                    name: stage
+                  - op: literal
+                    value: 1.5
+                - op: sub
+                  args:
+                  - op: literal
+                    value: 1.0
+                  - op: register
+                    name: phase
+            - op: mul
+              args:
+              - op: mul
+                args:
+                - op: mul
+                  args:
+                  - op: greater
+                    args:
+                    - op: register
+                      name: stage
+                    - op: literal
+                      value: 0.5
+                  - op: less
+                    args:
+                    - op: register
+                      name: stage
+                    - op: literal
+                      value: 1.5
+                - op: div
+                  args:
+                  - op: literal
+                    value: 1.0
+                  - op: mul
+                    args:
+                    - op: clamp
+                      args:
+                      - op: input
+                        name: attack
+                      - op: literal
+                        value: 0.0001
+                      - op: literal
+                        value: 10.0
+                    - op: sample_rate
+              - op: nested_output
+                nested_id: b1
+                output_index: 0
+          - op: mul
+            args:
+            - op: mul
+              args:
+              - op: mul
+                args:
+                - op: greater
+                  args:
+                  - op: register
+                    name: stage
+                  - op: literal
+                    value: 0.5
+                - op: less
+                  args:
+                  - op: register
+                    name: stage
+                  - op: literal
+                    value: 1.5
+              - op: div
+                args:
+                - op: literal
+                  value: 1.0
+                - op: mul
+                  args:
+                  - op: clamp
+                    args:
+                    - op: input
+                      name: attack
+                    - op: literal
+                      value: 0.0001
+                    - op: literal
+                      value: 10.0
+                  - op: sample_rate
+            - op: nested_output
+              nested_id: b2
+              output_index: 0
+        - op: mul
+          args:
+          - op: mul
+            args:
+            - op: greater
+              args:
+              - op: register
+                name: stage
+              - op: literal
+                value: 1.5
+            - op: div
+              args:
+              - op: literal
+                value: 1.0
+              - op: mul
+                args:
+                - op: clamp
+                  args:
+                  - op: input
+                    name: decay
+                  - op: literal
+                    value: 0.0001
+                  - op: literal
+                    value: 10.0
+                - op: sample_rate
+          - op: nested_output
+            nested_id: b3
+            output_index: 0
+      - op: mul
+        args:
+        - op: mul
+          args:
+          - op: greater
+            args:
+            - op: register
+              name: stage
+            - op: literal
+              value: 1.5
+          - op: div
+            args:
+            - op: literal
+              value: 1.0
+            - op: mul
+              args:
+              - op: clamp
+                args:
+                - op: input
+                  name: decay
+                - op: literal
+                  value: 0.0001
+                - op: literal
+                  value: 10.0
+              - op: sample_rate
+        - op: nested_output
+          nested_id: b4
+          output_index: 0
+    - op: literal
+      value: 0.0
+    - op: literal
+      value: 1.0

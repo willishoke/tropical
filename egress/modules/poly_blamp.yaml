@@ -1,0 +1,195 @@
+schema_version: 1
+name: PolyBlamp
+sample_rate: 44100.0
+inputs: [t, dt]
+outputs: [value]
+
+# valid      = (dt > 0.0) * (dt < 1.0)
+# u          = t / dt
+# left       = u*u - u*u*u/3.0 - u
+# v          = (1.0 - t) / dt
+# right      = -(v*v - v*v*v/3.0 - v)
+# left_mask  = t < dt
+# right_mask = (1.0 - t) < dt
+# value = valid * (left_mask * left + right_mask * right)
+
+output_exprs:
+  value:
+    op: mul
+    args:
+      # valid
+      - op: mul
+        args:
+          - op: greater
+            args:
+              - op: input
+                name: dt
+              - op: literal
+                value: 0.0
+          - op: less
+            args:
+              - op: input
+                name: dt
+              - op: literal
+                value: 1.0
+      # left_mask * left + right_mask * right
+      - op: add
+        args:
+          # left_mask * left
+          - op: mul
+            args:
+              # left_mask = t < dt
+              - op: less
+                args:
+                  - op: input
+                    name: t
+                  - op: input
+                    name: dt
+              # left = u*u - u*u*u/3.0 - u   where u = t/dt
+              - op: sub
+                args:
+                  - op: sub
+                    args:
+                      # u*u
+                      - op: mul
+                        args:
+                          - op: div
+                            args:
+                              - op: input
+                                name: t
+                              - op: input
+                                name: dt
+                          - op: div
+                            args:
+                              - op: input
+                                name: t
+                              - op: input
+                                name: dt
+                      # u*u*u/3.0
+                      - op: div
+                        args:
+                          - op: mul
+                            args:
+                              - op: mul
+                                args:
+                                  - op: div
+                                    args:
+                                      - op: input
+                                        name: t
+                                      - op: input
+                                        name: dt
+                                  - op: div
+                                    args:
+                                      - op: input
+                                        name: t
+                                      - op: input
+                                        name: dt
+                              - op: div
+                                args:
+                                  - op: input
+                                    name: t
+                                  - op: input
+                                    name: dt
+                          - op: literal
+                            value: 3.0
+                  # u
+                  - op: div
+                    args:
+                      - op: input
+                        name: t
+                      - op: input
+                        name: dt
+          # right_mask * right
+          - op: mul
+            args:
+              # right_mask = (1.0 - t) < dt
+              - op: less
+                args:
+                  - op: sub
+                    args:
+                      - op: literal
+                        value: 1.0
+                      - op: input
+                        name: t
+                  - op: input
+                    name: dt
+              # right = -(v*v - v*v*v/3.0 - v)  where v = (1-t)/dt
+              - op: neg
+                args:
+                  - op: sub
+                    args:
+                      - op: sub
+                        args:
+                          # v*v
+                          - op: mul
+                            args:
+                              - op: div
+                                args:
+                                  - op: sub
+                                    args:
+                                      - op: literal
+                                        value: 1.0
+                                      - op: input
+                                        name: t
+                                  - op: input
+                                    name: dt
+                              - op: div
+                                args:
+                                  - op: sub
+                                    args:
+                                      - op: literal
+                                        value: 1.0
+                                      - op: input
+                                        name: t
+                                  - op: input
+                                    name: dt
+                          # v*v*v/3.0
+                          - op: div
+                            args:
+                              - op: mul
+                                args:
+                                  - op: mul
+                                    args:
+                                      - op: div
+                                        args:
+                                          - op: sub
+                                            args:
+                                              - op: literal
+                                                value: 1.0
+                                              - op: input
+                                                name: t
+                                          - op: input
+                                            name: dt
+                                      - op: div
+                                        args:
+                                          - op: sub
+                                            args:
+                                              - op: literal
+                                                value: 1.0
+                                              - op: input
+                                                name: t
+                                          - op: input
+                                            name: dt
+                                  - op: div
+                                    args:
+                                      - op: sub
+                                        args:
+                                          - op: literal
+                                            value: 1.0
+                                          - op: input
+                                            name: t
+                                      - op: input
+                                        name: dt
+                              - op: literal
+                                value: 3.0
+                      # v
+                      - op: div
+                        args:
+                          - op: sub
+                            args:
+                              - op: literal
+                                value: 1.0
+                              - op: input
+                                name: t
+                          - op: input
+                            name: dt

@@ -1,0 +1,4141 @@
+schema_version: 1
+name: BassDrum
+sample_rate: 44100.0
+inputs:
+- gate
+- freq
+- punch
+- decay
+- tone
+outputs:
+- output
+input_defaults:
+  gate: 0.0
+  freq: 60.0
+  punch: 0.5
+  decay: 0.35
+  tone: 8.0
+registers:
+- name: amp_env
+  init: 0.0
+  update:
+    op: add
+    args:
+    - op: mul
+      args:
+      - op: mul
+        args:
+        - op: greater
+          args:
+          - op: input
+            name: gate
+          - op: literal
+            value: 0.5
+        - op: less_equal
+          args:
+          - op: delay
+            id: gate_delay
+          - op: literal
+            value: 0.5
+      - op: literal
+        value: 1.0
+    - op: mul
+      args:
+      - op: mul
+        args:
+        - op: sub
+          args:
+          - op: literal
+            value: 1.0
+          - op: mul
+            args:
+            - op: greater
+              args:
+              - op: input
+                name: gate
+              - op: literal
+                value: 0.5
+            - op: less_equal
+              args:
+              - op: delay
+                id: gate_delay
+              - op: literal
+                value: 0.5
+        - op: pow
+          args:
+          - op: literal
+            value: 10.0
+          - op: div
+            args:
+            - op: literal
+              value: -0.4342944819
+            - op: clamp
+              args:
+              - op: mul
+                args:
+                - op: clamp
+                  args:
+                  - op: input
+                    name: decay
+                  - op: literal
+                    value: 0.01
+                  - op: literal
+                    value: 4.0
+                - op: sample_rate
+              - op: literal
+                value: 1.0
+              - op: literal
+                value: 100000000.0
+      - op: register
+        name: amp_env
+- name: pitch_env
+  init: 0.0
+  update:
+    op: add
+    args:
+    - op: mul
+      args:
+      - op: mul
+        args:
+        - op: greater
+          args:
+          - op: input
+            name: gate
+          - op: literal
+            value: 0.5
+        - op: less_equal
+          args:
+          - op: delay
+            id: gate_delay
+          - op: literal
+            value: 0.5
+      - op: literal
+        value: 1.0
+    - op: mul
+      args:
+      - op: mul
+        args:
+        - op: sub
+          args:
+          - op: literal
+            value: 1.0
+          - op: mul
+            args:
+            - op: greater
+              args:
+              - op: input
+                name: gate
+              - op: literal
+                value: 0.5
+            - op: less_equal
+              args:
+              - op: delay
+                id: gate_delay
+              - op: literal
+                value: 0.5
+        - op: pow
+          args:
+          - op: literal
+            value: 10.0
+          - op: div
+            args:
+            - op: literal
+              value: -0.4342944819
+            - op: clamp
+              args:
+              - op: mul
+                args:
+                - op: literal
+                  value: 0.04
+                - op: sample_rate
+              - op: literal
+                value: 1.0
+              - op: literal
+                value: 100000000.0
+      - op: register
+        name: pitch_env
+- name: ic1
+  init: 0.0
+  update:
+    op: add
+    args:
+    - op: add
+      args:
+      - op: mul
+        args:
+        - op: clamp
+          args:
+          - op: div
+            args:
+            - op: mul
+              args:
+              - op: literal
+                value: 3.14159265358979
+              - op: mul
+                args:
+                - op: clamp
+                  args:
+                  - op: input
+                    name: freq
+                  - op: literal
+                    value: 20.0
+                  - op: literal
+                    value: 500.0
+                - op: add
+                  args:
+                  - op: literal
+                    value: 1.0
+                  - op: mul
+                    args:
+                    - op: mul
+                      args:
+                      - op: clamp
+                        args:
+                        - op: input
+                          name: punch
+                        - op: literal
+                          value: 0.0
+                        - op: literal
+                          value: 1.0
+                      - op: literal
+                        value: 4.0
+                    - op: add
+                      args:
+                      - op: mul
+                        args:
+                        - op: mul
+                          args:
+                          - op: greater
+                            args:
+                            - op: input
+                              name: gate
+                            - op: literal
+                              value: 0.5
+                          - op: less_equal
+                            args:
+                            - op: delay
+                              id: gate_delay
+                            - op: literal
+                              value: 0.5
+                        - op: literal
+                          value: 1.0
+                      - op: mul
+                        args:
+                        - op: mul
+                          args:
+                          - op: sub
+                            args:
+                            - op: literal
+                              value: 1.0
+                            - op: mul
+                              args:
+                              - op: greater
+                                args:
+                                - op: input
+                                  name: gate
+                                - op: literal
+                                  value: 0.5
+                              - op: less_equal
+                                args:
+                                - op: delay
+                                  id: gate_delay
+                                - op: literal
+                                  value: 0.5
+                          - op: pow
+                            args:
+                            - op: literal
+                              value: 10.0
+                            - op: div
+                              args:
+                              - op: literal
+                                value: -0.4342944819
+                              - op: clamp
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: literal
+                                    value: 0.04
+                                  - op: sample_rate
+                                - op: literal
+                                  value: 1.0
+                                - op: literal
+                                  value: 100000000.0
+                        - op: register
+                          name: pitch_env
+            - op: sample_rate
+          - op: literal
+            value: 0.0
+          - op: literal
+            value: 0.98
+        - op: div
+          args:
+          - op: sub
+            args:
+            - op: sub
+              args:
+              - op: literal
+                value: 0.0
+              - op: add
+                args:
+                - op: mul
+                  args:
+                  - op: mul
+                    args:
+                    - op: greater
+                      args:
+                      - op: input
+                        name: gate
+                      - op: literal
+                        value: 0.5
+                    - op: less_equal
+                      args:
+                      - op: delay
+                        id: gate_delay
+                      - op: literal
+                        value: 0.5
+                  - op: literal
+                    value: 2.0
+                - op: mul
+                  args:
+                  - op: sub
+                    args:
+                    - op: literal
+                      value: 1.0
+                    - op: mul
+                      args:
+                      - op: greater
+                        args:
+                        - op: input
+                          name: gate
+                        - op: literal
+                          value: 0.5
+                      - op: less_equal
+                        args:
+                        - op: delay
+                          id: gate_delay
+                        - op: literal
+                          value: 0.5
+                  - op: register
+                    name: ic2
+            - op: mul
+              args:
+              - op: add
+                args:
+                - op: mul
+                  args:
+                  - op: literal
+                    value: 2.0
+                  - op: div
+                    args:
+                    - op: literal
+                      value: 0.5
+                    - op: clamp
+                      args:
+                      - op: input
+                        name: tone
+                      - op: literal
+                        value: 0.5
+                      - op: literal
+                        value: 50.0
+                - op: clamp
+                  args:
+                  - op: div
+                    args:
+                    - op: mul
+                      args:
+                      - op: literal
+                        value: 3.14159265358979
+                      - op: mul
+                        args:
+                        - op: clamp
+                          args:
+                          - op: input
+                            name: freq
+                          - op: literal
+                            value: 20.0
+                          - op: literal
+                            value: 500.0
+                        - op: add
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: clamp
+                                args:
+                                - op: input
+                                  name: punch
+                                - op: literal
+                                  value: 0.0
+                                - op: literal
+                                  value: 1.0
+                              - op: literal
+                                value: 4.0
+                            - op: add
+                              args:
+                              - op: mul
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: greater
+                                    args:
+                                    - op: input
+                                      name: gate
+                                    - op: literal
+                                      value: 0.5
+                                  - op: less_equal
+                                    args:
+                                    - op: delay
+                                      id: gate_delay
+                                    - op: literal
+                                      value: 0.5
+                                - op: literal
+                                  value: 1.0
+                              - op: mul
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: sub
+                                    args:
+                                    - op: literal
+                                      value: 1.0
+                                    - op: mul
+                                      args:
+                                      - op: greater
+                                        args:
+                                        - op: input
+                                          name: gate
+                                        - op: literal
+                                          value: 0.5
+                                      - op: less_equal
+                                        args:
+                                        - op: delay
+                                          id: gate_delay
+                                        - op: literal
+                                          value: 0.5
+                                  - op: pow
+                                    args:
+                                    - op: literal
+                                      value: 10.0
+                                    - op: div
+                                      args:
+                                      - op: literal
+                                        value: -0.4342944819
+                                      - op: clamp
+                                        args:
+                                        - op: mul
+                                          args:
+                                          - op: literal
+                                            value: 0.04
+                                          - op: sample_rate
+                                        - op: literal
+                                          value: 1.0
+                                        - op: literal
+                                          value: 100000000.0
+                                - op: register
+                                  name: pitch_env
+                    - op: sample_rate
+                  - op: literal
+                    value: 0.0
+                  - op: literal
+                    value: 0.98
+              - op: add
+                args:
+                - op: mul
+                  args:
+                  - op: mul
+                    args:
+                    - op: greater
+                      args:
+                      - op: input
+                        name: gate
+                      - op: literal
+                        value: 0.5
+                    - op: less_equal
+                      args:
+                      - op: delay
+                        id: gate_delay
+                      - op: literal
+                        value: 0.5
+                  - op: literal
+                    value: 0.0
+                - op: mul
+                  args:
+                  - op: sub
+                    args:
+                    - op: literal
+                      value: 1.0
+                    - op: mul
+                      args:
+                      - op: greater
+                        args:
+                        - op: input
+                          name: gate
+                        - op: literal
+                          value: 0.5
+                      - op: less_equal
+                        args:
+                        - op: delay
+                          id: gate_delay
+                        - op: literal
+                          value: 0.5
+                  - op: register
+                    name: ic1
+          - op: add
+            args:
+            - op: add
+              args:
+              - op: literal
+                value: 1.0
+              - op: mul
+                args:
+                - op: mul
+                  args:
+                  - op: literal
+                    value: 2.0
+                  - op: div
+                    args:
+                    - op: literal
+                      value: 0.5
+                    - op: clamp
+                      args:
+                      - op: input
+                        name: tone
+                      - op: literal
+                        value: 0.5
+                      - op: literal
+                        value: 50.0
+                - op: clamp
+                  args:
+                  - op: div
+                    args:
+                    - op: mul
+                      args:
+                      - op: literal
+                        value: 3.14159265358979
+                      - op: mul
+                        args:
+                        - op: clamp
+                          args:
+                          - op: input
+                            name: freq
+                          - op: literal
+                            value: 20.0
+                          - op: literal
+                            value: 500.0
+                        - op: add
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: clamp
+                                args:
+                                - op: input
+                                  name: punch
+                                - op: literal
+                                  value: 0.0
+                                - op: literal
+                                  value: 1.0
+                              - op: literal
+                                value: 4.0
+                            - op: add
+                              args:
+                              - op: mul
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: greater
+                                    args:
+                                    - op: input
+                                      name: gate
+                                    - op: literal
+                                      value: 0.5
+                                  - op: less_equal
+                                    args:
+                                    - op: delay
+                                      id: gate_delay
+                                    - op: literal
+                                      value: 0.5
+                                - op: literal
+                                  value: 1.0
+                              - op: mul
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: sub
+                                    args:
+                                    - op: literal
+                                      value: 1.0
+                                    - op: mul
+                                      args:
+                                      - op: greater
+                                        args:
+                                        - op: input
+                                          name: gate
+                                        - op: literal
+                                          value: 0.5
+                                      - op: less_equal
+                                        args:
+                                        - op: delay
+                                          id: gate_delay
+                                        - op: literal
+                                          value: 0.5
+                                  - op: pow
+                                    args:
+                                    - op: literal
+                                      value: 10.0
+                                    - op: div
+                                      args:
+                                      - op: literal
+                                        value: -0.4342944819
+                                      - op: clamp
+                                        args:
+                                        - op: mul
+                                          args:
+                                          - op: literal
+                                            value: 0.04
+                                          - op: sample_rate
+                                        - op: literal
+                                          value: 1.0
+                                        - op: literal
+                                          value: 100000000.0
+                                - op: register
+                                  name: pitch_env
+                    - op: sample_rate
+                  - op: literal
+                    value: 0.0
+                  - op: literal
+                    value: 0.98
+            - op: mul
+              args:
+              - op: clamp
+                args:
+                - op: div
+                  args:
+                  - op: mul
+                    args:
+                    - op: literal
+                      value: 3.14159265358979
+                    - op: mul
+                      args:
+                      - op: clamp
+                        args:
+                        - op: input
+                          name: freq
+                        - op: literal
+                          value: 20.0
+                        - op: literal
+                          value: 500.0
+                      - op: add
+                        args:
+                        - op: literal
+                          value: 1.0
+                        - op: mul
+                          args:
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: punch
+                              - op: literal
+                                value: 0.0
+                              - op: literal
+                                value: 1.0
+                            - op: literal
+                              value: 4.0
+                          - op: add
+                            args:
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: greater
+                                  args:
+                                  - op: input
+                                    name: gate
+                                  - op: literal
+                                    value: 0.5
+                                - op: less_equal
+                                  args:
+                                  - op: delay
+                                    id: gate_delay
+                                  - op: literal
+                                    value: 0.5
+                              - op: literal
+                                value: 1.0
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: sub
+                                  args:
+                                  - op: literal
+                                    value: 1.0
+                                  - op: mul
+                                    args:
+                                    - op: greater
+                                      args:
+                                      - op: input
+                                        name: gate
+                                      - op: literal
+                                        value: 0.5
+                                    - op: less_equal
+                                      args:
+                                      - op: delay
+                                        id: gate_delay
+                                      - op: literal
+                                        value: 0.5
+                                - op: pow
+                                  args:
+                                  - op: literal
+                                    value: 10.0
+                                  - op: div
+                                    args:
+                                    - op: literal
+                                      value: -0.4342944819
+                                    - op: clamp
+                                      args:
+                                      - op: mul
+                                        args:
+                                        - op: literal
+                                          value: 0.04
+                                        - op: sample_rate
+                                      - op: literal
+                                        value: 1.0
+                                      - op: literal
+                                        value: 100000000.0
+                              - op: register
+                                name: pitch_env
+                  - op: sample_rate
+                - op: literal
+                  value: 0.0
+                - op: literal
+                  value: 0.98
+              - op: clamp
+                args:
+                - op: div
+                  args:
+                  - op: mul
+                    args:
+                    - op: literal
+                      value: 3.14159265358979
+                    - op: mul
+                      args:
+                      - op: clamp
+                        args:
+                        - op: input
+                          name: freq
+                        - op: literal
+                          value: 20.0
+                        - op: literal
+                          value: 500.0
+                      - op: add
+                        args:
+                        - op: literal
+                          value: 1.0
+                        - op: mul
+                          args:
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: punch
+                              - op: literal
+                                value: 0.0
+                              - op: literal
+                                value: 1.0
+                            - op: literal
+                              value: 4.0
+                          - op: add
+                            args:
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: greater
+                                  args:
+                                  - op: input
+                                    name: gate
+                                  - op: literal
+                                    value: 0.5
+                                - op: less_equal
+                                  args:
+                                  - op: delay
+                                    id: gate_delay
+                                  - op: literal
+                                    value: 0.5
+                              - op: literal
+                                value: 1.0
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: sub
+                                  args:
+                                  - op: literal
+                                    value: 1.0
+                                  - op: mul
+                                    args:
+                                    - op: greater
+                                      args:
+                                      - op: input
+                                        name: gate
+                                      - op: literal
+                                        value: 0.5
+                                    - op: less_equal
+                                      args:
+                                      - op: delay
+                                        id: gate_delay
+                                      - op: literal
+                                        value: 0.5
+                                - op: pow
+                                  args:
+                                  - op: literal
+                                    value: 10.0
+                                  - op: div
+                                    args:
+                                    - op: literal
+                                      value: -0.4342944819
+                                    - op: clamp
+                                      args:
+                                      - op: mul
+                                        args:
+                                        - op: literal
+                                          value: 0.04
+                                        - op: sample_rate
+                                      - op: literal
+                                        value: 1.0
+                                      - op: literal
+                                        value: 100000000.0
+                              - op: register
+                                name: pitch_env
+                  - op: sample_rate
+                - op: literal
+                  value: 0.0
+                - op: literal
+                  value: 0.98
+      - op: add
+        args:
+        - op: mul
+          args:
+          - op: mul
+            args:
+            - op: greater
+              args:
+              - op: input
+                name: gate
+              - op: literal
+                value: 0.5
+            - op: less_equal
+              args:
+              - op: delay
+                id: gate_delay
+              - op: literal
+                value: 0.5
+          - op: literal
+            value: 0.0
+        - op: mul
+          args:
+          - op: sub
+            args:
+            - op: literal
+              value: 1.0
+            - op: mul
+              args:
+              - op: greater
+                args:
+                - op: input
+                  name: gate
+                - op: literal
+                  value: 0.5
+              - op: less_equal
+                args:
+                - op: delay
+                  id: gate_delay
+                - op: literal
+                  value: 0.5
+          - op: register
+            name: ic1
+    - op: mul
+      args:
+      - op: clamp
+        args:
+        - op: div
+          args:
+          - op: mul
+            args:
+            - op: literal
+              value: 3.14159265358979
+            - op: mul
+              args:
+              - op: clamp
+                args:
+                - op: input
+                  name: freq
+                - op: literal
+                  value: 20.0
+                - op: literal
+                  value: 500.0
+              - op: add
+                args:
+                - op: literal
+                  value: 1.0
+                - op: mul
+                  args:
+                  - op: mul
+                    args:
+                    - op: clamp
+                      args:
+                      - op: input
+                        name: punch
+                      - op: literal
+                        value: 0.0
+                      - op: literal
+                        value: 1.0
+                    - op: literal
+                      value: 4.0
+                  - op: add
+                    args:
+                    - op: mul
+                      args:
+                      - op: mul
+                        args:
+                        - op: greater
+                          args:
+                          - op: input
+                            name: gate
+                          - op: literal
+                            value: 0.5
+                        - op: less_equal
+                          args:
+                          - op: delay
+                            id: gate_delay
+                          - op: literal
+                            value: 0.5
+                      - op: literal
+                        value: 1.0
+                    - op: mul
+                      args:
+                      - op: mul
+                        args:
+                        - op: sub
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: greater
+                              args:
+                              - op: input
+                                name: gate
+                              - op: literal
+                                value: 0.5
+                            - op: less_equal
+                              args:
+                              - op: delay
+                                id: gate_delay
+                              - op: literal
+                                value: 0.5
+                        - op: pow
+                          args:
+                          - op: literal
+                            value: 10.0
+                          - op: div
+                            args:
+                            - op: literal
+                              value: -0.4342944819
+                            - op: clamp
+                              args:
+                              - op: mul
+                                args:
+                                - op: literal
+                                  value: 0.04
+                                - op: sample_rate
+                              - op: literal
+                                value: 1.0
+                              - op: literal
+                                value: 100000000.0
+                      - op: register
+                        name: pitch_env
+          - op: sample_rate
+        - op: literal
+          value: 0.0
+        - op: literal
+          value: 0.98
+      - op: div
+        args:
+        - op: sub
+          args:
+          - op: sub
+            args:
+            - op: literal
+              value: 0.0
+            - op: add
+              args:
+              - op: mul
+                args:
+                - op: mul
+                  args:
+                  - op: greater
+                    args:
+                    - op: input
+                      name: gate
+                    - op: literal
+                      value: 0.5
+                  - op: less_equal
+                    args:
+                    - op: delay
+                      id: gate_delay
+                    - op: literal
+                      value: 0.5
+                - op: literal
+                  value: 2.0
+              - op: mul
+                args:
+                - op: sub
+                  args:
+                  - op: literal
+                    value: 1.0
+                  - op: mul
+                    args:
+                    - op: greater
+                      args:
+                      - op: input
+                        name: gate
+                      - op: literal
+                        value: 0.5
+                    - op: less_equal
+                      args:
+                      - op: delay
+                        id: gate_delay
+                      - op: literal
+                        value: 0.5
+                - op: register
+                  name: ic2
+          - op: mul
+            args:
+            - op: add
+              args:
+              - op: mul
+                args:
+                - op: literal
+                  value: 2.0
+                - op: div
+                  args:
+                  - op: literal
+                    value: 0.5
+                  - op: clamp
+                    args:
+                    - op: input
+                      name: tone
+                    - op: literal
+                      value: 0.5
+                    - op: literal
+                      value: 50.0
+              - op: clamp
+                args:
+                - op: div
+                  args:
+                  - op: mul
+                    args:
+                    - op: literal
+                      value: 3.14159265358979
+                    - op: mul
+                      args:
+                      - op: clamp
+                        args:
+                        - op: input
+                          name: freq
+                        - op: literal
+                          value: 20.0
+                        - op: literal
+                          value: 500.0
+                      - op: add
+                        args:
+                        - op: literal
+                          value: 1.0
+                        - op: mul
+                          args:
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: punch
+                              - op: literal
+                                value: 0.0
+                              - op: literal
+                                value: 1.0
+                            - op: literal
+                              value: 4.0
+                          - op: add
+                            args:
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: greater
+                                  args:
+                                  - op: input
+                                    name: gate
+                                  - op: literal
+                                    value: 0.5
+                                - op: less_equal
+                                  args:
+                                  - op: delay
+                                    id: gate_delay
+                                  - op: literal
+                                    value: 0.5
+                              - op: literal
+                                value: 1.0
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: sub
+                                  args:
+                                  - op: literal
+                                    value: 1.0
+                                  - op: mul
+                                    args:
+                                    - op: greater
+                                      args:
+                                      - op: input
+                                        name: gate
+                                      - op: literal
+                                        value: 0.5
+                                    - op: less_equal
+                                      args:
+                                      - op: delay
+                                        id: gate_delay
+                                      - op: literal
+                                        value: 0.5
+                                - op: pow
+                                  args:
+                                  - op: literal
+                                    value: 10.0
+                                  - op: div
+                                    args:
+                                    - op: literal
+                                      value: -0.4342944819
+                                    - op: clamp
+                                      args:
+                                      - op: mul
+                                        args:
+                                        - op: literal
+                                          value: 0.04
+                                        - op: sample_rate
+                                      - op: literal
+                                        value: 1.0
+                                      - op: literal
+                                        value: 100000000.0
+                              - op: register
+                                name: pitch_env
+                  - op: sample_rate
+                - op: literal
+                  value: 0.0
+                - op: literal
+                  value: 0.98
+            - op: add
+              args:
+              - op: mul
+                args:
+                - op: mul
+                  args:
+                  - op: greater
+                    args:
+                    - op: input
+                      name: gate
+                    - op: literal
+                      value: 0.5
+                  - op: less_equal
+                    args:
+                    - op: delay
+                      id: gate_delay
+                    - op: literal
+                      value: 0.5
+                - op: literal
+                  value: 0.0
+              - op: mul
+                args:
+                - op: sub
+                  args:
+                  - op: literal
+                    value: 1.0
+                  - op: mul
+                    args:
+                    - op: greater
+                      args:
+                      - op: input
+                        name: gate
+                      - op: literal
+                        value: 0.5
+                    - op: less_equal
+                      args:
+                      - op: delay
+                        id: gate_delay
+                      - op: literal
+                        value: 0.5
+                - op: register
+                  name: ic1
+        - op: add
+          args:
+          - op: add
+            args:
+            - op: literal
+              value: 1.0
+            - op: mul
+              args:
+              - op: mul
+                args:
+                - op: literal
+                  value: 2.0
+                - op: div
+                  args:
+                  - op: literal
+                    value: 0.5
+                  - op: clamp
+                    args:
+                    - op: input
+                      name: tone
+                    - op: literal
+                      value: 0.5
+                    - op: literal
+                      value: 50.0
+              - op: clamp
+                args:
+                - op: div
+                  args:
+                  - op: mul
+                    args:
+                    - op: literal
+                      value: 3.14159265358979
+                    - op: mul
+                      args:
+                      - op: clamp
+                        args:
+                        - op: input
+                          name: freq
+                        - op: literal
+                          value: 20.0
+                        - op: literal
+                          value: 500.0
+                      - op: add
+                        args:
+                        - op: literal
+                          value: 1.0
+                        - op: mul
+                          args:
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: punch
+                              - op: literal
+                                value: 0.0
+                              - op: literal
+                                value: 1.0
+                            - op: literal
+                              value: 4.0
+                          - op: add
+                            args:
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: greater
+                                  args:
+                                  - op: input
+                                    name: gate
+                                  - op: literal
+                                    value: 0.5
+                                - op: less_equal
+                                  args:
+                                  - op: delay
+                                    id: gate_delay
+                                  - op: literal
+                                    value: 0.5
+                              - op: literal
+                                value: 1.0
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: sub
+                                  args:
+                                  - op: literal
+                                    value: 1.0
+                                  - op: mul
+                                    args:
+                                    - op: greater
+                                      args:
+                                      - op: input
+                                        name: gate
+                                      - op: literal
+                                        value: 0.5
+                                    - op: less_equal
+                                      args:
+                                      - op: delay
+                                        id: gate_delay
+                                      - op: literal
+                                        value: 0.5
+                                - op: pow
+                                  args:
+                                  - op: literal
+                                    value: 10.0
+                                  - op: div
+                                    args:
+                                    - op: literal
+                                      value: -0.4342944819
+                                    - op: clamp
+                                      args:
+                                      - op: mul
+                                        args:
+                                        - op: literal
+                                          value: 0.04
+                                        - op: sample_rate
+                                      - op: literal
+                                        value: 1.0
+                                      - op: literal
+                                        value: 100000000.0
+                              - op: register
+                                name: pitch_env
+                  - op: sample_rate
+                - op: literal
+                  value: 0.0
+                - op: literal
+                  value: 0.98
+          - op: mul
+            args:
+            - op: clamp
+              args:
+              - op: div
+                args:
+                - op: mul
+                  args:
+                  - op: literal
+                    value: 3.14159265358979
+                  - op: mul
+                    args:
+                    - op: clamp
+                      args:
+                      - op: input
+                        name: freq
+                      - op: literal
+                        value: 20.0
+                      - op: literal
+                        value: 500.0
+                    - op: add
+                      args:
+                      - op: literal
+                        value: 1.0
+                      - op: mul
+                        args:
+                        - op: mul
+                          args:
+                          - op: clamp
+                            args:
+                            - op: input
+                              name: punch
+                            - op: literal
+                              value: 0.0
+                            - op: literal
+                              value: 1.0
+                          - op: literal
+                            value: 4.0
+                        - op: add
+                          args:
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: greater
+                                args:
+                                - op: input
+                                  name: gate
+                                - op: literal
+                                  value: 0.5
+                              - op: less_equal
+                                args:
+                                - op: delay
+                                  id: gate_delay
+                                - op: literal
+                                  value: 0.5
+                            - op: literal
+                              value: 1.0
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: sub
+                                args:
+                                - op: literal
+                                  value: 1.0
+                                - op: mul
+                                  args:
+                                  - op: greater
+                                    args:
+                                    - op: input
+                                      name: gate
+                                    - op: literal
+                                      value: 0.5
+                                  - op: less_equal
+                                    args:
+                                    - op: delay
+                                      id: gate_delay
+                                    - op: literal
+                                      value: 0.5
+                              - op: pow
+                                args:
+                                - op: literal
+                                  value: 10.0
+                                - op: div
+                                  args:
+                                  - op: literal
+                                    value: -0.4342944819
+                                  - op: clamp
+                                    args:
+                                    - op: mul
+                                      args:
+                                      - op: literal
+                                        value: 0.04
+                                      - op: sample_rate
+                                    - op: literal
+                                      value: 1.0
+                                    - op: literal
+                                      value: 100000000.0
+                            - op: register
+                              name: pitch_env
+                - op: sample_rate
+              - op: literal
+                value: 0.0
+              - op: literal
+                value: 0.98
+            - op: clamp
+              args:
+              - op: div
+                args:
+                - op: mul
+                  args:
+                  - op: literal
+                    value: 3.14159265358979
+                  - op: mul
+                    args:
+                    - op: clamp
+                      args:
+                      - op: input
+                        name: freq
+                      - op: literal
+                        value: 20.0
+                      - op: literal
+                        value: 500.0
+                    - op: add
+                      args:
+                      - op: literal
+                        value: 1.0
+                      - op: mul
+                        args:
+                        - op: mul
+                          args:
+                          - op: clamp
+                            args:
+                            - op: input
+                              name: punch
+                            - op: literal
+                              value: 0.0
+                            - op: literal
+                              value: 1.0
+                          - op: literal
+                            value: 4.0
+                        - op: add
+                          args:
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: greater
+                                args:
+                                - op: input
+                                  name: gate
+                                - op: literal
+                                  value: 0.5
+                              - op: less_equal
+                                args:
+                                - op: delay
+                                  id: gate_delay
+                                - op: literal
+                                  value: 0.5
+                            - op: literal
+                              value: 1.0
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: sub
+                                args:
+                                - op: literal
+                                  value: 1.0
+                                - op: mul
+                                  args:
+                                  - op: greater
+                                    args:
+                                    - op: input
+                                      name: gate
+                                    - op: literal
+                                      value: 0.5
+                                  - op: less_equal
+                                    args:
+                                    - op: delay
+                                      id: gate_delay
+                                    - op: literal
+                                      value: 0.5
+                              - op: pow
+                                args:
+                                - op: literal
+                                  value: 10.0
+                                - op: div
+                                  args:
+                                  - op: literal
+                                    value: -0.4342944819
+                                  - op: clamp
+                                    args:
+                                    - op: mul
+                                      args:
+                                      - op: literal
+                                        value: 0.04
+                                      - op: sample_rate
+                                    - op: literal
+                                      value: 1.0
+                                    - op: literal
+                                      value: 100000000.0
+                            - op: register
+                              name: pitch_env
+                - op: sample_rate
+              - op: literal
+                value: 0.0
+              - op: literal
+                value: 0.98
+- name: ic2
+  init: 0.0
+  update:
+    op: add
+    args:
+    - op: add
+      args:
+      - op: mul
+        args:
+        - op: clamp
+          args:
+          - op: div
+            args:
+            - op: mul
+              args:
+              - op: literal
+                value: 3.14159265358979
+              - op: mul
+                args:
+                - op: clamp
+                  args:
+                  - op: input
+                    name: freq
+                  - op: literal
+                    value: 20.0
+                  - op: literal
+                    value: 500.0
+                - op: add
+                  args:
+                  - op: literal
+                    value: 1.0
+                  - op: mul
+                    args:
+                    - op: mul
+                      args:
+                      - op: clamp
+                        args:
+                        - op: input
+                          name: punch
+                        - op: literal
+                          value: 0.0
+                        - op: literal
+                          value: 1.0
+                      - op: literal
+                        value: 4.0
+                    - op: add
+                      args:
+                      - op: mul
+                        args:
+                        - op: mul
+                          args:
+                          - op: greater
+                            args:
+                            - op: input
+                              name: gate
+                            - op: literal
+                              value: 0.5
+                          - op: less_equal
+                            args:
+                            - op: delay
+                              id: gate_delay
+                            - op: literal
+                              value: 0.5
+                        - op: literal
+                          value: 1.0
+                      - op: mul
+                        args:
+                        - op: mul
+                          args:
+                          - op: sub
+                            args:
+                            - op: literal
+                              value: 1.0
+                            - op: mul
+                              args:
+                              - op: greater
+                                args:
+                                - op: input
+                                  name: gate
+                                - op: literal
+                                  value: 0.5
+                              - op: less_equal
+                                args:
+                                - op: delay
+                                  id: gate_delay
+                                - op: literal
+                                  value: 0.5
+                          - op: pow
+                            args:
+                            - op: literal
+                              value: 10.0
+                            - op: div
+                              args:
+                              - op: literal
+                                value: -0.4342944819
+                              - op: clamp
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: literal
+                                    value: 0.04
+                                  - op: sample_rate
+                                - op: literal
+                                  value: 1.0
+                                - op: literal
+                                  value: 100000000.0
+                        - op: register
+                          name: pitch_env
+            - op: sample_rate
+          - op: literal
+            value: 0.0
+          - op: literal
+            value: 0.98
+        - op: add
+          args:
+          - op: mul
+            args:
+            - op: clamp
+              args:
+              - op: div
+                args:
+                - op: mul
+                  args:
+                  - op: literal
+                    value: 3.14159265358979
+                  - op: mul
+                    args:
+                    - op: clamp
+                      args:
+                      - op: input
+                        name: freq
+                      - op: literal
+                        value: 20.0
+                      - op: literal
+                        value: 500.0
+                    - op: add
+                      args:
+                      - op: literal
+                        value: 1.0
+                      - op: mul
+                        args:
+                        - op: mul
+                          args:
+                          - op: clamp
+                            args:
+                            - op: input
+                              name: punch
+                            - op: literal
+                              value: 0.0
+                            - op: literal
+                              value: 1.0
+                          - op: literal
+                            value: 4.0
+                        - op: add
+                          args:
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: greater
+                                args:
+                                - op: input
+                                  name: gate
+                                - op: literal
+                                  value: 0.5
+                              - op: less_equal
+                                args:
+                                - op: delay
+                                  id: gate_delay
+                                - op: literal
+                                  value: 0.5
+                            - op: literal
+                              value: 1.0
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: sub
+                                args:
+                                - op: literal
+                                  value: 1.0
+                                - op: mul
+                                  args:
+                                  - op: greater
+                                    args:
+                                    - op: input
+                                      name: gate
+                                    - op: literal
+                                      value: 0.5
+                                  - op: less_equal
+                                    args:
+                                    - op: delay
+                                      id: gate_delay
+                                    - op: literal
+                                      value: 0.5
+                              - op: pow
+                                args:
+                                - op: literal
+                                  value: 10.0
+                                - op: div
+                                  args:
+                                  - op: literal
+                                    value: -0.4342944819
+                                  - op: clamp
+                                    args:
+                                    - op: mul
+                                      args:
+                                      - op: literal
+                                        value: 0.04
+                                      - op: sample_rate
+                                    - op: literal
+                                      value: 1.0
+                                    - op: literal
+                                      value: 100000000.0
+                            - op: register
+                              name: pitch_env
+                - op: sample_rate
+              - op: literal
+                value: 0.0
+              - op: literal
+                value: 0.98
+            - op: div
+              args:
+              - op: sub
+                args:
+                - op: sub
+                  args:
+                  - op: literal
+                    value: 0.0
+                  - op: add
+                    args:
+                    - op: mul
+                      args:
+                      - op: mul
+                        args:
+                        - op: greater
+                          args:
+                          - op: input
+                            name: gate
+                          - op: literal
+                            value: 0.5
+                        - op: less_equal
+                          args:
+                          - op: delay
+                            id: gate_delay
+                          - op: literal
+                            value: 0.5
+                      - op: literal
+                        value: 2.0
+                    - op: mul
+                      args:
+                      - op: sub
+                        args:
+                        - op: literal
+                          value: 1.0
+                        - op: mul
+                          args:
+                          - op: greater
+                            args:
+                            - op: input
+                              name: gate
+                            - op: literal
+                              value: 0.5
+                          - op: less_equal
+                            args:
+                            - op: delay
+                              id: gate_delay
+                            - op: literal
+                              value: 0.5
+                      - op: register
+                        name: ic2
+                - op: mul
+                  args:
+                  - op: add
+                    args:
+                    - op: mul
+                      args:
+                      - op: literal
+                        value: 2.0
+                      - op: div
+                        args:
+                        - op: literal
+                          value: 0.5
+                        - op: clamp
+                          args:
+                          - op: input
+                            name: tone
+                          - op: literal
+                            value: 0.5
+                          - op: literal
+                            value: 50.0
+                    - op: clamp
+                      args:
+                      - op: div
+                        args:
+                        - op: mul
+                          args:
+                          - op: literal
+                            value: 3.14159265358979
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: freq
+                              - op: literal
+                                value: 20.0
+                              - op: literal
+                                value: 500.0
+                            - op: add
+                              args:
+                              - op: literal
+                                value: 1.0
+                              - op: mul
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: clamp
+                                    args:
+                                    - op: input
+                                      name: punch
+                                    - op: literal
+                                      value: 0.0
+                                    - op: literal
+                                      value: 1.0
+                                  - op: literal
+                                    value: 4.0
+                                - op: add
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: mul
+                                      args:
+                                      - op: greater
+                                        args:
+                                        - op: input
+                                          name: gate
+                                        - op: literal
+                                          value: 0.5
+                                      - op: less_equal
+                                        args:
+                                        - op: delay
+                                          id: gate_delay
+                                        - op: literal
+                                          value: 0.5
+                                    - op: literal
+                                      value: 1.0
+                                  - op: mul
+                                    args:
+                                    - op: mul
+                                      args:
+                                      - op: sub
+                                        args:
+                                        - op: literal
+                                          value: 1.0
+                                        - op: mul
+                                          args:
+                                          - op: greater
+                                            args:
+                                            - op: input
+                                              name: gate
+                                            - op: literal
+                                              value: 0.5
+                                          - op: less_equal
+                                            args:
+                                            - op: delay
+                                              id: gate_delay
+                                            - op: literal
+                                              value: 0.5
+                                      - op: pow
+                                        args:
+                                        - op: literal
+                                          value: 10.0
+                                        - op: div
+                                          args:
+                                          - op: literal
+                                            value: -0.4342944819
+                                          - op: clamp
+                                            args:
+                                            - op: mul
+                                              args:
+                                              - op: literal
+                                                value: 0.04
+                                              - op: sample_rate
+                                            - op: literal
+                                              value: 1.0
+                                            - op: literal
+                                              value: 100000000.0
+                                    - op: register
+                                      name: pitch_env
+                        - op: sample_rate
+                      - op: literal
+                        value: 0.0
+                      - op: literal
+                        value: 0.98
+                  - op: add
+                    args:
+                    - op: mul
+                      args:
+                      - op: mul
+                        args:
+                        - op: greater
+                          args:
+                          - op: input
+                            name: gate
+                          - op: literal
+                            value: 0.5
+                        - op: less_equal
+                          args:
+                          - op: delay
+                            id: gate_delay
+                          - op: literal
+                            value: 0.5
+                      - op: literal
+                        value: 0.0
+                    - op: mul
+                      args:
+                      - op: sub
+                        args:
+                        - op: literal
+                          value: 1.0
+                        - op: mul
+                          args:
+                          - op: greater
+                            args:
+                            - op: input
+                              name: gate
+                            - op: literal
+                              value: 0.5
+                          - op: less_equal
+                            args:
+                            - op: delay
+                              id: gate_delay
+                            - op: literal
+                              value: 0.5
+                      - op: register
+                        name: ic1
+              - op: add
+                args:
+                - op: add
+                  args:
+                  - op: literal
+                    value: 1.0
+                  - op: mul
+                    args:
+                    - op: mul
+                      args:
+                      - op: literal
+                        value: 2.0
+                      - op: div
+                        args:
+                        - op: literal
+                          value: 0.5
+                        - op: clamp
+                          args:
+                          - op: input
+                            name: tone
+                          - op: literal
+                            value: 0.5
+                          - op: literal
+                            value: 50.0
+                    - op: clamp
+                      args:
+                      - op: div
+                        args:
+                        - op: mul
+                          args:
+                          - op: literal
+                            value: 3.14159265358979
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: freq
+                              - op: literal
+                                value: 20.0
+                              - op: literal
+                                value: 500.0
+                            - op: add
+                              args:
+                              - op: literal
+                                value: 1.0
+                              - op: mul
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: clamp
+                                    args:
+                                    - op: input
+                                      name: punch
+                                    - op: literal
+                                      value: 0.0
+                                    - op: literal
+                                      value: 1.0
+                                  - op: literal
+                                    value: 4.0
+                                - op: add
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: mul
+                                      args:
+                                      - op: greater
+                                        args:
+                                        - op: input
+                                          name: gate
+                                        - op: literal
+                                          value: 0.5
+                                      - op: less_equal
+                                        args:
+                                        - op: delay
+                                          id: gate_delay
+                                        - op: literal
+                                          value: 0.5
+                                    - op: literal
+                                      value: 1.0
+                                  - op: mul
+                                    args:
+                                    - op: mul
+                                      args:
+                                      - op: sub
+                                        args:
+                                        - op: literal
+                                          value: 1.0
+                                        - op: mul
+                                          args:
+                                          - op: greater
+                                            args:
+                                            - op: input
+                                              name: gate
+                                            - op: literal
+                                              value: 0.5
+                                          - op: less_equal
+                                            args:
+                                            - op: delay
+                                              id: gate_delay
+                                            - op: literal
+                                              value: 0.5
+                                      - op: pow
+                                        args:
+                                        - op: literal
+                                          value: 10.0
+                                        - op: div
+                                          args:
+                                          - op: literal
+                                            value: -0.4342944819
+                                          - op: clamp
+                                            args:
+                                            - op: mul
+                                              args:
+                                              - op: literal
+                                                value: 0.04
+                                              - op: sample_rate
+                                            - op: literal
+                                              value: 1.0
+                                            - op: literal
+                                              value: 100000000.0
+                                    - op: register
+                                      name: pitch_env
+                        - op: sample_rate
+                      - op: literal
+                        value: 0.0
+                      - op: literal
+                        value: 0.98
+                - op: mul
+                  args:
+                  - op: clamp
+                    args:
+                    - op: div
+                      args:
+                      - op: mul
+                        args:
+                        - op: literal
+                          value: 3.14159265358979
+                        - op: mul
+                          args:
+                          - op: clamp
+                            args:
+                            - op: input
+                              name: freq
+                            - op: literal
+                              value: 20.0
+                            - op: literal
+                              value: 500.0
+                          - op: add
+                            args:
+                            - op: literal
+                              value: 1.0
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: clamp
+                                  args:
+                                  - op: input
+                                    name: punch
+                                  - op: literal
+                                    value: 0.0
+                                  - op: literal
+                                    value: 1.0
+                                - op: literal
+                                  value: 4.0
+                              - op: add
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: greater
+                                      args:
+                                      - op: input
+                                        name: gate
+                                      - op: literal
+                                        value: 0.5
+                                    - op: less_equal
+                                      args:
+                                      - op: delay
+                                        id: gate_delay
+                                      - op: literal
+                                        value: 0.5
+                                  - op: literal
+                                    value: 1.0
+                                - op: mul
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: sub
+                                      args:
+                                      - op: literal
+                                        value: 1.0
+                                      - op: mul
+                                        args:
+                                        - op: greater
+                                          args:
+                                          - op: input
+                                            name: gate
+                                          - op: literal
+                                            value: 0.5
+                                        - op: less_equal
+                                          args:
+                                          - op: delay
+                                            id: gate_delay
+                                          - op: literal
+                                            value: 0.5
+                                    - op: pow
+                                      args:
+                                      - op: literal
+                                        value: 10.0
+                                      - op: div
+                                        args:
+                                        - op: literal
+                                          value: -0.4342944819
+                                        - op: clamp
+                                          args:
+                                          - op: mul
+                                            args:
+                                            - op: literal
+                                              value: 0.04
+                                            - op: sample_rate
+                                          - op: literal
+                                            value: 1.0
+                                          - op: literal
+                                            value: 100000000.0
+                                  - op: register
+                                    name: pitch_env
+                      - op: sample_rate
+                    - op: literal
+                      value: 0.0
+                    - op: literal
+                      value: 0.98
+                  - op: clamp
+                    args:
+                    - op: div
+                      args:
+                      - op: mul
+                        args:
+                        - op: literal
+                          value: 3.14159265358979
+                        - op: mul
+                          args:
+                          - op: clamp
+                            args:
+                            - op: input
+                              name: freq
+                            - op: literal
+                              value: 20.0
+                            - op: literal
+                              value: 500.0
+                          - op: add
+                            args:
+                            - op: literal
+                              value: 1.0
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: clamp
+                                  args:
+                                  - op: input
+                                    name: punch
+                                  - op: literal
+                                    value: 0.0
+                                  - op: literal
+                                    value: 1.0
+                                - op: literal
+                                  value: 4.0
+                              - op: add
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: greater
+                                      args:
+                                      - op: input
+                                        name: gate
+                                      - op: literal
+                                        value: 0.5
+                                    - op: less_equal
+                                      args:
+                                      - op: delay
+                                        id: gate_delay
+                                      - op: literal
+                                        value: 0.5
+                                  - op: literal
+                                    value: 1.0
+                                - op: mul
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: sub
+                                      args:
+                                      - op: literal
+                                        value: 1.0
+                                      - op: mul
+                                        args:
+                                        - op: greater
+                                          args:
+                                          - op: input
+                                            name: gate
+                                          - op: literal
+                                            value: 0.5
+                                        - op: less_equal
+                                          args:
+                                          - op: delay
+                                            id: gate_delay
+                                          - op: literal
+                                            value: 0.5
+                                    - op: pow
+                                      args:
+                                      - op: literal
+                                        value: 10.0
+                                      - op: div
+                                        args:
+                                        - op: literal
+                                          value: -0.4342944819
+                                        - op: clamp
+                                          args:
+                                          - op: mul
+                                            args:
+                                            - op: literal
+                                              value: 0.04
+                                            - op: sample_rate
+                                          - op: literal
+                                            value: 1.0
+                                          - op: literal
+                                            value: 100000000.0
+                                  - op: register
+                                    name: pitch_env
+                      - op: sample_rate
+                    - op: literal
+                      value: 0.0
+                    - op: literal
+                      value: 0.98
+          - op: add
+            args:
+            - op: mul
+              args:
+              - op: mul
+                args:
+                - op: greater
+                  args:
+                  - op: input
+                    name: gate
+                  - op: literal
+                    value: 0.5
+                - op: less_equal
+                  args:
+                  - op: delay
+                    id: gate_delay
+                  - op: literal
+                    value: 0.5
+              - op: literal
+                value: 0.0
+            - op: mul
+              args:
+              - op: sub
+                args:
+                - op: literal
+                  value: 1.0
+                - op: mul
+                  args:
+                  - op: greater
+                    args:
+                    - op: input
+                      name: gate
+                    - op: literal
+                      value: 0.5
+                  - op: less_equal
+                    args:
+                    - op: delay
+                      id: gate_delay
+                    - op: literal
+                      value: 0.5
+              - op: register
+                name: ic1
+      - op: add
+        args:
+        - op: mul
+          args:
+          - op: mul
+            args:
+            - op: greater
+              args:
+              - op: input
+                name: gate
+              - op: literal
+                value: 0.5
+            - op: less_equal
+              args:
+              - op: delay
+                id: gate_delay
+              - op: literal
+                value: 0.5
+          - op: literal
+            value: 2.0
+        - op: mul
+          args:
+          - op: sub
+            args:
+            - op: literal
+              value: 1.0
+            - op: mul
+              args:
+              - op: greater
+                args:
+                - op: input
+                  name: gate
+                - op: literal
+                  value: 0.5
+              - op: less_equal
+                args:
+                - op: delay
+                  id: gate_delay
+                - op: literal
+                  value: 0.5
+          - op: register
+            name: ic2
+    - op: mul
+      args:
+      - op: clamp
+        args:
+        - op: div
+          args:
+          - op: mul
+            args:
+            - op: literal
+              value: 3.14159265358979
+            - op: mul
+              args:
+              - op: clamp
+                args:
+                - op: input
+                  name: freq
+                - op: literal
+                  value: 20.0
+                - op: literal
+                  value: 500.0
+              - op: add
+                args:
+                - op: literal
+                  value: 1.0
+                - op: mul
+                  args:
+                  - op: mul
+                    args:
+                    - op: clamp
+                      args:
+                      - op: input
+                        name: punch
+                      - op: literal
+                        value: 0.0
+                      - op: literal
+                        value: 1.0
+                    - op: literal
+                      value: 4.0
+                  - op: add
+                    args:
+                    - op: mul
+                      args:
+                      - op: mul
+                        args:
+                        - op: greater
+                          args:
+                          - op: input
+                            name: gate
+                          - op: literal
+                            value: 0.5
+                        - op: less_equal
+                          args:
+                          - op: delay
+                            id: gate_delay
+                          - op: literal
+                            value: 0.5
+                      - op: literal
+                        value: 1.0
+                    - op: mul
+                      args:
+                      - op: mul
+                        args:
+                        - op: sub
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: greater
+                              args:
+                              - op: input
+                                name: gate
+                              - op: literal
+                                value: 0.5
+                            - op: less_equal
+                              args:
+                              - op: delay
+                                id: gate_delay
+                              - op: literal
+                                value: 0.5
+                        - op: pow
+                          args:
+                          - op: literal
+                            value: 10.0
+                          - op: div
+                            args:
+                            - op: literal
+                              value: -0.4342944819
+                            - op: clamp
+                              args:
+                              - op: mul
+                                args:
+                                - op: literal
+                                  value: 0.04
+                                - op: sample_rate
+                              - op: literal
+                                value: 1.0
+                              - op: literal
+                                value: 100000000.0
+                      - op: register
+                        name: pitch_env
+          - op: sample_rate
+        - op: literal
+          value: 0.0
+        - op: literal
+          value: 0.98
+      - op: add
+        args:
+        - op: mul
+          args:
+          - op: clamp
+            args:
+            - op: div
+              args:
+              - op: mul
+                args:
+                - op: literal
+                  value: 3.14159265358979
+                - op: mul
+                  args:
+                  - op: clamp
+                    args:
+                    - op: input
+                      name: freq
+                    - op: literal
+                      value: 20.0
+                    - op: literal
+                      value: 500.0
+                  - op: add
+                    args:
+                    - op: literal
+                      value: 1.0
+                    - op: mul
+                      args:
+                      - op: mul
+                        args:
+                        - op: clamp
+                          args:
+                          - op: input
+                            name: punch
+                          - op: literal
+                            value: 0.0
+                          - op: literal
+                            value: 1.0
+                        - op: literal
+                          value: 4.0
+                      - op: add
+                        args:
+                        - op: mul
+                          args:
+                          - op: mul
+                            args:
+                            - op: greater
+                              args:
+                              - op: input
+                                name: gate
+                              - op: literal
+                                value: 0.5
+                            - op: less_equal
+                              args:
+                              - op: delay
+                                id: gate_delay
+                              - op: literal
+                                value: 0.5
+                          - op: literal
+                            value: 1.0
+                        - op: mul
+                          args:
+                          - op: mul
+                            args:
+                            - op: sub
+                              args:
+                              - op: literal
+                                value: 1.0
+                              - op: mul
+                                args:
+                                - op: greater
+                                  args:
+                                  - op: input
+                                    name: gate
+                                  - op: literal
+                                    value: 0.5
+                                - op: less_equal
+                                  args:
+                                  - op: delay
+                                    id: gate_delay
+                                  - op: literal
+                                    value: 0.5
+                            - op: pow
+                              args:
+                              - op: literal
+                                value: 10.0
+                              - op: div
+                                args:
+                                - op: literal
+                                  value: -0.4342944819
+                                - op: clamp
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: literal
+                                      value: 0.04
+                                    - op: sample_rate
+                                  - op: literal
+                                    value: 1.0
+                                  - op: literal
+                                    value: 100000000.0
+                          - op: register
+                            name: pitch_env
+              - op: sample_rate
+            - op: literal
+              value: 0.0
+            - op: literal
+              value: 0.98
+          - op: div
+            args:
+            - op: sub
+              args:
+              - op: sub
+                args:
+                - op: literal
+                  value: 0.0
+                - op: add
+                  args:
+                  - op: mul
+                    args:
+                    - op: mul
+                      args:
+                      - op: greater
+                        args:
+                        - op: input
+                          name: gate
+                        - op: literal
+                          value: 0.5
+                      - op: less_equal
+                        args:
+                        - op: delay
+                          id: gate_delay
+                        - op: literal
+                          value: 0.5
+                    - op: literal
+                      value: 2.0
+                  - op: mul
+                    args:
+                    - op: sub
+                      args:
+                      - op: literal
+                        value: 1.0
+                      - op: mul
+                        args:
+                        - op: greater
+                          args:
+                          - op: input
+                            name: gate
+                          - op: literal
+                            value: 0.5
+                        - op: less_equal
+                          args:
+                          - op: delay
+                            id: gate_delay
+                          - op: literal
+                            value: 0.5
+                    - op: register
+                      name: ic2
+              - op: mul
+                args:
+                - op: add
+                  args:
+                  - op: mul
+                    args:
+                    - op: literal
+                      value: 2.0
+                    - op: div
+                      args:
+                      - op: literal
+                        value: 0.5
+                      - op: clamp
+                        args:
+                        - op: input
+                          name: tone
+                        - op: literal
+                          value: 0.5
+                        - op: literal
+                          value: 50.0
+                  - op: clamp
+                    args:
+                    - op: div
+                      args:
+                      - op: mul
+                        args:
+                        - op: literal
+                          value: 3.14159265358979
+                        - op: mul
+                          args:
+                          - op: clamp
+                            args:
+                            - op: input
+                              name: freq
+                            - op: literal
+                              value: 20.0
+                            - op: literal
+                              value: 500.0
+                          - op: add
+                            args:
+                            - op: literal
+                              value: 1.0
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: clamp
+                                  args:
+                                  - op: input
+                                    name: punch
+                                  - op: literal
+                                    value: 0.0
+                                  - op: literal
+                                    value: 1.0
+                                - op: literal
+                                  value: 4.0
+                              - op: add
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: greater
+                                      args:
+                                      - op: input
+                                        name: gate
+                                      - op: literal
+                                        value: 0.5
+                                    - op: less_equal
+                                      args:
+                                      - op: delay
+                                        id: gate_delay
+                                      - op: literal
+                                        value: 0.5
+                                  - op: literal
+                                    value: 1.0
+                                - op: mul
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: sub
+                                      args:
+                                      - op: literal
+                                        value: 1.0
+                                      - op: mul
+                                        args:
+                                        - op: greater
+                                          args:
+                                          - op: input
+                                            name: gate
+                                          - op: literal
+                                            value: 0.5
+                                        - op: less_equal
+                                          args:
+                                          - op: delay
+                                            id: gate_delay
+                                          - op: literal
+                                            value: 0.5
+                                    - op: pow
+                                      args:
+                                      - op: literal
+                                        value: 10.0
+                                      - op: div
+                                        args:
+                                        - op: literal
+                                          value: -0.4342944819
+                                        - op: clamp
+                                          args:
+                                          - op: mul
+                                            args:
+                                            - op: literal
+                                              value: 0.04
+                                            - op: sample_rate
+                                          - op: literal
+                                            value: 1.0
+                                          - op: literal
+                                            value: 100000000.0
+                                  - op: register
+                                    name: pitch_env
+                      - op: sample_rate
+                    - op: literal
+                      value: 0.0
+                    - op: literal
+                      value: 0.98
+                - op: add
+                  args:
+                  - op: mul
+                    args:
+                    - op: mul
+                      args:
+                      - op: greater
+                        args:
+                        - op: input
+                          name: gate
+                        - op: literal
+                          value: 0.5
+                      - op: less_equal
+                        args:
+                        - op: delay
+                          id: gate_delay
+                        - op: literal
+                          value: 0.5
+                    - op: literal
+                      value: 0.0
+                  - op: mul
+                    args:
+                    - op: sub
+                      args:
+                      - op: literal
+                        value: 1.0
+                      - op: mul
+                        args:
+                        - op: greater
+                          args:
+                          - op: input
+                            name: gate
+                          - op: literal
+                            value: 0.5
+                        - op: less_equal
+                          args:
+                          - op: delay
+                            id: gate_delay
+                          - op: literal
+                            value: 0.5
+                    - op: register
+                      name: ic1
+            - op: add
+              args:
+              - op: add
+                args:
+                - op: literal
+                  value: 1.0
+                - op: mul
+                  args:
+                  - op: mul
+                    args:
+                    - op: literal
+                      value: 2.0
+                    - op: div
+                      args:
+                      - op: literal
+                        value: 0.5
+                      - op: clamp
+                        args:
+                        - op: input
+                          name: tone
+                        - op: literal
+                          value: 0.5
+                        - op: literal
+                          value: 50.0
+                  - op: clamp
+                    args:
+                    - op: div
+                      args:
+                      - op: mul
+                        args:
+                        - op: literal
+                          value: 3.14159265358979
+                        - op: mul
+                          args:
+                          - op: clamp
+                            args:
+                            - op: input
+                              name: freq
+                            - op: literal
+                              value: 20.0
+                            - op: literal
+                              value: 500.0
+                          - op: add
+                            args:
+                            - op: literal
+                              value: 1.0
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: clamp
+                                  args:
+                                  - op: input
+                                    name: punch
+                                  - op: literal
+                                    value: 0.0
+                                  - op: literal
+                                    value: 1.0
+                                - op: literal
+                                  value: 4.0
+                              - op: add
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: greater
+                                      args:
+                                      - op: input
+                                        name: gate
+                                      - op: literal
+                                        value: 0.5
+                                    - op: less_equal
+                                      args:
+                                      - op: delay
+                                        id: gate_delay
+                                      - op: literal
+                                        value: 0.5
+                                  - op: literal
+                                    value: 1.0
+                                - op: mul
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: sub
+                                      args:
+                                      - op: literal
+                                        value: 1.0
+                                      - op: mul
+                                        args:
+                                        - op: greater
+                                          args:
+                                          - op: input
+                                            name: gate
+                                          - op: literal
+                                            value: 0.5
+                                        - op: less_equal
+                                          args:
+                                          - op: delay
+                                            id: gate_delay
+                                          - op: literal
+                                            value: 0.5
+                                    - op: pow
+                                      args:
+                                      - op: literal
+                                        value: 10.0
+                                      - op: div
+                                        args:
+                                        - op: literal
+                                          value: -0.4342944819
+                                        - op: clamp
+                                          args:
+                                          - op: mul
+                                            args:
+                                            - op: literal
+                                              value: 0.04
+                                            - op: sample_rate
+                                          - op: literal
+                                            value: 1.0
+                                          - op: literal
+                                            value: 100000000.0
+                                  - op: register
+                                    name: pitch_env
+                      - op: sample_rate
+                    - op: literal
+                      value: 0.0
+                    - op: literal
+                      value: 0.98
+              - op: mul
+                args:
+                - op: clamp
+                  args:
+                  - op: div
+                    args:
+                    - op: mul
+                      args:
+                      - op: literal
+                        value: 3.14159265358979
+                      - op: mul
+                        args:
+                        - op: clamp
+                          args:
+                          - op: input
+                            name: freq
+                          - op: literal
+                            value: 20.0
+                          - op: literal
+                            value: 500.0
+                        - op: add
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: clamp
+                                args:
+                                - op: input
+                                  name: punch
+                                - op: literal
+                                  value: 0.0
+                                - op: literal
+                                  value: 1.0
+                              - op: literal
+                                value: 4.0
+                            - op: add
+                              args:
+                              - op: mul
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: greater
+                                    args:
+                                    - op: input
+                                      name: gate
+                                    - op: literal
+                                      value: 0.5
+                                  - op: less_equal
+                                    args:
+                                    - op: delay
+                                      id: gate_delay
+                                    - op: literal
+                                      value: 0.5
+                                - op: literal
+                                  value: 1.0
+                              - op: mul
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: sub
+                                    args:
+                                    - op: literal
+                                      value: 1.0
+                                    - op: mul
+                                      args:
+                                      - op: greater
+                                        args:
+                                        - op: input
+                                          name: gate
+                                        - op: literal
+                                          value: 0.5
+                                      - op: less_equal
+                                        args:
+                                        - op: delay
+                                          id: gate_delay
+                                        - op: literal
+                                          value: 0.5
+                                  - op: pow
+                                    args:
+                                    - op: literal
+                                      value: 10.0
+                                    - op: div
+                                      args:
+                                      - op: literal
+                                        value: -0.4342944819
+                                      - op: clamp
+                                        args:
+                                        - op: mul
+                                          args:
+                                          - op: literal
+                                            value: 0.04
+                                          - op: sample_rate
+                                        - op: literal
+                                          value: 1.0
+                                        - op: literal
+                                          value: 100000000.0
+                                - op: register
+                                  name: pitch_env
+                    - op: sample_rate
+                  - op: literal
+                    value: 0.0
+                  - op: literal
+                    value: 0.98
+                - op: clamp
+                  args:
+                  - op: div
+                    args:
+                    - op: mul
+                      args:
+                      - op: literal
+                        value: 3.14159265358979
+                      - op: mul
+                        args:
+                        - op: clamp
+                          args:
+                          - op: input
+                            name: freq
+                          - op: literal
+                            value: 20.0
+                          - op: literal
+                            value: 500.0
+                        - op: add
+                          args:
+                          - op: literal
+                            value: 1.0
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: clamp
+                                args:
+                                - op: input
+                                  name: punch
+                                - op: literal
+                                  value: 0.0
+                                - op: literal
+                                  value: 1.0
+                              - op: literal
+                                value: 4.0
+                            - op: add
+                              args:
+                              - op: mul
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: greater
+                                    args:
+                                    - op: input
+                                      name: gate
+                                    - op: literal
+                                      value: 0.5
+                                  - op: less_equal
+                                    args:
+                                    - op: delay
+                                      id: gate_delay
+                                    - op: literal
+                                      value: 0.5
+                                - op: literal
+                                  value: 1.0
+                              - op: mul
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: sub
+                                    args:
+                                    - op: literal
+                                      value: 1.0
+                                    - op: mul
+                                      args:
+                                      - op: greater
+                                        args:
+                                        - op: input
+                                          name: gate
+                                        - op: literal
+                                          value: 0.5
+                                      - op: less_equal
+                                        args:
+                                        - op: delay
+                                          id: gate_delay
+                                        - op: literal
+                                          value: 0.5
+                                  - op: pow
+                                    args:
+                                    - op: literal
+                                      value: 10.0
+                                    - op: div
+                                      args:
+                                      - op: literal
+                                        value: -0.4342944819
+                                      - op: clamp
+                                        args:
+                                        - op: mul
+                                          args:
+                                          - op: literal
+                                            value: 0.04
+                                          - op: sample_rate
+                                        - op: literal
+                                          value: 1.0
+                                        - op: literal
+                                          value: 100000000.0
+                                - op: register
+                                  name: pitch_env
+                    - op: sample_rate
+                  - op: literal
+                    value: 0.0
+                  - op: literal
+                    value: 0.98
+        - op: add
+          args:
+          - op: mul
+            args:
+            - op: mul
+              args:
+              - op: greater
+                args:
+                - op: input
+                  name: gate
+                - op: literal
+                  value: 0.5
+              - op: less_equal
+                args:
+                - op: delay
+                  id: gate_delay
+                - op: literal
+                  value: 0.5
+            - op: literal
+              value: 0.0
+          - op: mul
+            args:
+            - op: sub
+              args:
+              - op: literal
+                value: 1.0
+              - op: mul
+                args:
+                - op: greater
+                  args:
+                  - op: input
+                    name: gate
+                  - op: literal
+                    value: 0.5
+                - op: less_equal
+                  args:
+                  - op: delay
+                    id: gate_delay
+                  - op: literal
+                    value: 0.5
+            - op: register
+              name: ic1
+delay_states:
+- id: gate_delay
+  init: 0.0
+  update:
+    op: input
+    name: gate
+output_exprs:
+  output:
+    op: mul
+    args:
+    - op: mul
+      args:
+      - op: add
+        args:
+        - op: mul
+          args:
+          - op: mul
+            args:
+            - op: greater
+              args:
+              - op: input
+                name: gate
+              - op: literal
+                value: 0.5
+            - op: less_equal
+              args:
+              - op: delay
+                id: gate_delay
+              - op: literal
+                value: 0.5
+          - op: literal
+            value: 1.0
+        - op: mul
+          args:
+          - op: mul
+            args:
+            - op: sub
+              args:
+              - op: literal
+                value: 1.0
+              - op: mul
+                args:
+                - op: greater
+                  args:
+                  - op: input
+                    name: gate
+                  - op: literal
+                    value: 0.5
+                - op: less_equal
+                  args:
+                  - op: delay
+                    id: gate_delay
+                  - op: literal
+                    value: 0.5
+            - op: pow
+              args:
+              - op: literal
+                value: 10.0
+              - op: div
+                args:
+                - op: literal
+                  value: -0.4342944819
+                - op: clamp
+                  args:
+                  - op: mul
+                    args:
+                    - op: clamp
+                      args:
+                      - op: input
+                        name: decay
+                      - op: literal
+                        value: 0.01
+                      - op: literal
+                        value: 4.0
+                    - op: sample_rate
+                  - op: literal
+                    value: 1.0
+                  - op: literal
+                    value: 100000000.0
+          - op: register
+            name: amp_env
+      - op: clamp
+        args:
+        - op: mul
+          args:
+          - op: add
+            args:
+            - op: mul
+              args:
+              - op: clamp
+                args:
+                - op: div
+                  args:
+                  - op: mul
+                    args:
+                    - op: literal
+                      value: 3.14159265358979
+                    - op: mul
+                      args:
+                      - op: clamp
+                        args:
+                        - op: input
+                          name: freq
+                        - op: literal
+                          value: 20.0
+                        - op: literal
+                          value: 500.0
+                      - op: add
+                        args:
+                        - op: literal
+                          value: 1.0
+                        - op: mul
+                          args:
+                          - op: mul
+                            args:
+                            - op: clamp
+                              args:
+                              - op: input
+                                name: punch
+                              - op: literal
+                                value: 0.0
+                              - op: literal
+                                value: 1.0
+                            - op: literal
+                              value: 4.0
+                          - op: add
+                            args:
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: greater
+                                  args:
+                                  - op: input
+                                    name: gate
+                                  - op: literal
+                                    value: 0.5
+                                - op: less_equal
+                                  args:
+                                  - op: delay
+                                    id: gate_delay
+                                  - op: literal
+                                    value: 0.5
+                              - op: literal
+                                value: 1.0
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: sub
+                                  args:
+                                  - op: literal
+                                    value: 1.0
+                                  - op: mul
+                                    args:
+                                    - op: greater
+                                      args:
+                                      - op: input
+                                        name: gate
+                                      - op: literal
+                                        value: 0.5
+                                    - op: less_equal
+                                      args:
+                                      - op: delay
+                                        id: gate_delay
+                                      - op: literal
+                                        value: 0.5
+                                - op: pow
+                                  args:
+                                  - op: literal
+                                    value: 10.0
+                                  - op: div
+                                    args:
+                                    - op: literal
+                                      value: -0.4342944819
+                                    - op: clamp
+                                      args:
+                                      - op: mul
+                                        args:
+                                        - op: literal
+                                          value: 0.04
+                                        - op: sample_rate
+                                      - op: literal
+                                        value: 1.0
+                                      - op: literal
+                                        value: 100000000.0
+                              - op: register
+                                name: pitch_env
+                  - op: sample_rate
+                - op: literal
+                  value: 0.0
+                - op: literal
+                  value: 0.98
+              - op: add
+                args:
+                - op: mul
+                  args:
+                  - op: clamp
+                    args:
+                    - op: div
+                      args:
+                      - op: mul
+                        args:
+                        - op: literal
+                          value: 3.14159265358979
+                        - op: mul
+                          args:
+                          - op: clamp
+                            args:
+                            - op: input
+                              name: freq
+                            - op: literal
+                              value: 20.0
+                            - op: literal
+                              value: 500.0
+                          - op: add
+                            args:
+                            - op: literal
+                              value: 1.0
+                            - op: mul
+                              args:
+                              - op: mul
+                                args:
+                                - op: clamp
+                                  args:
+                                  - op: input
+                                    name: punch
+                                  - op: literal
+                                    value: 0.0
+                                  - op: literal
+                                    value: 1.0
+                                - op: literal
+                                  value: 4.0
+                              - op: add
+                                args:
+                                - op: mul
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: greater
+                                      args:
+                                      - op: input
+                                        name: gate
+                                      - op: literal
+                                        value: 0.5
+                                    - op: less_equal
+                                      args:
+                                      - op: delay
+                                        id: gate_delay
+                                      - op: literal
+                                        value: 0.5
+                                  - op: literal
+                                    value: 1.0
+                                - op: mul
+                                  args:
+                                  - op: mul
+                                    args:
+                                    - op: sub
+                                      args:
+                                      - op: literal
+                                        value: 1.0
+                                      - op: mul
+                                        args:
+                                        - op: greater
+                                          args:
+                                          - op: input
+                                            name: gate
+                                          - op: literal
+                                            value: 0.5
+                                        - op: less_equal
+                                          args:
+                                          - op: delay
+                                            id: gate_delay
+                                          - op: literal
+                                            value: 0.5
+                                    - op: pow
+                                      args:
+                                      - op: literal
+                                        value: 10.0
+                                      - op: div
+                                        args:
+                                        - op: literal
+                                          value: -0.4342944819
+                                        - op: clamp
+                                          args:
+                                          - op: mul
+                                            args:
+                                            - op: literal
+                                              value: 0.04
+                                            - op: sample_rate
+                                          - op: literal
+                                            value: 1.0
+                                          - op: literal
+                                            value: 100000000.0
+                                  - op: register
+                                    name: pitch_env
+                      - op: sample_rate
+                    - op: literal
+                      value: 0.0
+                    - op: literal
+                      value: 0.98
+                  - op: div
+                    args:
+                    - op: sub
+                      args:
+                      - op: sub
+                        args:
+                        - op: literal
+                          value: 0.0
+                        - op: add
+                          args:
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: greater
+                                args:
+                                - op: input
+                                  name: gate
+                                - op: literal
+                                  value: 0.5
+                              - op: less_equal
+                                args:
+                                - op: delay
+                                  id: gate_delay
+                                - op: literal
+                                  value: 0.5
+                            - op: literal
+                              value: 2.0
+                          - op: mul
+                            args:
+                            - op: sub
+                              args:
+                              - op: literal
+                                value: 1.0
+                              - op: mul
+                                args:
+                                - op: greater
+                                  args:
+                                  - op: input
+                                    name: gate
+                                  - op: literal
+                                    value: 0.5
+                                - op: less_equal
+                                  args:
+                                  - op: delay
+                                    id: gate_delay
+                                  - op: literal
+                                    value: 0.5
+                            - op: register
+                              name: ic2
+                      - op: mul
+                        args:
+                        - op: add
+                          args:
+                          - op: mul
+                            args:
+                            - op: literal
+                              value: 2.0
+                            - op: div
+                              args:
+                              - op: literal
+                                value: 0.5
+                              - op: clamp
+                                args:
+                                - op: input
+                                  name: tone
+                                - op: literal
+                                  value: 0.5
+                                - op: literal
+                                  value: 50.0
+                          - op: clamp
+                            args:
+                            - op: div
+                              args:
+                              - op: mul
+                                args:
+                                - op: literal
+                                  value: 3.14159265358979
+                                - op: mul
+                                  args:
+                                  - op: clamp
+                                    args:
+                                    - op: input
+                                      name: freq
+                                    - op: literal
+                                      value: 20.0
+                                    - op: literal
+                                      value: 500.0
+                                  - op: add
+                                    args:
+                                    - op: literal
+                                      value: 1.0
+                                    - op: mul
+                                      args:
+                                      - op: mul
+                                        args:
+                                        - op: clamp
+                                          args:
+                                          - op: input
+                                            name: punch
+                                          - op: literal
+                                            value: 0.0
+                                          - op: literal
+                                            value: 1.0
+                                        - op: literal
+                                          value: 4.0
+                                      - op: add
+                                        args:
+                                        - op: mul
+                                          args:
+                                          - op: mul
+                                            args:
+                                            - op: greater
+                                              args:
+                                              - op: input
+                                                name: gate
+                                              - op: literal
+                                                value: 0.5
+                                            - op: less_equal
+                                              args:
+                                              - op: delay
+                                                id: gate_delay
+                                              - op: literal
+                                                value: 0.5
+                                          - op: literal
+                                            value: 1.0
+                                        - op: mul
+                                          args:
+                                          - op: mul
+                                            args:
+                                            - op: sub
+                                              args:
+                                              - op: literal
+                                                value: 1.0
+                                              - op: mul
+                                                args:
+                                                - op: greater
+                                                  args:
+                                                  - op: input
+                                                    name: gate
+                                                  - op: literal
+                                                    value: 0.5
+                                                - op: less_equal
+                                                  args:
+                                                  - op: delay
+                                                    id: gate_delay
+                                                  - op: literal
+                                                    value: 0.5
+                                            - op: pow
+                                              args:
+                                              - op: literal
+                                                value: 10.0
+                                              - op: div
+                                                args:
+                                                - op: literal
+                                                  value: -0.4342944819
+                                                - op: clamp
+                                                  args:
+                                                  - op: mul
+                                                    args:
+                                                    - op: literal
+                                                      value: 0.04
+                                                    - op: sample_rate
+                                                  - op: literal
+                                                    value: 1.0
+                                                  - op: literal
+                                                    value: 100000000.0
+                                          - op: register
+                                            name: pitch_env
+                              - op: sample_rate
+                            - op: literal
+                              value: 0.0
+                            - op: literal
+                              value: 0.98
+                        - op: add
+                          args:
+                          - op: mul
+                            args:
+                            - op: mul
+                              args:
+                              - op: greater
+                                args:
+                                - op: input
+                                  name: gate
+                                - op: literal
+                                  value: 0.5
+                              - op: less_equal
+                                args:
+                                - op: delay
+                                  id: gate_delay
+                                - op: literal
+                                  value: 0.5
+                            - op: literal
+                              value: 0.0
+                          - op: mul
+                            args:
+                            - op: sub
+                              args:
+                              - op: literal
+                                value: 1.0
+                              - op: mul
+                                args:
+                                - op: greater
+                                  args:
+                                  - op: input
+                                    name: gate
+                                  - op: literal
+                                    value: 0.5
+                                - op: less_equal
+                                  args:
+                                  - op: delay
+                                    id: gate_delay
+                                  - op: literal
+                                    value: 0.5
+                            - op: register
+                              name: ic1
+                    - op: add
+                      args:
+                      - op: add
+                        args:
+                        - op: literal
+                          value: 1.0
+                        - op: mul
+                          args:
+                          - op: mul
+                            args:
+                            - op: literal
+                              value: 2.0
+                            - op: div
+                              args:
+                              - op: literal
+                                value: 0.5
+                              - op: clamp
+                                args:
+                                - op: input
+                                  name: tone
+                                - op: literal
+                                  value: 0.5
+                                - op: literal
+                                  value: 50.0
+                          - op: clamp
+                            args:
+                            - op: div
+                              args:
+                              - op: mul
+                                args:
+                                - op: literal
+                                  value: 3.14159265358979
+                                - op: mul
+                                  args:
+                                  - op: clamp
+                                    args:
+                                    - op: input
+                                      name: freq
+                                    - op: literal
+                                      value: 20.0
+                                    - op: literal
+                                      value: 500.0
+                                  - op: add
+                                    args:
+                                    - op: literal
+                                      value: 1.0
+                                    - op: mul
+                                      args:
+                                      - op: mul
+                                        args:
+                                        - op: clamp
+                                          args:
+                                          - op: input
+                                            name: punch
+                                          - op: literal
+                                            value: 0.0
+                                          - op: literal
+                                            value: 1.0
+                                        - op: literal
+                                          value: 4.0
+                                      - op: add
+                                        args:
+                                        - op: mul
+                                          args:
+                                          - op: mul
+                                            args:
+                                            - op: greater
+                                              args:
+                                              - op: input
+                                                name: gate
+                                              - op: literal
+                                                value: 0.5
+                                            - op: less_equal
+                                              args:
+                                              - op: delay
+                                                id: gate_delay
+                                              - op: literal
+                                                value: 0.5
+                                          - op: literal
+                                            value: 1.0
+                                        - op: mul
+                                          args:
+                                          - op: mul
+                                            args:
+                                            - op: sub
+                                              args:
+                                              - op: literal
+                                                value: 1.0
+                                              - op: mul
+                                                args:
+                                                - op: greater
+                                                  args:
+                                                  - op: input
+                                                    name: gate
+                                                  - op: literal
+                                                    value: 0.5
+                                                - op: less_equal
+                                                  args:
+                                                  - op: delay
+                                                    id: gate_delay
+                                                  - op: literal
+                                                    value: 0.5
+                                            - op: pow
+                                              args:
+                                              - op: literal
+                                                value: 10.0
+                                              - op: div
+                                                args:
+                                                - op: literal
+                                                  value: -0.4342944819
+                                                - op: clamp
+                                                  args:
+                                                  - op: mul
+                                                    args:
+                                                    - op: literal
+                                                      value: 0.04
+                                                    - op: sample_rate
+                                                  - op: literal
+                                                    value: 1.0
+                                                  - op: literal
+                                                    value: 100000000.0
+                                          - op: register
+                                            name: pitch_env
+                              - op: sample_rate
+                            - op: literal
+                              value: 0.0
+                            - op: literal
+                              value: 0.98
+                      - op: mul
+                        args:
+                        - op: clamp
+                          args:
+                          - op: div
+                            args:
+                            - op: mul
+                              args:
+                              - op: literal
+                                value: 3.14159265358979
+                              - op: mul
+                                args:
+                                - op: clamp
+                                  args:
+                                  - op: input
+                                    name: freq
+                                  - op: literal
+                                    value: 20.0
+                                  - op: literal
+                                    value: 500.0
+                                - op: add
+                                  args:
+                                  - op: literal
+                                    value: 1.0
+                                  - op: mul
+                                    args:
+                                    - op: mul
+                                      args:
+                                      - op: clamp
+                                        args:
+                                        - op: input
+                                          name: punch
+                                        - op: literal
+                                          value: 0.0
+                                        - op: literal
+                                          value: 1.0
+                                      - op: literal
+                                        value: 4.0
+                                    - op: add
+                                      args:
+                                      - op: mul
+                                        args:
+                                        - op: mul
+                                          args:
+                                          - op: greater
+                                            args:
+                                            - op: input
+                                              name: gate
+                                            - op: literal
+                                              value: 0.5
+                                          - op: less_equal
+                                            args:
+                                            - op: delay
+                                              id: gate_delay
+                                            - op: literal
+                                              value: 0.5
+                                        - op: literal
+                                          value: 1.0
+                                      - op: mul
+                                        args:
+                                        - op: mul
+                                          args:
+                                          - op: sub
+                                            args:
+                                            - op: literal
+                                              value: 1.0
+                                            - op: mul
+                                              args:
+                                              - op: greater
+                                                args:
+                                                - op: input
+                                                  name: gate
+                                                - op: literal
+                                                  value: 0.5
+                                              - op: less_equal
+                                                args:
+                                                - op: delay
+                                                  id: gate_delay
+                                                - op: literal
+                                                  value: 0.5
+                                          - op: pow
+                                            args:
+                                            - op: literal
+                                              value: 10.0
+                                            - op: div
+                                              args:
+                                              - op: literal
+                                                value: -0.4342944819
+                                              - op: clamp
+                                                args:
+                                                - op: mul
+                                                  args:
+                                                  - op: literal
+                                                    value: 0.04
+                                                  - op: sample_rate
+                                                - op: literal
+                                                  value: 1.0
+                                                - op: literal
+                                                  value: 100000000.0
+                                        - op: register
+                                          name: pitch_env
+                            - op: sample_rate
+                          - op: literal
+                            value: 0.0
+                          - op: literal
+                            value: 0.98
+                        - op: clamp
+                          args:
+                          - op: div
+                            args:
+                            - op: mul
+                              args:
+                              - op: literal
+                                value: 3.14159265358979
+                              - op: mul
+                                args:
+                                - op: clamp
+                                  args:
+                                  - op: input
+                                    name: freq
+                                  - op: literal
+                                    value: 20.0
+                                  - op: literal
+                                    value: 500.0
+                                - op: add
+                                  args:
+                                  - op: literal
+                                    value: 1.0
+                                  - op: mul
+                                    args:
+                                    - op: mul
+                                      args:
+                                      - op: clamp
+                                        args:
+                                        - op: input
+                                          name: punch
+                                        - op: literal
+                                          value: 0.0
+                                        - op: literal
+                                          value: 1.0
+                                      - op: literal
+                                        value: 4.0
+                                    - op: add
+                                      args:
+                                      - op: mul
+                                        args:
+                                        - op: mul
+                                          args:
+                                          - op: greater
+                                            args:
+                                            - op: input
+                                              name: gate
+                                            - op: literal
+                                              value: 0.5
+                                          - op: less_equal
+                                            args:
+                                            - op: delay
+                                              id: gate_delay
+                                            - op: literal
+                                              value: 0.5
+                                        - op: literal
+                                          value: 1.0
+                                      - op: mul
+                                        args:
+                                        - op: mul
+                                          args:
+                                          - op: sub
+                                            args:
+                                            - op: literal
+                                              value: 1.0
+                                            - op: mul
+                                              args:
+                                              - op: greater
+                                                args:
+                                                - op: input
+                                                  name: gate
+                                                - op: literal
+                                                  value: 0.5
+                                              - op: less_equal
+                                                args:
+                                                - op: delay
+                                                  id: gate_delay
+                                                - op: literal
+                                                  value: 0.5
+                                          - op: pow
+                                            args:
+                                            - op: literal
+                                              value: 10.0
+                                            - op: div
+                                              args:
+                                              - op: literal
+                                                value: -0.4342944819
+                                              - op: clamp
+                                                args:
+                                                - op: mul
+                                                  args:
+                                                  - op: literal
+                                                    value: 0.04
+                                                  - op: sample_rate
+                                                - op: literal
+                                                  value: 1.0
+                                                - op: literal
+                                                  value: 100000000.0
+                                        - op: register
+                                          name: pitch_env
+                            - op: sample_rate
+                          - op: literal
+                            value: 0.0
+                          - op: literal
+                            value: 0.98
+                - op: add
+                  args:
+                  - op: mul
+                    args:
+                    - op: mul
+                      args:
+                      - op: greater
+                        args:
+                        - op: input
+                          name: gate
+                        - op: literal
+                          value: 0.5
+                      - op: less_equal
+                        args:
+                        - op: delay
+                          id: gate_delay
+                        - op: literal
+                          value: 0.5
+                    - op: literal
+                      value: 0.0
+                  - op: mul
+                    args:
+                    - op: sub
+                      args:
+                      - op: literal
+                        value: 1.0
+                      - op: mul
+                        args:
+                        - op: greater
+                          args:
+                          - op: input
+                            name: gate
+                          - op: literal
+                            value: 0.5
+                        - op: less_equal
+                          args:
+                          - op: delay
+                            id: gate_delay
+                          - op: literal
+                            value: 0.5
+                    - op: register
+                      name: ic1
+            - op: add
+              args:
+              - op: mul
+                args:
+                - op: mul
+                  args:
+                  - op: greater
+                    args:
+                    - op: input
+                      name: gate
+                    - op: literal
+                      value: 0.5
+                  - op: less_equal
+                    args:
+                    - op: delay
+                      id: gate_delay
+                    - op: literal
+                      value: 0.5
+                - op: literal
+                  value: 2.0
+              - op: mul
+                args:
+                - op: sub
+                  args:
+                  - op: literal
+                    value: 1.0
+                  - op: mul
+                    args:
+                    - op: greater
+                      args:
+                      - op: input
+                        name: gate
+                      - op: literal
+                        value: 0.5
+                    - op: less_equal
+                      args:
+                      - op: delay
+                        id: gate_delay
+                      - op: literal
+                        value: 0.5
+                - op: register
+                  name: ic2
+          - op: literal
+            value: 0.5
+        - op: literal
+          value: -1.0
+        - op: literal
+          value: 1.0
+    - op: literal
+      value: 5.0

@@ -1,0 +1,313 @@
+schema_version: 1
+name: VCO
+sample_rate: 44100.0
+inputs:
+- freq
+- fm
+- fm_index
+input_defaults:
+  freq: 100.0
+  fm: 0.0
+  fm_index: 5.0
+outputs:
+- saw
+- tri
+- sin
+- sqr
+registers:
+- name: phase
+  init: 0.0
+  update:
+    op: nested_output
+    nested_id: w1
+    output_index: 0
+- name: tri_state
+  init: 0.0
+  update:
+    op: clamp
+    args:
+    - op: add
+      args:
+      - op: register
+        name: tri_state
+      - op: mul
+        args:
+        - op: mul
+          args:
+          - op: sub
+            args:
+            - op: add
+              args:
+              - op: sub
+                args:
+                - op: literal
+                  value: 1.0
+                - op: mul
+                  args:
+                  - op: literal
+                    value: 2.0
+                  - op: greater_equal
+                    args:
+                    - op: nested_output
+                      nested_id: w1
+                      output_index: 0
+                    - op: literal
+                      value: 0.5
+              - op: nested_output
+                nested_id: pb2
+                output_index: 0
+            - op: nested_output
+              nested_id: pb3
+              output_index: 0
+          - op: clamp
+            args:
+            - op: div
+              args:
+              - op: abs
+                args:
+                - op: mul
+                  args:
+                  - op: input
+                    name: freq
+                  - op: pow
+                    args:
+                    - op: literal
+                      value: 2.0
+                    - op: div
+                      args:
+                      - op: mul
+                        args:
+                        - op: input
+                          name: fm_index
+                        - op: input
+                          name: fm
+                      - op: literal
+                        value: 5.0
+              - op: sample_rate
+            - op: literal
+              value: 0.0
+            - op: literal
+              value: 0.5
+        - op: literal
+          value: 4.0
+    - op: literal
+      value: -1.0
+    - op: literal
+      value: 1.0
+nested_modules:
+- id: w1
+  type: Wrap01
+  input_exprs:
+  - op: add
+    args:
+    - op: register
+      name: phase
+    - op: div
+      args:
+      - op: mul
+        args:
+        - op: input
+          name: freq
+        - op: pow
+          args:
+          - op: literal
+            value: 2.0
+          - op: div
+            args:
+            - op: mul
+              args:
+              - op: input
+                name: fm_index
+              - op: input
+                name: fm
+            - op: literal
+              value: 5.0
+      - op: sample_rate
+- id: pb1
+  type: PolyBlep
+  input_exprs:
+  - op: nested_output
+    nested_id: w1
+    output_index: 0
+  - op: clamp
+    args:
+    - op: div
+      args:
+      - op: abs
+        args:
+        - op: mul
+          args:
+          - op: input
+            name: freq
+          - op: pow
+            args:
+            - op: literal
+              value: 2.0
+            - op: div
+              args:
+              - op: mul
+                args:
+                - op: input
+                  name: fm_index
+                - op: input
+                  name: fm
+              - op: literal
+                value: 5.0
+      - op: sample_rate
+    - op: literal
+      value: 0.0
+    - op: literal
+      value: 0.5
+- id: pb2
+  type: PolyBlep
+  input_exprs:
+  - op: nested_output
+    nested_id: w1
+    output_index: 0
+  - op: clamp
+    args:
+    - op: div
+      args:
+      - op: abs
+        args:
+        - op: mul
+          args:
+          - op: input
+            name: freq
+          - op: pow
+            args:
+            - op: literal
+              value: 2.0
+            - op: div
+              args:
+              - op: mul
+                args:
+                - op: input
+                  name: fm_index
+                - op: input
+                  name: fm
+              - op: literal
+                value: 5.0
+      - op: sample_rate
+    - op: literal
+      value: 0.0
+    - op: literal
+      value: 0.5
+- id: w2
+  type: Wrap01
+  input_exprs:
+  - op: add
+    args:
+    - op: nested_output
+      nested_id: w1
+      output_index: 0
+    - op: literal
+      value: 0.5
+- id: pb3
+  type: PolyBlep
+  input_exprs:
+  - op: nested_output
+    nested_id: w2
+    output_index: 0
+  - op: clamp
+    args:
+    - op: div
+      args:
+      - op: abs
+        args:
+        - op: mul
+          args:
+          - op: input
+            name: freq
+          - op: pow
+            args:
+            - op: literal
+              value: 2.0
+            - op: div
+              args:
+              - op: mul
+                args:
+                - op: input
+                  name: fm_index
+                - op: input
+                  name: fm
+              - op: literal
+                value: 5.0
+      - op: sample_rate
+    - op: literal
+      value: 0.0
+    - op: literal
+      value: 0.5
+output_exprs:
+  saw:
+    op: mul
+    args:
+    - op: literal
+      value: 5.0
+    - op: sub
+      args:
+      - op: sub
+        args:
+        - op: mul
+          args:
+          - op: literal
+            value: 2.0
+          - op: nested_output
+            nested_id: w1
+            output_index: 0
+        - op: literal
+          value: 1.0
+      - op: nested_output
+        nested_id: pb1
+        output_index: 0
+  tri:
+    op: mul
+    args:
+    - op: literal
+      value: 5.0
+    - op: register
+      name: tri_state
+  sin:
+    op: mul
+    args:
+    - op: literal
+      value: 5.0
+    - op: sin
+      args:
+      - op: mul
+        args:
+        - op: literal
+          value: 6.283185307179586
+        - op: nested_output
+          nested_id: w1
+          output_index: 0
+  sqr:
+    op: mul
+    args:
+    - op: literal
+      value: 5.0
+    - op: sub
+      args:
+      - op: add
+        args:
+        - op: sub
+          args:
+          - op: literal
+            value: 1.0
+          - op: mul
+            args:
+            - op: literal
+              value: 2.0
+            - op: greater_equal
+              args:
+              - op: nested_output
+                nested_id: w1
+                output_index: 0
+              - op: literal
+                value: 0.5
+        - op: nested_output
+          nested_id: pb2
+          output_index: 0
+      - op: nested_output
+        nested_id: pb3
+        output_index: 0

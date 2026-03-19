@@ -1,0 +1,58 @@
+schema_version: 1
+name: AllpassStage
+sample_rate: 44100.0
+inputs: [x, a]
+outputs: [y]
+
+registers:
+  - name: x_prev
+    init: 0.0
+    update:
+      op: input
+      name: x
+  - name: y_prev
+    init: 0.0
+    update:
+      op: add
+      args:
+        - op: add
+          args:
+            - op: mul
+              args:
+                - op: neg
+                  args:
+                    - op: input
+                      name: a
+                - op: input
+                  name: x
+            - op: register
+              name: x_prev
+        - op: mul
+          args:
+            - op: input
+              name: a
+            - op: register
+              name: y_prev
+
+output_exprs:
+  y:
+    op: add
+    args:
+      - op: add
+        args:
+          - op: mul
+            args:
+              - op: neg
+                args:
+                  - op: input
+                    name: a
+              - op: input
+                name: x
+          - op: register
+            name: x_prev
+      - op: mul
+        args:
+          - op: input
+            name: a
+          - op: register
+            name: y_prev
