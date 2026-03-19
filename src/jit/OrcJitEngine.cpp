@@ -768,7 +768,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         llvm::Value * cond     = load_temp(instr.src_a);
         llvm::Value * then_val = load_temp(instr.src_b);
         llvm::Value * else_val = load_temp(instr.src_c);
-        llvm::Value * cond_bool = builder.CreateFCmpUNE(cond, llvm::ConstantFP::get(double_type, 0.0));
+        llvm::Value * cond_bool = builder.CreateFCmpUNE(cond, llvm::ConstantFP::get(f64_ty, 0.0));
         result = builder.CreateSelect(cond_bool, then_val, else_val);
         break;
       }
@@ -825,6 +825,29 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       {
         llvm::Value * value = builder.CreateFPToSI(load_temp(instr.src_a), i64_ty);
         result = builder.CreateSIToFP(builder.CreateNot(value), f64_ty);
+        break;
+      }
+      case NumericOp::SmoothedParam:
+      {
+        // Load current smoother state from registers[slot_id]
+        llvm::Value * reg_ptr = gep_f64(regs_arg, instr.slot_id);
+        llvm::Value * current = builder.CreateLoad(f64_ty, reg_ptr, "smooth_current");
+
+        // Atomic monotonic load of target value from ControlParam::value
+        llvm::Value * param_addr = builder.CreateIntToPtr(
+          builder.getInt64(instr.param_ptr), f64_ptr_ty, "smooth_param_ptr");
+        llvm::LoadInst * target_load = builder.CreateAlignedLoad(
+          f64_ty, param_addr, llvm::Align(sizeof(double)), "smooth_target");
+        target_load->setAtomic(llvm::AtomicOrdering::Monotonic);
+
+        // new_val = current + coeff * (target - current)
+        llvm::Value * coeff = llvm::ConstantFP::get(f64_ty, instr.literal);
+        llvm::Value * diff = builder.CreateFSub(target_load, current, "smooth_diff");
+        llvm::Value * step = builder.CreateFMul(coeff, diff, "smooth_step");
+        result = builder.CreateFAdd(current, step, "smooth_new");
+
+        // Write back smoother state for next sample
+        builder.CreateStore(result, reg_ptr);
         break;
       }
     }

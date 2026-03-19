@@ -108,6 +108,14 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         }
       }
 
+      // Preserve anonymous registers (e.g., SmoothedParam state) written in-kernel
+      for (unsigned int register_id = static_cast<unsigned int>(program_.register_targets.size());
+           register_id < numeric_registers_.size();
+           ++register_id)
+      {
+        numeric_next_registers_[register_id] = numeric_registers_[register_id];
+      }
+
       numeric_registers_.swap(numeric_next_registers_);
 
       for (unsigned int register_id = 0; register_id < array_register_targets_.size(); ++register_id)

@@ -203,13 +203,9 @@ class Module
       temps_.assign(temp_register_count, expr::float_value(0.0));
 
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_ && !has_smoothed_params_)
+      if (!has_dynamic_registers_)
       {
         initialize_numeric_jit(inputs);
-      }
-      else if (has_smoothed_params_)
-      {
-        jit_status_ = "numeric JIT disabled for SmoothedParam (one-pole smoother)";
       }
       else
       {
