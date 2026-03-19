@@ -107,6 +107,7 @@ bool Module::supports_numeric_jit_expr_kind(ExprKind kind) const
     case ExprKind::Neg:
     case ExprKind::BitNot:
     case ExprKind::ArrayPack:
+    case ExprKind::SmoothedParam:
       return true;
     default:
       return false;
@@ -1724,6 +1725,23 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         jit_instr.op = egress_jit::NumericOp::BitNot;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
         break;
+      case ExprKind::SmoothedParam:
+      {
+        if (!instr.control_param)
+        {
+          return false;
+        }
+        const double tc = instr.control_param->time_const;
+        const double coeff = (tc > 0.0)
+          ? 1.0 - std::exp(-1.0 / (tc * sample_rate_))
+          : 1.0;
+        jit_instr.op = egress_jit::NumericOp::SmoothedParam;
+        jit_instr.literal = coeff;
+        jit_instr.param_ptr = reinterpret_cast<uint64_t>(&instr.control_param->value);
+        jit_instr.slot_id = instr.slot_id;
+        reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        break;
+      }
       default:
         return false;
     }
@@ -1741,6 +1759,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
           instr.kind != ExprKind::RegisterValue &&
           instr.kind != ExprKind::SampleRate &&
           instr.kind != ExprKind::SampleIndex &&
+          instr.kind != ExprKind::SmoothedParam &&
           instr.kind != ExprKind::Index &&
           instr.kind != ExprKind::ArraySet)
       {
@@ -2360,6 +2379,14 @@ void Module::apply_numeric_register_targets(
     {
       numeric_next_registers_[register_id] = numeric_registers_[register_id];
     }
+  }
+
+  // Preserve anonymous registers (e.g., SmoothedParam state) written in-kernel
+  for (unsigned int register_id = static_cast<unsigned int>(compiled_program.register_targets.size());
+       register_id < numeric_registers_.size();
+       ++register_id)
+  {
+    numeric_next_registers_[register_id] = numeric_registers_[register_id];
   }
 
   numeric_registers_.swap(numeric_next_registers_);

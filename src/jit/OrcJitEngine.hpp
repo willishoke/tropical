@@ -64,7 +64,8 @@ enum class NumericOp : uint8_t
   SetArrayElement,
   Sin,
   Neg,
-  BitNot
+  BitNot,
+  SmoothedParam
 };
 
 struct NumericInstr
@@ -76,6 +77,7 @@ struct NumericInstr
   uint32_t src_c = 0;
   uint32_t slot_id = 0;
   double literal = 0.0;
+  uint64_t param_ptr = 0;
   std::vector<uint32_t> args;
 };
 
@@ -87,7 +89,7 @@ struct NumericProgram
 
 using NumericKernelFn = void (*)(
   const double * inputs,
-  const double * registers,
+  double * registers,
   double * const * arrays,
   const uint64_t * array_sizes,
   double * temps,
