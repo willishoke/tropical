@@ -1,0 +1,11 @@
+extends: default
+
+rules:
+  # GitHub Actions uses `on:` as an unquoted key — allow it
+  truthy:
+    allowed-values: ["true", "false", "on", "off"]
+  # 80 chars is too tight for CI workflow commands
+  line-length:
+    max: 120
+  # Don't require `---` document-start marker
+  document-start: disable

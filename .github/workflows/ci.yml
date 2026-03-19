@@ -46,7 +46,7 @@ jobs:
           # Disable LLVM ORC JIT — requires a custom LLVM build not available here.
           # Disable LLVM_STATIC as well since JIT is off.
           CMAKE_ARGS: "-DEGRESS_LLVM_ORC_JIT=OFF -DEGRESS_LLVM_STATIC=OFF"
-        run: pip install -e .
+        run: pip install .
 
       - name: Run pytest
         run: pytest test/

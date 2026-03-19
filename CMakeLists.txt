@@ -17,6 +17,7 @@ option(EGRESS_LLVM_STATIC "Link LLVM statically into libegress for self-containe
 add_library(rtaudio STATIC lib/rtaudio/RtAudio.cpp)
 target_include_directories(rtaudio SYSTEM PUBLIC lib/rtaudio)
 target_compile_options(rtaudio PRIVATE -Wno-vla-cxx-extension)
+set_target_properties(rtaudio PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(APPLE)
     target_compile_definitions(rtaudio PUBLIC __MACOSX_CORE__)
     target_link_libraries(rtaudio PUBLIC
