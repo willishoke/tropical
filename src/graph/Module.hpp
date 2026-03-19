@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -126,6 +127,10 @@ class Module
         for (const auto & e : register_exprs) walk_expr_for_params(e, param_anon_reg_map_, next_anon_idx);
         for (const auto & ds : delay_state_specs) walk_expr_for_params(ds.update_expr, param_anon_reg_map_, next_anon_idx);
         has_smoothed_params_ = !param_anon_reg_map_.empty();
+        // Collect TriggerParam pointers separately so Graph can snapshot them per frame.
+        for (const auto & e : output_exprs) collect_trigger_params(e, trigger_params_);
+        for (const auto & e : register_exprs) collect_trigger_params(e, trigger_params_);
+        for (const auto & ds : delay_state_specs) collect_trigger_params(ds.update_expr, trigger_params_);
         if (has_smoothed_params_)
         {
           // Build sorted list so register slots are assigned deterministically
@@ -221,6 +226,13 @@ class Module
 
     unsigned int register_count() const;
 
+    // Returns the set of TriggerParam ControlParam pointers used by this module.
+    // The Graph uses this to snapshot trigger values once per frame before processing.
+    const std::unordered_set<egress_expr::ControlParam *> & trigger_params() const
+    {
+      return trigger_params_;
+    }
+
   #ifdef EGRESS_PROFILE
     CompileStats compile_stats() const;
 
@@ -280,13 +292,28 @@ class Module
 
     // Walk an expression tree and collect unique ControlParam pointers.
     // Assigns each a sequential anonymous register index (0-based) in map.
+    static void collect_trigger_params(
+      const ExprSpecPtr & expr,
+      std::unordered_set<egress_expr::ControlParam *> & out)
+    {
+      if (!expr) return;
+      if (expr->kind == ExprKind::TriggerParam)
+      {
+        if (expr->control_param) out.insert(expr->control_param);
+        return;
+      }
+      collect_trigger_params(expr->lhs, out);
+      collect_trigger_params(expr->rhs, out);
+      for (const auto & arg : expr->args) collect_trigger_params(arg, out);
+    }
+
     static void walk_expr_for_params(
       const ExprSpecPtr & expr,
       std::unordered_map<egress_expr::ControlParam *, uint32_t> & map,
       uint32_t & next_idx)
     {
       if (!expr) return;
-      if (expr->kind == ExprKind::SmoothedParam)
+      if (expr->kind == ExprKind::SmoothedParam || expr->kind == ExprKind::TriggerParam)
       {
         if (expr->control_param && map.find(expr->control_param) == map.end())
         {
@@ -305,6 +332,7 @@ class Module
     unsigned int input_count_ = 0;
     uint32_t user_register_count_ = 0;
     std::unordered_map<egress_expr::ControlParam *, uint32_t> param_anon_reg_map_;
+    std::unordered_set<egress_expr::ControlParam *> trigger_params_;
     bool has_smoothed_params_ = false;
     CompiledProgram program_;
     CompiledProgram composite_output_program_;

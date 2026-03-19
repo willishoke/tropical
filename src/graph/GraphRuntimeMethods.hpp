@@ -93,6 +93,24 @@ Graph::RuntimeState Graph::build_runtime_locked() const
     slot.indexed_prev_output_values.assign(module.out_count, {});
   }
 
+  // Collect all TriggerParam ControlParam pointers across modules (deduped).
+  {
+    std::unordered_set<egress_expr::ControlParam *> seen;
+    for (const auto & slot : runtime.modules)
+    {
+      if (slot.module)
+      {
+        for (auto * p : slot.module->trigger_params())
+        {
+          if (seen.insert(p).second)
+          {
+            runtime.trigger_params.push_back(p);
+          }
+        }
+      }
+    }
+  }
+
   runtime.mix.reserve(control_mix_.size());
   for (const auto & tap : control_mix_)
   {

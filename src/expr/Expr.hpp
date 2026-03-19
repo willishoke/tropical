@@ -15,10 +15,15 @@ namespace egress_expr
 // ControlParam: lock-free parameter for control-rate values.
 // Written from UI/control thread, read per-sample by the DSP evaluator.
 // One-pole lowpass smoothing (time_const in seconds) is applied automatically.
+// frame_value: written once per frame by the Graph before module processing (used by TriggerParam).
+// It is std::atomic<double> because the write happens on the audio thread and the reads happen on
+// parallel worker threads. Relaxed ordering is sufficient: the snapshot loop runs before workers
+// are dispatched, so the sequencing is established by the worker dispatch barrier, not by frame_value itself.
 struct ControlParam
 {
   std::atomic<double> value;
   double time_const;
+  std::atomic<double> frame_value{0.0};
 
   ControlParam(double init, double tc) : value(init), time_const(tc) {}
 
@@ -100,7 +105,8 @@ enum class ExprKind
   Neg,
   BitNot,
   SmoothedParam,
-  Select
+  Select,
+  TriggerParam
 };
 
 struct ExprSpec
@@ -738,6 +744,16 @@ inline ExprSpecPtr smoothed_param_expr(ControlParam * param)
 {
   auto expr = std::make_shared<ExprSpec>();
   expr->kind = ExprKind::SmoothedParam;
+  expr->control_param = param;
+  return expr;
+}
+
+// Creates a TriggerParam expression. The Graph snapshots frame_value once per frame
+// (via exchange) before module processing, so all modules see the same trigger state.
+inline ExprSpecPtr trigger_param_expr(ControlParam * param)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::TriggerParam;
   expr->control_param = param;
   return expr;
 }

@@ -56,7 +56,7 @@ from .module import (
     _InputPort,
 )
 from .audio import DAC
-from .param import Param
+from .param import Param, Trigger
 from .udp import UDPParamListener, parse_text, parse_osc
 from .yaml_schema import load_module_from_yaml, load_patch_from_yaml, save_patch_to_yaml
 
@@ -110,7 +110,7 @@ __all__ = [
     "ModuleType", "PureFunction",
     "DAC",
     "connect", "disconnect", "add_output",
-    "Param",
+    "Param", "Trigger",
     "UDPParamListener", "parse_text", "parse_osc",
     "load_module_from_yaml", "load_patch_from_yaml", "save_patch_to_yaml",
 ]

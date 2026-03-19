@@ -252,6 +252,26 @@ egress_expr_t egress_expr_param(egress_param_t p)
   catch (const std::exception & e) { set_error(e.what()); return nullptr; }
 }
 
+egress_param_t egress_param_new_trigger(void)
+{
+  try { return new EgressParam(0.0, 0.0); }
+  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
+}
+
+egress_expr_t egress_expr_trigger_param(egress_param_t p)
+{
+  try
+  {
+    if (!p)
+    {
+      set_error("egress_expr_trigger_param: null param handle");
+      return nullptr;
+    }
+    return new EgressExpr{expr::trigger_param_expr(static_cast<EgressParam *>(p)->param)};
+  }
+  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
+}
+
 // ---------- Expression factory API ----------
 
 egress_expr_t egress_expr_literal_float(double v)

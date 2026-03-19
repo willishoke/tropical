@@ -200,6 +200,13 @@ class Graph
         {
           run_fused_input_kernel(runtime, false);
         }
+        // Snapshot all TriggerParam values once per sample before any module processes.
+        // This must run unconditionally — even when the fused body covers all modules — so that
+        // triggers fire correctly regardless of which execution path is taken.
+        for (auto * p : runtime.trigger_params)
+        {
+          p->frame_value.store(p->value.exchange(0.0, std::memory_order_acq_rel), std::memory_order_relaxed);
+        }
         if (!body_covers_all_modules)
         {
           parallel_next_module_index_.store(0, std::memory_order_relaxed);

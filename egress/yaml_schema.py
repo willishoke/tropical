@@ -9,7 +9,7 @@ Public API:
 from __future__ import annotations
 
 import io
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -110,6 +110,10 @@ def _build_expr(node: dict, lctx: _LoadContext) -> SignalExpr:
         return register_expr(idx)
 
     if op == "param":
+        p = lctx.param_registry[node["name"]]
+        return p._as_expr()
+
+    if op == "trigger_param":
         p = lctx.param_registry[node["name"]]
         return p._as_expr()
 

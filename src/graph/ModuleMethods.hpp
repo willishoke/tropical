@@ -751,6 +751,7 @@ uint32_t Module::compile_expr_node(
       }
       break;
     case ExprKind::SmoothedParam:
+    case ExprKind::TriggerParam:
     {
       // Assign the anonymous register slot (user_register_count_ + anon_index)
       const auto it = param_anon_reg_map_.find(expr->control_param);
@@ -1021,6 +1022,20 @@ void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & tem
           {
             next_registers_[instr.slot_id] = egress_expr::float_value(new_val);
           }
+        }
+        else
+        {
+          temps[instr.dst] = egress_expr::float_value(0.0);
+        }
+        break;
+      }
+      case ExprKind::TriggerParam:
+      {
+        // Read the per-frame snapshot written by Graph before the processing loop.
+        // The Graph does a single exchange(0.0) per frame so all modules see the same value.
+        if (instr.control_param)
+        {
+          temps[instr.dst] = egress_expr::float_value(instr.control_param->frame_value.load(std::memory_order_relaxed));
         }
         else
         {

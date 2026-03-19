@@ -18,7 +18,7 @@ Usage::
 
 from . import _bindings as _b
 
-__all__ = ["Param"]
+__all__ = ["Param", "Trigger"]
 
 
 class Param:
@@ -97,3 +97,48 @@ class Param:
 
     def __repr__(self):
         return f"Param(value={self.value!r})"
+
+
+class Trigger:
+    """
+    Lock-free one-shot trigger parameter.
+
+    Call ``fire()`` from the UI/control thread to arm the trigger. The Graph
+    snapshots the value once per frame (before any module processes), so every
+    module referencing this Trigger sees it fire exactly once — on the sample
+    immediately following the ``fire()`` call — then automatically resets to 0.0.
+
+    Triggers are not composable arithmetically; use them as gate/reset signals
+    rather than continuous values.
+    """
+
+    __slots__ = ("_h",)
+
+    def __init__(self):
+        self._h = _b.check(
+            _b.egress_param_new_trigger(), "param_new_trigger"
+        )
+
+    def __del__(self):
+        if self._h:
+            _b.egress_param_free(self._h)
+            self._h = None
+
+    def fire(self):
+        """Arm the trigger (atomic store of 1.0). Safe to call from any thread."""
+        _b.egress_param_set(self._h, 1.0)
+
+    @property
+    def value(self) -> float:
+        """Raw atomic read — for debugging. Not the consumed per-frame value."""
+        return _b.egress_param_get(self._h)
+
+    def _as_expr(self):
+        """Return a TriggerParam SignalExpr for use in module expressions."""
+        from .expr import SignalExpr
+        return SignalExpr._from_handle(
+            _b.check(_b.egress_expr_trigger_param(self._h), "expr_trigger_param")
+        )
+
+    def __repr__(self):
+        return "Trigger()"

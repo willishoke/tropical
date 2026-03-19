@@ -11,10 +11,7 @@ Each test verifies a distinct capability:
   7. Patch save/load round-trip
 """
 import math
-import tempfile
-from pathlib import Path
 
-import pytest
 import egress as eg
 from egress.yaml_schema import load_module_from_yaml, load_patch_from_yaml, save_patch_to_yaml
 
