@@ -171,6 +171,25 @@ void            egress_graph_set_fusion_enabled(egress_graph_t, bool);
 bool            egress_graph_get_fusion_enabled(egress_graph_t);
 unsigned int    egress_graph_get_buffer_length(egress_graph_t);
 
+/* ---------- Device enumeration (no DAC instance required) ---------- */
+
+typedef struct {
+  unsigned int id;
+  char         name[256];
+  unsigned int output_channels;
+  unsigned int input_channels;
+  bool         is_default_output;
+  unsigned int preferred_sample_rate;
+  unsigned int sample_rate_count;        /* number of valid entries in sample_rates */
+  unsigned int sample_rates[32];
+} egress_device_info_t;
+
+unsigned int egress_audio_device_count(void);
+/* Fills `out[0..count-1]` with device IDs.  Call egress_audio_device_count() first. */
+void         egress_audio_get_device_ids(unsigned int* out, unsigned int count);
+bool         egress_audio_get_device_info(unsigned int device_id, egress_device_info_t* out);
+unsigned int egress_audio_default_output_device(void);
+
 /* ---------- DAC API ---------- */
 egress_dac_t egress_dac_new(egress_graph_t, unsigned int sample_rate, unsigned int channels);
 void         egress_dac_free(egress_dac_t);
@@ -190,6 +209,11 @@ void egress_dac_get_stats(egress_dac_t, egress_dac_stats_t* out);
 void egress_dac_reset_stats(egress_dac_t);
 /* True while a device-disconnect has been detected and reconnection is in progress */
 bool egress_dac_is_reconnecting(egress_dac_t);
+
+/* Returns the device ID currently open for output (0 if not started) */
+unsigned int egress_dac_get_active_device(egress_dac_t);
+/* Switch the running DAC to a different output device.  Returns false on failure. */
+bool         egress_dac_switch_device(egress_dac_t, unsigned int device_id);
 
 #ifdef __cplusplus
 }

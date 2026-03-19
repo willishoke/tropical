@@ -7,6 +7,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 static constexpr int kPrimeCycles = 4;
 
@@ -119,6 +120,71 @@ struct EgressDAC
     overrun_count_.store(0, std::memory_order_relaxed);
   }
 
+  // ---------- Device query ----------
+
+  unsigned int active_device() const noexcept { return active_device_id_; }
+
+  std::vector<unsigned int> device_ids() { return audio.getDeviceIds(); }
+
+  RtAudio::DeviceInfo device_info(unsigned int id)
+  {
+    return audio.getDeviceInfo(id);
+  }
+
+  unsigned int default_output_device()
+  {
+    return audio.getDefaultOutputDevice();
+  }
+
+  // ---------- Device switching ----------
+
+  // Switch the active output to `device_id`.  Returns false if the stream is
+  // not running or if `device_id` is not a valid output device.
+  bool switch_device(unsigned int device_id)
+  {
+    if (!running)
+      return false;
+
+    // Validate: device must exist and have at least one output channel.
+    const auto info = audio.getDeviceInfo(device_id);
+    if (info.outputChannels == 0)
+      return false;
+
+    // Stop the watcher so it doesn't race with our stream swap.
+    watcher_shutdown_.store(true, std::memory_order_relaxed);
+    if (watcher_thread_.joinable())
+      watcher_thread_.join();
+
+    // Close the current stream quickly (no fade — user-initiated switch).
+    try
+    {
+      if (audio.isStreamRunning())
+        audio.abortStream();
+      if (audio.isStreamOpen())
+        audio.closeStream();
+    }
+    catch (...) {}
+
+    // Open on the requested device.
+    bool ok = true;
+    try
+    {
+      graph->begin_fade_in();
+      open_stream(device_id);
+    }
+    catch (...)
+    {
+      ok = false;
+    }
+
+    // Restart the watcher regardless of success so auto-reconnect keeps working.
+    device_disconnected_.store(false, std::memory_order_relaxed);
+    watcher_shutdown_.store(false, std::memory_order_relaxed);
+    watcher_thread_ = std::thread(&EgressDAC::watcher_loop, this);
+
+    return ok;
+  }
+
   static int fill_buffer(
     void*               output_buffer,
     void*,
@@ -164,11 +230,16 @@ struct EgressDAC
 private:
   void open_stream()
   {
+    open_stream(audio.getDefaultOutputDevice());
+  }
+
+  void open_stream(unsigned int device_id)
+  {
     if (audio.getDeviceCount() < 1)
       throw std::runtime_error("No audio output devices found.");
 
     RtAudio::StreamParameters out_params;
-    active_device_id_       = audio.getDefaultOutputDevice();
+    active_device_id_       = device_id;
     out_params.deviceId     = active_device_id_;
     out_params.nChannels    = channels;
     out_params.firstChannel = 0;

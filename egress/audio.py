@@ -2,6 +2,8 @@
 DAC — Digital-to-Analog Converter.  Wraps egress_dac_t.
 """
 
+import ctypes
+
 from . import _bindings as _b
 
 __all__ = ["DAC"]
@@ -77,3 +79,58 @@ class DAC:
     def reset_stats(self) -> None:
         """Reset all callback diagnostic counters."""
         _b.egress_dac_reset_stats(self._h)
+
+    @property
+    def active_device(self) -> int:
+        """Device ID currently open for output (0 if not started)."""
+        return int(_b.egress_dac_get_active_device(self._h))
+
+    def switch_device(self, device_id: int) -> bool:
+        """
+        Switch output to the specified device while running.
+
+        Returns True on success, False if the DAC is not running or the
+        device ID is invalid / has no output channels.
+        """
+        return bool(_b.egress_dac_switch_device(self._h, device_id))
+
+    # ---------- Class-level device enumeration ----------
+
+    @staticmethod
+    def list_devices() -> list:
+        """
+        Return a list of dicts describing all available audio devices.
+
+        Each dict contains:
+          id                    -- RtAudio device ID
+          name                  -- human-readable device name
+          output_channels       -- maximum output channels
+          input_channels        -- maximum input channels
+          is_default_output     -- True if this is the system default output
+          preferred_sample_rate -- driver-preferred sample rate in Hz
+          sample_rates          -- list of supported sample rates
+        """
+        count = _b.egress_audio_device_count()
+        if count == 0:
+            return []
+        id_arr = (ctypes.c_uint * count)()
+        _b.egress_audio_get_device_ids(id_arr, count)
+        devices = []
+        info = _b.EgressDeviceInfo()
+        for device_id in id_arr:
+            if _b.egress_audio_get_device_info(device_id, ctypes.byref(info)):
+                devices.append({
+                    "id":                    info.id,
+                    "name":                  info.name.decode("utf-8", errors="replace"),
+                    "output_channels":       info.output_channels,
+                    "input_channels":        info.input_channels,
+                    "is_default_output":     bool(info.is_default_output),
+                    "preferred_sample_rate": info.preferred_sample_rate,
+                    "sample_rates":          list(info.sample_rates[:info.sample_rate_count]),
+                })
+        return devices
+
+    @staticmethod
+    def default_device() -> int:
+        """Return the system default output device ID."""
+        return int(_b.egress_audio_default_output_device())
