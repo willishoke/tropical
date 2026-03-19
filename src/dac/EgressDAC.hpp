@@ -228,11 +228,17 @@ private:
       if (!disconnected && !default_changed)
         continue;
 
-      // Abort and close without fade (either dead or switching away from it)
-      if (audio.isStreamRunning())
-        audio.abortStream();
-      if (audio.isStreamOpen())
-        audio.closeStream();
+      // Abort and close without fade (stream is either dead or being swapped).
+      // Guard each call: RtAudio can throw if the stream closed between the
+      // isStreamRunning/isStreamOpen check and the actual call (TOCTOU).
+      try
+      {
+        if (audio.isStreamRunning())
+          audio.abortStream();
+        if (audio.isStreamOpen())
+          audio.closeStream();
+      }
+      catch (...) {}
 
       // Give the OS time to register the new default device
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -240,15 +246,19 @@ private:
       if (watcher_shutdown_.load(std::memory_order_relaxed))
         break;
 
+      // Clear the flag before opening so a disconnect event that fires during
+      // open_stream() is not silently swallowed.
+      device_disconnected_.store(false, std::memory_order_relaxed);
+
       try
       {
         graph->begin_fade_in();
         open_stream();
-        device_disconnected_.store(false, std::memory_order_relaxed);
       }
       catch (...)
       {
-        // Reconnect failed — leave device_disconnected_ set and retry next loop
+        // Reconnect failed — set flag so the next loop iteration retries
+        device_disconnected_.store(true, std::memory_order_relaxed);
       }
     }
   }
