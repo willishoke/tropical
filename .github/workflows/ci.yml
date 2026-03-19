@@ -39,18 +39,20 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y cmake ninja-build libasound2-dev
+          sudo apt-get install -y cmake g++ libasound2-dev
 
-      - name: Install build tools
-        run: pip install --upgrade pip build "scikit-build-core>=0.9" cmake ninja
+      - name: Install Python dependencies
+        run: pip install "ruamel.yaml>=0.15" pytest
 
-      - name: Build wheel
-        env:
-          CMAKE_ARGS: "-DEGRESS_LLVM_ORC_JIT=OFF -DEGRESS_LLVM_STATIC=OFF"
-        run: python -m build --no-isolation --wheel
-
-      - name: Install wheel
-        run: pip install dist/*.whl
+      - name: Build and install C extension
+        run: |
+          cmake -S . -B _build \
+            -DEGRESS_BUILD_PYTHON=ON \
+            -DEGRESS_LLVM_ORC_JIT=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPython3_EXECUTABLE=$(which python)
+          cmake --build _build --parallel
+          cmake --install _build --prefix .
 
       - name: Run pytest
-        run: pytest test/
+        run: PYTHONPATH=. pytest test/
