@@ -210,7 +210,6 @@ class ModuleType:
                 "No graph provided for module instantiation. "
                 "Pass graph= or use inside a Graph context."
             )
-        from .graph import Graph  # avoid circular import at module level
         name = graph.next_name(self._def["type_name"])
         spec_h = self._build_spec()
         try:
@@ -312,7 +311,7 @@ class ModuleType:
             else:
                 _b.egress_module_spec_add_register(spec_h, body_h, init_h)
         for delay_node_id, init_h, update_h in d["delay_spec_handles"]:
-            assigned_id = _b.egress_module_spec_add_delay_state(
+            _b.egress_module_spec_add_delay_state(
                 spec_h, init_h, update_h)
         for _, nested_h in d.get("nested_spec_handles", []):
             _b.egress_module_spec_add_nested(spec_h, nested_h)
@@ -405,8 +404,6 @@ class _InputPort:
     def _current(self) -> SignalExpr:
         e = self.expr
         if e is None:
-            from .expr import input_expr as _ie
-            # return a zero literal if no expr set
             return _coerce(0.0)
         return e
 

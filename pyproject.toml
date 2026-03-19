@@ -11,6 +11,12 @@ dependencies = ["ruamel.yaml>=0.15"]
 readme = "README.md"
 license = {file = "LICENSE"}
 
+[tool.ruff.lint]
+ignore = [
+    "E741",  # ambiguous variable names (e.g. `l`) — common in math/DSP code
+    "E702",  # multiple statements on one line — used for compact operator overloads
+]
+
 [tool.scikit-build]
 cmake.build-type = "Release"
 wheel.packages = ["egress"]

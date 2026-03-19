@@ -6,7 +6,6 @@ All opaque handles are c_void_p.
 import ctypes
 import ctypes.util
 import os
-import sys
 
 # ---------- Load the shared library ----------
 

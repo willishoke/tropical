@@ -4,7 +4,7 @@ Graph — wraps egress_graph_t via ctypes.
 
 import ctypes
 from . import _bindings as _b
-from .expr import SignalExpr, _coerce
+from .expr import SignalExpr
 
 __all__ = ["Graph"]
 
