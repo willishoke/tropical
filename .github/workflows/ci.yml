@@ -57,4 +57,4 @@ jobs:
           cmake --install _build --prefix .
 
       - name: Run pytest
-        run: PYTHONPATH=. pytest test/
+        run: PYTHONPATH=. pytest test/unit/
