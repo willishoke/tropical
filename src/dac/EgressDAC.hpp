@@ -32,9 +32,18 @@ struct EgressDAC
   std::atomic<uint64_t> underrun_count_{0};
   std::atomic<uint64_t> overrun_count_{0};
 
+  std::atomic<bool>     device_disconnected_{false};
+  std::atomic<bool>     watcher_shutdown_{false};
+  std::thread           watcher_thread_;
+  unsigned int          active_device_id_{0};
+
   EgressDAC(Graph* g, unsigned int sr, unsigned int ch)
     : graph(g), sample_rate(sr), channels(ch)
   {
+    audio.setErrorCallback([this](RtAudioErrorType type, const std::string&) {
+      if (type == RTAUDIO_DEVICE_DISCONNECT)
+        device_disconnected_.store(true, std::memory_order_relaxed);
+    });
   }
 
   ~EgressDAC() { stop(); }
@@ -43,8 +52,6 @@ struct EgressDAC
   {
     if (running)
       return;
-    if (audio.getDeviceCount() < 1)
-      throw std::runtime_error("No audio output devices found.");
 
     graph->prime_numeric_jit();
     for (int i = 0; i < kPrimeCycles; ++i)
@@ -58,53 +65,27 @@ struct EgressDAC
     underrun_count_.store(0, std::memory_order_relaxed);
     overrun_count_.store(0, std::memory_order_relaxed);
 
-    RtAudio::StreamParameters out_params;
-    out_params.deviceId     = audio.getDefaultOutputDevice();
-    out_params.nChannels    = channels;
-    out_params.firstChannel = 0;
-
-    unsigned int buffer_frames = graph->getBufferLength();
-
-    audio.openStream(
-      &out_params,
-      nullptr,
-      RTAUDIO_FLOAT64,
-      sample_rate,
-      &buffer_frames,
-      &EgressDAC::fill_buffer,
-      this);
-
-    audio.startStream();
+    open_stream();
     running = true;
+
+    device_disconnected_.store(false, std::memory_order_relaxed);
+    watcher_shutdown_.store(false, std::memory_order_relaxed);
+    watcher_thread_ = std::thread(&EgressDAC::watcher_loop, this);
   }
 
   void stop()
   {
-    if (!audio.isStreamOpen())
-    {
-      running = false;
-      return;
-    }
-    if (audio.isStreamRunning())
-    {
-      graph->begin_fade_out();
+    watcher_shutdown_.store(true, std::memory_order_relaxed);
+    if (watcher_thread_.joinable())
+      watcher_thread_.join();
 
-      const int buf_ms = (static_cast<int>(graph->getBufferLength()) * 1000)
-                         / static_cast<int>(sample_rate);
-      const int timeout_ms = (2048 * 1000) / static_cast<int>(sample_rate)
-                             + 4 * buf_ms + 50;
-      const auto deadline = std::chrono::steady_clock::now()
-                            + std::chrono::milliseconds(timeout_ms);
-      while (!graph->is_fade_out_complete()
-             && std::chrono::steady_clock::now() < deadline)
-      {
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds(buf_ms + 5));
-      audio.stopStream();
-    }
-    audio.closeStream();
+    close_stream(/*fade=*/true);
     running = false;
+  }
+
+  bool is_reconnecting() const
+  {
+    return device_disconnected_.load(std::memory_order_relaxed);
   }
 
   struct Stats {
@@ -178,5 +159,107 @@ struct EgressDAC
       self->overrun_count_.fetch_add(1, std::memory_order_relaxed);
 
     return 0;
+  }
+
+private:
+  void open_stream()
+  {
+    if (audio.getDeviceCount() < 1)
+      throw std::runtime_error("No audio output devices found.");
+
+    RtAudio::StreamParameters out_params;
+    active_device_id_       = audio.getDefaultOutputDevice();
+    out_params.deviceId     = active_device_id_;
+    out_params.nChannels    = channels;
+    out_params.firstChannel = 0;
+
+    unsigned int buffer_frames = graph->getBufferLength();
+
+    audio.openStream(
+      &out_params,
+      nullptr,
+      RTAUDIO_FLOAT64,
+      sample_rate,
+      &buffer_frames,
+      &EgressDAC::fill_buffer,
+      this);
+
+    audio.startStream();
+  }
+
+  void close_stream(bool fade)
+  {
+    if (!audio.isStreamOpen())
+      return;
+    if (audio.isStreamRunning())
+    {
+      if (fade)
+      {
+        graph->begin_fade_out();
+        const int buf_ms = (static_cast<int>(graph->getBufferLength()) * 1000)
+                           / static_cast<int>(sample_rate);
+        const int timeout_ms = (2048 * 1000) / static_cast<int>(sample_rate)
+                               + 4 * buf_ms + 50;
+        const auto deadline = std::chrono::steady_clock::now()
+                              + std::chrono::milliseconds(timeout_ms);
+        while (!graph->is_fade_out_complete()
+               && std::chrono::steady_clock::now() < deadline)
+        {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(buf_ms + 5));
+      }
+      audio.stopStream();
+    }
+    audio.closeStream();
+  }
+
+  void watcher_loop()
+  {
+    while (!watcher_shutdown_.load(std::memory_order_relaxed))
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+      const bool disconnected = device_disconnected_.load(std::memory_order_relaxed);
+      const bool default_changed = !disconnected
+                                   && audio.isStreamOpen()
+                                   && audio.getDefaultOutputDevice() != active_device_id_;
+
+      if (!disconnected && !default_changed)
+        continue;
+
+      // Abort and close without fade (stream is either dead or being swapped).
+      // Guard each call: RtAudio can throw if the stream closed between the
+      // isStreamRunning/isStreamOpen check and the actual call (TOCTOU).
+      try
+      {
+        if (audio.isStreamRunning())
+          audio.abortStream();
+        if (audio.isStreamOpen())
+          audio.closeStream();
+      }
+      catch (...) {}
+
+      // Give the OS time to register the new default device
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+      if (watcher_shutdown_.load(std::memory_order_relaxed))
+        break;
+
+      // Clear the flag before opening so a disconnect event that fires during
+      // open_stream() is not silently swallowed.
+      device_disconnected_.store(false, std::memory_order_relaxed);
+
+      try
+      {
+        graph->begin_fade_in();
+        open_stream();
+      }
+      catch (...)
+      {
+        // Reconnect failed — set flag so the next loop iteration retries
+        device_disconnected_.store(true, std::memory_order_relaxed);
+      }
+    }
   }
 };
