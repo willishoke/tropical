@@ -26,6 +26,20 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+  build-macos:
+    name: build (C++ core, macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure
+        run: cmake -S . -B build -DEGRESS_BUILD_PYTHON=OFF -DEGRESS_LLVM_ORC_JIT=OFF
+
+      - name: Build
+        run: cmake --build build --parallel
+
   pytest:
     name: pytest (Python 3.13, ubuntu-latest)
     runs-on: ubuntu-latest
