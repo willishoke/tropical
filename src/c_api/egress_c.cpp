@@ -899,4 +899,9 @@ void egress_dac_reset_stats(egress_dac_t d)
   if (d) static_cast<EgressDAC*>(d)->reset_stats();
 }
 
+bool egress_dac_is_reconnecting(egress_dac_t d)
+{
+  return d && static_cast<EgressDAC*>(d)->is_reconnecting();
+}
+
 } // extern "C"

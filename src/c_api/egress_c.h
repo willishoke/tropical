@@ -188,6 +188,8 @@ typedef struct {
 
 void egress_dac_get_stats(egress_dac_t, egress_dac_stats_t* out);
 void egress_dac_reset_stats(egress_dac_t);
+/* True while a device-disconnect has been detected and reconnection is in progress */
+bool egress_dac_is_reconnecting(egress_dac_t);
 
 #ifdef __cplusplus
 }

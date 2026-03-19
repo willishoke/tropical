@@ -177,8 +177,9 @@ class EgressDacStats(ctypes.Structure):
         ("overrun_count",   ctypes.c_uint64),
     ]
 
-egress_dac_get_stats   = _fn("egress_dac_get_stats",   None, _c, ctypes.POINTER(EgressDacStats))
-egress_dac_reset_stats = _fn("egress_dac_reset_stats", None, _c)
+egress_dac_get_stats      = _fn("egress_dac_get_stats",      None, _c, ctypes.POINTER(EgressDacStats))
+egress_dac_reset_stats    = _fn("egress_dac_reset_stats",    None, _c)
+egress_dac_is_reconnecting = _fn("egress_dac_is_reconnecting", _b,  _c)
 
 # ---------- ExprKind constants ----------
 EXPR_LITERAL        = 0

@@ -50,6 +50,11 @@ class DAC:
         """True if the audio stream is currently active."""
         return bool(_b.egress_dac_is_running(self._h))
 
+    @property
+    def is_reconnecting(self) -> bool:
+        """True while a device-disconnect has been detected and reconnection is in progress."""
+        return bool(_b.egress_dac_is_reconnecting(self._h))
+
     def callback_stats(self) -> dict:
         """
         Return a dict of real-time callback diagnostics:
