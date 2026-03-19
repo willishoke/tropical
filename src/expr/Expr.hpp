@@ -16,11 +16,14 @@ namespace egress_expr
 // Written from UI/control thread, read per-sample by the DSP evaluator.
 // One-pole lowpass smoothing (time_const in seconds) is applied automatically.
 // frame_value: written once per frame by the Graph before module processing (used by TriggerParam).
+// It is std::atomic<double> because the write happens on the audio thread and the reads happen on
+// parallel worker threads. Relaxed ordering is sufficient: the snapshot loop runs before workers
+// are dispatched, so the sequencing is established by the worker dispatch barrier, not by frame_value itself.
 struct ControlParam
 {
   std::atomic<double> value;
   double time_const;
-  double frame_value = 0.0;
+  std::atomic<double> frame_value{0.0};
 
   ControlParam(double init, double tc) : value(init), time_const(tc) {}
 

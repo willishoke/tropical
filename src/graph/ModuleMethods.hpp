@@ -1035,7 +1035,7 @@ void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & tem
         // The Graph does a single exchange(0.0) per frame so all modules see the same value.
         if (instr.control_param)
         {
-          temps[instr.dst] = egress_expr::float_value(instr.control_param->frame_value);
+          temps[instr.dst] = egress_expr::float_value(instr.control_param->frame_value.load(std::memory_order_relaxed));
         }
         else
         {
