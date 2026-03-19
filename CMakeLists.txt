@@ -16,12 +16,18 @@ option(EGRESS_LLVM_STATIC "Link LLVM statically into libegress for self-containe
 # RtAudio library target
 add_library(rtaudio STATIC lib/rtaudio/RtAudio.cpp)
 target_include_directories(rtaudio SYSTEM PUBLIC lib/rtaudio)
-target_compile_definitions(rtaudio PUBLIC __MACOSX_CORE__)
 target_compile_options(rtaudio PRIVATE -Wno-vla-cxx-extension)
-target_link_libraries(rtaudio PUBLIC
-    "-framework CoreAudio"
-    "-framework CoreFoundation"
-    pthread)
+if(APPLE)
+    target_compile_definitions(rtaudio PUBLIC __MACOSX_CORE__)
+    target_link_libraries(rtaudio PUBLIC
+        "-framework CoreAudio"
+        "-framework CoreFoundation"
+        pthread)
+elseif(UNIX)
+    target_compile_definitions(rtaudio PUBLIC __LINUX_ALSA__)
+    find_package(ALSA REQUIRED)
+    target_link_libraries(rtaudio PUBLIC ALSA::ALSA pthread)
+endif()
 
 # Core C++ sources shared by all targets
 set(EGRESS_CORE_SOURCES

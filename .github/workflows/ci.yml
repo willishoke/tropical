@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pytest:
+    name: pytest (Python 3.11, ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake ninja-build libasound2-dev
+
+      - name: Build and install egress
+        env:
+          # Disable LLVM ORC JIT — requires a custom LLVM build not available here.
+          # Disable LLVM_STATIC as well since JIT is off.
+          CMAKE_ARGS: "-DEGRESS_LLVM_ORC_JIT=OFF -DEGRESS_LLVM_STATIC=OFF"
+        run: pip install -e .
+
+      - name: Run pytest
+        run: pytest test/
