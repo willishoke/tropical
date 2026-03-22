@@ -179,7 +179,28 @@ class EgressDacStats(ctypes.Structure):
 
 egress_dac_get_stats      = _fn("egress_dac_get_stats",      None, _c, ctypes.POINTER(EgressDacStats))
 egress_dac_reset_stats    = _fn("egress_dac_reset_stats",    None, _c)
-egress_dac_is_reconnecting = _fn("egress_dac_is_reconnecting", _b,  _c)
+egress_dac_is_reconnecting   = _fn("egress_dac_is_reconnecting",   _b, _c)
+egress_dac_get_active_device = _fn("egress_dac_get_active_device", _u, _c)
+egress_dac_switch_device     = _fn("egress_dac_switch_device",     _b, _c, _u)
+
+# ---------- Device enumeration ----------
+
+class EgressDeviceInfo(ctypes.Structure):
+    _fields_ = [
+        ("id",                    ctypes.c_uint),
+        ("name",                  ctypes.c_char * 256),
+        ("output_channels",       ctypes.c_uint),
+        ("input_channels",        ctypes.c_uint),
+        ("is_default_output",     ctypes.c_bool),
+        ("preferred_sample_rate", ctypes.c_uint),
+        ("sample_rate_count",     ctypes.c_uint),
+        ("sample_rates",          ctypes.c_uint * 32),
+    ]
+
+egress_audio_device_count          = _fn("egress_audio_device_count",          _u,   )
+egress_audio_get_device_ids        = _fn("egress_audio_get_device_ids",        None, ctypes.POINTER(ctypes.c_uint), _u)
+egress_audio_get_device_info       = _fn("egress_audio_get_device_info",       _b,   _u, ctypes.POINTER(EgressDeviceInfo))
+egress_audio_default_output_device = _fn("egress_audio_default_output_device", _u,   )
 
 # ---------- ExprKind constants ----------
 EXPR_LITERAL        = 0

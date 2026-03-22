@@ -5,6 +5,8 @@
 #include "graph/Module.hpp"
 #include "dac/EgressDAC.hpp"
 
+#include <algorithm>
+#include <cstring>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -853,6 +855,54 @@ unsigned int egress_graph_get_buffer_length(egress_graph_t g)
   return static_cast<Graph*>(g)->getBufferLength();
 }
 
+// ---------- Device enumeration ----------
+
+unsigned int egress_audio_device_count(void)
+{
+  RtAudio tmp;
+  return tmp.getDeviceCount();
+}
+
+void egress_audio_get_device_ids(unsigned int* out, unsigned int count)
+{
+  if (!out) return;
+  RtAudio tmp;
+  const auto ids = tmp.getDeviceIds();
+  const unsigned int n = std::min(static_cast<unsigned int>(ids.size()), count);
+  for (unsigned int i = 0; i < n; ++i)
+    out[i] = ids[i];
+}
+
+bool egress_audio_get_device_info(unsigned int device_id, egress_device_info_t* out)
+{
+  if (!out) return false;
+  try
+  {
+    RtAudio tmp;
+    const RtAudio::DeviceInfo info = tmp.getDeviceInfo(device_id);
+    out->id                  = info.ID;
+    std::strncpy(out->name, info.name.c_str(), sizeof(out->name) - 1);
+    out->name[sizeof(out->name) - 1] = '\0';
+    out->output_channels     = info.outputChannels;
+    out->input_channels      = info.inputChannels;
+    out->is_default_output   = info.isDefaultOutput;
+    out->preferred_sample_rate = info.preferredSampleRate;
+    const unsigned int n = std::min(static_cast<unsigned int>(info.sampleRates.size()),
+                                    static_cast<unsigned int>(32));
+    out->sample_rate_count = n;
+    for (unsigned int i = 0; i < n; ++i)
+      out->sample_rates[i] = info.sampleRates[i];
+    return true;
+  }
+  catch (...) { return false; }
+}
+
+unsigned int egress_audio_default_output_device(void)
+{
+  RtAudio tmp;
+  return tmp.getDefaultOutputDevice();
+}
+
 // ---------- DAC API ----------
 
 egress_dac_t egress_dac_new(egress_graph_t g, unsigned int sample_rate, unsigned int channels)
@@ -902,6 +952,18 @@ void egress_dac_reset_stats(egress_dac_t d)
 bool egress_dac_is_reconnecting(egress_dac_t d)
 {
   return d && static_cast<EgressDAC*>(d)->is_reconnecting();
+}
+
+unsigned int egress_dac_get_active_device(egress_dac_t d)
+{
+  return d ? static_cast<EgressDAC*>(d)->active_device() : 0;
+}
+
+bool egress_dac_switch_device(egress_dac_t d, unsigned int device_id)
+{
+  if (!d) return false;
+  try { return static_cast<EgressDAC*>(d)->switch_device(device_id); }
+  catch (const std::exception& e) { set_error(e.what()); return false; }
 }
 
 } // extern "C"
