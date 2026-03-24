@@ -1,10 +1,10 @@
-.PHONY: build profile repl run clean
+.PHONY: build profile repl run tui clean
 
-ROOT := /Users/willishoke/egress
+ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
 PROFILE_BUILD_DIR := $(ROOT)/build-profile
 
-PYTHON := /opt/homebrew/bin/python3
+PYTHON := $(shell which python3)
 LLVM_DIR ?= /opt/homebrew/opt/llvm/lib/cmake/llvm
 
 JOBS ?= 4
@@ -31,6 +31,9 @@ repl: build
 	PYTHONPATH=$(BUILD_DIR) $(PYTHON)
 
 run: repl
+
+tui: build
+	PYTHONPATH=$(BUILD_DIR) $(PYTHON) -m egress.tui
 
 clean:
 	rm -rf $(BUILD_DIR)
