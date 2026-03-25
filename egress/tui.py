@@ -2,9 +2,8 @@
 egress/tui.py — Textual TUI frontend for the egress MCP server.
 
 Spawns `python -m egress.mcp_server` as a subprocess, connects via the MCP
-client library, and provides a three-panel interface:
-  left   : live graph state (auto-refreshes every 500ms)
-  right  : append-only output log
+client library, and provides a two-panel interface:
+  top    : append-only output log
   bottom : readline-style command input with history and tab completion
 """
 
@@ -12,18 +11,60 @@ from __future__ import annotations
 
 import asyncio
 import io
+import re
+import select
 import sys
+import termios
+import tty
 from pathlib import Path
 from typing import Optional
 
 from ruamel.yaml import YAML
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal
-from textual.widgets import Input, RichLog, Rule, Static
+from textual.strip import Strip
+from textual.widgets import Input, RichLog, Static
 from textual.events import Key
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+
+# ---------------------------------------------------------------------------
+# Terminal background detection (OSC 11) — must run before Textual starts
+# ---------------------------------------------------------------------------
+
+def _query_terminal_bg(fallback: str = "#1e1e2e", timeout: float = 0.2) -> str:
+    """
+    Send OSC 11 to the terminal and parse the rgb: response.
+    Terminals return 16-bit components (e.g. "3c3c"); we take the high byte.
+    Returns a hex color string, or *fallback* on any failure.
+    """
+    try:
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            sys.stdout.write("\033]11;?\033\\")
+            sys.stdout.flush()
+            buf = ""
+            while select.select([sys.stdin], [], [], timeout)[0]:
+                ch = sys.stdin.read(1)
+                buf += ch
+                if ch == "\007" or buf.endswith("\033\\"):
+                    break
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        m = re.search(r"rgb:([0-9a-fA-F]+)/([0-9a-fA-F]+)/([0-9a-fA-F]+)", buf)
+        if m:
+            r = int(m.group(1)[:2], 16)
+            g = int(m.group(2)[:2], 16)
+            b = int(m.group(3)[:2], 16)
+            return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        pass
+    return fallback
+
 
 # ---------------------------------------------------------------------------
 # Demo patch — loaded on startup if the file exists.
@@ -60,20 +101,24 @@ def _format_result(data) -> str:
 # Widgets
 # ---------------------------------------------------------------------------
 
-class GraphPanel(Static):
-    """Left panel — displays live graph state, auto-refreshed every 500ms."""
+class Divider(Static):
+    """A simple horizontal rule drawn with box-drawing characters."""
 
-    DEFAULT_CSS = ""
+    DEFAULT_CSS = """
+Divider {
+    height: 1;
+    background: transparent;
+    color: #ff00ff;
+}
+"""
 
-    def __init__(self, **kwargs):
-        super().__init__("", **kwargs)
-
-    def render_state(self, text: str) -> None:
-        self.update(text)
+    def render(self):
+        inner = max(0, self.size.width - 2)
+        return f" {'─' * inner} "
 
 
 class OutputLog(RichLog):
-    """Right panel — append-only command/result log with markup support."""
+    """Append-only command/result log with markup support."""
 
     def log_command(self, command_str: str) -> None:
         self.write(f"[bold #00ffff]▸ {command_str}[/bold #00ffff]")
@@ -100,6 +145,13 @@ class InputBar(Input):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._history_index: int = -1  # -1 means "not browsing history"
+        self.cursor_blink = False
+
+    def render_line(self, y: int) -> Strip:
+        # Extend to full widget width so no cell is left to Textual's
+        # background-fill mechanism (which doesn't respect transparency).
+        strip = super().render_line(y)
+        return strip.extend_cell_length(self.size.width)
 
     # ------------------------------------------------------------------
     # Key handling
@@ -181,55 +233,49 @@ class InputBar(Input):
 
 class EgressTUI(App):
     CSS = """
+App {
+    background: transparent;
+}
 Screen {
     layout: vertical;
-    background: #0a0a0f;
-}
-Horizontal {
-    height: 1fr;
-}
-GraphPanel {
-    width: 35;
-    padding: 1;
-    color: #00ff41;
-    background: #0a0a0f;
-}
-Rule.vertical-divider {
-    width: 1;
-    color: #ff00ff;
-}
-Rule.horizontal-divider {
-    height: 1;
-    color: #ff00ff;
-    margin: 0;
+    background: transparent;
 }
 OutputLog {
-    width: 1fr;
-    background: #0a0a0f;
+    height: 1fr;
+    background: transparent;
     color: #c0c0d0;
+    scrollbar-size-vertical: 0;
 }
 Horizontal#input-row {
-    height: 3;
-    background: #0d0d1a;
+    height: 1;
+    background: transparent;
 }
 #prompt-label {
     width: auto;
-    padding: 1 1;
+    padding: 0 1;
     color: #ff00ff;
+    background: transparent;
 }
 InputBar {
     width: 1fr;
-    background: #0d0d1a;
+    background: transparent;
     color: #00ffff;
-    border: tall #1a1a2e;
+    border: none;
+    padding: 0;
 }
 InputBar:focus {
-    border: tall #ff00ff;
+    border: none;
+}
+InputBar > .input--cursor {
+    background: transparent;
+    color: #00ffff;
+    text-style: underline;
 }
 """
 
-    def __init__(self, **kwargs):
+    def __init__(self, bg_color: str = "#1e1e2e", **kwargs):
         super().__init__(**kwargs)
+        self._bg_color = bg_color
         self.mcp: Optional[ClientSession] = None
         # tool name → mcp Tool object (has .inputSchema)
         self.tools: dict = {}
@@ -237,7 +283,6 @@ InputBar:focus {
         self.command_history: list[str] = []
         # module names from last successful list_modules call
         self.cached_module_names: list[str] = []
-        self._refresh_in_progress: bool = False
         self._mcp_stop: Optional[asyncio.Event] = None
         self._mcp_done: Optional[asyncio.Event] = None
         self._mcp_ready: Optional[asyncio.Event] = None
@@ -248,22 +293,16 @@ InputBar:focus {
     # ------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        with Horizontal():
-            yield GraphPanel(id="graph")
-            yield Rule(orientation="vertical", classes="vertical-divider")
-            yield OutputLog(id="output", markup=True)
-        yield Rule(classes="horizontal-divider")
+        yield OutputLog(id="output", markup=True)
+        yield Divider()
         with Horizontal(id="input-row"):
-            yield Static("▸", id="prompt-label")
+            yield Static("❯", id="prompt-label")
             yield InputBar(id="input")
+        yield Divider()
 
     # ------------------------------------------------------------------
     # Convenience properties
     # ------------------------------------------------------------------
-
-    @property
-    def graph_panel(self) -> GraphPanel:
-        return self.query_one("#graph", GraphPanel)
 
     @property
     def output(self) -> OutputLog:
@@ -283,7 +322,6 @@ InputBar:focus {
         self._mcp_ready = asyncio.Event()
         self._mcp_task = asyncio.create_task(self._mcp_lifecycle())
         await self._mcp_ready.wait()
-        self.set_interval(0.5, self.refresh_graph)
         self.input_bar.focus()
 
     async def on_unmount(self) -> None:
@@ -376,87 +414,6 @@ InputBar:focus {
             return parsed
         except Exception:
             return raw
-
-    # ------------------------------------------------------------------
-    # Graph panel refresh
-    # ------------------------------------------------------------------
-
-    async def refresh_graph(self) -> None:
-        """Query MCP for current graph state and update the left panel."""
-        if self._refresh_in_progress:
-            return
-        if self.mcp is None:
-            self.graph_panel.render_state("[bold #ff0066]◎ MCP OFFLINE[/bold #ff0066]")
-            return
-        self._refresh_in_progress = True
-        try:
-            await self._refresh_graph_inner()
-        finally:
-            self._refresh_in_progress = False
-
-    async def _refresh_graph_inner(self) -> None:
-
-        lines: list[str] = []
-
-        def _unwrap(result) -> tuple[bool, object]:
-            """Extract (ok, data) from a server response envelope."""
-            if isinstance(result, dict):
-                return result.get("ok", False), result.get("data")
-            return False, None
-
-        # Modules
-        try:
-            ok, modules = _unwrap(await self._call_tool("list_modules", {}))
-            lines.append("[bold #ff00ff]▪ MODULES[/bold #ff00ff]")
-            if ok and isinstance(modules, list):
-                self.cached_module_names = [
-                    m.get("name", "") for m in modules if isinstance(m, dict)
-                ]
-                for m in modules:
-                    if isinstance(m, dict):
-                        name = m.get("name", "?")
-                        mtype = m.get("type_name", "?")
-                        n_in = len(m.get("inputs", []))
-                        n_out = len(m.get("outputs", []))
-                        lines.append(f"  [#00ffff]{name}[/#00ffff]  [dim #ff00ff]{mtype}[/dim #ff00ff]  [dim]in:{n_in}  out:{n_out}[/dim]")
-            else:
-                lines.append("  [dim](none)[/dim]")
-        except Exception:
-            lines.append("  [dim #ff0066](unavailable)[/dim #ff0066]")
-
-        lines.append("")
-
-        # Connections
-        try:
-            ok, conns = _unwrap(await self._call_tool("list_connections", {}))
-            lines.append("[bold #ff00ff]▪ CONNECTIONS[/bold #ff00ff]")
-            if ok and isinstance(conns, list) and conns:
-                for c in conns:
-                    if isinstance(c, dict):
-                        src = f"{c.get('src', '?')}.{c.get('src_output', '?')}"
-                        dst = f"{c.get('dst', '?')}.{c.get('dst_input', '?')}"
-                        lines.append(f"  [#00ff41]{src}[/#00ff41] [#ff00ff]→[/#ff00ff] [#00ff41]{dst}[/#00ff41]")
-            else:
-                lines.append("  [dim](none)[/dim]")
-        except Exception:
-            lines.append("  [dim #ff0066](unavailable)[/dim #ff0066]")
-
-        lines.append("")
-
-        # Audio status
-        try:
-            ok, status = _unwrap(await self._call_tool("audio_status", {}))
-            if ok and isinstance(status, dict):
-                running = status.get("is_running", False)
-                dot = "[bold #00ff41]◉[/bold #00ff41]" if running else "[dim #ff0066]◎[/dim #ff0066]"
-                state_str = "[bold #00ff41]RUNNING[/bold #00ff41]" if running else "[dim #ff0066]STOPPED[/dim #ff0066]"
-                lines.append(f"[bold #ff00ff]▪ AUDIO[/bold #ff00ff]  {dot} {state_str}")
-            else:
-                lines.append("[bold #ff00ff]▪ AUDIO[/bold #ff00ff]  [dim #ff0066]◎ STOPPED[/dim #ff0066]")
-        except Exception:
-            lines.append("[bold #ff00ff]▪ AUDIO[/bold #ff00ff]  [dim #ff0066](unavailable)[/dim #ff0066]")
-
-        self.graph_panel.render_state("\n".join(lines))
 
     # ------------------------------------------------------------------
     # Command dispatch
@@ -588,8 +545,9 @@ def _coerce_arg(raw: str, schema_type: str):
 # ---------------------------------------------------------------------------
 
 def main():
-    app = EgressTUI()
-    app.run()
+    bg = _query_terminal_bg()
+    app = EgressTUI(bg_color=bg)
+    app.run(inline=True)
 
 
 if __name__ == "__main__":
