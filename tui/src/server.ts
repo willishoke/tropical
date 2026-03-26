@@ -10,6 +10,8 @@ import { StdioServerTransport }from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 
 import {
@@ -504,12 +506,141 @@ function handleTool(name: string, args: Record<string, unknown>) {
   }
 }
 
+// ─── Resources ────────────────────────────────────────────────────────────────
+
+const RESOURCES = [
+  {
+    uri:         'egress://modules',
+    name:        'Module catalog',
+    description: 'Markdown catalog of all registered module types with inputs, outputs, and default values.',
+    mimeType:    'text/markdown',
+  },
+  {
+    uri:         'egress://patch-format',
+    name:        'Patch format',
+    description: 'Reference doc for the egress_patch_1 patch schema with a complete worked example.',
+    mimeType:    'text/markdown',
+  },
+]
+
+function renderModuleCatalog(): string {
+  const lines: string[] = ['# egress module catalog\n']
+  for (const [typeName, type] of session.typeRegistry) {
+    lines.push(`## ${typeName}`)
+    const d = type._def
+    const defaultsMap = d.rawInputDefaults as Record<string, unknown>
+    const inputParts = d.inputNames.map(n => {
+      const val = defaultsMap[n]
+      return val !== undefined ? `${n}=${JSON.stringify(val)}` : n
+    })
+    lines.push(`Inputs:  ${inputParts.join(', ')}`)
+    lines.push(`Outputs: ${d.outputNames.join(', ')}`)
+    lines.push('')
+  }
+  return lines.join('\n')
+}
+
+const PATCH_FORMAT_DOC = `# egress_patch_1 patch format
+
+Patches are JSON objects with \`"schema": "egress_patch_1"\`.
+
+## Top-level fields
+
+- \`schema\` (required): \`"egress_patch_1"\`
+- \`types\` (optional): inline module type definitions (avoids a separate \`define_module\` call)
+- \`modules\`: list of \`{ type_name, instance_name }\` objects
+- \`connections\`: list of \`{ src, src_output, dst, dst_input }\` objects
+- \`outputs\`: list of \`{ module, output }\` objects to route to the graph mix
+- \`params\`: map of \`param_name → value\`
+- \`graph\`: optional graph settings (\`worker_count\`, \`fusion_enabled\`, \`buffer_length\`)
+
+## Inline type definitions
+
+Embed simple arithmetic types directly in \`types\` instead of calling \`define_module\` separately:
+
+\`\`\`json
+"types": [
+  {
+    "name": "VCA",
+    "inputs": ["audio", "cv"],
+    "outputs": ["out"],
+    "regs": {},
+    "process": {
+      "outputs": { "out": { "op": "mul", "lhs": { "op": "input", "name": "audio" }, "rhs": { "op": "input", "name": "cv" } } },
+      "next_regs": {}
+    }
+  }
+]
+\`\`\`
+
+## Complete example: VCO → VCA → output
+
+\`\`\`json
+{
+  "schema": "egress_patch_1",
+  "types": [
+    {
+      "name": "VCA",
+      "inputs": ["audio", "cv"],
+      "outputs": ["out"],
+      "regs": {},
+      "process": {
+        "outputs": { "out": { "op": "mul", "lhs": { "op": "input", "name": "audio" }, "rhs": { "op": "input", "name": "cv" } } },
+        "next_regs": {}
+      }
+    }
+  ],
+  "modules": [
+    { "type_name": "VCO", "instance_name": "osc" },
+    { "type_name": "VCA", "instance_name": "vca" }
+  ],
+  "connections": [
+    { "src": "osc", "src_output": "sin", "dst": "vca", "dst_input": "audio" }
+  ],
+  "outputs": [
+    { "module": "vca", "output": "out" }
+  ],
+  "params": {},
+  "graph": { "worker_count": 1, "fusion_enabled": false }
+}
+\`\`\`
+
+## Expression node format (ExprNode)
+
+Used in \`set_module_input\` and inline type process definitions:
+
+- Literal: \`3.14\` or \`true\`
+- Reference: \`{ "op": "ref", "module": "osc", "output": "sin" }\`
+- Input: \`{ "op": "input", "name": "freq" }\`
+- Binary: \`{ "op": "mul", "lhs": <expr>, "rhs": <expr> }\`
+  - ops: \`add\`, \`sub\`, \`mul\`, \`div\`, \`mod\`, \`pow\`
+- Unary: \`{ "op": "neg", "operand": <expr> }\`
+  - ops: \`neg\`, \`abs\`, \`sin\`, \`log\`
+- Compare: \`{ "op": "lt", "lhs": <expr>, "rhs": <expr> }\`
+  - ops: \`lt\`, \`lte\`, \`gt\`, \`gte\`
+- Clamp: \`{ "op": "clamp", "value": <expr>, "min": <expr>, "max": <expr> }\`
+- Builtins: \`{ "op": "sample_rate" }\`, \`{ "op": "sample_index" }\`
+`
+
 // ─── Server wiring ────────────────────────────────────────────────────────────
 
 const server = new Server(
   { name: 'egress', version: '0.2.0' },
-  { capabilities: { tools: {} } },
+  { capabilities: { tools: {}, resources: {} } },
 )
+
+server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: RESOURCES }))
+
+server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+  const { uri } = req.params
+  if (uri === 'egress://modules') {
+    return { contents: [{ uri, mimeType: 'text/markdown', text: renderModuleCatalog() }] }
+  }
+  if (uri === 'egress://patch-format') {
+    return { contents: [{ uri, mimeType: 'text/markdown', text: PATCH_FORMAT_DOC }] }
+  }
+  throw new Error(`Unknown resource: ${uri}`)
+})
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
 

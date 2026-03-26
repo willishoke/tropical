@@ -165,6 +165,7 @@ interface ModuleDef {
   inputNames: string[]
   outputNames: string[]
   sampleRate: number
+  rawInputDefaults: Record<string, ExprCoercible>
   inputDefaults: (SignalExpr | null)[]
   outputExprHandles: unknown[]
   registerSpecs: RegisterSpec[]
@@ -511,6 +512,7 @@ export function defineModule(
     inputNames,
     outputNames,
     sampleRate,
+    rawInputDefaults: inputDefaults ?? {},
     inputDefaults: parsedDefaults,
     outputExprHandles: outputExprs.map(e => e._h),
     registerSpecs,
