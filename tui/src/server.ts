@@ -15,7 +15,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 
 import {
-  makeSession, loadModuleFromJSON, loadPatchFromJSON, savePatchToJSON,
+  makeSession, loadModuleFromJSON, loadPatchFromJSON, mergePatchFromJSON, savePatchToJSON,
   buildExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
 } from './patch.js'
 import { loadBuiltins }        from './module_library.js'
@@ -177,6 +177,17 @@ const TOOLS = [
         output_name: { description: 'Output port name or index' },
       },
       required: ['module_name', 'output_name'],
+    },
+  },
+  {
+    name: 'merge_patch',
+    description: 'Add modules, connections, outputs, and params from a patch into the existing graph without clearing it. Fails fast with an error on name collisions, leaving the graph intact. Use this for subpatching: load patch A, load patch B with merge_patch, then wire them together with connect_modules.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        patch: { type: 'object', description: 'PatchJSON object with schema: "egress_patch_1"' },
+      },
+      required: ['patch'],
     },
   },
   {
@@ -415,6 +426,21 @@ function handleTool(name: string, args: Record<string, unknown>) {
       return {
         removed_from_tracking: before - session.graphOutputs.length,
         note: 'graph has no remove_output API; output persists until graph rebuild.',
+      }
+    })
+
+    // ── merge_patch ────────────────────────────────────────────────────────
+    case 'merge_patch': return wrap(() => {
+      const patch = args.patch as PatchJSON
+      if (patch?.schema !== 'egress_patch_1')
+        throw new Error(`Unsupported schema: ${(patch as any)?.schema}. Expected 'egress_patch_1'.`)
+      mergePatchFromJSON(patch, session)
+      return {
+        modules:     [...session.instanceRegistry.keys()],
+        connections: session.connections.length,
+        outputs:     session.graphOutputs.length,
+        params:      [...session.paramRegistry.keys()],
+        triggers:    [...session.triggerRegistry.keys()],
       }
     })
 

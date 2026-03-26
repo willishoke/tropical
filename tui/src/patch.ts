@@ -573,6 +573,97 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
 }
 
 // ─────────────────────────────────────────────────────────────
+// Patch merger (additive — no session teardown)
+// ─────────────────────────────────────────────────────────────
+
+export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void {
+  // Fail fast on name collisions before touching the graph
+  for (const entry of json.modules) {
+    if (entry.name && session.instanceRegistry.has(entry.name))
+      throw new Error(`merge_patch collision: module '${entry.name}' already exists.`)
+  }
+  for (const p of json.params ?? []) {
+    if (session.paramRegistry.has(p.name) || session.triggerRegistry.has(p.name))
+      throw new Error(`merge_patch collision: param/trigger '${p.name}' already exists.`)
+  }
+
+  // Load inline type definitions
+  for (const def of json.module_defs ?? []) {
+    const type = loadModuleFromJSON(def, session)
+    session.typeRegistry.set(type.name, type)
+  }
+
+  // Create params and triggers
+  for (const p of json.params ?? []) {
+    if (p.type === 'trigger') {
+      session.triggerRegistry.set(p.name, new Trigger())
+    } else {
+      session.paramRegistry.set(p.name, new Param(p.value ?? 0.0, p.time_const ?? 0.005))
+    }
+  }
+
+  // Instantiate modules
+  for (const entry of json.modules) {
+    const type = session.typeRegistry.get(entry.type)
+    if (!type) throw new Error(`Unknown module type '${entry.type}'.`)
+    const inst = entry.name
+      ? type.instantiateAs(session.graph, entry.name)
+      : type.instantiate(session.graph)
+    session.instanceRegistry.set(inst.name, inst)
+  }
+
+  // Apply connections
+  for (const conn of json.connections ?? []) {
+    const srcInst = session.instanceRegistry.get(conn.src)
+    const dstInst = session.instanceRegistry.get(conn.dst)
+    if (!srcInst) throw new Error(`Connection src module '${conn.src}' not found.`)
+    if (!dstInst) throw new Error(`Connection dst module '${conn.dst}' not found.`)
+    const srcId = typeof conn.src_output === 'number' ? conn.src_output : srcInst.outputIndex(conn.src_output)
+    const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
+    const ok = session.graph.connect(conn.src, srcId, conn.dst, dstId)
+    if (!ok) throw new Error(`Failed to connect ${conn.src}.${conn.src_output} → ${conn.dst}.${conn.dst_input}.`)
+    session.connections.push({
+      src: conn.src, srcOutput: String(conn.src_output),
+      dst: conn.dst, dstInput: String(conn.dst_input),
+    })
+  }
+
+  // Set input expressions
+  const exprCtx: BuildCtx = {
+    inputNames: [],
+    regNames: [],
+    paramRegistry: session.paramRegistry,
+    triggerRegistry: session.triggerRegistry,
+    instanceRegistry: session.instanceRegistry,
+    typeRegistry: session.typeRegistry,
+    delayRefs: new Map(),
+    nestedAliases: new Map(),
+  }
+  for (const ie of json.input_exprs ?? []) {
+    const inst = session.instanceRegistry.get(ie.module)
+    if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
+    const inputId = typeof ie.input === 'number' ? ie.input : inst.inputIndex(ie.input)
+    const expr = buildExpr(ie.expr, exprCtx)
+    session.graph.setInputExpr(ie.module, inputId, expr)
+    session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
+  }
+
+  // Add graph outputs
+  for (const out of json.outputs ?? []) {
+    if ('expr' in out) {
+      const expr = buildExpr(out.expr, exprCtx)
+      session.graph.addOutputExpr(expr)
+    } else {
+      const inst = session.instanceRegistry.get(out.module)
+      if (!inst) throw new Error(`Output module '${out.module}' not found.`)
+      const outputId = typeof out.output === 'number' ? out.output : inst.outputIndex(out.output)
+      session.graph.addOutput(out.module, outputId)
+      session.graphOutputs.push({ module: out.module, output: String(out.output) })
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Patch saver
 // ─────────────────────────────────────────────────────────────
 
