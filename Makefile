@@ -1,4 +1,4 @@
-.PHONY: build profile repl run tui clean
+.PHONY: build profile repl run tui-ts clean
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -32,8 +32,11 @@ repl: build
 
 run: repl
 
-tui: build
-	PYTHONPATH=$(BUILD_DIR) $(PYTHON) -m egress.tui
+tui-ts: build
+	cd tui && bun install --silent && bun run src/index.tsx
+
+mcp-ts: build
+	cd tui && bun install --silent && bun run src/server.ts
 
 clean:
 	rm -rf $(BUILD_DIR)
