@@ -12,6 +12,8 @@ import {
   CallToolRequestSchema,
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 
 import {
@@ -648,11 +650,51 @@ Used in \`set_module_input\` and inline type process definitions:
 - Builtins: \`{ "op": "sample_rate" }\`, \`{ "op": "sample_index" }\`
 `
 
+// ─── Prompts ──────────────────────────────────────────────────────────────────
+
+const PROMPTS = [
+  {
+    name:        'build-patch',
+    description: 'Three-tiered workflow guidance for building and editing egress patches efficiently.',
+  },
+]
+
+const BUILD_PATCH_PROMPT = `# build-patch workflow
+
+Before writing any patch YAML, always fetch both resources:
+- \`egress://modules\` — full catalog of available module types with inputs, defaults, and outputs
+- \`egress://patch-format\` — egress_patch_1 schema reference with a worked example
+
+## Choose the right tool for the job
+
+### New patch (starting from scratch)
+Use \`load_patch\` with a **complete** egress_patch_1 JSON object in a single call.
+Do not call \`instantiate_module\`, \`connect_modules\`, or \`set_module_input\` one-by-one —
+that requires 40+ round trips and recompiles the JIT graph on every input change.
+
+### Extending an existing patch (adding new modules)
+Use \`merge_patch\` with a partial patch containing only the new modules, connections,
+outputs, and params. Then use \`connect_modules\` to wire the new modules to existing ones.
+Do not use \`load_patch\` — it tears down the entire graph and loses the existing session.
+
+### Targeted edits (changing a value, tweaking a param)
+Use \`set_module_input\` or \`set_param\` directly on the specific input or param.
+Do not reload or rebuild the patch for a single value change.
+
+## Writing patch YAML
+
+- Embed simple arithmetic types (VCA, mixer, attenuator, etc.) inline in the \`types\` block
+  rather than calling \`define_module\` separately. This keeps the patch self-contained.
+- Use named ports (e.g. \`"src_output": "sin"\`) rather than integer indices — more readable
+  and robust to future port reordering.
+- Wire everything in one patch object where possible; minimize round trips.
+`
+
 // ─── Server wiring ────────────────────────────────────────────────────────────
 
 const server = new Server(
   { name: 'egress', version: '0.2.0' },
-  { capabilities: { tools: {}, resources: {} } },
+  { capabilities: { tools: {}, resources: {}, prompts: {} } },
 )
 
 server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: RESOURCES }))
@@ -666,6 +708,15 @@ server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
     return { contents: [{ uri, mimeType: 'text/markdown', text: PATCH_FORMAT_DOC }] }
   }
   throw new Error(`Unknown resource: ${uri}`)
+})
+
+server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: PROMPTS }))
+
+server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+  if (req.params.name === 'build-patch') {
+    return { messages: [{ role: 'user', content: { type: 'text', text: BUILD_PATCH_PROMPT } }] }
+  }
+  throw new Error(`Unknown prompt: ${req.params.name}`)
 })
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }))
