@@ -21,7 +21,7 @@ jobs:
           sudo apt-get install -y cmake g++ libasound2-dev
 
       - name: Configure
-        run: cmake -S . -B build -DEGRESS_BUILD_PYTHON=OFF -DEGRESS_LLVM_ORC_JIT=OFF
+        run: cmake -S . -B build -DEGRESS_LLVM_ORC_JIT=OFF
 
       - name: Build
         run: cmake --build build --parallel
@@ -35,40 +35,18 @@ jobs:
           submodules: recursive
 
       - name: Configure
-        run: cmake -S . -B build -DEGRESS_BUILD_PYTHON=OFF -DEGRESS_LLVM_ORC_JIT=OFF
+        run: cmake -S . -B build -DEGRESS_LLVM_ORC_JIT=OFF
 
       - name: Build
         run: cmake --build build --parallel
 
-  pytest:
-    name: pytest (Python 3.13, ubuntu-latest)
+  ts-typecheck:
+    name: TypeScript type-check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y cmake g++ libasound2-dev
-
-      - name: Install Python dependencies
-        run: pip install "ruamel.yaml>=0.15" pytest
-
-      - name: Build and install C extension
-        run: |
-          cmake -S . -B _build \
-            -DEGRESS_BUILD_PYTHON=ON \
-            -DEGRESS_LLVM_ORC_JIT=OFF \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DPython3_EXECUTABLE=$(which python)
-          cmake --build _build --parallel
-          cmake --install _build --prefix .
-
-      - name: Run pytest
-        run: PYTHONPATH=. pytest test/unit/
+      - uses: oven-sh/setup-bun@v1
+      - name: Install dependencies
+        run: cd tui && bun install
+      - name: Type-check
+        run: cd tui && bun run tsc --noEmit

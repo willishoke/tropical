@@ -7,7 +7,7 @@ name = "egress"
 version = "0.1.0"
 description = "DSP graph synthesis library with JIT-compiled signal processing"
 requires-python = ">=3.9"
-dependencies = ["ruamel.yaml>=0.15"]
+dependencies = ["ruamel.yaml>=0.15", "mcp[cli]>=1.0", "textual>=0.70"]
 readme = "README.md"
 license = {file = "LICENSE"}
 
