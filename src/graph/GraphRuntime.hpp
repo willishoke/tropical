@@ -223,6 +223,7 @@ struct FusedGraphKernelState
 #ifdef EGRESS_LLVM_ORC_JIT
   egress_jit::NumericProgram program;
   egress_jit::NumericKernelFn kernel = nullptr;
+  std::vector<uint64_t> param_ptrs;
 #endif
 };
 
@@ -251,6 +252,7 @@ struct FusedGraphState
 #ifdef EGRESS_LLVM_ORC_JIT
   egress_jit::NumericProgram program;
   egress_jit::NumericKernelFn kernel = nullptr;
+  std::vector<uint64_t> param_ptrs;
   std::vector<double> inputs;
   std::vector<double> registers;
   std::vector<double> temps;

@@ -352,6 +352,7 @@ class Module
     uint64_t sample_index_ = 0;
 #ifdef EGRESS_LLVM_ORC_JIT
     egress_jit::NumericKernelFn jit_kernel_ = nullptr;
+    std::vector<uint64_t> numeric_param_ptrs_;
     std::vector<double> numeric_inputs_;
     bool numeric_input_override_active_ = false;
     std::vector<double> numeric_input_scalar_override_;
@@ -388,6 +389,7 @@ class Module
     struct NumericJitState
     {
       egress_jit::NumericKernelFn kernel = nullptr;
+      std::vector<uint64_t> param_ptrs;
       PreparedNumericJitProgram prepared;
       std::vector<NumericInputInfo> input_info;
       std::vector<NumericOutputInfo> output_info;

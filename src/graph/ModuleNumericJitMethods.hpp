@@ -1965,6 +1965,22 @@ void Module::initialize_numeric_jit_state(
   }
 
   state.kernel = *kernel_or_err;
+
+  // Build per-instance param_ptrs in canonical (first-appearance) order.
+  state.param_ptrs.clear();
+  {
+    std::unordered_map<uint64_t, uint32_t> seen;
+    for (const auto & instr : numeric_program.instructions)
+    {
+      if (instr.op == egress_jit::NumericOp::SmoothedParam && instr.param_ptr != 0 &&
+          seen.find(instr.param_ptr) == seen.end())
+      {
+        seen.emplace(instr.param_ptr, static_cast<uint32_t>(state.param_ptrs.size()));
+        state.param_ptrs.push_back(instr.param_ptr);
+      }
+    }
+  }
+
   state.temps.assign(state.prepared.program.register_count, 0.0);
   state.inputs.assign(jit_inputs.size(), 0.0);
   state.array_ptrs.resize(state.array_storage.size(), nullptr);
@@ -2187,7 +2203,8 @@ bool Module::run_numeric_jit_state(
     state.array_sizes.data(),
     state.temps.data(),
     sample_rate_,
-    sample_index_);
+    sample_index_,
+    state.param_ptrs.data());
 
   return true;
 }
@@ -2548,6 +2565,22 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
     }
 
     jit_kernel_ = *kernel_or_err;
+
+    // Build per-instance param_ptrs in canonical (first-appearance) order.
+    numeric_param_ptrs_.clear();
+    {
+      std::unordered_map<uint64_t, uint32_t> seen;
+      for (const auto & instr : numeric_program.instructions)
+      {
+        if (instr.op == egress_jit::NumericOp::SmoothedParam && instr.param_ptr != 0 &&
+            seen.find(instr.param_ptr) == seen.end())
+        {
+          seen.emplace(instr.param_ptr, static_cast<uint32_t>(numeric_param_ptrs_.size()));
+          numeric_param_ptrs_.push_back(instr.param_ptr);
+        }
+      }
+    }
+
     numeric_temps_.assign(program_.register_count, 0.0);
     numeric_array_ptrs_.resize(numeric_array_storage_.size(), nullptr);
     numeric_array_sizes_.resize(numeric_array_storage_.size(), 0);

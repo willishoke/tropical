@@ -9,6 +9,7 @@
 #include <llvm/Support/TargetSelect.h>
 
 #include <atomic>
+#include <unordered_map>
 #endif
 
 namespace egress_jit
@@ -102,6 +103,54 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
 
   std::lock_guard<std::mutex> lock(jit_mutex_);
 
+  // Build canonical param_ptr → index map (order of first appearance).
+  std::unordered_map<uint64_t, uint64_t> param_index;
+  for (const auto & instr : program.instructions)
+  {
+    if (instr.op == NumericOp::SmoothedParam && instr.param_ptr != 0 &&
+        param_index.find(instr.param_ptr) == param_index.end())
+    {
+      param_index.emplace(instr.param_ptr, static_cast<uint64_t>(param_index.size()));
+    }
+  }
+
+  // Serialize canonical program to a cache key (param_ptrs replaced by their index).
+  std::string cache_key;
+  {
+    auto append = [&](const void * data, std::size_t size) {
+      cache_key.append(static_cast<const char *>(data), size);
+    };
+    append(&program.register_count, sizeof(uint32_t));
+    uint32_t instr_count = static_cast<uint32_t>(program.instructions.size());
+    append(&instr_count, sizeof(uint32_t));
+    for (const auto & instr : program.instructions)
+    {
+      append(&instr.op,     sizeof(NumericOp));
+      append(&instr.dst,    sizeof(uint32_t));
+      append(&instr.src_a,  sizeof(uint32_t));
+      append(&instr.src_b,  sizeof(uint32_t));
+      append(&instr.src_c,  sizeof(uint32_t));
+      append(&instr.slot_id, sizeof(uint32_t));
+      append(&instr.literal, sizeof(double));
+      uint64_t canonical_ptr = 0;
+      if (instr.op == NumericOp::SmoothedParam && instr.param_ptr != 0)
+      {
+        auto it = param_index.find(instr.param_ptr);
+        if (it != param_index.end())
+          canonical_ptr = it->second;
+      }
+      append(&canonical_ptr, sizeof(uint64_t));
+      uint32_t args_size = static_cast<uint32_t>(instr.args.size());
+      append(&args_size, sizeof(uint32_t));
+      if (!instr.args.empty())
+        append(instr.args.data(), instr.args.size() * sizeof(uint32_t));
+    }
+  }
+
+  auto cache_it = kernel_cache_.find(cache_key);
+  if (cache_it != kernel_cache_.end())
+    return cache_it->second;
+
   auto context = std::make_unique<llvm::LLVMContext>();
   auto module = std::make_unique<llvm::Module>("egress_udm_numeric", *context);
   module->setDataLayout(jit_->getDataLayout());
@@ -116,7 +165,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
 
   llvm::FunctionType * fn_ty = llvm::FunctionType::get(
     void_ty,
-    {f64_ptr_ty, f64_ptr_ty, f64_ptr_ptr_ty, i64_ptr_ty, f64_ptr_ty, f64_ty, i64_ty},
+    {f64_ptr_ty, f64_ptr_ty, f64_ptr_ptr_ty, i64_ptr_ty, f64_ptr_ty, f64_ty, i64_ty, i64_ptr_ty},
     false);
 
   static std::atomic<uint64_t> function_counter{0};
@@ -139,6 +188,8 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
   sample_rate_arg->setName("sample_rate");
   llvm::Value * sample_index_arg = &*arg_it++;
   sample_index_arg->setName("sample_index");
+  llvm::Value * param_ptrs_arg = &*arg_it++;
+  param_ptrs_arg->setName("param_ptrs");
 
   llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
   builder.SetInsertPoint(entry);
@@ -835,9 +886,18 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         llvm::Value * reg_ptr = gep_f64(regs_arg, instr.slot_id);
         llvm::Value * current = builder.CreateLoad(f64_ty, reg_ptr, "smooth_current");
 
-        // Atomic monotonic load of target value from ControlParam::value
-        llvm::Value * param_addr = builder.CreateIntToPtr(
-          builder.getInt64(instr.param_ptr), f64_ptr_ty, "smooth_param_ptr");
+        // Load the ControlParam address through the per-instance param_ptrs array.
+        // canonical index was stored in param_index map during key serialization.
+        uint64_t canonical_idx = 0;
+        {
+          auto it = param_index.find(instr.param_ptr);
+          if (it != param_index.end())
+            canonical_idx = it->second;
+        }
+        llvm::Value * param_ptr_slot = builder.CreateInBoundsGEP(
+          i64_ty, param_ptrs_arg, builder.getInt64(canonical_idx));
+        llvm::Value * param_ptr_raw = builder.CreateLoad(i64_ty, param_ptr_slot, "smooth_param_raw");
+        llvm::Value * param_addr = builder.CreateIntToPtr(param_ptr_raw, f64_ptr_ty, "smooth_param_ptr");
         llvm::LoadInst * target_load = builder.CreateAlignedLoad(
           f64_ty, param_addr, llvm::Align(sizeof(double)), "smooth_target");
         target_load->setAtomic(llvm::AtomicOrdering::Monotonic);
@@ -887,7 +947,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
     return addr_or_err.takeError();
   }
 
-  return reinterpret_cast<NumericKernelFn>(*addr_or_err);
+  auto kernel = reinterpret_cast<NumericKernelFn>(*addr_or_err);
+  kernel_cache_.emplace(std::move(cache_key), kernel);
+  return kernel;
 }
 #else
 OrcJitEngine & OrcJitEngine::instance()

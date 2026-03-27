@@ -3,6 +3,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <cstdint>
 
@@ -95,7 +96,8 @@ using NumericKernelFn = void (*)(
   const uint64_t * array_sizes,
   double * temps,
   double sample_rate,
-  uint64_t sample_index);
+  uint64_t sample_index,
+  const uint64_t * param_ptrs);
 
 #ifdef EGRESS_LLVM_ORC_JIT
 class OrcJitEngine
@@ -122,6 +124,7 @@ class OrcJitEngine
     std::unique_ptr<llvm::orc::LLJIT> jit_;
     std::string init_error_;
     mutable std::mutex jit_mutex_;
+    std::unordered_map<std::string, NumericKernelFn> kernel_cache_;
 };
 #else
 class OrcJitEngine
