@@ -14,6 +14,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -862,6 +863,47 @@ class Graph
       return true;
     }
 
+    void begin_update()
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      batch_update_active_ = true;
+      batch_dirty_modules_.clear();
+    }
+
+    bool end_update()
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      batch_update_active_ = false;
+      if (batch_dirty_modules_.empty())
+      {
+        return true;
+      }
+      wait_for_runtime_available(0);
+      wait_for_runtime_available(1);
+      bool all_ok = true;
+      for (const auto & name : batch_dirty_modules_)
+      {
+        auto it = control_modules_.find(name);
+        if (it == control_modules_.end())
+        {
+          continue;
+        }
+        const bool ok0 = recompile_module_inputs_in_runtime(runtimes_[0], name, it->second.input_exprs);
+        const bool ok1 = recompile_module_inputs_in_runtime(runtimes_[1], name, it->second.input_exprs);
+        if (!ok0 || !ok1)
+        {
+          all_ok = false;
+        }
+      }
+      batch_dirty_modules_.clear();
+      if (!all_ok)
+      {
+        runtimes_[0] = build_runtime_locked();
+        runtimes_[1] = build_runtime_locked();
+      }
+      return true;
+    }
+
     bool set_input_expr(const std::string & module_name, unsigned int input_id, ExprSpecPtr expr)
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -877,6 +919,12 @@ class Graph
       }
 
       module_it->second.input_exprs[input_id] = simplify_expr(expr);
+
+      if (batch_update_active_)
+      {
+        batch_dirty_modules_.insert(module_name);
+        return true;
+      }
 
       wait_for_runtime_available(0);
       wait_for_runtime_available(1);
@@ -1491,6 +1539,8 @@ class Graph
     std::vector<ControlTap> control_taps_;
 
     mutable std::mutex pending_mutex_;
+    bool batch_update_active_ = false;
+    std::unordered_set<std::string> batch_dirty_modules_;
     std::atomic<uint32_t> parallel_next_module_index_{0};
     mutable std::mutex worker_mutex_;
     std::condition_variable worker_cv_;

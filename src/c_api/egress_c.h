@@ -153,6 +153,8 @@ bool            egress_graph_disconnect(egress_graph_t, const char* src, unsigne
                                         const char* dst, unsigned int dst_in);
 bool            egress_graph_set_input_expr(egress_graph_t, const char* module,
                                             unsigned int input_id, egress_expr_t);
+void            egress_graph_begin_update(egress_graph_t);
+bool            egress_graph_end_update(egress_graph_t);
 egress_expr_t   egress_graph_get_input_expr(egress_graph_t, const char* module,
                                             unsigned int input_id);
 bool            egress_graph_add_output(egress_graph_t, const char* module, unsigned int output_id);

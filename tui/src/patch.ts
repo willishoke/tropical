@@ -548,13 +548,18 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
     delayRefs: new Map(),
     nestedAliases: new Map(),
   }
-  for (const ie of json.input_exprs ?? []) {
-    const inst = session.instanceRegistry.get(ie.module)
-    if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
-    const inputId = typeof ie.input === 'number' ? ie.input : inst.inputIndex(ie.input)
-    const expr = buildExpr(ie.expr, exprCtx)
-    session.graph.setInputExpr(ie.module, inputId, expr)
-    session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
+  session.graph.beginUpdate()
+  try {
+    for (const ie of json.input_exprs ?? []) {
+      const inst = session.instanceRegistry.get(ie.module)
+      if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
+      const inputId = typeof ie.input === 'number' ? ie.input : inst.inputIndex(ie.input)
+      const expr = buildExpr(ie.expr, exprCtx)
+      session.graph.setInputExpr(ie.module, inputId, expr)
+      session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
+    }
+  } finally {
+    session.graph.endUpdate()
   }
 
   // Add graph outputs
@@ -639,13 +644,18 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
     delayRefs: new Map(),
     nestedAliases: new Map(),
   }
-  for (const ie of json.input_exprs ?? []) {
-    const inst = session.instanceRegistry.get(ie.module)
-    if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
-    const inputId = typeof ie.input === 'number' ? ie.input : inst.inputIndex(ie.input)
-    const expr = buildExpr(ie.expr, exprCtx)
-    session.graph.setInputExpr(ie.module, inputId, expr)
-    session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
+  session.graph.beginUpdate()
+  try {
+    for (const ie of json.input_exprs ?? []) {
+      const inst = session.instanceRegistry.get(ie.module)
+      if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
+      const inputId = typeof ie.input === 'number' ? ie.input : inst.inputIndex(ie.input)
+      const expr = buildExpr(ie.expr, exprCtx)
+      session.graph.setInputExpr(ie.module, inputId, expr)
+      session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
+    }
+  } finally {
+    session.graph.endUpdate()
   }
 
   // Add graph outputs
