@@ -100,6 +100,8 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       llvm::inconvertibleErrorCode());
   }
 
+  std::lock_guard<std::mutex> lock(jit_mutex_);
+
   auto context = std::make_unique<llvm::LLVMContext>();
   auto module = std::make_unique<llvm::Module>("egress_udm_numeric", *context);
   module->setDataLayout(jit_->getDataLayout());

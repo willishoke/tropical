@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <cstdint>
@@ -120,6 +121,7 @@ class OrcJitEngine
 
     std::unique_ptr<llvm::orc::LLJIT> jit_;
     std::string init_error_;
+    mutable std::mutex jit_mutex_;
 };
 #else
 class OrcJitEngine

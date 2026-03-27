@@ -51,6 +51,14 @@ export class Graph {
     return b.egress_graph_set_input_expr(this._h, moduleName, inputId, handle) as boolean
   }
 
+  beginUpdate(): void {
+    b.egress_graph_begin_update(this._h)
+  }
+
+  endUpdate(): boolean {
+    return b.egress_graph_end_update(this._h) as boolean
+  }
+
   getInputExpr(moduleName: string, inputId: number): SignalExpr | null {
     const h = b.egress_graph_get_input_expr(this._h, moduleName, inputId)
     return h ? SignalExpr.fromHandle(h) : null

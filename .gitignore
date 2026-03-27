@@ -140,3 +140,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Node (root-level, from local dev installs)
+node_modules/
+package-lock.json
+package.json

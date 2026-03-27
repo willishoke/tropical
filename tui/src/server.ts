@@ -158,6 +158,28 @@ const TOOLS = [
     },
   },
   {
+    name: 'set_inputs_batch',
+    description: 'Set multiple module inputs in a single JIT compilation pass. Use this instead of repeated set_module_input calls when updating many inputs at once (e.g. tuning all oscillators). Triggers one recompile per module rather than one per call.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        updates: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              instance_name: { type: 'string' },
+              input_name:    { description: 'Input port name or index' },
+              expr:          { description: 'ExprNode: number, bool, array, or {op, ...} object' },
+            },
+            required: ['instance_name', 'input_name', 'expr'],
+          },
+        },
+      },
+      required: ['updates'],
+    },
+  },
+  {
     name: 'add_graph_output',
     description: 'Add a module output to the graph mix output.',
     inputSchema: {
@@ -386,6 +408,38 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
       return { module: instanceName, input: resolvedName, expr: node }
+    })
+
+    // ── set_inputs_batch ───────────────────────────────────────────────────
+    case 'set_inputs_batch': return wrap(() => {
+      const updates = args.updates as Array<{
+        instance_name: string; input_name: string | number; expr: ExprNode
+      }>
+      const ctx = {
+        inputNames: [], regNames: [],
+        paramRegistry: session.paramRegistry, triggerRegistry: session.triggerRegistry,
+        instanceRegistry: session.instanceRegistry, typeRegistry: session.typeRegistry,
+        delayRefs: new Map(), nestedAliases: new Map(),
+      }
+      session.graph.beginUpdate()
+      try {
+        const results = []
+        for (const u of updates) {
+          const inst = session.instanceRegistry.get(u.instance_name)
+          if (!inst) throw new Error(`No instance named '${u.instance_name}'.`)
+          const raw = u.input_name
+          const inputId = typeof raw === 'number'
+            ? raw
+            : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
+          const expr = buildExpr(u.expr, ctx)
+          session.graph.setInputExpr(u.instance_name, inputId, expr)
+          session.inputExprNodes.set(`${u.instance_name}:${inputId}`, u.expr)
+          results.push({ module: u.instance_name, input: inst.inputNames[inputId] ?? String(inputId), expr: u.expr })
+        }
+        return results
+      } finally {
+        session.graph.endUpdate()
+      }
     })
 
     // ── add_graph_output ───────────────────────────────────────────────────

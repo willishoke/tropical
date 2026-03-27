@@ -737,6 +737,18 @@ bool egress_graph_set_input_expr(
   catch (const std::exception & e2) { set_error(e2.what()); return false; }
 }
 
+void egress_graph_begin_update(egress_graph_t g)
+{
+  try { static_cast<Graph*>(g)->begin_update(); }
+  catch (const std::exception & e) { set_error(e.what()); }
+}
+
+bool egress_graph_end_update(egress_graph_t g)
+{
+  try { return static_cast<Graph*>(g)->end_update(); }
+  catch (const std::exception & e) { set_error(e.what()); return false; }
+}
+
 egress_expr_t egress_graph_get_input_expr(
   egress_graph_t g,
   const char* module,
