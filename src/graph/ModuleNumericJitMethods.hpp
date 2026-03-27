@@ -66,7 +66,7 @@ inline bool copy_numeric_aggregate_value(const Value & value, std::vector<double
 }
 }
 
-bool Module::supports_numeric_jit_expr_kind(ExprKind kind) const
+bool Module::supports_numeric_jit_expr_kind(ExprKind kind)
 {
   switch (kind)
   {
@@ -1120,41 +1120,47 @@ std::vector<Value> Module::build_numeric_jit_inputs(
   return values;
 }
 
-bool Module::build_numeric_program(const std::vector<Value> & current_inputs, egress_jit::NumericProgram & numeric_program)
+bool Module::build_numeric_program_impl(
+  const CompiledProgram & program,
+  const std::vector<Value> & registers,
+  double sample_rate,
+  const std::vector<Value> & current_inputs,
+  egress_jit::NumericProgram & numeric_program,
+  NumericJitState & state)
 {
-  if (program_.register_count == 0)
+  if (program.register_count == 0)
   {
     return false;
   }
 
   numeric_program.instructions.clear();
-  numeric_program.register_count = program_.register_count;
-  numeric_array_storage_.clear();
-  register_scalar_mask_.assign(registers_.size(), true);
-  register_array_slot_.assign(registers_.size(), 0);
-  array_register_targets_.assign(registers_.size(), -1);
-  array_register_can_swap_.assign(registers_.size(), false);
-  numeric_output_info_.clear();
+  numeric_program.register_count = program.register_count;
+  state.array_storage.clear();
+  state.register_scalar_mask.assign(registers.size(), true);
+  state.register_array_slot.assign(registers.size(), 0);
+  state.array_register_targets.assign(registers.size(), -1);
+  state.array_register_can_swap.assign(registers.size(), false);
+  state.output_info.clear();
 
-  if (!configure_numeric_inputs_for_jit(current_inputs))
+  if (!configure_numeric_inputs_for_jit(state, current_inputs))
   {
     return false;
   }
 
-  std::vector<NumericRegInfo> reg_info(program_.register_count);
+  std::vector<NumericRegInfo> reg_info(program.register_count);
 
-  for (unsigned int reg_slot = 0; reg_slot < registers_.size(); ++reg_slot)
+  for (unsigned int reg_slot = 0; reg_slot < registers.size(); ++reg_slot)
   {
-    const Value & reg = registers_[reg_slot];
+    const Value & reg = registers[reg_slot];
     if (reg.type == ValueType::Array)
     {
       uint32_t array_slot = 0;
-      if (!add_array_value_to_jit_table(reg, array_slot))
+      if (!add_array_value_to_jit_table(state.array_storage, reg, array_slot))
       {
         return false;
       }
-      register_scalar_mask_[reg_slot] = false;
-      register_array_slot_[reg_slot] = array_slot;
+      state.register_scalar_mask[reg_slot] = false;
+      state.register_array_slot[reg_slot] = array_slot;
     }
     else if (reg.type == ValueType::Matrix)
     {
@@ -1162,7 +1168,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
     }
   }
 
-  for (const Instr & instr : program_.instructions)
+  for (const Instr & instr : program.instructions)
   {
     if (!supports_numeric_jit_expr_kind(instr.kind))
     {
@@ -1186,7 +1192,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         if (instr.literal.type == ValueType::Array)
         {
           uint32_t array_slot = 0;
-          if (!add_array_value_to_jit_table(instr.literal, array_slot))
+          if (!add_array_value_to_jit_table(state.array_storage, instr.literal, array_slot))
           {
             return false;
           }
@@ -1198,7 +1204,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         else if (instr.literal.type == ValueType::Matrix)
         {
           uint32_t array_slot = 0;
-          if (!add_matrix_values_to_jit_table(instr.literal, array_slot))
+          if (!add_matrix_values_to_jit_table(state.array_storage, instr.literal, array_slot))
           {
             return false;
           }
@@ -1220,11 +1226,11 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         break;
       }
       case ExprKind::InputValue:
-        if (instr.slot_id >= numeric_input_info_.size())
+        if (instr.slot_id >= state.input_info.size())
         {
           return false;
         }
-        if (numeric_input_info_[instr.slot_id].is_scalar)
+        if (state.input_info[instr.slot_id].is_scalar)
         {
           jit_instr.op = egress_jit::NumericOp::InputValue;
           reg_info[instr.dst].kind = NumericValueKind::Scalar;
@@ -1232,21 +1238,21 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         else
         {
           reg_info[instr.dst].kind = NumericValueKind::Array;
-          reg_info[instr.dst].array_slot = numeric_input_info_[instr.slot_id].array_slot;
-          reg_info[instr.dst].array_size = numeric_input_info_[instr.slot_id].array_size;
+          reg_info[instr.dst].array_slot = state.input_info[instr.slot_id].array_slot;
+          reg_info[instr.dst].array_size = state.input_info[instr.slot_id].array_size;
           emit_instruction = false;
         }
         break;
       case ExprKind::RegisterValue:
-        if (instr.slot_id >= register_scalar_mask_.size())
+        if (instr.slot_id >= state.register_scalar_mask.size())
         {
           return false;
         }
-        if (!register_scalar_mask_[instr.slot_id])
+        if (!state.register_scalar_mask[instr.slot_id])
         {
           reg_info[instr.dst].kind = NumericValueKind::Array;
-          reg_info[instr.dst].array_slot = register_array_slot_[instr.slot_id];
-          reg_info[instr.dst].array_size = static_cast<uint32_t>(numeric_array_storage_[register_array_slot_[instr.slot_id]].size());
+          reg_info[instr.dst].array_slot = state.register_array_slot[instr.slot_id];
+          reg_info[instr.dst].array_size = static_cast<uint32_t>(state.array_storage[state.register_array_slot[instr.slot_id]].size());
           emit_instruction = false;
         }
         else
@@ -1286,7 +1292,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         uint32_t array_slot = 0;
         if (all_constant)
         {
-          if (!add_array_values_to_jit_table(packed_values, array_slot))
+          if (!add_array_values_to_jit_table(state.array_storage, packed_values, array_slot))
           {
             return false;
           }
@@ -1294,7 +1300,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         }
         else
         {
-          array_slot = allocate_array_slot_with_size(array_size);
+          array_slot = allocate_array_slot_with_size(state.array_storage, array_size);
           jit_instr.op = egress_jit::NumericOp::ArrayPack;
           jit_instr.dst = array_slot;
           jit_instr.args = instr.args;
@@ -1362,7 +1368,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         const NumericRegInfo & rhs = reg_info[instr.src_b];
         if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
         {
-          const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.array_size);
           switch (instr.kind)
           {
             case ExprKind::Less:
@@ -1435,7 +1441,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
           {
             return false;
           }
-          const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.array_size);
           jit_instr.op = egress_jit::NumericOp::ArrayAdd;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = lhs.array_slot;
@@ -1448,7 +1454,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         }
         if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
         {
-          const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.array_size);
           jit_instr.op = egress_jit::NumericOp::ArrayAddScalar;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = lhs.array_slot;
@@ -1461,7 +1467,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         }
         if (lhs.kind == NumericValueKind::Scalar && rhs.kind == NumericValueKind::Array)
         {
-          const uint32_t dst_slot = allocate_array_slot_with_size(rhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, rhs.array_size);
           jit_instr.op = egress_jit::NumericOp::ArrayAddScalar;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = rhs.array_slot;
@@ -1474,7 +1480,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         }
         if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
         {
-          const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.array_size);
           jit_instr.op = egress_jit::NumericOp::ArrayDivScalar;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = lhs.array_slot;
@@ -1503,7 +1509,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
           {
             return false;
           }
-          const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.array_size);
           jit_instr.op = egress_jit::NumericOp::ArraySub;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = lhs.array_slot;
@@ -1532,7 +1538,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
           {
             return false;
           }
-          const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.array_size);
           jit_instr.op = egress_jit::NumericOp::ArrayMul;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = lhs.array_slot;
@@ -1545,7 +1551,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         }
         if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
         {
-          const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.array_size);
           jit_instr.op = egress_jit::NumericOp::ArrayMulScalar;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = lhs.array_slot;
@@ -1558,7 +1564,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         }
         if (lhs.kind == NumericValueKind::Scalar && rhs.kind == NumericValueKind::Array)
         {
-          const uint32_t dst_slot = allocate_array_slot_with_size(rhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, rhs.array_size);
           jit_instr.op = egress_jit::NumericOp::ArrayMulScalar;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = rhs.array_slot;
@@ -1587,7 +1593,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
           {
             return false;
           }
-          const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.array_size);
           jit_instr.op = egress_jit::NumericOp::ArrayDiv;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = lhs.array_slot;
@@ -1600,7 +1606,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         }
         if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
         {
-          const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.array_size);
           jit_instr.op = egress_jit::NumericOp::ArrayDivScalar;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = lhs.array_slot;
@@ -1631,7 +1637,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         {
           return false;
         }
-        const uint32_t dst_slot = allocate_array_slot_with_size(lhs.matrix_rows);
+        const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.matrix_rows);
         jit_instr.op = egress_jit::NumericOp::MatMul;
         jit_instr.dst = dst_slot;
         jit_instr.src_a = lhs.array_slot;
@@ -1654,7 +1660,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         const NumericRegInfo & rhs = reg_info[instr.src_b];
         if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
         {
-          const uint32_t dst_slot = allocate_array_slot_with_size(lhs.array_size);
+          const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.array_size);
           jit_instr.op = egress_jit::NumericOp::ArrayModScalar;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = lhs.array_slot;
@@ -1733,7 +1739,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
         }
         const double tc = instr.control_param->time_const;
         const double coeff = (tc > 0.0)
-          ? 1.0 - std::exp(-1.0 / (tc * sample_rate_))
+          ? 1.0 - std::exp(-1.0 / (tc * sample_rate))
           : 1.0;
         jit_instr.op = egress_jit::NumericOp::SmoothedParam;
         jit_instr.literal = coeff;
@@ -1793,8 +1799,8 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
     }
   }
 
-  numeric_output_info_.reserve(program_.output_targets.size());
-  for (uint32_t output_reg : program_.output_targets)
+  state.output_info.reserve(program.output_targets.size());
+  for (uint32_t output_reg : program.output_targets)
   {
     if (output_reg >= reg_info.size())
     {
@@ -1805,12 +1811,12 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
     output_info.array_slot = reg_info[output_reg].array_slot;
     output_info.matrix_rows = reg_info[output_reg].matrix_rows;
     output_info.matrix_cols = reg_info[output_reg].matrix_cols;
-    numeric_output_info_.push_back(output_info);
+    state.output_info.push_back(output_info);
   }
 
-  for (unsigned int reg_slot = 0; reg_slot < program_.register_targets.size(); ++reg_slot)
+  for (unsigned int reg_slot = 0; reg_slot < program.register_targets.size(); ++reg_slot)
   {
-    const int32_t target = program_.register_targets[reg_slot];
+    const int32_t target = program.register_targets[reg_slot];
     if (target < 0)
     {
       continue;
@@ -1821,7 +1827,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
       return false;
     }
 
-    if (register_scalar_mask_[reg_slot])
+    if (state.register_scalar_mask[reg_slot])
     {
       if (reg_info[target].kind != NumericValueKind::Scalar)
       {
@@ -1835,23 +1841,23 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
       return false;
     }
 
-    const uint32_t dst_slot = register_array_slot_[reg_slot];
-    if (dst_slot >= numeric_array_storage_.size())
+    const uint32_t dst_slot = state.register_array_slot[reg_slot];
+    if (dst_slot >= state.array_storage.size())
     {
       return false;
     }
-    if (numeric_array_storage_[dst_slot].size() != reg_info[target].array_size)
+    if (state.array_storage[dst_slot].size() != reg_info[target].array_size)
     {
       return false;
     }
 
-    array_register_targets_[reg_slot] = static_cast<int32_t>(reg_info[target].array_slot);
+    state.array_register_targets[reg_slot] = static_cast<int32_t>(reg_info[target].array_slot);
   }
 
-  std::vector<uint32_t> array_target_use_counts(numeric_array_storage_.size(), 0);
-  for (unsigned int reg_slot = 0; reg_slot < array_register_targets_.size(); ++reg_slot)
+  std::vector<uint32_t> array_target_use_counts(state.array_storage.size(), 0);
+  for (unsigned int reg_slot = 0; reg_slot < state.array_register_targets.size(); ++reg_slot)
   {
-    const int32_t src_slot = array_register_targets_[reg_slot];
+    const int32_t src_slot = state.array_register_targets[reg_slot];
     if (src_slot < 0)
     {
       continue;
@@ -1863,20 +1869,20 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
     ++array_target_use_counts[static_cast<std::size_t>(src_slot)];
   }
 
-  for (unsigned int reg_slot = 0; reg_slot < array_register_targets_.size(); ++reg_slot)
+  for (unsigned int reg_slot = 0; reg_slot < state.array_register_targets.size(); ++reg_slot)
   {
-    const int32_t src_slot = array_register_targets_[reg_slot];
-    if (src_slot < 0 || register_scalar_mask_[reg_slot])
+    const int32_t src_slot = state.array_register_targets[reg_slot];
+    if (src_slot < 0 || state.register_scalar_mask[reg_slot])
     {
       continue;
     }
-    const uint32_t dst_slot = register_array_slot_[reg_slot];
-    if (dst_slot >= numeric_array_storage_.size() ||
-        static_cast<std::size_t>(src_slot) >= numeric_array_storage_.size())
+    const uint32_t dst_slot = state.register_array_slot[reg_slot];
+    if (dst_slot >= state.array_storage.size() ||
+        static_cast<std::size_t>(src_slot) >= state.array_storage.size())
     {
       return false;
     }
-    array_register_can_swap_[reg_slot] =
+    state.array_register_can_swap[reg_slot] =
       dst_slot != static_cast<uint32_t>(src_slot) &&
       array_target_use_counts[static_cast<std::size_t>(src_slot)] == 1;
   }
@@ -1884,53 +1890,30 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
   return true;
 }
 
+bool Module::build_numeric_program(const std::vector<Value> & current_inputs, egress_jit::NumericProgram & numeric_program)
+{
+  NumericJitState tmp;
+  if (!build_numeric_program_impl(program_, registers_, sample_rate_, current_inputs, numeric_program, tmp))
+  {
+    return false;
+  }
+  numeric_array_storage_  = std::move(tmp.array_storage);
+  register_scalar_mask_   = std::move(tmp.register_scalar_mask);
+  register_array_slot_    = std::move(tmp.register_array_slot);
+  array_register_targets_ = std::move(tmp.array_register_targets);
+  array_register_can_swap_= std::move(tmp.array_register_can_swap);
+  numeric_input_info_     = std::move(tmp.input_info);
+  numeric_output_info_    = std::move(tmp.output_info);
+  return true;
+}
+
 bool Module::build_numeric_program(
   const CompiledProgram & compiled_program,
   NumericJitState & state,
   const std::vector<Value> & current_inputs,
-  egress_jit::NumericProgram & numeric_program)
+  egress_jit::NumericProgram & numeric_program) const
 {
-  CompiledProgram saved_program = std::move(program_);
-  std::vector<std::vector<double>> saved_array_storage = std::move(numeric_array_storage_);
-  std::vector<bool> saved_register_scalar_mask = std::move(register_scalar_mask_);
-  std::vector<uint32_t> saved_register_array_slot = std::move(register_array_slot_);
-  std::vector<int32_t> saved_array_register_targets = std::move(array_register_targets_);
-  std::vector<bool> saved_array_register_can_swap = std::move(array_register_can_swap_);
-  std::vector<NumericInputInfo> saved_input_info = std::move(numeric_input_info_);
-  std::vector<NumericOutputInfo> saved_output_info = std::move(numeric_output_info_);
-
-  program_ = compiled_program;
-  numeric_array_storage_ = state.array_storage;
-  register_scalar_mask_ = state.register_scalar_mask;
-  register_array_slot_ = state.register_array_slot;
-  array_register_targets_ = state.array_register_targets;
-  array_register_can_swap_ = state.array_register_can_swap;
-  numeric_input_info_ = state.input_info;
-  numeric_output_info_ = state.output_info;
-
-  const bool ok = build_numeric_program(current_inputs, numeric_program);
-
-  if (ok)
-  {
-    state.array_storage = std::move(numeric_array_storage_);
-    state.register_scalar_mask = std::move(register_scalar_mask_);
-    state.register_array_slot = std::move(register_array_slot_);
-    state.array_register_targets = std::move(array_register_targets_);
-    state.array_register_can_swap = std::move(array_register_can_swap_);
-    state.input_info = std::move(numeric_input_info_);
-    state.output_info = std::move(numeric_output_info_);
-  }
-
-  program_ = std::move(saved_program);
-  numeric_array_storage_ = std::move(saved_array_storage);
-  register_scalar_mask_ = std::move(saved_register_scalar_mask);
-  register_array_slot_ = std::move(saved_register_array_slot);
-  array_register_targets_ = std::move(saved_array_register_targets);
-  array_register_can_swap_ = std::move(saved_array_register_can_swap);
-  numeric_input_info_ = std::move(saved_input_info);
-  numeric_output_info_ = std::move(saved_output_info);
-
-  return ok;
+  return build_numeric_program_impl(compiled_program, registers_, sample_rate_, current_inputs, numeric_program, state);
 }
 
 void Module::initialize_numeric_jit_state(
