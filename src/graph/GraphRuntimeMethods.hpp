@@ -396,7 +396,8 @@ bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_
     fused->input_kernel.array_sizes.data(),
     fused->input_kernel.temps.data(),
     44100.0,
-    0);
+    0,
+    fused->input_kernel.param_ptrs.data());
 
   for (const auto & binding : fused->input_kernel.input_bindings)
   {
@@ -510,7 +511,8 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
     fused->array_sizes.empty() ? nullptr : fused->array_sizes.data(),
     fused->temps.empty() ? nullptr : fused->temps.data(),
     fused->primitive_body_sample_rate,
-    sample_index);
+    sample_index,
+    fused->param_ptrs.data());
 
   for (const auto & binding : fused->primitive_body_modules)
   {
@@ -802,7 +804,8 @@ bool Graph::run_fused_mix_kernel(RuntimeState & runtime, double & mixed) const
     fused->mix_kernel.array_sizes.data(),
     fused->mix_kernel.temps.data(),
     44100.0,
-    0);
+    0,
+    fused->mix_kernel.param_ptrs.data());
 
   for (const auto & binding : fused->mix_kernel.mix_bindings)
   {
@@ -1358,6 +1361,19 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
         fused->primitive_body_available = true;
         fused->primitive_body_status = "numeric JIT active";
         fused->primitive_body_sample_rate = expected_sample_rate;
+        fused->param_ptrs.clear();
+        {
+          std::unordered_map<uint64_t, uint32_t> seen;
+          for (const auto & instr : fused->program.instructions)
+          {
+            if (instr.op == egress_jit::NumericOp::SmoothedParam && instr.param_ptr != 0 &&
+                seen.find(instr.param_ptr) == seen.end())
+            {
+              seen.emplace(instr.param_ptr, static_cast<uint32_t>(fused->param_ptrs.size()));
+              fused->param_ptrs.push_back(instr.param_ptr);
+            }
+          }
+        }
         fused->temps.assign(fused->program.register_count, 0.0);
         fused->array_ptrs.resize(fused->array_storage.size(), nullptr);
         fused->array_sizes.resize(fused->array_storage.size(), 0);
@@ -2089,6 +2105,19 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
     kernel_state.kernel = *kernel_or_err;
     kernel_state.available = true;
     kernel_state.status = "numeric JIT active";
+    kernel_state.param_ptrs.clear();
+    {
+      std::unordered_map<uint64_t, uint32_t> seen;
+      for (const auto & instr : kernel_state.program.instructions)
+      {
+        if (instr.op == egress_jit::NumericOp::SmoothedParam && instr.param_ptr != 0 &&
+            seen.find(instr.param_ptr) == seen.end())
+        {
+          seen.emplace(instr.param_ptr, static_cast<uint32_t>(kernel_state.param_ptrs.size()));
+          kernel_state.param_ptrs.push_back(instr.param_ptr);
+        }
+      }
+    }
     if (kernel_state.scalar_inputs.size() < fused->source_outputs.size())
     {
       kernel_state.scalar_inputs.resize(fused->source_outputs.size(), 0.0);

@@ -40,7 +40,8 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         numeric_array_sizes_.data(),
         numeric_temps_.data(),
         sample_rate_,
-        sample_index_);
+        sample_index_,
+        numeric_param_ptrs_.data());
       capture_numeric_scalar_outputs(program_, numeric_output_info_, numeric_temps_);
 
 #ifdef EGRESS_PROFILE

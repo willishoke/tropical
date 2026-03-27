@@ -352,6 +352,7 @@ class Module
     uint64_t sample_index_ = 0;
 #ifdef EGRESS_LLVM_ORC_JIT
     egress_jit::NumericKernelFn jit_kernel_ = nullptr;
+    std::vector<uint64_t> numeric_param_ptrs_;
     std::vector<double> numeric_inputs_;
     bool numeric_input_override_active_ = false;
     std::vector<double> numeric_input_scalar_override_;
@@ -388,6 +389,7 @@ class Module
     struct NumericJitState
     {
       egress_jit::NumericKernelFn kernel = nullptr;
+      std::vector<uint64_t> param_ptrs;
       PreparedNumericJitProgram prepared;
       std::vector<NumericInputInfo> input_info;
       std::vector<NumericOutputInfo> output_info;
@@ -471,7 +473,7 @@ class Module
     std::atomic<uint64_t> profile_materialized_array_registers_{0};
   #endif
 
-    bool supports_numeric_jit_expr_kind(ExprKind kind) const;
+    static bool supports_numeric_jit_expr_kind(ExprKind kind);
 
     static void assign_scalar_numeric_value(Value & dst, double value);
 
@@ -562,7 +564,7 @@ class Module
       const std::vector<Value> & current_inputs,
       const PreparedNumericJitProgram & prepared) const;
 
-    bool configure_numeric_inputs_for_jit(
+    static bool configure_numeric_inputs_for_jit(
       NumericJitState & state,
       const std::vector<Value> & current_inputs);
 
@@ -584,7 +586,15 @@ class Module
       const CompiledProgram & compiled_program,
       NumericJitState & state,
       const std::vector<Value> & current_inputs,
-      egress_jit::NumericProgram & numeric_program);
+      egress_jit::NumericProgram & numeric_program) const;
+
+    static bool build_numeric_program_impl(
+      const CompiledProgram & program,
+      const std::vector<Value> & registers,
+      double sample_rate,
+      const std::vector<Value> & current_inputs,
+      egress_jit::NumericProgram & numeric_program,
+      NumericJitState & state);
 
     void initialize_numeric_jit_state(
       NumericJitState & state,

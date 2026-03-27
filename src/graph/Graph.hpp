@@ -878,8 +878,22 @@ class Graph
       {
         return true;
       }
-      wait_for_runtime_available(0);
-      wait_for_runtime_available(1);
+
+      // Double-buffer protocol (mirrors rebuild_and_publish_runtime_locked):
+      // 1. Update the currently-inactive runtime — audio is on the active one so this is safe.
+      // 2. Atomic-swap so audio switches to the freshly updated runtime.
+      // 3. Update the formerly-active (now-inactive) runtime — audio has moved away from it.
+      //
+      // The previous approach waited for both runtimes to be free simultaneously, which only
+      // happens during the brief !audio_processing_ window between callbacks. That window is
+      // not a lock: the audio callback can restart immediately and read a runtime we are still
+      // writing, causing a data race and crash.
+
+      const uint32_t active   = active_runtime_index_.load(std::memory_order_acquire);
+      const uint32_t inactive = 1U - active;
+
+      // Step 1: update inactive (audio is on `active`, so `inactive` is free).
+      wait_for_runtime_available(inactive);
       bool all_ok = true;
       for (const auto & name : batch_dirty_modules_)
       {
@@ -888,19 +902,41 @@ class Graph
         {
           continue;
         }
-        const bool ok0 = recompile_module_inputs_in_runtime(runtimes_[0], name, it->second.input_exprs);
-        const bool ok1 = recompile_module_inputs_in_runtime(runtimes_[1], name, it->second.input_exprs);
-        if (!ok0 || !ok1)
+        if (!recompile_module_inputs_in_runtime(runtimes_[inactive], name, it->second.input_exprs))
         {
           all_ok = false;
         }
       }
-      batch_dirty_modules_.clear();
       if (!all_ok)
       {
-        runtimes_[0] = build_runtime_locked();
-        runtimes_[1] = build_runtime_locked();
+        runtimes_[inactive] = build_runtime_locked();
       }
+
+      // Step 2: swap — audio now uses the updated `inactive` runtime.
+      active_runtime_index_.store(inactive, std::memory_order_release);
+
+      // Step 3: update formerly-active (now-inactive) runtime.
+      // Audio has read the new active_runtime_index_, so it will no longer use `active`.
+      wait_for_runtime_available(active);
+      all_ok = true;
+      for (const auto & name : batch_dirty_modules_)
+      {
+        auto it = control_modules_.find(name);
+        if (it == control_modules_.end())
+        {
+          continue;
+        }
+        if (!recompile_module_inputs_in_runtime(runtimes_[active], name, it->second.input_exprs))
+        {
+          all_ok = false;
+        }
+      }
+      if (!all_ok)
+      {
+        runtimes_[active] = build_runtime_locked();
+      }
+
+      batch_dirty_modules_.clear();
       return true;
     }
 
