@@ -98,8 +98,13 @@ const TOOLS = [
     },
   },
   {
+    name: 'list_module_types',
+    description: 'List all registered module types (builtins + user-defined) with their input/output port names and input defaults. Call this before building a patch to discover what is available — do NOT use list_modules for this; list_modules shows live instances only.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'list_modules',
-    description: 'List all live module instances with their port names.',
+    description: 'List all live module instances (already instantiated in the current session) with their port names. This shows running instances, not available types — use list_module_types to discover what can be instantiated.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -310,6 +315,22 @@ function handleTool(name: string, args: Record<string, unknown>) {
       session.graphOutputs = session.graphOutputs.filter(o => o.module !== instanceName)
       return { removed: instanceName }
     })
+
+    // ── list_module_types ──────────────────────────────────────────────────
+    case 'list_module_types': return wrap(() =>
+      [...session.typeRegistry.entries()].map(([typeName, type]) => {
+        const d = type._def
+        const defaultsMap = (d.rawInputDefaults ?? {}) as Record<string, unknown>
+        return {
+          type_name: typeName,
+          inputs:    d.inputNames.map(n => ({
+            name: n,
+            default: defaultsMap[n] ?? null,
+          })),
+          outputs: d.outputNames,
+        }
+      }),
+    )
 
     // ── list_modules ───────────────────────────────────────────────────────
     case 'list_modules': return wrap(() =>
