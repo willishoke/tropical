@@ -1920,8 +1920,7 @@ void Module::initialize_numeric_jit_state(
   NumericJitState & state,
   const CompiledProgram & source_program,
   const std::vector<Value> & current_inputs,
-  unsigned int base_input_count,
-  const std::string & symbol_prefix)
+  unsigned int base_input_count)
 {
   if (value_registers_dirty_)
   {
@@ -1941,7 +1940,7 @@ void Module::initialize_numeric_jit_state(
   }
 
   auto & jit = egress_jit::OrcJitEngine::instance();
-  auto kernel_or_err = jit.compile_numeric_program(numeric_program, symbol_prefix);
+  auto kernel_or_err = jit.compile_numeric_program(numeric_program);
   if (!kernel_or_err)
   {
     return;
@@ -1982,8 +1981,7 @@ void Module::ensure_numeric_jit_state_current(
   NumericJitState & state,
   const CompiledProgram & source_program,
   const std::vector<Value> & current_inputs,
-  unsigned int base_input_count,
-  const std::string & symbol_prefix)
+  unsigned int base_input_count)
 {
   if (state.kernel != nullptr)
   {
@@ -1994,7 +1992,7 @@ void Module::ensure_numeric_jit_state_current(
     }
   }
 
-  initialize_numeric_jit_state(state, source_program, current_inputs, base_input_count, symbol_prefix);
+  initialize_numeric_jit_state(state, source_program, current_inputs, base_input_count);
 }
 
 bool Module::prepare_composite_body_jit_program(CompositeBodyJitState & state) const
@@ -2125,7 +2123,7 @@ void Module::initialize_composite_body_jit(const std::vector<Value> & current_in
   }
 
   auto & jit = egress_jit::OrcJitEngine::instance();
-  auto kernel_or_err = jit.compile_numeric_program(numeric_program, "egress_udm_composite_body");
+  auto kernel_or_err = jit.compile_numeric_program(numeric_program);
   if (!kernel_or_err)
   {
     composite_body_jit_ = CompositeBodyJitState{};
@@ -2540,7 +2538,7 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
     numeric_jit_instruction_count_ = static_cast<uint64_t>(numeric_program.instructions.size());
 #endif
 
-    auto kernel_or_err = jit.compile_numeric_program(numeric_program, "egress_udm_kernel");
+    auto kernel_or_err = jit.compile_numeric_program(numeric_program);
     if (!kernel_or_err)
     {
       jit_status_ = llvm::toString(kernel_or_err.takeError());
@@ -2648,20 +2646,17 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
       composite_output_jit_,
       composite_output_program_,
       current_inputs,
-      static_cast<unsigned int>(current_inputs.size()),
-      "egress_udm_composite_output");
+      static_cast<unsigned int>(current_inputs.size()));
     ensure_numeric_jit_state_current(
       composite_register_jit_,
       composite_register_program_,
       current_inputs,
-      static_cast<unsigned int>(current_inputs.size()),
-      "egress_udm_composite_register");
+      static_cast<unsigned int>(current_inputs.size()));
     ensure_numeric_jit_state_current(
       delay_update_jit_,
       delay_update_program_,
       current_inputs,
-      static_cast<unsigned int>(current_inputs.size()),
-      "egress_udm_delay_update");
+      static_cast<unsigned int>(current_inputs.size()));
   }
 
   jit_status_ = "numeric JIT active";

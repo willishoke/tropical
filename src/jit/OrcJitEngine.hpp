@@ -14,6 +14,8 @@
 #include <llvm/IR/Module.h>
 #endif
 
+#include <filesystem>
+
 namespace egress_jit
 {
 enum class NumericOp : uint8_t
@@ -100,6 +102,8 @@ using NumericKernelFn = void (*)(
   const uint64_t * param_ptrs);
 
 #ifdef EGRESS_LLVM_ORC_JIT
+class KernelObjectCache;
+
 class OrcJitEngine
 {
   public:
@@ -115,8 +119,7 @@ class OrcJitEngine
     llvm::Expected<uint64_t> lookup(const std::string & symbol_name);
 
     llvm::Expected<NumericKernelFn> compile_numeric_program(
-      const NumericProgram & program,
-      const std::string & symbol_prefix);
+      const NumericProgram & program);
 
   private:
     OrcJitEngine();
@@ -125,6 +128,7 @@ class OrcJitEngine
     std::string init_error_;
     mutable std::mutex jit_mutex_;
     std::unordered_map<std::string, NumericKernelFn> kernel_cache_;
+    std::unique_ptr<KernelObjectCache> object_cache_;
 };
 #else
 class OrcJitEngine

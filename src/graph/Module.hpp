@@ -600,15 +600,13 @@ class Module
       NumericJitState & state,
       const CompiledProgram & source_program,
       const std::vector<Value> & current_inputs,
-      unsigned int base_input_count,
-      const std::string & symbol_prefix);
+      unsigned int base_input_count);
 
     void ensure_numeric_jit_state_current(
       NumericJitState & state,
       const CompiledProgram & source_program,
       const std::vector<Value> & current_inputs,
-      unsigned int base_input_count,
-      const std::string & symbol_prefix);
+      unsigned int base_input_count);
 
     bool run_numeric_jit_state(
       NumericJitState & state,

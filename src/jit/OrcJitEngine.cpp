@@ -4,21 +4,201 @@
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/ExecutionEngine/ObjectCache.h>
+#include <llvm/ExecutionEngine/Orc/CompileUtils.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Support/MD5.h>
+#include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
+#include <llvm/Support/raw_ostream.h>
 
-#include <atomic>
+#include <cstdlib>
+#include <filesystem>
+#include <string>
 #include <unordered_map>
+
+#if defined(__APPLE__)
+#  include <dlfcn.h>
+#  include <mach-o/dyld.h>
+#  include <mach-o/loader.h>
+#elif defined(__linux__)
+#  include <dlfcn.h>
+#  include <elf.h>
+#  include <link.h>
+#endif
+
+namespace fs = std::filesystem;
 #endif
 
 namespace egress_jit
 {
 #ifdef EGRESS_LLVM_ORC_JIT
+
+// ---------------------------------------------------------------------------
+// KernelObjectCache — persists compiled object code to disk so kernels survive
+// process restarts. Files are named <md5-of-canonical-program>.o and live in a
+// versioned subdirectory; bump kCacheVersion when IR generation changes.
+// ---------------------------------------------------------------------------
+
+class KernelObjectCache : public llvm::ObjectCache
+{
+public:
+  explicit KernelObjectCache(fs::path dir) : dir_(std::move(dir))
+  {
+    std::error_code ec;
+    fs::create_directories(dir_, ec);
+    // If directory creation fails the cache simply won't persist — not fatal.
+  }
+
+#if LLVM_VERSION_MAJOR >= 14
+  void notifyObjectCompiled(const llvm::Module * M, llvm::MemoryBufferRef obj) override
+  {
+    auto path = dir_ / (M->getModuleIdentifier() + ".o");
+    std::error_code ec;
+    llvm::raw_fd_ostream out(path.string(), ec);
+    if (!ec)
+      out.write(obj.getBufferStart(), obj.getBufferSize());
+  }
+#else
+  void notifyObjectCompiled(const llvm::Module * M, std::unique_ptr<llvm::MemoryBuffer> obj) override
+  {
+    auto path = dir_ / (M->getModuleIdentifier() + ".o");
+    std::error_code ec;
+    llvm::raw_fd_ostream out(path.string(), ec);
+    if (!ec)
+      out.write(obj->getBufferStart(), obj->getBufferSize());
+  }
+#endif
+
+  std::unique_ptr<llvm::MemoryBuffer> getObject(const llvm::Module * M) override
+  {
+    auto path = dir_ / (M->getModuleIdentifier() + ".o");
+    auto buf = llvm::MemoryBuffer::getFile(path.string());
+    if (buf)
+      return std::move(*buf);
+    return nullptr;
+  }
+
+private:
+  fs::path dir_;
+};
+
+static std::string md5_hex(const std::string & data)
+{
+  llvm::MD5 hasher;
+  hasher.update(llvm::StringRef(data.data(), data.size()));
+  llvm::MD5::MD5Result result;
+  hasher.final(result);
+  llvm::SmallString<32> hex;
+  llvm::MD5::stringifyResult(result, hex);
+  return std::string(hex.str());
+}
+
+// ---------------------------------------------------------------------------
+
 OrcJitEngine & OrcJitEngine::instance()
 {
   static OrcJitEngine engine;
   return engine;
+}
+
+// Returns an 8-hex-char string derived from the build ID of the shared library
+// containing this code. Changes on every relink, providing automatic cache
+// invalidation without a manually bumped version number.
+static std::string binary_build_id()
+{
+#if defined(__APPLE__)
+  Dl_info info;
+  if (!dladdr(reinterpret_cast<void *>(&binary_build_id), &info) || !info.dli_fbase)
+    return "unknown";
+
+  // Walk Mach-O load commands looking for LC_UUID.
+  const auto * hdr = static_cast<const mach_header_64 *>(info.dli_fbase);
+  const auto * lc  = reinterpret_cast<const load_command *>(hdr + 1);
+  for (uint32_t i = 0; i < hdr->ncmds; ++i)
+  {
+    if (lc->cmd == LC_UUID)
+    {
+      const auto * ucmd = reinterpret_cast<const uuid_command *>(lc);
+      char buf[9];
+      std::snprintf(buf, sizeof(buf), "%02x%02x%02x%02x",
+        ucmd->uuid[0], ucmd->uuid[1], ucmd->uuid[2], ucmd->uuid[3]);
+      return buf;
+    }
+    lc = reinterpret_cast<const load_command *>(
+      reinterpret_cast<const char *>(lc) + lc->cmdsize);
+  }
+  return "unknown";
+
+#elif defined(__linux__)
+  struct Result { std::string id; const void * target; };
+  Result result{"unknown", reinterpret_cast<const void *>(&binary_build_id)};
+
+  dl_iterate_phdr(
+    [](dl_phdr_info * info, std::size_t, void * data) -> int
+    {
+      auto * r = static_cast<Result *>(data);
+      // Check if this image contains our target address.
+      for (int i = 0; i < info->dlpi_phnum; ++i)
+      {
+        const auto & ph = info->dlpi_phdr[i];
+        if (ph.p_type != PT_LOAD) continue;
+        const auto start = info->dlpi_addr + ph.p_vaddr;
+        if (reinterpret_cast<uintptr_t>(r->target) < start) continue;
+        if (reinterpret_cast<uintptr_t>(r->target) >= start + ph.p_memsz) continue;
+
+        // Found our image — look for PT_NOTE with build-id.
+        for (int j = 0; j < info->dlpi_phnum; ++j)
+        {
+          const auto & note_ph = info->dlpi_phdr[j];
+          if (note_ph.p_type != PT_NOTE) continue;
+          const auto * p   = reinterpret_cast<const char *>(info->dlpi_addr + note_ph.p_vaddr);
+          const auto * end = p + note_ph.p_filesz;
+          while (p + sizeof(Elf64_Nhdr) <= end)
+          {
+            const auto * nhdr = reinterpret_cast<const Elf64_Nhdr *>(p);
+            const char * name = p + sizeof(Elf64_Nhdr);
+            const char * desc = name + ((nhdr->n_namesz + 3) & ~3u);
+            if (nhdr->n_type == NT_GNU_BUILD_ID &&
+                nhdr->n_namesz == 4 && std::memcmp(name, "GNU\0", 4) == 0 &&
+                nhdr->n_descsz >= 4)
+            {
+              char buf[9];
+              std::snprintf(buf, sizeof(buf), "%02x%02x%02x%02x",
+                static_cast<unsigned char>(desc[0]),
+                static_cast<unsigned char>(desc[1]),
+                static_cast<unsigned char>(desc[2]),
+                static_cast<unsigned char>(desc[3]));
+              r->id = buf;
+              return 1;
+            }
+            p = desc + ((nhdr->n_descsz + 3) & ~3u);
+          }
+        }
+        return 1;
+      }
+      return 0;
+    },
+    &result);
+
+  return result.id;
+
+#else
+  return "unknown";
+#endif
+}
+
+static fs::path kernel_cache_dir()
+{
+  fs::path base;
+  if (const char * xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
+    base = fs::path(xdg);
+  else if (const char * home = std::getenv("HOME"); home && *home)
+    base = fs::path(home) / ".cache";
+  else
+    base = fs::temp_directory_path();
+  return base / "egress" / "kernels" / binary_build_id();
 }
 
 OrcJitEngine::OrcJitEngine()
@@ -26,7 +206,18 @@ OrcJitEngine::OrcJitEngine()
   llvm::InitializeNativeTarget();
   llvm::InitializeNativeTargetAsmPrinter();
 
-  auto jit_or_err = llvm::orc::LLJITBuilder().create();
+  object_cache_ = std::make_unique<KernelObjectCache>(kernel_cache_dir());
+  KernelObjectCache * cache_ptr = object_cache_.get();
+
+  auto jit_or_err = llvm::orc::LLJITBuilder()
+    .setCompileFunctionCreator(
+      [cache_ptr](llvm::orc::JITTargetMachineBuilder jtmb)
+        -> llvm::Expected<std::unique_ptr<llvm::orc::IRCompileLayer::IRCompiler>>
+      {
+        return std::make_unique<llvm::orc::ConcurrentIRCompiler>(std::move(jtmb), cache_ptr);
+      })
+    .create();
+
   if (!jit_or_err)
   {
     init_error_ = llvm::toString(jit_or_err.takeError());
@@ -91,8 +282,7 @@ llvm::Expected<uint64_t> OrcJitEngine::lookup(const std::string & symbol_name)
 }
 
 llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
-  const NumericProgram & program,
-  const std::string & symbol_prefix)
+  const NumericProgram & program)
 {
   if (!jit_)
   {
@@ -151,8 +341,11 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
   if (cache_it != kernel_cache_.end())
     return cache_it->second;
 
+  const std::string hash = md5_hex(cache_key);
+  const std::string function_name = "egress_k_" + hash;
+
   auto context = std::make_unique<llvm::LLVMContext>();
-  auto module = std::make_unique<llvm::Module>("egress_udm_numeric", *context);
+  auto module = std::make_unique<llvm::Module>(hash, *context);
   module->setDataLayout(jit_->getDataLayout());
 
   llvm::IRBuilder<> builder(*context);
@@ -167,9 +360,6 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
     void_ty,
     {f64_ptr_ty, f64_ptr_ty, f64_ptr_ptr_ty, i64_ptr_ty, f64_ptr_ty, f64_ty, i64_ty, i64_ptr_ty},
     false);
-
-  static std::atomic<uint64_t> function_counter{0};
-  const std::string function_name = symbol_prefix + "_" + std::to_string(function_counter.fetch_add(1, std::memory_order_relaxed));
 
   llvm::Function * fn = llvm::Function::Create(fn_ty, llvm::Function::ExternalLinkage, function_name, module.get());
 
