@@ -1350,7 +1350,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
     if (primitive_body_ok && !fused->primitive_body_modules.empty())
     {
       auto & jit = egress_jit::OrcJitEngine::instance();
-      auto kernel_or_err = jit.compile_numeric_program(fused->program, "egress_graph_primitive_body");
+      auto kernel_or_err = jit.compile_numeric_program(fused->program);
       if (!kernel_or_err)
       {
         mark_primitive_body_unavailable(llvm::toString(kernel_or_err.takeError()));
@@ -2095,8 +2095,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
       kernel_state.status = jit.init_error();
       return false;
     }
-    auto kernel_or_err = jit.compile_numeric_program(kernel_state.program,
-                                                     use_prev_outputs ? "egress_graph_inputs" : "egress_graph_mix");
+    auto kernel_or_err = jit.compile_numeric_program(kernel_state.program);
     if (!kernel_or_err)
     {
       kernel_state.status = llvm::toString(kernel_or_err.takeError());

@@ -202,8 +202,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
           composite_output_jit_,
           composite_output_program_,
           inputs,
-          static_cast<unsigned int>(inputs.size()),
-          "egress_udm_composite_output");
+          static_cast<unsigned int>(inputs.size()));
         if (composite_output_jit_.kernel != nullptr &&
             run_numeric_jit_state(composite_output_jit_, inputs))
         {
@@ -252,8 +251,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         input_jit,
         nested.input_program,
         inputs,
-        static_cast<unsigned int>(inputs.size()),
-        "egress_udm_nested_input");
+        static_cast<unsigned int>(inputs.size()));
       if (run_numeric_jit_state(input_jit, inputs))
       {
         if (nested.module->try_set_direct_numeric_inputs(input_jit, nested.input_program))
@@ -317,8 +315,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
          composite_register_jit_,
          composite_register_program_,
          inputs,
-         static_cast<unsigned int>(inputs.size()),
-         "egress_udm_composite_register"),
+         static_cast<unsigned int>(inputs.size())),
        composite_register_jit_.kernel != nullptr) &&
       run_numeric_jit_state(composite_register_jit_, inputs))
   {
@@ -368,8 +365,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
            delay_update_jit_,
            delay_update_program_,
            inputs,
-           static_cast<unsigned int>(inputs.size()),
-           "egress_udm_delay_update"),
+           static_cast<unsigned int>(inputs.size())),
           delay_update_jit_.kernel != nullptr) &&
         run_numeric_jit_state(delay_update_jit_, inputs))
     {
