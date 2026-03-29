@@ -2359,6 +2359,7 @@ void Module::initialize_composite_body_jit(const std::vector<Value> & current_in
 
   composite_body_jit_.state.kernel = *kernel_or_err;
   composite_body_jit_.state.temps.assign(composite_body_jit_.state.prepared.program.register_count, 0.0);
+  composite_body_jit_.state.int_temps.assign(composite_body_jit_.state.prepared.program.register_count, 0);
   composite_body_jit_.state.inputs.assign(jit_inputs.size(), 0.0);
   composite_body_jit_.state.array_ptrs.resize(composite_body_jit_.state.array_storage.size(), nullptr);
   composite_body_jit_.state.array_sizes.resize(composite_body_jit_.state.array_storage.size(), 0);

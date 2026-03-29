@@ -295,6 +295,200 @@ static void test_clock_wired_to_seq_trigger()
   egress_graph_free(g);
 }
 
+// IntSeq-style module: 5 inputs (trigger, is_forward, step, seq_len, sequence/array)
+// 2 outputs (value=sequence[index], index), 1 integer register (index=0)
+// Mirrors the inline module_def from 31tet_otonal_seq.json.
+static egress_module_spec_t build_intseq_spec()
+{
+  // 5 inputs, sample_rate=44100
+  egress_module_spec_t spec = egress_module_spec_new(5, 44100.0);
+
+  // inputs: 0=trigger, 1=is_forward, 2=step, 3=seq_len, 4=sequence(array)
+  egress_expr_t trigger    = egress_expr_input(0);
+  egress_expr_t is_forward = egress_expr_input(1);
+  egress_expr_t step       = egress_expr_input(2);
+  egress_expr_t seq_len    = egress_expr_input(3);
+  egress_expr_t sequence   = egress_expr_input(4);
+  egress_expr_t index_reg  = egress_expr_register(0);
+
+  // output: value = sequence[index_reg]
+  egress_expr_t value_out = egress_expr_binary(EGRESS_EXPR_INDEX, sequence, index_reg);
+  egress_module_spec_add_output(spec, value_out);
+  egress_expr_free(value_out);
+
+  // output: index = index_reg
+  egress_module_spec_add_output(spec, egress_expr_register(0));
+
+  // next_index = select(trigger,
+  //   mod(add(index_reg, select(is_forward, step, seq_len - step)), seq_len),
+  //   index_reg)
+  egress_expr_t rev_step   = egress_expr_binary(EGRESS_EXPR_SUB, egress_expr_input(3), egress_expr_input(2));
+  egress_expr_t fwd_step   = egress_expr_select(egress_expr_input(1), egress_expr_input(2), rev_step);
+  egress_expr_t next_raw   = egress_expr_binary(EGRESS_EXPR_ADD, egress_expr_register(0), fwd_step);
+  egress_expr_t next_mod   = egress_expr_binary(EGRESS_EXPR_MOD, next_raw, egress_expr_input(3));
+  egress_expr_t next_index = egress_expr_select(egress_expr_input(0), next_mod, egress_expr_register(0));
+
+  // register 0: index, initial value int 0
+  egress_value_t zero = egress_value_int(0);
+  egress_module_spec_add_register(spec, next_index, zero);
+  egress_value_free(zero);
+  egress_expr_free(next_index);
+
+  egress_expr_free(trigger);
+  egress_expr_free(is_forward);
+  egress_expr_free(step);
+  egress_expr_free(seq_len);
+  egress_expr_free(sequence);
+  egress_expr_free(index_reg);
+  egress_expr_free(rev_step);
+  egress_expr_free(fwd_step);
+  egress_expr_free(next_raw);
+  egress_expr_free(next_mod);
+
+  return spec;
+}
+
+static void test_intseq_with_clock()
+{
+  egress_graph_t g = egress_graph_new(256);
+  ASSERT(g != nullptr);
+
+  // Add Clock
+  egress_module_spec_t clock_spec = build_clock_spec();
+  ASSERT_OK(egress_graph_add_module(g, "Clock1", clock_spec));
+  egress_module_spec_free(clock_spec);
+
+  egress_expr_t freq_expr = egress_expr_literal_float(2.0);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
+  egress_expr_free(freq_expr);
+
+  egress_value_t r_item  = egress_value_float(1.0);
+  egress_value_t r_arr   = egress_value_array(&r_item, 1);
+  egress_expr_t  r_expr  = egress_expr_literal_value(r_arr);
+  egress_value_free(r_item);
+  egress_value_free(r_arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, r_expr));
+  egress_expr_free(r_expr);
+
+  // Add IntSeq
+  egress_module_spec_t seq_spec = build_intseq_spec();
+  ASSERT_OK(egress_graph_add_module(g, "Seq1", seq_spec));
+  egress_module_spec_free(seq_spec);
+
+  // Wire Clock1.output -> Seq1.trigger
+  ASSERT_OK(egress_graph_connect(g, "Clock1", 0, "Seq1", 0));
+
+  // Set remaining Seq1 inputs
+  egress_expr_t fwd  = egress_expr_literal_bool(true);
+  egress_expr_t stp  = egress_expr_literal_int(1);
+  egress_expr_t slen = egress_expr_literal_int(8);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
+  egress_expr_free(fwd);
+  egress_expr_free(stp);
+  egress_expr_free(slen);
+
+  // sequence = [110, 137, 164, 192, 220, 192, 164, 137]
+  double freqs[8] = {110.0, 137.56, 164.48, 192.38, 220.0, 192.38, 164.48, 137.56};
+  egress_value_t seq_items[8];
+  for (int i = 0; i < 8; i++) seq_items[i] = egress_value_float(freqs[i]);
+  egress_value_t seq_arr  = egress_value_array(seq_items, 8);
+  egress_expr_t  seq_expr = egress_expr_literal_value(seq_arr);
+  for (int i = 0; i < 8; i++) egress_value_free(seq_items[i]);
+  egress_value_free(seq_arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq_expr));
+  egress_expr_free(seq_expr);
+
+  ASSERT_OK(egress_graph_add_output(g, "Seq1", 0));
+
+  egress_graph_prime_jit(g);
+  for (int i = 0; i < 128; ++i)
+  {
+    egress_graph_process(g);
+  }
+
+  egress_graph_free(g);
+}
+
+// Four IntSeqs + four scalar modules to mimic the 31tet_otonal_seq patch structure.
+// Exercises primitive body fusion across multiple heterogeneous modules.
+static void test_multi_module_fusion()
+{
+  egress_graph_t g = egress_graph_new(256);
+  ASSERT(g != nullptr);
+
+  // Clock1
+  {
+    egress_module_spec_t s = build_clock_spec();
+    ASSERT_OK(egress_graph_add_module(g, "Clock1", s));
+    egress_module_spec_free(s);
+    egress_expr_t f = egress_expr_literal_float(1.5);
+    ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, f));
+    egress_expr_free(f);
+    egress_value_t ri = egress_value_float(1.0);
+    egress_value_t ra = egress_value_array(&ri, 1);
+    egress_expr_t  re = egress_expr_literal_value(ra);
+    egress_value_free(ri); egress_value_free(ra);
+    ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, re));
+    egress_expr_free(re);
+  }
+
+  double freqs[4][8] = {
+    {110.00, 137.56, 164.48, 192.38, 220.00, 192.38, 164.48, 137.56},
+    {137.56, 172.01, 205.66, 240.53, 275.12, 240.53, 205.66, 172.01},
+    {164.48, 205.73, 245.93, 287.67, 328.97, 287.67, 245.93, 205.73},
+    {192.38, 240.53, 287.67, 336.44, 384.75, 336.44, 287.67, 240.53},
+  };
+
+  const char* seq_names[4] = {"Seq1","Seq2","Seq3","Seq4"};
+  const char* vco_names[4] = {"VCO1","VCO2","VCO3","VCO4"};
+
+  for (int i = 0; i < 4; i++)
+  {
+    egress_module_spec_t s = build_intseq_spec();
+    ASSERT_OK(egress_graph_add_module(g, seq_names[i], s));
+    egress_module_spec_free(s);
+
+    ASSERT_OK(egress_graph_connect(g, "Clock1", 0, seq_names[i], 0));
+
+    egress_expr_t fwd  = egress_expr_literal_bool(true);
+    egress_expr_t stp  = egress_expr_literal_int(1);
+    egress_expr_t slen = egress_expr_literal_int(8);
+    ASSERT_OK(egress_graph_set_input_expr(g, seq_names[i], 1, fwd));
+    ASSERT_OK(egress_graph_set_input_expr(g, seq_names[i], 2, stp));
+    ASSERT_OK(egress_graph_set_input_expr(g, seq_names[i], 3, slen));
+    egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
+
+    egress_value_t items[8];
+    for (int j = 0; j < 8; j++) items[j] = egress_value_float(freqs[i][j]);
+    egress_value_t arr = egress_value_array(items, 8);
+    egress_expr_t  ex  = egress_expr_literal_value(arr);
+    for (int j = 0; j < 8; j++) egress_value_free(items[j]);
+    egress_value_free(arr);
+    ASSERT_OK(egress_graph_set_input_expr(g, seq_names[i], 4, ex));
+    egress_expr_free(ex);
+  }
+
+  // Four VCOs driven by sequencer output
+  for (int i = 0; i < 4; i++)
+  {
+    egress_module_spec_t s = build_simple_scalar_spec();
+    ASSERT_OK(egress_graph_add_module(g, vco_names[i], s));
+    egress_module_spec_free(s);
+    ASSERT_OK(egress_graph_connect(g, seq_names[i], 0, vco_names[i], 0));
+    ASSERT_OK(egress_graph_add_output(g, vco_names[i], 0));
+  }
+
+  egress_graph_prime_jit(g);
+  for (int i = 0; i < 128; ++i)
+  {
+    egress_graph_process(g);
+  }
+
+  egress_graph_free(g);
+}
+
 // ---- main --------------------------------------------------------------------
 
 int main()
@@ -312,6 +506,12 @@ int main()
 
   run_test("clock: two-ratio array + output tap + 64 process() calls",
            test_clock_wired_to_seq_trigger);
+
+  run_test("intseq: integer-register module wired to clock + 128 process() calls",
+           test_intseq_with_clock);
+
+  run_test("multi-module fusion: clock + 4 intseqs + 4 vcos + 128 frames",
+           test_multi_module_fusion);
 
   printf("\n=== results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
