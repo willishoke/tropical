@@ -5,6 +5,7 @@
  * Spawned by: tui/src/mcp.ts via StdioClientTransport
  */
 
+import { readFileSync }        from 'node:fs'
 import { Server }              from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport }from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
@@ -221,13 +222,13 @@ const TOOLS = [
   },
   {
     name: 'load_patch',
-    description: 'Load a patch from an egress_patch_1 JSON object. Stops audio, recreates the graph, and rebuilds session state.',
+    description: 'Load a patch. Stops audio, recreates the graph, and rebuilds session state. Provide either patch_path (preferred — path to a .json file on disk) or patch (inline PatchJSON object).',
     inputSchema: {
       type: 'object',
       properties: {
-        patch: { type: 'object', description: 'PatchJSON object with schema: "egress_patch_1"' },
+        patch_path: { type: 'string', description: 'Absolute or relative path to an egress_patch_1 JSON file on disk. Preferred over inline patch.' },
+        patch: { type: 'object', description: 'Inline PatchJSON object with schema: "egress_patch_1". Use patch_path instead when the patch exists as a file.' },
       },
-      required: ['patch'],
     },
   },
   {
@@ -523,7 +524,13 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
     // ── load_patch ─────────────────────────────────────────────────────────
     case 'load_patch': return wrap(() => {
-      const patch = args.patch as PatchJSON
+      let patch: PatchJSON
+      if (args.patch_path) {
+        const raw = readFileSync(args.patch_path as string, 'utf-8')
+        patch = JSON.parse(raw) as PatchJSON
+      } else {
+        patch = args.patch as PatchJSON
+      }
       if (patch?.schema !== 'egress_patch_1')
         throw new Error(`Unsupported schema: ${(patch as any)?.schema}. Expected 'egress_patch_1'.`)
       if (session.dac?.isRunning) session.dac.stop()
