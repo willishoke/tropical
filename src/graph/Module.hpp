@@ -183,6 +183,10 @@ class Module
 
 #ifdef EGRESS_LLVM_ORC_JIT
       initialize_numeric_jit(inputs);
+      if (jit_status_ != "numeric JIT active")
+      {
+        throw std::runtime_error("JIT compilation failed: " + jit_status_);
+      }
 #endif
     }
 

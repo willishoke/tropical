@@ -211,17 +211,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       if (!used_jit_outputs)
 #endif
       {
-#ifdef EGRESS_LLVM_ORC_JIT
-        if (value_registers_dirty_)
-        {
-          ensure_value_registers_current();
-        }
-#endif
-        eval_program(composite_output_program_, temps_);
-        for (unsigned int output_id = 0; output_id < composite_output_program_.output_targets.size(); ++output_id)
-        {
-          outputs[output_id] = temps_[composite_output_program_.output_targets[output_id]];
-        }
+        throw std::runtime_error("JIT unavailable for composite output program: " + jit_status_);
       }
       composite_outputs_materialized = true;
       continue;
@@ -261,17 +251,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     if (!used_jit_inputs)
 #endif
     {
-#ifdef EGRESS_LLVM_ORC_JIT
-    if (value_registers_dirty_)
-    {
-      ensure_value_registers_current();
-    }
-#endif
-    eval_program(nested.input_program, nested.input_temps);
-    for (unsigned int input_id = 0; input_id < nested.input_program.output_targets.size(); ++input_id)
-    {
-      nested.module->inputs[input_id] = nested.input_temps[nested.input_program.output_targets[input_id]];
-    }
+      throw std::runtime_error("JIT unavailable for nested module input program: " + jit_status_);
     }
     nested.module->process();
   }
@@ -283,17 +263,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
 
   if (!use_composite_programs)
   {
-#ifdef EGRESS_LLVM_ORC_JIT
-    if (value_registers_dirty_)
-    {
-      ensure_value_registers_current();
-    }
-#endif
-    eval_program(output_program, temps_);
-    for (unsigned int output_id = 0; output_id < output_program.output_targets.size(); ++output_id)
-    {
-      outputs[output_id] = temps_[output_program.output_targets[output_id]];
-    }
+    throw std::runtime_error("JIT kernel unavailable at process time: " + jit_status_);
   }
   else if (!composite_outputs_materialized)
   {
@@ -301,47 +271,25 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   }
 
 #ifdef EGRESS_LLVM_ORC_JIT
-  if (!used_composite_body_jit &&
-      use_composite_programs &&
-      (ensure_numeric_jit_state_current(
-         composite_register_jit_,
-         composite_register_program_,
-         inputs,
-         static_cast<unsigned int>(inputs.size())),
-       composite_register_jit_.kernel != nullptr) &&
-      run_numeric_jit_state(composite_register_jit_, inputs))
+  if (!used_composite_body_jit)
   {
-    apply_numeric_register_targets(composite_register_jit_, register_program);
-  }
-  else
-#endif
-  {
-#ifdef EGRESS_LLVM_ORC_JIT
-    if (value_registers_dirty_)
+    if (use_composite_programs &&
+        (ensure_numeric_jit_state_current(
+           composite_register_jit_,
+           composite_register_program_,
+           inputs,
+           static_cast<unsigned int>(inputs.size())),
+         composite_register_jit_.kernel != nullptr) &&
+        run_numeric_jit_state(composite_register_jit_, inputs))
     {
-      ensure_value_registers_current();
+      apply_numeric_register_targets(composite_register_jit_, register_program);
     }
-#endif
-    eval_program(register_program, temps_);
-    for (unsigned int register_id = 0; register_id < register_program.register_targets.size(); ++register_id)
+    else
     {
-      const int32_t target = register_program.register_targets[register_id];
-      if (target >= 0)
-      {
-        next_registers_[register_id] = temps_[static_cast<std::size_t>(target)];
-      }
-      else
-      {
-        next_registers_[register_id] = registers_[register_id];
-      }
-    }
-    // Only swap here for composite modules; non-composite modules are swapped
-    // by the unconditional swap at the end of process() (line ~395).
-    if (use_composite_programs)
-    {
-      registers_.swap(next_registers_);
+      throw std::runtime_error("JIT unavailable for register program: " + jit_status_);
     }
   }
+#endif
 
   if (!delay_update_program_.output_targets.empty())
   {
@@ -371,22 +319,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       else
 #endif
       {
-#ifdef EGRESS_LLVM_ORC_JIT
-        if (value_registers_dirty_)
-        {
-          ensure_value_registers_current();
-        }
-#endif
-        eval_program(delay_update_program_, temps_);
-        next_delay_states_ = delay_states_;
-        for (unsigned int delay_id = 0; delay_id < delay_update_program_.output_targets.size(); ++delay_id)
-        {
-          next_delay_states_[delay_id] = temps_[delay_update_program_.output_targets[delay_id]];
-        }
-        delay_states_.swap(next_delay_states_);
-#ifdef EGRESS_LLVM_ORC_JIT
-        value_delay_states_dirty_ = false;
-#endif
+        throw std::runtime_error("JIT unavailable for delay update program: " + jit_status_);
       }
     }
   }
