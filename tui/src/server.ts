@@ -685,8 +685,9 @@ Patches are JSON objects with \`"schema": "egress_patch_1"\`.
 
 - \`schema\` (required): \`"egress_patch_1"\`
 - \`types\` (optional): inline module type definitions (avoids a separate \`define_module\` call)
-- \`modules\`: list of \`{ type_name, instance_name }\` objects
-- \`connections\`: list of \`{ src, src_output, dst, dst_input }\` objects
+- \`modules\`: list of \`{ type, name }\` objects
+- \`input_exprs\`: list of \`{ module, input, expr }\` objects — **canonical wiring mechanism**
+- \`connections\` (legacy): list of \`{ src, src_output, dst, dst_input }\` objects; equivalent to \`input_exprs\` entries with \`{ "op": "ref" }\` expressions. Accepted on load for backward compatibility, not emitted on save.
 - \`outputs\`: list of \`{ module, output }\` objects to route to the graph mix
 - \`params\`: map of \`param_name → value\`
 - \`graph\`: optional graph settings (\`worker_count\`, \`fusion_enabled\`, \`buffer_length\`)
@@ -728,11 +729,11 @@ Embed simple arithmetic types directly in \`types\` instead of calling \`define_
     }
   ],
   "modules": [
-    { "type_name": "VCO", "instance_name": "osc" },
-    { "type_name": "VCA", "instance_name": "vca" }
+    { "type": "VCO", "name": "osc" },
+    { "type": "VCA", "name": "vca" }
   ],
-  "connections": [
-    { "src": "osc", "src_output": "sin", "dst": "vca", "dst_input": "audio" }
+  "input_exprs": [
+    { "module": "vca", "input": "audio", "expr": { "op": "ref", "module": "osc", "output": "sin" } }
   ],
   "outputs": [
     { "module": "vca", "output": "out" }
@@ -744,19 +745,24 @@ Embed simple arithmetic types directly in \`types\` instead of calling \`define_
 
 ## Expression node format (ExprNode)
 
-Used in \`set_module_input\` and inline type process definitions:
+Used in \`input_exprs\`, \`set_module_input\`, \`set_inputs_batch\`, and inline type process definitions.
 
-- Literal: \`3.14\` or \`true\`
-- Reference: \`{ "op": "ref", "module": "osc", "output": "sin" }\`
-- Input: \`{ "op": "input", "name": "freq" }\`
-- Binary: \`{ "op": "mul", "lhs": <expr>, "rhs": <expr> }\`
-  - ops: \`add\`, \`sub\`, \`mul\`, \`div\`, \`mod\`, \`pow\`
-- Unary: \`{ "op": "neg", "operand": <expr> }\`
-  - ops: \`neg\`, \`abs\`, \`sin\`, \`log\`
-- Compare: \`{ "op": "lt", "lhs": <expr>, "rhs": <expr> }\`
-  - ops: \`lt\`, \`lte\`, \`gt\`, \`gte\`
-- Clamp: \`{ "op": "clamp", "value": <expr>, "min": <expr>, "max": <expr> }\`
-- Builtins: \`{ "op": "sample_rate" }\`, \`{ "op": "sample_index" }\`
+- **Literal**: \`3.14\` or \`true\`
+- **Reference**: \`{ "op": "ref", "module": "osc", "output": "sin" }\` — routes another module's output to this input
+- **Input port**: \`{ "op": "input", "name": "freq" }\` — (inside type definitions only)
+- **Param / Trigger**: \`{ "op": "param", "name": "cutoff" }\` / \`{ "op": "trigger", "name": "gate" }\`
+- **Binary**: \`{ "op": "mul", "args": [<expr>, <expr>] }\`
+  - Arithmetic: \`add\`, \`sub\`, \`mul\`, \`div\`, \`floor_div\`, \`mod\`, \`pow\`, \`matmul\`
+  - Compare: \`lt\`, \`lte\`, \`gt\`, \`gte\`, \`eq\`, \`neq\`
+  - Bitwise: \`bit_and\`, \`bit_or\`, \`bit_xor\`, \`lshift\`, \`rshift\`
+- **Unary**: \`{ "op": "neg", "args": [<expr>] }\`
+  - ops: \`neg\`, \`abs\`, \`sin\`, \`log\`, \`not\`, \`bit_not\`
+- **Clamp**: \`{ "op": "clamp", "args": [<value>, <min>, <max>] }\`
+- **Select**: \`{ "op": "select", "args": [<cond>, <if_true>, <if_false>] }\`
+- **Array**: \`{ "op": "array", "items": [<expr>, ...] }\`
+- **Index**: \`{ "op": "index", "args": [<array_expr>, <index_expr>] }\`
+- **Delay**: \`{ "op": "delay", "args": [<expr>], "init": 0.0, "id": "optional_name" }\`
+- **Builtins**: \`{ "op": "sample_rate" }\`, \`{ "op": "sample_index" }\`
 `
 
 // ─── Prompts ──────────────────────────────────────────────────────────────────
