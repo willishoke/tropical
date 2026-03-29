@@ -172,6 +172,9 @@ unsigned int    egress_graph_get_worker_count(egress_graph_t);
 void            egress_graph_set_fusion_enabled(egress_graph_t, bool);
 bool            egress_graph_get_fusion_enabled(egress_graph_t);
 unsigned int    egress_graph_get_buffer_length(egress_graph_t);
+/* Returns JSON-serialized ProfileStats. Pointer valid until next call on this thread. */
+const char*     egress_graph_get_profile_stats_json(egress_graph_t);
+void            egress_graph_reset_profile_stats(egress_graph_t);
 
 /* ---------- Device enumeration (no DAC instance required) ---------- */
 
