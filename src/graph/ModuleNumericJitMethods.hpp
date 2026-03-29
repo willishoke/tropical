@@ -2519,12 +2519,6 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
     return;
   }
 
-  if (has_dynamic_registers_)
-  {
-    jit_status_ = "numeric JIT disabled for dynamic array_state registers";
-    return;
-  }
-
   if (!has_nested_modules_ && !has_delay_states_)
   {
     egress_jit::NumericProgram numeric_program;
@@ -2664,11 +2658,6 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
 
 void Module::ensure_numeric_jit_current()
 {
-  if (has_dynamic_registers_)
-  {
-    return;
-  }
-
   if (!has_nested_modules_ && !has_delay_states_)
   {
     if (numeric_input_layout_matches(inputs))

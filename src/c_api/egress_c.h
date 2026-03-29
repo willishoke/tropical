@@ -120,7 +120,6 @@ egress_expr_t  egress_expr_trigger_param(egress_param_t);
 egress_module_spec_t egress_module_spec_new(unsigned int input_count, double sample_rate);
 void         egress_module_spec_add_output(egress_module_spec_t, egress_expr_t);
 void         egress_module_spec_add_register(egress_module_spec_t, egress_expr_t body, egress_value_t init);
-void         egress_module_spec_add_register_array(egress_module_spec_t, unsigned int source_input_id, egress_value_t init);
 /* Returns the node_id assigned to the delay state (for use in egress_expr_delay_value) */
 unsigned int egress_module_spec_add_delay_state(egress_module_spec_t, egress_value_t init, egress_expr_t update_expr);
 void         egress_module_spec_add_nested(egress_module_spec_t, egress_nested_spec_t);
@@ -135,7 +134,6 @@ unsigned int egress_nested_spec_node_id(egress_nested_spec_t);
 void         egress_nested_spec_add_input_expr(egress_nested_spec_t, egress_expr_t);
 void         egress_nested_spec_add_output(egress_nested_spec_t, egress_expr_t);
 void         egress_nested_spec_add_register(egress_nested_spec_t, egress_expr_t body, egress_value_t init);
-void         egress_nested_spec_add_register_array(egress_nested_spec_t, unsigned int source_input_id, egress_value_t init);
 unsigned int egress_nested_spec_add_delay_state(egress_nested_spec_t, egress_value_t init, egress_expr_t update_expr);
 void         egress_nested_spec_add_nested(egress_nested_spec_t outer, egress_nested_spec_t inner);
 void         egress_nested_spec_set_composite_schedule(egress_nested_spec_t, const unsigned int* schedule, size_t n);

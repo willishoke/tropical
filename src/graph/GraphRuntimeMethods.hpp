@@ -1024,11 +1024,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
         output_id < slot.indexed_prev_output_values.size() ? slot.indexed_prev_output_values[output_id] : std::vector<Value>{});
     }
 
-    if (slot.module->has_dynamic_registers_)
-    {
-      mark_ineligible("graph fusion disabled for dynamic array_state registers");
-      return fused;
-    }
+
 
     if (!is_fused_numeric_candidate(slot.input_program))
     {
@@ -1233,7 +1229,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
       ++active_module_count;
 
       Module & module = *slot.module;
-      if (module.has_nested_modules_ || module.has_delay_states_ || module.has_dynamic_registers_)
+      if (module.has_nested_modules_ || module.has_delay_states_)
       {
         continue;
       }

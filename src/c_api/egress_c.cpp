@@ -57,7 +57,6 @@ struct EgressModuleSpecBuilder
   std::vector<ExprSpecPtr> output_exprs;
   std::vector<ExprSpecPtr> register_exprs;
   std::vector<Value> initial_registers;
-  std::vector<Module::RegisterArraySpec> register_array_specs;
   std::vector<Module::DelayStateSpec> delay_state_specs;
   std::vector<Module::NestedModuleSpec> nested_module_specs;
   std::vector<uint32_t> composite_schedule;
@@ -75,7 +74,6 @@ struct EgressNestedSpecBuilder
   std::vector<ExprSpecPtr> output_exprs;
   std::vector<ExprSpecPtr> register_exprs;
   std::vector<Value> initial_registers;
-  std::vector<Module::RegisterArraySpec> register_array_specs;
   std::vector<Module::DelayStateSpec> delay_state_specs;
   std::vector<Module::NestedModuleSpec> nested_module_specs;
   std::vector<uint32_t> composite_schedule;
@@ -122,7 +120,6 @@ static Module::NestedModuleSpec nested_spec_from_builder(const EgressNestedSpecB
   ns.output_exprs = n->output_exprs;
   ns.register_exprs = n->register_exprs;
   ns.initial_registers = n->initial_registers;
-  ns.register_array_specs = n->register_array_specs;
   ns.delay_state_specs = n->delay_state_specs;
   ns.nested_module_specs = n->nested_module_specs;
   ns.composite_schedule = n->composite_schedule;
@@ -485,22 +482,6 @@ void egress_module_spec_add_register(
   auto* b = static_cast<EgressModuleSpecBuilder*>(spec);
   b->register_exprs.push_back(static_cast<EgressExpr*>(body)->spec);
   b->initial_registers.push_back(static_cast<EgressValue*>(init)->value);
-  b->register_array_specs.push_back(Module::RegisterArraySpec{});
-}
-
-void egress_module_spec_add_register_array(
-  egress_module_spec_t spec,
-  unsigned int source_input_id,
-  egress_value_t init)
-{
-  auto* b = static_cast<EgressModuleSpecBuilder*>(spec);
-  b->register_exprs.push_back(nullptr);
-  b->initial_registers.push_back(expr::array_value({}));
-  Module::RegisterArraySpec array_spec;
-  array_spec.enabled = true;
-  array_spec.source_input_id = source_input_id;
-  array_spec.init_value = static_cast<EgressValue*>(init)->value;
-  b->register_array_specs.push_back(array_spec);
 }
 
 unsigned int egress_module_spec_add_delay_state(
@@ -584,22 +565,6 @@ void egress_nested_spec_add_register(
   auto* b = static_cast<EgressNestedSpecBuilder*>(nested);
   b->register_exprs.push_back(static_cast<EgressExpr*>(body)->spec);
   b->initial_registers.push_back(static_cast<EgressValue*>(init)->value);
-  b->register_array_specs.push_back(Module::RegisterArraySpec{});
-}
-
-void egress_nested_spec_add_register_array(
-  egress_nested_spec_t nested,
-  unsigned int source_input_id,
-  egress_value_t init)
-{
-  auto* b = static_cast<EgressNestedSpecBuilder*>(nested);
-  b->register_exprs.push_back(nullptr);
-  b->initial_registers.push_back(expr::array_value({}));
-  Module::RegisterArraySpec array_spec;
-  array_spec.enabled = true;
-  array_spec.source_input_id = source_input_id;
-  array_spec.init_value = static_cast<EgressValue*>(init)->value;
-  b->register_array_specs.push_back(array_spec);
 }
 
 unsigned int egress_nested_spec_add_delay_state(
@@ -676,7 +641,6 @@ bool egress_graph_add_module(egress_graph_t g, const char* name, egress_module_s
         b->output_exprs,
         b->register_exprs,
         b->initial_registers,
-        b->register_array_specs,
         b->delay_state_specs,
         b->nested_module_specs,
         composite_schedule,

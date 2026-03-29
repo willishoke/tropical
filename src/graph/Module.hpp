@@ -54,13 +54,6 @@ class Module
     };
 #endif
 
-    struct RegisterArraySpec
-    {
-      bool enabled = false;
-      unsigned int source_input_id = 0;
-      Value init_value;
-    };
-
     struct DelayStateSpec
     {
       uint32_t node_id = 0;
@@ -77,7 +70,6 @@ class Module
       std::vector<ExprSpecPtr> output_exprs;
       std::vector<ExprSpecPtr> register_exprs;
       std::vector<Value> initial_registers;
-      std::vector<RegisterArraySpec> register_array_specs;
       std::vector<DelayStateSpec> delay_state_specs;
       std::vector<NestedModuleSpec> nested_module_specs;
       std::vector<uint32_t> composite_schedule;
@@ -92,7 +84,6 @@ class Module
       std::vector<ExprSpecPtr> output_exprs,
       std::vector<ExprSpecPtr> register_exprs,
       std::vector<Value> initial_registers,
-      std::vector<RegisterArraySpec> register_array_specs,
       std::vector<DelayStateSpec> delay_state_specs,
       std::vector<NestedModuleSpec> nested_module_specs,
       std::vector<uint32_t> composite_schedule,
@@ -104,20 +95,9 @@ class Module
         input_count_(input_count),
         registers_(std::move(initial_registers)),
         next_registers_(registers_),
-        register_array_specs_(std::move(register_array_specs)),
         sample_rate_(sample_rate),
         composite_output_boundary_id_(output_boundary_id)
     {
-      has_dynamic_registers_ = false;
-      for (const auto & spec : register_array_specs_)
-      {
-        if (spec.enabled)
-        {
-          has_dynamic_registers_ = true;
-          break;
-        }
-      }
-
       // Pre-walk expression trees to find SmoothedParam nodes and allocate anonymous registers.
       // Anonymous registers are appended after user-defined registers in registers_/next_registers_.
       user_register_count_ = static_cast<uint32_t>(registers_.size());
@@ -175,7 +155,6 @@ class Module
           std::move(nested_module_spec.output_exprs),
           std::move(nested_module_spec.register_exprs),
           std::move(nested_module_spec.initial_registers),
-          std::move(nested_module_spec.register_array_specs),
           std::move(nested_module_spec.delay_state_specs),
           std::move(nested_module_spec.nested_module_specs),
           std::move(nested_module_spec.composite_schedule),
@@ -203,14 +182,7 @@ class Module
       temps_.assign(temp_register_count, expr::float_value(0.0));
 
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_)
-      {
-        initialize_numeric_jit(inputs);
-      }
-      else
-      {
-        jit_status_ = "numeric JIT disabled for dynamic array_state registers";
-      }
+      initialize_numeric_jit(inputs);
 #endif
     }
 
@@ -270,7 +242,6 @@ class Module
 
     static void clamp_output_value(Value & value);
 
-    void resize_array_registers_to_inputs();
 
     CompiledProgram compile_program(
       const std::vector<ExprSpecPtr> & output_exprs,
@@ -344,8 +315,6 @@ class Module
     std::unordered_map<uint32_t, std::size_t> delay_state_lookup_;
     std::vector<uint32_t> composite_schedule_;
     uint32_t composite_output_boundary_id_ = std::numeric_limits<uint32_t>::max();
-    std::vector<RegisterArraySpec> register_array_specs_;
-    bool has_dynamic_registers_ = false;
     bool has_nested_modules_ = false;
     bool has_delay_states_ = false;
     double sample_rate_ = 44100.0;

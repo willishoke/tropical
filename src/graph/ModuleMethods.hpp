@@ -2,7 +2,6 @@
 
 void Module::process(const std::vector<bool> * output_materialize_mask)
 {
-  resize_array_registers_to_inputs();
   const bool use_composite_programs = has_nested_modules_ || has_delay_states_;
 #ifdef EGRESS_LLVM_ORC_JIT
   if (numeric_output_scalar_mask_.size() != outputs.size())
@@ -16,12 +15,9 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   }
 #endif
 #ifdef EGRESS_LLVM_ORC_JIT
-  if (!has_dynamic_registers_)
+  if (!numeric_input_override_active_)
   {
-    if (!numeric_input_override_active_)
-    {
-      ensure_numeric_jit_current();
-    }
+    ensure_numeric_jit_current();
   }
 
   if (!use_composite_programs && jit_kernel_)
@@ -185,7 +181,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     if (use_composite_programs && node_id == composite_output_boundary_id_)
     {
  #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_)
       {
         ensure_composite_body_jit_current();
         if (run_composite_body_jit(output_materialize_mask))
@@ -196,7 +191,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         }
       }
       bool used_jit_outputs = false;
-      if (!has_dynamic_registers_)
       {
         ensure_numeric_jit_state_current(
           composite_output_jit_,
@@ -242,8 +236,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     NestedModuleRuntime & nested = nested_modules_[nested_it->second];
 #ifdef EGRESS_LLVM_ORC_JIT
     bool used_jit_inputs = false;
-    if (!has_dynamic_registers_ &&
-        nested_it->second < nested_input_jit_states_.size() &&
+    if (nested_it->second < nested_input_jit_states_.size() &&
         nested_input_jit_states_[nested_it->second])
     {
       NumericJitState & input_jit = *nested_input_jit_states_[nested_it->second];
@@ -310,7 +303,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
 #ifdef EGRESS_LLVM_ORC_JIT
   if (!used_composite_body_jit &&
       use_composite_programs &&
-      !has_dynamic_registers_ &&
       (ensure_numeric_jit_state_current(
          composite_register_jit_,
          composite_register_program_,
@@ -360,8 +352,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     else
     {
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_ &&
-        (ensure_numeric_jit_state_current(
+      if ((ensure_numeric_jit_state_current(
            delay_update_jit_,
            delay_update_program_,
            inputs,
@@ -400,7 +391,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     }
   }
 
-  if (!use_composite_programs || has_dynamic_registers_)
+  if (!use_composite_programs)
   {
     registers_.swap(next_registers_);
   }
@@ -618,56 +609,6 @@ void Module::clamp_output_value(Value & value)
   value = expr::float_value(clamped);
 }
 
-void Module::resize_array_registers_to_inputs()
-{
-  if (!has_dynamic_registers_)
-  {
-    return;
-  }
-
-  for (unsigned int reg_id = 0; reg_id < register_array_specs_.size(); ++reg_id)
-  {
-    const RegisterArraySpec & spec = register_array_specs_[reg_id];
-    if (!spec.enabled)
-    {
-      continue;
-    }
-
-    if (spec.source_input_id >= inputs.size())
-    {
-      throw std::invalid_argument("Array register spec references unknown input id.");
-    }
-
-    const Value & input = inputs[spec.source_input_id];
-    if (input.type != ValueType::Array)
-    {
-      throw std::invalid_argument("Array register requires array-valued input.");
-    }
-
-    const std::size_t desired = input.array_items.size();
-    Value & reg = registers_[reg_id];
-    bool resized = false;
-
-    if (reg.type != ValueType::Array)
-    {
-      std::vector<Value> items(desired, spec.init_value);
-      reg = expr::array_value(std::move(items));
-      resized = true;
-    }
-    else if (reg.array_items.size() != desired)
-    {
-      std::vector<Value> items = reg.array_items;
-      items.resize(desired, spec.init_value);
-      reg = expr::array_value(std::move(items));
-      resized = true;
-    }
-
-    if (resized)
-    {
-      next_registers_[reg_id] = reg;
-    }
-  }
-}
 
 Module::CompiledProgram Module::compile_program(
   const std::vector<ExprSpecPtr> & output_exprs,
