@@ -19,7 +19,7 @@ import {
 
 import {
   makeSession, loadModuleFromJSON, loadPatchFromJSON, mergePatchFromJSON, savePatchToJSON,
-  buildExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
+  buildExpr, prettyExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
 } from './patch.js'
 import { loadBuiltins }        from './module_library.js'
 import { DAC }                 from './audio.js'
@@ -146,9 +146,14 @@ const TOOLS = [
     },
   },
   {
-    name: 'list_connections',
-    description: 'List all tracked connections in the current patch.',
-    inputSchema: { type: 'object', properties: {} },
+    name: 'list_inputs',
+    description: 'List all wired inputs in the current patch. Shows the expression assigned to each input — refs appear as Module.output, inline math is shown as an expression string.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        module: { type: 'string', description: 'If provided, filter to inputs of this module instance.' },
+      },
+    },
   },
   {
     name: 'set_module_input',
@@ -320,9 +325,9 @@ function handleTool(name: string, args: Record<string, unknown>) {
         throw new Error(`No instance named '${instanceName}'.`)
       session.graph.removeModule(instanceName)
       session.instanceRegistry.delete(instanceName)
-      session.connections = session.connections.filter(
-        c => c.src !== instanceName && c.dst !== instanceName,
-      )
+      for (const key of [...session.inputExprNodes.keys()]) {
+        if (key.startsWith(`${instanceName}:`)) session.inputExprNodes.delete(key)
+      }
       session.graphOutputs = session.graphOutputs.filter(o => o.module !== instanceName)
       return { removed: instanceName }
     })
@@ -353,15 +358,14 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const instanceName = args.instance_name as string
       const inst = session.instanceRegistry.get(instanceName)
       if (!inst) throw new Error(`No instance named '${instanceName}'.`)
-      const conns = session.connections.filter(
-        c => c.src === instanceName || c.dst === instanceName,
-      )
       return {
         name: instanceName,
         type_name: inst.typeName,
-        inputs:  inst.inputNames.map((n, i) => ({ name: n, index: i })),
+        inputs:  inst.inputNames.map((n, i) => ({
+          name: n, index: i,
+          expr: session.inputExprNodes.get(`${instanceName}:${n}`) ?? null,
+        })),
         outputs: inst.outputNames.map((n, i) => ({ name: n, index: i })),
-        connections: conns,
       }
     })
 
@@ -378,12 +382,13 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const ok = session.graph.connect(args.src_module as string, srcId, args.dst_module as string, dstId)
       if (!ok) throw new Error(`graph.connect returned false.`)
 
-      const conn = {
-        src: args.src_module as string, srcOutput: srcInst.outputNames[srcId],
-        dst: args.dst_module as string, dstInput:  dstInst.inputNames[dstId],
-      }
-      session.connections.push(conn)
-      return { src: conn.src, src_output: conn.srcOutput, dst: conn.dst, dst_input: conn.dstInput }
+      const srcOut = srcInst.outputNames[srcId]
+      const dstIn  = dstInst.inputNames[dstId]
+      session.inputExprNodes.set(
+        `${args.dst_module as string}:${dstIn}`,
+        { op: 'ref', module: args.src_module as string, output: srcOut },
+      )
+      return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn }
     })
 
     // ── disconnect_modules ─────────────────────────────────────────────────
@@ -401,20 +406,23 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
       const srcOut = srcInst.outputNames[srcId]
       const dstIn  = dstInst.inputNames[dstId]
-      session.connections = session.connections.filter(
-        c => !(c.src === args.src_module && c.srcOutput === srcOut &&
-               c.dst === args.dst_module && c.dstInput  === dstIn),
-      )
+      session.inputExprNodes.delete(`${args.dst_module as string}:${dstIn}`)
       return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn }
     })
 
-    // ── list_connections ───────────────────────────────────────────────────
-    case 'list_connections': return wrap(() =>
-      session.connections.map(c => ({
-        src: c.src, src_output: c.srcOutput,
-        dst: c.dst, dst_input:  c.dstInput,
-      })),
-    )
+    // ── list_inputs ────────────────────────────────────────────────────────
+    case 'list_inputs': return wrap(() => {
+      const filterModule = args.module as string | undefined
+      const results: Array<{ module: string; input: string; expr: string }> = []
+      for (const [key, node] of session.inputExprNodes) {
+        const colonIdx = key.indexOf(':')
+        const mod   = key.slice(0, colonIdx)
+        const input = key.slice(colonIdx + 1)
+        if (filterModule && mod !== filterModule) continue
+        results.push({ module: mod, input, expr: prettyExpr(node, session.instanceRegistry) })
+      }
+      return results
+    })
 
     // ── set_module_input ───────────────────────────────────────────────────
     case 'set_module_input': return wrap(() => {
@@ -525,7 +533,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       mergePatchFromJSON(patch, session)
       return {
         modules:     [...session.instanceRegistry.keys()],
-        connections: session.connections.length,
+        input_exprs: session.inputExprNodes.size,
         outputs:     session.graphOutputs.length,
         params:      [...session.paramRegistry.keys()],
         triggers:    [...session.triggerRegistry.keys()],
@@ -547,7 +555,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       loadPatchFromJSON(patch, session)
       return {
         modules:     [...session.instanceRegistry.keys()],
-        connections: session.connections.length,
+        input_exprs: session.inputExprNodes.size,
         outputs:     session.graphOutputs.length,
         params:      [...session.paramRegistry.keys()],
         triggers:    [...session.triggerRegistry.keys()],
@@ -677,8 +685,9 @@ Patches are JSON objects with \`"schema": "egress_patch_1"\`.
 
 - \`schema\` (required): \`"egress_patch_1"\`
 - \`types\` (optional): inline module type definitions (avoids a separate \`define_module\` call)
-- \`modules\`: list of \`{ type_name, instance_name }\` objects
-- \`connections\`: list of \`{ src, src_output, dst, dst_input }\` objects
+- \`modules\`: list of \`{ type, name }\` objects
+- \`input_exprs\`: list of \`{ module, input, expr }\` objects — **canonical wiring mechanism**
+- \`connections\` (legacy): list of \`{ src, src_output, dst, dst_input }\` objects; equivalent to \`input_exprs\` entries with \`{ "op": "ref" }\` expressions. Accepted on load for backward compatibility, not emitted on save.
 - \`outputs\`: list of \`{ module, output }\` objects to route to the graph mix
 - \`params\`: map of \`param_name → value\`
 - \`graph\`: optional graph settings (\`worker_count\`, \`fusion_enabled\`, \`buffer_length\`)
@@ -720,11 +729,11 @@ Embed simple arithmetic types directly in \`types\` instead of calling \`define_
     }
   ],
   "modules": [
-    { "type_name": "VCO", "instance_name": "osc" },
-    { "type_name": "VCA", "instance_name": "vca" }
+    { "type": "VCO", "name": "osc" },
+    { "type": "VCA", "name": "vca" }
   ],
-  "connections": [
-    { "src": "osc", "src_output": "sin", "dst": "vca", "dst_input": "audio" }
+  "input_exprs": [
+    { "module": "vca", "input": "audio", "expr": { "op": "ref", "module": "osc", "output": "sin" } }
   ],
   "outputs": [
     { "module": "vca", "output": "out" }
@@ -736,19 +745,24 @@ Embed simple arithmetic types directly in \`types\` instead of calling \`define_
 
 ## Expression node format (ExprNode)
 
-Used in \`set_module_input\` and inline type process definitions:
+Used in \`input_exprs\`, \`set_module_input\`, \`set_inputs_batch\`, and inline type process definitions.
 
-- Literal: \`3.14\` or \`true\`
-- Reference: \`{ "op": "ref", "module": "osc", "output": "sin" }\`
-- Input: \`{ "op": "input", "name": "freq" }\`
-- Binary: \`{ "op": "mul", "lhs": <expr>, "rhs": <expr> }\`
-  - ops: \`add\`, \`sub\`, \`mul\`, \`div\`, \`mod\`, \`pow\`
-- Unary: \`{ "op": "neg", "operand": <expr> }\`
-  - ops: \`neg\`, \`abs\`, \`sin\`, \`log\`
-- Compare: \`{ "op": "lt", "lhs": <expr>, "rhs": <expr> }\`
-  - ops: \`lt\`, \`lte\`, \`gt\`, \`gte\`
-- Clamp: \`{ "op": "clamp", "value": <expr>, "min": <expr>, "max": <expr> }\`
-- Builtins: \`{ "op": "sample_rate" }\`, \`{ "op": "sample_index" }\`
+- **Literal**: \`3.14\` or \`true\`
+- **Reference**: \`{ "op": "ref", "module": "osc", "output": "sin" }\` — routes another module's output to this input
+- **Input port**: \`{ "op": "input", "name": "freq" }\` — (inside type definitions only)
+- **Param / Trigger**: \`{ "op": "param", "name": "cutoff" }\` / \`{ "op": "trigger", "name": "gate" }\`
+- **Binary**: \`{ "op": "mul", "args": [<expr>, <expr>] }\`
+  - Arithmetic: \`add\`, \`sub\`, \`mul\`, \`div\`, \`floor_div\`, \`mod\`, \`pow\`, \`matmul\`
+  - Compare: \`lt\`, \`lte\`, \`gt\`, \`gte\`, \`eq\`, \`neq\`
+  - Bitwise: \`bit_and\`, \`bit_or\`, \`bit_xor\`, \`lshift\`, \`rshift\`
+- **Unary**: \`{ "op": "neg", "args": [<expr>] }\`
+  - ops: \`neg\`, \`abs\`, \`sin\`, \`log\`, \`not\`, \`bit_not\`
+- **Clamp**: \`{ "op": "clamp", "args": [<value>, <min>, <max>] }\`
+- **Select**: \`{ "op": "select", "args": [<cond>, <if_true>, <if_false>] }\`
+- **Array**: \`{ "op": "array", "items": [<expr>, ...] }\`
+- **Index**: \`{ "op": "index", "args": [<array_expr>, <index_expr>] }\`
+- **Delay**: \`{ "op": "delay", "args": [<expr>], "init": 0.0, "id": "optional_name" }\`
+- **Builtins**: \`{ "op": "sample_rate" }\`, \`{ "op": "sample_index" }\`
 `
 
 // ─── Prompts ──────────────────────────────────────────────────────────────────

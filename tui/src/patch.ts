@@ -102,11 +102,10 @@ export interface SessionState {
   dac: DAC | null
   typeRegistry: Map<string, ModuleType>
   instanceRegistry: Map<string, ModuleInstance>
-  connections: Array<{ src: string; srcOutput: string; dst: string; dstInput: string }>
   graphOutputs: Array<{ module: string; output: string }>
   paramRegistry: Map<string, Param>
   triggerRegistry: Map<string, Trigger>
-  /** Tracks the last-set input expression as a JSON node for round-trip save. */
+  /** Canonical input wiring: key is `${module}:${input}`, value is the ExprNode for round-trip save. */
   inputExprNodes: Map<string, ExprNode>  // key: `${module}:${input}`
 }
 
@@ -116,7 +115,6 @@ export function makeSession(bufferLength = 512): SessionState {
     dac: null,
     typeRegistry: new Map(),
     instanceRegistry: new Map(),
-    connections: [],
     graphOutputs: [],
     paramRegistry: new Map(),
     triggerRegistry: new Map(),
@@ -478,6 +476,78 @@ export function loadModuleFromJSON(
 }
 
 // ─────────────────────────────────────────────────────────────
+// Expression pretty-printer
+// ─────────────────────────────────────────────────────────────
+
+/** Infix symbols for binary ops. Ops in BINARY_OPS but absent here fall back to `op(l, r)`. */
+const BINARY_INFIX: Record<string, string> = {
+  add: '+', sub: '-', mul: '*', div: '/', floor_div: '//', mod: '%', pow: '**', matmul: '@',
+  lt: '<', lte: '<=', gt: '>', gte: '>=', eq: '==', neq: '!=',
+  bit_and: '&', bit_or: '|', bit_xor: '^', lshift: '<<', rshift: '>>',
+}
+
+/** Prefix symbols for unary ops. Ops in UNARY_OPS but absent here use `op(x)` notation. */
+const UNARY_PREFIX: Record<string, string> = { neg: '-' }
+
+/**
+ * Render an ExprNode as a human-readable string.
+ * Refs appear as `Module.output`; math appears as infix expressions.
+ * instanceRegistry is used to resolve numeric output indices to port names.
+ */
+export function prettyExpr(
+  node: ExprNode,
+  instanceRegistry: Map<string, ModuleInstance>,
+): string {
+  if (typeof node === 'number') return String(node)
+  if (typeof node === 'boolean') return String(node)
+  if (Array.isArray(node)) return `[${node.map(n => prettyExpr(n, instanceRegistry)).join(', ')}]`
+
+  const n = node as { op: string; [k: string]: unknown }
+  const op = n.op
+  const args = (n.args as ExprNode[] | undefined) ?? []
+
+  if (op === 'ref') {
+    const mod = n.module as string
+    const out = n.output
+    const inst = instanceRegistry.get(mod)
+    const outName = inst && typeof out === 'number' ? (inst.outputNames[out] ?? String(out)) : String(out)
+    return `${mod}.${outName}`
+  }
+  if (op === 'input')     return `input(${n.name})`
+  if (op === 'param')     return `param(${n.name})`
+  if (op === 'trigger')   return `trigger(${n.name})`
+  if (op === 'sample_rate')  return 'sample_rate'
+  if (op === 'sample_index') return 'sample_index'
+  if (op === 'float' || op === 'int')  return String(n.value)
+  if (op === 'bool')  return String(n.value)
+
+  if (op in BINARY_OPS) {
+    const sym = BINARY_INFIX[op]
+    const l = prettyExpr(args[0], instanceRegistry)
+    const r = prettyExpr(args[1], instanceRegistry)
+    return sym ? `(${l} ${sym} ${r})` : `${op}(${l}, ${r})`
+  }
+  if (op in UNARY_OPS) {
+    const pfx = UNARY_PREFIX[op]
+    const x = prettyExpr(args[0], instanceRegistry)
+    return pfx ? `${pfx}${x}` : `${op}(${x})`
+  }
+
+  if (op === 'clamp')  return `clamp(${args.map(a => prettyExpr(a, instanceRegistry)).join(', ')})`
+  if (op === 'select') return `select(${args.map(a => prettyExpr(a, instanceRegistry)).join(', ')})`
+  if (op === 'index')  return `${prettyExpr(args[0], instanceRegistry)}[${prettyExpr(args[1], instanceRegistry)}]`
+  if (op === 'array_set') return `array_set(${args.map(a => prettyExpr(a, instanceRegistry)).join(', ')})`
+  if (op === 'array') return `[${(n.items as ExprNode[]).map(i => prettyExpr(i, instanceRegistry)).join(', ')}]`
+  if (op === 'matrix') return `matrix(${JSON.stringify(n.rows)})`
+  if (op === 'delay') return `delay(${prettyExpr(args[0], instanceRegistry)}, ${n.init ?? 0})`
+  if (op === 'delay_ref') return `delay_ref(${n.id})`
+  if (op === 'nested_out') return `${n.ref}.${n.output}`
+
+  // Should never reach here given the finite op set, but keep a safe fallback
+  throw new Error(`prettyExpr: unhandled op '${op}'`)
+}
+
+// ─────────────────────────────────────────────────────────────
 // Patch loader
 // ─────────────────────────────────────────────────────────────
 
@@ -490,7 +560,6 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
 
   session.dac = null
   session.instanceRegistry.clear()
-  session.connections.length = 0
   session.graphOutputs.length = 0
   session.paramRegistry.clear()
   session.triggerRegistry.clear()
@@ -521,7 +590,7 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
     session.instanceRegistry.set(inst.name, inst)
   }
 
-  // Apply connections
+  // Apply connections (legacy sugar — expand to inputExprNodes refs)
   for (const conn of json.connections ?? []) {
     const srcInst = session.instanceRegistry.get(conn.src)
     const dstInst = session.instanceRegistry.get(conn.dst)
@@ -531,10 +600,9 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
     const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
     const ok = session.graph.connect(conn.src, srcId, conn.dst, dstId)
     if (!ok) throw new Error(`Failed to connect ${conn.src}.${conn.src_output} → ${conn.dst}.${conn.dst_input}.`)
-    session.connections.push({
-      src: conn.src, srcOutput: String(conn.src_output),
-      dst: conn.dst, dstInput: String(conn.dst_input),
-    })
+    const srcOutName = srcInst.outputNames[srcId]
+    const dstInName  = dstInst.inputNames[dstId]
+    session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
   }
 
   // Set input expressions
@@ -617,7 +685,7 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
     session.instanceRegistry.set(inst.name, inst)
   }
 
-  // Apply connections
+  // Apply connections (legacy sugar — expand to inputExprNodes refs)
   for (const conn of json.connections ?? []) {
     const srcInst = session.instanceRegistry.get(conn.src)
     const dstInst = session.instanceRegistry.get(conn.dst)
@@ -627,10 +695,9 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
     const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
     const ok = session.graph.connect(conn.src, srcId, conn.dst, dstId)
     if (!ok) throw new Error(`Failed to connect ${conn.src}.${conn.src_output} → ${conn.dst}.${conn.dst_input}.`)
-    session.connections.push({
-      src: conn.src, srcOutput: String(conn.src_output),
-      dst: conn.dst, dstInput: String(conn.dst_input),
-    })
+    const srcOutName = srcInst.outputNames[srcId]
+    const dstInName  = dstInst.inputNames[dstId]
+    session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
   }
 
   // Set input expressions
@@ -691,11 +758,6 @@ export function savePatchToJSON(session: SessionState): PatchJSON {
     params.push({ name, type: 'trigger' })
   }
 
-  const connections: NonNullable<PatchJSON['connections']> = session.connections.map(c => ({
-    src: c.src, src_output: c.srcOutput,
-    dst: c.dst, dst_input: c.dstInput,
-  }))
-
   const outputs: NonNullable<PatchJSON['outputs']> = session.graphOutputs.map(o => ({
     module: o.module, output: o.output,
   }))
@@ -711,7 +773,6 @@ export function savePatchToJSON(session: SessionState): PatchJSON {
     modules,
   }
   if (params.length)      patch.params      = params
-  if (connections.length) patch.connections = connections
   if (outputs.length)     patch.outputs     = outputs
   if (inputExprs.length)  patch.input_exprs = inputExprs
 
