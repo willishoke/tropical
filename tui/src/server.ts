@@ -378,11 +378,17 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const ok = session.graph.connect(args.src_module as string, srcId, args.dst_module as string, dstId)
       if (!ok) throw new Error(`graph.connect returned false.`)
 
+      const srcOut = srcInst.outputNames[srcId]
+      const dstIn  = dstInst.inputNames[dstId]
       const conn = {
-        src: args.src_module as string, srcOutput: srcInst.outputNames[srcId],
-        dst: args.dst_module as string, dstInput:  dstInst.inputNames[dstId],
+        src: args.src_module as string, srcOutput: srcOut,
+        dst: args.dst_module as string, dstInput:  dstIn,
       }
       session.connections.push(conn)
+      session.inputExprNodes.set(
+        `${args.dst_module as string}:${dstIn}`,
+        { op: 'ref', module: args.src_module as string, output: srcOut },
+      )
       return { src: conn.src, src_output: conn.srcOutput, dst: conn.dst, dst_input: conn.dstInput }
     })
 
@@ -405,6 +411,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         c => !(c.src === args.src_module && c.srcOutput === srcOut &&
                c.dst === args.dst_module && c.dstInput  === dstIn),
       )
+      session.inputExprNodes.delete(`${args.dst_module as string}:${dstIn}`)
       return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn }
     })
 
