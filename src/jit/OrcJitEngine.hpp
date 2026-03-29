@@ -18,6 +18,8 @@
 
 namespace egress_jit
 {
+enum class JitScalarType : uint8_t { Float, Int, Bool };
+
 enum class NumericOp : uint8_t
 {
   Literal,
@@ -81,7 +83,11 @@ struct NumericInstr
   uint32_t src_c = 0;
   uint32_t slot_id = 0;
   double literal = 0.0;
+  int64_t int_literal = 0;
   uint64_t param_ptr = 0;
+  JitScalarType dst_type = JitScalarType::Float;
+  JitScalarType src_a_type = JitScalarType::Float;
+  JitScalarType src_b_type = JitScalarType::Float;
   std::vector<uint32_t> args;
 };
 
@@ -99,7 +105,11 @@ using NumericKernelFn = void (*)(
   double * temps,
   double sample_rate,
   uint64_t sample_index,
-  const uint64_t * param_ptrs);
+  const uint64_t * param_ptrs,
+  const int64_t * int_inputs,
+  int64_t * int_regs,
+  int64_t * const * int_arrays,
+  int64_t * int_temps);
 
 #ifdef EGRESS_LLVM_ORC_JIT
 class KernelObjectCache;

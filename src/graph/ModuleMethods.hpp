@@ -37,7 +37,11 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         numeric_temps_.data(),
         sample_rate_,
         sample_index_,
-        numeric_param_ptrs_.data());
+        numeric_param_ptrs_.data(),
+        numeric_int_inputs_.data(),
+        numeric_int_registers_.data(),
+        numeric_int_array_ptrs_.empty() ? nullptr : numeric_int_array_ptrs_.data(),
+        numeric_int_temps_.data());
       capture_numeric_scalar_outputs(program_, numeric_output_info_, numeric_temps_);
 
 #ifdef EGRESS_PROFILE
@@ -73,7 +77,9 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
           numeric_output_info_[output_id],
           program_.output_targets[output_id],
           numeric_temps_,
-          numeric_array_storage_);
+          numeric_array_storage_,
+          &numeric_int_temps_,
+          &numeric_int_array_storage_);
       }
 #ifdef EGRESS_PROFILE
       record_numeric_output_materialize_profile(
@@ -90,18 +96,38 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         const int32_t target = program_.register_targets[register_id];
         if (register_scalar_mask_[register_id])
         {
-          if (target >= 0)
+          const bool is_int = register_id < registers_.size() &&
+            (registers_[register_id].type == ValueType::Int ||
+             registers_[register_id].type == ValueType::Bool);
+          if (is_int)
           {
-            numeric_next_registers_[register_id] = numeric_temps_[static_cast<std::size_t>(target)];
+            if (target >= 0 && static_cast<std::size_t>(target) < numeric_int_temps_.size())
+            {
+              numeric_next_int_registers_[register_id] = numeric_int_temps_[static_cast<std::size_t>(target)];
+            }
+            else
+            {
+              numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+            }
+            numeric_next_registers_[register_id] = numeric_registers_[register_id];
           }
           else
           {
-            numeric_next_registers_[register_id] = numeric_registers_[register_id];
+            if (target >= 0)
+            {
+              numeric_next_registers_[register_id] = numeric_temps_[static_cast<std::size_t>(target)];
+            }
+            else
+            {
+              numeric_next_registers_[register_id] = numeric_registers_[register_id];
+            }
+            numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
           }
         }
         else
         {
           numeric_next_registers_[register_id] = numeric_registers_[register_id];
+          numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
         }
       }
 
@@ -112,8 +138,15 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       {
         numeric_next_registers_[register_id] = numeric_registers_[register_id];
       }
+      for (unsigned int register_id = static_cast<unsigned int>(program_.register_targets.size());
+           register_id < numeric_int_registers_.size();
+           ++register_id)
+      {
+        numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+      }
 
       numeric_registers_.swap(numeric_next_registers_);
+      numeric_int_registers_.swap(numeric_next_int_registers_);
 
       for (unsigned int register_id = 0; register_id < array_register_targets_.size(); ++register_id)
       {

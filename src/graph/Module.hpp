@@ -327,12 +327,17 @@ class Module
     egress_jit::NumericKernelFn jit_kernel_ = nullptr;
     std::vector<uint64_t> numeric_param_ptrs_;
     std::vector<double> numeric_inputs_;
+    std::vector<int64_t> numeric_int_inputs_;
     bool numeric_input_override_active_ = false;
     std::vector<double> numeric_input_scalar_override_;
     std::vector<double> numeric_temps_;
+    std::vector<int64_t> numeric_int_temps_;
     std::vector<std::vector<double>> numeric_array_storage_;
     std::vector<double *> numeric_array_ptrs_;
     std::vector<uint64_t> numeric_array_sizes_;
+    std::vector<std::vector<int64_t>> numeric_int_array_storage_;
+    std::vector<int64_t *> numeric_int_array_ptrs_;
+    std::vector<uint64_t> numeric_int_array_sizes_;
     std::vector<bool> register_scalar_mask_;
     std::vector<uint32_t> register_array_slot_;
     std::vector<int32_t> array_register_targets_;
@@ -375,6 +380,12 @@ class Module
       std::vector<uint32_t> register_array_slot;
       std::vector<int32_t> array_register_targets;
       std::vector<bool> array_register_can_swap;
+      std::vector<int64_t> int_inputs;
+      std::vector<int64_t> int_temps;
+      std::vector<std::vector<int64_t>> int_array_storage;
+      std::vector<int64_t *> int_array_ptrs;
+      std::vector<uint64_t> int_array_sizes;
+      std::vector<bool> register_int_mask;
   #ifdef EGRESS_PROFILE
       uint64_t instruction_count = 0;
    #endif
@@ -393,6 +404,8 @@ class Module
 
     std::vector<double> numeric_registers_;
     std::vector<double> numeric_next_registers_;
+    std::vector<int64_t> numeric_int_registers_;
+    std::vector<int64_t> numeric_next_int_registers_;
     std::vector<std::vector<double>> numeric_register_arrays_;
     bool value_registers_dirty_ = false;
     std::vector<bool> numeric_output_scalar_mask_;
@@ -450,12 +463,20 @@ class Module
 
     static void assign_scalar_numeric_value(Value & dst, double value);
 
+    static void assign_jit_scalar_value(
+      Value & dst,
+      egress_jit::JitScalarType type,
+      double float_val,
+      int64_t int_val);
+
     static void assign_numeric_value_to(
       Value & dst,
       const NumericOutputInfo & info,
       uint32_t scalar_register,
       const std::vector<double> & numeric_temps,
-      const std::vector<std::vector<double>> & numeric_array_storage);
+      const std::vector<std::vector<double>> & numeric_array_storage,
+      const std::vector<int64_t> * int_temps = nullptr,
+      const std::vector<std::vector<int64_t>> * int_array_storage = nullptr);
 
     static NumericValueRef make_numeric_value_ref(
       const NumericOutputInfo & info,
