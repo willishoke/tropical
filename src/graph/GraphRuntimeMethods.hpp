@@ -397,7 +397,9 @@ bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_
     fused->input_kernel.temps.data(),
     44100.0,
     0,
-    fused->input_kernel.param_ptrs.data());
+    fused->input_kernel.param_ptrs.data(),
+    nullptr, nullptr, nullptr,
+    fused->input_kernel.int_temps.empty() ? nullptr : fused->input_kernel.int_temps.data());
 
   for (const auto & binding : fused->input_kernel.input_bindings)
   {
@@ -512,7 +514,9 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
     fused->temps.empty() ? nullptr : fused->temps.data(),
     fused->primitive_body_sample_rate,
     sample_index,
-    fused->param_ptrs.data());
+    fused->param_ptrs.data(),
+    nullptr, nullptr, nullptr,
+    fused->int_temps.empty() ? nullptr : fused->int_temps.data());
 
   for (const auto & binding : fused->primitive_body_modules)
   {
@@ -805,7 +809,9 @@ bool Graph::run_fused_mix_kernel(RuntimeState & runtime, double & mixed) const
     fused->mix_kernel.temps.data(),
     44100.0,
     0,
-    fused->mix_kernel.param_ptrs.data());
+    fused->mix_kernel.param_ptrs.data(),
+    nullptr, nullptr, nullptr,
+    fused->mix_kernel.int_temps.empty() ? nullptr : fused->mix_kernel.int_temps.data());
 
   for (const auto & binding : fused->mix_kernel.mix_bindings)
   {
@@ -1371,6 +1377,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
           }
         }
         fused->temps.assign(fused->program.register_count, 0.0);
+        fused->int_temps.assign(fused->program.register_count, 0);
         fused->array_ptrs.resize(fused->array_storage.size(), nullptr);
         fused->array_sizes.resize(fused->array_storage.size(), 0);
         for (std::size_t array_id = 0; array_id < fused->array_storage.size(); ++array_id)
@@ -2118,6 +2125,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
       kernel_state.scalar_inputs.resize(fused->source_outputs.size(), 0.0);
     }
     kernel_state.temps.assign(kernel_state.program.register_count, 0.0);
+    kernel_state.int_temps.assign(kernel_state.program.register_count, 0);
     kernel_state.array_ptrs.resize(kernel_state.array_storage.size(), nullptr);
     kernel_state.array_sizes.resize(kernel_state.array_storage.size(), 0);
     for (std::size_t array_id = 0; array_id < kernel_state.array_storage.size(); ++array_id)

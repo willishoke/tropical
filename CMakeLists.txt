@@ -80,6 +80,19 @@ target_link_libraries(egress_core PRIVATE rtaudio)
 target_include_directories(egress_core PRIVATE src)
 set_target_properties(egress_core PROPERTIES OUTPUT_NAME "egress")
 
+# ---- Tests -------------------------------------------------------------------
+
+option(EGRESS_BUILD_TESTS "Build C++ process tests (no audio device required)" ON)
+
+if(EGRESS_BUILD_TESTS)
+    enable_testing()
+    add_executable(test_module_process tests/test_module_process.cpp)
+    target_include_directories(test_module_process PRIVATE src)
+    target_compile_features(test_module_process PRIVATE cxx_std_17)
+    target_link_libraries(test_module_process PRIVATE egress_core)
+    add_test(NAME module_process COMMAND test_module_process)
+endif()
+
 # Install the public C header
 install(FILES src/c_api/egress_c.h DESTINATION include)
 if(EGRESS_BUILD_PYTHON)
