@@ -102,11 +102,10 @@ export interface SessionState {
   dac: DAC | null
   typeRegistry: Map<string, ModuleType>
   instanceRegistry: Map<string, ModuleInstance>
-  connections: Array<{ src: string; srcOutput: string; dst: string; dstInput: string }>
   graphOutputs: Array<{ module: string; output: string }>
   paramRegistry: Map<string, Param>
   triggerRegistry: Map<string, Trigger>
-  /** Tracks the last-set input expression as a JSON node for round-trip save. */
+  /** Canonical input wiring: key is `${module}:${input}`, value is the ExprNode for round-trip save. */
   inputExprNodes: Map<string, ExprNode>  // key: `${module}:${input}`
 }
 
@@ -116,7 +115,6 @@ export function makeSession(bufferLength = 512): SessionState {
     dac: null,
     typeRegistry: new Map(),
     instanceRegistry: new Map(),
-    connections: [],
     graphOutputs: [],
     paramRegistry: new Map(),
     triggerRegistry: new Map(),
@@ -562,7 +560,6 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
 
   session.dac = null
   session.instanceRegistry.clear()
-  session.connections.length = 0
   session.graphOutputs.length = 0
   session.paramRegistry.clear()
   session.triggerRegistry.clear()
@@ -593,7 +590,7 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
     session.instanceRegistry.set(inst.name, inst)
   }
 
-  // Apply connections
+  // Apply connections (legacy sugar — expand to inputExprNodes refs)
   for (const conn of json.connections ?? []) {
     const srcInst = session.instanceRegistry.get(conn.src)
     const dstInst = session.instanceRegistry.get(conn.dst)
@@ -603,10 +600,9 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
     const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
     const ok = session.graph.connect(conn.src, srcId, conn.dst, dstId)
     if (!ok) throw new Error(`Failed to connect ${conn.src}.${conn.src_output} → ${conn.dst}.${conn.dst_input}.`)
-    session.connections.push({
-      src: conn.src, srcOutput: String(conn.src_output),
-      dst: conn.dst, dstInput: String(conn.dst_input),
-    })
+    const srcOutName = srcInst.outputNames[srcId]
+    const dstInName  = dstInst.inputNames[dstId]
+    session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
   }
 
   // Set input expressions
@@ -689,7 +685,7 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
     session.instanceRegistry.set(inst.name, inst)
   }
 
-  // Apply connections
+  // Apply connections (legacy sugar — expand to inputExprNodes refs)
   for (const conn of json.connections ?? []) {
     const srcInst = session.instanceRegistry.get(conn.src)
     const dstInst = session.instanceRegistry.get(conn.dst)
@@ -699,10 +695,9 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
     const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
     const ok = session.graph.connect(conn.src, srcId, conn.dst, dstId)
     if (!ok) throw new Error(`Failed to connect ${conn.src}.${conn.src_output} → ${conn.dst}.${conn.dst_input}.`)
-    session.connections.push({
-      src: conn.src, srcOutput: String(conn.src_output),
-      dst: conn.dst, dstInput: String(conn.dst_input),
-    })
+    const srcOutName = srcInst.outputNames[srcId]
+    const dstInName  = dstInst.inputNames[dstId]
+    session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
   }
 
   // Set input expressions
@@ -763,11 +758,6 @@ export function savePatchToJSON(session: SessionState): PatchJSON {
     params.push({ name, type: 'trigger' })
   }
 
-  const connections: NonNullable<PatchJSON['connections']> = session.connections.map(c => ({
-    src: c.src, src_output: c.srcOutput,
-    dst: c.dst, dst_input: c.dstInput,
-  }))
-
   const outputs: NonNullable<PatchJSON['outputs']> = session.graphOutputs.map(o => ({
     module: o.module, output: o.output,
   }))
@@ -783,7 +773,6 @@ export function savePatchToJSON(session: SessionState): PatchJSON {
     modules,
   }
   if (params.length)      patch.params      = params
-  if (connections.length) patch.connections = connections
   if (outputs.length)     patch.outputs     = outputs
   if (inputExprs.length)  patch.input_exprs = inputExprs
 

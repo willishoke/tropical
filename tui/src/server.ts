@@ -19,7 +19,7 @@ import {
 
 import {
   makeSession, loadModuleFromJSON, loadPatchFromJSON, mergePatchFromJSON, savePatchToJSON,
-  buildExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
+  buildExpr, prettyExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
 } from './patch.js'
 import { loadBuiltins }        from './module_library.js'
 import { DAC }                 from './audio.js'
@@ -146,9 +146,14 @@ const TOOLS = [
     },
   },
   {
-    name: 'list_connections',
-    description: 'List all tracked connections in the current patch.',
-    inputSchema: { type: 'object', properties: {} },
+    name: 'list_inputs',
+    description: 'List all wired inputs in the current patch. Shows the expression assigned to each input — refs appear as Module.output, inline math is shown as an expression string.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        module: { type: 'string', description: 'If provided, filter to inputs of this module instance.' },
+      },
+    },
   },
   {
     name: 'set_module_input',
@@ -320,9 +325,9 @@ function handleTool(name: string, args: Record<string, unknown>) {
         throw new Error(`No instance named '${instanceName}'.`)
       session.graph.removeModule(instanceName)
       session.instanceRegistry.delete(instanceName)
-      session.connections = session.connections.filter(
-        c => c.src !== instanceName && c.dst !== instanceName,
-      )
+      for (const key of [...session.inputExprNodes.keys()]) {
+        if (key.startsWith(`${instanceName}:`)) session.inputExprNodes.delete(key)
+      }
       session.graphOutputs = session.graphOutputs.filter(o => o.module !== instanceName)
       return { removed: instanceName }
     })
@@ -353,15 +358,14 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const instanceName = args.instance_name as string
       const inst = session.instanceRegistry.get(instanceName)
       if (!inst) throw new Error(`No instance named '${instanceName}'.`)
-      const conns = session.connections.filter(
-        c => c.src === instanceName || c.dst === instanceName,
-      )
       return {
         name: instanceName,
         type_name: inst.typeName,
-        inputs:  inst.inputNames.map((n, i) => ({ name: n, index: i })),
+        inputs:  inst.inputNames.map((n, i) => ({
+          name: n, index: i,
+          expr: session.inputExprNodes.get(`${instanceName}:${n}`) ?? null,
+        })),
         outputs: inst.outputNames.map((n, i) => ({ name: n, index: i })),
-        connections: conns,
       }
     })
 
@@ -380,16 +384,11 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
       const srcOut = srcInst.outputNames[srcId]
       const dstIn  = dstInst.inputNames[dstId]
-      const conn = {
-        src: args.src_module as string, srcOutput: srcOut,
-        dst: args.dst_module as string, dstInput:  dstIn,
-      }
-      session.connections.push(conn)
       session.inputExprNodes.set(
         `${args.dst_module as string}:${dstIn}`,
         { op: 'ref', module: args.src_module as string, output: srcOut },
       )
-      return { src: conn.src, src_output: conn.srcOutput, dst: conn.dst, dst_input: conn.dstInput }
+      return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn }
     })
 
     // ── disconnect_modules ─────────────────────────────────────────────────
@@ -407,21 +406,23 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
       const srcOut = srcInst.outputNames[srcId]
       const dstIn  = dstInst.inputNames[dstId]
-      session.connections = session.connections.filter(
-        c => !(c.src === args.src_module && c.srcOutput === srcOut &&
-               c.dst === args.dst_module && c.dstInput  === dstIn),
-      )
       session.inputExprNodes.delete(`${args.dst_module as string}:${dstIn}`)
       return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn }
     })
 
-    // ── list_connections ───────────────────────────────────────────────────
-    case 'list_connections': return wrap(() =>
-      session.connections.map(c => ({
-        src: c.src, src_output: c.srcOutput,
-        dst: c.dst, dst_input:  c.dstInput,
-      })),
-    )
+    // ── list_inputs ────────────────────────────────────────────────────────
+    case 'list_inputs': return wrap(() => {
+      const filterModule = args.module as string | undefined
+      const results: Array<{ module: string; input: string; expr: string }> = []
+      for (const [key, node] of session.inputExprNodes) {
+        const colonIdx = key.indexOf(':')
+        const mod   = key.slice(0, colonIdx)
+        const input = key.slice(colonIdx + 1)
+        if (filterModule && mod !== filterModule) continue
+        results.push({ module: mod, input, expr: prettyExpr(node, session.instanceRegistry) })
+      }
+      return results
+    })
 
     // ── set_module_input ───────────────────────────────────────────────────
     case 'set_module_input': return wrap(() => {
@@ -532,7 +533,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       mergePatchFromJSON(patch, session)
       return {
         modules:     [...session.instanceRegistry.keys()],
-        connections: session.connections.length,
+        input_exprs: session.inputExprNodes.size,
         outputs:     session.graphOutputs.length,
         params:      [...session.paramRegistry.keys()],
         triggers:    [...session.triggerRegistry.keys()],
@@ -554,7 +555,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       loadPatchFromJSON(patch, session)
       return {
         modules:     [...session.instanceRegistry.keys()],
-        connections: session.connections.length,
+        input_exprs: session.inputExprNodes.size,
         outputs:     session.graphOutputs.length,
         params:      [...session.paramRegistry.keys()],
         triggers:    [...session.triggerRegistry.keys()],
