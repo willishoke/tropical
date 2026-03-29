@@ -257,6 +257,16 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} },
   },
   {
+    name: 'get_profile_stats',
+    description: 'Return graph profiling statistics: per-callback timing, JIT fusion usage, and per-module call timing. Module-level timing and fused-sync detail are only populated when built with -DEGRESS_PROFILE=ON (make profile); JIT fusion flags are always available.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'reset_profile_stats',
+    description: 'Reset all accumulated graph profile statistics to zero.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
     name: 'set_param',
     description: 'Set the value of a named Param (thread-safe, smoothed).',
     inputSchema: {
@@ -585,6 +595,15 @@ function handleTool(name: string, args: Record<string, unknown>) {
         is_reconnecting: session.dac.isReconnecting,
         stats:           session.dac.callbackStats(),
       }
+    })
+
+    // ── get_profile_stats ──────────────────────────────────────────────────
+    case 'get_profile_stats': return wrap(() => session.graph.profileStats())
+
+    // ── reset_profile_stats ────────────────────────────────────────────────
+    case 'reset_profile_stats': return wrap(() => {
+      session.graph.resetProfileStats()
+      return { reset: true }
     })
 
     // ── set_param ──────────────────────────────────────────────────────────

@@ -128,6 +128,17 @@ export class Graph {
     b.egress_graph_set_fusion_enabled(this._h, v)
   }
 
+  // ---- Profiling ----
+
+  profileStats(): unknown {
+    const json = b.egress_graph_get_profile_stats_json(this._h) as string
+    return JSON.parse(json)
+  }
+
+  resetProfileStats(): void {
+    b.egress_graph_reset_profile_stats(this._h)
+  }
+
   // ---- Name generation (used by module builder) ----
 
   nextName(prefix: string): string {

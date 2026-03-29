@@ -171,7 +171,9 @@ export const egress_graph_set_worker_count  = lib.func('egress_graph_set_worker_
 export const egress_graph_get_worker_count  = lib.func('egress_graph_get_worker_count',  'uint32', ['void *'])
 export const egress_graph_set_fusion_enabled = lib.func('egress_graph_set_fusion_enabled', 'void', ['void *', 'bool'])
 export const egress_graph_get_fusion_enabled = lib.func('egress_graph_get_fusion_enabled', 'bool', ['void *'])
-export const egress_graph_get_buffer_length  = lib.func('egress_graph_get_buffer_length',  'uint32', ['void *'])
+export const egress_graph_get_buffer_length          = lib.func('egress_graph_get_buffer_length',          'uint32', ['void *'])
+export const egress_graph_get_profile_stats_json     = lib.func('egress_graph_get_profile_stats_json',     'string', ['void *'])
+export const egress_graph_reset_profile_stats        = lib.func('egress_graph_reset_profile_stats',        'void',   ['void *'])
 
 // ---------- DAC API ----------
 

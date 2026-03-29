@@ -867,6 +867,80 @@ unsigned int egress_graph_get_buffer_length(egress_graph_t g)
   return static_cast<Graph*>(g)->getBufferLength();
 }
 
+// ---------- Profile stats ----------
+
+static thread_local std::string tls_profile_stats_json;
+
+static std::string profile_escape_json(const std::string & s)
+{
+  std::string out;
+  out.reserve(s.size() + 2);
+  out += '"';
+  for (unsigned char c : s)
+  {
+    if      (c == '"')  out += "\\\"";
+    else if (c == '\\') out += "\\\\";
+    else if (c == '\n') out += "\\n";
+    else if (c == '\r') out += "\\r";
+    else if (c == '\t') out += "\\t";
+    else                out += static_cast<char>(c);
+  }
+  out += '"';
+  return out;
+}
+
+const char* egress_graph_get_profile_stats_json(egress_graph_t g)
+{
+  const auto s = static_cast<Graph*>(g)->profile_stats();
+  std::string j;
+  j.reserve(512);
+  j += "{\"enabled\":";         j += s.enabled ? "true" : "false";
+  j += ",\"callback_count\":";  j += std::to_string(s.callback_count);
+  j += ",\"avg_callback_ms\":"; j += std::to_string(s.avg_callback_ms);
+  j += ",\"max_callback_ms\":"; j += std::to_string(s.max_callback_ms);
+  j += ",\"primitive_body_available\":";          j += s.primitive_body_available ? "true" : "false";
+  j += ",\"primitive_body_covers_all_modules\":"; j += s.primitive_body_covers_all_modules ? "true" : "false";
+  j += ",\"input_kernel_available\":";            j += s.input_kernel_available ? "true" : "false";
+  j += ",\"fused_input_use_count\":";  j += std::to_string(s.fused_input_use_count);
+  j += ",\"fused_body_use_count\":";   j += std::to_string(s.fused_body_use_count);
+  j += ",\"fusion_candidate_reason\":"; j += profile_escape_json(s.fusion_candidate_reason);
+  j += ",\"primitive_body_status\":";   j += profile_escape_json(s.primitive_body_status);
+  j += ",\"input_kernel_status\":";     j += profile_escape_json(s.input_kernel_status);
+  j += ",\"modules\":[";
+  for (size_t i = 0; i < s.modules.size(); ++i)
+  {
+    const auto & m = s.modules[i];
+    if (i > 0) j += ",";
+    j += "{\"name\":";        j += profile_escape_json(m.module_name);
+    j += ",\"call_count\":";  j += std::to_string(m.call_count);
+    j += ",\"avg_call_ms\":"; j += std::to_string(m.avg_call_ms);
+    j += ",\"max_call_ms\":"; j += std::to_string(m.max_call_ms);
+    j += "}";
+  }
+  j += "]";
+#ifdef EGRESS_PROFILE
+  auto fused_sync_json = [](const Graph::ProfileStats::FusedSyncStats & fs) {
+    std::string r;
+    r += "{\"call_count\":";       r += std::to_string(fs.call_count);
+    r += ",\"total_ms\":";         r += std::to_string(fs.total_ms);
+    r += ",\"max_ms\":";           r += std::to_string(fs.max_ms);
+    r += ",\"output_copy_count\":";r += std::to_string(fs.output_copy_count);
+    r += "}";
+    return r;
+  };
+  j += ",\"fused_current_output_sync\":"; j += fused_sync_json(s.fused_current_output_sync);
+  j += ",\"fused_prev_output_sync\":";    j += fused_sync_json(s.fused_prev_output_sync);
+#endif
+  j += "}";
+  tls_profile_stats_json = std::move(j);
+  return tls_profile_stats_json.c_str();
+}
+
+void egress_graph_reset_profile_stats(egress_graph_t g)
+{
+  static_cast<Graph*>(g)->reset_profile_stats();
+}
+
 // ---------- Device enumeration ----------
 
 unsigned int egress_audio_device_count(void)
