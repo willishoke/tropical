@@ -282,7 +282,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       if (!used_jit_outputs)
 #endif
       {
-        throw std::runtime_error("JIT unavailable for composite output program: " + jit_status_);
+        throw std::runtime_error("JIT unavailable for composite output program");
       }
       composite_outputs_materialized = true;
       continue;
@@ -322,7 +322,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     if (!used_jit_inputs)
 #endif
     {
-      throw std::runtime_error("JIT unavailable for nested module input program: " + jit_status_);
+      throw std::runtime_error("JIT unavailable for nested module input program");
     }
     nested.module->process();
   }
@@ -334,7 +334,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
 
   if (!use_composite_programs)
   {
-    throw std::runtime_error("JIT kernel unavailable at process time: " + jit_status_);
+    throw std::runtime_error("JIT kernel unavailable at process time");
   }
   else if (!composite_outputs_materialized)
   {
@@ -390,7 +390,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       else
 #endif
       {
-        throw std::runtime_error("JIT unavailable for delay update program: " + jit_status_);
+        throw std::runtime_error("JIT unavailable for delay update program");
       }
     }
   }

@@ -13,7 +13,7 @@ import * as b from './bindings.js'
 import { Graph } from './graph.js'
 import { makeSession, loadPatchFromJSON } from './patch.js'
 import { loadBuiltins } from './module_library.js'
-import type { PatchJSON } from './types.js'
+import type { PatchJSON } from './patch.js'
 
 const patchArg = process.argv[2]
 const nFrames  = parseInt(process.argv[3] ?? '128', 10)
