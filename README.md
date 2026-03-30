@@ -4,6 +4,26 @@ A C++ library for algorithmic and generative audio synthesis. You build a graph 
 
 Modules are defined using built-in or user-defined operations; connections are expressed using a symbolic expression syntax. An LLVM ORC JIT backend compiles module definitions to native code for realtime execution. Currently only tested on macOS.
 
+## Getting started
+
+Build the core and start the MCP server:
+
+```bash
+make build
+make mcp-ts
+```
+
+Then connect any MCP-compatible client — Claude or otherwise — and load a patch:
+
+> Load `patches/31tet_otonal_seq.json` and start audio.
+
+The MCP server exposes `load_patch` and `start_audio` tools; the client will call them automatically. Within a few seconds you should hear five microtonal sine voices cycling slowly through a 31-TET otonal sequence, passing through a 16-stage phaser and a long reverb tail.
+
+Two patches are included to start:
+
+- **`31tet_otonal_seq.json`** — Five VCOs tuned to the overtone series in 31-tone equal temperament, with a slow global transposition sequence and a sub-bass voice. Additive drone synthesis; long reverb. Good for getting a feel for expression-based routing and multi-voice patches.
+- **`compressor_harmonics.json`** — Ten VCOs at the odd harmonics of 40 Hz (the spectral content of a square wave), each gated by its own compressor/envelope pair at a different clock rate. Spectral animation through dynamics rather than amplitude — each partial opens and closes independently.
+
 ## Build
 
 ```bash
