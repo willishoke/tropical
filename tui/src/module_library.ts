@@ -4,10 +4,10 @@
 
 import {
   SignalExpr, ExprCoercible,
-  add, sub, mul, div, mod, pow_, neg,
+  add, sub, mul, div, mod, pow_, neg, floorDiv,
   lt, lte, gt, gte,
   abs_, sin, log,
-  clamp, arrayPack, arraySet, matmul,
+  clamp, select, arrayPack, arraySet, matmul,
   sampleRate, sampleIndex,
 } from './expr.js'
 import {
@@ -587,13 +587,52 @@ export function vca(name = 'VCA'): ModuleType {
   )
 }
 
+// ─── BitCrusher ──────────────────────────────────────────────────────────────
+
+export function bitCrusher(name = 'BitCrusher'): ModuleType {
+  return defineModule(
+    name,
+    ['audio', 'bit_depth', 'sample_rate_hz'],
+    ['output'],
+    { hold_sample: 0.0, hold_counter: 0.0 },
+    (inp, reg) => {
+      const sr = sampleRate()
+
+      // Clamp parameters: bit_depth ∈ [1, 24], sample_rate_hz ∈ [1, sr]
+      const bd       = clamp(inp.get('bit_depth'), 1.0, 24.0)
+      const targetSr = clamp(inp.get('sample_rate_hz'), 1.0, sr)
+
+      // Quantisation levels for bit-depth reduction
+      const levels    = pow_(2.0, sub(bd, 1.0))
+      const audio     = inp.get('audio')
+      const quantized = div(floorDiv(add(mul(audio, levels), 0.5), 1.0), levels)
+
+      // Sample-and-hold: capture a new quantised sample every N input samples
+      const samplesPerHold = clamp(floorDiv(sr, targetSr), 1.0, 44100.0)
+      const counter        = reg.get('hold_counter')
+      const incremented    = add(counter, 1.0)
+      const shouldCapture  = gte(incremented, samplesPerHold)
+
+      const nextHold    = select(shouldCapture, quantized, reg.get('hold_sample'))
+      const nextCounter = select(shouldCapture, 0.0, incremented)
+
+      return {
+        outputs:  { output: nextHold },
+        nextRegs: { hold_sample: nextHold, hold_counter: nextCounter },
+      }
+    },
+    44100.0,
+    { audio: 0.0, bit_depth: 24.0, sample_rate_hz: 44100.0 },
+  )
+}
+
 // ─── Builtin registry ─────────────────────────────────────────────────────────
 
 /** Canonical type names shipped with the library. */
 export const BUILTIN_NAMES = [
   'VCO', 'Phaser', 'Phaser16', 'Clock',
   'Reverb', 'ADEnvelope', 'Compressor', 'BassDrum', 'TopoWaveguide',
-  'VCA',
+  'VCA', 'BitCrusher',
   'Delay8', 'Delay16', 'Delay512', 'Delay4410', 'Delay44100',
 ] as const
 
@@ -609,6 +648,7 @@ export function loadBuiltins(typeRegistry: Map<string, ModuleType>): void {
   typeRegistry.set('BassDrum',      bassDrum())
   typeRegistry.set('TopoWaveguide', topoWaveguide())
   typeRegistry.set('VCA',           vca())
+  typeRegistry.set('BitCrusher',    bitCrusher())
   // Common delay lengths
   typeRegistry.set('Delay8',     delayLine(8,     'Delay8'))
   typeRegistry.set('Delay16',    delayLine(16,    'Delay16'))
