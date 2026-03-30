@@ -619,6 +619,633 @@ static void test_multi_module_fusion()
   egress_graph_free(g);
 }
 
+// Verify the Clock output is a proper square wave by checking sample-by-sample values.
+// At 2Hz with sr=44100, the half-period is 11025 samples.
+// Output should be 1.0 for samples 0..11024, then 0.0 for 11025..22049, etc.
+static void test_clock_output_waveform()
+{
+  const unsigned int BUF_LEN = 1;
+  egress_graph_t g = egress_graph_new(BUF_LEN);
+  ASSERT(g != nullptr);
+
+  egress_module_spec_t spec = build_clock_spec();
+  ASSERT_OK(egress_graph_add_module(g, "Clock1", spec));
+  egress_module_spec_free(spec);
+
+  // freq = 2.0 Hz
+  egress_expr_t freq_expr = egress_expr_literal_float(2.0);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
+  egress_expr_free(freq_expr);
+
+  egress_value_t r_item = egress_value_float(1.0);
+  egress_value_t r_arr = egress_value_array(&r_item, 1);
+  egress_expr_t r_expr = egress_expr_literal_value(r_arr);
+  egress_value_free(r_item); egress_value_free(r_arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, r_expr));
+  egress_expr_free(r_expr);
+
+  size_t tap_id = egress_graph_add_output_tap(g, "Clock1", 0);
+  ASSERT(tap_id != (size_t)-1);
+
+  egress_graph_prime_jit(g);
+
+  // Process enough samples to see one full cycle + transition
+  // At 2Hz, sr=44100: half-period = 11025 samples
+  int first_zero = -1;
+  int first_one_again = -1;
+  double prev = -1.0;
+  for (int f = 0; f < 25000; ++f)
+  {
+    egress_graph_process(g);
+    size_t len = 0;
+    const double * buf = egress_graph_tap_buffer(g, tap_id, &len);
+    ASSERT(len == 1);
+    double val = buf[0];
+
+    // Clock output should be 0.0 or 1.0
+    ASSERT(val == 0.0 || val == 1.0);
+
+    if (prev == 1.0 && val == 0.0 && first_zero < 0)
+      first_zero = f;
+    if (first_zero >= 0 && prev == 0.0 && val == 1.0 && first_one_again < 0)
+      first_one_again = f;
+    prev = val;
+  }
+
+  // Verify transitions happened at roughly the right times
+  ASSERT(first_zero > 0);
+  ASSERT(first_one_again > first_zero);
+  // Half-period should be ~11025 samples
+  int high_duration = first_zero;          // samples 0..first_zero-1 were high
+  int low_duration = first_one_again - first_zero;
+  ASSERT(high_duration > 10000 && high_duration < 12000);
+  ASSERT(low_duration > 10000 && low_duration < 12000);
+
+  printf("[clock: high=%d low=%d] ", high_duration, low_duration);
+  egress_graph_free(g);
+}
+
+// Edge detection with manual trigger pattern: feed 0,0,1,1,1,0,0,1,1,0
+// and verify index advances only on 0->1 transitions.
+static void test_intseq_edge_detect_manual_pattern()
+{
+  const unsigned int BUF_LEN = 1;
+  egress_graph_t g = egress_graph_new(BUF_LEN);
+  ASSERT(g != nullptr);
+
+  egress_module_spec_t spec = build_intseq_edge_detect_spec();
+  ASSERT_OK(egress_graph_add_module(g, "Seq1", spec));
+  egress_module_spec_free(spec);
+
+  // is_forward=true, step=1, seq_len=4
+  egress_expr_t fwd = egress_expr_literal_bool(true);
+  egress_expr_t stp = egress_expr_literal_int(1);
+  egress_expr_t slen = egress_expr_literal_int(4);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
+  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
+
+  // sequence = [100, 200, 300, 400]
+  egress_value_t items[4] = {
+    egress_value_float(100.0), egress_value_float(200.0),
+    egress_value_float(300.0), egress_value_float(400.0),
+  };
+  egress_value_t arr = egress_value_array(items, 4);
+  egress_expr_t seq = egress_expr_literal_value(arr);
+  for (int i = 0; i < 4; i++) egress_value_free(items[i]);
+  egress_value_free(arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
+  egress_expr_free(seq);
+
+  size_t tap_id = egress_graph_add_output_tap(g, "Seq1", 1);
+  ASSERT(tap_id != (size_t)-1);
+
+  egress_graph_prime_jit(g);
+
+  // Pattern: trigger values per frame
+  //   0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0
+  // Expected index output (register updates apply next frame):
+  //   Frame 0: trig=0, idx output=0 (initial)
+  //   Frame 1: trig=0, idx output=0
+  //   Frame 2: trig=1, rising edge (prev=0), idx output=0, next_idx=1
+  //   Frame 3: trig=1, held (prev=1), idx output=1, next_idx=1
+  //   Frame 4: trig=1, held (prev=1), idx output=1, next_idx=1
+  //   Frame 5: trig=0, idx output=1
+  //   Frame 6: trig=0, idx output=1
+  //   Frame 7: trig=1, rising edge (prev=0), idx output=1, next_idx=2
+  //   Frame 8: trig=1, held, idx output=2
+  //   Frame 9: trig=0, idx output=2
+  //   Frame 10: trig=1, rising edge, idx output=2, next_idx=3
+  //   Frame 11: trig=0, idx output=3
+  double triggers[] = {0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0};
+  double expected[] =  {0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 3};
+  const int N = 12;
+
+  for (int f = 0; f < N; ++f)
+  {
+    // Set trigger for this frame
+    egress_expr_t trig = egress_expr_literal_float(triggers[f]);
+    ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig));
+    egress_expr_free(trig);
+
+    egress_graph_process(g);
+    size_t len = 0;
+    const double * buf = egress_graph_tap_buffer(g, tap_id, &len);
+    ASSERT(len == 1);
+
+    if (buf[0] != expected[f])
+    {
+      printf("FAIL\n    frame %d: trigger=%.0f, expected index=%.0f, got=%.0f\n",
+             f, triggers[f], expected[f], buf[0]);
+      ++g_fail;
+      egress_graph_free(g);
+      return;
+    }
+  }
+
+  egress_graph_free(g);
+}
+
+// End-to-end: Clock (2Hz) drives IntSeq with edge detection.
+// Over enough samples to see several clock cycles, verify the index
+// advances exactly once per rising edge.
+static void test_clock_drives_edge_detect_intseq()
+{
+  const unsigned int BUF_LEN = 1;
+  egress_graph_t g = egress_graph_new(BUF_LEN);
+  ASSERT(g != nullptr);
+
+  // Clock
+  egress_module_spec_t clock_spec = build_clock_spec();
+  ASSERT_OK(egress_graph_add_module(g, "Clock1", clock_spec));
+  egress_module_spec_free(clock_spec);
+
+  egress_expr_t freq_expr = egress_expr_literal_float(2.0);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
+  egress_expr_free(freq_expr);
+
+  egress_value_t r_item = egress_value_float(1.0);
+  egress_value_t r_arr = egress_value_array(&r_item, 1);
+  egress_expr_t r_expr = egress_expr_literal_value(r_arr);
+  egress_value_free(r_item); egress_value_free(r_arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, r_expr));
+  egress_expr_free(r_expr);
+
+  // IntSeq with edge detection
+  egress_module_spec_t seq_spec = build_intseq_edge_detect_spec();
+  ASSERT_OK(egress_graph_add_module(g, "Seq1", seq_spec));
+  egress_module_spec_free(seq_spec);
+
+  // Wire Clock1.output -> Seq1.trigger
+  ASSERT_OK(egress_graph_connect(g, "Clock1", 0, "Seq1", 0));
+
+  egress_expr_t fwd = egress_expr_literal_bool(true);
+  egress_expr_t stp = egress_expr_literal_int(1);
+  egress_expr_t slen = egress_expr_literal_int(8);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
+  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
+
+  egress_value_t items[8];
+  double freqs[8] = {100, 200, 300, 400, 500, 600, 700, 800};
+  for (int i = 0; i < 8; i++) items[i] = egress_value_float(freqs[i]);
+  egress_value_t arr = egress_value_array(items, 8);
+  egress_expr_t seq = egress_expr_literal_value(arr);
+  for (int i = 0; i < 8; i++) egress_value_free(items[i]);
+  egress_value_free(arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
+  egress_expr_free(seq);
+
+  // Tap both clock output and seq index
+  size_t clock_tap = egress_graph_add_output_tap(g, "Clock1", 0);
+  size_t index_tap = egress_graph_add_output_tap(g, "Seq1", 1);
+  ASSERT(clock_tap != (size_t)-1);
+  ASSERT(index_tap != (size_t)-1);
+
+  egress_graph_prime_jit(g);
+
+  // Run for 3 full clock cycles (~66150 samples at 2Hz, sr=44100)
+  // Count rising edges and index changes
+  double prev_clock = 0.0;
+  double prev_index = 0.0;
+  int rising_edges = 0;
+  int index_changes = 0;
+  int frames = 70000;
+
+  for (int f = 0; f < frames; ++f)
+  {
+    egress_graph_process(g);
+
+    size_t len = 0;
+    const double * clk_buf = egress_graph_tap_buffer(g, clock_tap, &len);
+    ASSERT(len == 1);
+    double clock_val = clk_buf[0];
+
+    const double * idx_buf = egress_graph_tap_buffer(g, index_tap, &len);
+    ASSERT(len == 1);
+    double index_val = idx_buf[0];
+
+    if (prev_clock == 0.0 && clock_val == 1.0)
+      ++rising_edges;
+    if (index_val != prev_index)
+      ++index_changes;
+
+    prev_clock = clock_val;
+    prev_index = index_val;
+  }
+
+  printf("[edges=%d idx_changes=%d] ", rising_edges, index_changes);
+
+  // Should have ~3 rising edges and ~3 index changes (one per edge)
+  ASSERT(rising_edges >= 2 && rising_edges <= 4);
+  ASSERT(index_changes == rising_edges);
+
+  egress_graph_free(g);
+}
+
+// Same as test_clock_drives_edge_detect_intseq but with BUF_LEN=256
+// to exercise the fused kernel path and verify correctness with buffered processing.
+static void test_clock_drives_edge_detect_intseq_buffered()
+{
+  const unsigned int BUF_LEN = 256;
+  egress_graph_t g = egress_graph_new(BUF_LEN);
+  ASSERT(g != nullptr);
+
+  // Clock
+  egress_module_spec_t clock_spec = build_clock_spec();
+  ASSERT_OK(egress_graph_add_module(g, "Clock1", clock_spec));
+  egress_module_spec_free(clock_spec);
+
+  egress_expr_t freq_expr = egress_expr_literal_float(2.0);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
+  egress_expr_free(freq_expr);
+
+  egress_value_t r_item = egress_value_float(1.0);
+  egress_value_t r_arr = egress_value_array(&r_item, 1);
+  egress_expr_t r_expr = egress_expr_literal_value(r_arr);
+  egress_value_free(r_item); egress_value_free(r_arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, r_expr));
+  egress_expr_free(r_expr);
+
+  // IntSeq with edge detection
+  egress_module_spec_t seq_spec = build_intseq_edge_detect_spec();
+  ASSERT_OK(egress_graph_add_module(g, "Seq1", seq_spec));
+  egress_module_spec_free(seq_spec);
+
+  ASSERT_OK(egress_graph_connect(g, "Clock1", 0, "Seq1", 0));
+
+  egress_expr_t fwd = egress_expr_literal_bool(true);
+  egress_expr_t stp = egress_expr_literal_int(1);
+  egress_expr_t slen = egress_expr_literal_int(8);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
+  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
+
+  egress_value_t items[8];
+  double freqs[8] = {100, 200, 300, 400, 500, 600, 700, 800};
+  for (int i = 0; i < 8; i++) items[i] = egress_value_float(freqs[i]);
+  egress_value_t arr = egress_value_array(items, 8);
+  egress_expr_t seq = egress_expr_literal_value(arr);
+  for (int i = 0; i < 8; i++) egress_value_free(items[i]);
+  egress_value_free(arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
+  egress_expr_free(seq);
+
+  // Tap index output — buffer will have BUF_LEN samples
+  size_t index_tap = egress_graph_add_output_tap(g, "Seq1", 1);
+  ASSERT(index_tap != (size_t)-1);
+
+  egress_graph_prime_jit(g);
+
+  // Run ~70000 samples = ~275 process() calls at BUF_LEN=256
+  // Count how many distinct index transitions we see
+  int total_samples = 0;
+  int rising_transitions = 0;
+  double last_index = 0.0;
+
+  for (int call = 0; call < 275; ++call)
+  {
+    egress_graph_process(g);
+    size_t len = 0;
+    const double * buf = egress_graph_tap_buffer(g, index_tap, &len);
+    ASSERT(len == BUF_LEN);
+
+    for (unsigned int s = 0; s < len; ++s)
+    {
+      if (buf[s] != last_index)
+      {
+        ++rising_transitions;
+        last_index = buf[s];
+      }
+      ++total_samples;
+    }
+  }
+
+  printf("[samples=%d idx_changes=%d] ", total_samples, rising_transitions);
+
+  // At 2Hz, ~70000 samples = ~3.17 half-cycles... expect ~3 rising edges
+  ASSERT(rising_transitions >= 2 && rising_transitions <= 5);
+
+  egress_graph_free(g);
+}
+
+// Verify that the OLD IntSeq spec (without edge detection) retriggers every sample
+// the clock is high. This confirms the old behavior is broken and edge detection is needed.
+static void test_intseq_old_spec_retriggers()
+{
+  const unsigned int BUF_LEN = 1;
+  egress_graph_t g = egress_graph_new(BUF_LEN);
+  ASSERT(g != nullptr);
+
+  // Use the old IntSeq spec (no prev_trig register)
+  egress_module_spec_t seq_spec = build_intseq_spec();
+  ASSERT_OK(egress_graph_add_module(g, "Seq1", seq_spec));
+  egress_module_spec_free(seq_spec);
+
+  // Set constant trigger = 1.0
+  egress_expr_t trig = egress_expr_literal_float(1.0);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig));
+  egress_expr_free(trig);
+
+  egress_expr_t fwd = egress_expr_literal_bool(true);
+  egress_expr_t stp = egress_expr_literal_int(1);
+  egress_expr_t slen = egress_expr_literal_int(4);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
+  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
+
+  egress_value_t items[4] = {
+    egress_value_float(100.0), egress_value_float(200.0),
+    egress_value_float(300.0), egress_value_float(400.0),
+  };
+  egress_value_t arr = egress_value_array(items, 4);
+  egress_expr_t seq = egress_expr_literal_value(arr);
+  for (int i = 0; i < 4; i++) egress_value_free(items[i]);
+  egress_value_free(arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
+  egress_expr_free(seq);
+
+  size_t tap_id = egress_graph_add_output_tap(g, "Seq1", 1);
+  ASSERT(tap_id != (size_t)-1);
+
+  egress_graph_prime_jit(g);
+
+  // With constant trigger=1, old spec should advance every frame
+  // Frame 0: index=0, Frame 1: index=1, Frame 2: index=2, Frame 3: index=3, Frame 4: index=0 (wrap)
+  double expected[] = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
+  for (int f = 0; f < 10; ++f)
+  {
+    egress_graph_process(g);
+    size_t len = 0;
+    const double * buf = egress_graph_tap_buffer(g, tap_id, &len);
+    ASSERT(len == 1);
+    if (buf[0] != expected[f])
+    {
+      printf("FAIL\n    frame %d: expected=%.0f got=%.0f\n", f, expected[f], buf[0]);
+      ++g_fail;
+      egress_graph_free(g);
+      return;
+    }
+  }
+
+  egress_graph_free(g);
+}
+
+// Same as build_intseq_edge_detect_spec but with FLOAT register initial values
+// to match what the TS patch loader actually produces (JSON "prev_trig": 0 → float 0.0).
+static egress_module_spec_t build_intseq_edge_detect_spec_float_regs()
+{
+  egress_module_spec_t spec = egress_module_spec_new(5, 44100.0);
+
+  egress_expr_t value_out = egress_expr_binary(EGRESS_EXPR_INDEX,
+    egress_expr_input(4), egress_expr_register(0));
+  egress_module_spec_add_output(spec, value_out);
+  egress_expr_free(value_out);
+
+  egress_expr_t idx_out = egress_expr_register(0);
+  egress_module_spec_add_output(spec, idx_out);
+  egress_expr_free(idx_out);
+
+  egress_expr_t trigger   = egress_expr_input(0);
+  egress_expr_t prev_trig = egress_expr_register(1);
+  egress_expr_t not_prev  = egress_expr_unary(EGRESS_EXPR_NOT, prev_trig);
+  egress_expr_t rising    = egress_expr_binary(EGRESS_EXPR_BIT_AND, trigger, not_prev);
+
+  egress_expr_t rev_step   = egress_expr_binary(EGRESS_EXPR_SUB, egress_expr_input(3), egress_expr_input(2));
+  egress_expr_t fwd_step   = egress_expr_select(egress_expr_input(1), egress_expr_input(2), rev_step);
+  egress_expr_t next_raw   = egress_expr_binary(EGRESS_EXPR_ADD, egress_expr_register(0), fwd_step);
+  egress_expr_t next_mod   = egress_expr_binary(EGRESS_EXPR_MOD, next_raw, egress_expr_input(3));
+  egress_expr_t next_index = egress_expr_select(rising, next_mod, egress_expr_register(0));
+
+  // KEY DIFFERENCE: use egress_value_float instead of egress_value_int
+  egress_value_t zero_idx = egress_value_float(0.0);
+  egress_module_spec_add_register(spec, next_index, zero_idx);
+  egress_value_free(zero_idx);
+  egress_expr_free(next_index);
+
+  egress_expr_t prev_trig_next = egress_expr_input(0);
+  egress_value_t zero_pt = egress_value_float(0.0);
+  egress_module_spec_add_register(spec, prev_trig_next, zero_pt);
+  egress_value_free(zero_pt);
+  egress_expr_free(prev_trig_next);
+
+  egress_expr_free(trigger);
+  egress_expr_free(prev_trig);
+  egress_expr_free(not_prev);
+  egress_expr_free(rising);
+  egress_expr_free(rev_step);
+  egress_expr_free(fwd_step);
+  egress_expr_free(next_raw);
+  egress_expr_free(next_mod);
+
+  return spec;
+}
+
+// Test with float registers (as the TS patch loader creates):
+// Held gate should still only advance once.
+static void test_intseq_edge_detect_float_regs_held_gate()
+{
+  const unsigned int BUF_LEN = 1;
+  egress_graph_t g = egress_graph_new(BUF_LEN);
+  ASSERT(g != nullptr);
+
+  egress_module_spec_t spec = build_intseq_edge_detect_spec_float_regs();
+  ASSERT_OK(egress_graph_add_module(g, "Seq1", spec));
+  egress_module_spec_free(spec);
+
+  egress_expr_t trig = egress_expr_literal_float(1.0);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig));
+  egress_expr_free(trig);
+
+  egress_expr_t fwd = egress_expr_literal_bool(true);
+  egress_expr_t stp = egress_expr_literal_int(1);
+  egress_expr_t slen = egress_expr_literal_int(4);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
+  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
+
+  egress_value_t items[4] = {
+    egress_value_float(100.0), egress_value_float(200.0),
+    egress_value_float(300.0), egress_value_float(400.0),
+  };
+  egress_value_t arr = egress_value_array(items, 4);
+  egress_expr_t seq = egress_expr_literal_value(arr);
+  for (int i = 0; i < 4; i++) egress_value_free(items[i]);
+  egress_value_free(arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
+  egress_expr_free(seq);
+
+  egress_graph_prime_jit(g);
+  egress_graph_free(g);
+
+  // Run the actual assertion
+  g = egress_graph_new(BUF_LEN);
+  spec = build_intseq_edge_detect_spec_float_regs();
+  ASSERT_OK(egress_graph_add_module(g, "Seq1", spec));
+  egress_module_spec_free(spec);
+
+  trig = egress_expr_literal_float(1.0);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig));
+  egress_expr_free(trig);
+  fwd = egress_expr_literal_bool(true);
+  stp = egress_expr_literal_int(1);
+  slen = egress_expr_literal_int(4);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
+  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
+
+  egress_value_t items2[4] = {
+    egress_value_float(100.0), egress_value_float(200.0),
+    egress_value_float(300.0), egress_value_float(400.0),
+  };
+  arr = egress_value_array(items2, 4);
+  seq = egress_expr_literal_value(arr);
+  for (int i = 0; i < 4; i++) egress_value_free(items2[i]);
+  egress_value_free(arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
+  egress_expr_free(seq);
+
+  size_t tap_id = egress_graph_add_output_tap(g, "Seq1", 1);
+  ASSERT(tap_id != (size_t)-1);
+  egress_graph_prime_jit(g);
+
+  double indices[10];
+  for (int f = 0; f < 10; ++f)
+  {
+    egress_graph_process(g);
+    size_t len = 0;
+    const double * buf = egress_graph_tap_buffer(g, tap_id, &len);
+    ASSERT(len == 1);
+    indices[f] = buf[0];
+  }
+
+  ASSERT(indices[0] == 0.0);
+  for (int f = 1; f < 10; ++f)
+  {
+    if (indices[f] != 1.0)
+    {
+      printf("FAIL\n    frame %d: expected 1.0, got %.1f (float regs may cause different behavior)\n",
+             f, indices[f]);
+      ++g_fail;
+      egress_graph_free(g);
+      return;
+    }
+  }
+
+  egress_graph_free(g);
+}
+
+// Clock + edge-detect IntSeq with FLOAT registers: full end-to-end test
+// matching actual patch behavior.
+static void test_clock_edge_detect_float_regs_end_to_end()
+{
+  const unsigned int BUF_LEN = 1;
+  egress_graph_t g = egress_graph_new(BUF_LEN);
+  ASSERT(g != nullptr);
+
+  egress_module_spec_t clock_spec = build_clock_spec();
+  ASSERT_OK(egress_graph_add_module(g, "Clock1", clock_spec));
+  egress_module_spec_free(clock_spec);
+
+  egress_expr_t freq_expr = egress_expr_literal_float(2.0);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
+  egress_expr_free(freq_expr);
+
+  egress_value_t r_item = egress_value_float(1.0);
+  egress_value_t r_arr = egress_value_array(&r_item, 1);
+  egress_expr_t r_expr = egress_expr_literal_value(r_arr);
+  egress_value_free(r_item); egress_value_free(r_arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, r_expr));
+  egress_expr_free(r_expr);
+
+  // IntSeq with float registers (matching TS patch loader)
+  egress_module_spec_t seq_spec = build_intseq_edge_detect_spec_float_regs();
+  ASSERT_OK(egress_graph_add_module(g, "Seq1", seq_spec));
+  egress_module_spec_free(seq_spec);
+
+  ASSERT_OK(egress_graph_connect(g, "Clock1", 0, "Seq1", 0));
+
+  egress_expr_t fwd = egress_expr_literal_bool(true);
+  egress_expr_t stp = egress_expr_literal_int(1);
+  egress_expr_t slen = egress_expr_literal_int(8);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
+  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
+
+  egress_value_t items[8];
+  double freqs[8] = {100, 200, 300, 400, 500, 600, 700, 800};
+  for (int i = 0; i < 8; i++) items[i] = egress_value_float(freqs[i]);
+  egress_value_t arr = egress_value_array(items, 8);
+  egress_expr_t seq = egress_expr_literal_value(arr);
+  for (int i = 0; i < 8; i++) egress_value_free(items[i]);
+  egress_value_free(arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
+  egress_expr_free(seq);
+
+  size_t clock_tap = egress_graph_add_output_tap(g, "Clock1", 0);
+  size_t index_tap = egress_graph_add_output_tap(g, "Seq1", 1);
+  ASSERT(clock_tap != (size_t)-1);
+  ASSERT(index_tap != (size_t)-1);
+
+  egress_graph_prime_jit(g);
+
+  double prev_clock = 0.0;
+  double prev_index = 0.0;
+  int rising_edges = 0;
+  int index_changes = 0;
+
+  for (int f = 0; f < 70000; ++f)
+  {
+    egress_graph_process(g);
+    size_t len = 0;
+    const double * clk_buf = egress_graph_tap_buffer(g, clock_tap, &len);
+    double clock_val = clk_buf[0];
+    const double * idx_buf = egress_graph_tap_buffer(g, index_tap, &len);
+    double index_val = idx_buf[0];
+
+    if (prev_clock == 0.0 && clock_val == 1.0)
+      ++rising_edges;
+    if (index_val != prev_index)
+      ++index_changes;
+
+    prev_clock = clock_val;
+    prev_index = index_val;
+  }
+
+  printf("[edges=%d idx_changes=%d] ", rising_edges, index_changes);
+  ASSERT(rising_edges >= 2 && rising_edges <= 4);
+  ASSERT(index_changes == rising_edges);
+
+  egress_graph_free(g);
+}
+
 // ---- main --------------------------------------------------------------------
 
 int main()
@@ -645,6 +1272,27 @@ int main()
 
   run_test("multi-module fusion: clock + 4 intseqs + 4 vcos + 128 frames",
            test_multi_module_fusion);
+
+  run_test("clock output: verify square wave shape sample-by-sample",
+           test_clock_output_waveform);
+
+  run_test("intseq edge detect: manual 0/1 trigger pattern",
+           test_intseq_edge_detect_manual_pattern);
+
+  run_test("clock + edge-detect intseq: index advances once per rising edge",
+           test_clock_drives_edge_detect_intseq);
+
+  run_test("clock + edge-detect intseq (BUF_LEN=256): buffered processing",
+           test_clock_drives_edge_detect_intseq_buffered);
+
+  run_test("old intseq (no edge detect): retriggers every sample when gate held",
+           test_intseq_old_spec_retriggers);
+
+  run_test("intseq edge detect (FLOAT regs): held gate triggers only once",
+           test_intseq_edge_detect_float_regs_held_gate);
+
+  run_test("clock + edge-detect intseq (FLOAT regs): end-to-end",
+           test_clock_edge_detect_float_regs_end_to_end);
 
   printf("\n=== results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;

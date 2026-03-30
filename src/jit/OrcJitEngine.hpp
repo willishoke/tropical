@@ -88,6 +88,7 @@ struct NumericInstr
   JitScalarType dst_type = JitScalarType::Float;
   JitScalarType src_a_type = JitScalarType::Float;
   JitScalarType src_b_type = JitScalarType::Float;
+  JitScalarType src_c_type = JitScalarType::Float;
   std::vector<uint32_t> args;
 };
 

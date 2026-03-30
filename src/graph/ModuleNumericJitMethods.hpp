@@ -2031,6 +2031,10 @@ bool Module::build_numeric_program_impl(
       {
         jit_instr.src_b_type = reg_info[instr.src_b].scalar_type;
       }
+      if (instr.src_c < reg_info.size() && reg_info[instr.src_c].kind == NumericValueKind::Scalar)
+      {
+        jit_instr.src_c_type = reg_info[instr.src_c].scalar_type;
+      }
       numeric_program.instructions.push_back(jit_instr);
     }
   }

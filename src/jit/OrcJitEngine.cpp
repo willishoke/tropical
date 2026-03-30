@@ -1061,14 +1061,14 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         break;
       }
       case NumericOp::Pow:
-        result = builder.CreateCall(llvm_pow, {load_temp(instr.src_a), load_temp(instr.src_b)});
+        result = builder.CreateCall(llvm_pow, {load_as_float(instr.src_a, instr.src_a_type), load_as_float(instr.src_b, instr.src_b_type)});
         break;
       case NumericOp::Mod:
       {
         if (instr.dst_type == JitScalarType::Float)
         {
-          llvm::Value * lhs = load_temp(instr.src_a);
-          llvm::Value * rhs = load_temp(instr.src_b);
+          llvm::Value * lhs = load_as_float(instr.src_a, instr.src_a_type);
+          llvm::Value * rhs = load_as_float(instr.src_b, instr.src_b_type);
           llvm::Value * is_zero = builder.CreateFCmpOEQ(rhs, llvm::ConstantFP::get(f64_ty, 0.0));
           llvm::Value * mod_value = builder.CreateCall(llvm_fmod, {lhs, rhs});
           result = builder.CreateSelect(is_zero, llvm::ConstantFP::get(f64_ty, 0.0), mod_value);
@@ -1087,8 +1087,8 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::FloorDiv:
       {
-        llvm::Value * lhs = load_temp(instr.src_a);
-        llvm::Value * rhs = load_temp(instr.src_b);
+        llvm::Value * lhs = load_as_float(instr.src_a, instr.src_a_type);
+        llvm::Value * rhs = load_as_float(instr.src_b, instr.src_b_type);
         llvm::Value * is_zero = builder.CreateFCmpOEQ(rhs, llvm::ConstantFP::get(f64_ty, 0.0));
         llvm::Value * div_value = builder.CreateFDiv(lhs, rhs);
         llvm::Value * floor_value = builder.CreateUnaryIntrinsic(llvm::Intrinsic::floor, div_value);
@@ -1141,7 +1141,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::Abs:
         if (instr.dst_type == JitScalarType::Float)
-          result = builder.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, load_temp(instr.src_a));
+          result = builder.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, load_as_float(instr.src_a, instr.src_a_type));
         else
         {
           llvm::Value * v = load_int_temp(instr.src_a);
@@ -1155,9 +1155,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       {
         if (instr.dst_type == JitScalarType::Float)
         {
-          llvm::Value * value     = load_temp(instr.src_a);
-          llvm::Value * min_value = load_temp(instr.src_b);
-          llvm::Value * max_value = load_temp(instr.src_c);
+          llvm::Value * value     = load_as_float(instr.src_a, instr.src_a_type);
+          llvm::Value * min_value = load_as_float(instr.src_b, instr.src_b_type);
+          llvm::Value * max_value = load_as_float(instr.src_c, instr.src_c_type);
           llvm::Value * lower_bounded = builder.CreateSelect(
             builder.CreateFCmpOLT(value, min_value), min_value, value);
           result = builder.CreateSelect(
@@ -1185,24 +1185,26 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         else
           cond_bool = builder.CreateICmpNE(load_int_temp(instr.src_a), builder.getInt64(0));
         if (instr.dst_type == JitScalarType::Float)
-          result = builder.CreateSelect(cond_bool, load_temp(instr.src_b), load_temp(instr.src_c));
+          result = builder.CreateSelect(cond_bool, load_as_float(instr.src_b, instr.src_b_type), load_as_float(instr.src_c, instr.src_c_type));
         else
         {
-          result_i64 = builder.CreateSelect(cond_bool, load_int_temp(instr.src_b), load_int_temp(instr.src_c));
+          result_i64 = builder.CreateSelect(cond_bool, load_as_int(instr.src_b, instr.src_b_type), load_as_int(instr.src_c, instr.src_c_type));
           writes_int_temp = true;
           writes_temp = false;
         }
         break;
       }
       case NumericOp::Log:
-        result = builder.CreateCall(llvm_log, {load_temp(instr.src_a)});
+        result = builder.CreateCall(llvm_log, {load_as_float(instr.src_a, instr.src_a_type)});
         break;
       case NumericOp::IndexArray:
       {
         llvm::Value * array_slot_ptr = builder.CreateInBoundsGEP(i64_ty, array_sizes_arg, builder.getInt64(instr.slot_id));
         llvm::Value * array_size = builder.CreateLoad(i64_ty, array_slot_ptr);
 
-        llvm::Value * raw_index = builder.CreateFPToSI(load_temp(instr.src_a), i64_ty);
+        llvm::Value * raw_index = (instr.src_a_type == JitScalarType::Float)
+          ? builder.CreateFPToSI(load_temp(instr.src_a), i64_ty)
+          : load_int_temp(instr.src_a);
         llvm::Value * is_negative = builder.CreateICmpSLT(raw_index, builder.getInt64(0));
         llvm::Value * in_range_upper = builder.CreateICmpULT(raw_index, array_size);
         llvm::Value * in_range = builder.CreateAnd(builder.CreateNot(is_negative), in_range_upper);
@@ -1218,7 +1220,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       {
         // Conditionally write value to array[index]; aliases dst to same slot (in-place).
         llvm::Value * array_size = load_array_size(instr.slot_id);
-        llvm::Value * raw_index = builder.CreateFPToSI(load_temp(instr.src_a), i64_ty);
+        llvm::Value * raw_index = (instr.src_a_type == JitScalarType::Float)
+          ? builder.CreateFPToSI(load_temp(instr.src_a), i64_ty)
+          : load_int_temp(instr.src_a);
         llvm::Value * is_negative = builder.CreateICmpSLT(raw_index, builder.getInt64(0));
         llvm::Value * in_range_upper = builder.CreateICmpULT(raw_index, array_size);
         llvm::Value * in_range = builder.CreateAnd(builder.CreateNot(is_negative), in_range_upper);
@@ -1230,7 +1234,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         builder.SetInsertPoint(write_bb);
         llvm::Value * array_ptr = load_array_ptr(instr.slot_id);
         llvm::Value * elem_ptr = builder.CreateInBoundsGEP(f64_ty, array_ptr, raw_index);
-        builder.CreateStore(load_temp(instr.src_b), elem_ptr);
+        builder.CreateStore(load_as_float(instr.src_b, instr.src_b_type), elem_ptr);
         builder.CreateBr(merge_bb);
 
         builder.SetInsertPoint(merge_bb);
@@ -1238,11 +1242,11 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         break;
       }
       case NumericOp::Sin:
-        result = builder.CreateCall(llvm_sin, {load_temp(instr.src_a)});
+        result = builder.CreateCall(llvm_sin, {load_as_float(instr.src_a, instr.src_a_type)});
         break;
       case NumericOp::Neg:
         if (instr.dst_type == JitScalarType::Float)
-          result = builder.CreateFNeg(load_temp(instr.src_a));
+          result = builder.CreateFNeg(load_as_float(instr.src_a, instr.src_a_type));
         else
         {
           result_i64 = builder.CreateNeg(load_int_temp(instr.src_a));
