@@ -422,6 +422,12 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
     return builder.CreateSIToFP(builder.CreateLoad(i64_ty, gep_i64(int_temps_arg, index)), f64_ty);
   };
 
+  auto load_as_int = [&](uint32_t index, JitScalarType type) -> llvm::Value * {
+    if (type == JitScalarType::Float)
+      return builder.CreateFPToSI(builder.CreateLoad(f64_ty, gep_f64(temps_arg, index)), i64_ty);
+    return builder.CreateLoad(i64_ty, gep_i64(int_temps_arg, index));
+  };
+
   auto store_int_temp = [&](uint32_t index, llvm::Value * value) {
     builder.CreateStore(value, gep_i64(int_temps_arg, index));
   };
@@ -1094,21 +1100,21 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::BitAnd:
       {
-        result_i64 = builder.CreateAnd(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
+        result_i64 = builder.CreateAnd(load_as_int(instr.src_a, instr.src_a_type), load_as_int(instr.src_b, instr.src_b_type));
         writes_int_temp = true;
         writes_temp = false;
         break;
       }
       case NumericOp::BitOr:
       {
-        result_i64 = builder.CreateOr(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
+        result_i64 = builder.CreateOr(load_as_int(instr.src_a, instr.src_a_type), load_as_int(instr.src_b, instr.src_b_type));
         writes_int_temp = true;
         writes_temp = false;
         break;
       }
       case NumericOp::BitXor:
       {
-        result_i64 = builder.CreateXor(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
+        result_i64 = builder.CreateXor(load_as_int(instr.src_a, instr.src_a_type), load_as_int(instr.src_b, instr.src_b_type));
         writes_int_temp = true;
         writes_temp = false;
         break;
@@ -1116,8 +1122,8 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       case NumericOp::LShift:
       case NumericOp::RShift:
       {
-        llvm::Value * lhs = load_int_temp(instr.src_a);
-        llvm::Value * shift_raw = load_int_temp(instr.src_b);
+        llvm::Value * lhs = load_as_int(instr.src_a, instr.src_a_type);
+        llvm::Value * shift_raw = load_as_int(instr.src_b, instr.src_b_type);
         llvm::Value * shift_non_negative = builder.CreateSelect(
           builder.CreateICmpSLT(shift_raw, builder.getInt64(0)),
           builder.getInt64(0),

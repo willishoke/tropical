@@ -346,6 +346,7 @@ class Module
     std::vector<uint32_t> register_array_slot_;
     std::vector<int32_t> array_register_targets_;
     std::vector<bool> array_register_can_swap_;
+    std::vector<egress_jit::JitScalarType> register_target_types_;
     std::vector<NumericInputInfo> numeric_input_info_;
     std::vector<NumericOutputInfo> numeric_output_info_;
     enum class NumericSyntheticInputKind : uint8_t
@@ -390,6 +391,7 @@ class Module
       std::vector<int64_t *> int_array_ptrs;
       std::vector<uint64_t> int_array_sizes;
       std::vector<bool> register_int_mask;
+      std::vector<egress_jit::JitScalarType> register_target_types;
   #ifdef EGRESS_PROFILE
       uint64_t instruction_count = 0;
    #endif

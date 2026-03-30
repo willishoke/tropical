@@ -1311,6 +1311,7 @@ bool Module::build_numeric_program_impl(
   state.array_register_targets.assign(registers.size(), -1);
   state.array_register_can_swap.assign(registers.size(), false);
   state.register_int_mask.assign(registers.size(), false);
+  state.register_target_types.assign(registers.size(), egress_jit::JitScalarType::Float);
   state.output_info.clear();
 
   if (!configure_numeric_inputs_for_jit(state, current_inputs))
@@ -2070,6 +2071,7 @@ bool Module::build_numeric_program_impl(
       {
         return false;
       }
+      state.register_target_types[reg_slot] = reg_info[target].scalar_type;
       continue;
     }
 
@@ -2139,6 +2141,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
   register_array_slot_    = std::move(tmp.register_array_slot);
   array_register_targets_ = std::move(tmp.array_register_targets);
   array_register_can_swap_= std::move(tmp.array_register_can_swap);
+  register_target_types_  = std::move(tmp.register_target_types);
   numeric_input_info_     = std::move(tmp.input_info);
   numeric_output_info_    = std::move(tmp.output_info);
   return true;
@@ -2616,11 +2619,30 @@ void Module::apply_numeric_register_targets(
     if (state.register_scalar_mask[register_id])
     {
       const bool is_int = register_id < state.register_int_mask.size() && state.register_int_mask[register_id];
+      const egress_jit::JitScalarType target_type =
+        register_id < state.register_target_types.size()
+          ? state.register_target_types[register_id]
+          : egress_jit::JitScalarType::Float;
       if (is_int)
       {
-        if (target >= 0 && static_cast<std::size_t>(target) < state.int_temps.size())
+        if (target >= 0)
         {
-          numeric_next_int_registers_[register_id] = state.int_temps[static_cast<std::size_t>(target)];
+          const auto t = static_cast<std::size_t>(target);
+          if (target_type == egress_jit::JitScalarType::Float)
+          {
+            // Target expression produced a float — convert to int
+            if (t < state.temps.size())
+              numeric_next_int_registers_[register_id] = static_cast<int64_t>(state.temps[t]);
+            else
+              numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+          }
+          else
+          {
+            if (t < state.int_temps.size())
+              numeric_next_int_registers_[register_id] = state.int_temps[t];
+            else
+              numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+          }
         }
         else
         {
@@ -2632,7 +2654,22 @@ void Module::apply_numeric_register_targets(
       {
         if (target >= 0)
         {
-          numeric_next_registers_[register_id] = state.temps[static_cast<std::size_t>(target)];
+          const auto t = static_cast<std::size_t>(target);
+          if (target_type == egress_jit::JitScalarType::Int || target_type == egress_jit::JitScalarType::Bool)
+          {
+            // Target expression produced an int — convert to float
+            if (t < state.int_temps.size())
+              numeric_next_registers_[register_id] = static_cast<double>(state.int_temps[t]);
+            else
+              numeric_next_registers_[register_id] = numeric_registers_[register_id];
+          }
+          else
+          {
+            if (t < state.temps.size())
+              numeric_next_registers_[register_id] = state.temps[t];
+            else
+              numeric_next_registers_[register_id] = numeric_registers_[register_id];
+          }
         }
         else
         {

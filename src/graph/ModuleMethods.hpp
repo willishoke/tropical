@@ -105,11 +105,29 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
           const bool is_int = register_id < registers_.size() &&
             (registers_[register_id].type == ValueType::Int ||
              registers_[register_id].type == ValueType::Bool);
+          const egress_jit::JitScalarType target_type =
+            register_id < register_target_types_.size()
+              ? register_target_types_[register_id]
+              : egress_jit::JitScalarType::Float;
           if (is_int)
           {
-            if (target >= 0 && static_cast<std::size_t>(target) < numeric_int_temps_.size())
+            if (target >= 0)
             {
-              numeric_next_int_registers_[register_id] = numeric_int_temps_[static_cast<std::size_t>(target)];
+              const auto t = static_cast<std::size_t>(target);
+              if (target_type == egress_jit::JitScalarType::Float)
+              {
+                if (t < numeric_temps_.size())
+                  numeric_next_int_registers_[register_id] = static_cast<int64_t>(numeric_temps_[t]);
+                else
+                  numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+              }
+              else
+              {
+                if (t < numeric_int_temps_.size())
+                  numeric_next_int_registers_[register_id] = numeric_int_temps_[t];
+                else
+                  numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+              }
             }
             else
             {
@@ -121,7 +139,21 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
           {
             if (target >= 0)
             {
-              numeric_next_registers_[register_id] = numeric_temps_[static_cast<std::size_t>(target)];
+              const auto t = static_cast<std::size_t>(target);
+              if (target_type == egress_jit::JitScalarType::Int || target_type == egress_jit::JitScalarType::Bool)
+              {
+                if (t < numeric_int_temps_.size())
+                  numeric_next_registers_[register_id] = static_cast<double>(numeric_int_temps_[t]);
+                else
+                  numeric_next_registers_[register_id] = numeric_registers_[register_id];
+              }
+              else
+              {
+                if (t < numeric_temps_.size())
+                  numeric_next_registers_[register_id] = numeric_temps_[t];
+                else
+                  numeric_next_registers_[register_id] = numeric_registers_[register_id];
+              }
             }
             else
             {

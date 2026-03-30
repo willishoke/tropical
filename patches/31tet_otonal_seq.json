@@ -5,7 +5,7 @@
       "name": "IntSeq",
       "inputs": ["trigger", "is_forward", "step", "seq_len", "sequence"],
       "outputs": ["value", "index"],
-      "regs": { "index": 0 },
+      "regs": { "index": 0, "prev_trig": 0 },
       "process": {
         "outputs": {
           "value": {
@@ -18,10 +18,14 @@
           "index": {"op": "reg", "name": "index"}
         },
         "next_regs": {
+          "prev_trig": {"op": "input", "name": "trigger"},
           "index": {
             "op": "select",
             "args": [
-              {"op": "input", "name": "trigger"},
+              {"op": "bit_and", "args": [
+                {"op": "input", "name": "trigger"},
+                {"op": "not", "args": [{"op": "reg", "name": "prev_trig"}]}
+              ]},
               {
                 "op": "mod",
                 "args": [

@@ -161,6 +161,66 @@ static egress_module_spec_t build_simple_scalar_spec()
   return spec;
 }
 
+// IntSeq with edge detection: includes prev_trig register so a held gate
+// only advances the index once (on the rising edge).
+// 2 registers: 0=index (int, init 0), 1=prev_trig (int, init 0)
+// index_next = select(bit_and(trigger, not(prev_trig)),
+//                     mod(add(index, step), seq_len),
+//                     index)
+// prev_trig_next = trigger
+static egress_module_spec_t build_intseq_edge_detect_spec()
+{
+  egress_module_spec_t spec = egress_module_spec_new(5, 44100.0);
+
+  // output 0: value = sequence[index_reg]
+  egress_expr_t value_out = egress_expr_binary(EGRESS_EXPR_INDEX,
+    egress_expr_input(4), egress_expr_register(0));
+  egress_module_spec_add_output(spec, value_out);
+  egress_expr_free(value_out);
+
+  // output 1: index = index_reg
+  egress_expr_t idx_out = egress_expr_register(0);
+  egress_module_spec_add_output(spec, idx_out);
+  egress_expr_free(idx_out);
+
+  // Edge detect: rising = bit_and(trigger, not(prev_trig))
+  egress_expr_t trigger   = egress_expr_input(0);
+  egress_expr_t prev_trig = egress_expr_register(1);
+  egress_expr_t not_prev  = egress_expr_unary(EGRESS_EXPR_NOT, prev_trig);
+  egress_expr_t rising    = egress_expr_binary(EGRESS_EXPR_BIT_AND, trigger, not_prev);
+
+  // next_index = select(rising, mod(add(index, step), seq_len), index)
+  egress_expr_t rev_step   = egress_expr_binary(EGRESS_EXPR_SUB, egress_expr_input(3), egress_expr_input(2));
+  egress_expr_t fwd_step   = egress_expr_select(egress_expr_input(1), egress_expr_input(2), rev_step);
+  egress_expr_t next_raw   = egress_expr_binary(EGRESS_EXPR_ADD, egress_expr_register(0), fwd_step);
+  egress_expr_t next_mod   = egress_expr_binary(EGRESS_EXPR_MOD, next_raw, egress_expr_input(3));
+  egress_expr_t next_index = egress_expr_select(rising, next_mod, egress_expr_register(0));
+
+  // register 0: index, initial value int 0
+  egress_value_t zero_idx = egress_value_int(0);
+  egress_module_spec_add_register(spec, next_index, zero_idx);
+  egress_value_free(zero_idx);
+  egress_expr_free(next_index);
+
+  // register 1: prev_trig = trigger, initial value int 0
+  egress_expr_t prev_trig_next = egress_expr_input(0);
+  egress_value_t zero_pt = egress_value_int(0);
+  egress_module_spec_add_register(spec, prev_trig_next, zero_pt);
+  egress_value_free(zero_pt);
+  egress_expr_free(prev_trig_next);
+
+  egress_expr_free(trigger);
+  egress_expr_free(prev_trig);
+  egress_expr_free(not_prev);
+  egress_expr_free(rising);
+  egress_expr_free(rev_step);
+  egress_expr_free(fwd_step);
+  egress_expr_free(next_raw);
+  egress_expr_free(next_mod);
+
+  return spec;
+}
+
 // ---- tests -------------------------------------------------------------------
 
 static void test_scalar_module_processes()
@@ -411,6 +471,76 @@ static void test_intseq_with_clock()
   egress_graph_free(g);
 }
 
+// Gate held high should only advance sequencer once (rising edge detection).
+// Uses build_intseq_edge_detect_spec which has prev_trig register.
+// Feed a constant 1.0 gate — index should go from 0→1 on the first frame
+// and stay at 1 for all subsequent frames.
+static void test_intseq_gate_triggers_once()
+{
+  const unsigned int BUF_LEN = 1; // 1 sample per process() call for precise control
+  egress_graph_t g = egress_graph_new(BUF_LEN);
+  ASSERT(g != nullptr);
+
+  egress_module_spec_t spec = build_intseq_edge_detect_spec();
+  ASSERT_OK(egress_graph_add_module(g, "Seq1", spec));
+  egress_module_spec_free(spec);
+
+  // trigger = constant 1.0 (gate held high — a Float, like Clock output)
+  egress_expr_t trig = egress_expr_literal_float(1.0);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig));
+  egress_expr_free(trig);
+
+  // is_forward = true, step = 1, seq_len = 4
+  egress_expr_t fwd  = egress_expr_literal_bool(true);
+  egress_expr_t stp  = egress_expr_literal_int(1);
+  egress_expr_t slen = egress_expr_literal_int(4);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
+  egress_expr_free(fwd);
+  egress_expr_free(stp);
+  egress_expr_free(slen);
+
+  // sequence = [100, 200, 300, 400]
+  egress_value_t items[4] = {
+    egress_value_float(100.0), egress_value_float(200.0),
+    egress_value_float(300.0), egress_value_float(400.0),
+  };
+  egress_value_t arr = egress_value_array(items, 4);
+  egress_expr_t  seq = egress_expr_literal_value(arr);
+  for (int i = 0; i < 4; i++) egress_value_free(items[i]);
+  egress_value_free(arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
+  egress_expr_free(seq);
+
+  // Tap the index output (output 1)
+  size_t tap_id = egress_graph_add_output_tap(g, "Seq1", 1);
+  ASSERT(tap_id != (size_t)-1);
+
+  egress_graph_prime_jit(g);
+
+  // Process 10 frames and collect index values
+  double indices[10];
+  for (int f = 0; f < 10; ++f)
+  {
+    egress_graph_process(g);
+    size_t len = 0;
+    const double * buf = egress_graph_tap_buffer(g, tap_id, &len);
+    ASSERT(len == 1);
+    indices[f] = buf[0];
+  }
+
+  // Frame 0: output reads initial index (0), rising edge advances it for next frame
+  ASSERT(indices[0] == 0.0);
+  // Frame 1+: index=1, gate held so no more advances
+  for (int f = 1; f < 10; ++f)
+  {
+    ASSERT(indices[f] == 1.0);
+  }
+
+  egress_graph_free(g);
+}
+
 // Four IntSeqs + four scalar modules to mimic the 31tet_otonal_seq patch structure.
 // Exercises primitive body fusion across multiple heterogeneous modules.
 static void test_multi_module_fusion()
@@ -509,6 +639,9 @@ int main()
 
   run_test("intseq: integer-register module wired to clock + 128 process() calls",
            test_intseq_with_clock);
+
+  run_test("intseq edge detect: held gate triggers only one index advance",
+           test_intseq_gate_triggers_once);
 
   run_test("multi-module fusion: clock + 4 intseqs + 4 vcos + 128 frames",
            test_multi_module_fusion);

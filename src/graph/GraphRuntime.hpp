@@ -204,6 +204,8 @@ struct FusedPrimitiveBodyModule
   std::vector<int32_t> register_targets;
   std::vector<int32_t> array_register_targets;
   std::vector<bool> array_register_can_swap;
+  std::vector<bool> register_int_mask;
+  std::vector<egress_jit::JitScalarType> register_target_types;
 };
 
 struct FusedGraphKernelState

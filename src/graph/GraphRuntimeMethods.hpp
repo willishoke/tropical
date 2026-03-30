@@ -626,13 +626,59 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
         return fail("primitive body runtime scalar register out of range");
       }
       const int32_t target = binding.register_targets[register_id];
-      const double next_value =
-        target >= 0 && static_cast<std::size_t>(target) < fused->temps.size()
-          ? fused->temps[static_cast<std::size_t>(target)]
-          : fused->registers[fused_register_id];
+      const bool is_int = register_id < binding.register_int_mask.size() &&
+                          binding.register_int_mask[register_id];
+      const egress_jit::JitScalarType target_type =
+        register_id < binding.register_target_types.size()
+          ? binding.register_target_types[register_id]
+          : egress_jit::JitScalarType::Float;
+      double next_value;
+      int64_t next_int_value = 0;
+      if (target >= 0)
+      {
+        const auto t = static_cast<std::size_t>(target);
+        if (is_int)
+        {
+          if (target_type == egress_jit::JitScalarType::Float)
+          {
+            next_int_value = (t < fused->temps.size())
+              ? static_cast<int64_t>(fused->temps[t]) : 0;
+          }
+          else
+          {
+            next_int_value = (t < fused->int_temps.size())
+              ? fused->int_temps[t] : 0;
+          }
+          next_value = static_cast<double>(next_int_value);
+        }
+        else
+        {
+          if (target_type == egress_jit::JitScalarType::Int || target_type == egress_jit::JitScalarType::Bool)
+          {
+            next_value = (t < fused->int_temps.size())
+              ? static_cast<double>(fused->int_temps[t]) : fused->registers[fused_register_id];
+          }
+          else
+          {
+            next_value = (t < fused->temps.size())
+              ? fused->temps[t] : fused->registers[fused_register_id];
+          }
+        }
+      }
+      else
+      {
+        next_value = fused->registers[fused_register_id];
+        if (is_int && register_id < module.numeric_int_registers_.size())
+          next_int_value = module.numeric_int_registers_[register_id];
+      }
       fused->registers[fused_register_id] = next_value;
       module.numeric_registers_[register_id] = next_value;
       module.numeric_next_registers_[register_id] = next_value;
+      if (is_int && register_id < module.numeric_int_registers_.size())
+      {
+        module.numeric_int_registers_[register_id] = next_int_value;
+        module.numeric_next_int_registers_[register_id] = next_int_value;
+      }
     }
 
     for (unsigned int register_id = 0; register_id < binding.array_register_targets.size(); ++register_id)
@@ -1318,6 +1364,8 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
       binding.register_array_slot = state.register_array_slot;
       binding.array_register_targets = state.array_register_targets;
       binding.array_register_can_swap = state.array_register_can_swap;
+      binding.register_int_mask = state.register_int_mask;
+      binding.register_target_types = state.register_target_types;
       binding.output_registers.reserve(module.program_.output_targets.size());
       for (uint32_t output_reg : module.program_.output_targets)
       {
