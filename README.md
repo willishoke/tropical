@@ -1,10 +1,6 @@
 # egress
 
-## Intro
-
-`egress` is a C++ library for realtime audio synthesis. Modules are defined using built-in or user-defined operations, and connections are expressed using a symbolic expression syntax. JIT compilation for module definitions ensures fast realtime execution with native audio playback. Currently only tested on macOS.
-
-![demo](./img/testchaos.png)
+A C++ library for realtime audio synthesis. Modules are defined using built-in or user-defined operations; connections are expressed using a symbolic expression syntax. An LLVM ORC JIT backend compiles module definitions to native code for realtime execution. Currently only tested on macOS.
 
 ## Build
 
@@ -14,30 +10,51 @@ make build
 
 Configures and builds the C++ core via CMake. Requires [LLVM](https://llvm.org) (ORC JIT).
 
-## TUI and MCP server
-
-The primary interface is a TypeScript TUI and MCP server in `tui/`. Requires [Bun](https://bun.sh).
-
-```bash
-make tui-ts    # launch the full-screen Ink/React TUI
-make mcp-ts    # launch the MCP server standalone on stdio
-```
-
-The TUI is a full-screen terminal interface for building and manipulating patches interactively — create modules, wire connections, set parameters, and control playback.
-
-The MCP server exposes the full egress graph API as MCP tools, so any MCP-compatible client (including Claude) can build and manipulate patches programmatically at runtime.
-
-Sample patches live in `patches/`.
-
 ## Graph
 
-`Graph` stores modules, per-input expression trees, output taps, and the output buffer. Each input is represented by a single expression tree whose leaves are literals or references to module outputs. `Graph::process()` evaluates those input expressions sample-by-sample, processes modules, and mixes selected outputs into the output buffer. Top-level module references always read previous-sample outputs, so connected modules have a single-sample boundary even when graph-level worker threads are enabled.
+`Graph` stores modules, per-input expression trees, output taps, and the output buffer. Each input is represented by a single expression tree whose leaves are literals or references to module outputs. `Graph::process()` evaluates those input expressions sample-by-sample, processes modules, and mixes selected outputs into the output buffer.
 
-Modules expose named inputs and outputs plus an optional register bank. After each sample, the runtime applies register updates and resets inputs to their default values. Output signals are clipped to `[-10.0, 10.0]`; most patches are expected to stay in the bipolar `[-5.0, 5.0]` range.
+Top-level module references always read previous-sample outputs, so connected modules observe a single-sample boundary even when graph-level worker threads are enabled.
+
+Modules expose named inputs and outputs plus an optional register bank. After each sample, the runtime applies register updates and resets inputs to their default values.
+
+## Patches
+
+Patches are JSON files describing a graph: modules, input expressions, output taps, and parameter values. Sample patches live in `patches/`. The canonical patch format uses `input_exprs` to describe connections; the legacy `connections` array is deprecated.
+
+## C API
+
+A stable C API is exposed in `src/c_api/egress_c.h`. This is the integration point for language bindings and external tools.
+
+## JIT
+
+When built with `EGRESS_LLVM_ORC_JIT=ON` (the default via `make build`), module kernels are compiled to native code on first use and cached on disk across process restarts. The JIT uses a static type system (float/int/bool) derived from expression structure. JIT failures are fatal — there is no interpreter fallback.
 
 ## Testing
 
-Tests can be compiled with `make debug`. The `test` directory contains scripts for visualizing test outputs.
+```bash
+make debug
+```
+
+Builds and runs the C++ test suite. Tests cover module processing, expression evaluation, and the JIT pipeline. No audio device is required.
+
+## Profiling
+
+```bash
+make profile
+```
+
+Builds with timing instrumentation. Profile stats are accessible via the C API and at runtime through the MCP server.
+
+## MCP Server (experimental)
+
+An MCP server in `tui/` exposes the full graph API as tools, allowing MCP-compatible clients to build and manipulate patches programmatically. Requires [Bun](https://bun.sh).
+
+```bash
+make mcp-ts
+```
+
+**The TUI and MCP server are experimental and unsupported.** The C++ core and C API are the stable surface.
 
 ## License
 
