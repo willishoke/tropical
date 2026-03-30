@@ -56,9 +56,6 @@ export function coerce(value: ExprCoercible): SignalExpr {
     return SignalExpr.fromHandle(b.check(b.egress_expr_literal_bool(value), 'literal_bool'))
   }
   if (typeof value === 'number') {
-    if (Number.isInteger(value)) {
-      return SignalExpr.fromHandle(b.check(b.egress_expr_literal_int(value), 'literal_int'))
-    }
     return SignalExpr.fromHandle(b.check(b.egress_expr_literal_float(value), 'literal_float'))
   }
   if (Array.isArray(value)) return arrayPack(value)

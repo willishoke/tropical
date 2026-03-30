@@ -2,7 +2,6 @@
 
 void Module::process(const std::vector<bool> * output_materialize_mask)
 {
-  resize_array_registers_to_inputs();
   const bool use_composite_programs = has_nested_modules_ || has_delay_states_;
 #ifdef EGRESS_LLVM_ORC_JIT
   if (numeric_output_scalar_mask_.size() != outputs.size())
@@ -16,12 +15,14 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   }
 #endif
 #ifdef EGRESS_LLVM_ORC_JIT
-  if (!has_dynamic_registers_)
+  if (!numeric_input_override_active_)
   {
-    if (!numeric_input_override_active_)
-    {
-      ensure_numeric_jit_current();
-    }
+    ensure_numeric_jit_current();
+  }
+
+  if (!use_composite_programs && !jit_kernel_)
+  {
+    throw std::runtime_error("JIT kernel unavailable for primitive module: " + jit_status_);
   }
 
   if (!use_composite_programs && jit_kernel_)
@@ -30,6 +31,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     {
       jit_status_ = "numeric input sync failed";
       jit_kernel_ = nullptr;
+      throw std::runtime_error("JIT numeric input sync failed: " + jit_status_);
     }
     else
     {
@@ -41,7 +43,11 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         numeric_temps_.data(),
         sample_rate_,
         sample_index_,
-        numeric_param_ptrs_.data());
+        numeric_param_ptrs_.data(),
+        numeric_int_inputs_.data(),
+        numeric_int_registers_.data(),
+        numeric_int_array_ptrs_.empty() ? nullptr : numeric_int_array_ptrs_.data(),
+        numeric_int_temps_.data());
       capture_numeric_scalar_outputs(program_, numeric_output_info_, numeric_temps_);
 
 #ifdef EGRESS_PROFILE
@@ -77,7 +83,9 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
           numeric_output_info_[output_id],
           program_.output_targets[output_id],
           numeric_temps_,
-          numeric_array_storage_);
+          numeric_array_storage_,
+          &numeric_int_temps_,
+          &numeric_int_array_storage_);
       }
 #ifdef EGRESS_PROFILE
       record_numeric_output_materialize_profile(
@@ -94,18 +102,70 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         const int32_t target = program_.register_targets[register_id];
         if (register_scalar_mask_[register_id])
         {
-          if (target >= 0)
+          const bool is_int = register_id < registers_.size() &&
+            (registers_[register_id].type == ValueType::Int ||
+             registers_[register_id].type == ValueType::Bool);
+          const egress_jit::JitScalarType target_type =
+            register_id < register_target_types_.size()
+              ? register_target_types_[register_id]
+              : egress_jit::JitScalarType::Float;
+          if (is_int)
           {
-            numeric_next_registers_[register_id] = numeric_temps_[static_cast<std::size_t>(target)];
+            if (target >= 0)
+            {
+              const auto t = static_cast<std::size_t>(target);
+              if (target_type == egress_jit::JitScalarType::Float)
+              {
+                if (t < numeric_temps_.size())
+                  numeric_next_int_registers_[register_id] = static_cast<int64_t>(numeric_temps_[t]);
+                else
+                  numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+              }
+              else
+              {
+                if (t < numeric_int_temps_.size())
+                  numeric_next_int_registers_[register_id] = numeric_int_temps_[t];
+                else
+                  numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+              }
+            }
+            else
+            {
+              numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+            }
+            numeric_next_registers_[register_id] = numeric_registers_[register_id];
           }
           else
           {
-            numeric_next_registers_[register_id] = numeric_registers_[register_id];
+            if (target >= 0)
+            {
+              const auto t = static_cast<std::size_t>(target);
+              if (target_type == egress_jit::JitScalarType::Int || target_type == egress_jit::JitScalarType::Bool)
+              {
+                if (t < numeric_int_temps_.size())
+                  numeric_next_registers_[register_id] = static_cast<double>(numeric_int_temps_[t]);
+                else
+                  numeric_next_registers_[register_id] = numeric_registers_[register_id];
+              }
+              else
+              {
+                if (t < numeric_temps_.size())
+                  numeric_next_registers_[register_id] = numeric_temps_[t];
+                else
+                  numeric_next_registers_[register_id] = numeric_registers_[register_id];
+              }
+            }
+            else
+            {
+              numeric_next_registers_[register_id] = numeric_registers_[register_id];
+            }
+            numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
           }
         }
         else
         {
           numeric_next_registers_[register_id] = numeric_registers_[register_id];
+          numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
         }
       }
 
@@ -116,8 +176,15 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       {
         numeric_next_registers_[register_id] = numeric_registers_[register_id];
       }
+      for (unsigned int register_id = static_cast<unsigned int>(program_.register_targets.size());
+           register_id < numeric_int_registers_.size();
+           ++register_id)
+      {
+        numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+      }
 
       numeric_registers_.swap(numeric_next_registers_);
+      numeric_int_registers_.swap(numeric_next_int_registers_);
 
       for (unsigned int register_id = 0; register_id < array_register_targets_.size(); ++register_id)
       {
@@ -185,7 +252,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     if (use_composite_programs && node_id == composite_output_boundary_id_)
     {
  #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_)
       {
         ensure_composite_body_jit_current();
         if (run_composite_body_jit(output_materialize_mask))
@@ -196,7 +262,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         }
       }
       bool used_jit_outputs = false;
-      if (!has_dynamic_registers_)
       {
         ensure_numeric_jit_state_current(
           composite_output_jit_,
@@ -217,17 +282,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       if (!used_jit_outputs)
 #endif
       {
-#ifdef EGRESS_LLVM_ORC_JIT
-        if (value_registers_dirty_)
-        {
-          ensure_value_registers_current();
-        }
-#endif
-        eval_program(composite_output_program_, temps_);
-        for (unsigned int output_id = 0; output_id < composite_output_program_.output_targets.size(); ++output_id)
-        {
-          outputs[output_id] = temps_[composite_output_program_.output_targets[output_id]];
-        }
+        throw std::runtime_error("JIT unavailable for composite output program");
       }
       composite_outputs_materialized = true;
       continue;
@@ -242,8 +297,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     NestedModuleRuntime & nested = nested_modules_[nested_it->second];
 #ifdef EGRESS_LLVM_ORC_JIT
     bool used_jit_inputs = false;
-    if (!has_dynamic_registers_ &&
-        nested_it->second < nested_input_jit_states_.size() &&
+    if (nested_it->second < nested_input_jit_states_.size() &&
         nested_input_jit_states_[nested_it->second])
     {
       NumericJitState & input_jit = *nested_input_jit_states_[nested_it->second];
@@ -268,17 +322,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     if (!used_jit_inputs)
 #endif
     {
-#ifdef EGRESS_LLVM_ORC_JIT
-    if (value_registers_dirty_)
-    {
-      ensure_value_registers_current();
-    }
-#endif
-    eval_program(nested.input_program, nested.input_temps);
-    for (unsigned int input_id = 0; input_id < nested.input_program.output_targets.size(); ++input_id)
-    {
-      nested.module->inputs[input_id] = nested.input_temps[nested.input_program.output_targets[input_id]];
-    }
+      throw std::runtime_error("JIT unavailable for nested module input program");
     }
     nested.module->process();
   }
@@ -290,17 +334,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
 
   if (!use_composite_programs)
   {
-#ifdef EGRESS_LLVM_ORC_JIT
-    if (value_registers_dirty_)
-    {
-      ensure_value_registers_current();
-    }
-#endif
-    eval_program(output_program, temps_);
-    for (unsigned int output_id = 0; output_id < output_program.output_targets.size(); ++output_id)
-    {
-      outputs[output_id] = temps_[output_program.output_targets[output_id]];
-    }
+    throw std::runtime_error("JIT kernel unavailable at process time");
   }
   else if (!composite_outputs_materialized)
   {
@@ -308,48 +342,25 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   }
 
 #ifdef EGRESS_LLVM_ORC_JIT
-  if (!used_composite_body_jit &&
-      use_composite_programs &&
-      !has_dynamic_registers_ &&
-      (ensure_numeric_jit_state_current(
-         composite_register_jit_,
-         composite_register_program_,
-         inputs,
-         static_cast<unsigned int>(inputs.size())),
-       composite_register_jit_.kernel != nullptr) &&
-      run_numeric_jit_state(composite_register_jit_, inputs))
+  if (!used_composite_body_jit)
   {
-    apply_numeric_register_targets(composite_register_jit_, register_program);
-  }
-  else
-#endif
-  {
-#ifdef EGRESS_LLVM_ORC_JIT
-    if (value_registers_dirty_)
+    if (use_composite_programs &&
+        (ensure_numeric_jit_state_current(
+           composite_register_jit_,
+           composite_register_program_,
+           inputs,
+           static_cast<unsigned int>(inputs.size())),
+         composite_register_jit_.kernel != nullptr) &&
+        run_numeric_jit_state(composite_register_jit_, inputs))
     {
-      ensure_value_registers_current();
+      apply_numeric_register_targets(composite_register_jit_, register_program);
     }
-#endif
-    eval_program(register_program, temps_);
-    for (unsigned int register_id = 0; register_id < register_program.register_targets.size(); ++register_id)
+    else
     {
-      const int32_t target = register_program.register_targets[register_id];
-      if (target >= 0)
-      {
-        next_registers_[register_id] = temps_[static_cast<std::size_t>(target)];
-      }
-      else
-      {
-        next_registers_[register_id] = registers_[register_id];
-      }
-    }
-    // Only swap here for composite modules; non-composite modules are swapped
-    // by the unconditional swap at the end of process() (line ~395).
-    if (use_composite_programs)
-    {
-      registers_.swap(next_registers_);
+      throw std::runtime_error("JIT unavailable for register program: " + jit_status_);
     }
   }
+#endif
 
   if (!delay_update_program_.output_targets.empty())
   {
@@ -360,8 +371,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     else
     {
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_ &&
-        (ensure_numeric_jit_state_current(
+      if ((ensure_numeric_jit_state_current(
            delay_update_jit_,
            delay_update_program_,
            inputs,
@@ -380,27 +390,12 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       else
 #endif
       {
-#ifdef EGRESS_LLVM_ORC_JIT
-        if (value_registers_dirty_)
-        {
-          ensure_value_registers_current();
-        }
-#endif
-        eval_program(delay_update_program_, temps_);
-        next_delay_states_ = delay_states_;
-        for (unsigned int delay_id = 0; delay_id < delay_update_program_.output_targets.size(); ++delay_id)
-        {
-          next_delay_states_[delay_id] = temps_[delay_update_program_.output_targets[delay_id]];
-        }
-        delay_states_.swap(next_delay_states_);
-#ifdef EGRESS_LLVM_ORC_JIT
-        value_delay_states_dirty_ = false;
-#endif
+        throw std::runtime_error("JIT unavailable for delay update program");
       }
     }
   }
 
-  if (!use_composite_programs || has_dynamic_registers_)
+  if (!use_composite_programs)
   {
     registers_.swap(next_registers_);
   }
@@ -584,90 +579,8 @@ void Module::reset_inputs_after_process()
 void Module::postprocess()
 {
   reset_inputs_after_process();
-
-  for (auto & out : outputs)
-  {
-    clamp_output_value(out);
-  }
 }
 
-double Module::clamp_output_scalar(double value)
-{
-  return std::fmax(-10.0, std::fmin(10.0, value));
-}
-
-void Module::clamp_output_value(Value & value)
-{
-  if (value.type == ValueType::Array)
-  {
-    for (auto & item : value.array_items)
-    {
-      clamp_output_value(item);
-    }
-    return;
-  }
-  if (value.type == ValueType::Matrix)
-  {
-    for (auto & item : value.matrix_items)
-    {
-      clamp_output_value(item);
-    }
-    return;
-  }
-  const double clamped = clamp_output_scalar(expr::to_float64(value));
-  value = expr::float_value(clamped);
-}
-
-void Module::resize_array_registers_to_inputs()
-{
-  if (!has_dynamic_registers_)
-  {
-    return;
-  }
-
-  for (unsigned int reg_id = 0; reg_id < register_array_specs_.size(); ++reg_id)
-  {
-    const RegisterArraySpec & spec = register_array_specs_[reg_id];
-    if (!spec.enabled)
-    {
-      continue;
-    }
-
-    if (spec.source_input_id >= inputs.size())
-    {
-      throw std::invalid_argument("Array register spec references unknown input id.");
-    }
-
-    const Value & input = inputs[spec.source_input_id];
-    if (input.type != ValueType::Array)
-    {
-      throw std::invalid_argument("Array register requires array-valued input.");
-    }
-
-    const std::size_t desired = input.array_items.size();
-    Value & reg = registers_[reg_id];
-    bool resized = false;
-
-    if (reg.type != ValueType::Array)
-    {
-      std::vector<Value> items(desired, spec.init_value);
-      reg = expr::array_value(std::move(items));
-      resized = true;
-    }
-    else if (reg.array_items.size() != desired)
-    {
-      std::vector<Value> items = reg.array_items;
-      items.resize(desired, spec.init_value);
-      reg = expr::array_value(std::move(items));
-      resized = true;
-    }
-
-    if (resized)
-    {
-      next_registers_[reg_id] = reg;
-    }
-  }
-}
 
 Module::CompiledProgram Module::compile_program(
   const std::vector<ExprSpecPtr> & output_exprs,

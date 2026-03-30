@@ -27,7 +27,12 @@ export class Graph {
   // ---- Module management ----
 
   addModule(name: string, specHandle: unknown): boolean {
-    return b.egress_graph_add_module(this._h, name, specHandle) as boolean
+    const ok = b.egress_graph_add_module(this._h, name, specHandle) as boolean
+    if (!ok) {
+      const cErr = b.egress_last_error()
+      if (cErr) throw new Error(`Failed to add module '${name}' to graph: ${cErr}`)
+    }
+    return ok
   }
 
   removeModule(name: string): boolean {
@@ -85,7 +90,10 @@ export class Graph {
   // ---- Processing ----
 
   process(): void {
+    const prevErr = b.egress_last_error() as string | null
     b.egress_graph_process(this._h)
+    const err = b.egress_last_error() as string | null
+    if (err && err !== prevErr) throw new Error(`graph process failed: ${err}`)
   }
 
   primeJit(): void {

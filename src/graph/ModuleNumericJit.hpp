@@ -1,6 +1,7 @@
 #pragma once
 
 #include "graph/GraphTypes.hpp"
+#include "jit/OrcJitEngine.hpp"
 
 #include <cstdint>
 
@@ -11,6 +12,8 @@ struct NumericInputInfo
   bool is_scalar = true;
   uint32_t array_slot = 0;
   uint32_t array_size = 0;
+  egress_jit::JitScalarType scalar_type = egress_jit::JitScalarType::Float;
+  egress_jit::JitScalarType array_element_type = egress_jit::JitScalarType::Float;
 };
 
 struct NumericOutputInfo
@@ -19,6 +22,8 @@ struct NumericOutputInfo
   uint32_t array_slot = 0;
   uint32_t matrix_rows = 0;
   uint32_t matrix_cols = 0;
+  egress_jit::JitScalarType scalar_type = egress_jit::JitScalarType::Float;
+  egress_jit::JitScalarType array_element_type = egress_jit::JitScalarType::Float;
 };
 
 enum class NumericValueKind
@@ -47,5 +52,8 @@ struct NumericRegInfo
   uint32_t matrix_cols = 0;
   bool scalar_is_constant = false;
   double scalar_constant = 0.0;
+  int64_t int_constant = 0;
+  egress_jit::JitScalarType scalar_type = egress_jit::JitScalarType::Float;
+  egress_jit::JitScalarType array_element_type = egress_jit::JitScalarType::Float;
 };
 }  // namespace egress_module_detail

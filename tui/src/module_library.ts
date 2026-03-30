@@ -570,12 +570,30 @@ export function topoWaveguide(nx = 4, ny = 4, name = 'TopoWaveguide'): ModuleTyp
   )
 }
 
+// ─── VCA ──────────────────────────────────────────────────────────────────────
+
+export function vca(name = 'VCA'): ModuleType {
+  return defineModule(
+    name,
+    ['audio', 'cv'],
+    ['out'],
+    {},
+    (inp) => ({
+      outputs: { out: mul(inp.get('audio'), inp.get('cv')) },
+      nextRegs: {},
+    }),
+    44100.0,
+    { audio: 0.0, cv: 0.0 },
+  )
+}
+
 // ─── Builtin registry ─────────────────────────────────────────────────────────
 
 /** Canonical type names shipped with the library. */
 export const BUILTIN_NAMES = [
   'VCO', 'Phaser', 'Phaser16', 'Clock',
   'Reverb', 'ADEnvelope', 'Compressor', 'BassDrum', 'TopoWaveguide',
+  'VCA',
   'Delay8', 'Delay16', 'Delay512', 'Delay4410', 'Delay44100',
 ] as const
 
@@ -590,6 +608,7 @@ export function loadBuiltins(typeRegistry: Map<string, ModuleType>): void {
   typeRegistry.set('Compressor',    compressor())
   typeRegistry.set('BassDrum',      bassDrum())
   typeRegistry.set('TopoWaveguide', topoWaveguide())
+  typeRegistry.set('VCA',           vca())
   // Common delay lengths
   typeRegistry.set('Delay8',     delayLine(8,     'Delay8'))
   typeRegistry.set('Delay16',    delayLine(16,    'Delay16'))

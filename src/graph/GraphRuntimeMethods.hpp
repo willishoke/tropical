@@ -397,7 +397,9 @@ bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_
     fused->input_kernel.temps.data(),
     44100.0,
     0,
-    fused->input_kernel.param_ptrs.data());
+    fused->input_kernel.param_ptrs.data(),
+    nullptr, nullptr, nullptr,
+    fused->input_kernel.int_temps.empty() ? nullptr : fused->input_kernel.int_temps.data());
 
   for (const auto & binding : fused->input_kernel.input_bindings)
   {
@@ -512,7 +514,9 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
     fused->temps.empty() ? nullptr : fused->temps.data(),
     fused->primitive_body_sample_rate,
     sample_index,
-    fused->param_ptrs.data());
+    fused->param_ptrs.data(),
+    nullptr, nullptr, nullptr,
+    fused->int_temps.empty() ? nullptr : fused->int_temps.data());
 
   for (const auto & binding : fused->primitive_body_modules)
   {
@@ -552,9 +556,8 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
         {
           return fail("primitive body runtime scalar output register out of range");
         }
-        const double clamped = Module::clamp_output_scalar(fused->temps[output_reg]);
         module.numeric_output_scalar_mask_[output_id] = true;
-        module.numeric_output_scalars_[output_id] = clamped;
+        module.numeric_output_scalars_[output_id] = fused->temps[output_reg];
       }
       else if (output_kind == egress_module_detail::NumericValueKind::Array)
       {
@@ -622,13 +625,59 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
         return fail("primitive body runtime scalar register out of range");
       }
       const int32_t target = binding.register_targets[register_id];
-      const double next_value =
-        target >= 0 && static_cast<std::size_t>(target) < fused->temps.size()
-          ? fused->temps[static_cast<std::size_t>(target)]
-          : fused->registers[fused_register_id];
+      const bool is_int = register_id < binding.register_int_mask.size() &&
+                          binding.register_int_mask[register_id];
+      const egress_jit::JitScalarType target_type =
+        register_id < binding.register_target_types.size()
+          ? binding.register_target_types[register_id]
+          : egress_jit::JitScalarType::Float;
+      double next_value;
+      int64_t next_int_value = 0;
+      if (target >= 0)
+      {
+        const auto t = static_cast<std::size_t>(target);
+        if (is_int)
+        {
+          if (target_type == egress_jit::JitScalarType::Float)
+          {
+            next_int_value = (t < fused->temps.size())
+              ? static_cast<int64_t>(fused->temps[t]) : 0;
+          }
+          else
+          {
+            next_int_value = (t < fused->int_temps.size())
+              ? fused->int_temps[t] : 0;
+          }
+          next_value = static_cast<double>(next_int_value);
+        }
+        else
+        {
+          if (target_type == egress_jit::JitScalarType::Int || target_type == egress_jit::JitScalarType::Bool)
+          {
+            next_value = (t < fused->int_temps.size())
+              ? static_cast<double>(fused->int_temps[t]) : fused->registers[fused_register_id];
+          }
+          else
+          {
+            next_value = (t < fused->temps.size())
+              ? fused->temps[t] : fused->registers[fused_register_id];
+          }
+        }
+      }
+      else
+      {
+        next_value = fused->registers[fused_register_id];
+        if (is_int && register_id < module.numeric_int_registers_.size())
+          next_int_value = module.numeric_int_registers_[register_id];
+      }
       fused->registers[fused_register_id] = next_value;
       module.numeric_registers_[register_id] = next_value;
       module.numeric_next_registers_[register_id] = next_value;
+      if (is_int && register_id < module.numeric_int_registers_.size())
+      {
+        module.numeric_int_registers_[register_id] = next_int_value;
+        module.numeric_next_int_registers_[register_id] = next_int_value;
+      }
     }
 
     for (unsigned int register_id = 0; register_id < binding.array_register_targets.size(); ++register_id)
@@ -805,7 +854,9 @@ bool Graph::run_fused_mix_kernel(RuntimeState & runtime, double & mixed) const
     fused->mix_kernel.temps.data(),
     44100.0,
     0,
-    fused->mix_kernel.param_ptrs.data());
+    fused->mix_kernel.param_ptrs.data(),
+    nullptr, nullptr, nullptr,
+    fused->mix_kernel.int_temps.empty() ? nullptr : fused->mix_kernel.int_temps.data());
 
   for (const auto & binding : fused->mix_kernel.mix_bindings)
   {
@@ -1024,11 +1075,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
         output_id < slot.indexed_prev_output_values.size() ? slot.indexed_prev_output_values[output_id] : std::vector<Value>{});
     }
 
-    if (slot.module->has_dynamic_registers_)
-    {
-      mark_ineligible("graph fusion disabled for dynamic array_state registers");
-      return fused;
-    }
+
 
     if (!is_fused_numeric_candidate(slot.input_program))
     {
@@ -1233,7 +1280,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
       ++active_module_count;
 
       Module & module = *slot.module;
-      if (module.has_nested_modules_ || module.has_delay_states_ || module.has_dynamic_registers_)
+      if (module.has_nested_modules_ || module.has_delay_states_)
       {
         continue;
       }
@@ -1316,6 +1363,8 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
       binding.register_array_slot = state.register_array_slot;
       binding.array_register_targets = state.array_register_targets;
       binding.array_register_can_swap = state.array_register_can_swap;
+      binding.register_int_mask = state.register_int_mask;
+      binding.register_target_types = state.register_target_types;
       binding.output_registers.reserve(module.program_.output_targets.size());
       for (uint32_t output_reg : module.program_.output_targets)
       {
@@ -1375,6 +1424,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
           }
         }
         fused->temps.assign(fused->program.register_count, 0.0);
+        fused->int_temps.assign(fused->program.register_count, 0);
         fused->array_ptrs.resize(fused->array_storage.size(), nullptr);
         fused->array_sizes.resize(fused->array_storage.size(), 0);
         for (std::size_t array_id = 0; array_id < fused->array_storage.size(); ++array_id)
@@ -2122,6 +2172,7 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
       kernel_state.scalar_inputs.resize(fused->source_outputs.size(), 0.0);
     }
     kernel_state.temps.assign(kernel_state.program.register_count, 0.0);
+    kernel_state.int_temps.assign(kernel_state.program.register_count, 0);
     kernel_state.array_ptrs.resize(kernel_state.array_storage.size(), nullptr);
     kernel_state.array_sizes.resize(kernel_state.array_storage.size(), 0);
     for (std::size_t array_id = 0; array_id < kernel_state.array_storage.size(); ++array_id)
@@ -2659,7 +2710,7 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
             throw std::out_of_range("Array index out of range.");
           }
           registers[instr.dst] =
-            expr::float_value(Module::clamp_output_scalar((*numeric_values)[static_cast<std::size_t>(instr.ref_index)]));
+            expr::float_value((*numeric_values)[static_cast<std::size_t>(instr.ref_index)]);
           break;
         }
       }
@@ -2699,7 +2750,7 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
           throw std::out_of_range("Array index out of range.");
         }
         registers[instr.dst] =
-          expr::float_value(Module::clamp_output_scalar((*numeric_values)[static_cast<std::size_t>(instr.ref_index)]));
+          expr::float_value((*numeric_values)[static_cast<std::size_t>(instr.ref_index)]);
         break;
       }
 #endif

@@ -15,7 +15,7 @@ import {
   paramExpr, triggerParamExpr,
 } from './expr.js'
 import {
-  defineModule, ModuleType, ModuleInstance, ArrayStateSpec, delay,
+  defineModule, ModuleType, ModuleInstance, delay,
   valueHandle, SymbolMap, ValueCoercible,
 } from './module.js'
 import { Graph } from './graph.js'
@@ -33,10 +33,6 @@ export type ExprNode =
   | ExprNode[]
   | { op: string; [key: string]: unknown }
 
-export interface ArrayStateJSON {
-  array_state: string   // input name whose shape the register mirrors
-  init?: number
-}
 
 export interface NestedModuleJSON {
   type: string
@@ -47,8 +43,7 @@ export interface ModuleDefJSON {
   name: string
   inputs: string[]
   outputs: string[]
-  /** Register initial values. Use { array_state, init } for dynamic array registers. */
-  regs?: Record<string, number | boolean | number[] | number[][] | ArrayStateJSON>
+  regs?: Record<string, number | boolean | number[] | number[][]>
   /** Named delay nodes, declared before any expression that references them. */
   delays?: Record<string, { update: ExprNode; init?: number }>
   /** Named nested sub-module instances. */
@@ -387,13 +382,9 @@ export function loadModuleFromJSON(
   const nestedRaw   = def.nested ?? {}
 
   // Convert regs to defineModule format
-  const regsForDefine: Record<string, ValueCoercible | ArrayStateSpec> = {}
+  const regsForDefine: Record<string, ValueCoercible> = {}
   for (const [name, val] of Object.entries(regsRaw)) {
-    if (val !== null && typeof val === 'object' && !Array.isArray(val) && 'array_state' in val) {
-      regsForDefine[name] = new ArrayStateSpec((val as ArrayStateJSON).array_state, (val as ArrayStateJSON).init ?? 0.0)
-    } else {
-      regsForDefine[name] = val as ValueCoercible
-    }
+    regsForDefine[name] = val as ValueCoercible
   }
 
   // Parse input defaults (build each default through the expr builder so they become SignalExpr)

@@ -85,20 +85,6 @@ export class SymbolMap {
   }
 }
 
-// ---------- ArrayStateSpec ----------
-
-export class ArrayStateSpec {
-  constructor(
-    public readonly inputName: string,
-    public readonly init: number = 0.0,
-  ) {}
-}
-
-/** Declare a dynamic array register whose size mirrors a named input. */
-export function arrayState(inputName: string, init = 0.0): ArrayStateSpec {
-  return new ArrayStateSpec(inputName, init)
-}
-
 // ---------- delay() DSL function ----------
 
 /** Create a one-sample delay. Only valid inside defineModule process callbacks. */
@@ -119,7 +105,6 @@ export type ValueCoercible = boolean | number | number[] | number[][]
 
 function scalarValueHandle(v: boolean | number): unknown {
   if (typeof v === 'boolean') return b.check(b.egress_value_bool(v), 'value_bool')
-  if (Number.isInteger(v))   return b.check(b.egress_value_int(v),   'value_int')
   return b.check(b.egress_value_float(v), 'value_float')
 }
 
@@ -151,7 +136,6 @@ export function valueHandle(v: ValueCoercible): unknown {
 interface RegisterSpec {
   bodyH: unknown | null
   initH: unknown
-  arraySpec: { sourceInputId: number; init: number } | null
 }
 
 interface DelaySpecHandle {
@@ -214,8 +198,7 @@ export class ModuleType {
     const d = this._def
     const specH = this._buildSpec()
     try {
-      const ok = graph.addModule(name, specH)
-      if (!ok) throw new Error(`Failed to add module '${name}' to graph.`)
+      graph.addModule(name, specH)
     } finally {
       b.egress_module_spec_free(specH)
     }
@@ -231,8 +214,7 @@ export class ModuleType {
     const name = graph.nextName(d.typeName)
     const specH = this._buildSpec()
     try {
-      const ok = graph.addModule(name, specH)
-      if (!ok) throw new Error(`Failed to add module '${name}' to graph.`)
+      graph.addModule(name, specH)
     } finally {
       b.egress_module_spec_free(specH)
     }
@@ -277,12 +259,8 @@ export class ModuleType {
     for (const exprH of d.outputExprHandles) {
       b.egress_nested_spec_add_output(nestedH, exprH)
     }
-    for (const { bodyH, initH, arraySpec } of d.registerSpecs) {
-      if (arraySpec !== null) {
-        b.egress_nested_spec_add_register_array(nestedH, arraySpec.sourceInputId, initH)
-      } else {
-        b.egress_nested_spec_add_register(nestedH, bodyH, initH)
-      }
+    for (const { bodyH, initH } of d.registerSpecs) {
+      b.egress_nested_spec_add_register(nestedH, bodyH, initH)
     }
     for (const { initH, updateH } of d.delaySpecHandles) {
       b.egress_nested_spec_add_delay_state(nestedH, initH, updateH)
@@ -306,12 +284,8 @@ export class ModuleType {
     for (const exprH of d.outputExprHandles) {
       b.egress_module_spec_add_output(specH, exprH)
     }
-    for (const { bodyH, initH, arraySpec } of d.registerSpecs) {
-      if (arraySpec !== null) {
-        b.egress_module_spec_add_register_array(specH, arraySpec.sourceInputId, initH)
-      } else {
-        b.egress_module_spec_add_register(specH, bodyH, initH)
-      }
+    for (const { bodyH, initH } of d.registerSpecs) {
+      b.egress_module_spec_add_register(specH, bodyH, initH)
     }
     for (const { initH, updateH } of d.delaySpecHandles) {
       b.egress_module_spec_add_delay_state(specH, initH, updateH)
@@ -398,7 +372,7 @@ export class InputPort {
 
 // ---------- defineModule ----------
 
-type RegsInit = Record<string, ValueCoercible | ArrayStateSpec>
+type RegsInit = Record<string, ValueCoercible>
 
 interface ProcessResult {
   outputs: Record<string, ExprCoercible>
@@ -421,20 +395,11 @@ export function defineModule(
 
   // Parse regs
   const regNames: string[] = []
-  const regInitValues: (ValueCoercible)[] = []
-  const regArraySpecs: ({ sourceInputId: number; init: number } | null)[] = []
+  const regInitValues: ValueCoercible[] = []
 
   for (const [regName, regInit] of Object.entries(regs)) {
     regNames.push(regName)
-    if (regInit instanceof ArrayStateSpec) {
-      const srcId = inputNames.indexOf(regInit.inputName)
-      if (srcId === -1) throw new Error(`arrayState input '${regInit.inputName}' not found.`)
-      regInitValues.push(0.0)
-      regArraySpecs.push({ sourceInputId: srcId, init: regInit.init })
-    } else {
-      regInitValues.push(regInit as ValueCoercible)
-      regArraySpecs.push(null)
-    }
+    regInitValues.push(regInit as ValueCoercible)
   }
 
   // Parse input defaults
@@ -477,9 +442,7 @@ export function defineModule(
   for (const [regName, regVal] of Object.entries(result.nextRegs)) {
     const idx = regNames.indexOf(regName)
     if (idx === -1) throw new Error(`nextRegs references unknown register '${regName}'.`)
-    if (regArraySpecs[idx] === null) {
-      regUpdateExprs[idx] = coerce(regVal)
-    }
+    regUpdateExprs[idx] = coerce(regVal)
   }
 
   // Build C value handles for register initial values
@@ -487,16 +450,9 @@ export function defineModule(
   const registerSpecs: RegisterSpec[] = []
 
   for (let i = 0; i < regNames.length; i++) {
-    const arraySpec = regArraySpecs[i]
-    const initVal = arraySpec !== null ? arraySpec.init : (regInitValues[i] as ValueCoercible)
-    const initH = valueHandle(initVal as ValueCoercible)
+    const initH = valueHandle(regInitValues[i])
     liveValueHandles.push(initH)
-
-    if (arraySpec !== null) {
-      registerSpecs.push({ bodyH: null, initH, arraySpec })
-    } else {
-      registerSpecs.push({ bodyH: regUpdateExprs[i]?._h ?? null, initH, arraySpec: null })
-    }
+    registerSpecs.push({ bodyH: regUpdateExprs[i]?._h ?? null, initH })
   }
 
   // Build delay spec handles

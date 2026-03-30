@@ -66,6 +66,65 @@ inline bool copy_numeric_aggregate_value(const Value & value, std::vector<double
 }
 }
 
+namespace
+{
+egress_jit::JitScalarType infer_jit_scalar_type(
+  ExprKind kind,
+  egress_jit::JitScalarType a,
+  egress_jit::JitScalarType b = egress_jit::JitScalarType::Float)
+{
+  using JST = egress_jit::JitScalarType;
+  switch (kind)
+  {
+    case ExprKind::Less:
+    case ExprKind::LessEqual:
+    case ExprKind::Greater:
+    case ExprKind::GreaterEqual:
+    case ExprKind::Equal:
+    case ExprKind::NotEqual:
+    case ExprKind::Not:
+      return JST::Bool;
+
+    case ExprKind::BitAnd:
+    case ExprKind::BitOr:
+    case ExprKind::BitXor:
+    case ExprKind::LShift:
+    case ExprKind::RShift:
+    case ExprKind::BitNot:
+    case ExprKind::FloorDiv:
+    case ExprKind::SampleIndex:
+      return JST::Int;
+
+    case ExprKind::Div:
+    case ExprKind::Sin:
+    case ExprKind::Log:
+    case ExprKind::Pow:
+    case ExprKind::SampleRate:
+    case ExprKind::SmoothedParam:
+      return JST::Float;
+
+    case ExprKind::Add:
+    case ExprKind::Sub:
+    case ExprKind::Mul:
+    case ExprKind::Mod:
+      if (a == JST::Float || b == JST::Float) return JST::Float;
+      return JST::Int;
+
+    case ExprKind::Abs:
+    case ExprKind::Neg:
+      return a;
+
+    case ExprKind::Clamp:
+    case ExprKind::Select:
+      if (a == JST::Float || b == JST::Float) return JST::Float;
+      return JST::Int;
+
+    default:
+      return JST::Float;
+  }
+}
+} // anonymous namespace
+
 bool Module::supports_numeric_jit_expr_kind(ExprKind kind)
 {
   switch (kind)
@@ -116,11 +175,10 @@ bool Module::supports_numeric_jit_expr_kind(ExprKind kind)
 
 void Module::assign_scalar_numeric_value(Value & dst, double value)
 {
-  const double clamped = clamp_output_scalar(value);
   dst.type = ValueType::Float;
-  dst.int_value = static_cast<int64_t>(clamped);
-  dst.float_value = clamped;
-  dst.bool_value = clamped != 0.0;
+  dst.int_value = static_cast<int64_t>(value);
+  dst.float_value = value;
+  dst.bool_value = value != 0.0;
   dst.array_items.clear();
   dst.matrix_items.clear();
   dst.matrix_rows = 0;
@@ -128,18 +186,60 @@ void Module::assign_scalar_numeric_value(Value & dst, double value)
   dst.aggregate_scalar_type = AggregateScalarType::None;
 }
 
+void Module::assign_jit_scalar_value(
+  Value & dst,
+  egress_jit::JitScalarType type,
+  double float_val,
+  int64_t int_val)
+{
+  dst.array_items.clear();
+  dst.matrix_items.clear();
+  dst.matrix_rows = 0;
+  dst.matrix_cols = 0;
+  dst.aggregate_scalar_type = AggregateScalarType::None;
+
+  if (type == egress_jit::JitScalarType::Float)
+  {
+    dst.type = ValueType::Float;
+    dst.int_value = static_cast<int64_t>(float_val);
+    dst.float_value = float_val;
+    dst.bool_value = float_val != 0.0;
+  }
+  else if (type == egress_jit::JitScalarType::Int)
+  {
+    dst.type = ValueType::Int;
+    dst.int_value = int_val;
+    dst.float_value = static_cast<double>(int_val);
+    dst.bool_value = int_val != 0;
+  }
+  else // Bool
+  {
+    const bool b = int_val != 0;
+    dst.type = ValueType::Bool;
+    dst.bool_value = b;
+    dst.int_value = b ? 1 : 0;
+    dst.float_value = b ? 1.0 : 0.0;
+  }
+}
+
 void Module::assign_numeric_value_to(
   Value & dst,
   const NumericOutputInfo & info,
   uint32_t scalar_register,
   const std::vector<double> & numeric_temps,
-  const std::vector<std::vector<double>> & numeric_array_storage)
+  const std::vector<std::vector<double>> & numeric_array_storage,
+  const std::vector<int64_t> * int_temps,
+  const std::vector<std::vector<int64_t>> * int_array_storage)
 {
   switch (static_cast<NumericValueKind>(info.kind))
   {
     case NumericValueKind::Scalar:
-      assign_scalar_numeric_value(dst, numeric_temps[scalar_register]);
+    {
+      const double fval = scalar_register < numeric_temps.size() ? numeric_temps[scalar_register] : 0.0;
+      const int64_t ival = (int_temps && scalar_register < int_temps->size()) ? (*int_temps)[scalar_register] : 0;
+      assign_jit_scalar_value(dst, info.scalar_type, fval, ival);
       return;
+    }
     case NumericValueKind::Array:
     {
       const auto & values = numeric_array_storage[info.array_slot];
@@ -282,7 +382,9 @@ const Value & Module::materialize_output_value(unsigned int output_id, bool prev
         numeric_output_info_[output_id],
         program_.output_targets[output_id],
         numeric_temps_,
-        numeric_array_storage_);
+        numeric_array_storage_,
+        &numeric_int_temps_,
+        &numeric_int_array_storage_);
       return destinations[output_id];
     }
   }
@@ -366,6 +468,12 @@ void Module::capture_numeric_scalar_outputs(
       numeric_output_scalar_mask_[output_id] = false;
       continue;
     }
+    if (output_info[output_id].scalar_type != egress_jit::JitScalarType::Float)
+    {
+      // Int/Bool outputs are not cached as float scalars; callers use the slow path.
+      numeric_output_scalar_mask_[output_id] = false;
+      continue;
+    }
     const uint32_t scalar_register = compiled_program.output_targets[output_id];
     if (scalar_register >= temps.size())
     {
@@ -373,7 +481,7 @@ void Module::capture_numeric_scalar_outputs(
       continue;
     }
     numeric_output_scalar_mask_[output_id] = true;
-    numeric_output_scalars_[output_id] = Module::clamp_output_scalar(temps[scalar_register]);
+    numeric_output_scalars_[output_id] = temps[scalar_register];
   }
 }
 
@@ -556,6 +664,7 @@ bool Module::sync_numeric_inputs_from_values()
   if (numeric_inputs_.size() < inputs.size())
   {
     numeric_inputs_.assign(inputs.size(), 0.0);
+    numeric_int_inputs_.assign(inputs.size(), 0);
   }
 
   if (numeric_input_info_.size() != inputs.size())
@@ -607,6 +716,13 @@ bool Module::sync_numeric_inputs_from_values()
         return false;
       }
       numeric_inputs_[input_id] = expr::to_float64(input);
+      if (info.scalar_type != egress_jit::JitScalarType::Float)
+      {
+        if (input_id < numeric_int_inputs_.size())
+        {
+          numeric_int_inputs_[input_id] = input.int_value;
+        }
+      }
       continue;
     }
 
@@ -714,14 +830,29 @@ bool Module::configure_numeric_inputs_for_jit(
   for (unsigned int input_id = 0; input_id < current_inputs.size(); ++input_id)
   {
     const Value & input = current_inputs[input_id];
+    NumericInputInfo & info = state.input_info[input_id];
+
     if (input.type == ValueType::Matrix)
     {
       return false;
     }
+
+    // Determine scalar type
+    if (input.type == ValueType::Int)
+      info.scalar_type = egress_jit::JitScalarType::Int;
+    else if (input.type == ValueType::Bool)
+      info.scalar_type = egress_jit::JitScalarType::Bool;
+
     if (input.type != ValueType::Array)
     {
       continue;
     }
+
+    // Array element type
+    if (input.aggregate_scalar_type == AggregateScalarType::Int)
+      info.array_element_type = egress_jit::JitScalarType::Int;
+    else if (input.aggregate_scalar_type == AggregateScalarType::Bool)
+      info.array_element_type = egress_jit::JitScalarType::Bool;
 
     uint32_t array_slot = 0;
     if (!add_array_value_to_jit_table(state.array_storage, input, array_slot))
@@ -729,7 +860,6 @@ bool Module::configure_numeric_inputs_for_jit(
       return false;
     }
 
-    NumericInputInfo & info = state.input_info[input_id];
     info.is_scalar = false;
     info.array_slot = array_slot;
     info.array_size = static_cast<uint32_t>(input.array_items.size());
@@ -767,6 +897,16 @@ bool Module::numeric_input_layout_matches(
     {
       return false;
     }
+    // Check scalar type compatibility — type change requires recompile
+    egress_jit::JitScalarType current_type = egress_jit::JitScalarType::Float;
+    if (input.type == ValueType::Int)
+      current_type = egress_jit::JitScalarType::Int;
+    else if (input.type == ValueType::Bool)
+      current_type = egress_jit::JitScalarType::Bool;
+    if (current_type != info.scalar_type)
+    {
+      return false;
+    }
   }
 
   return true;
@@ -799,7 +939,22 @@ bool Module::sync_numeric_inputs_from_values(
       {
         return false;
       }
-      state.inputs[input_id] = expr::to_float64(input);
+      if (info.scalar_type == egress_jit::JitScalarType::Float)
+      {
+        state.inputs[input_id] = expr::to_float64(input);
+      }
+      else if (info.scalar_type == egress_jit::JitScalarType::Int)
+      {
+        if (input_id >= state.int_inputs.size())
+          return false;
+        state.int_inputs[input_id] = expr::to_int64(input);
+      }
+      else // Bool
+      {
+        if (input_id >= state.int_inputs.size())
+          return false;
+        state.int_inputs[input_id] = expr::is_truthy(input) ? 1LL : 0LL;
+      }
       continue;
     }
 
@@ -988,12 +1143,25 @@ bool Module::update_numeric_delay_states_from_outputs(
     if (kind == NumericValueKind::Scalar)
     {
       const uint32_t reg = compiled_program.output_targets[output_id];
-      if (reg >= state.temps.size())
+      double scalar_val;
+      if (state.output_info[output_id].scalar_type != egress_jit::JitScalarType::Float)
       {
-        return false;
+        if (reg >= state.int_temps.size())
+        {
+          return false;
+        }
+        scalar_val = static_cast<double>(state.int_temps[reg]);
+      }
+      else
+      {
+        if (reg >= state.temps.size())
+        {
+          return false;
+        }
+        scalar_val = state.temps[reg];
       }
       numeric_delay_scalar_mask_[delay_id] = true;
-      numeric_delay_scalars_[delay_id] = clamp_output_scalar(state.temps[reg]);
+      numeric_delay_scalars_[delay_id] = scalar_val;
       numeric_delay_arrays_[delay_id].clear();
       continue;
     }
@@ -1007,10 +1175,6 @@ bool Module::update_numeric_delay_states_from_outputs(
       numeric_delay_array_mask_[delay_id] = true;
       auto & dst = numeric_delay_arrays_[delay_id];
       dst = state.array_storage[array_slot];
-      for (double & value : dst)
-      {
-        value = clamp_output_scalar(value);
-      }
       continue;
     }
     return false;
@@ -1140,6 +1304,8 @@ bool Module::build_numeric_program_impl(
   state.register_array_slot.assign(registers.size(), 0);
   state.array_register_targets.assign(registers.size(), -1);
   state.array_register_can_swap.assign(registers.size(), false);
+  state.register_int_mask.assign(registers.size(), false);
+  state.register_target_types.assign(registers.size(), egress_jit::JitScalarType::Float);
   state.output_info.clear();
 
   if (!configure_numeric_inputs_for_jit(state, current_inputs))
@@ -1165,6 +1331,10 @@ bool Module::build_numeric_program_impl(
     else if (reg.type == ValueType::Matrix)
     {
       return false;
+    }
+    else if (reg.type == ValueType::Int || reg.type == ValueType::Bool)
+    {
+      state.register_int_mask[reg_slot] = true;
     }
   }
 
@@ -1222,6 +1392,19 @@ bool Module::build_numeric_program_impl(
           reg_info[instr.dst].kind = NumericValueKind::Scalar;
           reg_info[instr.dst].scalar_is_constant = true;
           reg_info[instr.dst].scalar_constant = jit_instr.literal;
+          if (instr.literal.type == ValueType::Int)
+          {
+            jit_instr.int_literal = instr.literal.int_value;
+            reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Int;
+            reg_info[instr.dst].int_constant = instr.literal.int_value;
+          }
+          else if (instr.literal.type == ValueType::Bool)
+          {
+            jit_instr.int_literal = instr.literal.bool_value ? 1LL : 0LL;
+            reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Bool;
+            reg_info[instr.dst].int_constant = jit_instr.int_literal;
+          }
+          // else: Float (default)
         }
         break;
       }
@@ -1232,14 +1415,19 @@ bool Module::build_numeric_program_impl(
         }
         if (state.input_info[instr.slot_id].is_scalar)
         {
+          const egress_jit::JitScalarType input_type = state.input_info[instr.slot_id].scalar_type;
           jit_instr.op = egress_jit::NumericOp::InputValue;
+          jit_instr.src_a_type = input_type;
+          jit_instr.dst_type = input_type;
           reg_info[instr.dst].kind = NumericValueKind::Scalar;
+          reg_info[instr.dst].scalar_type = input_type;
         }
         else
         {
           reg_info[instr.dst].kind = NumericValueKind::Array;
           reg_info[instr.dst].array_slot = state.input_info[instr.slot_id].array_slot;
           reg_info[instr.dst].array_size = state.input_info[instr.slot_id].array_size;
+          reg_info[instr.dst].array_element_type = state.input_info[instr.slot_id].array_element_type;
           emit_instruction = false;
         }
         break;
@@ -1257,8 +1445,15 @@ bool Module::build_numeric_program_impl(
         }
         else
         {
+          const bool reg_is_int = instr.slot_id < state.register_int_mask.size() &&
+                                  state.register_int_mask[instr.slot_id];
+          const egress_jit::JitScalarType reg_type =
+            reg_is_int ? egress_jit::JitScalarType::Int : egress_jit::JitScalarType::Float;
           jit_instr.op = egress_jit::NumericOp::RegisterValue;
+          jit_instr.src_a_type = reg_type;
+          jit_instr.dst_type = reg_type;
           reg_info[instr.dst].kind = NumericValueKind::Scalar;
+          reg_info[instr.dst].scalar_type = reg_type;
         }
         break;
       case ExprKind::SampleRate:
@@ -1268,6 +1463,7 @@ bool Module::build_numeric_program_impl(
       case ExprKind::SampleIndex:
         jit_instr.op = egress_jit::NumericOp::SampleIndex;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Int;
         break;
       case ExprKind::ArrayPack:
       {
@@ -1356,6 +1552,7 @@ bool Module::build_numeric_program_impl(
       case ExprKind::Not:
         jit_instr.op = egress_jit::NumericOp::Not;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Bool;
         break;
       case ExprKind::Less:
       case ExprKind::LessEqual:
@@ -1429,6 +1626,7 @@ bool Module::build_numeric_program_impl(
             break;
         }
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Bool;
         break;
       }
       case ExprKind::Add:
@@ -1497,6 +1695,7 @@ bool Module::build_numeric_program_impl(
         }
         jit_instr.op = egress_jit::NumericOp::Add;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = infer_jit_scalar_type(ExprKind::Add, lhs.scalar_type, rhs.scalar_type);
         break;
       }
       case ExprKind::Sub:
@@ -1526,6 +1725,7 @@ bool Module::build_numeric_program_impl(
         }
         jit_instr.op = egress_jit::NumericOp::Sub;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = infer_jit_scalar_type(ExprKind::Sub, lhs.scalar_type, rhs.scalar_type);
         break;
       }
       case ExprKind::Mul:
@@ -1581,6 +1781,7 @@ bool Module::build_numeric_program_impl(
         }
         jit_instr.op = egress_jit::NumericOp::Mul;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = infer_jit_scalar_type(ExprKind::Mul, lhs.scalar_type, rhs.scalar_type);
         break;
       }
       case ExprKind::Div:
@@ -1623,6 +1824,7 @@ bool Module::build_numeric_program_impl(
         }
         jit_instr.op = egress_jit::NumericOp::Div;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Float;
         break;
       }
       case ExprKind::MatMul:
@@ -1677,59 +1879,75 @@ bool Module::build_numeric_program_impl(
         }
         jit_instr.op = egress_jit::NumericOp::Mod;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = infer_jit_scalar_type(ExprKind::Mod, lhs.scalar_type, rhs.scalar_type);
         break;
       }
       case ExprKind::FloorDiv:
         jit_instr.op = egress_jit::NumericOp::FloorDiv;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Int;
         break;
       case ExprKind::BitAnd:
         jit_instr.op = egress_jit::NumericOp::BitAnd;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Int;
         break;
       case ExprKind::BitOr:
         jit_instr.op = egress_jit::NumericOp::BitOr;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Int;
         break;
       case ExprKind::BitXor:
         jit_instr.op = egress_jit::NumericOp::BitXor;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Int;
         break;
       case ExprKind::LShift:
         jit_instr.op = egress_jit::NumericOp::LShift;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Int;
         break;
       case ExprKind::RShift:
         jit_instr.op = egress_jit::NumericOp::RShift;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Int;
         break;
       case ExprKind::Abs:
         jit_instr.op = egress_jit::NumericOp::Abs;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = reg_info[instr.src_a].scalar_type;
         break;
       case ExprKind::Clamp:
         jit_instr.op = egress_jit::NumericOp::Clamp;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = infer_jit_scalar_type(
+          ExprKind::Clamp, reg_info[instr.src_a].scalar_type, reg_info[instr.src_b].scalar_type);
         break;
       case ExprKind::Select:
         jit_instr.op = egress_jit::NumericOp::Select;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = infer_jit_scalar_type(
+          ExprKind::Select, reg_info[instr.src_b].scalar_type, reg_info[instr.src_c].scalar_type);
         break;
       case ExprKind::Log:
         jit_instr.op = egress_jit::NumericOp::Log;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Float;
         break;
       case ExprKind::Sin:
         jit_instr.op = egress_jit::NumericOp::Sin;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Float;
         break;
       case ExprKind::Neg:
         jit_instr.op = egress_jit::NumericOp::Neg;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = reg_info[instr.src_a].scalar_type;
         break;
       case ExprKind::BitNot:
         jit_instr.op = egress_jit::NumericOp::BitNot;
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Int;
         break;
       case ExprKind::SmoothedParam:
       {
@@ -1795,6 +2013,22 @@ bool Module::build_numeric_program_impl(
         reg_info[instr.dst].scalar_is_constant = false;
         reg_info[instr.dst].scalar_constant = 0.0;
       }
+      if (reg_info[instr.dst].kind == NumericValueKind::Scalar)
+      {
+        jit_instr.dst_type = reg_info[instr.dst].scalar_type;
+      }
+      if (instr.src_a < reg_info.size() && reg_info[instr.src_a].kind == NumericValueKind::Scalar)
+      {
+        jit_instr.src_a_type = reg_info[instr.src_a].scalar_type;
+      }
+      if (instr.src_b < reg_info.size() && reg_info[instr.src_b].kind == NumericValueKind::Scalar)
+      {
+        jit_instr.src_b_type = reg_info[instr.src_b].scalar_type;
+      }
+      if (instr.src_c < reg_info.size() && reg_info[instr.src_c].kind == NumericValueKind::Scalar)
+      {
+        jit_instr.src_c_type = reg_info[instr.src_c].scalar_type;
+      }
       numeric_program.instructions.push_back(jit_instr);
     }
   }
@@ -1811,6 +2045,8 @@ bool Module::build_numeric_program_impl(
     output_info.array_slot = reg_info[output_reg].array_slot;
     output_info.matrix_rows = reg_info[output_reg].matrix_rows;
     output_info.matrix_cols = reg_info[output_reg].matrix_cols;
+    output_info.scalar_type = reg_info[output_reg].scalar_type;
+    output_info.array_element_type = reg_info[output_reg].array_element_type;
     state.output_info.push_back(output_info);
   }
 
@@ -1833,6 +2069,7 @@ bool Module::build_numeric_program_impl(
       {
         return false;
       }
+      state.register_target_types[reg_slot] = reg_info[target].scalar_type;
       continue;
     }
 
@@ -1902,6 +2139,7 @@ bool Module::build_numeric_program(const std::vector<Value> & current_inputs, eg
   register_array_slot_    = std::move(tmp.register_array_slot);
   array_register_targets_ = std::move(tmp.array_register_targets);
   array_register_can_swap_= std::move(tmp.array_register_can_swap);
+  register_target_types_  = std::move(tmp.register_target_types);
   numeric_input_info_     = std::move(tmp.input_info);
   numeric_output_info_    = std::move(tmp.output_info);
   return true;
@@ -1965,6 +2203,8 @@ void Module::initialize_numeric_jit_state(
 
   state.temps.assign(state.prepared.program.register_count, 0.0);
   state.inputs.assign(jit_inputs.size(), 0.0);
+  state.int_temps.assign(state.prepared.program.register_count, 0);
+  state.int_inputs.assign(jit_inputs.size(), 0);
   state.array_ptrs.resize(state.array_storage.size(), nullptr);
   state.array_sizes.resize(state.array_storage.size(), 0);
   for (std::size_t i = 0; i < state.array_storage.size(); ++i)
@@ -1972,6 +2212,9 @@ void Module::initialize_numeric_jit_state(
     state.array_ptrs[i] = state.array_storage[i].empty() ? nullptr : state.array_storage[i].data();
     state.array_sizes[i] = static_cast<uint64_t>(state.array_storage[i].size());
   }
+  state.int_array_storage.resize(state.array_storage.size());
+  state.int_array_ptrs.resize(state.array_storage.size(), nullptr);
+  state.int_array_sizes.resize(state.array_storage.size(), 0);
 #ifdef EGRESS_PROFILE
   state.instruction_count = static_cast<uint64_t>(numeric_program.instructions.size());
 #endif
@@ -2132,6 +2375,7 @@ void Module::initialize_composite_body_jit(const std::vector<Value> & current_in
 
   composite_body_jit_.state.kernel = *kernel_or_err;
   composite_body_jit_.state.temps.assign(composite_body_jit_.state.prepared.program.register_count, 0.0);
+  composite_body_jit_.state.int_temps.assign(composite_body_jit_.state.prepared.program.register_count, 0);
   composite_body_jit_.state.inputs.assign(jit_inputs.size(), 0.0);
   composite_body_jit_.state.array_ptrs.resize(composite_body_jit_.state.array_storage.size(), nullptr);
   composite_body_jit_.state.array_sizes.resize(composite_body_jit_.state.array_storage.size(), 0);
@@ -2185,7 +2429,11 @@ bool Module::run_numeric_jit_state(
     state.temps.data(),
     sample_rate_,
     sample_index_,
-    state.param_ptrs.data());
+    state.param_ptrs.data(),
+    state.int_inputs.data(),
+    numeric_int_registers_.data(),
+    state.int_array_ptrs.empty() ? nullptr : state.int_array_ptrs.data(),
+    state.int_temps.data());
 
   return true;
 }
@@ -2281,7 +2529,9 @@ void Module::materialize_numeric_outputs(
       state.output_info[output_id],
       compiled_program.output_targets[output_id],
       state.temps,
-      state.array_storage);
+      state.array_storage,
+      &state.int_temps,
+      &state.int_array_storage);
   }
 #ifdef EGRESS_PROFILE
   record_numeric_output_materialize_profile(
@@ -2343,7 +2593,9 @@ void Module::materialize_numeric_outputs_range(
       state.output_info[compiled_output_id],
       compiled_program.output_targets[compiled_output_id],
       state.temps,
-      state.array_storage);
+      state.array_storage,
+      &state.int_temps,
+      &state.int_array_storage);
   }
 #ifdef EGRESS_PROFILE
   record_numeric_output_materialize_profile(
@@ -2364,18 +2616,70 @@ void Module::apply_numeric_register_targets(
     const int32_t target = compiled_program.register_targets[register_id];
     if (state.register_scalar_mask[register_id])
     {
-      if (target >= 0)
+      const bool is_int = register_id < state.register_int_mask.size() && state.register_int_mask[register_id];
+      const egress_jit::JitScalarType target_type =
+        register_id < state.register_target_types.size()
+          ? state.register_target_types[register_id]
+          : egress_jit::JitScalarType::Float;
+      if (is_int)
       {
-        numeric_next_registers_[register_id] = state.temps[static_cast<std::size_t>(target)];
+        if (target >= 0)
+        {
+          const auto t = static_cast<std::size_t>(target);
+          if (target_type == egress_jit::JitScalarType::Float)
+          {
+            // Target expression produced a float — convert to int
+            if (t < state.temps.size())
+              numeric_next_int_registers_[register_id] = static_cast<int64_t>(state.temps[t]);
+            else
+              numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+          }
+          else
+          {
+            if (t < state.int_temps.size())
+              numeric_next_int_registers_[register_id] = state.int_temps[t];
+            else
+              numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+          }
+        }
+        else
+        {
+          numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+        }
+        numeric_next_registers_[register_id] = numeric_registers_[register_id];
       }
       else
       {
-        numeric_next_registers_[register_id] = numeric_registers_[register_id];
+        if (target >= 0)
+        {
+          const auto t = static_cast<std::size_t>(target);
+          if (target_type == egress_jit::JitScalarType::Int || target_type == egress_jit::JitScalarType::Bool)
+          {
+            // Target expression produced an int — convert to float
+            if (t < state.int_temps.size())
+              numeric_next_registers_[register_id] = static_cast<double>(state.int_temps[t]);
+            else
+              numeric_next_registers_[register_id] = numeric_registers_[register_id];
+          }
+          else
+          {
+            if (t < state.temps.size())
+              numeric_next_registers_[register_id] = state.temps[t];
+            else
+              numeric_next_registers_[register_id] = numeric_registers_[register_id];
+          }
+        }
+        else
+        {
+          numeric_next_registers_[register_id] = numeric_registers_[register_id];
+        }
+        numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
       }
     }
     else
     {
       numeric_next_registers_[register_id] = numeric_registers_[register_id];
+      numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
     }
   }
 
@@ -2386,8 +2690,15 @@ void Module::apply_numeric_register_targets(
   {
     numeric_next_registers_[register_id] = numeric_registers_[register_id];
   }
+  for (unsigned int register_id = static_cast<unsigned int>(compiled_program.register_targets.size());
+       register_id < numeric_int_registers_.size();
+       ++register_id)
+  {
+    numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+  }
 
   numeric_registers_.swap(numeric_next_registers_);
+  numeric_int_registers_.swap(numeric_next_int_registers_);
 
   for (unsigned int register_id = 0; register_id < state.array_register_targets.size(); ++register_id)
   {
@@ -2464,7 +2775,19 @@ void Module::sync_value_registers_from_numeric_state(const NumericJitState & sta
   {
     if (register_id < state.register_scalar_mask.size() && state.register_scalar_mask[register_id])
     {
-      assign_scalar_numeric_value(registers_[register_id], numeric_registers_[register_id]);
+      const bool is_int = register_id < state.register_int_mask.size() && state.register_int_mask[register_id];
+      if (is_int)
+      {
+        const int64_t ival = register_id < numeric_int_registers_.size() ? numeric_int_registers_[register_id] : 0;
+        const egress_jit::JitScalarType jtype = (registers_[register_id].type == ValueType::Bool)
+          ? egress_jit::JitScalarType::Bool
+          : egress_jit::JitScalarType::Int;
+        assign_jit_scalar_value(registers_[register_id], jtype, 0.0, ival);
+      }
+      else
+      {
+        assign_scalar_numeric_value(registers_[register_id], numeric_registers_[register_id]);
+      }
       next_registers_[register_id] = registers_[register_id];
 #ifdef EGRESS_PROFILE
       ++materialized_scalar_registers;
@@ -2519,12 +2842,6 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
     return;
   }
 
-  if (has_dynamic_registers_)
-  {
-    jit_status_ = "numeric JIT disabled for dynamic array_state registers";
-    return;
-  }
-
   if (!has_nested_modules_ && !has_delay_states_)
   {
     egress_jit::NumericProgram numeric_program;
@@ -2563,6 +2880,7 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
     }
 
     numeric_temps_.assign(program_.register_count, 0.0);
+    numeric_int_temps_.assign(program_.register_count, 0);
     numeric_array_ptrs_.resize(numeric_array_storage_.size(), nullptr);
     numeric_array_sizes_.resize(numeric_array_storage_.size(), 0);
     for (std::size_t i = 0; i < numeric_array_storage_.size(); ++i)
@@ -2570,16 +2888,26 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
       numeric_array_ptrs_[i] = numeric_array_storage_[i].empty() ? nullptr : numeric_array_storage_[i].data();
       numeric_array_sizes_[i] = static_cast<uint64_t>(numeric_array_storage_[i].size());
     }
+    numeric_int_array_storage_.resize(numeric_array_storage_.size());
+    numeric_int_array_ptrs_.resize(numeric_array_storage_.size(), nullptr);
+    numeric_int_array_sizes_.resize(numeric_array_storage_.size(), 0);
   }
 
   numeric_registers_.resize(registers_.size(), 0.0);
   numeric_next_registers_.resize(registers_.size(), 0.0);
+  numeric_int_registers_.resize(registers_.size(), 0);
+  numeric_next_int_registers_.resize(registers_.size(), 0);
   numeric_register_arrays_.resize(registers_.size());
   for (unsigned int i = 0; i < registers_.size(); ++i)
   {
     const bool scalar_register =
       i >= register_scalar_mask_.size() || register_scalar_mask_[i];
     numeric_registers_[i] = scalar_register ? to_float64(registers_[i]) : 0.0;
+    if (scalar_register &&
+        (registers_[i].type == ValueType::Int || registers_[i].type == ValueType::Bool))
+    {
+      numeric_int_registers_[i] = registers_[i].int_value;
+    }
     if (!scalar_register &&
         i < register_array_slot_.size() &&
         register_array_slot_[i] < numeric_array_storage_.size())
@@ -2603,7 +2931,7 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
     if (value_to_scalar_double(delay_states_[i], scalar))
     {
       numeric_delay_scalar_mask_[i] = true;
-      numeric_delay_scalars_[i] = clamp_output_scalar(scalar);
+      numeric_delay_scalars_[i] = scalar;
       continue;
     }
     if (delay_states_[i].type == ValueType::Array)
@@ -2611,10 +2939,6 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
       std::vector<double> values(delay_states_[i].array_items.size(), 0.0);
       if (copy_numeric_aggregate_value(delay_states_[i], values))
       {
-        for (double & value : values)
-        {
-          value = clamp_output_scalar(value);
-        }
         numeric_delay_array_mask_[i] = true;
         numeric_delay_arrays_[i] = std::move(values);
       }
@@ -2664,11 +2988,6 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
 
 void Module::ensure_numeric_jit_current()
 {
-  if (has_dynamic_registers_)
-  {
-    return;
-  }
-
   if (!has_nested_modules_ && !has_delay_states_)
   {
     if (numeric_input_layout_matches(inputs))

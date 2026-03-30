@@ -204,6 +204,8 @@ struct FusedPrimitiveBodyModule
   std::vector<int32_t> register_targets;
   std::vector<int32_t> array_register_targets;
   std::vector<bool> array_register_can_swap;
+  std::vector<bool> register_int_mask;
+  std::vector<egress_jit::JitScalarType> register_target_types;
 };
 
 struct FusedGraphKernelState
@@ -224,6 +226,7 @@ struct FusedGraphKernelState
   egress_jit::NumericProgram program;
   egress_jit::NumericKernelFn kernel = nullptr;
   std::vector<uint64_t> param_ptrs;
+  std::vector<int64_t> int_temps;
 #endif
 };
 
@@ -256,6 +259,7 @@ struct FusedGraphState
   std::vector<double> inputs;
   std::vector<double> registers;
   std::vector<double> temps;
+  std::vector<int64_t> int_temps;
   std::vector<std::vector<double>> array_storage;
   std::vector<double *> array_ptrs;
   std::vector<uint64_t> array_sizes;

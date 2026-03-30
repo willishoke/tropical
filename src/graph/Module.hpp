@@ -54,13 +54,6 @@ class Module
     };
 #endif
 
-    struct RegisterArraySpec
-    {
-      bool enabled = false;
-      unsigned int source_input_id = 0;
-      Value init_value;
-    };
-
     struct DelayStateSpec
     {
       uint32_t node_id = 0;
@@ -77,7 +70,6 @@ class Module
       std::vector<ExprSpecPtr> output_exprs;
       std::vector<ExprSpecPtr> register_exprs;
       std::vector<Value> initial_registers;
-      std::vector<RegisterArraySpec> register_array_specs;
       std::vector<DelayStateSpec> delay_state_specs;
       std::vector<NestedModuleSpec> nested_module_specs;
       std::vector<uint32_t> composite_schedule;
@@ -92,7 +84,6 @@ class Module
       std::vector<ExprSpecPtr> output_exprs,
       std::vector<ExprSpecPtr> register_exprs,
       std::vector<Value> initial_registers,
-      std::vector<RegisterArraySpec> register_array_specs,
       std::vector<DelayStateSpec> delay_state_specs,
       std::vector<NestedModuleSpec> nested_module_specs,
       std::vector<uint32_t> composite_schedule,
@@ -104,20 +95,9 @@ class Module
         input_count_(input_count),
         registers_(std::move(initial_registers)),
         next_registers_(registers_),
-        register_array_specs_(std::move(register_array_specs)),
         sample_rate_(sample_rate),
         composite_output_boundary_id_(output_boundary_id)
     {
-      has_dynamic_registers_ = false;
-      for (const auto & spec : register_array_specs_)
-      {
-        if (spec.enabled)
-        {
-          has_dynamic_registers_ = true;
-          break;
-        }
-      }
-
       // Pre-walk expression trees to find SmoothedParam nodes and allocate anonymous registers.
       // Anonymous registers are appended after user-defined registers in registers_/next_registers_.
       user_register_count_ = static_cast<uint32_t>(registers_.size());
@@ -175,7 +155,6 @@ class Module
           std::move(nested_module_spec.output_exprs),
           std::move(nested_module_spec.register_exprs),
           std::move(nested_module_spec.initial_registers),
-          std::move(nested_module_spec.register_array_specs),
           std::move(nested_module_spec.delay_state_specs),
           std::move(nested_module_spec.nested_module_specs),
           std::move(nested_module_spec.composite_schedule),
@@ -203,13 +182,14 @@ class Module
       temps_.assign(temp_register_count, expr::float_value(0.0));
 
 #ifdef EGRESS_LLVM_ORC_JIT
-      if (!has_dynamic_registers_)
+      initialize_numeric_jit(inputs);
+      // "numeric compatibility check failed" means input types don't match the compiled
+      // program yet (e.g. an array input still holds its scalar default). This is normal
+      // at construction time; ensure_numeric_jit_current() will recompile on first
+      // process() call once real inputs are wired in.
+      if (jit_status_ != "numeric JIT active" && jit_status_ != "numeric compatibility check failed")
       {
-        initialize_numeric_jit(inputs);
-      }
-      else
-      {
-        jit_status_ = "numeric JIT disabled for dynamic array_state registers";
+        throw std::runtime_error("JIT compilation failed: " + jit_status_);
       }
 #endif
     }
@@ -266,11 +246,7 @@ class Module
       std::unique_ptr<Module> module;
     };
 
-    static double clamp_output_scalar(double value);
 
-    static void clamp_output_value(Value & value);
-
-    void resize_array_registers_to_inputs();
 
     CompiledProgram compile_program(
       const std::vector<ExprSpecPtr> & output_exprs,
@@ -344,8 +320,6 @@ class Module
     std::unordered_map<uint32_t, std::size_t> delay_state_lookup_;
     std::vector<uint32_t> composite_schedule_;
     uint32_t composite_output_boundary_id_ = std::numeric_limits<uint32_t>::max();
-    std::vector<RegisterArraySpec> register_array_specs_;
-    bool has_dynamic_registers_ = false;
     bool has_nested_modules_ = false;
     bool has_delay_states_ = false;
     double sample_rate_ = 44100.0;
@@ -354,16 +328,22 @@ class Module
     egress_jit::NumericKernelFn jit_kernel_ = nullptr;
     std::vector<uint64_t> numeric_param_ptrs_;
     std::vector<double> numeric_inputs_;
+    std::vector<int64_t> numeric_int_inputs_;
     bool numeric_input_override_active_ = false;
     std::vector<double> numeric_input_scalar_override_;
     std::vector<double> numeric_temps_;
+    std::vector<int64_t> numeric_int_temps_;
     std::vector<std::vector<double>> numeric_array_storage_;
     std::vector<double *> numeric_array_ptrs_;
     std::vector<uint64_t> numeric_array_sizes_;
+    std::vector<std::vector<int64_t>> numeric_int_array_storage_;
+    std::vector<int64_t *> numeric_int_array_ptrs_;
+    std::vector<uint64_t> numeric_int_array_sizes_;
     std::vector<bool> register_scalar_mask_;
     std::vector<uint32_t> register_array_slot_;
     std::vector<int32_t> array_register_targets_;
     std::vector<bool> array_register_can_swap_;
+    std::vector<egress_jit::JitScalarType> register_target_types_;
     std::vector<NumericInputInfo> numeric_input_info_;
     std::vector<NumericOutputInfo> numeric_output_info_;
     enum class NumericSyntheticInputKind : uint8_t
@@ -402,6 +382,13 @@ class Module
       std::vector<uint32_t> register_array_slot;
       std::vector<int32_t> array_register_targets;
       std::vector<bool> array_register_can_swap;
+      std::vector<int64_t> int_inputs;
+      std::vector<int64_t> int_temps;
+      std::vector<std::vector<int64_t>> int_array_storage;
+      std::vector<int64_t *> int_array_ptrs;
+      std::vector<uint64_t> int_array_sizes;
+      std::vector<bool> register_int_mask;
+      std::vector<egress_jit::JitScalarType> register_target_types;
   #ifdef EGRESS_PROFILE
       uint64_t instruction_count = 0;
    #endif
@@ -420,6 +407,8 @@ class Module
 
     std::vector<double> numeric_registers_;
     std::vector<double> numeric_next_registers_;
+    std::vector<int64_t> numeric_int_registers_;
+    std::vector<int64_t> numeric_next_int_registers_;
     std::vector<std::vector<double>> numeric_register_arrays_;
     bool value_registers_dirty_ = false;
     std::vector<bool> numeric_output_scalar_mask_;
@@ -477,12 +466,20 @@ class Module
 
     static void assign_scalar_numeric_value(Value & dst, double value);
 
+    static void assign_jit_scalar_value(
+      Value & dst,
+      egress_jit::JitScalarType type,
+      double float_val,
+      int64_t int_val);
+
     static void assign_numeric_value_to(
       Value & dst,
       const NumericOutputInfo & info,
       uint32_t scalar_register,
       const std::vector<double> & numeric_temps,
-      const std::vector<std::vector<double>> & numeric_array_storage);
+      const std::vector<std::vector<double>> & numeric_array_storage,
+      const std::vector<int64_t> * int_temps = nullptr,
+      const std::vector<std::vector<int64_t>> * int_array_storage = nullptr);
 
     static NumericValueRef make_numeric_value_ref(
       const NumericOutputInfo & info,
