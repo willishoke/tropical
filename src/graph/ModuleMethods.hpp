@@ -1,5 +1,7 @@
 #pragma once
 
+#include <bit>
+
 void Module::process(const std::vector<bool> * output_materialize_mask)
 {
   const bool use_composite_programs = has_nested_modules_ || has_delay_states_;
@@ -7,7 +9,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   if (numeric_output_scalar_mask_.size() != outputs.size())
   {
     numeric_output_scalar_mask_.assign(outputs.size(), false);
-    numeric_output_scalars_.assign(outputs.size(), 0.0);
+    numeric_output_scalars_.assign(outputs.size(), 0);
   }
   else
   {
@@ -43,11 +45,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         numeric_temps_.data(),
         sample_rate_,
         sample_index_,
-        numeric_param_ptrs_.data(),
-        numeric_int_inputs_.data(),
-        numeric_int_registers_.data(),
-        numeric_int_array_ptrs_.empty() ? nullptr : numeric_int_array_ptrs_.data(),
-        numeric_int_temps_.data());
+        numeric_param_ptrs_.data());
       capture_numeric_scalar_outputs(program_, numeric_output_info_, numeric_temps_);
 
 #ifdef EGRESS_PROFILE
@@ -83,9 +81,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
           numeric_output_info_[output_id],
           program_.output_targets[output_id],
           numeric_temps_,
-          numeric_array_storage_,
-          &numeric_int_temps_,
-          &numeric_int_array_storage_);
+          numeric_array_storage_);
       }
 #ifdef EGRESS_PROFILE
       record_numeric_output_materialize_profile(
@@ -102,70 +98,53 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         const int32_t target = program_.register_targets[register_id];
         if (register_scalar_mask_[register_id])
         {
-          const bool is_int = register_id < registers_.size() &&
-            (registers_[register_id].type == ValueType::Int ||
-             registers_[register_id].type == ValueType::Bool);
-          const egress_jit::JitScalarType target_type =
-            register_id < register_target_types_.size()
-              ? register_target_types_[register_id]
-              : egress_jit::JitScalarType::Float;
-          if (is_int)
+          if (target >= 0)
           {
-            if (target >= 0)
+            const auto t = static_cast<std::size_t>(target);
+            if (t < numeric_temps_.size())
             {
-              const auto t = static_cast<std::size_t>(target);
-              if (target_type == egress_jit::JitScalarType::Float)
+              const bool is_int = register_id < registers_.size() &&
+                (registers_[register_id].type == ValueType::Int ||
+                 registers_[register_id].type == ValueType::Bool);
+              const egress_jit::JitScalarType target_type =
+                register_id < register_target_types_.size()
+                  ? register_target_types_[register_id]
+                  : egress_jit::JitScalarType::Float;
+              const bool target_is_int =
+                target_type == egress_jit::JitScalarType::Int ||
+                target_type == egress_jit::JitScalarType::Bool;
+              const int64_t raw = numeric_temps_[t];
+              if (is_int == target_is_int)
               {
-                if (t < numeric_temps_.size())
-                  numeric_next_int_registers_[register_id] = static_cast<int64_t>(numeric_temps_[t]);
-                else
-                  numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+                // Types match — direct copy
+                numeric_next_registers_[register_id] = raw;
+              }
+              else if (target_is_int)
+              {
+                // Kernel produced int, register is float — convert int to double bits
+                numeric_next_registers_[register_id] =
+                  std::bit_cast<int64_t>(static_cast<double>(raw));
               }
               else
               {
-                if (t < numeric_int_temps_.size())
-                  numeric_next_int_registers_[register_id] = numeric_int_temps_[t];
-                else
-                  numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
-              }
-            }
-            else
-            {
-              numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
-            }
-            numeric_next_registers_[register_id] = numeric_registers_[register_id];
-          }
-          else
-          {
-            if (target >= 0)
-            {
-              const auto t = static_cast<std::size_t>(target);
-              if (target_type == egress_jit::JitScalarType::Int || target_type == egress_jit::JitScalarType::Bool)
-              {
-                if (t < numeric_int_temps_.size())
-                  numeric_next_registers_[register_id] = static_cast<double>(numeric_int_temps_[t]);
-                else
-                  numeric_next_registers_[register_id] = numeric_registers_[register_id];
-              }
-              else
-              {
-                if (t < numeric_temps_.size())
-                  numeric_next_registers_[register_id] = numeric_temps_[t];
-                else
-                  numeric_next_registers_[register_id] = numeric_registers_[register_id];
+                // Kernel produced float, register is int — convert double bits to int
+                numeric_next_registers_[register_id] =
+                  static_cast<int64_t>(std::bit_cast<double>(raw));
               }
             }
             else
             {
               numeric_next_registers_[register_id] = numeric_registers_[register_id];
             }
-            numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
+          }
+          else
+          {
+            numeric_next_registers_[register_id] = numeric_registers_[register_id];
           }
         }
         else
         {
           numeric_next_registers_[register_id] = numeric_registers_[register_id];
-          numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
         }
       }
 
@@ -176,15 +155,8 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       {
         numeric_next_registers_[register_id] = numeric_registers_[register_id];
       }
-      for (unsigned int register_id = static_cast<unsigned int>(program_.register_targets.size());
-           register_id < numeric_int_registers_.size();
-           ++register_id)
-      {
-        numeric_next_int_registers_[register_id] = numeric_int_registers_[register_id];
-      }
 
       numeric_registers_.swap(numeric_next_registers_);
-      numeric_int_registers_.swap(numeric_next_int_registers_);
 
       for (unsigned int register_id = 0; register_id < array_register_targets_.size(); ++register_id)
       {
@@ -228,14 +200,20 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
           }
           if (register_id < numeric_register_arrays_.size())
           {
-            numeric_register_arrays_[register_id] = dst;
+            auto & reg_arr = numeric_register_arrays_[register_id];
+            reg_arr.resize(dst.size());
+            for (std::size_t j = 0; j < dst.size(); ++j)
+              reg_arr[j] = std::bit_cast<double>(dst[j]);
           }
           continue;
         }
         std::copy(src.begin(), src.end(), dst.begin());
         if (register_id < numeric_register_arrays_.size())
         {
-          numeric_register_arrays_[register_id] = dst;
+          auto & reg_arr = numeric_register_arrays_[register_id];
+          reg_arr.resize(dst.size());
+          for (std::size_t j = 0; j < dst.size(); ++j)
+            reg_arr[j] = std::bit_cast<double>(dst[j]);
         }
       }
 

@@ -327,18 +327,13 @@ class Module
 #ifdef EGRESS_LLVM_ORC_JIT
     egress_jit::NumericKernelFn jit_kernel_ = nullptr;
     std::vector<uint64_t> numeric_param_ptrs_;
-    std::vector<double> numeric_inputs_;
-    std::vector<int64_t> numeric_int_inputs_;
+    std::vector<int64_t> numeric_inputs_;
     bool numeric_input_override_active_ = false;
-    std::vector<double> numeric_input_scalar_override_;
-    std::vector<double> numeric_temps_;
-    std::vector<int64_t> numeric_int_temps_;
-    std::vector<std::vector<double>> numeric_array_storage_;
-    std::vector<double *> numeric_array_ptrs_;
+    std::vector<int64_t> numeric_input_scalar_override_;
+    std::vector<int64_t> numeric_temps_;
+    std::vector<std::vector<int64_t>> numeric_array_storage_;
+    std::vector<int64_t *> numeric_array_ptrs_;
     std::vector<uint64_t> numeric_array_sizes_;
-    std::vector<std::vector<int64_t>> numeric_int_array_storage_;
-    std::vector<int64_t *> numeric_int_array_ptrs_;
-    std::vector<uint64_t> numeric_int_array_sizes_;
     std::vector<bool> register_scalar_mask_;
     std::vector<uint32_t> register_array_slot_;
     std::vector<int32_t> array_register_targets_;
@@ -373,21 +368,15 @@ class Module
       PreparedNumericJitProgram prepared;
       std::vector<NumericInputInfo> input_info;
       std::vector<NumericOutputInfo> output_info;
-      std::vector<double> inputs;
-      std::vector<double> temps;
-      std::vector<std::vector<double>> array_storage;
-      std::vector<double *> array_ptrs;
+      std::vector<int64_t> inputs;
+      std::vector<int64_t> temps;
+      std::vector<std::vector<int64_t>> array_storage;
+      std::vector<int64_t *> array_ptrs;
       std::vector<uint64_t> array_sizes;
       std::vector<bool> register_scalar_mask;
       std::vector<uint32_t> register_array_slot;
       std::vector<int32_t> array_register_targets;
       std::vector<bool> array_register_can_swap;
-      std::vector<int64_t> int_inputs;
-      std::vector<int64_t> int_temps;
-      std::vector<std::vector<int64_t>> int_array_storage;
-      std::vector<int64_t *> int_array_ptrs;
-      std::vector<uint64_t> int_array_sizes;
-      std::vector<bool> register_int_mask;
       std::vector<egress_jit::JitScalarType> register_target_types;
   #ifdef EGRESS_PROFILE
       uint64_t instruction_count = 0;
@@ -405,20 +394,18 @@ class Module
     #endif
     };
 
-    std::vector<double> numeric_registers_;
-    std::vector<double> numeric_next_registers_;
-    std::vector<int64_t> numeric_int_registers_;
-    std::vector<int64_t> numeric_next_int_registers_;
+    std::vector<int64_t> numeric_registers_;
+    std::vector<int64_t> numeric_next_registers_;
     std::vector<std::vector<double>> numeric_register_arrays_;
     bool value_registers_dirty_ = false;
     std::vector<bool> numeric_output_scalar_mask_;
-    std::vector<double> numeric_output_scalars_;
+    std::vector<int64_t> numeric_output_scalars_;
     std::vector<bool> numeric_prev_output_scalar_mask_;
-    std::vector<double> numeric_prev_output_scalars_;
+    std::vector<int64_t> numeric_prev_output_scalars_;
     std::vector<bool> numeric_prev_output_array_mask_;
     std::vector<std::vector<double>> numeric_prev_output_arrays_;
     std::vector<bool> numeric_delay_scalar_mask_;
-    std::vector<double> numeric_delay_scalars_;
+    std::vector<int64_t> numeric_delay_scalars_;
     std::vector<bool> numeric_delay_array_mask_;
     std::vector<std::vector<double>> numeric_delay_arrays_;
     bool value_delay_states_dirty_ = false;
@@ -476,10 +463,8 @@ class Module
       Value & dst,
       const NumericOutputInfo & info,
       uint32_t scalar_register,
-      const std::vector<double> & numeric_temps,
-      const std::vector<std::vector<double>> & numeric_array_storage,
-      const std::vector<int64_t> * int_temps = nullptr,
-      const std::vector<std::vector<int64_t>> * int_array_storage = nullptr);
+      const std::vector<int64_t> & numeric_temps,
+      const std::vector<std::vector<int64_t>> & numeric_array_storage);
 
     static NumericValueRef make_numeric_value_ref(
       const NumericOutputInfo & info,
@@ -496,7 +481,7 @@ class Module
     void capture_numeric_scalar_outputs(
       const CompiledProgram & compiled_program,
       const std::vector<NumericOutputInfo> & output_info,
-      const std::vector<double> & temps,
+      const std::vector<int64_t> & temps,
       std::size_t start_output_id = 0,
       std::size_t output_count = std::numeric_limits<std::size_t>::max());
 
@@ -511,22 +496,22 @@ class Module
     uint32_t allocate_array_slot_with_size(std::size_t size);
 
     static bool add_array_values_to_jit_table(
-      std::vector<std::vector<double>> & array_storage,
+      std::vector<std::vector<int64_t>> & array_storage,
       const std::vector<Value> & values,
       uint32_t & out_slot);
 
     static bool add_array_value_to_jit_table(
-      std::vector<std::vector<double>> & array_storage,
+      std::vector<std::vector<int64_t>> & array_storage,
       const Value & value,
       uint32_t & out_slot);
 
     static bool add_matrix_values_to_jit_table(
-      std::vector<std::vector<double>> & array_storage,
+      std::vector<std::vector<int64_t>> & array_storage,
       const Value & value,
       uint32_t & out_slot);
 
     static uint32_t allocate_array_slot_with_size(
-      std::vector<std::vector<double>> & array_storage,
+      std::vector<std::vector<int64_t>> & array_storage,
       std::size_t size);
 
     bool configure_numeric_inputs_for_jit(const std::vector<Value> & current_inputs);
