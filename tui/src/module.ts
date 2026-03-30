@@ -105,7 +105,6 @@ export type ValueCoercible = boolean | number | number[] | number[][]
 
 function scalarValueHandle(v: boolean | number): unknown {
   if (typeof v === 'boolean') return b.check(b.egress_value_bool(v), 'value_bool')
-  if (Number.isInteger(v))   return b.check(b.egress_value_int(v),   'value_int')
   return b.check(b.egress_value_float(v), 'value_float')
 }
 
@@ -199,8 +198,7 @@ export class ModuleType {
     const d = this._def
     const specH = this._buildSpec()
     try {
-      const ok = graph.addModule(name, specH)
-      if (!ok) throw new Error(`Failed to add module '${name}' to graph.`)
+      graph.addModule(name, specH)
     } finally {
       b.egress_module_spec_free(specH)
     }
@@ -216,8 +214,7 @@ export class ModuleType {
     const name = graph.nextName(d.typeName)
     const specH = this._buildSpec()
     try {
-      const ok = graph.addModule(name, specH)
-      if (!ok) throw new Error(`Failed to add module '${name}' to graph.`)
+      graph.addModule(name, specH)
     } finally {
       b.egress_module_spec_free(specH)
     }

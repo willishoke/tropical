@@ -20,12 +20,18 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     ensure_numeric_jit_current();
   }
 
+  if (!use_composite_programs && !jit_kernel_)
+  {
+    throw std::runtime_error("JIT kernel unavailable for primitive module: " + jit_status_);
+  }
+
   if (!use_composite_programs && jit_kernel_)
   {
     if (!sync_numeric_inputs_from_values())
     {
       jit_status_ = "numeric input sync failed";
       jit_kernel_ = nullptr;
+      throw std::runtime_error("JIT numeric input sync failed: " + jit_status_);
     }
     else
     {

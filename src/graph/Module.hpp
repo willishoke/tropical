@@ -183,7 +183,11 @@ class Module
 
 #ifdef EGRESS_LLVM_ORC_JIT
       initialize_numeric_jit(inputs);
-      if (jit_status_ != "numeric JIT active")
+      // "numeric compatibility check failed" means input types don't match the compiled
+      // program yet (e.g. an array input still holds its scalar default). This is normal
+      // at construction time; ensure_numeric_jit_current() will recompile on first
+      // process() call once real inputs are wired in.
+      if (jit_status_ != "numeric JIT active" && jit_status_ != "numeric compatibility check failed")
       {
         throw std::runtime_error("JIT compilation failed: " + jit_status_);
       }

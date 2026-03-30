@@ -1,0 +1,152 @@
+{
+  "schema": "egress_patch_1",
+  "module_defs": [
+    {
+      "name": "IntSeq",
+      "inputs": ["trigger", "is_forward", "step", "seq_len", "sequence"],
+      "outputs": ["value", "index"],
+      "regs": { "index": 0 },
+      "process": {
+        "outputs": {
+          "value": {
+            "op": "index",
+            "args": [
+              {"op": "input", "name": "sequence"},
+              {"op": "reg", "name": "index"}
+            ]
+          },
+          "index": {"op": "reg", "name": "index"}
+        },
+        "next_regs": {
+          "index": {
+            "op": "select",
+            "args": [
+              {"op": "input", "name": "trigger"},
+              {
+                "op": "mod",
+                "args": [
+                  {
+                    "op": "add",
+                    "args": [
+                      {"op": "reg", "name": "index"},
+                      {"op": "select", "args": [
+                        {"op": "input", "name": "is_forward"},
+                        {"op": "input", "name": "step"},
+                        {"op": "sub", "args": [{"op": "input", "name": "seq_len"}, {"op": "input", "name": "step"}]}
+                      ]}
+                    ]
+                  },
+                  {"op": "input", "name": "seq_len"}
+                ]
+              },
+              {"op": "reg", "name": "index"}
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "modules": [
+    {"type": "Clock",      "name": "Clock1"},
+    {"type": "IntSeq",     "name": "Seq1"},
+    {"type": "IntSeq",     "name": "Seq2"},
+    {"type": "IntSeq",     "name": "Seq3"},
+    {"type": "IntSeq",     "name": "Seq4"},
+    {"type": "VCO",        "name": "VCO1"},
+    {"type": "VCO",        "name": "VCO2"},
+    {"type": "VCO",        "name": "VCO3"},
+    {"type": "VCO",        "name": "VCO4"},
+    {"type": "ADEnvelope", "name": "Env1"},
+    {"type": "VCA",        "name": "VCA1"},
+    {"type": "VCA",        "name": "VCA2"},
+    {"type": "VCA",        "name": "VCA3"},
+    {"type": "VCA",        "name": "VCA4"},
+    {"type": "Phaser16",   "name": "Ph1"},
+    {"type": "Reverb",     "name": "Rev1"}
+  ],
+  "outputs": [
+    {"module": "Rev1", "output": "output"}
+  ],
+  "input_exprs": [
+    {"module": "Clock1", "input": "freq", "expr": 1.5},
+
+    {"module": "Seq1", "input": "trigger",    "expr": {"op": "ref", "module": "Clock1", "output": "output"}},
+    {"module": "Seq2", "input": "trigger",    "expr": {"op": "ref", "module": "Clock1", "output": "output"}},
+    {"module": "Seq3", "input": "trigger",    "expr": {"op": "ref", "module": "Clock1", "output": "output"}},
+    {"module": "Seq4", "input": "trigger",    "expr": {"op": "ref", "module": "Clock1", "output": "output"}},
+
+    {"module": "Seq1", "input": "is_forward", "expr": true},
+    {"module": "Seq2", "input": "is_forward", "expr": true},
+    {"module": "Seq3", "input": "is_forward", "expr": true},
+    {"module": "Seq4", "input": "is_forward", "expr": true},
+
+    {"module": "Seq1", "input": "step",       "expr": 1},
+    {"module": "Seq2", "input": "step",       "expr": 1},
+    {"module": "Seq3", "input": "step",       "expr": 1},
+    {"module": "Seq4", "input": "step",       "expr": 1},
+
+    {"module": "Seq1", "input": "seq_len",    "expr": 8},
+    {"module": "Seq2", "input": "seq_len",    "expr": 8},
+    {"module": "Seq3", "input": "seq_len",    "expr": 8},
+    {"module": "Seq4", "input": "seq_len",    "expr": 8},
+
+    {
+      "module": "Seq1", "input": "sequence",
+      "expr": {"op": "array", "items": [110.00, 137.56, 164.48, 192.38, 220.00, 192.38, 164.48, 137.56]}
+    },
+    {
+      "module": "Seq2", "input": "sequence",
+      "expr": {"op": "array", "items": [137.56, 172.01, 205.66, 240.53, 275.12, 240.53, 205.66, 172.01]}
+    },
+    {
+      "module": "Seq3", "input": "sequence",
+      "expr": {"op": "array", "items": [164.48, 205.73, 245.93, 287.67, 328.97, 287.67, 245.93, 205.73]}
+    },
+    {
+      "module": "Seq4", "input": "sequence",
+      "expr": {"op": "array", "items": [192.38, 240.53, 287.67, 336.44, 384.75, 336.44, 287.67, 240.53]}
+    },
+
+    {"module": "VCO1", "input": "freq", "expr": {"op": "ref", "module": "Seq1", "output": "value"}},
+    {"module": "VCO2", "input": "freq", "expr": {"op": "ref", "module": "Seq2", "output": "value"}},
+    {"module": "VCO3", "input": "freq", "expr": {"op": "ref", "module": "Seq3", "output": "value"}},
+    {"module": "VCO4", "input": "freq", "expr": {"op": "ref", "module": "Seq4", "output": "value"}},
+
+    {"module": "Env1", "input": "gate",   "expr": {"op": "ref", "module": "Clock1", "output": "output"}},
+    {"module": "Env1", "input": "attack", "expr": 0.012},
+    {"module": "Env1", "input": "decay",  "expr": 0.58},
+
+    {"module": "VCA1", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO1", "output": "sin"}, 0.12]}},
+    {"module": "VCA2", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO2", "output": "sin"}, 0.12]}},
+    {"module": "VCA3", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO3", "output": "sin"}, 0.12]}},
+    {"module": "VCA4", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO4", "output": "sin"}, 0.12]}},
+
+    {"module": "VCA1", "input": "cv", "expr": {"op": "ref", "module": "Env1", "output": "env"}},
+    {"module": "VCA2", "input": "cv", "expr": {"op": "ref", "module": "Env1", "output": "env"}},
+    {"module": "VCA3", "input": "cv", "expr": {"op": "ref", "module": "Env1", "output": "env"}},
+    {"module": "VCA4", "input": "cv", "expr": {"op": "ref", "module": "Env1", "output": "env"}},
+
+    {
+      "module": "Ph1", "input": "input",
+      "expr": {
+        "op": "add", "args": [
+          {"op": "add", "args": [
+            {"op": "add", "args": [
+              {"op": "ref", "module": "VCA1", "output": "out"},
+              {"op": "ref", "module": "VCA2", "output": "out"}
+            ]},
+            {"op": "ref", "module": "VCA3", "output": "out"}
+          ]},
+          {"op": "ref", "module": "VCA4", "output": "out"}
+        ]
+      }
+    },
+    {"module": "Ph1", "input": "feedback",  "expr": 0.78},
+    {"module": "Ph1", "input": "lfo_speed", "expr": 0.03},
+
+    {"module": "Rev1", "input": "input", "expr": {"op": "ref", "module": "Ph1", "output": "output"}},
+    {"module": "Rev1", "input": "mix",   "expr": 0.45},
+    {"module": "Rev1", "input": "decay", "expr": 0.88},
+    {"module": "Rev1", "input": "damp",  "expr": 0.3}
+  ]
+}

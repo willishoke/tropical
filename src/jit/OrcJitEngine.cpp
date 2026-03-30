@@ -416,6 +416,12 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
     return builder.CreateLoad(i64_ty, gep_i64(int_temps_arg, index));
   };
 
+  auto load_as_float = [&](uint32_t index, JitScalarType type) -> llvm::Value * {
+    if (type == JitScalarType::Float)
+      return builder.CreateLoad(f64_ty, gep_f64(temps_arg, index));
+    return builder.CreateSIToFP(builder.CreateLoad(i64_ty, gep_i64(int_temps_arg, index)), f64_ty);
+  };
+
   auto store_int_temp = [&](uint32_t index, llvm::Value * value) {
     builder.CreateStore(value, gep_i64(int_temps_arg, index));
   };
@@ -785,8 +791,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::Less:
       {
-        llvm::Value * cmp = (instr.src_a_type == JitScalarType::Float)
-          ? builder.CreateFCmpOLT(load_temp(instr.src_a), load_temp(instr.src_b))
+        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
+        llvm::Value * cmp = use_float
+          ? builder.CreateFCmpOLT(load_as_float(instr.src_a, instr.src_a_type), load_as_float(instr.src_b, instr.src_b_type))
           : builder.CreateICmpSLT(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
         result_i64 = builder.CreateZExt(cmp, i64_ty);
         writes_int_temp = true;
@@ -795,8 +802,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::LessEqual:
       {
-        llvm::Value * cmp = (instr.src_a_type == JitScalarType::Float)
-          ? builder.CreateFCmpOLE(load_temp(instr.src_a), load_temp(instr.src_b))
+        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
+        llvm::Value * cmp = use_float
+          ? builder.CreateFCmpOLE(load_as_float(instr.src_a, instr.src_a_type), load_as_float(instr.src_b, instr.src_b_type))
           : builder.CreateICmpSLE(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
         result_i64 = builder.CreateZExt(cmp, i64_ty);
         writes_int_temp = true;
@@ -805,8 +813,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::Greater:
       {
-        llvm::Value * cmp = (instr.src_a_type == JitScalarType::Float)
-          ? builder.CreateFCmpOGT(load_temp(instr.src_a), load_temp(instr.src_b))
+        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
+        llvm::Value * cmp = use_float
+          ? builder.CreateFCmpOGT(load_as_float(instr.src_a, instr.src_a_type), load_as_float(instr.src_b, instr.src_b_type))
           : builder.CreateICmpSGT(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
         result_i64 = builder.CreateZExt(cmp, i64_ty);
         writes_int_temp = true;
@@ -815,8 +824,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::GreaterEqual:
       {
-        llvm::Value * cmp = (instr.src_a_type == JitScalarType::Float)
-          ? builder.CreateFCmpOGE(load_temp(instr.src_a), load_temp(instr.src_b))
+        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
+        llvm::Value * cmp = use_float
+          ? builder.CreateFCmpOGE(load_as_float(instr.src_a, instr.src_a_type), load_as_float(instr.src_b, instr.src_b_type))
           : builder.CreateICmpSGE(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
         result_i64 = builder.CreateZExt(cmp, i64_ty);
         writes_int_temp = true;
@@ -825,8 +835,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::Equal:
       {
-        llvm::Value * cmp = (instr.src_a_type == JitScalarType::Float)
-          ? builder.CreateFCmpOEQ(load_temp(instr.src_a), load_temp(instr.src_b))
+        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
+        llvm::Value * cmp = use_float
+          ? builder.CreateFCmpOEQ(load_as_float(instr.src_a, instr.src_a_type), load_as_float(instr.src_b, instr.src_b_type))
           : builder.CreateICmpEQ(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
         result_i64 = builder.CreateZExt(cmp, i64_ty);
         writes_int_temp = true;
@@ -835,8 +846,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::NotEqual:
       {
-        llvm::Value * cmp = (instr.src_a_type == JitScalarType::Float)
-          ? builder.CreateFCmpUNE(load_temp(instr.src_a), load_temp(instr.src_b))
+        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
+        llvm::Value * cmp = use_float
+          ? builder.CreateFCmpUNE(load_as_float(instr.src_a, instr.src_a_type), load_as_float(instr.src_b, instr.src_b_type))
           : builder.CreateICmpNE(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
         result_i64 = builder.CreateZExt(cmp, i64_ty);
         writes_int_temp = true;
@@ -916,7 +928,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::Add:
         if (instr.dst_type == JitScalarType::Float)
-          result = builder.CreateFAdd(load_temp(instr.src_a), load_temp(instr.src_b));
+          result = builder.CreateFAdd(load_as_float(instr.src_a, instr.src_a_type), load_as_float(instr.src_b, instr.src_b_type));
         else
         {
           result_i64 = builder.CreateAdd(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
@@ -946,7 +958,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::Sub:
         if (instr.dst_type == JitScalarType::Float)
-          result = builder.CreateFSub(load_temp(instr.src_a), load_temp(instr.src_b));
+          result = builder.CreateFSub(load_as_float(instr.src_a, instr.src_a_type), load_as_float(instr.src_b, instr.src_b_type));
         else
         {
           result_i64 = builder.CreateSub(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
@@ -966,7 +978,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::Mul:
         if (instr.dst_type == JitScalarType::Float)
-          result = builder.CreateFMul(load_temp(instr.src_a), load_temp(instr.src_b));
+          result = builder.CreateFMul(load_as_float(instr.src_a, instr.src_a_type), load_as_float(instr.src_b, instr.src_b_type));
         else
         {
           result_i64 = builder.CreateMul(load_int_temp(instr.src_a), load_int_temp(instr.src_b));
@@ -996,8 +1008,8 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
       }
       case NumericOp::Div:
       {
-        llvm::Value * lhs = load_temp(instr.src_a);
-        llvm::Value * rhs = load_temp(instr.src_b);
+        llvm::Value * lhs = load_as_float(instr.src_a, instr.src_a_type);
+        llvm::Value * rhs = load_as_float(instr.src_b, instr.src_b_type);
         llvm::Value * is_zero = builder.CreateFCmpOEQ(rhs, llvm::ConstantFP::get(f64_ty, 0.0));
         llvm::Value * div_value = builder.CreateFDiv(lhs, rhs);
         result = builder.CreateSelect(is_zero, llvm::ConstantFP::get(f64_ty, 0.0), div_value);

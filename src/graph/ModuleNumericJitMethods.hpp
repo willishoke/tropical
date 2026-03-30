@@ -384,7 +384,9 @@ const Value & Module::materialize_output_value(unsigned int output_id, bool prev
         numeric_output_info_[output_id],
         program_.output_targets[output_id],
         numeric_temps_,
-        numeric_array_storage_);
+        numeric_array_storage_,
+        &numeric_int_temps_,
+        &numeric_int_array_storage_);
       return destinations[output_id];
     }
   }
@@ -1143,12 +1145,25 @@ bool Module::update_numeric_delay_states_from_outputs(
     if (kind == NumericValueKind::Scalar)
     {
       const uint32_t reg = compiled_program.output_targets[output_id];
-      if (reg >= state.temps.size())
+      double scalar_val;
+      if (state.output_info[output_id].scalar_type != egress_jit::JitScalarType::Float)
       {
-        return false;
+        if (reg >= state.int_temps.size())
+        {
+          return false;
+        }
+        scalar_val = static_cast<double>(state.int_temps[reg]);
+      }
+      else
+      {
+        if (reg >= state.temps.size())
+        {
+          return false;
+        }
+        scalar_val = state.temps[reg];
       }
       numeric_delay_scalar_mask_[delay_id] = true;
-      numeric_delay_scalars_[delay_id] = clamp_output_scalar(state.temps[reg]);
+      numeric_delay_scalars_[delay_id] = clamp_output_scalar(scalar_val);
       numeric_delay_arrays_[delay_id].clear();
       continue;
     }
