@@ -247,9 +247,12 @@ class Graph
             }
 #ifdef EGRESS_LLVM_ORC_JIT
             double numeric_scalar = 0.0;
-            if (tap.output_id < slot.output_materialize_mask.size() &&
-                !slot.output_materialize_mask[tap.output_id] &&
-                slot.module->try_get_numeric_scalar_output(tap.output_id, false, numeric_scalar))
+            bool mask_ok = tap.output_id < slot.output_materialize_mask.size() &&
+                !slot.output_materialize_mask[tap.output_id];
+            double pre_scalar = 0.0;
+            bool scalar_ok = mask_ok && slot.module->try_get_numeric_scalar_output(tap.output_id, false, pre_scalar);
+            numeric_scalar = pre_scalar;
+            if (scalar_ok)
             {
               tap.buffer.buffers[tap_write_indices[tap_id]][sample] = numeric_scalar;
               continue;
@@ -342,7 +345,7 @@ class Graph
                   continue;
                 }
                 cached_values[index_id] =
-                  expr::float_value(Module::clamp_output_scalar((*numeric_values)[static_cast<std::size_t>(raw_index)]));
+                  expr::float_value((*numeric_values)[static_cast<std::size_t>(raw_index)]);
               }
               if (runtime.fused_graph != nullptr &&
                   module_id < runtime.fused_graph->module_output_spans.size())

@@ -246,9 +246,6 @@ class Module
       std::unique_ptr<Module> module;
     };
 
-    static double clamp_output_scalar(double value);
-
-    static void clamp_output_value(Value & value);
 
 
     CompiledProgram compile_program(

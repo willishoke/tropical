@@ -556,9 +556,8 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
         {
           return fail("primitive body runtime scalar output register out of range");
         }
-        const double clamped = Module::clamp_output_scalar(fused->temps[output_reg]);
         module.numeric_output_scalar_mask_[output_id] = true;
-        module.numeric_output_scalars_[output_id] = clamped;
+        module.numeric_output_scalars_[output_id] = fused->temps[output_reg];
       }
       else if (output_kind == egress_module_detail::NumericValueKind::Array)
       {
@@ -2711,7 +2710,7 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
             throw std::out_of_range("Array index out of range.");
           }
           registers[instr.dst] =
-            expr::float_value(Module::clamp_output_scalar((*numeric_values)[static_cast<std::size_t>(instr.ref_index)]));
+            expr::float_value((*numeric_values)[static_cast<std::size_t>(instr.ref_index)]);
           break;
         }
       }
@@ -2751,7 +2750,7 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
           throw std::out_of_range("Array index out of range.");
         }
         registers[instr.dst] =
-          expr::float_value(Module::clamp_output_scalar((*numeric_values)[static_cast<std::size_t>(instr.ref_index)]));
+          expr::float_value((*numeric_values)[static_cast<std::size_t>(instr.ref_index)]);
         break;
       }
 #endif

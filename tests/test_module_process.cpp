@@ -1246,6 +1246,125 @@ static void test_clock_edge_detect_float_regs_end_to_end()
   egress_graph_free(g);
 }
 
+// IntSeq with 4x frequency sequence driven by a TriggerParam.
+// Uses TriggerParam (no runtime rebuilds) to fire trigger pulses and verifies
+// that sequence[index] produces correct float values from the 31tet 4x frequencies.
+static void test_intseq_4x_freq_values()
+{
+  const unsigned int BUF_LEN = 1;
+  egress_graph_t g = egress_graph_new(BUF_LEN);
+  ASSERT(g != nullptr);
+
+  // IntSeq with edge detection + float registers (matches TS patch loader)
+  egress_module_spec_t spec = build_intseq_edge_detect_spec_float_regs();
+  ASSERT_OK(egress_graph_add_module(g, "Seq1", spec));
+  egress_module_spec_free(spec);
+
+  // Start with trigger=0
+  egress_expr_t trig0 = egress_expr_literal_float(0.0);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig0));
+  egress_expr_free(trig0);
+
+  // is_forward=true, step=1, seq_len=8
+  egress_expr_t fwd  = egress_expr_literal_bool(true);
+  egress_expr_t stp  = egress_expr_literal_int(1);
+  egress_expr_t slen = egress_expr_literal_int(8);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
+  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
+
+  // 4x frequency sequence (from 31tet patch)
+  double freqs[8] = {440.00, 550.24, 657.92, 769.52, 880.00, 769.52, 657.92, 550.24};
+  egress_value_t items[8];
+  for (int i = 0; i < 8; i++) items[i] = egress_value_float(freqs[i]);
+  egress_value_t arr = egress_value_array(items, 8);
+  egress_expr_t seq  = egress_expr_literal_value(arr);
+  for (int i = 0; i < 8; i++) egress_value_free(items[i]);
+  egress_value_free(arr);
+  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
+  egress_expr_free(seq);
+
+  // Tap value (output 0) and index (output 1)
+  size_t val_tap = egress_graph_add_output_tap(g, "Seq1", 0);
+  size_t idx_tap = egress_graph_add_output_tap(g, "Seq1", 1);
+  ASSERT(val_tap != (size_t)-1);
+  ASSERT(idx_tap != (size_t)-1);
+
+  egress_graph_prime_jit(g);
+
+  // Frame 0: no trigger, index=0, value=freqs[0]
+  egress_graph_process(g);
+  {
+    // Read taps one at a time (C API uses thread_local buffer)
+    size_t len = 0;
+    const double * vbuf = egress_graph_tap_buffer(g, val_tap, &len);
+    ASSERT(len == 1);
+    double val0 = vbuf[0];
+
+    const double * ibuf = egress_graph_tap_buffer(g, idx_tap, &len);
+    ASSERT(len == 1);
+    double idx0 = ibuf[0];
+
+    if (idx0 != 0.0)
+    {
+      printf("FAIL\n    frame 0: expected index=0, got=%.6g\n", idx0);
+      ++g_fail;
+      egress_graph_free(g);
+      return;
+    }
+    double diff = val0 - freqs[0];
+    if (diff < 0) diff = -diff;
+    if (diff > 0.01)
+    {
+      printf("FAIL\n    frame 0: expected value=%.2f, got=%.6g\n", freqs[0], val0);
+      ++g_fail;
+      egress_graph_free(g);
+      return;
+    }
+  }
+
+  // Fire trigger and advance through the sequence
+  for (int step = 1; step < 8; ++step)
+  {
+    // Rising edge: set trigger=1, process one frame
+    egress_expr_t trig1 = egress_expr_literal_float(1.0);
+    ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig1));
+    egress_expr_free(trig1);
+    egress_graph_process(g);
+
+    // Register writeback applies next frame. Set trigger=0 and process again.
+    egress_expr_t trig_off = egress_expr_literal_float(0.0);
+    ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig_off));
+    egress_expr_free(trig_off);
+    egress_graph_process(g);
+
+    size_t len = 0;
+    const double * vbuf = egress_graph_tap_buffer(g, val_tap, &len);
+    ASSERT(len == 1);
+    double value = vbuf[0];
+
+    const double * ibuf = egress_graph_tap_buffer(g, idx_tap, &len);
+    ASSERT(len == 1);
+    double index = ibuf[0];
+
+    // Check value output matches the expected frequency
+    double diff = value - freqs[step];
+    if (diff < 0) diff = -diff;
+    if (diff > 0.01)
+    {
+      printf("FAIL\n    step %d: expected value=%.2f, got=%.6g (index=%.6g)\n",
+             step, freqs[step], value, index);
+      ++g_fail;
+      egress_graph_free(g);
+      return;
+    }
+  }
+
+  printf("[all 8 sequence values correct] ");
+  egress_graph_free(g);
+}
+
 // ---- main --------------------------------------------------------------------
 
 int main()
@@ -1293,6 +1412,9 @@ int main()
 
   run_test("clock + edge-detect intseq (FLOAT regs): end-to-end",
            test_clock_edge_detect_float_regs_end_to_end);
+
+  run_test("intseq 4x freq: value output matches sequence entries",
+           test_intseq_4x_freq_values);
 
   printf("\n=== results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;

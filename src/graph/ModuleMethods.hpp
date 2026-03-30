@@ -579,38 +579,6 @@ void Module::reset_inputs_after_process()
 void Module::postprocess()
 {
   reset_inputs_after_process();
-
-  for (auto & out : outputs)
-  {
-    clamp_output_value(out);
-  }
-}
-
-double Module::clamp_output_scalar(double value)
-{
-  return std::fmax(-10.0, std::fmin(10.0, value));
-}
-
-void Module::clamp_output_value(Value & value)
-{
-  if (value.type == ValueType::Array)
-  {
-    for (auto & item : value.array_items)
-    {
-      clamp_output_value(item);
-    }
-    return;
-  }
-  if (value.type == ValueType::Matrix)
-  {
-    for (auto & item : value.matrix_items)
-    {
-      clamp_output_value(item);
-    }
-    return;
-  }
-  const double clamped = clamp_output_scalar(expr::to_float64(value));
-  value = expr::float_value(clamped);
 }
 
 

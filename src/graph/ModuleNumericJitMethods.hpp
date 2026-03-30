@@ -175,11 +175,10 @@ bool Module::supports_numeric_jit_expr_kind(ExprKind kind)
 
 void Module::assign_scalar_numeric_value(Value & dst, double value)
 {
-  const double clamped = clamp_output_scalar(value);
   dst.type = ValueType::Float;
-  dst.int_value = static_cast<int64_t>(clamped);
-  dst.float_value = clamped;
-  dst.bool_value = clamped != 0.0;
+  dst.int_value = static_cast<int64_t>(value);
+  dst.float_value = value;
+  dst.bool_value = value != 0.0;
   dst.array_items.clear();
   dst.matrix_items.clear();
   dst.matrix_rows = 0;
@@ -201,11 +200,10 @@ void Module::assign_jit_scalar_value(
 
   if (type == egress_jit::JitScalarType::Float)
   {
-    const double clamped = clamp_output_scalar(float_val);
     dst.type = ValueType::Float;
-    dst.int_value = static_cast<int64_t>(clamped);
-    dst.float_value = clamped;
-    dst.bool_value = clamped != 0.0;
+    dst.int_value = static_cast<int64_t>(float_val);
+    dst.float_value = float_val;
+    dst.bool_value = float_val != 0.0;
   }
   else if (type == egress_jit::JitScalarType::Int)
   {
@@ -483,7 +481,7 @@ void Module::capture_numeric_scalar_outputs(
       continue;
     }
     numeric_output_scalar_mask_[output_id] = true;
-    numeric_output_scalars_[output_id] = Module::clamp_output_scalar(temps[scalar_register]);
+    numeric_output_scalars_[output_id] = temps[scalar_register];
   }
 }
 
@@ -1163,7 +1161,7 @@ bool Module::update_numeric_delay_states_from_outputs(
         scalar_val = state.temps[reg];
       }
       numeric_delay_scalar_mask_[delay_id] = true;
-      numeric_delay_scalars_[delay_id] = clamp_output_scalar(scalar_val);
+      numeric_delay_scalars_[delay_id] = scalar_val;
       numeric_delay_arrays_[delay_id].clear();
       continue;
     }
@@ -1177,10 +1175,6 @@ bool Module::update_numeric_delay_states_from_outputs(
       numeric_delay_array_mask_[delay_id] = true;
       auto & dst = numeric_delay_arrays_[delay_id];
       dst = state.array_storage[array_slot];
-      for (double & value : dst)
-      {
-        value = clamp_output_scalar(value);
-      }
       continue;
     }
     return false;
@@ -2937,7 +2931,7 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
     if (value_to_scalar_double(delay_states_[i], scalar))
     {
       numeric_delay_scalar_mask_[i] = true;
-      numeric_delay_scalars_[i] = clamp_output_scalar(scalar);
+      numeric_delay_scalars_[i] = scalar;
       continue;
     }
     if (delay_states_[i].type == ValueType::Array)
@@ -2945,10 +2939,6 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
       std::vector<double> values(delay_states_[i].array_items.size(), 0.0);
       if (copy_numeric_aggregate_value(delay_states_[i], values))
       {
-        for (double & value : values)
-        {
-          value = clamp_output_scalar(value);
-        }
         numeric_delay_array_mask_[i] = true;
         numeric_delay_arrays_[i] = std::move(values);
       }
