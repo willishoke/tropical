@@ -21,6 +21,7 @@ import {
   makeSession, loadModuleFromJSON, loadPatchFromJSON, mergePatchFromJSON, savePatchToJSON,
   buildExpr, prettyExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
 } from './patch.js'
+import { parseModuleDef, parsePatch } from './schema.js'
 import { loadBuiltins }        from './module_library.js'
 import { DAC }                 from './audio.js'
 import { Param, Trigger }      from './param.js'
@@ -297,8 +298,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
     // ── define_module ──────────────────────────────────────────────────────
     case 'define_module': return wrap(() => {
-      const def = args.def as ModuleDefJSON
-      if (!def?.name) throw new Error('def.name is required.')
+      const def = parseModuleDef(args.def) as ModuleDefJSON
       const type = loadModuleFromJSON(def, session)
       session.typeRegistry.set(type.name, type)
       return { type_name: type.name, inputs: type._def.inputNames, outputs: type._def.outputNames }
@@ -527,9 +527,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
     // ── merge_patch ────────────────────────────────────────────────────────
     case 'merge_patch': return wrap(() => {
-      const patch = args.patch as PatchJSON
-      if (patch?.schema !== 'egress_patch_1')
-        throw new Error(`Unsupported schema: ${(patch as any)?.schema}. Expected 'egress_patch_1'.`)
+      const patch = parsePatch(args.patch) as PatchJSON
       mergePatchFromJSON(patch, session)
       return {
         modules:     [...session.instanceRegistry.keys()],
@@ -542,15 +540,13 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
     // ── load_patch ─────────────────────────────────────────────────────────
     case 'load_patch': return wrap(() => {
-      let patch: PatchJSON
+      let raw: unknown
       if (args.patch_path) {
-        const raw = readFileSync(args.patch_path as string, 'utf-8')
-        patch = JSON.parse(raw) as PatchJSON
+        raw = JSON.parse(readFileSync(args.patch_path as string, 'utf-8'))
       } else {
-        patch = args.patch as PatchJSON
+        raw = args.patch
       }
-      if (patch?.schema !== 'egress_patch_1')
-        throw new Error(`Unsupported schema: ${(patch as any)?.schema}. Expected 'egress_patch_1'.`)
+      const patch = parsePatch(raw) as PatchJSON
       if (session.dac?.isRunning) session.dac.stop()
       loadPatchFromJSON(patch, session)
       return {
