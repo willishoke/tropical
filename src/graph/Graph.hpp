@@ -684,9 +684,29 @@ class Graph
       module.in_count = in_count;
       module.out_count = out_count;
       module.input_exprs.assign(in_count, nullptr);
+      module.input_types.assign(in_count, "");
+      module.output_types.assign(out_count, "");
 
       control_modules_.emplace(std::move(name), std::move(module));
       rebuild_and_publish_runtime_locked();
+      return true;
+    }
+
+    bool declare_input_type(const std::string & module_name, unsigned int idx, const std::string & type_name)
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      auto it = control_modules_.find(module_name);
+      if (it == control_modules_.end() || idx >= it->second.in_count) return false;
+      it->second.input_types[idx] = type_name;
+      return true;
+    }
+
+    bool declare_output_type(const std::string & module_name, unsigned int idx, const std::string & type_name)
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      auto it = control_modules_.find(module_name);
+      if (it == control_modules_.end() || idx >= it->second.out_count) return false;
+      it->second.output_types[idx] = type_name;
       return true;
     }
 
@@ -829,6 +849,16 @@ class Graph
       if (src_output_id >= src_it->second.out_count || dst_input_id >= dst_it->second.in_count)
       {
         return false;
+      }
+
+      const auto & src_type = src_it->second.output_types[src_output_id];
+      const auto & dst_type = dst_it->second.input_types[dst_input_id];
+      if (!src_type.empty() && !dst_type.empty() && src_type != dst_type)
+      {
+        throw std::runtime_error(
+          "Type mismatch: '" + src_module + "' output " + std::to_string(src_output_id) +
+          " has type '" + src_type + "' but '" + dst_module + "' input " +
+          std::to_string(dst_input_id) + " expects '" + dst_type + "'");
       }
 
       ExprSpecPtr ref = expr::ref_expr(src_module, src_output_id);

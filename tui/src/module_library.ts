@@ -81,8 +81,8 @@ const _polyBlamp: PureFunction = definePureFunction(['t', 'dt'], ['value'], (inp
 export function vco(name = 'VCO'): ModuleType {
   return defineModule(
     name,
-    ['freq', 'fm', 'fm_index'],
-    ['saw', 'tri', 'sin', 'sqr'],
+    [{ name: 'freq', type: 'float' }, { name: 'fm', type: 'float' }, { name: 'fm_index', type: 'float' }],
+    [{ name: 'saw', type: 'float' }, { name: 'tri', type: 'float' }, { name: 'sin', type: 'float' }, { name: 'sqr', type: 'float' }],
     { phase: 0.0, tri_state: 0.0 },
     (inp, reg) => {
       const fmRatio = pow_(2.0, div(mul(inp.get('fm_index'), inp.get('fm')), 5.0))
@@ -707,8 +707,8 @@ export function topoWaveguide(nx = 4, ny = 4, name = 'TopoWaveguide'): ModuleTyp
 export function vca(name = 'VCA'): ModuleType {
   return defineModule(
     name,
-    ['audio', 'cv'],
-    ['out'],
+    [{ name: 'audio', type: 'float' }, { name: 'cv', type: 'float' }],
+    [{ name: 'out', type: 'float' }],
     {},
     (inp) => ({
       outputs: { out: mul(inp.get('audio'), inp.get('cv')) },

@@ -379,6 +379,15 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const srcId = resolveOutputIdx(srcInst, args.src_output as string | number)
       const dstId = resolveInputIdx(dstInst,  args.dst_input  as string | number)
 
+      const srcType = srcInst.outputPortType(srcId)
+      const dstType = dstInst.inputPortType(dstId)
+      if (srcType !== undefined && dstType !== undefined && srcType !== dstType) {
+        throw new Error(
+          `Type mismatch: '${args.src_module as string}'.${srcInst.outputNames[srcId]} is type '${srcType}' ` +
+          `but '${args.dst_module as string}'.${dstInst.inputNames[dstId]}' expects '${dstType}'`
+        )
+      }
+
       const ok = session.graph.connect(args.src_module as string, srcId, args.dst_module as string, dstId)
       if (!ok) throw new Error(`graph.connect returned false.`)
 

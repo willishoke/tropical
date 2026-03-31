@@ -30,6 +30,8 @@ struct ControlModule
   unsigned int in_count = 0;
   unsigned int out_count = 0;
   std::vector<ExprSpecPtr> input_exprs;
+  std::vector<std::string> input_types;   // "" = untyped (compatible with any)
+  std::vector<std::string> output_types;  // "" = untyped (compatible with any)
 };
 
 enum class OpCode

@@ -148,6 +148,8 @@ interface ModuleDef {
   typeName: string
   inputNames: string[]
   outputNames: string[]
+  inputPortTypes: (string | undefined)[]
+  outputPortTypes: (string | undefined)[]
   sampleRate: number
   rawInputDefaults: Record<string, ExprCoercible>
   inputDefaults: (SignalExpr | null)[]
@@ -202,6 +204,7 @@ export class ModuleType {
     } finally {
       b.egress_module_spec_free(specH)
     }
+    this._registerPortTypes(graph, name)
     for (let i = 0; i < d.inputDefaults.length; i++) {
       const def = d.inputDefaults[i]
       if (def !== null) graph.setInputExpr(name, i, def)
@@ -219,6 +222,8 @@ export class ModuleType {
       b.egress_module_spec_free(specH)
     }
 
+    this._registerPortTypes(graph, name)
+
     // Set input defaults
     for (let i = 0; i < d.inputDefaults.length; i++) {
       const def = d.inputDefaults[i]
@@ -226,6 +231,18 @@ export class ModuleType {
     }
 
     return new ModuleInstance(d, graph, name)
+  }
+
+  private _registerPortTypes(graph: Graph, name: string): void {
+    const d = this._def
+    for (let i = 0; i < d.inputPortTypes.length; i++) {
+      const t = d.inputPortTypes[i]
+      if (t !== undefined) graph.declareInputType(name, i, t)
+    }
+    for (let i = 0; i < d.outputPortTypes.length; i++) {
+      const t = d.outputPortTypes[i]
+      if (t !== undefined) graph.declareOutputType(name, i, t)
+    }
   }
 
   private _nestedCall(ctx: _BuildContext, args: ExprCoercible[]): SignalExpr | SignalExpr[] {
@@ -314,6 +331,9 @@ export class ModuleInstance {
   get outputNames(): string[] { return this._def.outputNames }
   get typeName(): string { return this._def.typeName }
 
+  inputPortType(idx: number): string | undefined { return this._def.inputPortTypes[idx] }
+  outputPortType(idx: number): string | undefined { return this._def.outputPortTypes[idx] }
+
   inputIndex(name: string): number {
     const idx = this._def.inputNames.indexOf(name)
     if (idx === -1) throw new Error(`Unknown input '${name}' on module '${this.name}'.`)
@@ -372,6 +392,12 @@ export class InputPort {
 
 // ---------- defineModule ----------
 
+/** A port spec is either a plain name string or an object with optional type annotation. */
+export type PortSpec = string | { name: string; type?: string }
+
+function _portName(s: PortSpec): string { return typeof s === 'string' ? s : s.name }
+function _portType(s: PortSpec): string | undefined { return typeof s === 'string' ? undefined : s.type }
+
 type RegsInit = Record<string, ValueCoercible>
 
 interface ProcessResult {
@@ -383,15 +409,17 @@ type ProcessFn = (inputs: SymbolMap, regs: SymbolMap) => ProcessResult
 
 export function defineModule(
   name: string,
-  inputs: string[],
-  outputs: string[],
+  inputs: PortSpec[],
+  outputs: PortSpec[],
   regs: RegsInit,
   process: ProcessFn,
   sampleRate = 44100.0,
   inputDefaults?: Record<string, ExprCoercible>,
 ): ModuleType {
-  const inputNames = [...inputs]
-  const outputNames = [...outputs]
+  const inputNames = inputs.map(_portName)
+  const outputNames = outputs.map(_portName)
+  const inputPortTypes = inputs.map(_portType)
+  const outputPortTypes = outputs.map(_portType)
 
   // Parse regs
   const regNames: string[] = []
@@ -467,6 +495,8 @@ export function defineModule(
     typeName: name,
     inputNames,
     outputNames,
+    inputPortTypes,
+    outputPortTypes,
     sampleRate,
     rawInputDefaults: inputDefaults ?? {},
     inputDefaults: parsedDefaults,
