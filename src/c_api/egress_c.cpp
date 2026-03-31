@@ -921,7 +921,10 @@ const double* egress_graph_tap_buffer(egress_graph_t g, size_t tap_id, size_t* o
   try
   {
     static thread_local std::vector<double> tap_buffer;
-    tap_buffer = static_cast<Graph*>(g)->outputTapBuffer(tap_id);
+    {
+      auto tmp = static_cast<Graph*>(g)->outputTapBuffer(tap_id);
+      tap_buffer.assign(tmp.begin(), tmp.end());
+    }
     if (out_len)
     {
       *out_len = tap_buffer.size();

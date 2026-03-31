@@ -74,6 +74,8 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
           case NumericValueKind::Matrix:
             ++materialized_matrix_outputs;
             break;
+          case NumericValueKind::CompoundSlot:
+            break;
         }
 #endif
         assign_numeric_value_to(
