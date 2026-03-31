@@ -110,6 +110,18 @@ export const egress_expr_function       = lib.func('egress_expr_function',      
 export const egress_expr_call           = lib.func('egress_expr_call',           'void *', ['void *', 'void **', 'size_t'])
 export const egress_expr_free           = lib.func('egress_expr_free',           'void',   ['void *'])
 
+// ---------- ADT expression constructors ----------
+
+export const egress_expr_construct_struct  = lib.func('egress_expr_construct_struct',  'void *', ['str', 'void **', 'size_t'])
+export const egress_expr_field_access      = lib.func('egress_expr_field_access',      'void *', ['str', 'void *', 'uint32'])
+export const egress_expr_construct_variant = lib.func('egress_expr_construct_variant', 'void *', ['str', 'uint32', 'void **', 'size_t'])
+export const egress_expr_match_variant     = lib.func('egress_expr_match_variant',     'void *', ['str', 'void *', 'void **', 'size_t'])
+
+// ---------- Type definition API (graph-scoped) ----------
+
+export const egress_typedef_struct = lib.func('egress_typedef_struct', 'bool', ['void *', 'str', 'void **', 'int *', 'size_t'])
+export const egress_typedef_sum    = lib.func('egress_typedef_sum',    'bool', ['void *', 'str', 'void **', 'void **', 'int *', 'size_t *', 'size_t'])
+
 // ---------- ControlParam API ----------
 
 export const egress_param_new          = lib.func('egress_param_new',          'void *', ['double', 'double'])
@@ -235,9 +247,13 @@ export const EXPR_LOG            = 35
 export const EXPR_SIN            = 36
 export const EXPR_NEG            = 37
 export const EXPR_BIT_NOT        = 38
-export const EXPR_SMOOTHED_PARAM = 39
-export const EXPR_SELECT         = 40
-export const EXPR_TRIGGER_PARAM  = 41
+export const EXPR_SMOOTHED_PARAM     = 39
+export const EXPR_SELECT             = 40
+export const EXPR_TRIGGER_PARAM      = 41
+export const EXPR_CONSTRUCT_STRUCT   = 42
+export const EXPR_FIELD_ACCESS       = 43
+export const EXPR_CONSTRUCT_VARIANT  = 44
+export const EXPR_MATCH_VARIANT      = 45
 
 // ---------- Helpers ----------
 
