@@ -122,6 +122,11 @@ export const egress_expr_match_variant     = lib.func('egress_expr_match_variant
 export const egress_typedef_struct = lib.func('egress_typedef_struct', 'bool', ['void *', 'str', 'void **', 'int *', 'size_t'])
 export const egress_typedef_sum    = lib.func('egress_typedef_sum',    'bool', ['void *', 'str', 'void **', 'void **', 'int *', 'size_t *', 'size_t'])
 
+// ---------- Port type annotation API ----------
+
+export const egress_module_declare_input_type  = lib.func('egress_module_declare_input_type',  'bool', ['void *', 'str', 'uint32', 'str'])
+export const egress_module_declare_output_type = lib.func('egress_module_declare_output_type', 'bool', ['void *', 'str', 'uint32', 'str'])
+
 // ---------- ControlParam API ----------
 
 export const egress_param_new          = lib.func('egress_param_new',          'void *', ['double', 'double'])

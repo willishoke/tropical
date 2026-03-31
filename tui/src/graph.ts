@@ -74,6 +74,22 @@ export class Graph {
     return b.egress_graph_remove_module(this._h, name) as boolean
   }
 
+  declareInputType(moduleName: string, idx: number, typeName: string): void {
+    const ok = b.egress_module_declare_input_type(this._h, moduleName, idx, typeName) as boolean
+    if (!ok) {
+      const cErr = b.egress_last_error()
+      throw new Error(`Failed to declare input type on '${moduleName}' port ${idx}: ${cErr}`)
+    }
+  }
+
+  declareOutputType(moduleName: string, idx: number, typeName: string): void {
+    const ok = b.egress_module_declare_output_type(this._h, moduleName, idx, typeName) as boolean
+    if (!ok) {
+      const cErr = b.egress_last_error()
+      throw new Error(`Failed to declare output type on '${moduleName}' port ${idx}: ${cErr}`)
+    }
+  }
+
   // ---- Connections ----
 
   connect(srcModule: string, srcOutputId: number, dstModule: string, dstInputId: number): boolean {
