@@ -1327,7 +1327,8 @@ bool Module::build_numeric_program_impl(
   double sample_rate,
   const std::vector<Value> & current_inputs,
   egress_jit::NumericProgram & numeric_program,
-  NumericJitState & state)
+  NumericJitState & state,
+  const egress::TypeRegistry* registry)
 {
   if (program.register_count == 0)
   {
@@ -2168,7 +2169,7 @@ bool Module::build_numeric_program_impl(
 bool Module::build_numeric_program(const std::vector<Value> & current_inputs, egress_jit::NumericProgram & numeric_program)
 {
   NumericJitState tmp;
-  if (!build_numeric_program_impl(program_, registers_, sample_rate_, current_inputs, numeric_program, tmp))
+  if (!build_numeric_program_impl(program_, registers_, sample_rate_, current_inputs, numeric_program, tmp, type_registry_))
   {
     return false;
   }
@@ -2189,7 +2190,7 @@ bool Module::build_numeric_program(
   const std::vector<Value> & current_inputs,
   egress_jit::NumericProgram & numeric_program) const
 {
-  return build_numeric_program_impl(compiled_program, registers_, sample_rate_, current_inputs, numeric_program, state);
+  return build_numeric_program_impl(compiled_program, registers_, sample_rate_, current_inputs, numeric_program, state, type_registry_);
 }
 
 void Module::initialize_numeric_jit_state(
