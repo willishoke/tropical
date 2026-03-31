@@ -123,6 +123,12 @@ bool egress_typedef_sum(egress_graph_t g, const char* name,
     const size_t* variant_field_counts,
     size_t variant_count);
 
+/* ---------- Port type annotation API ---------- */
+bool egress_module_declare_input_type(egress_graph_t g, const char* module_name,
+    unsigned int input_index, const char* type_name);
+bool egress_module_declare_output_type(egress_graph_t g, const char* module_name,
+    unsigned int output_index, const char* type_name);
+
 /* ---------- ControlParam API ---------- */
 /* Create a smoothed parameter. init_value is the starting value; time_const is the
    one-pole lowpass time constant in seconds (e.g. 0.01 = ~10ms ramp). */
