@@ -57,9 +57,13 @@ typedef void* egress_param_t;
 #define EGRESS_EXPR_SIN           36
 #define EGRESS_EXPR_NEG           37
 #define EGRESS_EXPR_BIT_NOT       38
-#define EGRESS_EXPR_SMOOTHED_PARAM 39
-#define EGRESS_EXPR_SELECT        40
-#define EGRESS_EXPR_TRIGGER_PARAM 41
+#define EGRESS_EXPR_SMOOTHED_PARAM       39
+#define EGRESS_EXPR_SELECT               40
+#define EGRESS_EXPR_TRIGGER_PARAM        41
+#define EGRESS_EXPR_CONSTRUCT_STRUCT     42
+#define EGRESS_EXPR_FIELD_ACCESS         43
+#define EGRESS_EXPR_CONSTRUCT_VARIANT    44
+#define EGRESS_EXPR_MATCH_VARIANT        45
 
 /* Error handling — thread-local; valid until next call on this thread */
 const char* egress_last_error(void);
@@ -96,6 +100,28 @@ egress_expr_t egress_expr_array_set(egress_expr_t arr, egress_expr_t idx, egress
 egress_expr_t egress_expr_function(unsigned int param_count, egress_expr_t body);
 egress_expr_t egress_expr_call(egress_expr_t callee, const egress_expr_t* args, size_t n);
 void          egress_expr_free(egress_expr_t);
+
+/* ---------- ADT expression constructors ---------- */
+egress_expr_t egress_expr_construct_struct(
+    const char* type_name, const egress_expr_t* field_exprs, size_t count);
+egress_expr_t egress_expr_field_access(
+    const char* type_name, egress_expr_t struct_expr, unsigned int field_index);
+egress_expr_t egress_expr_construct_variant(
+    const char* type_name, unsigned int variant_tag,
+    const egress_expr_t* payload_exprs, size_t count);
+egress_expr_t egress_expr_match_variant(
+    const char* type_name, egress_expr_t scrutinee,
+    const egress_expr_t* branch_exprs, size_t branch_count);
+
+/* ---------- Type definition API (graph-scoped) ---------- */
+bool egress_typedef_struct(egress_graph_t g, const char* name,
+    const char** field_names, const int* field_scalar_types, size_t count);
+bool egress_typedef_sum(egress_graph_t g, const char* name,
+    const char** variant_names,
+    const char** variant_field_names_flat,
+    const int* variant_field_scalar_types_flat,
+    const size_t* variant_field_counts,
+    size_t variant_count);
 
 /* ---------- ControlParam API ---------- */
 /* Create a smoothed parameter. init_value is the starting value; time_const is the

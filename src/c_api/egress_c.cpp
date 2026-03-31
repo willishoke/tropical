@@ -454,6 +454,141 @@ void egress_expr_free(egress_expr_t e)
   delete static_cast<EgressExpr*>(e);
 }
 
+// ---------- ADT expression constructors ----------
+
+egress_expr_t egress_expr_construct_struct(
+  const char* type_name, const egress_expr_t* field_exprs, size_t count)
+{
+  try
+  {
+    std::vector<ExprSpecPtr> fields;
+    fields.reserve(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+      fields.push_back(static_cast<EgressExpr*>(field_exprs[i])->spec);
+    }
+    return new EgressExpr{expr::construct_struct_expr(type_name ? type_name : "", std::move(fields))};
+  }
+  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
+}
+
+egress_expr_t egress_expr_field_access(
+  const char* type_name, egress_expr_t struct_expr, unsigned int field_index)
+{
+  try
+  {
+    if (!struct_expr) { set_error("egress_expr_field_access: null struct_expr"); return nullptr; }
+    return new EgressExpr{expr::field_access_expr(
+      type_name ? type_name : "",
+      static_cast<EgressExpr*>(struct_expr)->spec,
+      field_index)};
+  }
+  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
+}
+
+egress_expr_t egress_expr_construct_variant(
+  const char* type_name, unsigned int variant_tag,
+  const egress_expr_t* payload_exprs, size_t count)
+{
+  try
+  {
+    std::vector<ExprSpecPtr> payload;
+    payload.reserve(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+      payload.push_back(static_cast<EgressExpr*>(payload_exprs[i])->spec);
+    }
+    return new EgressExpr{expr::construct_variant_expr(
+      type_name ? type_name : "", variant_tag, std::move(payload))};
+  }
+  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
+}
+
+egress_expr_t egress_expr_match_variant(
+  const char* type_name, egress_expr_t scrutinee,
+  const egress_expr_t* branch_exprs, size_t branch_count)
+{
+  try
+  {
+    if (!scrutinee) { set_error("egress_expr_match_variant: null scrutinee"); return nullptr; }
+    std::vector<ExprSpecPtr> branches;
+    branches.reserve(branch_count);
+    for (size_t i = 0; i < branch_count; ++i)
+    {
+      branches.push_back(static_cast<EgressExpr*>(branch_exprs[i])->spec);
+    }
+    return new EgressExpr{expr::match_variant_expr(
+      type_name ? type_name : "",
+      static_cast<EgressExpr*>(scrutinee)->spec,
+      std::move(branches))};
+  }
+  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
+}
+
+// ---------- Type definition API ----------
+
+bool egress_typedef_struct(egress_graph_t g, const char* name,
+  const char** field_names, const int* field_scalar_types, size_t count)
+{
+  try
+  {
+    if (!g || !name) { set_error("egress_typedef_struct: null argument"); return false; }
+    std::vector<egress::FieldDef> fields;
+    fields.reserve(count);
+    for (size_t i = 0; i < count; ++i)
+    {
+      egress::FieldDef fd;
+      fd.name = field_names ? (field_names[i] ? field_names[i] : "") : "";
+      const int st = field_scalar_types ? field_scalar_types[i] : 0;
+      fd.scalar_type = (st == 1) ? egress_jit::JitScalarType::Int
+                     : (st == 2) ? egress_jit::JitScalarType::Bool
+                     : egress_jit::JitScalarType::Float;
+      fields.push_back(std::move(fd));
+    }
+    static_cast<Graph*>(g)->type_registry().define_struct(name, std::move(fields));
+    return true;
+  }
+  catch (const std::exception & e) { set_error(e.what()); return false; }
+}
+
+bool egress_typedef_sum(egress_graph_t g, const char* name,
+  const char** variant_names,
+  const char** variant_field_names_flat,
+  const int* variant_field_scalar_types_flat,
+  const size_t* variant_field_counts,
+  size_t variant_count)
+{
+  try
+  {
+    if (!g || !name) { set_error("egress_typedef_sum: null argument"); return false; }
+    std::vector<egress::VariantDef> variants;
+    variants.reserve(variant_count);
+    size_t flat_offset = 0;
+    for (size_t v = 0; v < variant_count; ++v)
+    {
+      egress::VariantDef vd;
+      vd.name = variant_names ? (variant_names[v] ? variant_names[v] : "") : "";
+      const size_t fcount = variant_field_counts ? variant_field_counts[v] : 0;
+      vd.payload.reserve(fcount);
+      for (size_t f = 0; f < fcount; ++f)
+      {
+        egress::FieldDef fd;
+        fd.name = variant_field_names_flat ? (variant_field_names_flat[flat_offset] ? variant_field_names_flat[flat_offset] : "") : "";
+        const int st = variant_field_scalar_types_flat ? variant_field_scalar_types_flat[flat_offset] : 0;
+        fd.scalar_type = (st == 1) ? egress_jit::JitScalarType::Int
+                       : (st == 2) ? egress_jit::JitScalarType::Bool
+                       : egress_jit::JitScalarType::Float;
+        vd.payload.push_back(std::move(fd));
+        ++flat_offset;
+      }
+      variants.push_back(std::move(vd));
+    }
+    static_cast<Graph*>(g)->type_registry().define_sum(name, std::move(variants));
+    return true;
+  }
+  catch (const std::exception & e) { set_error(e.what()); return false; }
+}
+
 // ---------- Module spec builder API ----------
 
 egress_module_spec_t egress_module_spec_new(unsigned int input_count, double sample_rate)
