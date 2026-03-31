@@ -1502,6 +1502,50 @@ int main()
     egress_graph_free(g);
   });
 
+  run_test("register type declaration and metadata", []() {
+    egress_graph_t g = egress_graph_new(1);
+    ASSERT(g != nullptr);
+
+    // Build a simple module with 2 registers
+    egress_module_spec_t spec = egress_module_spec_new(1, 44100.0);
+    ASSERT(spec != nullptr);
+
+    // output: register(0)
+    egress_expr_t out = egress_expr_register(0);
+    egress_module_spec_add_output(spec, out);
+
+    // register 0: next = input(0), init = 0.0
+    egress_expr_t reg0_body = egress_expr_input(0);
+    egress_value_t reg0_init = egress_value_float(0.0);
+    egress_module_spec_add_register(spec, reg0_body, reg0_init);
+    egress_value_free(reg0_init);
+
+    // register 1: next = input(0), init = 0 (int)
+    egress_expr_t reg1_body = egress_expr_input(0);
+    egress_value_t reg1_init = egress_value_int(0);
+    egress_module_spec_add_register(spec, reg1_body, reg1_init);
+    egress_value_free(reg1_init);
+
+    ASSERT_OK(egress_graph_add_module(g, "RegMod", spec));
+    egress_module_spec_free(spec);
+
+    // Declare register types
+    ASSERT_OK(egress_module_declare_register_type(g, "RegMod", 0, "float"));
+    ASSERT_OK(egress_module_declare_register_type(g, "RegMod", 1, "int"));
+
+    // Invalid index should return false
+    ASSERT(!egress_module_declare_register_type(g, "RegMod", 99, "float"));
+
+    // Invalid module name should return false
+    ASSERT(!egress_module_declare_register_type(g, "NoSuchModule", 0, "float"));
+
+    // Module should still process correctly after type annotation
+    egress_graph_prime_jit(g);
+    for (int i = 0; i < 8; ++i) egress_graph_process(g);
+
+    egress_graph_free(g);
+  });
+
   printf("\n=== results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
 }

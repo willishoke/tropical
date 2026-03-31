@@ -90,6 +90,14 @@ export class Graph {
     }
   }
 
+  declareRegisterType(moduleName: string, idx: number, typeName: string): void {
+    const ok = b.egress_module_declare_register_type(this._h, moduleName, idx, typeName) as boolean
+    if (!ok) {
+      const cErr = b.egress_last_error()
+      throw new Error(`Failed to declare register type on '${moduleName}' register ${idx}: ${cErr}`)
+    }
+  }
+
   // ---- Connections ----
 
   connect(srcModule: string, srcOutputId: number, dstModule: string, dstInputId: number): boolean {

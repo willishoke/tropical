@@ -686,6 +686,7 @@ class Graph
       module.input_exprs.assign(in_count, nullptr);
       module.input_types.assign(in_count, "");
       module.output_types.assign(out_count, "");
+      module.register_types.assign(module.module->user_register_count(), "");
 
       control_modules_.emplace(std::move(name), std::move(module));
       rebuild_and_publish_runtime_locked();
@@ -707,6 +708,15 @@ class Graph
       auto it = control_modules_.find(module_name);
       if (it == control_modules_.end() || idx >= it->second.out_count) return false;
       it->second.output_types[idx] = type_name;
+      return true;
+    }
+
+    bool declare_register_type(const std::string & module_name, unsigned int idx, const std::string & type_name)
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      auto it = control_modules_.find(module_name);
+      if (it == control_modules_.end() || idx >= it->second.register_types.size()) return false;
+      it->second.register_types[idx] = type_name;
       return true;
     }
 

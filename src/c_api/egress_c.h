@@ -128,6 +128,8 @@ bool egress_module_declare_input_type(egress_graph_t g, const char* module_name,
     unsigned int input_index, const char* type_name);
 bool egress_module_declare_output_type(egress_graph_t g, const char* module_name,
     unsigned int output_index, const char* type_name);
+bool egress_module_declare_register_type(egress_graph_t g, const char* module_name,
+    unsigned int register_index, const char* type_name);
 
 /* ---------- ControlParam API ---------- */
 /* Create a smoothed parameter. init_value is the starting value; time_const is the

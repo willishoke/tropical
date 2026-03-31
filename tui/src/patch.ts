@@ -17,7 +17,7 @@ import {
 } from './expr.js'
 import {
   defineModule, ModuleType, ModuleInstance, delay,
-  valueHandle, SymbolMap, ValueCoercible,
+  valueHandle, SymbolMap, ValueCoercible, RegInit,
 } from './module.js'
 import { Graph } from './graph.js'
 import { DAC } from './audio.js'
@@ -44,7 +44,7 @@ export interface ModuleDefJSON {
   name: string
   inputs: string[]
   outputs: string[]
-  regs?: Record<string, number | boolean | number[] | number[][]>
+  regs?: Record<string, number | boolean | number[] | number[][] | { init: number | boolean | number[] | number[][]; type: string }>
   /** Named delay nodes, declared before any expression that references them. */
   delays?: Record<string, { update: ExprNode; init?: number }>
   /** Named nested sub-module instances. */
@@ -430,10 +430,14 @@ export function loadModuleFromJSON(
   const delaysRaw   = def.delays ?? {}
   const nestedRaw   = def.nested ?? {}
 
-  // Convert regs to defineModule format
-  const regsForDefine: Record<string, ValueCoercible> = {}
+  // Convert regs to defineModule format (supports bare values and { init, type })
+  const regsForDefine: Record<string, RegInit> = {}
   for (const [name, val] of Object.entries(regsRaw)) {
-    regsForDefine[name] = val as ValueCoercible
+    if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'init' in val) {
+      regsForDefine[name] = { init: (val as { init: ValueCoercible; type: string }).init, type: (val as { init: ValueCoercible; type: string }).type }
+    } else {
+      regsForDefine[name] = val as ValueCoercible
+    }
   }
 
   // Parse input defaults (build each default through the expr builder so they become SignalExpr)

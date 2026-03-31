@@ -43,6 +43,15 @@ const RegValueSchema = z.union([
   ArrayStateJSONSchema,
 ])
 
+/** Typed register entry: { init, type } */
+const TypedRegValueSchema = z.object({
+  init: RegValueSchema,
+  type: z.string(),
+})
+
+/** A register entry is either a bare value or a typed { init, type } object. */
+const RegEntrySchema = z.union([RegValueSchema, TypedRegValueSchema])
+
 // ─────────────────────────────────────────────────────────────
 // NestedModuleJSON
 // ─────────────────────────────────────────────────────────────
@@ -60,7 +69,7 @@ export const ModuleDefJSONSchema = z.object({
   name: z.string().min(1, 'Module name must be a non-empty string'),
   inputs: z.array(z.string()),
   outputs: z.array(z.string()).min(1, 'Module must have at least one output'),
-  regs: z.record(z.string(), RegValueSchema).optional(),
+  regs: z.record(z.string(), RegEntrySchema).optional(),
   delays: z.record(z.string(), z.object({
     update: ExprNodeSchema,
     init: z.number().optional(),
