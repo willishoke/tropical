@@ -99,18 +99,14 @@ struct NumericProgram
 };
 
 using NumericKernelFn = void (*)(
-  const double * inputs,
-  double * registers,
-  double * const * arrays,
+  const int64_t * inputs,
+  int64_t * registers,
+  int64_t * const * arrays,
   const uint64_t * array_sizes,
-  double * temps,
+  int64_t * temps,
   double sample_rate,
   uint64_t sample_index,
-  const uint64_t * param_ptrs,
-  const int64_t * int_inputs,
-  int64_t * int_regs,
-  int64_t * const * int_arrays,
-  int64_t * int_temps);
+  const uint64_t * param_ptrs);
 
 #ifdef EGRESS_LLVM_ORC_JIT
 class KernelObjectCache;
