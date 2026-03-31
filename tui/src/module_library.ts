@@ -7,6 +7,7 @@ import {
   add, sub, mul, div, mod, pow_, neg, floorDiv,
   lt, lte, gt, gte,
   abs_, sin, log,
+  bitAnd, bitXor, rshift,
   clamp, select, arrayPack, arraySet, matmul,
   sampleRate, sampleIndex,
 } from './expr.js'
@@ -338,6 +339,137 @@ export function adEnvelope(name = 'ADEnvelope'): ModuleType {
   )
 }
 
+// ─── ADSR Envelope ───────────────────────────────────────────────────────────
+
+export function adsrEnvelope(name = 'ADSREnvelope'): ModuleType {
+  return defineModule(
+    name,
+    ['gate', 'attack', 'decay', 'sustain', 'release'],
+    ['env'],
+    { stage: 0.0, phase: 0.0, release_level: 0.0 },
+    (inp, reg) => {
+      const sr       = sampleRate()
+      const attack   = clamp(inp.get('attack'),  1e-4, 10.0)
+      const decayT   = clamp(inp.get('decay'),   1e-4, 10.0)
+      const sustain  = clamp(inp.get('sustain'),  0.0,  1.0)
+      const releaseT = clamp(inp.get('release'), 1e-4, 10.0)
+      const gate     = inp.get('gate')
+
+      const prevGate = delay(gate, 0.0)
+      const trig     = mul(gt(gate, 0.5), lte(prevGate, 0.5))
+      const gateOff  = mul(lte(gate, 0.5), gt(prevGate, 0.5))
+
+      const stage = reg.get('stage')
+      const phase = reg.get('phase')
+      const relLvl = reg.get('release_level')
+
+      // Branchless stage detection
+      const inAttack  = mul(gt(stage, 0.5), lt(stage, 1.5))
+      const inDecay   = mul(gt(stage, 1.5), lt(stage, 2.5))
+      const inSustain = mul(gt(stage, 2.5), lt(stage, 3.5))
+      const inRelease = gt(stage, 3.5)
+      const inADS     = mul(gt(stage, 0.5), lt(stage, 3.5))
+
+      // Phase increments per stage
+      const dtA = div(1.0, mul(attack,   sr))
+      const dtD = div(1.0, mul(decayT,   sr))
+      const dtR = div(1.0, mul(releaseT, sr))
+      const dt  = add(add(mul(inAttack, dtA), mul(inDecay, dtD)), mul(inRelease, dtR))
+
+      const newPhase = add(phase, dt)
+      const atkDone  = mul(inAttack,  gte(newPhase, 1.0))
+      const decDone  = mul(inDecay,   gte(newPhase, 1.0))
+      const relDone  = mul(inRelease, gte(newPhase, 1.0))
+
+      // Current envelope value (before transitions) for release capture
+      const currentEnv = add(
+        add(mul(inAttack, phase),
+            mul(inDecay, sub(1.0, mul(phase, sub(1.0, sustain))))),
+        add(mul(inSustain, sustain),
+            mul(inRelease, mul(relLvl, sub(1.0, phase)))),
+      )
+
+      // Gate-off: capture current env and enter release
+      const enterRelease = mul(gateOff, inADS)
+
+      const notTrig = sub(1.0, trig)
+      const notGateOff = sub(1.0, enterRelease)
+
+      // Next stage logic (trig overrides gate-off overrides normal transitions)
+      const normalNext = add(
+        add(
+          mul(mul(inAttack, sub(1.0, atkDone)), 1.0),  // stay in attack
+          mul(atkDone, 2.0),                            // attack → decay
+        ),
+        add(
+          add(
+            mul(mul(inDecay, sub(1.0, decDone)), 2.0),  // stay in decay
+            mul(decDone, 3.0),                           // decay → sustain
+          ),
+          add(
+            mul(inSustain, 3.0),                         // stay in sustain
+            mul(mul(inRelease, sub(1.0, relDone)), 4.0), // stay in release (idle if done = 0)
+          ),
+        ),
+      )
+
+      const afterGateOff = add(
+        mul(enterRelease, 4.0),
+        mul(notGateOff, normalNext),
+      )
+
+      const nextStage = add(
+        mul(trig, 1.0),
+        mul(notTrig, afterGateOff),
+      )
+
+      // Next phase
+      const normalPhase = add(
+        mul(atkDone, clamp(sub(newPhase, 1.0), 0.0, 1.0)),
+        mul(
+          sub(1.0, add(atkDone, add(decDone, relDone))),
+          clamp(newPhase, 0.0, 1.0),
+        ),
+      )
+
+      const afterGateOffPhase = add(
+        mul(enterRelease, 0.0),
+        mul(notGateOff, normalPhase),
+      )
+
+      const nextPhase = mul(notTrig, afterGateOffPhase)
+
+      // Next release_level: capture on gate-off, keep otherwise
+      const nextRelLvl = add(
+        mul(enterRelease, currentEnv),
+        mul(sub(1.0, enterRelease), relLvl),
+      )
+
+      // Compute output envelope with polyBLAMP antialiasing
+      const rawEnv = currentEnv
+
+      let env: ExprCoercible = rawEnv
+      // Attack BLAMP
+      env = sub(env, mul(mul(inAttack, dtA), one(_polyBlamp.call(phase, dtA))))
+      env = add(env, mul(mul(inAttack, dtA), one(_polyBlamp.call(sub(1.0, phase), dtA))))
+      // Decay BLAMP
+      const decaySlope = sub(1.0, sustain)
+      env = add(env, mul(mul(mul(inDecay, dtD), decaySlope), one(_polyBlamp.call(phase, dtD))))
+      env = sub(env, mul(mul(mul(inDecay, dtD), decaySlope), one(_polyBlamp.call(sub(1.0, phase), dtD))))
+      // Release BLAMP
+      env = add(env, mul(mul(mul(inRelease, dtR), relLvl), one(_polyBlamp.call(phase, dtR))))
+      env = sub(env, mul(mul(mul(inRelease, dtR), relLvl), one(_polyBlamp.call(sub(1.0, phase), dtR))))
+
+      return {
+        outputs: { env: clamp(env as SignalExpr, 0.0, 1.0) },
+        nextRegs: { stage: nextStage, phase: nextPhase, release_level: nextRelLvl },
+      }
+    },
+    44100.0,
+    { gate: 0.0, attack: 0.01, decay: 0.1, sustain: 0.7, release: 0.3 },
+  )
+}
+
 // ─── Compressor ───────────────────────────────────────────────────────────────
 
 export function compressor(name = 'Compressor'): ModuleType {
@@ -626,13 +758,110 @@ export function bitCrusher(name = 'BitCrusher'): ModuleType {
   )
 }
 
+// ─── Ladder Filter ───────────────────────────────────────────────────────────
+
+const _tanhApprox: PureFunction = definePureFunction(['x'], ['value'], (inp) => {
+  const x = clamp(inp.get('x'), -3.0, 3.0)
+  const x2 = mul(x, x)
+  return { value: div(mul(x, add(27.0, x2)), add(27.0, mul(9.0, x2))) }
+})
+
+export function ladderFilter(name = 'LadderFilter'): ModuleType {
+  const E = 2.718281828459045
+
+  return defineModule(
+    name,
+    ['input', 'cutoff', 'resonance', 'drive'],
+    ['lp', 'bp', 'hp', 'notch'],
+    { s1: 0.0, s2: 0.0, s3: 0.0, s4: 0.0 },
+    (inp, reg) => {
+      const sr = sampleRate()
+      const cutoff = clamp(inp.get('cutoff'), 20.0, 20000.0)
+      const reso = mul(clamp(inp.get('resonance'), 0.0, 1.0), 4.0)
+      const drive = clamp(inp.get('drive'), 1.0, 10.0)
+      const raw = inp.get('input')
+      const driven = mul(raw, drive)
+
+      // 2x oversampled one-pole coefficient
+      const g = sub(1.0, pow_(E, neg(div(mul(TWO_PI, cutoff), mul(sr, 2.0)))))
+
+      let s1: ExprCoercible = reg.get('s1')
+      let s2: ExprCoercible = reg.get('s2')
+      let s3: ExprCoercible = reg.get('s3')
+      let s4: ExprCoercible = reg.get('s4')
+
+      // 2x oversampled Huovilainen ladder with tanh saturation
+      for (let i = 0; i < 2; i++) {
+        const fb = mul(reso, one(_tanhApprox.call(s4)))
+        const u = sub(driven, fb)
+        s1 = add(s1, mul(g, sub(one(_tanhApprox.call(u)),  one(_tanhApprox.call(s1)))))
+        s2 = add(s2, mul(g, sub(one(_tanhApprox.call(s1)), one(_tanhApprox.call(s2)))))
+        s3 = add(s3, mul(g, sub(one(_tanhApprox.call(s2)), one(_tanhApprox.call(s3)))))
+        s4 = add(s4, mul(g, sub(one(_tanhApprox.call(s3)), one(_tanhApprox.call(s4)))))
+      }
+
+      const lp = s4 as SignalExpr      // 24dB/oct lowpass
+      const bp = s2 as SignalExpr       // 12dB/oct (bandpass character with resonance)
+      const hp = sub(raw, lp)           // highpass (input minus lowpass)
+      const notch = sub(raw, bp)        // notch (input minus bandpass)
+
+      return {
+        outputs: { lp, bp, hp, notch },
+        nextRegs: { s1: s1 as SignalExpr, s2: s2 as SignalExpr, s3: s3 as SignalExpr, s4: s4 as SignalExpr },
+      }
+    },
+    44100.0,
+    { input: 0.0, cutoff: 1000.0, resonance: 0.5, drive: 1.0 },
+  )
+}
+
+// ─── Noise LFSR ──────────────────────────────────────────────────────────────
+
+export function noiseLFSR(name = 'NoiseLFSR'): ModuleType {
+  return defineModule(
+    name,
+    ['clock'],
+    ['out'],
+    { state: 0xACE1, value: 0.0 },
+    (inp, reg) => {
+      const clock = inp.get('clock')
+      const prevClock = delay(clock, 0.0)
+      const tick = mul(gt(clock, 0.5), lte(prevClock, 0.5))
+
+      const state = reg.get('state')
+
+      // Galois LFSR 16-bit: x^16 + x^14 + x^13 + x^11 + 1
+      const lsb = bitAnd(state, 1)
+      const shifted = rshift(state, 1)
+      const newState = select(lsb, bitXor(shifted, 0xB400), shifted)
+
+      // Normalize to [-1, 1]
+      const normalized = sub(div(mul(newState, 2.0), 65535.0), 1.0)
+
+      // Sample-and-hold: advance on rising edge, hold between ticks
+      const prevValue = reg.get('value')
+      const outValue = select(tick, normalized, prevValue)
+
+      return {
+        outputs: { out: outValue },
+        nextRegs: {
+          state: select(tick, newState, state),
+          value: outValue,
+        },
+      }
+    },
+    44100.0,
+    { clock: 0.0 },
+  )
+}
+
 // ─── Builtin registry ─────────────────────────────────────────────────────────
 
 /** Canonical type names shipped with the library. */
 export const BUILTIN_NAMES = [
   'VCO', 'Phaser', 'Phaser16', 'Clock',
-  'Reverb', 'ADEnvelope', 'Compressor', 'BassDrum', 'TopoWaveguide',
-  'VCA', 'BitCrusher',
+  'Reverb', 'ADEnvelope', 'ADSREnvelope', 'Compressor', 'BassDrum', 'TopoWaveguide',
+  'VCA', 'BitCrusher', 'LadderFilter', 'NoiseLFSR',
   'Delay8', 'Delay16', 'Delay512', 'Delay4410', 'Delay44100',
 ] as const
 
@@ -644,11 +873,14 @@ export function loadBuiltins(typeRegistry: Map<string, ModuleType>): void {
   typeRegistry.set('Clock',         clock())
   typeRegistry.set('Reverb',        reverb())
   typeRegistry.set('ADEnvelope',    adEnvelope())
+  typeRegistry.set('ADSREnvelope',  adsrEnvelope())
   typeRegistry.set('Compressor',    compressor())
   typeRegistry.set('BassDrum',      bassDrum())
   typeRegistry.set('TopoWaveguide', topoWaveguide())
   typeRegistry.set('VCA',           vca())
   typeRegistry.set('BitCrusher',    bitCrusher())
+  typeRegistry.set('LadderFilter',  ladderFilter())
+  typeRegistry.set('NoiseLFSR',    noiseLFSR())
   // Common delay lengths
   typeRegistry.set('Delay8',     delayLine(8,     'Delay8'))
   typeRegistry.set('Delay16',    delayLine(16,    'Delay16'))
