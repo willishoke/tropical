@@ -16,6 +16,7 @@ egress/egress.dll
 
 # IDE
 .vscode
+.claude/
 
 # Distribution / packaging
 .Python
