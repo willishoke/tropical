@@ -78,6 +78,43 @@ export const ModuleDefJSONSchema = z.object({
 // PatchJSON
 // ─────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────
+// ADT type definitions
+// ─────────────────────────────────────────────────────────────
+
+const StructFieldSchema = z.object({
+  name: z.string(),
+  scalar_type: z.number().int(),
+})
+
+const StructTypeDefSchema = z.object({
+  kind: z.literal('struct'),
+  name: z.string(),
+  fields: z.array(StructFieldSchema),
+})
+
+const VariantPayloadFieldSchema = z.object({
+  name: z.string(),
+  scalar_type: z.number().int(),
+})
+
+const SumVariantSchema = z.object({
+  name: z.string(),
+  payload: z.array(VariantPayloadFieldSchema),
+})
+
+const SumTypeDefSchema = z.object({
+  kind: z.literal('sum'),
+  name: z.string(),
+  variants: z.array(SumVariantSchema),
+})
+
+const TypeDefSchema = z.union([StructTypeDefSchema, SumTypeDefSchema])
+
+// ─────────────────────────────────────────────────────────────
+// PatchJSON
+// ─────────────────────────────────────────────────────────────
+
 export const PatchJSONSchema = z.object({
   schema: z.literal('egress_patch_1'),
   config: z.object({
@@ -85,6 +122,7 @@ export const PatchJSONSchema = z.object({
     worker_count: z.number().int().positive().optional(),
     fusion_enabled: z.boolean().optional(),
   }).optional(),
+  type_defs: z.array(TypeDefSchema).optional(),
   module_defs: z.array(ModuleDefJSONSchema).optional(),
   modules: z.array(z.object({
     type: z.string(),

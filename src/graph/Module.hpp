@@ -3,6 +3,7 @@
 #include "graph/GraphTypes.hpp"
 #include "graph/ModuleNumericJit.hpp"
 #include "graph/ModuleProgram.hpp"
+#include "graph/TypeRegistry.hpp"
 #include "expr/ExprStructural.hpp"
 #include "jit/OrcJitEngine.hpp"
 
@@ -301,6 +302,7 @@ class Module
       }
     }
 
+    const egress::TypeRegistry* type_registry_ = nullptr;
     unsigned int input_count_ = 0;
     uint32_t user_register_count_ = 0;
     std::unordered_map<egress_expr::ControlParam *, uint32_t> param_anon_reg_map_;
@@ -576,7 +578,8 @@ class Module
       double sample_rate,
       const std::vector<Value> & current_inputs,
       egress_jit::NumericProgram & numeric_program,
-      NumericJitState & state);
+      NumericJitState & state,
+      const egress::TypeRegistry* registry = nullptr);
 
     void initialize_numeric_jit_state(
       NumericJitState & state,

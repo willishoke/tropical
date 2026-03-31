@@ -119,6 +119,15 @@ egress_jit::JitScalarType infer_jit_scalar_type(
       if (a == JST::Float || b == JST::Float) return JST::Float;
       return JST::Int;
 
+    // FieldAccess returns the field's scalar type; the registry lookup happens
+    // in build_numeric_program_impl where reg_info is available.
+    // For single-scalar inference fallback, return Float.
+    case ExprKind::FieldAccess:
+    case ExprKind::ConstructStruct:
+    case ExprKind::ConstructVariant:
+    case ExprKind::MatchVariant:
+      return JST::Float;
+
     default:
       return JST::Float;
   }
@@ -167,6 +176,10 @@ bool Module::supports_numeric_jit_expr_kind(ExprKind kind)
     case ExprKind::BitNot:
     case ExprKind::ArrayPack:
     case ExprKind::SmoothedParam:
+    case ExprKind::ConstructStruct:
+    case ExprKind::FieldAccess:
+    case ExprKind::ConstructVariant:
+    case ExprKind::MatchVariant:
       return true;
     default:
       return false;
@@ -272,6 +285,11 @@ void Module::assign_numeric_value_to(
       dst.aggregate_scalar_type = AggregateScalarType::Float;
       return;
     }
+    case NumericValueKind::CompoundSlot:
+      // CompoundSlot outputs are not directly materializable as a single Value;
+      // they must be accessed via FieldAccess expressions.
+      dst = expr::float_value(0.0);
+      return;
   }
 }
 
@@ -292,6 +310,8 @@ Module::NumericValueRef Module::make_numeric_value_ref(
       {
         ref.array_size = 0;
       }
+      return ref;
+    case NumericValueKind::CompoundSlot:
       return ref;
     case NumericValueKind::Matrix:
       ref.matrix_rows = info.matrix_rows;
@@ -1327,7 +1347,8 @@ bool Module::build_numeric_program_impl(
   double sample_rate,
   const std::vector<Value> & current_inputs,
   egress_jit::NumericProgram & numeric_program,
-  NumericJitState & state)
+  NumericJitState & state,
+  const egress::TypeRegistry* registry)
 {
   if (program.register_count == 0)
   {
@@ -2004,6 +2025,279 @@ bool Module::build_numeric_program_impl(
         reg_info[instr.dst].kind = NumericValueKind::Scalar;
         break;
       }
+      case ExprKind::ConstructStruct:
+      {
+        // Allocate consecutive temp slots for each field.
+        // Each field is a scalar; emit CopySlot for each.
+        if (!registry) return false;
+        const auto * type_def = registry->find(instr.type_name);
+        if (!type_def || type_def->kind != egress::TypeDef::Kind::Struct)
+          return false;
+        const uint32_t n_fields = static_cast<uint32_t>(type_def->fields.size());
+        if (instr.args.size() < n_fields) return false;
+
+        // Validate all field sources are scalar
+        for (uint32_t fi = 0; fi < n_fields; ++fi)
+        {
+          const uint32_t src = instr.args[fi];
+          if (src >= reg_info.size() || reg_info[src].kind != NumericValueKind::Scalar)
+            return false;
+        }
+
+        // Allocate n_fields new temp slots
+        const uint32_t base = numeric_program.register_count;
+        numeric_program.register_count += n_fields;
+        reg_info.resize(numeric_program.register_count);
+
+        // Emit CopySlot for each field
+        for (uint32_t fi = 0; fi < n_fields; ++fi)
+        {
+          const uint32_t src = instr.args[fi];
+          const egress_jit::JitScalarType ftype = type_def->fields[fi].scalar_type;
+          egress_jit::NumericInstr copy_instr;
+          copy_instr.op = egress_jit::NumericOp::CopySlot;
+          copy_instr.dst = base + fi;
+          copy_instr.src_a = src;
+          copy_instr.src_a_type = ftype;
+          copy_instr.dst_type = ftype;
+          numeric_program.instructions.push_back(copy_instr);
+
+          reg_info[base + fi].kind = NumericValueKind::Scalar;
+          reg_info[base + fi].scalar_type = ftype;
+        }
+
+        reg_info[instr.dst].kind = NumericValueKind::CompoundSlot;
+        reg_info[instr.dst].compound_base_slot = base;
+        emit_instruction = false;
+        break;
+      }
+      case ExprKind::FieldAccess:
+      {
+        if (!registry) return false;
+        const auto * type_def = registry->find(instr.type_name);
+        if (!type_def || type_def->kind != egress::TypeDef::Kind::Struct)
+          return false;
+        const uint32_t field_index = instr.slot_id;
+        if (field_index >= type_def->fields.size()) return false;
+
+        if (instr.src_a >= reg_info.size() ||
+            reg_info[instr.src_a].kind != NumericValueKind::CompoundSlot)
+          return false;
+
+        const uint32_t field_slot = reg_info[instr.src_a].compound_base_slot + field_index;
+        if (field_slot >= reg_info.size()) return false;
+
+        const egress_jit::JitScalarType ftype = type_def->fields[field_index].scalar_type;
+        jit_instr.op = egress_jit::NumericOp::CopySlot;
+        jit_instr.src_a = field_slot;
+        jit_instr.src_a_type = ftype;
+        jit_instr.dst_type = ftype;
+        reg_info[instr.dst].kind = NumericValueKind::Scalar;
+        reg_info[instr.dst].scalar_type = ftype;
+        require_scalar_inputs = false;  // src_a is compound; we resolved it above
+        break;
+      }
+      case ExprKind::ConstructVariant:
+      {
+        if (!registry) return false;
+        const auto * type_def = registry->find(instr.type_name);
+        if (!type_def || type_def->kind != egress::TypeDef::Kind::Sum)
+          return false;
+        const uint32_t variant_idx = instr.slot_id;
+        if (variant_idx >= type_def->variants.size()) return false;
+        const auto & variant = type_def->variants[variant_idx];
+        const uint32_t n_payload = static_cast<uint32_t>(variant.payload.size());
+        if (instr.args.size() < n_payload) return false;
+
+        // Validate all payload sources are scalar
+        for (uint32_t pi = 0; pi < n_payload; ++pi)
+        {
+          const uint32_t src = instr.args[pi];
+          if (src >= reg_info.size() || reg_info[src].kind != NumericValueKind::Scalar)
+            return false;
+        }
+
+        // slot layout: [discriminant, payload_0, payload_1, ...]
+        const uint32_t slot_count = type_def->slot_count();
+        const uint32_t base = numeric_program.register_count;
+        numeric_program.register_count += slot_count;
+        reg_info.resize(numeric_program.register_count);
+
+        // Emit Literal(int, variant_idx) → discriminant slot
+        {
+          egress_jit::NumericInstr disc_instr;
+          disc_instr.op = egress_jit::NumericOp::Literal;
+          disc_instr.dst = base;
+          disc_instr.int_literal = static_cast<int64_t>(variant_idx);
+          disc_instr.literal = static_cast<double>(variant_idx);
+          disc_instr.dst_type = egress_jit::JitScalarType::Int;
+          numeric_program.instructions.push_back(disc_instr);
+          reg_info[base].kind = NumericValueKind::Scalar;
+          reg_info[base].scalar_type = egress_jit::JitScalarType::Int;
+          reg_info[base].scalar_is_constant = true;
+          reg_info[base].int_constant = static_cast<int64_t>(variant_idx);
+        }
+
+        // Emit CopySlot for each payload field
+        for (uint32_t pi = 0; pi < n_payload; ++pi)
+        {
+          const uint32_t src = instr.args[pi];
+          const egress_jit::JitScalarType ftype = variant.payload[pi].scalar_type;
+          egress_jit::NumericInstr copy_instr;
+          copy_instr.op = egress_jit::NumericOp::CopySlot;
+          copy_instr.dst = base + 1 + pi;
+          copy_instr.src_a = src;
+          copy_instr.src_a_type = ftype;
+          copy_instr.dst_type = ftype;
+          numeric_program.instructions.push_back(copy_instr);
+          reg_info[base + 1 + pi].kind = NumericValueKind::Scalar;
+          reg_info[base + 1 + pi].scalar_type = ftype;
+        }
+
+        reg_info[instr.dst].kind = NumericValueKind::CompoundSlot;
+        reg_info[instr.dst].compound_base_slot = base;
+        emit_instruction = false;
+        break;
+      }
+      case ExprKind::MatchVariant:
+      {
+        if (!registry) return false;
+        const auto * type_def = registry->find(instr.type_name);
+        if (!type_def || type_def->kind != egress::TypeDef::Kind::Sum)
+          return false;
+        const uint32_t n_variants = static_cast<uint32_t>(type_def->variants.size());
+        if (instr.args.size() < n_variants) return false;
+
+        // Scrutinee must be a CompoundSlot from ConstructVariant
+        if (instr.src_a >= reg_info.size() ||
+            reg_info[instr.src_a].kind != NumericValueKind::CompoundSlot)
+          return false;
+        const uint32_t disc_slot = reg_info[instr.src_a].compound_base_slot;
+
+        // Determine max payload size (result slot count)
+        uint32_t max_payload = 0;
+        for (const auto & v : type_def->variants)
+          max_payload = std::max(max_payload, static_cast<uint32_t>(v.payload.size()));
+
+        if (max_payload == 0)
+        {
+          // No payload: just alias any branch result or return 0
+          reg_info[instr.dst].kind = NumericValueKind::Scalar;
+          reg_info[instr.dst].scalar_type = egress_jit::JitScalarType::Float;
+          jit_instr.op = egress_jit::NumericOp::Literal;
+          jit_instr.literal = 0.0;
+          jit_instr.dst_type = egress_jit::JitScalarType::Float;
+          break;
+        }
+
+        // Validate all branch args are CompoundSlot
+        for (uint32_t vi = 0; vi < n_variants; ++vi)
+        {
+          const uint32_t bsrc = instr.args[vi];
+          if (bsrc >= reg_info.size() || reg_info[bsrc].kind != NumericValueKind::CompoundSlot)
+            return false;
+        }
+
+        // Allocate result slots
+        const uint32_t result_base = numeric_program.register_count;
+        numeric_program.register_count += max_payload;
+        reg_info.resize(numeric_program.register_count);
+
+        // For each payload slot j: emit Select chain across all variants
+        for (uint32_t j = 0; j < max_payload; ++j)
+        {
+          uint32_t current_result = 0;
+          bool have_result = false;
+
+          for (uint32_t vi = 0; vi < n_variants; ++vi)
+          {
+            const uint32_t branch_base = reg_info[instr.args[vi]].compound_base_slot;
+            const uint32_t n_payload_vi = static_cast<uint32_t>(type_def->variants[vi].payload.size());
+            const egress_jit::JitScalarType ftype = (j < n_payload_vi)
+              ? type_def->variants[vi].payload[j].scalar_type
+              : egress_jit::JitScalarType::Float;
+            const uint32_t branch_slot = branch_base + 1 + j; // +1 for discriminant
+
+            if (!have_result)
+            {
+              // First variant: result_j starts as branch_0_j (CopySlot)
+              const uint32_t slot = result_base + j;
+              egress_jit::NumericInstr copy_instr;
+              copy_instr.op = egress_jit::NumericOp::CopySlot;
+              copy_instr.dst = slot;
+              copy_instr.src_a = (j < n_payload_vi) ? branch_slot : 0;
+              copy_instr.src_a_type = ftype;
+              copy_instr.dst_type = ftype;
+              numeric_program.instructions.push_back(copy_instr);
+              reg_info[slot].kind = NumericValueKind::Scalar;
+              reg_info[slot].scalar_type = ftype;
+              current_result = slot;
+              have_result = true;
+            }
+            else
+            {
+              // Subsequent variants: emit Equal(disc_slot, vi) then Select
+              // Emit Equal: cond_slot = (disc == vi)
+              const uint32_t cond_slot = numeric_program.register_count++;
+              reg_info.resize(numeric_program.register_count);
+              {
+                egress_jit::NumericInstr eq_instr;
+                eq_instr.op = egress_jit::NumericOp::Equal;
+                eq_instr.dst = cond_slot;
+                eq_instr.src_a = disc_slot;
+                eq_instr.src_b = numeric_program.register_count; // points to literal below
+                eq_instr.src_a_type = egress_jit::JitScalarType::Int;
+                eq_instr.src_b_type = egress_jit::JitScalarType::Int;
+                eq_instr.dst_type = egress_jit::JitScalarType::Bool;
+
+                // Emit literal vi
+                const uint32_t lit_slot = numeric_program.register_count++;
+                reg_info.resize(numeric_program.register_count);
+                eq_instr.src_b = lit_slot;
+
+                egress_jit::NumericInstr lit_instr;
+                lit_instr.op = egress_jit::NumericOp::Literal;
+                lit_instr.dst = lit_slot;
+                lit_instr.int_literal = static_cast<int64_t>(vi);
+                lit_instr.literal = static_cast<double>(vi);
+                lit_instr.dst_type = egress_jit::JitScalarType::Int;
+                numeric_program.instructions.push_back(lit_instr);
+                reg_info[lit_slot].kind = NumericValueKind::Scalar;
+                reg_info[lit_slot].scalar_type = egress_jit::JitScalarType::Int;
+
+                numeric_program.instructions.push_back(eq_instr);
+                reg_info[cond_slot].kind = NumericValueKind::Scalar;
+                reg_info[cond_slot].scalar_type = egress_jit::JitScalarType::Bool;
+              }
+
+              // Emit Select: new_result_j = select(cond, branch_i_j, prev_result_j)
+              const uint32_t new_result = numeric_program.register_count++;
+              reg_info.resize(numeric_program.register_count);
+              {
+                egress_jit::NumericInstr sel_instr;
+                sel_instr.op = egress_jit::NumericOp::Select;
+                sel_instr.dst = new_result;
+                sel_instr.src_a = cond_slot;
+                sel_instr.src_b = (j < n_payload_vi) ? branch_slot : current_result;
+                sel_instr.src_c = current_result;
+                sel_instr.src_a_type = egress_jit::JitScalarType::Bool;
+                sel_instr.src_b_type = ftype;
+                sel_instr.src_c_type = ftype;
+                sel_instr.dst_type = ftype;
+                numeric_program.instructions.push_back(sel_instr);
+                reg_info[new_result].kind = NumericValueKind::Scalar;
+                reg_info[new_result].scalar_type = ftype;
+              }
+              current_result = new_result;
+            }
+          }
+        }
+
+        reg_info[instr.dst].kind = NumericValueKind::CompoundSlot;
+        reg_info[instr.dst].compound_base_slot = result_base;
+        emit_instruction = false;
+        break;
+      }
       default:
         return false;
     }
@@ -2168,7 +2462,7 @@ bool Module::build_numeric_program_impl(
 bool Module::build_numeric_program(const std::vector<Value> & current_inputs, egress_jit::NumericProgram & numeric_program)
 {
   NumericJitState tmp;
-  if (!build_numeric_program_impl(program_, registers_, sample_rate_, current_inputs, numeric_program, tmp))
+  if (!build_numeric_program_impl(program_, registers_, sample_rate_, current_inputs, numeric_program, tmp, type_registry_))
   {
     return false;
   }
@@ -2189,7 +2483,7 @@ bool Module::build_numeric_program(
   const std::vector<Value> & current_inputs,
   egress_jit::NumericProgram & numeric_program) const
 {
-  return build_numeric_program_impl(compiled_program, registers_, sample_rate_, current_inputs, numeric_program, state);
+  return build_numeric_program_impl(compiled_program, registers_, sample_rate_, current_inputs, numeric_program, state, type_registry_);
 }
 
 void Module::initialize_numeric_jit_state(
@@ -2239,7 +2533,7 @@ void Module::initialize_numeric_jit_state(
     }
   }
 
-  state.temps.assign(state.prepared.program.register_count, 0);
+  state.temps.assign(numeric_program.register_count, 0);
   state.inputs.assign(jit_inputs.size(), 0);
   state.array_ptrs.resize(state.array_storage.size(), nullptr);
   state.array_sizes.resize(state.array_storage.size(), 0);
@@ -2407,7 +2701,7 @@ void Module::initialize_composite_body_jit(const std::vector<Value> & current_in
   }
 
   composite_body_jit_.state.kernel = *kernel_or_err;
-  composite_body_jit_.state.temps.assign(composite_body_jit_.state.prepared.program.register_count, 0);
+  composite_body_jit_.state.temps.assign(numeric_program.register_count, 0);
   composite_body_jit_.state.inputs.assign(jit_inputs.size(), 0);
   composite_body_jit_.state.array_ptrs.resize(composite_body_jit_.state.array_storage.size(), nullptr);
   composite_body_jit_.state.array_sizes.resize(composite_body_jit_.state.array_storage.size(), 0);
@@ -2550,6 +2844,8 @@ void Module::materialize_numeric_outputs(
       case NumericValueKind::Matrix:
         ++materialized_matrix_outputs;
         break;
+      case NumericValueKind::CompoundSlot:
+        break;
     }
 #endif
     assign_numeric_value_to(
@@ -2611,6 +2907,8 @@ void Module::materialize_numeric_outputs_range(
         break;
       case NumericValueKind::Matrix:
         ++materialized_matrix_outputs;
+        break;
+      case NumericValueKind::CompoundSlot:
         break;
     }
 #endif
@@ -2871,7 +3169,7 @@ void Module::initialize_numeric_jit(const std::vector<Value> & current_inputs)
       }
     }
 
-    numeric_temps_.assign(program_.register_count, 0);
+    numeric_temps_.assign(numeric_program.register_count, 0);
     numeric_array_ptrs_.resize(numeric_array_storage_.size(), nullptr);
     numeric_array_sizes_.resize(numeric_array_storage_.size(), 0);
     for (std::size_t i = 0; i < numeric_array_storage_.size(); ++i)

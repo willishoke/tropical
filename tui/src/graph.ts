@@ -24,6 +24,41 @@ export class Graph {
     this._h = null
   }
 
+  // ---- Type definitions ----
+
+  /** Register a struct type in the graph's type registry. fields is an array of {name, scalar_type} where scalar_type: 0=float, 1=int, 2=bool. */
+  defineStruct(name: string, fields: Array<{ name: string; scalar_type: number }>): boolean {
+    const fieldNames = fields.map(f => f.name)
+    const fieldTypes = fields.map(f => f.scalar_type)
+    const ok = b.egress_typedef_struct(this._h, name, fieldNames, fieldTypes, fields.length) as boolean
+    if (!ok) {
+      const cErr = b.egress_last_error()
+      if (cErr) throw new Error(`Failed to define struct type '${name}': ${cErr}`)
+    }
+    return ok
+  }
+
+  /** Register a sum type in the graph's type registry. */
+  defineSumType(name: string, variants: Array<{ name: string; payload: Array<{ name: string; scalar_type: number }> }>): boolean {
+    const variantNames = variants.map(v => v.name)
+    const flatFieldNames: string[] = []
+    const flatFieldTypes: number[] = []
+    const fieldCounts: number[] = []
+    for (const v of variants) {
+      for (const f of v.payload) {
+        flatFieldNames.push(f.name)
+        flatFieldTypes.push(f.scalar_type)
+      }
+      fieldCounts.push(v.payload.length)
+    }
+    const ok = b.egress_typedef_sum(this._h, name, variantNames, flatFieldNames, flatFieldTypes, fieldCounts, variants.length) as boolean
+    if (!ok) {
+      const cErr = b.egress_last_error()
+      if (cErr) throw new Error(`Failed to define sum type '${name}': ${cErr}`)
+    }
+    return ok
+  }
+
   // ---- Module management ----
 
   addModule(name: string, specHandle: unknown): boolean {

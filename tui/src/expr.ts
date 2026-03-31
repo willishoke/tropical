@@ -170,6 +170,32 @@ export function exprCall(fn: SignalExpr, args: ExprCoercible[]): SignalExpr {
   return SignalExpr.fromHandle(b.check(b.egress_expr_call(fn._h, handles, handles.length), 'expr_call'))
 }
 
+// ---------- ADT expression builders ----------
+
+export function constructStruct(typeName: string, fieldExprs: ExprCoercible[]): SignalExpr {
+  const items = fieldExprs.map(coerce)
+  const handles = items.map(e => e._h)
+  return SignalExpr.fromHandle(b.check(b.egress_expr_construct_struct(typeName, handles, handles.length), 'construct_struct'))
+}
+
+export function fieldAccess(typeName: string, structExpr: ExprCoercible, fieldIndex: number): SignalExpr {
+  const s = coerce(structExpr)
+  return SignalExpr.fromHandle(b.check(b.egress_expr_field_access(typeName, s._h, fieldIndex), 'field_access'))
+}
+
+export function constructVariant(typeName: string, variantTag: number, payloadExprs: ExprCoercible[]): SignalExpr {
+  const items = payloadExprs.map(coerce)
+  const handles = items.map(e => e._h)
+  return SignalExpr.fromHandle(b.check(b.egress_expr_construct_variant(typeName, variantTag, handles, handles.length), 'construct_variant'))
+}
+
+export function matchVariant(typeName: string, scrutinee: ExprCoercible, branchExprs: ExprCoercible[]): SignalExpr {
+  const s = coerce(scrutinee)
+  const items = branchExprs.map(coerce)
+  const handles = items.map(e => e._h)
+  return SignalExpr.fromHandle(b.check(b.egress_expr_match_variant(typeName, s._h, handles, handles.length), 'match_variant'))
+}
+
 // ---------- Leaf node constructors ----------
 
 export function sampleRate(): SignalExpr {

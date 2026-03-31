@@ -1416,6 +1416,92 @@ int main()
   run_test("intseq 4x freq: value output matches sequence entries",
            test_intseq_4x_freq_values);
 
+  run_test("ADT: construct_struct + field_access round-trip", []() {
+    egress_graph_t g = egress_graph_new(1);
+    ASSERT(g != nullptr);
+
+    // Define struct NoteEvent { pitch: float, vel: float, gate: bool }
+    const char* field_names[] = { "pitch", "vel", "gate" };
+    const int   field_types[] = { 0, 0, 2 };  // 0=Float, 2=Bool
+    ASSERT_OK(egress_typedef_struct(g, "NoteEvent", field_names, field_types, 3));
+
+    // Module: 3 inputs, 2 outputs
+    // out[0] = field_access(construct_struct(in0, in1, in2), 0)  -> pitch
+    // out[1] = field_access(construct_struct(in0, in1, in2), 1)  -> vel
+    egress_module_spec_t spec = egress_module_spec_new(3, 44100.0);
+    ASSERT(spec != nullptr);
+
+    egress_expr_t in0 = egress_expr_input(0);
+    egress_expr_t in1 = egress_expr_input(1);
+    egress_expr_t in2 = egress_expr_input(2);
+    ASSERT(in0 && in1 && in2);
+
+    egress_expr_t field_exprs[3] = { in0, in1, in2 };
+    egress_expr_t s0 = egress_expr_construct_struct("NoteEvent", field_exprs, 3);
+    ASSERT(s0 != nullptr);
+    egress_expr_t s1 = egress_expr_construct_struct("NoteEvent", field_exprs, 3);
+    ASSERT(s1 != nullptr);
+
+    egress_expr_t out0 = egress_expr_field_access("NoteEvent", s0, 0);
+    ASSERT(out0 != nullptr);
+    egress_expr_t out1 = egress_expr_field_access("NoteEvent", s1, 1);
+    ASSERT(out1 != nullptr);
+
+    egress_module_spec_add_output(spec, out0);
+    egress_module_spec_add_output(spec, out1);
+
+    egress_expr_free(in0);
+    egress_expr_free(in1);
+    egress_expr_free(in2);
+    egress_expr_free(s0);
+    egress_expr_free(s1);
+    egress_expr_free(out0);
+    egress_expr_free(out1);
+
+    ASSERT_OK(egress_graph_add_module(g, "ADT1", spec));
+    egress_module_spec_free(spec);
+
+    // Set inputs to known values: pitch=440.0, vel=0.75, gate=1.0
+    egress_expr_t e_pitch = egress_expr_literal_float(440.0);
+    egress_expr_t e_vel   = egress_expr_literal_float(0.75);
+    egress_expr_t e_gate  = egress_expr_literal_float(1.0);
+    ASSERT_OK(egress_graph_set_input_expr(g, "ADT1", 0, e_pitch));
+    ASSERT_OK(egress_graph_set_input_expr(g, "ADT1", 1, e_vel));
+    ASSERT_OK(egress_graph_set_input_expr(g, "ADT1", 2, e_gate));
+    egress_expr_free(e_pitch);
+    egress_expr_free(e_vel);
+    egress_expr_free(e_gate);
+
+    ASSERT_OK(egress_graph_add_output(g, "ADT1", 0));
+
+    egress_graph_prime_jit(g);
+    egress_graph_process(g);
+
+    // Read outputs via output tap
+    size_t tap0 = egress_graph_add_output_tap(g, "ADT1", 0);
+    size_t tap1 = egress_graph_add_output_tap(g, "ADT1", 1);
+
+    egress_graph_process(g);
+
+    size_t len0 = 0, len1 = 0;
+    // Read each tap buffer's first sample immediately to avoid aliasing through the static buffer
+    const double* buf0 = egress_graph_tap_buffer(g, tap0, &len0);
+    ASSERT(buf0 != nullptr);
+    ASSERT(len0 >= 1);
+    const double val0 = buf0[0];
+
+    const double* buf1 = egress_graph_tap_buffer(g, tap1, &len1);
+    ASSERT(buf1 != nullptr);
+    ASSERT(len1 >= 1);
+    const double val1 = buf1[0];
+
+    // Output 0 should be pitch=440.0, output 1 should be vel=0.75
+    ASSERT(val0 >= 439.9 && val0 <= 440.1);
+    ASSERT(val1 >= 0.74 && val1 <= 0.76);
+
+    egress_graph_free(g);
+  });
+
   printf("\n=== results: %d passed, %d failed ===\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
 }

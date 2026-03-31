@@ -3,6 +3,7 @@
 #include "expr/ExprStructural.hpp"
 #include "graph/GraphRuntime.hpp"
 #include "graph/Module.hpp"
+#include "graph/TypeRegistry.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -81,12 +82,16 @@ class Graph
     };
 
     explicit Graph(unsigned int bufferLength)
-      : bufferLength_(bufferLength), outputBuffer(bufferLength, 0.0)
+      : bufferLength_(bufferLength), outputBuffer(bufferLength, 0.0),
+        type_registry_(std::make_shared<egress::TypeRegistry>())
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
       runtimes_[0] = build_runtime_locked();
       runtimes_[1] = build_runtime_locked();
     }
+
+    egress::TypeRegistry& type_registry() { return *type_registry_; }
+    const egress::TypeRegistry& type_registry() const { return *type_registry_; }
 
     ~Graph()
     {
@@ -675,6 +680,7 @@ class Graph
 
       ControlModule module;
       module.module = std::shared_ptr<Module>(std::move(new_module));
+      module.module->type_registry_ = type_registry_.get();
       module.in_count = in_count;
       module.out_count = out_count;
       module.input_exprs.assign(in_count, nullptr);
@@ -1555,6 +1561,7 @@ class Graph
     }
 
     unsigned int bufferLength_ = 0;
+    std::shared_ptr<egress::TypeRegistry> type_registry_;
 
     std::array<RuntimeState, 2> runtimes_;
     std::atomic<uint32_t> active_runtime_index_{0};

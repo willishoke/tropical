@@ -1218,6 +1218,21 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
         builder.CreateStore(builder.CreateBitCast(result_f64, i64_ty), reg_ptr);
         break;
       }
+      case NumericOp::CopySlot:
+      {
+        // Pass src_a value through to dst with correct type
+        if (instr.src_a_type == JitScalarType::Float)
+        {
+          result = load_temp(instr.src_a);
+        }
+        else
+        {
+          result_i64 = load_int_temp(instr.src_a);
+          writes_int_temp = true;
+          writes_temp = false;
+        }
+        break;
+      }
     }
 
     if (writes_slot)

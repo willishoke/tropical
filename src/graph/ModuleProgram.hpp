@@ -22,6 +22,8 @@ struct Instr
   std::vector<uint32_t> args;
   // For SmoothedParam: raw non-owning pointer to the control parameter
   egress_expr::ControlParam * control_param = nullptr;
+  // For ADT nodes: repurposed module_name from ExprSpec as type_name
+  std::string type_name;
 };
 
 struct CompiledProgram

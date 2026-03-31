@@ -520,6 +520,50 @@ ExprSpecPtr simplify_expr(const ExprSpecPtr & expr_spec)
       }
       return expr::binary_expr(expr_spec->kind, lhs, rhs);
     }
+    case ExprKind::ConstructStruct:
+    {
+      std::vector<ExprSpecPtr> items;
+      items.reserve(expr_spec->args.size());
+      for (const auto & arg : expr_spec->args)
+      {
+        ExprSpecPtr item = simplify_expr(arg);
+        if (!item) item = expr::literal_expr(0.0);
+        items.push_back(std::move(item));
+      }
+      return expr::construct_struct_expr(expr_spec->module_name, std::move(items));
+    }
+    case ExprKind::FieldAccess:
+    {
+      ExprSpecPtr struct_expr = simplify_expr(expr_spec->lhs);
+      if (!struct_expr) struct_expr = expr::literal_expr(0.0);
+      return expr::field_access_expr(expr_spec->module_name, std::move(struct_expr), expr_spec->slot_id);
+    }
+    case ExprKind::ConstructVariant:
+    {
+      std::vector<ExprSpecPtr> items;
+      items.reserve(expr_spec->args.size());
+      for (const auto & arg : expr_spec->args)
+      {
+        ExprSpecPtr item = simplify_expr(arg);
+        if (!item) item = expr::literal_expr(0.0);
+        items.push_back(std::move(item));
+      }
+      return expr::construct_variant_expr(expr_spec->module_name, expr_spec->slot_id, std::move(items));
+    }
+    case ExprKind::MatchVariant:
+    {
+      ExprSpecPtr scrutinee = simplify_expr(expr_spec->lhs);
+      if (!scrutinee) scrutinee = expr::literal_expr(static_cast<int64_t>(0));
+      std::vector<ExprSpecPtr> branches;
+      branches.reserve(expr_spec->args.size());
+      for (const auto & arg : expr_spec->args)
+      {
+        ExprSpecPtr branch = simplify_expr(arg);
+        if (!branch) branch = expr::literal_expr(0.0);
+        branches.push_back(std::move(branch));
+      }
+      return expr::match_variant_expr(expr_spec->module_name, std::move(scrutinee), std::move(branches));
+    }
   }
 
   return expr_spec;

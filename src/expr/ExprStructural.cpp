@@ -49,6 +49,15 @@ std::size_t hash_value(const Value & value)
         seed = hash_mix(seed, hash_value(item));
       }
       return seed;
+    case ValueType::Struct:
+    case ValueType::Sum:
+      seed = hash_mix(seed, std::hash<std::string>{}(value.type_name));
+      seed = hash_mix(seed, std::hash<uint32_t>{}(value.variant_tag));
+      for (const Value & field : value.struct_fields)
+      {
+        seed = hash_mix(seed, hash_value(field));
+      }
+      return seed;
   }
   return seed;
 }
@@ -93,6 +102,21 @@ bool value_equal(const Value & lhs, const Value & rhs)
       for (std::size_t i = 0; i < lhs.matrix_items.size(); ++i)
       {
         if (!value_equal(lhs.matrix_items[i], rhs.matrix_items[i]))
+        {
+          return false;
+        }
+      }
+      return true;
+    case ValueType::Struct:
+    case ValueType::Sum:
+      if (lhs.type_name != rhs.type_name || lhs.variant_tag != rhs.variant_tag ||
+          lhs.struct_fields.size() != rhs.struct_fields.size())
+      {
+        return false;
+      }
+      for (std::size_t i = 0; i < lhs.struct_fields.size(); ++i)
+      {
+        if (!value_equal(lhs.struct_fields[i], rhs.struct_fields[i]))
         {
           return false;
         }
@@ -148,6 +172,9 @@ bool is_pure_function_body(const ExprSpecPtr & expr_spec, unsigned int param_cou
              is_pure_function_body(expr_spec->rhs, param_count) &&
              is_pure_function_body(expr_spec->args.empty() ? nullptr : expr_spec->args.front(), param_count);
     case ExprKind::ArrayPack:
+    case ExprKind::ConstructStruct:
+    case ExprKind::ConstructVariant:
+    case ExprKind::MatchVariant:
       for (const auto & arg : expr_spec->args)
       {
         if (!is_pure_function_body(arg, param_count))
@@ -155,7 +182,9 @@ bool is_pure_function_body(const ExprSpecPtr & expr_spec, unsigned int param_cou
           return false;
         }
       }
-      return true;
+      return is_pure_function_body(expr_spec->lhs, param_count);
+    case ExprKind::FieldAccess:
+      return is_pure_function_body(expr_spec->lhs, param_count);
     default:
       break;
   }
@@ -228,6 +257,38 @@ ExprSpecPtr clone_with_subst(
         clone_with_subst(expr_spec->args.empty() ? nullptr : expr_spec->args.front(), args));
     case ExprKind::Index:
       return expr::index_expr(clone_with_subst(expr_spec->lhs, args), clone_with_subst(expr_spec->rhs, args));
+    case ExprKind::ConstructStruct:
+    {
+      std::vector<ExprSpecPtr> items;
+      items.reserve(expr_spec->args.size());
+      for (const auto & arg : expr_spec->args)
+        items.push_back(clone_with_subst(arg, args));
+      return expr::construct_struct_expr(expr_spec->module_name, std::move(items));
+    }
+    case ExprKind::FieldAccess:
+      return expr::field_access_expr(
+        expr_spec->module_name,
+        clone_with_subst(expr_spec->lhs, args),
+        expr_spec->slot_id);
+    case ExprKind::ConstructVariant:
+    {
+      std::vector<ExprSpecPtr> items;
+      items.reserve(expr_spec->args.size());
+      for (const auto & arg : expr_spec->args)
+        items.push_back(clone_with_subst(arg, args));
+      return expr::construct_variant_expr(expr_spec->module_name, expr_spec->slot_id, std::move(items));
+    }
+    case ExprKind::MatchVariant:
+    {
+      std::vector<ExprSpecPtr> branches;
+      branches.reserve(expr_spec->args.size());
+      for (const auto & arg : expr_spec->args)
+        branches.push_back(clone_with_subst(arg, args));
+      return expr::match_variant_expr(
+        expr_spec->module_name,
+        clone_with_subst(expr_spec->lhs, args),
+        std::move(branches));
+    }
     default:
       break;
   }
@@ -330,6 +391,27 @@ std::size_t structural_hash(
     case ExprKind::SampleRate:
     case ExprKind::SampleIndex:
       break;
+    case ExprKind::ConstructStruct:
+    case ExprKind::ConstructVariant:
+    case ExprKind::MatchVariant:
+    {
+      seed = hash_mix(seed, std::hash<std::string>{}(expr_spec->module_name));
+      seed = hash_mix(seed, std::hash<unsigned int>{}(expr_spec->slot_id));
+      seed = hash_mix(seed, structural_hash(expr_spec->lhs, cache));
+      seed = hash_mix(seed, std::hash<std::size_t>{}(expr_spec->args.size()));
+      for (const auto & arg : expr_spec->args)
+      {
+        seed = hash_mix(seed, structural_hash(arg, cache));
+      }
+      break;
+    }
+    case ExprKind::FieldAccess:
+    {
+      seed = hash_mix(seed, std::hash<std::string>{}(expr_spec->module_name));
+      seed = hash_mix(seed, std::hash<unsigned int>{}(expr_spec->slot_id));
+      seed = hash_mix(seed, structural_hash(expr_spec->lhs, cache));
+      break;
+    }
     default:
       seed = hash_mix(seed, structural_hash(expr_spec->lhs, cache));
       seed = hash_mix(seed, structural_hash(expr_spec->rhs, cache));
@@ -394,6 +476,9 @@ bool structural_equal(const ExprSpecPtr & lhs, const ExprSpecPtr & rhs)
             }
           }
           return true;
+        case ValueType::Struct:
+        case ValueType::Sum:
+          return value_equal(lhs->literal, rhs->literal);
       }
       return true;
     case ExprKind::Ref:
@@ -454,6 +539,24 @@ bool structural_equal(const ExprSpecPtr & lhs, const ExprSpecPtr & rhs)
     case ExprKind::SampleRate:
     case ExprKind::SampleIndex:
       return true;
+    case ExprKind::ConstructStruct:
+    case ExprKind::ConstructVariant:
+    case ExprKind::MatchVariant:
+    {
+      if (lhs->module_name != rhs->module_name || lhs->slot_id != rhs->slot_id ||
+          !structural_equal(lhs->lhs, rhs->lhs) || lhs->args.size() != rhs->args.size())
+      {
+        return false;
+      }
+      for (std::size_t i = 0; i < lhs->args.size(); ++i)
+      {
+        if (!structural_equal(lhs->args[i], rhs->args[i])) return false;
+      }
+      return true;
+    }
+    case ExprKind::FieldAccess:
+      return lhs->module_name == rhs->module_name && lhs->slot_id == rhs->slot_id &&
+             structural_equal(lhs->lhs, rhs->lhs);
     default:
       return structural_equal(lhs->lhs, rhs->lhs) && structural_equal(lhs->rhs, rhs->rhs);
   }
@@ -533,6 +636,38 @@ ExprSpecPtr inline_functions(const ExprSpecPtr & expr_spec, unsigned int inline_
         inline_functions(expr_spec->args.empty() ? nullptr : expr_spec->args.front(), inline_depth));
     case ExprKind::Index:
       return expr::index_expr(inline_functions(expr_spec->lhs, inline_depth), inline_functions(expr_spec->rhs, inline_depth));
+    case ExprKind::ConstructStruct:
+    {
+      std::vector<ExprSpecPtr> items;
+      items.reserve(expr_spec->args.size());
+      for (const auto & arg : expr_spec->args)
+        items.push_back(inline_functions(arg, inline_depth));
+      return expr::construct_struct_expr(expr_spec->module_name, std::move(items));
+    }
+    case ExprKind::FieldAccess:
+      return expr::field_access_expr(
+        expr_spec->module_name,
+        inline_functions(expr_spec->lhs, inline_depth),
+        expr_spec->slot_id);
+    case ExprKind::ConstructVariant:
+    {
+      std::vector<ExprSpecPtr> items;
+      items.reserve(expr_spec->args.size());
+      for (const auto & arg : expr_spec->args)
+        items.push_back(inline_functions(arg, inline_depth));
+      return expr::construct_variant_expr(expr_spec->module_name, expr_spec->slot_id, std::move(items));
+    }
+    case ExprKind::MatchVariant:
+    {
+      std::vector<ExprSpecPtr> branches;
+      branches.reserve(expr_spec->args.size());
+      for (const auto & arg : expr_spec->args)
+        branches.push_back(inline_functions(arg, inline_depth));
+      return expr::match_variant_expr(
+        expr_spec->module_name,
+        inline_functions(expr_spec->lhs, inline_depth),
+        std::move(branches));
+    }
     default:
       break;
   }

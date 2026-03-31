@@ -30,7 +30,8 @@ enum class NumericValueKind
 {
   Scalar,
   Array,
-  Matrix
+  Matrix,
+  CompoundSlot
 };
 
 struct NumericValueRef
@@ -55,5 +56,7 @@ struct NumericRegInfo
   int64_t int_constant = 0;
   egress_jit::JitScalarType scalar_type = egress_jit::JitScalarType::Float;
   egress_jit::JitScalarType array_element_type = egress_jit::JitScalarType::Float;
+  uint16_t compound_type_id = 0xFFFF;
+  uint32_t compound_base_slot = 0;
 };
 }  // namespace egress_module_detail

@@ -71,7 +71,8 @@ enum class NumericOp : uint8_t
   Sin,
   Neg,
   BitNot,
-  SmoothedParam
+  SmoothedParam,
+  CopySlot
 };
 
 struct NumericInstr

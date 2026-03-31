@@ -13,6 +13,7 @@ import {
   clamp, select, arrayPack, arraySet, matrix,
   inputExpr, registerExpr, refExpr, sampleRate, sampleIndex,
   paramExpr, triggerParamExpr,
+  constructStruct, fieldAccess, constructVariant, matchVariant,
 } from './expr.js'
 import {
   defineModule, ModuleType, ModuleInstance, delay,
@@ -56,6 +57,30 @@ export interface ModuleDefJSON {
   }
 }
 
+export interface TypeDefFieldJSON {
+  name: string
+  scalar_type: number
+}
+
+export interface StructTypeDefJSON {
+  kind: 'struct'
+  name: string
+  fields: TypeDefFieldJSON[]
+}
+
+export interface SumVariantJSON {
+  name: string
+  payload: TypeDefFieldJSON[]
+}
+
+export interface SumTypeDefJSON {
+  kind: 'sum'
+  name: string
+  variants: SumVariantJSON[]
+}
+
+export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON
+
 export interface PatchJSON {
   schema: 'egress_patch_1'
   config?: {
@@ -63,6 +88,8 @@ export interface PatchJSON {
     worker_count?: number
     fusion_enabled?: boolean
   }
+  /** Inline ADT type definitions (loaded before module instantiation). */
+  type_defs?: TypeDefJSON[]
   /** Inline module type definitions (loaded before instantiation). */
   module_defs?: ModuleDefJSON[]
   modules: Array<{ type: string; name?: string }>
@@ -283,6 +310,24 @@ export function buildExpr(node: ExprNode, ctx: BuildCtx): SignalExpr {
     return matrix(n.rows)
   }
 
+  // ── ADT operations ──
+  if (op === 'construct_struct') {
+    const n = node as { op: string; type_name: string; fields: ExprNode[] }
+    return constructStruct(n.type_name, n.fields.map(f => buildExpr(f, ctx)))
+  }
+  if (op === 'field_access') {
+    const n = node as { op: string; type_name: string; struct_expr: ExprNode; field_index: number }
+    return fieldAccess(n.type_name, buildExpr(n.struct_expr, ctx), n.field_index)
+  }
+  if (op === 'construct_variant') {
+    const n = node as { op: string; type_name: string; variant_tag: number; payload: ExprNode[] }
+    return constructVariant(n.type_name, n.variant_tag, n.payload.map(p => buildExpr(p, ctx)))
+  }
+  if (op === 'match_variant') {
+    const n = node as { op: string; type_name: string; scrutinee: ExprNode; branches: ExprNode[] }
+    return matchVariant(n.type_name, buildExpr(n.scrutinee, ctx), n.branches.map(b => buildExpr(b, ctx)))
+  }
+
   // ── Explicit literal forms (rarely needed, bare numbers are preferred) ──
   if (op === 'float') return coerce((node as { op: string; value: number }).value)
   if (op === 'int')   return coerce((node as { op: string; value: number }).value)
@@ -364,6 +409,10 @@ export function validateExpr(node: ExprNode, ctx: ValidateCtx): ExprType {
   if (op === 'matrix') return 'array'
   if (op === 'float' || op === 'int') return 'scalar'
   if (op === 'bool') return 'bool'
+  if (op === 'construct_struct')  return 'unknown'
+  if (op === 'field_access')      return 'scalar'
+  if (op === 'construct_variant') return 'unknown'
+  if (op === 'match_variant')     return 'unknown'
   throw new Error(`Unknown op '${op}'.`)
 }
 
@@ -533,6 +582,21 @@ export function prettyExpr(
   if (op === 'delay') return `delay(${prettyExpr(args[0], instanceRegistry)}, ${n.init ?? 0})`
   if (op === 'delay_ref') return `delay_ref(${n.id})`
   if (op === 'nested_out') return `${n.ref}.${n.output}`
+  if (op === 'construct_struct') {
+    const fields = (n.fields as ExprNode[]).map(f => prettyExpr(f, instanceRegistry))
+    return `${n.type_name}{${fields.join(', ')}}`
+  }
+  if (op === 'field_access') {
+    return `${prettyExpr(n.struct_expr as ExprNode, instanceRegistry)}.field[${n.field_index}]`
+  }
+  if (op === 'construct_variant') {
+    const payload = (n.payload as ExprNode[]).map(p => prettyExpr(p, instanceRegistry))
+    return `${n.type_name}::${n.variant_tag}(${payload.join(', ')})`
+  }
+  if (op === 'match_variant') {
+    const branches = (n.branches as ExprNode[]).map(b => prettyExpr(b, instanceRegistry))
+    return `match(${prettyExpr(n.scrutinee as ExprNode, instanceRegistry)}){${branches.join(', ')}}`
+  }
 
   // Should never reach here given the finite op set, but keep a safe fallback
   throw new Error(`prettyExpr: unhandled op '${op}'`)
@@ -555,6 +619,15 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
   session.paramRegistry.clear()
   session.triggerRegistry.clear()
   session.inputExprNodes.clear()
+
+  // Load ADT type definitions
+  for (const td of json.type_defs ?? []) {
+    if (td.kind === 'struct') {
+      session.graph.defineStruct(td.name, td.fields)
+    } else {
+      session.graph.defineSumType(td.name, td.variants)
+    }
+  }
 
   // Load inline module type definitions
   for (const def of json.module_defs ?? []) {
@@ -649,6 +722,15 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
   for (const p of json.params ?? []) {
     if (session.paramRegistry.has(p.name) || session.triggerRegistry.has(p.name))
       throw new Error(`merge_patch collision: param/trigger '${p.name}' already exists.`)
+  }
+
+  // Load ADT type definitions
+  for (const td of json.type_defs ?? []) {
+    if (td.kind === 'struct') {
+      session.graph.defineStruct(td.name, td.fields)
+    } else {
+      session.graph.defineSumType(td.name, td.variants)
+    }
   }
 
   // Load inline type definitions

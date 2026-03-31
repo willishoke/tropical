@@ -74,6 +74,8 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
           case NumericValueKind::Matrix:
             ++materialized_matrix_outputs;
             break;
+          case NumericValueKind::CompoundSlot:
+            break;
         }
 #endif
         assign_numeric_value_to(
@@ -657,6 +659,45 @@ uint32_t Module::compile_expr_node(
       instr.control_param = expr->control_param;
       break;
     }
+    case ExprKind::ConstructStruct:
+    {
+      instr.type_name = expr->module_name;
+      instr.args.reserve(expr->args.size());
+      for (const auto & arg : expr->args)
+      {
+        instr.args.push_back(compile_expr_node(arg, compiled, memo, hash_cache));
+      }
+      break;
+    }
+    case ExprKind::FieldAccess:
+    {
+      instr.type_name = expr->module_name;
+      instr.slot_id = expr->slot_id;
+      instr.src_a = compile_expr_node(expr->lhs, compiled, memo, hash_cache);
+      break;
+    }
+    case ExprKind::ConstructVariant:
+    {
+      instr.type_name = expr->module_name;
+      instr.slot_id = expr->slot_id;
+      instr.args.reserve(expr->args.size());
+      for (const auto & arg : expr->args)
+      {
+        instr.args.push_back(compile_expr_node(arg, compiled, memo, hash_cache));
+      }
+      break;
+    }
+    case ExprKind::MatchVariant:
+    {
+      instr.type_name = expr->module_name;
+      instr.src_a = compile_expr_node(expr->lhs, compiled, memo, hash_cache);
+      instr.args.reserve(expr->args.size());
+      for (const auto & arg : expr->args)
+      {
+        instr.args.push_back(compile_expr_node(arg, compiled, memo, hash_cache));
+      }
+      break;
+    }
     default:
       if (egress_module_detail::is_local_unary(expr->kind))
       {
@@ -932,6 +973,66 @@ void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & tem
         if (instr.control_param)
         {
           temps[instr.dst] = egress_expr::float_value(instr.control_param->frame_value.load(std::memory_order_relaxed));
+        }
+        else
+        {
+          temps[instr.dst] = egress_expr::float_value(0.0);
+        }
+        break;
+      }
+      case ExprKind::ConstructStruct:
+      {
+        Value result;
+        result.type = ValueType::Struct;
+        result.type_name = instr.type_name;
+        result.struct_fields.reserve(instr.args.size());
+        for (uint32_t src : instr.args)
+        {
+          result.struct_fields.push_back(temps[src]);
+        }
+        temps[instr.dst] = std::move(result);
+        break;
+      }
+      case ExprKind::FieldAccess:
+      {
+        const Value & struct_val = temps[instr.src_a];
+        if (struct_val.type == ValueType::Struct && instr.slot_id < struct_val.struct_fields.size())
+        {
+          temps[instr.dst] = struct_val.struct_fields[instr.slot_id];
+        }
+        else
+        {
+          temps[instr.dst] = egress_expr::float_value(0.0);
+        }
+        break;
+      }
+      case ExprKind::ConstructVariant:
+      {
+        Value result;
+        result.type = ValueType::Sum;
+        result.type_name = instr.type_name;
+        result.variant_tag = instr.slot_id;
+        result.struct_fields.reserve(instr.args.size());
+        for (uint32_t src : instr.args)
+        {
+          result.struct_fields.push_back(temps[src]);
+        }
+        temps[instr.dst] = std::move(result);
+        break;
+      }
+      case ExprKind::MatchVariant:
+      {
+        const Value & scrutinee = temps[instr.src_a];
+        const uint32_t tag = (scrutinee.type == ValueType::Sum)
+          ? scrutinee.variant_tag
+          : static_cast<uint32_t>(egress_expr::to_int64(scrutinee));
+        if (tag < instr.args.size())
+        {
+          temps[instr.dst] = temps[instr.args[tag]];
+        }
+        else if (!instr.args.empty())
+        {
+          temps[instr.dst] = temps[instr.args.back()];
         }
         else
         {

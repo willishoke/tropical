@@ -37,7 +37,9 @@ enum class ValueType : uint8_t
   Float,
   Bool,
   Array,
-  Matrix
+  Matrix,
+  Struct,
+  Sum
 };
 
 enum class AggregateScalarType : uint8_t
@@ -61,6 +63,9 @@ struct Value
   std::size_t matrix_rows = 0;
   std::size_t matrix_cols = 0;
   AggregateScalarType aggregate_scalar_type = AggregateScalarType::None;
+  std::string type_name;             // for Struct and Sum values
+  uint32_t variant_tag = 0;          // for Sum values
+  std::vector<Value> struct_fields;  // for Struct and Sum payload values
 };
 
 enum class ExprKind
@@ -106,7 +111,11 @@ enum class ExprKind
   BitNot,
   SmoothedParam,
   Select,
-  TriggerParam
+  TriggerParam,
+  ConstructStruct,
+  FieldAccess,
+  ConstructVariant,
+  MatchVariant
 };
 
 struct ExprSpec
@@ -168,6 +177,8 @@ inline AggregateScalarType scalar_type_from_value_type(ValueType type)
       return AggregateScalarType::Float;
     case ValueType::Array:
     case ValueType::Matrix:
+    case ValueType::Struct:
+    case ValueType::Sum:
       return AggregateScalarType::NonScalar;
   }
   return AggregateScalarType::NonScalar;
@@ -249,6 +260,10 @@ inline bool is_truthy(const Value & value)
       throw std::invalid_argument("Array truthiness is ambiguous.");
     case ValueType::Matrix:
       throw std::invalid_argument("Matrix truthiness is ambiguous.");
+    case ValueType::Struct:
+      throw std::invalid_argument("Struct truthiness is ambiguous.");
+    case ValueType::Sum:
+      throw std::invalid_argument("Sum truthiness is ambiguous.");
   }
   return false;
 }
@@ -267,6 +282,10 @@ inline double to_float64(const Value & value)
       throw std::invalid_argument("Expected scalar float-compatible value, got array.");
     case ValueType::Matrix:
       throw std::invalid_argument("Expected scalar float-compatible value, got matrix.");
+    case ValueType::Struct:
+      throw std::invalid_argument("Expected scalar float-compatible value, got struct.");
+    case ValueType::Sum:
+      throw std::invalid_argument("Expected scalar float-compatible value, got sum.");
   }
   return 0.0;
 }
@@ -285,6 +304,10 @@ inline int64_t to_int64(const Value & value)
       throw std::invalid_argument("Expected scalar int-compatible value, got array.");
     case ValueType::Matrix:
       throw std::invalid_argument("Expected scalar int-compatible value, got matrix.");
+    case ValueType::Struct:
+      throw std::invalid_argument("Expected scalar int-compatible value, got struct.");
+    case ValueType::Sum:
+      return static_cast<int64_t>(value.variant_tag);
   }
   return 0;
 }
@@ -757,4 +780,46 @@ inline ExprSpecPtr trigger_param_expr(ControlParam * param)
   expr->control_param = param;
   return expr;
 }
+
+// ADT helpers — module_name field is repurposed as type_name; slot_id as field_index or variant_tag.
+
+inline ExprSpecPtr construct_struct_expr(std::string type_name, std::vector<ExprSpecPtr> fields)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::ConstructStruct;
+  expr->module_name = std::move(type_name);
+  expr->args = std::move(fields);
+  return expr;
+}
+
+inline ExprSpecPtr field_access_expr(std::string type_name, ExprSpecPtr struct_expr, uint32_t field_index)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::FieldAccess;
+  expr->module_name = std::move(type_name);
+  expr->lhs = std::move(struct_expr);
+  expr->slot_id = field_index;
+  return expr;
+}
+
+inline ExprSpecPtr construct_variant_expr(std::string type_name, uint32_t variant_tag, std::vector<ExprSpecPtr> payload)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::ConstructVariant;
+  expr->module_name = std::move(type_name);
+  expr->slot_id = variant_tag;
+  expr->args = std::move(payload);
+  return expr;
+}
+
+inline ExprSpecPtr match_variant_expr(std::string type_name, ExprSpecPtr scrutinee, std::vector<ExprSpecPtr> branches)
+{
+  auto expr = std::make_shared<ExprSpec>();
+  expr->kind = ExprKind::MatchVariant;
+  expr->module_name = std::move(type_name);
+  expr->lhs = std::move(scrutinee);
+  expr->args = std::move(branches);
+  return expr;
+}
+
 }  // namespace egress_expr
