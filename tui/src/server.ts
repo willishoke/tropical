@@ -19,13 +19,13 @@ import {
 
 import {
   makeSession, loadModuleFromJSON, loadPatchFromJSON, mergePatchFromJSON, savePatchToJSON,
-  buildExpr, prettyExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
+  prettyExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
 } from './patch.js'
 import { parseModuleDef, parsePatch } from './schema.js'
 import { loadBuiltins }        from './module_library.js'
 import { DAC }                 from './audio.js'
 import { Param, Trigger }      from './param.js'
-import { coerce }              from './expr.js'
+import { applySessionWiring }  from './apply_plan.js'
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
@@ -329,6 +329,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         if (key.startsWith(`${instanceName}:`)) session.inputExprNodes.delete(key)
       }
       session.graphOutputs = session.graphOutputs.filter(o => o.module !== instanceName)
+      applySessionWiring(session)
       return { removed: instanceName }
     })
 
@@ -396,15 +397,13 @@ function handleTool(name: string, args: Record<string, unknown>) {
         )
       }
 
-      const ok = session.graph.connect(args.src_module as string, srcId, args.dst_module as string, dstId)
-      if (!ok) throw new Error(`graph.connect returned false.`)
-
       const srcOut = srcInst.outputNames[srcId]
       const dstIn  = dstInst.inputNames[dstId]
       session.inputExprNodes.set(
         `${args.dst_module as string}:${dstIn}`,
         { op: 'ref', module: args.src_module as string, output: srcOut },
       )
+      applySessionWiring(session)
       return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn }
     })
 
@@ -418,12 +417,10 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const srcId = resolveOutputIdx(srcInst, args.src_output as string | number)
       const dstId = resolveInputIdx(dstInst,  args.dst_input  as string | number)
 
-      const ok = session.graph.disconnect(args.src_module as string, srcId, args.dst_module as string, dstId)
-      if (!ok) throw new Error(`graph.disconnect returned false.`)
-
       const srcOut = srcInst.outputNames[srcId]
       const dstIn  = dstInst.inputNames[dstId]
       session.inputExprNodes.delete(`${args.dst_module as string}:${dstIn}`)
+      applySessionWiring(session)
       return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn }
     })
 
@@ -453,17 +450,9 @@ function handleTool(name: string, args: Record<string, unknown>) {
         : (rawInput.match(/^\d+$/) ? parseInt(rawInput, 10) : inst.inputIndex(rawInput))
 
       const node = args.expr as ExprNode
-      const ctx = {
-        inputNames: [], regNames: [],
-        paramRegistry: session.paramRegistry, triggerRegistry: session.triggerRegistry,
-        instanceRegistry: session.instanceRegistry, typeRegistry: session.typeRegistry,
-        delayRefs: new Map(), nestedAliases: new Map(),
-      }
-      const expr = buildExpr(node, ctx)
-      session.graph.setInputExpr(instanceName, inputId, expr)
-      session.inputExprNodes.set(`${instanceName}:${inputId}`, node)
-
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
+      session.inputExprNodes.set(`${instanceName}:${resolvedName}`, node)
+      applySessionWiring(session)
       return { module: instanceName, input: resolvedName, expr: node }
     })
 
@@ -472,31 +461,20 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const updates = args.updates as Array<{
         instance_name: string; input_name: string | number; expr: ExprNode
       }>
-      const ctx = {
-        inputNames: [], regNames: [],
-        paramRegistry: session.paramRegistry, triggerRegistry: session.triggerRegistry,
-        instanceRegistry: session.instanceRegistry, typeRegistry: session.typeRegistry,
-        delayRefs: new Map(), nestedAliases: new Map(),
+      const results = []
+      for (const u of updates) {
+        const inst = session.instanceRegistry.get(u.instance_name)
+        if (!inst) throw new Error(`No instance named '${u.instance_name}'.`)
+        const raw = u.input_name
+        const inputId = typeof raw === 'number'
+          ? raw
+          : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
+        const resolvedName = inst.inputNames[inputId] ?? String(inputId)
+        session.inputExprNodes.set(`${u.instance_name}:${resolvedName}`, u.expr)
+        results.push({ module: u.instance_name, input: resolvedName, expr: u.expr })
       }
-      session.graph.beginUpdate()
-      try {
-        const results = []
-        for (const u of updates) {
-          const inst = session.instanceRegistry.get(u.instance_name)
-          if (!inst) throw new Error(`No instance named '${u.instance_name}'.`)
-          const raw = u.input_name
-          const inputId = typeof raw === 'number'
-            ? raw
-            : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
-          const expr = buildExpr(u.expr, ctx)
-          session.graph.setInputExpr(u.instance_name, inputId, expr)
-          session.inputExprNodes.set(`${u.instance_name}:${inputId}`, u.expr)
-          results.push({ module: u.instance_name, input: inst.inputNames[inputId] ?? String(inputId), expr: u.expr })
-        }
-        return results
-      } finally {
-        session.graph.endUpdate()
-      }
+      applySessionWiring(session)
+      return results
     })
 
     // ── add_graph_output ───────────────────────────────────────────────────
@@ -510,13 +488,11 @@ function handleTool(name: string, args: Record<string, unknown>) {
         ? rawOut
         : (String(rawOut).match(/^\d+$/) ? parseInt(String(rawOut), 10) : inst.outputIndex(rawOut))
 
-      const added = session.graph.addOutput(moduleName, outId)
-      if (!added) throw new Error(`graph.addOutput returned false.`)
-
       const resolvedName = inst.outputNames[outId]
       const entry = { module: moduleName, output: resolvedName }
       if (!session.graphOutputs.some(o => o.module === entry.module && o.output === entry.output))
         session.graphOutputs.push(entry)
+      applySessionWiring(session)
       return entry
     })
 
@@ -536,10 +512,8 @@ function handleTool(name: string, args: Record<string, unknown>) {
       session.graphOutputs = session.graphOutputs.filter(
         o => !(o.module === moduleName && o.output === resolvedName),
       )
-      return {
-        removed_from_tracking: before - session.graphOutputs.length,
-        note: 'graph has no remove_output API; output persists until graph rebuild.',
-      }
+      applySessionWiring(session)
+      return { removed: before - session.graphOutputs.length }
     })
 
     // ── merge_patch ────────────────────────────────────────────────────────

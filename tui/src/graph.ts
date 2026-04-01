@@ -159,6 +159,11 @@ export class Graph {
     b.egress_graph_prime_jit(this._h)
   }
 
+  /** Clear all input expressions and output mix. */
+  clearWiring(): void {
+    b.egress_graph_clear_wiring(this._h)
+  }
+
   /** Load wiring and outputs from a plan JSON string. Modules must already exist. */
   loadPlan(planJson: string): boolean {
     const ok = b.egress_graph_load_plan(this._h, planJson, planJson.length) as boolean

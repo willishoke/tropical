@@ -195,6 +195,8 @@ size_t          egress_graph_add_output_tap(egress_graph_t, const char* module, 
 bool            egress_graph_remove_output_tap(egress_graph_t, size_t tap_id);
 void            egress_graph_process(egress_graph_t);
 void            egress_graph_prime_jit(egress_graph_t);
+/* Clear all input expressions and output mix on the graph. */
+void            egress_graph_clear_wiring(egress_graph_t);
 /* Load wiring and outputs from a plan JSON string. Modules must already exist.
    Wraps begin_update/end_update internally. Returns false on error. */
 bool            egress_graph_load_plan(egress_graph_t, const char* plan_json, size_t len);
