@@ -124,8 +124,9 @@ export const egress_typedef_sum    = lib.func('egress_typedef_sum',    'bool', [
 
 // ---------- Port type annotation API ----------
 
-export const egress_module_declare_input_type  = lib.func('egress_module_declare_input_type',  'bool', ['void *', 'str', 'uint32', 'str'])
-export const egress_module_declare_output_type = lib.func('egress_module_declare_output_type', 'bool', ['void *', 'str', 'uint32', 'str'])
+export const egress_module_declare_input_type    = lib.func('egress_module_declare_input_type',    'bool', ['void *', 'str', 'uint32', 'str'])
+export const egress_module_declare_output_type   = lib.func('egress_module_declare_output_type',   'bool', ['void *', 'str', 'uint32', 'str'])
+export const egress_module_declare_register_type = lib.func('egress_module_declare_register_type', 'bool', ['void *', 'str', 'uint32', 'str'])
 
 // ---------- ControlParam API ----------
 

@@ -203,6 +203,8 @@ class Module
 
     unsigned int register_count() const;
 
+    unsigned int user_register_count() const { return user_register_count_; }
+
     // Returns the set of TriggerParam ControlParam pointers used by this module.
     // The Graph uses this to snapshot trigger values once per frame before processing.
     const std::unordered_set<egress_expr::ControlParam *> & trigger_params() const

@@ -344,6 +344,10 @@ function handleTool(name: string, args: Record<string, unknown>) {
             default: defaultsMap[n] ?? null,
           })),
           outputs: d.outputNames,
+          registers: d.registerNames.map((n, i) => ({
+            name: n,
+            type: d.registerPortTypes[i] ?? null,
+          })),
         }
       }),
     )
@@ -366,6 +370,10 @@ function handleTool(name: string, args: Record<string, unknown>) {
           expr: session.inputExprNodes.get(`${instanceName}:${n}`) ?? null,
         })),
         outputs: inst.outputNames.map((n, i) => ({ name: n, index: i })),
+        registers: inst.registerNames.map((n, i) => ({
+          name: n, index: i,
+          type: inst.registerPortType(i) ?? null,
+        })),
       }
     })
 

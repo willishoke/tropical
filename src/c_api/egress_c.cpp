@@ -613,6 +613,17 @@ bool egress_module_declare_output_type(egress_graph_t g, const char* module_name
   catch (const std::exception & e) { set_error(e.what()); return false; }
 }
 
+bool egress_module_declare_register_type(egress_graph_t g, const char* module_name,
+    unsigned int register_index, const char* type_name)
+{
+  try
+  {
+    if (!g || !module_name || !type_name) { set_error("egress_module_declare_register_type: null argument"); return false; }
+    return static_cast<Graph*>(g)->declare_register_type(std::string(module_name), register_index, std::string(type_name));
+  }
+  catch (const std::exception & e) { set_error(e.what()); return false; }
+}
+
 // ---------- Module spec builder API ----------
 
 egress_module_spec_t egress_module_spec_new(unsigned int input_count, double sample_rate)

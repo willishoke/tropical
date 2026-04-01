@@ -131,11 +131,72 @@ export function valueHandle(v: ValueCoercible): unknown {
   throw new TypeError(`Cannot convert ${typeof v} to egress value`)
 }
 
+// ---------- Typed register helpers ----------
+
+/** A register initialiser: either a bare value (backwards compatible) or { init, type }. */
+export type RegInit = ValueCoercible | { init: ValueCoercible; type: string }
+
+/** Infer a type name from a register initial value. */
+function inferTypeName(v: ValueCoercible): string {
+  if (typeof v === 'boolean') return 'bool'
+  if (typeof v === 'number') return 'float'
+  if (Array.isArray(v)) {
+    if (v.length > 0 && Array.isArray(v[0])) return 'matrix'
+    return 'array'
+  }
+  return 'float'
+}
+
+function isTypedRegInit(v: RegInit): v is { init: ValueCoercible; type: string } {
+  return typeof v === 'object' && v !== null && !Array.isArray(v) && 'init' in v
+}
+
+/** Validate that a declared type is compatible with the initial value. */
+function validateRegType(name: string, declaredType: string, initValue: ValueCoercible): void {
+  const inferred = inferTypeName(initValue)
+  const compatible =
+    declaredType === inferred ||
+    (declaredType === 'float' && inferred === 'int') ||
+    (declaredType === 'int' && inferred === 'float')
+  if (!compatible) {
+    throw new TypeError(
+      `Register '${name}': declared type '${declaredType}' is incompatible ` +
+      `with initial value type '${inferred}'.`,
+    )
+  }
+}
+
+// ---------- feedback() DSL helper ----------
+
+/** Descriptor returned by feedback(): bundles init, type, and update morphism. */
+export interface FeedbackSpec {
+  init: ValueCoercible
+  type: string
+  update: (current: SignalExpr) => SignalExpr
+}
+
+/**
+ * Define a feedback register specification.  The morphism `f` maps the current
+ * state to the next state.  Type is inferred from `init`.
+ *
+ * Usage inside defineModule:
+ *   const phase = feedback(p => mod(add(p, dt), 1.0), 0.0)
+ *   // In regs:     { phase: { init: phase.init, type: phase.type } }
+ *   // In nextRegs: { phase: phase.update(regs.get('phase')) }
+ */
+export function feedback(
+  f: (current: SignalExpr) => SignalExpr,
+  init: ValueCoercible,
+): FeedbackSpec {
+  return { init, type: inferTypeName(init), update: f }
+}
+
 // ---------- Definition shape ----------
 
 interface RegisterSpec {
   bodyH: unknown | null
   initH: unknown
+  typeName?: string
 }
 
 interface DelaySpecHandle {
@@ -150,6 +211,8 @@ interface ModuleDef {
   outputNames: string[]
   inputPortTypes: (string | undefined)[]
   outputPortTypes: (string | undefined)[]
+  registerNames: string[]
+  registerPortTypes: (string | undefined)[]
   sampleRate: number
   rawInputDefaults: Record<string, ExprCoercible>
   inputDefaults: (SignalExpr | null)[]
@@ -243,6 +306,10 @@ export class ModuleType {
       const t = d.outputPortTypes[i]
       if (t !== undefined) graph.declareOutputType(name, i, t)
     }
+    for (let i = 0; i < d.registerPortTypes.length; i++) {
+      const t = d.registerPortTypes[i]
+      if (t !== undefined) graph.declareRegisterType(name, i, t)
+    }
   }
 
   private _nestedCall(ctx: _BuildContext, args: ExprCoercible[]): SignalExpr | SignalExpr[] {
@@ -329,10 +396,12 @@ export class ModuleInstance {
 
   get inputNames(): string[] { return this._def.inputNames }
   get outputNames(): string[] { return this._def.outputNames }
+  get registerNames(): string[] { return this._def.registerNames }
   get typeName(): string { return this._def.typeName }
 
   inputPortType(idx: number): string | undefined { return this._def.inputPortTypes[idx] }
   outputPortType(idx: number): string | undefined { return this._def.outputPortTypes[idx] }
+  registerPortType(idx: number): string | undefined { return this._def.registerPortTypes[idx] }
 
   inputIndex(name: string): number {
     const idx = this._def.inputNames.indexOf(name)
@@ -398,7 +467,7 @@ export type PortSpec = string | { name: string; type?: string }
 function _portName(s: PortSpec): string { return typeof s === 'string' ? s : s.name }
 function _portType(s: PortSpec): string | undefined { return typeof s === 'string' ? undefined : s.type }
 
-type RegsInit = Record<string, ValueCoercible>
+type RegsInit = Record<string, RegInit>
 
 interface ProcessResult {
   outputs: Record<string, ExprCoercible>
@@ -421,13 +490,23 @@ export function defineModule(
   const inputPortTypes = inputs.map(_portType)
   const outputPortTypes = outputs.map(_portType)
 
-  // Parse regs
+  // Parse regs (supports bare values or { init, type } objects)
   const regNames: string[] = []
   const regInitValues: ValueCoercible[] = []
+  const regPortTypes: (string | undefined)[] = []
 
-  for (const [regName, regInit] of Object.entries(regs)) {
+  for (const [regName, regSpec] of Object.entries(regs)) {
     regNames.push(regName)
-    regInitValues.push(regInit as ValueCoercible)
+    if (isTypedRegInit(regSpec)) {
+      if (regSpec.type !== undefined) {
+        validateRegType(regName, regSpec.type, regSpec.init)
+      }
+      regInitValues.push(regSpec.init)
+      regPortTypes.push(regSpec.type)
+    } else {
+      regInitValues.push(regSpec as ValueCoercible)
+      regPortTypes.push(undefined)
+    }
   }
 
   // Parse input defaults
@@ -480,7 +559,7 @@ export function defineModule(
   for (let i = 0; i < regNames.length; i++) {
     const initH = valueHandle(regInitValues[i])
     liveValueHandles.push(initH)
-    registerSpecs.push({ bodyH: regUpdateExprs[i]?._h ?? null, initH })
+    registerSpecs.push({ bodyH: regUpdateExprs[i]?._h ?? null, initH, typeName: regPortTypes[i] })
   }
 
   // Build delay spec handles
@@ -497,6 +576,8 @@ export function defineModule(
     outputNames,
     inputPortTypes,
     outputPortTypes,
+    registerNames: regNames,
+    registerPortTypes: regPortTypes,
     sampleRate,
     rawInputDefaults: inputDefaults ?? {},
     inputDefaults: parsedDefaults,
