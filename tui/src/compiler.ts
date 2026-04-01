@@ -444,6 +444,10 @@ export interface CompiledPatch {
   levels: string[][]
   /** Detected feedback cycles (each is a list of module names). */
   cycles: string[][]
+  /** Input wiring expressions (carried through for plan generation). */
+  inputExprNodes: Map<string, ExprNode>
+  /** Graph outputs (carried through for plan generation). */
+  graphOutputs: Array<{ module: string; output: string }>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -474,6 +478,8 @@ export function compilePatch(input: CompilerInput): CompiledPatch {
       modules,
       levels: [],
       cycles: [],
+      inputExprNodes,
+      graphOutputs,
     }
   }
 
@@ -555,7 +561,7 @@ export function compilePatch(input: CompilerInput): CompiledPatch {
     )
   }
 
-  return { term, modules, levels, cycles }
+  return { term, modules, levels, cycles, inputExprNodes, graphOutputs }
 }
 
 // ─────────────────────────────────────────────────────────────
