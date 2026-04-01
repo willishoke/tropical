@@ -19,6 +19,9 @@ import {
 import { portTypeFromString } from './compiler'
 import { Float, Int, Bool, product } from './term'
 import type { ExprNode } from './patch'
+import { makeSession, loadPatchFromJSON, type PatchJSON } from './patch'
+import { loadBuiltins } from './module_library'
+import { Graph } from './graph'
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -497,5 +500,192 @@ describe('end-to-end: compile → plan → validate', () => {
     expect(stats.group_count).toBe(3)
     expect(stats.max_parallelism).toBe(2)
     expect(stats.total_registers).toBe(5) // VCO:2 + Env:2 + Clock:1
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// Integration: plan loading via C API
+// ─────────────────────────────────────────────────────────────
+
+describe('C++ plan loading', () => {
+  test('load plan wiring produces non-silent output', () => {
+    // 1. Set up session with builtins
+    const session = makeSession(256)
+    loadBuiltins(session.typeRegistry)
+
+    // 2. Load a simple patch via the old path to get module types registered
+    const patchJson: PatchJSON = {
+      schema: 'egress_patch_1',
+      modules: [
+        { type: 'VCO', name: 'VCO1' },
+        { type: 'VCA', name: 'VCA1' },
+      ],
+      input_exprs: [
+        { module: 'VCO1', input: 'freq', expr: 440 },
+        { module: 'VCA1', input: 'audio', expr: { op: 'ref', module: 'VCO1', output: 'saw' } },
+        { module: 'VCA1', input: 'cv', expr: 1.0 },
+      ],
+      outputs: [{ module: 'VCA1', output: 'out' }],
+    }
+    loadPatchFromJSON(patchJson, session)
+
+    // 3. Process via old path to get reference output
+    session.graph.primeJit()
+    session.graph.process()
+    const refBuffer = new Float64Array(session.graph.outputBuffer)
+
+    // 4. Build a fresh graph with same modules but apply wiring via plan loading
+    const session2 = makeSession(256)
+    loadBuiltins(session2.typeRegistry)
+
+    // Instantiate modules (this still uses the old path — modules need their body expressions)
+    const patchNoWiring: PatchJSON = {
+      schema: 'egress_patch_1',
+      modules: [
+        { type: 'VCO', name: 'VCO1' },
+        { type: 'VCA', name: 'VCA1' },
+      ],
+      // No input_exprs, no outputs — those come from the plan
+    }
+    loadPatchFromJSON(patchNoWiring, session2)
+
+    // 5. Build CompilerInput from the original patch's wiring info
+    const compilerInput: CompilerInput = {
+      modules: new Map([
+        ['VCO1', {
+          name: 'VCO1',
+          typeName: 'VCO',
+          inputNames: session.instanceRegistry.get('VCO1')!.inputNames,
+          outputNames: session.instanceRegistry.get('VCO1')!.outputNames,
+          registerNames: session.instanceRegistry.get('VCO1')!.registerNames,
+          inputTypes: session.instanceRegistry.get('VCO1')!.inputNames.map(() => Float),
+          outputTypes: session.instanceRegistry.get('VCO1')!.outputNames.map(() => Float),
+          registerTypes: session.instanceRegistry.get('VCO1')!.registerNames.map(() => Float),
+        }],
+        ['VCA1', {
+          name: 'VCA1',
+          typeName: 'VCA',
+          inputNames: session.instanceRegistry.get('VCA1')!.inputNames,
+          outputNames: session.instanceRegistry.get('VCA1')!.outputNames,
+          registerNames: session.instanceRegistry.get('VCA1')!.registerNames,
+          inputTypes: session.instanceRegistry.get('VCA1')!.inputNames.map(() => Float),
+          outputTypes: session.instanceRegistry.get('VCA1')!.outputNames.map(() => Float),
+          registerTypes: session.instanceRegistry.get('VCA1')!.registerNames.map(() => Float),
+        }],
+      ]),
+      inputExprNodes: new Map<string, ExprNode>([
+        ['VCO1:freq', 440],
+        ['VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' }],
+        ['VCA1:cv', 1.0],
+      ]),
+      graphOutputs: [{ module: 'VCA1', output: 'out' }],
+    }
+
+    const compiled = compilePatch(compilerInput)
+    const plan = generatePlan(compiled)
+    validatePlan(plan)
+
+    // 6. Load plan wiring via C API
+    const planJsonStr = planToJSON(plan)
+    session2.graph.loadPlan(planJsonStr)
+
+    // 7. Process and verify
+    session2.graph.primeJit()
+    session2.graph.process()
+    const planBuffer = session2.graph.outputBuffer
+
+    // Should produce non-silent output
+    let peak = 0
+    for (let i = 0; i < planBuffer.length; i++) {
+      peak = Math.max(peak, Math.abs(planBuffer[i]))
+    }
+    expect(peak).toBeGreaterThan(0)
+
+    // Should match reference output (same wiring, same initial state)
+    for (let i = 0; i < Math.min(refBuffer.length, planBuffer.length); i++) {
+      expect(planBuffer[i]).toBeCloseTo(refBuffer[i], 10)
+    }
+
+    session.graph.dispose()
+    session2.graph.dispose()
+  })
+
+  test('plan with nested ref in binary op', () => {
+    // Tests that string output names inside nested expressions are resolved
+    const session = makeSession(256)
+    loadBuiltins(session.typeRegistry)
+
+    const patchJson: PatchJSON = {
+      schema: 'egress_patch_1',
+      modules: [
+        { type: 'VCO', name: 'VCO1' },
+        { type: 'VCA', name: 'VCA1' },
+      ],
+      input_exprs: [
+        { module: 'VCO1', input: 'freq', expr: 440 },
+        // Nested ref: mul(ref(VCO1.saw), 0.5)
+        { module: 'VCA1', input: 'audio', expr: { op: 'mul', args: [{ op: 'ref', module: 'VCO1', output: 'saw' }, 0.5] } },
+        { module: 'VCA1', input: 'cv', expr: 1.0 },
+      ],
+      outputs: [{ module: 'VCA1', output: 'out' }],
+    }
+    loadPatchFromJSON(patchJson, session)
+    session.graph.primeJit()
+    session.graph.process()
+    const refBuffer = new Float64Array(session.graph.outputBuffer)
+
+    // Now do it via plan
+    const session2 = makeSession(256)
+    loadBuiltins(session2.typeRegistry)
+    loadPatchFromJSON({
+      schema: 'egress_patch_1',
+      modules: [
+        { type: 'VCO', name: 'VCO1' },
+        { type: 'VCA', name: 'VCA1' },
+      ],
+    }, session2)
+
+    const compilerInput: CompilerInput = {
+      modules: new Map([
+        ['VCO1', {
+          name: 'VCO1', typeName: 'VCO',
+          inputNames: session.instanceRegistry.get('VCO1')!.inputNames,
+          outputNames: session.instanceRegistry.get('VCO1')!.outputNames,
+          registerNames: session.instanceRegistry.get('VCO1')!.registerNames,
+          inputTypes: session.instanceRegistry.get('VCO1')!.inputNames.map(() => Float),
+          outputTypes: session.instanceRegistry.get('VCO1')!.outputNames.map(() => Float),
+          registerTypes: session.instanceRegistry.get('VCO1')!.registerNames.map(() => Float),
+        }],
+        ['VCA1', {
+          name: 'VCA1', typeName: 'VCA',
+          inputNames: session.instanceRegistry.get('VCA1')!.inputNames,
+          outputNames: session.instanceRegistry.get('VCA1')!.outputNames,
+          registerNames: session.instanceRegistry.get('VCA1')!.registerNames,
+          inputTypes: session.instanceRegistry.get('VCA1')!.inputNames.map(() => Float),
+          outputTypes: session.instanceRegistry.get('VCA1')!.outputNames.map(() => Float),
+          registerTypes: session.instanceRegistry.get('VCA1')!.registerNames.map(() => Float),
+        }],
+      ]),
+      inputExprNodes: new Map<string, ExprNode>([
+        ['VCO1:freq', 440],
+        ['VCA1:audio', { op: 'mul', args: [{ op: 'ref', module: 'VCO1', output: 'saw' }, 0.5] }],
+        ['VCA1:cv', 1.0],
+      ]),
+      graphOutputs: [{ module: 'VCA1', output: 'out' }],
+    }
+
+    const compiled = compilePatch(compilerInput)
+    const plan = generatePlan(compiled)
+    session2.graph.loadPlan(planToJSON(plan))
+    session2.graph.primeJit()
+    session2.graph.process()
+    const planBuffer = session2.graph.outputBuffer
+
+    for (let i = 0; i < Math.min(refBuffer.length, planBuffer.length); i++) {
+      expect(planBuffer[i]).toBeCloseTo(refBuffer[i], 10)
+    }
+
+    session.graph.dispose()
+    session2.graph.dispose()
   })
 })

@@ -1,4 +1,5 @@
 #include "c_api/egress_c.h"
+#include "c_api/plan_loader.hpp"
 
 #include "expr/Expr.hpp"
 #include "graph/Graph.hpp"
@@ -944,6 +945,16 @@ void egress_graph_prime_jit(egress_graph_t g)
 {
   try { static_cast<Graph*>(g)->prime_numeric_jit(); }
   catch (const std::exception & e) { set_error(e.what()); }
+}
+
+bool egress_graph_load_plan(egress_graph_t g, const char* plan_json, size_t len)
+{
+  try
+  {
+    std::string json_str(plan_json, len);
+    return egress_plan::load_plan_wiring(*static_cast<Graph*>(g), json_str);
+  }
+  catch (const std::exception & e) { set_error(e.what()); return false; }
 }
 
 const double* egress_graph_output_buffer(egress_graph_t g)

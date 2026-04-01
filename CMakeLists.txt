@@ -13,6 +13,11 @@ option(EGRESS_PROFILE "Enable profiling counters and timing instrumentation" OFF
 option(EGRESS_LLVM_ORC_JIT "Enable LLVM ORC JIT backend in C++ runtime" OFF)
 option(EGRESS_LLVM_STATIC "Link LLVM statically into libegress for self-contained wheel distribution" OFF)
 
+# nlohmann/json — header-only JSON library (for plan loading)
+set(JSON_BuildTests OFF CACHE INTERNAL "")
+set(JSON_Install OFF CACHE INTERNAL "")
+add_subdirectory(lib/json)
+
 # RtAudio library target
 add_library(rtaudio STATIC lib/rtaudio/RtAudio.cpp)
 target_include_directories(rtaudio SYSTEM PUBLIC lib/rtaudio)
@@ -76,7 +81,7 @@ target_compile_features(egress_core PRIVATE cxx_std_20)
 if(EGRESS_PROFILE)
     target_compile_definitions(egress_core PRIVATE EGRESS_PROFILE=1)
 endif()
-target_link_libraries(egress_core PRIVATE rtaudio)
+target_link_libraries(egress_core PRIVATE rtaudio nlohmann_json::nlohmann_json)
 target_include_directories(egress_core PRIVATE src)
 set_target_properties(egress_core PROPERTIES OUTPUT_NAME "egress")
 
