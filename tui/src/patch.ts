@@ -22,6 +22,7 @@ import {
 import { Graph } from './graph.js'
 import { DAC } from './audio.js'
 import { Param, Trigger } from './param.js'
+import { applySessionWiring } from './apply_plan.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -658,7 +659,7 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
     session.instanceRegistry.set(inst.name, inst)
   }
 
-  // Apply connections (legacy sugar — expand to inputExprNodes refs)
+  // Populate wiring state — connections, input expressions, outputs
   for (const conn of json.connections ?? []) {
     const srcInst = session.instanceRegistry.get(conn.src)
     const dstInst = session.instanceRegistry.get(conn.dst)
@@ -666,51 +667,28 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
     if (!dstInst) throw new Error(`Connection dst module '${conn.dst}' not found.`)
     const srcId = typeof conn.src_output === 'number' ? conn.src_output : srcInst.outputIndex(conn.src_output)
     const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
-    const ok = session.graph.connect(conn.src, srcId, conn.dst, dstId)
-    if (!ok) throw new Error(`Failed to connect ${conn.src}.${conn.src_output} → ${conn.dst}.${conn.dst_input}.`)
     const srcOutName = srcInst.outputNames[srcId]
     const dstInName  = dstInst.inputNames[dstId]
     session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
   }
 
-  // Set input expressions
-  const exprCtx: BuildCtx = {
-    inputNames: [],
-    regNames: [],
-    paramRegistry: session.paramRegistry,
-    triggerRegistry: session.triggerRegistry,
-    instanceRegistry: session.instanceRegistry,
-    typeRegistry: session.typeRegistry,
-    delayRefs: new Map(),
-    nestedAliases: new Map(),
-  }
-  session.graph.beginUpdate()
-  try {
-    for (const ie of json.input_exprs ?? []) {
-      const inst = session.instanceRegistry.get(ie.module)
-      if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
-      const inputId = typeof ie.input === 'number' ? ie.input : inst.inputIndex(ie.input)
-      const expr = buildExpr(ie.expr, exprCtx)
-      session.graph.setInputExpr(ie.module, inputId, expr)
-      session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
-    }
-  } finally {
-    session.graph.endUpdate()
+  for (const ie of json.input_exprs ?? []) {
+    const inst = session.instanceRegistry.get(ie.module)
+    if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
+    session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
   }
 
-  // Add graph outputs
   for (const out of json.outputs ?? []) {
     if ('expr' in out) {
-      const expr = buildExpr(out.expr, exprCtx)
-      session.graph.addOutputExpr(expr)
-    } else {
-      const inst = session.instanceRegistry.get(out.module)
-      if (!inst) throw new Error(`Output module '${out.module}' not found.`)
-      const outputId = typeof out.output === 'number' ? out.output : inst.outputIndex(out.output)
-      session.graph.addOutput(out.module, outputId)
-      session.graphOutputs.push({ module: out.module, output: String(out.output) })
+      throw new Error('Output expressions not supported in plan-based path. Use module output refs instead.')
     }
+    const inst = session.instanceRegistry.get(out.module)
+    if (!inst) throw new Error(`Output module '${out.module}' not found.`)
+    session.graphOutputs.push({ module: out.module, output: String(out.output) })
   }
+
+  // Apply all wiring via compilation pipeline
+  applySessionWiring(session)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -762,7 +740,7 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
     session.instanceRegistry.set(inst.name, inst)
   }
 
-  // Apply connections (legacy sugar — expand to inputExprNodes refs)
+  // Populate wiring state — connections, input expressions, outputs
   for (const conn of json.connections ?? []) {
     const srcInst = session.instanceRegistry.get(conn.src)
     const dstInst = session.instanceRegistry.get(conn.dst)
@@ -770,51 +748,28 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
     if (!dstInst) throw new Error(`Connection dst module '${conn.dst}' not found.`)
     const srcId = typeof conn.src_output === 'number' ? conn.src_output : srcInst.outputIndex(conn.src_output)
     const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
-    const ok = session.graph.connect(conn.src, srcId, conn.dst, dstId)
-    if (!ok) throw new Error(`Failed to connect ${conn.src}.${conn.src_output} → ${conn.dst}.${conn.dst_input}.`)
     const srcOutName = srcInst.outputNames[srcId]
     const dstInName  = dstInst.inputNames[dstId]
     session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
   }
 
-  // Set input expressions
-  const exprCtx: BuildCtx = {
-    inputNames: [],
-    regNames: [],
-    paramRegistry: session.paramRegistry,
-    triggerRegistry: session.triggerRegistry,
-    instanceRegistry: session.instanceRegistry,
-    typeRegistry: session.typeRegistry,
-    delayRefs: new Map(),
-    nestedAliases: new Map(),
-  }
-  session.graph.beginUpdate()
-  try {
-    for (const ie of json.input_exprs ?? []) {
-      const inst = session.instanceRegistry.get(ie.module)
-      if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
-      const inputId = typeof ie.input === 'number' ? ie.input : inst.inputIndex(ie.input)
-      const expr = buildExpr(ie.expr, exprCtx)
-      session.graph.setInputExpr(ie.module, inputId, expr)
-      session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
-    }
-  } finally {
-    session.graph.endUpdate()
+  for (const ie of json.input_exprs ?? []) {
+    const inst = session.instanceRegistry.get(ie.module)
+    if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
+    session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
   }
 
-  // Add graph outputs
   for (const out of json.outputs ?? []) {
     if ('expr' in out) {
-      const expr = buildExpr(out.expr, exprCtx)
-      session.graph.addOutputExpr(expr)
-    } else {
-      const inst = session.instanceRegistry.get(out.module)
-      if (!inst) throw new Error(`Output module '${out.module}' not found.`)
-      const outputId = typeof out.output === 'number' ? out.output : inst.outputIndex(out.output)
-      session.graph.addOutput(out.module, outputId)
-      session.graphOutputs.push({ module: out.module, output: String(out.output) })
+      throw new Error('Output expressions not supported in plan-based path. Use module output refs instead.')
     }
+    const inst = session.instanceRegistry.get(out.module)
+    if (!inst) throw new Error(`Output module '${out.module}' not found.`)
+    session.graphOutputs.push({ module: out.module, output: String(out.output) })
   }
+
+  // Apply all wiring via compilation pipeline
+  applySessionWiring(session)
 }
 
 // ─────────────────────────────────────────────────────────────

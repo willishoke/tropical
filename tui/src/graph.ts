@@ -98,16 +98,6 @@ export class Graph {
     }
   }
 
-  // ---- Connections ----
-
-  connect(srcModule: string, srcOutputId: number, dstModule: string, dstInputId: number): boolean {
-    return b.egress_graph_connect(this._h, srcModule, srcOutputId, dstModule, dstInputId) as boolean
-  }
-
-  disconnect(srcModule: string, srcOutputId: number, dstModule: string, dstInputId: number): boolean {
-    return b.egress_graph_disconnect(this._h, srcModule, srcOutputId, dstModule, dstInputId) as boolean
-  }
-
   // ---- Input expressions ----
 
   setInputExpr(moduleName: string, inputId: number, expr: SignalExpr | null): boolean {
@@ -115,28 +105,7 @@ export class Graph {
     return b.egress_graph_set_input_expr(this._h, moduleName, inputId, handle) as boolean
   }
 
-  beginUpdate(): void {
-    b.egress_graph_begin_update(this._h)
-  }
-
-  endUpdate(): boolean {
-    return b.egress_graph_end_update(this._h) as boolean
-  }
-
-  getInputExpr(moduleName: string, inputId: number): SignalExpr | null {
-    const h = b.egress_graph_get_input_expr(this._h, moduleName, inputId)
-    return h ? SignalExpr.fromHandle(h) : null
-  }
-
   // ---- Outputs ----
-
-  addOutput(moduleName: string, outputId: number): boolean {
-    return b.egress_graph_add_output(this._h, moduleName, outputId) as boolean
-  }
-
-  addOutputExpr(expr: SignalExpr): boolean {
-    return b.egress_graph_add_output_expr(this._h, expr._h) as boolean
-  }
 
   addOutputTap(moduleName: string, outputId: number): number {
     return b.egress_graph_add_output_tap(this._h, moduleName, outputId) as number
