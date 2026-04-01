@@ -103,11 +103,24 @@ function splitTraceType(
     return { rest: Unit }
   }
 
-  // If it's a product, check if the last factor is the state type
+  // If it's a product, check if the trailing factors match the state type
   if (t.tag === 'product') {
     const factors = t.factors
-    if (factors.length < 2) return null
 
+    if (stateType.tag === 'product') {
+      // Compound state: match last N factors against state's N factors
+      const stateFactors = stateType.factors
+      const n = stateFactors.length
+      if (factors.length <= n) return null
+      const tail = factors.slice(factors.length - n)
+      if (tail.every((f, i) => portTypeEqual(f, stateFactors[i]))) {
+        return { rest: product(factors.slice(0, factors.length - n)) }
+      }
+      return null
+    }
+
+    // Scalar state: match last single factor
+    if (factors.length < 2) return null
     const last = factors[factors.length - 1]
     if (portTypeEqual(last, stateType)) {
       return { rest: product(factors.slice(0, -1)) }
