@@ -181,20 +181,18 @@ bool            egress_graph_add_module(egress_graph_t, const char* name, egress
 bool            egress_graph_remove_module(egress_graph_t, const char* name);
 bool            egress_graph_connect(egress_graph_t, const char* src, unsigned int src_out,
                                      const char* dst, unsigned int dst_in);
-bool            egress_graph_disconnect(egress_graph_t, const char* src, unsigned int src_out,
-                                        const char* dst, unsigned int dst_in);
 bool            egress_graph_set_input_expr(egress_graph_t, const char* module,
                                             unsigned int input_id, egress_expr_t);
-void            egress_graph_begin_update(egress_graph_t);
-bool            egress_graph_end_update(egress_graph_t);
-egress_expr_t   egress_graph_get_input_expr(egress_graph_t, const char* module,
-                                            unsigned int input_id);
 bool            egress_graph_add_output(egress_graph_t, const char* module, unsigned int output_id);
-bool            egress_graph_add_output_expr(egress_graph_t, egress_expr_t);
 size_t          egress_graph_add_output_tap(egress_graph_t, const char* module, unsigned int output_id);
 bool            egress_graph_remove_output_tap(egress_graph_t, size_t tap_id);
 void            egress_graph_process(egress_graph_t);
 void            egress_graph_prime_jit(egress_graph_t);
+/* Clear all input expressions and output mix on the graph. */
+void            egress_graph_clear_wiring(egress_graph_t);
+/* Load wiring and outputs from a plan JSON string. Modules must already exist.
+   Wraps begin_update/end_update internally. Returns false on error. */
+bool            egress_graph_load_plan(egress_graph_t, const char* plan_json, size_t len);
 /* Pointer valid until next egress_graph_process() call */
 const double*   egress_graph_output_buffer(egress_graph_t);
 /* Pointer valid until next egress_graph_tap_buffer() call on this thread */

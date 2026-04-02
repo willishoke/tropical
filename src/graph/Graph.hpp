@@ -909,6 +909,20 @@ class Graph
       return true;
     }
 
+    /** Clear all input expressions and output mix. Used before declarative plan load. */
+    void clear_wiring()
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      for (auto & [name, cm] : control_modules_)
+      {
+        for (auto & expr : cm.input_exprs)
+          expr = nullptr;
+      }
+      control_mix_.clear();
+      control_mix_exprs_.clear();
+      rebuild_and_publish_runtime_locked();
+    }
+
     void begin_update()
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);

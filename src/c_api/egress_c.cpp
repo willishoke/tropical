@@ -1,4 +1,5 @@
 #include "c_api/egress_c.h"
+#include "c_api/plan_loader.hpp"
 
 #include "expr/Expr.hpp"
 #include "graph/Graph.hpp"
@@ -841,21 +842,6 @@ bool egress_graph_connect(
   catch (const std::exception & e) { set_error(e.what()); return false; }
 }
 
-bool egress_graph_disconnect(
-  egress_graph_t g,
-  const char* src,
-  unsigned int src_out,
-  const char* dst,
-  unsigned int dst_in)
-{
-  try
-  {
-    return static_cast<Graph*>(g)->remove_connection(
-      std::string(src), src_out, std::string(dst), dst_in);
-  }
-  catch (const std::exception & e) { set_error(e.what()); return false; }
-}
-
 bool egress_graph_set_input_expr(
   egress_graph_t g,
   const char* module,
@@ -871,35 +857,6 @@ bool egress_graph_set_input_expr(
   catch (const std::exception & e2) { set_error(e2.what()); return false; }
 }
 
-void egress_graph_begin_update(egress_graph_t g)
-{
-  try { static_cast<Graph*>(g)->begin_update(); }
-  catch (const std::exception & e) { set_error(e.what()); }
-}
-
-bool egress_graph_end_update(egress_graph_t g)
-{
-  try { return static_cast<Graph*>(g)->end_update(); }
-  catch (const std::exception & e) { set_error(e.what()); return false; }
-}
-
-egress_expr_t egress_graph_get_input_expr(
-  egress_graph_t g,
-  const char* module,
-  unsigned int input_id)
-{
-  try
-  {
-    auto spec = static_cast<Graph*>(g)->get_input_expr(std::string(module), input_id);
-    if (!spec)
-    {
-      return nullptr;
-    }
-    return new EgressExpr{std::move(spec)};
-  }
-  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
-}
-
 bool egress_graph_add_output(egress_graph_t g, const char* module, unsigned int output_id)
 {
   try
@@ -908,15 +865,6 @@ bool egress_graph_add_output(egress_graph_t g, const char* module, unsigned int 
       std::make_pair(std::string(module), output_id));
   }
   catch (const std::exception & e) { set_error(e.what()); return false; }
-}
-
-bool egress_graph_add_output_expr(egress_graph_t g, egress_expr_t e)
-{
-  try
-  {
-    return static_cast<Graph*>(g)->addOutputExpr(static_cast<EgressExpr*>(e)->spec);
-  }
-  catch (const std::exception & e2) { set_error(e2.what()); return false; }
 }
 
 size_t egress_graph_add_output_tap(egress_graph_t g, const char* module, unsigned int output_id)
@@ -944,6 +892,22 @@ void egress_graph_prime_jit(egress_graph_t g)
 {
   try { static_cast<Graph*>(g)->prime_numeric_jit(); }
   catch (const std::exception & e) { set_error(e.what()); }
+}
+
+void egress_graph_clear_wiring(egress_graph_t g)
+{
+  try { static_cast<Graph*>(g)->clear_wiring(); }
+  catch (const std::exception & e) { set_error(e.what()); }
+}
+
+bool egress_graph_load_plan(egress_graph_t g, const char* plan_json, size_t len)
+{
+  try
+  {
+    std::string json_str(plan_json, len);
+    return egress_plan::load_plan_wiring(*static_cast<Graph*>(g), json_str);
+  }
+  catch (const std::exception & e) { set_error(e.what()); return false; }
 }
 
 const double* egress_graph_output_buffer(egress_graph_t g)

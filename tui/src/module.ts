@@ -13,7 +13,7 @@
 import * as b from './bindings.js'
 import {
   SignalExpr, ExprCoercible, coerce,
-  inputExpr, registerExpr, nestedOutputExpr, delayValueExpr, refExpr,
+  inputExpr, registerExpr, nestedOutputExpr, delayValueExpr,
 } from './expr.js'
 import type { Graph } from './graph.js'
 
@@ -415,48 +415,6 @@ export class ModuleInstance {
     return idx
   }
 
-  input(name: string): InputPort {
-    return new InputPort(this._graph, this.name, this.inputIndex(name))
-  }
-
-  output(name: string): OutputPort {
-    return new OutputPort(this._graph, this.name, this.outputIndex(name))
-  }
-
-  setInput(name: string, value: ExprCoercible): void {
-    this._graph.setInputExpr(this.name, this.inputIndex(name), coerce(value))
-  }
-}
-
-// ---------- Port types ----------
-
-export class OutputPort {
-  constructor(
-    private _graph: Graph,
-    public readonly moduleName: string,
-    public readonly outputId: number,
-  ) {}
-
-  /** Return a ref expression pointing to this output. */
-  asExpr(): SignalExpr {
-    return refExpr(this.moduleName, this.outputId)
-  }
-}
-
-export class InputPort {
-  constructor(
-    private _graph: Graph,
-    public readonly moduleName: string,
-    public readonly inputId: number,
-  ) {}
-
-  getExpr(): SignalExpr | null {
-    return this._graph.getInputExpr(this.moduleName, this.inputId)
-  }
-
-  assign(value: ExprCoercible): void {
-    this._graph.setInputExpr(this.moduleName, this.inputId, coerce(value))
-  }
 }
 
 // ---------- defineModule ----------
