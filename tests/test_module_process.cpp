@@ -5,7 +5,7 @@
  * an audio device.  Covers the JIT code paths that the audio thread exercises,
  * catching crashes that would otherwise terminate the server process.
  *
- * Build with EGRESS_LLVM_ORC_JIT=ON to exercise JIT paths.
+ * LLVM ORC JIT is always enabled (required dependency).
  */
 
 #include "c_api/egress_c.h"

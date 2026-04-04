@@ -30,7 +30,7 @@ cmake --build build -j4 && ctest --test-dir build   # run tests
 
 ## CI note
 
-CI builds with `EGRESS_LLVM_ORC_JIT=OFF`, so JIT paths are only tested locally. Always run tests locally before pushing JIT-related changes.
+LLVM ORC JIT is always enabled. CI runners need LLVM installed to build. Always run tests locally before pushing JIT-related changes.
 
 ## Adding tests
 

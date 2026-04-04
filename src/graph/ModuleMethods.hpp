@@ -5,7 +5,6 @@
 void Module::process(const std::vector<bool> * output_materialize_mask)
 {
   const bool use_composite_programs = has_nested_modules_ || has_delay_states_;
-#ifdef EGRESS_LLVM_ORC_JIT
   if (numeric_output_scalar_mask_.size() != outputs.size())
   {
     numeric_output_scalar_mask_.assign(outputs.size(), false);
@@ -15,8 +14,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   {
     std::fill(numeric_output_scalar_mask_.begin(), numeric_output_scalar_mask_.end(), false);
   }
-#endif
-#ifdef EGRESS_LLVM_ORC_JIT
   if (!numeric_input_override_active_)
   {
     ensure_numeric_jit_current();
@@ -224,14 +221,12 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       return;
     }
   }
-#endif
   bool composite_outputs_materialized = false;
   bool used_composite_body_jit = false;
   for (uint32_t node_id : composite_schedule_)
   {
     if (use_composite_programs && node_id == composite_output_boundary_id_)
     {
- #ifdef EGRESS_LLVM_ORC_JIT
       {
         ensure_composite_body_jit_current();
         if (run_composite_body_jit(output_materialize_mask))
@@ -260,7 +255,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         }
       }
       if (!used_jit_outputs)
-#endif
       {
         throw std::runtime_error("JIT unavailable for composite output program");
       }
@@ -275,7 +269,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     }
 
     NestedModuleRuntime & nested = nested_modules_[nested_it->second];
-#ifdef EGRESS_LLVM_ORC_JIT
     bool used_jit_inputs = false;
     if (nested_it->second < nested_input_jit_states_.size() &&
         nested_input_jit_states_[nested_it->second])
@@ -300,7 +293,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       }
     }
     if (!used_jit_inputs)
-#endif
     {
       throw std::runtime_error("JIT unavailable for nested module input program");
     }
@@ -321,7 +313,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     throw std::invalid_argument("Composite module schedule did not materialize the output boundary.");
   }
 
-#ifdef EGRESS_LLVM_ORC_JIT
   if (!used_composite_body_jit)
   {
     if (use_composite_programs &&
@@ -340,7 +331,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       throw std::runtime_error("JIT unavailable for register program: " + jit_status_);
     }
   }
-#endif
 
   if (!delay_update_program_.output_targets.empty())
   {
@@ -350,7 +340,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     }
     else
     {
-#ifdef EGRESS_LLVM_ORC_JIT
       if ((ensure_numeric_jit_state_current(
            delay_update_jit_,
            delay_update_program_,
@@ -368,7 +357,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       }
     }
       else
-#endif
       {
         throw std::runtime_error("JIT unavailable for delay update program");
       }
@@ -429,7 +417,6 @@ Module::CompileStats Module::compile_stats() const
   }
   stats.instruction_count += static_cast<uint64_t>(delay_update_program_.instructions.size());
   stats.nested_module_count = static_cast<uint64_t>(nested_modules_.size());
-#ifdef EGRESS_LLVM_ORC_JIT
   stats.numeric_jit_instruction_count = numeric_jit_instruction_count_;
   if (composite_body_jit_.state.kernel != nullptr)
   {
@@ -455,9 +442,7 @@ Module::CompileStats Module::compile_stats() const
     }
   }
   stats.jit_status = jit_status_;
-  #else
   stats.jit_status = "LLVM ORC JIT disabled";
-#endif
   return stats;
 }
 #endif // EGRESS_PROFILE
@@ -466,7 +451,6 @@ Module::CompileStats Module::compile_stats() const
 Module::RuntimeStats Module::runtime_stats() const
 {
   RuntimeStats stats;
-#ifdef EGRESS_LLVM_ORC_JIT
   stats.numeric_input_sync_call_count = profile_numeric_input_sync_call_count_.load(std::memory_order_relaxed);
   stats.numeric_input_sync_total_ns = profile_numeric_input_sync_total_ns_.load(std::memory_order_relaxed);
   stats.numeric_input_sync_max_ns = profile_numeric_input_sync_max_ns_.load(std::memory_order_relaxed);
@@ -484,13 +468,11 @@ Module::RuntimeStats Module::runtime_stats() const
   stats.numeric_register_sync_max_ns = profile_numeric_register_sync_max_ns_.load(std::memory_order_relaxed);
   stats.materialized_scalar_registers = profile_materialized_scalar_registers_.load(std::memory_order_relaxed);
   stats.materialized_array_registers = profile_materialized_array_registers_.load(std::memory_order_relaxed);
-#endif
   return stats;
 }
 
 void Module::reset_runtime_stats()
 {
-#ifdef EGRESS_LLVM_ORC_JIT
   profile_numeric_input_sync_call_count_.store(0, std::memory_order_relaxed);
   profile_numeric_input_sync_total_ns_.store(0, std::memory_order_relaxed);
   profile_numeric_input_sync_max_ns_.store(0, std::memory_order_relaxed);
@@ -505,11 +487,10 @@ void Module::reset_runtime_stats()
   profile_numeric_register_sync_max_ns_.store(0, std::memory_order_relaxed);
   profile_materialized_scalar_registers_.store(0, std::memory_order_relaxed);
   profile_materialized_array_registers_.store(0, std::memory_order_relaxed);
-#endif
 }
 #endif // EGRESS_PROFILE
 
-#if defined(EGRESS_PROFILE) && defined(EGRESS_LLVM_ORC_JIT)
+#ifdef EGRESS_PROFILE
 void Module::update_profile_max(std::atomic<uint64_t> & dst, uint64_t candidate)
 {
   uint64_t current = dst.load(std::memory_order_relaxed);
@@ -551,13 +532,11 @@ void Module::record_numeric_register_sync_profile(
   profile_materialized_scalar_registers_.fetch_add(scalar_count, std::memory_order_relaxed);
   profile_materialized_array_registers_.fetch_add(array_count, std::memory_order_relaxed);
 }
-#endif // EGRESS_PROFILE && EGRESS_LLVM_ORC_JIT
+#endif // EGRESS_PROFILE
 
 void Module::reset_inputs_after_process()
 {
-#ifdef EGRESS_LLVM_ORC_JIT
   numeric_input_override_active_ = false;
-#endif
 }
 
 void Module::postprocess()

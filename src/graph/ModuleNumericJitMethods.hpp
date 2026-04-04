@@ -1,7 +1,5 @@
 #pragma once
 
-#ifdef EGRESS_LLVM_ORC_JIT
-
 namespace
 {
 inline bool copy_numeric_scalar_values(
@@ -3311,5 +3309,3 @@ void Module::ensure_numeric_jit_current()
     }
   }
 }
-
-#endif

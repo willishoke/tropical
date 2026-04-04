@@ -7,12 +7,10 @@
 #include <vector>
 #include <cstdint>
 
-#ifdef EGRESS_LLVM_ORC_JIT
 #include <llvm/Config/llvm-config.h>
 #include <llvm/ExecutionEngine/Orc/LLJIT.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
-#endif
 
 #include <filesystem>
 
@@ -109,7 +107,6 @@ using NumericKernelFn = void (*)(
   uint64_t sample_index,
   const uint64_t * param_ptrs);
 
-#ifdef EGRESS_LLVM_ORC_JIT
 class KernelObjectCache;
 
 class OrcJitEngine
@@ -138,17 +135,4 @@ class OrcJitEngine
     std::unordered_map<std::string, NumericKernelFn> kernel_cache_;
     std::unique_ptr<KernelObjectCache> object_cache_;
 };
-#else
-class OrcJitEngine
-{
-  public:
-    static OrcJitEngine & instance();
-
-    bool available() const;
-    const std::string & init_error() const;
-
-  private:
-    OrcJitEngine() = default;
-};
-#endif
 } // namespace egress_jit

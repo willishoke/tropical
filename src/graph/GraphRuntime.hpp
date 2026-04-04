@@ -224,11 +224,9 @@ struct FusedGraphKernelState
   std::vector<FusedGraphInputBinding> input_bindings;
   std::vector<FusedGraphMixBinding> mix_bindings;
 
-#ifdef EGRESS_LLVM_ORC_JIT
   egress_jit::NumericProgram program;
   egress_jit::NumericKernelFn kernel = nullptr;
   std::vector<uint64_t> param_ptrs;
-#endif
 };
 
 struct FusedGraphState
@@ -253,7 +251,6 @@ struct FusedGraphState
   FusedGraphKernelState input_kernel;
   FusedGraphKernelState mix_kernel;
 
-#ifdef EGRESS_LLVM_ORC_JIT
   egress_jit::NumericProgram program;
   egress_jit::NumericKernelFn kernel = nullptr;
   std::vector<uint64_t> param_ptrs;
@@ -263,7 +260,6 @@ struct FusedGraphState
   std::vector<std::vector<int64_t>> array_storage;
   std::vector<int64_t *> array_ptrs;
   std::vector<uint64_t> array_sizes;
-#endif
 };
 
 struct RuntimeState

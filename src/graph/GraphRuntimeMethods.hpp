@@ -304,10 +304,6 @@ void Graph::sync_fused_prev_outputs(RuntimeState & runtime) const
 
 bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_body_inputs) const
 {
-#ifndef EGRESS_LLVM_ORC_JIT
-  (void)runtime;
-  return false;
-#else
   auto * fused = runtime.fused_graph.get();
   const bool allow_without_fusion_flag =
     allow_primitive_body_inputs &&
@@ -478,15 +474,10 @@ bool Graph::run_fused_input_kernel(RuntimeState & runtime, bool allow_primitive_
   }
 
   return true;
-#endif
 }
 
 bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
 {
-#ifndef EGRESS_LLVM_ORC_JIT
-  (void)runtime;
-  return false;
-#else
   auto * fused = runtime.fused_graph.get();
   if (fused == nullptr ||
       !fused->primitive_body_available ||
@@ -734,16 +725,10 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
 
   fused->primitive_body_status = "numeric JIT active";
   return true;
-#endif
 }
 
 bool Graph::run_fused_mix_kernel(RuntimeState & runtime, double & mixed) const
 {
-#ifndef EGRESS_LLVM_ORC_JIT
-  (void)runtime;
-  (void)mixed;
-  return false;
-#else
   auto * fused = runtime.fused_graph.get();
   if (!fusion_enabled_ ||
       fused == nullptr ||
@@ -852,7 +837,6 @@ bool Graph::run_fused_mix_kernel(RuntimeState & runtime, double & mixed) const
     mixed += std::bit_cast<double>(fused->mix_kernel.temps[binding.value.scalar_register]) / 20.0;
   }
   return true;
-#endif
 }
 
 void Graph::refresh_runtime_ref_metadata(RuntimeState & runtime) const
@@ -922,7 +906,6 @@ void Graph::refresh_runtime_ref_metadata(RuntimeState & runtime) const
       }
 
       ModuleSlot & source_slot = runtime.modules[instr.ref_module_id];
-#ifdef EGRESS_LLVM_ORC_JIT
       if (source_slot.module != nullptr)
       {
         if (previous_outputs)
@@ -957,7 +940,6 @@ void Graph::refresh_runtime_ref_metadata(RuntimeState & runtime) const
           }
         }
       }
-#endif
       auto & mask = previous_outputs ? source_slot.output_prev_materialize_mask : source_slot.output_materialize_mask;
       if (instr.ref_output_id >= mask.size())
       {
@@ -1017,10 +999,6 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
   auto fused = std::make_unique<FusedGraphState>();
   fused->module_output_spans.resize(runtime.modules.size());
 
-#ifndef EGRESS_LLVM_ORC_JIT
-  fused->candidate_reason = "graph fusion requires LLVM ORC JIT";
-  return fused;
-#endif
 
   auto mark_ineligible = [&](const std::string & reason)
   {
@@ -1108,7 +1086,6 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
   std::vector<uint32_t> primitive_input_base_by_module(runtime.modules.size(), std::numeric_limits<uint32_t>::max());
   std::vector<std::vector<uint32_t>> primitive_array_input_slots_by_module(runtime.modules.size());
 
- #ifdef EGRESS_LLVM_ORC_JIT
   auto mark_primitive_body_unavailable = [&](const std::string & reason)
   {
     fused->primitive_body_available = false;
@@ -2277,7 +2254,6 @@ std::unique_ptr<Graph::FusedGraphState> Graph::build_fused_graph_state(const Run
   {
     fused->mix_kernel = egress_graph_detail::FusedGraphKernelState{};
   }
- #endif
 
   fused->numeric_candidate = true;
   fused->candidate_reason = "graph-level lowering candidate";
@@ -2392,7 +2368,6 @@ void Graph::eval_instruction(const RuntimeState & runtime, const ExprInstr & ins
       }
       const auto & slot = runtime.modules[instr.ref_module_id];
       const uint32_t source_slot = get_fused_source_slot(instr.ref_module_id, instr.ref_output_id);
-#ifdef EGRESS_LLVM_ORC_JIT
       if (slot.module != nullptr)
       {
         double scalar = 0.0;
@@ -2413,7 +2388,6 @@ void Graph::eval_instruction(const RuntimeState & runtime, const ExprInstr & ins
           break;
         }
       }
-#endif
       if (runtime.fused_graph != nullptr &&
           source_slot < runtime.fused_graph->prev_outputs.size())
       {
@@ -2646,7 +2620,6 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
         break;
       }
       const auto & slot = runtime.modules[instr.ref_module_id];
-#ifdef EGRESS_LLVM_ORC_JIT
       if (slot.module != nullptr)
       {
         double numeric_scalar = 0.0;
@@ -2656,7 +2629,6 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
           break;
         }
       }
-#endif
       const uint32_t source_slot = get_fused_source_slot(instr.ref_module_id, instr.ref_output_id);
       if (runtime.fused_graph != nullptr &&
           source_slot < runtime.fused_graph->current_outputs.size())
@@ -2680,7 +2652,6 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
         break;
       }
       const auto & slot = runtime.modules[instr.ref_module_id];
-#ifdef EGRESS_LLVM_ORC_JIT
       if (slot.module != nullptr && instr.ref_index >= 0)
       {
         const auto * numeric_values = slot.module->try_get_numeric_output_array_values(instr.ref_output_id);
@@ -2695,7 +2666,6 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
           break;
         }
       }
-#endif
       const uint32_t source_slot = get_fused_source_slot(instr.ref_module_id, instr.ref_output_id);
       if (runtime.fused_graph != nullptr &&
           source_slot < runtime.fused_graph->current_outputs.size())
@@ -2722,7 +2692,6 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
         registers[instr.dst] = float_value(0.0);
         break;
       }
-#ifdef EGRESS_LLVM_ORC_JIT
       const auto * numeric_values = slot.module->try_get_numeric_output_array_values(instr.ref_output_id);
       if (numeric_values != nullptr)
       {
@@ -2734,7 +2703,6 @@ void Graph::eval_mix_instruction(const RuntimeState & runtime, const ExprInstr &
           expr::float_value((*numeric_values)[static_cast<std::size_t>(instr.ref_index)]);
         break;
       }
-#endif
       const Value & output = slot.module->materialize_output_value(instr.ref_output_id, false);
       const std::size_t item_index = static_cast<std::size_t>(instr.ref_index);
       if (expr::is_array(output))

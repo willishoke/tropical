@@ -270,7 +270,6 @@ class Graph
             {
               continue;
             }
-#ifdef EGRESS_LLVM_ORC_JIT
             double numeric_scalar = 0.0;
             bool mask_ok = tap.output_id < slot.output_materialize_mask.size() &&
                 !slot.output_materialize_mask[tap.output_id];
@@ -282,7 +281,6 @@ class Graph
               tap.buffer.buffers[tap_write_indices[tap_id]][sample] = numeric_scalar;
               continue;
             }
-#endif
             const Value & output = slot.module->materialize_output_value(tap.output_id, false);
             if (expr::is_array(output) || expr::is_matrix(output))
             {
@@ -309,7 +307,6 @@ class Graph
             continue;
           }
 
-#ifdef EGRESS_LLVM_ORC_JIT
           double numeric_scalar = 0.0;
           if (tap.output_id < slot.output_materialize_mask.size() &&
               !slot.output_materialize_mask[tap.output_id] &&
@@ -318,7 +315,6 @@ class Graph
             mixed += numeric_scalar / 20.0;
             continue;
           }
-#endif
           mixed += expr::to_float64(slot.module->materialize_output_value(tap.output_id, false)) / 20.0;
         }
         if (!run_fused_mix_kernel(runtime, mixed))
@@ -358,7 +354,6 @@ class Graph
               continue;
             }
 
-#ifdef EGRESS_LLVM_ORC_JIT
             const auto * numeric_values = slot.module->try_get_numeric_output_array_values(output_id);
             if (numeric_values != nullptr)
             {
@@ -384,7 +379,6 @@ class Graph
               }
               continue;
             }
-#endif
 
             if (output_id < slot.module->outputs.size())
             {
@@ -416,11 +410,9 @@ class Graph
           }
 
           slot.module->prev_outputs.swap(slot.module->outputs);
-  #ifdef EGRESS_LLVM_ORC_JIT
           slot.module->capture_numeric_prev_array_outputs();
           slot.module->numeric_prev_output_scalar_mask_.swap(slot.module->numeric_output_scalar_mask_);
           slot.module->numeric_prev_output_scalars_.swap(slot.module->numeric_output_scalars_);
-  #endif
         }
 
         sync_fused_prev_outputs(runtime);
@@ -543,9 +535,7 @@ class Graph
         }
 
         eval_input_program(runtime, slot.input_program, slot.input_registers, slot.module->inputs);
-#ifdef EGRESS_LLVM_ORC_JIT
         slot.module->ensure_numeric_jit_current();
-#endif
       }
     }
 
@@ -1142,9 +1132,7 @@ class Graph
       std::vector<Value> input_values(input_count, float_value(0.0));
       eval_input_program(runtime, input_program, input_registers, input_values);
       module_it->second.module->inputs = std::move(input_values);
-#ifdef EGRESS_LLVM_ORC_JIT
       module_it->second.module->ensure_numeric_jit_current();
-#endif
       return true;
     }
 

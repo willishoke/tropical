@@ -26,6 +26,5 @@ EGRESS_BUILD_PYTHON = "ON"
 # Requires LLVM >= 15 built with static libraries:
 # -DLLVM_BUILD_LLVM_DYLIB=OFF -DLLVM_LINK_LLVM_DYLIB=OFF
 # Point CMake at it via -DLLVM_DIR or the LLVM_DIR env var.
-EGRESS_LLVM_ORC_JIT = "ON"
 EGRESS_LLVM_STATIC = "ON"
 LLVM_DIR = {env = "LLVM_DIR", default = "/opt/homebrew/opt/llvm/lib/cmake/llvm"}

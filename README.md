@@ -61,7 +61,7 @@ A stable C API is exposed in `src/c_api/egress_c.h`. This is the integration poi
 
 ## JIT
 
-When built with `EGRESS_LLVM_ORC_JIT=ON` (the default via `make build`), module kernels are compiled to native code on first use and cached on disk across process restarts. The JIT uses a static type system (float/int/bool) derived from expression structure.
+Module kernels are compiled to native code on first use via LLVM ORC JIT and cached on disk across process restarts. The JIT uses a static type system (float/int/bool) derived from expression structure.
 
 ## Testing
 
