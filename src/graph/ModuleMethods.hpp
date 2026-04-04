@@ -558,10 +558,6 @@ void Module::reset_inputs_after_process()
 #ifdef EGRESS_LLVM_ORC_JIT
   numeric_input_override_active_ = false;
 #endif
-  for (auto & in : inputs)
-  {
-    in = expr::float_value(0.0);
-  }
 }
 
 void Module::postprocess()
