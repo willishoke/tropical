@@ -14,7 +14,6 @@ define configure_and_build
 	cmake -S $(ROOT) -B $(1) \
 		-DEGRESS_BUILD_PYTHON=ON \
 		-DEGRESS_PROFILE=$(2) \
-		-DEGRESS_LLVM_ORC_JIT=ON \
 		-DLLVM_DIR=$(LLVM_DIR) \
 		-DPython3_EXECUTABLE=$(PYTHON) \
 		$(EXTRA_CMAKE_ARGS)

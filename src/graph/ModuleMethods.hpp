@@ -5,7 +5,6 @@
 void Module::process(const std::vector<bool> * output_materialize_mask)
 {
   const bool use_composite_programs = has_nested_modules_ || has_delay_states_;
-#ifdef EGRESS_LLVM_ORC_JIT
   if (numeric_output_scalar_mask_.size() != outputs.size())
   {
     numeric_output_scalar_mask_.assign(outputs.size(), false);
@@ -15,8 +14,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   {
     std::fill(numeric_output_scalar_mask_.begin(), numeric_output_scalar_mask_.end(), false);
   }
-#endif
-#ifdef EGRESS_LLVM_ORC_JIT
   if (!numeric_input_override_active_)
   {
     ensure_numeric_jit_current();
@@ -220,18 +217,16 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       }
 
       value_registers_dirty_ = true;
-      postprocess();
+      numeric_input_override_active_ = false;
       return;
     }
   }
-#endif
   bool composite_outputs_materialized = false;
   bool used_composite_body_jit = false;
   for (uint32_t node_id : composite_schedule_)
   {
     if (use_composite_programs && node_id == composite_output_boundary_id_)
     {
- #ifdef EGRESS_LLVM_ORC_JIT
       {
         ensure_composite_body_jit_current();
         if (run_composite_body_jit(output_materialize_mask))
@@ -260,7 +255,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
         }
       }
       if (!used_jit_outputs)
-#endif
       {
         throw std::runtime_error("JIT unavailable for composite output program");
       }
@@ -275,7 +269,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     }
 
     NestedModuleRuntime & nested = nested_modules_[nested_it->second];
-#ifdef EGRESS_LLVM_ORC_JIT
     bool used_jit_inputs = false;
     if (nested_it->second < nested_input_jit_states_.size() &&
         nested_input_jit_states_[nested_it->second])
@@ -300,7 +293,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       }
     }
     if (!used_jit_inputs)
-#endif
     {
       throw std::runtime_error("JIT unavailable for nested module input program");
     }
@@ -321,7 +313,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     throw std::invalid_argument("Composite module schedule did not materialize the output boundary.");
   }
 
-#ifdef EGRESS_LLVM_ORC_JIT
   if (!used_composite_body_jit)
   {
     if (use_composite_programs &&
@@ -340,7 +331,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       throw std::runtime_error("JIT unavailable for register program: " + jit_status_);
     }
   }
-#endif
 
   if (!delay_update_program_.output_targets.empty())
   {
@@ -350,7 +340,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
     }
     else
     {
-#ifdef EGRESS_LLVM_ORC_JIT
       if ((ensure_numeric_jit_state_current(
            delay_update_jit_,
            delay_update_program_,
@@ -368,7 +357,6 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       }
     }
       else
-#endif
       {
         throw std::runtime_error("JIT unavailable for delay update program");
       }
@@ -379,7 +367,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   {
     registers_.swap(next_registers_);
   }
-  postprocess();
+  numeric_input_override_active_ = false;
 }
 
 void Module::advance_sample_index_tree()
@@ -429,7 +417,6 @@ Module::CompileStats Module::compile_stats() const
   }
   stats.instruction_count += static_cast<uint64_t>(delay_update_program_.instructions.size());
   stats.nested_module_count = static_cast<uint64_t>(nested_modules_.size());
-#ifdef EGRESS_LLVM_ORC_JIT
   stats.numeric_jit_instruction_count = numeric_jit_instruction_count_;
   if (composite_body_jit_.state.kernel != nullptr)
   {
@@ -455,9 +442,7 @@ Module::CompileStats Module::compile_stats() const
     }
   }
   stats.jit_status = jit_status_;
-  #else
   stats.jit_status = "LLVM ORC JIT disabled";
-#endif
   return stats;
 }
 #endif // EGRESS_PROFILE
@@ -466,7 +451,6 @@ Module::CompileStats Module::compile_stats() const
 Module::RuntimeStats Module::runtime_stats() const
 {
   RuntimeStats stats;
-#ifdef EGRESS_LLVM_ORC_JIT
   stats.numeric_input_sync_call_count = profile_numeric_input_sync_call_count_.load(std::memory_order_relaxed);
   stats.numeric_input_sync_total_ns = profile_numeric_input_sync_total_ns_.load(std::memory_order_relaxed);
   stats.numeric_input_sync_max_ns = profile_numeric_input_sync_max_ns_.load(std::memory_order_relaxed);
@@ -484,13 +468,11 @@ Module::RuntimeStats Module::runtime_stats() const
   stats.numeric_register_sync_max_ns = profile_numeric_register_sync_max_ns_.load(std::memory_order_relaxed);
   stats.materialized_scalar_registers = profile_materialized_scalar_registers_.load(std::memory_order_relaxed);
   stats.materialized_array_registers = profile_materialized_array_registers_.load(std::memory_order_relaxed);
-#endif
   return stats;
 }
 
 void Module::reset_runtime_stats()
 {
-#ifdef EGRESS_LLVM_ORC_JIT
   profile_numeric_input_sync_call_count_.store(0, std::memory_order_relaxed);
   profile_numeric_input_sync_total_ns_.store(0, std::memory_order_relaxed);
   profile_numeric_input_sync_max_ns_.store(0, std::memory_order_relaxed);
@@ -505,11 +487,10 @@ void Module::reset_runtime_stats()
   profile_numeric_register_sync_max_ns_.store(0, std::memory_order_relaxed);
   profile_materialized_scalar_registers_.store(0, std::memory_order_relaxed);
   profile_materialized_array_registers_.store(0, std::memory_order_relaxed);
-#endif
 }
 #endif // EGRESS_PROFILE
 
-#if defined(EGRESS_PROFILE) && defined(EGRESS_LLVM_ORC_JIT)
+#ifdef EGRESS_PROFILE
 void Module::update_profile_max(std::atomic<uint64_t> & dst, uint64_t candidate)
 {
   uint64_t current = dst.load(std::memory_order_relaxed);
@@ -551,23 +532,7 @@ void Module::record_numeric_register_sync_profile(
   profile_materialized_scalar_registers_.fetch_add(scalar_count, std::memory_order_relaxed);
   profile_materialized_array_registers_.fetch_add(array_count, std::memory_order_relaxed);
 }
-#endif // EGRESS_PROFILE && EGRESS_LLVM_ORC_JIT
-
-void Module::reset_inputs_after_process()
-{
-#ifdef EGRESS_LLVM_ORC_JIT
-  numeric_input_override_active_ = false;
-#endif
-  for (auto & in : inputs)
-  {
-    in = expr::float_value(0.0);
-  }
-}
-
-void Module::postprocess()
-{
-  reset_inputs_after_process();
-}
+#endif // EGRESS_PROFILE
 
 
 Module::CompiledProgram Module::compile_program(
@@ -734,320 +699,3 @@ uint32_t Module::compile_expr_node(
   return compiled.instructions.back().dst;
 }
 
-void Module::eval_program(const CompiledProgram & expr, std::vector<Value> & temps)
-{
-  if (expr.instructions.empty())
-  {
-    return;
-  }
-
-  if (temps.size() < expr.register_count)
-  {
-    temps.resize(expr.register_count, expr::float_value(0.0));
-  }
-
-  for (const Instr & instr : expr.instructions)
-  {
-    switch (instr.kind)
-    {
-      case ExprKind::Function:
-      case ExprKind::Call:
-        throw std::invalid_argument("Function values must be inlined before evaluation.");
-      case ExprKind::Literal:
-        temps[instr.dst] = instr.literal;
-        break;
-      case ExprKind::InputValue:
-        temps[instr.dst] = instr.slot_id < inputs.size()
-                             ? inputs[instr.slot_id]
-                             : expr::float_value(0.0);
-        break;
-      case ExprKind::RegisterValue:
-        temps[instr.dst] = instr.slot_id < registers_.size()
-                             ? registers_[instr.slot_id]
-                             : expr::float_value(0.0);
-        break;
-      case ExprKind::NestedValue:
-      {
-        const auto nested_it = nested_module_lookup_.find(instr.slot_id);
-        if (nested_it == nested_module_lookup_.end())
-        {
-          temps[instr.dst] = expr::float_value(0.0);
-          break;
-        }
-        const NestedModuleRuntime & nested = nested_modules_[nested_it->second];
-        temps[instr.dst] = instr.output_id < nested.module->outputs.size()
-                             ? nested.module->outputs[instr.output_id]
-                             : expr::float_value(0.0);
-        break;
-      }
-      case ExprKind::DelayValue:
-      {
-        const auto delay_it = delay_state_lookup_.find(instr.slot_id);
-        if (delay_it == delay_state_lookup_.end())
-        {
-          temps[instr.dst] = expr::float_value(0.0);
-          break;
-        }
-#ifdef EGRESS_LLVM_ORC_JIT
-        double scalar = 0.0;
-        if (try_get_numeric_delay_scalar(static_cast<unsigned int>(delay_it->second), scalar))
-        {
-          temps[instr.dst] = expr::float_value(scalar);
-          break;
-        }
-        if (const auto * values = try_get_numeric_delay_array(static_cast<unsigned int>(delay_it->second)))
-        {
-          std::vector<Value> items(values->size(), expr::float_value(0.0));
-          for (std::size_t item_id = 0; item_id < values->size(); ++item_id)
-          {
-            assign_scalar_numeric_value(items[item_id], (*values)[item_id]);
-          }
-          temps[instr.dst] = expr::array_value(std::move(items));
-          break;
-        }
-#endif
-        temps[instr.dst] = delay_states_[delay_it->second];
-        break;
-      }
-      case ExprKind::SampleRate:
-        temps[instr.dst] = expr::float_value(sample_rate_);
-        break;
-      case ExprKind::SampleIndex:
-        temps[instr.dst] = expr::int_value(static_cast<int64_t>(sample_index_));
-        break;
-      case ExprKind::ArrayPack:
-      {
-        std::vector<Value> items;
-        items.reserve(instr.args.size());
-        for (uint32_t src : instr.args)
-        {
-          if (expr::is_array(temps[src]) || expr::is_matrix(temps[src]))
-          {
-            throw std::invalid_argument("Nested arrays are not supported.");
-          }
-          items.push_back(temps[src]);
-        }
-        temps[instr.dst] = expr::array_value(std::move(items));
-        break;
-      }
-      case ExprKind::Index:
-      {
-        const Value & array_value = temps[instr.src_a];
-        const int64_t index = expr::to_int64(temps[instr.src_b]);
-        if (index < 0)
-        {
-          throw std::out_of_range("Array index out of range.");
-        }
-        if (expr::is_array(array_value))
-        {
-          if (static_cast<std::size_t>(index) >= array_value.array_items.size())
-          {
-            throw std::out_of_range("Array index out of range.");
-          }
-          temps[instr.dst] = array_value.array_items[static_cast<std::size_t>(index)];
-          break;
-        }
-        if (expr::is_matrix(array_value))
-        {
-          temps[instr.dst] = expr::array_from_matrix_row(array_value, static_cast<std::size_t>(index));
-          break;
-        }
-        temps[instr.dst] = expr::float_value(0.0);
-        break;
-      }
-      case ExprKind::ArraySet:
-        temps[instr.dst] = expr_eval::array_set_value(
-          temps[instr.src_a],
-          temps[instr.src_b],
-          temps[instr.src_c]);
-        break;
-      case ExprKind::Abs:
-        temps[instr.dst] = expr_eval::abs_value(temps[instr.src_a]);
-        break;
-      case ExprKind::Not:
-        temps[instr.dst] = expr_eval::not_value(temps[instr.src_a]);
-        break;
-      case ExprKind::Less:
-        temps[instr.dst] = expr_eval::less_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::LessEqual:
-        temps[instr.dst] = expr_eval::less_equal_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::Greater:
-        temps[instr.dst] = expr_eval::greater_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::GreaterEqual:
-        temps[instr.dst] = expr_eval::greater_equal_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::Equal:
-        temps[instr.dst] = expr_eval::equal_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::NotEqual:
-        temps[instr.dst] = expr_eval::not_equal_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::Add:
-        temps[instr.dst] = expr_eval::add_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::Sub:
-        temps[instr.dst] = expr_eval::sub_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::Mul:
-        temps[instr.dst] = expr_eval::mul_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::MatMul:
-        temps[instr.dst] = expr_eval::matmul_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::Div:
-        temps[instr.dst] = expr_eval::div_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::Pow:
-        temps[instr.dst] = expr_eval::pow_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::Mod:
-        temps[instr.dst] = expr_eval::mod_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::FloorDiv:
-        temps[instr.dst] = expr_eval::floor_div_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::BitAnd:
-        temps[instr.dst] = expr_eval::bit_and_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::BitOr:
-        temps[instr.dst] = expr_eval::bit_or_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::BitXor:
-        temps[instr.dst] = expr_eval::bit_xor_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::LShift:
-        temps[instr.dst] = expr_eval::lshift_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::RShift:
-        temps[instr.dst] = expr_eval::rshift_values(temps[instr.src_a], temps[instr.src_b]);
-        break;
-      case ExprKind::Clamp:
-        temps[instr.dst] = expr_eval::clamp_values(temps[instr.src_a], temps[instr.src_b], temps[instr.src_c]);
-        break;
-      case ExprKind::Select:
-        temps[instr.dst] = expr_eval::select_values(temps[instr.src_a], temps[instr.src_b], temps[instr.src_c]);
-        break;
-      case ExprKind::Log:
-        temps[instr.dst] = expr_eval::log_value(temps[instr.src_a]);
-        break;
-      case ExprKind::Sin:
-        temps[instr.dst] = expr_eval::sin_value(temps[instr.src_a]);
-        break;
-      case ExprKind::Neg:
-        temps[instr.dst] = expr_eval::neg_value(temps[instr.src_a]);
-        break;
-      case ExprKind::BitNot:
-        temps[instr.dst] = expr_eval::bit_not_value(temps[instr.src_a]);
-        break;
-      case ExprKind::Ref:
-        temps[instr.dst] = expr::float_value(0.0);
-        break;
-      case ExprKind::SmoothedParam:
-      {
-        // One-pole lowpass smoother: y[n] = y[n-1] + coeff * (target - y[n-1])
-        // coeff = 1 - exp(-1 / (time_const * sample_rate))
-        // The anonymous register at slot_id stores the current smoothed value.
-        // Writing to next_registers_ here is safe: the slot is beyond user register range
-        // and the register swap at end of process() will persist the updated state.
-        if (instr.control_param && instr.slot_id < registers_.size())
-        {
-          const double target = instr.control_param->value.load(std::memory_order_relaxed);
-          const double current = egress_expr::to_float64(registers_[instr.slot_id]);
-          const double tc = instr.control_param->time_const;
-          const double coeff = (tc > 0.0)
-            ? 1.0 - std::exp(-1.0 / (tc * sample_rate_))
-            : 1.0;
-          const double new_val = current + coeff * (target - current);
-          temps[instr.dst] = egress_expr::float_value(new_val);
-          // Side-effect: advance smoother state (written to next_registers_, swapped end of process())
-          if (instr.slot_id < next_registers_.size())
-          {
-            next_registers_[instr.slot_id] = egress_expr::float_value(new_val);
-          }
-        }
-        else
-        {
-          temps[instr.dst] = egress_expr::float_value(0.0);
-        }
-        break;
-      }
-      case ExprKind::TriggerParam:
-      {
-        // Read the per-frame snapshot written by Graph before the processing loop.
-        // The Graph does a single exchange(0.0) per frame so all modules see the same value.
-        if (instr.control_param)
-        {
-          temps[instr.dst] = egress_expr::float_value(instr.control_param->frame_value.load(std::memory_order_relaxed));
-        }
-        else
-        {
-          temps[instr.dst] = egress_expr::float_value(0.0);
-        }
-        break;
-      }
-      case ExprKind::ConstructStruct:
-      {
-        Value result;
-        result.type = ValueType::Struct;
-        result.type_name = instr.type_name;
-        result.struct_fields.reserve(instr.args.size());
-        for (uint32_t src : instr.args)
-        {
-          result.struct_fields.push_back(temps[src]);
-        }
-        temps[instr.dst] = std::move(result);
-        break;
-      }
-      case ExprKind::FieldAccess:
-      {
-        const Value & struct_val = temps[instr.src_a];
-        if (struct_val.type == ValueType::Struct && instr.slot_id < struct_val.struct_fields.size())
-        {
-          temps[instr.dst] = struct_val.struct_fields[instr.slot_id];
-        }
-        else
-        {
-          temps[instr.dst] = egress_expr::float_value(0.0);
-        }
-        break;
-      }
-      case ExprKind::ConstructVariant:
-      {
-        Value result;
-        result.type = ValueType::Sum;
-        result.type_name = instr.type_name;
-        result.variant_tag = instr.slot_id;
-        result.struct_fields.reserve(instr.args.size());
-        for (uint32_t src : instr.args)
-        {
-          result.struct_fields.push_back(temps[src]);
-        }
-        temps[instr.dst] = std::move(result);
-        break;
-      }
-      case ExprKind::MatchVariant:
-      {
-        const Value & scrutinee = temps[instr.src_a];
-        const uint32_t tag = (scrutinee.type == ValueType::Sum)
-          ? scrutinee.variant_tag
-          : static_cast<uint32_t>(egress_expr::to_int64(scrutinee));
-        if (tag < instr.args.size())
-        {
-          temps[instr.dst] = temps[instr.args[tag]];
-        }
-        else if (!instr.args.empty())
-        {
-          temps[instr.dst] = temps[instr.args.back()];
-        }
-        else
-        {
-          temps[instr.dst] = egress_expr::float_value(0.0);
-        }
-        break;
-      }
-    }
-  }
-}

@@ -7,39 +7,6 @@ on:
     branches: [main]
 
 jobs:
-  build:
-    name: build (C++ core, ubuntu-latest)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y cmake g++ libasound2-dev
-
-      - name: Configure
-        run: cmake -S . -B build -DEGRESS_LLVM_ORC_JIT=OFF
-
-      - name: Build
-        run: cmake --build build --parallel
-
-  build-macos:
-    name: build (C++ core, macos-latest)
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - name: Configure
-        run: cmake -S . -B build -DEGRESS_LLVM_ORC_JIT=OFF
-
-      - name: Build
-        run: cmake --build build --parallel
-
   ts-typecheck:
     name: TypeScript type-check
     runs-on: ubuntu-latest

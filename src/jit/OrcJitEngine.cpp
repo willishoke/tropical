@@ -1,6 +1,5 @@
 #include "jit/OrcJitEngine.hpp"
 
-#ifdef EGRESS_LLVM_ORC_JIT
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Intrinsics.h>
 #include <llvm/IR/Verifier.h>
@@ -29,11 +28,9 @@
 #endif
 
 namespace fs = std::filesystem;
-#endif
 
 namespace egress_jit
 {
-#ifdef EGRESS_LLVM_ORC_JIT
 
 // ---------------------------------------------------------------------------
 // KernelObjectCache — persists compiled object code to disk so kernels survive
@@ -1272,22 +1269,4 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
   kernel_cache_.emplace(std::move(cache_key), kernel);
   return kernel;
 }
-#else
-OrcJitEngine & OrcJitEngine::instance()
-{
-  static OrcJitEngine engine;
-  return engine;
-}
-
-bool OrcJitEngine::available() const
-{
-  return false;
-}
-
-const std::string & OrcJitEngine::init_error() const
-{
-  static const std::string kDisabled = "Built without EGRESS_LLVM_ORC_JIT";
-  return kDisabled;
-}
-#endif
 } // namespace egress_jit

@@ -12,7 +12,6 @@ option(EGRESS_BUILD_PYTHON "Build ctypes-based Python package support (installs 
 # Profiling overhead is minimal (atomic increments + rdtsc, gated by #ifdef).
 # ON by default — pass -DEGRESS_PROFILE=OFF to disable.
 option(EGRESS_PROFILE "Enable profiling counters and timing instrumentation" ON)
-option(EGRESS_LLVM_ORC_JIT "Enable LLVM ORC JIT backend in C++ runtime" OFF)
 option(EGRESS_LLVM_STATIC "Link LLVM statically into libegress for self-contained wheel distribution" OFF)
 
 # nlohmann/json — header-only JSON library (for plan loading)
@@ -48,34 +47,32 @@ set(EGRESS_CORE_SOURCES
 # libegress — stable C shared library (no Python dependency)
 add_library(egress_core SHARED ${EGRESS_CORE_SOURCES})
 
-if(EGRESS_LLVM_ORC_JIT)
-    find_package(LLVM CONFIG REQUIRED)
-    if(LLVM_PACKAGE_VERSION VERSION_LESS 15)
-        message(FATAL_ERROR "EGRESS_LLVM_ORC_JIT requires LLVM >= 15; found ${LLVM_PACKAGE_VERSION}")
-    endif()
-    message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION}")
+find_package(LLVM CONFIG REQUIRED)
+if(LLVM_PACKAGE_VERSION VERSION_LESS 15)
+    message(FATAL_ERROR "LLVM >= 15 required; found ${LLVM_PACKAGE_VERSION}")
+endif()
+message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION}")
 
-    target_sources(egress_core PRIVATE src/jit/OrcJitEngine.cpp)
-    target_include_directories(egress_core PRIVATE ${LLVM_INCLUDE_DIRS})
-    target_compile_definitions(egress_core PRIVATE ${LLVM_DEFINITIONS} EGRESS_LLVM_ORC_JIT=1)
+target_sources(egress_core PRIVATE src/jit/OrcJitEngine.cpp)
+target_include_directories(egress_core PRIVATE ${LLVM_INCLUDE_DIRS})
+target_compile_definitions(egress_core PRIVATE ${LLVM_DEFINITIONS})
 
-    llvm_map_components_to_libnames(LLVM_ORC_JIT_LIBS
-        Core OrcJIT ExecutionEngine native nativecodegen Support)
-    target_link_libraries(egress_core PRIVATE ${LLVM_ORC_JIT_LIBS})
+llvm_map_components_to_libnames(LLVM_ORC_JIT_LIBS
+    Core OrcJIT ExecutionEngine native nativecodegen Support)
+target_link_libraries(egress_core PRIVATE ${LLVM_ORC_JIT_LIBS})
 
-    if(EGRESS_LLVM_STATIC)
-        # Hide LLVM symbols so they don't leak out of libegress and conflict
-        # with any other LLVM loaded in the same process.
-        if(APPLE)
-            target_link_options(egress_core PRIVATE
-                -Wl,-dead_strip
-                -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/cmake/egress_exports.txt)
-        elseif(UNIX)
-            target_link_options(egress_core PRIVATE
-                -Wl,--gc-sections
-                -Wl,--exclude-libs,ALL
-                -Wl,--version-script,${CMAKE_CURRENT_SOURCE_DIR}/cmake/egress.map)
-        endif()
+if(EGRESS_LLVM_STATIC)
+    # Hide LLVM symbols so they don't leak out of libegress and conflict
+    # with any other LLVM loaded in the same process.
+    if(APPLE)
+        target_link_options(egress_core PRIVATE
+            -Wl,-dead_strip
+            -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/cmake/egress_exports.txt)
+    elseif(UNIX)
+        target_link_options(egress_core PRIVATE
+            -Wl,--gc-sections
+            -Wl,--exclude-libs,ALL
+            -Wl,--version-script,${CMAKE_CURRENT_SOURCE_DIR}/cmake/egress.map)
     endif()
 endif()
 

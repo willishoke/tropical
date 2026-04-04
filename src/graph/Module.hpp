@@ -182,7 +182,6 @@ class Module
           std::max(composite_register_program_.register_count, delay_update_program_.register_count)));
       temps_.assign(temp_register_count, expr::float_value(0.0));
 
-#ifdef EGRESS_LLVM_ORC_JIT
       initialize_numeric_jit(inputs);
       // "numeric compatibility check failed" means input types don't match the compiled
       // program yet (e.g. an array input still holds its scalar default). This is normal
@@ -192,7 +191,6 @@ class Module
       {
         throw std::runtime_error("JIT compilation failed: " + jit_status_);
       }
-#endif
     }
 
     void process(const std::vector<bool> * output_materialize_mask = nullptr);
@@ -221,10 +219,6 @@ class Module
   #endif
 
   protected:
-    void reset_inputs_after_process();
-
-    void postprocess();
-
     std::vector<Value> inputs;
     std::vector<Value> outputs;
     std::vector<Value> prev_outputs;
@@ -260,8 +254,6 @@ class Module
       CompiledProgram & compiled,
       std::unordered_map<std::size_t, std::vector<std::pair<ExprSpecPtr, uint32_t>>> & memo,
       std::unordered_map<const ExprSpec *, std::size_t> & hash_cache);
-
-    void eval_program(const CompiledProgram & expr, std::vector<Value> & temps);
 
     const Value & materialize_output_value(unsigned int output_id, bool previous = false);
 
@@ -328,7 +320,6 @@ class Module
     bool has_delay_states_ = false;
     double sample_rate_ = 44100.0;
     uint64_t sample_index_ = 0;
-#ifdef EGRESS_LLVM_ORC_JIT
     egress_jit::NumericKernelFn jit_kernel_ = nullptr;
     std::vector<uint64_t> numeric_param_ptrs_;
     std::vector<int64_t> numeric_inputs_;
@@ -630,6 +621,4 @@ class Module
     void initialize_numeric_jit(const std::vector<Value> & current_inputs);
 
     void ensure_numeric_jit_current();
-
-  #endif
 };
