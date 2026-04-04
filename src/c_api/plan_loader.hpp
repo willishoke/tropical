@@ -498,16 +498,10 @@ inline bool load_plan_wiring(Graph & graph, const std::string & plan_json)
         return resolved;
     };
 
-    // Collect parsed outputs for after batch update
-    struct PendingOutput
-    {
-        std::string module_name;
-        unsigned int output_idx;
-    };
-    std::vector<PendingOutput> pending_outputs;
-
-    // Apply wiring inside batch update (defers recompilation to end_update)
+    // Clear existing wiring and apply the new plan in a single batch so that
+    // all changes — clear + wiring + outputs — are compiled in one rebuild.
     graph.begin_update();
+    graph.clear_wiring_deferred();
 
     try
     {
@@ -530,8 +524,6 @@ inline bool load_plan_wiring(Graph & graph, const std::string & plan_json)
                     " ('" + w.value("input_name", std::string("?")) + "')");
         }
 
-        // Collect outputs (don't apply yet — addOutput triggers a full rebuild
-        // which should happen after the batch wiring update completes)
         for (const auto & o : plan["outputs"])
         {
             int kernel_id = o["kernel"].get<int>();
@@ -540,7 +532,10 @@ inline bool load_plan_wiring(Graph & graph, const std::string & plan_json)
                 throw std::runtime_error(
                     "plan_loader: output references unknown kernel ID " + std::to_string(kernel_id));
 
-            pending_outputs.push_back({kit->second.name, o["output"].get<unsigned int>()});
+            if (!graph.addOutput(std::make_pair(kit->second.name, o["output"].get<unsigned int>())))
+                throw std::runtime_error(
+                    "plan_loader: failed to add output on '" + kit->second.name +
+                    "' output " + std::to_string(o["output"].get<unsigned int>()));
         }
 
         graph.end_update();
@@ -549,15 +544,6 @@ inline bool load_plan_wiring(Graph & graph, const std::string & plan_json)
     {
         try { graph.end_update(); } catch (...) {}
         throw;
-    }
-
-    // Apply outputs after batch update (each triggers rebuild_and_publish_runtime)
-    for (const auto & po : pending_outputs)
-    {
-        if (!graph.addOutput(std::make_pair(po.module_name, po.output_idx)))
-            throw std::runtime_error(
-                "plan_loader: failed to add output on '" + po.module_name +
-                "' output " + std::to_string(po.output_idx));
     }
 
     return true;

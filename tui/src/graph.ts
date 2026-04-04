@@ -190,6 +190,18 @@ export class Graph {
     b.egress_graph_reset_profile_stats(this._h)
   }
 
+  /** Timing entries accumulated since the last begin_update / loadPlan call.
+   *  Each entry corresponds to one rebuild_and_publish_runtime_locked() call. */
+  buildTimingEntries(): Array<{
+    module_count: number
+    input_programs_ms: number
+    fused_jit_ms: number
+    total_ms: number
+  }> {
+    const json = b.egress_graph_get_build_timing_json(this._h) as string
+    return JSON.parse(json)
+  }
+
   // ---- Name generation (used by module builder) ----
 
   nextName(prefix: string): string {

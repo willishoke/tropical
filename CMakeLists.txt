@@ -9,7 +9,9 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(EGRESS_BUILD_PYTHON "Build ctypes-based Python package support (installs egress/ package)" ON)
-option(EGRESS_PROFILE "Enable profiling counters and timing instrumentation" OFF)
+# Profiling overhead is minimal (atomic increments + rdtsc, gated by #ifdef).
+# ON by default — pass -DEGRESS_PROFILE=OFF to disable.
+option(EGRESS_PROFILE "Enable profiling counters and timing instrumentation" ON)
 option(EGRESS_LLVM_ORC_JIT "Enable LLVM ORC JIT backend in C++ runtime" OFF)
 option(EGRESS_LLVM_STATIC "Link LLVM statically into libegress for self-contained wheel distribution" OFF)
 

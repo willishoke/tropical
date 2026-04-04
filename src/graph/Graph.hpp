@@ -24,6 +24,26 @@ class Graph;
 class Graph
 {
   public:
+
+    // One timing entry per rebuild_and_publish_runtime_locked() call.
+    // Accumulated in build_timings_ (protected by pending_mutex_), reset at begin_update().
+    struct BuildTimingEntry
+    {
+      size_t  module_count       = 0;
+      double  input_programs_ms  = 0.0;  // compile_input_program for all modules
+      double  fused_jit_ms       = 0.0;  // build_fused_graph_state (all JIT phases)
+      double  total_ms           = 0.0;  // full build_runtime_locked wall time
+    };
+
+    // Snapshot returned by build_timing_snapshot(). Thread-safe copy.
+    using BuildTimingSnapshot = std::vector<BuildTimingEntry>;
+
+    BuildTimingSnapshot build_timing_snapshot() const
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      return build_timings_;
+    }
+
 #ifdef EGRESS_PROFILE
     struct ModuleCompileStats
     {
@@ -779,6 +799,13 @@ class Graph
       }
 
       control_mix_.push_back(output);
+
+      if (batch_update_active_)
+      {
+        batch_outputs_dirty_ = true;
+        return true;
+      }
+
       rebuild_and_publish_runtime_locked();
       return true;
     }
@@ -923,19 +950,52 @@ class Graph
       rebuild_and_publish_runtime_locked();
     }
 
+    // Like clear_wiring() but does not trigger a rebuild — use only when a
+    // rebuild is immediately following (e.g. inside a batch or loadPlan).
+    void clear_wiring_deferred()
+    {
+      std::lock_guard<std::mutex> lock(pending_mutex_);
+      for (auto & [name, cm] : control_modules_)
+      {
+        for (auto & expr : cm.input_exprs)
+          expr = nullptr;
+      }
+      control_mix_.clear();
+      control_mix_exprs_.clear();
+      // Mark outputs dirty so end_update knows a full rebuild is needed.
+      batch_outputs_dirty_ = true;
+      for (auto & [name, cm] : control_modules_)
+        batch_dirty_modules_.insert(name);
+    }
+
     void begin_update()
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
       batch_update_active_ = true;
+      batch_outputs_dirty_ = false;
       batch_dirty_modules_.clear();
+      build_timings_.clear();
     }
 
     bool end_update()
     {
       std::lock_guard<std::mutex> lock(pending_mutex_);
       batch_update_active_ = false;
-      if (batch_dirty_modules_.empty())
+      const bool outputs_dirty = batch_outputs_dirty_;
+      batch_outputs_dirty_ = false;
+
+      if (batch_dirty_modules_.empty() && !outputs_dirty)
       {
+        return true;
+      }
+
+      // If outputs changed (mix list modified), the incremental per-module
+      // recompilation path cannot handle it — fall back to a full rebuild.
+      // This collapses N addOutput calls into a single rebuild.
+      if (outputs_dirty)
+      {
+        rebuild_and_publish_runtime_locked();
+        batch_dirty_modules_.clear();
         return true;
       }
 
@@ -1634,7 +1694,9 @@ class Graph
 
     mutable std::mutex pending_mutex_;
     bool batch_update_active_ = false;
+    bool batch_outputs_dirty_ = false;
     std::unordered_set<std::string> batch_dirty_modules_;
+    mutable std::vector<BuildTimingEntry> build_timings_;
     std::atomic<uint32_t> parallel_next_module_index_{0};
     mutable std::mutex worker_mutex_;
     std::condition_variable worker_cv_;
