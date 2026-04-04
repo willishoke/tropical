@@ -190,8 +190,14 @@ void            egress_graph_process(egress_graph_t);
 void            egress_graph_prime_jit(egress_graph_t);
 /* Clear all input expressions and output mix on the graph. */
 void            egress_graph_clear_wiring(egress_graph_t);
+/* Begin a batched update — addModule, set_input_expr, etc. defer rebuilds
+   until egress_graph_end_update(). Calls may nest with load_plan. */
+void            egress_graph_begin_update(egress_graph_t);
+/* End a batched update — triggers a single rebuild for all deferred changes.
+   Returns false on error. */
+bool            egress_graph_end_update(egress_graph_t);
 /* Load wiring and outputs from a plan JSON string. Modules must already exist.
-   Wraps begin_update/end_update internally. Returns false on error. */
+   Joins an active batch if one exists, otherwise wraps its own begin/end_update. */
 bool            egress_graph_load_plan(egress_graph_t, const char* plan_json, size_t len);
 /* Pointer valid until next egress_graph_process() call */
 const double*   egress_graph_output_buffer(egress_graph_t);

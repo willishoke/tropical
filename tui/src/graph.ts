@@ -133,6 +133,16 @@ export class Graph {
     b.egress_graph_clear_wiring(this._h)
   }
 
+  /** Begin a batched update — addModule, setInputExpr, etc. defer rebuilds until endUpdate(). */
+  beginUpdate(): void {
+    b.egress_graph_begin_update(this._h)
+  }
+
+  /** End a batched update — triggers a single rebuild for all deferred changes. */
+  endUpdate(): boolean {
+    return b.egress_graph_end_update(this._h) as boolean
+  }
+
   /** Load wiring and outputs from a plan JSON string. Modules must already exist. */
   loadPlan(planJson: string): boolean {
     const ok = b.egress_graph_load_plan(this._h, planJson, planJson.length) as boolean
