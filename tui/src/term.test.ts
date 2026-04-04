@@ -10,7 +10,7 @@ import {
   type PortType,
   type Term,
   Float, Int, Bool, Unit,
-  ScalarType, StructType, SumType, FunctionType,
+  ScalarType, StructType, SumType,
   product,
   portTypeEqual,
   portTypeToString,
@@ -34,14 +34,7 @@ const arbPortType: fc.Arbitrary<PortType> = fc.letrec<{ type: PortType }>(tie =>
     { weight: 1, arbitrary: fc.constant(Unit) },
     { weight: 2, arbitrary: fc.string({ minLength: 1, maxLength: 8 }).map(StructType) },
     {
-      weight: 1,
-      arbitrary: fc.tuple(
-        fc.array(tie('type'), { minLength: 1, maxLength: 3 }),
-        tie('type'),
-      ).map(([params, ret]) => FunctionType(params, ret)),
-    },
-    {
-      weight: 2,
+      weight: 3,
       arbitrary: fc.array(tie('type'), { minLength: 2, maxLength: 4 }).map(product),
     },
   ),
@@ -110,14 +103,6 @@ describe('PortType', () => {
     expect(portTypeEqual(StructType('Foo'), StructType('Bar'))).toBe(false)
   })
 
-  test('function type equality', () => {
-    const f1 = FunctionType([Float, Int], Bool)
-    const f2 = FunctionType([Float, Int], Bool)
-    const f3 = FunctionType([Float], Bool)
-    expect(portTypeEqual(f1, f2)).toBe(true)
-    expect(portTypeEqual(f1, f3)).toBe(false)
-  })
-
   test('product flattening', () => {
     // product([A, product([B, C])]) should flatten to product([A, B, C])
     const inner = product([Int, Bool])
@@ -142,7 +127,6 @@ describe('PortType', () => {
     expect(portTypeToString(Float)).toBe('float')
     expect(portTypeToString(Unit)).toBe('I')
     expect(portTypeToString(product([Float, Int]))).toBe('float ⊗ int')
-    expect(portTypeToString(FunctionType([Float], Int))).toBe('(float) → int')
   })
 })
 

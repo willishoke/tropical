@@ -21,7 +21,6 @@ export type PortType =
   | { tag: 'scalar'; scalar: ScalarKind }
   | { tag: 'struct'; name: string }
   | { tag: 'sum'; name: string }
-  | { tag: 'function'; params: PortType[]; returns: PortType }
   | { tag: 'product'; factors: PortType[] }
   | { tag: 'unit' }
 
@@ -33,8 +32,6 @@ export const Bool: PortType = ScalarType('bool')
 export const Unit: PortType = { tag: 'unit' }
 export const StructType = (name: string): PortType => ({ tag: 'struct', name })
 export const SumType = (name: string): PortType => ({ tag: 'sum', name })
-export const FunctionType = (params: PortType[], returns: PortType): PortType =>
-  ({ tag: 'function', params, returns })
 
 /**
  * Build a product type, flattening nested products and eliminating units.
@@ -65,12 +62,6 @@ export function portTypeEqual(a: PortType, b: PortType): boolean {
     case 'struct':
     case 'sum':
       return a.name === (b as typeof a).name
-    case 'function': {
-      const bf = b as typeof a
-      if (a.params.length !== bf.params.length) return false
-      return a.params.every((p, i) => portTypeEqual(p, bf.params[i])) &&
-             portTypeEqual(a.returns, bf.returns)
-    }
     case 'product': {
       const bp = b as typeof a
       if (a.factors.length !== bp.factors.length) return false
@@ -89,8 +80,6 @@ export function portTypeToString(t: PortType): string {
     case 'scalar': return t.scalar
     case 'struct': return t.name
     case 'sum': return t.name
-    case 'function':
-      return `(${t.params.map(portTypeToString).join(', ')}) → ${portTypeToString(t.returns)}`
     case 'product':
       return t.factors.map(portTypeToString).join(' ⊗ ')
     case 'unit': return 'I'
