@@ -709,6 +709,11 @@ class Graph
       module.register_types.assign(module.module->user_register_count(), "");
 
       control_modules_.emplace(std::move(name), std::move(module));
+      if (batch_update_active_)
+      {
+        batch_outputs_dirty_ = true;
+        return true;
+      }
       rebuild_and_publish_runtime_locked();
       return true;
     }
@@ -967,6 +972,8 @@ class Graph
       for (auto & [name, cm] : control_modules_)
         batch_dirty_modules_.insert(name);
     }
+
+    bool is_batch_active() const { return batch_update_active_; }
 
     void begin_update()
     {

@@ -185,6 +185,8 @@ export const egress_graph_get_profile_stats_json     = lib.func('egress_graph_ge
 export const egress_graph_reset_profile_stats        = lib.func('egress_graph_reset_profile_stats',        'void',   ['void *'])
 export const egress_graph_get_build_timing_json      = lib.func('egress_graph_get_build_timing_json',      'string', ['void *'])
 export const egress_graph_clear_wiring               = lib.func('egress_graph_clear_wiring',               'void',   ['void *'])
+export const egress_graph_begin_update               = lib.func('egress_graph_begin_update',               'void',   ['void *'])
+export const egress_graph_end_update                 = lib.func('egress_graph_end_update',                 'bool',   ['void *'])
 export const egress_graph_load_plan                  = lib.func('egress_graph_load_plan',                  'bool',   ['void *', 'str', 'size_t'])
 
 // ---------- DAC API ----------

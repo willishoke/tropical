@@ -498,9 +498,10 @@ inline bool load_plan_wiring(Graph & graph, const std::string & plan_json)
         return resolved;
     };
 
-    // Clear existing wiring and apply the new plan in a single batch so that
-    // all changes — clear + wiring + outputs — are compiled in one rebuild.
-    graph.begin_update();
+    // If already inside a batch (e.g. caller batching module additions + wiring),
+    // join the existing batch instead of starting a new one.
+    const bool own_batch = !graph.is_batch_active();
+    if (own_batch) graph.begin_update();
     graph.clear_wiring_deferred();
 
     try
@@ -538,11 +539,11 @@ inline bool load_plan_wiring(Graph & graph, const std::string & plan_json)
                     "' output " + std::to_string(o["output"].get<unsigned int>()));
         }
 
-        graph.end_update();
+        if (own_batch) graph.end_update();
     }
     catch (...)
     {
-        try { graph.end_update(); } catch (...) {}
+        try { if (own_batch) graph.end_update(); } catch (...) {}
         throw;
     }
 
