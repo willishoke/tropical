@@ -460,7 +460,56 @@ Module::CompileStats Module::compile_stats() const
 #endif
   return stats;
 }
+#endif // EGRESS_PROFILE
 
+#ifdef EGRESS_PROFILE
+Module::RuntimeStats Module::runtime_stats() const
+{
+  RuntimeStats stats;
+#ifdef EGRESS_LLVM_ORC_JIT
+  stats.numeric_input_sync_call_count = profile_numeric_input_sync_call_count_.load(std::memory_order_relaxed);
+  stats.numeric_input_sync_total_ns = profile_numeric_input_sync_total_ns_.load(std::memory_order_relaxed);
+  stats.numeric_input_sync_max_ns = profile_numeric_input_sync_max_ns_.load(std::memory_order_relaxed);
+  stats.numeric_output_materialize_call_count =
+    profile_numeric_output_materialize_call_count_.load(std::memory_order_relaxed);
+  stats.numeric_output_materialize_total_ns =
+    profile_numeric_output_materialize_total_ns_.load(std::memory_order_relaxed);
+  stats.numeric_output_materialize_max_ns =
+    profile_numeric_output_materialize_max_ns_.load(std::memory_order_relaxed);
+  stats.materialized_scalar_outputs = profile_materialized_scalar_outputs_.load(std::memory_order_relaxed);
+  stats.materialized_array_outputs = profile_materialized_array_outputs_.load(std::memory_order_relaxed);
+  stats.materialized_matrix_outputs = profile_materialized_matrix_outputs_.load(std::memory_order_relaxed);
+  stats.numeric_register_sync_call_count = profile_numeric_register_sync_call_count_.load(std::memory_order_relaxed);
+  stats.numeric_register_sync_total_ns = profile_numeric_register_sync_total_ns_.load(std::memory_order_relaxed);
+  stats.numeric_register_sync_max_ns = profile_numeric_register_sync_max_ns_.load(std::memory_order_relaxed);
+  stats.materialized_scalar_registers = profile_materialized_scalar_registers_.load(std::memory_order_relaxed);
+  stats.materialized_array_registers = profile_materialized_array_registers_.load(std::memory_order_relaxed);
+#endif
+  return stats;
+}
+
+void Module::reset_runtime_stats()
+{
+#ifdef EGRESS_LLVM_ORC_JIT
+  profile_numeric_input_sync_call_count_.store(0, std::memory_order_relaxed);
+  profile_numeric_input_sync_total_ns_.store(0, std::memory_order_relaxed);
+  profile_numeric_input_sync_max_ns_.store(0, std::memory_order_relaxed);
+  profile_numeric_output_materialize_call_count_.store(0, std::memory_order_relaxed);
+  profile_numeric_output_materialize_total_ns_.store(0, std::memory_order_relaxed);
+  profile_numeric_output_materialize_max_ns_.store(0, std::memory_order_relaxed);
+  profile_materialized_scalar_outputs_.store(0, std::memory_order_relaxed);
+  profile_materialized_array_outputs_.store(0, std::memory_order_relaxed);
+  profile_materialized_matrix_outputs_.store(0, std::memory_order_relaxed);
+  profile_numeric_register_sync_call_count_.store(0, std::memory_order_relaxed);
+  profile_numeric_register_sync_total_ns_.store(0, std::memory_order_relaxed);
+  profile_numeric_register_sync_max_ns_.store(0, std::memory_order_relaxed);
+  profile_materialized_scalar_registers_.store(0, std::memory_order_relaxed);
+  profile_materialized_array_registers_.store(0, std::memory_order_relaxed);
+#endif
+}
+#endif // EGRESS_PROFILE
+
+#if defined(EGRESS_PROFILE) && defined(EGRESS_LLVM_ORC_JIT)
 void Module::update_profile_max(std::atomic<uint64_t> & dst, uint64_t candidate)
 {
   uint64_t current = dst.load(std::memory_order_relaxed);
@@ -502,48 +551,7 @@ void Module::record_numeric_register_sync_profile(
   profile_materialized_scalar_registers_.fetch_add(scalar_count, std::memory_order_relaxed);
   profile_materialized_array_registers_.fetch_add(array_count, std::memory_order_relaxed);
 }
-
-Module::RuntimeStats Module::runtime_stats() const
-{
-  RuntimeStats stats;
-  stats.numeric_input_sync_call_count = profile_numeric_input_sync_call_count_.load(std::memory_order_relaxed);
-  stats.numeric_input_sync_total_ns = profile_numeric_input_sync_total_ns_.load(std::memory_order_relaxed);
-  stats.numeric_input_sync_max_ns = profile_numeric_input_sync_max_ns_.load(std::memory_order_relaxed);
-  stats.numeric_output_materialize_call_count =
-    profile_numeric_output_materialize_call_count_.load(std::memory_order_relaxed);
-  stats.numeric_output_materialize_total_ns =
-    profile_numeric_output_materialize_total_ns_.load(std::memory_order_relaxed);
-  stats.numeric_output_materialize_max_ns =
-    profile_numeric_output_materialize_max_ns_.load(std::memory_order_relaxed);
-  stats.materialized_scalar_outputs = profile_materialized_scalar_outputs_.load(std::memory_order_relaxed);
-  stats.materialized_array_outputs = profile_materialized_array_outputs_.load(std::memory_order_relaxed);
-  stats.materialized_matrix_outputs = profile_materialized_matrix_outputs_.load(std::memory_order_relaxed);
-  stats.numeric_register_sync_call_count = profile_numeric_register_sync_call_count_.load(std::memory_order_relaxed);
-  stats.numeric_register_sync_total_ns = profile_numeric_register_sync_total_ns_.load(std::memory_order_relaxed);
-  stats.numeric_register_sync_max_ns = profile_numeric_register_sync_max_ns_.load(std::memory_order_relaxed);
-  stats.materialized_scalar_registers = profile_materialized_scalar_registers_.load(std::memory_order_relaxed);
-  stats.materialized_array_registers = profile_materialized_array_registers_.load(std::memory_order_relaxed);
-  return stats;
-}
-
-void Module::reset_runtime_stats()
-{
-  profile_numeric_input_sync_call_count_.store(0, std::memory_order_relaxed);
-  profile_numeric_input_sync_total_ns_.store(0, std::memory_order_relaxed);
-  profile_numeric_input_sync_max_ns_.store(0, std::memory_order_relaxed);
-  profile_numeric_output_materialize_call_count_.store(0, std::memory_order_relaxed);
-  profile_numeric_output_materialize_total_ns_.store(0, std::memory_order_relaxed);
-  profile_numeric_output_materialize_max_ns_.store(0, std::memory_order_relaxed);
-  profile_materialized_scalar_outputs_.store(0, std::memory_order_relaxed);
-  profile_materialized_array_outputs_.store(0, std::memory_order_relaxed);
-  profile_materialized_matrix_outputs_.store(0, std::memory_order_relaxed);
-  profile_numeric_register_sync_call_count_.store(0, std::memory_order_relaxed);
-  profile_numeric_register_sync_total_ns_.store(0, std::memory_order_relaxed);
-  profile_numeric_register_sync_max_ns_.store(0, std::memory_order_relaxed);
-  profile_materialized_scalar_registers_.store(0, std::memory_order_relaxed);
-  profile_materialized_array_registers_.store(0, std::memory_order_relaxed);
-}
-#endif
+#endif // EGRESS_PROFILE && EGRESS_LLVM_ORC_JIT
 
 void Module::reset_inputs_after_process()
 {
