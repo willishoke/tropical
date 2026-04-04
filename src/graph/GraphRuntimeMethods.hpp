@@ -720,7 +720,7 @@ bool Graph::run_fused_primitive_body_kernel(RuntimeState & runtime) const
     }
 
     module.value_registers_dirty_ = true;
-    module.reset_inputs_after_process();
+    module.numeric_input_override_active_ = false;
   }
 
   fused->primitive_body_status = "numeric JIT active";

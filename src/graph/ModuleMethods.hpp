@@ -217,7 +217,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
       }
 
       value_registers_dirty_ = true;
-      postprocess();
+      numeric_input_override_active_ = false;
       return;
     }
   }
@@ -367,7 +367,7 @@ void Module::process(const std::vector<bool> * output_materialize_mask)
   {
     registers_.swap(next_registers_);
   }
-  postprocess();
+  numeric_input_override_active_ = false;
 }
 
 void Module::advance_sample_index_tree()
@@ -533,16 +533,6 @@ void Module::record_numeric_register_sync_profile(
   profile_materialized_array_registers_.fetch_add(array_count, std::memory_order_relaxed);
 }
 #endif // EGRESS_PROFILE
-
-void Module::reset_inputs_after_process()
-{
-  numeric_input_override_active_ = false;
-}
-
-void Module::postprocess()
-{
-  reset_inputs_after_process();
-}
 
 
 Module::CompiledProgram Module::compile_program(

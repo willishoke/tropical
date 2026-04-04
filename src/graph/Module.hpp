@@ -219,10 +219,6 @@ class Module
   #endif
 
   protected:
-    void reset_inputs_after_process();
-
-    void postprocess();
-
     std::vector<Value> inputs;
     std::vector<Value> outputs;
     std::vector<Value> prev_outputs;
