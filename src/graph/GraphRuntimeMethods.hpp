@@ -1,6 +1,8 @@
 #pragma once
 
 #include <bit>
+#include <chrono>
+#include <cstdio>
 
 void Graph::wait_for_runtime_available(uint32_t runtime_index) const
 {
@@ -35,6 +37,7 @@ uint64_t Graph::estimate_module_execution_cost(const Module & module)
 
 Graph::RuntimeState Graph::build_runtime_locked() const
 {
+  const auto _brl_start = std::chrono::steady_clock::now();
   RuntimeState runtime;
   runtime.modules.reserve(control_modules_.size());
   runtime.name_to_id.reserve(control_modules_.size());
@@ -179,7 +182,20 @@ Graph::RuntimeState Graph::build_runtime_locked() const
     runtime.taps.push_back(std::move(tap));
   }
 
+  const auto _brl_pre_jit = std::chrono::steady_clock::now();
   rebuild_fused_graph_state(runtime);
+  const auto _brl_end = std::chrono::steady_clock::now();
+
+  auto us_to_ms = [](auto a, auto b) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(b - a).count() / 1000.0;
+  };
+  BuildTimingEntry entry;
+  entry.module_count      = control_modules_.size();
+  entry.input_programs_ms = us_to_ms(_brl_start, _brl_pre_jit);
+  entry.fused_jit_ms      = us_to_ms(_brl_pre_jit, _brl_end);
+  entry.total_ms          = us_to_ms(_brl_start, _brl_end);
+  // pending_mutex_ is already held by all callers of build_runtime_locked().
+  build_timings_.push_back(entry);
   return runtime;
 }
 

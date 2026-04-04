@@ -1042,6 +1042,31 @@ void egress_graph_reset_profile_stats(egress_graph_t g)
   static_cast<Graph*>(g)->reset_profile_stats();
 }
 
+// ---------- Build timing ----------
+
+static thread_local std::string tls_build_timing_json;
+
+const char* egress_graph_get_build_timing_json(egress_graph_t g)
+{
+  const auto entries = static_cast<Graph*>(g)->build_timing_snapshot();
+  std::string j;
+  j.reserve(256);
+  j += "[";
+  for (size_t i = 0; i < entries.size(); ++i)
+  {
+    const auto & e = entries[i];
+    if (i > 0) j += ",";
+    j += "{\"module_count\":";      j += std::to_string(e.module_count);
+    j += ",\"input_programs_ms\":"; j += std::to_string(e.input_programs_ms);
+    j += ",\"fused_jit_ms\":";      j += std::to_string(e.fused_jit_ms);
+    j += ",\"total_ms\":";          j += std::to_string(e.total_ms);
+    j += "}";
+  }
+  j += "]";
+  tls_build_timing_json = std::move(j);
+  return tls_build_timing_json.c_str();
+}
+
 // ---------- Device enumeration ----------
 
 unsigned int egress_audio_device_count(void)

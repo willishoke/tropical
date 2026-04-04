@@ -205,6 +205,10 @@ unsigned int    egress_graph_get_buffer_length(egress_graph_t);
 /* Returns JSON-serialized ProfileStats. Pointer valid until next call on this thread. */
 const char*     egress_graph_get_profile_stats_json(egress_graph_t);
 void            egress_graph_reset_profile_stats(egress_graph_t);
+/* Returns JSON array of build timing entries accumulated since the last begin_update().
+   Each entry: {module_count, input_programs_ms, fused_jit_ms, total_ms}.
+   Pointer valid until next call on this thread. */
+const char*     egress_graph_get_build_timing_json(egress_graph_t);
 
 /* ---------- Device enumeration (no DAC instance required) ---------- */
 

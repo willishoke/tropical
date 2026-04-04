@@ -678,6 +678,17 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
     session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
   }
 
+  // Ensure module input defaults are included in the plan so they survive clearWiring()
+  for (const [name, inst] of session.instanceRegistry) {
+    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
+    for (const [inputName, value] of Object.entries(defaults)) {
+      const key = `${name}:${inputName}`
+      if (!session.inputExprNodes.has(key)) {
+        session.inputExprNodes.set(key, value)
+      }
+    }
+  }
+
   for (const out of json.outputs ?? []) {
     if ('expr' in out) {
       throw new Error('Output expressions not supported in plan-based path. Use module output refs instead.')
@@ -757,6 +768,17 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
     const inst = session.instanceRegistry.get(ie.module)
     if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
     session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
+  }
+
+  // Ensure module input defaults are included in the plan so they survive clearWiring()
+  for (const [name, inst] of session.instanceRegistry) {
+    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
+    for (const [inputName, value] of Object.entries(defaults)) {
+      const key = `${name}:${inputName}`
+      if (!session.inputExprNodes.has(key)) {
+        session.inputExprNodes.set(key, value)
+      }
+    }
   }
 
   for (const out of json.outputs ?? []) {

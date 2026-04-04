@@ -25,7 +25,7 @@ import { parseModuleDef, parsePatch } from './schema.js'
 import { loadBuiltins }        from './module_library.js'
 import { DAC }                 from './audio.js'
 import { Param, Trigger }      from './param.js'
-import { applySessionWiring }  from './apply_plan.js'
+import { applySessionWiring, WiringTiming }  from './apply_plan.js'
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
@@ -64,6 +64,20 @@ function instanceSummary(name: string) {
   return { name, type_name: inst.typeName, inputs: inst.inputNames, outputs: inst.outputNames }
 }
 
+/** Apply wiring and optionally collect timing. Returns { timing } or {} to spread into the result. */
+function wire(collectTiming: boolean | undefined): { timing?: WiringTiming } {
+  if (collectTiming) {
+    return { timing: applySessionWiring(session, true) }
+  }
+  applySessionWiring(session)
+  return {}
+}
+
+// Shared schema property added to every tool that triggers a JIT recompile.
+const TIMING_PROP = {
+  timing: { type: 'boolean', description: 'If true, include JIT compilation timing breakdown in the response.' },
+} as const
+
 // ─── Tool definitions ─────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -95,7 +109,7 @@ const TOOLS = [
     description: 'Remove a module instance from the graph.',
     inputSchema: {
       type: 'object',
-      properties: { instance_name: { type: 'string' } },
+      properties: { instance_name: { type: 'string' }, ...TIMING_PROP },
       required: ['instance_name'],
     },
   },
@@ -128,6 +142,7 @@ const TOOLS = [
         src_output:  { description: 'Output port name or index' },
         dst_module:  { type: 'string' },
         dst_input:   { description: 'Input port name or index' },
+        ...TIMING_PROP,
       },
       required: ['src_module', 'src_output', 'dst_module', 'dst_input'],
     },
@@ -142,6 +157,7 @@ const TOOLS = [
         src_output:  { description: 'Output port name or index' },
         dst_module:  { type: 'string' },
         dst_input:   { description: 'Input port name or index' },
+        ...TIMING_PROP,
       },
       required: ['src_module', 'src_output', 'dst_module', 'dst_input'],
     },
@@ -165,6 +181,7 @@ const TOOLS = [
         instance_name: { type: 'string' },
         input_name:    { description: 'Input port name or index' },
         expr:          { description: 'ExprNode: number, bool, array, or {op, ...} object' },
+        ...TIMING_PROP,
       },
       required: ['instance_name', 'input_name', 'expr'],
     },
@@ -187,6 +204,7 @@ const TOOLS = [
             required: ['instance_name', 'input_name', 'expr'],
           },
         },
+        ...TIMING_PROP,
       },
       required: ['updates'],
     },
@@ -199,6 +217,7 @@ const TOOLS = [
       properties: {
         module_name:  { type: 'string' },
         output_name:  { description: 'Output port name or index' },
+        ...TIMING_PROP,
       },
       required: ['module_name', 'output_name'],
     },
@@ -211,6 +230,7 @@ const TOOLS = [
       properties: {
         module_name: { type: 'string' },
         output_name: { description: 'Output port name or index' },
+        ...TIMING_PROP,
       },
       required: ['module_name', 'output_name'],
     },
@@ -228,7 +248,7 @@ const TOOLS = [
   },
   {
     name: 'load_patch',
-    description: 'Load a patch. Stops audio, recreates the graph, and rebuilds session state. Provide either patch_path (preferred — path to a .json file on disk) or patch (inline PatchJSON object).',
+    description: 'Load a patch. Stops audio, recreates the graph, and rebuilds session state. Provide either patch_path (preferred — path to a .json file on disk) or patch (inline PatchJSON object). Always returns timing breakdown.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -329,8 +349,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         if (key.startsWith(`${instanceName}:`)) session.inputExprNodes.delete(key)
       }
       session.graphOutputs = session.graphOutputs.filter(o => o.module !== instanceName)
-      applySessionWiring(session)
-      return { removed: instanceName }
+      return { removed: instanceName, ...wire(args.timing as boolean | undefined) }
     })
 
     // ── list_module_types ──────────────────────────────────────────────────
@@ -403,8 +422,8 @@ function handleTool(name: string, args: Record<string, unknown>) {
         `${args.dst_module as string}:${dstIn}`,
         { op: 'ref', module: args.src_module as string, output: srcOut },
       )
-      applySessionWiring(session)
-      return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn }
+      return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn,
+               ...wire(args.timing as boolean | undefined) }
     })
 
     // ── disconnect_modules ─────────────────────────────────────────────────
@@ -420,8 +439,8 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const srcOut = srcInst.outputNames[srcId]
       const dstIn  = dstInst.inputNames[dstId]
       session.inputExprNodes.delete(`${args.dst_module as string}:${dstIn}`)
-      applySessionWiring(session)
-      return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn }
+      return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn,
+               ...wire(args.timing as boolean | undefined) }
     })
 
     // ── list_inputs ────────────────────────────────────────────────────────
@@ -452,8 +471,8 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const node = args.expr as ExprNode
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
       session.inputExprNodes.set(`${instanceName}:${resolvedName}`, node)
-      applySessionWiring(session)
-      return { module: instanceName, input: resolvedName, expr: node }
+      return { module: instanceName, input: resolvedName, expr: node,
+               ...wire(args.timing as boolean | undefined) }
     })
 
     // ── set_inputs_batch ───────────────────────────────────────────────────
@@ -473,8 +492,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         session.inputExprNodes.set(`${u.instance_name}:${resolvedName}`, u.expr)
         results.push({ module: u.instance_name, input: resolvedName, expr: u.expr })
       }
-      applySessionWiring(session)
-      return results
+      return { updates: results, ...wire(args.timing as boolean | undefined) }
     })
 
     // ── add_graph_output ───────────────────────────────────────────────────
@@ -492,8 +510,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const entry = { module: moduleName, output: resolvedName }
       if (!session.graphOutputs.some(o => o.module === entry.module && o.output === entry.output))
         session.graphOutputs.push(entry)
-      applySessionWiring(session)
-      return entry
+      return { ...entry, ...wire(args.timing as boolean | undefined) }
     })
 
     // ── remove_graph_output ────────────────────────────────────────────────
@@ -512,8 +529,8 @@ function handleTool(name: string, args: Record<string, unknown>) {
       session.graphOutputs = session.graphOutputs.filter(
         o => !(o.module === moduleName && o.output === resolvedName),
       )
-      applySessionWiring(session)
-      return { removed: before - session.graphOutputs.length }
+      return { removed: before - session.graphOutputs.length,
+               ...wire(args.timing as boolean | undefined) }
     })
 
     // ── merge_patch ────────────────────────────────────────────────────────
@@ -539,13 +556,17 @@ function handleTool(name: string, args: Record<string, unknown>) {
       }
       const patch = parsePatch(raw) as PatchJSON
       if (session.dac?.isRunning) session.dac.stop()
+      const t0 = performance.now()
       loadPatchFromJSON(patch, session)
+      const timing = session.graph.buildTimingEntries()
+      const wall_ms = performance.now() - t0
       return {
         modules:     [...session.instanceRegistry.keys()],
         input_exprs: session.inputExprNodes.size,
         outputs:     session.graphOutputs.length,
         params:      [...session.paramRegistry.keys()],
         triggers:    [...session.triggerRegistry.keys()],
+        timing: { wall_ms, rebuilds: timing },
       }
     })
 
