@@ -261,8 +261,6 @@ class Module
       std::unordered_map<std::size_t, std::vector<std::pair<ExprSpecPtr, uint32_t>>> & memo,
       std::unordered_map<const ExprSpec *, std::size_t> & hash_cache);
 
-    void eval_program(const CompiledProgram & expr, std::vector<Value> & temps);
-
     const Value & materialize_output_value(unsigned int output_id, bool previous = false);
 
     // Walk an expression tree and collect unique ControlParam pointers.
