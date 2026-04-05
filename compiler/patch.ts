@@ -124,11 +124,14 @@ export interface SessionState {
   inputExprNodes: Map<string, ExprNode>  // key: `${module}:${input}`
   /** FlatRuntime — all audio goes through this. */
   runtime: Runtime
+  /** Thin proxy over runtime that matches the old Graph interface for tests and legacy callers. */
+  graph: { primeJit(): void; process(): void; readonly outputBuffer: Float64Array; dispose(): void }
   /** Name counter for auto-generated instance names. */
   _nameCounters: Map<string, number>
 }
 
 export function makeSession(bufferLength = 512): SessionState {
+  const runtime = new Runtime(bufferLength)
   return {
     bufferLength,
     dac: null,
@@ -138,7 +141,13 @@ export function makeSession(bufferLength = 512): SessionState {
     paramRegistry: new Map(),
     triggerRegistry: new Map(),
     inputExprNodes: new Map(),
-    runtime: new Runtime(bufferLength),
+    runtime,
+    graph: {
+      primeJit: () => {},
+      process: () => runtime.process(),
+      get outputBuffer() { return runtime.outputBuffer },
+      dispose: () => runtime.dispose(),
+    },
     _nameCounters: new Map(),
   }
 }
