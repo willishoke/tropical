@@ -9,11 +9,9 @@
  */
 
 #include "graph/GraphTypes.hpp"
-#include "graph/ModuleNumericJit.hpp"
-#include "graph/ModuleProgram.hpp"
-#include "graph/Module.hpp"
+#include "runtime/NumericProgramBuilder.hpp"
 #include "runtime/ExprCompiler.hpp"
-#include "c_api/plan_loader.hpp"
+#include "runtime/PlanParser.hpp"
 #include "jit/OrcJitEngine.hpp"
 
 #include <array>

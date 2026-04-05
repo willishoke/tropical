@@ -3,17 +3,10 @@
  *
  * TypeScript has no operator overloading, so all operations are named
  * free functions: add(a, b), mul(a, b), sin(x), etc.
- * SignalExpr holds a koffi opaque pointer; FinalizationRegistry calls
- * egress_expr_free when the object is collected.
+ *
+ * SignalExpr is a pure wrapper around an ExprNode (JSON-serializable tree).
+ * No C handles — all expression evaluation happens via FlatRuntime's plan JSON.
  */
-
-import * as b from './bindings.js'
-
-// ---------- FinalizationRegistry ----------
-
-const _registry = new FinalizationRegistry((handle: unknown) => {
-  b.egress_expr_free(handle)
-})
 
 // ---------- ExprNode (JSON-serializable expression tree) ----------
 
@@ -27,36 +20,26 @@ export type ExprNode =
 // ---------- SignalExpr ----------
 
 export class SignalExpr {
-  _h: unknown
-  /** JSON-serializable expression tree, built alongside the C handle. */
+  /** JSON-serializable expression tree. */
   _node: ExprNode
 
-  private constructor(handle: unknown, node: ExprNode) {
-    this._h = handle
+  private constructor(node: ExprNode) {
     this._node = node
-    _registry.register(this, handle, this)
   }
 
-  static fromHandle(handle: unknown, node: ExprNode): SignalExpr {
-    return new SignalExpr(handle, node)
+  static fromNode(node: ExprNode): SignalExpr {
+    return new SignalExpr(node)
   }
 
-  /** Explicitly free the underlying C expression before GC. */
-  dispose(): void {
-    if (this._h !== null) {
-      _registry.unregister(this)
-      b.egress_expr_free(this._h)
-      this._h = null
-    }
+  /** @deprecated Alias for fromNode — old code used fromHandle(handle, node). */
+  static fromHandle(_handle: unknown, node: ExprNode): SignalExpr {
+    return new SignalExpr(node)
   }
 
   /** Index into an array expression: expr[idx] */
   at(idx: ExprCoercible): SignalExpr {
     const i = coerce(idx)
-    return SignalExpr.fromHandle(
-      b.check(b.egress_expr_index(this._h, i._h), 'expr_index'),
-      { op: 'index', args: [this._node, i._node] },
-    )
+    return new SignalExpr({ op: 'index', args: [this._node, i._node] })
   }
 }
 
@@ -67,238 +50,165 @@ export type ExprCoercible = SignalExpr | number | boolean | ExprCoercible[]
 /** Convert a scalar, boolean, array, or SignalExpr to a SignalExpr. */
 export function coerce(value: ExprCoercible): SignalExpr {
   if (value instanceof SignalExpr) return value
-  if (typeof value === 'boolean') {
-    return SignalExpr.fromHandle(b.check(b.egress_expr_literal_bool(value), 'literal_bool'), value)
-  }
-  if (typeof value === 'number') {
-    return SignalExpr.fromHandle(b.check(b.egress_expr_literal_float(value), 'literal_float'), value)
-  }
+  if (typeof value === 'boolean') return SignalExpr.fromNode(value)
+  if (typeof value === 'number') return SignalExpr.fromNode(value)
   if (Array.isArray(value)) return arrayPack(value)
   throw new TypeError(`Cannot coerce ${typeof value} to SignalExpr`)
 }
 
-// ---------- Kind → op string mapping ----------
-
-const BINARY_OP_NAMES: Record<number, string> = {
-  [b.EXPR_ADD]: 'add', [b.EXPR_SUB]: 'sub', [b.EXPR_MUL]: 'mul', [b.EXPR_DIV]: 'div',
-  [b.EXPR_FLOOR_DIV]: 'floor_div', [b.EXPR_MOD]: 'mod', [b.EXPR_POW]: 'pow', [b.EXPR_MATMUL]: 'matmul',
-  [b.EXPR_LESS]: 'lt', [b.EXPR_LESS_EQUAL]: 'lte', [b.EXPR_GREATER]: 'gt', [b.EXPR_GREATER_EQUAL]: 'gte',
-  [b.EXPR_EQUAL]: 'eq', [b.EXPR_NOT_EQUAL]: 'neq',
-  [b.EXPR_BIT_AND]: 'bit_and', [b.EXPR_BIT_OR]: 'bit_or', [b.EXPR_BIT_XOR]: 'bit_xor',
-  [b.EXPR_LSHIFT]: 'lshift', [b.EXPR_RSHIFT]: 'rshift',
-}
-
-const UNARY_OP_NAMES: Record<number, string> = {
-  [b.EXPR_NEG]: 'neg', [b.EXPR_ABS]: 'abs', [b.EXPR_SIN]: 'sin', [b.EXPR_LOG]: 'log',
-  [b.EXPR_NOT]: 'not', [b.EXPR_BIT_NOT]: 'bit_not',
-}
-
 // ---------- Internal helpers ----------
 
-function binary(kind: number, lhs: ExprCoercible, rhs: ExprCoercible): SignalExpr {
+function binary(opName: string, lhs: ExprCoercible, rhs: ExprCoercible): SignalExpr {
   const l = coerce(lhs)
   const r = coerce(rhs)
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_binary(kind, l._h, r._h), 'binary_expr'),
-    { op: BINARY_OP_NAMES[kind], args: [l._node, r._node] },
-  )
+  return SignalExpr.fromNode({ op: opName, args: [l._node, r._node] })
 }
 
-function unary(kind: number, operand: ExprCoercible): SignalExpr {
+function unary(opName: string, operand: ExprCoercible): SignalExpr {
   const o = coerce(operand)
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_unary(kind, o._h), 'unary_expr'),
-    { op: UNARY_OP_NAMES[kind], args: [o._node] },
-  )
+  return SignalExpr.fromNode({ op: opName, args: [o._node] })
 }
 
 // ---------- Arithmetic ----------
 
-export const add      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_ADD,       lhs, rhs)
-export const sub      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_SUB,       lhs, rhs)
-export const mul      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_MUL,       lhs, rhs)
-export const div      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_DIV,       lhs, rhs)
-export const floorDiv = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_FLOOR_DIV, lhs, rhs)
-export const mod      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_MOD,       lhs, rhs)
-export const pow_     = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_POW,       lhs, rhs)
-export const matmul   = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_MATMUL,    lhs, rhs)
+export const add      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('add',       lhs, rhs)
+export const sub      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('sub',       lhs, rhs)
+export const mul      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('mul',       lhs, rhs)
+export const div      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('div',       lhs, rhs)
+export const floorDiv = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('floor_div', lhs, rhs)
+export const mod      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('mod',       lhs, rhs)
+export const pow_     = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('pow',       lhs, rhs)
+export const matmul   = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('matmul',    lhs, rhs)
 
 // ---------- Comparison ----------
 
-export const lt  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_LESS,          lhs, rhs)
-export const lte = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_LESS_EQUAL,    lhs, rhs)
-export const gt  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_GREATER,       lhs, rhs)
-export const gte = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_GREATER_EQUAL, lhs, rhs)
-export const eq  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_EQUAL,         lhs, rhs)
-export const neq = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_NOT_EQUAL,     lhs, rhs)
+export const lt  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('lt',  lhs, rhs)
+export const lte = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('lte', lhs, rhs)
+export const gt  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('gt',  lhs, rhs)
+export const gte = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('gte', lhs, rhs)
+export const eq  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('eq',  lhs, rhs)
+export const neq = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('neq', lhs, rhs)
 
 // ---------- Bitwise ----------
 
-export const bitAnd  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_BIT_AND, lhs, rhs)
-export const bitOr   = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_BIT_OR,  lhs, rhs)
-export const bitXor  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_BIT_XOR, lhs, rhs)
-export const lshift  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_LSHIFT,  lhs, rhs)
-export const rshift  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary(b.EXPR_RSHIFT,  lhs, rhs)
-export const bitNot  = (operand: ExprCoercible) => unary(b.EXPR_BIT_NOT, operand)
+export const bitAnd  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('bit_and', lhs, rhs)
+export const bitOr   = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('bit_or',  lhs, rhs)
+export const bitXor  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('bit_xor', lhs, rhs)
+export const lshift  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('lshift',  lhs, rhs)
+export const rshift  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('rshift',  lhs, rhs)
+export const bitNot  = (operand: ExprCoercible) => unary('bit_not', operand)
 
 // ---------- Unary / math ----------
 
-export const neg        = (operand: ExprCoercible) => unary(b.EXPR_NEG, operand)
-export const abs_       = (operand: ExprCoercible) => unary(b.EXPR_ABS, operand)
-export const sin        = (operand: ExprCoercible) => unary(b.EXPR_SIN, operand)
-export const log        = (operand: ExprCoercible) => unary(b.EXPR_LOG, operand)
-export const logicalNot = (operand: ExprCoercible) => unary(b.EXPR_NOT, operand)
+export const neg        = (operand: ExprCoercible) => unary('neg', operand)
+export const abs_       = (operand: ExprCoercible) => unary('abs', operand)
+export const sin        = (operand: ExprCoercible) => unary('sin', operand)
+export const log        = (operand: ExprCoercible) => unary('log', operand)
+export const logicalNot = (operand: ExprCoercible) => unary('not', operand)
 
 export function clamp(value: ExprCoercible, lo: ExprCoercible, hi: ExprCoercible): SignalExpr {
   const v = coerce(value)
   const l = coerce(lo)
   const h = coerce(hi)
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_clamp(v._h, l._h, h._h), 'clamp'),
-    { op: 'clamp', args: [v._node, l._node, h._node] },
-  )
+  return SignalExpr.fromNode({ op: 'clamp', args: [v._node, l._node, h._node] })
 }
 
 export function select(cond: ExprCoercible, thenVal: ExprCoercible, elseVal: ExprCoercible): SignalExpr {
   const c = coerce(cond)
   const t = coerce(thenVal)
   const e = coerce(elseVal)
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_select(c._h, t._h, e._h), 'select'),
-    { op: 'select', args: [c._node, t._node, e._node] },
-  )
+  return SignalExpr.fromNode({ op: 'select', args: [c._node, t._node, e._node] })
 }
 
 // ---------- Array operations ----------
 
 export function arrayPack(values: ExprCoercible[]): SignalExpr {
   const items = values.map(coerce)
-  const handles = items.map(e => e._h)
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_array_pack(handles, handles.length), 'array_pack'),
-    items.map(e => e._node),
-  )
+  return SignalExpr.fromNode(items.map(e => e._node))
 }
 
 export function arraySet(arrExpr: ExprCoercible, idx: ExprCoercible, val: ExprCoercible): SignalExpr {
   const a = coerce(arrExpr)
   const i = coerce(idx)
   const v = coerce(val)
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_array_set(a._h, i._h, v._h), 'array_set'),
-    { op: 'array_set', args: [a._node, i._node, v._node] },
-  )
+  return SignalExpr.fromNode({ op: 'array_set', args: [a._node, i._node, v._node] })
 }
 
 /** Build a matrix literal expression from a row-major 2D array of numbers. */
 export function matrix(rows: number[][]): SignalExpr {
-  const nRows = rows.length
-  const nCols = rows[0]?.length ?? 0
-  const valueHandles: unknown[] = []
-  for (const row of rows) {
-    for (const item of row) {
-      valueHandles.push(b.check(b.egress_value_float(item), 'value_float'))
-    }
-  }
-  const valH = b.check(b.egress_value_matrix(valueHandles, nRows, nCols), 'value_matrix')
-  for (const h of valueHandles) b.egress_value_free(h)
-  const exprH = b.check(b.egress_expr_literal_value(valH), 'literal_value')
-  b.egress_value_free(valH)
-  return SignalExpr.fromHandle(exprH, rows)
+  return SignalExpr.fromNode({ op: 'matrix', rows })
 }
 
 // ---------- Function expressions ----------
 
 export function exprFunction(paramCount: number, body: SignalExpr): SignalExpr {
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_function(paramCount, body._h), 'expr_function'),
-    { op: 'function', param_count: paramCount, body: body._node },
-  )
+  return SignalExpr.fromNode({ op: 'function', param_count: paramCount, body: body._node })
 }
 
 export function exprCall(fn: SignalExpr, args: ExprCoercible[]): SignalExpr {
   const coerced = args.map(coerce)
-  const handles = coerced.map(e => e._h)
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_call(fn._h, handles, handles.length), 'expr_call'),
-    { op: 'call', callee: fn._node, args: coerced.map(e => e._node) },
-  )
+  return SignalExpr.fromNode({ op: 'call', callee: fn._node, args: coerced.map(e => e._node) })
 }
 
 // ---------- ADT expression builders ----------
 
 export function constructStruct(typeName: string, fieldExprs: ExprCoercible[]): SignalExpr {
   const items = fieldExprs.map(coerce)
-  const handles = items.map(e => e._h)
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_construct_struct(typeName, handles, handles.length), 'construct_struct'),
-    { op: 'construct_struct', type_name: typeName, fields: items.map(e => e._node) },
-  )
+  return SignalExpr.fromNode({ op: 'construct_struct', type_name: typeName, fields: items.map(e => e._node) })
 }
 
 export function fieldAccess(typeName: string, structExpr: ExprCoercible, fieldIndex: number): SignalExpr {
   const s = coerce(structExpr)
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_field_access(typeName, s._h, fieldIndex), 'field_access'),
-    { op: 'field_access', type_name: typeName, struct_expr: s._node, field_index: fieldIndex },
-  )
+  return SignalExpr.fromNode({ op: 'field_access', type_name: typeName, struct_expr: s._node, field_index: fieldIndex })
 }
 
 export function constructVariant(typeName: string, variantTag: number, payloadExprs: ExprCoercible[]): SignalExpr {
   const items = payloadExprs.map(coerce)
-  const handles = items.map(e => e._h)
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_construct_variant(typeName, variantTag, handles, handles.length), 'construct_variant'),
-    { op: 'construct_variant', type_name: typeName, variant_tag: variantTag, payload: items.map(e => e._node) },
-  )
+  return SignalExpr.fromNode({ op: 'construct_variant', type_name: typeName, variant_tag: variantTag, payload: items.map(e => e._node) })
 }
 
 export function matchVariant(typeName: string, scrutinee: ExprCoercible, branchExprs: ExprCoercible[]): SignalExpr {
   const s = coerce(scrutinee)
   const items = branchExprs.map(coerce)
-  const handles = items.map(e => e._h)
-  return SignalExpr.fromHandle(
-    b.check(b.egress_expr_match_variant(typeName, s._h, handles, handles.length), 'match_variant'),
-    { op: 'match_variant', type_name: typeName, scrutinee: s._node, branches: items.map(e => e._node) },
-  )
+  return SignalExpr.fromNode({ op: 'match_variant', type_name: typeName, scrutinee: s._node, branches: items.map(e => e._node) })
 }
 
 // ---------- Leaf node constructors ----------
 
 export function sampleRate(): SignalExpr {
-  return SignalExpr.fromHandle(b.check(b.egress_expr_sample_rate(), 'sample_rate'), { op: 'sample_rate' })
+  return SignalExpr.fromNode({ op: 'sample_rate' })
 }
 
 export function sampleIndex(): SignalExpr {
-  return SignalExpr.fromHandle(b.check(b.egress_expr_sample_index(), 'sample_index'), { op: 'sample_index' })
+  return SignalExpr.fromNode({ op: 'sample_index' })
 }
 
 export function inputExpr(inputId: number): SignalExpr {
-  return SignalExpr.fromHandle(b.check(b.egress_expr_input(inputId), 'expr_input'), { op: 'input', id: inputId })
+  return SignalExpr.fromNode({ op: 'input', id: inputId })
 }
 
 export function registerExpr(regId: number): SignalExpr {
-  return SignalExpr.fromHandle(b.check(b.egress_expr_register(regId), 'expr_register'), { op: 'reg', id: regId })
+  return SignalExpr.fromNode({ op: 'reg', id: regId })
 }
 
 export function refExpr(moduleName: string, outputId: number): SignalExpr {
-  return SignalExpr.fromHandle(b.check(b.egress_expr_ref(moduleName, outputId), 'expr_ref'), { op: 'ref', module: moduleName, output: outputId })
+  return SignalExpr.fromNode({ op: 'ref', module: moduleName, output: outputId })
 }
 
 export function nestedOutputExpr(nodeId: number, outputId: number): SignalExpr {
-  return SignalExpr.fromHandle(b.check(b.egress_expr_nested_output(nodeId, outputId), 'nested_output'), { op: 'nested_output', node_id: nodeId, output_id: outputId })
+  return SignalExpr.fromNode({ op: 'nested_output', node_id: nodeId, output_id: outputId })
 }
 
 export function delayValueExpr(nodeId: number): SignalExpr {
-  return SignalExpr.fromHandle(b.check(b.egress_expr_delay_value(nodeId), 'delay_value'), { op: 'delay_value', node_id: nodeId })
+  return SignalExpr.fromNode({ op: 'delay_value', node_id: nodeId })
 }
 
-/** Wrap an egress_param_t handle in a smoothed-param expression. */
+/** Create a smoothed-param expression node for use in wiring expressions. */
 export function paramExpr(paramHandle: unknown): SignalExpr {
-  return SignalExpr.fromHandle(b.check(b.egress_expr_param(paramHandle), 'expr_param'), { op: 'smoothed_param', _ptr: true })
+  return SignalExpr.fromNode({ op: 'smoothed_param', _ptr: true, _handle: paramHandle })
 }
 
-/** Wrap an egress_param_t trigger handle in a trigger-param expression. */
+/** Create a trigger-param expression node for use in wiring expressions. */
 export function triggerParamExpr(paramHandle: unknown): SignalExpr {
-  return SignalExpr.fromHandle(b.check(b.egress_expr_trigger_param(paramHandle), 'expr_trigger_param'), { op: 'trigger_param', _ptr: true })
+  return SignalExpr.fromNode({ op: 'trigger_param', _ptr: true, _handle: paramHandle })
 }

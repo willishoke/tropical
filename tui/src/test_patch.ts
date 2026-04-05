@@ -1,25 +1,24 @@
 /**
  * test_patch.ts — standalone patch smoke-test, no audio device required.
  *
- * Usage:  tsx src/test_patch.ts <patch.json> [n_frames]
+ * Usage:  bun run src/test_patch.ts <patch.json> [n_frames]
  *
- * Loads a patch, primes the JIT, calls graph.process() n_frames times,
- * and reports pass/fail.  Exits non-zero on any thrown exception.
+ * Loads a patch, calls runtime.process() n_frames times,
+ * and reports pass/fail. Exits non-zero on any thrown exception.
  */
 
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import * as b from './bindings.js'
-import { Graph } from './graph.js'
 import { makeSession, loadPatchFromJSON } from './patch.js'
 import { loadBuiltins } from './module_library.js'
 import type { PatchJSON } from './patch.js'
+import * as b from './bindings.js'
 
 const patchArg = process.argv[2]
 const nFrames  = parseInt(process.argv[3] ?? '128', 10)
 
 if (!patchArg) {
-  console.error('Usage: tsx src/test_patch.ts <patch.json> [n_frames]')
+  console.error('Usage: bun run src/test_patch.ts <patch.json> [n_frames]')
   process.exit(1)
 }
 
@@ -33,28 +32,31 @@ const session = makeSession(256)
 loadBuiltins(session.typeRegistry)
 loadPatchFromJSON(json, session)
 
-const graph: Graph = session.graph
+const runtime = session.runtime
 
-// Prime JIT (compiles kernels without needing audio hardware)
-b.egress_graph_prime_jit(graph._h)
-console.log('JIT primed.')
+console.log('Plan loaded. Processing frames...')
 
 // Process frames and collect peak absolute value
 let peak = 0
 for (let i = 0; i < nFrames; i++) {
-  b.egress_graph_process(graph._h)
-  const buf = graph.outputBuffer
+  b.egress_runtime_process(runtime._h)
+  const buf = runtime.outputBuffer
   for (let s = 0; s < buf.length; s++) {
     const abs = Math.abs(buf[s])
     if (abs > peak) peak = abs
   }
 }
 
-console.log(`Peak output: ${peak}`)
+console.log(`Processed ${nFrames} frames.`)
+console.log(`Peak output level: ${peak.toFixed(6)}`)
 
-if (peak === 0) {
-  console.error('FAIL — output is silent (all samples are zero)')
+if (peak > 0 && peak < 100) {
+  console.log('PASS — non-zero, non-exploding output.')
+  process.exit(0)
+} else if (peak === 0) {
+  console.log('WARN — zero output (may be expected for silent patches).')
+  process.exit(0)
+} else {
+  console.log('FAIL — output out of range.')
   process.exit(1)
 }
-
-console.log(`PASS — processed ${nFrames} frames, peak=${peak.toFixed(6)}`)

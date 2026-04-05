@@ -1,18 +1,18 @@
 /**
  * test_module_process.cpp
  *
- * Instantiates modules via the C API and calls egress_graph_process() without
- * an audio device.  Covers the JIT code paths that the audio thread exercises,
- * catching crashes that would otherwise terminate the server process.
- *
- * LLVM ORC JIT is always enabled (required dependency).
+ * Exercises the FlatRuntime C API (egress_runtime_*) and JIT code paths
+ * without an audio device.  Plans are specified as JSON strings, compiled
+ * to native kernels, and processed in-memory.
  */
 
 #include "c_api/egress_c.h"
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <string>
 
 // ---- tiny test harness -------------------------------------------------------
 
@@ -24,7 +24,6 @@ static void run_test(const char* name, std::function<void()> fn)
   printf("  %-60s", name);
   fflush(stdout);
   fn();
-  // If fn() didn't abort/exit we reach here
   printf("PASS\n");
   ++g_pass;
 }
@@ -52,1665 +51,468 @@ static void run_test(const char* name, std::function<void()> fn)
     }                                                                         \
   } while (0)
 
-// ---- helpers -----------------------------------------------------------------
+#define ASSERT_NEAR(val, expected, tol)                                       \
+  do {                                                                        \
+    double _v = (val), _e = (expected), _t = (tol);                           \
+    if (std::fabs(_v - _e) > _t) {                                            \
+      printf("FAIL\n    %s = %.10f, expected %.10f +/- %g  (line %d)\n",     \
+             #val, _v, _e, _t, __LINE__);                                     \
+      ++g_fail;                                                               \
+      return;                                                                 \
+    }                                                                         \
+  } while (0)
 
-// Builds the expression:  mod(add(mod(x, 1.0), 1.0), 1.0)
-// This is _wrap01 inlined — the same wrapping the Clock module uses.
-static egress_expr_t wrap01(egress_expr_t x)
+// ---- tests ------------------------------------------------------------------
+
+/**
+ * 1. Sawtooth oscillator
+ *
+ * One register (phase), init=0.  Update: mod(add(reg(0), div(440.0, sample_rate)), 1.0)
+ * Output 0: mul(sub(mul(reg(0), 2.0), 1.0), 10.0)  — maps [0,1) to [-10,10)
+ * Outputs: [0]
+ *
+ * Audio = output / 20.0, so saw ranges [-0.5, 0.5).
+ * After one sample, phase = 440/44100 ~= 0.00998.
+ */
+static void test_sawtooth()
 {
-  egress_expr_t one  = egress_expr_literal_float(1.0);
-  egress_expr_t one2 = egress_expr_literal_float(1.0);
-  egress_expr_t one3 = egress_expr_literal_float(1.0);
-  egress_expr_t inner = egress_expr_binary(EGRESS_EXPR_MOD, x, one);
-  egress_expr_t added = egress_expr_binary(EGRESS_EXPR_ADD, inner, one2);
-  egress_expr_t outer = egress_expr_binary(EGRESS_EXPR_MOD, added, one3);
-  egress_expr_free(one);
-  egress_expr_free(one2);
-  egress_expr_free(one3);
-  return outer;
-}
+  const unsigned int buf_len = 256;
+  egress_runtime_t rt = egress_runtime_new(buf_len);
+  ASSERT(rt != nullptr);
 
-// ---- module spec builders ----------------------------------------------------
+  std::string plan = R"({
+    "schema": "egress_plan_2",
+    "config": { "sample_rate": 44100.0 },
+    "output_exprs": [
+      { "op": "mul", "args": [
+        { "op": "sub", "args": [
+          { "op": "mul", "args": [{ "op": "reg", "id": 0 }, 2.0] },
+          1.0
+        ]},
+        10.0
+      ]}
+    ],
+    "register_exprs": [
+      { "op": "mod", "args": [
+        { "op": "add", "args": [
+          { "op": "reg", "id": 0 },
+          { "op": "div", "args": [440.0, { "op": "sample_rate" }] }
+        ]},
+        1.0
+      ]}
+    ],
+    "state_init": [0.0],
+    "register_names": ["phase"],
+    "outputs": [0]
+  })";
 
-// Clock module: 2 inputs (freq scalar, ratios_in array), 2 outputs
-//   output  = mul(lt(basePhase, 0.5), 1.0)
-//   ratios_out = mul(lt(ratioPhase, 0.5), 1.0)   <- array output
-// No registers, no delay states.  Mirrors module_library.ts clock().
-static egress_module_spec_t build_clock_spec()
-{
-  egress_module_spec_t spec = egress_module_spec_new(2, 44100.0);
+  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  egress_runtime_process(rt);
 
-  egress_expr_t sr  = egress_expr_sample_rate();
-  egress_expr_t idx = egress_expr_sample_index();
-  egress_expr_t inp0 = egress_expr_input(0);  // freq (scalar)
-  egress_expr_t inp1 = egress_expr_input(1);  // ratios_in (array)
+  const double* buf = egress_runtime_output_buffer(rt);
+  ASSERT(buf != nullptr);
 
-  // basePhase = wrap01(sampleIndex * inp0 / sr)
-  egress_expr_t phase_num  = egress_expr_binary(EGRESS_EXPR_MUL, egress_expr_sample_index(), egress_expr_input(0));
-  egress_expr_t base_raw   = egress_expr_binary(EGRESS_EXPR_DIV, phase_num, egress_expr_sample_rate());
-  egress_expr_t base_phase = wrap01(base_raw);
+  // Sample 0: phase=0 at start, output = (0*2 - 1)*10 = -10, audio = -10/20 = -0.5
+  ASSERT_NEAR(buf[0], -0.5, 1e-6);
 
-  // output = mul(lt(basePhase, 0.5), 1.0)
-  egress_expr_t half0   = egress_expr_literal_float(0.5);
-  egress_expr_t lt0     = egress_expr_binary(EGRESS_EXPR_LESS, base_phase, half0);
-  egress_expr_t one0    = egress_expr_literal_float(1.0);
-  egress_expr_t output  = egress_expr_binary(EGRESS_EXPR_MUL, lt0, one0);
-  egress_module_spec_add_output(spec, output);
-  egress_expr_free(half0);
-  egress_expr_free(one0);
-  egress_expr_free(output);
+  // Sample 1: phase = 440/44100, output = (phase*2 - 1)*10, audio = that/20
+  double phase1 = 440.0 / 44100.0;
+  double expected1 = (phase1 * 2.0 - 1.0) * 10.0 / 20.0;
+  ASSERT_NEAR(buf[1], expected1, 1e-6);
 
-  // ratioPhase = wrap01(sampleIndex * inp0 * inp1 / sr)   <- inp1 is array
-  egress_expr_t ri_inner = egress_expr_binary(EGRESS_EXPR_MUL, egress_expr_sample_index(), egress_expr_input(0));
-  egress_expr_t ri_scaled = egress_expr_binary(EGRESS_EXPR_MUL, ri_inner, egress_expr_input(1));
-  egress_expr_t ri_div    = egress_expr_binary(EGRESS_EXPR_DIV, ri_scaled, egress_expr_sample_rate());
-  egress_expr_t ratio_phase = wrap01(ri_div);
-
-  // ratios_out = mul(lt(ratioPhase, 0.5), 1.0)
-  egress_expr_t half1     = egress_expr_literal_float(0.5);
-  egress_expr_t lt1       = egress_expr_binary(EGRESS_EXPR_LESS, ratio_phase, half1);
-  egress_expr_t one1      = egress_expr_literal_float(1.0);
-  egress_expr_t ratios_out = egress_expr_binary(EGRESS_EXPR_MUL, lt1, one1);
-  egress_module_spec_add_output(spec, ratios_out);
-  egress_expr_free(half1);
-  egress_expr_free(one1);
-  egress_expr_free(ratios_out);
-
-  // Free intermediate exprs (add_output keeps a reference)
-  egress_expr_free(sr);
-  egress_expr_free(idx);
-  egress_expr_free(inp0);
-  egress_expr_free(inp1);
-  egress_expr_free(base_phase);
-  egress_expr_free(lt0);
-  egress_expr_free(ratio_phase);
-  egress_expr_free(lt1);
-
-  return spec;
-}
-
-// Simple scalar VCO-like module: 1 input (freq), 1 output (sin wave)
-//   output = sin(2π * sampleIndex * freq / sr)
-// No registers.
-static egress_module_spec_t build_simple_scalar_spec()
-{
-  egress_module_spec_t spec = egress_module_spec_new(1, 44100.0);
-
-  const double TWO_PI = 6.283185307179586;
-  egress_expr_t two_pi = egress_expr_literal_float(TWO_PI);
-  egress_expr_t idx    = egress_expr_sample_index();
-  egress_expr_t freq   = egress_expr_input(0);
-  egress_expr_t sr     = egress_expr_sample_rate();
-
-  egress_expr_t phase  = egress_expr_binary(EGRESS_EXPR_MUL, idx, freq);
-  egress_expr_t phase2 = egress_expr_binary(EGRESS_EXPR_DIV, phase, sr);
-  egress_expr_t phase3 = egress_expr_binary(EGRESS_EXPR_MUL, two_pi, phase2);
-  egress_expr_t output = egress_expr_unary(EGRESS_EXPR_SIN, phase3);
-
-  egress_module_spec_add_output(spec, output);
-
-  egress_expr_free(two_pi);
-  egress_expr_free(idx);
-  egress_expr_free(freq);
-  egress_expr_free(sr);
-  egress_expr_free(phase);
-  egress_expr_free(phase2);
-  egress_expr_free(phase3);
-  egress_expr_free(output);
-
-  return spec;
-}
-
-// IntSeq with edge detection: includes prev_trig register so a held gate
-// only advances the index once (on the rising edge).
-// 2 registers: 0=index (int, init 0), 1=prev_trig (int, init 0)
-// index_next = select(bit_and(trigger, not(prev_trig)),
-//                     mod(add(index, step), seq_len),
-//                     index)
-// prev_trig_next = trigger
-static egress_module_spec_t build_intseq_edge_detect_spec()
-{
-  egress_module_spec_t spec = egress_module_spec_new(5, 44100.0);
-
-  // output 0: value = sequence[index_reg]
-  egress_expr_t value_out = egress_expr_binary(EGRESS_EXPR_INDEX,
-    egress_expr_input(4), egress_expr_register(0));
-  egress_module_spec_add_output(spec, value_out);
-  egress_expr_free(value_out);
-
-  // output 1: index = index_reg
-  egress_expr_t idx_out = egress_expr_register(0);
-  egress_module_spec_add_output(spec, idx_out);
-  egress_expr_free(idx_out);
-
-  // Edge detect: rising = bit_and(trigger, not(prev_trig))
-  egress_expr_t trigger   = egress_expr_input(0);
-  egress_expr_t prev_trig = egress_expr_register(1);
-  egress_expr_t not_prev  = egress_expr_unary(EGRESS_EXPR_NOT, prev_trig);
-  egress_expr_t rising    = egress_expr_binary(EGRESS_EXPR_BIT_AND, trigger, not_prev);
-
-  // next_index = select(rising, mod(add(index, step), seq_len), index)
-  egress_expr_t rev_step   = egress_expr_binary(EGRESS_EXPR_SUB, egress_expr_input(3), egress_expr_input(2));
-  egress_expr_t fwd_step   = egress_expr_select(egress_expr_input(1), egress_expr_input(2), rev_step);
-  egress_expr_t next_raw   = egress_expr_binary(EGRESS_EXPR_ADD, egress_expr_register(0), fwd_step);
-  egress_expr_t next_mod   = egress_expr_binary(EGRESS_EXPR_MOD, next_raw, egress_expr_input(3));
-  egress_expr_t next_index = egress_expr_select(rising, next_mod, egress_expr_register(0));
-
-  // register 0: index, initial value int 0
-  egress_value_t zero_idx = egress_value_int(0);
-  egress_module_spec_add_register(spec, next_index, zero_idx);
-  egress_value_free(zero_idx);
-  egress_expr_free(next_index);
-
-  // register 1: prev_trig = trigger, initial value int 0
-  egress_expr_t prev_trig_next = egress_expr_input(0);
-  egress_value_t zero_pt = egress_value_int(0);
-  egress_module_spec_add_register(spec, prev_trig_next, zero_pt);
-  egress_value_free(zero_pt);
-  egress_expr_free(prev_trig_next);
-
-  egress_expr_free(trigger);
-  egress_expr_free(prev_trig);
-  egress_expr_free(not_prev);
-  egress_expr_free(rising);
-  egress_expr_free(rev_step);
-  egress_expr_free(fwd_step);
-  egress_expr_free(next_raw);
-  egress_expr_free(next_mod);
-
-  return spec;
-}
-
-// ---- tests -------------------------------------------------------------------
-
-static void test_scalar_module_processes()
-{
-  egress_graph_t g = egress_graph_new(256);
-  ASSERT(g != nullptr);
-
-  egress_module_spec_t spec = build_simple_scalar_spec();
-  ASSERT_OK(egress_graph_add_module(g, "VCO1", spec));
-  egress_module_spec_free(spec);
-
-  // Set freq = 440.0
-  egress_expr_t freq_expr = egress_expr_literal_float(440.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "VCO1", 0, freq_expr));
-  egress_expr_free(freq_expr);
-
-  // Prime JIT then process several frames
-  egress_graph_prime_jit(g);
-  for (int i = 0; i < 32; ++i)
-  {
-    egress_graph_process(g);
+  // Check several samples are increasing before the first phase wrap.
+  // Phase wraps at sample ~44100/440 ~= 100, so check the first 50.
+  for (unsigned int i = 1; i < 50; ++i) {
+    ASSERT(buf[i] > buf[i - 1]);
   }
 
-  egress_graph_free(g);
+  egress_runtime_free(rt);
 }
 
-static void test_clock_module_default_array_input()
+/**
+ * 2. Two outputs with mix
+ *
+ * Output 0: constant 5.0
+ * Output 1: constant -3.0
+ * Outputs: [0, 1]
+ *
+ * Audio = (5.0 + -3.0) / 20.0 = 0.1
+ */
+static void test_two_outputs_mix()
 {
-  // This test exercises the exact crash scenario: Clock has an array default
-  // for ratios_in. On first process(), the JIT must re-initialize with the
-  // array input and compile array-output kernels.
-  egress_graph_t g = egress_graph_new(256);
-  ASSERT(g != nullptr);
+  const unsigned int buf_len = 32;
+  egress_runtime_t rt = egress_runtime_new(buf_len);
+  ASSERT(rt != nullptr);
 
-  egress_module_spec_t spec = build_clock_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Clock1", spec));
-  egress_module_spec_free(spec);
+  std::string plan = R"({
+    "schema": "egress_plan_2",
+    "config": { "sample_rate": 44100.0 },
+    "output_exprs": [5.0, -3.0],
+    "register_exprs": [],
+    "state_init": [],
+    "register_names": [],
+    "outputs": [0, 1]
+  })";
 
-  // freq = 2.0 Hz
-  egress_expr_t freq_expr = egress_expr_literal_float(2.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
-  egress_expr_free(freq_expr);
+  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  egress_runtime_process(rt);
 
-  // ratios_in = [1.0]  (array with one element — default from module_library)
-  egress_value_t item    = egress_value_float(1.0);
-  egress_value_t arr_val = egress_value_array(&item, 1);
-  egress_expr_t  arr_expr = egress_expr_literal_value(arr_val);
-  egress_value_free(item);
-  egress_value_free(arr_val);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, arr_expr));
-  egress_expr_free(arr_expr);
+  const double* buf = egress_runtime_output_buffer(rt);
+  ASSERT(buf != nullptr);
 
-  egress_graph_prime_jit(g);
-  for (int i = 0; i < 32; ++i)
-  {
-    egress_graph_process(g);
+  for (unsigned int i = 0; i < buf_len; ++i) {
+    ASSERT_NEAR(buf[i], 0.1, 1e-9);
   }
 
-  egress_graph_free(g);
+  egress_runtime_free(rt);
 }
 
-static void test_clock_module_multi_ratio_array()
+/**
+ * 3. Hot-swap preserves state
+ *
+ * Load sawtooth plan, process a few buffers so phase accumulates,
+ * then load a new plan with the same register name.  The phase
+ * should carry over.
+ */
+static void test_hot_swap_preserves_state()
 {
-  // Same as above but ratios_in has 3 elements.
-  egress_graph_t g = egress_graph_new(256);
-  ASSERT(g != nullptr);
+  const unsigned int buf_len = 64;
+  egress_runtime_t rt = egress_runtime_new(buf_len);
+  ASSERT(rt != nullptr);
 
-  egress_module_spec_t spec = build_clock_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Clock1", spec));
-  egress_module_spec_free(spec);
+  // Plan A: sawtooth, phase register named "phase"
+  std::string plan_a = R"({
+    "schema": "egress_plan_2",
+    "config": { "sample_rate": 44100.0 },
+    "output_exprs": [{ "op": "reg", "id": 0 }],
+    "register_exprs": [
+      { "op": "mod", "args": [
+        { "op": "add", "args": [
+          { "op": "reg", "id": 0 },
+          { "op": "div", "args": [440.0, { "op": "sample_rate" }] }
+        ]},
+        1.0
+      ]}
+    ],
+    "state_init": [0.0],
+    "register_names": ["phase"],
+    "outputs": [0]
+  })";
 
-  egress_expr_t freq_expr = egress_expr_literal_float(1.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
-  egress_expr_free(freq_expr);
+  ASSERT_OK(egress_runtime_load_plan(rt, plan_a.c_str(), plan_a.size()));
 
-  egress_value_t items[3] = {
-    egress_value_float(1.0),
-    egress_value_float(2.0),
-    egress_value_float(4.0),
-  };
-  egress_value_t arr_val  = egress_value_array(items, 3);
-  egress_expr_t  arr_expr = egress_expr_literal_value(arr_val);
-  for (int i = 0; i < 3; ++i) egress_value_free(items[i]);
-  egress_value_free(arr_val);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, arr_expr));
-  egress_expr_free(arr_expr);
-
-  egress_graph_prime_jit(g);
-  for (int i = 0; i < 32; ++i)
-  {
-    egress_graph_process(g);
+  // Process 4 buffers to accumulate phase
+  for (int i = 0; i < 4; ++i) {
+    egress_runtime_process(rt);
   }
 
-  egress_graph_free(g);
+  // Read last sample of last buffer — phase should be well above 0
+  const double* buf = egress_runtime_output_buffer(rt);
+  ASSERT(buf != nullptr);
+  double phase_before = buf[buf_len - 1];
+  ASSERT(phase_before > 0.01);
+
+  // Plan B: same structure, same register name "phase", but scale output differently
+  // Output: mul(reg(0), 5.0)
+  std::string plan_b = R"({
+    "schema": "egress_plan_2",
+    "config": { "sample_rate": 44100.0 },
+    "output_exprs": [{ "op": "mul", "args": [{ "op": "reg", "id": 0 }, 5.0] }],
+    "register_exprs": [
+      { "op": "mod", "args": [
+        { "op": "add", "args": [
+          { "op": "reg", "id": 0 },
+          { "op": "div", "args": [440.0, { "op": "sample_rate" }] }
+        ]},
+        1.0
+      ]}
+    ],
+    "state_init": [0.0],
+    "register_names": ["phase"],
+    "outputs": [0]
+  })";
+
+  ASSERT_OK(egress_runtime_load_plan(rt, plan_b.c_str(), plan_b.size()));
+  egress_runtime_process(rt);
+
+  // First sample of new plan should use the transferred phase, not 0.
+  // Output = phase * 5.0, audio = that / 20.0
+  // The phase should be near where plan A left off (plus one increment).
+  const double* buf2 = egress_runtime_output_buffer(rt);
+  ASSERT(buf2 != nullptr);
+  double first_output_audio = buf2[0];
+  // If state was NOT preserved, output would be 0*5/20 = 0.
+  // With preserved state, it should be noticeably positive.
+  ASSERT(first_output_audio > 0.001);
+
+  egress_runtime_free(rt);
 }
 
-static void test_clock_wired_to_seq_trigger()
+/**
+ * 4. Array literal in expression
+ *
+ * Register 0 (idx): init=0, update=identity (stays 0)
+ * Register 1 (idx2): init=1, update=identity (stays 1)
+ * Output 0: div(index([10.0, 20.0, 30.0, 40.0], reg(0)),
+ *               index([10.0, 20.0, 30.0, 40.0], reg(1)))
+ *         = 10.0 / 20.0 = 0.5
+ *
+ * Audio = 0.5 / 20.0 = 0.025
+ */
+static void test_array_literal()
 {
-  // Clock1.output -> Seq1 (a simple passthrough for the trigger).
-  // We can't instantiate IntSeq here without the full TS spec, but we can
-  // verify Clock1's output is readable after processing.
-  egress_graph_t g = egress_graph_new(256);
-  ASSERT(g != nullptr);
+  const unsigned int buf_len = 8;
+  egress_runtime_t rt = egress_runtime_new(buf_len);
+  ASSERT(rt != nullptr);
 
-  egress_module_spec_t spec = build_clock_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Clock1", spec));
-  egress_module_spec_free(spec);
+  std::string plan = R"({
+    "schema": "egress_plan_2",
+    "config": { "sample_rate": 44100.0 },
+    "output_exprs": [
+      { "op": "div", "args": [
+        { "op": "index", "args": [[10.0, 20.0, 30.0, 40.0], { "op": "reg", "id": 0 }] },
+        { "op": "index", "args": [[10.0, 20.0, 30.0, 40.0], { "op": "reg", "id": 1 }] }
+      ]}
+    ],
+    "register_exprs": [
+      { "op": "reg", "id": 0 },
+      { "op": "reg", "id": 1 }
+    ],
+    "state_init": [0.0, 1.0],
+    "register_names": ["idx", "idx2"],
+    "outputs": [0]
+  })";
 
-  // freq = 4.0, ratios_in = [1.0, 2.0]
-  egress_expr_t freq_expr = egress_expr_literal_float(4.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
-  egress_expr_free(freq_expr);
+  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  egress_runtime_process(rt);
 
-  egress_value_t items[2] = { egress_value_float(1.0), egress_value_float(2.0) };
-  egress_value_t arr_val  = egress_value_array(items, 2);
-  egress_expr_t  arr_expr = egress_expr_literal_value(arr_val);
-  egress_value_free(items[0]);
-  egress_value_free(items[1]);
-  egress_value_free(arr_val);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, arr_expr));
-  egress_expr_free(arr_expr);
+  const double* buf = egress_runtime_output_buffer(rt);
+  ASSERT(buf != nullptr);
 
-  // Add Clock1.output (output_id=0) as a tap so it is materialized
-  ASSERT_OK(egress_graph_add_output(g, "Clock1", 0));
-
-  egress_graph_prime_jit(g);
-  for (int i = 0; i < 64; ++i)
-  {
-    egress_graph_process(g);
+  // 10.0 / 20.0 = 0.5, audio = 0.5 / 20.0 = 0.025
+  for (unsigned int i = 0; i < buf_len; ++i) {
+    ASSERT_NEAR(buf[i], 0.025, 1e-9);
   }
 
-  egress_graph_free(g);
+  egress_runtime_free(rt);
 }
 
-// IntSeq-style module: 5 inputs (trigger, is_forward, step, seq_len, sequence/array)
-// 2 outputs (value=sequence[index], index), 1 integer register (index=0)
-// Mirrors the inline module_def from 31tet_otonal_seq.json.
-static egress_module_spec_t build_intseq_spec()
+/**
+ * 5. Integer counter with modular wrap
+ *
+ * Register 0 (counter): init=0, update=mod(add(reg(0), 1), 8)
+ * Output 0: reg(0)
+ * Outputs: [0]
+ *
+ * Process 10 single-sample buffers.
+ * Counter sequence: 0, 1, 2, 3, 4, 5, 6, 7, 0, 1
+ *   (output reads register BEFORE update)
+ *
+ * Audio = counter / 20.0
+ */
+static void test_counter_wrap()
 {
-  // 5 inputs, sample_rate=44100
-  egress_module_spec_t spec = egress_module_spec_new(5, 44100.0);
+  const unsigned int buf_len = 1;
+  egress_runtime_t rt = egress_runtime_new(buf_len);
+  ASSERT(rt != nullptr);
 
-  // inputs: 0=trigger, 1=is_forward, 2=step, 3=seq_len, 4=sequence(array)
-  egress_expr_t trigger    = egress_expr_input(0);
-  egress_expr_t is_forward = egress_expr_input(1);
-  egress_expr_t step       = egress_expr_input(2);
-  egress_expr_t seq_len    = egress_expr_input(3);
-  egress_expr_t sequence   = egress_expr_input(4);
-  egress_expr_t index_reg  = egress_expr_register(0);
+  std::string plan = R"({
+    "schema": "egress_plan_2",
+    "config": { "sample_rate": 44100.0 },
+    "output_exprs": [{ "op": "reg", "id": 0 }],
+    "register_exprs": [
+      { "op": "mod", "args": [
+        { "op": "add", "args": [{ "op": "reg", "id": 0 }, 1.0] },
+        8.0
+      ]}
+    ],
+    "state_init": [0.0],
+    "register_names": ["counter"],
+    "outputs": [0]
+  })";
 
-  // output: value = sequence[index_reg]
-  egress_expr_t value_out = egress_expr_binary(EGRESS_EXPR_INDEX, sequence, index_reg);
-  egress_module_spec_add_output(spec, value_out);
-  egress_expr_free(value_out);
+  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
 
-  // output: index = index_reg
-  egress_module_spec_add_output(spec, egress_expr_register(0));
+  double expected[] = {0, 1, 2, 3, 4, 5, 6, 7, 0, 1};
+  for (int i = 0; i < 10; ++i) {
+    egress_runtime_process(rt);
+    const double* buf = egress_runtime_output_buffer(rt);
+    ASSERT(buf != nullptr);
+    ASSERT_NEAR(buf[0], expected[i] / 20.0, 1e-9);
+  }
 
-  // next_index = select(trigger,
-  //   mod(add(index_reg, select(is_forward, step, seq_len - step)), seq_len),
-  //   index_reg)
-  egress_expr_t rev_step   = egress_expr_binary(EGRESS_EXPR_SUB, egress_expr_input(3), egress_expr_input(2));
-  egress_expr_t fwd_step   = egress_expr_select(egress_expr_input(1), egress_expr_input(2), rev_step);
-  egress_expr_t next_raw   = egress_expr_binary(EGRESS_EXPR_ADD, egress_expr_register(0), fwd_step);
-  egress_expr_t next_mod   = egress_expr_binary(EGRESS_EXPR_MOD, next_raw, egress_expr_input(3));
-  egress_expr_t next_index = egress_expr_select(egress_expr_input(0), next_mod, egress_expr_register(0));
-
-  // register 0: index, initial value int 0
-  egress_value_t zero = egress_value_int(0);
-  egress_module_spec_add_register(spec, next_index, zero);
-  egress_value_free(zero);
-  egress_expr_free(next_index);
-
-  egress_expr_free(trigger);
-  egress_expr_free(is_forward);
-  egress_expr_free(step);
-  egress_expr_free(seq_len);
-  egress_expr_free(sequence);
-  egress_expr_free(index_reg);
-  egress_expr_free(rev_step);
-  egress_expr_free(fwd_step);
-  egress_expr_free(next_raw);
-  egress_expr_free(next_mod);
-
-  return spec;
+  egress_runtime_free(rt);
 }
 
-static void test_intseq_with_clock()
+/**
+ * 6. Select/conditional expression
+ *
+ * Register 0 (phase): init=0, update=add(reg(0), 1)
+ * Output 0: select(gt(reg(0), 4), 1.0, 0.0)
+ *   — gate goes high when phase > 4
+ *
+ * Process 8 single-sample buffers.
+ * Phase sequence (at read time): 0, 1, 2, 3, 4, 5, 6, 7
+ * Gate output:                   0, 0, 0, 0, 0, 1, 1, 1
+ *
+ * Audio = gate / 20.0
+ */
+static void test_select_conditional()
 {
-  egress_graph_t g = egress_graph_new(256);
-  ASSERT(g != nullptr);
+  const unsigned int buf_len = 1;
+  egress_runtime_t rt = egress_runtime_new(buf_len);
+  ASSERT(rt != nullptr);
 
-  // Add Clock
-  egress_module_spec_t clock_spec = build_clock_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Clock1", clock_spec));
-  egress_module_spec_free(clock_spec);
+  std::string plan = R"({
+    "schema": "egress_plan_2",
+    "config": { "sample_rate": 44100.0 },
+    "output_exprs": [
+      { "op": "select", "args": [
+        { "op": "gt", "args": [{ "op": "reg", "id": 0 }, 4.0] },
+        1.0,
+        0.0
+      ]}
+    ],
+    "register_exprs": [
+      { "op": "add", "args": [{ "op": "reg", "id": 0 }, 1.0] }
+    ],
+    "state_init": [0.0],
+    "register_names": ["phase"],
+    "outputs": [0]
+  })";
 
-  egress_expr_t freq_expr = egress_expr_literal_float(2.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
-  egress_expr_free(freq_expr);
+  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
 
-  egress_value_t r_item  = egress_value_float(1.0);
-  egress_value_t r_arr   = egress_value_array(&r_item, 1);
-  egress_expr_t  r_expr  = egress_expr_literal_value(r_arr);
-  egress_value_free(r_item);
-  egress_value_free(r_arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, r_expr));
-  egress_expr_free(r_expr);
-
-  // Add IntSeq
-  egress_module_spec_t seq_spec = build_intseq_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Seq1", seq_spec));
-  egress_module_spec_free(seq_spec);
-
-  // Wire Clock1.output -> Seq1.trigger
-  ASSERT_OK(egress_graph_connect(g, "Clock1", 0, "Seq1", 0));
-
-  // Set remaining Seq1 inputs
-  egress_expr_t fwd  = egress_expr_literal_bool(true);
-  egress_expr_t stp  = egress_expr_literal_int(1);
-  egress_expr_t slen = egress_expr_literal_int(8);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
-  egress_expr_free(fwd);
-  egress_expr_free(stp);
-  egress_expr_free(slen);
-
-  // sequence = [110, 137, 164, 192, 220, 192, 164, 137]
-  double freqs[8] = {110.0, 137.56, 164.48, 192.38, 220.0, 192.38, 164.48, 137.56};
-  egress_value_t seq_items[8];
-  for (int i = 0; i < 8; i++) seq_items[i] = egress_value_float(freqs[i]);
-  egress_value_t seq_arr  = egress_value_array(seq_items, 8);
-  egress_expr_t  seq_expr = egress_expr_literal_value(seq_arr);
-  for (int i = 0; i < 8; i++) egress_value_free(seq_items[i]);
-  egress_value_free(seq_arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq_expr));
-  egress_expr_free(seq_expr);
-
-  ASSERT_OK(egress_graph_add_output(g, "Seq1", 0));
-
-  egress_graph_prime_jit(g);
-  for (int i = 0; i < 128; ++i)
-  {
-    egress_graph_process(g);
+  double expected[] = {0, 0, 0, 0, 0, 1, 1, 1};
+  for (int i = 0; i < 8; ++i) {
+    egress_runtime_process(rt);
+    const double* buf = egress_runtime_output_buffer(rt);
+    ASSERT(buf != nullptr);
+    ASSERT_NEAR(buf[0], expected[i] / 20.0, 1e-9);
   }
 
-  egress_graph_free(g);
+  egress_runtime_free(rt);
 }
 
-// Gate held high should only advance sequencer once (rising edge detection).
-// Uses build_intseq_edge_detect_spec which has prev_trig register.
-// Feed a constant 1.0 gate — index should go from 0→1 on the first frame
-// and stay at 1 for all subsequent frames.
-static void test_intseq_gate_triggers_once()
+/**
+ * 7. Multi-register interaction (clock-like)
+ *
+ * Register 0 (phase): init=0, update=mod(add(reg(0), div(1.0, sample_rate)), 1.0)
+ * Register 1 (gate):  init=0, update=select(lt(reg(0), 0.5), 1.0, 0.0)
+ * Output 0: reg(1)
+ * Outputs: [0]
+ *
+ * The gate reads phase BEFORE its update this sample.
+ * Phase ramps from 0 to 1 over 44100 samples.
+ * For the first ~22050 samples, phase < 0.5 so gate update writes 1.0.
+ * But gate output reads gate BEFORE update, so there is a 1-sample delay.
+ *
+ * Process one 256-sample buffer.  Gate should be ~1.0 for first half of a
+ * 44100-sample cycle (we are well within that at 256 samples).
+ *
+ * Sample 0: gate reads init(0)=0, then gate update sets to 1.0 (since phase=0 < 0.5)
+ * Sample 1+: gate reads 1.0 (set last sample), stays 1.0
+ */
+static void test_multi_register_clock()
 {
-  const unsigned int BUF_LEN = 1; // 1 sample per process() call for precise control
-  egress_graph_t g = egress_graph_new(BUF_LEN);
-  ASSERT(g != nullptr);
+  const unsigned int buf_len = 256;
+  egress_runtime_t rt = egress_runtime_new(buf_len);
+  ASSERT(rt != nullptr);
 
-  egress_module_spec_t spec = build_intseq_edge_detect_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Seq1", spec));
-  egress_module_spec_free(spec);
+  std::string plan = R"({
+    "schema": "egress_plan_2",
+    "config": { "sample_rate": 44100.0 },
+    "output_exprs": [{ "op": "reg", "id": 1 }],
+    "register_exprs": [
+      { "op": "mod", "args": [
+        { "op": "add", "args": [
+          { "op": "reg", "id": 0 },
+          { "op": "div", "args": [1.0, { "op": "sample_rate" }] }
+        ]},
+        1.0
+      ]},
+      { "op": "select", "args": [
+        { "op": "lt", "args": [{ "op": "reg", "id": 0 }, 0.5] },
+        1.0,
+        0.0
+      ]}
+    ],
+    "state_init": [0.0, 0.0],
+    "register_names": ["phase", "gate"],
+    "outputs": [0]
+  })";
 
-  // trigger = constant 1.0 (gate held high — a Float, like Clock output)
-  egress_expr_t trig = egress_expr_literal_float(1.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig));
-  egress_expr_free(trig);
+  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  egress_runtime_process(rt);
 
-  // is_forward = true, step = 1, seq_len = 4
-  egress_expr_t fwd  = egress_expr_literal_bool(true);
-  egress_expr_t stp  = egress_expr_literal_int(1);
-  egress_expr_t slen = egress_expr_literal_int(4);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
-  egress_expr_free(fwd);
-  egress_expr_free(stp);
-  egress_expr_free(slen);
+  const double* buf = egress_runtime_output_buffer(rt);
+  ASSERT(buf != nullptr);
 
-  // sequence = [100, 200, 300, 400]
-  egress_value_t items[4] = {
-    egress_value_float(100.0), egress_value_float(200.0),
-    egress_value_float(300.0), egress_value_float(400.0),
-  };
-  egress_value_t arr = egress_value_array(items, 4);
-  egress_expr_t  seq = egress_expr_literal_value(arr);
-  for (int i = 0; i < 4; i++) egress_value_free(items[i]);
-  egress_value_free(arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
-  egress_expr_free(seq);
+  // Sample 0: gate=init(0)=0
+  ASSERT_NEAR(buf[0], 0.0, 1e-9);
 
-  // Tap the index output (output 1)
-  size_t tap_id = egress_graph_add_output_tap(g, "Seq1", 1);
-  ASSERT(tap_id != (size_t)-1);
-
-  egress_graph_prime_jit(g);
-
-  // Process 10 frames and collect index values
-  double indices[10];
-  for (int f = 0; f < 10; ++f)
-  {
-    egress_graph_process(g);
-    size_t len = 0;
-    const double * buf = egress_graph_tap_buffer(g, tap_id, &len);
-    ASSERT(len == 1);
-    indices[f] = buf[0];
+  // Samples 1..255: gate should be 1.0 (phase is still well under 0.5)
+  // Audio = 1.0 / 20.0 = 0.05
+  for (unsigned int i = 1; i < buf_len; ++i) {
+    ASSERT_NEAR(buf[i], 1.0 / 20.0, 1e-9);
   }
 
-  // Frame 0: output reads initial index (0), rising edge advances it for next frame
-  ASSERT(indices[0] == 0.0);
-  // Frame 1+: index=1, gate held so no more advances
-  for (int f = 1; f < 10; ++f)
-  {
-    ASSERT(indices[f] == 1.0);
-  }
-
-  egress_graph_free(g);
+  egress_runtime_free(rt);
 }
 
-// Four IntSeqs + four scalar modules to mimic the 31tet_otonal_seq patch structure.
-// Exercises primitive body fusion across multiple heterogeneous modules.
-static void test_multi_module_fusion()
+/**
+ * 8. Multiple outputs summed
+ *
+ * Output 0: constant 3.0
+ * Output 1: constant 7.0
+ * Outputs: [0, 1]
+ *
+ * Audio = (3.0 / 20.0) + (7.0 / 20.0) = 10.0 / 20.0 = 0.5
+ */
+static void test_multiple_outputs_summed()
 {
-  egress_graph_t g = egress_graph_new(256);
-  ASSERT(g != nullptr);
+  const unsigned int buf_len = 16;
+  egress_runtime_t rt = egress_runtime_new(buf_len);
+  ASSERT(rt != nullptr);
 
-  // Clock1
-  {
-    egress_module_spec_t s = build_clock_spec();
-    ASSERT_OK(egress_graph_add_module(g, "Clock1", s));
-    egress_module_spec_free(s);
-    egress_expr_t f = egress_expr_literal_float(1.5);
-    ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, f));
-    egress_expr_free(f);
-    egress_value_t ri = egress_value_float(1.0);
-    egress_value_t ra = egress_value_array(&ri, 1);
-    egress_expr_t  re = egress_expr_literal_value(ra);
-    egress_value_free(ri); egress_value_free(ra);
-    ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, re));
-    egress_expr_free(re);
+  std::string plan = R"({
+    "schema": "egress_plan_2",
+    "config": { "sample_rate": 44100.0 },
+    "output_exprs": [3.0, 7.0],
+    "register_exprs": [],
+    "state_init": [],
+    "register_names": [],
+    "outputs": [0, 1]
+  })";
+
+  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  egress_runtime_process(rt);
+
+  const double* buf = egress_runtime_output_buffer(rt);
+  ASSERT(buf != nullptr);
+
+  for (unsigned int i = 0; i < buf_len; ++i) {
+    ASSERT_NEAR(buf[i], 0.5, 1e-9);
   }
 
-  double freqs[4][8] = {
-    {110.00, 137.56, 164.48, 192.38, 220.00, 192.38, 164.48, 137.56},
-    {137.56, 172.01, 205.66, 240.53, 275.12, 240.53, 205.66, 172.01},
-    {164.48, 205.73, 245.93, 287.67, 328.97, 287.67, 245.93, 205.73},
-    {192.38, 240.53, 287.67, 336.44, 384.75, 336.44, 287.67, 240.53},
-  };
-
-  const char* seq_names[4] = {"Seq1","Seq2","Seq3","Seq4"};
-  const char* vco_names[4] = {"VCO1","VCO2","VCO3","VCO4"};
-
-  for (int i = 0; i < 4; i++)
-  {
-    egress_module_spec_t s = build_intseq_spec();
-    ASSERT_OK(egress_graph_add_module(g, seq_names[i], s));
-    egress_module_spec_free(s);
-
-    ASSERT_OK(egress_graph_connect(g, "Clock1", 0, seq_names[i], 0));
-
-    egress_expr_t fwd  = egress_expr_literal_bool(true);
-    egress_expr_t stp  = egress_expr_literal_int(1);
-    egress_expr_t slen = egress_expr_literal_int(8);
-    ASSERT_OK(egress_graph_set_input_expr(g, seq_names[i], 1, fwd));
-    ASSERT_OK(egress_graph_set_input_expr(g, seq_names[i], 2, stp));
-    ASSERT_OK(egress_graph_set_input_expr(g, seq_names[i], 3, slen));
-    egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
-
-    egress_value_t items[8];
-    for (int j = 0; j < 8; j++) items[j] = egress_value_float(freqs[i][j]);
-    egress_value_t arr = egress_value_array(items, 8);
-    egress_expr_t  ex  = egress_expr_literal_value(arr);
-    for (int j = 0; j < 8; j++) egress_value_free(items[j]);
-    egress_value_free(arr);
-    ASSERT_OK(egress_graph_set_input_expr(g, seq_names[i], 4, ex));
-    egress_expr_free(ex);
-  }
-
-  // Four VCOs driven by sequencer output
-  for (int i = 0; i < 4; i++)
-  {
-    egress_module_spec_t s = build_simple_scalar_spec();
-    ASSERT_OK(egress_graph_add_module(g, vco_names[i], s));
-    egress_module_spec_free(s);
-    ASSERT_OK(egress_graph_connect(g, seq_names[i], 0, vco_names[i], 0));
-    ASSERT_OK(egress_graph_add_output(g, vco_names[i], 0));
-  }
-
-  egress_graph_prime_jit(g);
-  for (int i = 0; i < 128; ++i)
-  {
-    egress_graph_process(g);
-  }
-
-  egress_graph_free(g);
+  egress_runtime_free(rt);
 }
 
-// Verify the Clock output is a proper square wave by checking sample-by-sample values.
-// At 2Hz with sr=44100, the half-period is 11025 samples.
-// Output should be 1.0 for samples 0..11024, then 0.0 for 11025..22049, etc.
-static void test_clock_output_waveform()
-{
-  const unsigned int BUF_LEN = 1;
-  egress_graph_t g = egress_graph_new(BUF_LEN);
-  ASSERT(g != nullptr);
-
-  egress_module_spec_t spec = build_clock_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Clock1", spec));
-  egress_module_spec_free(spec);
-
-  // freq = 2.0 Hz
-  egress_expr_t freq_expr = egress_expr_literal_float(2.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
-  egress_expr_free(freq_expr);
-
-  egress_value_t r_item = egress_value_float(1.0);
-  egress_value_t r_arr = egress_value_array(&r_item, 1);
-  egress_expr_t r_expr = egress_expr_literal_value(r_arr);
-  egress_value_free(r_item); egress_value_free(r_arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, r_expr));
-  egress_expr_free(r_expr);
-
-  size_t tap_id = egress_graph_add_output_tap(g, "Clock1", 0);
-  ASSERT(tap_id != (size_t)-1);
-
-  egress_graph_prime_jit(g);
-
-  // Process enough samples to see one full cycle + transition
-  // At 2Hz, sr=44100: half-period = 11025 samples
-  int first_zero = -1;
-  int first_one_again = -1;
-  double prev = -1.0;
-  for (int f = 0; f < 25000; ++f)
-  {
-    egress_graph_process(g);
-    size_t len = 0;
-    const double * buf = egress_graph_tap_buffer(g, tap_id, &len);
-    ASSERT(len == 1);
-    double val = buf[0];
-
-    // Clock output should be 0.0 or 1.0
-    ASSERT(val == 0.0 || val == 1.0);
-
-    if (prev == 1.0 && val == 0.0 && first_zero < 0)
-      first_zero = f;
-    if (first_zero >= 0 && prev == 0.0 && val == 1.0 && first_one_again < 0)
-      first_one_again = f;
-    prev = val;
-  }
-
-  // Verify transitions happened at roughly the right times
-  ASSERT(first_zero > 0);
-  ASSERT(first_one_again > first_zero);
-  // Half-period should be ~11025 samples
-  int high_duration = first_zero;          // samples 0..first_zero-1 were high
-  int low_duration = first_one_again - first_zero;
-  ASSERT(high_duration > 10000 && high_duration < 12000);
-  ASSERT(low_duration > 10000 && low_duration < 12000);
-
-  printf("[clock: high=%d low=%d] ", high_duration, low_duration);
-  egress_graph_free(g);
-}
-
-// Edge detection with manual trigger pattern: feed 0,0,1,1,1,0,0,1,1,0
-// and verify index advances only on 0->1 transitions.
-static void test_intseq_edge_detect_manual_pattern()
-{
-  const unsigned int BUF_LEN = 1;
-  egress_graph_t g = egress_graph_new(BUF_LEN);
-  ASSERT(g != nullptr);
-
-  egress_module_spec_t spec = build_intseq_edge_detect_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Seq1", spec));
-  egress_module_spec_free(spec);
-
-  // is_forward=true, step=1, seq_len=4
-  egress_expr_t fwd = egress_expr_literal_bool(true);
-  egress_expr_t stp = egress_expr_literal_int(1);
-  egress_expr_t slen = egress_expr_literal_int(4);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
-  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
-
-  // sequence = [100, 200, 300, 400]
-  egress_value_t items[4] = {
-    egress_value_float(100.0), egress_value_float(200.0),
-    egress_value_float(300.0), egress_value_float(400.0),
-  };
-  egress_value_t arr = egress_value_array(items, 4);
-  egress_expr_t seq = egress_expr_literal_value(arr);
-  for (int i = 0; i < 4; i++) egress_value_free(items[i]);
-  egress_value_free(arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
-  egress_expr_free(seq);
-
-  size_t tap_id = egress_graph_add_output_tap(g, "Seq1", 1);
-  ASSERT(tap_id != (size_t)-1);
-
-  egress_graph_prime_jit(g);
-
-  // Pattern: trigger values per frame
-  //   0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0
-  // Expected index output (register updates apply next frame):
-  //   Frame 0: trig=0, idx output=0 (initial)
-  //   Frame 1: trig=0, idx output=0
-  //   Frame 2: trig=1, rising edge (prev=0), idx output=0, next_idx=1
-  //   Frame 3: trig=1, held (prev=1), idx output=1, next_idx=1
-  //   Frame 4: trig=1, held (prev=1), idx output=1, next_idx=1
-  //   Frame 5: trig=0, idx output=1
-  //   Frame 6: trig=0, idx output=1
-  //   Frame 7: trig=1, rising edge (prev=0), idx output=1, next_idx=2
-  //   Frame 8: trig=1, held, idx output=2
-  //   Frame 9: trig=0, idx output=2
-  //   Frame 10: trig=1, rising edge, idx output=2, next_idx=3
-  //   Frame 11: trig=0, idx output=3
-  double triggers[] = {0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0};
-  double expected[] =  {0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 3};
-  const int N = 12;
-
-  for (int f = 0; f < N; ++f)
-  {
-    // Set trigger for this frame
-    egress_expr_t trig = egress_expr_literal_float(triggers[f]);
-    ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig));
-    egress_expr_free(trig);
-
-    egress_graph_process(g);
-    size_t len = 0;
-    const double * buf = egress_graph_tap_buffer(g, tap_id, &len);
-    ASSERT(len == 1);
-
-    if (buf[0] != expected[f])
-    {
-      printf("FAIL\n    frame %d: trigger=%.0f, expected index=%.0f, got=%.0f\n",
-             f, triggers[f], expected[f], buf[0]);
-      ++g_fail;
-      egress_graph_free(g);
-      return;
-    }
-  }
-
-  egress_graph_free(g);
-}
-
-// End-to-end: Clock (2Hz) drives IntSeq with edge detection.
-// Over enough samples to see several clock cycles, verify the index
-// advances exactly once per rising edge.
-static void test_clock_drives_edge_detect_intseq()
-{
-  const unsigned int BUF_LEN = 1;
-  egress_graph_t g = egress_graph_new(BUF_LEN);
-  ASSERT(g != nullptr);
-
-  // Clock
-  egress_module_spec_t clock_spec = build_clock_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Clock1", clock_spec));
-  egress_module_spec_free(clock_spec);
-
-  egress_expr_t freq_expr = egress_expr_literal_float(2.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
-  egress_expr_free(freq_expr);
-
-  egress_value_t r_item = egress_value_float(1.0);
-  egress_value_t r_arr = egress_value_array(&r_item, 1);
-  egress_expr_t r_expr = egress_expr_literal_value(r_arr);
-  egress_value_free(r_item); egress_value_free(r_arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, r_expr));
-  egress_expr_free(r_expr);
-
-  // IntSeq with edge detection
-  egress_module_spec_t seq_spec = build_intseq_edge_detect_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Seq1", seq_spec));
-  egress_module_spec_free(seq_spec);
-
-  // Wire Clock1.output -> Seq1.trigger
-  ASSERT_OK(egress_graph_connect(g, "Clock1", 0, "Seq1", 0));
-
-  egress_expr_t fwd = egress_expr_literal_bool(true);
-  egress_expr_t stp = egress_expr_literal_int(1);
-  egress_expr_t slen = egress_expr_literal_int(8);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
-  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
-
-  egress_value_t items[8];
-  double freqs[8] = {100, 200, 300, 400, 500, 600, 700, 800};
-  for (int i = 0; i < 8; i++) items[i] = egress_value_float(freqs[i]);
-  egress_value_t arr = egress_value_array(items, 8);
-  egress_expr_t seq = egress_expr_literal_value(arr);
-  for (int i = 0; i < 8; i++) egress_value_free(items[i]);
-  egress_value_free(arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
-  egress_expr_free(seq);
-
-  // Tap both clock output and seq index
-  size_t clock_tap = egress_graph_add_output_tap(g, "Clock1", 0);
-  size_t index_tap = egress_graph_add_output_tap(g, "Seq1", 1);
-  ASSERT(clock_tap != (size_t)-1);
-  ASSERT(index_tap != (size_t)-1);
-
-  egress_graph_prime_jit(g);
-
-  // Run for 3 full clock cycles (~66150 samples at 2Hz, sr=44100)
-  // Count rising edges and index changes
-  double prev_clock = 0.0;
-  double prev_index = 0.0;
-  int rising_edges = 0;
-  int index_changes = 0;
-  int frames = 70000;
-
-  for (int f = 0; f < frames; ++f)
-  {
-    egress_graph_process(g);
-
-    size_t len = 0;
-    const double * clk_buf = egress_graph_tap_buffer(g, clock_tap, &len);
-    ASSERT(len == 1);
-    double clock_val = clk_buf[0];
-
-    const double * idx_buf = egress_graph_tap_buffer(g, index_tap, &len);
-    ASSERT(len == 1);
-    double index_val = idx_buf[0];
-
-    if (prev_clock == 0.0 && clock_val == 1.0)
-      ++rising_edges;
-    if (index_val != prev_index)
-      ++index_changes;
-
-    prev_clock = clock_val;
-    prev_index = index_val;
-  }
-
-  printf("[edges=%d idx_changes=%d] ", rising_edges, index_changes);
-
-  // Should have ~3 rising edges and ~3 index changes (one per edge)
-  ASSERT(rising_edges >= 2 && rising_edges <= 4);
-  ASSERT(index_changes == rising_edges);
-
-  egress_graph_free(g);
-}
-
-// Same as test_clock_drives_edge_detect_intseq but with BUF_LEN=256
-// to exercise the fused kernel path and verify correctness with buffered processing.
-static void test_clock_drives_edge_detect_intseq_buffered()
-{
-  const unsigned int BUF_LEN = 256;
-  egress_graph_t g = egress_graph_new(BUF_LEN);
-  ASSERT(g != nullptr);
-
-  // Clock
-  egress_module_spec_t clock_spec = build_clock_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Clock1", clock_spec));
-  egress_module_spec_free(clock_spec);
-
-  egress_expr_t freq_expr = egress_expr_literal_float(2.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
-  egress_expr_free(freq_expr);
-
-  egress_value_t r_item = egress_value_float(1.0);
-  egress_value_t r_arr = egress_value_array(&r_item, 1);
-  egress_expr_t r_expr = egress_expr_literal_value(r_arr);
-  egress_value_free(r_item); egress_value_free(r_arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, r_expr));
-  egress_expr_free(r_expr);
-
-  // IntSeq with edge detection
-  egress_module_spec_t seq_spec = build_intseq_edge_detect_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Seq1", seq_spec));
-  egress_module_spec_free(seq_spec);
-
-  ASSERT_OK(egress_graph_connect(g, "Clock1", 0, "Seq1", 0));
-
-  egress_expr_t fwd = egress_expr_literal_bool(true);
-  egress_expr_t stp = egress_expr_literal_int(1);
-  egress_expr_t slen = egress_expr_literal_int(8);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
-  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
-
-  egress_value_t items[8];
-  double freqs[8] = {100, 200, 300, 400, 500, 600, 700, 800};
-  for (int i = 0; i < 8; i++) items[i] = egress_value_float(freqs[i]);
-  egress_value_t arr = egress_value_array(items, 8);
-  egress_expr_t seq = egress_expr_literal_value(arr);
-  for (int i = 0; i < 8; i++) egress_value_free(items[i]);
-  egress_value_free(arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
-  egress_expr_free(seq);
-
-  // Tap index output — buffer will have BUF_LEN samples
-  size_t index_tap = egress_graph_add_output_tap(g, "Seq1", 1);
-  ASSERT(index_tap != (size_t)-1);
-
-  egress_graph_prime_jit(g);
-
-  // Run ~70000 samples = ~275 process() calls at BUF_LEN=256
-  // Count how many distinct index transitions we see
-  int total_samples = 0;
-  int rising_transitions = 0;
-  double last_index = 0.0;
-
-  for (int call = 0; call < 275; ++call)
-  {
-    egress_graph_process(g);
-    size_t len = 0;
-    const double * buf = egress_graph_tap_buffer(g, index_tap, &len);
-    ASSERT(len == BUF_LEN);
-
-    for (unsigned int s = 0; s < len; ++s)
-    {
-      if (buf[s] != last_index)
-      {
-        ++rising_transitions;
-        last_index = buf[s];
-      }
-      ++total_samples;
-    }
-  }
-
-  printf("[samples=%d idx_changes=%d] ", total_samples, rising_transitions);
-
-  // At 2Hz, ~70000 samples = ~3.17 half-cycles... expect ~3 rising edges
-  ASSERT(rising_transitions >= 2 && rising_transitions <= 5);
-
-  egress_graph_free(g);
-}
-
-// Verify that the OLD IntSeq spec (without edge detection) retriggers every sample
-// the clock is high. This confirms the old behavior is broken and edge detection is needed.
-static void test_intseq_old_spec_retriggers()
-{
-  const unsigned int BUF_LEN = 1;
-  egress_graph_t g = egress_graph_new(BUF_LEN);
-  ASSERT(g != nullptr);
-
-  // Use the old IntSeq spec (no prev_trig register)
-  egress_module_spec_t seq_spec = build_intseq_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Seq1", seq_spec));
-  egress_module_spec_free(seq_spec);
-
-  // Set constant trigger = 1.0
-  egress_expr_t trig = egress_expr_literal_float(1.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig));
-  egress_expr_free(trig);
-
-  egress_expr_t fwd = egress_expr_literal_bool(true);
-  egress_expr_t stp = egress_expr_literal_int(1);
-  egress_expr_t slen = egress_expr_literal_int(4);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
-  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
-
-  egress_value_t items[4] = {
-    egress_value_float(100.0), egress_value_float(200.0),
-    egress_value_float(300.0), egress_value_float(400.0),
-  };
-  egress_value_t arr = egress_value_array(items, 4);
-  egress_expr_t seq = egress_expr_literal_value(arr);
-  for (int i = 0; i < 4; i++) egress_value_free(items[i]);
-  egress_value_free(arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
-  egress_expr_free(seq);
-
-  size_t tap_id = egress_graph_add_output_tap(g, "Seq1", 1);
-  ASSERT(tap_id != (size_t)-1);
-
-  egress_graph_prime_jit(g);
-
-  // With constant trigger=1, old spec should advance every frame
-  // Frame 0: index=0, Frame 1: index=1, Frame 2: index=2, Frame 3: index=3, Frame 4: index=0 (wrap)
-  double expected[] = {0, 1, 2, 3, 0, 1, 2, 3, 0, 1};
-  for (int f = 0; f < 10; ++f)
-  {
-    egress_graph_process(g);
-    size_t len = 0;
-    const double * buf = egress_graph_tap_buffer(g, tap_id, &len);
-    ASSERT(len == 1);
-    if (buf[0] != expected[f])
-    {
-      printf("FAIL\n    frame %d: expected=%.0f got=%.0f\n", f, expected[f], buf[0]);
-      ++g_fail;
-      egress_graph_free(g);
-      return;
-    }
-  }
-
-  egress_graph_free(g);
-}
-
-// Same as build_intseq_edge_detect_spec but with FLOAT register initial values
-// to match what the TS patch loader actually produces (JSON "prev_trig": 0 → float 0.0).
-static egress_module_spec_t build_intseq_edge_detect_spec_float_regs()
-{
-  egress_module_spec_t spec = egress_module_spec_new(5, 44100.0);
-
-  egress_expr_t value_out = egress_expr_binary(EGRESS_EXPR_INDEX,
-    egress_expr_input(4), egress_expr_register(0));
-  egress_module_spec_add_output(spec, value_out);
-  egress_expr_free(value_out);
-
-  egress_expr_t idx_out = egress_expr_register(0);
-  egress_module_spec_add_output(spec, idx_out);
-  egress_expr_free(idx_out);
-
-  egress_expr_t trigger   = egress_expr_input(0);
-  egress_expr_t prev_trig = egress_expr_register(1);
-  egress_expr_t not_prev  = egress_expr_unary(EGRESS_EXPR_NOT, prev_trig);
-  egress_expr_t rising    = egress_expr_binary(EGRESS_EXPR_BIT_AND, trigger, not_prev);
-
-  egress_expr_t rev_step   = egress_expr_binary(EGRESS_EXPR_SUB, egress_expr_input(3), egress_expr_input(2));
-  egress_expr_t fwd_step   = egress_expr_select(egress_expr_input(1), egress_expr_input(2), rev_step);
-  egress_expr_t next_raw   = egress_expr_binary(EGRESS_EXPR_ADD, egress_expr_register(0), fwd_step);
-  egress_expr_t next_mod   = egress_expr_binary(EGRESS_EXPR_MOD, next_raw, egress_expr_input(3));
-  egress_expr_t next_index = egress_expr_select(rising, next_mod, egress_expr_register(0));
-
-  // KEY DIFFERENCE: use egress_value_float instead of egress_value_int
-  egress_value_t zero_idx = egress_value_float(0.0);
-  egress_module_spec_add_register(spec, next_index, zero_idx);
-  egress_value_free(zero_idx);
-  egress_expr_free(next_index);
-
-  egress_expr_t prev_trig_next = egress_expr_input(0);
-  egress_value_t zero_pt = egress_value_float(0.0);
-  egress_module_spec_add_register(spec, prev_trig_next, zero_pt);
-  egress_value_free(zero_pt);
-  egress_expr_free(prev_trig_next);
-
-  egress_expr_free(trigger);
-  egress_expr_free(prev_trig);
-  egress_expr_free(not_prev);
-  egress_expr_free(rising);
-  egress_expr_free(rev_step);
-  egress_expr_free(fwd_step);
-  egress_expr_free(next_raw);
-  egress_expr_free(next_mod);
-
-  return spec;
-}
-
-// Test with float registers (as the TS patch loader creates):
-// Held gate should still only advance once.
-static void test_intseq_edge_detect_float_regs_held_gate()
-{
-  const unsigned int BUF_LEN = 1;
-  egress_graph_t g = egress_graph_new(BUF_LEN);
-  ASSERT(g != nullptr);
-
-  egress_module_spec_t spec = build_intseq_edge_detect_spec_float_regs();
-  ASSERT_OK(egress_graph_add_module(g, "Seq1", spec));
-  egress_module_spec_free(spec);
-
-  egress_expr_t trig = egress_expr_literal_float(1.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig));
-  egress_expr_free(trig);
-
-  egress_expr_t fwd = egress_expr_literal_bool(true);
-  egress_expr_t stp = egress_expr_literal_int(1);
-  egress_expr_t slen = egress_expr_literal_int(4);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
-  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
-
-  egress_value_t items[4] = {
-    egress_value_float(100.0), egress_value_float(200.0),
-    egress_value_float(300.0), egress_value_float(400.0),
-  };
-  egress_value_t arr = egress_value_array(items, 4);
-  egress_expr_t seq = egress_expr_literal_value(arr);
-  for (int i = 0; i < 4; i++) egress_value_free(items[i]);
-  egress_value_free(arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
-  egress_expr_free(seq);
-
-  egress_graph_prime_jit(g);
-  egress_graph_free(g);
-
-  // Run the actual assertion
-  g = egress_graph_new(BUF_LEN);
-  spec = build_intseq_edge_detect_spec_float_regs();
-  ASSERT_OK(egress_graph_add_module(g, "Seq1", spec));
-  egress_module_spec_free(spec);
-
-  trig = egress_expr_literal_float(1.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig));
-  egress_expr_free(trig);
-  fwd = egress_expr_literal_bool(true);
-  stp = egress_expr_literal_int(1);
-  slen = egress_expr_literal_int(4);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
-  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
-
-  egress_value_t items2[4] = {
-    egress_value_float(100.0), egress_value_float(200.0),
-    egress_value_float(300.0), egress_value_float(400.0),
-  };
-  arr = egress_value_array(items2, 4);
-  seq = egress_expr_literal_value(arr);
-  for (int i = 0; i < 4; i++) egress_value_free(items2[i]);
-  egress_value_free(arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
-  egress_expr_free(seq);
-
-  size_t tap_id = egress_graph_add_output_tap(g, "Seq1", 1);
-  ASSERT(tap_id != (size_t)-1);
-  egress_graph_prime_jit(g);
-
-  double indices[10];
-  for (int f = 0; f < 10; ++f)
-  {
-    egress_graph_process(g);
-    size_t len = 0;
-    const double * buf = egress_graph_tap_buffer(g, tap_id, &len);
-    ASSERT(len == 1);
-    indices[f] = buf[0];
-  }
-
-  ASSERT(indices[0] == 0.0);
-  for (int f = 1; f < 10; ++f)
-  {
-    if (indices[f] != 1.0)
-    {
-      printf("FAIL\n    frame %d: expected 1.0, got %.1f (float regs may cause different behavior)\n",
-             f, indices[f]);
-      ++g_fail;
-      egress_graph_free(g);
-      return;
-    }
-  }
-
-  egress_graph_free(g);
-}
-
-// Clock + edge-detect IntSeq with FLOAT registers: full end-to-end test
-// matching actual patch behavior.
-static void test_clock_edge_detect_float_regs_end_to_end()
-{
-  const unsigned int BUF_LEN = 1;
-  egress_graph_t g = egress_graph_new(BUF_LEN);
-  ASSERT(g != nullptr);
-
-  egress_module_spec_t clock_spec = build_clock_spec();
-  ASSERT_OK(egress_graph_add_module(g, "Clock1", clock_spec));
-  egress_module_spec_free(clock_spec);
-
-  egress_expr_t freq_expr = egress_expr_literal_float(2.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 0, freq_expr));
-  egress_expr_free(freq_expr);
-
-  egress_value_t r_item = egress_value_float(1.0);
-  egress_value_t r_arr = egress_value_array(&r_item, 1);
-  egress_expr_t r_expr = egress_expr_literal_value(r_arr);
-  egress_value_free(r_item); egress_value_free(r_arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Clock1", 1, r_expr));
-  egress_expr_free(r_expr);
-
-  // IntSeq with float registers (matching TS patch loader)
-  egress_module_spec_t seq_spec = build_intseq_edge_detect_spec_float_regs();
-  ASSERT_OK(egress_graph_add_module(g, "Seq1", seq_spec));
-  egress_module_spec_free(seq_spec);
-
-  ASSERT_OK(egress_graph_connect(g, "Clock1", 0, "Seq1", 0));
-
-  egress_expr_t fwd = egress_expr_literal_bool(true);
-  egress_expr_t stp = egress_expr_literal_int(1);
-  egress_expr_t slen = egress_expr_literal_int(8);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
-  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
-
-  egress_value_t items[8];
-  double freqs[8] = {100, 200, 300, 400, 500, 600, 700, 800};
-  for (int i = 0; i < 8; i++) items[i] = egress_value_float(freqs[i]);
-  egress_value_t arr = egress_value_array(items, 8);
-  egress_expr_t seq = egress_expr_literal_value(arr);
-  for (int i = 0; i < 8; i++) egress_value_free(items[i]);
-  egress_value_free(arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
-  egress_expr_free(seq);
-
-  size_t clock_tap = egress_graph_add_output_tap(g, "Clock1", 0);
-  size_t index_tap = egress_graph_add_output_tap(g, "Seq1", 1);
-  ASSERT(clock_tap != (size_t)-1);
-  ASSERT(index_tap != (size_t)-1);
-
-  egress_graph_prime_jit(g);
-
-  double prev_clock = 0.0;
-  double prev_index = 0.0;
-  int rising_edges = 0;
-  int index_changes = 0;
-
-  for (int f = 0; f < 70000; ++f)
-  {
-    egress_graph_process(g);
-    size_t len = 0;
-    const double * clk_buf = egress_graph_tap_buffer(g, clock_tap, &len);
-    double clock_val = clk_buf[0];
-    const double * idx_buf = egress_graph_tap_buffer(g, index_tap, &len);
-    double index_val = idx_buf[0];
-
-    if (prev_clock == 0.0 && clock_val == 1.0)
-      ++rising_edges;
-    if (index_val != prev_index)
-      ++index_changes;
-
-    prev_clock = clock_val;
-    prev_index = index_val;
-  }
-
-  printf("[edges=%d idx_changes=%d] ", rising_edges, index_changes);
-  ASSERT(rising_edges >= 2 && rising_edges <= 4);
-  ASSERT(index_changes == rising_edges);
-
-  egress_graph_free(g);
-}
-
-// IntSeq with 4x frequency sequence driven by a TriggerParam.
-// Uses TriggerParam (no runtime rebuilds) to fire trigger pulses and verifies
-// that sequence[index] produces correct float values from the 31tet 4x frequencies.
-static void test_intseq_4x_freq_values()
-{
-  const unsigned int BUF_LEN = 1;
-  egress_graph_t g = egress_graph_new(BUF_LEN);
-  ASSERT(g != nullptr);
-
-  // IntSeq with edge detection + float registers (matches TS patch loader)
-  egress_module_spec_t spec = build_intseq_edge_detect_spec_float_regs();
-  ASSERT_OK(egress_graph_add_module(g, "Seq1", spec));
-  egress_module_spec_free(spec);
-
-  // Start with trigger=0
-  egress_expr_t trig0 = egress_expr_literal_float(0.0);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig0));
-  egress_expr_free(trig0);
-
-  // is_forward=true, step=1, seq_len=8
-  egress_expr_t fwd  = egress_expr_literal_bool(true);
-  egress_expr_t stp  = egress_expr_literal_int(1);
-  egress_expr_t slen = egress_expr_literal_int(8);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 1, fwd));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 2, stp));
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 3, slen));
-  egress_expr_free(fwd); egress_expr_free(stp); egress_expr_free(slen);
-
-  // 4x frequency sequence (from 31tet patch)
-  double freqs[8] = {440.00, 550.24, 657.92, 769.52, 880.00, 769.52, 657.92, 550.24};
-  egress_value_t items[8];
-  for (int i = 0; i < 8; i++) items[i] = egress_value_float(freqs[i]);
-  egress_value_t arr = egress_value_array(items, 8);
-  egress_expr_t seq  = egress_expr_literal_value(arr);
-  for (int i = 0; i < 8; i++) egress_value_free(items[i]);
-  egress_value_free(arr);
-  ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 4, seq));
-  egress_expr_free(seq);
-
-  // Tap value (output 0) and index (output 1)
-  size_t val_tap = egress_graph_add_output_tap(g, "Seq1", 0);
-  size_t idx_tap = egress_graph_add_output_tap(g, "Seq1", 1);
-  ASSERT(val_tap != (size_t)-1);
-  ASSERT(idx_tap != (size_t)-1);
-
-  egress_graph_prime_jit(g);
-
-  // Frame 0: no trigger, index=0, value=freqs[0]
-  egress_graph_process(g);
-  {
-    // Read taps one at a time (C API uses thread_local buffer)
-    size_t len = 0;
-    const double * vbuf = egress_graph_tap_buffer(g, val_tap, &len);
-    ASSERT(len == 1);
-    double val0 = vbuf[0];
-
-    const double * ibuf = egress_graph_tap_buffer(g, idx_tap, &len);
-    ASSERT(len == 1);
-    double idx0 = ibuf[0];
-
-    if (idx0 != 0.0)
-    {
-      printf("FAIL\n    frame 0: expected index=0, got=%.6g\n", idx0);
-      ++g_fail;
-      egress_graph_free(g);
-      return;
-    }
-    double diff = val0 - freqs[0];
-    if (diff < 0) diff = -diff;
-    if (diff > 0.01)
-    {
-      printf("FAIL\n    frame 0: expected value=%.2f, got=%.6g\n", freqs[0], val0);
-      ++g_fail;
-      egress_graph_free(g);
-      return;
-    }
-  }
-
-  // Fire trigger and advance through the sequence
-  for (int step = 1; step < 8; ++step)
-  {
-    // Rising edge: set trigger=1, process one frame
-    egress_expr_t trig1 = egress_expr_literal_float(1.0);
-    ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig1));
-    egress_expr_free(trig1);
-    egress_graph_process(g);
-
-    // Register writeback applies next frame. Set trigger=0 and process again.
-    egress_expr_t trig_off = egress_expr_literal_float(0.0);
-    ASSERT_OK(egress_graph_set_input_expr(g, "Seq1", 0, trig_off));
-    egress_expr_free(trig_off);
-    egress_graph_process(g);
-
-    size_t len = 0;
-    const double * vbuf = egress_graph_tap_buffer(g, val_tap, &len);
-    ASSERT(len == 1);
-    double value = vbuf[0];
-
-    const double * ibuf = egress_graph_tap_buffer(g, idx_tap, &len);
-    ASSERT(len == 1);
-    double index = ibuf[0];
-
-    // Check value output matches the expected frequency
-    double diff = value - freqs[step];
-    if (diff < 0) diff = -diff;
-    if (diff > 0.01)
-    {
-      printf("FAIL\n    step %d: expected value=%.2f, got=%.6g (index=%.6g)\n",
-             step, freqs[step], value, index);
-      ++g_fail;
-      egress_graph_free(g);
-      return;
-    }
-  }
-
-  printf("[all 8 sequence values correct] ");
-  egress_graph_free(g);
-}
-
-// ---- main --------------------------------------------------------------------
+// ---- main -------------------------------------------------------------------
 
 int main()
 {
-  printf("=== egress module process tests ===\n\n");
-
-  run_test("scalar module: construct + 32 process() calls",
-           test_scalar_module_processes);
-
-  run_test("clock: array default input (ratios_in=[1.0]) + 32 process() calls",
-           test_clock_module_default_array_input);
-
-  run_test("clock: multi-ratio array input (ratios_in=[1,2,4]) + 32 process() calls",
-           test_clock_module_multi_ratio_array);
-
-  run_test("clock: two-ratio array + output tap + 64 process() calls",
-           test_clock_wired_to_seq_trigger);
-
-  run_test("intseq: integer-register module wired to clock + 128 process() calls",
-           test_intseq_with_clock);
-
-  run_test("intseq edge detect: held gate triggers only one index advance",
-           test_intseq_gate_triggers_once);
-
-  run_test("multi-module fusion: clock + 4 intseqs + 4 vcos + 128 frames",
-           test_multi_module_fusion);
-
-  run_test("clock output: verify square wave shape sample-by-sample",
-           test_clock_output_waveform);
-
-  run_test("intseq edge detect: manual 0/1 trigger pattern",
-           test_intseq_edge_detect_manual_pattern);
-
-  run_test("clock + edge-detect intseq: index advances once per rising edge",
-           test_clock_drives_edge_detect_intseq);
-
-  run_test("clock + edge-detect intseq (BUF_LEN=256): buffered processing",
-           test_clock_drives_edge_detect_intseq_buffered);
-
-  run_test("old intseq (no edge detect): retriggers every sample when gate held",
-           test_intseq_old_spec_retriggers);
-
-  run_test("intseq edge detect (FLOAT regs): held gate triggers only once",
-           test_intseq_edge_detect_float_regs_held_gate);
-
-  run_test("clock + edge-detect intseq (FLOAT regs): end-to-end",
-           test_clock_edge_detect_float_regs_end_to_end);
-
-  run_test("intseq 4x freq: value output matches sequence entries",
-           test_intseq_4x_freq_values);
-
-  run_test("ADT: construct_struct + field_access round-trip", []() {
-    egress_graph_t g = egress_graph_new(1);
-    ASSERT(g != nullptr);
-
-    // Define struct NoteEvent { pitch: float, vel: float, gate: bool }
-    const char* field_names[] = { "pitch", "vel", "gate" };
-    const int   field_types[] = { 0, 0, 2 };  // 0=Float, 2=Bool
-    ASSERT_OK(egress_typedef_struct(g, "NoteEvent", field_names, field_types, 3));
-
-    // Module: 3 inputs, 2 outputs
-    // out[0] = field_access(construct_struct(in0, in1, in2), 0)  -> pitch
-    // out[1] = field_access(construct_struct(in0, in1, in2), 1)  -> vel
-    egress_module_spec_t spec = egress_module_spec_new(3, 44100.0);
-    ASSERT(spec != nullptr);
-
-    egress_expr_t in0 = egress_expr_input(0);
-    egress_expr_t in1 = egress_expr_input(1);
-    egress_expr_t in2 = egress_expr_input(2);
-    ASSERT(in0 && in1 && in2);
-
-    egress_expr_t field_exprs[3] = { in0, in1, in2 };
-    egress_expr_t s0 = egress_expr_construct_struct("NoteEvent", field_exprs, 3);
-    ASSERT(s0 != nullptr);
-    egress_expr_t s1 = egress_expr_construct_struct("NoteEvent", field_exprs, 3);
-    ASSERT(s1 != nullptr);
-
-    egress_expr_t out0 = egress_expr_field_access("NoteEvent", s0, 0);
-    ASSERT(out0 != nullptr);
-    egress_expr_t out1 = egress_expr_field_access("NoteEvent", s1, 1);
-    ASSERT(out1 != nullptr);
-
-    egress_module_spec_add_output(spec, out0);
-    egress_module_spec_add_output(spec, out1);
-
-    egress_expr_free(in0);
-    egress_expr_free(in1);
-    egress_expr_free(in2);
-    egress_expr_free(s0);
-    egress_expr_free(s1);
-    egress_expr_free(out0);
-    egress_expr_free(out1);
-
-    ASSERT_OK(egress_graph_add_module(g, "ADT1", spec));
-    egress_module_spec_free(spec);
-
-    // Set inputs to known values: pitch=440.0, vel=0.75, gate=1.0
-    egress_expr_t e_pitch = egress_expr_literal_float(440.0);
-    egress_expr_t e_vel   = egress_expr_literal_float(0.75);
-    egress_expr_t e_gate  = egress_expr_literal_float(1.0);
-    ASSERT_OK(egress_graph_set_input_expr(g, "ADT1", 0, e_pitch));
-    ASSERT_OK(egress_graph_set_input_expr(g, "ADT1", 1, e_vel));
-    ASSERT_OK(egress_graph_set_input_expr(g, "ADT1", 2, e_gate));
-    egress_expr_free(e_pitch);
-    egress_expr_free(e_vel);
-    egress_expr_free(e_gate);
-
-    ASSERT_OK(egress_graph_add_output(g, "ADT1", 0));
-
-    egress_graph_prime_jit(g);
-    egress_graph_process(g);
-
-    // Read outputs via output tap
-    size_t tap0 = egress_graph_add_output_tap(g, "ADT1", 0);
-    size_t tap1 = egress_graph_add_output_tap(g, "ADT1", 1);
-
-    egress_graph_process(g);
-
-    size_t len0 = 0, len1 = 0;
-    // Read each tap buffer's first sample immediately to avoid aliasing through the static buffer
-    const double* buf0 = egress_graph_tap_buffer(g, tap0, &len0);
-    ASSERT(buf0 != nullptr);
-    ASSERT(len0 >= 1);
-    const double val0 = buf0[0];
-
-    const double* buf1 = egress_graph_tap_buffer(g, tap1, &len1);
-    ASSERT(buf1 != nullptr);
-    ASSERT(len1 >= 1);
-    const double val1 = buf1[0];
-
-    // Output 0 should be pitch=440.0, output 1 should be vel=0.75
-    ASSERT(val0 >= 439.9 && val0 <= 440.1);
-    ASSERT(val1 >= 0.74 && val1 <= 0.76);
-
-    egress_graph_free(g);
-  });
-
-  // ── FlatRuntime tests ──────────────────────────────────────────────────
-
-  run_test("flat runtime: sawtooth phase accumulator via plan JSON", []() {
-    // Build a minimal egress_plan_2 plan:
-    //   1 register (phase), init = 0.0
-    //   register expr: mod(add(reg(0), div(440.0, sample_rate)), 1.0)
-    //   1 output: reg(0)  (reads phase — previous sample value)
-    //   outputs: [0]  (output 0 feeds audio mix)
-    //
-    // This is a sawtooth oscillator: phase ramps 0→1 at 440 Hz.
-    const char* plan_json = R"({
-      "schema": "egress_plan_2",
-      "config": { "sample_rate": 44100.0 },
-      "output_exprs": [
-        { "op": "reg", "id": 0 }
-      ],
-      "register_exprs": [
-        { "op": "mod", "args": [
-          { "op": "add", "args": [
-            { "op": "reg", "id": 0 },
-            { "op": "div", "args": [ 440.0, { "op": "sample_rate" } ] }
-          ]},
-          1.0
-        ]}
-      ],
-      "state_init": [0.0],
-      "register_names": ["phase"],
-      "outputs": [0]
-    })";
-
-    const unsigned int BUF_LEN = 256;
-    egress_runtime_t rt = egress_runtime_new(BUF_LEN);
-    ASSERT(rt != nullptr);
-
-    ASSERT_OK(egress_runtime_load_plan(rt, plan_json, strlen(plan_json)));
-
-    // Process one buffer
-    egress_runtime_process(rt);
-    const double* buf = egress_runtime_output_buffer(rt);
-    ASSERT(buf != nullptr);
-
-    // First sample: phase was 0.0 (register reads previous-sample value)
-    // Output is mixed /20.0, so sample[0] = 0.0 / 20.0 = 0.0
-    ASSERT(buf[0] >= -0.001 && buf[0] <= 0.001);
-
-    // Phase increment = 440/44100 ≈ 0.009977
-    // After sample 0, register becomes 0.009977
-    // Sample 1 reads that → 0.009977 / 20.0 ≈ 0.000499
-    const double inc = 440.0 / 44100.0;
-    const double expected_s1 = inc / 20.0;
-    ASSERT(buf[1] >= expected_s1 - 0.0001 && buf[1] <= expected_s1 + 0.0001);
-
-    // Check monotonic increase for first ~90 samples (well before wrap at ~100.2)
-    for (int i = 1; i < 90; ++i)
-    {
-      ASSERT(buf[i] > buf[i - 1]);
-    }
-
-    // Verify approximate value at sample 50: phase ≈ 50 * inc, output ≈ 50*inc/20
-    const double expected_s50 = 50.0 * inc / 20.0;
-    ASSERT(buf[50] >= expected_s50 - 0.001 && buf[50] <= expected_s50 + 0.001);
-
-    egress_runtime_free(rt);
-  });
-
-  run_test("flat runtime: two outputs with separate mix", []() {
-    // Two outputs: constant 1.0 and constant 2.0
-    // Mix only output 1 (the 2.0)
-    // Expected audio: 2.0 / 20.0 = 0.1
-    const char* plan_json = R"({
-      "schema": "egress_plan_2",
-      "config": { "sample_rate": 44100.0 },
-      "output_exprs": [
-        1.0,
-        2.0
-      ],
-      "register_exprs": [],
-      "state_init": [],
-      "register_names": [],
-      "outputs": [1]
-    })";
-
-    const unsigned int BUF_LEN = 32;
-    egress_runtime_t rt = egress_runtime_new(BUF_LEN);
-    ASSERT(rt != nullptr);
-    ASSERT_OK(egress_runtime_load_plan(rt, plan_json, strlen(plan_json)));
-
-    egress_runtime_process(rt);
-    const double* buf = egress_runtime_output_buffer(rt);
-    ASSERT(buf != nullptr);
-
-    // Every sample should be 2.0 / 20.0 = 0.1
-    for (unsigned int i = 0; i < BUF_LEN; ++i)
-    {
-      ASSERT(buf[i] >= 0.099 && buf[i] <= 0.101);
-    }
-
-    egress_runtime_free(rt);
-  });
-
-  run_test("flat runtime: hot-swap preserves register state", []() {
-    // Load a plan with a counter register, process some samples,
-    // then reload a compatible plan and check state is preserved.
-    //
-    // Register: counter, init = 0.0, update = add(reg(0), 1.0)
-    // Output: reg(0)
-    const char* plan1 = R"({
-      "schema": "egress_plan_2",
-      "config": { "sample_rate": 44100.0 },
-      "output_exprs": [ { "op": "reg", "id": 0 } ],
-      "register_exprs": [
-        { "op": "add", "args": [ { "op": "reg", "id": 0 }, 1.0 ] }
-      ],
-      "state_init": [0.0],
-      "register_names": ["counter"],
-      "outputs": [0]
-    })";
-
-    const unsigned int BUF_LEN = 1;
-    egress_runtime_t rt = egress_runtime_new(BUF_LEN);
-    ASSERT(rt != nullptr);
-    ASSERT_OK(egress_runtime_load_plan(rt, plan1, strlen(plan1)));
-
-    // Process 10 samples — counter goes 0,1,2,...,9
-    for (int i = 0; i < 10; ++i)
-      egress_runtime_process(rt);
-
-    // Output after 10th process: reads reg(0) which was 9 going into the
-    // 10th call, then becomes 10 after. The output reads the *old* value.
-    // Actually: sample reads reg THEN updates. After 10 calls:
-    //   call 0: output=0, reg becomes 1
-    //   call 1: output=1, reg becomes 2
-    //   ...
-    //   call 9: output=9, reg becomes 10
-    // So the last output buffer has value 9.0 / 20.0
-
-    // Hot-swap: load same structure (same register_names) — should preserve counter
-    const char* plan2 = R"({
-      "schema": "egress_plan_2",
-      "config": { "sample_rate": 44100.0 },
-      "output_exprs": [ { "op": "reg", "id": 0 } ],
-      "register_exprs": [
-        { "op": "add", "args": [ { "op": "reg", "id": 0 }, 1.0 ] }
-      ],
-      "state_init": [0.0],
-      "register_names": ["counter"],
-      "outputs": [0]
-    })";
-
-    ASSERT_OK(egress_runtime_load_plan(rt, plan2, strlen(plan2)));
-
-    // Process one more sample — if state was preserved, counter should be 10
-    egress_runtime_process(rt);
-    const double* buf = egress_runtime_output_buffer(rt);
-    ASSERT(buf != nullptr);
-
-    // Output should be 10.0 / 20.0 = 0.5
-    const double expected = 10.0 / 20.0;
-    ASSERT(buf[0] >= expected - 0.01 && buf[0] <= expected + 0.01);
-
-    egress_runtime_free(rt);
-  });
-
-  // ── Graph-based tests ──────────────────────────────────────────────────
-
-  run_test("register type declaration and metadata", []() {
-    egress_graph_t g = egress_graph_new(1);
-    ASSERT(g != nullptr);
-
-    // Build a simple module with 2 registers
-    egress_module_spec_t spec = egress_module_spec_new(1, 44100.0);
-    ASSERT(spec != nullptr);
-
-    // output: register(0)
-    egress_expr_t out = egress_expr_register(0);
-    egress_module_spec_add_output(spec, out);
-
-    // register 0: next = input(0), init = 0.0
-    egress_expr_t reg0_body = egress_expr_input(0);
-    egress_value_t reg0_init = egress_value_float(0.0);
-    egress_module_spec_add_register(spec, reg0_body, reg0_init);
-    egress_value_free(reg0_init);
-
-    // register 1: next = input(0), init = 0 (int)
-    egress_expr_t reg1_body = egress_expr_input(0);
-    egress_value_t reg1_init = egress_value_int(0);
-    egress_module_spec_add_register(spec, reg1_body, reg1_init);
-    egress_value_free(reg1_init);
-
-    ASSERT_OK(egress_graph_add_module(g, "RegMod", spec));
-    egress_module_spec_free(spec);
-
-    // Declare register types
-    ASSERT_OK(egress_module_declare_register_type(g, "RegMod", 0, "float"));
-    ASSERT_OK(egress_module_declare_register_type(g, "RegMod", 1, "int"));
-
-    // Invalid index should return false
-    ASSERT(!egress_module_declare_register_type(g, "RegMod", 99, "float"));
-
-    // Invalid module name should return false
-    ASSERT(!egress_module_declare_register_type(g, "NoSuchModule", 0, "float"));
-
-    // Module should still process correctly after type annotation
-    egress_graph_prime_jit(g);
-    for (int i = 0; i < 8; ++i) egress_graph_process(g);
-
-    egress_graph_free(g);
-  });
-
-  printf("\n=== results: %d passed, %d failed ===\n", g_pass, g_fail);
+  printf("test_module_process (FlatRuntime API)\n");
+
+  run_test("sawtooth oscillator",            test_sawtooth);
+  run_test("two outputs with mix",           test_two_outputs_mix);
+  run_test("hot-swap preserves state",       test_hot_swap_preserves_state);
+  run_test("array literal in expression",    test_array_literal);
+  run_test("integer counter with mod wrap",  test_counter_wrap);
+  run_test("select/conditional expression",  test_select_conditional);
+  run_test("multi-register clock",           test_multi_register_clock);
+  run_test("multiple outputs summed",        test_multiple_outputs_summed);
+
+  printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
 }

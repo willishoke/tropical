@@ -28,18 +28,10 @@ const _registry = new FinalizationRegistry((handle: unknown) => {
 
 export class DAC {
   _h: unknown
-  private _graph: unknown
 
-  constructor(graphHandle: unknown, sampleRate = 44100, channels = 2) {
-    this._graph = graphHandle
-    this._h = b.check(b.egress_dac_new(graphHandle, sampleRate, channels), 'dac_new')
-    _registry.register(this, this._h, this)
-  }
-
-  /** Create a DAC backed by a FlatRuntime instead of a Graph. */
+  /** Create a DAC backed by a FlatRuntime. */
   static fromRuntime(runtimeHandle: unknown, sampleRate = 44100, channels = 2): DAC {
     const dac = Object.create(DAC.prototype) as DAC
-    dac._graph = runtimeHandle
     dac._h = b.check(b.egress_dac_new_runtime(runtimeHandle, sampleRate, channels), 'dac_new_runtime')
     _registry.register(dac, dac._h, dac)
     return dac

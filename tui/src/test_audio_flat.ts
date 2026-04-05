@@ -10,7 +10,6 @@
 import { makeSession, loadPatchFromJSON } from './patch'
 import { loadBuiltins } from './module_library'
 import { applyFlatPlan } from './apply_plan'
-import { Runtime } from './runtime'
 
 const session = makeSession(512)
 loadBuiltins(session.typeRegistry)
@@ -20,18 +19,16 @@ loadPatchFromJSON({
     { type: 'VCO', name: 'VCO1' },
     { type: 'VCA', name: 'VCA1' },
   ],
+  input_exprs: [
+    { module: 'VCO1', input: 'freq', expr: 440 },
+    { module: 'VCA1', input: 'audio', expr: { op: 'ref', module: 'VCO1', output: 'saw' } },
+    { module: 'VCA1', input: 'cv', expr: 0.3 },
+  ],
+  outputs: [{ module: 'VCA1', output: 'out' }],
 }, session)
 
-session.inputExprNodes.set('VCO1:freq', 440)
-session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
-session.inputExprNodes.set('VCA1:cv', 0.3)
-session.graphOutputs.push({ module: 'VCA1', output: 'out' })
-
-const rt = new Runtime(512)
-applyFlatPlan(session, rt)
-
 console.log('Starting DAC (FlatRuntime)...')
-const dac = rt.createDAC()
+const dac = session.runtime.createDAC()
 dac.start()
 console.log('Playing 440 Hz saw → VCA for 3 seconds...')
 
@@ -39,8 +36,7 @@ setTimeout(() => {
   console.log('Stopping...')
   dac.stop()
   dac.dispose()
-  rt.dispose()
-  session.graph.dispose()
+  session.runtime.dispose()
   console.log('Done.')
   process.exit(0)
 }, 3000)

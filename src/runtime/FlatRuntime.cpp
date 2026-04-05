@@ -101,13 +101,13 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
 
   // ── Build NumericProgram from CompiledProgram ──
   // Use Module's static build_numeric_program_impl (made public in Phase 1)
-  Module::NumericJitState jit_state;
+  egress_runtime::NumericJitState jit_state;
   egress_jit::NumericProgram numeric_program;
 
   // The flat program has zero inputs — everything is embedded in expressions
   const std::vector<Value> empty_inputs;
 
-  if (!Module::build_numeric_program_impl(
+  if (!egress_runtime::build_numeric_program(
         compiled, initial_registers, sample_rate,
         empty_inputs, numeric_program, jit_state, nullptr))
   {
@@ -125,7 +125,7 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
         diag += " INPUT_AT=" + std::to_string(i) + "[slot=" + std::to_string(instr.slot_id) + "]";
       }
       if (instr.kind != egress_expr::ExprKind::InputValue &&
-          !Module::supports_numeric_jit_expr_kind(instr.kind)) {
+          !egress_runtime::supports_numeric_jit_expr_kind(instr.kind)) {
         diag += " UNSUPPORTED_AT=" + std::to_string(i) + "[kind=" + std::to_string(static_cast<int>(instr.kind)) + "]";
       }
       if (instr.kind == egress_expr::ExprKind::Ref) {

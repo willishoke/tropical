@@ -3,7 +3,7 @@
  */
 
 import * as b from './bindings.js'
-import { SignalExpr, paramExpr, triggerParamExpr } from './expr.js'
+import { SignalExpr } from './expr.js'
 
 const _registry = new FinalizationRegistry((handle: unknown) => {
   b.egress_param_free(handle)
@@ -30,9 +30,9 @@ export class Param {
     b.egress_param_set(this._h, v)
   }
 
-  /** Return a SmoothedParam SignalExpr for use in module expressions. */
+  /** Return a SmoothedParam SignalExpr node for use in wiring expressions. */
   asExpr(): SignalExpr {
-    return paramExpr(this._h)
+    return SignalExpr.fromNode({ op: 'smoothed_param', name: '(unnamed)', _ptr: true, _handle: this._h })
   }
 
   dispose(): void {
@@ -58,9 +58,9 @@ export class Trigger {
     return b.egress_param_get(this._h) as number
   }
 
-  /** Return a TriggerParam SignalExpr for use in module expressions. */
+  /** Return a TriggerParam SignalExpr node for use in wiring expressions. */
   asExpr(): SignalExpr {
-    return triggerParamExpr(this._h)
+    return SignalExpr.fromNode({ op: 'trigger_param', name: '(unnamed)', _ptr: true, _handle: this._h })
   }
 
   dispose(): void {
