@@ -35,6 +35,49 @@ loadBuiltins(session.typeRegistry)
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Type-check an input expression against a destination port type, inserting
+ * a broadcast_to wrapper when the shapes are compatible but differ (e.g. scalar→array).
+ * Throws if the connection is incompatible (e.g. array→scalar, shape mismatch).
+ * Returns the (possibly wrapped) expression and the resultShape if broadcasting occurred.
+ */
+function adaptInputExpr(
+  node: ExprNode,
+  dstTypeStr: string | undefined,
+  instanceName: string,
+  inputName: string,
+): { expr: ExprNode; resultShape?: number[] } {
+  let srcTypeStr: string | undefined
+
+  if (typeof node === 'number') {
+    srcTypeStr = 'float'
+  } else if (typeof node === 'boolean') {
+    srcTypeStr = 'bool'
+  } else if (Array.isArray(node)) {
+    srcTypeStr = `float[${(node as unknown[]).length}]`
+  } else if (typeof node === 'object' && node !== null) {
+    const obj = node as Record<string, unknown>
+    if (obj.op === 'ref') {
+      const srcInst = session.instanceRegistry.get(obj.module as string)
+      if (srcInst) {
+        const outName = obj.output as string | number
+        const outIdx = typeof outName === 'number' ? outName : srcInst.outputNames.indexOf(String(outName))
+        if (outIdx !== -1) srcTypeStr = srcInst.outputPortType(outIdx)
+      }
+    }
+  }
+
+  if (srcTypeStr === undefined) return { expr: node }
+
+  const check = checkArrayConnection(srcTypeStr, dstTypeStr, node)
+  if (!check.compatible) {
+    throw new Error(
+      `Type mismatch on '${instanceName}'.${inputName}: ${check.error}`
+    )
+  }
+  return { expr: check.broadcastExpr ?? node, resultShape: check.resultShape }
+}
+
 const ok  = (data: unknown) =>
   ({ content: [{ type: 'text' as const, text: JSON.stringify({ ok: true,  data  }) }] })
 
@@ -448,10 +491,12 @@ function handleTool(name: string, args: Record<string, unknown>) {
         ? rawInput
         : (rawInput.match(/^\d+$/) ? parseInt(rawInput, 10) : inst.inputIndex(rawInput))
 
-      const node = args.expr as ExprNode
+      const rawNode = args.expr as ExprNode
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
+      const { expr: node, resultShape } = adaptInputExpr(rawNode, inst.inputPortType(inputId), instanceName, resolvedName)
       session.inputExprNodes.set(`${instanceName}:${resolvedName}`, node)
       return { module: instanceName, input: resolvedName, expr: node,
+               ...(resultShape ? { broadcast_shape: resultShape } : {}),
                ...wire() }
     })
 
@@ -469,8 +514,9 @@ function handleTool(name: string, args: Record<string, unknown>) {
           ? raw
           : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
         const resolvedName = inst.inputNames[inputId] ?? String(inputId)
-        session.inputExprNodes.set(`${u.instance_name}:${resolvedName}`, u.expr)
-        results.push({ module: u.instance_name, input: resolvedName, expr: u.expr })
+        const { expr } = adaptInputExpr(u.expr, inst.inputPortType(inputId), u.instance_name, resolvedName)
+        session.inputExprNodes.set(`${u.instance_name}:${resolvedName}`, expr)
+        results.push({ module: u.instance_name, input: resolvedName, expr })
       }
       return { updates: results, ...wire() }
     })

@@ -17,6 +17,94 @@ import {
   buildDependencyGraph, topologicalSort,
 } from './compiler.js'
 import { lowerArrayOps, type ArrayLayout } from './lower_arrays.js'
+import { portTypeToString } from './term.js'
+import { checkArrayConnection } from './array_wiring.js'
+
+// ─────────────────────────────────────────────────────────────
+// Wiring type validation
+// ─────────────────────────────────────────────────────────────
+
+export class FlattenError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'FlattenError'
+  }
+}
+
+/**
+ * Infer the output type string of an ExprNode, given the module type context.
+ * Returns undefined when the type cannot be statically determined.
+ */
+function inferExprOutputType(
+  expr: ExprNode,
+  moduleInfos: Map<string, ModuleInfo>,
+): string | undefined {
+  if (typeof expr === 'number') return 'float'
+  if (typeof expr === 'boolean') return 'bool'
+  if (Array.isArray(expr)) return `float[${(expr as unknown[]).length}]`
+  if (typeof expr !== 'object' || expr === null) return undefined
+  const obj = expr as Record<string, unknown>
+  switch (obj.op as string) {
+    case 'ref': {
+      const modInfo = moduleInfos.get(obj.module as string)
+      if (!modInfo) return undefined
+      const outName = obj.output as string | number
+      const outIdx = typeof outName === 'number' ? outName : modInfo.outputNames.indexOf(outName)
+      if (outIdx === -1 || outIdx >= modInfo.outputTypes.length) return undefined
+      return portTypeToString(modInfo.outputTypes[outIdx])
+    }
+    case 'broadcast_to':
+      return `float[${(obj.shape as number[]).join(',')}]`
+    case 'zeros':
+    case 'ones':
+    case 'fill':
+    case 'array_literal':
+      return `float[${(obj.shape as number[]).join(',')}]`
+    default:
+      return undefined
+  }
+}
+
+/**
+ * Validate all wiring expressions against their destination port types.
+ * Throws FlattenError on incompatible connections (e.g. array → scalar).
+ * Inserts broadcast_to wrappers for compatible shape mismatches (e.g. scalar → array[4]).
+ * Returns a new Map with any necessary broadcast wrappers applied.
+ */
+export function normalizeWiringTypes(
+  moduleInfos: Map<string, ModuleInfo>,
+  inputExprNodes: Map<string, ExprNode>,
+): Map<string, ExprNode> {
+  const result = new Map(inputExprNodes)
+
+  for (const [key, expr] of inputExprNodes) {
+    const colonIdx = key.indexOf(':')
+    const moduleName = key.slice(0, colonIdx)
+    const inputName = key.slice(colonIdx + 1)
+
+    const modInfo = moduleInfos.get(moduleName)
+    if (!modInfo) continue
+
+    const inputIdx = modInfo.inputNames.indexOf(inputName)
+    if (inputIdx === -1) continue
+
+    const dstTypeStr = portTypeToString(modInfo.inputTypes[inputIdx])
+    const srcTypeStr = inferExprOutputType(expr, moduleInfos)
+    if (srcTypeStr === undefined) continue
+
+    const check = checkArrayConnection(srcTypeStr, dstTypeStr, expr)
+    if (!check.compatible) {
+      throw new FlattenError(
+        `Wiring type mismatch on '${moduleName}'.${inputName}: ${check.error}`
+      )
+    }
+    if (check.broadcastExpr) {
+      result.set(key, check.broadcastExpr)
+    }
+  }
+
+  return result
+}
 
 // ─────────────────────────────────────────────────────────────
 // egress_plan_2 schema
@@ -458,7 +546,7 @@ function resolveRefs(
  * 4. Emit egress_plan_2 JSON
  */
 export function flattenPatch(session: SessionState): FlatPlan {
-  const { instanceRegistry, inputExprNodes, graphOutputs } = session
+  const { instanceRegistry, graphOutputs } = session
 
   // Build module info map
   const moduleInfos = new Map<string, ModuleInfo>()
@@ -467,6 +555,10 @@ export function flattenPatch(session: SessionState): FlatPlan {
     moduleInfos.set(name, extractModuleInfo(name, inst._def))
     moduleInstances.set(name, inst)
   }
+
+  // Validate and normalize wiring types (throws FlattenError on incompatible connections,
+  // inserts broadcast_to wrappers for shape mismatches from patch-file or direct wiring)
+  const inputExprNodes = normalizeWiringTypes(moduleInfos, session.inputExprNodes)
 
   // Topological sort
   const deps = buildDependencyGraph(moduleInfos.keys(), inputExprNodes)
