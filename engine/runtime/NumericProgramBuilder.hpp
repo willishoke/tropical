@@ -888,7 +888,7 @@ inline bool build_numeric_program(
         if (lhs.kind == NumericValueKind::Array && rhs.kind == NumericValueKind::Scalar)
         {
           const uint32_t dst_slot = allocate_array_slot_with_size(state.array_storage, lhs.array_size);
-          jit_instr.op = egress_jit::NumericOp::ArrayDivScalar;
+          jit_instr.op = egress_jit::NumericOp::ArrayAddScalar;
           jit_instr.dst = dst_slot;
           jit_instr.src_a = lhs.array_slot;
           jit_instr.src_b = instr.src_b;
