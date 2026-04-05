@@ -11,7 +11,7 @@
 #include "graph/GraphTypes.hpp"
 #include "runtime/NumericProgramBuilder.hpp"
 #include "runtime/ExprCompiler.hpp"
-#include "c_api/plan_loader.hpp"
+#include "runtime/PlanParser.hpp"
 #include "jit/OrcJitEngine.hpp"
 
 #include <array>
