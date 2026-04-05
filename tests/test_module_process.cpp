@@ -1502,6 +1502,171 @@ int main()
     egress_graph_free(g);
   });
 
+  // ── FlatRuntime tests ──────────────────────────────────────────────────
+
+  run_test("flat runtime: sawtooth phase accumulator via plan JSON", []() {
+    // Build a minimal egress_plan_2 plan:
+    //   1 register (phase), init = 0.0
+    //   register expr: mod(add(reg(0), div(440.0, sample_rate)), 1.0)
+    //   1 output: reg(0)  (reads phase — previous sample value)
+    //   outputs: [0]  (output 0 feeds audio mix)
+    //
+    // This is a sawtooth oscillator: phase ramps 0→1 at 440 Hz.
+    const char* plan_json = R"({
+      "schema": "egress_plan_2",
+      "config": { "sample_rate": 44100.0 },
+      "output_exprs": [
+        { "op": "reg", "id": 0 }
+      ],
+      "register_exprs": [
+        { "op": "mod", "args": [
+          { "op": "add", "args": [
+            { "op": "reg", "id": 0 },
+            { "op": "div", "args": [ 440.0, { "op": "sample_rate" } ] }
+          ]},
+          1.0
+        ]}
+      ],
+      "state_init": [0.0],
+      "register_names": ["phase"],
+      "outputs": [0]
+    })";
+
+    const unsigned int BUF_LEN = 256;
+    egress_runtime_t rt = egress_runtime_new(BUF_LEN);
+    ASSERT(rt != nullptr);
+
+    ASSERT_OK(egress_runtime_load_plan(rt, plan_json, strlen(plan_json)));
+
+    // Process one buffer
+    egress_runtime_process(rt);
+    const double* buf = egress_runtime_output_buffer(rt);
+    ASSERT(buf != nullptr);
+
+    // First sample: phase was 0.0 (register reads previous-sample value)
+    // Output is mixed /20.0, so sample[0] = 0.0 / 20.0 = 0.0
+    ASSERT(buf[0] >= -0.001 && buf[0] <= 0.001);
+
+    // Phase increment = 440/44100 ≈ 0.009977
+    // After sample 0, register becomes 0.009977
+    // Sample 1 reads that → 0.009977 / 20.0 ≈ 0.000499
+    const double inc = 440.0 / 44100.0;
+    const double expected_s1 = inc / 20.0;
+    ASSERT(buf[1] >= expected_s1 - 0.0001 && buf[1] <= expected_s1 + 0.0001);
+
+    // Check monotonic increase for first ~90 samples (well before wrap at ~100.2)
+    for (int i = 1; i < 90; ++i)
+    {
+      ASSERT(buf[i] > buf[i - 1]);
+    }
+
+    // Verify approximate value at sample 50: phase ≈ 50 * inc, output ≈ 50*inc/20
+    const double expected_s50 = 50.0 * inc / 20.0;
+    ASSERT(buf[50] >= expected_s50 - 0.001 && buf[50] <= expected_s50 + 0.001);
+
+    egress_runtime_free(rt);
+  });
+
+  run_test("flat runtime: two outputs with separate mix", []() {
+    // Two outputs: constant 1.0 and constant 2.0
+    // Mix only output 1 (the 2.0)
+    // Expected audio: 2.0 / 20.0 = 0.1
+    const char* plan_json = R"({
+      "schema": "egress_plan_2",
+      "config": { "sample_rate": 44100.0 },
+      "output_exprs": [
+        1.0,
+        2.0
+      ],
+      "register_exprs": [],
+      "state_init": [],
+      "register_names": [],
+      "outputs": [1]
+    })";
+
+    const unsigned int BUF_LEN = 32;
+    egress_runtime_t rt = egress_runtime_new(BUF_LEN);
+    ASSERT(rt != nullptr);
+    ASSERT_OK(egress_runtime_load_plan(rt, plan_json, strlen(plan_json)));
+
+    egress_runtime_process(rt);
+    const double* buf = egress_runtime_output_buffer(rt);
+    ASSERT(buf != nullptr);
+
+    // Every sample should be 2.0 / 20.0 = 0.1
+    for (unsigned int i = 0; i < BUF_LEN; ++i)
+    {
+      ASSERT(buf[i] >= 0.099 && buf[i] <= 0.101);
+    }
+
+    egress_runtime_free(rt);
+  });
+
+  run_test("flat runtime: hot-swap preserves register state", []() {
+    // Load a plan with a counter register, process some samples,
+    // then reload a compatible plan and check state is preserved.
+    //
+    // Register: counter, init = 0.0, update = add(reg(0), 1.0)
+    // Output: reg(0)
+    const char* plan1 = R"({
+      "schema": "egress_plan_2",
+      "config": { "sample_rate": 44100.0 },
+      "output_exprs": [ { "op": "reg", "id": 0 } ],
+      "register_exprs": [
+        { "op": "add", "args": [ { "op": "reg", "id": 0 }, 1.0 ] }
+      ],
+      "state_init": [0.0],
+      "register_names": ["counter"],
+      "outputs": [0]
+    })";
+
+    const unsigned int BUF_LEN = 1;
+    egress_runtime_t rt = egress_runtime_new(BUF_LEN);
+    ASSERT(rt != nullptr);
+    ASSERT_OK(egress_runtime_load_plan(rt, plan1, strlen(plan1)));
+
+    // Process 10 samples — counter goes 0,1,2,...,9
+    for (int i = 0; i < 10; ++i)
+      egress_runtime_process(rt);
+
+    // Output after 10th process: reads reg(0) which was 9 going into the
+    // 10th call, then becomes 10 after. The output reads the *old* value.
+    // Actually: sample reads reg THEN updates. After 10 calls:
+    //   call 0: output=0, reg becomes 1
+    //   call 1: output=1, reg becomes 2
+    //   ...
+    //   call 9: output=9, reg becomes 10
+    // So the last output buffer has value 9.0 / 20.0
+
+    // Hot-swap: load same structure (same register_names) — should preserve counter
+    const char* plan2 = R"({
+      "schema": "egress_plan_2",
+      "config": { "sample_rate": 44100.0 },
+      "output_exprs": [ { "op": "reg", "id": 0 } ],
+      "register_exprs": [
+        { "op": "add", "args": [ { "op": "reg", "id": 0 }, 1.0 ] }
+      ],
+      "state_init": [0.0],
+      "register_names": ["counter"],
+      "outputs": [0]
+    })";
+
+    ASSERT_OK(egress_runtime_load_plan(rt, plan2, strlen(plan2)));
+
+    // Process one more sample — if state was preserved, counter should be 10
+    egress_runtime_process(rt);
+    const double* buf = egress_runtime_output_buffer(rt);
+    ASSERT(buf != nullptr);
+
+    // Output should be 10.0 / 20.0 = 0.5
+    const double expected = 10.0 / 20.0;
+    ASSERT(buf[0] >= expected - 0.01 && buf[0] <= expected + 0.01);
+
+    egress_runtime_free(rt);
+  });
+
+  // ── Graph-based tests ──────────────────────────────────────────────────
+
   run_test("register type declaration and metadata", []() {
     egress_graph_t g = egress_graph_new(1);
     ASSERT(g != nullptr);

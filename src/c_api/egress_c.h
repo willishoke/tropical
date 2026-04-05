@@ -260,6 +260,21 @@ unsigned int egress_dac_get_active_device(egress_dac_t);
 /* Switch the running DAC to a different output device.  Returns false on failure. */
 bool         egress_dac_switch_device(egress_dac_t, unsigned int device_id);
 
+/* ---------- FlatRuntime API ---------- */
+typedef void* egress_runtime_t;
+
+egress_runtime_t egress_runtime_new(unsigned int buffer_length);
+void             egress_runtime_free(egress_runtime_t);
+bool             egress_runtime_load_plan(egress_runtime_t, const char* plan_json, size_t len);
+void             egress_runtime_process(egress_runtime_t);
+const double*    egress_runtime_output_buffer(egress_runtime_t);
+unsigned int     egress_runtime_get_buffer_length(egress_runtime_t);
+
+/* Fade control (for DAC) */
+void             egress_runtime_begin_fade_in(egress_runtime_t);
+void             egress_runtime_begin_fade_out(egress_runtime_t);
+bool             egress_runtime_is_fade_out_complete(egress_runtime_t);
+
 #ifdef __cplusplus
 }
 #endif

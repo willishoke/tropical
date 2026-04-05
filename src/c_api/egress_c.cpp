@@ -4,6 +4,7 @@
 #include "expr/Expr.hpp"
 #include "graph/Graph.hpp"
 #include "graph/Module.hpp"
+#include "runtime/FlatRuntime.hpp"
 #include "dac/EgressDAC.hpp"
 
 #include <algorithm>
@@ -1188,6 +1189,62 @@ bool egress_dac_switch_device(egress_dac_t d, unsigned int device_id)
   if (!d) return false;
   try { return static_cast<EgressDAC*>(d)->switch_device(device_id); }
   catch (const std::exception& e) { set_error(e.what()); return false; }
+}
+
+// ---------- FlatRuntime API ----------
+
+egress_runtime_t egress_runtime_new(unsigned int buffer_length)
+{
+  try { return new egress_runtime::FlatRuntime(buffer_length); }
+  catch (const std::exception& e) { set_error(e.what()); return nullptr; }
+}
+
+void egress_runtime_free(egress_runtime_t r)
+{
+  delete static_cast<egress_runtime::FlatRuntime*>(r);
+}
+
+bool egress_runtime_load_plan(egress_runtime_t r, const char* plan_json, size_t len)
+{
+  if (!r || !plan_json) return false;
+  try
+  {
+    return static_cast<egress_runtime::FlatRuntime*>(r)->load_plan(std::string(plan_json, len));
+  }
+  catch (const std::exception& e) { set_error(e.what()); return false; }
+}
+
+void egress_runtime_process(egress_runtime_t r)
+{
+  if (r) static_cast<egress_runtime::FlatRuntime*>(r)->process();
+}
+
+const double* egress_runtime_output_buffer(egress_runtime_t r)
+{
+  if (!r) return nullptr;
+  return static_cast<egress_runtime::FlatRuntime*>(r)->outputBuffer.data();
+}
+
+unsigned int egress_runtime_get_buffer_length(egress_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<egress_runtime::FlatRuntime*>(r)->getBufferLength();
+}
+
+void egress_runtime_begin_fade_in(egress_runtime_t r)
+{
+  if (r) static_cast<egress_runtime::FlatRuntime*>(r)->begin_fade_in();
+}
+
+void egress_runtime_begin_fade_out(egress_runtime_t r)
+{
+  if (r) static_cast<egress_runtime::FlatRuntime*>(r)->begin_fade_out();
+}
+
+bool egress_runtime_is_fade_out_complete(egress_runtime_t r)
+{
+  if (!r) return true;
+  return static_cast<egress_runtime::FlatRuntime*>(r)->is_fade_out_complete();
 }
 
 } // extern "C"
