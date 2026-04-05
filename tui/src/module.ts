@@ -1,21 +1,15 @@
 /**
  * Module spec builder DSL. Port of egress/module.py.
  *
- * Key differences from Python:
- * - No operator overloading; arithmetic uses named functions from expr.ts
- * - define_module takes a process callback instead of using a context manager
- * - delay() reads from a module-level context stack (same pattern as Python,
- *   works fine since Node.js is single-threaded during synchronous callbacks)
- * - ModuleType.call() is used for nested calls inside process bodies;
- *   ModuleType.instantiate(graph) is used for top-level instantiation
+ * Module types are defined purely in TypeScript. The process function builds
+ * expression trees (ExprNode) that are serialized to JSON and sent to FlatRuntime.
+ * No C API calls — all module instantiation is TS-only.
  */
 
-import * as b from './bindings.js'
 import {
   SignalExpr, ExprCoercible, coerce, ExprNode,
   inputExpr, registerExpr, nestedOutputExpr, delayValueExpr,
 } from './expr.js'
-import type { Graph } from './graph.js'
 
 // ---------- Internal build context stack ----------
 
@@ -25,16 +19,11 @@ interface DelayState {
   updateExpr: SignalExpr
 }
 
-interface NestedEntry {
-  nodeId: number
-  nestedH: unknown
-}
-
 class _BuildContext {
   readonly inputCount: number
   readonly sampleRate: number
   readonly delayStates: DelayState[] = []
-  readonly nestedModules: NestedEntry[] = []
+  readonly nestedModules: { nodeId: number }[] = []
   private _delayNodeCounter = 0
 
   constructor(inputCount: number, sampleRate: number) {
@@ -103,34 +92,6 @@ export function delay(value: ExprCoercible, init = 0.0): SignalExpr {
 
 export type ValueCoercible = boolean | number | number[] | number[][]
 
-function scalarValueHandle(v: boolean | number): unknown {
-  if (typeof v === 'boolean') return b.check(b.egress_value_bool(v), 'value_bool')
-  return b.check(b.egress_value_float(v), 'value_float')
-}
-
-export function valueHandle(v: ValueCoercible): unknown {
-  if (typeof v === 'boolean' || typeof v === 'number') return scalarValueHandle(v)
-  if (Array.isArray(v)) {
-    if (v.length > 0 && Array.isArray(v[0])) {
-      // Matrix
-      const rows = v as number[][]
-      const nRows = rows.length
-      const nCols = rows[0].length
-      const items = rows.flat().map(x => scalarValueHandle(x as number))
-      const h = b.check(b.egress_value_matrix(items, nRows, nCols), 'value_matrix')
-      items.forEach(ih => b.egress_value_free(ih))
-      return h
-    } else {
-      // Flat array
-      const items = (v as number[]).map(x => scalarValueHandle(x))
-      const h = b.check(b.egress_value_array(items, items.length), 'value_array')
-      items.forEach(ih => b.egress_value_free(ih))
-      return h
-    }
-  }
-  throw new TypeError(`Cannot convert ${typeof v} to egress value`)
-}
-
 // ---------- Typed register helpers ----------
 
 /** A register initialiser: either a bare value (backwards compatible) or { init, type }. */
@@ -193,18 +154,6 @@ export function feedback(
 
 // ---------- Definition shape ----------
 
-interface RegisterSpec {
-  bodyH: unknown | null
-  initH: unknown
-  typeName?: string
-}
-
-interface DelaySpecHandle {
-  nodeId: number
-  initH: unknown
-  updateH: unknown
-}
-
 interface ModuleDef {
   typeName: string
   inputNames: string[]
@@ -217,19 +166,14 @@ interface ModuleDef {
   sampleRate: number
   rawInputDefaults: Record<string, ExprCoercible>
   inputDefaults: (SignalExpr | null)[]
-  outputExprHandles: unknown[]
-  registerSpecs: RegisterSpec[]
-  delaySpecHandles: DelaySpecHandle[]
   delayInitValues: number[]
-  nestedSpecHandles: NestedEntry[]
   // ExprNode trees (JSON-serializable) for each output and register update
   outputExprNodes: ExprNode[]
   registerExprNodes: (ExprNode | null)[]
-  // Keep JS objects alive to protect their koffi handles from FinalizationRegistry
-  _liveOutputExprs: SignalExpr[]
-  _liveRegUpdateExprs: (SignalExpr | null)[]
-  _liveDelayUpdateExprs: SignalExpr[]
-  _liveValueHandles: unknown[]   // egress_value_t — managed manually
+  // Delay update expressions
+  delayUpdateNodes: ExprNode[]
+  // Nested module call info (for the call() DSL)
+  nestedTypes: ModuleType[]
 }
 
 // ---------- ModuleType ----------
@@ -252,69 +196,15 @@ export class ModuleType {
     if (!ctx) {
       throw new Error(
         `ModuleType.call() used outside a defineModule body. ` +
-        `Use .instantiate(graph) for top-level instantiation.`
+        `Use .instantiateAs(name) for top-level instantiation.`
       )
     }
     return this._nestedCall(ctx, args)
   }
 
-  /** Top-level instantiation onto a Graph (auto-generates a name). */
-  instantiate(graph: Graph): ModuleInstance {
-    return this._instantiate(graph)
-  }
-
-  /** Instantiate with an explicit instance name (used by the MCP server). */
-  instantiateAs(graph: Graph, name: string): ModuleInstance {
-    const d = this._def
-    const specH = this._buildSpec()
-    try {
-      graph.addModule(name, specH)
-    } finally {
-      b.egress_module_spec_free(specH)
-    }
-    this._registerPortTypes(graph, name)
-    for (let i = 0; i < d.inputDefaults.length; i++) {
-      const def = d.inputDefaults[i]
-      if (def !== null) graph.setInputExpr(name, i, def)
-    }
-    return new ModuleInstance(d, graph, name)
-  }
-
-  private _instantiate(graph: Graph): ModuleInstance {
-    const d = this._def
-    const name = graph.nextName(d.typeName)
-    const specH = this._buildSpec()
-    try {
-      graph.addModule(name, specH)
-    } finally {
-      b.egress_module_spec_free(specH)
-    }
-
-    this._registerPortTypes(graph, name)
-
-    // Set input defaults
-    for (let i = 0; i < d.inputDefaults.length; i++) {
-      const def = d.inputDefaults[i]
-      if (def !== null) graph.setInputExpr(name, i, def)
-    }
-
-    return new ModuleInstance(d, graph, name)
-  }
-
-  private _registerPortTypes(graph: Graph, name: string): void {
-    const d = this._def
-    for (let i = 0; i < d.inputPortTypes.length; i++) {
-      const t = d.inputPortTypes[i]
-      if (t !== undefined) graph.declareInputType(name, i, t)
-    }
-    for (let i = 0; i < d.outputPortTypes.length; i++) {
-      const t = d.outputPortTypes[i]
-      if (t !== undefined) graph.declareOutputType(name, i, t)
-    }
-    for (let i = 0; i < d.registerPortTypes.length; i++) {
-      const t = d.registerPortTypes[i]
-      if (t !== undefined) graph.declareRegisterType(name, i, t)
-    }
+  /** Instantiate with an explicit instance name. Returns a TS-only ModuleInstance. */
+  instantiateAs(name: string): ModuleInstance {
+    return new ModuleInstance(this._def, name)
   }
 
   private _nestedCall(ctx: _BuildContext, args: ExprCoercible[]): SignalExpr | SignalExpr[] {
@@ -336,53 +226,12 @@ export class ModuleType {
       }
     }
 
-    const nestedH = b.check(
-      b.egress_nested_spec_new(inputNames.length, d.sampleRate),
-      'nested_spec_new',
-    )
-    const nodeId = b.egress_nested_spec_node_id(nestedH) as number
-
-    for (const arg of callArgs) {
-      b.egress_nested_spec_add_input_expr(nestedH, arg._h)
-    }
-    for (const exprH of d.outputExprHandles) {
-      b.egress_nested_spec_add_output(nestedH, exprH)
-    }
-    for (const { bodyH, initH } of d.registerSpecs) {
-      b.egress_nested_spec_add_register(nestedH, bodyH, initH)
-    }
-    for (const { initH, updateH } of d.delaySpecHandles) {
-      b.egress_nested_spec_add_delay_state(nestedH, initH, updateH)
-    }
-    for (const { nestedH: innerH } of d.nestedSpecHandles) {
-      b.egress_nested_spec_add_nested(nestedH, innerH)
-    }
-
-    ctx.nestedModules.push({ nodeId, nestedH })
+    // Allocate a node ID for this nested call
+    const nodeId = ctx.nestedModules.length
+    ctx.nestedModules.push({ nodeId })
 
     const outputs = d.outputNames.map((_, outId) => nestedOutputExpr(nodeId, outId))
     return outputs.length === 1 ? outputs[0] : outputs
-  }
-
-  _buildSpec(): unknown {
-    const d = this._def
-    const specH = b.check(
-      b.egress_module_spec_new(d.inputNames.length, d.sampleRate),
-      'module_spec_new',
-    )
-    for (const exprH of d.outputExprHandles) {
-      b.egress_module_spec_add_output(specH, exprH)
-    }
-    for (const { bodyH, initH } of d.registerSpecs) {
-      b.egress_module_spec_add_register(specH, bodyH, initH)
-    }
-    for (const { initH, updateH } of d.delaySpecHandles) {
-      b.egress_module_spec_add_delay_state(specH, initH, updateH)
-    }
-    for (const { nestedH } of d.nestedSpecHandles) {
-      b.egress_module_spec_add_nested(specH, nestedH)
-    }
-    return specH
   }
 }
 
@@ -390,12 +239,10 @@ export class ModuleType {
 
 export class ModuleInstance {
   readonly _def: ModuleDef
-  readonly _graph: Graph
   readonly name: string
 
-  constructor(def: ModuleDef, graph: Graph, name: string) {
+  constructor(def: ModuleDef, name: string) {
     this._def = def
-    this._graph = graph
     this.name = name
   }
 
@@ -419,7 +266,6 @@ export class ModuleInstance {
     if (idx === -1) throw new Error(`Unknown output '${name}' on module '${this.name}'.`)
     return idx
   }
-
 }
 
 // ---------- defineModule ----------
@@ -515,24 +361,6 @@ export function defineModule(
     regUpdateExprs[idx] = coerce(regVal)
   }
 
-  // Build C value handles for register initial values
-  const liveValueHandles: unknown[] = []
-  const registerSpecs: RegisterSpec[] = []
-
-  for (let i = 0; i < regNames.length; i++) {
-    const initH = valueHandle(regInitValues[i])
-    liveValueHandles.push(initH)
-    registerSpecs.push({ bodyH: regUpdateExprs[i]?._h ?? null, initH, typeName: regPortTypes[i] })
-  }
-
-  // Build delay spec handles
-  const delaySpecHandles: DelaySpecHandle[] = []
-  for (const { nodeId, initVal, updateExpr } of ctx.delayStates) {
-    const initH = valueHandle(initVal)
-    liveValueHandles.push(initH)
-    delaySpecHandles.push({ nodeId, initH, updateH: updateExpr._h })
-  }
-
   const def: ModuleDef = {
     typeName: name,
     inputNames,
@@ -545,17 +373,11 @@ export function defineModule(
     sampleRate,
     rawInputDefaults: inputDefaults ?? {},
     inputDefaults: parsedDefaults,
-    outputExprHandles: outputExprs.map(e => e._h),
-    registerSpecs,
-    delaySpecHandles,
     delayInitValues: ctx.delayStates.map(d => d.initVal),
-    nestedSpecHandles: ctx.nestedModules.map(({ nodeId, nestedH }) => ({ nodeId, nestedH })),
     outputExprNodes: outputExprs.map(e => e._node),
     registerExprNodes: regUpdateExprs.map(e => e?._node ?? null),
-    _liveOutputExprs: outputExprs,
-    _liveRegUpdateExprs: regUpdateExprs,
-    _liveDelayUpdateExprs: ctx.delayStates.map(d => d.updateExpr),
-    _liveValueHandles: liveValueHandles,
+    delayUpdateNodes: ctx.delayStates.map(d => d.updateExpr._node),
+    nestedTypes: [],
   }
 
   return new ModuleType(def)
@@ -567,8 +389,7 @@ export class PureFunction {
   private _def: {
     inputNames: string[]
     outputNames: string[]
-    outputExprHandles: unknown[]
-    _liveOutputExprs: SignalExpr[]
+    outputExprNodes: ExprNode[]
   }
 
   constructor(def: PureFunction['_def']) {
@@ -581,17 +402,12 @@ export class PureFunction {
       throw new TypeError(`PureFunction expects ${d.inputNames.length} arguments.`)
     }
     const callArgs = args.map(a => coerce(a))
-    const argHandles = callArgs.map(a => a._h)
     const argNodes = callArgs.map(a => a._node)
 
     const outputs: SignalExpr[] = []
-    for (let i = 0; i < d.outputExprHandles.length; i++) {
-      const bodyH = d.outputExprHandles[i]
-      const fnH = b.check(b.egress_expr_function(d.inputNames.length, bodyH), 'expr_function')
-      const callH = b.check(b.egress_expr_call(fnH, argHandles, argHandles.length), 'expr_call')
-      b.egress_expr_free(fnH)
-      const bodyNode = d._liveOutputExprs[i]._node
-      outputs.push(SignalExpr.fromHandle(callH, {
+    for (let i = 0; i < d.outputExprNodes.length; i++) {
+      const bodyNode = d.outputExprNodes[i]
+      outputs.push(SignalExpr.fromNode({
         op: 'call',
         callee: { op: 'function', param_count: d.inputNames.length, body: bodyNode },
         args: argNodes,
@@ -627,7 +443,6 @@ export function definePureFunction(
   return new PureFunction({
     inputNames,
     outputNames,
-    outputExprHandles: outputExprs.map(e => e._h),
-    _liveOutputExprs: outputExprs,
+    outputExprNodes: outputExprs.map(e => e._node),
   })
 }

@@ -355,20 +355,19 @@ export function flattenPatch(session: SessionState): FlatPlan {
     }
 
     // Process delay state registers (delay_value(N) reads from delayBase + N)
-    for (let i = 0; i < def.delaySpecHandles.length; i++) {
-      const { nodeId } = def.delaySpecHandles[i]
-      const updateNode = def._liveDelayUpdateExprs[i]._node
+    for (let i = 0; i < def.delayUpdateNodes.length; i++) {
+      const updateNode = def.delayUpdateNodes[i]
       if (updateNode !== null && updateNode !== undefined) {
         flatRegisterExprs.push(processExpr(updateNode as ExprNode))
       } else {
         // No update — hold current value
-        flatRegisterExprs.push({ op: 'reg', id: delayBase + nodeId })
+        flatRegisterExprs.push({ op: 'reg', id: delayBase + i })
       }
-      flatRegisterNames.push(`${name}_delay_${nodeId}`)
+      flatRegisterNames.push(`${name}_delay_${i}`)
       flatStateInit.push(def.delayInitValues[i] ?? 0)
     }
 
-    registerBase += def.registerNames.length + def.delaySpecHandles.length
+    registerBase += def.registerNames.length + def.delayUpdateNodes.length
   }
 
   // Build output indices: map graphOutputs → flat output indices

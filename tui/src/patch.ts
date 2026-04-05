@@ -3,7 +3,6 @@
  * Replaces egress/yaml_schema.py with a clean-break JSON format.
  */
 
-import * as b from './bindings.js'
 import {
   SignalExpr, ExprCoercible, coerce,
   add, sub, mul, div, floorDiv, mod, pow_, matmul,
@@ -12,17 +11,15 @@ import {
   neg, abs_, sin, log, logicalNot,
   clamp, select, arrayPack, arraySet, matrix,
   inputExpr, registerExpr, refExpr, sampleRate, sampleIndex,
-  paramExpr, triggerParamExpr,
   constructStruct, fieldAccess, constructVariant, matchVariant,
 } from './expr.js'
 import {
   defineModule, ModuleType, ModuleInstance, delay,
-  valueHandle, SymbolMap, ValueCoercible, RegInit,
+  SymbolMap, ValueCoercible, RegInit,
 } from './module.js'
-import { Graph } from './graph.js'
-import { DAC } from './audio.js'
 import { Param, Trigger } from './param.js'
-import { applySessionWiring, applyFlatPlan } from './apply_plan.js'
+import { applyFlatPlan } from './apply_plan.js'
+import { Runtime } from './runtime.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -83,8 +80,6 @@ export interface PatchJSON {
   schema: 'egress_patch_1'
   config?: {
     buffer_length?: number
-    worker_count?: number
-    fusion_enabled?: boolean
   }
   /** Inline ADT type definitions (loaded before module instantiation). */
   type_defs?: TypeDefJSON[]
@@ -118,8 +113,8 @@ export interface PatchJSON {
 // ─────────────────────────────────────────────────────────────
 
 export interface SessionState {
-  graph: Graph
-  dac: DAC | null
+  bufferLength: number
+  dac: import('./audio.js').DAC | null  // lazy type import to avoid circular dep
   typeRegistry: Map<string, ModuleType>
   instanceRegistry: Map<string, ModuleInstance>
   graphOutputs: Array<{ module: string; output: string }>
@@ -127,13 +122,15 @@ export interface SessionState {
   triggerRegistry: Map<string, Trigger>
   /** Canonical input wiring: key is `${module}:${input}`, value is the ExprNode for round-trip save. */
   inputExprNodes: Map<string, ExprNode>  // key: `${module}:${input}`
-  /** Optional FlatRuntime — when set, wiring goes through applyFlatPlan instead of Graph. */
-  runtime?: import('./runtime.js').Runtime
+  /** FlatRuntime — all audio goes through this. */
+  runtime: Runtime
+  /** Name counter for auto-generated instance names. */
+  _nameCounters: Map<string, number>
 }
 
 export function makeSession(bufferLength = 512): SessionState {
   return {
-    graph: new Graph(bufferLength),
+    bufferLength,
     dac: null,
     typeRegistry: new Map(),
     instanceRegistry: new Map(),
@@ -141,7 +138,16 @@ export function makeSession(bufferLength = 512): SessionState {
     paramRegistry: new Map(),
     triggerRegistry: new Map(),
     inputExprNodes: new Map(),
+    runtime: new Runtime(bufferLength),
+    _nameCounters: new Map(),
   }
+}
+
+/** Generate a unique instance name from a type prefix. */
+export function nextName(session: SessionState, prefix: string): string {
+  const count = (session._nameCounters.get(prefix) ?? 0) + 1
+  session._nameCounters.set(prefix, count)
+  return `${prefix}${count}`
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -224,14 +230,14 @@ export function buildExpr(node: ExprNode, ctx: BuildCtx): SignalExpr {
     const n = node as { op: string; name: string }
     const p = ctx.paramRegistry.get(n.name)
     if (!p) throw new Error(`Unknown param '${n.name}'.`)
-    return SignalExpr.fromHandle(b.check(b.egress_expr_param(p._h), 'expr_param'), { op: 'smoothed_param', name: n.name, _ptr: true })
+    return SignalExpr.fromNode({ op: 'smoothed_param', name: n.name, _ptr: true, _handle: p._h })
   }
 
   if (op === 'trigger') {
     const n = node as { op: string; name: string }
     const t = ctx.triggerRegistry.get(n.name)
     if (!t) throw new Error(`Unknown trigger '${n.name}'.`)
-    return SignalExpr.fromHandle(b.check(b.egress_expr_trigger_param(t._h), 'expr_trigger_param'), { op: 'trigger_param', name: n.name, _ptr: true })
+    return SignalExpr.fromNode({ op: 'trigger_param', name: n.name, _ptr: true, _handle: t._h })
   }
 
   if (op === 'sample_rate')  return sampleRate()
@@ -261,10 +267,6 @@ export function buildExpr(node: ExprNode, ctx: BuildCtx): SignalExpr {
     if (Array.isArray(alias)) {
       const idx = typeof n.output === 'number' ? n.output : null
       if (idx === null) {
-        // Look up by output name in the type
-        const type = ctx.typeRegistry.get(
-          (ctx.instanceRegistry.get(n.ref) ?? null)?.typeName ?? ''
-        )
         throw new Error(`nested_out: use numeric index or provide type context for '${n.ref}.${n.output}'`)
       }
       return alias[idx]
@@ -611,27 +613,13 @@ export function prettyExpr(
 // ─────────────────────────────────────────────────────────────
 
 export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void {
-  // Rebuild from a clean slate (same graph object, wiped state)
-  const bufLen = json.config?.buffer_length ?? session.graph.bufferLength
-  session.graph = new Graph(bufLen)
-  if (json.config?.worker_count !== undefined) session.graph.workerCount = json.config.worker_count
-  if (json.config?.fusion_enabled !== undefined) session.graph.fusionEnabled = json.config.fusion_enabled
-
   session.dac = null
   session.instanceRegistry.clear()
   session.graphOutputs.length = 0
   session.paramRegistry.clear()
   session.triggerRegistry.clear()
   session.inputExprNodes.clear()
-
-  // Load ADT type definitions
-  for (const td of json.type_defs ?? []) {
-    if (td.kind === 'struct') {
-      session.graph.defineStruct(td.name, td.fields)
-    } else {
-      session.graph.defineSumType(td.name, td.variants)
-    }
-  }
+  session._nameCounters.clear()
 
   // Load inline module type definitions
   for (const def of json.module_defs ?? []) {
@@ -648,71 +636,56 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
     }
   }
 
-  // Batch module instantiation + wiring into a single C++ rebuild.
-  // addModule() and setInputExpr() skip rebuilds while a batch is active;
-  // loadPlan() detects the active batch and defers its own end_update().
-  // The single endUpdate() at the end triggers one fused JIT compile.
-  session.graph.beginUpdate()
-  try {
-    // Instantiate modules (rebuilds deferred)
-    for (const entry of json.modules) {
-      const type = session.typeRegistry.get(entry.type)
-      if (!type) throw new Error(`Unknown module type '${entry.type}'.`)
-      const inst = entry.name
-        ? type.instantiateAs(session.graph, entry.name)
-        : type.instantiate(session.graph)
-      session.instanceRegistry.set(inst.name, inst)
-    }
-
-    // Populate wiring state — connections, input expressions, outputs
-    for (const conn of json.connections ?? []) {
-      const srcInst = session.instanceRegistry.get(conn.src)
-      const dstInst = session.instanceRegistry.get(conn.dst)
-      if (!srcInst) throw new Error(`Connection src module '${conn.src}' not found.`)
-      if (!dstInst) throw new Error(`Connection dst module '${conn.dst}' not found.`)
-      const srcId = typeof conn.src_output === 'number' ? conn.src_output : srcInst.outputIndex(conn.src_output)
-      const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
-      const srcOutName = srcInst.outputNames[srcId]
-      const dstInName  = dstInst.inputNames[dstId]
-      session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
-    }
-
-    for (const ie of json.input_exprs ?? []) {
-      const inst = session.instanceRegistry.get(ie.module)
-      if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
-      session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
-    }
-
-    // Ensure module input defaults are included in the plan so they survive clearWiring()
-    for (const [name, inst] of session.instanceRegistry) {
-      const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
-      for (const [inputName, value] of Object.entries(defaults)) {
-        const key = `${name}:${inputName}`
-        if (!session.inputExprNodes.has(key)) {
-          session.inputExprNodes.set(key, value)
-        }
-      }
-    }
-
-    for (const out of json.outputs ?? []) {
-      if ('expr' in out) {
-        throw new Error('Output expressions not supported in plan-based path. Use module output refs instead.')
-      }
-      const inst = session.instanceRegistry.get(out.module)
-      if (!inst) throw new Error(`Output module '${out.module}' not found.`)
-      session.graphOutputs.push({ module: out.module, output: String(out.output) })
-    }
-
-    // Apply wiring: FlatRuntime if available, otherwise Graph pipeline
-    if (session.runtime) applyFlatPlan(session, session.runtime)
-    else applySessionWiring(session)
-
-    // Single rebuild for all module additions + wiring
-    session.graph.endUpdate()
-  } catch (e) {
-    try { session.graph.endUpdate() } catch {}
-    throw e
+  // Instantiate modules (TS-only — no C API calls)
+  for (const entry of json.modules) {
+    const type = session.typeRegistry.get(entry.type)
+    if (!type) throw new Error(`Unknown module type '${entry.type}'.`)
+    const name = entry.name ?? nextName(session, type.name)
+    const inst = type.instantiateAs(name)
+    session.instanceRegistry.set(inst.name, inst)
   }
+
+  // Populate wiring state — connections, input expressions, outputs
+  for (const conn of json.connections ?? []) {
+    const srcInst = session.instanceRegistry.get(conn.src)
+    const dstInst = session.instanceRegistry.get(conn.dst)
+    if (!srcInst) throw new Error(`Connection src module '${conn.src}' not found.`)
+    if (!dstInst) throw new Error(`Connection dst module '${conn.dst}' not found.`)
+    const srcId = typeof conn.src_output === 'number' ? conn.src_output : srcInst.outputIndex(conn.src_output)
+    const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
+    const srcOutName = srcInst.outputNames[srcId]
+    const dstInName  = dstInst.inputNames[dstId]
+    session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
+  }
+
+  for (const ie of json.input_exprs ?? []) {
+    const inst = session.instanceRegistry.get(ie.module)
+    if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
+    session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
+  }
+
+  // Ensure module input defaults are included in the plan
+  for (const [name, inst] of session.instanceRegistry) {
+    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
+    for (const [inputName, value] of Object.entries(defaults)) {
+      const key = `${name}:${inputName}`
+      if (!session.inputExprNodes.has(key)) {
+        session.inputExprNodes.set(key, value)
+      }
+    }
+  }
+
+  for (const out of json.outputs ?? []) {
+    if ('expr' in out) {
+      throw new Error('Output expressions not supported in plan-based path. Use module output refs instead.')
+    }
+    const inst = session.instanceRegistry.get(out.module)
+    if (!inst) throw new Error(`Output module '${out.module}' not found.`)
+    session.graphOutputs.push({ module: out.module, output: String(out.output) })
+  }
+
+  // Apply wiring via FlatRuntime
+  applyFlatPlan(session, session.runtime)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -720,7 +693,7 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
 // ─────────────────────────────────────────────────────────────
 
 export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void {
-  // Fail fast on name collisions before touching the graph
+  // Fail fast on name collisions before touching state
   for (const entry of json.modules) {
     if (entry.name && session.instanceRegistry.has(entry.name))
       throw new Error(`merge_patch collision: module '${entry.name}' already exists.`)
@@ -728,15 +701,6 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
   for (const p of json.params ?? []) {
     if (session.paramRegistry.has(p.name) || session.triggerRegistry.has(p.name))
       throw new Error(`merge_patch collision: param/trigger '${p.name}' already exists.`)
-  }
-
-  // Load ADT type definitions
-  for (const td of json.type_defs ?? []) {
-    if (td.kind === 'struct') {
-      session.graph.defineStruct(td.name, td.fields)
-    } else {
-      session.graph.defineSumType(td.name, td.variants)
-    }
   }
 
   // Load inline type definitions
@@ -754,68 +718,56 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
     }
   }
 
-  // Batch module instantiation + wiring into a single C++ rebuild.
-  session.graph.beginUpdate()
-  try {
-    // Instantiate modules (rebuilds deferred)
-    for (const entry of json.modules) {
-      const type = session.typeRegistry.get(entry.type)
-      if (!type) throw new Error(`Unknown module type '${entry.type}'.`)
-      const inst = entry.name
-        ? type.instantiateAs(session.graph, entry.name)
-        : type.instantiate(session.graph)
-      session.instanceRegistry.set(inst.name, inst)
-    }
-
-    // Populate wiring state — connections, input expressions, outputs
-    for (const conn of json.connections ?? []) {
-      const srcInst = session.instanceRegistry.get(conn.src)
-      const dstInst = session.instanceRegistry.get(conn.dst)
-      if (!srcInst) throw new Error(`Connection src module '${conn.src}' not found.`)
-      if (!dstInst) throw new Error(`Connection dst module '${conn.dst}' not found.`)
-      const srcId = typeof conn.src_output === 'number' ? conn.src_output : srcInst.outputIndex(conn.src_output)
-      const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
-      const srcOutName = srcInst.outputNames[srcId]
-      const dstInName  = dstInst.inputNames[dstId]
-      session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
-    }
-
-    for (const ie of json.input_exprs ?? []) {
-      const inst = session.instanceRegistry.get(ie.module)
-      if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
-      session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
-    }
-
-    // Ensure module input defaults are included in the plan so they survive clearWiring()
-    for (const [name, inst] of session.instanceRegistry) {
-      const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
-      for (const [inputName, value] of Object.entries(defaults)) {
-        const key = `${name}:${inputName}`
-        if (!session.inputExprNodes.has(key)) {
-          session.inputExprNodes.set(key, value)
-        }
-      }
-    }
-
-    for (const out of json.outputs ?? []) {
-      if ('expr' in out) {
-        throw new Error('Output expressions not supported in plan-based path. Use module output refs instead.')
-      }
-      const inst = session.instanceRegistry.get(out.module)
-      if (!inst) throw new Error(`Output module '${out.module}' not found.`)
-      session.graphOutputs.push({ module: out.module, output: String(out.output) })
-    }
-
-    // Apply wiring: FlatRuntime if available, otherwise Graph pipeline
-    if (session.runtime) applyFlatPlan(session, session.runtime)
-    else applySessionWiring(session)
-
-    // Single rebuild for all module additions + wiring
-    session.graph.endUpdate()
-  } catch (e) {
-    try { session.graph.endUpdate() } catch {}
-    throw e
+  // Instantiate modules (TS-only)
+  for (const entry of json.modules) {
+    const type = session.typeRegistry.get(entry.type)
+    if (!type) throw new Error(`Unknown module type '${entry.type}'.`)
+    const name = entry.name ?? nextName(session, type.name)
+    const inst = type.instantiateAs(name)
+    session.instanceRegistry.set(inst.name, inst)
   }
+
+  // Populate wiring state — connections, input expressions, outputs
+  for (const conn of json.connections ?? []) {
+    const srcInst = session.instanceRegistry.get(conn.src)
+    const dstInst = session.instanceRegistry.get(conn.dst)
+    if (!srcInst) throw new Error(`Connection src module '${conn.src}' not found.`)
+    if (!dstInst) throw new Error(`Connection dst module '${conn.dst}' not found.`)
+    const srcId = typeof conn.src_output === 'number' ? conn.src_output : srcInst.outputIndex(conn.src_output)
+    const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
+    const srcOutName = srcInst.outputNames[srcId]
+    const dstInName  = dstInst.inputNames[dstId]
+    session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
+  }
+
+  for (const ie of json.input_exprs ?? []) {
+    const inst = session.instanceRegistry.get(ie.module)
+    if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
+    session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
+  }
+
+  // Ensure module input defaults are included in the plan
+  for (const [name, inst] of session.instanceRegistry) {
+    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
+    for (const [inputName, value] of Object.entries(defaults)) {
+      const key = `${name}:${inputName}`
+      if (!session.inputExprNodes.has(key)) {
+        session.inputExprNodes.set(key, value)
+      }
+    }
+  }
+
+  for (const out of json.outputs ?? []) {
+    if ('expr' in out) {
+      throw new Error('Output expressions not supported in plan-based path. Use module output refs instead.')
+    }
+    const inst = session.instanceRegistry.get(out.module)
+    if (!inst) throw new Error(`Output module '${out.module}' not found.`)
+    session.graphOutputs.push({ module: out.module, output: String(out.output) })
+  }
+
+  // Apply wiring via FlatRuntime
+  applyFlatPlan(session, session.runtime)
 }
 
 // ─────────────────────────────────────────────────────────────

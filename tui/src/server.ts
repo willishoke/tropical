@@ -18,7 +18,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 
 import {
-  makeSession, loadModuleFromJSON, loadPatchFromJSON, mergePatchFromJSON, savePatchToJSON,
+  makeSession, nextName, loadModuleFromJSON, loadPatchFromJSON, mergePatchFromJSON, savePatchToJSON,
   prettyExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
 } from './patch.js'
 import { parseModuleDef, parsePatch } from './schema.js'
@@ -26,16 +26,11 @@ import { loadBuiltins }        from './module_library.js'
 import { DAC }                 from './audio.js'
 import { Param, Trigger }      from './param.js'
 import { applyFlatPlan }  from './apply_plan.js'
-import { Runtime }             from './runtime.js'
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
 const session: SessionState = makeSession()
 loadBuiltins(session.typeRegistry)
-
-// FlatRuntime instance — replaces Graph for audio processing
-const runtime = new Runtime(session.graph.bufferLength)
-session.runtime = runtime
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -70,15 +65,10 @@ function instanceSummary(name: string) {
 }
 
 /** Apply wiring via FlatRuntime. */
-function wire(_collectTiming?: boolean | undefined): {} {
-  applyFlatPlan(session, runtime)
+function wire(): {} {
+  applyFlatPlan(session, session.runtime)
   return {}
 }
-
-// Shared schema property added to every tool that triggers a JIT recompile.
-const TIMING_PROP = {
-  timing: { type: 'boolean', description: 'If true, include JIT compilation timing breakdown in the response.' },
-} as const
 
 // ─── Tool definitions ─────────────────────────────────────────────────────────
 
@@ -108,10 +98,10 @@ const TOOLS = [
   },
   {
     name: 'remove_module',
-    description: 'Remove a module instance from the graph.',
+    description: 'Remove a module instance from the session.',
     inputSchema: {
       type: 'object',
-      properties: { instance_name: { type: 'string' }, ...TIMING_PROP },
+      properties: { instance_name: { type: 'string' } },
       required: ['instance_name'],
     },
   },
@@ -144,7 +134,6 @@ const TOOLS = [
         src_output:  { description: 'Output port name or index' },
         dst_module:  { type: 'string' },
         dst_input:   { description: 'Input port name or index' },
-        ...TIMING_PROP,
       },
       required: ['src_module', 'src_output', 'dst_module', 'dst_input'],
     },
@@ -159,7 +148,6 @@ const TOOLS = [
         src_output:  { description: 'Output port name or index' },
         dst_module:  { type: 'string' },
         dst_input:   { description: 'Input port name or index' },
-        ...TIMING_PROP,
       },
       required: ['src_module', 'src_output', 'dst_module', 'dst_input'],
     },
@@ -183,7 +171,6 @@ const TOOLS = [
         instance_name: { type: 'string' },
         input_name:    { description: 'Input port name or index' },
         expr:          { description: 'ExprNode: number, bool, array, or {op, ...} object' },
-        ...TIMING_PROP,
       },
       required: ['instance_name', 'input_name', 'expr'],
     },
@@ -206,40 +193,37 @@ const TOOLS = [
             required: ['instance_name', 'input_name', 'expr'],
           },
         },
-        ...TIMING_PROP,
       },
       required: ['updates'],
     },
   },
   {
     name: 'add_graph_output',
-    description: 'Add a module output to the graph mix output.',
+    description: 'Add a module output to the audio mix output.',
     inputSchema: {
       type: 'object',
       properties: {
         module_name:  { type: 'string' },
         output_name:  { description: 'Output port name or index' },
-        ...TIMING_PROP,
       },
       required: ['module_name', 'output_name'],
     },
   },
   {
     name: 'remove_graph_output',
-    description: 'Remove a graph output from session tracking (graph has no remove_output API; output persists until graph rebuild).',
+    description: 'Remove an output from the audio mix.',
     inputSchema: {
       type: 'object',
       properties: {
         module_name: { type: 'string' },
         output_name: { description: 'Output port name or index' },
-        ...TIMING_PROP,
       },
       required: ['module_name', 'output_name'],
     },
   },
   {
     name: 'merge_patch',
-    description: 'Add modules, connections, outputs, and params from a patch into the existing graph without clearing it. Fails fast with an error on name collisions, leaving the graph intact. Use this for subpatching: load patch A, load patch B with merge_patch, then wire them together with connect_modules.',
+    description: 'Add modules, connections, outputs, and params from a patch into the existing session without clearing it. Fails fast with an error on name collisions, leaving the session intact. Use this for subpatching: load patch A, load patch B with merge_patch, then wire them together with connect_modules.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -250,7 +234,7 @@ const TOOLS = [
   },
   {
     name: 'load_patch',
-    description: 'Load a patch. Stops audio, recreates the graph, and rebuilds session state. Provide either patch_path (preferred — path to a .json file on disk) or patch (inline PatchJSON object). Always returns timing breakdown.',
+    description: 'Load a patch. Stops audio, recreates the session, and rebuilds state. Provide either patch_path (preferred — path to a .json file on disk) or patch (inline PatchJSON object). Always returns timing breakdown.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -282,16 +266,6 @@ const TOOLS = [
   {
     name: 'audio_status',
     description: 'Return current audio status including callback statistics.',
-    inputSchema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'get_profile_stats',
-    description: 'Return graph profiling statistics: per-callback timing, JIT fusion usage, and per-module call timing. Module-level timing and fused-sync detail are only populated when built with -DEGRESS_PROFILE=ON (make profile); JIT fusion flags are always available.',
-    inputSchema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'reset_profile_stats',
-    description: 'Reset all accumulated graph profile statistics to zero.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -335,7 +309,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const type = session.typeRegistry.get(typeName)
       if (!type)
         throw new Error(`Unknown type '${typeName}'. Known: ${[...session.typeRegistry.keys()].join(', ')}`)
-      const inst = type.instantiateAs(session.graph, instanceName)
+      const inst = type.instantiateAs(instanceName)
       session.instanceRegistry.set(instanceName, inst)
       return instanceSummary(instanceName)
     })
@@ -345,13 +319,12 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const instanceName = args.instance_name as string
       if (!session.instanceRegistry.has(instanceName))
         throw new Error(`No instance named '${instanceName}'.`)
-      session.graph.removeModule(instanceName)
       session.instanceRegistry.delete(instanceName)
       for (const key of [...session.inputExprNodes.keys()]) {
         if (key.startsWith(`${instanceName}:`)) session.inputExprNodes.delete(key)
       }
       session.graphOutputs = session.graphOutputs.filter(o => o.module !== instanceName)
-      return { removed: instanceName, ...wire(args.timing as boolean | undefined) }
+      return { removed: instanceName, ...wire() }
     })
 
     // ── list_module_types ──────────────────────────────────────────────────
@@ -425,7 +398,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         { op: 'ref', module: args.src_module as string, output: srcOut },
       )
       return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn,
-               ...wire(args.timing as boolean | undefined) }
+               ...wire() }
     })
 
     // ── disconnect_modules ─────────────────────────────────────────────────
@@ -442,7 +415,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const dstIn  = dstInst.inputNames[dstId]
       session.inputExprNodes.delete(`${args.dst_module as string}:${dstIn}`)
       return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn,
-               ...wire(args.timing as boolean | undefined) }
+               ...wire() }
     })
 
     // ── list_inputs ────────────────────────────────────────────────────────
@@ -474,7 +447,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
       session.inputExprNodes.set(`${instanceName}:${resolvedName}`, node)
       return { module: instanceName, input: resolvedName, expr: node,
-               ...wire(args.timing as boolean | undefined) }
+               ...wire() }
     })
 
     // ── set_inputs_batch ───────────────────────────────────────────────────
@@ -494,7 +467,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         session.inputExprNodes.set(`${u.instance_name}:${resolvedName}`, u.expr)
         results.push({ module: u.instance_name, input: resolvedName, expr: u.expr })
       }
-      return { updates: results, ...wire(args.timing as boolean | undefined) }
+      return { updates: results, ...wire() }
     })
 
     // ── add_graph_output ───────────────────────────────────────────────────
@@ -512,7 +485,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const entry = { module: moduleName, output: resolvedName }
       if (!session.graphOutputs.some(o => o.module === entry.module && o.output === entry.output))
         session.graphOutputs.push(entry)
-      return { ...entry, ...wire(args.timing as boolean | undefined) }
+      return { ...entry, ...wire() }
     })
 
     // ── remove_graph_output ────────────────────────────────────────────────
@@ -532,7 +505,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         o => !(o.module === moduleName && o.output === resolvedName),
       )
       return { removed: before - session.graphOutputs.length,
-               ...wire(args.timing as boolean | undefined) }
+               ...wire() }
     })
 
     // ── merge_patch ────────────────────────────────────────────────────────
@@ -576,7 +549,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
     // ── start_audio ────────────────────────────────────────────────────────
     case 'start_audio': return wrap(() => {
-      if (!session.dac) session.dac = DAC.fromRuntime(runtime._h)
+      if (!session.dac) session.dac = DAC.fromRuntime(session.runtime._h)
 
       const deviceName = args.device_name as string | undefined
       if (deviceName) {
@@ -613,12 +586,6 @@ function handleTool(name: string, args: Record<string, unknown>) {
         stats:           session.dac.callbackStats(),
       }
     })
-
-    // ── get_profile_stats ──────────────────────────────────────────────────
-    case 'get_profile_stats': return wrap(() => ({}))
-
-    // ── reset_profile_stats ────────────────────────────────────────────────
-    case 'reset_profile_stats': return wrap(() => ({ reset: true }))
 
     // ── set_param ──────────────────────────────────────────────────────────
     case 'set_param': return wrap(() => {
@@ -694,9 +661,8 @@ Patches are JSON objects with \`"schema": "egress_patch_1"\`.
 - \`modules\`: list of \`{ type, name }\` objects
 - \`input_exprs\`: list of \`{ module, input, expr }\` objects — **canonical wiring mechanism**
 - \`connections\` (legacy): list of \`{ src, src_output, dst, dst_input }\` objects; equivalent to \`input_exprs\` entries with \`{ "op": "ref" }\` expressions. Accepted on load for backward compatibility, not emitted on save.
-- \`outputs\`: list of \`{ module, output }\` objects to route to the graph mix
+- \`outputs\`: list of \`{ module, output }\` objects to route to the audio mix
 - \`params\`: map of \`param_name → value\`
-- \`graph\`: optional graph settings (\`worker_count\`, \`fusion_enabled\`, \`buffer_length\`)
 
 ## Inline type definitions
 
@@ -744,8 +710,7 @@ Embed simple arithmetic types directly in \`types\` instead of calling \`define_
   "outputs": [
     { "module": "vca", "output": "out" }
   ],
-  "params": {},
-  "graph": { "worker_count": 1, "fusion_enabled": false }
+  "params": {}
 }
 \`\`\`
 
@@ -791,12 +756,12 @@ Before writing any patch YAML, always fetch both resources:
 ### New patch (starting from scratch)
 Use \`load_patch\` with a **complete** egress_patch_1 JSON object in a single call.
 Do not call \`instantiate_module\`, \`connect_modules\`, or \`set_module_input\` one-by-one —
-that requires 40+ round trips and recompiles the JIT graph on every input change.
+that requires 40+ round trips and recompiles the JIT kernel on every input change.
 
 ### Extending an existing patch (adding new modules)
 Use \`merge_patch\` with a partial patch containing only the new modules, connections,
 outputs, and params. Then use \`connect_modules\` to wire the new modules to existing ones.
-Do not use \`load_patch\` — it tears down the entire graph and loses the existing session.
+Do not use \`load_patch\` — it tears down the entire session and loses the existing state.
 
 ### Targeted edits (changing a value, tweaking a param)
 Use \`set_module_input\` or \`set_param\` directly on the specific input or param.
@@ -814,7 +779,7 @@ Do not reload or rebuild the patch for a single value change.
 // ─── Server wiring ────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: 'egress', version: '0.2.0' },
+  { name: 'egress', version: '0.3.0' },
   { capabilities: { tools: {}, resources: {}, prompts: {} } },
 )
 
