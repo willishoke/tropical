@@ -18,6 +18,79 @@ namespace egress_jit
 {
 enum class JitScalarType : uint8_t { Float, Int, Bool };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// New flat instruction format (FlatProgram / FlatInstr)
+//
+// Terminals (literals, inputs, registers, params) are Operand kinds —
+// not instructions. OpTag covers only genuine computations (~30 entries).
+// loop_count > 1 triggers an elementwise loop; strides[i] controls whether
+// args[i] advances with the loop index (1) or broadcasts (0).
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum class OpTag : uint8_t
+{
+  // arity 2
+  Add, Sub, Mul, Div, Mod, Pow, FloorDiv,
+  Less, LessEq, Greater, GreaterEq, Equal, NotEqual,
+  BitAnd, BitOr, BitXor, LShift, RShift,
+  Index,    // array[scalar_idx] → element
+  MatMul,
+  // arity 1
+  Neg, Abs, Sin, Cos, Log, Exp, Sqrt, Floor, Ceil, Round, Not, BitNot,
+  // arity 3
+  Clamp, Select, SetElement,
+  // arity N
+  Pack,
+};
+
+enum class OperandKind : uint8_t
+{
+  Const,    // floating-point constant
+  Input,    // module input port (slot index)
+  Reg,      // virtual register (result of a prior FlatInstr)
+  StateReg, // persistent module register (delay / feedback)
+  Param,    // smoothed/trigger ControlParam pointer
+  Rate,     // sample rate (runtime constant)
+  Tick,     // sample index (runtime counter)
+};
+
+struct Operand
+{
+  OperandKind kind = OperandKind::Const;
+  double      const_val = 0.0;  // Const
+  uint32_t    slot      = 0;    // Input, Reg, StateReg
+  uint64_t    ptr       = 0;    // Param
+
+  static Operand make_const(double v)    { Operand o; o.kind = OperandKind::Const;    o.const_val = v; return o; }
+  static Operand make_input(uint32_t s)  { Operand o; o.kind = OperandKind::Input;    o.slot = s;      return o; }
+  static Operand make_reg(uint32_t id)   { Operand o; o.kind = OperandKind::Reg;      o.slot = id;     return o; }
+  static Operand make_state(uint32_t s)  { Operand o; o.kind = OperandKind::StateReg; o.slot = s;      return o; }
+  static Operand make_param(uint64_t p)  { Operand o; o.kind = OperandKind::Param;    o.ptr = p;       return o; }
+  static Operand make_rate()             { Operand o; o.kind = OperandKind::Rate;                      return o; }
+  static Operand make_tick()             { Operand o; o.kind = OperandKind::Tick;                      return o; }
+};
+
+struct FlatInstr
+{
+  OpTag                tag        = OpTag::Add;
+  uint32_t             dst        = 0;
+  std::vector<Operand> args;
+  uint32_t             loop_count = 1;       // 1 = scalar; N > 1 = elementwise loop
+  std::vector<uint8_t> strides;              // per-arg: 1 = iterate, 0 = broadcast
+};
+
+struct FlatProgram
+{
+  std::vector<FlatInstr> instructions;
+  uint32_t               register_count   = 0;
+  std::vector<uint32_t>  output_targets;
+  std::vector<int32_t>   register_targets;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEPRECATED — kept for NumericProgramBuilder until egress_plan_2 is removed
+// ─────────────────────────────────────────────────────────────────────────────
+
 enum class NumericOp : uint8_t
 {
   Literal,
@@ -125,6 +198,9 @@ class OrcJitEngine
 
     llvm::Expected<NumericKernelFn> compile_numeric_program(
       const NumericProgram & program);
+
+    llvm::Expected<NumericKernelFn> compile_flat_program(
+      const FlatProgram & program);
 
   private:
     OrcJitEngine();
