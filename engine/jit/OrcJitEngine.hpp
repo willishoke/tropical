@@ -89,6 +89,7 @@ struct FlatProgram
 {
   std::vector<FlatInstr> instructions;
   uint32_t               register_count   = 0;
+  std::vector<uint32_t>  array_slot_sizes; // element count per array slot
   std::vector<uint32_t>  output_targets;
   std::vector<int32_t>   register_targets;
 };

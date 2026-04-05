@@ -1,4 +1,5 @@
 #include "runtime/FlatRuntime.hpp"
+#include "runtime/NumericProgramParser.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -13,8 +14,79 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
 
   const json plan = json::parse(plan_json);
 
-  if (!plan.contains("schema") || plan["schema"] != "egress_plan_2")
-    throw std::runtime_error("FlatRuntime: unsupported schema (expected 'egress_plan_2')");
+  const std::string schema = plan.value("schema", std::string{});
+
+  // ── egress_plan_3: compiled flat instruction stream ──
+  if (schema == "egress_plan_3")
+  {
+    const auto parsed = egress_plan3::parse_plan3(plan);
+
+    auto kernel_result = egress_jit::OrcJitEngine::instance().compile_flat_program(parsed.program);
+    if (!kernel_result)
+    {
+      std::string err;
+      llvm::handleAllErrors(kernel_result.takeError(),
+        [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
+      throw std::runtime_error("FlatRuntime: JIT compilation failed: " + err);
+    }
+
+    KernelState new_state;
+    new_state.kernel       = *kernel_result;
+    new_state.sample_rate  = parsed.sample_rate;
+    new_state.output_count = static_cast<uint32_t>(parsed.program.output_targets.size());
+    new_state.mix_indices  = parsed.mix_indices;
+    new_state.register_names = parsed.register_names;
+
+    // Scalar state registers
+    new_state.registers.resize(parsed.state_init.size(), 0);
+    for (std::size_t i = 0; i < parsed.state_init.size(); ++i)
+      new_state.registers[i] = std::bit_cast<int64_t>(parsed.state_init[i]);
+    new_state.register_scalar_mask.assign(parsed.state_init.size(), true);
+
+    // Scalar temps
+    new_state.temps.assign(parsed.program.register_count, 0);
+
+    // Array slot storage
+    const auto & sizes = parsed.program.array_slot_sizes;
+    new_state.array_storage.resize(sizes.size());
+    for (std::size_t i = 0; i < sizes.size(); ++i)
+      new_state.array_storage[i].assign(static_cast<std::size_t>(sizes[i]), 0);
+    new_state.array_ptrs.resize(new_state.array_storage.size());
+    new_state.array_sizes.resize(new_state.array_storage.size());
+    for (std::size_t i = 0; i < new_state.array_storage.size(); ++i)
+    {
+      new_state.array_ptrs[i]  = new_state.array_storage[i].data();
+      new_state.array_sizes[i] = new_state.array_storage[i].size();
+    }
+
+    new_state.output_temp_indices.assign(
+      parsed.program.output_targets.begin(), parsed.program.output_targets.end());
+    new_state.register_temp_indices.assign(
+      parsed.program.register_targets.begin(), parsed.program.register_targets.end());
+
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    const uint32_t active   = active_state_.load(std::memory_order_acquire);
+    const uint32_t inactive = 1U - active;
+    wait_for_state_available(inactive);
+
+    const auto & old_state = states_[active];
+    auto mapping = compute_register_mapping(old_state, new_state);
+    new_state.sample_index = old_state.sample_index;
+
+    states_[inactive] = std::move(new_state);
+    active_state_.store(inactive, std::memory_order_release);
+
+    if (!mapping.empty() && old_state.kernel != nullptr)
+    {
+      auto * pt = new PendingTransfer{std::move(mapping), active};
+      delete pending_transfer_.exchange(pt, std::memory_order_acq_rel);
+    }
+    return true;
+  }
+
+  // ── egress_plan_2: expression tree path ──
+  if (schema != "egress_plan_2")
+    throw std::runtime_error("FlatRuntime: unsupported schema '" + schema + "'");
 
   // ── Parse config ──
   const double sample_rate = plan.value("config", json::object()).value("sample_rate", 44100.0);

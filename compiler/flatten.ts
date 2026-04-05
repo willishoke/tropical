@@ -1,11 +1,11 @@
 /**
- * flatten.ts — Flatten a patch into a single egress_plan_2 kernel.
+ * flatten.ts — Flatten a patch into a single egress_plan_3 kernel.
  *
  * Takes a SessionState and produces a flat plan JSON where all module
  * expression trees are inlined: input() nodes are substituted with wiring
  * expressions, ref() nodes are resolved by inlining the referenced module's
  * output expression. The result has zero inter-module boundaries — just one
- * flat set of output_exprs and register_exprs.
+ * flat instruction stream (egress_plan_3).
  */
 
 import type { ExprNode } from './expr.js'
@@ -16,9 +16,10 @@ import {
   compilerInputFromSession, extractModuleInfo,
   buildDependencyGraph, topologicalSort,
 } from './compiler.js'
-import { lowerArrayOps, type ArrayLayout } from './lower_arrays.js'
+import { lowerArrayOps } from './lower_arrays.js'
 import { portTypeToString } from './term.js'
 import { checkArrayConnection } from './array_wiring.js'
+import { emitNumericProgram, type NInstr } from './emit_numeric.js'
 
 // ─────────────────────────────────────────────────────────────
 // Wiring type validation
@@ -107,19 +108,22 @@ export function normalizeWiringTypes(
 }
 
 // ─────────────────────────────────────────────────────────────
-// egress_plan_2 schema
+// egress_plan_3 schema
 // ─────────────────────────────────────────────────────────────
 
 export interface FlatPlan {
-  schema: 'egress_plan_2'
+  schema: 'egress_plan_3'
   config: { sample_rate: number }
-  output_exprs: ExprNode[]
-  register_exprs: ExprNode[]
-  state_init: (number | boolean | number[])[]
+  state_init: (number | boolean)[]
   register_names: string[]
   outputs: number[]
-  /** Array layout metadata — maps "module:port" to ArrayLayout. Empty if no arrays. */
-  array_layouts?: Record<string, ArrayLayout>
+  // Compiled instruction stream (from emitNumericProgram)
+  instructions:    NInstr[]
+  register_count:  number
+  array_slot_count: number
+  array_slot_sizes: number[]
+  output_targets:  number[]
+  register_targets: number[]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -532,7 +536,7 @@ function resolveRefs(
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Flatten a session's patch into a single egress_plan_2 plan.
+ * Flatten a session's patch into a single egress_plan_3 plan.
  *
  * Process:
  * 1. Topologically sort modules
@@ -543,7 +547,8 @@ function resolveRefs(
  *    d. Resolve remaining refs (from wiring exprs that reference earlier modules)
  *    e. Record the resolved output expressions for use by later modules' refs
  * 3. Collect all outputs matching graphOutputs
- * 4. Emit egress_plan_2 JSON
+ * 4. Compile expression trees → FlatProgram via emitNumericProgram
+ * 5. Emit egress_plan_3 JSON
  */
 export function flattenPatch(session: SessionState): FlatPlan {
   const { instanceRegistry, graphOutputs } = session
@@ -739,54 +744,21 @@ export function flattenPatch(session: SessionState): FlatPlan {
     outputIndices.push(flatIdx)
   }
 
-  // Collect array layout metadata from module port types
-  const arrayLayouts: Record<string, ArrayLayout> = {}
-  for (const [name, info] of moduleInfos) {
-    for (let i = 0; i < info.outputNames.length; i++) {
-      const pt = info.outputTypes[i]
-      if (pt.tag === 'array') {
-        const strides = shapeStridesFor(pt.shape)
-        arrayLayouts[`${name}:${info.outputNames[i]}`] = {
-          slotId: `${name}:${info.outputNames[i]}`,
-          shape: pt.shape,
-          strides,
-          totalScalars: pt.shape.reduce((a, b) => a * b, 1),
-        }
-      }
-    }
-    for (let i = 0; i < info.registerNames.length; i++) {
-      const pt = info.registerTypes[i]
-      if (pt.tag === 'array') {
-        const strides = shapeStridesFor(pt.shape)
-        arrayLayouts[`${name}:${info.registerNames[i]}`] = {
-          slotId: `${name}:${info.registerNames[i]}`,
-          shape: pt.shape,
-          strides,
-          totalScalars: pt.shape.reduce((a, b) => a * b, 1),
-        }
-      }
-    }
-  }
+  // Compile expression trees → flat instruction stream
+  const program = emitNumericProgram(flatOutputExprs, flatRegisterExprs)
 
   return {
-    schema: 'egress_plan_2',
+    schema: 'egress_plan_3',
     config: { sample_rate: 44100 },
-    output_exprs: flatOutputExprs,
-    register_exprs: flatRegisterExprs,
-    state_init: flatStateInit,
+    state_init: flatStateInit as (number | boolean)[],
     register_names: flatRegisterNames,
     outputs: outputIndices,
-    ...(Object.keys(arrayLayouts).length > 0 ? { array_layouts: arrayLayouts } : {}),
+    instructions:     program.instructions,
+    register_count:   program.register_count,
+    array_slot_count: program.array_slot_count,
+    array_slot_sizes: program.array_slot_sizes,
+    output_targets:   program.output_targets,
+    register_targets: program.register_targets,
   }
 }
 
-/** Compute row-major strides for a shape. */
-function shapeStridesFor(shape: number[]): number[] {
-  const strides = new Array(shape.length)
-  let stride = 1
-  for (let i = shape.length - 1; i >= 0; i--) {
-    strides[i] = stride
-    stride *= shape[i]
-  }
-  return strides
-}
