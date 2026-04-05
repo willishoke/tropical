@@ -16,6 +16,7 @@ import {
   compilerInputFromSession, extractModuleInfo,
   buildDependencyGraph, topologicalSort,
 } from './compiler.js'
+import { lowerArrayOps, type ArrayLayout } from './lower_arrays.js'
 
 // ─────────────────────────────────────────────────────────────
 // egress_plan_2 schema
@@ -29,6 +30,8 @@ export interface FlatPlan {
   state_init: (number | boolean | number[])[]
   register_names: string[]
   outputs: number[]
+  /** Array layout metadata — maps "module:port" to ArrayLayout. Empty if no arrays. */
+  array_layouts?: Record<string, ArrayLayout>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -520,6 +523,8 @@ export function flattenPatch(session: SessionState): FlatPlan {
       expr = resolveDelayValues(expr, delayBase)
       expr = substituteInputs(expr, inputMap)
       expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames)
+      // Lower array ops (zeros, ones, fill, array_literal, etc.) to primitives
+      expr = lowerArrayOps(expr)
       return expr
     }
 
@@ -642,6 +647,35 @@ export function flattenPatch(session: SessionState): FlatPlan {
     outputIndices.push(flatIdx)
   }
 
+  // Collect array layout metadata from module port types
+  const arrayLayouts: Record<string, ArrayLayout> = {}
+  for (const [name, info] of moduleInfos) {
+    for (let i = 0; i < info.outputNames.length; i++) {
+      const pt = info.outputTypes[i]
+      if (pt.tag === 'array') {
+        const strides = shapeStridesFor(pt.shape)
+        arrayLayouts[`${name}:${info.outputNames[i]}`] = {
+          slotId: `${name}:${info.outputNames[i]}`,
+          shape: pt.shape,
+          strides,
+          totalScalars: pt.shape.reduce((a, b) => a * b, 1),
+        }
+      }
+    }
+    for (let i = 0; i < info.registerNames.length; i++) {
+      const pt = info.registerTypes[i]
+      if (pt.tag === 'array') {
+        const strides = shapeStridesFor(pt.shape)
+        arrayLayouts[`${name}:${info.registerNames[i]}`] = {
+          slotId: `${name}:${info.registerNames[i]}`,
+          shape: pt.shape,
+          strides,
+          totalScalars: pt.shape.reduce((a, b) => a * b, 1),
+        }
+      }
+    }
+  }
+
   return {
     schema: 'egress_plan_2',
     config: { sample_rate: 44100 },
@@ -650,5 +684,17 @@ export function flattenPatch(session: SessionState): FlatPlan {
     state_init: flatStateInit,
     register_names: flatRegisterNames,
     outputs: outputIndices,
+    ...(Object.keys(arrayLayouts).length > 0 ? { array_layouts: arrayLayouts } : {}),
   }
+}
+
+/** Compute row-major strides for a shape. */
+function shapeStridesFor(shape: number[]): number[] {
+  const strides = new Array(shape.length)
+  let stride = 1
+  for (let i = shape.length - 1; i >= 0; i--) {
+    strides[i] = stride
+    stride *= shape[i]
+  }
+  return strides
 }
