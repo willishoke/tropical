@@ -353,4 +353,40 @@ describe('applyFlatPlan', () => {
     rt.dispose()
     session.graph.dispose()
   })
+
+  test('hot-swap preserves register state across rewiring', () => {
+    const session = setupSession([
+      { type: 'VCO', name: 'VCO1' },
+      { type: 'VCA', name: 'VCA1' },
+    ])
+
+    session.inputExprNodes.set('VCO1:freq', 440)
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:cv', 1.0)
+    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+
+    const rt = new Runtime(256)
+    applyFlatPlan(session, rt)
+
+    // Process several buffers to advance VCO phase
+    for (let i = 0; i < 10; i++) rt.process()
+    const buf1 = new Float64Array(rt.outputBuffer)
+
+    // Rewire: change VCA cv from 1.0 to 0.5 (VCO registers should persist)
+    session.inputExprNodes.set('VCA1:cv', 0.5)
+    applyFlatPlan(session, rt)
+    rt.process()
+    const buf2 = rt.outputBuffer
+
+    // Output should be non-silent (VCO kept running thanks to register transfer)
+    expect(peak(buf2)).toBeGreaterThan(0)
+
+    // Should be roughly half amplitude of what buf1 was (cv halved)
+    const ratio = peak(buf2) / peak(buf1)
+    expect(ratio).toBeGreaterThan(0.3)
+    expect(ratio).toBeLessThan(0.7)
+
+    rt.dispose()
+    session.graph.dispose()
+  })
 })
