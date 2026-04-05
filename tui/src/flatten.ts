@@ -129,6 +129,35 @@ function substituteInputs(node: ExprNode, inputMap: Map<number, ExprNode>): Expr
 }
 
 /**
+ * Rewrite delay_value(nodeId) nodes as register reads.
+ * Each delay state becomes a flat register at (delayBase + nodeId).
+ */
+function resolveDelayValues(node: ExprNode, delayBase: number): ExprNode {
+  if (typeof node === 'number' || typeof node === 'boolean') return node
+  if (Array.isArray(node)) return node.map(n => resolveDelayValues(n, delayBase))
+  if (typeof node !== 'object' || node === null) return node
+
+  const obj = node as { op: string; [k: string]: unknown }
+
+  if (obj.op === 'delay_value') {
+    return { op: 'reg', id: delayBase + (obj.node_id as number) }
+  }
+
+  const result: Record<string, unknown> = { op: obj.op }
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === 'op') continue
+    if (Array.isArray(v)) {
+      result[k] = (v as ExprNode[]).map(n => resolveDelayValues(n, delayBase))
+    } else if (typeof v === 'object' && v !== null && 'op' in v) {
+      result[k] = resolveDelayValues(v as ExprNode, delayBase)
+    } else {
+      result[k] = v
+    }
+  }
+  return result as ExprNode
+}
+
+/**
  * Rewrite register(id) nodes with an offset.
  * Register IDs in a module's local expression tree are 0-based;
  * in the flat plan they need to be offset by the module's register base.
@@ -261,6 +290,9 @@ export function flattenPatch(session: SessionState): FlatPlan {
 
     moduleOutputBase.set(name, flatOutputExprs.length)
 
+    // Delay states occupy registers immediately after the module's named registers
+    const delayBase = registerBase + def.registerNames.length
+
     // Build input substitution map: input(i) → wiring expression
     const inputMap = new Map<number, ExprNode>()
     for (let i = 0; i < def.inputNames.length; i++) {
@@ -277,32 +309,34 @@ export function flattenPatch(session: SessionState): FlatPlan {
       }
     }
 
+    // Helper: full expression pipeline for a local module expression
+    const processExpr = (rawNode: ExprNode): ExprNode => {
+      let expr = cloneExpr(rawNode)
+      expr = inlineCalls(expr)
+      expr = offsetRegisters(expr, registerBase)
+      expr = resolveDelayValues(expr, delayBase)
+      expr = substituteInputs(expr, inputMap)
+      expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames)
+      return expr
+    }
+
     // Process each output expression
     // Order matters: offset registers BEFORE substituting inputs/resolving refs,
     // because wiring expressions already have globally-correct register IDs.
     const moduleResolvedOutputs: ExprNode[] = []
     for (let i = 0; i < def.outputExprNodes.length; i++) {
-      let expr = cloneExpr(def.outputExprNodes[i])
-      expr = inlineCalls(expr)
-      expr = offsetRegisters(expr, registerBase)
-      expr = substituteInputs(expr, inputMap)
-      expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames)
+      const expr = processExpr(def.outputExprNodes[i])
       flatOutputExprs.push(expr)
       moduleResolvedOutputs.push(expr)
     }
     resolvedOutputs.set(name, moduleResolvedOutputs)
     resolvedOutputNames.set(name, [...def.outputNames])
 
-    // Process each register expression
+    // Process each named register expression
     for (let i = 0; i < def.registerExprNodes.length; i++) {
       const regNode = def.registerExprNodes[i]
       if (regNode !== null) {
-        let expr = cloneExpr(regNode)
-        expr = inlineCalls(expr)
-        expr = offsetRegisters(expr, registerBase)
-        expr = substituteInputs(expr, inputMap)
-        expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames)
-        flatRegisterExprs.push(expr)
+        flatRegisterExprs.push(processExpr(regNode))
       } else {
         // No update — register holds its value (identity: reg(registerBase + i))
         flatRegisterExprs.push({ op: 'reg', id: registerBase + i })
@@ -320,7 +354,21 @@ export function flattenPatch(session: SessionState): FlatPlan {
       }
     }
 
-    registerBase += def.registerNames.length
+    // Process delay state registers (delay_value(N) reads from delayBase + N)
+    for (let i = 0; i < def.delaySpecHandles.length; i++) {
+      const { nodeId } = def.delaySpecHandles[i]
+      const updateNode = def._liveDelayUpdateExprs[i]._node
+      if (updateNode !== null && updateNode !== undefined) {
+        flatRegisterExprs.push(processExpr(updateNode as ExprNode))
+      } else {
+        // No update — hold current value
+        flatRegisterExprs.push({ op: 'reg', id: delayBase + nodeId })
+      }
+      flatRegisterNames.push(`${name}_delay_${nodeId}`)
+      flatStateInit.push(def.delayInitValues[i] ?? 0)
+    }
+
+    registerBase += def.registerNames.length + def.delaySpecHandles.length
   }
 
   // Build output indices: map graphOutputs → flat output indices

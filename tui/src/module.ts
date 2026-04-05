@@ -220,6 +220,7 @@ interface ModuleDef {
   outputExprHandles: unknown[]
   registerSpecs: RegisterSpec[]
   delaySpecHandles: DelaySpecHandle[]
+  delayInitValues: number[]
   nestedSpecHandles: NestedEntry[]
   // ExprNode trees (JSON-serializable) for each output and register update
   outputExprNodes: ExprNode[]
@@ -547,6 +548,7 @@ export function defineModule(
     outputExprHandles: outputExprs.map(e => e._h),
     registerSpecs,
     delaySpecHandles,
+    delayInitValues: ctx.delayStates.map(d => d.initVal),
     nestedSpecHandles: ctx.nestedModules.map(({ nodeId, nestedH }) => ({ nodeId, nestedH })),
     outputExprNodes: outputExprs.map(e => e._node),
     registerExprNodes: regUpdateExprs.map(e => e?._node ?? null),

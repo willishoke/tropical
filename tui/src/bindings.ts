@@ -34,7 +34,7 @@ function findLib(): string {
   }
 
   // 3. Common build subdirectories
-  const buildDirs = ['build', 'build-jit-profile', 'build-jit-ctypes', 'build-jit', 'build-profile', 'build-ctypes']
+  const buildDirs = ['build-profile', 'build', 'build-jit-profile', 'build-jit-ctypes', 'build-jit', 'build-ctypes']
   for (const buildDir of buildDirs) {
     for (const name of unixNames) {
       const candidate = path.join(parent, buildDir, name)
