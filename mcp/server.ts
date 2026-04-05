@@ -26,6 +26,7 @@ import { loadBuiltins }        from '../compiler/module_library.js'
 import { DAC }                 from '../compiler/runtime/audio.js'
 import { Param, Trigger }      from '../compiler/runtime/param.js'
 import { applyFlatPlan }  from '../compiler/apply_plan.js'
+import { checkArrayConnection } from '../compiler/array_wiring.js'
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
@@ -382,22 +383,26 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const srcId = resolveOutputIdx(srcInst, args.src_output as string | number)
       const dstId = resolveInputIdx(dstInst,  args.dst_input  as string | number)
 
+      const srcOut = srcInst.outputNames[srcId]
+      const dstIn  = dstInst.inputNames[dstId]
+      const refExpr: ExprNode = { op: 'ref', module: args.src_module as string, output: srcOut }
+
+      // Shape-aware type checking with auto-broadcasting
       const srcType = srcInst.outputPortType(srcId)
       const dstType = dstInst.inputPortType(dstId)
-      if (srcType !== undefined && dstType !== undefined && srcType !== dstType) {
+      const check = checkArrayConnection(srcType, dstType, refExpr)
+      if (!check.compatible) {
         throw new Error(
-          `Type mismatch: '${args.src_module as string}'.${srcInst.outputNames[srcId]} is type '${srcType}' ` +
-          `but '${args.dst_module as string}'.${dstInst.inputNames[dstId]}' expects '${dstType}'`
+          `Connection '${args.src_module as string}'.${srcOut} → '${args.dst_module as string}'.${dstIn}: ${check.error}`
         )
       }
 
-      const srcOut = srcInst.outputNames[srcId]
-      const dstIn  = dstInst.inputNames[dstId]
-      session.inputExprNodes.set(
-        `${args.dst_module as string}:${dstIn}`,
-        { op: 'ref', module: args.src_module as string, output: srcOut },
-      )
+      // Use broadcast expression if shapes need alignment, otherwise plain ref
+      const wiringExpr = check.broadcastExpr ?? refExpr
+      session.inputExprNodes.set(`${args.dst_module as string}:${dstIn}`, wiringExpr)
+
       return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn,
+               ...(check.resultShape ? { broadcast_shape: check.resultShape } : {}),
                ...wire() }
     })
 
