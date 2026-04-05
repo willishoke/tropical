@@ -111,7 +111,34 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
         compiled, initial_registers, sample_rate,
         empty_inputs, numeric_program, jit_state, nullptr))
   {
-    throw std::runtime_error("FlatRuntime: failed to build numeric program");
+    // Diagnostic: find the offending instruction
+    std::string diag = "FlatRuntime: failed to build numeric program (";
+    diag += "outputs=" + std::to_string(output_exprs.size());
+    diag += " regs=" + std::to_string(register_exprs.size());
+    diag += " instrs=" + std::to_string(compiled.instructions.size());
+    diag += " reg_count=" + std::to_string(compiled.register_count);
+    diag += " init_regs=" + std::to_string(initial_registers.size());
+    // Check for InputValue instructions
+    for (std::size_t i = 0; i < compiled.instructions.size(); ++i) {
+      const auto & instr = compiled.instructions[i];
+      if (instr.kind == egress_expr::ExprKind::InputValue) {
+        diag += " INPUT_AT=" + std::to_string(i) + "[slot=" + std::to_string(instr.slot_id) + "]";
+      }
+      if (instr.kind != egress_expr::ExprKind::InputValue &&
+          !Module::supports_numeric_jit_expr_kind(instr.kind)) {
+        diag += " UNSUPPORTED_AT=" + std::to_string(i) + "[kind=" + std::to_string(static_cast<int>(instr.kind)) + "]";
+      }
+      if (instr.kind == egress_expr::ExprKind::Ref) {
+        diag += " REF_AT=" + std::to_string(i);
+      }
+      if (instr.kind == egress_expr::ExprKind::RegisterValue &&
+          instr.slot_id >= initial_registers.size()) {
+        diag += " REG_OOB_AT=" + std::to_string(i) + "[slot=" + std::to_string(instr.slot_id)
+          + " max=" + std::to_string(initial_registers.size()) + "]";
+      }
+    }
+    diag += ")";
+    throw std::runtime_error(diag);
   }
 
   // ── JIT compile to native kernel ──

@@ -39,18 +39,62 @@ export interface FlatPlan {
 function cloneExpr(node: ExprNode): ExprNode {
   if (typeof node === 'number' || typeof node === 'boolean') return node
   if (Array.isArray(node)) return node.map(cloneExpr)
-  const obj = node as { op: string; [k: string]: unknown }
-  const result: Record<string, unknown> = { op: obj.op }
+  if (typeof node !== 'object' || node === null) return node
+  const obj = node as Record<string, unknown>
+  const result: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
     if (Array.isArray(v)) {
       result[k] = (v as ExprNode[]).map(cloneExpr)
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
+    } else if (typeof v === 'object' && v !== null && !('_ptr' in (v as Record<string, unknown>))) {
       result[k] = cloneExpr(v as ExprNode)
     } else {
       result[k] = v
     }
   }
+  return result as ExprNode
+}
+
+/**
+ * Inline call(function(body), args) patterns.
+ * A call whose callee is a function literal is expanded by substituting
+ * input(N) nodes in the function body with the corresponding argument.
+ * This eliminates function/call nodes that the C++ plan_loader doesn't support.
+ */
+function inlineCalls(node: ExprNode): ExprNode {
+  if (typeof node === 'number' || typeof node === 'boolean') return node
+  if (Array.isArray(node)) return node.map(inlineCalls)
+  if (typeof node !== 'object' || node === null) return node
+
+  const obj = node as Record<string, unknown>
+
+  // First, recursively inline in children
+  const result: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (Array.isArray(v)) {
+      result[k] = (v as ExprNode[]).map(inlineCalls)
+    } else if (typeof v === 'object' && v !== null && 'op' in v) {
+      result[k] = inlineCalls(v as ExprNode)
+    } else {
+      result[k] = v
+    }
+  }
+
+  // Now check if this is a call(function(...), args) that can be inlined
+  if (result.op === 'call') {
+    const callee = result.callee as ExprNode
+    if (typeof callee === 'object' && !Array.isArray(callee) && (callee as Record<string, unknown>).op === 'function') {
+      const fnNode = callee as Record<string, unknown>
+      const body = fnNode.body as ExprNode
+      const args = result.args as ExprNode[]
+      // Substitute input(N) → args[N] in the function body
+      const argMap = new Map<number, ExprNode>()
+      for (let i = 0; i < args.length; i++) {
+        argMap.set(i, args[i])
+      }
+      return substituteInputs(body, argMap)
+    }
+  }
+
   return result as ExprNode
 }
 
@@ -116,20 +160,36 @@ function offsetRegisters(node: ExprNode, offset: number): ExprNode {
 
 /**
  * Resolve all ref(module, output) nodes by inlining the referenced module's
- * output expression. outputExprs maps "moduleName" → array of output ExprNodes
- * (already fully resolved for modules earlier in topological order).
+ * output expression. outputExprs maps "moduleName" → array of output ExprNodes.
+ * outputNames maps "moduleName" → array of output name strings (for name→index lookup).
  */
-function resolveRefs(node: ExprNode, outputExprs: Map<string, ExprNode[]>): ExprNode {
+function resolveRefs(
+  node: ExprNode,
+  outputExprs: Map<string, ExprNode[]>,
+  outputNames: Map<string, string[]>,
+): ExprNode {
   if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => resolveRefs(n, outputExprs))
+  if (Array.isArray(node)) return node.map(n => resolveRefs(n, outputExprs, outputNames))
+  if (typeof node !== 'object' || node === null) return node
 
   const obj = node as { op: string; [k: string]: unknown }
 
   if (obj.op === 'ref') {
     const moduleName = obj.module as string
-    const outputId = obj.output as number
     const moduleOutputs = outputExprs.get(moduleName)
     if (!moduleOutputs) throw new Error(`flatten: unresolved ref to unknown module '${moduleName}'`)
+
+    let outputId: number
+    if (typeof obj.output === 'number') {
+      outputId = obj.output
+    } else {
+      // String output name — resolve to index
+      const names = outputNames.get(moduleName)
+      if (!names) throw new Error(`flatten: no output names for module '${moduleName}'`)
+      outputId = names.indexOf(obj.output as string)
+      if (outputId === -1) throw new Error(`flatten: unknown output '${obj.output}' on module '${moduleName}'`)
+    }
+
     if (outputId >= moduleOutputs.length) throw new Error(`flatten: ref output ${outputId} out of range for '${moduleName}'`)
     return cloneExpr(moduleOutputs[outputId])
   }
@@ -138,9 +198,9 @@ function resolveRefs(node: ExprNode, outputExprs: Map<string, ExprNode[]>): Expr
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'op') continue
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => resolveRefs(n, outputExprs))
+      result[k] = (v as ExprNode[]).map(n => resolveRefs(n, outputExprs, outputNames))
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = resolveRefs(v as ExprNode, outputExprs)
+      result[k] = resolveRefs(v as ExprNode, outputExprs, outputNames)
     } else {
       result[k] = v
     }
@@ -190,6 +250,7 @@ export function flattenPatch(session: SessionState): FlatPlan {
 
   // Track each module's register base offset and resolved output expressions
   const resolvedOutputs = new Map<string, ExprNode[]>()
+  const resolvedOutputNames = new Map<string, string[]>()
   const moduleOutputBase = new Map<string, number>()
 
   // Process each module in topological order
@@ -207,34 +268,40 @@ export function flattenPatch(session: SessionState): FlatPlan {
       const wiringExpr = inputExprNodes.get(key)
       if (wiringExpr !== undefined) {
         // Resolve refs in the wiring expression (they reference earlier modules)
-        inputMap.set(i, resolveRefs(wiringExpr, resolvedOutputs))
+        inputMap.set(i, resolveRefs(wiringExpr, resolvedOutputs, resolvedOutputNames))
       } else {
         // Use default value or 0
         const defaultExpr = def.inputDefaults[i]
-        inputMap.set(i, defaultExpr?._node ?? 0)
+        const node = defaultExpr?._node ?? 0
+        inputMap.set(i, inlineCalls(typeof node === 'object' ? cloneExpr(node) : node))
       }
     }
 
     // Process each output expression
+    // Order matters: offset registers BEFORE substituting inputs/resolving refs,
+    // because wiring expressions already have globally-correct register IDs.
     const moduleResolvedOutputs: ExprNode[] = []
     for (let i = 0; i < def.outputExprNodes.length; i++) {
       let expr = cloneExpr(def.outputExprNodes[i])
-      expr = substituteInputs(expr, inputMap)
+      expr = inlineCalls(expr)
       expr = offsetRegisters(expr, registerBase)
-      expr = resolveRefs(expr, resolvedOutputs)
+      expr = substituteInputs(expr, inputMap)
+      expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames)
       flatOutputExprs.push(expr)
       moduleResolvedOutputs.push(expr)
     }
     resolvedOutputs.set(name, moduleResolvedOutputs)
+    resolvedOutputNames.set(name, [...def.outputNames])
 
     // Process each register expression
     for (let i = 0; i < def.registerExprNodes.length; i++) {
       const regNode = def.registerExprNodes[i]
       if (regNode !== null) {
         let expr = cloneExpr(regNode)
-        expr = substituteInputs(expr, inputMap)
+        expr = inlineCalls(expr)
         expr = offsetRegisters(expr, registerBase)
-        expr = resolveRefs(expr, resolvedOutputs)
+        expr = substituteInputs(expr, inputMap)
+        expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames)
         flatRegisterExprs.push(expr)
       } else {
         // No update — register holds its value (identity: reg(registerBase + i))
