@@ -41,14 +41,6 @@ struct KernelState
 
   // Output extraction
   uint32_t output_count = 0;
-  std::vector<uint32_t> output_temp_indices;  // output i → temp register index
-  std::vector<uint32_t> mix_indices;          // which outputs go to audio
-
-  // Register writeback: register i gets its new value from temps[register_temp_indices[i]]
-  // -1 means no update (keep current value)
-  std::vector<int32_t> register_temp_indices;
-  // Which registers are scalar (vs array)
-  std::vector<bool> register_scalar_mask;
 
   // Trigger params (need per-frame snapshot)
   std::vector<egress_expr::ControlParam *> trigger_params;
@@ -132,52 +124,28 @@ public:
       return;
     }
 
-    for (unsigned int s = 0; s < buffer_length_; ++s)
+    // Snapshot trigger params once per buffer
+    for (auto * p : state.trigger_params)
     {
-      // Snapshot trigger param values (fires once per frame)
-      for (auto * p : state.trigger_params)
-      {
-        p->frame_value.store(
-          p->value.exchange(0.0, std::memory_order_acq_rel),
-          std::memory_order_relaxed);
-      }
-
-      // Run the kernel — one call processes all outputs and register updates
-      state.kernel(
-        nullptr,                       // no inputs (all embedded in expressions)
-        state.registers.data(),
-        state.array_ptrs.data(),
-        state.array_sizes.data(),
-        state.temps.data(),
-        state.sample_rate,
-        state.sample_index++,
-        state.param_ptrs.data());
-
-      // Apply register writeback: copy computed values from temps → registers
-      for (uint32_t ri = 0; ri < state.register_temp_indices.size(); ++ri)
-      {
-        const int32_t ti = state.register_temp_indices[ri];
-        if (ti >= 0 && ri < state.register_scalar_mask.size() && state.register_scalar_mask[ri])
-        {
-          state.registers[ri] = state.temps[static_cast<uint32_t>(ti)];
-        }
-      }
-
-      // Mix outputs to audio buffer
-      double mixed = 0.0;
-      for (uint32_t idx : state.mix_indices)
-      {
-        if (idx < state.output_temp_indices.size())
-        {
-          const uint32_t temp_reg = state.output_temp_indices[idx];
-          if (temp_reg < state.temps.size())
-          {
-            mixed += std::bit_cast<double>(state.temps[temp_reg]) / 20.0;
-          }
-        }
-      }
-      outputBuffer[s] = mixed;
+      p->frame_value.store(
+        p->value.exchange(0.0, std::memory_order_acq_rel),
+        std::memory_order_relaxed);
     }
+
+    // Single kernel call processes the entire buffer
+    state.kernel(
+      nullptr,                       // no inputs (all embedded in expressions)
+      state.registers.data(),
+      state.array_ptrs.data(),
+      state.array_sizes.data(),
+      state.temps.data(),
+      state.sample_rate,
+      state.sample_index,
+      state.param_ptrs.data(),
+      outputBuffer.data(),
+      buffer_length_);
+
+    state.sample_index += buffer_length_;
 
     // Apply fade envelope
     {

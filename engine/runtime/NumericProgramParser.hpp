@@ -153,6 +153,13 @@ inline ParsedPlan3 parse_plan3(const nlohmann::json & plan)
     for (const auto & t : plan["register_targets"])
       prog.register_targets.push_back(t.get<int32_t>());
 
+  // Compute mix_output_temps: map mix_indices through output_targets
+  for (uint32_t idx : result.mix_indices)
+  {
+    if (idx < prog.output_targets.size())
+      prog.mix_output_temps.push_back(prog.output_targets[idx]);
+  }
+
   if (plan.contains("instructions"))
   {
     for (const auto & ji : plan["instructions"])

@@ -92,6 +92,7 @@ struct FlatProgram
   std::vector<uint32_t>  array_slot_sizes; // element count per array slot
   std::vector<uint32_t>  output_targets;
   std::vector<int32_t>   register_targets;
+  std::vector<uint32_t>  mix_output_temps;  // temp indices whose values mix to audio
 };
 
 using NumericKernelFn = void (*)(
@@ -101,8 +102,10 @@ using NumericKernelFn = void (*)(
   const uint64_t * array_sizes,
   int64_t * temps,
   double sample_rate,
-  uint64_t sample_index,
-  const uint64_t * param_ptrs);
+  uint64_t start_sample_index,
+  const uint64_t * param_ptrs,
+  double * output_buffer,
+  uint64_t buffer_length);
 
 class KernelObjectCache;
 

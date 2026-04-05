@@ -34,15 +34,12 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
     new_state.kernel       = *kernel_result;
     new_state.sample_rate  = parsed.sample_rate;
     new_state.output_count = static_cast<uint32_t>(parsed.program.output_targets.size());
-    new_state.mix_indices  = parsed.mix_indices;
     new_state.register_names = parsed.register_names;
 
     // Scalar state registers
     new_state.registers.resize(parsed.state_init.size(), 0);
     for (std::size_t i = 0; i < parsed.state_init.size(); ++i)
       new_state.registers[i] = std::bit_cast<int64_t>(parsed.state_init[i]);
-    new_state.register_scalar_mask.assign(parsed.state_init.size(), true);
-
     // Scalar temps
     new_state.temps.assign(parsed.program.register_count, 0);
 
@@ -58,11 +55,6 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
       new_state.array_ptrs[i]  = new_state.array_storage[i].data();
       new_state.array_sizes[i] = new_state.array_storage[i].size();
     }
-
-    new_state.output_temp_indices.assign(
-      parsed.program.output_targets.begin(), parsed.program.output_targets.end());
-    new_state.register_temp_indices.assign(
-      parsed.program.register_targets.begin(), parsed.program.register_targets.end());
 
     std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t active   = active_state_.load(std::memory_order_acquire);
