@@ -33,23 +33,28 @@ enum class OpTag : uint8_t
   Add, Sub, Mul, Div, Mod, Pow, FloorDiv,
   Less, LessEq, Greater, GreaterEq, Equal, NotEqual,
   BitAnd, BitOr, BitXor, LShift, RShift,
-  Index,    // array[scalar_idx] → element
+  Index,    // args[0]=ArrayReg, args[1]=scalar idx → scalar element
   MatMul,
   // arity 1
   Neg, Abs, Sin, Cos, Log, Exp, Sqrt, Floor, Ceil, Round, Not, BitNot,
   // arity 3
-  Clamp, Select, SetElement,
+  Clamp, Select,
+  SetElement,  // args[0]=ArrayReg, args[1]=idx, args[2]=val; no dst slot written
   // arity N
-  Pack,
+  Pack,     // args = scalar values → arrays[dst]
+  // Stateful param ops (special handling)
+  SmoothParam,   // args[0]=Param(ptr), args[1]=StateReg(slot), args[2]=Const(coeff)
+  TriggerParam,  // args[0]=Param(ptr)
 };
 
 enum class OperandKind : uint8_t
 {
-  Const,    // floating-point constant
-  Input,    // module input port (slot index)
-  Reg,      // virtual register (result of a prior FlatInstr)
-  StateReg, // persistent module register (delay / feedback)
-  Param,    // smoothed/trigger ControlParam pointer
+  Const,    // floating-point constant (const_val field)
+  Input,    // module input port (slot field)
+  Reg,      // virtual register — scalar result in temps[slot]
+  ArrayReg, // virtual register — array result in arrays[slot]
+  StateReg, // persistent module register in registers[slot]
+  Param,    // ControlParam pointer (ptr field)
   Rate,     // sample rate (runtime constant)
   Tick,     // sample index (runtime counter)
 };
@@ -64,6 +69,7 @@ struct Operand
   static Operand make_const(double v)    { Operand o; o.kind = OperandKind::Const;    o.const_val = v; return o; }
   static Operand make_input(uint32_t s)  { Operand o; o.kind = OperandKind::Input;    o.slot = s;      return o; }
   static Operand make_reg(uint32_t id)   { Operand o; o.kind = OperandKind::Reg;      o.slot = id;     return o; }
+  static Operand make_array_reg(uint32_t s) { Operand o; o.kind = OperandKind::ArrayReg; o.slot = s;   return o; }
   static Operand make_state(uint32_t s)  { Operand o; o.kind = OperandKind::StateReg; o.slot = s;      return o; }
   static Operand make_param(uint64_t p)  { Operand o; o.kind = OperandKind::Param;    o.ptr = p;       return o; }
   static Operand make_rate()             { Operand o; o.kind = OperandKind::Rate;                      return o; }
