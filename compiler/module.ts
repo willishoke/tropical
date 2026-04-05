@@ -19,11 +19,17 @@ interface DelayState {
   updateExpr: SignalExpr
 }
 
+interface NestedCallState {
+  nodeId: number
+  moduleDef: ModuleDef
+  callArgNodes: ExprNode[]
+}
+
 class _BuildContext {
   readonly inputCount: number
   readonly sampleRate: number
   readonly delayStates: DelayState[] = []
-  readonly nestedModules: { nodeId: number }[] = []
+  readonly nestedCalls: NestedCallState[] = []
   private _delayNodeCounter = 0
 
   constructor(inputCount: number, sampleRate: number) {
@@ -172,8 +178,14 @@ interface ModuleDef {
   registerExprNodes: (ExprNode | null)[]
   // Delay update expressions
   delayUpdateNodes: ExprNode[]
-  // Nested module call info (for the call() DSL)
-  nestedTypes: ModuleType[]
+  // Nested module call info — each entry records the nested module's def and the call arguments
+  nestedCalls: NestedCallDef[]
+}
+
+/** Captured metadata for a nested ModuleType.call() inside a defineModule body. */
+export interface NestedCallDef {
+  moduleDef: ModuleDef
+  callArgNodes: ExprNode[]
 }
 
 // ---------- ModuleType ----------
@@ -226,9 +238,13 @@ export class ModuleType {
       }
     }
 
-    // Allocate a node ID for this nested call
-    const nodeId = ctx.nestedModules.length
-    ctx.nestedModules.push({ nodeId })
+    // Allocate a node ID for this nested call and capture metadata
+    const nodeId = ctx.nestedCalls.length
+    ctx.nestedCalls.push({
+      nodeId,
+      moduleDef: d,
+      callArgNodes: callArgs.map(a => a._node),
+    })
 
     const outputs = d.outputNames.map((_, outId) => nestedOutputExpr(nodeId, outId))
     return outputs.length === 1 ? outputs[0] : outputs
@@ -377,7 +393,10 @@ export function defineModule(
     outputExprNodes: outputExprs.map(e => e._node),
     registerExprNodes: regUpdateExprs.map(e => e?._node ?? null),
     delayUpdateNodes: ctx.delayStates.map(d => d.updateExpr._node),
-    nestedTypes: [],
+    nestedCalls: ctx.nestedCalls.map(nc => ({
+      moduleDef: nc.moduleDef,
+      callArgNodes: nc.callArgNodes,
+    })),
   }
 
   return new ModuleType(def)
