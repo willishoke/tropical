@@ -22,7 +22,7 @@ import {
 import { Graph } from './graph.js'
 import { DAC } from './audio.js'
 import { Param, Trigger } from './param.js'
-import { applySessionWiring } from './apply_plan.js'
+import { applySessionWiring, applyFlatPlan } from './apply_plan.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -127,6 +127,8 @@ export interface SessionState {
   triggerRegistry: Map<string, Trigger>
   /** Canonical input wiring: key is `${module}:${input}`, value is the ExprNode for round-trip save. */
   inputExprNodes: Map<string, ExprNode>  // key: `${module}:${input}`
+  /** Optional FlatRuntime — when set, wiring goes through applyFlatPlan instead of Graph. */
+  runtime?: import('./runtime.js').Runtime
 }
 
 export function makeSession(bufferLength = 512): SessionState {
@@ -701,8 +703,9 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
       session.graphOutputs.push({ module: out.module, output: String(out.output) })
     }
 
-    // Apply all wiring via compilation pipeline (joins the active batch)
-    applySessionWiring(session)
+    // Apply wiring: FlatRuntime if available, otherwise Graph pipeline
+    if (session.runtime) applyFlatPlan(session, session.runtime)
+    else applySessionWiring(session)
 
     // Single rebuild for all module additions + wiring
     session.graph.endUpdate()
@@ -803,8 +806,9 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
       session.graphOutputs.push({ module: out.module, output: String(out.output) })
     }
 
-    // Apply all wiring via compilation pipeline (joins the active batch)
-    applySessionWiring(session)
+    // Apply wiring: FlatRuntime if available, otherwise Graph pipeline
+    if (session.runtime) applyFlatPlan(session, session.runtime)
+    else applySessionWiring(session)
 
     // Single rebuild for all module additions + wiring
     session.graph.endUpdate()
