@@ -13,6 +13,7 @@ import {
   product,
   portTypeEqual,
   portTypeToString,
+  broadcastShapes,
 } from './term'
 
 // ─────────────────────────────────────────────────────────────

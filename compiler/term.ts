@@ -19,6 +19,7 @@ export type ScalarKind = 'float' | 'int' | 'bool'
 
 export type PortType =
   | { tag: 'scalar'; scalar: ScalarKind }
+  | { tag: 'array'; element: PortType; shape: number[] }
   | { tag: 'struct'; name: string }
   | { tag: 'sum'; name: string }
   | { tag: 'product'; factors: PortType[] }
@@ -32,6 +33,84 @@ export const Bool: PortType = ScalarType('bool')
 export const Unit: PortType = { tag: 'unit' }
 export const StructType = (name: string): PortType => ({ tag: 'struct', name })
 export const SumType = (name: string): PortType => ({ tag: 'sum', name })
+
+/**
+ * Construct an array type: element type with a static shape.
+ * Shape is a list of dimension sizes, e.g. [4] for a vector, [4,4] for a matrix.
+ */
+export const ArrayType = (element: PortType, shape: number[]): PortType => {
+  if (shape.length === 0) return element // shape [] degenerates to scalar
+  return { tag: 'array', element, shape }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Shape algebra (numpy-style, static shapes)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Broadcast two shapes following numpy rules:
+ * 1. Shapes are right-aligned
+ * 2. For each dimension pair: equal sizes pass through, size-1 stretches, mismatch is an error
+ * Returns the broadcasted shape, or null if incompatible.
+ */
+export function broadcastShapes(a: number[], b: number[]): number[] | null {
+  const rank = Math.max(a.length, b.length)
+  const result: number[] = new Array(rank)
+  for (let i = 0; i < rank; i++) {
+    const da = i < a.length ? a[a.length - 1 - i] : 1
+    const db = i < b.length ? b[b.length - 1 - i] : 1
+    if (da === db) {
+      result[rank - 1 - i] = da
+    } else if (da === 1) {
+      result[rank - 1 - i] = db
+    } else if (db === 1) {
+      result[rank - 1 - i] = da
+    } else {
+      return null // incompatible
+    }
+  }
+  return result
+}
+
+/** Compute row-major strides for a shape. */
+export function shapeStrides(shape: number[]): number[] {
+  const strides = new Array(shape.length)
+  let stride = 1
+  for (let i = shape.length - 1; i >= 0; i--) {
+    strides[i] = stride
+    stride *= shape[i]
+  }
+  return strides
+}
+
+/** Total number of elements in a shape. */
+export function shapeSize(shape: number[]): number {
+  let size = 1
+  for (const d of shape) size *= d
+  return size
+}
+
+/** Convert multi-dimensional indices to a flat index using row-major strides. */
+export function flattenIndex(indices: number[], strides: number[]): number {
+  let idx = 0
+  for (let i = 0; i < indices.length; i++) idx += indices[i] * strides[i]
+  return idx
+}
+
+/**
+ * Count the total number of scalars in a PortType.
+ * Scalars = 1, arrays = product(shape) * scalarCount(element), etc.
+ */
+export function scalarCount(t: PortType): number {
+  switch (t.tag) {
+    case 'scalar': return 1
+    case 'unit': return 0
+    case 'array': return shapeSize(t.shape) * scalarCount(t.element)
+    case 'struct': return 1 // opaque — struct scalar count comes from registry
+    case 'sum': return 1
+    case 'product': return t.factors.reduce((s, f) => s + scalarCount(f), 0)
+  }
+}
 
 /**
  * Build a product type, flattening nested products and eliminating units.
@@ -59,6 +138,12 @@ export function portTypeEqual(a: PortType, b: PortType): boolean {
   switch (a.tag) {
     case 'scalar':
       return a.scalar === (b as typeof a).scalar
+    case 'array': {
+      const ba = b as typeof a
+      if (a.shape.length !== ba.shape.length) return false
+      if (!a.shape.every((d, i) => d === ba.shape[i])) return false
+      return portTypeEqual(a.element, ba.element)
+    }
     case 'struct':
     case 'sum':
       return a.name === (b as typeof a).name
@@ -78,12 +163,27 @@ export function portTypeEqual(a: PortType, b: PortType): boolean {
 export function portTypeToString(t: PortType): string {
   switch (t.tag) {
     case 'scalar': return t.scalar
+    case 'array': return `${portTypeToString(t.element)}[${t.shape.join(',')}]`
     case 'struct': return t.name
     case 'sum': return t.name
     case 'product':
       return t.factors.map(portTypeToString).join(' ⊗ ')
     case 'unit': return 'I'
   }
+}
+
+/**
+ * Check if two array shapes are broadcast-compatible.
+ * Returns the result shape, or null if incompatible.
+ */
+export function shapesCompatible(a: PortType, b: PortType): number[] | null {
+  if (a.tag === 'array' && b.tag === 'array') {
+    return broadcastShapes(a.shape, b.shape)
+  }
+  if (a.tag === 'array' && b.tag === 'scalar') return a.shape  // scalar broadcasts to any array
+  if (a.tag === 'scalar' && b.tag === 'array') return b.shape
+  if (a.tag === 'scalar' && b.tag === 'scalar') return []      // both scalar
+  return null
 }
 
 // ─────────────────────────────────────────────────────────────
