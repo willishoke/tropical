@@ -83,6 +83,9 @@ class Emitter {
   private nextArraySlot = 0
   private arraySizes:   number[] = []
   private instrs:       NInstr[] = []
+  // CSE: memoize compiled results by structural hash (JSON.stringify of the ExprNode).
+  // Terminals are not memoized — they allocate nothing and return an Operand directly.
+  private memo = new Map<string, CompileResult>()
 
   // Allocate a new scalar temporary register.
   private allocReg(): number { return this.nextReg++ }
@@ -120,16 +123,32 @@ class Emitter {
 
   // ── Compile a node to an operand (emitting instructions as needed). ──
   compileNode(node: ExprNode): CompileResult {
-    // Terminal shortcut
+    // Terminal shortcut — no allocation, skip memo
     const terminal = this.tryTerminal(node)
     if (terminal !== null) return { isArray: false, op: terminal }
 
+    // CSE: check memo before allocating anything
+    const key = JSON.stringify(node)
+    const cached = this.memo.get(key)
+    if (cached !== undefined) return cached
+
+    const result = this.compileNodeUncached(node)
+    this.memo.set(key, result)
+    return result
+  }
+
+  private compileNodeUncached(node: ExprNode): CompileResult {
     // Inline JS array → Pack instruction
     if (Array.isArray(node)) {
       return this.compilePack(node as ExprNode[])
     }
 
     const obj = node as { op: string; [k: string]: unknown }
+
+    // {"op":"array","items":[...]} — JSON patch format for inline arrays
+    if (obj.op === 'array' && Array.isArray(obj.items)) {
+      return this.compilePack(obj.items as ExprNode[])
+    }
 
     // Binary ops
     const binTag = BINARY_TAG[obj.op]
