@@ -30,6 +30,35 @@ extern "C" const char* egress_last_error(void)
   return tls_last_error.c_str();
 }
 
+// ---------- DAC wrapper (type-erased for Graph and FlatRuntime) ----------
+
+using RuntimeDAC = EgressDACImpl<egress_runtime::FlatRuntime>;
+
+struct DACWrapper
+{
+  enum Kind { kGraph, kRuntime };
+  Kind kind;
+  union {
+    EgressDAC *   graph_dac;
+    RuntimeDAC *  runtime_dac;
+  };
+
+  DACWrapper(EgressDAC * d) : kind(kGraph), graph_dac(d) {}
+  DACWrapper(RuntimeDAC * d) : kind(kRuntime), runtime_dac(d) {}
+
+  // Dispatch helper macro-free: visit with a lambda
+  template <typename F>
+  auto visit(F && f) { return kind == kGraph ? f(graph_dac) : f(runtime_dac); }
+  template <typename F>
+  auto visit(F && f) const { return kind == kGraph ? f(graph_dac) : f(runtime_dac); }
+
+  ~DACWrapper() { visit([](auto * d) { delete d; }); }
+  DACWrapper(const DACWrapper &) = delete;
+  DACWrapper & operator=(const DACWrapper &) = delete;
+};
+
+static DACWrapper * unwrap_dac(egress_dac_t d) { return static_cast<DACWrapper *>(d); }
+
 // ---------- Opaque wrapper types ----------
 
 struct EgressExpr
@@ -1132,62 +1161,79 @@ unsigned int egress_audio_default_output_device(void)
 
 egress_dac_t egress_dac_new(egress_graph_t g, unsigned int sample_rate, unsigned int channels)
 {
-  try { return new EgressDAC(static_cast<Graph*>(g), sample_rate, channels); }
+  try {
+    auto * dac = new EgressDAC(static_cast<Graph*>(g), sample_rate, channels);
+    return new DACWrapper(dac);
+  }
+  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
+}
+
+egress_dac_t egress_dac_new_runtime(egress_runtime_t r, unsigned int sample_rate, unsigned int channels)
+{
+  try {
+    auto * rt = static_cast<egress_runtime::FlatRuntime*>(r);
+    auto * dac = new RuntimeDAC(rt, sample_rate, channels);
+    return new DACWrapper(dac);
+  }
   catch (const std::exception & e) { set_error(e.what()); return nullptr; }
 }
 
 void egress_dac_free(egress_dac_t d)
 {
-  delete static_cast<EgressDAC*>(d);
+  delete unwrap_dac(d);
 }
 
 void egress_dac_start(egress_dac_t d)
 {
-  try { static_cast<EgressDAC*>(d)->start(); }
+  try { unwrap_dac(d)->visit([](auto * dac) { dac->start(); }); }
   catch (const std::exception & e) { set_error(e.what()); }
 }
 
 void egress_dac_stop(egress_dac_t d)
 {
-  try { static_cast<EgressDAC*>(d)->stop(); }
+  try { unwrap_dac(d)->visit([](auto * dac) { dac->stop(); }); }
   catch (const std::exception & e) { set_error(e.what()); }
 }
 
 bool egress_dac_is_running(egress_dac_t d)
 {
-  return static_cast<EgressDAC*>(d)->running;
+  return unwrap_dac(d)->visit([](auto * dac) { return dac->running; });
 }
 
 void egress_dac_get_stats(egress_dac_t d, egress_dac_stats_t* out)
 {
   if (!d || !out) return;
-  const auto s    = static_cast<EgressDAC*>(d)->stats();
-  out->callback_count  = s.callback_count;
-  out->avg_callback_ms = s.avg_callback_ms;
-  out->max_callback_ms = s.max_callback_ms;
-  out->underrun_count  = s.underrun_count;
-  out->overrun_count   = s.overrun_count;
+  unwrap_dac(d)->visit([out](auto * dac) {
+    const auto s = dac->stats();
+    out->callback_count  = s.callback_count;
+    out->avg_callback_ms = s.avg_callback_ms;
+    out->max_callback_ms = s.max_callback_ms;
+    out->underrun_count  = s.underrun_count;
+    out->overrun_count   = s.overrun_count;
+  });
 }
 
 void egress_dac_reset_stats(egress_dac_t d)
 {
-  if (d) static_cast<EgressDAC*>(d)->reset_stats();
+  if (d) unwrap_dac(d)->visit([](auto * dac) { dac->reset_stats(); });
 }
 
 bool egress_dac_is_reconnecting(egress_dac_t d)
 {
-  return d && static_cast<EgressDAC*>(d)->is_reconnecting();
+  return d && unwrap_dac(d)->visit([](auto * dac) { return dac->is_reconnecting(); });
 }
 
 unsigned int egress_dac_get_active_device(egress_dac_t d)
 {
-  return d ? static_cast<EgressDAC*>(d)->active_device() : 0;
+  return d ? unwrap_dac(d)->visit([](auto * dac) { return dac->active_device(); }) : 0;
 }
 
 bool egress_dac_switch_device(egress_dac_t d, unsigned int device_id)
 {
   if (!d) return false;
-  try { return static_cast<EgressDAC*>(d)->switch_device(device_id); }
+  try {
+    return unwrap_dac(d)->visit([device_id](auto * dac) { return dac->switch_device(device_id); });
+  }
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }
 

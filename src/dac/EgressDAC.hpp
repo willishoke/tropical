@@ -19,9 +19,23 @@ static inline void update_max(std::atomic<uint64_t>& cur, uint64_t val)
   {}
 }
 
-struct EgressDAC
+/**
+ * EgressDACImpl — templated DAC driver.
+ *
+ * AudioSource must provide:
+ *   void process();
+ *   std::vector<double> outputBuffer;
+ *   unsigned int getBufferLength() const;
+ *   void begin_fade_in(int samples = 2048);
+ *   void begin_fade_out(int samples = 2048);
+ *   bool is_fade_out_complete() const;
+ *
+ * Both Graph and FlatRuntime satisfy this.
+ */
+template <typename AudioSource>
+struct EgressDACImpl
 {
-  Graph*       graph;
+  AudioSource* source;
   RtAudio      audio;
   unsigned int sample_rate;
   unsigned int channels;
@@ -38,8 +52,8 @@ struct EgressDAC
   std::thread           watcher_thread_;
   unsigned int          active_device_id_{0};
 
-  EgressDAC(Graph* g, unsigned int sr, unsigned int ch)
-    : graph(g), sample_rate(sr), channels(ch)
+  EgressDACImpl(AudioSource* s, unsigned int sr, unsigned int ch)
+    : source(s), sample_rate(sr), channels(ch)
   {
     audio.setErrorCallback([this](RtAudioErrorType type, const std::string&) {
       if (type == RTAUDIO_DEVICE_DISCONNECT)
@@ -47,18 +61,19 @@ struct EgressDAC
     });
   }
 
-  ~EgressDAC() { stop(); }
+  ~EgressDACImpl() { stop(); }
 
   void start()
   {
     if (running)
       return;
 
-    graph->prime_numeric_jit();
+    if constexpr (requires { source->prime_numeric_jit(); })
+      source->prime_numeric_jit();
     for (int i = 0; i < kPrimeCycles; ++i)
-      graph->process();
+      source->process();
 
-    graph->begin_fade_in();
+    source->begin_fade_in();
 
     callback_count_.store(0, std::memory_order_relaxed);
     total_callback_ns_.store(0, std::memory_order_relaxed);
@@ -71,7 +86,7 @@ struct EgressDAC
 
     device_disconnected_.store(false, std::memory_order_relaxed);
     watcher_shutdown_.store(false, std::memory_order_relaxed);
-    watcher_thread_ = std::thread(&EgressDAC::watcher_loop, this);
+    watcher_thread_ = std::thread(&EgressDACImpl::watcher_loop, this);
   }
 
   void stop()
@@ -138,24 +153,19 @@ struct EgressDAC
 
   // ---------- Device switching ----------
 
-  // Switch the active output to `device_id`.  Returns false if the stream is
-  // not running or if `device_id` is not a valid output device.
   bool switch_device(unsigned int device_id)
   {
     if (!running)
       return false;
 
-    // Validate: device must exist and have at least one output channel.
     const auto info = audio.getDeviceInfo(device_id);
     if (info.outputChannels == 0)
       return false;
 
-    // Stop the watcher so it doesn't race with our stream swap.
     watcher_shutdown_.store(true, std::memory_order_relaxed);
     if (watcher_thread_.joinable())
       watcher_thread_.join();
 
-    // Close the current stream quickly (no fade — user-initiated switch).
     try
     {
       if (audio.isStreamRunning())
@@ -165,11 +175,10 @@ struct EgressDAC
     }
     catch (...) {}
 
-    // Open on the requested device.
     bool ok = true;
     try
     {
-      graph->begin_fade_in();
+      source->begin_fade_in();
       open_stream(device_id);
     }
     catch (...)
@@ -177,10 +186,9 @@ struct EgressDAC
       ok = false;
     }
 
-    // Restart the watcher regardless of success so auto-reconnect keeps working.
     device_disconnected_.store(false, std::memory_order_relaxed);
     watcher_shutdown_.store(false, std::memory_order_relaxed);
-    watcher_thread_ = std::thread(&EgressDAC::watcher_loop, this);
+    watcher_thread_ = std::thread(&EgressDACImpl::watcher_loop, this);
 
     return ok;
   }
@@ -195,18 +203,18 @@ struct EgressDAC
   {
     const auto t0 = std::chrono::steady_clock::now();
 
-    auto* self = static_cast<EgressDAC*>(user_data);
+    auto* self = static_cast<EgressDACImpl*>(user_data);
 
     if (status)
       self->underrun_count_.fetch_add(1, std::memory_order_relaxed);
 
-    self->graph->process();
-    const auto& source = self->graph->outputBuffer;
+    self->source->process();
+    const auto& buf = self->source->outputBuffer;
     auto* out = static_cast<double*>(output_buffer);
 
     for (unsigned int i = 0; i < n_buffer_frames; ++i)
     {
-      const double sample = i < source.size() ? source[i] : 0.0;
+      const double sample = i < buf.size() ? buf[i] : 0.0;
       for (unsigned int c = 0; c < self->channels; ++c)
         *out++ = sample;
     }
@@ -244,7 +252,7 @@ private:
     out_params.nChannels    = channels;
     out_params.firstChannel = 0;
 
-    unsigned int buffer_frames = graph->getBufferLength();
+    unsigned int buffer_frames = source->getBufferLength();
 
     audio.openStream(
       &out_params,
@@ -252,7 +260,7 @@ private:
       RTAUDIO_FLOAT64,
       sample_rate,
       &buffer_frames,
-      &EgressDAC::fill_buffer,
+      &EgressDACImpl::fill_buffer,
       this);
 
     audio.startStream();
@@ -266,14 +274,14 @@ private:
     {
       if (fade)
       {
-        graph->begin_fade_out();
-        const int buf_ms = (static_cast<int>(graph->getBufferLength()) * 1000)
+        source->begin_fade_out();
+        const int buf_ms = (static_cast<int>(source->getBufferLength()) * 1000)
                            / static_cast<int>(sample_rate);
         const int timeout_ms = (2048 * 1000) / static_cast<int>(sample_rate)
                                + 4 * buf_ms + 50;
         const auto deadline = std::chrono::steady_clock::now()
                               + std::chrono::milliseconds(timeout_ms);
-        while (!graph->is_fade_out_complete()
+        while (!source->is_fade_out_complete()
                && std::chrono::steady_clock::now() < deadline)
         {
           std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -299,9 +307,6 @@ private:
       if (!disconnected && !default_changed)
         continue;
 
-      // Abort and close without fade (stream is either dead or being swapped).
-      // Guard each call: RtAudio can throw if the stream closed between the
-      // isStreamRunning/isStreamOpen check and the actual call (TOCTOU).
       try
       {
         if (audio.isStreamRunning())
@@ -311,26 +316,25 @@ private:
       }
       catch (...) {}
 
-      // Give the OS time to register the new default device
       std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
       if (watcher_shutdown_.load(std::memory_order_relaxed))
         break;
 
-      // Clear the flag before opening so a disconnect event that fires during
-      // open_stream() is not silently swallowed.
       device_disconnected_.store(false, std::memory_order_relaxed);
 
       try
       {
-        graph->begin_fade_in();
+        source->begin_fade_in();
         open_stream();
       }
       catch (...)
       {
-        // Reconnect failed — set flag so the next loop iteration retries
         device_disconnected_.store(true, std::memory_order_relaxed);
       }
     }
   }
 };
+
+// Backward-compatible alias
+using EgressDAC = EgressDACImpl<Graph>;

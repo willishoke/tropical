@@ -36,6 +36,15 @@ export class DAC {
     _registry.register(this, this._h, this)
   }
 
+  /** Create a DAC backed by a FlatRuntime instead of a Graph. */
+  static fromRuntime(runtimeHandle: unknown, sampleRate = 44100, channels = 2): DAC {
+    const dac = Object.create(DAC.prototype) as DAC
+    dac._graph = runtimeHandle
+    dac._h = b.check(b.egress_dac_new_runtime(runtimeHandle, sampleRate, channels), 'dac_new_runtime')
+    _registry.register(dac, dac._h, dac)
+    return dac
+  }
+
   start(): void {
     b.egress_dac_start(this._h)
   }

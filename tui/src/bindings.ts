@@ -192,6 +192,7 @@ export const egress_graph_load_plan                  = lib.func('egress_graph_lo
 // ---------- DAC API ----------
 
 export const egress_dac_new              = lib.func('egress_dac_new',              'void *', ['void *', 'uint32', 'uint32'])
+export const egress_dac_new_runtime     = lib.func('egress_dac_new_runtime',     'void *', ['void *', 'uint32', 'uint32'])
 export const egress_dac_free             = lib.func('egress_dac_free',             'void',   ['void *'])
 export const egress_dac_start            = lib.func('egress_dac_start',            'void',   ['void *'])
 export const egress_dac_stop             = lib.func('egress_dac_stop',             'void',   ['void *'])

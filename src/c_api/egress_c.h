@@ -16,6 +16,7 @@ typedef void* egress_module_spec_t;
 typedef void* egress_nested_spec_t;
 typedef void* egress_dac_t;
 typedef void* egress_param_t;
+typedef void* egress_runtime_t;
 
 /* ExprKind integer constants — match ExprKind enum order in Expr.hpp */
 #define EGRESS_EXPR_LITERAL       0
@@ -237,6 +238,7 @@ unsigned int egress_audio_default_output_device(void);
 
 /* ---------- DAC API ---------- */
 egress_dac_t egress_dac_new(egress_graph_t, unsigned int sample_rate, unsigned int channels);
+egress_dac_t egress_dac_new_runtime(egress_runtime_t, unsigned int sample_rate, unsigned int channels);
 void         egress_dac_free(egress_dac_t);
 void         egress_dac_start(egress_dac_t);
 void         egress_dac_stop(egress_dac_t);
@@ -261,7 +263,6 @@ unsigned int egress_dac_get_active_device(egress_dac_t);
 bool         egress_dac_switch_device(egress_dac_t, unsigned int device_id);
 
 /* ---------- FlatRuntime API ---------- */
-typedef void* egress_runtime_t;
 
 egress_runtime_t egress_runtime_new(unsigned int buffer_length);
 void             egress_runtime_free(egress_runtime_t);

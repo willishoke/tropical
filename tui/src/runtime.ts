@@ -6,6 +6,7 @@
  */
 
 import * as b from './bindings.js'
+import { DAC } from './audio.js'
 
 const _registry = new FinalizationRegistry((handle: unknown) => {
   b.egress_runtime_free(handle)
@@ -60,5 +61,10 @@ export class Runtime {
 
   isFadeOutComplete(): boolean {
     return b.egress_runtime_is_fade_out_complete(this._h) as boolean
+  }
+
+  /** Create a DAC that reads audio from this runtime. */
+  createDAC(sampleRate = 44100, channels = 2): DAC {
+    return DAC.fromRuntime(this._h, sampleRate, channels)
   }
 }
