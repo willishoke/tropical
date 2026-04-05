@@ -41,6 +41,31 @@ export class SignalExpr {
     const i = coerce(idx)
     return new SignalExpr({ op: 'index', args: [this._node, i._node] })
   }
+
+  /** Reshape this array to a new shape. */
+  reshape(newShape: number[]): SignalExpr {
+    return new SignalExpr({ op: 'reshape', args: [this._node], shape: newShape })
+  }
+
+  /** Transpose a 2D array. */
+  transpose(): SignalExpr {
+    return new SignalExpr({ op: 'transpose', args: [this._node] })
+  }
+
+  /** Slice along an axis: [start, end). */
+  slice(axis: number, start: number, end: number): SignalExpr {
+    return new SignalExpr({ op: 'slice', args: [this._node], axis, start, end })
+  }
+
+  /** Reduce along an axis with an associative op ('add', 'mul', 'min', 'max'). */
+  reduce(axis: number, reduceOp: string): SignalExpr {
+    return new SignalExpr({ op: 'reduce', args: [this._node], axis, reduce_op: reduceOp })
+  }
+
+  /** Sum all elements (reduce over axis 0 with 'add'). */
+  sum(axis = 0): SignalExpr {
+    return this.reduce(axis, 'add')
+  }
 }
 
 // ---------- Coercion ----------
@@ -137,6 +162,75 @@ export function arraySet(arrExpr: ExprCoercible, idx: ExprCoercible, val: ExprCo
 /** Build a matrix literal expression from a row-major 2D array of numbers. */
 export function matrix(rows: number[][]): SignalExpr {
   return SignalExpr.fromNode({ op: 'matrix', rows })
+}
+
+// ---------- First-class array operations (static shapes) ----------
+
+/**
+ * Typed array literal with explicit shape.
+ * Values are provided in row-major order and must match product(shape).
+ */
+export function arrayLiteral(shape: number[], values: ExprCoercible[]): SignalExpr {
+  const items = values.map(v => coerce(v)._node)
+  return SignalExpr.fromNode({ op: 'array_literal', shape, values: items })
+}
+
+/** Create an array filled with zeros. */
+export function zeros(shape: number[]): SignalExpr {
+  return SignalExpr.fromNode({ op: 'zeros', shape })
+}
+
+/** Create an array filled with ones. */
+export function ones(shape: number[]): SignalExpr {
+  return SignalExpr.fromNode({ op: 'ones', shape })
+}
+
+/** Create an array filled with a constant value. */
+export function fill(shape: number[], value: ExprCoercible): SignalExpr {
+  return SignalExpr.fromNode({ op: 'fill', shape, value: coerce(value)._node })
+}
+
+/** Reshape an array to a new shape (total elements must match). */
+export function reshape(arr: ExprCoercible, newShape: number[]): SignalExpr {
+  return SignalExpr.fromNode({ op: 'reshape', args: [coerce(arr)._node], shape: newShape })
+}
+
+/** Transpose a 2D array (swap axes). */
+export function transpose(arr: ExprCoercible): SignalExpr {
+  return unary('transpose', arr)
+}
+
+/**
+ * Slice an array along a dimension.
+ * Returns elements [start, end) along the given axis.
+ */
+export function slice(arr: ExprCoercible, axis: number, start: number, end: number): SignalExpr {
+  return SignalExpr.fromNode({ op: 'slice', args: [coerce(arr)._node], axis, start, end })
+}
+
+/**
+ * Reduce an array along an axis using an associative operation.
+ * reduceOp is one of: 'add', 'mul', 'min', 'max'.
+ */
+export function reduce(arr: ExprCoercible, axis: number, reduceOp: string): SignalExpr {
+  return SignalExpr.fromNode({ op: 'reduce', args: [coerce(arr)._node], axis, reduce_op: reduceOp })
+}
+
+/** Explicitly broadcast an array to a target shape. */
+export function broadcastTo(arr: ExprCoercible, shape: number[]): SignalExpr {
+  return SignalExpr.fromNode({ op: 'broadcast_to', args: [coerce(arr)._node], shape })
+}
+
+/** Map a function over array elements: map(fn, arr) applies fn to each element. */
+export function mapArray(fn: (elem: SignalExpr) => SignalExpr, arr: ExprCoercible): SignalExpr {
+  // Build as: map(function(1, body), arr) — function takes 1 param (the element)
+  const param = inputExpr(0)
+  const body = fn(param)
+  return SignalExpr.fromNode({
+    op: 'map',
+    callee: { op: 'function', param_count: 1, body: body._node },
+    args: [coerce(arr)._node],
+  })
 }
 
 // ---------- Function expressions ----------
