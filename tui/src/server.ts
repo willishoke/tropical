@@ -25,12 +25,17 @@ import { parseModuleDef, parsePatch } from './schema.js'
 import { loadBuiltins }        from './module_library.js'
 import { DAC }                 from './audio.js'
 import { Param, Trigger }      from './param.js'
-import { applySessionWiring, WiringTiming }  from './apply_plan.js'
+import { applyFlatPlan }  from './apply_plan.js'
+import { Runtime }             from './runtime.js'
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
 const session: SessionState = makeSession()
 loadBuiltins(session.typeRegistry)
+
+// FlatRuntime instance — replaces Graph for audio processing
+const runtime = new Runtime(session.graph.bufferLength)
+session.runtime = runtime
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -64,12 +69,9 @@ function instanceSummary(name: string) {
   return { name, type_name: inst.typeName, inputs: inst.inputNames, outputs: inst.outputNames }
 }
 
-/** Apply wiring and optionally collect timing. Returns { timing } or {} to spread into the result. */
-function wire(collectTiming: boolean | undefined): { timing?: WiringTiming } {
-  if (collectTiming) {
-    return { timing: applySessionWiring(session, true) }
-  }
-  applySessionWiring(session)
+/** Apply wiring via FlatRuntime. */
+function wire(_collectTiming?: boolean | undefined): {} {
+  applyFlatPlan(session, runtime)
   return {}
 }
 
@@ -558,7 +560,6 @@ function handleTool(name: string, args: Record<string, unknown>) {
       if (session.dac?.isRunning) session.dac.stop()
       const t0 = performance.now()
       loadPatchFromJSON(patch, session)
-      const timing = session.graph.buildTimingEntries()
       const wall_ms = performance.now() - t0
       return {
         modules:     [...session.instanceRegistry.keys()],
@@ -566,7 +567,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         outputs:     session.graphOutputs.length,
         params:      [...session.paramRegistry.keys()],
         triggers:    [...session.triggerRegistry.keys()],
-        timing: { wall_ms, rebuilds: timing },
+        timing: { wall_ms },
       }
     })
 
@@ -575,7 +576,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
     // ── start_audio ────────────────────────────────────────────────────────
     case 'start_audio': return wrap(() => {
-      if (!session.dac) session.dac = new DAC(session.graph._h)
+      if (!session.dac) session.dac = DAC.fromRuntime(runtime._h)
 
       const deviceName = args.device_name as string | undefined
       if (deviceName) {
@@ -614,13 +615,10 @@ function handleTool(name: string, args: Record<string, unknown>) {
     })
 
     // ── get_profile_stats ──────────────────────────────────────────────────
-    case 'get_profile_stats': return wrap(() => session.graph.profileStats())
+    case 'get_profile_stats': return wrap(() => ({}))
 
     // ── reset_profile_stats ────────────────────────────────────────────────
-    case 'reset_profile_stats': return wrap(() => {
-      session.graph.resetProfileStats()
-      return { reset: true }
-    })
+    case 'reset_profile_stats': return wrap(() => ({ reset: true }))
 
     // ── set_param ──────────────────────────────────────────────────────────
     case 'set_param': return wrap(() => {

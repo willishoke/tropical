@@ -356,6 +356,8 @@ class Module
       std::vector<NumericSyntheticInput> synthetic_inputs;
     };
 
+    // Public for FlatRuntime access (will be removed with Module in Phase 5)
+  public:
     struct NumericJitState
     {
       egress_jit::NumericKernelFn kernel = nullptr;
@@ -389,6 +391,7 @@ class Module
     #endif
     };
 
+  private:
     std::vector<int64_t> numeric_registers_;
     std::vector<int64_t> numeric_next_registers_;
     std::vector<std::vector<double>> numeric_register_arrays_;
@@ -444,6 +447,8 @@ class Module
     std::atomic<uint64_t> profile_materialized_array_registers_{0};
   #endif
 
+    // Public statics for FlatRuntime access (will be removed with Module in Phase 5)
+  public:
     static bool supports_numeric_jit_expr_kind(ExprKind kind);
 
     static void assign_scalar_numeric_value(Value & dst, double value);
@@ -574,6 +579,7 @@ class Module
       NumericJitState & state,
       const egress::TypeRegistry* registry = nullptr);
 
+  private:
     void initialize_numeric_jit_state(
       NumericJitState & state,
       const CompiledProgram & source_program,

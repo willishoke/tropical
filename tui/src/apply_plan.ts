@@ -10,6 +10,8 @@
 import type { SessionState } from './patch'
 import { compilerInputFromSession, compilePatch } from './compiler'
 import { generatePlan, planToJSON } from './plan'
+import { flattenPatch } from './flatten'
+import type { Runtime } from './runtime'
 
 export interface WiringTiming {
   ts_compile_ms: number
@@ -62,4 +64,17 @@ export function applySessionWiring(session: SessionState, collectTiming = false)
       rebuilds:      session.graph.buildTimingEntries(),
     }
   }
+}
+
+/**
+ * Flatten the session's patch and push to a FlatRuntime.
+ *
+ * Call this after any mutation to inputExprNodes or graphOutputs.
+ * Unlike applySessionWiring, this bypasses Graph/Module entirely —
+ * all expression trees are inlined in TS and sent as a single flat plan.
+ */
+export function applyFlatPlan(session: SessionState, runtime: Runtime): void {
+  const plan = flattenPatch(session)
+  const json = JSON.stringify(plan)
+  runtime.loadPlan(json)
 }

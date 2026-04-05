@@ -12,7 +12,7 @@
 
 import * as b from './bindings.js'
 import {
-  SignalExpr, ExprCoercible, coerce,
+  SignalExpr, ExprCoercible, coerce, ExprNode,
   inputExpr, registerExpr, nestedOutputExpr, delayValueExpr,
 } from './expr.js'
 import type { Graph } from './graph.js'
@@ -213,13 +213,18 @@ interface ModuleDef {
   outputPortTypes: (string | undefined)[]
   registerNames: string[]
   registerPortTypes: (string | undefined)[]
+  registerInitValues: ValueCoercible[]
   sampleRate: number
   rawInputDefaults: Record<string, ExprCoercible>
   inputDefaults: (SignalExpr | null)[]
   outputExprHandles: unknown[]
   registerSpecs: RegisterSpec[]
   delaySpecHandles: DelaySpecHandle[]
+  delayInitValues: number[]
   nestedSpecHandles: NestedEntry[]
+  // ExprNode trees (JSON-serializable) for each output and register update
+  outputExprNodes: ExprNode[]
+  registerExprNodes: (ExprNode | null)[]
   // Keep JS objects alive to protect their koffi handles from FinalizationRegistry
   _liveOutputExprs: SignalExpr[]
   _liveRegUpdateExprs: (SignalExpr | null)[]
@@ -536,13 +541,17 @@ export function defineModule(
     outputPortTypes,
     registerNames: regNames,
     registerPortTypes: regPortTypes,
+    registerInitValues: regInitValues,
     sampleRate,
     rawInputDefaults: inputDefaults ?? {},
     inputDefaults: parsedDefaults,
     outputExprHandles: outputExprs.map(e => e._h),
     registerSpecs,
     delaySpecHandles,
+    delayInitValues: ctx.delayStates.map(d => d.initVal),
     nestedSpecHandles: ctx.nestedModules.map(({ nodeId, nestedH }) => ({ nodeId, nestedH })),
+    outputExprNodes: outputExprs.map(e => e._node),
+    registerExprNodes: regUpdateExprs.map(e => e?._node ?? null),
     _liveOutputExprs: outputExprs,
     _liveRegUpdateExprs: regUpdateExprs,
     _liveDelayUpdateExprs: ctx.delayStates.map(d => d.updateExpr),
@@ -573,13 +582,20 @@ export class PureFunction {
     }
     const callArgs = args.map(a => coerce(a))
     const argHandles = callArgs.map(a => a._h)
+    const argNodes = callArgs.map(a => a._node)
 
     const outputs: SignalExpr[] = []
-    for (const bodyH of d.outputExprHandles) {
+    for (let i = 0; i < d.outputExprHandles.length; i++) {
+      const bodyH = d.outputExprHandles[i]
       const fnH = b.check(b.egress_expr_function(d.inputNames.length, bodyH), 'expr_function')
       const callH = b.check(b.egress_expr_call(fnH, argHandles, argHandles.length), 'expr_call')
       b.egress_expr_free(fnH)
-      outputs.push(SignalExpr.fromHandle(callH))
+      const bodyNode = d._liveOutputExprs[i]._node
+      outputs.push(SignalExpr.fromHandle(callH, {
+        op: 'call',
+        callee: { op: 'function', param_count: d.inputNames.length, body: bodyNode },
+        args: argNodes,
+      }))
     }
     return outputs.length === 1 ? outputs[0] : outputs
   }

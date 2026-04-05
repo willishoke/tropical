@@ -34,7 +34,7 @@ function findLib(): string {
   }
 
   // 3. Common build subdirectories
-  const buildDirs = ['build', 'build-jit-profile', 'build-jit-ctypes', 'build-jit', 'build-profile', 'build-ctypes']
+  const buildDirs = ['build-profile', 'build', 'build-jit-profile', 'build-jit-ctypes', 'build-jit', 'build-ctypes']
   for (const buildDir of buildDirs) {
     for (const name of unixNames) {
       const candidate = path.join(parent, buildDir, name)
@@ -192,6 +192,7 @@ export const egress_graph_load_plan                  = lib.func('egress_graph_lo
 // ---------- DAC API ----------
 
 export const egress_dac_new              = lib.func('egress_dac_new',              'void *', ['void *', 'uint32', 'uint32'])
+export const egress_dac_new_runtime     = lib.func('egress_dac_new_runtime',     'void *', ['void *', 'uint32', 'uint32'])
 export const egress_dac_free             = lib.func('egress_dac_free',             'void',   ['void *'])
 export const egress_dac_start            = lib.func('egress_dac_start',            'void',   ['void *'])
 export const egress_dac_stop             = lib.func('egress_dac_stop',             'void',   ['void *'])
@@ -201,6 +202,18 @@ export const egress_dac_reset_stats      = lib.func('egress_dac_reset_stats',   
 export const egress_dac_is_reconnecting  = lib.func('egress_dac_is_reconnecting',  'bool',   ['void *'])
 export const egress_dac_get_active_device = lib.func('egress_dac_get_active_device', 'uint32', ['void *'])
 export const egress_dac_switch_device    = lib.func('egress_dac_switch_device',    'bool',   ['void *', 'uint32'])
+
+// ---------- FlatRuntime API ----------
+
+export const egress_runtime_new                    = lib.func('egress_runtime_new',                    'void *', ['uint32'])
+export const egress_runtime_free                   = lib.func('egress_runtime_free',                   'void',   ['void *'])
+export const egress_runtime_load_plan              = lib.func('egress_runtime_load_plan',              'bool',   ['void *', 'str', 'size_t'])
+export const egress_runtime_process                = lib.func('egress_runtime_process',                'void',   ['void *'])
+export const egress_runtime_output_buffer          = lib.func('egress_runtime_output_buffer',          'void *', ['void *'])
+export const egress_runtime_get_buffer_length      = lib.func('egress_runtime_get_buffer_length',      'uint32', ['void *'])
+export const egress_runtime_begin_fade_in          = lib.func('egress_runtime_begin_fade_in',          'void',   ['void *'])
+export const egress_runtime_begin_fade_out         = lib.func('egress_runtime_begin_fade_out',         'void',   ['void *'])
+export const egress_runtime_is_fade_out_complete   = lib.func('egress_runtime_is_fade_out_complete',   'bool',   ['void *'])
 
 // ---------- Device enumeration ----------
 

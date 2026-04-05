@@ -8,7 +8,8 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadPatchFromJSON, type PatchJSON, type ExprNode } from './patch'
 import { loadBuiltins } from './module_library'
-import { applySessionWiring } from './apply_plan'
+import { applySessionWiring, applyFlatPlan } from './apply_plan'
+import { Runtime } from './runtime'
 
 function setupSession(modules: PatchJSON['modules'], bufferLength = 256) {
   const session = makeSession(bufferLength)
@@ -243,6 +244,149 @@ describe('applySessionWiring', () => {
 
     expect(peak(session.graph.outputBuffer)).toBeGreaterThan(0)
 
+    session.graph.dispose()
+  })
+})
+
+// ─── FlatRuntime tests ───────────────────────────────────────────────────
+
+describe('applyFlatPlan', () => {
+  test('VCO → VCA through flat runtime produces audio', () => {
+    const session = setupSession([
+      { type: 'VCO', name: 'VCO1' },
+      { type: 'VCA', name: 'VCA1' },
+    ])
+
+    session.inputExprNodes.set('VCO1:freq', 440)
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:cv', 1.0)
+    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+
+    const rt = new Runtime(256)
+    applyFlatPlan(session, rt)
+    rt.process()
+
+    const buf = rt.outputBuffer
+    expect(peak(buf)).toBeGreaterThan(0)
+
+    rt.dispose()
+    session.graph.dispose()
+  })
+
+  test('Clock module through flat runtime produces output', () => {
+    const session = setupSession([
+      { type: 'Clock', name: 'Clock1' },
+    ])
+
+    session.inputExprNodes.set('Clock1:freq', 1.0)
+    session.inputExprNodes.set('Clock1:ratios_in', [1.0])
+    session.graphOutputs.push({ module: 'Clock1', output: 'output' })
+
+    const rt = new Runtime(256)
+    applyFlatPlan(session, rt)
+    rt.process()
+
+    const buf = rt.outputBuffer
+    // Clock output is a square wave — should have nonzero samples
+    expect(peak(buf)).toBeGreaterThan(0)
+
+    rt.dispose()
+    session.graph.dispose()
+  })
+
+  test('flat runtime produces continuous output over two buffers', () => {
+    const session = setupSession([
+      { type: 'VCO', name: 'VCO1' },
+      { type: 'VCA', name: 'VCA1' },
+    ])
+    session.inputExprNodes.set('VCO1:freq', 440)
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:cv', 1.0)
+    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+
+    const rt = new Runtime(256)
+    applyFlatPlan(session, rt)
+
+    rt.process()
+    const buf1 = new Float64Array(rt.outputBuffer)
+    expect(peak(buf1)).toBeGreaterThan(0)
+
+    // Second buffer should also produce audio (registers persist)
+    rt.process()
+    const buf2 = new Float64Array(rt.outputBuffer)
+    expect(peak(buf2)).toBeGreaterThan(0)
+
+    // The two buffers should be different (phase advances)
+    let differs = false
+    for (let i = 0; i < buf1.length; i++) {
+      if (Math.abs(buf1[i] - buf2[i]) > 1e-10) { differs = true; break }
+    }
+    expect(differs).toBe(true)
+
+    rt.dispose()
+    session.graph.dispose()
+  })
+
+  test('three-module chain: VCO → VCO (FM) → VCA', () => {
+    const session = setupSession([
+      { type: 'VCO', name: 'Mod' },
+      { type: 'VCO', name: 'Carrier' },
+      { type: 'VCA', name: 'VCA1' },
+    ])
+
+    // FM: modulator saw → carrier freq modulation
+    session.inputExprNodes.set('Mod:freq', 5)
+    session.inputExprNodes.set('Carrier:freq', {
+      op: 'add',
+      args: [440, { op: 'mul', args: [{ op: 'ref', module: 'Mod', output: 'saw' }, 100] }],
+    } as ExprNode)
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'Carrier', output: 'saw' })
+    session.inputExprNodes.set('VCA1:cv', 1.0)
+    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+
+    const rt = new Runtime(256)
+    applyFlatPlan(session, rt)
+    rt.process()
+
+    expect(peak(rt.outputBuffer)).toBeGreaterThan(0)
+
+    rt.dispose()
+    session.graph.dispose()
+  })
+
+  test('hot-swap preserves register state across rewiring', () => {
+    const session = setupSession([
+      { type: 'VCO', name: 'VCO1' },
+      { type: 'VCA', name: 'VCA1' },
+    ])
+
+    session.inputExprNodes.set('VCO1:freq', 440)
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:cv', 1.0)
+    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+
+    const rt = new Runtime(256)
+    applyFlatPlan(session, rt)
+
+    // Process several buffers to advance VCO phase
+    for (let i = 0; i < 10; i++) rt.process()
+    const buf1 = new Float64Array(rt.outputBuffer)
+
+    // Rewire: change VCA cv from 1.0 to 0.5 (VCO registers should persist)
+    session.inputExprNodes.set('VCA1:cv', 0.5)
+    applyFlatPlan(session, rt)
+    rt.process()
+    const buf2 = rt.outputBuffer
+
+    // Output should be non-silent (VCO kept running thanks to register transfer)
+    expect(peak(buf2)).toBeGreaterThan(0)
+
+    // Should be roughly half amplitude of what buf1 was (cv halved)
+    const ratio = peak(buf2) / peak(buf1)
+    expect(ratio).toBeGreaterThan(0.3)
+    expect(ratio).toBeLessThan(0.7)
+
+    rt.dispose()
     session.graph.dispose()
   })
 })

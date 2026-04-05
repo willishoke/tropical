@@ -16,6 +16,7 @@ typedef void* egress_module_spec_t;
 typedef void* egress_nested_spec_t;
 typedef void* egress_dac_t;
 typedef void* egress_param_t;
+typedef void* egress_runtime_t;
 
 /* ExprKind integer constants — match ExprKind enum order in Expr.hpp */
 #define EGRESS_EXPR_LITERAL       0
@@ -237,6 +238,7 @@ unsigned int egress_audio_default_output_device(void);
 
 /* ---------- DAC API ---------- */
 egress_dac_t egress_dac_new(egress_graph_t, unsigned int sample_rate, unsigned int channels);
+egress_dac_t egress_dac_new_runtime(egress_runtime_t, unsigned int sample_rate, unsigned int channels);
 void         egress_dac_free(egress_dac_t);
 void         egress_dac_start(egress_dac_t);
 void         egress_dac_stop(egress_dac_t);
@@ -259,6 +261,20 @@ bool egress_dac_is_reconnecting(egress_dac_t);
 unsigned int egress_dac_get_active_device(egress_dac_t);
 /* Switch the running DAC to a different output device.  Returns false on failure. */
 bool         egress_dac_switch_device(egress_dac_t, unsigned int device_id);
+
+/* ---------- FlatRuntime API ---------- */
+
+egress_runtime_t egress_runtime_new(unsigned int buffer_length);
+void             egress_runtime_free(egress_runtime_t);
+bool             egress_runtime_load_plan(egress_runtime_t, const char* plan_json, size_t len);
+void             egress_runtime_process(egress_runtime_t);
+const double*    egress_runtime_output_buffer(egress_runtime_t);
+unsigned int     egress_runtime_get_buffer_length(egress_runtime_t);
+
+/* Fade control (for DAC) */
+void             egress_runtime_begin_fade_in(egress_runtime_t);
+void             egress_runtime_begin_fade_out(egress_runtime_t);
+bool             egress_runtime_is_fade_out_complete(egress_runtime_t);
 
 #ifdef __cplusplus
 }

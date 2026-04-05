@@ -42,6 +42,7 @@ set(EGRESS_CORE_SOURCES
     src/graph/Module.cpp
     src/expr/ExprStructural.cpp
     src/expr/ExprRewrite.cpp
+    src/runtime/FlatRuntime.cpp
     src/c_api/egress_c.cpp)
 
 # libegress — stable C shared library (no Python dependency)

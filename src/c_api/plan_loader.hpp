@@ -371,6 +371,14 @@ inline ExprSpecPtr parse_expr(const json & node)
         return spec;
     }
 
+    if (op == "delay_value")
+    {
+        auto spec = std::make_shared<egress_expr::ExprSpec>();
+        spec->kind = K::DelayValue;
+        spec->slot_id = node["node_id"].get<unsigned int>();
+        return spec;
+    }
+
     throw std::runtime_error("plan_loader: unsupported expr op '" + op + "'");
 }
 

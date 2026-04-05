@@ -22,18 +22,15 @@ import {
 import { Graph } from './graph.js'
 import { DAC } from './audio.js'
 import { Param, Trigger } from './param.js'
-import { applySessionWiring } from './apply_plan.js'
+import { applySessionWiring, applyFlatPlan } from './apply_plan.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
 // ─────────────────────────────────────────────────────────────
 
-/** An expression node — bare scalar, inline array, or a named op object. */
-export type ExprNode =
-  | number
-  | boolean
-  | ExprNode[]
-  | { op: string; [key: string]: unknown }
+// ExprNode is defined in expr.ts and re-exported here for backward compatibility.
+export type { ExprNode } from './expr.js'
+import type { ExprNode } from './expr.js'
 
 
 export interface NestedModuleJSON {
@@ -130,6 +127,8 @@ export interface SessionState {
   triggerRegistry: Map<string, Trigger>
   /** Canonical input wiring: key is `${module}:${input}`, value is the ExprNode for round-trip save. */
   inputExprNodes: Map<string, ExprNode>  // key: `${module}:${input}`
+  /** Optional FlatRuntime — when set, wiring goes through applyFlatPlan instead of Graph. */
+  runtime?: import('./runtime.js').Runtime
 }
 
 export function makeSession(bufferLength = 512): SessionState {
@@ -225,14 +224,14 @@ export function buildExpr(node: ExprNode, ctx: BuildCtx): SignalExpr {
     const n = node as { op: string; name: string }
     const p = ctx.paramRegistry.get(n.name)
     if (!p) throw new Error(`Unknown param '${n.name}'.`)
-    return SignalExpr.fromHandle(b.check(b.egress_expr_param(p._h), 'expr_param'))
+    return SignalExpr.fromHandle(b.check(b.egress_expr_param(p._h), 'expr_param'), { op: 'smoothed_param', name: n.name, _ptr: true })
   }
 
   if (op === 'trigger') {
     const n = node as { op: string; name: string }
     const t = ctx.triggerRegistry.get(n.name)
     if (!t) throw new Error(`Unknown trigger '${n.name}'.`)
-    return SignalExpr.fromHandle(b.check(b.egress_expr_trigger_param(t._h), 'expr_trigger_param'))
+    return SignalExpr.fromHandle(b.check(b.egress_expr_trigger_param(t._h), 'expr_trigger_param'), { op: 'trigger_param', name: n.name, _ptr: true })
   }
 
   if (op === 'sample_rate')  return sampleRate()
@@ -704,8 +703,9 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
       session.graphOutputs.push({ module: out.module, output: String(out.output) })
     }
 
-    // Apply all wiring via compilation pipeline (joins the active batch)
-    applySessionWiring(session)
+    // Apply wiring: FlatRuntime if available, otherwise Graph pipeline
+    if (session.runtime) applyFlatPlan(session, session.runtime)
+    else applySessionWiring(session)
 
     // Single rebuild for all module additions + wiring
     session.graph.endUpdate()
@@ -806,8 +806,9 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
       session.graphOutputs.push({ module: out.module, output: String(out.output) })
     }
 
-    // Apply all wiring via compilation pipeline (joins the active batch)
-    applySessionWiring(session)
+    // Apply wiring: FlatRuntime if available, otherwise Graph pipeline
+    if (session.runtime) applyFlatPlan(session, session.runtime)
+    else applySessionWiring(session)
 
     // Single rebuild for all module additions + wiring
     session.graph.endUpdate()
