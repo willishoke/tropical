@@ -356,6 +356,8 @@ class Module
       std::vector<NumericSyntheticInput> synthetic_inputs;
     };
 
+    // Public for FlatRuntime access (will be removed with Module in Phase 5)
+  public:
     struct NumericJitState
     {
       egress_jit::NumericKernelFn kernel = nullptr;
@@ -389,6 +391,7 @@ class Module
     #endif
     };
 
+  private:
     std::vector<int64_t> numeric_registers_;
     std::vector<int64_t> numeric_next_registers_;
     std::vector<std::vector<double>> numeric_register_arrays_;
