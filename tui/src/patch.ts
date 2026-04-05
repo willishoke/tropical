@@ -28,12 +28,9 @@ import { applySessionWiring } from './apply_plan.js'
 // JSON schema types
 // ─────────────────────────────────────────────────────────────
 
-/** An expression node — bare scalar, inline array, or a named op object. */
-export type ExprNode =
-  | number
-  | boolean
-  | ExprNode[]
-  | { op: string; [key: string]: unknown }
+// ExprNode is defined in expr.ts and re-exported here for backward compatibility.
+export type { ExprNode } from './expr.js'
+import type { ExprNode } from './expr.js'
 
 
 export interface NestedModuleJSON {
@@ -225,14 +222,14 @@ export function buildExpr(node: ExprNode, ctx: BuildCtx): SignalExpr {
     const n = node as { op: string; name: string }
     const p = ctx.paramRegistry.get(n.name)
     if (!p) throw new Error(`Unknown param '${n.name}'.`)
-    return SignalExpr.fromHandle(b.check(b.egress_expr_param(p._h), 'expr_param'))
+    return SignalExpr.fromHandle(b.check(b.egress_expr_param(p._h), 'expr_param'), { op: 'smoothed_param', name: n.name, _ptr: true })
   }
 
   if (op === 'trigger') {
     const n = node as { op: string; name: string }
     const t = ctx.triggerRegistry.get(n.name)
     if (!t) throw new Error(`Unknown trigger '${n.name}'.`)
-    return SignalExpr.fromHandle(b.check(b.egress_expr_trigger_param(t._h), 'expr_trigger_param'))
+    return SignalExpr.fromHandle(b.check(b.egress_expr_trigger_param(t._h), 'expr_trigger_param'), { op: 'trigger_param', name: n.name, _ptr: true })
   }
 
   if (op === 'sample_rate')  return sampleRate()

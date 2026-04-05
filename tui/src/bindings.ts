@@ -202,6 +202,18 @@ export const egress_dac_is_reconnecting  = lib.func('egress_dac_is_reconnecting'
 export const egress_dac_get_active_device = lib.func('egress_dac_get_active_device', 'uint32', ['void *'])
 export const egress_dac_switch_device    = lib.func('egress_dac_switch_device',    'bool',   ['void *', 'uint32'])
 
+// ---------- FlatRuntime API ----------
+
+export const egress_runtime_new                    = lib.func('egress_runtime_new',                    'void *', ['uint32'])
+export const egress_runtime_free                   = lib.func('egress_runtime_free',                   'void',   ['void *'])
+export const egress_runtime_load_plan              = lib.func('egress_runtime_load_plan',              'bool',   ['void *', 'str', 'size_t'])
+export const egress_runtime_process                = lib.func('egress_runtime_process',                'void',   ['void *'])
+export const egress_runtime_output_buffer          = lib.func('egress_runtime_output_buffer',          'void *', ['void *'])
+export const egress_runtime_get_buffer_length      = lib.func('egress_runtime_get_buffer_length',      'uint32', ['void *'])
+export const egress_runtime_begin_fade_in          = lib.func('egress_runtime_begin_fade_in',          'void',   ['void *'])
+export const egress_runtime_begin_fade_out         = lib.func('egress_runtime_begin_fade_out',         'void',   ['void *'])
+export const egress_runtime_is_fade_out_complete   = lib.func('egress_runtime_is_fade_out_complete',   'bool',   ['void *'])
+
 // ---------- Device enumeration ----------
 
 export const egress_audio_device_count          = lib.func('egress_audio_device_count',          'uint32', [])
