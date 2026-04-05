@@ -7,9 +7,9 @@
  * Plays a VCO → VCA patch for 3 seconds, then stops.
  */
 
-import { makeSession, loadPatchFromJSON } from './patch'
-import { loadBuiltins } from './module_library'
-import { applyFlatPlan } from './apply_plan'
+import { makeSession, loadPatchFromJSON } from '../patch'
+import { loadBuiltins } from '../module_library'
+import { applyFlatPlan } from '../apply_plan'
 
 const session = makeSession(512)
 loadBuiltins(session.typeRegistry)

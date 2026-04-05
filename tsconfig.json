@@ -9,6 +9,6 @@
     "skipLibCheck": true,
     "outDir": "dist"
   },
-  "include": ["src"],
-  "exclude": ["src/**/*.test.ts"]
+  "include": ["compiler", "mcp"],
+  "exclude": ["compiler/**/*.test.ts", "mcp/**/*.test.ts"]
 }

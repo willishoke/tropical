@@ -9,10 +9,10 @@
 
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { makeSession, loadPatchFromJSON } from './patch.js'
-import { loadBuiltins } from './module_library.js'
-import type { PatchJSON } from './patch.js'
-import * as b from './bindings.js'
+import { makeSession, loadPatchFromJSON } from '../compiler/patch.js'
+import { loadBuiltins } from '../compiler/module_library.js'
+import type { PatchJSON } from '../compiler/patch.js'
+import * as b from '../compiler/runtime/bindings.js'
 
 const patchArg = process.argv[2]
 const nFrames  = parseInt(process.argv[3] ?? '128', 10)

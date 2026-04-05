@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "egress": {
+      "command": "bun",
+      "args": ["run", "mcp/server.ts"],
+      "cwd": "/Users/rhizome/egress"
+    }
+  }
+}

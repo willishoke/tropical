@@ -40,7 +40,8 @@
     {"type": "Compressor", "name": "Comp7"},
     {"type": "Compressor", "name": "Comp8"},
     {"type": "Compressor", "name": "Comp9"},
-    {"type": "Compressor", "name": "Comp10"}
+    {"type": "Compressor", "name": "Comp10"},
+    {"type": "Clock", "name": "SeqClock"}
   ],
   "outputs": [
     {"module": "Comp1", "output": "output"},
@@ -55,16 +56,17 @@
     {"module": "Comp10", "output": "output"}
   ],
   "input_exprs": [
-    {"module": "VCO1", "input": "freq", "expr": 40},
-    {"module": "VCO2", "input": "freq", "expr": 120},
-    {"module": "VCO3", "input": "freq", "expr": 200},
-    {"module": "VCO4", "input": "freq", "expr": 280},
-    {"module": "VCO5", "input": "freq", "expr": 360},
-    {"module": "VCO6", "input": "freq", "expr": 440},
-    {"module": "VCO7", "input": "freq", "expr": 520},
-    {"module": "VCO8", "input": "freq", "expr": 600},
-    {"module": "VCO9", "input": "freq", "expr": 680},
-    {"module": "VCO10", "input": "freq", "expr": 760},
+    {"module": "VCO1",  "input": "freq", "expr": {"op": "mul", "args": [40,  {"op": "add", "args": [1, {"op": "mul", "args": [0.5, {"op": "ref", "module": "SeqClock", "output": "output"}]}]}]}},
+    {"module": "VCO2",  "input": "freq", "expr": {"op": "mul", "args": [120, {"op": "add", "args": [1, {"op": "mul", "args": [0.5, {"op": "ref", "module": "SeqClock", "output": "output"}]}]}]}},
+    {"module": "VCO3",  "input": "freq", "expr": {"op": "mul", "args": [200, {"op": "add", "args": [1, {"op": "mul", "args": [0.5, {"op": "ref", "module": "SeqClock", "output": "output"}]}]}]}},
+    {"module": "VCO4",  "input": "freq", "expr": {"op": "mul", "args": [280, {"op": "add", "args": [1, {"op": "mul", "args": [0.5, {"op": "ref", "module": "SeqClock", "output": "output"}]}]}]}},
+    {"module": "VCO5",  "input": "freq", "expr": {"op": "mul", "args": [360, {"op": "add", "args": [1, {"op": "mul", "args": [0.5, {"op": "ref", "module": "SeqClock", "output": "output"}]}]}]}},
+    {"module": "VCO6",  "input": "freq", "expr": {"op": "mul", "args": [440, {"op": "add", "args": [1, {"op": "mul", "args": [0.5, {"op": "ref", "module": "SeqClock", "output": "output"}]}]}]}},
+    {"module": "VCO7",  "input": "freq", "expr": {"op": "mul", "args": [520, {"op": "add", "args": [1, {"op": "mul", "args": [0.5, {"op": "ref", "module": "SeqClock", "output": "output"}]}]}]}},
+    {"module": "VCO8",  "input": "freq", "expr": {"op": "mul", "args": [600, {"op": "add", "args": [1, {"op": "mul", "args": [0.5, {"op": "ref", "module": "SeqClock", "output": "output"}]}]}]}},
+    {"module": "VCO9",  "input": "freq", "expr": {"op": "mul", "args": [680, {"op": "add", "args": [1, {"op": "mul", "args": [0.5, {"op": "ref", "module": "SeqClock", "output": "output"}]}]}]}},
+    {"module": "VCO10", "input": "freq", "expr": {"op": "mul", "args": [760, {"op": "add", "args": [1, {"op": "mul", "args": [0.5, {"op": "ref", "module": "SeqClock", "output": "output"}]}]}]}},
+    {"module": "SeqClock", "input": "freq", "expr": 1},
     {"module": "Clock1", "input": "freq", "expr": 0.1},
     {"module": "Clock2", "input": "freq", "expr": 0.3},
     {"module": "Clock3", "input": "freq", "expr": 0.5},

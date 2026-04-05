@@ -3,7 +3,7 @@
  */
 
 import * as b from './bindings.js'
-import { SignalExpr } from './expr.js'
+import { SignalExpr } from '../expr.js'
 
 const _registry = new FinalizationRegistry((handle: unknown) => {
   b.egress_param_free(handle)

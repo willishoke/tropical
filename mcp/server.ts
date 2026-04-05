@@ -20,12 +20,12 @@ import {
 import {
   makeSession, nextName, loadModuleFromJSON, loadPatchFromJSON, mergePatchFromJSON, savePatchToJSON,
   prettyExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
-} from './patch.js'
-import { parseModuleDef, parsePatch } from './schema.js'
-import { loadBuiltins }        from './module_library.js'
-import { DAC }                 from './audio.js'
-import { Param, Trigger }      from './param.js'
-import { applyFlatPlan }  from './apply_plan.js'
+} from '../compiler/patch.js'
+import { parseModuleDef, parsePatch } from '../compiler/schema.js'
+import { loadBuiltins }        from '../compiler/module_library.js'
+import { DAC }                 from '../compiler/runtime/audio.js'
+import { Param, Trigger }      from '../compiler/runtime/param.js'
+import { applyFlatPlan }  from '../compiler/apply_plan.js'
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
