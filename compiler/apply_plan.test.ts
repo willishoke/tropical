@@ -273,8 +273,26 @@ describe('applyFlatPlan', () => {
     session.graph.dispose()
   })
 
-  // TODO: Clock test needs Clock module's ratios_in port declared as float[1] array type
-  // test('Clock module through flat runtime produces output', ...)
+  test('Clock module through flat runtime produces output', () => {
+    const session = setupSession([
+      { type: 'Clock', name: 'Clock1' },
+    ])
+
+    session.inputExprNodes.set('Clock1:freq', 1.0)
+    session.inputExprNodes.set('Clock1:ratios_in', [1.0])
+    session.graphOutputs.push({ module: 'Clock1', output: 'output' })
+
+    const rt = new Runtime(256)
+    applyFlatPlan(session, rt)
+    rt.process()
+
+    const buf = rt.outputBuffer
+    // Clock output is a square wave — should have nonzero samples
+    expect(peak(buf)).toBeGreaterThan(0)
+
+    rt.dispose()
+    session.graph.dispose()
+  })
 
   test('flat runtime produces continuous output over two buffers', () => {
     const session = setupSession([

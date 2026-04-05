@@ -162,6 +162,16 @@ class Emitter {
     return { isArray: false, op: { kind: 'const', val: 0 } }
   }
 
+  // ── Unbox a size-1 array to a scalar via Index[0].
+  // Needed because loop_count == 1 is the scalar signal to the JIT — using it for
+  // a size-1 array loop would cause the JIT's scalar path to receive ArrayReg args
+  // (which resolve_scalar returns nullptr for), causing a null-deref / segfault.
+  private unboxArray(arr: ArrayResult): ScalarResult {
+    const dst = this.allocReg()
+    this.emit({ tag: 'Index', dst, args: [arr.op, { kind: 'const', val: 0 }], loop_count: 1, strides: [] })
+    return { isArray: false, op: { kind: 'reg', slot: dst } }
+  }
+
   // ── Compile an inline JS array to a Pack instruction. ──
   private compilePack(elements: ExprNode[]): ArrayResult {
     const size = elements.length
@@ -177,8 +187,12 @@ class Emitter {
 
   // ── Compile a binary op, routing to scalar or elementwise. ──
   private compileBinary(tag: string, argNodes: ExprNode[]): CompileResult {
-    const l = this.compileNode(argNodes[0])
-    const r = this.compileNode(argNodes[1])
+    let l = this.compileNode(argNodes[0])
+    let r = this.compileNode(argNodes[1])
+
+    // Unbox size-1 arrays: loop_count==1 is the scalar signal; don't emit ArrayReg into it.
+    if (l.isArray && l.size === 1) l = this.unboxArray(l)
+    if (r.isArray && r.size === 1) r = this.unboxArray(r)
 
     if (!l.isArray && !r.isArray) {
       // Scalar × scalar → scalar instruction
@@ -187,8 +201,8 @@ class Emitter {
       return { isArray: false, op: { kind: 'reg', slot: dst } }
     }
 
-    // At least one array → elementwise loop
-    const size = l.isArray ? l.size : r.isArray ? r.size : 1
+    // At least one array (size > 1) → elementwise loop
+    const size = l.isArray ? l.size : (r as ArrayResult).size
     const slot = this.allocArraySlot(size)
     const strides = [l.isArray ? 1 : 0, r.isArray ? 1 : 0]
     this.emit({ tag, dst: slot, args: [l.op, r.op], loop_count: size, strides })
@@ -196,7 +210,8 @@ class Emitter {
   }
 
   private compileUnary(tag: string, argNode: ExprNode): CompileResult {
-    const a = this.compileNode(argNode)
+    let a = this.compileNode(argNode)
+    if (a.isArray && a.size === 1) a = this.unboxArray(a)
 
     if (!a.isArray) {
       const dst = this.allocReg()
@@ -210,9 +225,14 @@ class Emitter {
   }
 
   private compileTernary(tag: string, argNodes: ExprNode[]): CompileResult {
-    const a = this.compileNode(argNodes[0])
-    const b = this.compileNode(argNodes[1])
-    const c = this.compileNode(argNodes[2])
+    let a = this.compileNode(argNodes[0])
+    let b = this.compileNode(argNodes[1])
+    let c = this.compileNode(argNodes[2])
+
+    // Unbox size-1 arrays before checking array path
+    if (a.isArray && a.size === 1) a = this.unboxArray(a)
+    if (b.isArray && b.size === 1) b = this.unboxArray(b)
+    if (c.isArray && c.size === 1) c = this.unboxArray(c)
 
     const anyArray = a.isArray || b.isArray || c.isArray
     if (!anyArray) {

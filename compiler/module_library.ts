@@ -152,8 +152,8 @@ export function phaser16(name = 'Phaser16'): ModuleType { return _phaser(16, nam
 export function clock(name = 'Clock'): ModuleType {
   return defineModule(
     name,
-    ['freq', 'ratios_in'],
-    ['output', 'ratios_out'],
+    ['freq', { name: 'ratios_in', type: 'float[1]' }],
+    ['output', { name: 'ratios_out', type: 'float[1]' }],
     {},
     (inp) => {
       const sr = sampleRate()
