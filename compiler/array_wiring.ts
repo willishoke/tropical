@@ -52,16 +52,14 @@ export function checkArrayConnection(
     return { compatible: true }
   }
 
-  // Scalar → scalar: existing behavior (type check was string-based)
+  // Scalar → scalar: same kind always passes; bool→float is safe (bool = 0.0/1.0 in JIT)
   if (srcType.tag === 'scalar' && dstType.tag === 'scalar') {
-    // Allow float↔float, but not float→bool etc.
-    if (srcType.scalar !== dstType.scalar) {
-      return {
-        compatible: false,
-        error: `Type mismatch: source is ${portTypeToString(srcType)} but destination expects ${portTypeToString(dstType)}`,
-      }
+    if (srcType.scalar === dstType.scalar) return { compatible: true }
+    if (srcType.scalar === 'bool' && dstType.scalar === 'float') return { compatible: true }
+    return {
+      compatible: false,
+      error: `Type mismatch: source is ${portTypeToString(srcType)} but destination expects ${portTypeToString(dstType)}`,
     }
-    return { compatible: true }
   }
 
   // Scalar → array: broadcast scalar to array shape
