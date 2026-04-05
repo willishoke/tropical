@@ -5,16 +5,21 @@ C++ core of egress. C++17, header-heavy by design (templates + inlining for audi
 ## Layout
 
 ```
-c_api/    Stable C API — the ONLY external interface to the core
+runtime/  FlatRuntime, NumericProgramBuilder, PlanParser, ExprCompiler
 expr/     Expression AST, evaluation, structural ops, rewrite/optimization
-graph/    Graph runtime, Module class, numeric JIT compilation
+graph/    GraphTypes.hpp only (core Value/ExprKind type aliases)
 jit/      LLVM ORC JIT engine (OrcJitEngine.hpp/.cpp)
 dac/      Audio output via RtAudio (EgressDAC.hpp)
+c_api/    Stable C API (egress_c.h)
 ```
 
 ## C API boundary
 
-All external access (TypeScript FFI, Python ctypes, tests) goes through `c_api/egress_c.h`. This is the stable interface. Internal C++ classes are not exported.
+All external access (TypeScript FFI, tests) goes through `c_api/egress_c.h`. This exposes:
+- **FlatRuntime** — `egress_runtime_*` (create, load plan, process, output buffer, fade control)
+- **ControlParam** — `egress_param_*` (smoothed params and triggers for thread-safe control)
+- **DAC** — `egress_dac_*` (audio output backed by FlatRuntime)
+- **Device enumeration** — `egress_audio_*`
 
 ## Expression pipeline
 
@@ -23,23 +28,17 @@ All external access (TypeScript FFI, Python ctypes, tests) goes through `c_api/e
 3. **Rewrite** (`expr/ExprRewrite.cpp`) — constant folding, dead code elimination, algebraic simplification
 4. **Eval** (`expr/ExprEval.hpp`) — interpreter (used during module definition, not at runtime)
 
-## Module compilation
+## FlatRuntime compilation pipeline
 
-When a module is instantiated, its expression trees go through:
+When a plan is loaded via `egress_runtime_load_plan()`:
 
-1. Type inference — static float/int/bool types propagated through the expression tree
-2. LLVM IR emission — expressions lowered to LLVM IR in `ModuleNumericJitMethods.hpp`
-3. ORC JIT compilation — `OrcJitEngine.cpp` compiles IR to native code
-4. Disk caching — compiled kernels cached by content hash to avoid recompilation
+1. **PlanParser** (`runtime/PlanParser.hpp`) — JSON → ExprSpec trees
+2. **ExprCompiler** (`runtime/ExprCompiler.hpp`) — ExprSpec → CompiledProgram (instruction stream)
+3. **NumericProgramBuilder** (`runtime/NumericProgramBuilder.hpp`) — CompiledProgram → NumericProgram (JIT IR)
+4. **OrcJitEngine** (`jit/OrcJitEngine.cpp`) — NumericProgram → native kernel via LLVM ORC
+5. **FlatRuntime** (`runtime/FlatRuntime.hpp`) — double-buffered kernel hot-swap, per-sample execution
 
 JIT failures are fatal (no interpreter fallback at runtime).
-
-## Large files warning
-
-These files are 100K+ lines of template-expanded methods. **Never read them in full.** Search for specific function names instead:
-
-- `graph/ModuleNumericJitMethods.hpp` — JIT IR emission for all expression node types
-- `graph/GraphRuntimeMethods.hpp` — fused graph kernel compilation and runtime dispatch
 
 ## Adding a new module type
 
@@ -51,4 +50,4 @@ Module types are defined in TypeScript (`tui/src/module_library.ts`), not in C++
 
 ## Type system
 
-`GraphTypes.hpp` defines the core type aliases. Values are tagged unions supporting float, int, bool, array, and matrix types. The JIT pipeline infers static types to emit typed LLVM IR rather than falling back to dynamic dispatch.
+`graph/GraphTypes.hpp` defines the core type aliases. Values are tagged unions supporting float, int, bool, array, and matrix types. The JIT pipeline infers static types to emit typed LLVM IR rather than falling back to dynamic dispatch.

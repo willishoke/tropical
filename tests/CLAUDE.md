@@ -10,23 +10,24 @@ cmake --build build -j4 && ctest --test-dir build   # run tests
 
 ## What's here
 
-`test_module_process.cpp` — single file, custom harness (`run_test()` / `ASSERT()` / `ASSERT_OK()`). Tests exercise the C API and JIT code paths **without an audio device**.
+`test_module_process.cpp` — single file, custom harness (`run_test()` / `ASSERT()` / `ASSERT_OK()`). Tests exercise the FlatRuntime C API and JIT code paths **without an audio device**.
 
 ### Test cases
 
-1. **scalar module** — construct + 32 `process()` calls
-2. **clock: array default input** — `ratios_in=[1.0]` + 32 process calls
-3. **clock: multi-ratio array** — `ratios_in=[1,2,4]` + 32 process calls
-4. **clock: two-ratio + output tap** — 64 process calls with graph output
-5. **intseq: integer-register module** — wired to clock, 128 process calls
-6. **multi-module fusion** — clock + 4 intseqs + 4 VCOs, 128 frames (fused graph kernel)
+1. **scalar accumulator** — sawtooth phase accumulator, 32 process calls
+2. **clock: array default input** — `ratios_in=[1.0]`, 32 process calls
+3. **clock: multi-ratio array** — `ratios_in=[1,2,4]`, 32 process calls
+4. **clock: two-ratio + output tap** — 2 ratios, 64 process calls
+5. **intseq with edge detection** — integer sequence stepping, 128 process calls
+6. **multi-module fusion** — clock + 4 intseqs + 4 VCOs fused into one kernel, 128 process calls
+7. **smoothed param** — SmoothedParam expression with atomic value set
+8. **trigger param** — TriggerParam fire-once-per-frame behavior
 
 ### Structure
 
-- **Helpers** (line ~55) — `wrap01()` and similar expression builders
-- **Module spec builders** (line ~73) — `build_clock_spec()`, `build_intseq_spec()`, etc. mirror `module_library.ts` definitions in C
-- **Tests** (line ~164) — each test creates a graph, instantiates modules, wires inputs, processes frames, checks outputs
-- **Main** (line ~492) — runs all tests, prints pass/fail summary
+- Tests use `egress_runtime_new`, `egress_runtime_load_plan`, `egress_runtime_process`, `egress_runtime_output_buffer`
+- Each test builds an `egress_plan_2` JSON string directly (no Graph or Module)
+- Plan JSON includes `output_exprs`, `register_exprs`, `state_init`, `register_names`, `outputs`
 
 ## CI note
 
@@ -34,4 +35,4 @@ LLVM ORC JIT is always enabled. CI runners need LLVM installed to build. Always 
 
 ## Adding tests
 
-Add a new `run_test(...)` call in `main()`. Build module specs using the C API functions (`egress_module_spec_create`, `egress_module_spec_add_output`, etc.) following existing patterns. Process with `egress_graph_process()` and assert on output values.
+Add a new `run_test(...)` call in `main()`. Build plan JSON strings directly using the `egress_plan_2` schema, then use `egress_runtime_*` C API functions to load and process. Assert on output buffer values.

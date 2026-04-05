@@ -26,44 +26,43 @@ Tests run via `test_module_process` — exercises the C API and JIT code paths w
 
 ```
 src/
+  runtime/    FlatRuntime (plan executor), NumericProgramBuilder, PlanParser, ExprCompiler
   expr/       Expression AST, evaluator, rewrite/optimization passes
-  graph/      Graph runtime, Module class, JIT compilation pipeline
-  jit/        LLVM ORC JIT engine
-  dac/        Audio output (RtAudio)
+  graph/      GraphTypes.hpp (core Value/ExprKind type aliases — the only surviving file)
+  jit/        LLVM ORC JIT engine (OrcJitEngine)
+  dac/        Audio output (RtAudio), templated for any AudioSource
   c_api/      Stable C API (egress_c.h) — all external access goes through here
 
 tui/
   src/
     server.ts          MCP server (stdio transport)
     index.tsx          TUI entry point (Ink/React)
-    bindings.ts        koffi FFI to libegress
+    bindings.ts        koffi FFI to libegress (param, runtime, DAC, device APIs)
     module_library.ts  Built-in module type definitions (VCO, Clock, etc.)
-    module.ts          Module spec builder DSL
-    expr.ts            Expression builder functions
-    patch.ts           Patch serialization/deserialization
+    module.ts          Module type DSL — builds expression trees, TS-only instantiation
+    expr.ts            Expression builder functions (pure ExprNode trees, no C handles)
+    patch.ts           Patch serialization/deserialization, session state
+    flatten.ts         Flatten patch into egress_plan_2 (inline all module expressions)
+    runtime.ts         FlatRuntime wrapper
 ```
 
-**Data flow:** TypeScript DSL → C API (via koffi FFI) → Graph → Module → Expr → JIT → audio callback
+**Data flow:** TypeScript DSL → expression trees (ExprNode JSON) → flatten → egress_plan_2 JSON → C++ FlatRuntime → JIT → audio callback
 
-**Key boundary:** the C API in `src/c_api/egress_c.h` is the only interface between the TypeScript layer and the C++ core. All module definitions, graph operations, and audio control go through it.
+**Key boundary:** the C API in `src/c_api/egress_c.h` is the interface between TypeScript and C++. It exposes: FlatRuntime (plan loading, audio processing), ControlParam (smoothed/trigger parameters), DAC (audio output), and device enumeration. Module definitions and expression building happen entirely in TypeScript.
 
 ## Core concepts
 
-- **Graph** stores modules, per-input expression trees, output taps, and the output buffer.
-- **Module** has named inputs, outputs, and optional registers. Inputs reset to defaults after each sample. Outputs clip to [-10.0, 10.0].
-- **Expressions** are symbolic trees (leaves = literals or output refs). They define module I/O behavior and get JIT-compiled to native code.
+- **FlatRuntime** receives a flat JSON plan (egress_plan_2), JIT-compiles all expressions into a single native kernel, and runs it per-sample. No module boundaries at runtime.
+- **Module types** are defined in `tui/src/module_library.ts` using the DSL in `module.ts`. Each type specifies inputs, outputs, registers, and a process function that builds expression trees. Instantiation is TS-only — no C API calls.
+- **Expressions** are symbolic JSON trees (ExprNode). They define module I/O behavior and get flattened + JIT-compiled to native code.
+- **Flattening** (`flatten.ts`) inlines all module expression trees, resolves inter-module references, and produces a single egress_plan_2 with flat output/register expression arrays.
 - **Single-sample boundary:** connected modules always read previous-sample outputs. No implicit multi-sample delay.
-- **Module types** are defined in `tui/src/module_library.ts` using the DSL in `module.ts`. Each type specifies inputs, outputs, registers, and a process function that builds expression trees.
 
 ## JIT pipeline
 
-Expression trees → static type inference (float/int/bool) → LLVM IR emission → ORC JIT compilation → cached native kernel. Disk caching avoids recompilation across runs.
+Expression trees → PlanParser (JSON → ExprSpec) → ExprCompiler (ExprSpec → CompiledProgram) → NumericProgramBuilder (→ NumericProgram) → LLVM IR emission → ORC JIT compilation → native kernel.
 
-JIT failures are **fatal** (no interpreter fallback). If a module fails to compile, it throws.
-
-## Large files
-
-`ModuleNumericJitMethods.hpp` and `GraphRuntimeMethods.hpp` are 100K+ lines each (template-expanded JIT and runtime methods). Do not read them in full — search for specific functions instead.
+JIT failures are **fatal** (no interpreter fallback). If a plan fails to compile, it throws.
 
 ## Patch format
 
@@ -74,13 +73,13 @@ Patches are JSON files in `patches/`. Schema version: `egress_patch_1`.
   "schema": "egress_patch_1",
   "modules": [{"type": "VCO", "name": "VCO1"}, ...],
   "outputs": [{"module": "VCA1", "output": "out"}, ...],
-  "connections": [{"target": "VCA1.signal", "expr": "VCO1.saw"}, ...]
+  "input_exprs": [{"module": "VCA1", "input": "audio", "expr": {"op": "ref", "module": "VCO1", "output": "saw"}}, ...]
 }
 ```
 
 ## MCP server
 
-`make mcp-ts` starts the MCP server on stdio. It exposes the full graph API as tools: instantiate modules, connect them, set parameters, control audio, save/load patches. This is the primary agent interface for building patches at runtime.
+`make mcp-ts` starts the MCP server on stdio. It exposes tools to: define module types, instantiate modules, connect them, set parameters, control audio, save/load patches. This is the primary agent interface for building patches at runtime.
 
 ## Conventions
 
