@@ -7,16 +7,129 @@
  */
 
 #include "graph/GraphTypes.hpp"
-#include "graph/ModuleNumericJit.hpp"
-#include "graph/ModuleProgram.hpp"
-#include "graph/TypeRegistry.hpp"
+#include "runtime/ExprCompiler.hpp"
 #include "jit/OrcJitEngine.hpp"
 
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <string>
+#include <unordered_map>
 #include <vector>
+
+// ---------- Numeric JIT info types (formerly ModuleNumericJit.hpp) ----------
+
+namespace egress_module_detail
+{
+struct NumericInputInfo
+{
+  bool is_scalar = true;
+  uint32_t array_slot = 0;
+  uint32_t array_size = 0;
+  egress_jit::JitScalarType scalar_type = egress_jit::JitScalarType::Float;
+  egress_jit::JitScalarType array_element_type = egress_jit::JitScalarType::Float;
+};
+
+struct NumericOutputInfo
+{
+  uint8_t kind = 0;
+  uint32_t array_slot = 0;
+  uint32_t matrix_rows = 0;
+  uint32_t matrix_cols = 0;
+  egress_jit::JitScalarType scalar_type = egress_jit::JitScalarType::Float;
+  egress_jit::JitScalarType array_element_type = egress_jit::JitScalarType::Float;
+};
+
+enum class NumericValueKind
+{
+  Scalar,
+  Array,
+  Matrix,
+  CompoundSlot
+};
+
+struct NumericValueRef
+{
+  NumericValueKind kind = NumericValueKind::Scalar;
+  uint32_t scalar_register = 0;
+  uint32_t array_slot = 0;
+  uint32_t array_size = 0;
+  uint32_t matrix_rows = 0;
+  uint32_t matrix_cols = 0;
+};
+
+struct NumericRegInfo
+{
+  NumericValueKind kind = NumericValueKind::Scalar;
+  uint32_t array_slot = 0;
+  uint32_t array_size = 0;
+  uint32_t matrix_rows = 0;
+  uint32_t matrix_cols = 0;
+  bool scalar_is_constant = false;
+  double scalar_constant = 0.0;
+  int64_t int_constant = 0;
+  egress_jit::JitScalarType scalar_type = egress_jit::JitScalarType::Float;
+  egress_jit::JitScalarType array_element_type = egress_jit::JitScalarType::Float;
+  uint16_t compound_type_id = 0xFFFF;
+  uint32_t compound_base_slot = 0;
+};
+}  // namespace egress_module_detail
+
+// ---------- TypeRegistry (formerly graph/TypeRegistry.hpp) ----------
+
+namespace egress {
+
+struct FieldDef {
+    std::string name;
+    egress_jit::JitScalarType scalar_type;
+};
+
+struct VariantDef {
+    std::string name;
+    std::vector<FieldDef> payload;
+};
+
+struct TypeDef {
+    enum class Kind { Struct, Sum } kind;
+    std::string name;
+    std::vector<FieldDef> fields;        // for Struct
+    std::vector<VariantDef> variants;    // for Sum
+
+    uint32_t slot_count() const {
+        if (kind == Kind::Struct) return static_cast<uint32_t>(fields.size());
+        // Sum: discriminant slot + max payload slots
+        uint32_t max_payload = 0;
+        for (const auto& v : variants)
+            max_payload = std::max(max_payload, static_cast<uint32_t>(v.payload.size()));
+        return 1 + max_payload;
+    }
+};
+
+class TypeRegistry {
+    std::unordered_map<std::string, TypeDef> types_;
+public:
+    void define_struct(std::string name, std::vector<FieldDef> fields) {
+        TypeDef td;
+        td.kind = TypeDef::Kind::Struct;
+        td.name = name;
+        td.fields = std::move(fields);
+        types_[name] = std::move(td);
+    }
+    void define_sum(std::string name, std::vector<VariantDef> variants) {
+        TypeDef td;
+        td.kind = TypeDef::Kind::Sum;
+        td.name = name;
+        td.variants = std::move(variants);
+        types_[name] = std::move(td);
+    }
+    const TypeDef* find(const std::string& name) const {
+        auto it = types_.find(name);
+        return it == types_.end() ? nullptr : &it->second;
+    }
+};
+
+} // namespace egress
 
 namespace egress_runtime
 {

@@ -38,8 +38,6 @@ endif()
 
 # Core C++ sources shared by all targets
 set(EGRESS_CORE_SOURCES
-    src/graph/Graph.cpp
-    src/graph/Module.cpp
     src/expr/ExprStructural.cpp
     src/expr/ExprRewrite.cpp
     src/runtime/FlatRuntime.cpp

@@ -1,6 +1,5 @@
 #pragma once
 
-#include "graph/Graph.hpp"
 #include "../lib/rtaudio/RtAudio.h"
 
 #include <atomic>
@@ -335,6 +334,3 @@ private:
     }
   }
 };
-
-// Backward-compatible alias
-using EgressDAC = EgressDACImpl<Graph>;
