@@ -23,3 +23,7 @@ export function applyFlatPlan(session: SessionState, runtime: Runtime): void {
   const json = JSON.stringify(plan)
   runtime.loadPlan(json)
 }
+
+export function applySessionWiring(session: SessionState): void {
+  applyFlatPlan(session, session.runtime)
+}

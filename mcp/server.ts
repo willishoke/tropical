@@ -26,6 +26,7 @@ import { loadBuiltins }        from '../compiler/module_library.js'
 import { DAC }                 from '../compiler/runtime/audio.js'
 import { Param, Trigger }      from '../compiler/runtime/param.js'
 import { applyFlatPlan }  from '../compiler/apply_plan.js'
+import { checkArrayConnection } from '../compiler/array_wiring.js'
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
@@ -33,6 +34,49 @@ const session: SessionState = makeSession()
 loadBuiltins(session.typeRegistry)
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Type-check an input expression against a destination port type, inserting
+ * a broadcast_to wrapper when the shapes are compatible but differ (e.g. scalar→array).
+ * Throws if the connection is incompatible (e.g. array→scalar, shape mismatch).
+ * Returns the (possibly wrapped) expression and the resultShape if broadcasting occurred.
+ */
+function adaptInputExpr(
+  node: ExprNode,
+  dstTypeStr: string | undefined,
+  instanceName: string,
+  inputName: string,
+): { expr: ExprNode; resultShape?: number[] } {
+  let srcTypeStr: string | undefined
+
+  if (typeof node === 'number') {
+    srcTypeStr = 'float'
+  } else if (typeof node === 'boolean') {
+    srcTypeStr = 'bool'
+  } else if (Array.isArray(node)) {
+    srcTypeStr = `float[${(node as unknown[]).length}]`
+  } else if (typeof node === 'object' && node !== null) {
+    const obj = node as Record<string, unknown>
+    if (obj.op === 'ref') {
+      const srcInst = session.instanceRegistry.get(obj.module as string)
+      if (srcInst) {
+        const outName = obj.output as string | number
+        const outIdx = typeof outName === 'number' ? outName : srcInst.outputNames.indexOf(String(outName))
+        if (outIdx !== -1) srcTypeStr = srcInst.outputPortType(outIdx)
+      }
+    }
+  }
+
+  if (srcTypeStr === undefined) return { expr: node }
+
+  const check = checkArrayConnection(srcTypeStr, dstTypeStr, node)
+  if (!check.compatible) {
+    throw new Error(
+      `Type mismatch on '${instanceName}'.${inputName}: ${check.error}`
+    )
+  }
+  return { expr: check.broadcastExpr ?? node, resultShape: check.resultShape }
+}
 
 const ok  = (data: unknown) =>
   ({ content: [{ type: 'text' as const, text: JSON.stringify({ ok: true,  data  }) }] })
@@ -382,22 +426,26 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const srcId = resolveOutputIdx(srcInst, args.src_output as string | number)
       const dstId = resolveInputIdx(dstInst,  args.dst_input  as string | number)
 
+      const srcOut = srcInst.outputNames[srcId]
+      const dstIn  = dstInst.inputNames[dstId]
+      const refExpr: ExprNode = { op: 'ref', module: args.src_module as string, output: srcOut }
+
+      // Shape-aware type checking with auto-broadcasting
       const srcType = srcInst.outputPortType(srcId)
       const dstType = dstInst.inputPortType(dstId)
-      if (srcType !== undefined && dstType !== undefined && srcType !== dstType) {
+      const check = checkArrayConnection(srcType, dstType, refExpr)
+      if (!check.compatible) {
         throw new Error(
-          `Type mismatch: '${args.src_module as string}'.${srcInst.outputNames[srcId]} is type '${srcType}' ` +
-          `but '${args.dst_module as string}'.${dstInst.inputNames[dstId]}' expects '${dstType}'`
+          `Connection '${args.src_module as string}'.${srcOut} → '${args.dst_module as string}'.${dstIn}: ${check.error}`
         )
       }
 
-      const srcOut = srcInst.outputNames[srcId]
-      const dstIn  = dstInst.inputNames[dstId]
-      session.inputExprNodes.set(
-        `${args.dst_module as string}:${dstIn}`,
-        { op: 'ref', module: args.src_module as string, output: srcOut },
-      )
+      // Use broadcast expression if shapes need alignment, otherwise plain ref
+      const wiringExpr = check.broadcastExpr ?? refExpr
+      session.inputExprNodes.set(`${args.dst_module as string}:${dstIn}`, wiringExpr)
+
       return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn,
+               ...(check.resultShape ? { broadcast_shape: check.resultShape } : {}),
                ...wire() }
     })
 
@@ -443,10 +491,12 @@ function handleTool(name: string, args: Record<string, unknown>) {
         ? rawInput
         : (rawInput.match(/^\d+$/) ? parseInt(rawInput, 10) : inst.inputIndex(rawInput))
 
-      const node = args.expr as ExprNode
+      const rawNode = args.expr as ExprNode
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
+      const { expr: node, resultShape } = adaptInputExpr(rawNode, inst.inputPortType(inputId), instanceName, resolvedName)
       session.inputExprNodes.set(`${instanceName}:${resolvedName}`, node)
       return { module: instanceName, input: resolvedName, expr: node,
+               ...(resultShape ? { broadcast_shape: resultShape } : {}),
                ...wire() }
     })
 
@@ -464,8 +514,9 @@ function handleTool(name: string, args: Record<string, unknown>) {
           ? raw
           : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
         const resolvedName = inst.inputNames[inputId] ?? String(inputId)
-        session.inputExprNodes.set(`${u.instance_name}:${resolvedName}`, u.expr)
-        results.push({ module: u.instance_name, input: resolvedName, expr: u.expr })
+        const { expr } = adaptInputExpr(u.expr, inst.inputPortType(inputId), u.instance_name, resolvedName)
+        session.inputExprNodes.set(`${u.instance_name}:${resolvedName}`, expr)
+        results.push({ module: u.instance_name, input: resolvedName, expr })
       }
       return { updates: results, ...wire() }
     })

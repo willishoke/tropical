@@ -2,8 +2,8 @@
  * test_module_process.cpp
  *
  * Exercises the FlatRuntime C API (egress_runtime_*) and JIT code paths
- * without an audio device.  Plans are specified as JSON strings, compiled
- * to native kernels, and processed in-memory.
+ * without an audio device.  Plans are specified as egress_plan_3 JSON strings,
+ * compiled to native kernels via compile_flat_program, and processed in-memory.
  */
 
 #include "c_api/egress_c.h"
@@ -81,29 +81,26 @@ static void test_sawtooth()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_2",
+    "schema": "egress_plan_3",
     "config": { "sample_rate": 44100.0 },
-    "output_exprs": [
-      { "op": "mul", "args": [
-        { "op": "sub", "args": [
-          { "op": "mul", "args": [{ "op": "reg", "id": 0 }, 2.0] },
-          1.0
-        ]},
-        10.0
-      ]}
-    ],
-    "register_exprs": [
-      { "op": "mod", "args": [
-        { "op": "add", "args": [
-          { "op": "reg", "id": 0 },
-          { "op": "div", "args": [440.0, { "op": "sample_rate" }] }
-        ]},
-        1.0
-      ]}
-    ],
     "state_init": [0.0],
     "register_names": ["phase"],
-    "outputs": [0]
+    "outputs": [0],
+    "instructions": [
+      {"tag":"Mul","dst":0,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":2.0}],"loop_count":1,"strides":[]},
+      {"tag":"Sub","dst":1,"args":[{"kind":"reg","slot":0},{"kind":"const","val":1.0}],"loop_count":1,"strides":[]},
+      {"tag":"Mul","dst":2,"args":[{"kind":"reg","slot":1},{"kind":"const","val":10.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":3,"args":[{"kind":"reg","slot":2},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Div","dst":4,"args":[{"kind":"const","val":440.0},{"kind":"rate"}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":5,"args":[{"kind":"state_reg","slot":0},{"kind":"reg","slot":4}],"loop_count":1,"strides":[]},
+      {"tag":"Mod","dst":6,"args":[{"kind":"reg","slot":5},{"kind":"const","val":1.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":7,"args":[{"kind":"reg","slot":6},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+    ],
+    "register_count": 8,
+    "array_slot_count": 0,
+    "array_slot_sizes": [],
+    "output_targets": [3],
+    "register_targets": [7]
   })";
 
   ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
@@ -145,13 +142,20 @@ static void test_two_outputs_mix()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_2",
+    "schema": "egress_plan_3",
     "config": { "sample_rate": 44100.0 },
-    "output_exprs": [5.0, -3.0],
-    "register_exprs": [],
     "state_init": [],
     "register_names": [],
-    "outputs": [0, 1]
+    "outputs": [0, 1],
+    "instructions": [
+      {"tag":"Add","dst":0,"args":[{"kind":"const","val":5.0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":1,"args":[{"kind":"const","val":-3.0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+    ],
+    "register_count": 2,
+    "array_slot_count": 0,
+    "array_slot_sizes": [],
+    "output_targets": [0, 1],
+    "register_targets": []
   })";
 
   ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
@@ -180,23 +184,25 @@ static void test_hot_swap_preserves_state()
   egress_runtime_t rt = egress_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
-  // Plan A: sawtooth, phase register named "phase"
+  // Plan A: output = reg(0), register update = mod(reg(0) + 440/sr, 1)
   std::string plan_a = R"({
-    "schema": "egress_plan_2",
+    "schema": "egress_plan_3",
     "config": { "sample_rate": 44100.0 },
-    "output_exprs": [{ "op": "reg", "id": 0 }],
-    "register_exprs": [
-      { "op": "mod", "args": [
-        { "op": "add", "args": [
-          { "op": "reg", "id": 0 },
-          { "op": "div", "args": [440.0, { "op": "sample_rate" }] }
-        ]},
-        1.0
-      ]}
-    ],
     "state_init": [0.0],
     "register_names": ["phase"],
-    "outputs": [0]
+    "outputs": [0],
+    "instructions": [
+      {"tag":"Add","dst":0,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Div","dst":1,"args":[{"kind":"const","val":440.0},{"kind":"rate"}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":2,"args":[{"kind":"state_reg","slot":0},{"kind":"reg","slot":1}],"loop_count":1,"strides":[]},
+      {"tag":"Mod","dst":3,"args":[{"kind":"reg","slot":2},{"kind":"const","val":1.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":4,"args":[{"kind":"reg","slot":3},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+    ],
+    "register_count": 5,
+    "array_slot_count": 0,
+    "array_slot_sizes": [],
+    "output_targets": [0],
+    "register_targets": [4]
   })";
 
   ASSERT_OK(egress_runtime_load_plan(rt, plan_a.c_str(), plan_a.size()));
@@ -212,24 +218,26 @@ static void test_hot_swap_preserves_state()
   double phase_before = buf[buf_len - 1];
   ASSERT(phase_before > 0.01);
 
-  // Plan B: same structure, same register name "phase", but scale output differently
-  // Output: mul(reg(0), 5.0)
+  // Plan B: output = reg(0) * 5.0, same register name "phase"
   std::string plan_b = R"({
-    "schema": "egress_plan_2",
+    "schema": "egress_plan_3",
     "config": { "sample_rate": 44100.0 },
-    "output_exprs": [{ "op": "mul", "args": [{ "op": "reg", "id": 0 }, 5.0] }],
-    "register_exprs": [
-      { "op": "mod", "args": [
-        { "op": "add", "args": [
-          { "op": "reg", "id": 0 },
-          { "op": "div", "args": [440.0, { "op": "sample_rate" }] }
-        ]},
-        1.0
-      ]}
-    ],
     "state_init": [0.0],
     "register_names": ["phase"],
-    "outputs": [0]
+    "outputs": [0],
+    "instructions": [
+      {"tag":"Mul","dst":0,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":5.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":1,"args":[{"kind":"reg","slot":0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Div","dst":2,"args":[{"kind":"const","val":440.0},{"kind":"rate"}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":3,"args":[{"kind":"state_reg","slot":0},{"kind":"reg","slot":2}],"loop_count":1,"strides":[]},
+      {"tag":"Mod","dst":4,"args":[{"kind":"reg","slot":3},{"kind":"const","val":1.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":5,"args":[{"kind":"reg","slot":4},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+    ],
+    "register_count": 6,
+    "array_slot_count": 0,
+    "array_slot_sizes": [],
+    "output_targets": [1],
+    "register_targets": [5]
   })";
 
   ASSERT_OK(egress_runtime_load_plan(rt, plan_b.c_str(), plan_b.size()));
@@ -237,7 +245,6 @@ static void test_hot_swap_preserves_state()
 
   // First sample of new plan should use the transferred phase, not 0.
   // Output = phase * 5.0, audio = that / 20.0
-  // The phase should be near where plan A left off (plus one increment).
   const double* buf2 = egress_runtime_output_buffer(rt);
   ASSERT(buf2 != nullptr);
   double first_output_audio = buf2[0];
@@ -266,21 +273,26 @@ static void test_array_literal()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_2",
+    "schema": "egress_plan_3",
     "config": { "sample_rate": 44100.0 },
-    "output_exprs": [
-      { "op": "div", "args": [
-        { "op": "index", "args": [[10.0, 20.0, 30.0, 40.0], { "op": "reg", "id": 0 }] },
-        { "op": "index", "args": [[10.0, 20.0, 30.0, 40.0], { "op": "reg", "id": 1 }] }
-      ]}
-    ],
-    "register_exprs": [
-      { "op": "reg", "id": 0 },
-      { "op": "reg", "id": 1 }
-    ],
     "state_init": [0.0, 1.0],
     "register_names": ["idx", "idx2"],
-    "outputs": [0]
+    "outputs": [0],
+    "instructions": [
+      {"tag":"Pack","dst":0,"args":[{"kind":"const","val":10.0},{"kind":"const","val":20.0},{"kind":"const","val":30.0},{"kind":"const","val":40.0}],"loop_count":1,"strides":[]},
+      {"tag":"Index","dst":0,"args":[{"kind":"array_reg","slot":0},{"kind":"state_reg","slot":0}],"loop_count":1,"strides":[]},
+      {"tag":"Pack","dst":1,"args":[{"kind":"const","val":10.0},{"kind":"const","val":20.0},{"kind":"const","val":30.0},{"kind":"const","val":40.0}],"loop_count":1,"strides":[]},
+      {"tag":"Index","dst":1,"args":[{"kind":"array_reg","slot":1},{"kind":"state_reg","slot":1}],"loop_count":1,"strides":[]},
+      {"tag":"Div","dst":2,"args":[{"kind":"reg","slot":0},{"kind":"reg","slot":1}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":3,"args":[{"kind":"reg","slot":2},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":4,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":5,"args":[{"kind":"state_reg","slot":1},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+    ],
+    "register_count": 6,
+    "array_slot_count": 2,
+    "array_slot_sizes": [4, 4],
+    "output_targets": [3],
+    "register_targets": [4, 5]
   })";
 
   ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
@@ -317,18 +329,22 @@ static void test_counter_wrap()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_2",
+    "schema": "egress_plan_3",
     "config": { "sample_rate": 44100.0 },
-    "output_exprs": [{ "op": "reg", "id": 0 }],
-    "register_exprs": [
-      { "op": "mod", "args": [
-        { "op": "add", "args": [{ "op": "reg", "id": 0 }, 1.0] },
-        8.0
-      ]}
-    ],
     "state_init": [0.0],
     "register_names": ["counter"],
-    "outputs": [0]
+    "outputs": [0],
+    "instructions": [
+      {"tag":"Add","dst":0,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":1,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":1.0}],"loop_count":1,"strides":[]},
+      {"tag":"Mod","dst":2,"args":[{"kind":"reg","slot":1},{"kind":"const","val":8.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":3,"args":[{"kind":"reg","slot":2},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+    ],
+    "register_count": 4,
+    "array_slot_count": 0,
+    "array_slot_sizes": [],
+    "output_targets": [0],
+    "register_targets": [3]
   })";
 
   ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
@@ -364,21 +380,23 @@ static void test_select_conditional()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_2",
+    "schema": "egress_plan_3",
     "config": { "sample_rate": 44100.0 },
-    "output_exprs": [
-      { "op": "select", "args": [
-        { "op": "gt", "args": [{ "op": "reg", "id": 0 }, 4.0] },
-        1.0,
-        0.0
-      ]}
-    ],
-    "register_exprs": [
-      { "op": "add", "args": [{ "op": "reg", "id": 0 }, 1.0] }
-    ],
     "state_init": [0.0],
     "register_names": ["phase"],
-    "outputs": [0]
+    "outputs": [0],
+    "instructions": [
+      {"tag":"Greater","dst":0,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":4.0}],"loop_count":1,"strides":[]},
+      {"tag":"Select","dst":1,"args":[{"kind":"reg","slot":0},{"kind":"const","val":1.0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":2,"args":[{"kind":"reg","slot":1},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":3,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":1.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":4,"args":[{"kind":"reg","slot":3},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+    ],
+    "register_count": 5,
+    "array_slot_count": 0,
+    "array_slot_sizes": [],
+    "output_targets": [2],
+    "register_targets": [4]
   })";
 
   ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
@@ -402,15 +420,7 @@ static void test_select_conditional()
  * Output 0: reg(1)
  * Outputs: [0]
  *
- * The gate reads phase BEFORE its update this sample.
- * Phase ramps from 0 to 1 over 44100 samples.
- * For the first ~22050 samples, phase < 0.5 so gate update writes 1.0.
- * But gate output reads gate BEFORE update, so there is a 1-sample delay.
- *
- * Process one 256-sample buffer.  Gate should be ~1.0 for first half of a
- * 44100-sample cycle (we are well within that at 256 samples).
- *
- * Sample 0: gate reads init(0)=0, then gate update sets to 1.0 (since phase=0 < 0.5)
+ * Sample 0: gate=init(0)=0, then gate update sets to 1.0 (since phase=0 < 0.5)
  * Sample 1+: gate reads 1.0 (set last sample), stays 1.0
  */
 static void test_multi_register_clock()
@@ -420,26 +430,26 @@ static void test_multi_register_clock()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_2",
+    "schema": "egress_plan_3",
     "config": { "sample_rate": 44100.0 },
-    "output_exprs": [{ "op": "reg", "id": 1 }],
-    "register_exprs": [
-      { "op": "mod", "args": [
-        { "op": "add", "args": [
-          { "op": "reg", "id": 0 },
-          { "op": "div", "args": [1.0, { "op": "sample_rate" }] }
-        ]},
-        1.0
-      ]},
-      { "op": "select", "args": [
-        { "op": "lt", "args": [{ "op": "reg", "id": 0 }, 0.5] },
-        1.0,
-        0.0
-      ]}
-    ],
     "state_init": [0.0, 0.0],
     "register_names": ["phase", "gate"],
-    "outputs": [0]
+    "outputs": [0],
+    "instructions": [
+      {"tag":"Add","dst":0,"args":[{"kind":"state_reg","slot":1},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Div","dst":1,"args":[{"kind":"const","val":1.0},{"kind":"rate"}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":2,"args":[{"kind":"state_reg","slot":0},{"kind":"reg","slot":1}],"loop_count":1,"strides":[]},
+      {"tag":"Mod","dst":3,"args":[{"kind":"reg","slot":2},{"kind":"const","val":1.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":4,"args":[{"kind":"reg","slot":3},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Less","dst":5,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":0.5}],"loop_count":1,"strides":[]},
+      {"tag":"Select","dst":6,"args":[{"kind":"reg","slot":5},{"kind":"const","val":1.0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":7,"args":[{"kind":"reg","slot":6},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+    ],
+    "register_count": 8,
+    "array_slot_count": 0,
+    "array_slot_sizes": [],
+    "output_targets": [0],
+    "register_targets": [4, 7]
   })";
 
   ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
@@ -476,13 +486,20 @@ static void test_multiple_outputs_summed()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_2",
+    "schema": "egress_plan_3",
     "config": { "sample_rate": 44100.0 },
-    "output_exprs": [3.0, 7.0],
-    "register_exprs": [],
     "state_init": [],
     "register_names": [],
-    "outputs": [0, 1]
+    "outputs": [0, 1],
+    "instructions": [
+      {"tag":"Add","dst":0,"args":[{"kind":"const","val":3.0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":1,"args":[{"kind":"const","val":7.0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+    ],
+    "register_count": 2,
+    "array_slot_count": 0,
+    "array_slot_sizes": [],
+    "output_targets": [0, 1],
+    "register_targets": []
   })";
 
   ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));

@@ -9,9 +9,6 @@
  */
 
 #include "graph/GraphTypes.hpp"
-#include "runtime/NumericProgramBuilder.hpp"
-#include "runtime/ExprCompiler.hpp"
-#include "runtime/PlanParser.hpp"
 #include "jit/OrcJitEngine.hpp"
 
 #include <array>
@@ -84,16 +81,18 @@ public:
   /**
    * Load a plan JSON string, compile to a single kernel, and publish atomically.
    *
-   * Plan schema (egress_plan_2):
+   * Plan schema (egress_plan_3):
    * {
-   *   "schema": "egress_plan_2",
+   *   "schema": "egress_plan_3",
    *   "config": { "sample_rate": 44100 },
-   *   "output_exprs": [ExprNode, ...],
-   *   "register_exprs": [ExprNode, ...],
    *   "state_init": [0.0, ...],
    *   "register_names": ["VCO1_phase", ...],
    *   "outputs": [0, 2, ...],
-   *   "taps": [{ "name": "VCO1.saw", "output_index": 0 }, ...]
+   *   "instructions": [...],
+   *   "register_count": N,
+   *   "array_slot_sizes": [...],
+   *   "output_targets": [...],
+   *   "register_targets": [...]
    * }
    */
   bool load_plan(const std::string & plan_json);

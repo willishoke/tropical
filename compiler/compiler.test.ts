@@ -20,7 +20,7 @@ import {
   type CompilerInput,
 } from './compiler'
 import {
-  Float, Int, Bool, Unit, StructType,
+  Float, Int, Bool, Unit, StructType, ArrayType,
   product, portTypeEqual, portTypeToString,
 } from './term'
 import { inferType } from './type_check'
@@ -81,6 +81,34 @@ describe('portTypeFromString', () => {
     const t = portTypeFromString('MyStruct')
     expect(t.tag).toBe('struct')
     expect(portTypeEqual(t, StructType('MyStruct'))).toBe(true)
+  })
+
+  test('array type with shape', () => {
+    const t = portTypeFromString('float[4]')
+    expect(portTypeEqual(t, ArrayType(Float, [4]))).toBe(true)
+  })
+
+  test('array type multi-dimensional', () => {
+    const t = portTypeFromString('float[4,4]')
+    expect(portTypeEqual(t, ArrayType(Float, [4, 4]))).toBe(true)
+  })
+
+  test('array type with int element', () => {
+    const t = portTypeFromString('int[8]')
+    expect(portTypeEqual(t, ArrayType(Int, [8]))).toBe(true)
+  })
+
+  test('legacy array string', () => {
+    const t = portTypeFromString('array')
+    expect(t.tag).toBe('array')
+  })
+
+  test('legacy matrix string', () => {
+    const t = portTypeFromString('matrix')
+    expect(t.tag).toBe('array')
+    if (t.tag === 'array') {
+      expect(t.shape.length).toBe(2)
+    }
   })
 })
 

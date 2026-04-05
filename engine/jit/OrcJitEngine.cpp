@@ -278,8 +278,18 @@ llvm::Expected<uint64_t> OrcJitEngine::lookup(const std::string & symbol_name)
 #endif
 }
 
-llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
-  const NumericProgram & program)
+
+// ---------------------------------------------------------------------------
+// compile_flat_program — new emission path for egress_plan_3 / FlatProgram.
+//
+// Terminals (Const, Input, Reg, StateReg, Param, Rate, Tick) are Operands
+// embedded in instructions rather than separate pseudo-ops.  loop_count > 1
+// drives an elementwise loop; strides[i] selects per-iteration GEP (1) or
+// broadcast scalar (0) for each argument.
+// ---------------------------------------------------------------------------
+
+llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
+  const FlatProgram & program)
 {
   if (!jit_)
   {
@@ -290,51 +300,54 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
 
   std::lock_guard<std::mutex> lock(jit_mutex_);
 
-  // Build canonical param_ptr → index map (order of first appearance).
+  // Build canonical param_ptr → ordinal map (order of first appearance).
   std::unordered_map<uint64_t, uint64_t> param_index;
   for (const auto & instr : program.instructions)
   {
-    if (instr.op == NumericOp::SmoothedParam && instr.param_ptr != 0 &&
-        param_index.find(instr.param_ptr) == param_index.end())
+    for (const auto & arg : instr.args)
     {
-      param_index.emplace(instr.param_ptr, static_cast<uint64_t>(param_index.size()));
+      if (arg.kind == OperandKind::Param && arg.ptr != 0 &&
+          param_index.find(arg.ptr) == param_index.end())
+      {
+        param_index.emplace(arg.ptr, static_cast<uint64_t>(param_index.size()));
+      }
     }
   }
 
-  // Serialize canonical program to a cache key (param_ptrs replaced by their index).
+  // Serialize to a canonical cache key (param ptrs replaced by ordinal).
   std::string cache_key;
+  cache_key += "flat:";
   {
     auto append = [&](const void * data, std::size_t size) {
       cache_key.append(static_cast<const char *>(data), size);
     };
     append(&program.register_count, sizeof(uint32_t));
-    uint32_t instr_count = static_cast<uint32_t>(program.instructions.size());
-    append(&instr_count, sizeof(uint32_t));
+    uint32_t n = static_cast<uint32_t>(program.instructions.size());
+    append(&n, sizeof(uint32_t));
     for (const auto & instr : program.instructions)
     {
-      append(&instr.op,        sizeof(NumericOp));
-      append(&instr.dst,       sizeof(uint32_t));
-      append(&instr.src_a,     sizeof(uint32_t));
-      append(&instr.src_b,     sizeof(uint32_t));
-      append(&instr.src_c,     sizeof(uint32_t));
-      append(&instr.slot_id,   sizeof(uint32_t));
-      append(&instr.literal,   sizeof(double));
-      append(&instr.int_literal, sizeof(int64_t));
-      append(&instr.dst_type,   sizeof(JitScalarType));
-      append(&instr.src_a_type, sizeof(JitScalarType));
-      append(&instr.src_b_type, sizeof(JitScalarType));
-      uint64_t canonical_ptr = 0;
-      if (instr.op == NumericOp::SmoothedParam && instr.param_ptr != 0)
+      append(&instr.tag,        sizeof(OpTag));
+      append(&instr.dst,        sizeof(uint32_t));
+      append(&instr.loop_count, sizeof(uint32_t));
+      uint32_t na = static_cast<uint32_t>(instr.args.size());
+      append(&na, sizeof(uint32_t));
+      for (const auto & arg : instr.args)
       {
-        auto it = param_index.find(instr.param_ptr);
-        if (it != param_index.end())
-          canonical_ptr = it->second;
+        append(&arg.kind,      sizeof(OperandKind));
+        append(&arg.const_val, sizeof(double));
+        append(&arg.slot,      sizeof(uint32_t));
+        uint64_t canonical_ptr = 0;
+        if (arg.kind == OperandKind::Param && arg.ptr != 0)
+        {
+          auto it = param_index.find(arg.ptr);
+          if (it != param_index.end()) canonical_ptr = it->second;
+        }
+        append(&canonical_ptr, sizeof(uint64_t));
       }
-      append(&canonical_ptr, sizeof(uint64_t));
-      uint32_t args_size = static_cast<uint32_t>(instr.args.size());
-      append(&args_size, sizeof(uint32_t));
-      if (!instr.args.empty())
-        append(instr.args.data(), instr.args.size() * sizeof(uint32_t));
+      uint32_t ns = static_cast<uint32_t>(instr.strides.size());
+      append(&ns, sizeof(uint32_t));
+      if (!instr.strides.empty())
+        append(instr.strides.data(), instr.strides.size());
     }
   }
 
@@ -343,906 +356,369 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
     return cache_it->second;
 
   const std::string hash = md5_hex(cache_key);
-  const std::string function_name = "egress_k_" + hash;
+  const std::string function_name = "egress_f_" + hash;
 
   auto context = std::make_unique<llvm::LLVMContext>();
   auto module = std::make_unique<llvm::Module>(hash, *context);
   module->setDataLayout(jit_->getDataLayout());
 
   llvm::IRBuilder<> builder(*context);
-  llvm::Type * void_ty = builder.getVoidTy();
-  llvm::Type * f64_ty = builder.getDoubleTy();
-  llvm::Type * i64_ty = builder.getInt64Ty();
-  llvm::Type * ptr_ty = llvm::PointerType::get(*context, 0);
+  llvm::Type * void_ty  = builder.getVoidTy();
+  llvm::Type * f64_ty   = builder.getDoubleTy();
+  llvm::Type * i64_ty   = builder.getInt64Ty();
+  llvm::Type * ptr_ty   = llvm::PointerType::get(*context, 0);
 
   llvm::FunctionType * fn_ty = llvm::FunctionType::get(
     void_ty,
     {ptr_ty, ptr_ty, ptr_ty, ptr_ty, ptr_ty, f64_ty, i64_ty, ptr_ty},
     false);
 
-  llvm::Function * fn = llvm::Function::Create(fn_ty, llvm::Function::ExternalLinkage, function_name, module.get());
+  llvm::Function * fn = llvm::Function::Create(
+    fn_ty, llvm::Function::ExternalLinkage, function_name, module.get());
 
   auto arg_it = fn->arg_begin();
-  llvm::Value * inputs_arg = &*arg_it++;
-  inputs_arg->setName("inputs");
-  llvm::Value * regs_arg = &*arg_it++;
-  regs_arg->setName("registers");
-  llvm::Value * arrays_arg = &*arg_it++;
-  arrays_arg->setName("arrays");
-  llvm::Value * array_sizes_arg = &*arg_it++;
-  array_sizes_arg->setName("array_sizes");
-  llvm::Value * temps_arg = &*arg_it++;
-  temps_arg->setName("temps");
-  llvm::Value * sample_rate_arg = &*arg_it++;
-  sample_rate_arg->setName("sample_rate");
-  llvm::Value * sample_index_arg = &*arg_it++;
-  sample_index_arg->setName("sample_index");
-  llvm::Value * param_ptrs_arg = &*arg_it++;
-  param_ptrs_arg->setName("param_ptrs");
+  llvm::Value * inputs_arg      = &*arg_it++;  inputs_arg->setName("inputs");
+  llvm::Value * regs_arg        = &*arg_it++;  regs_arg->setName("registers");
+  llvm::Value * arrays_arg      = &*arg_it++;  arrays_arg->setName("arrays");
+  llvm::Value * array_sizes_arg = &*arg_it++;  array_sizes_arg->setName("array_sizes");
+  llvm::Value * temps_arg       = &*arg_it++;  temps_arg->setName("temps");
+  llvm::Value * sample_rate_arg = &*arg_it++;  sample_rate_arg->setName("sample_rate");
+  llvm::Value * sample_index_arg= &*arg_it++;  sample_index_arg->setName("sample_index");
+  llvm::Value * param_ptrs_arg  = &*arg_it++;  param_ptrs_arg->setName("param_ptrs");
 
   llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
   builder.SetInsertPoint(entry);
 
-  // All slot storage is unified int64_t*. Use bitcast to reinterpret as double.
-
-  auto gep_slot = [&](llvm::Value * base_ptr, uint32_t index) -> llvm::Value * {
-    return builder.CreateInBoundsGEP(i64_ty, base_ptr, builder.getInt64(index));
+  // ── Slot helpers ──
+  auto gep_temp = [&](uint32_t idx) {
+    return builder.CreateInBoundsGEP(i64_ty, temps_arg, builder.getInt64(idx));
+  };
+  auto load_temp_f64 = [&](uint32_t idx) -> llvm::Value * {
+    return builder.CreateBitCast(builder.CreateLoad(i64_ty, gep_temp(idx)), f64_ty);
+  };
+  auto store_temp_f64 = [&](uint32_t idx, llvm::Value * v) {
+    builder.CreateStore(builder.CreateBitCast(v, i64_ty), gep_temp(idx));
+  };
+  auto load_reg_f64 = [&](uint32_t slot) -> llvm::Value * {
+    llvm::Value * ptr = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(slot));
+    return builder.CreateBitCast(builder.CreateLoad(i64_ty, ptr), f64_ty);
+  };
+  auto load_input_f64 = [&](uint32_t slot) -> llvm::Value * {
+    llvm::Value * ptr = builder.CreateInBoundsGEP(i64_ty, inputs_arg, builder.getInt64(slot));
+    return builder.CreateBitCast(builder.CreateLoad(i64_ty, ptr), f64_ty);
+  };
+  auto load_array_ptr_f = [&](uint32_t slot) -> llvm::Value * {
+    llvm::Value * pp = builder.CreateInBoundsGEP(ptr_ty, arrays_arg, builder.getInt64(slot));
+    return builder.CreateLoad(ptr_ty, pp);
+  };
+  auto load_array_size_f = [&](uint32_t slot) -> llvm::Value * {
+    llvm::Value * sp = builder.CreateInBoundsGEP(i64_ty, array_sizes_arg, builder.getInt64(slot));
+    return builder.CreateLoad(i64_ty, sp);
   };
 
-  auto load_slot = [&](uint32_t index) -> llvm::Value * {
-    return builder.CreateLoad(i64_ty, gep_slot(temps_arg, index));
-  };
-
-  auto store_slot = [&](uint32_t index, llvm::Value * value) {
-    builder.CreateStore(value, gep_slot(temps_arg, index));
-  };
-
-  auto load_slot_as_float = [&](uint32_t index, JitScalarType type) -> llvm::Value * {
-    llvm::Value * raw = builder.CreateLoad(i64_ty, gep_slot(temps_arg, index));
-    if (type == JitScalarType::Float)
-      return builder.CreateBitCast(raw, f64_ty);
-    return builder.CreateSIToFP(raw, f64_ty);
-  };
-
-  auto load_slot_as_int = [&](uint32_t index, JitScalarType type) -> llvm::Value * {
-    llvm::Value * raw = builder.CreateLoad(i64_ty, gep_slot(temps_arg, index));
-    if (type != JitScalarType::Float)
-      return raw;
-    return builder.CreateFPToSI(builder.CreateBitCast(raw, f64_ty), i64_ty);
-  };
-
-  auto store_float_to_slot = [&](uint32_t index, llvm::Value * fval) {
-    builder.CreateStore(builder.CreateBitCast(fval, i64_ty), gep_slot(temps_arg, index));
-  };
-
-  auto load_input = [&](uint32_t index, JitScalarType type) -> llvm::Value * {
-    llvm::Value * raw = builder.CreateLoad(i64_ty, gep_slot(inputs_arg, index));
-    if (type == JitScalarType::Float)
-      return builder.CreateBitCast(raw, f64_ty);
-    return raw;
-  };
-
-  auto load_reg = [&](uint32_t index, JitScalarType type) -> llvm::Value * {
-    llvm::Value * raw = builder.CreateLoad(i64_ty, gep_slot(regs_arg, index));
-    if (type == JitScalarType::Float)
-      return builder.CreateBitCast(raw, f64_ty);
-    return raw;
-  };
-
-  auto load_array_ptr = [&](uint32_t slot) -> llvm::Value * {
-    llvm::Value * array_ptr_slot = builder.CreateInBoundsGEP(ptr_ty, arrays_arg, builder.getInt64(slot));
-    return builder.CreateLoad(ptr_ty, array_ptr_slot);
-  };
-
-  auto load_array_size = [&](uint32_t slot) -> llvm::Value * {
-    llvm::Value * array_size_slot = builder.CreateInBoundsGEP(i64_ty, array_sizes_arg, builder.getInt64(slot));
-    return builder.CreateLoad(i64_ty, array_size_slot);
-  };
-
+  // ── Intrinsics ──
   llvm::Value * zero_f64 = llvm::ConstantFP::get(f64_ty, 0.0);
-  llvm::FunctionCallee llvm_sin = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::sin, {f64_ty});
-  llvm::FunctionCallee llvm_pow = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::pow, {f64_ty});
-  llvm::FunctionCallee llvm_log = llvm::Intrinsic::getOrInsertDeclaration(module.get(), llvm::Intrinsic::log, {f64_ty});
-  llvm::FunctionCallee llvm_fmod = module->getOrInsertFunction(
-    "fmod",
-    llvm::FunctionType::get(f64_ty, {f64_ty, f64_ty}, false));
-
-  enum class ArrayBinaryOp
-  {
-    Add,
-    Sub,
-    Mul,
-    Div
+  auto intr1 = [&](llvm::Intrinsic::ID id) {
+    return llvm::Intrinsic::getOrInsertDeclaration(module.get(), id, {f64_ty});
   };
+  llvm::FunctionCallee llvm_sin   = intr1(llvm::Intrinsic::sin);
+  llvm::FunctionCallee llvm_cos   = intr1(llvm::Intrinsic::cos);
+  llvm::FunctionCallee llvm_log   = intr1(llvm::Intrinsic::log);
+  llvm::FunctionCallee llvm_exp   = intr1(llvm::Intrinsic::exp);
+  llvm::FunctionCallee llvm_pow   = intr1(llvm::Intrinsic::pow);
+  llvm::FunctionCallee llvm_sqrt  = intr1(llvm::Intrinsic::sqrt);
+  llvm::FunctionCallee llvm_floor = intr1(llvm::Intrinsic::floor);
+  llvm::FunctionCallee llvm_ceil  = intr1(llvm::Intrinsic::ceil);
+  llvm::FunctionCallee llvm_round = intr1(llvm::Intrinsic::round);
+  llvm::FunctionCallee llvm_fabs  = intr1(llvm::Intrinsic::fabs);
+  llvm::FunctionCallee llvm_fmod  = module->getOrInsertFunction(
+    "fmod", llvm::FunctionType::get(f64_ty, {f64_ty, f64_ty}, false));
 
-  enum class ArrayScalarCompareOp
-  {
-    Less,
-    LessEqual,
-    Greater,
-    GreaterEqual,
-    Equal,
-    NotEqual
-  };
-
-  auto emit_array_binary_op = [&](llvm::Value * dst_ptr,
-                                  llvm::Value * lhs_ptr,
-                                  llvm::Value * rhs_ptr,
-                                  llvm::Value * size,
-                                  ArrayBinaryOp op) {
-    llvm::BasicBlock * loop_cond = llvm::BasicBlock::Create(*context, "array_loop_cond", fn);
-    llvm::BasicBlock * loop_body = llvm::BasicBlock::Create(*context, "array_loop_body", fn);
-    llvm::BasicBlock * loop_end = llvm::BasicBlock::Create(*context, "array_loop_end", fn);
-
-    llvm::Value * index_ptr = builder.CreateAlloca(i64_ty, nullptr, "array_idx");
-    builder.CreateStore(builder.getInt64(0), index_ptr);
-    builder.CreateBr(loop_cond);
-
-    builder.SetInsertPoint(loop_cond);
-    llvm::Value * idx = builder.CreateLoad(i64_ty, index_ptr);
-    llvm::Value * cond = builder.CreateICmpULT(idx, size);
-    builder.CreateCondBr(cond, loop_body, loop_end);
-
-    builder.SetInsertPoint(loop_body);
-    llvm::Value * lhs_elem_ptr = builder.CreateInBoundsGEP(i64_ty, lhs_ptr, idx);
-    llvm::Value * rhs_elem_ptr = builder.CreateInBoundsGEP(i64_ty, rhs_ptr, idx);
-    llvm::Value * lhs_val = builder.CreateBitCast(builder.CreateLoad(i64_ty, lhs_elem_ptr), f64_ty);
-    llvm::Value * rhs_val = builder.CreateBitCast(builder.CreateLoad(i64_ty, rhs_elem_ptr), f64_ty);
-    llvm::Value * result = zero_f64;
-    switch (op)
+  // ── resolve_scalar: Operand → llvm::Value* (f64 or nullptr for array/param) ──
+  auto resolve_scalar = [&](const Operand & op) -> llvm::Value * {
+    switch (op.kind)
     {
-      case ArrayBinaryOp::Add:
-        result = builder.CreateFAdd(lhs_val, rhs_val);
-        break;
-      case ArrayBinaryOp::Sub:
-        result = builder.CreateFSub(lhs_val, rhs_val);
-        break;
-      case ArrayBinaryOp::Mul:
-        result = builder.CreateFMul(lhs_val, rhs_val);
-        break;
-      case ArrayBinaryOp::Div:
+      case OperandKind::Const:    return llvm::ConstantFP::get(f64_ty, op.const_val);
+      case OperandKind::Input:    return load_input_f64(op.slot);
+      case OperandKind::Reg:      return load_temp_f64(op.slot);
+      case OperandKind::StateReg: return load_reg_f64(op.slot);
+      case OperandKind::Rate:     return sample_rate_arg;
+      case OperandKind::Tick:     return builder.CreateSIToFP(sample_index_arg, f64_ty);
+      case OperandKind::ArrayReg:
+      case OperandKind::Param:    return nullptr;  // handled specially
+    }
+    return nullptr;
+  };
+
+  // ── emit_scalar_op: OpTag × [f64] → f64 ──
+  auto emit_scalar_op = [&](OpTag tag, const std::vector<llvm::Value *> & v) -> llvm::Value * {
+    switch (tag)
+    {
+      case OpTag::Add:      return builder.CreateFAdd(v[0], v[1]);
+      case OpTag::Sub:      return builder.CreateFSub(v[0], v[1]);
+      case OpTag::Mul:      return builder.CreateFMul(v[0], v[1]);
+      case OpTag::Div:
       {
-        llvm::Value * is_zero = builder.CreateFCmpOEQ(rhs_val, zero_f64);
-        llvm::Value * div_value = builder.CreateFDiv(lhs_val, rhs_val);
-        result = builder.CreateSelect(is_zero, zero_f64, div_value);
-        break;
+        llvm::Value * safe = builder.CreateSelect(builder.CreateFCmpOEQ(v[1], zero_f64), zero_f64, builder.CreateFDiv(v[0], v[1]));
+        return safe;
       }
-    }
-    llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(i64_ty, dst_ptr, idx);
-    builder.CreateStore(builder.CreateBitCast(result, i64_ty), dst_elem_ptr);
-    llvm::Value * next_idx = builder.CreateAdd(idx, builder.getInt64(1));
-    builder.CreateStore(next_idx, index_ptr);
-    builder.CreateBr(loop_cond);
-
-    builder.SetInsertPoint(loop_end);
-  };
-
-  auto emit_array_scalar_op = [&](llvm::Value * dst_ptr,
-                                  llvm::Value * lhs_ptr,
-                                  llvm::Value * scalar,
-                                  llvm::Value * size,
-                                  ArrayBinaryOp op) {
-    llvm::BasicBlock * loop_cond = llvm::BasicBlock::Create(*context, "array_scalar_cond", fn);
-    llvm::BasicBlock * loop_body = llvm::BasicBlock::Create(*context, "array_scalar_body", fn);
-    llvm::BasicBlock * loop_end = llvm::BasicBlock::Create(*context, "array_scalar_end", fn);
-
-    llvm::Value * index_ptr = builder.CreateAlloca(i64_ty, nullptr, "array_scalar_idx");
-    builder.CreateStore(builder.getInt64(0), index_ptr);
-    builder.CreateBr(loop_cond);
-
-    builder.SetInsertPoint(loop_cond);
-    llvm::Value * idx = builder.CreateLoad(i64_ty, index_ptr);
-    llvm::Value * cond = builder.CreateICmpULT(idx, size);
-    builder.CreateCondBr(cond, loop_body, loop_end);
-
-    builder.SetInsertPoint(loop_body);
-    llvm::Value * lhs_elem_ptr = builder.CreateInBoundsGEP(i64_ty, lhs_ptr, idx);
-    llvm::Value * lhs_val = builder.CreateBitCast(builder.CreateLoad(i64_ty, lhs_elem_ptr), f64_ty);
-    llvm::Value * result = zero_f64;
-    switch (op)
-    {
-      case ArrayBinaryOp::Add:
-        result = builder.CreateFAdd(lhs_val, scalar);
-        break;
-      case ArrayBinaryOp::Sub:
-        result = builder.CreateFSub(lhs_val, scalar);
-        break;
-      case ArrayBinaryOp::Mul:
-        result = builder.CreateFMul(lhs_val, scalar);
-        break;
-      case ArrayBinaryOp::Div:
+      case OpTag::Mod:
       {
-        llvm::Value * is_zero = builder.CreateFCmpOEQ(scalar, zero_f64);
-        llvm::Value * div_value = builder.CreateFDiv(lhs_val, scalar);
-        result = builder.CreateSelect(is_zero, zero_f64, div_value);
-        break;
+        llvm::Value * safe = builder.CreateSelect(builder.CreateFCmpOEQ(v[1], zero_f64), zero_f64, builder.CreateCall(llvm_fmod, {v[0], v[1]}));
+        return safe;
       }
+      case OpTag::Pow:      return builder.CreateCall(llvm_pow, {v[0], v[1]});
+      case OpTag::FloorDiv:
+      {
+        llvm::Value * dv = builder.CreateSelect(builder.CreateFCmpOEQ(v[1], zero_f64), zero_f64, builder.CreateFDiv(v[0], v[1]));
+        return builder.CreateCall(llvm_floor, {dv});
+      }
+      case OpTag::Less:      return builder.CreateUIToFP(builder.CreateFCmpOLT(v[0], v[1]), f64_ty);
+      case OpTag::LessEq:    return builder.CreateUIToFP(builder.CreateFCmpOLE(v[0], v[1]), f64_ty);
+      case OpTag::Greater:   return builder.CreateUIToFP(builder.CreateFCmpOGT(v[0], v[1]), f64_ty);
+      case OpTag::GreaterEq: return builder.CreateUIToFP(builder.CreateFCmpOGE(v[0], v[1]), f64_ty);
+      case OpTag::Equal:     return builder.CreateUIToFP(builder.CreateFCmpOEQ(v[0], v[1]), f64_ty);
+      case OpTag::NotEqual:  return builder.CreateUIToFP(builder.CreateFCmpUNE(v[0], v[1]), f64_ty);
+      case OpTag::BitAnd:
+      {
+        llvm::Value * r = builder.CreateAnd(builder.CreateFPToSI(v[0], i64_ty), builder.CreateFPToSI(v[1], i64_ty));
+        return builder.CreateSIToFP(r, f64_ty);
+      }
+      case OpTag::BitOr:
+      {
+        llvm::Value * r = builder.CreateOr(builder.CreateFPToSI(v[0], i64_ty), builder.CreateFPToSI(v[1], i64_ty));
+        return builder.CreateSIToFP(r, f64_ty);
+      }
+      case OpTag::BitXor:
+      {
+        llvm::Value * r = builder.CreateXor(builder.CreateFPToSI(v[0], i64_ty), builder.CreateFPToSI(v[1], i64_ty));
+        return builder.CreateSIToFP(r, f64_ty);
+      }
+      case OpTag::LShift:
+      {
+        llvm::Value * r = builder.CreateShl(builder.CreateFPToSI(v[0], i64_ty), builder.CreateFPToSI(v[1], i64_ty));
+        return builder.CreateSIToFP(r, f64_ty);
+      }
+      case OpTag::RShift:
+      {
+        llvm::Value * r = builder.CreateAShr(builder.CreateFPToSI(v[0], i64_ty), builder.CreateFPToSI(v[1], i64_ty));
+        return builder.CreateSIToFP(r, f64_ty);
+      }
+      case OpTag::Neg:    return builder.CreateFNeg(v[0]);
+      case OpTag::Abs:    return builder.CreateCall(llvm_fabs,  {v[0]});
+      case OpTag::Sin:    return builder.CreateCall(llvm_sin,   {v[0]});
+      case OpTag::Cos:    return builder.CreateCall(llvm_cos,   {v[0]});
+      case OpTag::Log:    return builder.CreateCall(llvm_log,   {v[0]});
+      case OpTag::Exp:    return builder.CreateCall(llvm_exp,   {v[0]});
+      case OpTag::Sqrt:   return builder.CreateCall(llvm_sqrt,  {v[0]});
+      case OpTag::Floor:  return builder.CreateCall(llvm_floor, {v[0]});
+      case OpTag::Ceil:   return builder.CreateCall(llvm_ceil,  {v[0]});
+      case OpTag::Round:  return builder.CreateCall(llvm_round, {v[0]});
+      case OpTag::Not:
+      {
+        llvm::Value * is_zero = builder.CreateFCmpOEQ(v[0], zero_f64);
+        return builder.CreateUIToFP(is_zero, f64_ty);
+      }
+      case OpTag::BitNot:
+        return builder.CreateSIToFP(builder.CreateNot(builder.CreateFPToSI(v[0], i64_ty)), f64_ty);
+      case OpTag::Clamp:
+      {
+        // clamp(val, lo, hi)
+        llvm::Value * lo_clamped = builder.CreateSelect(builder.CreateFCmpOGT(v[0], v[1]), v[0], v[1]);
+        return builder.CreateSelect(builder.CreateFCmpOLT(lo_clamped, v[2]), lo_clamped, v[2]);
+      }
+      case OpTag::Select:
+      {
+        // select(cond, then, else)
+        llvm::Value * cond = builder.CreateFCmpUNE(v[0], zero_f64);
+        return builder.CreateSelect(cond, v[1], v[2]);
+      }
+      default:
+        return nullptr;
     }
-    llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(i64_ty, dst_ptr, idx);
-    builder.CreateStore(builder.CreateBitCast(result, i64_ty), dst_elem_ptr);
-    llvm::Value * next_idx = builder.CreateAdd(idx, builder.getInt64(1));
-    builder.CreateStore(next_idx, index_ptr);
-    builder.CreateBr(loop_cond);
-
-    builder.SetInsertPoint(loop_end);
   };
 
-  auto emit_array_scalar_compare_op = [&](llvm::Value * dst_ptr,
-                                          llvm::Value * lhs_ptr,
-                                          llvm::Value * scalar,
-                                          llvm::Value * size,
-                                          ArrayScalarCompareOp op) {
-    llvm::BasicBlock * loop_cond = llvm::BasicBlock::Create(*context, "array_compare_cond", fn);
-    llvm::BasicBlock * loop_body = llvm::BasicBlock::Create(*context, "array_compare_body", fn);
-    llvm::BasicBlock * loop_end = llvm::BasicBlock::Create(*context, "array_compare_end", fn);
-
-    llvm::Value * index_ptr = builder.CreateAlloca(i64_ty, nullptr, "array_compare_idx");
-    builder.CreateStore(builder.getInt64(0), index_ptr);
-    builder.CreateBr(loop_cond);
-
-    builder.SetInsertPoint(loop_cond);
-    llvm::Value * idx = builder.CreateLoad(i64_ty, index_ptr);
-    llvm::Value * cond = builder.CreateICmpULT(idx, size);
-    builder.CreateCondBr(cond, loop_body, loop_end);
-
-    builder.SetInsertPoint(loop_body);
-    llvm::Value * lhs_elem_ptr = builder.CreateInBoundsGEP(i64_ty, lhs_ptr, idx);
-    llvm::Value * lhs_val = builder.CreateBitCast(builder.CreateLoad(i64_ty, lhs_elem_ptr), f64_ty);
-    llvm::Value * cmp = nullptr;
-    switch (op)
-    {
-      case ArrayScalarCompareOp::Less:
-        cmp = builder.CreateFCmpOLT(lhs_val, scalar);
-        break;
-      case ArrayScalarCompareOp::LessEqual:
-        cmp = builder.CreateFCmpOLE(lhs_val, scalar);
-        break;
-      case ArrayScalarCompareOp::Greater:
-        cmp = builder.CreateFCmpOGT(lhs_val, scalar);
-        break;
-      case ArrayScalarCompareOp::GreaterEqual:
-        cmp = builder.CreateFCmpOGE(lhs_val, scalar);
-        break;
-      case ArrayScalarCompareOp::Equal:
-        cmp = builder.CreateFCmpOEQ(lhs_val, scalar);
-        break;
-      case ArrayScalarCompareOp::NotEqual:
-        cmp = builder.CreateFCmpUNE(lhs_val, scalar);
-        break;
-    }
-    llvm::Value * result = builder.CreateUIToFP(cmp, f64_ty);
-    llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(i64_ty, dst_ptr, idx);
-    builder.CreateStore(builder.CreateBitCast(result, i64_ty), dst_elem_ptr);
-    llvm::Value * next_idx = builder.CreateAdd(idx, builder.getInt64(1));
-    builder.CreateStore(next_idx, index_ptr);
-    builder.CreateBr(loop_cond);
-
-    builder.SetInsertPoint(loop_end);
-  };
-
-  auto emit_array_scalar_mod_op = [&](llvm::Value * dst_ptr,
-                                      llvm::Value * lhs_ptr,
-                                      llvm::Value * scalar,
-                                      llvm::Value * size) {
-    llvm::BasicBlock * loop_cond = llvm::BasicBlock::Create(*context, "array_mod_cond", fn);
-    llvm::BasicBlock * loop_body = llvm::BasicBlock::Create(*context, "array_mod_body", fn);
-    llvm::BasicBlock * loop_end = llvm::BasicBlock::Create(*context, "array_mod_end", fn);
-
-    llvm::Value * index_ptr = builder.CreateAlloca(i64_ty, nullptr, "array_mod_idx");
-    builder.CreateStore(builder.getInt64(0), index_ptr);
-    builder.CreateBr(loop_cond);
-
-    builder.SetInsertPoint(loop_cond);
-    llvm::Value * idx = builder.CreateLoad(i64_ty, index_ptr);
-    llvm::Value * cond = builder.CreateICmpULT(idx, size);
-    builder.CreateCondBr(cond, loop_body, loop_end);
-
-    builder.SetInsertPoint(loop_body);
-    llvm::Value * lhs_elem_ptr = builder.CreateInBoundsGEP(i64_ty, lhs_ptr, idx);
-    llvm::Value * lhs_val = builder.CreateBitCast(builder.CreateLoad(i64_ty, lhs_elem_ptr), f64_ty);
-    llvm::Value * is_zero = builder.CreateFCmpOEQ(scalar, zero_f64);
-    llvm::Value * mod_value = builder.CreateCall(llvm_fmod, {lhs_val, scalar});
-    llvm::Value * result = builder.CreateSelect(is_zero, zero_f64, mod_value);
-    llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(i64_ty, dst_ptr, idx);
-    builder.CreateStore(builder.CreateBitCast(result, i64_ty), dst_elem_ptr);
-    llvm::Value * next_idx = builder.CreateAdd(idx, builder.getInt64(1));
-    builder.CreateStore(next_idx, index_ptr);
-    builder.CreateBr(loop_cond);
-
-    builder.SetInsertPoint(loop_end);
-  };
-
-  auto emit_matmul = [&](llvm::Value * dst_ptr,
-                         llvm::Value * matrix_ptr,
-                         llvm::Value * vector_ptr,
-                         uint32_t rows,
-                         uint32_t cols) {
-    llvm::Value * row_ptr = builder.CreateAlloca(i64_ty, nullptr, "matmul_row");
-    llvm::Value * col_ptr = builder.CreateAlloca(i64_ty, nullptr, "matmul_col");
-    llvm::Value * sum_ptr = builder.CreateAlloca(f64_ty, nullptr, "matmul_sum");
-
-    llvm::Value * rows_val = builder.getInt64(rows);
-    llvm::Value * cols_val = builder.getInt64(cols);
-
-    llvm::BasicBlock * outer_cond = llvm::BasicBlock::Create(*context, "matmul_outer_cond", fn);
-    llvm::BasicBlock * outer_body = llvm::BasicBlock::Create(*context, "matmul_outer_body", fn);
-    llvm::BasicBlock * outer_end = llvm::BasicBlock::Create(*context, "matmul_outer_end", fn);
-
-    llvm::BasicBlock * inner_cond = llvm::BasicBlock::Create(*context, "matmul_inner_cond", fn);
-    llvm::BasicBlock * inner_body = llvm::BasicBlock::Create(*context, "matmul_inner_body", fn);
-    llvm::BasicBlock * inner_end = llvm::BasicBlock::Create(*context, "matmul_inner_end", fn);
-
-    builder.CreateStore(builder.getInt64(0), row_ptr);
-    builder.CreateBr(outer_cond);
-
-    builder.SetInsertPoint(outer_cond);
-    llvm::Value * row = builder.CreateLoad(i64_ty, row_ptr);
-    llvm::Value * row_cond = builder.CreateICmpULT(row, rows_val);
-    builder.CreateCondBr(row_cond, outer_body, outer_end);
-
-    builder.SetInsertPoint(outer_body);
-    builder.CreateStore(builder.getInt64(0), col_ptr);
-    builder.CreateStore(zero_f64, sum_ptr);
-    builder.CreateBr(inner_cond);
-
-    builder.SetInsertPoint(inner_cond);
-    llvm::Value * col = builder.CreateLoad(i64_ty, col_ptr);
-    llvm::Value * col_cond = builder.CreateICmpULT(col, cols_val);
-    builder.CreateCondBr(col_cond, inner_body, inner_end);
-
-    builder.SetInsertPoint(inner_body);
-    llvm::Value * row_offset = builder.CreateMul(row, cols_val);
-    llvm::Value * index = builder.CreateAdd(row_offset, col);
-    llvm::Value * matrix_elem_ptr = builder.CreateInBoundsGEP(i64_ty, matrix_ptr, index);
-    llvm::Value * matrix_val = builder.CreateBitCast(builder.CreateLoad(i64_ty, matrix_elem_ptr), f64_ty);
-    llvm::Value * vector_elem_ptr = builder.CreateInBoundsGEP(i64_ty, vector_ptr, col);
-    llvm::Value * vector_val = builder.CreateBitCast(builder.CreateLoad(i64_ty, vector_elem_ptr), f64_ty);
-    llvm::Value * sum_val = builder.CreateLoad(f64_ty, sum_ptr);
-    llvm::Value * product = builder.CreateFMul(matrix_val, vector_val);
-    llvm::Value * next_sum = builder.CreateFAdd(sum_val, product);
-    builder.CreateStore(next_sum, sum_ptr);
-    llvm::Value * next_col = builder.CreateAdd(col, builder.getInt64(1));
-    builder.CreateStore(next_col, col_ptr);
-    builder.CreateBr(inner_cond);
-
-    builder.SetInsertPoint(inner_end);
-    llvm::Value * final_sum = builder.CreateLoad(f64_ty, sum_ptr);
-    llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(i64_ty, dst_ptr, row);
-    builder.CreateStore(builder.CreateBitCast(final_sum, i64_ty), dst_elem_ptr);
-    llvm::Value * next_row = builder.CreateAdd(row, builder.getInt64(1));
-    builder.CreateStore(next_row, row_ptr);
-    builder.CreateBr(outer_cond);
-
-    builder.SetInsertPoint(outer_end);
-  };
-
+  // ── Main instruction loop ──
   for (const auto & instr : program.instructions)
   {
-    // Unified result: every instruction produces either a float (result_f64)
-    // or an int (result_i64). Both are stored to the same i64 slot array;
-    // float results are bitcast to i64 before storing.
-    llvm::Value * result_f64 = nullptr;
-    llvm::Value * result_i64 = nullptr;
-    bool writes_slot = true;
-    switch (instr.op)
+    // ── SmoothParam ──
+    if (instr.tag == OpTag::SmoothParam)
     {
-      case NumericOp::Literal:
-        if (instr.dst_type == JitScalarType::Float)
-          result_f64 = llvm::ConstantFP::get(f64_ty, instr.literal);
-        else
-          result_i64 = builder.getInt64(instr.int_literal);
-        break;
-      case NumericOp::InputValue:
-      {
-        llvm::Value * raw = load_input(instr.slot_id, instr.dst_type);
-        if (instr.dst_type == JitScalarType::Float)
-          result_f64 = raw;
-        else
-          result_i64 = raw;
-        break;
-      }
-      case NumericOp::RegisterValue:
-      {
-        llvm::Value * raw = load_reg(instr.slot_id, instr.dst_type);
-        if (instr.dst_type == JitScalarType::Float)
-          result_f64 = raw;
-        else
-          result_i64 = raw;
-        break;
-      }
-      case NumericOp::SampleRate:
-        result_f64 = sample_rate_arg;
-        break;
-      case NumericOp::SampleIndex:
-        result_i64 = sample_index_arg;
-        break;
-      case NumericOp::Not:
-      {
-        llvm::Value * truthy;
-        if (instr.src_a_type == JitScalarType::Float)
-          truthy = builder.CreateFCmpUNE(load_slot_as_float(instr.src_a, JitScalarType::Float), llvm::ConstantFP::get(f64_ty, 0.0));
-        else
-          truthy = builder.CreateICmpNE(load_slot(instr.src_a), builder.getInt64(0));
-        result_i64 = builder.CreateZExt(builder.CreateNot(truthy), i64_ty);
-        break;
-      }
-      case NumericOp::Less:
-      {
-        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
-        llvm::Value * cmp = use_float
-          ? builder.CreateFCmpOLT(load_slot_as_float(instr.src_a, instr.src_a_type), load_slot_as_float(instr.src_b, instr.src_b_type))
-          : builder.CreateICmpSLT(load_slot(instr.src_a), load_slot(instr.src_b));
-        result_i64 = builder.CreateZExt(cmp, i64_ty);
-        break;
-      }
-      case NumericOp::LessEqual:
-      {
-        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
-        llvm::Value * cmp = use_float
-          ? builder.CreateFCmpOLE(load_slot_as_float(instr.src_a, instr.src_a_type), load_slot_as_float(instr.src_b, instr.src_b_type))
-          : builder.CreateICmpSLE(load_slot(instr.src_a), load_slot(instr.src_b));
-        result_i64 = builder.CreateZExt(cmp, i64_ty);
-        break;
-      }
-      case NumericOp::Greater:
-      {
-        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
-        llvm::Value * cmp = use_float
-          ? builder.CreateFCmpOGT(load_slot_as_float(instr.src_a, instr.src_a_type), load_slot_as_float(instr.src_b, instr.src_b_type))
-          : builder.CreateICmpSGT(load_slot(instr.src_a), load_slot(instr.src_b));
-        result_i64 = builder.CreateZExt(cmp, i64_ty);
-        break;
-      }
-      case NumericOp::GreaterEqual:
-      {
-        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
-        llvm::Value * cmp = use_float
-          ? builder.CreateFCmpOGE(load_slot_as_float(instr.src_a, instr.src_a_type), load_slot_as_float(instr.src_b, instr.src_b_type))
-          : builder.CreateICmpSGE(load_slot(instr.src_a), load_slot(instr.src_b));
-        result_i64 = builder.CreateZExt(cmp, i64_ty);
-        break;
-      }
-      case NumericOp::Equal:
-      {
-        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
-        llvm::Value * cmp = use_float
-          ? builder.CreateFCmpOEQ(load_slot_as_float(instr.src_a, instr.src_a_type), load_slot_as_float(instr.src_b, instr.src_b_type))
-          : builder.CreateICmpEQ(load_slot(instr.src_a), load_slot(instr.src_b));
-        result_i64 = builder.CreateZExt(cmp, i64_ty);
-        break;
-      }
-      case NumericOp::NotEqual:
-      {
-        const bool use_float = (instr.src_a_type == JitScalarType::Float || instr.src_b_type == JitScalarType::Float);
-        llvm::Value * cmp = use_float
-          ? builder.CreateFCmpUNE(load_slot_as_float(instr.src_a, instr.src_a_type), load_slot_as_float(instr.src_b, instr.src_b_type))
-          : builder.CreateICmpNE(load_slot(instr.src_a), load_slot(instr.src_b));
-        result_i64 = builder.CreateZExt(cmp, i64_ty);
-        break;
-      }
-      case NumericOp::ArrayLessScalar:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * size = load_array_size(instr.dst);
-        llvm::Value * scalar = load_slot_as_float(instr.src_b, instr.src_b_type);
-        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::Less);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::ArrayLessEqualScalar:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * size = load_array_size(instr.dst);
-        llvm::Value * scalar = load_slot_as_float(instr.src_b, instr.src_b_type);
-        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::LessEqual);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::ArrayGreaterScalar:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * size = load_array_size(instr.dst);
-        llvm::Value * scalar = load_slot_as_float(instr.src_b, instr.src_b_type);
-        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::Greater);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::ArrayGreaterEqualScalar:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * size = load_array_size(instr.dst);
-        llvm::Value * scalar = load_slot_as_float(instr.src_b, instr.src_b_type);
-        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::GreaterEqual);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::ArrayEqualScalar:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * size = load_array_size(instr.dst);
-        llvm::Value * scalar = load_slot_as_float(instr.src_b, instr.src_b_type);
-        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::Equal);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::ArrayNotEqualScalar:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * size = load_array_size(instr.dst);
-        llvm::Value * scalar = load_slot_as_float(instr.src_b, instr.src_b_type);
-        emit_array_scalar_compare_op(dst_ptr, lhs_ptr, scalar, size, ArrayScalarCompareOp::NotEqual);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::ArrayPack:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        for (std::size_t i = 0; i < instr.args.size(); ++i)
-        {
-          llvm::Value * dst_elem_ptr = builder.CreateInBoundsGEP(i64_ty, dst_ptr, builder.getInt64(static_cast<uint64_t>(i)));
-          llvm::Value * val = load_slot_as_float(instr.args[i], JitScalarType::Float);
-          builder.CreateStore(builder.CreateBitCast(val, i64_ty), dst_elem_ptr);
-        }
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::Add:
-        if (instr.dst_type == JitScalarType::Float)
-          result_f64 = builder.CreateFAdd(load_slot_as_float(instr.src_a, instr.src_a_type), load_slot_as_float(instr.src_b, instr.src_b_type));
-        else
-          result_i64 = builder.CreateAdd(load_slot(instr.src_a), load_slot(instr.src_b));
-        break;
-      case NumericOp::ArrayAdd:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * rhs_ptr = load_array_ptr(instr.src_b);
-        llvm::Value * size = load_array_size(instr.dst);
-        emit_array_binary_op(dst_ptr, lhs_ptr, rhs_ptr, size, ArrayBinaryOp::Add);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::ArrayAddScalar:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * size = load_array_size(instr.dst);
-        llvm::Value * scalar = load_slot_as_float(instr.src_b, instr.src_b_type);
-        emit_array_scalar_op(dst_ptr, lhs_ptr, scalar, size, ArrayBinaryOp::Add);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::Sub:
-        if (instr.dst_type == JitScalarType::Float)
-          result_f64 = builder.CreateFSub(load_slot_as_float(instr.src_a, instr.src_a_type), load_slot_as_float(instr.src_b, instr.src_b_type));
-        else
-          result_i64 = builder.CreateSub(load_slot(instr.src_a), load_slot(instr.src_b));
-        break;
-      case NumericOp::ArraySub:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * rhs_ptr = load_array_ptr(instr.src_b);
-        llvm::Value * size = load_array_size(instr.dst);
-        emit_array_binary_op(dst_ptr, lhs_ptr, rhs_ptr, size, ArrayBinaryOp::Sub);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::Mul:
-        if (instr.dst_type == JitScalarType::Float)
-          result_f64 = builder.CreateFMul(load_slot_as_float(instr.src_a, instr.src_a_type), load_slot_as_float(instr.src_b, instr.src_b_type));
-        else
-          result_i64 = builder.CreateMul(load_slot(instr.src_a), load_slot(instr.src_b));
-        break;
-      case NumericOp::ArrayMul:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * rhs_ptr = load_array_ptr(instr.src_b);
-        llvm::Value * size = load_array_size(instr.dst);
-        emit_array_binary_op(dst_ptr, lhs_ptr, rhs_ptr, size, ArrayBinaryOp::Mul);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::ArrayMulScalar:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * size = load_array_size(instr.dst);
-        llvm::Value * scalar = load_slot_as_float(instr.src_b, instr.src_b_type);
-        emit_array_scalar_op(dst_ptr, lhs_ptr, scalar, size, ArrayBinaryOp::Mul);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::Div:
-      {
-        llvm::Value * lhs = load_slot_as_float(instr.src_a, instr.src_a_type);
-        llvm::Value * rhs = load_slot_as_float(instr.src_b, instr.src_b_type);
-        llvm::Value * is_zero = builder.CreateFCmpOEQ(rhs, llvm::ConstantFP::get(f64_ty, 0.0));
-        llvm::Value * div_value = builder.CreateFDiv(lhs, rhs);
-        result_f64 = builder.CreateSelect(is_zero, llvm::ConstantFP::get(f64_ty, 0.0), div_value);
-        break;
-      }
-      case NumericOp::ArrayDiv:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * rhs_ptr = load_array_ptr(instr.src_b);
-        llvm::Value * size = load_array_size(instr.dst);
-        emit_array_binary_op(dst_ptr, lhs_ptr, rhs_ptr, size, ArrayBinaryOp::Div);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::ArrayDivScalar:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * size = load_array_size(instr.dst);
-        llvm::Value * scalar = load_slot_as_float(instr.src_b, instr.src_b_type);
-        emit_array_scalar_op(dst_ptr, lhs_ptr, scalar, size, ArrayBinaryOp::Div);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::ArrayModScalar:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * lhs_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * size = load_array_size(instr.dst);
-        llvm::Value * scalar = load_slot_as_float(instr.src_b, instr.src_b_type);
-        emit_array_scalar_mod_op(dst_ptr, lhs_ptr, scalar, size);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::MatMul:
-      {
-        llvm::Value * dst_ptr = load_array_ptr(instr.dst);
-        llvm::Value * matrix_ptr = load_array_ptr(instr.src_a);
-        llvm::Value * vector_ptr = load_array_ptr(instr.src_b);
-        emit_matmul(dst_ptr, matrix_ptr, vector_ptr, instr.src_c, instr.slot_id);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::Pow:
-        result_f64 = builder.CreateCall(llvm_pow, {load_slot_as_float(instr.src_a, instr.src_a_type), load_slot_as_float(instr.src_b, instr.src_b_type)});
-        break;
-      case NumericOp::Mod:
-      {
-        if (instr.dst_type == JitScalarType::Float)
-        {
-          llvm::Value * lhs = load_slot_as_float(instr.src_a, instr.src_a_type);
-          llvm::Value * rhs = load_slot_as_float(instr.src_b, instr.src_b_type);
-          llvm::Value * is_zero = builder.CreateFCmpOEQ(rhs, llvm::ConstantFP::get(f64_ty, 0.0));
-          llvm::Value * mod_value = builder.CreateCall(llvm_fmod, {lhs, rhs});
-          result_f64 = builder.CreateSelect(is_zero, llvm::ConstantFP::get(f64_ty, 0.0), mod_value);
-        }
-        else
-        {
-          llvm::Value * lhs = load_slot(instr.src_a);
-          llvm::Value * rhs = load_slot(instr.src_b);
-          llvm::Value * is_zero = builder.CreateICmpEQ(rhs, builder.getInt64(0));
-          llvm::Value * mod_value = builder.CreateSRem(lhs, rhs);
-          result_i64 = builder.CreateSelect(is_zero, builder.getInt64(0), mod_value);
-        }
-        break;
-      }
-      case NumericOp::FloorDiv:
-      {
-        llvm::Value * lhs = load_slot_as_float(instr.src_a, instr.src_a_type);
-        llvm::Value * rhs = load_slot_as_float(instr.src_b, instr.src_b_type);
-        llvm::Value * is_zero = builder.CreateFCmpOEQ(rhs, llvm::ConstantFP::get(f64_ty, 0.0));
-        llvm::Value * div_value = builder.CreateFDiv(lhs, rhs);
-        llvm::Value * floor_value = builder.CreateUnaryIntrinsic(llvm::Intrinsic::floor, div_value);
-        llvm::Value * int_value = builder.CreateFPToSI(floor_value, i64_ty);
-        result_i64 = builder.CreateSelect(is_zero, builder.getInt64(0), int_value);
-        break;
-      }
-      case NumericOp::BitAnd:
-      {
-        result_i64 = builder.CreateAnd(load_slot_as_int(instr.src_a, instr.src_a_type), load_slot_as_int(instr.src_b, instr.src_b_type));
-        break;
-      }
-      case NumericOp::BitOr:
-      {
-        result_i64 = builder.CreateOr(load_slot_as_int(instr.src_a, instr.src_a_type), load_slot_as_int(instr.src_b, instr.src_b_type));
-        break;
-      }
-      case NumericOp::BitXor:
-      {
-        result_i64 = builder.CreateXor(load_slot_as_int(instr.src_a, instr.src_a_type), load_slot_as_int(instr.src_b, instr.src_b_type));
-        break;
-      }
-      case NumericOp::LShift:
-      case NumericOp::RShift:
-      {
-        llvm::Value * lhs = load_slot_as_int(instr.src_a, instr.src_a_type);
-        llvm::Value * shift_raw = load_slot_as_int(instr.src_b, instr.src_b_type);
-        llvm::Value * shift_non_negative = builder.CreateSelect(
-          builder.CreateICmpSLT(shift_raw, builder.getInt64(0)),
-          builder.getInt64(0),
-          shift_raw);
-        llvm::Value * shift_clamped = builder.CreateSelect(
-          builder.CreateICmpSGT(shift_non_negative, builder.getInt64(63)),
-          builder.getInt64(63),
-          shift_non_negative);
-        result_i64 = instr.op == NumericOp::LShift
-          ? builder.CreateShl(lhs, shift_clamped)
-          : builder.CreateAShr(lhs, shift_clamped);
-        break;
-      }
-      case NumericOp::Abs:
-        if (instr.dst_type == JitScalarType::Float)
-          result_f64 = builder.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, load_slot_as_float(instr.src_a, instr.src_a_type));
-        else
-        {
-          llvm::Value * v = load_slot(instr.src_a);
-          llvm::Value * neg_v = builder.CreateNeg(v);
-          result_i64 = builder.CreateSelect(builder.CreateICmpSLT(v, builder.getInt64(0)), neg_v, v);
-        }
-        break;
-      case NumericOp::Clamp:
-      {
-        if (instr.dst_type == JitScalarType::Float)
-        {
-          llvm::Value * value     = load_slot_as_float(instr.src_a, instr.src_a_type);
-          llvm::Value * min_value = load_slot_as_float(instr.src_b, instr.src_b_type);
-          llvm::Value * max_value = load_slot_as_float(instr.src_c, instr.src_c_type);
-          llvm::Value * lower_bounded = builder.CreateSelect(
-            builder.CreateFCmpOLT(value, min_value), min_value, value);
-          result_f64 = builder.CreateSelect(
-            builder.CreateFCmpOGT(lower_bounded, max_value), max_value, lower_bounded);
-        }
-        else
-        {
-          llvm::Value * value     = load_slot(instr.src_a);
-          llvm::Value * min_value = load_slot(instr.src_b);
-          llvm::Value * max_value = load_slot(instr.src_c);
-          llvm::Value * lower_bounded = builder.CreateSelect(
-            builder.CreateICmpSLT(value, min_value), min_value, value);
-          result_i64 = builder.CreateSelect(
-            builder.CreateICmpSGT(lower_bounded, max_value), max_value, lower_bounded);
-        }
-        break;
-      }
-      case NumericOp::Select:
-      {
-        llvm::Value * cond_bool;
-        if (instr.src_a_type == JitScalarType::Float)
-          cond_bool = builder.CreateFCmpUNE(load_slot_as_float(instr.src_a, JitScalarType::Float), llvm::ConstantFP::get(f64_ty, 0.0));
-        else
-          cond_bool = builder.CreateICmpNE(load_slot(instr.src_a), builder.getInt64(0));
-        if (instr.dst_type == JitScalarType::Float)
-          result_f64 = builder.CreateSelect(cond_bool, load_slot_as_float(instr.src_b, instr.src_b_type), load_slot_as_float(instr.src_c, instr.src_c_type));
-        else
-          result_i64 = builder.CreateSelect(cond_bool, load_slot_as_int(instr.src_b, instr.src_b_type), load_slot_as_int(instr.src_c, instr.src_c_type));
-        break;
-      }
-      case NumericOp::Log:
-        result_f64 = builder.CreateCall(llvm_log, {load_slot_as_float(instr.src_a, instr.src_a_type)});
-        break;
-      case NumericOp::IndexArray:
-      {
-        llvm::Value * array_slot_ptr = builder.CreateInBoundsGEP(i64_ty, array_sizes_arg, builder.getInt64(instr.slot_id));
-        llvm::Value * array_size = builder.CreateLoad(i64_ty, array_slot_ptr);
+      // args: [Param(ptr), StateReg(slot), Const(coeff)]
+      const uint64_t param_ptr = instr.args[0].ptr;
+      const uint32_t state_slot = instr.args[1].slot;
+      const double coeff = instr.args[2].const_val;
 
-        llvm::Value * raw_index = (instr.src_a_type == JitScalarType::Float)
-          ? builder.CreateFPToSI(load_slot_as_float(instr.src_a, JitScalarType::Float), i64_ty)
-          : load_slot(instr.src_a);
-        llvm::Value * is_negative = builder.CreateICmpSLT(raw_index, builder.getInt64(0));
-        llvm::Value * in_range_upper = builder.CreateICmpULT(raw_index, array_size);
-        llvm::Value * in_range = builder.CreateAnd(builder.CreateNot(is_negative), in_range_upper);
+      llvm::Value * reg_gep = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(state_slot));
+      llvm::Value * current  = builder.CreateBitCast(builder.CreateLoad(i64_ty, reg_gep), f64_ty);
 
-        llvm::Value * array_ptr_slot = builder.CreateInBoundsGEP(ptr_ty, arrays_arg, builder.getInt64(instr.slot_id));
-        llvm::Value * array_ptr = builder.CreateLoad(ptr_ty, array_ptr_slot);
-        llvm::Value * elem_ptr = builder.CreateInBoundsGEP(i64_ty, array_ptr, raw_index);
-        llvm::Value * elem_bits = builder.CreateLoad(i64_ty, elem_ptr);
-        llvm::Value * elem_value = builder.CreateBitCast(elem_bits, f64_ty);
-        result_f64 = builder.CreateSelect(in_range, elem_value, llvm::ConstantFP::get(f64_ty, 0.0));
-        break;
-      }
-      case NumericOp::SetArrayElement:
-      {
-        llvm::Value * array_size = load_array_size(instr.slot_id);
-        llvm::Value * raw_index = (instr.src_a_type == JitScalarType::Float)
-          ? builder.CreateFPToSI(load_slot_as_float(instr.src_a, JitScalarType::Float), i64_ty)
-          : load_slot(instr.src_a);
-        llvm::Value * is_negative = builder.CreateICmpSLT(raw_index, builder.getInt64(0));
-        llvm::Value * in_range_upper = builder.CreateICmpULT(raw_index, array_size);
-        llvm::Value * in_range = builder.CreateAnd(builder.CreateNot(is_negative), in_range_upper);
+      auto pi = param_index.find(param_ptr);
+      uint64_t canonical_idx = (pi != param_index.end()) ? pi->second : 0;
+      llvm::Value * pp_slot = builder.CreateInBoundsGEP(i64_ty, param_ptrs_arg, builder.getInt64(canonical_idx));
+      llvm::Value * pp_raw  = builder.CreateLoad(i64_ty, pp_slot);
+      llvm::Value * pp_addr = builder.CreateIntToPtr(pp_raw, ptr_ty);
+      auto * target_ld = builder.CreateAlignedLoad(f64_ty, pp_addr, llvm::Align(sizeof(double)));
+      target_ld->setAtomic(llvm::AtomicOrdering::Monotonic);
 
-        llvm::BasicBlock * write_bb = llvm::BasicBlock::Create(*context, "set_arr_write", fn);
-        llvm::BasicBlock * merge_bb = llvm::BasicBlock::Create(*context, "set_arr_merge", fn);
-        builder.CreateCondBr(in_range, write_bb, merge_bb);
-
-        builder.SetInsertPoint(write_bb);
-        llvm::Value * array_ptr = load_array_ptr(instr.slot_id);
-        llvm::Value * elem_ptr = builder.CreateInBoundsGEP(i64_ty, array_ptr, raw_index);
-        llvm::Value * val_f64 = load_slot_as_float(instr.src_b, instr.src_b_type);
-        builder.CreateStore(builder.CreateBitCast(val_f64, i64_ty), elem_ptr);
-        builder.CreateBr(merge_bb);
-
-        builder.SetInsertPoint(merge_bb);
-        writes_slot = false;
-        break;
-      }
-      case NumericOp::Sin:
-        result_f64 = builder.CreateCall(llvm_sin, {load_slot_as_float(instr.src_a, instr.src_a_type)});
-        break;
-      case NumericOp::Neg:
-        if (instr.dst_type == JitScalarType::Float)
-          result_f64 = builder.CreateFNeg(load_slot_as_float(instr.src_a, instr.src_a_type));
-        else
-          result_i64 = builder.CreateNeg(load_slot(instr.src_a));
-        break;
-      case NumericOp::BitNot:
-      {
-        result_i64 = builder.CreateNot(load_slot(instr.src_a));
-        break;
-      }
-      case NumericOp::SmoothedParam:
-      {
-        // Load current smoother state from registers[slot_id] (stored as bitcast float)
-        llvm::Value * reg_ptr = gep_slot(regs_arg, instr.slot_id);
-        llvm::Value * current_bits = builder.CreateLoad(i64_ty, reg_ptr, "smooth_current_bits");
-        llvm::Value * current = builder.CreateBitCast(current_bits, f64_ty, "smooth_current");
-
-        uint64_t canonical_idx = 0;
-        {
-          auto it = param_index.find(instr.param_ptr);
-          if (it != param_index.end())
-            canonical_idx = it->second;
-        }
-        llvm::Value * param_ptr_slot = builder.CreateInBoundsGEP(
-          i64_ty, param_ptrs_arg, builder.getInt64(canonical_idx));
-        llvm::Value * param_ptr_raw = builder.CreateLoad(i64_ty, param_ptr_slot, "smooth_param_raw");
-        llvm::Value * param_addr = builder.CreateIntToPtr(param_ptr_raw, ptr_ty, "smooth_param_ptr");
-        llvm::LoadInst * target_load = builder.CreateAlignedLoad(
-          f64_ty, param_addr, llvm::Align(sizeof(double)), "smooth_target");
-        target_load->setAtomic(llvm::AtomicOrdering::Monotonic);
-
-        // new_val = current + coeff * (target - current)
-        llvm::Value * coeff = llvm::ConstantFP::get(f64_ty, instr.literal);
-        llvm::Value * diff = builder.CreateFSub(target_load, current, "smooth_diff");
-        llvm::Value * step = builder.CreateFMul(coeff, diff, "smooth_step");
-        result_f64 = builder.CreateFAdd(current, step, "smooth_new");
-
-        // Write back smoother state as bitcast i64
-        builder.CreateStore(builder.CreateBitCast(result_f64, i64_ty), reg_ptr);
-        break;
-      }
-      case NumericOp::CopySlot:
-      {
-        // Pass src_a value through to dst with correct type
-        if (instr.src_a_type == JitScalarType::Float)
-        {
-          result_f64 = load_slot_as_float(instr.src_a, instr.src_a_type);
-        }
-        else
-        {
-          result_i64 = load_slot(instr.src_a);
-        }
-        break;
-      }
+      llvm::Value * diff    = builder.CreateFSub(target_ld, current);
+      llvm::Value * new_val = builder.CreateFAdd(current, builder.CreateFMul(llvm::ConstantFP::get(f64_ty, coeff), diff));
+      builder.CreateStore(builder.CreateBitCast(new_val, i64_ty), reg_gep);
+      store_temp_f64(instr.dst, new_val);
+      continue;
     }
 
-    if (writes_slot)
+    // ── TriggerParam ── (reads frame_value via ptr; no smoothing)
+    if (instr.tag == OpTag::TriggerParam)
     {
-      if (result_f64)
-        store_float_to_slot(instr.dst, result_f64);
-      else if (result_i64)
-        store_slot(instr.dst, result_i64);
-      else
+      // ControlParam::frame_value is the second double field after value.
+      // Offset: sizeof(std::atomic<double>) ≈ 8 bytes for value + 8 bytes for frame_value.
+      // We read frame_value via a pointer offset identical to the existing NumericOp path.
+      const uint64_t param_ptr = instr.args[0].ptr;
+      auto pi = param_index.find(param_ptr);
+      uint64_t canonical_idx = (pi != param_index.end()) ? pi->second : 0;
+      llvm::Value * pp_slot = builder.CreateInBoundsGEP(i64_ty, param_ptrs_arg, builder.getInt64(canonical_idx));
+      llvm::Value * pp_raw  = builder.CreateLoad(i64_ty, pp_slot);
+      // frame_value is at offset +16 bytes (two atomic<double> fields: value, frame_value)
+      llvm::Value * pp_base = builder.CreateIntToPtr(pp_raw, ptr_ty);
+      llvm::Value * fv_ptr  = builder.CreateInBoundsGEP(
+        builder.getInt8Ty(), pp_base, builder.getInt64(16));
+      auto * fv_ld = builder.CreateAlignedLoad(f64_ty, fv_ptr, llvm::Align(sizeof(double)));
+      fv_ld->setAtomic(llvm::AtomicOrdering::Monotonic);
+      store_temp_f64(instr.dst, fv_ld);
+      continue;
+    }
+
+    // ── Pack: N scalar args → arrays[dst] ──
+    if (instr.tag == OpTag::Pack)
+    {
+      llvm::Value * dst_ptr = load_array_ptr_f(instr.dst);
+      for (std::size_t i = 0; i < instr.args.size(); ++i)
+      {
+        llvm::Value * val = resolve_scalar(instr.args[i]);
+        llvm::Value * ep  = builder.CreateInBoundsGEP(i64_ty, dst_ptr, builder.getInt64(static_cast<int64_t>(i)));
+        builder.CreateStore(builder.CreateBitCast(val, i64_ty), ep);
+      }
+      continue;
+    }
+
+    // ── Index: arrays[args[0].slot][args[1]] → temps[dst] ──
+    if (instr.tag == OpTag::Index)
+    {
+      const uint32_t arr_slot = instr.args[0].slot;
+      llvm::Value * array_size = load_array_size_f(arr_slot);
+      llvm::Value * array_ptr  = load_array_ptr_f(arr_slot);
+      llvm::Value * idx_f      = resolve_scalar(instr.args[1]);
+      llvm::Value * raw_idx    = builder.CreateFPToSI(idx_f, i64_ty);
+      llvm::Value * in_range   = builder.CreateAnd(
+        builder.CreateNot(builder.CreateICmpSLT(raw_idx, builder.getInt64(0))),
+        builder.CreateICmpULT(raw_idx, array_size));
+      llvm::Value * ep  = builder.CreateInBoundsGEP(i64_ty, array_ptr, raw_idx);
+      llvm::Value * val = builder.CreateBitCast(builder.CreateLoad(i64_ty, ep), f64_ty);
+      store_temp_f64(instr.dst, builder.CreateSelect(in_range, val, zero_f64));
+      continue;
+    }
+
+    // ── SetElement: side-effect write to arrays[args[0].slot] ──
+    if (instr.tag == OpTag::SetElement)
+    {
+      const uint32_t arr_slot = instr.args[0].slot;
+      llvm::Value * array_size = load_array_size_f(arr_slot);
+      llvm::Value * array_ptr  = load_array_ptr_f(arr_slot);
+      llvm::Value * raw_idx    = builder.CreateFPToSI(resolve_scalar(instr.args[1]), i64_ty);
+      llvm::Value * in_range   = builder.CreateAnd(
+        builder.CreateNot(builder.CreateICmpSLT(raw_idx, builder.getInt64(0))),
+        builder.CreateICmpULT(raw_idx, array_size));
+      llvm::BasicBlock * write_bb = llvm::BasicBlock::Create(*context, "set_elem_write", fn);
+      llvm::BasicBlock * merge_bb = llvm::BasicBlock::Create(*context, "set_elem_merge", fn);
+      builder.CreateCondBr(in_range, write_bb, merge_bb);
+      builder.SetInsertPoint(write_bb);
+      llvm::Value * ep = builder.CreateInBoundsGEP(i64_ty, array_ptr, raw_idx);
+      builder.CreateStore(builder.CreateBitCast(resolve_scalar(instr.args[2]), i64_ty), ep);
+      builder.CreateBr(merge_bb);
+      builder.SetInsertPoint(merge_bb);
+      continue;
+    }
+
+    // ── MatMul: stub (unimplemented) ──
+    if (instr.tag == OpTag::MatMul)
+    {
+      store_temp_f64(instr.dst, zero_f64);  // TODO: implement matmul
+      continue;
+    }
+
+    // ── Elementwise loop (loop_count > 1) ──
+    if (instr.loop_count > 1)
+    {
+      // Pre-resolve non-iterating args (stride == 0) and collect array ptrs for iterating args.
+      const std::size_t nargs = instr.args.size();
+      std::vector<llvm::Value *> arr_ptrs(nargs, nullptr);
+      std::vector<llvm::Value *> scalar_vals(nargs, nullptr);
+      for (std::size_t i = 0; i < nargs; ++i)
+      {
+        if (i < instr.strides.size() && instr.strides[i] == 1)
+          arr_ptrs[i] = load_array_ptr_f(instr.args[i].slot);
+        else
+          scalar_vals[i] = resolve_scalar(instr.args[i]);
+      }
+
+      llvm::Value * loop_n    = builder.getInt64(instr.loop_count);
+      llvm::Value * dst_ptr   = load_array_ptr_f(instr.dst);
+      llvm::Value * idx_alloc = builder.CreateAlloca(i64_ty, nullptr, "ew_idx");
+      builder.CreateStore(builder.getInt64(0), idx_alloc);
+
+      llvm::BasicBlock * cond_bb = llvm::BasicBlock::Create(*context, "ew_cond", fn);
+      llvm::BasicBlock * body_bb = llvm::BasicBlock::Create(*context, "ew_body", fn);
+      llvm::BasicBlock * end_bb  = llvm::BasicBlock::Create(*context, "ew_end",  fn);
+      builder.CreateBr(cond_bb);
+
+      builder.SetInsertPoint(cond_bb);
+      llvm::Value * idx = builder.CreateLoad(i64_ty, idx_alloc);
+      builder.CreateCondBr(builder.CreateICmpULT(idx, loop_n), body_bb, end_bb);
+
+      builder.SetInsertPoint(body_bb);
+      std::vector<llvm::Value *> iter_vals(nargs, nullptr);
+      for (std::size_t i = 0; i < nargs; ++i)
+      {
+        if (arr_ptrs[i])
+        {
+          llvm::Value * ep = builder.CreateInBoundsGEP(i64_ty, arr_ptrs[i], idx);
+          iter_vals[i] = builder.CreateBitCast(builder.CreateLoad(i64_ty, ep), f64_ty);
+        }
+        else
+        {
+          iter_vals[i] = scalar_vals[i];
+        }
+      }
+      llvm::Value * elem_result = emit_scalar_op(instr.tag, iter_vals);
+      if (!elem_result)
       {
         return llvm::make_error<llvm::StringError>(
-          "Failed to lower numeric instruction to LLVM IR",
+          "compile_flat_program: unsupported OpTag in elementwise loop",
           llvm::inconvertibleErrorCode());
       }
+      llvm::Value * dep = builder.CreateInBoundsGEP(i64_ty, dst_ptr, idx);
+      builder.CreateStore(builder.CreateBitCast(elem_result, i64_ty), dep);
+      builder.CreateStore(builder.CreateAdd(idx, builder.getInt64(1)), idx_alloc);
+      builder.CreateBr(cond_bb);
+
+      builder.SetInsertPoint(end_bb);
+      continue;
     }
+
+    // ── Scalar instruction ──
+    std::vector<llvm::Value *> vals;
+    vals.reserve(instr.args.size());
+    for (const auto & arg : instr.args)
+      vals.push_back(resolve_scalar(arg));
+
+    llvm::Value * result = emit_scalar_op(instr.tag, vals);
+    if (!result)
+    {
+      return llvm::make_error<llvm::StringError>(
+        "compile_flat_program: unsupported scalar OpTag",
+        llvm::inconvertibleErrorCode());
+    }
+    store_temp_f64(instr.dst, result);
   }
 
   builder.CreateRetVoid();
@@ -1250,23 +726,20 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_numeric_program(
   if (llvm::verifyFunction(*fn, &llvm::errs()) || llvm::verifyModule(*module, &llvm::errs()))
   {
     return llvm::make_error<llvm::StringError>(
-      "Generated invalid LLVM IR for numeric UDM kernel",
+      "compile_flat_program: generated invalid LLVM IR",
       llvm::inconvertibleErrorCode());
   }
 
   if (auto err = add_module(std::move(context), std::move(module)))
-  {
     return std::move(err);
-  }
 
   auto addr_or_err = lookup(function_name);
   if (!addr_or_err)
-  {
     return addr_or_err.takeError();
-  }
 
   auto kernel = reinterpret_cast<NumericKernelFn>(*addr_or_err);
   kernel_cache_.emplace(std::move(cache_key), kernel);
   return kernel;
 }
+
 } // namespace egress_jit

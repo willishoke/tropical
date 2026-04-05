@@ -1,11 +1,11 @@
 /**
- * flatten.ts — Flatten a patch into a single egress_plan_2 kernel.
+ * flatten.ts — Flatten a patch into a single egress_plan_3 kernel.
  *
  * Takes a SessionState and produces a flat plan JSON where all module
  * expression trees are inlined: input() nodes are substituted with wiring
  * expressions, ref() nodes are resolved by inlining the referenced module's
  * output expression. The result has zero inter-module boundaries — just one
- * flat set of output_exprs and register_exprs.
+ * flat instruction stream (egress_plan_3).
  */
 
 import type { ExprNode } from './expr.js'
@@ -16,19 +16,114 @@ import {
   compilerInputFromSession, extractModuleInfo,
   buildDependencyGraph, topologicalSort,
 } from './compiler.js'
+import { lowerArrayOps } from './lower_arrays.js'
+import { portTypeToString } from './term.js'
+import { checkArrayConnection } from './array_wiring.js'
+import { emitNumericProgram, type NInstr } from './emit_numeric.js'
 
 // ─────────────────────────────────────────────────────────────
-// egress_plan_2 schema
+// Wiring type validation
+// ─────────────────────────────────────────────────────────────
+
+export class FlattenError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'FlattenError'
+  }
+}
+
+/**
+ * Infer the output type string of an ExprNode, given the module type context.
+ * Returns undefined when the type cannot be statically determined.
+ */
+function inferExprOutputType(
+  expr: ExprNode,
+  moduleInfos: Map<string, ModuleInfo>,
+): string | undefined {
+  if (typeof expr === 'number') return 'float'
+  if (typeof expr === 'boolean') return 'bool'
+  if (Array.isArray(expr)) return `float[${(expr as unknown[]).length}]`
+  if (typeof expr !== 'object' || expr === null) return undefined
+  const obj = expr as Record<string, unknown>
+  switch (obj.op as string) {
+    case 'ref': {
+      const modInfo = moduleInfos.get(obj.module as string)
+      if (!modInfo) return undefined
+      const outName = obj.output as string | number
+      const outIdx = typeof outName === 'number' ? outName : modInfo.outputNames.indexOf(outName)
+      if (outIdx === -1 || outIdx >= modInfo.outputTypes.length) return undefined
+      return portTypeToString(modInfo.outputTypes[outIdx])
+    }
+    case 'broadcast_to':
+      return `float[${(obj.shape as number[]).join(',')}]`
+    case 'zeros':
+    case 'ones':
+    case 'fill':
+    case 'array_literal':
+      return `float[${(obj.shape as number[]).join(',')}]`
+    default:
+      return undefined
+  }
+}
+
+/**
+ * Validate all wiring expressions against their destination port types.
+ * Throws FlattenError on incompatible connections (e.g. array → scalar).
+ * Inserts broadcast_to wrappers for compatible shape mismatches (e.g. scalar → array[4]).
+ * Returns a new Map with any necessary broadcast wrappers applied.
+ */
+export function normalizeWiringTypes(
+  moduleInfos: Map<string, ModuleInfo>,
+  inputExprNodes: Map<string, ExprNode>,
+): Map<string, ExprNode> {
+  const result = new Map(inputExprNodes)
+
+  for (const [key, expr] of inputExprNodes) {
+    const colonIdx = key.indexOf(':')
+    const moduleName = key.slice(0, colonIdx)
+    const inputName = key.slice(colonIdx + 1)
+
+    const modInfo = moduleInfos.get(moduleName)
+    if (!modInfo) continue
+
+    const inputIdx = modInfo.inputNames.indexOf(inputName)
+    if (inputIdx === -1) continue
+
+    const dstTypeStr = portTypeToString(modInfo.inputTypes[inputIdx])
+    const srcTypeStr = inferExprOutputType(expr, moduleInfos)
+    if (srcTypeStr === undefined) continue
+
+    const check = checkArrayConnection(srcTypeStr, dstTypeStr, expr)
+    if (!check.compatible) {
+      throw new FlattenError(
+        `Wiring type mismatch on '${moduleName}'.${inputName}: ${check.error}`
+      )
+    }
+    if (check.broadcastExpr) {
+      result.set(key, check.broadcastExpr)
+    }
+  }
+
+  return result
+}
+
+// ─────────────────────────────────────────────────────────────
+// egress_plan_3 schema
 // ─────────────────────────────────────────────────────────────
 
 export interface FlatPlan {
-  schema: 'egress_plan_2'
+  schema: 'egress_plan_3'
   config: { sample_rate: number }
-  output_exprs: ExprNode[]
-  register_exprs: ExprNode[]
-  state_init: (number | boolean | number[])[]
+  state_init: (number | boolean)[]
   register_names: string[]
   outputs: number[]
+  // Compiled instruction stream (from emitNumericProgram)
+  instructions:    NInstr[]
+  register_count:  number
+  array_slot_count: number
+  array_slot_sizes: number[]
+  output_targets:  number[]
+  register_targets: number[]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -441,7 +536,7 @@ function resolveRefs(
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Flatten a session's patch into a single egress_plan_2 plan.
+ * Flatten a session's patch into a single egress_plan_3 plan.
  *
  * Process:
  * 1. Topologically sort modules
@@ -452,10 +547,11 @@ function resolveRefs(
  *    d. Resolve remaining refs (from wiring exprs that reference earlier modules)
  *    e. Record the resolved output expressions for use by later modules' refs
  * 3. Collect all outputs matching graphOutputs
- * 4. Emit egress_plan_2 JSON
+ * 4. Compile expression trees → FlatProgram via emitNumericProgram
+ * 5. Emit egress_plan_3 JSON
  */
 export function flattenPatch(session: SessionState): FlatPlan {
-  const { instanceRegistry, inputExprNodes, graphOutputs } = session
+  const { instanceRegistry, graphOutputs } = session
 
   // Build module info map
   const moduleInfos = new Map<string, ModuleInfo>()
@@ -464,6 +560,10 @@ export function flattenPatch(session: SessionState): FlatPlan {
     moduleInfos.set(name, extractModuleInfo(name, inst._def))
     moduleInstances.set(name, inst)
   }
+
+  // Validate and normalize wiring types (throws FlattenError on incompatible connections,
+  // inserts broadcast_to wrappers for shape mismatches from patch-file or direct wiring)
+  const inputExprNodes = normalizeWiringTypes(moduleInfos, session.inputExprNodes)
 
   // Topological sort
   const deps = buildDependencyGraph(moduleInfos.keys(), inputExprNodes)
@@ -520,6 +620,8 @@ export function flattenPatch(session: SessionState): FlatPlan {
       expr = resolveDelayValues(expr, delayBase)
       expr = substituteInputs(expr, inputMap)
       expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames)
+      // Lower array ops (zeros, ones, fill, array_literal, etc.) to primitives
+      expr = lowerArrayOps(expr)
       return expr
     }
 
@@ -642,13 +744,21 @@ export function flattenPatch(session: SessionState): FlatPlan {
     outputIndices.push(flatIdx)
   }
 
+  // Compile expression trees → flat instruction stream
+  const program = emitNumericProgram(flatOutputExprs, flatRegisterExprs)
+
   return {
-    schema: 'egress_plan_2',
+    schema: 'egress_plan_3',
     config: { sample_rate: 44100 },
-    output_exprs: flatOutputExprs,
-    register_exprs: flatRegisterExprs,
-    state_init: flatStateInit,
+    state_init: flatStateInit as (number | boolean)[],
     register_names: flatRegisterNames,
     outputs: outputIndices,
+    instructions:     program.instructions,
+    register_count:   program.register_count,
+    array_slot_count: program.array_slot_count,
+    array_slot_sizes: program.array_slot_sizes,
+    output_targets:   program.output_targets,
+    register_targets: program.register_targets,
   }
 }
+

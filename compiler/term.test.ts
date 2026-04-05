@@ -10,10 +10,16 @@ import {
   type PortType,
   type Term,
   Float, Int, Bool, Unit,
-  ScalarType, StructType, SumType,
+  ScalarType, StructType, SumType, ArrayType,
   product,
   portTypeEqual,
   portTypeToString,
+  broadcastShapes,
+  shapeStrides,
+  shapeSize,
+  flattenIndex,
+  scalarCount,
+  shapesCompatible,
   id, morphism, compose, tensor, trace,
   composeAll, tensorAll,
 } from './term'
@@ -127,6 +133,123 @@ describe('PortType', () => {
     expect(portTypeToString(Float)).toBe('float')
     expect(portTypeToString(Unit)).toBe('I')
     expect(portTypeToString(product([Float, Int]))).toBe('float ⊗ int')
+  })
+
+  test('array type equality', () => {
+    const a = ArrayType(Float, [4])
+    const b = ArrayType(Float, [4])
+    const c = ArrayType(Float, [8])
+    const d = ArrayType(Int, [4])
+    expect(portTypeEqual(a, b)).toBe(true)
+    expect(portTypeEqual(a, c)).toBe(false)
+    expect(portTypeEqual(a, d)).toBe(false)
+  })
+
+  test('array type multi-dimensional equality', () => {
+    const a = ArrayType(Float, [4, 4])
+    const b = ArrayType(Float, [4, 4])
+    const c = ArrayType(Float, [4, 8])
+    expect(portTypeEqual(a, b)).toBe(true)
+    expect(portTypeEqual(a, c)).toBe(false)
+  })
+
+  test('nested array type', () => {
+    // array of arrays: float[3][4] represented as array<array<float, [3]>, [4]>
+    const inner = ArrayType(Float, [3])
+    const outer = ArrayType(inner, [4])
+    expect(outer.tag).toBe('array')
+    if (outer.tag === 'array') {
+      expect(outer.shape).toEqual([4])
+      expect(outer.element).toEqual(inner)
+    }
+  })
+
+  test('array type degenerate shape', () => {
+    // empty shape degenerates to the element type
+    const a = ArrayType(Float, [])
+    expect(portTypeEqual(a, Float)).toBe(true)
+  })
+
+  test('portTypeToString for arrays', () => {
+    expect(portTypeToString(ArrayType(Float, [4]))).toBe('float[4]')
+    expect(portTypeToString(ArrayType(Float, [4, 4]))).toBe('float[4,4]')
+    expect(portTypeToString(ArrayType(Int, [8]))).toBe('int[8]')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// Unit tests: Shape algebra
+// ─────────────────────────────────────────────────────────────
+
+describe('Shape algebra', () => {
+  test('broadcastShapes — same shapes', () => {
+    expect(broadcastShapes([3, 4], [3, 4])).toEqual([3, 4])
+  })
+
+  test('broadcastShapes — scalar broadcast', () => {
+    expect(broadcastShapes([3, 4], [1])).toEqual([3, 4])
+    expect(broadcastShapes([1], [3, 4])).toEqual([3, 4])
+  })
+
+  test('broadcastShapes — dimension-1 stretch', () => {
+    expect(broadcastShapes([3, 1], [1, 4])).toEqual([3, 4])
+    expect(broadcastShapes([1, 4], [3, 1])).toEqual([3, 4])
+  })
+
+  test('broadcastShapes — different ranks', () => {
+    expect(broadcastShapes([2, 3, 4], [4])).toEqual([2, 3, 4])
+    expect(broadcastShapes([4], [2, 3, 4])).toEqual([2, 3, 4])
+  })
+
+  test('broadcastShapes — incompatible', () => {
+    expect(broadcastShapes([3], [4])).toBeNull()
+    expect(broadcastShapes([2, 3], [2, 4])).toBeNull()
+  })
+
+  test('shapeStrides — row major', () => {
+    expect(shapeStrides([2, 3, 4])).toEqual([12, 4, 1])
+    expect(shapeStrides([4])).toEqual([1])
+    expect(shapeStrides([3, 3])).toEqual([3, 1])
+  })
+
+  test('shapeSize', () => {
+    expect(shapeSize([2, 3, 4])).toBe(24)
+    expect(shapeSize([4])).toBe(4)
+    expect(shapeSize([])).toBe(1)
+  })
+
+  test('flattenIndex', () => {
+    const strides = shapeStrides([2, 3, 4])
+    expect(flattenIndex([0, 0, 0], strides)).toBe(0)
+    expect(flattenIndex([0, 0, 1], strides)).toBe(1)
+    expect(flattenIndex([0, 1, 0], strides)).toBe(4)
+    expect(flattenIndex([1, 0, 0], strides)).toBe(12)
+    expect(flattenIndex([1, 2, 3], strides)).toBe(23)
+  })
+
+  test('scalarCount — scalar', () => {
+    expect(scalarCount(Float)).toBe(1)
+    expect(scalarCount(Unit)).toBe(0)
+  })
+
+  test('scalarCount — array', () => {
+    expect(scalarCount(ArrayType(Float, [4]))).toBe(4)
+    expect(scalarCount(ArrayType(Float, [4, 4]))).toBe(16)
+  })
+
+  test('scalarCount — product', () => {
+    expect(scalarCount(product([Float, Float]))).toBe(2)
+    expect(scalarCount(product([ArrayType(Float, [4]), Float]))).toBe(5)
+  })
+
+  test('shapesCompatible', () => {
+    const a4 = ArrayType(Float, [4])
+    const a8 = ArrayType(Float, [8])
+    expect(shapesCompatible(a4, a4)).toEqual([4])
+    expect(shapesCompatible(a4, Float)).toEqual([4])
+    expect(shapesCompatible(Float, a4)).toEqual([4])
+    expect(shapesCompatible(Float, Float)).toEqual([])
+    expect(shapesCompatible(a4, a8)).toBeNull()
   })
 })
 
