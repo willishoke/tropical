@@ -1,4 +1,4 @@
-.PHONY: build profile repl run tui-ts clean
+.PHONY: build profile repl run mcp-ts clean
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -31,11 +31,8 @@ repl: build
 
 run: repl
 
-tui-ts: build
-	cd tui && bun install --silent && bun run src/index.tsx
-
 mcp-ts: build
-	cd tui && bun install --silent && bun run src/server.ts
+	bun install --silent && bun run mcp/server.ts
 
 clean:
 	rm -rf $(BUILD_DIR)

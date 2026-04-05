@@ -9,7 +9,7 @@
 
 import type { SessionState } from './patch'
 import { flattenPatch } from './flatten'
-import type { Runtime } from './runtime'
+import type { Runtime } from './runtime/runtime'
 
 /**
  * Flatten the session's patch and push to a FlatRuntime.

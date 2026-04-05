@@ -38,10 +38,10 @@ endif()
 
 # Core C++ sources shared by all targets
 set(EGRESS_CORE_SOURCES
-    src/expr/ExprStructural.cpp
-    src/expr/ExprRewrite.cpp
-    src/runtime/FlatRuntime.cpp
-    src/c_api/egress_c.cpp)
+    engine/expr/ExprStructural.cpp
+    engine/expr/ExprRewrite.cpp
+    engine/runtime/FlatRuntime.cpp
+    engine/c_api/egress_c.cpp)
 
 # libegress — stable C shared library (no Python dependency)
 add_library(egress_core SHARED ${EGRESS_CORE_SOURCES})
@@ -52,7 +52,7 @@ if(LLVM_PACKAGE_VERSION VERSION_LESS 15)
 endif()
 message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION}")
 
-target_sources(egress_core PRIVATE src/jit/OrcJitEngine.cpp)
+target_sources(egress_core PRIVATE engine/jit/OrcJitEngine.cpp)
 target_include_directories(egress_core PRIVATE ${LLVM_INCLUDE_DIRS})
 target_compile_definitions(egress_core PRIVATE ${LLVM_DEFINITIONS})
 
@@ -80,7 +80,7 @@ if(EGRESS_PROFILE)
     target_compile_definitions(egress_core PRIVATE EGRESS_PROFILE=1)
 endif()
 target_link_libraries(egress_core PRIVATE rtaudio nlohmann_json::nlohmann_json)
-target_include_directories(egress_core PRIVATE src)
+target_include_directories(egress_core PRIVATE engine)
 set_target_properties(egress_core PROPERTIES OUTPUT_NAME "egress")
 
 # ---- Tests -------------------------------------------------------------------
@@ -89,15 +89,15 @@ option(EGRESS_BUILD_TESTS "Build C++ process tests (no audio device required)" O
 
 if(EGRESS_BUILD_TESTS)
     enable_testing()
-    add_executable(test_module_process tests/test_module_process.cpp)
-    target_include_directories(test_module_process PRIVATE src)
+    add_executable(test_module_process engine/tests/test_module_process.cpp)
+    target_include_directories(test_module_process PRIVATE engine)
     target_compile_features(test_module_process PRIVATE cxx_std_20)
     target_link_libraries(test_module_process PRIVATE egress_core)
     add_test(NAME module_process COMMAND test_module_process)
 endif()
 
 # Install the public C header
-install(FILES src/c_api/egress_c.h DESTINATION include)
+install(FILES engine/c_api/egress_c.h DESTINATION include)
 if(EGRESS_BUILD_PYTHON)
     # Place libegress adjacent to the Python package so _bindings.py finds it
     # via its path-1 lookup (next to the egress/ dir in site-packages).

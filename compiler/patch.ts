@@ -17,9 +17,9 @@ import {
   defineModule, ModuleType, ModuleInstance, delay,
   SymbolMap, ValueCoercible, RegInit,
 } from './module.js'
-import { Param, Trigger } from './param.js'
+import { Param, Trigger } from './runtime/param.js'
 import { applyFlatPlan } from './apply_plan.js'
-import { Runtime } from './runtime.js'
+import { Runtime } from './runtime/runtime.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -114,7 +114,7 @@ export interface PatchJSON {
 
 export interface SessionState {
   bufferLength: number
-  dac: import('./audio.js').DAC | null  // lazy type import to avoid circular dep
+  dac: import('./runtime/audio.js').DAC | null  // lazy type import to avoid circular dep
   typeRegistry: Map<string, ModuleType>
   instanceRegistry: Map<string, ModuleInstance>
   graphOutputs: Array<{ module: string; output: string }>

@@ -9,7 +9,7 @@ import { describe, test, expect } from 'bun:test'
 import { makeSession, loadPatchFromJSON, type PatchJSON, type ExprNode } from './patch'
 import { loadBuiltins } from './module_library'
 import { applySessionWiring, applyFlatPlan } from './apply_plan'
-import { Runtime } from './runtime'
+import { Runtime } from './runtime/runtime'
 
 function setupSession(modules: PatchJSON['modules'], bufferLength = 256) {
   const session = makeSession(bufferLength)
