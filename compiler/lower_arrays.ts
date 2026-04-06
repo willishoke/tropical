@@ -25,66 +25,102 @@ export interface ArrayLayout {
 /**
  * Lower all array operations in an expression tree.
  * Recursively walks the tree and expands array ops to primitives.
+ *
+ * memo: optional WeakMap for identity-based memoization. Pass a fresh WeakMap
+ * at the call site to prevent O(2^N) traversal of shared DAG nodes.
  */
-export function lowerArrayOps(node: ExprNode): ExprNode {
+export function lowerArrayOps(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode {
   if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(lowerArrayOps)
+  if (Array.isArray(node)) return node.map(n => lowerArrayOps(n, memo))
   if (typeof node !== 'object' || node === null) return node
 
+  if (memo) {
+    const cached = memo.get(node as object)
+    if (cached !== undefined) return cached
+  }
+
   const obj = node as { op: string; [k: string]: unknown }
+  let result: ExprNode
 
   switch (obj.op) {
     case 'array_literal':
-      return lowerArrayLiteral(obj)
+      result = lowerArrayLiteral(obj, memo)
+      break
 
     case 'zeros':
-      return lowerZeros(obj)
+      result = lowerZeros(obj)
+      break
 
     case 'ones':
-      return lowerOnes(obj)
+      result = lowerOnes(obj)
+      break
 
     case 'fill':
-      return lowerFill(obj)
+      result = lowerFill(obj, memo)
+      break
 
     case 'reshape':
-      return lowerReshape(obj)
+      result = lowerReshape(obj, memo)
+      break
 
     case 'transpose':
-      return lowerTranspose(obj)
+      result = lowerTranspose(obj, memo)
+      break
 
     case 'slice':
-      return lowerSlice(obj)
+      result = lowerSlice(obj, memo)
+      break
 
     case 'reduce':
-      return lowerReduce(obj)
+      result = lowerReduce(obj, memo)
+      break
 
     case 'broadcast_to':
-      return lowerBroadcastTo(obj)
+      result = lowerBroadcastTo(obj, memo)
+      break
 
     case 'map':
-      return lowerMap(obj)
+      result = lowerMap(obj, memo)
+      break
 
     default:
-      return lowerChildren(obj)
+      result = lowerChildren(obj, memo)
+      break
   }
+
+  // Only cache object results (not arrays/primitives) since memo is WeakMap
+  if (memo && typeof result === 'object' && result !== null && !Array.isArray(result)) {
+    memo.set(node as object, result)
+  }
+
+  return result
 }
 
 // ─────────────────────────────────────────────────────────────
 // Child traversal (for non-array ops that may contain array ops)
 // ─────────────────────────────────────────────────────────────
 
-function lowerChildren(obj: Record<string, unknown>): ExprNode {
+function lowerChildren(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  // Return the original node if no children actually change — this preserves DAG
+  // identity so shared subexpressions remain shared through the lowering pass.
   const result: Record<string, unknown> = {}
+  let changed = false
   for (const [k, v] of Object.entries(obj)) {
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(lowerArrayOps)
+      const arr = v as ExprNode[]
+      const newArr = arr.map(n => lowerArrayOps(n, memo))
+      const anyChanged = newArr.some((n, i) => n !== arr[i])
+      result[k] = anyChanged ? newArr : arr
+      if (anyChanged) changed = true
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = lowerArrayOps(v as ExprNode)
+      const newV = lowerArrayOps(v as ExprNode, memo)
+      result[k] = newV
+      if (newV !== v) changed = true
     } else {
       result[k] = v
     }
   }
-  return result as ExprNode
+  return changed ? result as ExprNode : obj as ExprNode
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -94,8 +130,8 @@ function lowerChildren(obj: Record<string, unknown>): ExprNode {
 /**
  * array_literal({shape, values}) → ArrayPack of lowered values
  */
-function lowerArrayLiteral(obj: Record<string, unknown>): ExprNode {
-  const values = (obj.values as ExprNode[]).map(lowerArrayOps)
+function lowerArrayLiteral(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const values = (obj.values as ExprNode[]).map(n => lowerArrayOps(n, memo))
   // Emit as inline array (ArrayPack)
   return values
 }
@@ -121,10 +157,10 @@ function lowerOnes(obj: Record<string, unknown>): ExprNode {
 /**
  * fill({shape, value}) → ArrayPack of repeated value
  */
-function lowerFill(obj: Record<string, unknown>): ExprNode {
+function lowerFill(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
   const shape = obj.shape as number[]
   const size = shapeSize(shape)
-  const value = lowerArrayOps(obj.value as ExprNode)
+  const value = lowerArrayOps(obj.value as ExprNode, memo)
   return new Array(size).fill(value) as ExprNode
 }
 
@@ -133,18 +169,18 @@ function lowerFill(obj: Record<string, unknown>): ExprNode {
  * Reshape is a no-op on the flat representation since we use row-major layout.
  * The data is the same — only the logical shape changes.
  */
-function lowerReshape(obj: Record<string, unknown>): ExprNode {
+function lowerReshape(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
   const args = obj.args as ExprNode[]
-  return lowerArrayOps(args[0])
+  return lowerArrayOps(args[0], memo)
 }
 
 /**
  * transpose({args: [arr]}) → reindex a 2D array
  * For a [rows, cols] array, transpose produces [cols, rows] by reindexing.
  */
-function lowerTranspose(obj: Record<string, unknown>): ExprNode {
+function lowerTranspose(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
   const args = obj.args as ExprNode[]
-  const arr = lowerArrayOps(args[0])
+  const arr = lowerArrayOps(args[0], memo)
 
   // If the inner is an inline array literal, we can statically reindex.
   // Otherwise, emit index operations.
@@ -162,9 +198,9 @@ function lowerTranspose(obj: Record<string, unknown>): ExprNode {
  * slice({args: [arr], axis, start, end}) → extract a contiguous sub-array
  * For 1D: arr[start..end] → ArrayPack of Index operations
  */
-function lowerSlice(obj: Record<string, unknown>): ExprNode {
+function lowerSlice(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
   const args = obj.args as ExprNode[]
-  const arr = lowerArrayOps(args[0])
+  const arr = lowerArrayOps(args[0], memo)
   const start = obj.start as number
   const end = obj.end as number
   const count = end - start
@@ -181,9 +217,9 @@ function lowerSlice(obj: Record<string, unknown>): ExprNode {
  * reduce({args: [arr], axis, reduce_op}) → tree reduction
  * For 1D: reduce to a scalar via balanced binary tree.
  */
-function lowerReduce(obj: Record<string, unknown>): ExprNode {
+function lowerReduce(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
   const args = obj.args as ExprNode[]
-  const arr = lowerArrayOps(args[0])
+  const arr = lowerArrayOps(args[0], memo)
   const reduceOp = obj.reduce_op as string
 
   // If arr is an inline array, reduce statically
@@ -220,9 +256,9 @@ function treeReduce(elements: ExprNode[], op: string): ExprNode {
  * broadcast_to({args: [arr], shape}) → replicate elements
  * Broadcasts a smaller array to a target shape by repeating elements.
  */
-function lowerBroadcastTo(obj: Record<string, unknown>): ExprNode {
+function lowerBroadcastTo(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
   const args = obj.args as ExprNode[]
-  const arr = lowerArrayOps(args[0])
+  const arr = lowerArrayOps(args[0], memo)
   const targetShape = obj.shape as number[]
   const targetSize = shapeSize(targetShape)
 
@@ -250,10 +286,10 @@ function lowerBroadcastTo(obj: Record<string, unknown>): ExprNode {
  * map({callee, args: [arr]}) → apply function to each element
  * Unrolls into ArrayPack of call(fn, element) for each element.
  */
-function lowerMap(obj: Record<string, unknown>): ExprNode {
+function lowerMap(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
   const callee = obj.callee as ExprNode
   const args = obj.args as ExprNode[]
-  const arr = lowerArrayOps(args[0])
+  const arr = lowerArrayOps(args[0], memo)
 
   // If arr is an inline array, unroll the map
   if (Array.isArray(arr)) {
