@@ -83,9 +83,11 @@ class Emitter {
   private nextArraySlot = 0
   private arraySizes:   number[] = []
   private instrs:       NInstr[] = []
-  // CSE: memoize compiled results by structural hash (JSON.stringify of the ExprNode).
+  // CSE: memoize compiled results by object identity (WeakMap keyed on the ExprNode object).
+  // Identity-based lookup is O(1) vs O(JSON size) for structural hashing, which matters
+  // when expression DAGs have many shared subexpressions (e.g. nested module call chains).
   // Terminals are not memoized — they allocate nothing and return an Operand directly.
-  private memo = new Map<string, CompileResult>()
+  private memo = new WeakMap<object, CompileResult>()
   // Map register ID → pre-allocated array slot for registers whose init value is an array.
   private arrayRegMap = new Map<number, { slot: number, size: number }>()
 
@@ -144,12 +146,11 @@ class Emitter {
     if (terminal !== null) return { isArray: false, op: terminal }
 
     // CSE: check memo before allocating anything
-    const key = JSON.stringify(node)
-    const cached = this.memo.get(key)
+    const cached = this.memo.get(node as object)
     if (cached !== undefined) return cached
 
     const result = this.compileNodeUncached(node)
-    this.memo.set(key, result)
+    this.memo.set(node as object, result)
     return result
   }
 

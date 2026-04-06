@@ -131,22 +131,28 @@ export interface FlatPlan {
 // ─────────────────────────────────────────────────────────────
 
 /** Deep-clone an ExprNode tree. */
-function cloneExpr(node: ExprNode): ExprNode {
+function cloneExpr(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode {
   if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(cloneExpr)
+  if (Array.isArray(node)) return node.map(n => cloneExpr(n, memo))
   if (typeof node !== 'object' || node === null) return node
+  if (memo) {
+    const cached = memo.get(node as object)
+    if (cached !== undefined) return cached
+  }
   const obj = node as Record<string, unknown>
   const result: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(obj)) {
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(cloneExpr)
+      result[k] = (v as ExprNode[]).map(n => cloneExpr(n, memo))
     } else if (typeof v === 'object' && v !== null && !('_ptr' in (v as Record<string, unknown>))) {
-      result[k] = cloneExpr(v as ExprNode)
+      result[k] = cloneExpr(v as ExprNode, memo)
     } else {
       result[k] = v
     }
   }
-  return result as ExprNode
+  const cloned = result as ExprNode
+  if (memo) memo.set(node as object, cloned)
+  return cloned
 }
 
 /**
@@ -155,10 +161,15 @@ function cloneExpr(node: ExprNode): ExprNode {
  * input(N) nodes in the function body with the corresponding argument.
  * This eliminates function/call nodes that the C++ plan_loader doesn't support.
  */
-function inlineCalls(node: ExprNode): ExprNode {
+function inlineCalls(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode {
   if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(inlineCalls)
+  if (Array.isArray(node)) return node.map(n => inlineCalls(n, memo))
   if (typeof node !== 'object' || node === null) return node
+
+  if (memo) {
+    const cached = memo.get(node as object)
+    if (cached !== undefined) return cached
+  }
 
   const obj = node as Record<string, unknown>
 
@@ -166,14 +177,15 @@ function inlineCalls(node: ExprNode): ExprNode {
   const result: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(obj)) {
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(inlineCalls)
+      result[k] = (v as ExprNode[]).map(n => inlineCalls(n, memo))
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = inlineCalls(v as ExprNode)
+      result[k] = inlineCalls(v as ExprNode, memo)
     } else {
       result[k] = v
     }
   }
 
+  let out: ExprNode
   // Now check if this is a call(function(...), args) that can be inlined
   if (result.op === 'call') {
     const callee = result.callee as ExprNode
@@ -186,26 +198,43 @@ function inlineCalls(node: ExprNode): ExprNode {
       for (let i = 0; i < args.length; i++) {
         argMap.set(i, args[i])
       }
-      return substituteInputs(body, argMap)
+      out = substituteInputs(body, argMap)
+    } else {
+      out = result as ExprNode
     }
+  } else {
+    out = result as ExprNode
   }
 
-  return result as ExprNode
+  if (memo) memo.set(node as object, out)
+  return out
 }
 
 /**
  * Substitute all input(id) nodes in an expression tree.
  * inputMap maps input slot ID → replacement expression.
+ *
+ * Identity memo (optional): avoids re-processing the same object when the expression
+ * is a DAG with shared subexpressions. This preserves structural sharing and prevents
+ * exponential blowup when the same argument is referenced many times (e.g. in tanh).
+ * Replacements are returned directly (not cloned) so call-site sharing is preserved.
  */
-function substituteInputs(node: ExprNode, inputMap: Map<number, ExprNode>): ExprNode {
+function substituteInputs(node: ExprNode, inputMap: Map<number, ExprNode>, memo?: WeakMap<object, ExprNode>): ExprNode {
   if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => substituteInputs(n, inputMap))
+  if (Array.isArray(node)) return node.map(n => substituteInputs(n, inputMap, memo))
+
+  if (memo) {
+    const cached = memo.get(node as object)
+    if (cached !== undefined) return cached
+  }
 
   const obj = node as { op: string; [k: string]: unknown }
 
   if (obj.op === 'input') {
     const replacement = inputMap.get(obj.id as number)
-    if (replacement !== undefined) return cloneExpr(replacement)
+    // Return directly — all occurrences of input(N) share the same replacement object,
+    // keeping the expression a compact DAG rather than duplicating the arg subtree.
+    if (replacement !== undefined) return replacement
     return node
   }
 
@@ -213,43 +242,54 @@ function substituteInputs(node: ExprNode, inputMap: Map<number, ExprNode>): Expr
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'op') continue
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => substituteInputs(n, inputMap))
+      result[k] = (v as ExprNode[]).map(n => substituteInputs(n, inputMap, memo))
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = substituteInputs(v as ExprNode, inputMap)
+      result[k] = substituteInputs(v as ExprNode, inputMap, memo)
     } else {
       result[k] = v
     }
   }
-  return result as ExprNode
+  const out = result as ExprNode
+  if (memo) memo.set(node as object, out)
+  return out
 }
 
 /**
  * Rewrite delay_value(nodeId) nodes as register reads.
  * Each delay state becomes a flat register at (delayBase + nodeId).
  */
-function resolveDelayValues(node: ExprNode, delayBase: number): ExprNode {
+function resolveDelayValues(node: ExprNode, delayBase: number, memo?: WeakMap<object, ExprNode>): ExprNode {
   if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => resolveDelayValues(n, delayBase))
+  if (Array.isArray(node)) return node.map(n => resolveDelayValues(n, delayBase, memo))
   if (typeof node !== 'object' || node === null) return node
+
+  if (memo) {
+    const cached = memo.get(node as object)
+    if (cached !== undefined) return cached
+  }
 
   const obj = node as { op: string; [k: string]: unknown }
 
   if (obj.op === 'delay_value') {
-    return { op: 'reg', id: delayBase + (obj.node_id as number) }
+    const out = { op: 'reg', id: delayBase + (obj.node_id as number) }
+    if (memo) memo.set(node as object, out)
+    return out
   }
 
   const result: Record<string, unknown> = { op: obj.op }
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'op') continue
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => resolveDelayValues(n, delayBase))
+      result[k] = (v as ExprNode[]).map(n => resolveDelayValues(n, delayBase, memo))
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = resolveDelayValues(v as ExprNode, delayBase)
+      result[k] = resolveDelayValues(v as ExprNode, delayBase, memo)
     } else {
       result[k] = v
     }
   }
-  return result as ExprNode
+  const out = result as ExprNode
+  if (memo) memo.set(node as object, out)
+  return out
 }
 
 /**
@@ -296,22 +336,33 @@ function resolveNestedOutputs(
 
     const resolved: ExprNode[] = []
     for (let outId = 0; outId < nd.outputExprNodes.length; outId++) {
-      let expr = cloneExpr(nd.outputExprNodes[outId])
+      // Clone template preserving structural sharing — shared nodes (e.g. x2 in tanh)
+      // clone once and are referenced multiple times rather than copied exponentially.
+      const cloneMemo = new WeakMap<object, ExprNode>()
+      let expr = cloneExpr(nd.outputExprNodes[outId], cloneMemo)
       // First resolve any nested calls within the nested module itself
       expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart)
-      expr = inlineCalls(expr)
-      expr = offsetRegisters(expr, ncRegBase)
-      expr = resolveDelayValues(expr, ncDelayBase)
+      // Each pass uses its own identity memo to preserve DAG sharing through the pipeline.
+      const inlineMemo = new WeakMap<object, ExprNode>()
+      expr = inlineCalls(expr, inlineMemo)
+      const offsetMemo = new WeakMap<object, ExprNode>()
+      expr = offsetRegisters(expr, ncRegBase, offsetMemo)
+      const delayMemo = new WeakMap<object, ExprNode>()
+      expr = resolveDelayValues(expr, ncDelayBase, delayMemo)
       // Substitute nested module's input(i) → call argument i
       // Call args may reference earlier nested_output nodes — resolve those first
       const argMap = new Map<number, ExprNode>()
+      const argRefMemo = new WeakMap<object, ExprNode>()
       for (let i = 0; i < nc.callArgNodes.length; i++) {
         let arg = cloneExpr(nc.callArgNodes[i])
         // Resolve any nested_output refs in the call args (e.g., chained allpass stages)
-        arg = substituteNestedOutputRefs(arg, resolvedNestedOutputs)
+        arg = substituteNestedOutputRefs(arg, resolvedNestedOutputs, argRefMemo)
         argMap.set(i, arg)
       }
-      expr = substituteInputs(expr, argMap)
+      // Identity memo: if input(N) appears multiple times in the template body (via shared
+      // nodes), all occurrences map to the same replacement object — no exponential fanout.
+      const substMemo = new WeakMap<object, ExprNode>()
+      expr = substituteInputs(expr, argMap, substMemo)
       resolved.push(expr)
     }
     resolvedNestedOutputs.set(ncIdx, resolved)
@@ -322,14 +373,25 @@ function resolveNestedOutputs(
   return substituteNestedOutputRefs(node, resolvedNestedOutputs)
 }
 
-/** Replace nested_output(nodeId, outputId) nodes with pre-resolved expressions. */
+/** Replace nested_output(nodeId, outputId) nodes with pre-resolved expressions.
+ *
+ * Returns the resolved expression directly (not cloned) so multiple references to
+ * the same nested_output share a single physical object — keeping the result a compact
+ * DAG. The identity memo avoids re-traversing shared non-terminal nodes.
+ */
 function substituteNestedOutputRefs(
   node: ExprNode,
   resolved: Map<number, ExprNode[]>,
+  memo?: WeakMap<object, ExprNode>,
 ): ExprNode {
   if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => substituteNestedOutputRefs(n, resolved))
+  if (Array.isArray(node)) return node.map(n => substituteNestedOutputRefs(n, resolved, memo))
   if (typeof node !== 'object' || node === null) return node
+
+  if (memo) {
+    const cached = memo.get(node as object)
+    if (cached !== undefined) return cached
+  }
 
   const obj = node as { op: string; [k: string]: unknown }
 
@@ -339,21 +401,24 @@ function substituteNestedOutputRefs(
     const outputs = resolved.get(nodeId)
     if (!outputs) throw new Error(`flatten: unresolved nested_output node_id=${nodeId}`)
     if (outputId >= outputs.length) throw new Error(`flatten: nested_output output_id=${outputId} out of range`)
-    return cloneExpr(outputs[outputId])
+    // Return directly — no clone. All references to this call-site share one object.
+    return outputs[outputId]
   }
 
   const result: Record<string, unknown> = { op: obj.op }
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'op') continue
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => substituteNestedOutputRefs(n, resolved))
+      result[k] = (v as ExprNode[]).map(n => substituteNestedOutputRefs(n, resolved, memo))
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = substituteNestedOutputRefs(v as ExprNode, resolved)
+      result[k] = substituteNestedOutputRefs(v as ExprNode, resolved, memo)
     } else {
       result[k] = v
     }
   }
-  return result as ExprNode
+  const out = result as ExprNode
+  if (memo) memo.set(node as object, out)
+  return out
 }
 
 /**
@@ -388,20 +453,26 @@ function collectNestedRegisterExprs(
 
     // Build input substitution map for this nested call
     const argMap = new Map<number, ExprNode>()
+    const argRefMemo = new WeakMap<object, ExprNode>()
     for (let i = 0; i < nc.callArgNodes.length; i++) {
       let arg = cloneExpr(nc.callArgNodes[i])
-      arg = substituteNestedOutputRefs(arg, resolvedNestedOutputs)
+      arg = substituteNestedOutputRefs(arg, resolvedNestedOutputs, argRefMemo)
       argMap.set(i, arg)
     }
 
     // Process helper for nested module's expressions
     const processNestedExpr = (rawNode: ExprNode): ExprNode => {
-      let expr = cloneExpr(rawNode)
+      const cloneMemo = new WeakMap<object, ExprNode>()
+      let expr = cloneExpr(rawNode, cloneMemo)
       expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart)
-      expr = inlineCalls(expr)
-      expr = offsetRegisters(expr, ncRegBase)
-      expr = resolveDelayValues(expr, ncDelayBase)
-      expr = substituteInputs(expr, argMap)
+      const inlineMemo = new WeakMap<object, ExprNode>()
+      expr = inlineCalls(expr, inlineMemo)
+      const offsetMemo = new WeakMap<object, ExprNode>()
+      expr = offsetRegisters(expr, ncRegBase, offsetMemo)
+      const delayMemo = new WeakMap<object, ExprNode>()
+      expr = resolveDelayValues(expr, ncDelayBase, delayMemo)
+      const substMemo = new WeakMap<object, ExprNode>()
+      expr = substituteInputs(expr, argMap, substMemo)
       return expr
     }
 
@@ -456,29 +527,38 @@ function collectNestedRegisterExprs(
  * Register IDs in a module's local expression tree are 0-based;
  * in the flat plan they need to be offset by the module's register base.
  */
-function offsetRegisters(node: ExprNode, offset: number): ExprNode {
+function offsetRegisters(node: ExprNode, offset: number, memo?: WeakMap<object, ExprNode>): ExprNode {
   if (offset === 0) return node
   if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => offsetRegisters(n, offset))
+  if (Array.isArray(node)) return node.map(n => offsetRegisters(n, offset, memo))
+
+  if (memo) {
+    const cached = memo.get(node as object)
+    if (cached !== undefined) return cached
+  }
 
   const obj = node as { op: string; [k: string]: unknown }
 
   if (obj.op === 'reg') {
-    return { op: 'reg', id: (obj.id as number) + offset }
+    const out = { op: 'reg', id: (obj.id as number) + offset }
+    if (memo) memo.set(node as object, out)
+    return out
   }
 
   const result: Record<string, unknown> = { op: obj.op }
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'op') continue
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => offsetRegisters(n, offset))
+      result[k] = (v as ExprNode[]).map(n => offsetRegisters(n, offset, memo))
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = offsetRegisters(v as ExprNode, offset)
+      result[k] = offsetRegisters(v as ExprNode, offset, memo)
     } else {
       result[k] = v
     }
   }
-  return result as ExprNode
+  const out = result as ExprNode
+  if (memo) memo.set(node as object, out)
+  return out
 }
 
 /**
@@ -490,10 +570,16 @@ function resolveRefs(
   node: ExprNode,
   outputExprs: Map<string, ExprNode[]>,
   outputNames: Map<string, string[]>,
+  memo?: WeakMap<object, ExprNode>,
 ): ExprNode {
   if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => resolveRefs(n, outputExprs, outputNames))
+  if (Array.isArray(node)) return node.map(n => resolveRefs(n, outputExprs, outputNames, memo))
   if (typeof node !== 'object' || node === null) return node
+
+  if (memo) {
+    const cached = memo.get(node as object)
+    if (cached !== undefined) return cached
+  }
 
   const obj = node as { op: string; [k: string]: unknown }
 
@@ -514,21 +600,25 @@ function resolveRefs(
     }
 
     if (outputId >= moduleOutputs.length) throw new Error(`flatten: ref output ${outputId} out of range for '${moduleName}'`)
-    return cloneExpr(moduleOutputs[outputId])
+    // Return directly — the resolved output is already fully processed and immutable.
+    // Sharing is safe; the emitter's identity-based CSE compiles each unique node once.
+    return moduleOutputs[outputId]
   }
 
   const result: Record<string, unknown> = { op: obj.op }
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'op') continue
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => resolveRefs(n, outputExprs, outputNames))
+      result[k] = (v as ExprNode[]).map(n => resolveRefs(n, outputExprs, outputNames, memo))
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = resolveRefs(v as ExprNode, outputExprs, outputNames)
+      result[k] = resolveRefs(v as ExprNode, outputExprs, outputNames, memo)
     } else {
       result[k] = v
     }
   }
-  return result as ExprNode
+  const out = result as ExprNode
+  if (memo) memo.set(node as object, out)
+  return out
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -610,18 +700,29 @@ export function flattenPatch(session: SessionState): FlatPlan {
       }
     }
 
-    // Helper: full expression pipeline for a local module expression
+    // Helper: full expression pipeline for a local module expression.
+    // Each pass uses its own identity memo so shared subexpressions (DAG nodes) are
+    // processed exactly once per pass — preventing exponential work across all stages.
     const processExpr = (rawNode: ExprNode): ExprNode => {
-      let expr = cloneExpr(rawNode)
+      const cloneMemo = new WeakMap<object, ExprNode>()
+      let expr = cloneExpr(rawNode, cloneMemo)
       // Resolve nested module calls (ModuleType.call()) before other transforms
       expr = resolveNestedOutputs(expr, def.nestedCalls, nestedRegStart)
-      expr = inlineCalls(expr)
-      expr = offsetRegisters(expr, registerBase)
-      expr = resolveDelayValues(expr, delayBase)
-      expr = substituteInputs(expr, inputMap)
-      expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames)
-      // Lower array ops (zeros, ones, fill, array_literal, etc.) to primitives
-      expr = lowerArrayOps(expr)
+      const inlineMemo = new WeakMap<object, ExprNode>()
+      expr = inlineCalls(expr, inlineMemo)
+      const offsetMemo = new WeakMap<object, ExprNode>()
+      expr = offsetRegisters(expr, registerBase, offsetMemo)
+      const delayMemo = new WeakMap<object, ExprNode>()
+      expr = resolveDelayValues(expr, delayBase, delayMemo)
+      const substMemo = new WeakMap<object, ExprNode>()
+      expr = substituteInputs(expr, inputMap, substMemo)
+      const refsMemo = new WeakMap<object, ExprNode>()
+      expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames, refsMemo)
+      // Lower array ops (zeros, ones, fill, array_literal, etc.) to primitives.
+      // lowerArrayOps returns the original node unchanged when no array ops exist,
+      // preserving DAG identity throughout.
+      const lowerMemo = new WeakMap<object, ExprNode>()
+      expr = lowerArrayOps(expr, lowerMemo)
       return expr
     }
 
@@ -686,18 +787,24 @@ export function flattenPatch(session: SessionState): FlatPlan {
 
         const resolved: ExprNode[] = []
         for (let outId = 0; outId < nd.outputExprNodes.length; outId++) {
-          let expr = cloneExpr(nd.outputExprNodes[outId])
+          const cloneMemo = new WeakMap<object, ExprNode>()
+          let expr = cloneExpr(nd.outputExprNodes[outId], cloneMemo)
           expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart)
-          expr = inlineCalls(expr)
-          expr = offsetRegisters(expr, ncRegBase)
-          expr = resolveDelayValues(expr, ncDelayBase)
+          const inlineMemo = new WeakMap<object, ExprNode>()
+          expr = inlineCalls(expr, inlineMemo)
+          const offsetMemo = new WeakMap<object, ExprNode>()
+          expr = offsetRegisters(expr, ncRegBase, offsetMemo)
+          const delayMemo = new WeakMap<object, ExprNode>()
+          expr = resolveDelayValues(expr, ncDelayBase, delayMemo)
           const argMap = new Map<number, ExprNode>()
+          const argRefMemo = new WeakMap<object, ExprNode>()
           for (let i = 0; i < nc.callArgNodes.length; i++) {
             let arg = cloneExpr(nc.callArgNodes[i])
-            arg = substituteNestedOutputRefs(arg, resolvedNestedOutputs)
+            arg = substituteNestedOutputRefs(arg, resolvedNestedOutputs, argRefMemo)
             argMap.set(i, arg)
           }
-          expr = substituteInputs(expr, argMap)
+          const substMemo = new WeakMap<object, ExprNode>()
+          expr = substituteInputs(expr, argMap, substMemo)
           resolved.push(expr)
         }
         resolvedNestedOutputs.set(ncIdx, resolved)
@@ -708,9 +815,12 @@ export function flattenPatch(session: SessionState): FlatPlan {
       for (let i = 0; i < nested.exprs.length; i++) {
         // Apply the parent module's global transforms (offsetRegisters, substituteInputs, resolveRefs)
         let expr = nested.exprs[i]
-        expr = offsetRegisters(expr, registerBase)
-        expr = substituteInputs(expr, inputMap)
-        expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames)
+        const nestedOffsetMemo = new WeakMap<object, ExprNode>()
+        expr = offsetRegisters(expr, registerBase, nestedOffsetMemo)
+        const nestedSubstMemo = new WeakMap<object, ExprNode>()
+        expr = substituteInputs(expr, inputMap, nestedSubstMemo)
+        const nestedRefsMemo = new WeakMap<object, ExprNode>()
+        expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames, nestedRefsMemo)
         flatRegisterExprs.push(expr)
         flatRegisterNames.push(nested.names[i])
         flatStateInit.push(nested.inits[i])

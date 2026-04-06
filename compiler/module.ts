@@ -403,36 +403,21 @@ export function defineModule(
 }
 
 // ---------- PureFunction / definePureFunction ----------
+//
+// PureFunction is now a thin wrapper around a stateless ModuleType.
+// Using ModuleType.call() means outputs are resolved as nested_output refs
+// (one per call site, cached in resolveNestedOutputs) rather than as
+// inline function/call nodes that expand exponentially on shared DAGs.
 
 export class PureFunction {
-  private _def: {
-    inputNames: string[]
-    outputNames: string[]
-    outputExprNodes: ExprNode[]
-  }
+  private _moduleType: ModuleType
 
-  constructor(def: PureFunction['_def']) {
-    this._def = def
+  constructor(moduleType: ModuleType) {
+    this._moduleType = moduleType
   }
 
   call(...args: ExprCoercible[]): SignalExpr | SignalExpr[] {
-    const d = this._def
-    if (args.length !== d.inputNames.length) {
-      throw new TypeError(`PureFunction expects ${d.inputNames.length} arguments.`)
-    }
-    const callArgs = args.map(a => coerce(a))
-    const argNodes = callArgs.map(a => a._node)
-
-    const outputs: SignalExpr[] = []
-    for (let i = 0; i < d.outputExprNodes.length; i++) {
-      const bodyNode = d.outputExprNodes[i]
-      outputs.push(SignalExpr.fromNode({
-        op: 'call',
-        callee: { op: 'function', param_count: d.inputNames.length, body: bodyNode },
-        args: argNodes,
-      }))
-    }
-    return outputs.length === 1 ? outputs[0] : outputs
+    return this._moduleType.call(...args)
   }
 }
 
@@ -443,25 +428,12 @@ export function definePureFunction(
   outputs: string[],
   process: PureFn,
 ): PureFunction {
-  const inputNames = [...inputs]
-  const outputNames = [...outputs]
-
-  const inputsMap = new SymbolMap('input', inputNames)
-  const result = process(inputsMap)
-
-  const outputExprs: SignalExpr[] = new Array(outputNames.length).fill(null)
-  for (const [outName, outVal] of Object.entries(result)) {
-    const idx = outputNames.indexOf(outName)
-    if (idx === -1) throw new Error(`Output '${outName}' not in outputs list.`)
-    outputExprs[idx] = coerce(outVal)
-  }
-  for (let i = 0; i < outputNames.length; i++) {
-    if (outputExprs[i] === null) throw new Error(`Output '${outputNames[i]}' was not assigned.`)
-  }
-
-  return new PureFunction({
-    inputNames,
-    outputNames,
-    outputExprNodes: outputExprs.map(e => e._node),
-  })
+  const moduleType = defineModule(
+    '_pure',
+    inputs,
+    outputs,
+    {},
+    (inp) => ({ outputs: process(inp), nextRegs: {} }),
+  )
+  return new PureFunction(moduleType)
 }
