@@ -51,13 +51,6 @@ struct KernelState
   uint64_t sample_index = 0;
 };
 
-// Pending state transfer for hot-swap (scalar registers + array slots)
-struct PendingTransfer
-{
-  std::vector<std::pair<uint32_t, uint32_t>> mapping;        // scalar (src_idx, dst_idx)
-  std::vector<std::pair<uint32_t, uint32_t>> array_mapping;  // array  (src_idx, dst_idx)
-  uint32_t src_state;
-};
 
 class FlatRuntime
 {
@@ -68,10 +61,7 @@ public:
   {
   }
 
-  ~FlatRuntime()
-  {
-    delete pending_transfer_.exchange(nullptr, std::memory_order_acquire);
-  }
+
 
   /**
    * Load a plan JSON string, compile to a single kernel, and publish atomically.
@@ -98,27 +88,6 @@ public:
    */
   void process()
   {
-    // Apply pending state transfer from hot-swap (scalars + arrays)
-    if (PendingTransfer * pt = pending_transfer_.exchange(nullptr, std::memory_order_acq_rel))
-    {
-      const uint32_t active = active_state_.load(std::memory_order_acquire);
-      KernelState & src = states_[pt->src_state];
-      KernelState & dst = states_[active];
-      for (const auto & [si, di] : pt->mapping)
-      {
-        if (si < src.registers.size() && di < dst.registers.size())
-          dst.registers[di] = src.registers[si];
-      }
-      for (const auto & [si, di] : pt->array_mapping)
-      {
-        if (si < src.array_storage.size() && di < dst.array_storage.size() &&
-            src.array_storage[si].size() == dst.array_storage[di].size())
-        {
-          dst.array_storage[di] = src.array_storage[si];
-        }
-      }
-      delete pt;
-    }
 
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     audio_state_index_.store(state_idx, std::memory_order_release);
@@ -275,7 +244,6 @@ private:
   std::atomic<uint32_t> active_state_{0};
   std::atomic<uint32_t> audio_state_index_{0};
   std::atomic<bool> audio_processing_{false};
-  std::atomic<PendingTransfer *> pending_transfer_{nullptr};
 
   mutable std::mutex build_mutex_;
 
