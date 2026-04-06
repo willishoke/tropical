@@ -38,6 +38,8 @@ struct KernelState
 
   // Register names for state transfer on hot-swap
   std::vector<std::string> register_names;
+  // Array slot names for array state transfer on hot-swap
+  std::vector<std::string> array_names;
 
   // Output extraction
   uint32_t output_count = 0;
@@ -49,12 +51,6 @@ struct KernelState
   uint64_t sample_index = 0;
 };
 
-// Pending register state transfer for hot-swap
-struct PendingTransfer
-{
-  std::vector<std::pair<uint32_t, uint32_t>> mapping;  // (src_idx, dst_idx)
-  uint32_t src_state;
-};
 
 class FlatRuntime
 {
@@ -65,10 +61,7 @@ public:
   {
   }
 
-  ~FlatRuntime()
-  {
-    delete pending_transfer_.exchange(nullptr, std::memory_order_acquire);
-  }
+
 
   /**
    * Load a plan JSON string, compile to a single kernel, and publish atomically.
@@ -95,21 +88,6 @@ public:
    */
   void process()
   {
-    // Apply pending register transfer from hot-swap
-    if (PendingTransfer * pt = pending_transfer_.exchange(nullptr, std::memory_order_acq_rel))
-    {
-      const uint32_t active = active_state_.load(std::memory_order_acquire);
-      KernelState & src = states_[pt->src_state];
-      KernelState & dst = states_[active];
-      for (const auto & [si, di] : pt->mapping)
-      {
-        if (si < src.registers.size() && di < dst.registers.size())
-        {
-          dst.registers[di] = src.registers[si];
-        }
-      }
-      delete pt;
-    }
 
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     audio_state_index_.store(state_idx, std::memory_order_release);
@@ -213,7 +191,7 @@ private:
     }
   }
 
-  // Compute register mapping for hot-swap state transfer
+  // Compute scalar register mapping for hot-swap state transfer
   static std::vector<std::pair<uint32_t, uint32_t>> compute_register_mapping(
     const KernelState & old_state,
     const KernelState & new_state)
@@ -235,12 +213,37 @@ private:
     return mapping;
   }
 
+  // Compute array slot mapping for hot-swap state transfer.
+  // Only transfers slots where name and size both match (size change = reset to zero).
+  static std::vector<std::pair<uint32_t, uint32_t>> compute_array_mapping(
+    const KernelState & old_state,
+    const KernelState & new_state)
+  {
+    std::vector<std::pair<uint32_t, uint32_t>> mapping;
+    for (uint32_t ni = 0; ni < new_state.array_names.size(); ++ni)
+    {
+      const auto & name = new_state.array_names[ni];
+      if (name.empty()) continue;
+      for (uint32_t oi = 0; oi < old_state.array_names.size(); ++oi)
+      {
+        if (old_state.array_names[oi] == name &&
+            oi < old_state.array_storage.size() &&
+            ni < new_state.array_storage.size() &&
+            old_state.array_storage[oi].size() == new_state.array_storage[ni].size())
+        {
+          mapping.push_back({oi, ni});
+          break;
+        }
+      }
+    }
+    return mapping;
+  }
+
   unsigned int buffer_length_;
   std::array<KernelState, 2> states_;
   std::atomic<uint32_t> active_state_{0};
   std::atomic<uint32_t> audio_state_index_{0};
   std::atomic<bool> audio_processing_{false};
-  std::atomic<PendingTransfer *> pending_transfer_{nullptr};
 
   mutable std::mutex build_mutex_;
 

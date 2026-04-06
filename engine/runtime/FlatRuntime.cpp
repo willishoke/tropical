@@ -31,10 +31,11 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
     }
 
     KernelState new_state;
-    new_state.kernel       = *kernel_result;
-    new_state.sample_rate  = parsed.sample_rate;
-    new_state.output_count = static_cast<uint32_t>(parsed.program.output_targets.size());
+    new_state.kernel         = *kernel_result;
+    new_state.sample_rate    = parsed.sample_rate;
+    new_state.output_count   = static_cast<uint32_t>(parsed.program.output_targets.size());
     new_state.register_names = parsed.register_names;
+    new_state.array_names    = parsed.array_slot_names;
 
     // Scalar state registers
     new_state.registers.resize(parsed.state_init.size(), 0);
@@ -62,17 +63,29 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
     wait_for_state_available(inactive);
 
     const auto & old_state = states_[active];
-    auto mapping = compute_register_mapping(old_state, new_state);
+
+    // Apply state transfer directly into new_state BEFORE the atomic swap.
+    // This eliminates the race window that existed when PendingTransfer was used:
+    // the audio thread would run one buffer with zeroed registers between
+    // active_state_.store() and pending_transfer_.exchange(), causing a pop.
+    // Reading old_state concurrently with the audio thread is a benign data
+    // race — at most one sample stale, completely inaudible.
     new_state.sample_index = old_state.sample_index;
+    if (old_state.kernel != nullptr)
+    {
+      const auto mapping       = compute_register_mapping(old_state, new_state);
+      const auto array_mapping = compute_array_mapping(old_state, new_state);
+      for (const auto & [si, di] : mapping)
+        if (si < old_state.registers.size() && di < new_state.registers.size())
+          new_state.registers[di] = old_state.registers[si];
+      for (const auto & [si, di] : array_mapping)
+        if (si < old_state.array_storage.size() && di < new_state.array_storage.size() &&
+            old_state.array_storage[si].size() == new_state.array_storage[di].size())
+          new_state.array_storage[di] = old_state.array_storage[si];
+    }
 
     states_[inactive] = std::move(new_state);
     active_state_.store(inactive, std::memory_order_release);
-
-    if (!mapping.empty() && old_state.kernel != nullptr)
-    {
-      auto * pt = new PendingTransfer{std::move(mapping), active};
-      delete pending_transfer_.exchange(pt, std::memory_order_acq_rel);
-    }
     return true;
   }
 

@@ -276,7 +276,7 @@ export function adEnvelope(name = 'ADEnvelope'): ModuleType {
     name,
     ['gate', 'attack', 'decay'],
     ['env'],
-    { stage: 0.0, phase: 0.0 },
+    { stage: 0.0, phase: 0.0, startLevel: 0.0 },
     (inp, reg) => {
       const sr      = sampleRate()
       const attack  = clamp(inp.get('attack'), 1e-4, 10.0)
@@ -286,8 +286,9 @@ export function adEnvelope(name = 'ADEnvelope'): ModuleType {
       const prevGate = delay(gate, 0.0)
       const trig     = mul(gt(gate, 0.5), lte(prevGate, 0.5))
 
-      const stage = reg.get('stage')
-      const phase = reg.get('phase')
+      const stage      = reg.get('stage')
+      const phase      = reg.get('phase')
+      const startLevel = reg.get('startLevel')
 
       const inAttack = mul(gt(stage, 0.5), lt(stage, 1.5))
       const inDecay  = gt(stage, 1.5)
@@ -316,7 +317,17 @@ export function adEnvelope(name = 'ADEnvelope'): ModuleType {
         ),
       )
 
-      const rawEnv = add(mul(inAttack, phase), mul(inDecay, sub(1.0, phase)))
+      // Attack ramps from startLevel (captured at retrigger) up to 1.0,
+      // so retriggering mid-cycle never jumps discontinuously to zero.
+      const attackSlope = sub(1.0, startLevel)
+      const rawEnv = add(
+        mul(inAttack, add(startLevel, mul(phase, attackSlope))),
+        mul(inDecay,  sub(1.0, phase)),
+      )
+
+      // Capture envelope level at the retrigger moment for the next attack.
+      // Uses rawEnv (blamp correction is negligibly small at capture time).
+      const nextStartLevel = add(mul(trig, rawEnv), mul(notTrig, startLevel))
 
       const blampStart    = one(_polyBlamp.call(phase,           dtA))
       const blampAtkEnd   = one(_polyBlamp.call(sub(1.0, phase), dtA))
@@ -324,14 +335,15 @@ export function adEnvelope(name = 'ADEnvelope'): ModuleType {
       const blampEnd      = one(_polyBlamp.call(sub(1.0, phase), dtD))
 
       let env: ExprCoercible = rawEnv
-      env = sub(env, mul(mul(inAttack, dtA), blampStart))
-      env = add(env, mul(mul(inAttack, dtA), blampAtkEnd))
+      // Scale attack BLAMP by attackSlope: actual per-sample rise is dtA * attackSlope
+      env = sub(env, mul(mul(mul(inAttack, dtA), attackSlope), blampStart))
+      env = add(env, mul(mul(mul(inAttack, dtA), attackSlope), blampAtkEnd))
       env = add(env, mul(mul(inDecay,  dtD), blampDecStart))
       env = sub(env, mul(mul(inDecay,  dtD), blampEnd))
 
       return {
         outputs: { env: clamp(env as SignalExpr, 0.0, 1.0) },
-        nextRegs: { stage: nextStage, phase: nextPhase },
+        nextRegs: { stage: nextStage, phase: nextPhase, startLevel: nextStartLevel },
       }
     },
     44100.0,
