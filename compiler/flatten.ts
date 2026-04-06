@@ -116,6 +116,7 @@ export interface FlatPlan {
   config: { sample_rate: number }
   state_init: (number | boolean)[]
   register_names: string[]
+  array_slot_names: string[]
   outputs: number[]
   // Compiled instruction stream (from emitNumericProgram)
   instructions:    NInstr[]
@@ -747,11 +748,22 @@ export function flattenPatch(session: SessionState): FlatPlan {
   // Compile expression trees → flat instruction stream
   const program = emitNumericProgram(flatOutputExprs, flatRegisterExprs, flatStateInit)
 
+  // Compute array slot names for state transfer on hot-swap.
+  // Array slots are allocated in the order array entries appear in flatStateInit,
+  // matching the order of program.array_slot_sizes.
+  const arraySlotNames: string[] = []
+  for (let i = 0; i < flatStateInit.length; i++) {
+    if (Array.isArray(flatStateInit[i])) {
+      arraySlotNames.push(flatRegisterNames[i])
+    }
+  }
+
   return {
     schema: 'egress_plan_3',
     config: { sample_rate: 44100 },
     state_init: flatStateInit as (number | boolean)[],
     register_names: flatRegisterNames,
+    array_slot_names: arraySlotNames,
     outputs: outputIndices,
     instructions:     program.instructions,
     register_count:   program.register_count,

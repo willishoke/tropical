@@ -104,6 +104,7 @@ struct ParsedPlan3
   egress_jit::FlatProgram  program;
   std::vector<double>      state_init;
   std::vector<std::string> register_names;
+  std::vector<std::string> array_slot_names;
   std::vector<uint32_t>    mix_indices;
   double                   sample_rate = 44100.0;
 };
@@ -132,6 +133,10 @@ inline ParsedPlan3 parse_plan3(const nlohmann::json & plan)
   if (plan.contains("register_names"))
     for (const auto & n : plan["register_names"])
       result.register_names.push_back(n.get<std::string>());
+
+  if (plan.contains("array_slot_names"))
+    for (const auto & n : plan["array_slot_names"])
+      result.array_slot_names.push_back(n.get<std::string>());
 
   if (plan.contains("outputs"))
     for (const auto & o : plan["outputs"])

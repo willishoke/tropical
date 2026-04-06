@@ -31,10 +31,11 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
     }
 
     KernelState new_state;
-    new_state.kernel       = *kernel_result;
-    new_state.sample_rate  = parsed.sample_rate;
-    new_state.output_count = static_cast<uint32_t>(parsed.program.output_targets.size());
+    new_state.kernel         = *kernel_result;
+    new_state.sample_rate    = parsed.sample_rate;
+    new_state.output_count   = static_cast<uint32_t>(parsed.program.output_targets.size());
     new_state.register_names = parsed.register_names;
+    new_state.array_names    = parsed.array_slot_names;
 
     // Scalar state registers
     new_state.registers.resize(parsed.state_init.size(), 0);
@@ -62,15 +63,16 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
     wait_for_state_available(inactive);
 
     const auto & old_state = states_[active];
-    auto mapping = compute_register_mapping(old_state, new_state);
+    auto mapping       = compute_register_mapping(old_state, new_state);
+    auto array_mapping = compute_array_mapping(old_state, new_state);
     new_state.sample_index = old_state.sample_index;
 
     states_[inactive] = std::move(new_state);
     active_state_.store(inactive, std::memory_order_release);
 
-    if (!mapping.empty() && old_state.kernel != nullptr)
+    if (old_state.kernel != nullptr && (!mapping.empty() || !array_mapping.empty()))
     {
-      auto * pt = new PendingTransfer{std::move(mapping), active};
+      auto * pt = new PendingTransfer{std::move(mapping), std::move(array_mapping), active};
       delete pending_transfer_.exchange(pt, std::memory_order_acq_rel);
     }
     return true;
