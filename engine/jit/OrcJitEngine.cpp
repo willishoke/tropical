@@ -349,6 +349,11 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       if (!instr.strides.empty())
         append(instr.strides.data(), instr.strides.size());
     }
+    // Include mix_output_temps in cache key (different mixes → different kernels)
+    uint32_t nm = static_cast<uint32_t>(program.mix_output_temps.size());
+    append(&nm, sizeof(uint32_t));
+    for (uint32_t mt : program.mix_output_temps)
+      append(&mt, sizeof(uint32_t));
   }
 
   auto cache_it = kernel_cache_.find(cache_key);
@@ -370,7 +375,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
 
   llvm::FunctionType * fn_ty = llvm::FunctionType::get(
     void_ty,
-    {ptr_ty, ptr_ty, ptr_ty, ptr_ty, ptr_ty, f64_ty, i64_ty, ptr_ty},
+    {ptr_ty, ptr_ty, ptr_ty, ptr_ty, ptr_ty, f64_ty, i64_ty, ptr_ty, ptr_ty, i64_ty},
     false);
 
   llvm::Function * fn = llvm::Function::Create(
@@ -382,9 +387,11 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   llvm::Value * arrays_arg      = &*arg_it++;  arrays_arg->setName("arrays");
   llvm::Value * array_sizes_arg = &*arg_it++;  array_sizes_arg->setName("array_sizes");
   llvm::Value * temps_arg       = &*arg_it++;  temps_arg->setName("temps");
-  llvm::Value * sample_rate_arg = &*arg_it++;  sample_rate_arg->setName("sample_rate");
-  llvm::Value * sample_index_arg= &*arg_it++;  sample_index_arg->setName("sample_index");
-  llvm::Value * param_ptrs_arg  = &*arg_it++;  param_ptrs_arg->setName("param_ptrs");
+  llvm::Value * sample_rate_arg      = &*arg_it++;  sample_rate_arg->setName("sample_rate");
+  llvm::Value * start_sample_idx_arg = &*arg_it++;  start_sample_idx_arg->setName("start_sample_index");
+  llvm::Value * param_ptrs_arg       = &*arg_it++;  param_ptrs_arg->setName("param_ptrs");
+  llvm::Value * output_buffer_arg    = &*arg_it++;  output_buffer_arg->setName("output_buffer");
+  llvm::Value * buffer_length_arg    = &*arg_it++;  buffer_length_arg->setName("buffer_length");
 
   llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
   builder.SetInsertPoint(entry);
@@ -434,6 +441,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   llvm::FunctionCallee llvm_fmod  = module->getOrInsertFunction(
     "fmod", llvm::FunctionType::get(f64_ty, {f64_ty, f64_ty}, false));
 
+  // current_sample_idx is set inside the buffer loop (PHI node)
+  llvm::Value * current_sample_idx = nullptr;
+
   // ── resolve_scalar: Operand → llvm::Value* (f64 or nullptr for array/param) ──
   auto resolve_scalar = [&](const Operand & op) -> llvm::Value * {
     switch (op.kind)
@@ -443,7 +453,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       case OperandKind::Reg:      return load_temp_f64(op.slot);
       case OperandKind::StateReg: return load_reg_f64(op.slot);
       case OperandKind::Rate:     return sample_rate_arg;
-      case OperandKind::Tick:     return builder.CreateSIToFP(sample_index_arg, f64_ty);
+      case OperandKind::Tick:     return builder.CreateSIToFP(current_sample_idx, f64_ty);
       case OperandKind::ArrayReg:
       case OperandKind::Param:    return nullptr;  // handled specially
     }
@@ -537,6 +547,24 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
         return nullptr;
     }
   };
+
+  // ── Buffer loop: process buffer_length samples ──
+  llvm::BasicBlock * loop_cond_bb = llvm::BasicBlock::Create(*context, "loop_cond", fn);
+  llvm::BasicBlock * loop_body_bb = llvm::BasicBlock::Create(*context, "loop_body", fn);
+  llvm::BasicBlock * loop_end_bb  = llvm::BasicBlock::Create(*context, "loop_end",  fn);
+
+  builder.CreateBr(loop_cond_bb);
+
+  // Loop condition: %s < buffer_length
+  builder.SetInsertPoint(loop_cond_bb);
+  llvm::PHINode * loop_counter = builder.CreatePHI(i64_ty, 2, "s");
+  loop_counter->addIncoming(builder.getInt64(0), entry);
+  current_sample_idx = builder.CreateAdd(start_sample_idx_arg, loop_counter, "current_idx");
+  llvm::Value * loop_cond_val = builder.CreateICmpULT(loop_counter, buffer_length_arg);
+  builder.CreateCondBr(loop_cond_val, loop_body_bb, loop_end_bb);
+
+  // Loop body: all instructions + writeback + output mixing
+  builder.SetInsertPoint(loop_body_bb);
 
   // ── Main instruction loop ──
   for (const auto & instr : program.instructions)
@@ -721,6 +749,40 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     store_temp_f64(instr.dst, result);
   }
 
+  // ── Register writeback: temps[register_targets[i]] → registers[i] ──
+  // Emitted as fixed stores after all computation, so all reads of old
+  // state (via StateReg operands) have already completed.
+  for (uint32_t ri = 0; ri < program.register_targets.size(); ++ri)
+  {
+    const int32_t ti = program.register_targets[ri];
+    if (ti >= 0)
+    {
+      llvm::Value * val     = builder.CreateLoad(i64_ty, gep_temp(static_cast<uint32_t>(ti)));
+      llvm::Value * reg_ptr = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(ri));
+      builder.CreateStore(val, reg_ptr);
+    }
+  }
+
+  // ── Output mixing: accumulate mix_output_temps, scale, store to output_buffer[s] ──
+  {
+    llvm::Value * mixed = zero_f64;
+    for (uint32_t mt : program.mix_output_temps)
+    {
+      llvm::Value * val = load_temp_f64(mt);
+      mixed = builder.CreateFAdd(mixed, val);
+    }
+    llvm::Value * scaled = builder.CreateFDiv(mixed, llvm::ConstantFP::get(f64_ty, 20.0));
+    llvm::Value * out_ptr = builder.CreateInBoundsGEP(f64_ty, output_buffer_arg, loop_counter);
+    builder.CreateStore(scaled, out_ptr);
+  }
+
+  // Loop back-edge
+  llvm::Value * s_next = builder.CreateAdd(loop_counter, builder.getInt64(1), "s_next");
+  loop_counter->addIncoming(s_next, builder.GetInsertBlock());
+  builder.CreateBr(loop_cond_bb);
+
+  // Loop end
+  builder.SetInsertPoint(loop_end_bb);
   builder.CreateRetVoid();
 
   if (llvm::verifyFunction(*fn, &llvm::errs()) || llvm::verifyModule(*module, &llvm::errs()))
