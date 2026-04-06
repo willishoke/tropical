@@ -27,6 +27,7 @@ import { DAC }                 from '../compiler/runtime/audio.js'
 import { Param, Trigger }      from '../compiler/runtime/param.js'
 import { applyFlatPlan }  from '../compiler/apply_plan.js'
 import { checkArrayConnection } from '../compiler/array_wiring.js'
+import { exprDependencies }     from '../compiler/compiler.js'
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
@@ -366,6 +367,10 @@ function handleTool(name: string, args: Record<string, unknown>) {
       session.instanceRegistry.delete(instanceName)
       for (const key of [...session.inputExprNodes.keys()]) {
         if (key.startsWith(`${instanceName}:`)) session.inputExprNodes.delete(key)
+      }
+      // Remove other modules' inputs that reference the deleted module
+      for (const [key, expr] of [...session.inputExprNodes.entries()]) {
+        if (exprDependencies(expr).has(instanceName)) session.inputExprNodes.delete(key)
       }
       session.graphOutputs = session.graphOutputs.filter(o => o.module !== instanceName)
       return { removed: instanceName, ...wire() }
