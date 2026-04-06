@@ -745,7 +745,7 @@ export function flattenPatch(session: SessionState): FlatPlan {
   }
 
   // Compile expression trees → flat instruction stream
-  const program = emitNumericProgram(flatOutputExprs, flatRegisterExprs)
+  const program = emitNumericProgram(flatOutputExprs, flatRegisterExprs, flatStateInit)
 
   return {
     schema: 'egress_plan_3',

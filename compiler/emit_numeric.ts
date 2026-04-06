@@ -86,6 +86,20 @@ class Emitter {
   // CSE: memoize compiled results by structural hash (JSON.stringify of the ExprNode).
   // Terminals are not memoized — they allocate nothing and return an Operand directly.
   private memo = new Map<string, CompileResult>()
+  // Map register ID → pre-allocated array slot for registers whose init value is an array.
+  private arrayRegMap = new Map<number, { slot: number, size: number }>()
+
+  constructor(stateInit?: (number | boolean | number[])[]) {
+    if (stateInit) {
+      for (let i = 0; i < stateInit.length; i++) {
+        const init = stateInit[i]
+        if (Array.isArray(init)) {
+          const slot = this.allocArraySlot(init.length)
+          this.arrayRegMap.set(i, { slot, size: init.length })
+        }
+      }
+    }
+  }
 
   // Allocate a new scalar temporary register.
   private allocReg(): number { return this.nextReg++ }
@@ -107,7 +121,9 @@ class Emitter {
     const obj = node as { op: string; [k: string]: unknown }
     switch (obj.op) {
       case 'input':        return { kind: 'input',     slot: obj.id as number }
-      case 'reg':          return { kind: 'state_reg', slot: obj.id as number }
+      case 'reg':
+        if (this.arrayRegMap.has(obj.id as number)) return null  // array register — handled in compileNodeUncached
+        return { kind: 'state_reg', slot: obj.id as number }
       case 'sample_rate':  return { kind: 'rate' }
       case 'sample_index': return { kind: 'tick' }
       case 'smoothed_param':
@@ -144,6 +160,12 @@ class Emitter {
     }
 
     const obj = node as { op: string; [k: string]: unknown }
+
+    // Array register reference (skipped by tryTerminal)
+    if (obj.op === 'reg') {
+      const arrInfo = this.arrayRegMap.get(obj.id as number)
+      if (arrInfo) return { isArray: true, op: { kind: 'array_reg', slot: arrInfo.slot }, size: arrInfo.size }
+    }
 
     // {"op":"array","items":[...]} — JSON patch format for inline arrays
     if (obj.op === 'array' && Array.isArray(obj.items)) {
@@ -402,6 +424,7 @@ class Emitter {
 export function emitNumericProgram(
   outputExprs: ExprNode[],
   registerExprs: (ExprNode | null)[],
+  stateInit?: (number | boolean | number[])[],
 ): FlatProgram {
-  return new Emitter().emitProgram(outputExprs, registerExprs)
+  return new Emitter(stateInit).emitProgram(outputExprs, registerExprs)
 }
