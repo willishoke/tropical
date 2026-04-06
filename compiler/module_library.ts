@@ -225,47 +225,114 @@ function _defineCombFilter(delayLen: number, name: string): ModuleType {
 }
 
 // ─── Reverb ───────────────────────────────────────────────────────────────────
+//
+// 4-line feedback delay network with Hadamard mixing, multi-sample allpass
+// diffusers on input and output, one-pole LP damping in the feedback path,
+// and subtle LFO modulation on delay-line read positions to reduce metallic
+// resonance. All state is flat registers (no nested module calls).
 
 export function reverb(name = 'Reverb'): ModuleType {
-  const COMB_DELAYS = [1557, 1617, 1491, 1422]
-  const combFilters = COMB_DELAYS.map((d, i) => _defineCombFilter(d, `${name}_Comb${i}`))
-  const AP_IN  = [0.70, 0.65]
-  const AP_OUT = [0.60, 0.55, 0.50, 0.45]
+  // Delay lengths — all prime, mutually coprime, well-spread
+  const AP_IN_DELAYS  = [142, 107, 379, 277]     // input diffuser (4 stages)
+  const FDN_DELAYS    = [1453, 1747, 2111, 2473]  // FDN delay lines
+  const AP_OUT_DELAYS = [251, 163]                 // output diffuser (2 stages)
+
+  const AP_IN_G   = 0.625  // input diffuser allpass gain
+  const AP_OUT_G  = 0.5    // output diffuser allpass gain
+  const MOD_DEPTH = 4.0    // LFO modulation depth (samples)
+  const LFO_RATES = [0.80, 1.13, 0.67, 0.93]  // LFO Hz per FDN line
+
+  // Build registers: input AP buffers, FDN buffers + LP states, output AP buffers
+  const regs: Record<string, number | number[]> = {}
+  for (let i = 0; i < 4; i++) regs[`ai${i}`] = new Array(AP_IN_DELAYS[i]).fill(0)
+  for (let i = 0; i < 4; i++) {
+    regs[`dl${i}`] = new Array(FDN_DELAYS[i]).fill(0)
+    regs[`lp${i}`] = 0
+  }
+  for (let i = 0; i < 2; i++) regs[`ao${i}`] = new Array(AP_OUT_DELAYS[i]).fill(0)
 
   return defineModule(
     name,
     ['input', 'mix', 'decay', 'damp'],
     ['output'],
-    {},
-    (inp) => {
+    regs,
+    (inp, reg) => {
       const x     = inp.get('input')
       const mix   = clamp(inp.get('mix'),   0.0, 1.0)
       const decay = clamp(inp.get('decay'), 0.0, 0.99)
       const damp  = clamp(inp.get('damp'),  0.0, 1.0)
 
-      let diff: ExprCoercible = x
-      for (const a of AP_IN) {
-        diff = one(_allpassStage.call(diff, a))
+      const nextRegs: Record<string, ExprCoercible> = {}
+
+      // ── Input diffuser: 4 series Schroeder allpass stages ──
+      let sig: ExprCoercible = x
+      for (let i = 0; i < 4; i++) {
+        const buf = reg.get(`ai${i}`)
+        const len = AP_IN_DELAYS[i]
+        const wIdx = mod(sampleIndex(), len)
+        const delayed = buf.at(wIdx)
+        const v = sub(sig, mul(AP_IN_G, delayed))
+        nextRegs[`ai${i}`] = arraySet(buf, wIdx, v)
+        sig = add(delayed, mul(AP_IN_G, v))
       }
 
-      let wet: ExprCoercible = 0.0
-      for (const cf of combFilters) {
-        wet = add(wet, one(cf.call(diff, decay, damp)))
+      // ── FDN: read taps with LFO-modulated positions ──
+      const taps: SignalExpr[] = []
+      for (let i = 0; i < 4; i++) {
+        const buf = reg.get(`dl${i}`)
+        const len = FDN_DELAYS[i]
+        const wIdx = mod(sampleIndex(), len)
+        const lfo = sin(mul(sampleIndex(), TWO_PI * LFO_RATES[i] / 44100.0))
+        const readOff = floorDiv(mul(MOD_DEPTH, lfo), 1.0)
+        const rIdx = mod(add(add(wIdx, readOff), len), len)
+        taps.push(buf.at(rIdx) as SignalExpr)
       }
-      wet = mul(wet as SignalExpr, 0.25)
 
-      for (const a of AP_OUT) {
-        wet = one(_allpassStage.call(wet, a))
+      // ── Hadamard mixing (H4) ──
+      const s01 = add(taps[0], taps[1])
+      const d01 = sub(taps[0], taps[1])
+      const s23 = add(taps[2], taps[3])
+      const d23 = sub(taps[2], taps[3])
+      const mixed = [
+        mul(0.5, add(s01, s23)),   // ++++
+        mul(0.5, add(d01, d23)),   // +-+-
+        mul(0.5, sub(s01, s23)),   // ++--
+        mul(0.5, sub(d01, d23)),   // +--+
+      ]
+
+      // ── Decay + LP damping + write back to delay lines ──
+      for (let i = 0; i < 4; i++) {
+        const buf = reg.get(`dl${i}`)
+        const len = FDN_DELAYS[i]
+        const wIdx = mod(sampleIndex(), len)
+        const lpPrev = reg.get(`lp${i}`)
+        const filtered = add(mul(sub(1.0, damp), mixed[i]), mul(damp, lpPrev))
+        nextRegs[`lp${i}`] = filtered
+        nextRegs[`dl${i}`] = arraySet(buf, wIdx, add(sig, mul(decay, filtered)))
+      }
+
+      // ── Output tap: decorrelated combination ──
+      let wet: ExprCoercible = mul(0.25, sub(add(taps[0], taps[2]), add(taps[1], taps[3])))
+
+      // ── Output diffuser: 2 series allpass stages ──
+      for (let i = 0; i < 2; i++) {
+        const buf = reg.get(`ao${i}`)
+        const len = AP_OUT_DELAYS[i]
+        const wIdx = mod(sampleIndex(), len)
+        const delayed = buf.at(wIdx)
+        const v = sub(wet, mul(AP_OUT_G, delayed))
+        nextRegs[`ao${i}`] = arraySet(buf, wIdx, v)
+        wet = add(delayed, mul(AP_OUT_G, v))
       }
 
       const output = add(mul(sub(1.0, mix), x), mul(mix, wet as SignalExpr))
       return {
         outputs: { output },
-        nextRegs: {},
+        nextRegs,
       }
     },
     44100.0,
-    { input: 0.0, mix: 0.35, decay: 0.84, damp: 0.4 },
+    { input: 0.0, mix: 0.5, decay: 0.85, damp: 0.3 },
   )
 }
 
