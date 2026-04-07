@@ -66,9 +66,9 @@ public:
   /**
    * Load a plan JSON string, compile to a single kernel, and publish atomically.
    *
-   * Plan schema (egress_plan_3):
+   * Plan schema (egress_plan_4):
    * {
-   *   "schema": "egress_plan_3",
+   *   "schema": "egress_plan_4",
    *   "config": { "sample_rate": 44100 },
    *   "state_init": [0.0, ...],
    *   "register_names": ["VCO1_phase", ...],

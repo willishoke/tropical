@@ -2,7 +2,7 @@
  * test_module_process.cpp
  *
  * Exercises the FlatRuntime C API (egress_runtime_*) and JIT code paths
- * without an audio device.  Plans are specified as egress_plan_3 JSON strings,
+ * without an audio device.  Plans are specified as egress_plan_4 JSON strings,
  * compiled to native kernels via compile_flat_program, and processed in-memory.
  */
 
@@ -81,7 +81,7 @@ static void test_sawtooth()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -142,7 +142,7 @@ static void test_two_outputs_mix()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [],
     "register_names": [],
@@ -186,7 +186,7 @@ static void test_hot_swap_preserves_state()
 
   // Plan A: output = reg(0), register update = mod(reg(0) + 440/sr, 1)
   std::string plan_a = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -220,7 +220,7 @@ static void test_hot_swap_preserves_state()
 
   // Plan B: output = reg(0) * 5.0, same register name "phase"
   std::string plan_b = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -273,7 +273,7 @@ static void test_array_literal()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0, 1.0],
     "register_names": ["idx", "idx2"],
@@ -329,7 +329,7 @@ static void test_counter_wrap()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["counter"],
@@ -380,7 +380,7 @@ static void test_select_conditional()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -430,7 +430,7 @@ static void test_multi_register_clock()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0, 0.0],
     "register_names": ["phase", "gate"],
@@ -486,7 +486,7 @@ static void test_multiple_outputs_summed()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [],
     "register_names": [],

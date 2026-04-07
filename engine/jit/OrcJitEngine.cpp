@@ -280,7 +280,7 @@ llvm::Expected<uint64_t> OrcJitEngine::lookup(const std::string & symbol_name)
 
 
 // ---------------------------------------------------------------------------
-// compile_flat_program — new emission path for egress_plan_3 / FlatProgram.
+// compile_flat_program — emission path for egress_plan_4 / FlatProgram.
 //
 // Terminals (Const, Input, Reg, StateReg, Param, Rate, Tick) are Operands
 // embedded in instructions rather than separate pseudo-ops.  loop_count > 1

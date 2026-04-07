@@ -16,10 +16,10 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
 
   const std::string schema = plan.value("schema", std::string{});
 
-  // ── egress_plan_3: compiled flat instruction stream ──
-  if (schema == "egress_plan_3")
+  // ── egress_plan_4: compiled flat instruction stream with typed operands ──
+  if (schema == "egress_plan_4")
   {
-    const auto parsed = egress_plan3::parse_plan3(plan);
+    const auto parsed = egress_plan4::parse_plan4(plan);
 
     auto kernel_result = egress_jit::OrcJitEngine::instance().compile_flat_program(parsed.program);
     if (!kernel_result)

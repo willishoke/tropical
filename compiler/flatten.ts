@@ -1,11 +1,11 @@
 /**
- * flatten.ts — Flatten a patch into a single egress_plan_3 kernel.
+ * flatten.ts — Flatten a patch into a single egress_plan_4 kernel.
  *
  * Takes a SessionState and produces a flat plan JSON where all module
  * expression trees are inlined: input() nodes are substituted with wiring
  * expressions, ref() nodes are resolved by inlining the referenced module's
  * output expression. The result has zero inter-module boundaries — just one
- * flat instruction stream (egress_plan_3).
+ * flat instruction stream (egress_plan_4).
  */
 
 import type { ExprNode } from './expr.js'
@@ -19,7 +19,7 @@ import {
 import { lowerArrayOps } from './lower_arrays.js'
 import { portTypeToString } from './term.js'
 import { checkArrayConnection } from './array_wiring.js'
-import { emitNumericProgram, type NInstr } from './emit_numeric.js'
+import { emitNumericProgram, type NInstr, type ScalarType } from './emit_numeric.js'
 
 // ─────────────────────────────────────────────────────────────
 // Wiring type validation
@@ -108,14 +108,15 @@ export function normalizeWiringTypes(
 }
 
 // ─────────────────────────────────────────────────────────────
-// egress_plan_3 schema
+// egress_plan_4 schema
 // ─────────────────────────────────────────────────────────────
 
 export interface FlatPlan {
-  schema: 'egress_plan_3'
+  schema: 'egress_plan_4'
   config: { sample_rate: number }
   state_init: (number | boolean)[]
   register_names: string[]
+  register_types: ScalarType[]
   array_slot_names: string[]
   outputs: number[]
   // Compiled instruction stream (from emitNumericProgram)
@@ -627,7 +628,7 @@ function resolveRefs(
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Flatten a session's patch into a single egress_plan_3 plan.
+ * Flatten a session's patch into a single egress_plan_4 plan.
  *
  * Process:
  * 1. Topologically sort modules
@@ -639,7 +640,7 @@ function resolveRefs(
  *    e. Record the resolved output expressions for use by later modules' refs
  * 3. Collect all outputs matching graphOutputs
  * 4. Compile expression trees → FlatProgram via emitNumericProgram
- * 5. Emit egress_plan_3 JSON
+ * 5. Emit egress_plan_4 JSON
  */
 export function flattenPatch(session: SessionState): FlatPlan {
   const { instanceRegistry, graphOutputs } = session
@@ -666,6 +667,7 @@ export function flattenPatch(session: SessionState): FlatPlan {
   const flatRegisterExprs: ExprNode[] = []
   const flatStateInit: (number | boolean | number[])[] = []
   const flatRegisterNames: string[] = []
+  const flatRegisterTypes: ScalarType[] = []
 
   // Track each module's register base offset and resolved output expressions
   const resolvedOutputs = new Map<string, ExprNode[]>()
@@ -749,8 +751,9 @@ export function flattenPatch(session: SessionState): FlatPlan {
         flatRegisterExprs.push({ op: 'reg', id: registerBase + i })
       }
 
-      // Register name and init value
+      // Register name, init value, and type
       flatRegisterNames.push(`${name}_${def.registerNames[i]}`)
+      flatRegisterTypes.push('float')
       const initVal = def.registerInitValues[i]
       if (typeof initVal === 'number' || typeof initVal === 'boolean') {
         flatStateInit.push(initVal)
@@ -771,6 +774,7 @@ export function flattenPatch(session: SessionState): FlatPlan {
         flatRegisterExprs.push({ op: 'reg', id: delayBase + i })
       }
       flatRegisterNames.push(`${name}_delay_${i}`)
+      flatRegisterTypes.push('float')
       flatStateInit.push(def.delayInitValues[i] ?? 0)
     }
 
@@ -824,6 +828,7 @@ export function flattenPatch(session: SessionState): FlatPlan {
         expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames, nestedRefsMemo)
         flatRegisterExprs.push(expr)
         flatRegisterNames.push(nested.names[i])
+        flatRegisterTypes.push('float')
         flatStateInit.push(nested.inits[i])
       }
     }
@@ -869,10 +874,11 @@ export function flattenPatch(session: SessionState): FlatPlan {
   }
 
   return {
-    schema: 'egress_plan_3',
+    schema: 'egress_plan_4',
     config: { sample_rate: 44100 },
     state_init: flatStateInit as (number | boolean)[],
     register_names: flatRegisterNames,
+    register_types: flatRegisterTypes,
     array_slot_names: arraySlotNames,
     outputs: outputIndices,
     instructions:     program.instructions,

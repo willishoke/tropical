@@ -61,28 +61,38 @@ enum class OperandKind : uint8_t
 
 struct Operand
 {
-  OperandKind kind = OperandKind::Const;
-  double      const_val = 0.0;  // Const
-  uint32_t    slot      = 0;    // Input, Reg, StateReg
-  uint64_t    ptr       = 0;    // Param
+  OperandKind   kind        = OperandKind::Const;
+  JitScalarType scalar_type = JitScalarType::Float;
+  double        const_val   = 0.0;  // Const
+  uint32_t      slot        = 0;    // Input, Reg, StateReg
+  uint64_t      ptr         = 0;    // Param
 
-  static Operand make_const(double v)    { Operand o; o.kind = OperandKind::Const;    o.const_val = v; return o; }
-  static Operand make_input(uint32_t s)  { Operand o; o.kind = OperandKind::Input;    o.slot = s;      return o; }
-  static Operand make_reg(uint32_t id)   { Operand o; o.kind = OperandKind::Reg;      o.slot = id;     return o; }
-  static Operand make_array_reg(uint32_t s) { Operand o; o.kind = OperandKind::ArrayReg; o.slot = s;   return o; }
-  static Operand make_state(uint32_t s)  { Operand o; o.kind = OperandKind::StateReg; o.slot = s;      return o; }
-  static Operand make_param(uint64_t p)  { Operand o; o.kind = OperandKind::Param;    o.ptr = p;       return o; }
-  static Operand make_rate()             { Operand o; o.kind = OperandKind::Rate;                      return o; }
-  static Operand make_tick()             { Operand o; o.kind = OperandKind::Tick;                      return o; }
+  static Operand make_const(double v, JitScalarType t = JitScalarType::Float)
+  { Operand o; o.kind = OperandKind::Const; o.scalar_type = t; o.const_val = v; return o; }
+  static Operand make_input(uint32_t s, JitScalarType t = JitScalarType::Float)
+  { Operand o; o.kind = OperandKind::Input; o.scalar_type = t; o.slot = s; return o; }
+  static Operand make_reg(uint32_t id, JitScalarType t = JitScalarType::Float)
+  { Operand o; o.kind = OperandKind::Reg; o.scalar_type = t; o.slot = id; return o; }
+  static Operand make_array_reg(uint32_t s)
+  { Operand o; o.kind = OperandKind::ArrayReg; o.slot = s; return o; }
+  static Operand make_state(uint32_t s, JitScalarType t = JitScalarType::Float)
+  { Operand o; o.kind = OperandKind::StateReg; o.scalar_type = t; o.slot = s; return o; }
+  static Operand make_param(uint64_t p)
+  { Operand o; o.kind = OperandKind::Param; o.scalar_type = JitScalarType::Float; o.ptr = p; return o; }
+  static Operand make_rate()
+  { Operand o; o.kind = OperandKind::Rate; o.scalar_type = JitScalarType::Float; return o; }
+  static Operand make_tick()
+  { Operand o; o.kind = OperandKind::Tick; o.scalar_type = JitScalarType::Float; return o; }
 };
 
 struct FlatInstr
 {
-  OpTag                tag        = OpTag::Add;
-  uint32_t             dst        = 0;
+  OpTag                tag         = OpTag::Add;
+  JitScalarType        result_type = JitScalarType::Float;
+  uint32_t             dst         = 0;
   std::vector<Operand> args;
-  uint32_t             loop_count = 1;       // 1 = scalar; N > 1 = elementwise loop
-  std::vector<uint8_t> strides;              // per-arg: 1 = iterate, 0 = broadcast
+  uint32_t             loop_count  = 1;       // 1 = scalar; N > 1 = elementwise loop
+  std::vector<uint8_t> strides;               // per-arg: 1 = iterate, 0 = broadcast
 };
 
 struct FlatProgram
