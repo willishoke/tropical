@@ -66,7 +66,7 @@ export interface ProductField {
 
 export interface CoproductVariant {
   name: string
-  payload: SourceType  // { tag: 'unit' } for nullary constructors
+  payloadFields: Array<{ name: string; type: SourceType }>  // empty for nullary
 }
 
 export type ProductDef = {
@@ -122,13 +122,13 @@ export class TypeRegistry {
     return idx
   }
 
-  /** The payload SourceType for a specific variant. */
-  variantPayloadType(typeName: string, variantName: string): SourceType {
+  /** The payload fields for a specific variant. */
+  variantPayloadFields(typeName: string, variantName: string): Array<{ name: string; type: SourceType }> {
     const def = this.defs.get(typeName)
     if (!def || def.kind !== 'coproduct') throw new Error(`'${typeName}' is not a coproduct type`)
     const v = def.variants.find(v => v.name === variantName)
     if (!v) throw new Error(`Coproduct '${typeName}' has no variant '${variantName}'`)
-    return v.payload
+    return v.payloadFields
   }
 
   /** All variant names for a coproduct type (in declaration order). */
@@ -150,7 +150,7 @@ export class TypeRegistry {
     const def = this.defs.get(typeName)
     if (!def || def.kind !== 'coproduct') throw new Error(`'${typeName}' is not a coproduct type`)
     const maxPayload = def.variants.reduce((max, v) => {
-      const payloadCount = this.sourceTypeScalarCount(v.payload)
+      const payloadCount = v.payloadFields.reduce((sum, f) => sum + this.sourceTypeScalarCount(f.type), 0)
       return Math.max(max, payloadCount)
     }, 0)
     return 1 + maxPayload
@@ -223,11 +223,19 @@ export class TypeRegistry {
       if (factors.length === 1) return factors[0]
       return { tag: 'product', factors }
     }
-    // coproduct
-    const summands = def.variants.map(v => this.elaborate(v.payload))
+    // coproduct — each variant's payload fields become a product summand
+    const summands = def.variants.map(v => this.elaboratePayloadFields(v.payloadFields))
     if (summands.length === 0) return { tag: 'unit' }
     if (summands.length === 1) return summands[0]
     return { tag: 'coproduct', summands }
+  }
+
+  /** Elaborate a variant's payload fields to a structural PortType. */
+  private elaboratePayloadFields(fields: Array<{ name: string; type: SourceType }>): PortType {
+    if (fields.length === 0) return { tag: 'unit' }
+    const factors = fields.map(f => this.elaborate(f.type))
+    if (factors.length === 1) return factors[0]
+    return { tag: 'product', factors }
   }
 
   /** Convert a type name to its structural PortType (convenience). */

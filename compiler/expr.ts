@@ -263,27 +263,52 @@ export function exprCall(fn: SignalExpr, args: ExprCoercible[]): SignalExpr {
   return SignalExpr.fromNode({ op: 'call', callee: fn._node, args: coerced.map(e => e._node) })
 }
 
-// ---------- ADT expression builders ----------
+// ---------- ADT expression builders (name-based API) ----------
 
-export function constructStruct(typeName: string, fieldExprs: ExprCoercible[]): SignalExpr {
-  const items = fieldExprs.map(coerce)
-  return SignalExpr.fromNode({ op: 'construct_struct', type_name: typeName, fields: items.map(e => e._node) })
+/** Construct a product value: construct("Point", { x: 1.0, y: 2.0 }) */
+export function construct(typeName: string, fields: Record<string, ExprCoercible>): SignalExpr {
+  const fieldNodes: Record<string, ExprNode> = {}
+  for (const [k, v] of Object.entries(fields)) {
+    fieldNodes[k] = coerce(v)._node
+  }
+  return SignalExpr.fromNode({ op: 'construct', type_name: typeName, fields: fieldNodes })
 }
 
-export function fieldAccess(typeName: string, structExpr: ExprCoercible, fieldIndex: number): SignalExpr {
-  const s = coerce(structExpr)
-  return SignalExpr.fromNode({ op: 'field_access', type_name: typeName, struct_expr: s._node, field_index: fieldIndex })
+/** Inject a coproduct value: inject("Temp", "Hot") or inject("NoteEvent", "NoteOn", { pitch: 440, vel: 0.8 }) */
+export function inject(typeName: string, variant: string, payload?: Record<string, ExprCoercible>): SignalExpr {
+  const payloadNodes: Record<string, ExprNode> | undefined = payload
+    ? Object.fromEntries(Object.entries(payload).map(([k, v]) => [k, coerce(v)._node]))
+    : undefined
+  return SignalExpr.fromNode({ op: 'inject', type_name: typeName, variant, payload: payloadNodes })
 }
 
-export function constructVariant(typeName: string, variantTag: number, payloadExprs: ExprCoercible[]): SignalExpr {
-  const items = payloadExprs.map(coerce)
-  return SignalExpr.fromNode({ op: 'construct_variant', type_name: typeName, variant_tag: variantTag, payload: items.map(e => e._node) })
+/** Project a field from a product value: project("Point", "x", pointExpr) */
+export function project(typeName: string, field: string, expr: ExprCoercible): SignalExpr {
+  return SignalExpr.fromNode({ op: 'project', type_name: typeName, field, expr: coerce(expr)._node })
 }
 
-export function matchVariant(typeName: string, scrutinee: ExprCoercible, branchExprs: ExprCoercible[]): SignalExpr {
-  const s = coerce(scrutinee)
-  const items = branchExprs.map(coerce)
-  return SignalExpr.fromNode({ op: 'match_variant', type_name: typeName, scrutinee: s._node, branches: items.map(e => e._node) })
+/** Pattern match on a coproduct value. */
+export function match(
+  typeName: string,
+  scrutinee: ExprCoercible,
+  branches: Record<string, { bind?: string[]; body: ExprCoercible }>,
+): SignalExpr {
+  const branchNodes: Record<string, { bind?: string[]; body: ExprNode }> = {}
+  for (const [variant, branch] of Object.entries(branches)) {
+    branchNodes[variant] = {
+      ...(branch.bind ? { bind: branch.bind } : {}),
+      body: coerce(branch.body)._node,
+    }
+  }
+  return SignalExpr.fromNode({
+    op: 'match', type_name: typeName,
+    scrutinee: coerce(scrutinee)._node, branches: branchNodes,
+  })
+}
+
+/** Reference a bound variable from a match branch payload. Resolved during lowering. */
+export function bound(name: string): SignalExpr {
+  return SignalExpr.fromNode({ op: 'bound', name })
 }
 
 // ---------- Leaf node constructors ----------

@@ -81,12 +81,12 @@ describe('checkArrayConnection', () => {
     expect(check.broadcastExpr).toBeDefined()
   })
 
-  test('struct type mismatch', () => {
+  test('unknown type names without registry default to float (compatible)', () => {
     const check = checkArrayConnection('MyStruct', 'OtherStruct', ref)
-    expect(check.compatible).toBe(false)
+    expect(check.compatible).toBe(true)  // both resolve to Float without registry
   })
 
-  test('same struct types are compatible', () => {
+  test('same type names are compatible', () => {
     const check = checkArrayConnection('MyStruct', 'MyStruct', ref)
     expect(check.compatible).toBe(true)
   })

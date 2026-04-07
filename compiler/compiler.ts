@@ -147,16 +147,21 @@ function walkExprRefs(node: ExprNode, deps: Set<string>): void {
   }
   // Walk standard args
   for (const arg of ((n.args as ExprNode[]) ?? [])) walkExprRefs(arg, deps)
-  // Walk special nested expression forms
-  if (n.op === 'construct_struct')
-    for (const f of ((n.fields as ExprNode[]) ?? [])) walkExprRefs(f, deps)
-  if (n.op === 'field_access')
-    walkExprRefs(n.struct_expr as ExprNode, deps)
-  if (n.op === 'construct_variant')
-    for (const p of ((n.payload as ExprNode[]) ?? [])) walkExprRefs(p, deps)
-  if (n.op === 'match_variant') {
+  // Walk ADT expression forms
+  if (n.op === 'construct') {
+    const fields = n.fields as Record<string, ExprNode> | undefined
+    if (fields) for (const f of Object.values(fields)) walkExprRefs(f, deps)
+  }
+  if (n.op === 'project')
+    walkExprRefs(n.expr as ExprNode, deps)
+  if (n.op === 'inject') {
+    const payload = n.payload as Record<string, ExprNode> | undefined
+    if (payload) for (const p of Object.values(payload)) walkExprRefs(p, deps)
+  }
+  if (n.op === 'match') {
     walkExprRefs(n.scrutinee as ExprNode, deps)
-    for (const b of ((n.branches as ExprNode[]) ?? [])) walkExprRefs(b, deps)
+    const branches = n.branches as Record<string, { body: ExprNode }> | undefined
+    if (branches) for (const b of Object.values(branches)) walkExprRefs(b.body, deps)
   }
 }
 

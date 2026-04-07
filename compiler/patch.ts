@@ -11,7 +11,7 @@ import {
   neg, abs_, sin, log, logicalNot,
   clamp, select, arrayPack, arraySet, matrix,
   inputExpr, registerExpr, refExpr, sampleRate, sampleIndex,
-  constructStruct, fieldAccess, constructVariant, matchVariant,
+  construct, inject, project, match, bound,
 } from './expr.js'
 import {
   defineModule, ModuleType, ModuleInstance, delay,
@@ -20,6 +20,7 @@ import {
 import { Param, Trigger } from './runtime/param.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Runtime } from './runtime/runtime.js'
+import { TypeRegistry, parseSourceType, type TypeDef, type ProductDef, type CoproductDef } from './type_registry.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -52,29 +53,29 @@ export interface ModuleDefJSON {
   }
 }
 
-export interface TypeDefFieldJSON {
+export interface ProductFieldJSON {
   name: string
-  scalar_type: number
+  type: string  // 'float', 'int', 'bool', or another type name
 }
 
-export interface StructTypeDefJSON {
-  kind: 'struct'
+export interface ProductTypeDefJSON {
+  kind: 'product'
   name: string
-  fields: TypeDefFieldJSON[]
+  fields: ProductFieldJSON[]
 }
 
-export interface SumVariantJSON {
+export interface CoproductVariantJSON {
   name: string
-  payload: TypeDefFieldJSON[]
+  payload?: Array<{ name: string; type: string }>  // omitted = nullary (unit payload)
 }
 
-export interface SumTypeDefJSON {
-  kind: 'sum'
+export interface CoproductTypeDefJSON {
+  kind: 'coproduct'
   name: string
-  variants: SumVariantJSON[]
+  variants: CoproductVariantJSON[]
 }
 
-export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON
+export type TypeDefJSON = ProductTypeDefJSON | CoproductTypeDefJSON
 
 export interface PatchJSON {
   schema: 'tropical_patch_1'
@@ -128,6 +129,8 @@ export interface SessionState {
   graph: { primeJit(): void; process(): void; readonly outputBuffer: Float64Array; dispose(): void }
   /** Name counter for auto-generated instance names. */
   _nameCounters: Map<string, number>
+  /** ADT type registry for product/coproduct type definitions. */
+  adtRegistry: TypeRegistry
 }
 
 export function makeSession(bufferLength = 512): SessionState {
@@ -149,6 +152,7 @@ export function makeSession(bufferLength = 512): SessionState {
       dispose: () => runtime.dispose(),
     },
     _nameCounters: new Map(),
+    adtRegistry: new TypeRegistry(),
   }
 }
 
@@ -322,21 +326,36 @@ export function buildExpr(node: ExprNode, ctx: BuildCtx): SignalExpr {
   }
 
   // ── ADT operations ──
-  if (op === 'construct_struct') {
-    const n = node as { op: string; type_name: string; fields: ExprNode[] }
-    return constructStruct(n.type_name, n.fields.map(f => buildExpr(f, ctx)))
+  if (op === 'construct') {
+    const n = node as { op: string; type_name: string; fields: Record<string, ExprNode> }
+    const fields: Record<string, SignalExpr> = {}
+    for (const [k, v] of Object.entries(n.fields)) fields[k] = buildExpr(v, ctx)
+    return construct(n.type_name, fields)
   }
-  if (op === 'field_access') {
-    const n = node as { op: string; type_name: string; struct_expr: ExprNode; field_index: number }
-    return fieldAccess(n.type_name, buildExpr(n.struct_expr, ctx), n.field_index)
+  if (op === 'project') {
+    const n = node as { op: string; type_name: string; field: string; expr: ExprNode }
+    return project(n.type_name, n.field, buildExpr(n.expr, ctx))
   }
-  if (op === 'construct_variant') {
-    const n = node as { op: string; type_name: string; variant_tag: number; payload: ExprNode[] }
-    return constructVariant(n.type_name, n.variant_tag, n.payload.map(p => buildExpr(p, ctx)))
+  if (op === 'inject') {
+    const n = node as { op: string; type_name: string; variant: string; payload?: Record<string, ExprNode> }
+    if (n.payload) {
+      const payload: Record<string, SignalExpr> = {}
+      for (const [k, v] of Object.entries(n.payload)) payload[k] = buildExpr(v, ctx)
+      return inject(n.type_name, n.variant, payload)
+    }
+    return inject(n.type_name, n.variant)
   }
-  if (op === 'match_variant') {
-    const n = node as { op: string; type_name: string; scrutinee: ExprNode; branches: ExprNode[] }
-    return matchVariant(n.type_name, buildExpr(n.scrutinee, ctx), n.branches.map(b => buildExpr(b, ctx)))
+  if (op === 'match') {
+    const n = node as { op: string; type_name: string; scrutinee: ExprNode; branches: Record<string, { bind?: string[]; body: ExprNode }> }
+    const branches: Record<string, { bind?: string[]; body: SignalExpr }> = {}
+    for (const [variant, branch] of Object.entries(n.branches)) {
+      branches[variant] = { ...(branch.bind ? { bind: branch.bind } : {}), body: buildExpr(branch.body, ctx) }
+    }
+    return match(n.type_name, buildExpr(n.scrutinee, ctx), branches)
+  }
+  if (op === 'bound') {
+    const n = node as { op: string; name: string }
+    return bound(n.name)
   }
 
   // ── Explicit literal forms (rarely needed, bare numbers are preferred) ──
@@ -420,10 +439,11 @@ export function validateExpr(node: ExprNode, ctx: ValidateCtx): ExprType {
   if (op === 'matrix') return 'array'
   if (op === 'float' || op === 'int') return 'scalar'
   if (op === 'bool') return 'bool'
-  if (op === 'construct_struct')  return 'unknown'
-  if (op === 'field_access')      return 'scalar'
-  if (op === 'construct_variant') return 'unknown'
-  if (op === 'match_variant')     return 'unknown'
+  if (op === 'construct')  return 'unknown'
+  if (op === 'project')    return 'scalar'
+  if (op === 'inject')     return 'unknown'
+  if (op === 'match')      return 'unknown'
+  if (op === 'bound')      return 'scalar'
   throw new Error(`Unknown op '${op}'.`)
 }
 
@@ -597,24 +617,61 @@ export function prettyExpr(
   if (op === 'delay') return `delay(${prettyExpr(args[0], instanceRegistry)}, ${n.init ?? 0})`
   if (op === 'delay_ref') return `delay_ref(${n.id})`
   if (op === 'nested_out') return `${n.ref}.${n.output}`
-  if (op === 'construct_struct') {
-    const fields = (n.fields as ExprNode[]).map(f => prettyExpr(f, instanceRegistry))
-    return `${n.type_name}{${fields.join(', ')}}`
+  if (op === 'construct') {
+    const fields = n.fields as Record<string, ExprNode>
+    const fieldStrs = Object.entries(fields).map(([k, v]) => `${k}: ${prettyExpr(v, instanceRegistry)}`)
+    return `${n.type_name}{${fieldStrs.join(', ')}}`
   }
-  if (op === 'field_access') {
-    return `${prettyExpr(n.struct_expr as ExprNode, instanceRegistry)}.field[${n.field_index}]`
+  if (op === 'project') {
+    return `${prettyExpr(n.expr as ExprNode, instanceRegistry)}.${n.field}`
   }
-  if (op === 'construct_variant') {
-    const payload = (n.payload as ExprNode[]).map(p => prettyExpr(p, instanceRegistry))
-    return `${n.type_name}::${n.variant_tag}(${payload.join(', ')})`
+  if (op === 'inject') {
+    const payload = n.payload as Record<string, ExprNode> | undefined
+    if (payload) {
+      const payloadStrs = Object.entries(payload).map(([k, v]) => `${k}: ${prettyExpr(v, instanceRegistry)}`)
+      return `${n.type_name}::${n.variant}(${payloadStrs.join(', ')})`
+    }
+    return `${n.type_name}::${n.variant}`
   }
-  if (op === 'match_variant') {
-    const branches = (n.branches as ExprNode[]).map(b => prettyExpr(b, instanceRegistry))
-    return `match(${prettyExpr(n.scrutinee as ExprNode, instanceRegistry)}){${branches.join(', ')}}`
+  if (op === 'match') {
+    const branches = n.branches as Record<string, { body: ExprNode }>
+    const branchStrs = Object.entries(branches).map(([k, v]) => `${k} → ${prettyExpr(v.body, instanceRegistry)}`)
+    return `match(${prettyExpr(n.scrutinee as ExprNode, instanceRegistry)}){${branchStrs.join(', ')}}`
   }
+  if (op === 'bound') return `$${n.name}`
 
   // Should never reach here given the finite op set, but keep a safe fallback
   throw new Error(`prettyExpr: unhandled op '${op}'`)
+}
+
+// ─────────────────────────────────────────────────────────────
+// ADT type def conversion
+// ─────────────────────────────────────────────────────────────
+
+/** Convert a JSON type definition to an internal TypeDef for the registry. */
+function typeDefFromJSON(json: TypeDefJSON): TypeDef {
+  if (json.kind === 'product') {
+    return {
+      kind: 'product',
+      name: json.name,
+      fields: json.fields.map(f => ({
+        name: f.name,
+        type: parseSourceType(f.type),
+      })),
+    } satisfies ProductDef
+  }
+  // coproduct
+  return {
+    kind: 'coproduct',
+    name: json.name,
+    variants: json.variants.map(v => ({
+      name: v.name,
+      payloadFields: (v.payload ?? []).map(p => ({
+        name: p.name,
+        type: parseSourceType(p.type),
+      })),
+    })),
+  } satisfies CoproductDef
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -629,6 +686,12 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
   session.triggerRegistry.clear()
   session.inputExprNodes.clear()
   session._nameCounters.clear()
+  session.adtRegistry = new TypeRegistry()
+
+  // Load ADT type definitions (before module instantiation)
+  for (const td of json.type_defs ?? []) {
+    session.adtRegistry.register(typeDefFromJSON(td))
+  }
 
   // Load inline module type definitions
   for (const def of json.module_defs ?? []) {
@@ -710,6 +773,11 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
   for (const p of json.params ?? []) {
     if (session.paramRegistry.has(p.name) || session.triggerRegistry.has(p.name))
       throw new Error(`merge_patch collision: param/trigger '${p.name}' already exists.`)
+  }
+
+  // Load ADT type definitions
+  for (const td of json.type_defs ?? []) {
+    session.adtRegistry.register(typeDefFromJSON(td))
   }
 
   // Load inline type definitions

@@ -88,37 +88,32 @@ export const ModuleDefJSONSchema = z.object({
 // ─────────────────────────────────────────────────────────────
 
 // ─────────────────────────────────────────────────────────────
-// ADT type definitions
+// ADT type definitions (product/coproduct)
 // ─────────────────────────────────────────────────────────────
 
-const StructFieldSchema = z.object({
+const ProductFieldSchema = z.object({
   name: z.string(),
-  scalar_type: z.number().int(),
+  type: z.string(),  // type string: 'float', 'int', 'bool', or another type name
 })
 
-const StructTypeDefSchema = z.object({
-  kind: z.literal('struct'),
+const ProductTypeDefSchema = z.object({
+  kind: z.literal('product'),
   name: z.string(),
-  fields: z.array(StructFieldSchema),
+  fields: z.array(ProductFieldSchema),
 })
 
-const VariantPayloadFieldSchema = z.object({
+const CoproductVariantSchema = z.object({
   name: z.string(),
-  scalar_type: z.number().int(),
+  payload: z.array(z.object({ name: z.string(), type: z.string() })).optional(),
 })
 
-const SumVariantSchema = z.object({
+const CoproductTypeDefSchema = z.object({
+  kind: z.literal('coproduct'),
   name: z.string(),
-  payload: z.array(VariantPayloadFieldSchema),
+  variants: z.array(CoproductVariantSchema),
 })
 
-const SumTypeDefSchema = z.object({
-  kind: z.literal('sum'),
-  name: z.string(),
-  variants: z.array(SumVariantSchema),
-})
-
-const TypeDefSchema = z.union([StructTypeDefSchema, SumTypeDefSchema])
+const TypeDefSchema = z.union([ProductTypeDefSchema, CoproductTypeDefSchema])
 
 // ─────────────────────────────────────────────────────────────
 // PatchJSON

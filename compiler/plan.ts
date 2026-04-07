@@ -309,14 +309,19 @@ function walkRefs(node: ExprNode, refs: Array<{ module: string; output: string }
     return
   }
   for (const arg of ((n.args as ExprNode[]) ?? [])) walkRefs(arg, refs)
-  if (n.op === 'construct_struct')
-    for (const f of ((n.fields as ExprNode[]) ?? [])) walkRefs(f, refs)
-  if (n.op === 'field_access') walkRefs(n.struct_expr as ExprNode, refs)
-  if (n.op === 'construct_variant')
-    for (const p of ((n.payload as ExprNode[]) ?? [])) walkRefs(p, refs)
-  if (n.op === 'match_variant') {
+  if (n.op === 'construct') {
+    const fields = n.fields as Record<string, ExprNode> | undefined
+    if (fields) for (const f of Object.values(fields)) walkRefs(f, refs)
+  }
+  if (n.op === 'project') walkRefs(n.expr as ExprNode, refs)
+  if (n.op === 'inject') {
+    const payload = n.payload as Record<string, ExprNode> | undefined
+    if (payload) for (const p of Object.values(payload)) walkRefs(p, refs)
+  }
+  if (n.op === 'match') {
     walkRefs(n.scrutinee as ExprNode, refs)
-    for (const b of ((n.branches as ExprNode[]) ?? [])) walkRefs(b, refs)
+    const branches = n.branches as Record<string, { body: ExprNode }> | undefined
+    if (branches) for (const b of Object.values(branches)) walkRefs(b.body, refs)
   }
 }
 
