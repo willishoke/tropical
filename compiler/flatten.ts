@@ -176,12 +176,18 @@ function inlineCalls(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode
   const obj = node as Record<string, unknown>
 
   // First, recursively inline in children
+  let changed = false
   const result: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(obj)) {
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => inlineCalls(n, memo))
+      const arr = v as ExprNode[]
+      const newArr = arr.map(n => inlineCalls(n, memo))
+      if (newArr.some((n, i) => n !== arr[i])) changed = true
+      result[k] = newArr
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = inlineCalls(v as ExprNode, memo)
+      const newV = inlineCalls(v as ExprNode, memo)
+      if (newV !== v) changed = true
+      result[k] = newV
     } else {
       result[k] = v
     }
@@ -189,12 +195,13 @@ function inlineCalls(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode
 
   let out: ExprNode
   // Now check if this is a call(function(...), args) that can be inlined
-  if (result.op === 'call') {
-    const callee = result.callee as ExprNode
+  if ((changed ? result.op : obj.op) === 'call') {
+    const src = changed ? result : obj
+    const callee = src.callee as ExprNode
     if (typeof callee === 'object' && !Array.isArray(callee) && (callee as Record<string, unknown>).op === 'function') {
       const fnNode = callee as Record<string, unknown>
       const body = fnNode.body as ExprNode
-      const args = result.args as ExprNode[]
+      const args = src.args as ExprNode[]
       // Substitute input(N) → args[N] in the function body
       const argMap = new Map<number, ExprNode>()
       for (let i = 0; i < args.length; i++) {
@@ -202,10 +209,10 @@ function inlineCalls(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode
       }
       out = substituteInputs(body, argMap)
     } else {
-      out = result as ExprNode
+      out = changed ? result as ExprNode : node
     }
   } else {
-    out = result as ExprNode
+    out = changed ? result as ExprNode : node
   }
 
   if (memo) memo.set(node as object, out)
@@ -240,16 +247,26 @@ function substituteInputs(node: ExprNode, inputMap: Map<number, ExprNode>, memo?
     return node
   }
 
+  let changed = false
   const result: Record<string, unknown> = { op: obj.op }
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'op') continue
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => substituteInputs(n, inputMap, memo))
+      const arr = v as ExprNode[]
+      const newArr = arr.map(n => substituteInputs(n, inputMap, memo))
+      if (newArr.some((n, i) => n !== arr[i])) changed = true
+      result[k] = newArr
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = substituteInputs(v as ExprNode, inputMap, memo)
+      const newV = substituteInputs(v as ExprNode, inputMap, memo)
+      if (newV !== v) changed = true
+      result[k] = newV
     } else {
       result[k] = v
     }
+  }
+  if (!changed) {
+    if (memo) memo.set(node as object, node)
+    return node
   }
   const out = result as ExprNode
   if (memo) memo.set(node as object, out)
@@ -278,16 +295,26 @@ function resolveDelayValues(node: ExprNode, delayBase: number, memo?: WeakMap<ob
     return out
   }
 
+  let changed = false
   const result: Record<string, unknown> = { op: obj.op }
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'op') continue
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => resolveDelayValues(n, delayBase, memo))
+      const arr = v as ExprNode[]
+      const newArr = arr.map(n => resolveDelayValues(n, delayBase, memo))
+      if (newArr.some((n, i) => n !== arr[i])) changed = true
+      result[k] = newArr
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = resolveDelayValues(v as ExprNode, delayBase, memo)
+      const newV = resolveDelayValues(v as ExprNode, delayBase, memo)
+      if (newV !== v) changed = true
+      result[k] = newV
     } else {
       result[k] = v
     }
+  }
+  if (!changed) {
+    if (memo) memo.set(node as object, node)
+    return node
   }
   const out = result as ExprNode
   if (memo) memo.set(node as object, out)
@@ -407,16 +434,26 @@ function substituteNestedOutputRefs(
     return outputs[outputId]
   }
 
+  let changed = false
   const result: Record<string, unknown> = { op: obj.op }
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'op') continue
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => substituteNestedOutputRefs(n, resolved, memo))
+      const arr = v as ExprNode[]
+      const newArr = arr.map(n => substituteNestedOutputRefs(n, resolved, memo))
+      if (newArr.some((n, i) => n !== arr[i])) changed = true
+      result[k] = newArr
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = substituteNestedOutputRefs(v as ExprNode, resolved, memo)
+      const newV = substituteNestedOutputRefs(v as ExprNode, resolved, memo)
+      if (newV !== v) changed = true
+      result[k] = newV
     } else {
       result[k] = v
     }
+  }
+  if (!changed) {
+    if (memo) memo.set(node as object, node)
+    return node
   }
   const out = result as ExprNode
   if (memo) memo.set(node as object, out)
@@ -547,16 +584,26 @@ function offsetRegisters(node: ExprNode, offset: number, memo?: WeakMap<object, 
     return out
   }
 
+  let changed = false
   const result: Record<string, unknown> = { op: obj.op }
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'op') continue
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => offsetRegisters(n, offset, memo))
+      const arr = v as ExprNode[]
+      const newArr = arr.map(n => offsetRegisters(n, offset, memo))
+      if (newArr.some((n, i) => n !== arr[i])) changed = true
+      result[k] = newArr
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = offsetRegisters(v as ExprNode, offset, memo)
+      const newV = offsetRegisters(v as ExprNode, offset, memo)
+      if (newV !== v) changed = true
+      result[k] = newV
     } else {
       result[k] = v
     }
+  }
+  if (!changed) {
+    if (memo) memo.set(node as object, node)
+    return node
   }
   const out = result as ExprNode
   if (memo) memo.set(node as object, out)
@@ -607,16 +654,26 @@ function resolveRefs(
     return moduleOutputs[outputId]
   }
 
+  let changed = false
   const result: Record<string, unknown> = { op: obj.op }
   for (const [k, v] of Object.entries(obj)) {
     if (k === 'op') continue
     if (Array.isArray(v)) {
-      result[k] = (v as ExprNode[]).map(n => resolveRefs(n, outputExprs, outputNames, memo))
+      const arr = v as ExprNode[]
+      const newArr = arr.map(n => resolveRefs(n, outputExprs, outputNames, memo))
+      if (newArr.some((n, i) => n !== arr[i])) changed = true
+      result[k] = newArr
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      result[k] = resolveRefs(v as ExprNode, outputExprs, outputNames, memo)
+      const newV = resolveRefs(v as ExprNode, outputExprs, outputNames, memo)
+      if (newV !== v) changed = true
+      result[k] = newV
     } else {
       result[k] = v
     }
+  }
+  if (!changed) {
+    if (memo) memo.set(node as object, node)
+    return node
   }
   const out = result as ExprNode
   if (memo) memo.set(node as object, out)
