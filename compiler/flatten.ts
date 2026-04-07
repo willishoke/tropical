@@ -753,7 +753,10 @@ export function flattenPatch(session: SessionState): FlatPlan {
 
       // Register name, init value, and type
       flatRegisterNames.push(`${name}_${def.registerNames[i]}`)
-      flatRegisterTypes.push('float')
+      const portType = def.registerPortTypes[i]
+      flatRegisterTypes.push(
+        portType === 'int' ? 'int' : portType === 'bool' ? 'bool' : 'float',
+      )
       const initVal = def.registerInitValues[i]
       if (typeof initVal === 'number' || typeof initVal === 'boolean') {
         flatStateInit.push(initVal)
@@ -861,7 +864,7 @@ export function flattenPatch(session: SessionState): FlatPlan {
   }
 
   // Compile expression trees → flat instruction stream
-  const program = emitNumericProgram(flatOutputExprs, flatRegisterExprs, flatStateInit)
+  const program = emitNumericProgram(flatOutputExprs, flatRegisterExprs, flatStateInit, flatRegisterTypes)
 
   // Compute array slot names for state transfer on hot-swap.
   // Array slots are allocated in the order array entries appear in flatStateInit,

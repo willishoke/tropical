@@ -74,6 +74,35 @@ const UNARY_TAG: Record<string, string> = {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Type inference
+// ─────────────────────────────────────────────────────────────
+
+const BITWISE_TAGS = new Set(['BitAnd', 'BitOr', 'BitXor', 'LShift', 'RShift', 'BitNot'])
+const COMPARISON_TAGS = new Set(['Less', 'LessEq', 'Greater', 'GreaterEq', 'Equal', 'NotEqual', 'Not'])
+const TRANSCENDENTAL_TAGS = new Set(['Sin', 'Cos', 'Tanh', 'Log', 'Exp', 'Sqrt', 'Floor', 'Ceil', 'Round'])
+
+/** Promotion order: float > int > bool. */
+function promoteTypes(a: ScalarType, b: ScalarType): ScalarType {
+  if (a === 'float' || b === 'float') return 'float'
+  if (a === 'int' || b === 'int') return 'int'
+  return 'bool'
+}
+
+/** Infer the result ScalarType of an op from its tag and argument types. */
+function inferResultType(tag: string, argTypes: ScalarType[]): ScalarType {
+  if (BITWISE_TAGS.has(tag)) return 'int'
+  if (COMPARISON_TAGS.has(tag)) return 'bool'
+  if (TRANSCENDENTAL_TAGS.has(tag)) return 'float'
+  // Select: type of then/else branches (args[1], args[2])
+  if (tag === 'Select') return promoteTypes(argTypes[1] ?? 'float', argTypes[2] ?? 'float')
+  // Clamp: type of value (args[0])
+  if (tag === 'Clamp') return argTypes[0] ?? 'float'
+  // Arithmetic (Add, Sub, Mul, Div, Mod, Pow, FloorDiv, Neg, Abs): promote all args
+  if (argTypes.length === 0) return 'float'
+  return argTypes.reduce(promoteTypes)
+}
+
+// ─────────────────────────────────────────────────────────────
 // Internal compile result
 // ─────────────────────────────────────────────────────────────
 
@@ -97,8 +126,16 @@ class Emitter {
   private memo = new WeakMap<object, CompileResult>()
   // Map register ID → pre-allocated array slot for registers whose init value is an array.
   private arrayRegMap = new Map<number, { slot: number, size: number }>()
+  // Type tracking: temp register slot → ScalarType
+  private regTypes = new Map<number, ScalarType>()
+  // Type annotations for state registers (from module registerPortTypes)
+  private stateRegTypes: ScalarType[]
 
-  constructor(stateInit?: (number | boolean | number[])[]) {
+  constructor(
+    stateInit?: (number | boolean | number[])[],
+    stateRegTypes?: ScalarType[],
+  ) {
+    this.stateRegTypes = stateRegTypes ?? []
     if (stateInit) {
       for (let i = 0; i < stateInit.length; i++) {
         const init = stateInit[i]
@@ -122,26 +159,28 @@ class Emitter {
 
   private emit(instr: NInstr): void { this.instrs.push(instr) }
 
-  // ── Terminal check: if node is a leaf, return its Operand directly. ──
-  private tryTerminal(node: ExprNode): NOperand | null {
-    if (typeof node === 'number')  return { kind: 'const', val: node, scalar_type: 'float' }
-    if (typeof node === 'boolean') return { kind: 'const', val: node ? 1 : 0, scalar_type: 'float' }
-    if (typeof node !== 'object' || node === null) return { kind: 'const', val: 0, scalar_type: 'float' }
+  // ── Terminal check: if node is a leaf, return its Operand + type directly. ──
+  private tryTerminal(node: ExprNode): { op: NOperand; scalarType: ScalarType } | null {
+    if (typeof node === 'number')  return { op: { kind: 'const', val: node, scalar_type: 'float' }, scalarType: 'float' }
+    if (typeof node === 'boolean') return { op: { kind: 'const', val: node ? 1 : 0, scalar_type: 'bool' }, scalarType: 'bool' }
+    if (typeof node !== 'object' || node === null) return { op: { kind: 'const', val: 0, scalar_type: 'float' }, scalarType: 'float' }
     const obj = node as { op: string; [k: string]: unknown }
     switch (obj.op) {
-      case 'input':        return { kind: 'input',     slot: obj.id as number, scalar_type: 'float' }
-      case 'reg':
+      case 'input':        return { op: { kind: 'input', slot: obj.id as number, scalar_type: 'float' }, scalarType: 'float' }
+      case 'reg': {
         if (this.arrayRegMap.has(obj.id as number)) return null  // array register — handled in compileNodeUncached
-        return { kind: 'state_reg', slot: obj.id as number, scalar_type: 'float' }
-      case 'sample_rate':  return { kind: 'rate', scalar_type: 'float' }
-      case 'sample_index': return { kind: 'tick', scalar_type: 'float' }
+        const regType = this.stateRegTypes[obj.id as number] ?? 'float'
+        return { op: { kind: 'state_reg', slot: obj.id as number, scalar_type: regType }, scalarType: regType }
+      }
+      case 'sample_rate':  return { op: { kind: 'rate', scalar_type: 'float' }, scalarType: 'float' }
+      case 'sample_index': return { op: { kind: 'tick', scalar_type: 'int' }, scalarType: 'int' }
       case 'smoothed_param':
       case 'trigger_param':
         // Params embed their C++ pointer. Serialize as decimal string (JSON-safe).
         if (obj._ptr && obj._handle != null) {
-          return { kind: 'param', ptr: String(obj._handle), scalar_type: 'float' }
+          return { op: { kind: 'param', ptr: String(obj._handle), scalar_type: 'float' }, scalarType: 'float' }
         }
-        return { kind: 'const', val: 0, scalar_type: 'float' }  // no live handle
+        return { op: { kind: 'const', val: 0, scalar_type: 'float' }, scalarType: 'float' }  // no live handle
     }
     return null  // not a terminal
   }
@@ -150,7 +189,7 @@ class Emitter {
   compileNode(node: ExprNode): CompileResult {
     // Terminal shortcut — no allocation, skip memo
     const terminal = this.tryTerminal(node)
-    if (terminal !== null) return { isArray: false, op: terminal, scalarType: 'float' }
+    if (terminal !== null) return { isArray: false, op: terminal.op, scalarType: terminal.scalarType }
 
     // CSE: check memo before allocating anything
     const cached = this.memo.get(node as object)
@@ -217,8 +256,10 @@ class Emitter {
   // (which resolve_scalar returns nullptr for), causing a null-deref / segfault.
   private unboxArray(arr: ArrayResult): ScalarResult {
     const dst = this.allocReg()
-    this.emit({ tag: 'Index', dst, args: [arr.op, { kind: 'const', val: 0, scalar_type: 'float' }], loop_count: 1, strides: [], result_type: 'float' })
-    return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: 'float' }, scalarType: 'float' }
+    const rt = arr.scalarType
+    this.regTypes.set(dst, rt)
+    this.emit({ tag: 'Index', dst, args: [arr.op, { kind: 'const', val: 0, scalar_type: 'int' }], loop_count: 1, strides: [], result_type: rt })
+    return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
   }
 
   // ── Compile an inline JS array to a Pack instruction. ──
@@ -243,11 +284,12 @@ class Emitter {
     if (l.isArray && l.size === 1) l = this.unboxArray(l)
     if (r.isArray && r.size === 1) r = this.unboxArray(r)
 
-    const rt: ScalarType = 'float'
+    const rt = inferResultType(tag, [l.scalarType, r.scalarType])
 
     if (!l.isArray && !r.isArray) {
       // Scalar × scalar → scalar instruction
       const dst = this.allocReg()
+      this.regTypes.set(dst, rt)
       this.emit({ tag, dst, args: [l.op, r.op], loop_count: 1, strides: [], result_type: rt })
       return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
     }
@@ -264,10 +306,11 @@ class Emitter {
     let a = this.compileNode(argNode)
     if (a.isArray && a.size === 1) a = this.unboxArray(a)
 
-    const rt: ScalarType = 'float'
+    const rt = inferResultType(tag, [a.scalarType])
 
     if (!a.isArray) {
       const dst = this.allocReg()
+      this.regTypes.set(dst, rt)
       this.emit({ tag, dst, args: [a.op], loop_count: 1, strides: [], result_type: rt })
       return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
     }
@@ -287,10 +330,11 @@ class Emitter {
     if (b.isArray && b.size === 1) b = this.unboxArray(b)
     if (c.isArray && c.size === 1) c = this.unboxArray(c)
 
-    const rt: ScalarType = 'float'
+    const rt = inferResultType(tag, [a.scalarType, b.scalarType, c.scalarType])
     const anyArray = a.isArray || b.isArray || c.isArray
     if (!anyArray) {
       const dst = this.allocReg()
+      this.regTypes.set(dst, rt)
       this.emit({ tag, dst, args: [a.op, b.op, c.op], loop_count: 1, strides: [], result_type: rt })
       return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
     }
@@ -307,10 +351,12 @@ class Emitter {
     const arr = this.compileNode(argNodes[0])
     const idx = this.compileNode(argNodes[1])
     const dst = this.allocReg()
+    const rt = arr.scalarType  // element type of the array
+    this.regTypes.set(dst, rt)
     const arrOp: NOperand = arr.isArray ? arr.op : { kind: 'const', val: 0, scalar_type: 'float' }
-    const idxOp: NOperand = idx.isArray ? { kind: 'const', val: 0, scalar_type: 'float' } : idx.op
-    this.emit({ tag: 'Index', dst, args: [arrOp, idxOp], loop_count: 1, strides: [], result_type: 'float' })
-    return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: 'float' }, scalarType: 'float' }
+    const idxOp: NOperand = idx.isArray ? { kind: 'const', val: 0, scalar_type: 'int' } : idx.op
+    this.emit({ tag: 'Index', dst, args: [arrOp, idxOp], loop_count: 1, strides: [], result_type: rt })
+    return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
   }
 
   // ── array_set(arr, idx, val) → same array slot (side-effect mutation) ──
@@ -384,15 +430,16 @@ class Emitter {
     for (const expr of outputExprs) {
       const r = this.compileNode(expr)
       if (r.isArray) {
-        // Array output: store array slot index in a scalar temp for FlatRuntime to read
-        // (FlatRuntime reads temps[output_targets[i]] and bitcasts to double)
-        // For now, index element 0 as the scalar output
+        // Array output → index element 0 as scalar output (always float for audio)
         const dst = this.allocReg()
-        this.emit({ tag: 'Index', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: 'float' }], loop_count: 1, strides: [], result_type: 'float' })
+        this.regTypes.set(dst, 'float')
+        this.emit({ tag: 'Index', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: 'int' }], loop_count: 1, strides: [], result_type: 'float' })
         output_targets.push(dst)
       } else {
+        // Copy to output temp, preserving float for audio path
         const dst = this.allocReg()
-        this.emit({ tag: 'Add', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: 'float' }], loop_count: 1, strides: [], result_type: 'float' })
+        this.regTypes.set(dst, r.scalarType)
+        this.emit({ tag: 'Add', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: r.scalarType }], loop_count: 1, strides: [], result_type: r.scalarType })
         output_targets.push(dst)
       }
     }
@@ -406,8 +453,10 @@ class Emitter {
       if (r.isArray) {
         register_targets.push(-1)  // array registers not supported as state reg targets yet
       } else {
+        // Register update: preserve the expression type
         const dst = this.allocReg()
-        this.emit({ tag: 'Add', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: 'float' }], loop_count: 1, strides: [], result_type: 'float' })
+        this.regTypes.set(dst, r.scalarType)
+        this.emit({ tag: 'Add', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: r.scalarType }], loop_count: 1, strides: [], result_type: r.scalarType })
         register_targets.push(dst)
       }
     }
@@ -430,13 +479,16 @@ class Emitter {
 /**
  * Compile flat ExprNode trees into a FlatProgram instruction stream.
  *
- * @param outputExprs    One expression per output port.
- * @param registerExprs  One expression per state register; null = no update.
+ * @param outputExprs     One expression per output port.
+ * @param registerExprs   One expression per state register; null = no update.
+ * @param stateInit       Initial values for state registers.
+ * @param stateRegTypes   ScalarType per state register (from module registerPortTypes).
  */
 export function emitNumericProgram(
   outputExprs: ExprNode[],
   registerExprs: (ExprNode | null)[],
   stateInit?: (number | boolean | number[])[],
+  stateRegTypes?: ScalarType[],
 ): FlatProgram {
-  return new Emitter(stateInit).emitProgram(outputExprs, registerExprs)
+  return new Emitter(stateInit, stateRegTypes).emitProgram(outputExprs, registerExprs)
 }
