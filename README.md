@@ -1,4 +1,4 @@
-# egress
+# tropical
 
 A C++ library for algorithmic and generative audio synthesis. You build a graph of modules — oscillators, envelopes, effects, sequencers — wire them together with expressions, and the engine runs them in realtime at 44.1 kHz through your audio interface. Load the 31-TET patch and you hear five microtonal sine voices stepping slowly through an otonal sequence, smeared by a 16-stage phaser and a long reverb tail.
 
@@ -57,7 +57,7 @@ The legacy `connections` array is deprecated. Replace it with `input_exprs` entr
 
 ## C API
 
-A stable C API is exposed in `src/c_api/egress_c.h`. This is the integration point for language bindings and external tools.
+A stable C API is exposed in `src/c_api/tropical_c.h`. This is the integration point for language bindings and external tools.
 
 ## JIT
 
@@ -91,8 +91,8 @@ make mcp-ts
 
 ## Troubleshooting
 
-**JIT compilation failure** — JIT failures are fatal; there is no interpreter fallback. If the engine throws on startup, check that your LLVM installation matches the version expected by the build (see `CMakeLists.txt`). Stale cached kernels can also cause issues; clear `~/.cache/egress/kernels/` and rebuild.
+**JIT compilation failure** — JIT failures are fatal; there is no interpreter fallback. If the engine throws on startup, check that your LLVM installation matches the version expected by the build (see `CMakeLists.txt`). Stale cached kernels can also cause issues; clear `~/.cache/tropical/kernels/` and rebuild.
 
 ## License
 
-Free use of `egress` is permitted under the terms of the MIT License.
+Free use of `tropical` is permitted under the terms of the MIT License.

@@ -125,7 +125,7 @@ const TypeDefSchema = z.union([StructTypeDefSchema, SumTypeDefSchema])
 // ─────────────────────────────────────────────────────────────
 
 export const PatchJSONSchema = z.object({
-  schema: z.literal('egress_patch_1'),
+  schema: z.literal('tropical_patch_1'),
   config: z.object({
     buffer_length: z.number().int().positive().optional(),
     worker_count: z.number().int().positive().optional(),

@@ -1,5 +1,5 @@
 /**
- * DAC — Digital-to-Analog Converter. Port of egress/audio.py.
+ * DAC — Digital-to-Analog Converter. Port of tropical/audio.py.
  */
 
 import * as b from './bindings.js'
@@ -23,7 +23,7 @@ export interface DeviceInfo {
 }
 
 const _registry = new FinalizationRegistry((handle: unknown) => {
-  b.egress_dac_free(handle)
+  b.tropical_dac_free(handle)
 })
 
 export class DAC {
@@ -32,30 +32,30 @@ export class DAC {
   /** Create a DAC backed by a FlatRuntime. */
   static fromRuntime(runtimeHandle: unknown, sampleRate = 44100, channels = 2): DAC {
     const dac = Object.create(DAC.prototype) as DAC
-    dac._h = b.check(b.egress_dac_new_runtime(runtimeHandle, sampleRate, channels), 'dac_new_runtime')
+    dac._h = b.check(b.tropical_dac_new_runtime(runtimeHandle, sampleRate, channels), 'dac_new_runtime')
     _registry.register(dac, dac._h, dac)
     return dac
   }
 
   start(): void {
-    b.egress_dac_start(this._h)
+    b.tropical_dac_start(this._h)
   }
 
   stop(): void {
-    b.egress_dac_stop(this._h)
+    b.tropical_dac_stop(this._h)
   }
 
   get isRunning(): boolean {
-    return b.egress_dac_is_running(this._h) as boolean
+    return b.tropical_dac_is_running(this._h) as boolean
   }
 
   get isReconnecting(): boolean {
-    return b.egress_dac_is_reconnecting(this._h) as boolean
+    return b.tropical_dac_is_reconnecting(this._h) as boolean
   }
 
   callbackStats(): DacStats {
     const s: Record<string, unknown> = {}
-    b.egress_dac_get_stats(this._h, s)
+    b.tropical_dac_get_stats(this._h, s)
     return {
       callbackCount: s.callback_count as number,
       avgCallbackMs: s.avg_callback_ms as number,
@@ -66,36 +66,36 @@ export class DAC {
   }
 
   resetStats(): void {
-    b.egress_dac_reset_stats(this._h)
+    b.tropical_dac_reset_stats(this._h)
   }
 
   get activeDevice(): number {
-    return b.egress_dac_get_active_device(this._h) as number
+    return b.tropical_dac_get_active_device(this._h) as number
   }
 
   switchDevice(deviceId: number): boolean {
-    return b.egress_dac_switch_device(this._h, deviceId) as boolean
+    return b.tropical_dac_switch_device(this._h, deviceId) as boolean
   }
 
   dispose(): void {
     _registry.unregister(this)
-    b.egress_dac_free(this._h)
+    b.tropical_dac_free(this._h)
     this._h = null
   }
 
   // ---------- Static device enumeration ----------
 
   static listDevices(): DeviceInfo[] {
-    const count = b.egress_audio_device_count() as number
+    const count = b.tropical_audio_device_count() as number
     if (count === 0) return []
 
     const ids = new Uint32Array(count)
-    b.egress_audio_get_device_ids(ids, count)
+    b.tropical_audio_get_device_ids(ids, count)
 
     const devices: DeviceInfo[] = []
     for (const deviceId of ids) {
       const info: Record<string, unknown> = {}
-      if (b.egress_audio_get_device_info(deviceId, info)) {
+      if (b.tropical_audio_get_device_info(deviceId, info)) {
         const name = Array.isArray(info.name)
           ? b.decodeCharArray(info.name as number[])
           : (info.name as string)
@@ -118,6 +118,6 @@ export class DAC {
   }
 
   static defaultDevice(): number {
-    return b.egress_audio_default_output_device() as number
+    return b.tropical_audio_default_output_device() as number
   }
 }

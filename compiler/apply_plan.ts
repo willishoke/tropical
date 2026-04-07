@@ -4,7 +4,7 @@
  * Flattens the session's patch and pushes to a FlatRuntime.
  * All expression trees are inlined in TS and sent as a single flat plan.
  *
- * Flow: SessionState → flattenPatch() → egress_plan_2 JSON → runtime.loadPlan()
+ * Flow: SessionState → flattenPatch() → tropical_plan_2 JSON → runtime.loadPlan()
  */
 
 import type { SessionState } from './patch'

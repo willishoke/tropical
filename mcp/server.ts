@@ -1,5 +1,5 @@
 /**
- * TypeScript MCP server — replaces egress/mcp_server.py.
+ * TypeScript MCP server — replaces tropical/mcp_server.py.
  *
  * Run with:   bun run src/server.ts
  * Spawned by: tui/src/mcp.ts via StdioClientTransport
@@ -272,7 +272,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        patch: { type: 'object', description: 'PatchJSON object with schema: "egress_patch_1"' },
+        patch: { type: 'object', description: 'PatchJSON object with schema: "tropical_patch_1"' },
       },
       required: ['patch'],
     },
@@ -283,14 +283,14 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        patch_path: { type: 'string', description: 'Absolute or relative path to an egress_patch_1 JSON file on disk. Preferred over inline patch.' },
-        patch: { type: 'object', description: 'Inline PatchJSON object with schema: "egress_patch_1". Use patch_path instead when the patch exists as a file.' },
+        patch_path: { type: 'string', description: 'Absolute or relative path to an tropical_patch_1 JSON file on disk. Preferred over inline patch.' },
+        patch: { type: 'object', description: 'Inline PatchJSON object with schema: "tropical_patch_1". Use patch_path instead when the patch exists as a file.' },
       },
     },
   },
   {
     name: 'save_patch',
-    description: 'Serialize the current session to an egress_patch_1 JSON patch object.',
+    description: 'Serialize the current session to an tropical_patch_1 JSON patch object.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -676,21 +676,21 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
 const RESOURCES = [
   {
-    uri:         'egress://modules',
+    uri:         'tropical://modules',
     name:        'Module catalog',
     description: 'Markdown catalog of all registered module types with inputs, outputs, and default values.',
     mimeType:    'text/markdown',
   },
   {
-    uri:         'egress://patch-format',
+    uri:         'tropical://patch-format',
     name:        'Patch format',
-    description: 'Reference doc for the egress_patch_1 patch schema with a complete worked example.',
+    description: 'Reference doc for the tropical_patch_1 patch schema with a complete worked example.',
     mimeType:    'text/markdown',
   },
 ]
 
 function renderModuleCatalog(): string {
-  const lines: string[] = ['# egress module catalog\n']
+  const lines: string[] = ['# tropical module catalog\n']
   for (const [typeName, type] of session.typeRegistry) {
     lines.push(`## ${typeName}`)
     const d = type._def
@@ -706,13 +706,13 @@ function renderModuleCatalog(): string {
   return lines.join('\n')
 }
 
-const PATCH_FORMAT_DOC = `# egress_patch_1 patch format
+const PATCH_FORMAT_DOC = `# tropical_patch_1 patch format
 
-Patches are JSON objects with \`"schema": "egress_patch_1"\`.
+Patches are JSON objects with \`"schema": "tropical_patch_1"\`.
 
 ## Top-level fields
 
-- \`schema\` (required): \`"egress_patch_1"\`
+- \`schema\` (required): \`"tropical_patch_1"\`
 - \`types\` (optional): inline module type definitions (avoids a separate \`define_module\` call)
 - \`modules\`: list of \`{ type, name }\` objects
 - \`input_exprs\`: list of \`{ module, input, expr }\` objects — **canonical wiring mechanism**
@@ -743,7 +743,7 @@ Embed simple arithmetic types directly in \`types\` instead of calling \`define_
 
 \`\`\`json
 {
-  "schema": "egress_patch_1",
+  "schema": "tropical_patch_1",
   "types": [
     {
       "name": "VCA",
@@ -797,20 +797,20 @@ Used in \`input_exprs\`, \`set_module_input\`, \`set_inputs_batch\`, and inline 
 const PROMPTS = [
   {
     name:        'build-patch',
-    description: 'Three-tiered workflow guidance for building and editing egress patches efficiently.',
+    description: 'Three-tiered workflow guidance for building and editing tropical patches efficiently.',
   },
 ]
 
 const BUILD_PATCH_PROMPT = `# build-patch workflow
 
 Before writing any patch YAML, always fetch both resources:
-- \`egress://modules\` — full catalog of available module types with inputs, defaults, and outputs
-- \`egress://patch-format\` — egress_patch_1 schema reference with a worked example
+- \`tropical://modules\` — full catalog of available module types with inputs, defaults, and outputs
+- \`tropical://patch-format\` — tropical_patch_1 schema reference with a worked example
 
 ## Choose the right tool for the job
 
 ### New patch (starting from scratch)
-Use \`load_patch\` with a **complete** egress_patch_1 JSON object in a single call.
+Use \`load_patch\` with a **complete** tropical_patch_1 JSON object in a single call.
 Do not call \`instantiate_module\`, \`connect_modules\`, or \`set_module_input\` one-by-one —
 that requires 40+ round trips and recompiles the JIT kernel on every input change.
 
@@ -835,7 +835,7 @@ Do not reload or rebuild the patch for a single value change.
 // ─── Server wiring ────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: 'egress', version: '0.3.0' },
+  { name: 'tropical', version: '0.3.0' },
   { capabilities: { tools: {}, resources: {}, prompts: {} } },
 )
 
@@ -843,10 +843,10 @@ server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: R
 
 server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
   const { uri } = req.params
-  if (uri === 'egress://modules') {
+  if (uri === 'tropical://modules') {
     return { contents: [{ uri, mimeType: 'text/markdown', text: renderModuleCatalog() }] }
   }
-  if (uri === 'egress://patch-format') {
+  if (uri === 'tropical://patch-format') {
     return { contents: [{ uri, mimeType: 'text/markdown', text: PATCH_FORMAT_DOC }] }
   }
   throw new Error(`Unknown resource: ${uri}`)

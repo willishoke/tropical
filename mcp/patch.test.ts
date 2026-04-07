@@ -39,7 +39,7 @@ console.log('Plan loaded. Processing frames...')
 // Process frames and collect peak absolute value
 let peak = 0
 for (let i = 0; i < nFrames; i++) {
-  b.egress_runtime_process(runtime._h)
+  b.tropical_runtime_process(runtime._h)
   const buf = runtime.outputBuffer
   for (let s = 0; s < buf.length; s++) {
     const abs = Math.abs(buf[s])

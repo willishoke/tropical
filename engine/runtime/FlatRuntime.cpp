@@ -5,7 +5,7 @@
 #include <bit>
 #include <stdexcept>
 
-namespace egress_runtime
+namespace tropical_runtime
 {
 
 bool FlatRuntime::load_plan(const std::string & plan_json)
@@ -16,12 +16,12 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
 
   const std::string schema = plan.value("schema", std::string{});
 
-  // ── egress_plan_4: compiled flat instruction stream with typed operands ──
-  if (schema == "egress_plan_4")
+  // ── tropical_plan_4: compiled flat instruction stream with typed operands ──
+  if (schema == "tropical_plan_4")
   {
-    const auto parsed = egress_plan4::parse_plan4(plan);
+    const auto parsed = tropical_plan4::parse_plan4(plan);
 
-    auto kernel_result = egress_jit::OrcJitEngine::instance().compile_flat_program(parsed.program);
+    auto kernel_result = tropical_jit::OrcJitEngine::instance().compile_flat_program(parsed.program);
     if (!kernel_result)
     {
       std::string err;
@@ -43,8 +43,8 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
     {
       const auto ty = (i < parsed.register_types.size())
         ? parsed.register_types[i]
-        : egress_jit::JitScalarType::Float;
-      if (ty == egress_jit::JitScalarType::Int || ty == egress_jit::JitScalarType::Bool)
+        : tropical_jit::JitScalarType::Float;
+      if (ty == tropical_jit::JitScalarType::Int || ty == tropical_jit::JitScalarType::Bool)
         new_state.registers[i] = static_cast<int64_t>(parsed.state_init[i]);
       else
         new_state.registers[i] = std::bit_cast<int64_t>(parsed.state_init[i]);
@@ -100,4 +100,4 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
   throw std::runtime_error("FlatRuntime: unsupported schema '" + schema + "'");
 }
 
-} // namespace egress_runtime
+} // namespace tropical_runtime

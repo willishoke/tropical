@@ -1,5 +1,5 @@
 /**
- * Preset module types. Port of egress/module_library.py.
+ * Preset module types. Port of tropical/module_library.py.
  */
 
 import {

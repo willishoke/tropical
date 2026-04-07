@@ -1,5 +1,5 @@
 /**
- * emit_numeric.ts — TS instruction emitter for egress_plan_4.
+ * emit_numeric.ts — TS instruction emitter for tropical_plan_4.
  *
  * Replaces the C++ PlanParser + ExprCompiler + NumericProgramBuilder pipeline.
  * Walks ExprNode trees (post-flatten, post-lower_arrays) and emits a flat

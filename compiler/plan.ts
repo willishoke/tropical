@@ -5,7 +5,7 @@
  * that can be serialized to JSON and loaded by the C++ runtime.
  *
  * The execution plan is the universal frontend interface — the "LLVM IR"
- * of egress. Any frontend (TS DSL, visual patcher, LLM agent) can emit
+ * of tropical. Any frontend (TS DSL, visual patcher, LLM agent) can emit
  * plans; the C++ runtime loads and JIT-compiles them.
  *
  * Type information is erased at this stage — only layouts, kernel IDs,
@@ -20,7 +20,7 @@ import type { CompiledPatch, ModuleInfo } from './compiler'
 // ─────────────────────────────────────────────────────────────
 
 export interface ExecutionPlan {
-  schema: 'egress_plan_1'
+  schema: 'tropical_plan_1'
   config: PlanConfig
   /** Kernels in topological execution order. */
   kernels: KernelSpec[]
@@ -158,7 +158,7 @@ export function generatePlan(
   }
 
   return {
-    schema: 'egress_plan_1',
+    schema: 'tropical_plan_1',
     config: cfg,
     kernels,
     wiring,

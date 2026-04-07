@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "egress": {
+    "tropical": {
       "command": "bun",
       "args": ["run", "mcp/server.ts"]
     }

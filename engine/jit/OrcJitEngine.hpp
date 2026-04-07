@@ -14,7 +14,7 @@
 
 #include <filesystem>
 
-namespace egress_jit
+namespace tropical_jit
 {
 enum class JitScalarType : uint8_t { Float, Int, Bool };
 
@@ -145,4 +145,4 @@ class OrcJitEngine
     std::unordered_map<std::string, NumericKernelFn> kernel_cache_;
     std::unique_ptr<KernelObjectCache> object_cache_;
 };
-} // namespace egress_jit
+} // namespace tropical_jit

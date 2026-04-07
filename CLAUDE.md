@@ -1,11 +1,11 @@
-# egress
+# tropical
 
 C++ realtime audio synthesis library with LLVM ORC JIT, a TypeScript TUI (Ink/React), and an MCP server for programmatic control.
 
 ## Build
 
 ```bash
-make build          # C++ core with LLVM JIT, outputs build/libegress.dylib
+make build          # C++ core with LLVM JIT, outputs build/libtropical.dylib
 make tui-ts         # build + launch full-screen TUI (requires Bun)
 make mcp-ts         # build + launch MCP server on stdio
 make debug          # build with tests enabled
@@ -32,16 +32,16 @@ compiler/     TS language layer: expression DSL, module library, type system,
 mcp/          MCP server — primary agent interface, AI-native delivery surface
 ```
 
-**Data flow:** TypeScript DSL → expression trees (ExprNode JSON) → flatten → egress_plan_2 JSON → C++ FlatRuntime → JIT → audio callback
+**Data flow:** TypeScript DSL → expression trees (ExprNode JSON) → flatten → tropical_plan_2 JSON → C++ FlatRuntime → JIT → audio callback
 
-**Key boundary:** the C API in `engine/c_api/egress_c.h` is the interface between the compiler layer and C++. It exposes: FlatRuntime (plan loading, audio processing), ControlParam (smoothed/trigger parameters), DAC (audio output), and device enumeration. Module definitions and expression building happen entirely in TypeScript.
+**Key boundary:** the C API in `engine/c_api/tropical_c.h` is the interface between the compiler layer and C++. It exposes: FlatRuntime (plan loading, audio processing), ControlParam (smoothed/trigger parameters), DAC (audio output), and device enumeration. Module definitions and expression building happen entirely in TypeScript.
 
 ## Core concepts
 
-- **FlatRuntime** receives a flat JSON plan (egress_plan_2), JIT-compiles all expressions into a single native kernel, and runs it per-sample. No module boundaries at runtime.
+- **FlatRuntime** receives a flat JSON plan (tropical_plan_2), JIT-compiles all expressions into a single native kernel, and runs it per-sample. No module boundaries at runtime.
 - **Module types** are defined in `compiler/module_library.ts` using the DSL in `module.ts`. Each type specifies inputs, outputs, registers, and a process function that builds expression trees. Instantiation is TS-only — no C API calls.
 - **Expressions** are symbolic JSON trees (ExprNode). They define module I/O behavior and get flattened + JIT-compiled to native code.
-- **Flattening** (`compiler/flatten.ts`) inlines all module expression trees, resolves inter-module references, and produces a single egress_plan_2 with flat output/register expression arrays.
+- **Flattening** (`compiler/flatten.ts`) inlines all module expression trees, resolves inter-module references, and produces a single tropical_plan_2 with flat output/register expression arrays.
 - **Single-sample boundary:** connected modules always read previous-sample outputs. No implicit multi-sample delay.
 
 ## JIT pipeline
@@ -52,11 +52,11 @@ JIT failures are **fatal** (no interpreter fallback). If a plan fails to compile
 
 ## Patch format
 
-Patches are JSON files in `patches/`. Schema version: `egress_patch_1`.
+Patches are JSON files in `patches/`. Schema version: `tropical_patch_1`.
 
 ```json
 {
-  "schema": "egress_patch_1",
+  "schema": "tropical_patch_1",
   "modules": [{"type": "VCO", "name": "VCO1"}, ...],
   "outputs": [{"module": "VCA1", "output": "out"}, ...],
   "input_exprs": [{"module": "VCA1", "input": "audio", "expr": {"op": "ref", "module": "VCO1", "output": "saw"}}, ...]

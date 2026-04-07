@@ -1,5 +1,5 @@
 {
-  "schema": "egress_patch_1",
+  "schema": "tropical_patch_1",
   "modules": [
     {"type": "Clock",        "name": "ClockStep"},
     {"type": "Clock",        "name": "ClockBeat"},

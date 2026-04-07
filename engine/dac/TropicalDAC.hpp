@@ -19,7 +19,7 @@ static inline void update_max(std::atomic<uint64_t>& cur, uint64_t val)
 }
 
 /**
- * EgressDACImpl — templated DAC driver.
+ * TropicalDACImpl — templated DAC driver.
  *
  * AudioSource must provide:
  *   void process();
@@ -32,7 +32,7 @@ static inline void update_max(std::atomic<uint64_t>& cur, uint64_t val)
  * Both Graph and FlatRuntime satisfy this.
  */
 template <typename AudioSource>
-struct EgressDACImpl
+struct TropicalDACImpl
 {
   AudioSource* source;
   RtAudio      audio;
@@ -51,7 +51,7 @@ struct EgressDACImpl
   std::thread           watcher_thread_;
   unsigned int          active_device_id_{0};
 
-  EgressDACImpl(AudioSource* s, unsigned int sr, unsigned int ch)
+  TropicalDACImpl(AudioSource* s, unsigned int sr, unsigned int ch)
     : source(s), sample_rate(sr), channels(ch)
   {
     audio.setErrorCallback([this](RtAudioErrorType type, const std::string&) {
@@ -60,7 +60,7 @@ struct EgressDACImpl
     });
   }
 
-  ~EgressDACImpl() { stop(); }
+  ~TropicalDACImpl() { stop(); }
 
   void start()
   {
@@ -85,7 +85,7 @@ struct EgressDACImpl
 
     device_disconnected_.store(false, std::memory_order_relaxed);
     watcher_shutdown_.store(false, std::memory_order_relaxed);
-    watcher_thread_ = std::thread(&EgressDACImpl::watcher_loop, this);
+    watcher_thread_ = std::thread(&TropicalDACImpl::watcher_loop, this);
   }
 
   void stop()
@@ -187,7 +187,7 @@ struct EgressDACImpl
 
     device_disconnected_.store(false, std::memory_order_relaxed);
     watcher_shutdown_.store(false, std::memory_order_relaxed);
-    watcher_thread_ = std::thread(&EgressDACImpl::watcher_loop, this);
+    watcher_thread_ = std::thread(&TropicalDACImpl::watcher_loop, this);
 
     return ok;
   }
@@ -202,7 +202,7 @@ struct EgressDACImpl
   {
     const auto t0 = std::chrono::steady_clock::now();
 
-    auto* self = static_cast<EgressDACImpl*>(user_data);
+    auto* self = static_cast<TropicalDACImpl*>(user_data);
 
     if (status)
       self->underrun_count_.fetch_add(1, std::memory_order_relaxed);
@@ -259,7 +259,7 @@ private:
       RTAUDIO_FLOAT64,
       sample_rate,
       &buffer_frames,
-      &EgressDACImpl::fill_buffer,
+      &TropicalDACImpl::fill_buffer,
       this);
 
     audio.startStream();
