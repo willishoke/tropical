@@ -20,7 +20,7 @@ import {
   type CompilerInput,
 } from './compiler'
 import {
-  Float, Int, Bool, Unit, StructType, ArrayType,
+  Float, Int, Bool, Unit, ArrayType,
   product, portTypeEqual, portTypeToString,
 } from './term'
 import { inferType } from './type_check'
@@ -77,10 +77,9 @@ describe('portTypeFromString', () => {
     expect(portTypeEqual(portTypeFromString(undefined), Float)).toBe(true)
   })
 
-  test('unknown name becomes struct type', () => {
+  test('unknown name without registry defaults to float', () => {
     const t = portTypeFromString('MyStruct')
-    expect(t.tag).toBe('struct')
-    expect(portTypeEqual(t, StructType('MyStruct'))).toBe(true)
+    expect(portTypeEqual(t, Float)).toBe(true)
   })
 
   test('array type with shape', () => {

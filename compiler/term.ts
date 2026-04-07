@@ -20,9 +20,8 @@ export type ScalarKind = 'float' | 'int' | 'bool'
 export type PortType =
   | { tag: 'scalar'; scalar: ScalarKind }
   | { tag: 'array'; element: PortType; shape: number[] }
-  | { tag: 'struct'; name: string }
-  | { tag: 'sum'; name: string }
   | { tag: 'product'; factors: PortType[] }
+  | { tag: 'coproduct'; summands: PortType[] }
   | { tag: 'unit' }
 
 // Constructors
@@ -31,8 +30,7 @@ export const Float: PortType = ScalarType('float')
 export const Int: PortType = ScalarType('int')
 export const Bool: PortType = ScalarType('bool')
 export const Unit: PortType = { tag: 'unit' }
-export const StructType = (name: string): PortType => ({ tag: 'struct', name })
-export const SumType = (name: string): PortType => ({ tag: 'sum', name })
+export const CoproductType = (summands: PortType[]): PortType => ({ tag: 'coproduct', summands })
 
 /**
  * Construct an array type: element type with a static shape.
@@ -106,9 +104,11 @@ export function scalarCount(t: PortType): number {
     case 'scalar': return 1
     case 'unit': return 0
     case 'array': return shapeSize(t.shape) * scalarCount(t.element)
-    case 'struct': return 1 // opaque — struct scalar count comes from registry
-    case 'sum': return 1
     case 'product': return t.factors.reduce((s, f) => s + scalarCount(f), 0)
+    case 'coproduct': {
+      const maxSummand = t.summands.reduce((max, s) => Math.max(max, scalarCount(s)), 0)
+      return 1 + maxSummand  // tag + padded payload
+    }
   }
 }
 
@@ -144,13 +144,15 @@ export function portTypeEqual(a: PortType, b: PortType): boolean {
       if (!a.shape.every((d, i) => d === ba.shape[i])) return false
       return portTypeEqual(a.element, ba.element)
     }
-    case 'struct':
-    case 'sum':
-      return a.name === (b as typeof a).name
     case 'product': {
       const bp = b as typeof a
       if (a.factors.length !== bp.factors.length) return false
       return a.factors.every((f, i) => portTypeEqual(f, bp.factors[i]))
+    }
+    case 'coproduct': {
+      const bc = b as typeof a
+      if (a.summands.length !== bc.summands.length) return false
+      return a.summands.every((s, i) => portTypeEqual(s, bc.summands[i]))
     }
     case 'unit':
       return true
@@ -164,10 +166,10 @@ export function portTypeToString(t: PortType): string {
   switch (t.tag) {
     case 'scalar': return t.scalar
     case 'array': return `${portTypeToString(t.element)}[${t.shape.join(',')}]`
-    case 'struct': return t.name
-    case 'sum': return t.name
     case 'product':
       return t.factors.map(portTypeToString).join(' ⊗ ')
+    case 'coproduct':
+      return t.summands.map(portTypeToString).join(' ⊕ ')
     case 'unit': return 'I'
   }
 }

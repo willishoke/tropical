@@ -16,9 +16,10 @@
 import type { ExprNode, SessionState } from './patch'
 import {
   type PortType, type Term, type MorphismBody, type StateInit,
-  Float, Int, Bool, Unit, StructType, ArrayType,
+  Float, Int, Bool, Unit, ArrayType,
   product, morphism, compose, tensor, trace, tensorAll, composeAll, id,
 } from './term'
+import { TypeRegistry } from './type_registry.js'
 import { inferType } from './type_check'
 
 // ─────────────────────────────────────────────────────────────
@@ -44,15 +45,18 @@ export class CompilerError extends Error {
  *   'float[4]', 'float[4,4]'             — arrays with static shapes
  *   'array'                                — float[1] (legacy compat)
  *   'matrix'                               — float[1,1] (legacy compat)
- *   anything else                          — struct type
+ *   anything else                          — named type (elaborated via registry)
+ *
+ * If a TypeRegistry is provided, named types are elaborated to structural
+ * PortTypes. Otherwise, named types produce a product([]) placeholder.
  */
-export function portTypeFromString(s: string | undefined): PortType {
+export function portTypeFromString(s: string | undefined, registry?: TypeRegistry): PortType {
   if (s === undefined) return Float
 
   // Check for array syntax: type[d1,d2,...] e.g. float[8], int[4,4]
   const arrayMatch = s.match(/^(\w+)\[([^\]]+)\]$/)
   if (arrayMatch) {
-    const elementType = portTypeFromString(arrayMatch[1])
+    const elementType = portTypeFromString(arrayMatch[1], registry)
     const shape = arrayMatch[2].split(',').map(d => {
       const n = parseInt(d.trim(), 10)
       if (isNaN(n) || n <= 0) throw new Error(`Invalid array dimension '${d.trim()}' in type '${s}'`)
@@ -68,7 +72,13 @@ export function portTypeFromString(s: string | undefined): PortType {
     case 'unit':  return Unit
     case 'array': return ArrayType(Float, [1])  // legacy: bare 'array' — shape from init value
     case 'matrix': return ArrayType(Float, [1, 1])  // legacy: bare 'matrix'
-    default:      return StructType(s)
+    default: {
+      if (registry && registry.has(s)) {
+        return registry.toPortType(s)
+      }
+      // Unknown named type without registry — treat as single float (backward compat)
+      return Float
+    }
   }
 }
 

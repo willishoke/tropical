@@ -10,7 +10,7 @@ import {
   type PortType,
   type Term,
   Float, Int, Bool, Unit,
-  ScalarType, StructType, SumType, ArrayType,
+  ScalarType, CoproductType, ArrayType,
   product,
   portTypeEqual,
   portTypeToString,
@@ -38,7 +38,7 @@ const arbPortType: fc.Arbitrary<PortType> = fc.letrec<{ type: PortType }>(tie =>
   type: fc.oneof(
     { weight: 5, arbitrary: arbScalar },
     { weight: 1, arbitrary: fc.constant(Unit) },
-    { weight: 2, arbitrary: fc.string({ minLength: 1, maxLength: 8 }).map(StructType) },
+    { weight: 2, arbitrary: fc.array(arbScalar, { minLength: 1, maxLength: 3 }).map(CoproductType) },
     {
       weight: 3,
       arbitrary: fc.array(tie('type'), { minLength: 2, maxLength: 4 }).map(product),
@@ -104,9 +104,18 @@ describe('PortType', () => {
     expect(portTypeEqual(Unit, Float)).toBe(false)
   })
 
-  test('struct equality by name', () => {
-    expect(portTypeEqual(StructType('Foo'), StructType('Foo'))).toBe(true)
-    expect(portTypeEqual(StructType('Foo'), StructType('Bar'))).toBe(false)
+  test('coproduct structural equality', () => {
+    expect(portTypeEqual(CoproductType([Float, Int]), CoproductType([Float, Int]))).toBe(true)
+    expect(portTypeEqual(CoproductType([Float, Int]), CoproductType([Float, Bool]))).toBe(false)
+    expect(portTypeEqual(CoproductType([Float]), CoproductType([Float, Int]))).toBe(false)
+  })
+
+  test('scalarCount — coproduct', () => {
+    // Temp = Hot | Cold → coproduct([Unit, Unit]) → 1 + max(0, 0) = 1
+    expect(scalarCount(CoproductType([Unit, Unit]))).toBe(1)
+    // NoteEvent = NoteOn(float,float) | NoteOff(float)
+    // → coproduct([product([Float,Float]), Float]) → 1 + max(2, 1) = 3
+    expect(scalarCount(CoproductType([product([Float, Float]), Float]))).toBe(3)
   })
 
   test('product flattening', () => {
