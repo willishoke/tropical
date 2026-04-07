@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * NumericProgramParser.hpp — Parse egress_plan_3 JSON → FlatProgram.
+ * NumericProgramParser.hpp — Parse egress_plan_4 JSON → FlatProgram.
  *
  * Thin deserialiser: no expression tree walking, no second compiler.
  * Reads the instruction stream emitted by compiler/emit_numeric.ts and
@@ -16,7 +16,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace egress_plan3
+namespace egress_plan4
 {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,19 +73,27 @@ inline egress_jit::OpTag parse_op_tag(const std::string & s)
   return it->second;
 }
 
+inline egress_jit::JitScalarType parse_scalar_type(const std::string & s)
+{
+  if (s == "int")  return egress_jit::JitScalarType::Int;
+  if (s == "bool") return egress_jit::JitScalarType::Bool;
+  return egress_jit::JitScalarType::Float;
+}
+
 inline egress_jit::Operand parse_operand(const nlohmann::json & j)
 {
   const std::string kind = j.at("kind").get<std::string>();
+  const auto st = parse_scalar_type(j.value("scalar_type", "float"));
   if (kind == "const")
-    return egress_jit::Operand::make_const(j.at("val").get<double>());
+    return egress_jit::Operand::make_const(j.at("val").get<double>(), st);
   if (kind == "input")
-    return egress_jit::Operand::make_input(j.at("slot").get<uint32_t>());
+    return egress_jit::Operand::make_input(j.at("slot").get<uint32_t>(), st);
   if (kind == "reg")
-    return egress_jit::Operand::make_reg(j.at("slot").get<uint32_t>());
+    return egress_jit::Operand::make_reg(j.at("slot").get<uint32_t>(), st);
   if (kind == "array_reg")
     return egress_jit::Operand::make_array_reg(j.at("slot").get<uint32_t>());
   if (kind == "state_reg")
-    return egress_jit::Operand::make_state(j.at("slot").get<uint32_t>());
+    return egress_jit::Operand::make_state(j.at("slot").get<uint32_t>(), st);
   if (kind == "param")
   {
     const uint64_t ptr = std::stoull(j.at("ptr").get<std::string>());
@@ -97,22 +105,23 @@ inline egress_jit::Operand parse_operand(const nlohmann::json & j)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Parsed plan_3 result
+// Parsed plan_4 result
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct ParsedPlan3
+struct ParsedPlan4
 {
   egress_jit::FlatProgram  program;
   std::vector<double>      state_init;
   std::vector<std::string> register_names;
+  std::vector<egress_jit::JitScalarType> register_types;
   std::vector<std::string> array_slot_names;
   std::vector<uint32_t>    mix_indices;
   double                   sample_rate = 44100.0;
 };
 
-inline ParsedPlan3 parse_plan3(const nlohmann::json & plan)
+inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
 {
-  ParsedPlan3 result;
+  ParsedPlan4 result;
 
   result.sample_rate = plan.value("config", nlohmann::json::object())
                            .value("sample_rate", 44100.0);
@@ -134,6 +143,10 @@ inline ParsedPlan3 parse_plan3(const nlohmann::json & plan)
   if (plan.contains("register_names"))
     for (const auto & n : plan["register_names"])
       result.register_names.push_back(n.get<std::string>());
+
+  if (plan.contains("register_types"))
+    for (const auto & t : plan["register_types"])
+      result.register_types.push_back(parse_scalar_type(t.get<std::string>()));
 
   if (plan.contains("array_slot_names"))
     for (const auto & n : plan["array_slot_names"])
@@ -171,9 +184,10 @@ inline ParsedPlan3 parse_plan3(const nlohmann::json & plan)
     for (const auto & ji : plan["instructions"])
     {
       egress_jit::FlatInstr instr;
-      instr.tag        = parse_op_tag(ji.at("tag").get<std::string>());
-      instr.dst        = ji.at("dst").get<uint32_t>();
-      instr.loop_count = ji.value("loop_count", 1u);
+      instr.tag         = parse_op_tag(ji.at("tag").get<std::string>());
+      instr.result_type = parse_scalar_type(ji.value("result_type", "float"));
+      instr.dst         = ji.at("dst").get<uint32_t>();
+      instr.loop_count  = ji.value("loop_count", 1u);
 
       if (ji.contains("args"))
         for (const auto & a : ji["args"])
@@ -190,4 +204,4 @@ inline ParsedPlan3 parse_plan3(const nlohmann::json & plan)
   return result;
 }
 
-} // namespace egress_plan3
+} // namespace egress_plan4

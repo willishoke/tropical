@@ -828,7 +828,7 @@ export function noiseLFSR(name = 'NoiseLFSR'): ModuleType {
     name,
     ['clock'],
     ['out'],
-    { state: 0xACE1, value: 0.0 },
+    { state: { init: 0xACE1, type: 'int' }, value: 0.0 },
     (inp, reg) => {
       const clock = inp.get('clock')
       const prevClock = delay(clock, 0.0)

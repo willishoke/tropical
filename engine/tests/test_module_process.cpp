@@ -2,7 +2,7 @@
  * test_module_process.cpp
  *
  * Exercises the FlatRuntime C API (egress_runtime_*) and JIT code paths
- * without an audio device.  Plans are specified as egress_plan_3 JSON strings,
+ * without an audio device.  Plans are specified as egress_plan_4 JSON strings,
  * compiled to native kernels via compile_flat_program, and processed in-memory.
  */
 
@@ -81,7 +81,7 @@ static void test_sawtooth()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -142,7 +142,7 @@ static void test_two_outputs_mix()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [],
     "register_names": [],
@@ -186,7 +186,7 @@ static void test_hot_swap_preserves_state()
 
   // Plan A: output = reg(0), register update = mod(reg(0) + 440/sr, 1)
   std::string plan_a = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -220,7 +220,7 @@ static void test_hot_swap_preserves_state()
 
   // Plan B: output = reg(0) * 5.0, same register name "phase"
   std::string plan_b = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -273,7 +273,7 @@ static void test_array_literal()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0, 1.0],
     "register_names": ["idx", "idx2"],
@@ -329,7 +329,7 @@ static void test_counter_wrap()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["counter"],
@@ -380,7 +380,7 @@ static void test_select_conditional()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -430,7 +430,7 @@ static void test_multi_register_clock()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0, 0.0],
     "register_names": ["phase", "gate"],
@@ -486,7 +486,7 @@ static void test_multiple_outputs_summed()
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_3",
+    "schema": "egress_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [],
     "register_names": [],
@@ -515,6 +515,170 @@ static void test_multiple_outputs_summed()
   egress_runtime_free(rt);
 }
 
+/**
+ * 9. Typed integer bitwise ops (LFSR-style)
+ *
+ * State register 0 (seed): init=1, type=int
+ * Update: BitXor(RShift(state, 1), BitAnd(Mul(BitAnd(state, 1), 0xB400), 0xFFFF))
+ * This is a 16-bit LFSR step. With scalar_type annotations, the JIT should
+ * emit native i64 ops (no FPToSI/SIToFP round-trips).
+ *
+ * Output 0: state value (as float / 20.0 via output mix)
+ * Process 4 steps and verify LFSR sequence: 1, 0x5A00, 0x2D00, 0x1680
+ */
+static void test_typed_int_bitwise()
+{
+  const unsigned int buf_len = 1;
+  egress_runtime_t rt = egress_runtime_new(buf_len);
+  ASSERT(rt != nullptr);
+
+  // LFSR: next = (state >> 1) ^ ((state & 1) * 0xB400 & 0xFFFF)
+  // reg0 = state_reg(0)                               [int]
+  // reg1 = BitAnd(reg0, 1)                             [int] — extract LSB
+  // reg2 = Mul(reg1, 0xB400)                           [int] — feedback mask
+  // reg3 = BitAnd(reg2, 0xFFFF)                        [int] — 16-bit mask
+  // reg4 = RShift(reg0, 1)                             [int] — shift right
+  // reg5 = BitXor(reg4, reg3)                          [int] — next state
+  // reg6 = SIToFP equivalent via Mul(reg0, 1.0)        [float] — for output
+  std::string plan = R"({
+    "schema": "egress_plan_4",
+    "config": { "sample_rate": 44100.0 },
+    "state_init": [1.0],
+    "register_names": ["lfsr_state"],
+    "register_types": ["int"],
+    "outputs": [0],
+    "instructions": [
+      {"tag":"Add","dst":0,"result_type":"int","args":[
+        {"kind":"state_reg","slot":0,"scalar_type":"int"},
+        {"kind":"const","val":0.0,"scalar_type":"int"}
+      ],"loop_count":1,"strides":[]},
+      {"tag":"BitAnd","dst":1,"result_type":"int","args":[
+        {"kind":"reg","slot":0,"scalar_type":"int"},
+        {"kind":"const","val":1.0,"scalar_type":"int"}
+      ],"loop_count":1,"strides":[]},
+      {"tag":"Mul","dst":2,"result_type":"int","args":[
+        {"kind":"reg","slot":1,"scalar_type":"int"},
+        {"kind":"const","val":46080.0,"scalar_type":"int"}
+      ],"loop_count":1,"strides":[]},
+      {"tag":"BitAnd","dst":3,"result_type":"int","args":[
+        {"kind":"reg","slot":2,"scalar_type":"int"},
+        {"kind":"const","val":65535.0,"scalar_type":"int"}
+      ],"loop_count":1,"strides":[]},
+      {"tag":"RShift","dst":4,"result_type":"int","args":[
+        {"kind":"reg","slot":0,"scalar_type":"int"},
+        {"kind":"const","val":1.0,"scalar_type":"int"}
+      ],"loop_count":1,"strides":[]},
+      {"tag":"BitXor","dst":5,"result_type":"int","args":[
+        {"kind":"reg","slot":4,"scalar_type":"int"},
+        {"kind":"reg","slot":3,"scalar_type":"int"}
+      ],"loop_count":1,"strides":[]},
+      {"tag":"Mul","dst":6,"result_type":"float","args":[
+        {"kind":"reg","slot":0,"scalar_type":"int"},
+        {"kind":"const","val":1.0,"scalar_type":"float"}
+      ],"loop_count":1,"strides":[]}
+    ],
+    "register_count": 7,
+    "array_slot_sizes": [],
+    "output_targets": [6],
+    "register_targets": [5]
+  })";
+
+  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
+
+  // LFSR sequence starting from seed=1:
+  // step 0: state=1, output=1
+  //   LSB=1, feedback=0xB400 & 0xFFFF=0xB400, shift=0, next=0^0xB400=0xB400
+  //   Wait: 0xB400 = 46080
+  // step 1: state=0xB400=46080
+  //   LSB=0, feedback=0, shift=0xB400>>1=0x5A00=23040, next=0x5A00
+  // step 2: state=0x5A00=23040
+  //   LSB=0, feedback=0, shift=0x5A00>>1=0x2D00=11520, next=0x2D00
+  // step 3: state=0x2D00=11520
+  //   LSB=0, feedback=0, shift=0x2D00>>1=0x1680=5760, next=0x1680
+
+  double expected[] = {1.0, 46080.0, 23040.0, 11520.0};
+  for (int i = 0; i < 4; ++i) {
+    egress_runtime_process(rt);
+    const double* buf = egress_runtime_output_buffer(rt);
+    ASSERT(buf != nullptr);
+    ASSERT_NEAR(buf[0], expected[i] / 20.0, 1e-6);
+  }
+
+  egress_runtime_free(rt);
+}
+
+/**
+ * 10. Bool-typed comparison chain with Select
+ *
+ * No state registers. Pure combinational:
+ * reg0 = tick (sample index, int)
+ * reg1 = Greater(reg0, 2)   → bool
+ * reg2 = Less(reg0, 6)      → bool
+ * reg3 = BitAnd(reg1, reg2) → int (bool promoted to int for bitwise)
+ * reg4 = Select(reg3, 10.0, 0.0) → float
+ *
+ * Output: 10/20=0.5 when 2 < tick < 6, else 0.
+ * Tick starts at 0 for first buffer, 1 for second, etc. (buf_len=1)
+ */
+static void test_typed_bool_select()
+{
+  const unsigned int buf_len = 1;
+  egress_runtime_t rt = egress_runtime_new(buf_len);
+  ASSERT(rt != nullptr);
+
+  std::string plan = R"({
+    "schema": "egress_plan_4",
+    "config": { "sample_rate": 44100.0 },
+    "state_init": [],
+    "register_names": [],
+    "outputs": [0],
+    "instructions": [
+      {"tag":"Add","dst":0,"result_type":"int","args":[
+        {"kind":"tick","scalar_type":"int"},
+        {"kind":"const","val":0.0,"scalar_type":"int"}
+      ],"loop_count":1,"strides":[]},
+      {"tag":"Greater","dst":1,"result_type":"bool","args":[
+        {"kind":"reg","slot":0,"scalar_type":"int"},
+        {"kind":"const","val":2.0,"scalar_type":"int"}
+      ],"loop_count":1,"strides":[]},
+      {"tag":"Less","dst":2,"result_type":"bool","args":[
+        {"kind":"reg","slot":0,"scalar_type":"int"},
+        {"kind":"const","val":6.0,"scalar_type":"int"}
+      ],"loop_count":1,"strides":[]},
+      {"tag":"BitAnd","dst":3,"result_type":"int","args":[
+        {"kind":"reg","slot":1,"scalar_type":"bool"},
+        {"kind":"reg","slot":2,"scalar_type":"bool"}
+      ],"loop_count":1,"strides":[]},
+      {"tag":"Select","dst":4,"result_type":"float","args":[
+        {"kind":"reg","slot":3,"scalar_type":"int"},
+        {"kind":"const","val":10.0,"scalar_type":"float"},
+        {"kind":"const","val":0.0,"scalar_type":"float"}
+      ],"loop_count":1,"strides":[]}
+    ],
+    "register_count": 5,
+    "array_slot_sizes": [],
+    "output_targets": [4],
+    "register_targets": []
+  })";
+
+  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
+
+  // tick: 0,1,2,3,4,5,6,7
+  // >2:  F,F,F,T,T,T,T,T
+  // <6:  T,T,T,T,T,T,F,F
+  // AND: F,F,F,T,T,T,F,F
+  // out: 0,0,0,0.5,0.5,0.5,0,0
+  double expected[] = {0, 0, 0, 0.5, 0.5, 0.5, 0, 0};
+  for (int i = 0; i < 8; ++i) {
+    egress_runtime_process(rt);
+    const double* buf = egress_runtime_output_buffer(rt);
+    ASSERT(buf != nullptr);
+    ASSERT_NEAR(buf[0], expected[i], 1e-9);
+  }
+
+  egress_runtime_free(rt);
+}
+
 // ---- main -------------------------------------------------------------------
 
 int main()
@@ -529,6 +693,8 @@ int main()
   run_test("select/conditional expression",  test_select_conditional);
   run_test("multi-register clock",           test_multi_register_clock);
   run_test("multiple outputs summed",        test_multiple_outputs_summed);
+  run_test("typed int bitwise (LFSR)",       test_typed_int_bitwise);
+  run_test("typed bool comparison + select", test_typed_bool_select);
 
   printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
