@@ -12,10 +12,9 @@ EXTRA_CMAKE_ARGS ?=
 
 define configure_and_build
 	cmake -S $(ROOT) -B $(1) \
-		-DEGRESS_BUILD_PYTHON=ON \
-		-DEGRESS_PROFILE=$(2) \
+		-DTROPICAL_BUILD_PYTHON=ON \
+		-DTROPICAL_PROFILE=$(2) \
 		-DLLVM_DIR=$(LLVM_DIR) \
-		-DPython3_EXECUTABLE=$(PYTHON) \
 		$(EXTRA_CMAKE_ARGS)
 	cmake --build $(1) -j$(JOBS)
 endef

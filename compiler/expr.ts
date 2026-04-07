@@ -1,5 +1,5 @@
 /**
- * SignalExpr — symbolic expression wrapper. Port of egress/expr.py.
+ * SignalExpr — symbolic expression wrapper. Port of tropical/expr.py.
  *
  * TypeScript has no operator overloading, so all operations are named
  * free functions: add(a, b), mul(a, b), sin(x), etc.

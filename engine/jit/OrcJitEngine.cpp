@@ -29,7 +29,7 @@
 
 namespace fs = std::filesystem;
 
-namespace egress_jit
+namespace tropical_jit
 {
 
 // ---------------------------------------------------------------------------
@@ -195,7 +195,7 @@ static fs::path kernel_cache_dir()
     base = fs::path(home) / ".cache";
   else
     base = fs::temp_directory_path();
-  return base / "egress" / "kernels" / binary_build_id();
+  return base / "tropical" / "kernels" / binary_build_id();
 }
 
 OrcJitEngine::OrcJitEngine()
@@ -280,7 +280,7 @@ llvm::Expected<uint64_t> OrcJitEngine::lookup(const std::string & symbol_name)
 
 
 // ---------------------------------------------------------------------------
-// compile_flat_program — emission path for egress_plan_4 / FlatProgram.
+// compile_flat_program — emission path for tropical_plan_4 / FlatProgram.
 //
 // Terminals (Const, Input, Reg, StateReg, Param, Rate, Tick) are Operands
 // embedded in instructions rather than separate pseudo-ops.  loop_count > 1
@@ -361,7 +361,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     return cache_it->second;
 
   const std::string hash = md5_hex(cache_key);
-  const std::string function_name = "egress_f_" + hash;
+  const std::string function_name = "tropical_f_" + hash;
 
   auto context = std::make_unique<llvm::LLVMContext>();
   auto module = std::make_unique<llvm::Module>(hash, *context);
@@ -1058,4 +1058,4 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   return kernel;
 }
 
-} // namespace egress_jit
+} // namespace tropical_jit

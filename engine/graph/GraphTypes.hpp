@@ -9,14 +9,14 @@
 #include <string>
 #include <utility>
 
-namespace expr = egress_expr;
-namespace expr_eval = egress_expr_eval;
+namespace expr = tropical_expr;
+namespace expr_eval = tropical_expr_eval;
 
 class Module;
 
 using Signal = double;
 using inputID = std::pair<std::string, unsigned int>;
-using outputID = egress_expr_rewrite::OutputRef;
+using outputID = tropical_expr_rewrite::OutputRef;
 using mPtr = std::unique_ptr<Module>;
 using ExprValueType = expr::ValueType;
 using ExprValue = expr::Value;
@@ -39,7 +39,7 @@ using expr::map_binary;
 using expr::map_unary;
 using expr::to_float64;
 using expr::to_int64;
-using egress_expr_rewrite::append_expr;
-using egress_expr_rewrite::collect_refs;
-using egress_expr_rewrite::replace_refs_with_zero;
-using egress_expr_rewrite::simplify_expr;
+using tropical_expr_rewrite::append_expr;
+using tropical_expr_rewrite::collect_refs;
+using tropical_expr_rewrite::replace_refs_with_zero;
+using tropical_expr_rewrite::simplify_expr;

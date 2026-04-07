@@ -1,6 +1,6 @@
 /**
  * JSON patch / module definition schema, expression AST builder, and load/save.
- * Replaces egress/yaml_schema.py with a clean-break JSON format.
+ * Replaces tropical/yaml_schema.py with a clean-break JSON format.
  */
 
 import {
@@ -77,7 +77,7 @@ export interface SumTypeDefJSON {
 export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON
 
 export interface PatchJSON {
-  schema: 'egress_patch_1'
+  schema: 'tropical_patch_1'
   config?: {
     buffer_length?: number
   }
@@ -808,7 +808,7 @@ export function savePatchToJSON(session: SessionState): PatchJSON {
   }
 
   const patch: PatchJSON = {
-    schema: 'egress_patch_1',
+    schema: 'tropical_patch_1',
     modules,
   }
   if (params.length)      patch.params      = params

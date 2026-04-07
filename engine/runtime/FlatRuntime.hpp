@@ -21,12 +21,12 @@
 #include <unordered_set>
 #include <vector>
 
-namespace egress_runtime
+namespace tropical_runtime
 {
 
 struct KernelState
 {
-  egress_jit::NumericKernelFn kernel = nullptr;
+  tropical_jit::NumericKernelFn kernel = nullptr;
 
   // Flat buffers passed to kernel (matches NumericKernelFn signature)
   std::vector<int64_t> registers;
@@ -45,7 +45,7 @@ struct KernelState
   uint32_t output_count = 0;
 
   // Trigger params (need per-frame snapshot)
-  std::vector<egress_expr::ControlParam *> trigger_params;
+  std::vector<tropical_expr::ControlParam *> trigger_params;
 
   double sample_rate = 44100.0;
   uint64_t sample_index = 0;
@@ -66,9 +66,9 @@ public:
   /**
    * Load a plan JSON string, compile to a single kernel, and publish atomically.
    *
-   * Plan schema (egress_plan_4):
+   * Plan schema (tropical_plan_4):
    * {
-   *   "schema": "egress_plan_4",
+   *   "schema": "tropical_plan_4",
    *   "config": { "sample_rate": 44100 },
    *   "state_init": [0.0, ...],
    *   "register_names": ["VCO1_phase", ...],
@@ -252,4 +252,4 @@ private:
   std::atomic<int> fade_out_remaining_{-1};
 };
 
-} // namespace egress_runtime
+} // namespace tropical_runtime

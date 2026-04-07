@@ -25,8 +25,8 @@ cmake --build build -j4 && ctest --test-dir build   # run tests
 
 ### Structure
 
-- Tests use `egress_runtime_new`, `egress_runtime_load_plan`, `egress_runtime_process`, `egress_runtime_output_buffer`
-- Each test builds an `egress_plan_2` JSON string directly (no Graph or Module)
+- Tests use `tropical_runtime_new`, `tropical_runtime_load_plan`, `tropical_runtime_process`, `tropical_runtime_output_buffer`
+- Each test builds an `tropical_plan_2` JSON string directly (no Graph or Module)
 - Plan JSON includes `output_exprs`, `register_exprs`, `state_init`, `register_names`, `outputs`
 
 ## CI note
@@ -35,4 +35,4 @@ LLVM ORC JIT is always enabled. CI runners need LLVM installed to build. Always 
 
 ## Adding tests
 
-Add a new `run_test(...)` call in `main()`. Build plan JSON strings directly using the `egress_plan_2` schema, then use `egress_runtime_*` C API functions to load and process. Assert on output buffer values.
+Add a new `run_test(...)` call in `main()`. Build plan JSON strings directly using the `tropical_plan_2` schema, then use `tropical_runtime_*` C API functions to load and process. Assert on output buffer values.

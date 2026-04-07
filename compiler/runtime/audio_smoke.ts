@@ -14,7 +14,7 @@ import { applyFlatPlan } from '../apply_plan'
 const session = makeSession(512)
 loadBuiltins(session.typeRegistry)
 loadPatchFromJSON({
-  schema: 'egress_patch_1',
+  schema: 'tropical_patch_1',
   modules: [
     { type: 'VCO', name: 'VCO1' },
     { type: 'VCA', name: 'VCA1' },

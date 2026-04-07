@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-namespace expr = egress_expr;
+namespace expr = tropical_expr;
 
 namespace
 {
@@ -310,7 +310,7 @@ ExprSpecPtr clone_with_subst(
 }
 }  // namespace
 
-namespace egress_expr_inline
+namespace tropical_expr_inline
 {
 std::size_t structural_hash(
   const ExprSpecPtr & expr_spec,
@@ -701,4 +701,4 @@ ExprSpecPtr inline_functions(const ExprSpecPtr & expr_spec, unsigned int inline_
     inline_functions(expr_spec->lhs, inline_depth),
     inline_functions(expr_spec->rhs, inline_depth));
 }
-}  // namespace egress_expr_inline
+}  // namespace tropical_expr_inline

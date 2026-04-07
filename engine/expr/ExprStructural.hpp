@@ -5,17 +5,17 @@
 #include <cstddef>
 #include <unordered_map>
 
-namespace egress_expr_inline
+namespace tropical_expr_inline
 {
 std::size_t structural_hash(
-  const egress_expr::ExprSpecPtr & expr,
-  std::unordered_map<const egress_expr::ExprSpec *, std::size_t> & cache);
+  const tropical_expr::ExprSpecPtr & expr,
+  std::unordered_map<const tropical_expr::ExprSpec *, std::size_t> & cache);
 
 bool structural_equal(
-  const egress_expr::ExprSpecPtr & lhs,
-  const egress_expr::ExprSpecPtr & rhs);
+  const tropical_expr::ExprSpecPtr & lhs,
+  const tropical_expr::ExprSpecPtr & rhs);
 
-egress_expr::ExprSpecPtr inline_functions(
-  const egress_expr::ExprSpecPtr & expr,
+tropical_expr::ExprSpecPtr inline_functions(
+  const tropical_expr::ExprSpecPtr & expr,
   unsigned int inline_depth = 0);
-}  // namespace egress_expr_inline
+}  // namespace tropical_expr_inline

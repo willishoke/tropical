@@ -1,5 +1,5 @@
 /**
- * Module spec builder DSL. Port of egress/module.py.
+ * Module spec builder DSL. Port of tropical/module.py.
  *
  * Module types are defined purely in TypeScript. The process function builds
  * expression trees (ExprNode) that are serialized to JSON and sent to FlatRuntime.

@@ -1,7 +1,7 @@
-#include "c_api/egress_c.h"
+#include "c_api/tropical_c.h"
 
 #include "runtime/FlatRuntime.hpp"
-#include "dac/EgressDAC.hpp"
+#include "dac/TropicalDAC.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -16,25 +16,25 @@ static thread_local std::string tls_last_error;
 
 static void set_error(const std::string & msg) { tls_last_error = msg; }
 
-extern "C" const char* egress_last_error(void)
+extern "C" const char* tropical_last_error(void)
 {
   return tls_last_error.c_str();
 }
 
 // ---------- DAC wrapper (RuntimeDAC only) ----------
 
-using RuntimeDAC = EgressDACImpl<egress_runtime::FlatRuntime>;
+using RuntimeDAC = TropicalDACImpl<tropical_runtime::FlatRuntime>;
 
 // ---------- Opaque wrapper types ----------
 
-struct EgressParam
+struct TropicalParam
 {
   expr::ControlParam * param;
-  EgressParam(double init, double tc) : param(new expr::ControlParam(init, tc)) {}
-  ~EgressParam() { delete param; }
+  TropicalParam(double init, double tc) : param(new expr::ControlParam(init, tc)) {}
+  ~TropicalParam() { delete param; }
   // Non-copyable
-  EgressParam(const EgressParam &) = delete;
-  EgressParam & operator=(const EgressParam &) = delete;
+  TropicalParam(const TropicalParam &) = delete;
+  TropicalParam & operator=(const TropicalParam &) = delete;
 };
 
 // ============================================================
@@ -45,46 +45,46 @@ extern "C" {
 
 // ---------- ControlParam API ----------
 
-egress_param_t egress_param_new(double init_value, double time_const)
+tropical_param_t tropical_param_new(double init_value, double time_const)
 {
-  try { return new EgressParam(init_value, time_const); }
+  try { return new TropicalParam(init_value, time_const); }
   catch (const std::exception & e) { set_error(e.what()); return nullptr; }
 }
 
-void egress_param_free(egress_param_t p)
+void tropical_param_free(tropical_param_t p)
 {
-  delete static_cast<EgressParam *>(p);
+  delete static_cast<TropicalParam *>(p);
 }
 
-void egress_param_set(egress_param_t p, double value)
+void tropical_param_set(tropical_param_t p, double value)
 {
   if (p)
   {
-    static_cast<EgressParam *>(p)->param->value.store(value, std::memory_order_relaxed);
+    static_cast<TropicalParam *>(p)->param->value.store(value, std::memory_order_relaxed);
   }
 }
 
-double egress_param_get(egress_param_t p)
+double tropical_param_get(tropical_param_t p)
 {
   if (!p) return 0.0;
-  return static_cast<EgressParam *>(p)->param->value.load(std::memory_order_relaxed);
+  return static_cast<TropicalParam *>(p)->param->value.load(std::memory_order_relaxed);
 }
 
-egress_param_t egress_param_new_trigger(void)
+tropical_param_t tropical_param_new_trigger(void)
 {
-  try { return new EgressParam(0.0, 0.0); }
+  try { return new TropicalParam(0.0, 0.0); }
   catch (const std::exception & e) { set_error(e.what()); return nullptr; }
 }
 
 // ---------- Device enumeration ----------
 
-unsigned int egress_audio_device_count(void)
+unsigned int tropical_audio_device_count(void)
 {
   RtAudio tmp;
   return tmp.getDeviceCount();
 }
 
-void egress_audio_get_device_ids(unsigned int* out, unsigned int count)
+void tropical_audio_get_device_ids(unsigned int* out, unsigned int count)
 {
   if (!out) return;
   RtAudio tmp;
@@ -94,7 +94,7 @@ void egress_audio_get_device_ids(unsigned int* out, unsigned int count)
     out[i] = ids[i];
 }
 
-bool egress_audio_get_device_info(unsigned int device_id, egress_device_info_t* out)
+bool tropical_audio_get_device_info(unsigned int device_id, tropical_device_info_t* out)
 {
   if (!out) return false;
   try
@@ -118,7 +118,7 @@ bool egress_audio_get_device_info(unsigned int device_id, egress_device_info_t* 
   catch (...) { return false; }
 }
 
-unsigned int egress_audio_default_output_device(void)
+unsigned int tropical_audio_default_output_device(void)
 {
   RtAudio tmp;
   return tmp.getDefaultOutputDevice();
@@ -126,39 +126,39 @@ unsigned int egress_audio_default_output_device(void)
 
 // ---------- DAC API ----------
 
-egress_dac_t egress_dac_new_runtime(egress_runtime_t r, unsigned int sample_rate, unsigned int channels)
+tropical_dac_t tropical_dac_new_runtime(tropical_runtime_t r, unsigned int sample_rate, unsigned int channels)
 {
   try {
-    auto * rt = static_cast<egress_runtime::FlatRuntime*>(r);
+    auto * rt = static_cast<tropical_runtime::FlatRuntime*>(r);
     auto * dac = new RuntimeDAC(rt, sample_rate, channels);
     return static_cast<void*>(dac);
   }
   catch (const std::exception & e) { set_error(e.what()); return nullptr; }
 }
 
-void egress_dac_free(egress_dac_t d)
+void tropical_dac_free(tropical_dac_t d)
 {
   delete static_cast<RuntimeDAC*>(d);
 }
 
-void egress_dac_start(egress_dac_t d)
+void tropical_dac_start(tropical_dac_t d)
 {
   try { static_cast<RuntimeDAC*>(d)->start(); }
   catch (const std::exception & e) { set_error(e.what()); }
 }
 
-void egress_dac_stop(egress_dac_t d)
+void tropical_dac_stop(tropical_dac_t d)
 {
   try { static_cast<RuntimeDAC*>(d)->stop(); }
   catch (const std::exception & e) { set_error(e.what()); }
 }
 
-bool egress_dac_is_running(egress_dac_t d)
+bool tropical_dac_is_running(tropical_dac_t d)
 {
   return static_cast<RuntimeDAC*>(d)->running;
 }
 
-void egress_dac_get_stats(egress_dac_t d, egress_dac_stats_t* out)
+void tropical_dac_get_stats(tropical_dac_t d, tropical_dac_stats_t* out)
 {
   if (!d || !out) return;
   const auto s = static_cast<RuntimeDAC*>(d)->stats();
@@ -169,22 +169,22 @@ void egress_dac_get_stats(egress_dac_t d, egress_dac_stats_t* out)
   out->overrun_count   = s.overrun_count;
 }
 
-void egress_dac_reset_stats(egress_dac_t d)
+void tropical_dac_reset_stats(tropical_dac_t d)
 {
   if (d) static_cast<RuntimeDAC*>(d)->reset_stats();
 }
 
-bool egress_dac_is_reconnecting(egress_dac_t d)
+bool tropical_dac_is_reconnecting(tropical_dac_t d)
 {
   return d && static_cast<RuntimeDAC*>(d)->is_reconnecting();
 }
 
-unsigned int egress_dac_get_active_device(egress_dac_t d)
+unsigned int tropical_dac_get_active_device(tropical_dac_t d)
 {
   return d ? static_cast<RuntimeDAC*>(d)->active_device() : 0;
 }
 
-bool egress_dac_switch_device(egress_dac_t d, unsigned int device_id)
+bool tropical_dac_switch_device(tropical_dac_t d, unsigned int device_id)
 {
   if (!d) return false;
   try {
@@ -195,58 +195,58 @@ bool egress_dac_switch_device(egress_dac_t d, unsigned int device_id)
 
 // ---------- FlatRuntime API ----------
 
-egress_runtime_t egress_runtime_new(unsigned int buffer_length)
+tropical_runtime_t tropical_runtime_new(unsigned int buffer_length)
 {
-  try { return new egress_runtime::FlatRuntime(buffer_length); }
+  try { return new tropical_runtime::FlatRuntime(buffer_length); }
   catch (const std::exception& e) { set_error(e.what()); return nullptr; }
 }
 
-void egress_runtime_free(egress_runtime_t r)
+void tropical_runtime_free(tropical_runtime_t r)
 {
-  delete static_cast<egress_runtime::FlatRuntime*>(r);
+  delete static_cast<tropical_runtime::FlatRuntime*>(r);
 }
 
-bool egress_runtime_load_plan(egress_runtime_t r, const char* plan_json, size_t len)
+bool tropical_runtime_load_plan(tropical_runtime_t r, const char* plan_json, size_t len)
 {
   if (!r || !plan_json) return false;
   try
   {
-    return static_cast<egress_runtime::FlatRuntime*>(r)->load_plan(std::string(plan_json, len));
+    return static_cast<tropical_runtime::FlatRuntime*>(r)->load_plan(std::string(plan_json, len));
   }
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }
 
-void egress_runtime_process(egress_runtime_t r)
+void tropical_runtime_process(tropical_runtime_t r)
 {
-  if (r) static_cast<egress_runtime::FlatRuntime*>(r)->process();
+  if (r) static_cast<tropical_runtime::FlatRuntime*>(r)->process();
 }
 
-const double* egress_runtime_output_buffer(egress_runtime_t r)
+const double* tropical_runtime_output_buffer(tropical_runtime_t r)
 {
   if (!r) return nullptr;
-  return static_cast<egress_runtime::FlatRuntime*>(r)->outputBuffer.data();
+  return static_cast<tropical_runtime::FlatRuntime*>(r)->outputBuffer.data();
 }
 
-unsigned int egress_runtime_get_buffer_length(egress_runtime_t r)
+unsigned int tropical_runtime_get_buffer_length(tropical_runtime_t r)
 {
   if (!r) return 0;
-  return static_cast<egress_runtime::FlatRuntime*>(r)->getBufferLength();
+  return static_cast<tropical_runtime::FlatRuntime*>(r)->getBufferLength();
 }
 
-void egress_runtime_begin_fade_in(egress_runtime_t r)
+void tropical_runtime_begin_fade_in(tropical_runtime_t r)
 {
-  if (r) static_cast<egress_runtime::FlatRuntime*>(r)->begin_fade_in();
+  if (r) static_cast<tropical_runtime::FlatRuntime*>(r)->begin_fade_in();
 }
 
-void egress_runtime_begin_fade_out(egress_runtime_t r)
+void tropical_runtime_begin_fade_out(tropical_runtime_t r)
 {
-  if (r) static_cast<egress_runtime::FlatRuntime*>(r)->begin_fade_out();
+  if (r) static_cast<tropical_runtime::FlatRuntime*>(r)->begin_fade_out();
 }
 
-bool egress_runtime_is_fade_out_complete(egress_runtime_t r)
+bool tropical_runtime_is_fade_out_complete(tropical_runtime_t r)
 {
   if (!r) return true;
-  return static_cast<egress_runtime::FlatRuntime*>(r)->is_fade_out_complete();
+  return static_cast<tropical_runtime::FlatRuntime*>(r)->is_fade_out_complete();
 }
 
 } // extern "C"

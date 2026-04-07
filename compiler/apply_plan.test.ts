@@ -14,7 +14,7 @@ import { Runtime } from './runtime/runtime'
 function setupSession(modules: PatchJSON['modules'], bufferLength = 256) {
   const session = makeSession(bufferLength)
   loadBuiltins(session.typeRegistry)
-  loadPatchFromJSON({ schema: 'egress_patch_1', modules }, session)
+  loadPatchFromJSON({ schema: 'tropical_patch_1', modules }, session)
   return session
 }
 
@@ -50,7 +50,7 @@ describe('applySessionWiring', () => {
   test('matches reference output from old path', () => {
     // Old path: loadPatchFromJSON with full wiring
     const patch: PatchJSON = {
-      schema: 'egress_patch_1',
+      schema: 'tropical_patch_1',
       modules: [
         { type: 'VCO', name: 'VCO1' },
         { type: 'VCA', name: 'VCA1' },

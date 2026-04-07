@@ -1,11 +1,11 @@
 /**
- * flatten.ts — Flatten a patch into a single egress_plan_4 kernel.
+ * flatten.ts — Flatten a patch into a single tropical_plan_4 kernel.
  *
  * Takes a SessionState and produces a flat plan JSON where all module
  * expression trees are inlined: input() nodes are substituted with wiring
  * expressions, ref() nodes are resolved by inlining the referenced module's
  * output expression. The result has zero inter-module boundaries — just one
- * flat instruction stream (egress_plan_4).
+ * flat instruction stream (tropical_plan_4).
  */
 
 import type { ExprNode } from './expr.js'
@@ -108,11 +108,11 @@ export function normalizeWiringTypes(
 }
 
 // ─────────────────────────────────────────────────────────────
-// egress_plan_4 schema
+// tropical_plan_4 schema
 // ─────────────────────────────────────────────────────────────
 
 export interface FlatPlan {
-  schema: 'egress_plan_4'
+  schema: 'tropical_plan_4'
   config: { sample_rate: number }
   state_init: (number | boolean)[]
   register_names: string[]
@@ -685,7 +685,7 @@ function resolveRefs(
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Flatten a session's patch into a single egress_plan_4 plan.
+ * Flatten a session's patch into a single tropical_plan_4 plan.
  *
  * Process:
  * 1. Topologically sort modules
@@ -697,7 +697,7 @@ function resolveRefs(
  *    e. Record the resolved output expressions for use by later modules' refs
  * 3. Collect all outputs matching graphOutputs
  * 4. Compile expression trees → FlatProgram via emitNumericProgram
- * 5. Emit egress_plan_4 JSON
+ * 5. Emit tropical_plan_4 JSON
  */
 export function flattenPatch(session: SessionState): FlatPlan {
   const { instanceRegistry, graphOutputs } = session
@@ -934,7 +934,7 @@ export function flattenPatch(session: SessionState): FlatPlan {
   }
 
   return {
-    schema: 'egress_plan_4',
+    schema: 'tropical_plan_4',
     config: { sample_rate: 44100 },
     state_init: flatStateInit as (number | boolean)[],
     register_names: flatRegisterNames,

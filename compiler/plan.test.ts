@@ -65,7 +65,7 @@ describe('generatePlan', () => {
       inputExprNodes: new Map(),
       graphOutputs: [],
     })
-    expect(plan.schema).toBe('egress_plan_1')
+    expect(plan.schema).toBe('tropical_plan_1')
     expect(plan.kernels).toEqual([])
     expect(plan.wiring).toEqual([])
     expect(plan.outputs).toEqual([])
@@ -231,7 +231,7 @@ describe('validatePlan', () => {
 
   test('duplicate kernel name throws', () => {
     const plan: ExecutionPlan = {
-      schema: 'egress_plan_1',
+      schema: 'tropical_plan_1',
       config: { sample_rate: 44100, buffer_length: 512 },
       kernels: [
         { id: 0, name: 'A', module_type: 'X', group: 0, inputs: [], outputs: ['out'], registers: [], state_init: [] },
@@ -245,7 +245,7 @@ describe('validatePlan', () => {
 
   test('non-sequential kernel IDs throw', () => {
     const plan: ExecutionPlan = {
-      schema: 'egress_plan_1',
+      schema: 'tropical_plan_1',
       config: { sample_rate: 44100, buffer_length: 512 },
       kernels: [
         { id: 0, name: 'A', module_type: 'X', group: 0, inputs: [], outputs: [], registers: [], state_init: [] },
@@ -259,7 +259,7 @@ describe('validatePlan', () => {
 
   test('wiring to unknown kernel throws', () => {
     const plan: ExecutionPlan = {
-      schema: 'egress_plan_1',
+      schema: 'tropical_plan_1',
       config: { sample_rate: 44100, buffer_length: 512 },
       kernels: [
         { id: 0, name: 'A', module_type: 'X', group: 0, inputs: ['in'], outputs: [], registers: [], state_init: [] },
@@ -274,7 +274,7 @@ describe('validatePlan', () => {
 
   test('wiring to out-of-range input throws', () => {
     const plan: ExecutionPlan = {
-      schema: 'egress_plan_1',
+      schema: 'tropical_plan_1',
       config: { sample_rate: 44100, buffer_length: 512 },
       kernels: [
         { id: 0, name: 'A', module_type: 'X', group: 0, inputs: ['in'], outputs: [], registers: [], state_init: [] },
@@ -289,7 +289,7 @@ describe('validatePlan', () => {
 
   test('output referencing unknown kernel throws', () => {
     const plan: ExecutionPlan = {
-      schema: 'egress_plan_1',
+      schema: 'tropical_plan_1',
       config: { sample_rate: 44100, buffer_length: 512 },
       kernels: [],
       wiring: [],
@@ -300,7 +300,7 @@ describe('validatePlan', () => {
 
   test('mismatched state_init length throws', () => {
     const plan: ExecutionPlan = {
-      schema: 'egress_plan_1',
+      schema: 'tropical_plan_1',
       config: { sample_rate: 44100, buffer_length: 512 },
       kernels: [
         { id: 0, name: 'A', module_type: 'X', group: 0, inputs: [], outputs: [], registers: ['r1', 'r2'], state_init: [0] },
@@ -313,7 +313,7 @@ describe('validatePlan', () => {
 
   test('non-monotonic group ordering throws', () => {
     const plan: ExecutionPlan = {
-      schema: 'egress_plan_1',
+      schema: 'tropical_plan_1',
       config: { sample_rate: 44100, buffer_length: 512 },
       kernels: [
         { id: 0, name: 'A', module_type: 'X', group: 1, inputs: [], outputs: [], registers: [], state_init: [] },
@@ -341,7 +341,7 @@ describe('planToJSON', () => {
     })
     const json = planToJSON(plan)
     const parsed = JSON.parse(json)
-    expect(parsed.schema).toBe('egress_plan_1')
+    expect(parsed.schema).toBe('tropical_plan_1')
     expect(parsed.kernels.length).toBe(1)
   })
 

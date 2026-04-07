@@ -1,11 +1,11 @@
 #pragma once
 
 /**
- * NumericProgramParser.hpp — Parse egress_plan_4 JSON → FlatProgram.
+ * NumericProgramParser.hpp — Parse tropical_plan_4 JSON → FlatProgram.
  *
  * Thin deserialiser: no expression tree walking, no second compiler.
  * Reads the instruction stream emitted by compiler/emit_numeric.ts and
- * produces the egress_jit::FlatProgram passed to compile_flat_program().
+ * produces the tropical_jit::FlatProgram passed to compile_flat_program().
  */
 
 #include "jit/OrcJitEngine.hpp"
@@ -16,16 +16,16 @@
 #include <unordered_map>
 #include <vector>
 
-namespace egress_plan4
+namespace tropical_plan4
 {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tag / operand parsing helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-inline egress_jit::OpTag parse_op_tag(const std::string & s)
+inline tropical_jit::OpTag parse_op_tag(const std::string & s)
 {
-  using T = egress_jit::OpTag;
+  using T = tropical_jit::OpTag;
   static const std::unordered_map<std::string, T> MAP = {
     {"Add",         T::Add},
     {"Sub",         T::Sub},
@@ -73,34 +73,34 @@ inline egress_jit::OpTag parse_op_tag(const std::string & s)
   return it->second;
 }
 
-inline egress_jit::JitScalarType parse_scalar_type(const std::string & s)
+inline tropical_jit::JitScalarType parse_scalar_type(const std::string & s)
 {
-  if (s == "int")  return egress_jit::JitScalarType::Int;
-  if (s == "bool") return egress_jit::JitScalarType::Bool;
-  return egress_jit::JitScalarType::Float;
+  if (s == "int")  return tropical_jit::JitScalarType::Int;
+  if (s == "bool") return tropical_jit::JitScalarType::Bool;
+  return tropical_jit::JitScalarType::Float;
 }
 
-inline egress_jit::Operand parse_operand(const nlohmann::json & j)
+inline tropical_jit::Operand parse_operand(const nlohmann::json & j)
 {
   const std::string kind = j.at("kind").get<std::string>();
   const auto st = parse_scalar_type(j.value("scalar_type", "float"));
   if (kind == "const")
-    return egress_jit::Operand::make_const(j.at("val").get<double>(), st);
+    return tropical_jit::Operand::make_const(j.at("val").get<double>(), st);
   if (kind == "input")
-    return egress_jit::Operand::make_input(j.at("slot").get<uint32_t>(), st);
+    return tropical_jit::Operand::make_input(j.at("slot").get<uint32_t>(), st);
   if (kind == "reg")
-    return egress_jit::Operand::make_reg(j.at("slot").get<uint32_t>(), st);
+    return tropical_jit::Operand::make_reg(j.at("slot").get<uint32_t>(), st);
   if (kind == "array_reg")
-    return egress_jit::Operand::make_array_reg(j.at("slot").get<uint32_t>());
+    return tropical_jit::Operand::make_array_reg(j.at("slot").get<uint32_t>());
   if (kind == "state_reg")
-    return egress_jit::Operand::make_state(j.at("slot").get<uint32_t>(), st);
+    return tropical_jit::Operand::make_state(j.at("slot").get<uint32_t>(), st);
   if (kind == "param")
   {
     const uint64_t ptr = std::stoull(j.at("ptr").get<std::string>());
-    return egress_jit::Operand::make_param(ptr);
+    return tropical_jit::Operand::make_param(ptr);
   }
-  if (kind == "rate") return egress_jit::Operand::make_rate();
-  if (kind == "tick") return egress_jit::Operand::make_tick();
+  if (kind == "rate") return tropical_jit::Operand::make_rate();
+  if (kind == "tick") return tropical_jit::Operand::make_tick();
   throw std::runtime_error("NumericProgramParser: unknown operand kind '" + kind + "'");
 }
 
@@ -110,10 +110,10 @@ inline egress_jit::Operand parse_operand(const nlohmann::json & j)
 
 struct ParsedPlan4
 {
-  egress_jit::FlatProgram  program;
+  tropical_jit::FlatProgram  program;
   std::vector<double>      state_init;
   std::vector<std::string> register_names;
-  std::vector<egress_jit::JitScalarType> register_types;
+  std::vector<tropical_jit::JitScalarType> register_types;
   std::vector<std::string> array_slot_names;
   std::vector<uint32_t>    mix_indices;
   double                   sample_rate = 44100.0;
@@ -183,7 +183,7 @@ inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
   {
     for (const auto & ji : plan["instructions"])
     {
-      egress_jit::FlatInstr instr;
+      tropical_jit::FlatInstr instr;
       instr.tag         = parse_op_tag(ji.at("tag").get<std::string>());
       instr.result_type = parse_scalar_type(ji.value("result_type", "float"));
       instr.dst         = ji.at("dst").get<uint32_t>();
@@ -204,4 +204,4 @@ inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
   return result;
 }
 
-} // namespace egress_plan4
+} // namespace tropical_plan4

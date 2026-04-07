@@ -6,9 +6,9 @@
 #include <cmath>
 #include <cstdlib>
 
-namespace egress_expr_eval
+namespace tropical_expr_eval
 {
-namespace expr = egress_expr;
+namespace expr = tropical_expr;
 
 inline int normalize_shift(const expr::Value & value)
 {

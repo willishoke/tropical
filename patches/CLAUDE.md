@@ -2,11 +2,11 @@
 
 Example patches in JSON format. Load via `make mcp-ts` → `load_patch` tool, or from the TUI.
 
-## Schema: `egress_patch_1`
+## Schema: `tropical_patch_1`
 
 ```json
 {
-  "schema": "egress_patch_1",
+  "schema": "tropical_patch_1",
   "modules": [
     {"type": "VCO", "name": "VCO1"}
   ],

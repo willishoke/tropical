@@ -7,8 +7,8 @@
 #include <utility>
 #include <vector>
 
-namespace expr = egress_expr;
-namespace expr_eval = egress_expr_eval;
+namespace expr = tropical_expr;
+namespace expr_eval = tropical_expr_eval;
 
 namespace
 {
@@ -36,7 +36,7 @@ bool is_one_expr(const ExprSpecPtr & expr_spec)
 }
 }  // namespace
 
-namespace egress_expr_rewrite
+namespace tropical_expr_rewrite
 {
 ExprSpecPtr append_expr(const ExprSpecPtr & lhs, const ExprSpecPtr & rhs)
 {
@@ -756,4 +756,4 @@ void collect_refs(const ExprSpecPtr & expr_spec, std::vector<OutputRef> & refs)
   collect_refs(expr_spec->lhs, refs);
   collect_refs(expr_spec->rhs, refs);
 }
-}  // namespace egress_expr_rewrite
+}  // namespace tropical_expr_rewrite

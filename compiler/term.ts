@@ -1,5 +1,5 @@
 /**
- * term.ts — Free monoidal category term language for egress.
+ * term.ts — Free monoidal category term language for tropical.
  *
  * Objects are PortTypes, morphisms are modules, composition is patching,
  * tensor is parallel execution, trace is feedback with typed state.

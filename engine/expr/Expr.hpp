@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-namespace egress_expr
+namespace tropical_expr
 {
 
 // ControlParam: lock-free parameter for control-rate values.
@@ -129,7 +129,7 @@ struct ExprSpec
   std::shared_ptr<ExprSpec> lhs;
   std::shared_ptr<ExprSpec> rhs;
   std::vector<std::shared_ptr<ExprSpec>> args;
-  // For SmoothedParam: raw non-owning pointer; EgressParam/Param object must outlive module
+  // For SmoothedParam: raw non-owning pointer; TropicalParam/Param object must outlive module
   ControlParam * control_param = nullptr;
 };
 
@@ -762,7 +762,7 @@ inline ExprSpecPtr select_expr(ExprSpecPtr cond_expr, ExprSpecPtr then_expr, Exp
 }
 
 // Creates a SmoothedParam expression. The ControlParam pointer is non-owning;
-// the caller (EgressParam) must ensure lifetime extends past any module using this expr.
+// the caller (TropicalParam) must ensure lifetime extends past any module using this expr.
 inline ExprSpecPtr smoothed_param_expr(ControlParam * param)
 {
   auto expr = std::make_shared<ExprSpec>();
@@ -822,4 +822,4 @@ inline ExprSpecPtr match_variant_expr(std::string type_name, ExprSpecPtr scrutin
   return expr;
 }
 
-}  // namespace egress_expr
+}  // namespace tropical_expr

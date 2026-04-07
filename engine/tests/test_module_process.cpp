@@ -1,12 +1,12 @@
 /**
  * test_module_process.cpp
  *
- * Exercises the FlatRuntime C API (egress_runtime_*) and JIT code paths
- * without an audio device.  Plans are specified as egress_plan_4 JSON strings,
+ * Exercises the FlatRuntime C API (tropical_runtime_*) and JIT code paths
+ * without an audio device.  Plans are specified as tropical_plan_4 JSON strings,
  * compiled to native kernels via compile_flat_program, and processed in-memory.
  */
 
-#include "c_api/egress_c.h"
+#include "c_api/tropical_c.h"
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -32,7 +32,7 @@ static void run_test(const char* name, std::function<void()> fn)
   do {                                                                        \
     if (!(cond)) {                                                            \
       printf("FAIL\n    assertion failed: %s  (line %d)\n", #cond, __LINE__);\
-      const char* err = egress_last_error();                                  \
+      const char* err = tropical_last_error();                                  \
       if (err && err[0]) printf("    last error: %s\n", err);                \
       ++g_fail;                                                               \
       return;                                                                 \
@@ -43,7 +43,7 @@ static void run_test(const char* name, std::function<void()> fn)
   do {                                                                        \
     bool _ok = (call);                                                        \
     if (!_ok) {                                                               \
-      const char* _err = egress_last_error();                                 \
+      const char* _err = tropical_last_error();                                 \
       printf("FAIL\n    %s returned false\n    last error: %s\n",            \
              #call, _err ? _err : "(none)");                                  \
       ++g_fail;                                                               \
@@ -77,11 +77,11 @@ static void run_test(const char* name, std::function<void()> fn)
 static void test_sawtooth()
 {
   const unsigned int buf_len = 256;
-  egress_runtime_t rt = egress_runtime_new(buf_len);
+  tropical_runtime_t rt = tropical_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_4",
+    "schema": "tropical_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -103,10 +103,10 @@ static void test_sawtooth()
     "register_targets": [7]
   })";
 
-  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
-  egress_runtime_process(rt);
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  tropical_runtime_process(rt);
 
-  const double* buf = egress_runtime_output_buffer(rt);
+  const double* buf = tropical_runtime_output_buffer(rt);
   ASSERT(buf != nullptr);
 
   // Sample 0: phase=0 at start, output = (0*2 - 1)*10 = -10, audio = -10/20 = -0.5
@@ -123,7 +123,7 @@ static void test_sawtooth()
     ASSERT(buf[i] > buf[i - 1]);
   }
 
-  egress_runtime_free(rt);
+  tropical_runtime_free(rt);
 }
 
 /**
@@ -138,11 +138,11 @@ static void test_sawtooth()
 static void test_two_outputs_mix()
 {
   const unsigned int buf_len = 32;
-  egress_runtime_t rt = egress_runtime_new(buf_len);
+  tropical_runtime_t rt = tropical_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_4",
+    "schema": "tropical_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [],
     "register_names": [],
@@ -158,17 +158,17 @@ static void test_two_outputs_mix()
     "register_targets": []
   })";
 
-  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
-  egress_runtime_process(rt);
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  tropical_runtime_process(rt);
 
-  const double* buf = egress_runtime_output_buffer(rt);
+  const double* buf = tropical_runtime_output_buffer(rt);
   ASSERT(buf != nullptr);
 
   for (unsigned int i = 0; i < buf_len; ++i) {
     ASSERT_NEAR(buf[i], 0.1, 1e-9);
   }
 
-  egress_runtime_free(rt);
+  tropical_runtime_free(rt);
 }
 
 /**
@@ -181,12 +181,12 @@ static void test_two_outputs_mix()
 static void test_hot_swap_preserves_state()
 {
   const unsigned int buf_len = 64;
-  egress_runtime_t rt = egress_runtime_new(buf_len);
+  tropical_runtime_t rt = tropical_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
   // Plan A: output = reg(0), register update = mod(reg(0) + 440/sr, 1)
   std::string plan_a = R"({
-    "schema": "egress_plan_4",
+    "schema": "tropical_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -205,22 +205,22 @@ static void test_hot_swap_preserves_state()
     "register_targets": [4]
   })";
 
-  ASSERT_OK(egress_runtime_load_plan(rt, plan_a.c_str(), plan_a.size()));
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan_a.c_str(), plan_a.size()));
 
   // Process 4 buffers to accumulate phase
   for (int i = 0; i < 4; ++i) {
-    egress_runtime_process(rt);
+    tropical_runtime_process(rt);
   }
 
   // Read last sample of last buffer — phase should be well above 0
-  const double* buf = egress_runtime_output_buffer(rt);
+  const double* buf = tropical_runtime_output_buffer(rt);
   ASSERT(buf != nullptr);
   double phase_before = buf[buf_len - 1];
   ASSERT(phase_before > 0.01);
 
   // Plan B: output = reg(0) * 5.0, same register name "phase"
   std::string plan_b = R"({
-    "schema": "egress_plan_4",
+    "schema": "tropical_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -240,19 +240,19 @@ static void test_hot_swap_preserves_state()
     "register_targets": [5]
   })";
 
-  ASSERT_OK(egress_runtime_load_plan(rt, plan_b.c_str(), plan_b.size()));
-  egress_runtime_process(rt);
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan_b.c_str(), plan_b.size()));
+  tropical_runtime_process(rt);
 
   // First sample of new plan should use the transferred phase, not 0.
   // Output = phase * 5.0, audio = that / 20.0
-  const double* buf2 = egress_runtime_output_buffer(rt);
+  const double* buf2 = tropical_runtime_output_buffer(rt);
   ASSERT(buf2 != nullptr);
   double first_output_audio = buf2[0];
   // If state was NOT preserved, output would be 0*5/20 = 0.
   // With preserved state, it should be noticeably positive.
   ASSERT(first_output_audio > 0.001);
 
-  egress_runtime_free(rt);
+  tropical_runtime_free(rt);
 }
 
 /**
@@ -269,11 +269,11 @@ static void test_hot_swap_preserves_state()
 static void test_array_literal()
 {
   const unsigned int buf_len = 8;
-  egress_runtime_t rt = egress_runtime_new(buf_len);
+  tropical_runtime_t rt = tropical_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_4",
+    "schema": "tropical_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0, 1.0],
     "register_names": ["idx", "idx2"],
@@ -295,10 +295,10 @@ static void test_array_literal()
     "register_targets": [4, 5]
   })";
 
-  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
-  egress_runtime_process(rt);
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  tropical_runtime_process(rt);
 
-  const double* buf = egress_runtime_output_buffer(rt);
+  const double* buf = tropical_runtime_output_buffer(rt);
   ASSERT(buf != nullptr);
 
   // 10.0 / 20.0 = 0.5, audio = 0.5 / 20.0 = 0.025
@@ -306,7 +306,7 @@ static void test_array_literal()
     ASSERT_NEAR(buf[i], 0.025, 1e-9);
   }
 
-  egress_runtime_free(rt);
+  tropical_runtime_free(rt);
 }
 
 /**
@@ -325,11 +325,11 @@ static void test_array_literal()
 static void test_counter_wrap()
 {
   const unsigned int buf_len = 1;
-  egress_runtime_t rt = egress_runtime_new(buf_len);
+  tropical_runtime_t rt = tropical_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_4",
+    "schema": "tropical_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["counter"],
@@ -347,17 +347,17 @@ static void test_counter_wrap()
     "register_targets": [3]
   })";
 
-  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan.c_str(), plan.size()));
 
   double expected[] = {0, 1, 2, 3, 4, 5, 6, 7, 0, 1};
   for (int i = 0; i < 10; ++i) {
-    egress_runtime_process(rt);
-    const double* buf = egress_runtime_output_buffer(rt);
+    tropical_runtime_process(rt);
+    const double* buf = tropical_runtime_output_buffer(rt);
     ASSERT(buf != nullptr);
     ASSERT_NEAR(buf[0], expected[i] / 20.0, 1e-9);
   }
 
-  egress_runtime_free(rt);
+  tropical_runtime_free(rt);
 }
 
 /**
@@ -376,11 +376,11 @@ static void test_counter_wrap()
 static void test_select_conditional()
 {
   const unsigned int buf_len = 1;
-  egress_runtime_t rt = egress_runtime_new(buf_len);
+  tropical_runtime_t rt = tropical_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_4",
+    "schema": "tropical_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
@@ -399,17 +399,17 @@ static void test_select_conditional()
     "register_targets": [4]
   })";
 
-  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan.c_str(), plan.size()));
 
   double expected[] = {0, 0, 0, 0, 0, 1, 1, 1};
   for (int i = 0; i < 8; ++i) {
-    egress_runtime_process(rt);
-    const double* buf = egress_runtime_output_buffer(rt);
+    tropical_runtime_process(rt);
+    const double* buf = tropical_runtime_output_buffer(rt);
     ASSERT(buf != nullptr);
     ASSERT_NEAR(buf[0], expected[i] / 20.0, 1e-9);
   }
 
-  egress_runtime_free(rt);
+  tropical_runtime_free(rt);
 }
 
 /**
@@ -426,11 +426,11 @@ static void test_select_conditional()
 static void test_multi_register_clock()
 {
   const unsigned int buf_len = 256;
-  egress_runtime_t rt = egress_runtime_new(buf_len);
+  tropical_runtime_t rt = tropical_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_4",
+    "schema": "tropical_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [0.0, 0.0],
     "register_names": ["phase", "gate"],
@@ -452,10 +452,10 @@ static void test_multi_register_clock()
     "register_targets": [4, 7]
   })";
 
-  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
-  egress_runtime_process(rt);
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  tropical_runtime_process(rt);
 
-  const double* buf = egress_runtime_output_buffer(rt);
+  const double* buf = tropical_runtime_output_buffer(rt);
   ASSERT(buf != nullptr);
 
   // Sample 0: gate=init(0)=0
@@ -467,7 +467,7 @@ static void test_multi_register_clock()
     ASSERT_NEAR(buf[i], 1.0 / 20.0, 1e-9);
   }
 
-  egress_runtime_free(rt);
+  tropical_runtime_free(rt);
 }
 
 /**
@@ -482,11 +482,11 @@ static void test_multi_register_clock()
 static void test_multiple_outputs_summed()
 {
   const unsigned int buf_len = 16;
-  egress_runtime_t rt = egress_runtime_new(buf_len);
+  tropical_runtime_t rt = tropical_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_4",
+    "schema": "tropical_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [],
     "register_names": [],
@@ -502,17 +502,17 @@ static void test_multiple_outputs_summed()
     "register_targets": []
   })";
 
-  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
-  egress_runtime_process(rt);
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  tropical_runtime_process(rt);
 
-  const double* buf = egress_runtime_output_buffer(rt);
+  const double* buf = tropical_runtime_output_buffer(rt);
   ASSERT(buf != nullptr);
 
   for (unsigned int i = 0; i < buf_len; ++i) {
     ASSERT_NEAR(buf[i], 0.5, 1e-9);
   }
 
-  egress_runtime_free(rt);
+  tropical_runtime_free(rt);
 }
 
 /**
@@ -529,7 +529,7 @@ static void test_multiple_outputs_summed()
 static void test_typed_int_bitwise()
 {
   const unsigned int buf_len = 1;
-  egress_runtime_t rt = egress_runtime_new(buf_len);
+  tropical_runtime_t rt = tropical_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
   // LFSR: next = (state >> 1) ^ ((state & 1) * 0xB400 & 0xFFFF)
@@ -541,7 +541,7 @@ static void test_typed_int_bitwise()
   // reg5 = BitXor(reg4, reg3)                          [int] — next state
   // reg6 = SIToFP equivalent via Mul(reg0, 1.0)        [float] — for output
   std::string plan = R"({
-    "schema": "egress_plan_4",
+    "schema": "tropical_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [1.0],
     "register_names": ["lfsr_state"],
@@ -583,7 +583,7 @@ static void test_typed_int_bitwise()
     "register_targets": [5]
   })";
 
-  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan.c_str(), plan.size()));
 
   // LFSR sequence starting from seed=1:
   // step 0: state=1, output=1
@@ -598,13 +598,13 @@ static void test_typed_int_bitwise()
 
   double expected[] = {1.0, 46080.0, 23040.0, 11520.0};
   for (int i = 0; i < 4; ++i) {
-    egress_runtime_process(rt);
-    const double* buf = egress_runtime_output_buffer(rt);
+    tropical_runtime_process(rt);
+    const double* buf = tropical_runtime_output_buffer(rt);
     ASSERT(buf != nullptr);
     ASSERT_NEAR(buf[0], expected[i] / 20.0, 1e-6);
   }
 
-  egress_runtime_free(rt);
+  tropical_runtime_free(rt);
 }
 
 /**
@@ -623,11 +623,11 @@ static void test_typed_int_bitwise()
 static void test_typed_bool_select()
 {
   const unsigned int buf_len = 1;
-  egress_runtime_t rt = egress_runtime_new(buf_len);
+  tropical_runtime_t rt = tropical_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
   std::string plan = R"({
-    "schema": "egress_plan_4",
+    "schema": "tropical_plan_4",
     "config": { "sample_rate": 44100.0 },
     "state_init": [],
     "register_names": [],
@@ -661,7 +661,7 @@ static void test_typed_bool_select()
     "register_targets": []
   })";
 
-  ASSERT_OK(egress_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan.c_str(), plan.size()));
 
   // tick: 0,1,2,3,4,5,6,7
   // >2:  F,F,F,T,T,T,T,T
@@ -670,13 +670,13 @@ static void test_typed_bool_select()
   // out: 0,0,0,0.5,0.5,0.5,0,0
   double expected[] = {0, 0, 0, 0.5, 0.5, 0.5, 0, 0};
   for (int i = 0; i < 8; ++i) {
-    egress_runtime_process(rt);
-    const double* buf = egress_runtime_output_buffer(rt);
+    tropical_runtime_process(rt);
+    const double* buf = tropical_runtime_output_buffer(rt);
     ASSERT(buf != nullptr);
     ASSERT_NEAR(buf[0], expected[i], 1e-9);
   }
 
-  egress_runtime_free(rt);
+  tropical_runtime_free(rt);
 }
 
 // ---- main -------------------------------------------------------------------
