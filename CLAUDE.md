@@ -67,6 +67,12 @@ Patches are JSON files in `patches/`. Schema version: `tropical_patch_1`.
 
 `make mcp-ts` starts the MCP server on stdio. It exposes tools to: define module types, instantiate modules, connect them, set parameters, control audio, save/load patches. This is the primary agent interface for building patches at runtime.
 
+## Signal levels and gain staging
+
+All audio signals use a **±1 convention**. VCO outputs (saw, tri, sin, sqr) range from -1 to +1. The JIT output mixer sums graph outputs with **no automatic scaling** — what the patch produces is what hits the DAC.
+
+**Gain staging is the patch's responsibility.** When summing N voices, scale by `1/N` or use VCAs to keep the mix within ±1. Exceeding ±1 will clip at the audio output. For example, 5 VCAs summed should be wrapped in `mul(sum, 0.2)`.
+
 ## Conventions
 
 - Commit messages: `type(scope): description` (e.g., `fix(jit):`, `feat(tui):`, `refactor:`)

@@ -71,7 +71,7 @@ static void run_test(const char* name, std::function<void()> fn)
  * Output 0: mul(sub(mul(reg(0), 2.0), 1.0), 10.0)  — maps [0,1) to [-10,10)
  * Outputs: [0]
  *
- * Audio = output / 20.0, so saw ranges [-0.5, 0.5).
+ * Audio = output directly, so saw ranges [-10, 10).
  * After one sample, phase = 440/44100 ~= 0.00998.
  */
 static void test_sawtooth()
@@ -109,12 +109,12 @@ static void test_sawtooth()
   const double* buf = tropical_runtime_output_buffer(rt);
   ASSERT(buf != nullptr);
 
-  // Sample 0: phase=0 at start, output = (0*2 - 1)*10 = -10, audio = -10/20 = -0.5
-  ASSERT_NEAR(buf[0], -0.5, 1e-6);
+  // Sample 0: phase=0 at start, output = (0*2 - 1)*10 = -10
+  ASSERT_NEAR(buf[0], -10.0, 1e-6);
 
-  // Sample 1: phase = 440/44100, output = (phase*2 - 1)*10, audio = that/20
+  // Sample 1: phase = 440/44100, output = (phase*2 - 1)*10
   double phase1 = 440.0 / 44100.0;
-  double expected1 = (phase1 * 2.0 - 1.0) * 10.0 / 20.0;
+  double expected1 = (phase1 * 2.0 - 1.0) * 10.0;
   ASSERT_NEAR(buf[1], expected1, 1e-6);
 
   // Check several samples are increasing before the first phase wrap.
@@ -133,7 +133,7 @@ static void test_sawtooth()
  * Output 1: constant -3.0
  * Outputs: [0, 1]
  *
- * Audio = (5.0 + -3.0) / 20.0 = 0.1
+ * Audio = (5.0 + -3.0) = 2.0
  */
 static void test_two_outputs_mix()
 {
@@ -165,7 +165,7 @@ static void test_two_outputs_mix()
   ASSERT(buf != nullptr);
 
   for (unsigned int i = 0; i < buf_len; ++i) {
-    ASSERT_NEAR(buf[i], 0.1, 1e-9);
+    ASSERT_NEAR(buf[i], 2.0, 1e-9);
   }
 
   tropical_runtime_free(rt);
@@ -244,11 +244,11 @@ static void test_hot_swap_preserves_state()
   tropical_runtime_process(rt);
 
   // First sample of new plan should use the transferred phase, not 0.
-  // Output = phase * 5.0, audio = that / 20.0
+  // Output = phase * 5.0
   const double* buf2 = tropical_runtime_output_buffer(rt);
   ASSERT(buf2 != nullptr);
   double first_output_audio = buf2[0];
-  // If state was NOT preserved, output would be 0*5/20 = 0.
+  // If state was NOT preserved, output would be 0*5 = 0.
   // With preserved state, it should be noticeably positive.
   ASSERT(first_output_audio > 0.001);
 
@@ -264,7 +264,7 @@ static void test_hot_swap_preserves_state()
  *               index([10.0, 20.0, 30.0, 40.0], reg(1)))
  *         = 10.0 / 20.0 = 0.5
  *
- * Audio = 0.5 / 20.0 = 0.025
+ * Audio = 0.5 (no output scaling)
  */
 static void test_array_literal()
 {
@@ -301,9 +301,9 @@ static void test_array_literal()
   const double* buf = tropical_runtime_output_buffer(rt);
   ASSERT(buf != nullptr);
 
-  // 10.0 / 20.0 = 0.5, audio = 0.5 / 20.0 = 0.025
+  // 10.0 / 20.0 = 0.5
   for (unsigned int i = 0; i < buf_len; ++i) {
-    ASSERT_NEAR(buf[i], 0.025, 1e-9);
+    ASSERT_NEAR(buf[i], 0.5, 1e-9);
   }
 
   tropical_runtime_free(rt);
@@ -320,7 +320,7 @@ static void test_array_literal()
  * Counter sequence: 0, 1, 2, 3, 4, 5, 6, 7, 0, 1
  *   (output reads register BEFORE update)
  *
- * Audio = counter / 20.0
+ * Audio = counter directly
  */
 static void test_counter_wrap()
 {
@@ -354,7 +354,7 @@ static void test_counter_wrap()
     tropical_runtime_process(rt);
     const double* buf = tropical_runtime_output_buffer(rt);
     ASSERT(buf != nullptr);
-    ASSERT_NEAR(buf[0], expected[i] / 20.0, 1e-9);
+    ASSERT_NEAR(buf[0], expected[i], 1e-9);
   }
 
   tropical_runtime_free(rt);
@@ -371,7 +371,7 @@ static void test_counter_wrap()
  * Phase sequence (at read time): 0, 1, 2, 3, 4, 5, 6, 7
  * Gate output:                   0, 0, 0, 0, 0, 1, 1, 1
  *
- * Audio = gate / 20.0
+ * Audio = gate directly
  */
 static void test_select_conditional()
 {
@@ -406,7 +406,7 @@ static void test_select_conditional()
     tropical_runtime_process(rt);
     const double* buf = tropical_runtime_output_buffer(rt);
     ASSERT(buf != nullptr);
-    ASSERT_NEAR(buf[0], expected[i] / 20.0, 1e-9);
+    ASSERT_NEAR(buf[0], expected[i], 1e-9);
   }
 
   tropical_runtime_free(rt);
@@ -462,9 +462,8 @@ static void test_multi_register_clock()
   ASSERT_NEAR(buf[0], 0.0, 1e-9);
 
   // Samples 1..255: gate should be 1.0 (phase is still well under 0.5)
-  // Audio = 1.0 / 20.0 = 0.05
   for (unsigned int i = 1; i < buf_len; ++i) {
-    ASSERT_NEAR(buf[i], 1.0 / 20.0, 1e-9);
+    ASSERT_NEAR(buf[i], 1.0, 1e-9);
   }
 
   tropical_runtime_free(rt);
@@ -477,7 +476,7 @@ static void test_multi_register_clock()
  * Output 1: constant 7.0
  * Outputs: [0, 1]
  *
- * Audio = (3.0 / 20.0) + (7.0 / 20.0) = 10.0 / 20.0 = 0.5
+ * Audio = 3.0 + 7.0 = 10.0
  */
 static void test_multiple_outputs_summed()
 {
@@ -509,7 +508,7 @@ static void test_multiple_outputs_summed()
   ASSERT(buf != nullptr);
 
   for (unsigned int i = 0; i < buf_len; ++i) {
-    ASSERT_NEAR(buf[i], 0.5, 1e-9);
+    ASSERT_NEAR(buf[i], 10.0, 1e-9);
   }
 
   tropical_runtime_free(rt);
@@ -523,7 +522,7 @@ static void test_multiple_outputs_summed()
  * This is a 16-bit LFSR step. With scalar_type annotations, the JIT should
  * emit native i64 ops (no FPToSI/SIToFP round-trips).
  *
- * Output 0: state value (as float / 20.0 via output mix)
+ * Output 0: state value (as float via output mix)
  * Process 4 steps and verify LFSR sequence: 1, 0x5A00, 0x2D00, 0x1680
  */
 static void test_typed_int_bitwise()
@@ -601,7 +600,7 @@ static void test_typed_int_bitwise()
     tropical_runtime_process(rt);
     const double* buf = tropical_runtime_output_buffer(rt);
     ASSERT(buf != nullptr);
-    ASSERT_NEAR(buf[0], expected[i] / 20.0, 1e-6);
+    ASSERT_NEAR(buf[0], expected[i], 1e-6);
   }
 
   tropical_runtime_free(rt);
@@ -617,7 +616,7 @@ static void test_typed_int_bitwise()
  * reg3 = BitAnd(reg1, reg2) → int (bool promoted to int for bitwise)
  * reg4 = Select(reg3, 10.0, 0.0) → float
  *
- * Output: 10/20=0.5 when 2 < tick < 6, else 0.
+ * Output: 10.0 when 2 < tick < 6, else 0.
  * Tick starts at 0 for first buffer, 1 for second, etc. (buf_len=1)
  */
 static void test_typed_bool_select()
@@ -667,8 +666,8 @@ static void test_typed_bool_select()
   // >2:  F,F,F,T,T,T,T,T
   // <6:  T,T,T,T,T,T,F,F
   // AND: F,F,F,T,T,T,F,F
-  // out: 0,0,0,0.5,0.5,0.5,0,0
-  double expected[] = {0, 0, 0, 0.5, 0.5, 0.5, 0, 0};
+  // out: 0,0,0,10,10,10,0,0
+  double expected[] = {0, 0, 0, 10.0, 10.0, 10.0, 0, 0};
   for (int i = 0; i < 8; ++i) {
     tropical_runtime_process(rt);
     const double* buf = tropical_runtime_output_buffer(rt);

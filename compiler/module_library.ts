@@ -103,10 +103,10 @@ export function vco(name = 'VCO'): ModuleType {
 
       return {
         outputs: {
-          saw: mul(5.0, saw),
-          tri: mul(5.0, triState),
-          sin: mul(5.0, sine),
-          sqr: mul(5.0, sqr),
+          saw,
+          tri: triState,
+          sin: sine,
+          sqr,
         },
         nextRegs: { phase, tri_state: triState },
       }
@@ -587,7 +587,7 @@ export function bassDrum(name = 'BassDrum'): ModuleType {
 
       const newIc1 = add(yBp, v1)
       const newIc2 = add(yLp, v2)
-      const output = mul(mul(newAmp, clamp(mul(yLp, 0.5), -1.0, 1.0)), 5.0)
+      const output = mul(newAmp, clamp(mul(yLp, 0.5), -1.0, 1.0))
 
       return {
         outputs: { output },
@@ -796,18 +796,19 @@ export function ladderFilter(name = 'LadderFilter'): ModuleType {
       let s3: ExprCoercible = reg.get('s3')
       let s4: ExprCoercible = reg.get('s4')
 
-      // 2x oversampled Huovilainen ladder with tanh saturation
+      // 2x oversampled ladder: tanh saturation on input + feedback only,
+      // clean one-pole stages to preserve gain through the filter.
       for (let i = 0; i < 2; i++) {
-        const fb = mul(reso, tanh(s4))
-        const u = sub(driven, fb)
-        s1 = add(s1, mul(g, sub(tanh(u),  tanh(s1))))
-        s2 = add(s2, mul(g, sub(tanh(s1), tanh(s2))))
-        s3 = add(s3, mul(g, sub(tanh(s2), tanh(s3))))
-        s4 = add(s4, mul(g, sub(tanh(s3), tanh(s4))))
+        const fb = mul(reso, s4)
+        const u = tanh(sub(driven, fb))
+        s1 = add(s1, mul(g, sub(u,  s1)))
+        s2 = add(s2, mul(g, sub(s1, s2)))
+        s3 = add(s3, mul(g, sub(s2, s3)))
+        s4 = add(s4, mul(g, sub(s3, s4)))
       }
 
-      const lp = s4 as SignalExpr      // 24dB/oct lowpass
-      const bp = s2 as SignalExpr       // 12dB/oct (bandpass character with resonance)
+      const lp = s4 as SignalExpr
+      const bp = s2 as SignalExpr
       const hp = sub(raw, lp)           // highpass (input minus lowpass)
       const notch = sub(raw, bp)        // notch (input minus bandpass)
 

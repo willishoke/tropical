@@ -165,18 +165,21 @@
     {
       "module": "Ph1", "input": "input",
       "expr": {
-        "op": "add", "args": [
+        "op": "mul", "args": [
           {"op": "add", "args": [
             {"op": "add", "args": [
               {"op": "add", "args": [
-                {"op": "ref", "module": "VCA1", "output": "out"},
-                {"op": "ref", "module": "VCA2", "output": "out"}
+                {"op": "add", "args": [
+                  {"op": "ref", "module": "VCA1", "output": "out"},
+                  {"op": "ref", "module": "VCA2", "output": "out"}
+                ]},
+                {"op": "ref", "module": "VCA3", "output": "out"}
               ]},
-              {"op": "ref", "module": "VCA3", "output": "out"}
+              {"op": "ref", "module": "VCA4", "output": "out"}
             ]},
-            {"op": "ref", "module": "VCA4", "output": "out"}
+            {"op": "ref", "module": "VCA5", "output": "out"}
           ]},
-          {"op": "ref", "module": "VCA5", "output": "out"}
+          0.2
         ]
       }
     },

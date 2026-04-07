@@ -1025,9 +1025,8 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       llvm::Value * f64_val = coerce(val, temp_types[mt], ST::Float);
       mixed = builder.CreateFAdd(mixed, f64_val);
     }
-    llvm::Value * scaled = builder.CreateFDiv(mixed, llvm::ConstantFP::get(f64_ty, 20.0));
     llvm::Value * out_ptr = builder.CreateInBoundsGEP(f64_ty, output_buffer_arg, loop_counter);
-    builder.CreateStore(scaled, out_ptr);
+    builder.CreateStore(mixed, out_ptr);
   }
 
   // Loop back-edge
