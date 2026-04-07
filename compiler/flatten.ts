@@ -17,6 +17,7 @@ import {
   buildDependencyGraph, topologicalSort,
 } from './compiler.js'
 import { lowerArrayOps } from './lower_arrays.js'
+import { lowerAdtOps } from './lower_adts.js'
 import { portTypeToString } from './term.js'
 import { checkArrayConnection } from './array_wiring.js'
 import { emitNumericProgram, type NInstr, type ScalarType } from './emit_numeric.js'
@@ -132,6 +133,63 @@ export interface FlatPlan {
 // Expression tree manipulation
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * Walk an expression value (array, op-object, or record-of-exprs) and apply a transform.
+ * Returns { changed, result } where changed indicates whether any child was modified.
+ * Handles Record<string, ExprNode> structures (used by ADT ops like construct, inject, match).
+ */
+function walkExprValue(
+  v: unknown,
+  transform: (n: ExprNode, memo?: WeakMap<object, ExprNode>) => ExprNode,
+  memo?: WeakMap<object, ExprNode>,
+): { changed: boolean; result: unknown } {
+  if (Array.isArray(v)) {
+    const arr = v as ExprNode[]
+    const newArr = arr.map(n => transform(n, memo))
+    const anyChanged = newArr.some((n, i) => n !== arr[i])
+    return { changed: anyChanged, result: anyChanged ? newArr : arr }
+  }
+  if (typeof v === 'object' && v !== null) {
+    const obj = v as Record<string, unknown>
+    if ('_ptr' in obj) return { changed: false, result: v }  // param handle — opaque
+    if ('op' in obj) {
+      const newV = transform(v as ExprNode, memo)
+      return { changed: newV !== v, result: newV }
+    }
+    // Record<string, ExprNode | mixed> — recurse into values (ADT fields/payload/branches)
+    let changed = false
+    const result: Record<string, unknown> = {}
+    for (const [key, val] of Object.entries(obj)) {
+      const { changed: c, result: r } = walkExprValue(val, transform, memo)
+      result[key] = r
+      if (c) changed = true
+    }
+    return { changed, result: changed ? result : v }
+  }
+  return { changed: false, result: v }
+}
+
+/**
+ * Generic object-property iteration for expression walkers.
+ * Iterates all properties of an op-node, recursing into arrays, op-objects,
+ * and record-of-expression containers (ADT fields/payload/branches).
+ */
+function walkExprProperties(
+  obj: Record<string, unknown>,
+  transform: (n: ExprNode, memo?: WeakMap<object, ExprNode>) => ExprNode,
+  memo?: WeakMap<object, ExprNode>,
+): { changed: boolean; result: Record<string, unknown> } {
+  let changed = false
+  const result: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === 'op') { result[k] = v; continue }
+    const { changed: c, result: r } = walkExprValue(v, transform, memo)
+    result[k] = r
+    if (c) changed = true
+  }
+  return { changed, result }
+}
+
 /** Deep-clone an ExprNode tree. */
 function cloneExpr(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode {
   if (typeof node === 'number' || typeof node === 'boolean') return node
@@ -176,22 +234,7 @@ function inlineCalls(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode
   const obj = node as Record<string, unknown>
 
   // First, recursively inline in children
-  let changed = false
-  const result: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(obj)) {
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => inlineCalls(n, memo))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = inlineCalls(v as ExprNode, memo)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else {
-      result[k] = v
-    }
-  }
+  const { changed, result } = walkExprProperties(obj, (n, m) => inlineCalls(n, m), memo)
 
   let out: ExprNode
   // Now check if this is a call(function(...), args) that can be inlined
@@ -247,23 +290,7 @@ function substituteInputs(node: ExprNode, inputMap: Map<number, ExprNode>, memo?
     return node
   }
 
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => substituteInputs(n, inputMap, memo))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = substituteInputs(v as ExprNode, inputMap, memo)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else {
-      result[k] = v
-    }
-  }
+  const { changed, result } = walkExprProperties(obj, (n, m) => substituteInputs(n, inputMap, m), memo)
   if (!changed) {
     if (memo) memo.set(node as object, node)
     return node
@@ -295,23 +322,7 @@ function resolveDelayValues(node: ExprNode, delayBase: number, memo?: WeakMap<ob
     return out
   }
 
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => resolveDelayValues(n, delayBase, memo))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = resolveDelayValues(v as ExprNode, delayBase, memo)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else {
-      result[k] = v
-    }
-  }
+  const { changed, result } = walkExprProperties(obj, (n, m) => resolveDelayValues(n, delayBase, m), memo)
   if (!changed) {
     if (memo) memo.set(node as object, node)
     return node
@@ -434,23 +445,7 @@ function substituteNestedOutputRefs(
     return outputs[outputId]
   }
 
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => substituteNestedOutputRefs(n, resolved, memo))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = substituteNestedOutputRefs(v as ExprNode, resolved, memo)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else {
-      result[k] = v
-    }
-  }
+  const { changed, result } = walkExprProperties(obj, (n, m) => substituteNestedOutputRefs(n, resolved, m), memo)
   if (!changed) {
     if (memo) memo.set(node as object, node)
     return node
@@ -584,23 +579,7 @@ function offsetRegisters(node: ExprNode, offset: number, memo?: WeakMap<object, 
     return out
   }
 
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => offsetRegisters(n, offset, memo))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = offsetRegisters(v as ExprNode, offset, memo)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else {
-      result[k] = v
-    }
-  }
+  const { changed, result } = walkExprProperties(obj, (n, m) => offsetRegisters(n, offset, m), memo)
   if (!changed) {
     if (memo) memo.set(node as object, node)
     return node
@@ -654,23 +633,7 @@ function resolveRefs(
     return moduleOutputs[outputId]
   }
 
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => resolveRefs(n, outputExprs, outputNames, memo))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = resolveRefs(v as ExprNode, outputExprs, outputNames, memo)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else {
-      result[k] = v
-    }
-  }
+  const { changed, result } = walkExprProperties(obj, (n, m) => resolveRefs(n, outputExprs, outputNames, m), memo)
   if (!changed) {
     if (memo) memo.set(node as object, node)
     return node
@@ -783,6 +746,11 @@ export function flattenPatch(session: SessionState): FlatPlan {
       // preserving DAG identity throughout.
       const lowerMemo = new WeakMap<object, ExprNode>()
       expr = lowerArrayOps(expr, lowerMemo)
+      // Lower ADT ops (construct, inject, project, match) to Pack/Index/Select.
+      if (session.adtRegistry) {
+        const adtMemo = new WeakMap<object, ExprNode>()
+        expr = lowerAdtOps(expr, session.adtRegistry, adtMemo)
+      }
       return expr
     }
 
