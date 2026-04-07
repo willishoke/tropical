@@ -36,7 +36,7 @@ enum class OpTag : uint8_t
   Index,    // args[0]=ArrayReg, args[1]=scalar idx → scalar element
   MatMul,
   // arity 1
-  Neg, Abs, Sin, Cos, Log, Exp, Sqrt, Floor, Ceil, Round, Not, BitNot,
+  Neg, Abs, Sin, Cos, Log, Exp, Sqrt, Floor, Ceil, Round, Not, BitNot, Tanh,
   // arity 3
   Clamp, Select,
   SetElement,  // args[0]=ArrayReg, args[1]=idx, args[2]=val; no dst slot written

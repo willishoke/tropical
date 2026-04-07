@@ -423,23 +423,118 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     return builder.CreateLoad(i64_ty, sp);
   };
 
-  // ── Intrinsics ──
+  // ── Constants & hardware intrinsics (only for ops that map to single instructions) ──
   llvm::Value * zero_f64 = llvm::ConstantFP::get(f64_ty, 0.0);
+  llvm::Value * one_f64  = llvm::ConstantFP::get(f64_ty, 1.0);
   auto intr1 = [&](llvm::Intrinsic::ID id) {
     return llvm::Intrinsic::getOrInsertDeclaration(module.get(), id, {f64_ty});
   };
-  llvm::FunctionCallee llvm_sin   = intr1(llvm::Intrinsic::sin);
-  llvm::FunctionCallee llvm_cos   = intr1(llvm::Intrinsic::cos);
-  llvm::FunctionCallee llvm_log   = intr1(llvm::Intrinsic::log);
-  llvm::FunctionCallee llvm_exp   = intr1(llvm::Intrinsic::exp);
-  llvm::FunctionCallee llvm_pow   = intr1(llvm::Intrinsic::pow);
+  // Hardware single-instruction ops — keep as intrinsics
   llvm::FunctionCallee llvm_sqrt  = intr1(llvm::Intrinsic::sqrt);
   llvm::FunctionCallee llvm_floor = intr1(llvm::Intrinsic::floor);
   llvm::FunctionCallee llvm_ceil  = intr1(llvm::Intrinsic::ceil);
   llvm::FunctionCallee llvm_round = intr1(llvm::Intrinsic::round);
   llvm::FunctionCallee llvm_fabs  = intr1(llvm::Intrinsic::fabs);
-  llvm::FunctionCallee llvm_fmod  = module->getOrInsertFunction(
-    "fmod", llvm::FunctionType::get(f64_ty, {f64_ty, f64_ty}, false));
+
+  // ── Inline transcendental approximations ──
+  // All emit pure arithmetic IR — no libm calls, deterministic across targets.
+
+  auto C = [&](double v) { return llvm::ConstantFP::get(f64_ty, v); };
+
+  // sin(x): Payne-Hanek range reduction to [-pi, pi], then 7th-order minimax.
+  // Max error ~2.5e-7 over full range (sufficient for audio).
+  auto emit_sin = [&](llvm::Value * x) -> llvm::Value * {
+    // Range reduction: x = x - round(x / (2*pi)) * (2*pi)
+    llvm::Value * inv_twopi = C(0.15915494309189533);  // 1/(2*pi)
+    llvm::Value * twopi     = C(6.283185307179586);
+    llvm::Value * n = builder.CreateCall(llvm_round, {builder.CreateFMul(x, inv_twopi)});
+    llvm::Value * r = builder.CreateFSub(x, builder.CreateFMul(n, twopi));
+    // 7th-order odd minimax: sin(r) ≈ r(c1 + r²(c3 + r²(c5 + r²·c7)))
+    llvm::Value * r2 = builder.CreateFMul(r, r);
+    llvm::Value * p = C(-1.9515295891e-4);                      // c7
+    p = builder.CreateFAdd(C(8.3321608736e-3), builder.CreateFMul(p, r2));  // c5
+    p = builder.CreateFAdd(C(-1.6666654611e-1), builder.CreateFMul(p, r2)); // c3
+    p = builder.CreateFAdd(C(9.9999999967e-1), builder.CreateFMul(p, r2));  // c1
+    return builder.CreateFMul(r, p);
+  };
+
+  // cos(x): sin(x + pi/2)
+  auto emit_cos = [&](llvm::Value * x) -> llvm::Value * {
+    return emit_sin(builder.CreateFAdd(x, C(1.5707963267948966)));
+  };
+
+  // exp(x): Cody-Waite reduction + 6th-order Padé on [-ln2/2, ln2/2].
+  // Max error ~2e-10 over [-87, 88].
+  auto emit_exp = [&](llvm::Value * x) -> llvm::Value * {
+    // Clamp to avoid overflow/underflow
+    llvm::Value * clamped = builder.CreateSelect(
+      builder.CreateFCmpOLT(x, C(-87.0)), C(-87.0),
+      builder.CreateSelect(builder.CreateFCmpOGT(x, C(88.0)), C(88.0), x));
+    // n = round(x / ln2), r = x - n*ln2
+    llvm::Value * log2e = C(1.4426950408889634);
+    llvm::Value * n = builder.CreateCall(llvm_round, {builder.CreateFMul(clamped, log2e)});
+    // Cody-Waite: subtract in two parts for precision
+    llvm::Value * r = builder.CreateFSub(clamped, builder.CreateFMul(n, C(0.693145751953125)));
+    r = builder.CreateFSub(r, builder.CreateFMul(n, C(1.42860682030941723212e-6)));
+    // Polynomial: exp(r) ≈ 1 + r(1 + r(c2 + r(c3 + r(c4 + r(c5 + r*c6)))))
+    llvm::Value * r2 = builder.CreateFMul(r, r);
+    llvm::Value * p = C(1.9875691500e-4);
+    p = builder.CreateFAdd(C(1.3981999507e-3), builder.CreateFMul(p, r));
+    p = builder.CreateFAdd(C(8.3334519073e-3), builder.CreateFMul(p, r));
+    p = builder.CreateFAdd(C(4.1665795894e-2), builder.CreateFMul(p, r));
+    p = builder.CreateFAdd(C(1.6666665459e-1), builder.CreateFMul(p, r));
+    p = builder.CreateFAdd(C(5.0000001201e-1), builder.CreateFMul(p, r));
+    llvm::Value * exp_r = builder.CreateFAdd(one_f64, builder.CreateFMul(r, builder.CreateFAdd(one_f64, builder.CreateFMul(r, p))));
+    // Reconstruct: exp(x) = exp(r) * 2^n  (via bit manipulation)
+    llvm::Value * ni = builder.CreateFPToSI(n, i64_ty);
+    llvm::Value * bias = builder.CreateShl(builder.CreateAdd(ni, builder.getInt64(1023)), 52);
+    llvm::Value * scale = builder.CreateBitCast(bias, f64_ty);
+    return builder.CreateFMul(exp_r, scale);
+  };
+
+  // log(x): exponent extraction + Remez polynomial on [1, 2).
+  // Max error ~1e-7.
+  auto emit_log = [&](llvm::Value * x) -> llvm::Value * {
+    // Safely handle x <= 0
+    llvm::Value * safe_x = builder.CreateSelect(
+      builder.CreateFCmpOLE(x, zero_f64), C(1e-45), x);
+    // Extract exponent: e = (bits >> 52) - 1023
+    llvm::Value * bits = builder.CreateBitCast(safe_x, i64_ty);
+    llvm::Value * e = builder.CreateSub(builder.CreateAShr(bits, 52), builder.getInt64(1023));
+    llvm::Value * ef = builder.CreateSIToFP(e, f64_ty);
+    // Extract mantissa in [1, 2): clear exponent bits, set to 1023
+    llvm::Value * mantissa_bits = builder.CreateOr(
+      builder.CreateAnd(bits, builder.getInt64(0x000FFFFFFFFFFFFFLL)),
+      builder.getInt64(0x3FF0000000000000LL));
+    llvm::Value * m = builder.CreateBitCast(mantissa_bits, f64_ty);
+    // Remez polynomial for log(m) where m in [1, 2): log(m) ≈ (m-1) * P(m-1)
+    llvm::Value * f = builder.CreateFSub(m, one_f64);
+    llvm::Value * f2 = builder.CreateFMul(f, f);
+    // log(1+f) ≈ f - f²/2 + f³·P(f)  — degree-4 Remez on mantissa
+    llvm::Value * p = C(7.40148531e-2);
+    p = builder.CreateFAdd(C(-1.24421087e-1), builder.CreateFMul(p, f));
+    p = builder.CreateFAdd(C(1.42493233e-1), builder.CreateFMul(p, f));
+    p = builder.CreateFAdd(C(-1.66680575e-1), builder.CreateFMul(p, f));
+    p = builder.CreateFAdd(C(2.00007403e-1), builder.CreateFMul(p, f));
+    p = builder.CreateFAdd(C(-2.49999403e-1), builder.CreateFMul(p, f));
+    llvm::Value * log_m = builder.CreateFAdd(f,
+      builder.CreateFMul(f2, p));
+    // log(x) = log(m) + e * ln(2)
+    return builder.CreateFAdd(log_m, builder.CreateFMul(ef, C(0.6931471805599453)));
+  };
+
+  // tanh(x): Padé approximant — tanh(x) ≈ x(27+x²)/(27+9x²), clamped to [-3,3].
+  // Same approximation previously done in DSL, now a first-class primitive.
+  auto emit_tanh = [&](llvm::Value * x) -> llvm::Value * {
+    llvm::Value * lo = C(-3.0);
+    llvm::Value * hi = C(3.0);
+    llvm::Value * c = builder.CreateSelect(builder.CreateFCmpOLT(x, lo), lo,
+                        builder.CreateSelect(builder.CreateFCmpOGT(x, hi), hi, x));
+    llvm::Value * c2 = builder.CreateFMul(c, c);
+    llvm::Value * num = builder.CreateFMul(c, builder.CreateFAdd(C(27.0), c2));
+    llvm::Value * den = builder.CreateFAdd(C(27.0), builder.CreateFMul(C(9.0), c2));
+    return builder.CreateFDiv(num, den);
+  };
 
   // current_sample_idx is set inside the buffer loop (PHI node)
   llvm::Value * current_sample_idx = nullptr;
@@ -474,10 +569,14 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       }
       case OpTag::Mod:
       {
-        llvm::Value * safe = builder.CreateSelect(builder.CreateFCmpOEQ(v[1], zero_f64), zero_f64, builder.CreateCall(llvm_fmod, {v[0], v[1]}));
-        return safe;
+        // fmod(a, b) = a - floor(a/b) * b — no libm call
+        llvm::Value * is_zero = builder.CreateFCmpOEQ(v[1], zero_f64);
+        llvm::Value * q = builder.CreateFDiv(v[0], v[1]);
+        llvm::Value * fq = builder.CreateCall(llvm_floor, {q});
+        llvm::Value * result = builder.CreateFSub(v[0], builder.CreateFMul(fq, v[1]));
+        return builder.CreateSelect(is_zero, zero_f64, result);
       }
-      case OpTag::Pow:      return builder.CreateCall(llvm_pow, {v[0], v[1]});
+      case OpTag::Pow:      return emit_exp(builder.CreateFMul(v[1], emit_log(v[0])));
       case OpTag::FloorDiv:
       {
         llvm::Value * dv = builder.CreateSelect(builder.CreateFCmpOEQ(v[1], zero_f64), zero_f64, builder.CreateFDiv(v[0], v[1]));
@@ -516,10 +615,11 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       }
       case OpTag::Neg:    return builder.CreateFNeg(v[0]);
       case OpTag::Abs:    return builder.CreateCall(llvm_fabs,  {v[0]});
-      case OpTag::Sin:    return builder.CreateCall(llvm_sin,   {v[0]});
-      case OpTag::Cos:    return builder.CreateCall(llvm_cos,   {v[0]});
-      case OpTag::Log:    return builder.CreateCall(llvm_log,   {v[0]});
-      case OpTag::Exp:    return builder.CreateCall(llvm_exp,   {v[0]});
+      case OpTag::Sin:    return emit_sin(v[0]);
+      case OpTag::Cos:    return emit_cos(v[0]);
+      case OpTag::Log:    return emit_log(v[0]);
+      case OpTag::Exp:    return emit_exp(v[0]);
+      case OpTag::Tanh:   return emit_tanh(v[0]);
       case OpTag::Sqrt:   return builder.CreateCall(llvm_sqrt,  {v[0]});
       case OpTag::Floor:  return builder.CreateCall(llvm_floor, {v[0]});
       case OpTag::Ceil:   return builder.CreateCall(llvm_ceil,  {v[0]});

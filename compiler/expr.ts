@@ -142,7 +142,10 @@ export const bitNot  = (operand: ExprCoercible) => unary('bit_not', operand)
 export const neg        = (operand: ExprCoercible) => unary('neg', operand)
 export const abs_       = (operand: ExprCoercible) => unary('abs', operand)
 export const sin        = (operand: ExprCoercible) => unary('sin', operand)
+export const cos        = (operand: ExprCoercible) => unary('cos', operand)
+export const exp        = (operand: ExprCoercible) => unary('exp', operand)
 export const log        = (operand: ExprCoercible) => unary('log', operand)
+export const tanh       = (operand: ExprCoercible) => unary('tanh', operand)
 export const logicalNot = (operand: ExprCoercible) => unary('not', operand)
 
 export function clamp(value: ExprCoercible, lo: ExprCoercible, hi: ExprCoercible): SignalExpr {

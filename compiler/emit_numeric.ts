@@ -60,7 +60,7 @@ const BINARY_TAG: Record<string, string> = {
 }
 
 const UNARY_TAG: Record<string, string> = {
-  neg: 'Neg', abs: 'Abs', sin: 'Sin', cos: 'Cos',
+  neg: 'Neg', abs: 'Abs', sin: 'Sin', cos: 'Cos', tanh: 'Tanh',
   log: 'Log', exp: 'Exp', sqrt: 'Sqrt',
   floor: 'Floor', ceil: 'Ceil', round: 'Round',
   not: 'Not', bit_not: 'BitNot',

@@ -6,7 +6,7 @@ import {
   SignalExpr, ExprCoercible,
   add, sub, mul, div, mod, pow_, neg, floorDiv,
   lt, lte, gt, gte,
-  abs_, sin, log,
+  abs_, sin, log, tanh,
   bitAnd, bitXor, rshift,
   clamp, select, arrayPack, arraySet, matmul,
   sampleRate, sampleIndex,
@@ -772,12 +772,6 @@ export function bitCrusher(name = 'BitCrusher'): ModuleType {
 
 // ─── Ladder Filter ───────────────────────────────────────────────────────────
 
-const _tanhApprox: PureFunction = definePureFunction(['x'], ['value'], (inp) => {
-  const x = clamp(inp.get('x'), -3.0, 3.0)
-  const x2 = mul(x, x)
-  return { value: div(mul(x, add(27.0, x2)), add(27.0, mul(9.0, x2))) }
-})
-
 export function ladderFilter(name = 'LadderFilter'): ModuleType {
   const E = 2.718281828459045
 
@@ -804,12 +798,12 @@ export function ladderFilter(name = 'LadderFilter'): ModuleType {
 
       // 2x oversampled Huovilainen ladder with tanh saturation
       for (let i = 0; i < 2; i++) {
-        const fb = mul(reso, one(_tanhApprox.call(s4)))
+        const fb = mul(reso, tanh(s4))
         const u = sub(driven, fb)
-        s1 = add(s1, mul(g, sub(one(_tanhApprox.call(u)),  one(_tanhApprox.call(s1)))))
-        s2 = add(s2, mul(g, sub(one(_tanhApprox.call(s1)), one(_tanhApprox.call(s2)))))
-        s3 = add(s3, mul(g, sub(one(_tanhApprox.call(s2)), one(_tanhApprox.call(s3)))))
-        s4 = add(s4, mul(g, sub(one(_tanhApprox.call(s3)), one(_tanhApprox.call(s4)))))
+        s1 = add(s1, mul(g, sub(tanh(u),  tanh(s1))))
+        s2 = add(s2, mul(g, sub(tanh(s1), tanh(s2))))
+        s3 = add(s3, mul(g, sub(tanh(s2), tanh(s3))))
+        s4 = add(s4, mul(g, sub(tanh(s3), tanh(s4))))
       }
 
       const lp = s4 as SignalExpr      // 24dB/oct lowpass

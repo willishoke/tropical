@@ -63,6 +63,7 @@ inline egress_jit::OpTag parse_op_tag(const std::string & s)
     {"Select",      T::Select},
     {"SetElement",  T::SetElement},
     {"Pack",        T::Pack},
+    {"Tanh",        T::Tanh},
     {"SmoothParam", T::SmoothParam},
     {"TriggerParam",T::TriggerParam},
   };
