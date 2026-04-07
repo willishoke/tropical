@@ -280,7 +280,7 @@ llvm::Expected<uint64_t> OrcJitEngine::lookup(const std::string & symbol_name)
 
 
 // ---------------------------------------------------------------------------
-// compile_flat_program — new emission path for egress_plan_3 / FlatProgram.
+// compile_flat_program — emission path for egress_plan_4 / FlatProgram.
 //
 // Terminals (Const, Input, Reg, StateReg, Param, Rate, Tick) are Operands
 // embedded in instructions rather than separate pseudo-ops.  loop_count > 1
@@ -371,6 +371,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   llvm::Type * void_ty  = builder.getVoidTy();
   llvm::Type * f64_ty   = builder.getDoubleTy();
   llvm::Type * i64_ty   = builder.getInt64Ty();
+  llvm::Type * i1_ty    = builder.getInt1Ty();
   llvm::Type * ptr_ty   = llvm::PointerType::get(*context, 0);
 
   llvm::FunctionType * fn_ty = llvm::FunctionType::get(
@@ -423,8 +424,59 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     return builder.CreateLoad(i64_ty, sp);
   };
 
+  // ── Typed load/store helpers ──
+  using ST = JitScalarType;
+
+  auto load_temp_typed = [&](uint32_t idx, ST ty) -> llvm::Value * {
+    llvm::Value * raw = builder.CreateLoad(i64_ty, gep_temp(idx));
+    switch (ty)
+    {
+      case ST::Float: return builder.CreateBitCast(raw, f64_ty);
+      case ST::Int:   return raw;
+      case ST::Bool:  return builder.CreateTrunc(raw, i1_ty);
+    }
+    return builder.CreateBitCast(raw, f64_ty);
+  };
+
+  auto store_temp_typed = [&](uint32_t idx, llvm::Value * v, ST ty) {
+    llvm::Value * as_i64;
+    switch (ty)
+    {
+      case ST::Float: as_i64 = builder.CreateBitCast(v, i64_ty); break;
+      case ST::Int:   as_i64 = v; break;  // already i64
+      case ST::Bool:  as_i64 = builder.CreateZExt(v, i64_ty); break;
+    }
+    builder.CreateStore(as_i64, gep_temp(idx));
+  };
+
+  auto load_reg_typed = [&](uint32_t slot, ST ty) -> llvm::Value * {
+    llvm::Value * ptr = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(slot));
+    llvm::Value * raw = builder.CreateLoad(i64_ty, ptr);
+    switch (ty)
+    {
+      case ST::Float: return builder.CreateBitCast(raw, f64_ty);
+      case ST::Int:   return raw;
+      case ST::Bool:  return builder.CreateTrunc(raw, i1_ty);
+    }
+    return builder.CreateBitCast(raw, f64_ty);
+  };
+
   // ── Intrinsics ──
-  llvm::Value * zero_f64 = llvm::ConstantFP::get(f64_ty, 0.0);
+  llvm::Value * zero_f64  = llvm::ConstantFP::get(f64_ty, 0.0);
+  llvm::Value * zero_i64  = builder.getInt64(0);
+  llvm::Value * zero_i1   = builder.getFalse();
+
+  // ── Coercion helper ──
+  auto coerce = [&](llvm::Value * v, ST from, ST to) -> llvm::Value * {
+    if (from == to) return v;
+    if (from == ST::Float && to == ST::Int)   return builder.CreateFPToSI(v, i64_ty);
+    if (from == ST::Float && to == ST::Bool)  return builder.CreateFCmpUNE(v, zero_f64);
+    if (from == ST::Int   && to == ST::Float) return builder.CreateSIToFP(v, f64_ty);
+    if (from == ST::Int   && to == ST::Bool)  return builder.CreateICmpNE(v, zero_i64);
+    if (from == ST::Bool  && to == ST::Float) return builder.CreateUIToFP(v, f64_ty);
+    if (from == ST::Bool  && to == ST::Int)   return builder.CreateZExt(v, i64_ty);
+    return v;
+  };
   auto intr1 = [&](llvm::Intrinsic::ID id) {
     return llvm::Intrinsic::getOrInsertDeclaration(module.get(), id, {f64_ty});
   };
@@ -444,107 +496,195 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   // current_sample_idx is set inside the buffer loop (PHI node)
   llvm::Value * current_sample_idx = nullptr;
 
-  // ── resolve_scalar: Operand → llvm::Value* (f64 or nullptr for array/param) ──
-  auto resolve_scalar = [&](const Operand & op) -> llvm::Value * {
+  // Typed value: LLVM value + its JIT scalar type
+  using TypedVal = std::pair<llvm::Value *, ST>;
+
+  // Per-temp register type tracking (updated per instruction)
+  std::vector<ST> temp_types(program.register_count, ST::Float);
+
+  // ── resolve_typed: Operand → (llvm::Value*, JitScalarType) ──
+  auto resolve_typed = [&](const Operand & op) -> TypedVal {
     switch (op.kind)
     {
-      case OperandKind::Const:    return llvm::ConstantFP::get(f64_ty, op.const_val);
-      case OperandKind::Input:    return load_input_f64(op.slot);
-      case OperandKind::Reg:      return load_temp_f64(op.slot);
-      case OperandKind::StateReg: return load_reg_f64(op.slot);
-      case OperandKind::Rate:     return sample_rate_arg;
-      case OperandKind::Tick:     return builder.CreateSIToFP(current_sample_idx, f64_ty);
+      case OperandKind::Const:
+        switch (op.scalar_type)
+        {
+          case ST::Int:   return {builder.getInt64(static_cast<int64_t>(op.const_val)), ST::Int};
+          case ST::Bool:  return {builder.getInt1(op.const_val != 0.0), ST::Bool};
+          default:        return {llvm::ConstantFP::get(f64_ty, op.const_val), ST::Float};
+        }
+      case OperandKind::Input:    return {load_input_f64(op.slot), ST::Float};
+      case OperandKind::Reg:      return {load_temp_typed(op.slot, temp_types[op.slot]), temp_types[op.slot]};
+      case OperandKind::StateReg: return {load_reg_typed(op.slot, op.scalar_type), op.scalar_type};
+      case OperandKind::Rate:     return {sample_rate_arg, ST::Float};
+      case OperandKind::Tick:     return {current_sample_idx, ST::Int};
       case OperandKind::ArrayReg:
-      case OperandKind::Param:    return nullptr;  // handled specially
+      case OperandKind::Param:    return {nullptr, ST::Float};
     }
-    return nullptr;
+    return {nullptr, ST::Float};
   };
 
-  // ── emit_scalar_op: OpTag × [f64] → f64 ──
-  auto emit_scalar_op = [&](OpTag tag, const std::vector<llvm::Value *> & v) -> llvm::Value * {
+  // Convenience: resolve and coerce to f64 (for legacy/array paths)
+  auto resolve_as_f64 = [&](const Operand & op) -> llvm::Value * {
+    auto [v, t] = resolve_typed(op);
+    return v ? coerce(v, t, ST::Float) : nullptr;
+  };
+
+  // ── emit_typed_op: OpTag × result_type × [(Value*, Type)] → (Value*, actual_type) ──
+  // Returns the computed value and its actual LLVM scalar type.
+  // The caller coerces from actual_type → result_type before storing.
+  auto emit_typed_op = [&](OpTag tag, ST result_type,
+                           const std::vector<TypedVal> & tv) -> TypedVal
+  {
+    // Helper: coerce arg to a target type
+    auto arg_as = [&](size_t i, ST target) -> llvm::Value * {
+      return coerce(tv[i].first, tv[i].second, target);
+    };
+
     switch (tag)
     {
-      case OpTag::Add:      return builder.CreateFAdd(v[0], v[1]);
-      case OpTag::Sub:      return builder.CreateFSub(v[0], v[1]);
-      case OpTag::Mul:      return builder.CreateFMul(v[0], v[1]);
+      // ── Arithmetic (type-directed, actual == result_type) ──
+      case OpTag::Add:
+        if (result_type == ST::Int)   return {builder.CreateAdd(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+        return {builder.CreateFAdd(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Float};
+      case OpTag::Sub:
+        if (result_type == ST::Int)   return {builder.CreateSub(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+        return {builder.CreateFSub(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Float};
+      case OpTag::Mul:
+        if (result_type == ST::Int)   return {builder.CreateMul(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+        return {builder.CreateFMul(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Float};
       case OpTag::Div:
       {
-        llvm::Value * safe = builder.CreateSelect(builder.CreateFCmpOEQ(v[1], zero_f64), zero_f64, builder.CreateFDiv(v[0], v[1]));
-        return safe;
+        if (result_type == ST::Int)
+        {
+          llvm::Value * b = arg_as(1, ST::Int);
+          return {builder.CreateSelect(builder.CreateICmpEQ(b, zero_i64), zero_i64, builder.CreateSDiv(arg_as(0, ST::Int), b)), ST::Int};
+        }
+        llvm::Value * b = arg_as(1, ST::Float);
+        return {builder.CreateSelect(builder.CreateFCmpOEQ(b, zero_f64), zero_f64, builder.CreateFDiv(arg_as(0, ST::Float), b)), ST::Float};
       }
       case OpTag::Mod:
       {
-        llvm::Value * safe = builder.CreateSelect(builder.CreateFCmpOEQ(v[1], zero_f64), zero_f64, builder.CreateCall(llvm_fmod, {v[0], v[1]}));
-        return safe;
+        if (result_type == ST::Int)
+        {
+          llvm::Value * b = arg_as(1, ST::Int);
+          return {builder.CreateSelect(builder.CreateICmpEQ(b, zero_i64), zero_i64, builder.CreateSRem(arg_as(0, ST::Int), b)), ST::Int};
+        }
+        llvm::Value * b = arg_as(1, ST::Float);
+        return {builder.CreateSelect(builder.CreateFCmpOEQ(b, zero_f64), zero_f64, builder.CreateCall(llvm_fmod, {arg_as(0, ST::Float), b})), ST::Float};
       }
-      case OpTag::Pow:      return builder.CreateCall(llvm_pow, {v[0], v[1]});
+      case OpTag::Pow:
+        return {builder.CreateCall(llvm_pow, {arg_as(0, ST::Float), arg_as(1, ST::Float)}), ST::Float};
       case OpTag::FloorDiv:
       {
-        llvm::Value * dv = builder.CreateSelect(builder.CreateFCmpOEQ(v[1], zero_f64), zero_f64, builder.CreateFDiv(v[0], v[1]));
-        return builder.CreateCall(llvm_floor, {dv});
+        if (result_type == ST::Int)
+        {
+          llvm::Value * b = arg_as(1, ST::Int);
+          return {builder.CreateSelect(builder.CreateICmpEQ(b, zero_i64), zero_i64, builder.CreateSDiv(arg_as(0, ST::Int), b)), ST::Int};
+        }
+        llvm::Value * b = arg_as(1, ST::Float);
+        llvm::Value * dv = builder.CreateSelect(builder.CreateFCmpOEQ(b, zero_f64), zero_f64, builder.CreateFDiv(arg_as(0, ST::Float), b));
+        return {builder.CreateCall(llvm_floor, {dv}), ST::Float};
       }
-      case OpTag::Less:      return builder.CreateUIToFP(builder.CreateFCmpOLT(v[0], v[1]), f64_ty);
-      case OpTag::LessEq:    return builder.CreateUIToFP(builder.CreateFCmpOLE(v[0], v[1]), f64_ty);
-      case OpTag::Greater:   return builder.CreateUIToFP(builder.CreateFCmpOGT(v[0], v[1]), f64_ty);
-      case OpTag::GreaterEq: return builder.CreateUIToFP(builder.CreateFCmpOGE(v[0], v[1]), f64_ty);
-      case OpTag::Equal:     return builder.CreateUIToFP(builder.CreateFCmpOEQ(v[0], v[1]), f64_ty);
-      case OpTag::NotEqual:  return builder.CreateUIToFP(builder.CreateFCmpUNE(v[0], v[1]), f64_ty);
-      case OpTag::BitAnd:
+
+      // ── Comparisons → always Bool (i1) ──
+      case OpTag::Less:
+        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+          return {builder.CreateICmpSLT(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+        return {builder.CreateFCmpOLT(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+      case OpTag::LessEq:
+        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+          return {builder.CreateICmpSLE(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+        return {builder.CreateFCmpOLE(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+      case OpTag::Greater:
+        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+          return {builder.CreateICmpSGT(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+        return {builder.CreateFCmpOGT(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+      case OpTag::GreaterEq:
+        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+          return {builder.CreateICmpSGE(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+        return {builder.CreateFCmpOGE(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+      case OpTag::Equal:
+        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+          return {builder.CreateICmpEQ(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+        return {builder.CreateFCmpOEQ(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+      case OpTag::NotEqual:
+        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+          return {builder.CreateICmpNE(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+        return {builder.CreateFCmpUNE(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+
+      // ── Bitwise → always Int (i64) ──
+      case OpTag::BitAnd:  return {builder.CreateAnd(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+      case OpTag::BitOr:   return {builder.CreateOr(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+      case OpTag::BitXor:  return {builder.CreateXor(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+      case OpTag::LShift:  return {builder.CreateShl(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+      case OpTag::RShift:  return {builder.CreateAShr(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+
+      // ── Unary ──
+      case OpTag::Neg:
+        if (result_type == ST::Int)   return {builder.CreateNeg(arg_as(0, ST::Int)), ST::Int};
+        return {builder.CreateFNeg(arg_as(0, ST::Float)), ST::Float};
+      case OpTag::Abs:
       {
-        llvm::Value * r = builder.CreateAnd(builder.CreateFPToSI(v[0], i64_ty), builder.CreateFPToSI(v[1], i64_ty));
-        return builder.CreateSIToFP(r, f64_ty);
+        if (result_type == ST::Int)
+        {
+          llvm::Value * v = arg_as(0, ST::Int);
+          llvm::Value * neg = builder.CreateNeg(v);
+          return {builder.CreateSelect(builder.CreateICmpSLT(v, zero_i64), neg, v), ST::Int};
+        }
+        return {builder.CreateCall(llvm_fabs, {arg_as(0, ST::Float)}), ST::Float};
       }
-      case OpTag::BitOr:
-      {
-        llvm::Value * r = builder.CreateOr(builder.CreateFPToSI(v[0], i64_ty), builder.CreateFPToSI(v[1], i64_ty));
-        return builder.CreateSIToFP(r, f64_ty);
-      }
-      case OpTag::BitXor:
-      {
-        llvm::Value * r = builder.CreateXor(builder.CreateFPToSI(v[0], i64_ty), builder.CreateFPToSI(v[1], i64_ty));
-        return builder.CreateSIToFP(r, f64_ty);
-      }
-      case OpTag::LShift:
-      {
-        llvm::Value * r = builder.CreateShl(builder.CreateFPToSI(v[0], i64_ty), builder.CreateFPToSI(v[1], i64_ty));
-        return builder.CreateSIToFP(r, f64_ty);
-      }
-      case OpTag::RShift:
-      {
-        llvm::Value * r = builder.CreateAShr(builder.CreateFPToSI(v[0], i64_ty), builder.CreateFPToSI(v[1], i64_ty));
-        return builder.CreateSIToFP(r, f64_ty);
-      }
-      case OpTag::Neg:    return builder.CreateFNeg(v[0]);
-      case OpTag::Abs:    return builder.CreateCall(llvm_fabs,  {v[0]});
-      case OpTag::Sin:    return builder.CreateCall(llvm_sin,   {v[0]});
-      case OpTag::Cos:    return builder.CreateCall(llvm_cos,   {v[0]});
-      case OpTag::Log:    return builder.CreateCall(llvm_log,   {v[0]});
-      case OpTag::Exp:    return builder.CreateCall(llvm_exp,   {v[0]});
-      case OpTag::Sqrt:   return builder.CreateCall(llvm_sqrt,  {v[0]});
-      case OpTag::Floor:  return builder.CreateCall(llvm_floor, {v[0]});
-      case OpTag::Ceil:   return builder.CreateCall(llvm_ceil,  {v[0]});
-      case OpTag::Round:  return builder.CreateCall(llvm_round, {v[0]});
+
+      // ── Transcendentals → always Float ──
+      case OpTag::Sin:    return {builder.CreateCall(llvm_sin,   {arg_as(0, ST::Float)}), ST::Float};
+      case OpTag::Cos:    return {builder.CreateCall(llvm_cos,   {arg_as(0, ST::Float)}), ST::Float};
+      case OpTag::Log:    return {builder.CreateCall(llvm_log,   {arg_as(0, ST::Float)}), ST::Float};
+      case OpTag::Exp:    return {builder.CreateCall(llvm_exp,   {arg_as(0, ST::Float)}), ST::Float};
+      case OpTag::Sqrt:   return {builder.CreateCall(llvm_sqrt,  {arg_as(0, ST::Float)}), ST::Float};
+      case OpTag::Floor:  return {builder.CreateCall(llvm_floor, {arg_as(0, ST::Float)}), ST::Float};
+      case OpTag::Ceil:   return {builder.CreateCall(llvm_ceil,  {arg_as(0, ST::Float)}), ST::Float};
+      case OpTag::Round:  return {builder.CreateCall(llvm_round, {arg_as(0, ST::Float)}), ST::Float};
+
+      // ── Boolean/bitwise unary ──
       case OpTag::Not:
       {
-        llvm::Value * is_zero = builder.CreateFCmpOEQ(v[0], zero_f64);
-        return builder.CreateUIToFP(is_zero, f64_ty);
+        if (tv[0].second == ST::Bool)  return {builder.CreateNot(tv[0].first), ST::Bool};
+        if (tv[0].second == ST::Int)   return {builder.CreateICmpEQ(tv[0].first, zero_i64), ST::Bool};
+        return {builder.CreateFCmpOEQ(tv[0].first, zero_f64), ST::Bool};
       }
       case OpTag::BitNot:
-        return builder.CreateSIToFP(builder.CreateNot(builder.CreateFPToSI(v[0], i64_ty)), f64_ty);
+        return {builder.CreateNot(arg_as(0, ST::Int)), ST::Int};
+
+      // ── Ternary ──
       case OpTag::Clamp:
       {
-        // clamp(val, lo, hi)
-        llvm::Value * lo_clamped = builder.CreateSelect(builder.CreateFCmpOGT(v[0], v[1]), v[0], v[1]);
-        return builder.CreateSelect(builder.CreateFCmpOLT(lo_clamped, v[2]), lo_clamped, v[2]);
+        if (result_type == ST::Int)
+        {
+          llvm::Value * val = arg_as(0, ST::Int);
+          llvm::Value * lo = arg_as(1, ST::Int);
+          llvm::Value * hi = arg_as(2, ST::Int);
+          llvm::Value * lo_c = builder.CreateSelect(builder.CreateICmpSGT(val, lo), val, lo);
+          return {builder.CreateSelect(builder.CreateICmpSLT(lo_c, hi), lo_c, hi), ST::Int};
+        }
+        llvm::Value * val = arg_as(0, ST::Float);
+        llvm::Value * lo = arg_as(1, ST::Float);
+        llvm::Value * hi = arg_as(2, ST::Float);
+        llvm::Value * lo_c = builder.CreateSelect(builder.CreateFCmpOGT(val, lo), val, lo);
+        return {builder.CreateSelect(builder.CreateFCmpOLT(lo_c, hi), lo_c, hi), ST::Float};
       }
       case OpTag::Select:
       {
-        // select(cond, then, else)
-        llvm::Value * cond = builder.CreateFCmpUNE(v[0], zero_f64);
-        return builder.CreateSelect(cond, v[1], v[2]);
+        llvm::Value * cond_val;
+        if (tv[0].second == ST::Bool)
+          cond_val = tv[0].first;
+        else if (tv[0].second == ST::Int)
+          cond_val = builder.CreateICmpNE(tv[0].first, zero_i64);
+        else
+          cond_val = builder.CreateFCmpUNE(tv[0].first, zero_f64);
+        return {builder.CreateSelect(cond_val, arg_as(1, result_type), arg_as(2, result_type)), result_type};
       }
       default:
-        return nullptr;
+        return {nullptr, ST::Float};
     }
   };
 
@@ -592,6 +732,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       llvm::Value * new_val = builder.CreateFAdd(current, builder.CreateFMul(llvm::ConstantFP::get(f64_ty, coeff), diff));
       builder.CreateStore(builder.CreateBitCast(new_val, i64_ty), reg_gep);
       store_temp_f64(instr.dst, new_val);
+      temp_types[instr.dst] = ST::Float;
       continue;
     }
 
@@ -613,6 +754,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       auto * fv_ld = builder.CreateAlignedLoad(f64_ty, fv_ptr, llvm::Align(sizeof(double)));
       fv_ld->setAtomic(llvm::AtomicOrdering::Monotonic);
       store_temp_f64(instr.dst, fv_ld);
+      temp_types[instr.dst] = ST::Float;
       continue;
     }
 
@@ -622,7 +764,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       llvm::Value * dst_ptr = load_array_ptr_f(instr.dst);
       for (std::size_t i = 0; i < instr.args.size(); ++i)
       {
-        llvm::Value * val = resolve_scalar(instr.args[i]);
+        llvm::Value * val = resolve_as_f64(instr.args[i]);
         llvm::Value * ep  = builder.CreateInBoundsGEP(i64_ty, dst_ptr, builder.getInt64(static_cast<int64_t>(i)));
         builder.CreateStore(builder.CreateBitCast(val, i64_ty), ep);
       }
@@ -635,14 +777,15 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       const uint32_t arr_slot = instr.args[0].slot;
       llvm::Value * array_size = load_array_size_f(arr_slot);
       llvm::Value * array_ptr  = load_array_ptr_f(arr_slot);
-      llvm::Value * idx_f      = resolve_scalar(instr.args[1]);
-      llvm::Value * raw_idx    = builder.CreateFPToSI(idx_f, i64_ty);
+      auto [idx_v, idx_t] = resolve_typed(instr.args[1]);
+      llvm::Value * raw_idx = coerce(idx_v, idx_t, ST::Int);
       llvm::Value * in_range   = builder.CreateAnd(
         builder.CreateNot(builder.CreateICmpSLT(raw_idx, builder.getInt64(0))),
         builder.CreateICmpULT(raw_idx, array_size));
       llvm::Value * ep  = builder.CreateInBoundsGEP(i64_ty, array_ptr, raw_idx);
       llvm::Value * val = builder.CreateBitCast(builder.CreateLoad(i64_ty, ep), f64_ty);
       store_temp_f64(instr.dst, builder.CreateSelect(in_range, val, zero_f64));
+      temp_types[instr.dst] = ST::Float;
       continue;
     }
 
@@ -652,7 +795,8 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       const uint32_t arr_slot = instr.args[0].slot;
       llvm::Value * array_size = load_array_size_f(arr_slot);
       llvm::Value * array_ptr  = load_array_ptr_f(arr_slot);
-      llvm::Value * raw_idx    = builder.CreateFPToSI(resolve_scalar(instr.args[1]), i64_ty);
+      auto [idx_v, idx_t] = resolve_typed(instr.args[1]);
+      llvm::Value * raw_idx = coerce(idx_v, idx_t, ST::Int);
       llvm::Value * in_range   = builder.CreateAnd(
         builder.CreateNot(builder.CreateICmpSLT(raw_idx, builder.getInt64(0))),
         builder.CreateICmpULT(raw_idx, array_size));
@@ -661,7 +805,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       builder.CreateCondBr(in_range, write_bb, merge_bb);
       builder.SetInsertPoint(write_bb);
       llvm::Value * ep = builder.CreateInBoundsGEP(i64_ty, array_ptr, raw_idx);
-      builder.CreateStore(builder.CreateBitCast(resolve_scalar(instr.args[2]), i64_ty), ep);
+      builder.CreateStore(builder.CreateBitCast(resolve_as_f64(instr.args[2]), i64_ty), ep);
       builder.CreateBr(merge_bb);
       builder.SetInsertPoint(merge_bb);
       continue;
@@ -671,6 +815,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     if (instr.tag == OpTag::MatMul)
     {
       store_temp_f64(instr.dst, zero_f64);  // TODO: implement matmul
+      temp_types[instr.dst] = ST::Float;
       continue;
     }
 
@@ -678,15 +823,16 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     if (instr.loop_count > 1)
     {
       // Pre-resolve non-iterating args (stride == 0) and collect array ptrs for iterating args.
+      // Elementwise ops operate on f64 arrays — coerce scalars to f64.
       const std::size_t nargs = instr.args.size();
       std::vector<llvm::Value *> arr_ptrs(nargs, nullptr);
-      std::vector<llvm::Value *> scalar_vals(nargs, nullptr);
+      std::vector<TypedVal> scalar_tvs(nargs, {nullptr, ST::Float});
       for (std::size_t i = 0; i < nargs; ++i)
       {
         if (i < instr.strides.size() && instr.strides[i] == 1)
           arr_ptrs[i] = load_array_ptr_f(instr.args[i].slot);
         else
-          scalar_vals[i] = resolve_scalar(instr.args[i]);
+          scalar_tvs[i] = resolve_typed(instr.args[i]);
       }
 
       llvm::Value * loop_n    = builder.getInt64(instr.loop_count);
@@ -704,28 +850,30 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       builder.CreateCondBr(builder.CreateICmpULT(idx, loop_n), body_bb, end_bb);
 
       builder.SetInsertPoint(body_bb);
-      std::vector<llvm::Value *> iter_vals(nargs, nullptr);
+      std::vector<TypedVal> iter_tvs(nargs, {nullptr, ST::Float});
       for (std::size_t i = 0; i < nargs; ++i)
       {
         if (arr_ptrs[i])
         {
           llvm::Value * ep = builder.CreateInBoundsGEP(i64_ty, arr_ptrs[i], idx);
-          iter_vals[i] = builder.CreateBitCast(builder.CreateLoad(i64_ty, ep), f64_ty);
+          iter_tvs[i] = {builder.CreateBitCast(builder.CreateLoad(i64_ty, ep), f64_ty), ST::Float};
         }
         else
         {
-          iter_vals[i] = scalar_vals[i];
+          iter_tvs[i] = scalar_tvs[i];
         }
       }
-      llvm::Value * elem_result = emit_scalar_op(instr.tag, iter_vals);
+      auto [elem_result, elem_actual_ty] = emit_typed_op(instr.tag, instr.result_type, iter_tvs);
       if (!elem_result)
       {
         return llvm::make_error<llvm::StringError>(
           "compile_flat_program: unsupported OpTag in elementwise loop",
           llvm::inconvertibleErrorCode());
       }
+      // Store result as f64 into array (arrays are f64-backed i64 stores)
+      llvm::Value * as_f64 = coerce(elem_result, elem_actual_ty, ST::Float);
       llvm::Value * dep = builder.CreateInBoundsGEP(i64_ty, dst_ptr, idx);
-      builder.CreateStore(builder.CreateBitCast(elem_result, i64_ty), dep);
+      builder.CreateStore(builder.CreateBitCast(as_f64, i64_ty), dep);
       builder.CreateStore(builder.CreateAdd(idx, builder.getInt64(1)), idx_alloc);
       builder.CreateBr(cond_bb);
 
@@ -734,19 +882,22 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     }
 
     // ── Scalar instruction ──
-    std::vector<llvm::Value *> vals;
-    vals.reserve(instr.args.size());
+    std::vector<TypedVal> tvs;
+    tvs.reserve(instr.args.size());
     for (const auto & arg : instr.args)
-      vals.push_back(resolve_scalar(arg));
+      tvs.push_back(resolve_typed(arg));
 
-    llvm::Value * result = emit_scalar_op(instr.tag, vals);
+    auto [result, actual_ty] = emit_typed_op(instr.tag, instr.result_type, tvs);
     if (!result)
     {
       return llvm::make_error<llvm::StringError>(
         "compile_flat_program: unsupported scalar OpTag",
         llvm::inconvertibleErrorCode());
     }
-    store_temp_f64(instr.dst, result);
+    // Coerce from actual IR type to declared result_type, then store
+    llvm::Value * coerced = coerce(result, actual_ty, instr.result_type);
+    store_temp_typed(instr.dst, coerced, instr.result_type);
+    temp_types[instr.dst] = instr.result_type;
   }
 
   // ── Register writeback: temps[register_targets[i]] → registers[i] ──
@@ -768,8 +919,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     llvm::Value * mixed = zero_f64;
     for (uint32_t mt : program.mix_output_temps)
     {
-      llvm::Value * val = load_temp_f64(mt);
-      mixed = builder.CreateFAdd(mixed, val);
+      llvm::Value * val = load_temp_typed(mt, temp_types[mt]);
+      llvm::Value * f64_val = coerce(val, temp_types[mt], ST::Float);
+      mixed = builder.CreateFAdd(mixed, f64_val);
     }
     llvm::Value * scaled = builder.CreateFDiv(mixed, llvm::ConstantFP::get(f64_ty, 20.0));
     llvm::Value * out_ptr = builder.CreateInBoundsGEP(f64_ty, output_buffer_arg, loop_counter);

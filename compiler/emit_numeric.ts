@@ -1,5 +1,5 @@
 /**
- * emit_numeric.ts — TS instruction emitter for egress_plan_3.
+ * emit_numeric.ts — TS instruction emitter for egress_plan_4.
  *
  * Replaces the C++ PlanParser + ExprCompiler + NumericProgramBuilder pipeline.
  * Walks ExprNode trees (post-flatten, post-lower_arrays) and emits a flat
@@ -10,6 +10,10 @@
  *
  * loop_count > 1 indicates an elementwise loop; strides[i] = 1 means arg i
  * advances with the loop index (array), 0 means it broadcasts (scalar).
+ *
+ * Every operand carries a scalar_type ('float' | 'int' | 'bool') and every
+ * instruction carries a result_type. The C++ JIT uses these to emit native
+ * typed LLVM IR (i64 for int, i1 for bool) instead of f64 round-trips.
  */
 
 import type { ExprNode } from './expr.js'
@@ -18,22 +22,25 @@ import type { ExprNode } from './expr.js'
 // Public types (mirror OrcJitEngine.hpp FlatProgram / FlatInstr)
 // ─────────────────────────────────────────────────────────────
 
+export type ScalarType = 'float' | 'int' | 'bool'
+
 export type NOperand =
-  | { kind: 'const';     val: number }
-  | { kind: 'input';     slot: number }
-  | { kind: 'reg';       slot: number }      // scalar temp register
-  | { kind: 'array_reg'; slot: number }      // array slot
-  | { kind: 'state_reg'; slot: number }      // persistent module register
-  | { kind: 'param';     ptr: string }       // ControlParam ptr as decimal string
-  | { kind: 'rate' }
-  | { kind: 'tick' }
+  | { kind: 'const';     val: number;  scalar_type: ScalarType }
+  | { kind: 'input';     slot: number; scalar_type: ScalarType }
+  | { kind: 'reg';       slot: number; scalar_type: ScalarType }      // scalar temp register
+  | { kind: 'array_reg'; slot: number }      // array slot (element type TBD)
+  | { kind: 'state_reg'; slot: number; scalar_type: ScalarType }      // persistent module register
+  | { kind: 'param';     ptr: string;  scalar_type: ScalarType }       // ControlParam ptr as decimal string
+  | { kind: 'rate';      scalar_type: ScalarType }
+  | { kind: 'tick';      scalar_type: ScalarType }
 
 export type NInstr = {
-  tag:        string      // OpTag name (e.g. 'Add', 'Sin', 'Pack')
-  dst:        number      // scalar temp index (loop_count==1) or array slot (loop_count>1 / Pack)
-  args:       NOperand[]
-  loop_count: number      // 1 = scalar; N > 1 = elementwise loop over N elements
-  strides:    number[]    // per-arg: 1 = iterate (arr[i]), 0 = broadcast
+  tag:         string       // OpTag name (e.g. 'Add', 'Sin', 'Pack')
+  dst:         number       // scalar temp index (loop_count==1) or array slot (loop_count>1 / Pack)
+  args:        NOperand[]
+  loop_count:  number       // 1 = scalar; N > 1 = elementwise loop over N elements
+  strides:     number[]     // per-arg: 1 = iterate (arr[i]), 0 = broadcast
+  result_type: ScalarType   // scalar type of the result written to dst
 }
 
 export type FlatProgram = {
@@ -67,11 +74,40 @@ const UNARY_TAG: Record<string, string> = {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Type inference
+// ─────────────────────────────────────────────────────────────
+
+const BITWISE_TAGS = new Set(['BitAnd', 'BitOr', 'BitXor', 'LShift', 'RShift', 'BitNot'])
+const COMPARISON_TAGS = new Set(['Less', 'LessEq', 'Greater', 'GreaterEq', 'Equal', 'NotEqual', 'Not'])
+const TRANSCENDENTAL_TAGS = new Set(['Sin', 'Cos', 'Tanh', 'Log', 'Exp', 'Sqrt', 'Floor', 'Ceil', 'Round'])
+
+/** Promotion order: float > int > bool. */
+function promoteTypes(a: ScalarType, b: ScalarType): ScalarType {
+  if (a === 'float' || b === 'float') return 'float'
+  if (a === 'int' || b === 'int') return 'int'
+  return 'bool'
+}
+
+/** Infer the result ScalarType of an op from its tag and argument types. */
+function inferResultType(tag: string, argTypes: ScalarType[]): ScalarType {
+  if (BITWISE_TAGS.has(tag)) return 'int'
+  if (COMPARISON_TAGS.has(tag)) return 'bool'
+  if (TRANSCENDENTAL_TAGS.has(tag)) return 'float'
+  // Select: type of then/else branches (args[1], args[2])
+  if (tag === 'Select') return promoteTypes(argTypes[1] ?? 'float', argTypes[2] ?? 'float')
+  // Clamp: type of value (args[0])
+  if (tag === 'Clamp') return argTypes[0] ?? 'float'
+  // Arithmetic (Add, Sub, Mul, Div, Mod, Pow, FloorDiv, Neg, Abs): promote all args
+  if (argTypes.length === 0) return 'float'
+  return argTypes.reduce(promoteTypes)
+}
+
+// ─────────────────────────────────────────────────────────────
 // Internal compile result
 // ─────────────────────────────────────────────────────────────
 
-type ScalarResult = { isArray: false; op: NOperand }
-type ArrayResult  = { isArray: true;  op: NOperand; size: number }
+type ScalarResult = { isArray: false; op: NOperand; scalarType: ScalarType }
+type ArrayResult  = { isArray: true;  op: NOperand; size: number; scalarType: ScalarType }
 type CompileResult = ScalarResult | ArrayResult
 
 // ─────────────────────────────────────────────────────────────
@@ -90,8 +126,16 @@ class Emitter {
   private memo = new WeakMap<object, CompileResult>()
   // Map register ID → pre-allocated array slot for registers whose init value is an array.
   private arrayRegMap = new Map<number, { slot: number, size: number }>()
+  // Type tracking: temp register slot → ScalarType
+  private regTypes = new Map<number, ScalarType>()
+  // Type annotations for state registers (from module registerPortTypes)
+  private stateRegTypes: ScalarType[]
 
-  constructor(stateInit?: (number | boolean | number[])[]) {
+  constructor(
+    stateInit?: (number | boolean | number[])[],
+    stateRegTypes?: ScalarType[],
+  ) {
+    this.stateRegTypes = stateRegTypes ?? []
     if (stateInit) {
       for (let i = 0; i < stateInit.length; i++) {
         const init = stateInit[i]
@@ -115,26 +159,28 @@ class Emitter {
 
   private emit(instr: NInstr): void { this.instrs.push(instr) }
 
-  // ── Terminal check: if node is a leaf, return its Operand directly. ──
-  private tryTerminal(node: ExprNode): NOperand | null {
-    if (typeof node === 'number')  return { kind: 'const', val: node }
-    if (typeof node === 'boolean') return { kind: 'const', val: node ? 1 : 0 }
-    if (typeof node !== 'object' || node === null) return { kind: 'const', val: 0 }
+  // ── Terminal check: if node is a leaf, return its Operand + type directly. ──
+  private tryTerminal(node: ExprNode): { op: NOperand; scalarType: ScalarType } | null {
+    if (typeof node === 'number')  return { op: { kind: 'const', val: node, scalar_type: 'float' }, scalarType: 'float' }
+    if (typeof node === 'boolean') return { op: { kind: 'const', val: node ? 1 : 0, scalar_type: 'bool' }, scalarType: 'bool' }
+    if (typeof node !== 'object' || node === null) return { op: { kind: 'const', val: 0, scalar_type: 'float' }, scalarType: 'float' }
     const obj = node as { op: string; [k: string]: unknown }
     switch (obj.op) {
-      case 'input':        return { kind: 'input',     slot: obj.id as number }
-      case 'reg':
+      case 'input':        return { op: { kind: 'input', slot: obj.id as number, scalar_type: 'float' }, scalarType: 'float' }
+      case 'reg': {
         if (this.arrayRegMap.has(obj.id as number)) return null  // array register — handled in compileNodeUncached
-        return { kind: 'state_reg', slot: obj.id as number }
-      case 'sample_rate':  return { kind: 'rate' }
-      case 'sample_index': return { kind: 'tick' }
+        const regType = this.stateRegTypes[obj.id as number] ?? 'float'
+        return { op: { kind: 'state_reg', slot: obj.id as number, scalar_type: regType }, scalarType: regType }
+      }
+      case 'sample_rate':  return { op: { kind: 'rate', scalar_type: 'float' }, scalarType: 'float' }
+      case 'sample_index': return { op: { kind: 'tick', scalar_type: 'int' }, scalarType: 'int' }
       case 'smoothed_param':
       case 'trigger_param':
         // Params embed their C++ pointer. Serialize as decimal string (JSON-safe).
         if (obj._ptr && obj._handle != null) {
-          return { kind: 'param', ptr: String(obj._handle) }
+          return { op: { kind: 'param', ptr: String(obj._handle), scalar_type: 'float' }, scalarType: 'float' }
         }
-        return { kind: 'const', val: 0 }  // no live handle
+        return { op: { kind: 'const', val: 0, scalar_type: 'float' }, scalarType: 'float' }  // no live handle
     }
     return null  // not a terminal
   }
@@ -143,7 +189,7 @@ class Emitter {
   compileNode(node: ExprNode): CompileResult {
     // Terminal shortcut — no allocation, skip memo
     const terminal = this.tryTerminal(node)
-    if (terminal !== null) return { isArray: false, op: terminal }
+    if (terminal !== null) return { isArray: false, op: terminal.op, scalarType: terminal.scalarType }
 
     // CSE: check memo before allocating anything
     const cached = this.memo.get(node as object)
@@ -165,7 +211,7 @@ class Emitter {
     // Array register reference (skipped by tryTerminal)
     if (obj.op === 'reg') {
       const arrInfo = this.arrayRegMap.get(obj.id as number)
-      if (arrInfo) return { isArray: true, op: { kind: 'array_reg', slot: arrInfo.slot }, size: arrInfo.size }
+      if (arrInfo) return { isArray: true, op: { kind: 'array_reg', slot: arrInfo.slot }, size: arrInfo.size, scalarType: 'float' }
     }
 
     // {"op":"array","items":[...]} — JSON patch format for inline arrays
@@ -201,7 +247,7 @@ class Emitter {
 
     // Fallthrough: emit a zero constant (unknown op — safe stub)
     console.warn(`emit_numeric: unhandled op '${obj.op}', substituting 0`)
-    return { isArray: false, op: { kind: 'const', val: 0 } }
+    return { isArray: false, op: { kind: 'const', val: 0, scalar_type: 'float' }, scalarType: 'float' }
   }
 
   // ── Unbox a size-1 array to a scalar via Index[0].
@@ -210,8 +256,10 @@ class Emitter {
   // (which resolve_scalar returns nullptr for), causing a null-deref / segfault.
   private unboxArray(arr: ArrayResult): ScalarResult {
     const dst = this.allocReg()
-    this.emit({ tag: 'Index', dst, args: [arr.op, { kind: 'const', val: 0 }], loop_count: 1, strides: [] })
-    return { isArray: false, op: { kind: 'reg', slot: dst } }
+    const rt = arr.scalarType
+    this.regTypes.set(dst, rt)
+    this.emit({ tag: 'Index', dst, args: [arr.op, { kind: 'const', val: 0, scalar_type: 'int' }], loop_count: 1, strides: [], result_type: rt })
+    return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
   }
 
   // ── Compile an inline JS array to a Pack instruction. ──
@@ -221,10 +269,10 @@ class Emitter {
     const args: NOperand[] = elements.map(e => {
       const r = this.compileNode(e)
       // Pack expects scalar operands; if element is array, flatten is unsupported here
-      return r.isArray ? { kind: 'const', val: 0 } : r.op
+      return r.isArray ? { kind: 'const' as const, val: 0, scalar_type: 'float' as ScalarType } : r.op
     })
-    this.emit({ tag: 'Pack', dst: slot, args, loop_count: 1, strides: [] })
-    return { isArray: true, op: { kind: 'array_reg', slot }, size }
+    this.emit({ tag: 'Pack', dst: slot, args, loop_count: 1, strides: [], result_type: 'float' })
+    return { isArray: true, op: { kind: 'array_reg', slot }, size, scalarType: 'float' }
   }
 
   // ── Compile a binary op, routing to scalar or elementwise. ──
@@ -236,34 +284,40 @@ class Emitter {
     if (l.isArray && l.size === 1) l = this.unboxArray(l)
     if (r.isArray && r.size === 1) r = this.unboxArray(r)
 
+    const rt = inferResultType(tag, [l.scalarType, r.scalarType])
+
     if (!l.isArray && !r.isArray) {
       // Scalar × scalar → scalar instruction
       const dst = this.allocReg()
-      this.emit({ tag, dst, args: [l.op, r.op], loop_count: 1, strides: [] })
-      return { isArray: false, op: { kind: 'reg', slot: dst } }
+      this.regTypes.set(dst, rt)
+      this.emit({ tag, dst, args: [l.op, r.op], loop_count: 1, strides: [], result_type: rt })
+      return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
     }
 
     // At least one array (size > 1) → elementwise loop
     const size = l.isArray ? l.size : (r as ArrayResult).size
     const slot = this.allocArraySlot(size)
     const strides = [l.isArray ? 1 : 0, r.isArray ? 1 : 0]
-    this.emit({ tag, dst: slot, args: [l.op, r.op], loop_count: size, strides })
-    return { isArray: true, op: { kind: 'array_reg', slot }, size }
+    this.emit({ tag, dst: slot, args: [l.op, r.op], loop_count: size, strides, result_type: rt })
+    return { isArray: true, op: { kind: 'array_reg', slot }, size, scalarType: rt }
   }
 
   private compileUnary(tag: string, argNode: ExprNode): CompileResult {
     let a = this.compileNode(argNode)
     if (a.isArray && a.size === 1) a = this.unboxArray(a)
 
+    const rt = inferResultType(tag, [a.scalarType])
+
     if (!a.isArray) {
       const dst = this.allocReg()
-      this.emit({ tag, dst, args: [a.op], loop_count: 1, strides: [] })
-      return { isArray: false, op: { kind: 'reg', slot: dst } }
+      this.regTypes.set(dst, rt)
+      this.emit({ tag, dst, args: [a.op], loop_count: 1, strides: [], result_type: rt })
+      return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
     }
 
     const slot = this.allocArraySlot(a.size)
-    this.emit({ tag, dst: slot, args: [a.op], loop_count: a.size, strides: [1] })
-    return { isArray: true, op: { kind: 'array_reg', slot }, size: a.size }
+    this.emit({ tag, dst: slot, args: [a.op], loop_count: a.size, strides: [1], result_type: rt })
+    return { isArray: true, op: { kind: 'array_reg', slot }, size: a.size, scalarType: rt }
   }
 
   private compileTernary(tag: string, argNodes: ExprNode[]): CompileResult {
@@ -276,18 +330,20 @@ class Emitter {
     if (b.isArray && b.size === 1) b = this.unboxArray(b)
     if (c.isArray && c.size === 1) c = this.unboxArray(c)
 
+    const rt = inferResultType(tag, [a.scalarType, b.scalarType, c.scalarType])
     const anyArray = a.isArray || b.isArray || c.isArray
     if (!anyArray) {
       const dst = this.allocReg()
-      this.emit({ tag, dst, args: [a.op, b.op, c.op], loop_count: 1, strides: [] })
-      return { isArray: false, op: { kind: 'reg', slot: dst } }
+      this.regTypes.set(dst, rt)
+      this.emit({ tag, dst, args: [a.op, b.op, c.op], loop_count: 1, strides: [], result_type: rt })
+      return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
     }
 
     const size = (a.isArray ? a.size : b.isArray ? b.size : (c as ArrayResult).size)
     const slot = this.allocArraySlot(size)
     const strides = [a.isArray ? 1 : 0, b.isArray ? 1 : 0, c.isArray ? 1 : 0]
-    this.emit({ tag, dst: slot, args: [a.op, b.op, c.op], loop_count: size, strides })
-    return { isArray: true, op: { kind: 'array_reg', slot }, size }
+    this.emit({ tag, dst: slot, args: [a.op, b.op, c.op], loop_count: size, strides, result_type: rt })
+    return { isArray: true, op: { kind: 'array_reg', slot }, size, scalarType: rt }
   }
 
   // ── index(arr, idx) → scalar element ──
@@ -295,10 +351,12 @@ class Emitter {
     const arr = this.compileNode(argNodes[0])
     const idx = this.compileNode(argNodes[1])
     const dst = this.allocReg()
-    const arrOp: NOperand = arr.isArray ? arr.op : { kind: 'const', val: 0 }
-    const idxOp: NOperand = idx.isArray ? { kind: 'const', val: 0 } : idx.op
-    this.emit({ tag: 'Index', dst, args: [arrOp, idxOp], loop_count: 1, strides: [] })
-    return { isArray: false, op: { kind: 'reg', slot: dst } }
+    const rt = arr.scalarType  // element type of the array
+    this.regTypes.set(dst, rt)
+    const arrOp: NOperand = arr.isArray ? arr.op : { kind: 'const', val: 0, scalar_type: 'float' }
+    const idxOp: NOperand = idx.isArray ? { kind: 'const', val: 0, scalar_type: 'int' } : idx.op
+    this.emit({ tag: 'Index', dst, args: [arrOp, idxOp], loop_count: 1, strides: [], result_type: rt })
+    return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
   }
 
   // ── array_set(arr, idx, val) → same array slot (side-effect mutation) ──
@@ -311,16 +369,16 @@ class Emitter {
       // Degenerate — shouldn't happen after lower_arrays; return a fresh zero array
       const size = 1
       const slot = this.allocArraySlot(size)
-      return { isArray: true, op: { kind: 'array_reg', slot }, size }
+      return { isArray: true, op: { kind: 'array_reg', slot }, size, scalarType: 'float' }
     }
 
     const arrOp: NOperand = arr.op
-    const idxOp: NOperand = idx.isArray ? { kind: 'const', val: 0 } : idx.op
-    const valOp: NOperand = val.isArray ? { kind: 'const', val: 0 } : val.op
+    const idxOp: NOperand = idx.isArray ? { kind: 'const', val: 0, scalar_type: 'float' } : idx.op
+    const valOp: NOperand = val.isArray ? { kind: 'const', val: 0, scalar_type: 'float' } : val.op
     // dst is ignored for SetElement (side-effect only) but must be a valid array slot
     const slot = (arr.op as { slot: number }).slot
-    this.emit({ tag: 'SetElement', dst: slot, args: [arrOp, idxOp, valOp], loop_count: 1, strides: [] })
-    return { isArray: true, op: arr.op, size: arr.size }
+    this.emit({ tag: 'SetElement', dst: slot, args: [arrOp, idxOp, valOp], loop_count: 1, strides: [], result_type: 'float' })
+    return { isArray: true, op: arr.op, size: arr.size, scalarType: 'float' }
   }
 
   // ── broadcast_to surviving lower_arrays (dynamic array source) ──
@@ -332,8 +390,8 @@ class Emitter {
     if (!src.isArray) {
       // Scalar broadcast: elementwise copy with stride=0
       const slot = this.allocArraySlot(targetSize)
-      this.emit({ tag: 'Add', dst: slot, args: [src.op, { kind: 'const', val: 0 }], loop_count: targetSize, strides: [0, 0] })
-      return { isArray: true, op: { kind: 'array_reg', slot }, size: targetSize }
+      this.emit({ tag: 'Add', dst: slot, args: [src.op, { kind: 'const', val: 0, scalar_type: 'float' }], loop_count: targetSize, strides: [0, 0], result_type: 'float' })
+      return { isArray: true, op: { kind: 'array_reg', slot }, size: targetSize, scalarType: 'float' }
     }
 
     if (src.size === targetSize) return src  // already the right size
@@ -342,24 +400,23 @@ class Emitter {
     // Implement as elementwise: dst[i] = src[i % src.size]
     // Can't do modulo indexing in the current loop scheme; fall back to Pack unrolling if small enough
     if (targetSize <= 64) {
-      const srcSlot = (src.op as { slot: number }).slot
       const elems: NOperand[] = []
       for (let i = 0; i < targetSize; i++) {
         const idxReg = this.allocReg()
-        this.emit({ tag: 'Index', dst: idxReg, args: [src.op, { kind: 'const', val: i % src.size }], loop_count: 1, strides: [] })
-        elems.push({ kind: 'reg', slot: idxReg })
+        this.emit({ tag: 'Index', dst: idxReg, args: [src.op, { kind: 'const', val: i % src.size, scalar_type: 'float' }], loop_count: 1, strides: [], result_type: 'float' })
+        elems.push({ kind: 'reg', slot: idxReg, scalar_type: 'float' })
       }
       const slot = this.allocArraySlot(targetSize)
-      this.emit({ tag: 'Pack', dst: slot, args: elems, loop_count: 1, strides: [] })
-      return { isArray: true, op: { kind: 'array_reg', slot }, size: targetSize }
+      this.emit({ tag: 'Pack', dst: slot, args: elems, loop_count: 1, strides: [], result_type: 'float' })
+      return { isArray: true, op: { kind: 'array_reg', slot }, size: targetSize, scalarType: 'float' }
     }
 
     // Large dynamic broadcast — stub with zero array
     console.warn(`emit_numeric: large dynamic broadcast_to (${src.size} → ${targetSize}), substituting zeros`)
     const slot = this.allocArraySlot(targetSize)
-    const zeroArgs = new Array<NOperand>(targetSize).fill({ kind: 'const', val: 0 })
-    this.emit({ tag: 'Pack', dst: slot, args: zeroArgs, loop_count: 1, strides: [] })
-    return { isArray: true, op: { kind: 'array_reg', slot }, size: targetSize }
+    const zeroArgs: NOperand[] = new Array(targetSize).fill(null).map(() => ({ kind: 'const' as const, val: 0, scalar_type: 'float' as ScalarType }))
+    this.emit({ tag: 'Pack', dst: slot, args: zeroArgs, loop_count: 1, strides: [], result_type: 'float' })
+    return { isArray: true, op: { kind: 'array_reg', slot }, size: targetSize, scalarType: 'float' }
   }
 
   // ── Entry point ──
@@ -373,15 +430,16 @@ class Emitter {
     for (const expr of outputExprs) {
       const r = this.compileNode(expr)
       if (r.isArray) {
-        // Array output: store array slot index in a scalar temp for FlatRuntime to read
-        // (FlatRuntime reads temps[output_targets[i]] and bitcasts to double)
-        // For now, index element 0 as the scalar output
+        // Array output → index element 0 as scalar output (always float for audio)
         const dst = this.allocReg()
-        this.emit({ tag: 'Index', dst, args: [r.op, { kind: 'const', val: 0 }], loop_count: 1, strides: [] })
+        this.regTypes.set(dst, 'float')
+        this.emit({ tag: 'Index', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: 'int' }], loop_count: 1, strides: [], result_type: 'float' })
         output_targets.push(dst)
       } else {
+        // Copy to output temp, preserving float for audio path
         const dst = this.allocReg()
-        this.emit({ tag: 'Add', dst, args: [r.op, { kind: 'const', val: 0 }], loop_count: 1, strides: [] })
+        this.regTypes.set(dst, r.scalarType)
+        this.emit({ tag: 'Add', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: r.scalarType }], loop_count: 1, strides: [], result_type: r.scalarType })
         output_targets.push(dst)
       }
     }
@@ -395,8 +453,10 @@ class Emitter {
       if (r.isArray) {
         register_targets.push(-1)  // array registers not supported as state reg targets yet
       } else {
+        // Register update: preserve the expression type
         const dst = this.allocReg()
-        this.emit({ tag: 'Add', dst, args: [r.op, { kind: 'const', val: 0 }], loop_count: 1, strides: [] })
+        this.regTypes.set(dst, r.scalarType)
+        this.emit({ tag: 'Add', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: r.scalarType }], loop_count: 1, strides: [], result_type: r.scalarType })
         register_targets.push(dst)
       }
     }
@@ -419,13 +479,16 @@ class Emitter {
 /**
  * Compile flat ExprNode trees into a FlatProgram instruction stream.
  *
- * @param outputExprs    One expression per output port.
- * @param registerExprs  One expression per state register; null = no update.
+ * @param outputExprs     One expression per output port.
+ * @param registerExprs   One expression per state register; null = no update.
+ * @param stateInit       Initial values for state registers.
+ * @param stateRegTypes   ScalarType per state register (from module registerPortTypes).
  */
 export function emitNumericProgram(
   outputExprs: ExprNode[],
   registerExprs: (ExprNode | null)[],
   stateInit?: (number | boolean | number[])[],
+  stateRegTypes?: ScalarType[],
 ): FlatProgram {
-  return new Emitter(stateInit).emitProgram(outputExprs, registerExprs)
+  return new Emitter(stateInit, stateRegTypes).emitProgram(outputExprs, registerExprs)
 }

@@ -16,10 +16,10 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
 
   const std::string schema = plan.value("schema", std::string{});
 
-  // ── egress_plan_3: compiled flat instruction stream ──
-  if (schema == "egress_plan_3")
+  // ── egress_plan_4: compiled flat instruction stream with typed operands ──
+  if (schema == "egress_plan_4")
   {
-    const auto parsed = egress_plan3::parse_plan3(plan);
+    const auto parsed = egress_plan4::parse_plan4(plan);
 
     auto kernel_result = egress_jit::OrcJitEngine::instance().compile_flat_program(parsed.program);
     if (!kernel_result)
@@ -37,10 +37,18 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
     new_state.register_names = parsed.register_names;
     new_state.array_names    = parsed.array_slot_names;
 
-    // Scalar state registers
+    // Scalar state registers (type-aware initialization)
     new_state.registers.resize(parsed.state_init.size(), 0);
     for (std::size_t i = 0; i < parsed.state_init.size(); ++i)
-      new_state.registers[i] = std::bit_cast<int64_t>(parsed.state_init[i]);
+    {
+      const auto ty = (i < parsed.register_types.size())
+        ? parsed.register_types[i]
+        : egress_jit::JitScalarType::Float;
+      if (ty == egress_jit::JitScalarType::Int || ty == egress_jit::JitScalarType::Bool)
+        new_state.registers[i] = static_cast<int64_t>(parsed.state_init[i]);
+      else
+        new_state.registers[i] = std::bit_cast<int64_t>(parsed.state_init[i]);
+    }
     // Scalar temps
     new_state.temps.assign(parsed.program.register_count, 0);
 
