@@ -63,7 +63,6 @@ const BINARY_TAG: Record<string, string> = {
   eq: 'Equal', neq: 'NotEqual',
   bit_and: 'BitAnd', bit_or: 'BitOr', bit_xor: 'BitXor',
   lshift: 'LShift', rshift: 'RShift',
-  matmul: 'MatMul',
 }
 
 const UNARY_TAG: Record<string, string> = {

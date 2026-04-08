@@ -83,6 +83,10 @@ export function lowerArrayOps(node: ExprNode, memo?: WeakMap<object, ExprNode>):
       result = lowerMap(obj, memo)
       break
 
+    case 'matmul':
+      result = lowerMatmul(obj, memo)
+      break
+
     default:
       result = lowerChildren(obj, memo)
       break
@@ -230,6 +234,32 @@ function lowerReduce(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNo
   // Otherwise, we can't statically reduce without knowing the size.
   // Pass through for the runtime or a later pass.
   return { op: 'reduce', args: [arr], axis: obj.axis, reduce_op: reduceOp }
+}
+
+/**
+ * matmul({args: [A, B], shape_a: [M,K], shape_b: [K,N]}) → flat [M*N] array of scalar trees
+ * C[i,j] = Σ_k A[i*K+k] * B[k*N+j]  (row-major)
+ */
+function lowerMatmul(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const args = obj.args as ExprNode[]
+  const A = lowerArrayOps(args[0], memo)
+  const B = lowerArrayOps(args[1], memo)
+  const [M, K] = obj.shape_a as [number, number]
+  const [, N] = obj.shape_b as [number, number]
+
+  const elements: ExprNode[] = []
+  for (let i = 0; i < M; i++) {
+    for (let j = 0; j < N; j++) {
+      const terms: ExprNode[] = []
+      for (let k = 0; k < K; k++) {
+        const aElem: ExprNode = { op: 'index', args: [A, i * K + k] }
+        const bElem: ExprNode = { op: 'index', args: [B, k * N + j] }
+        terms.push({ op: 'mul', args: [aElem, bElem] })
+      }
+      elements.push(treeReduce(terms, 'add'))
+    }
+  }
+  return elements
 }
 
 /** Build a balanced binary tree reduction. */

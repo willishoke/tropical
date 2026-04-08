@@ -913,14 +913,6 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       continue;
     }
 
-    // ── MatMul: stub (unimplemented) ──
-    if (instr.tag == OpTag::MatMul)
-    {
-      store_temp_f64(instr.dst, zero_f64);  // TODO: implement matmul
-      temp_types[instr.dst] = ST::Float;
-      continue;
-    }
-
     // ── Elementwise loop (loop_count > 1) ──
     if (instr.loop_count > 1)
     {
