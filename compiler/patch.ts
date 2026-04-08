@@ -164,7 +164,7 @@ export function nextName(session: SessionState, prefix: string): string {
 // ─────────────────────────────────────────────────────────────
 
 const BINARY_OPS: Record<string, (l: ExprCoercible, r: ExprCoercible) => SignalExpr> = {
-  add, sub, mul, div, floor_div: floorDiv, mod, pow: pow_, matmul,
+  add, sub, mul, div, floor_div: floorDiv, mod, pow: pow_,
   lt, lte, gt, gte, eq, neq,
   bit_and: bitAnd, bit_or: bitOr, bit_xor: bitXor, lshift, rshift,
 }
