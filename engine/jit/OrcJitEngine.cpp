@@ -714,6 +714,10 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
           return {builder.CreateICmpNE(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
         return {builder.CreateFCmpUNE(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
 
+      // ── Logical → always Bool (i1), coerces any input type via truthy check ──
+      case OpTag::And:  return {builder.CreateAnd(arg_as(0, ST::Bool), arg_as(1, ST::Bool)), ST::Bool};
+      case OpTag::Or:   return {builder.CreateOr (arg_as(0, ST::Bool), arg_as(1, ST::Bool)), ST::Bool};
+
       // ── Bitwise → always Int (i64) ──
       case OpTag::BitAnd:  return {builder.CreateAnd(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
       case OpTag::BitOr:   return {builder.CreateOr(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};

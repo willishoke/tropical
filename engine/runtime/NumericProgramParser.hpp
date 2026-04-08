@@ -46,6 +46,8 @@ inline tropical_jit::OpTag parse_op_tag(const std::string & s)
     {"LShift",      T::LShift},
     {"RShift",      T::RShift},
     {"Index",       T::Index},
+    {"And",         T::And},
+    {"Or",          T::Or},
     {"Neg",         T::Neg},
     {"Abs",         T::Abs},
     {"Sin",         T::Sin},

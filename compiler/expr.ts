@@ -120,13 +120,13 @@ export const pow_     = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('pow'
 /** Well-known semiring presets for matmul. */
 export const Rings = {
   /** Standard real/integer ring. Default. */
-  real:       { mul_op: 'mul',     add_op: 'add' },
-  /** Boolean semiring: reachability / graph composition. */
-  boolean:    { mul_op: 'bit_and', add_op: 'bit_or' },
+  real:       { mul_op: 'mul', add_op: 'add' },
+  /** Boolean semiring: reachability / graph composition (logical and/or). */
+  boolean:    { mul_op: 'and', add_op: 'or' },
   /** Tropical (min-plus) semiring: shortest-path composition. */
-  tropical:   { mul_op: 'add',     add_op: 'min' },
+  tropical:   { mul_op: 'add', add_op: 'min' },
   /** Max-plus semiring: longest-path / (max,+) algebra. */
-  max_plus:   { mul_op: 'add',     add_op: 'max' },
+  max_plus:   { mul_op: 'add', add_op: 'max' },
 } as const
 
 export const matmul = (
@@ -176,6 +176,8 @@ export const exp        = (operand: ExprCoercible) => unary('exp', operand)
 export const log        = (operand: ExprCoercible) => unary('log', operand)
 export const tanh       = (operand: ExprCoercible) => unary('tanh', operand)
 export const logicalNot = (operand: ExprCoercible) => unary('not', operand)
+export const logicalAnd = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('and', lhs, rhs)
+export const logicalOr  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('or',  lhs, rhs)
 
 export function clamp(value: ExprCoercible, lo: ExprCoercible, hi: ExprCoercible): SignalExpr {
   const v = coerce(value)
