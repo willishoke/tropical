@@ -83,6 +83,10 @@ export function lowerArrayOps(node: ExprNode, memo?: WeakMap<object, ExprNode>):
       result = lowerMap(obj, memo)
       break
 
+    case 'matmul':
+      result = lowerMatmul(obj, memo)
+      break
+
     default:
       result = lowerChildren(obj, memo)
       break
@@ -230,6 +234,49 @@ function lowerReduce(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNo
   // Otherwise, we can't statically reduce without knowing the size.
   // Pass through for the runtime or a later pass.
   return { op: 'reduce', args: [arr], axis: obj.axis, reduce_op: reduceOp }
+}
+
+/** Derive the ring ops (mul, add) from the element scalar type. */
+function ringOpsForType(elementType: string): { mul_op: string; add_op: string } {
+  switch (elementType) {
+    case 'bool': return { mul_op: 'and', add_op: 'or' }
+    case 'int':
+    case 'float':
+    default:     return { mul_op: 'mul', add_op: 'add' }
+  }
+}
+
+/**
+ * matmul({args: [A, B], shape_a: [M,K], shape_b: [K,N], element_type?})
+ * → flat [M*N] array of scalar trees: C[i,j] = Σ_k A[i*K+k] * B[k*N+j]
+ *
+ * Ring ops are derived from element_type (default 'float'):
+ *   'float' | 'int' → mul/add
+ *   'bool'          → and/or  (boolean semiring: reachability, graph composition)
+ *
+ * New scalar kinds (e.g. tropical floats) extend ringOpsForType when added.
+ */
+function lowerMatmul(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const args = obj.args as ExprNode[]
+  const A = lowerArrayOps(args[0], memo)
+  const B = lowerArrayOps(args[1], memo)
+  const [M, K] = obj.shape_a as [number, number]
+  const [, N] = obj.shape_b as [number, number]
+  const { mul_op, add_op } = ringOpsForType((obj.element_type as string | undefined) ?? 'float')
+
+  const elements: ExprNode[] = []
+  for (let i = 0; i < M; i++) {
+    for (let j = 0; j < N; j++) {
+      const terms: ExprNode[] = []
+      for (let k = 0; k < K; k++) {
+        const aElem: ExprNode = { op: 'index', args: [A, i * K + k] }
+        const bElem: ExprNode = { op: 'index', args: [B, k * N + j] }
+        terms.push({ op: mul_op, args: [aElem, bElem] })
+      }
+      elements.push(treeReduce(terms, add_op))
+    }
+  }
+  return elements
 }
 
 /** Build a balanced binary tree reduction. */

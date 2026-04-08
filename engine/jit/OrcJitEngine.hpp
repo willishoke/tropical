@@ -34,7 +34,7 @@ enum class OpTag : uint8_t
   Less, LessEq, Greater, GreaterEq, Equal, NotEqual,
   BitAnd, BitOr, BitXor, LShift, RShift,
   Index,    // args[0]=ArrayReg, args[1]=scalar idx → scalar element
-  MatMul,
+  And, Or,  // logical (truthy coercion: float/int → bool, then and/or)
   // arity 1
   Neg, Abs, Sin, Cos, Log, Exp, Sqrt, Floor, Ceil, Round, Not, BitNot, Tanh,
   // arity 3

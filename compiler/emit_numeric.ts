@@ -63,7 +63,7 @@ const BINARY_TAG: Record<string, string> = {
   eq: 'Equal', neq: 'NotEqual',
   bit_and: 'BitAnd', bit_or: 'BitOr', bit_xor: 'BitXor',
   lshift: 'LShift', rshift: 'RShift',
-  matmul: 'MatMul',
+  and: 'And', or: 'Or',
 }
 
 const UNARY_TAG: Record<string, string> = {
@@ -78,7 +78,7 @@ const UNARY_TAG: Record<string, string> = {
 // ─────────────────────────────────────────────────────────────
 
 const BITWISE_TAGS = new Set(['BitAnd', 'BitOr', 'BitXor', 'LShift', 'RShift', 'BitNot'])
-const COMPARISON_TAGS = new Set(['Less', 'LessEq', 'Greater', 'GreaterEq', 'Equal', 'NotEqual', 'Not'])
+const COMPARISON_TAGS = new Set(['Less', 'LessEq', 'Greater', 'GreaterEq', 'Equal', 'NotEqual', 'Not', 'And', 'Or'])
 const TRANSCENDENTAL_TAGS = new Set(['Sin', 'Cos', 'Tanh', 'Log', 'Exp', 'Sqrt', 'Floor', 'Ceil', 'Round'])
 
 /** Promotion order: float > int > bool. */

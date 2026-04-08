@@ -714,6 +714,10 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
           return {builder.CreateICmpNE(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
         return {builder.CreateFCmpUNE(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
 
+      // ── Logical → always Bool (i1), coerces any input type via truthy check ──
+      case OpTag::And:  return {builder.CreateAnd(arg_as(0, ST::Bool), arg_as(1, ST::Bool)), ST::Bool};
+      case OpTag::Or:   return {builder.CreateOr (arg_as(0, ST::Bool), arg_as(1, ST::Bool)), ST::Bool};
+
       // ── Bitwise → always Int (i64) ──
       case OpTag::BitAnd:  return {builder.CreateAnd(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
       case OpTag::BitOr:   return {builder.CreateOr(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
@@ -910,14 +914,6 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       builder.CreateStore(builder.CreateBitCast(resolve_as_f64(instr.args[2]), i64_ty), ep);
       builder.CreateBr(merge_bb);
       builder.SetInsertPoint(merge_bb);
-      continue;
-    }
-
-    // ── MatMul: stub (unimplemented) ──
-    if (instr.tag == OpTag::MatMul)
-    {
-      store_temp_f64(instr.dst, zero_f64);  // TODO: implement matmul
-      temp_types[instr.dst] = ST::Float;
       continue;
     }
 

@@ -8,7 +8,7 @@
  * No C handles — all expression evaluation happens via FlatRuntime's plan JSON.
  */
 
-import { broadcastShapes } from './term.js'
+import { broadcastShapes, type ScalarKind } from './term.js'
 
 // ---------- ExprNode (JSON-serializable expression tree) ----------
 
@@ -117,7 +117,24 @@ export const div      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('div'
 export const floorDiv = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('floor_div', lhs, rhs)
 export const mod      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('mod',       lhs, rhs)
 export const pow_     = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('pow',       lhs, rhs)
-export const matmul   = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('matmul',    lhs, rhs)
+export const matmul = (
+  lhs: ExprCoercible,
+  rhs: ExprCoercible,
+  shape_a: [number, number],
+  shape_b: [number, number],
+  element_type: ScalarKind = 'float',
+): SignalExpr => {
+  if (shape_a[1] !== shape_b[0])
+    throw new Error(`matmul: inner dimensions must match (${shape_a[1]} ≠ ${shape_b[0]})`)
+  const l = coerce(lhs)
+  const r = coerce(rhs)
+  const [M] = shape_a
+  const [, N] = shape_b
+  return SignalExpr.fromNode(
+    { op: 'matmul', args: [l._node, r._node], shape_a, shape_b, element_type },
+    [M, N],
+  )
+}
 
 // ---------- Comparison ----------
 
@@ -147,6 +164,8 @@ export const exp        = (operand: ExprCoercible) => unary('exp', operand)
 export const log        = (operand: ExprCoercible) => unary('log', operand)
 export const tanh       = (operand: ExprCoercible) => unary('tanh', operand)
 export const logicalNot = (operand: ExprCoercible) => unary('not', operand)
+export const logicalAnd = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('and', lhs, rhs)
+export const logicalOr  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('or',  lhs, rhs)
 
 export function clamp(value: ExprCoercible, lo: ExprCoercible, hi: ExprCoercible): SignalExpr {
   const v = coerce(value)
