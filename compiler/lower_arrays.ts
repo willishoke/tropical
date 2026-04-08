@@ -236,16 +236,25 @@ function lowerReduce(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNo
   return { op: 'reduce', args: [arr], axis: obj.axis, reduce_op: reduceOp }
 }
 
+/** Derive the ring ops (mul, add) from the element scalar type. */
+function ringOpsForType(elementType: string): { mul_op: string; add_op: string } {
+  switch (elementType) {
+    case 'bool': return { mul_op: 'and', add_op: 'or' }
+    case 'int':
+    case 'float':
+    default:     return { mul_op: 'mul', add_op: 'add' }
+  }
+}
+
 /**
- * matmul({args: [A, B], shape_a: [M,K], shape_b: [K,N], mul_op?, add_op?})
- * → flat [M*N] array of scalar trees: C[i,j] = add_op_k( mul_op(A[i*K+k], B[k*N+j]) )
+ * matmul({args: [A, B], shape_a: [M,K], shape_b: [K,N], element_type?})
+ * → flat [M*N] array of scalar trees: C[i,j] = Σ_k A[i*K+k] * B[k*N+j]
  *
- * mul_op / add_op default to 'mul' / 'add' (standard real/integer ring).
- * Override for other semirings:
- *   Boolean reachability : mul_op='bit_and', add_op='bit_or'
- *   Tropical (min-plus)  : mul_op='add',     add_op='min'   (shortest path)
- *   Max-plus             : mul_op='add',     add_op='max'   (longest path / (max,+) algebra)
- *   Integer mod n        : wrap results with mod after the fact
+ * Ring ops are derived from element_type (default 'float'):
+ *   'float' | 'int' → mul/add
+ *   'bool'          → and/or  (boolean semiring: reachability, graph composition)
+ *
+ * New scalar kinds (e.g. tropical floats) extend ringOpsForType when added.
  */
 function lowerMatmul(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
   const args = obj.args as ExprNode[]
@@ -253,8 +262,7 @@ function lowerMatmul(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNo
   const B = lowerArrayOps(args[1], memo)
   const [M, K] = obj.shape_a as [number, number]
   const [, N] = obj.shape_b as [number, number]
-  const mul_op = (obj.mul_op as string | undefined) ?? 'mul'
-  const add_op = (obj.add_op as string | undefined) ?? 'add'
+  const { mul_op, add_op } = ringOpsForType((obj.element_type as string | undefined) ?? 'float')
 
   const elements: ExprNode[] = []
   for (let i = 0; i < M; i++) {

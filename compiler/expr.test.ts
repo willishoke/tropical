@@ -167,7 +167,16 @@ describe('shape-polymorphic arithmetic', () => {
     expect(node.op).toBe('matmul')
     expect(node.shape_a).toEqual([2, 3])
     expect(node.shape_b).toEqual([3, 2])
+    expect(node.element_type).toBe('float')
     expect(r.shape).toEqual([2, 2])
+  })
+
+  test('matmul with bool element_type embeds element_type on node', () => {
+    const a = arrayLiteral([2, 2], [1, 0, 0, 1])
+    const b = arrayLiteral([2, 2], [1, 1, 0, 1])
+    const r = matmul(a, b, [2, 2], [2, 2], 'bool')
+    const node = r._node as Record<string, unknown>
+    expect(node.element_type).toBe('bool')
   })
 
   test('matmul throws on inner dimension mismatch', () => {

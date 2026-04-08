@@ -183,12 +183,12 @@ describe('lowerMatmul', () => {
     expect(result.length).toBe(2) // 2x1 output
   })
 
-  test('boolean semiring uses logical and/or instead of mul/add', () => {
+  test('bool element_type uses logical and/or instead of mul/add', () => {
     const node: ExprNode = {
       op: 'matmul',
       args: [[1, 0, 0, 1], [1, 1, 0, 1]],
       shape_a: [2, 2], shape_b: [2, 2],
-      mul_op: 'and', add_op: 'or',
+      element_type: 'bool',
     }
     const result = lowerArrayOps(node)
     const json = JSON.stringify(result)
@@ -198,16 +198,17 @@ describe('lowerMatmul', () => {
     expect(json).not.toContain('"add"')
   })
 
-  test('tropical (min-plus) semiring uses add/min', () => {
+  test('int element_type uses mul/add', () => {
     const node: ExprNode = {
       op: 'matmul',
-      args: [[0, 1, 1, 0], [0, 2, 3, 0]],
+      args: [[1, 2, 3, 4], [5, 6, 7, 8]],
       shape_a: [2, 2], shape_b: [2, 2],
-      mul_op: 'add', add_op: 'min',
+      element_type: 'int',
     }
     const result = lowerArrayOps(node)
     const json = JSON.stringify(result)
-    expect(json).toContain('"min"')
-    expect(json).not.toContain('"mul"')
+    expect(json).toContain('"mul"')
+    expect(json).toContain('"add"')
+    expect(json).not.toContain('"and"')
   })
 })
