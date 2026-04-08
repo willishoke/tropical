@@ -117,11 +117,24 @@ export const div      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('div'
 export const floorDiv = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('floor_div', lhs, rhs)
 export const mod      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('mod',       lhs, rhs)
 export const pow_     = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('pow',       lhs, rhs)
+/** Well-known semiring presets for matmul. */
+export const Rings = {
+  /** Standard real/integer ring. Default. */
+  real:       { mul_op: 'mul',     add_op: 'add' },
+  /** Boolean semiring: reachability / graph composition. */
+  boolean:    { mul_op: 'bit_and', add_op: 'bit_or' },
+  /** Tropical (min-plus) semiring: shortest-path composition. */
+  tropical:   { mul_op: 'add',     add_op: 'min' },
+  /** Max-plus semiring: longest-path / (max,+) algebra. */
+  max_plus:   { mul_op: 'add',     add_op: 'max' },
+} as const
+
 export const matmul = (
   lhs: ExprCoercible,
   rhs: ExprCoercible,
   shape_a: [number, number],
   shape_b: [number, number],
+  ring: { mul_op: string; add_op: string } = Rings.real,
 ): SignalExpr => {
   if (shape_a[1] !== shape_b[0])
     throw new Error(`matmul: inner dimensions must match (${shape_a[1]} ≠ ${shape_b[0]})`)
@@ -130,7 +143,7 @@ export const matmul = (
   const [M] = shape_a
   const [, N] = shape_b
   return SignalExpr.fromNode(
-    { op: 'matmul', args: [l._node, r._node], shape_a, shape_b },
+    { op: 'matmul', args: [l._node, r._node], shape_a, shape_b, ...ring },
     [M, N],
   )
 }

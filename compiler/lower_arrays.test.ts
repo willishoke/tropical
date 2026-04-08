@@ -182,4 +182,32 @@ describe('lowerMatmul', () => {
     expect(Array.isArray(result)).toBe(true)
     expect(result.length).toBe(2) // 2x1 output
   })
+
+  test('boolean semiring uses bit_and/bit_or instead of mul/add', () => {
+    const node: ExprNode = {
+      op: 'matmul',
+      args: [[1, 0, 0, 1], [1, 1, 0, 1]],
+      shape_a: [2, 2], shape_b: [2, 2],
+      mul_op: 'bit_and', add_op: 'bit_or',
+    }
+    const result = lowerArrayOps(node)
+    const json = JSON.stringify(result)
+    expect(json).toContain('"bit_and"')
+    expect(json).toContain('"bit_or"')
+    expect(json).not.toContain('"mul"')
+    expect(json).not.toContain('"add"')
+  })
+
+  test('tropical (min-plus) semiring uses add/min', () => {
+    const node: ExprNode = {
+      op: 'matmul',
+      args: [[0, 1, 1, 0], [0, 2, 3, 0]],
+      shape_a: [2, 2], shape_b: [2, 2],
+      mul_op: 'add', add_op: 'min',
+    }
+    const result = lowerArrayOps(node)
+    const json = JSON.stringify(result)
+    expect(json).toContain('"min"')
+    expect(json).not.toContain('"mul"')
+  })
 })

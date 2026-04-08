@@ -237,8 +237,15 @@ function lowerReduce(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNo
 }
 
 /**
- * matmul({args: [A, B], shape_a: [M,K], shape_b: [K,N]}) → flat [M*N] array of scalar trees
- * C[i,j] = Σ_k A[i*K+k] * B[k*N+j]  (row-major)
+ * matmul({args: [A, B], shape_a: [M,K], shape_b: [K,N], mul_op?, add_op?})
+ * → flat [M*N] array of scalar trees: C[i,j] = add_op_k( mul_op(A[i*K+k], B[k*N+j]) )
+ *
+ * mul_op / add_op default to 'mul' / 'add' (standard real/integer ring).
+ * Override for other semirings:
+ *   Boolean reachability : mul_op='bit_and', add_op='bit_or'
+ *   Tropical (min-plus)  : mul_op='add',     add_op='min'   (shortest path)
+ *   Max-plus             : mul_op='add',     add_op='max'   (longest path / (max,+) algebra)
+ *   Integer mod n        : wrap results with mod after the fact
  */
 function lowerMatmul(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
   const args = obj.args as ExprNode[]
@@ -246,6 +253,8 @@ function lowerMatmul(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNo
   const B = lowerArrayOps(args[1], memo)
   const [M, K] = obj.shape_a as [number, number]
   const [, N] = obj.shape_b as [number, number]
+  const mul_op = (obj.mul_op as string | undefined) ?? 'mul'
+  const add_op = (obj.add_op as string | undefined) ?? 'add'
 
   const elements: ExprNode[] = []
   for (let i = 0; i < M; i++) {
@@ -254,9 +263,9 @@ function lowerMatmul(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNo
       for (let k = 0; k < K; k++) {
         const aElem: ExprNode = { op: 'index', args: [A, i * K + k] }
         const bElem: ExprNode = { op: 'index', args: [B, k * N + j] }
-        terms.push({ op: 'mul', args: [aElem, bElem] })
+        terms.push({ op: mul_op, args: [aElem, bElem] })
       }
-      elements.push(treeReduce(terms, 'add'))
+      elements.push(treeReduce(terms, add_op))
     }
   }
   return elements
