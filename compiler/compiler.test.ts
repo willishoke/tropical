@@ -642,4 +642,34 @@ describe('compilePatch', () => {
     expect(portTypeEqual(t.dom, Unit)).toBe(true)
     expect(portTypeEqual(t.cod, Int)).toBe(true)
   })
+
+  test('matmul: 2x2 matrix output compiles to float[4] codomain', () => {
+    // Module outputs A@B where A and B are inline 2x2 matrix literals.
+    // The lowering pass should expand matmul to index/mul/add trees before
+    // emit_numeric sees it — no MatMul opcode should remain.
+    const matmulExpr: ExprNode = {
+      op: 'matmul',
+      args: [
+        [1, 0, 0, 1],  // 2x2 identity
+        [2, 3, 4, 5],  // arbitrary 2x2
+      ],
+      shape_a: [2, 2],
+      shape_b: [2, 2],
+    }
+    const input: CompilerInput = {
+      modules: new Map([
+        ['M', modInfo('M', {
+          outputs: ['out'],
+          outputTypes: ['float[4]'],
+          exprs: { out: matmulExpr },
+        })],
+      ]),
+      inputExprNodes: new Map(),
+      graphOutputs: [{ module: 'M', output: 'out' }],
+    }
+    const result = compilePatch(input)
+    const t = inferType(result.term)
+    expect(portTypeEqual(t.dom, Unit)).toBe(true)
+    expect(portTypeEqual(t.cod, ArrayType(Float, [4]))).toBe(true)
+  })
 })

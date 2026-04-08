@@ -109,3 +109,77 @@ describe('lowerArrayOps', () => {
     expect(args[1]).toEqual([1, 1])
   })
 })
+
+describe('lowerMatmul', () => {
+  test('2x2 @ 2x2 produces 4 elements', () => {
+    const node: ExprNode = {
+      op: 'matmul',
+      args: [[1, 2, 3, 4], [5, 6, 7, 8]],
+      shape_a: [2, 2], shape_b: [2, 2],
+    }
+    const result = lowerArrayOps(node) as ExprNode[]
+    expect(Array.isArray(result)).toBe(true)
+    expect(result.length).toBe(4)
+  })
+
+  test('1x3 @ 3x1 produces a single-element array (dot product)', () => {
+    const node: ExprNode = {
+      op: 'matmul',
+      args: [[1, 2, 3], [4, 5, 6]],
+      shape_a: [1, 3], shape_b: [3, 1],
+    }
+    const result = lowerArrayOps(node) as ExprNode[]
+    expect(Array.isArray(result)).toBe(true)
+    expect(result.length).toBe(1)
+  })
+
+  test('2x3 @ 3x2 produces 4 elements', () => {
+    const node: ExprNode = {
+      op: 'matmul',
+      args: [[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]],
+      shape_a: [2, 3], shape_b: [3, 2],
+    }
+    const result = lowerArrayOps(node) as ExprNode[]
+    expect(Array.isArray(result)).toBe(true)
+    expect(result.length).toBe(4)
+  })
+
+  test('no matmul nodes remain after lowering', () => {
+    const node: ExprNode = {
+      op: 'matmul',
+      args: [[1, 2, 3, 4], [5, 6, 7, 8]],
+      shape_a: [2, 2], shape_b: [2, 2],
+    }
+    const result = lowerArrayOps(node)
+    expect(JSON.stringify(result)).not.toContain('"matmul"')
+  })
+
+  test('output elements are scalar op trees (index/mul/add, no matmul)', () => {
+    const node: ExprNode = {
+      op: 'matmul',
+      args: [[1, 2, 3, 4], [5, 6, 7, 8]],
+      shape_a: [2, 2], shape_b: [2, 2],
+    }
+    const result = lowerArrayOps(node)
+    const json = JSON.stringify(result)
+    expect(json).not.toContain('"matmul"')
+    expect(json).toContain('"mul"')
+    expect(json).toContain('"add"')
+    expect(json).toContain('"index"') // index into inline arrays, folded by optimizer
+  })
+
+  test('identity @ vector leaves vector elements structurally correct', () => {
+    // I2 = [[1,0],[0,1]], v = [a, b] — result should be [a, b]
+    // With symbolic inputs, the index ops stay; check shape only
+    const ref: ExprNode = { op: 'ref', module: 'M', output: 'v' }
+    const I2 = [1, 0, 0, 1]
+    const node: ExprNode = {
+      op: 'matmul',
+      args: [I2, ref],
+      shape_a: [2, 2], shape_b: [2, 1],
+    }
+    const result = lowerArrayOps(node) as ExprNode[]
+    expect(Array.isArray(result)).toBe(true)
+    expect(result.length).toBe(2) // 2x1 output
+  })
+})

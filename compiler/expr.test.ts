@@ -159,11 +159,20 @@ describe('shape-polymorphic arithmetic', () => {
     expect(node.op).toBe('mul')
   })
 
-  test('matmul produces matmul node', () => {
+  test('matmul produces matmul node with shapes and result shape [M,N]', () => {
     const a = arrayLiteral([2, 3], [1, 2, 3, 4, 5, 6])
     const b = arrayLiteral([3, 2], [1, 2, 3, 4, 5, 6])
-    const r = matmul(a, b)
+    const r = matmul(a, b, [2, 3], [3, 2])
     const node = r._node as Record<string, unknown>
     expect(node.op).toBe('matmul')
+    expect(node.shape_a).toEqual([2, 3])
+    expect(node.shape_b).toEqual([3, 2])
+    expect(r.shape).toEqual([2, 2])
+  })
+
+  test('matmul throws on inner dimension mismatch', () => {
+    const a = arrayLiteral([2, 3], [1, 2, 3, 4, 5, 6])
+    const b = arrayLiteral([2, 2], [1, 2, 3, 4])
+    expect(() => matmul(a, b, [2, 3], [2, 2])).toThrow('inner dimensions must match')
   })
 })
