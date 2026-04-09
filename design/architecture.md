@@ -6,25 +6,28 @@ Detailed reference for the internal architecture. Organized by functional unit.
 
 ## 1. Overview
 
-tropical is a realtime audio synthesis system. An LLM or human author defines a *patch* — a graph of DSP module instances wired together — and the system compiles the entire patch into a single native kernel that runs per-sample in an audio callback. There is no interpreter fallback and no module boundaries at runtime.
+tropical is a realtime audio synthesis system. An LLM or human author defines a *program* — a graph of DSP program instances wired together — and the system compiles the entire program into a single native kernel that runs per-sample in an audio callback. There is no interpreter fallback and no module boundaries at runtime.
+
+The unified representation is `ProgramJSON` (`tropical_program_1`). A program with `process` is a leaf (direct computation); a program with `instances` and `audio_outputs` is a top-level graph; a program with `instances`, `inputs`, and `outputs` is a reusable composite. The legacy `tropical_patch_1` format is still accepted on load.
 
 The system has three layers:
 
 | Layer | Language | Directory | Role |
 |-------|----------|-----------|------|
-| **Compiler** | TypeScript | `compiler/` | DSL, module library, expression trees, flattening, instruction emission, type system |
+| **Compiler** | TypeScript | `compiler/` | DSL, module library, expression trees, combinators, flattening, instruction emission, type system |
 | **Engine** | C++20 | `engine/` | Plan parsing, JIT compilation (LLVM ORC), per-sample kernel execution, audio output |
-| **MCP Server** | TypeScript | `mcp/` | AI-native interface: tool-based patch manipulation over stdio, backed by the compiler and engine |
+| **MCP Server** | TypeScript | `mcp/` | AI-native interface: tool-based program manipulation over stdio, backed by the compiler and engine |
 
 The **C API** (`engine/c_api/tropical_c.h`) is the stable boundary between the TypeScript and C++ layers. TypeScript calls into C++ via koffi FFI.
 
 ### Data flow (high level)
 
 ```
-Patch definition (JSON / MCP tools / DSL)
+Program definition (JSON / MCP tools / DSL)
     → Module instantiation (TS-only, no C++ calls)
     → Expression tree construction (ExprNode JSON trees)
     → Flattening (inline all modules into one expression set)
+    → Combinator expansion (unroll generate/fold/chain/etc. to scalar trees)
     → Array lowering (expand static-shape array ops to scalar primitives)
     → Instruction emission (ExprNode → FlatProgram instruction stream)
     → JSON serialization (tropical_plan_4)
@@ -65,6 +68,7 @@ Operations available:
 - **Matrix**: `matrix`, `matmul`
 - **Function**: `exprFunction`, `exprCall`
 - **ADT**: `constructStruct`, `fieldAccess`, `constructVariant`, `matchVariant`
+- **Combinators** (compile-time expansion): `bindingExpr`, `let_`, `generate`, `repeat`, `iterate`, `fold`, `scan`, `map2`, `zipWith`, `chain`
 - **Leaf nodes**: `sampleRate`, `sampleIndex`, `inputExpr`, `registerExpr`, `refExpr`, `nestedOutputExpr`, `delayValueExpr`, `paramExpr`, `triggerParamExpr`
 
 ### 2.2 C++ Expression AST (`engine/expr/Expr.hpp`)
@@ -140,18 +144,20 @@ Private sub-modules used internally: `_wrap01`, `_polyBlep`, `_polyBlamp`, `_all
 
 ## 4. Compilation Pipeline
 
-### 4.1 Patch State (`compiler/patch.ts`)
+### 4.1 Session State (`compiler/patch.ts`, `compiler/program.ts`)
 
 `SessionState` is the mutable in-memory representation of a live session:
 
-- `typeRegistry: Map<string, ModuleType>` — registered module types (builtins + user-defined)
-- `instanceRegistry: Map<string, ModuleInstance>` — live module instances by name
-- `inputExprNodes: Map<string, ExprNode>` — wiring expressions keyed as `"ModuleName:inputName"`
+- `typeRegistry: Map<string, ModuleType>` — registered program types (builtins + user-defined)
+- `instanceRegistry: Map<string, ModuleInstance>` — live program instances by name
+- `inputExprNodes: Map<string, ExprNode>` — wiring expressions keyed as `"InstanceName:inputName"`
 - `graphOutputs: Array<{ module, output }>` — which outputs are mixed to audio
 - `params: Map<string, Param>` / `triggers: Map<string, Trigger>` — named control parameters
 - `runtime: Runtime` — the FlatRuntime wrapper
 
-Patches are loaded from / saved to `tropical_patch_1` JSON format.
+Programs are loaded via `loadJSON()` which accepts both `tropical_program_1` and `tropical_patch_1`. Saved as `tropical_program_1` via `saveProgramFromSession()`.
+
+`ProgramJSON` (`compiler/program.ts`) is the unified schema. Conversion functions bridge to/from the legacy `PatchJSON` format: `convertPatchToProgram`, `convertProgramToPatch`, `convertModuleDefToProgram`.
 
 ### 4.2 Compiler (`compiler/compiler.ts`)
 
@@ -207,16 +213,29 @@ Key operations:
 
 All operations use WeakMap-based memoization to maintain DAG sharing and prevent exponential blowup.
 
-### 4.7 Array Lowering (`compiler/lower_arrays.ts`)
+### 4.7 Array Lowering and Combinator Expansion (`compiler/lower_arrays.ts`)
 
-Lowers first-class array operations to scalar primitives. All shapes are static, so every expansion is fully unrolled:
+Lowers first-class array operations and compile-time combinators to scalar primitives. All shapes are static, so every expansion is fully unrolled.
 
+**Array operations:**
 - `zeros(shape)` → `ArrayPack` of zeros
 - `reshape`, `transpose`, `slice` → reindexed `ArrayPack`
 - `reduce(axis, op)` → unrolled fold
 - `broadcast_to` → replicated elements
 - `map(fn, arr)` → unrolled `call` per element
 - `matmul(a, b, shape_a, shape_b)` → unrolled dot products via semiring lowering (supports arbitrary `mul_op`/`add_op` for generalized semirings)
+
+**Compile-time combinators** (expand via `substituteBindings` — replaces `{ op: 'binding', name }` nodes with concrete values):
+- `let(bind, body)` → sequential let\* evaluation, substitute into body
+- `generate(n, i, body)` → `[body[i=0], body[i=1], ..., body[i=n-1]]` (inline array)
+- `iterate(n, init, x, body)` → `[init, body[x=init], body[x=body[x=init]], ...]` (length n)
+- `fold(arr, init, acc, elem, body)` → unrolled left fold threading accumulator, output: final scalar
+- `scan(arr, init, acc, elem, body)` → like fold but collect each intermediate, output: inline array
+- `map2(arr, elem, body)` → substitute per element, output: inline array
+- `zip_with(a, b, x, y, body)` → zip elements, substitute both vars, output: inline array
+- `chain(n, init, x, body)` → unroll n applications: `body[x=body[x=...body[x=init]...]]`, output: final value
+
+Combinators are organized by intent to help LLMs narrow their search: **generative** (generate, repeat, iterate), **reductive** (fold, scan), **transformative** (map2, zip_with), **compositional** (chain, let).
 
 ### 4.8 Instruction Emission (`compiler/emit_numeric.ts`)
 
@@ -390,48 +409,60 @@ TypeScript classes wrapping the C API via koffi:
 
 The primary agent interface. Runs on stdio, uses `@modelcontextprotocol/sdk`.
 
-Maintains a `SessionState` and exposes tools:
+Maintains a `SessionState` and exposes 16 consolidated tools (plus 15 deprecated aliases for backward compatibility):
 
-**Module management**: `define_module`, `instantiate_module`, `remove_module`, `list_module_types`, `list_modules`, `get_module_info`
+**Program management**: `define_program`, `add_instance`, `remove_instance`, `list_programs`, `list_instances`, `get_info`
 
-**Wiring**: `connect_modules`, `disconnect_modules`, `set_module_input`, `set_inputs_batch`, `list_inputs`, `list_params`, `set_param`
+**Wiring**: `wire` (set and/or remove input wiring in a single recompile — replaces the former `connect_modules`, `disconnect_modules`, `set_module_input`, `set_inputs_batch`), `list_wiring`
 
-**Audio graph**: `add_graph_output`, `remove_graph_output`
+**Audio output**: `set_output` (declarative — replaces full output list, replaces former `add_graph_output` / `remove_graph_output`)
 
-**Patch I/O**: `load_patch`, `merge_patch`, `save_patch`
+**Control parameters**: `set_param`, `list_params`
+
+**Program I/O**: `load` (accepts `tropical_program_1` or `tropical_patch_1`), `save` (outputs `tropical_program_1`), `merge`
 
 **Audio control**: `start_audio`, `stop_audio`, `audio_status`
 
-Every mutation that affects the signal graph calls `wire()` → `applyFlatPlan(session, runtime)`, which re-flattens and hot-swaps the kernel. The `set_inputs_batch` tool batches multiple updates into a single recompile.
+Every mutation that affects the signal graph calls `wire()` → `applyFlatPlan(session, runtime)`, which re-flattens and hot-swaps the kernel. The `wire` tool batches multiple set/remove operations into a single recompile.
+
+Old tool names (`define_module`, `instantiate_module`, `connect_modules`, `load_patch`, etc.) are preserved as deprecated aliases that delegate to the new handlers.
 
 ---
 
-## 10. Patch Format (`tropical_patch_1`)
+## 10. Program Format (`tropical_program_1`)
 
-JSON format for serializing/deserializing patches. Validated by Zod schemas in `compiler/schema.ts`.
+The unified JSON format for all DSP programs. Validated by Zod schemas in `compiler/schema.ts`. Defined in `compiler/program.ts`.
 
 ```json
 {
-  "schema": "tropical_patch_1",
-  "config": { "buffer_length": 512 },
-  "type_defs": [ ... ],           // optional: inline ADT type definitions
-  "module_defs": [ ... ],         // optional: inline module type definitions
-  "modules": [
-    { "type": "VCO", "name": "VCO1" }
-  ],
-  "connections": [
-    { "src": "VCO1", "src_output": "saw", "dst": "VCA1", "dst_input": "audio" }
-  ],
-  "outputs": [
-    { "module": "VCA1", "output": "out" }
-  ],
-  "params": [
-    { "name": "freq", "value": 440, "time_const": 0.005 }
-  ],
-  "input_exprs": [
-    { "module": "VCO1", "input": "freq", "expr": { "op": "smoothed_param", "name": "freq" } }
-  ]
+  "schema": "tropical_program_1",
+  "name": "MyPatch",
+  "programs": {
+    "Gain": {
+      "schema": "tropical_program_1",
+      "name": "Gain",
+      "inputs": ["audio", "cv"],
+      "outputs": ["out"],
+      "process": { "outputs": { "out": { "op": "mul", "args": [{"op":"input","name":"audio"}, {"op":"input","name":"cv"}] } } }
+    }
+  },
+  "instances": {
+    "osc": { "program": "VCO", "inputs": { "freq": 440 } },
+    "amp": { "program": "Gain", "inputs": {
+      "audio": { "op": "ref", "module": "osc", "output": "sin" },
+      "cv": 0.5
+    }}
+  },
+  "audio_outputs": [{ "instance": "amp", "output": "out" }],
+  "params": [{ "name": "freq", "value": 440, "time_const": 0.005 }]
 }
+```
+
+Key fields: `schema`, `name`, `inputs`/`outputs` (leaf/composite), `process` (leaf body), `programs` (inline subprogram definitions), `instances` (instantiated subprograms with wiring in `inputs`), `audio_outputs` (graph output routing), `params`, `regs`, `delays`, `config`, `type_defs`.
+
+### Legacy: `tropical_patch_1`
+
+The old patch format is still accepted by `loadJSON()` and converted internally via `convertPatchToProgram()`. The `save` MCP tool outputs `tropical_program_1`. Existing patches in `patches/` remain valid without modification.
 ```
 
 ---

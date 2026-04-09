@@ -1,6 +1,8 @@
 # patches/
 
-Example patches in JSON format. Load via `make mcp-ts` → `load_patch` tool, or from the TUI.
+Example patches in JSON format. Load via `make mcp-ts` → `load` tool (also accepts the deprecated `load_patch`), or from the TUI.
+
+Both `tropical_program_1` and `tropical_patch_1` formats are accepted. Existing patches use the legacy `tropical_patch_1` schema.
 
 ## Schema: `tropical_patch_1`
 
