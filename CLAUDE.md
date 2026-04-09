@@ -1,75 +1,114 @@
 # tropical
 
-C++ realtime audio synthesis library with LLVM ORC JIT, a TypeScript TUI (Ink/React), and an MCP server for programmatic control.
+Realtime audio synthesis with LLVM ORC JIT. The entire patch — a graph of DSP modules — compiles to a single native kernel that runs per-sample in an audio callback. No interpreter, no module boundaries at runtime.
 
 ## Build
 
 ```bash
-make build          # C++ core with LLVM JIT, outputs build/libtropical.dylib
-make tui-ts         # build + launch full-screen TUI (requires Bun)
-make mcp-ts         # build + launch MCP server on stdio
-make debug          # build with tests enabled
+make build          # C++ core, outputs build/libtropical.dylib
+make mcp-ts         # build + launch MCP server on stdio (requires Bun)
+make profile        # build with profiling instrumentation
+make clean          # remove build directories
 ```
 
-**Requirements:** CMake 3.20+, C++17, LLVM >= 15 (Homebrew: `/opt/homebrew/opt/llvm`), Bun (for TUI/MCP).
-Only tested on macOS (CoreAudio). Linux builds in CI without JIT.
+**Requirements:** CMake 3.20+, C++20, LLVM >= 15 (Homebrew: `/opt/homebrew/opt/llvm`), Bun (for MCP/TUI).
 
 ## Test
 
 ```bash
-cmake --build build -j4 && ctest --test-dir build
+cmake --build build -j4 && ctest --test-dir build   # C++ tests (JIT + C API)
+bun test                                              # TS compiler tests
 ```
 
-Tests run via `test_module_process` — exercises the C API and JIT code paths without an audio device. JIT is **off** in CI (no LLVM on runners); local testing with `make build` has it on.
+C++ tests (`engine/tests/test_module_process.cpp`) exercise the C API and JIT without an audio device. TS tests (`compiler/*.test.ts`) cover the optimizer, flattening, array wiring, type checking, expression emission, and more.
 
 ## Architecture
 
+Three layers, one stable boundary:
+
 ```
-engine/       C++ execution: JIT (OrcJitEngine), DAC (RtAudio), FlatRuntime, C API
-compiler/     TS language layer: expression DSL, module library, type system,
-              compilation pipeline (flatten, plan, optimizer, type_check, term)
-              compiler/runtime/  FFI bridge to engine (bindings, audio, param)
-mcp/          MCP server — primary agent interface, AI-native delivery surface
-```
-
-**Data flow:** TypeScript DSL → expression trees (ExprNode JSON) → flatten → tropical_plan_2 JSON → C++ FlatRuntime → JIT → audio callback
-
-**Key boundary:** the C API in `engine/c_api/tropical_c.h` is the interface between the compiler layer and C++. It exposes: FlatRuntime (plan loading, audio processing), ControlParam (smoothed/trigger parameters), DAC (audio output), and device enumeration. Module definitions and expression building happen entirely in TypeScript.
-
-## Core concepts
-
-- **FlatRuntime** receives a flat JSON plan (tropical_plan_2), JIT-compiles all expressions into a single native kernel, and runs it per-sample. No module boundaries at runtime.
-- **Module types** are defined in `compiler/module_library.ts` using the DSL in `module.ts`. Each type specifies inputs, outputs, registers, and a process function that builds expression trees. Instantiation is TS-only — no C API calls.
-- **Expressions** are symbolic JSON trees (ExprNode). They define module I/O behavior and get flattened + JIT-compiled to native code.
-- **Flattening** (`compiler/flatten.ts`) inlines all module expression trees, resolves inter-module references, and produces a single tropical_plan_2 with flat output/register expression arrays.
-- **Single-sample boundary:** connected modules always read previous-sample outputs. No implicit multi-sample delay.
-
-## JIT pipeline
-
-Expression trees → PlanParser (JSON → ExprSpec) → ExprCompiler (ExprSpec → CompiledProgram) → NumericProgramBuilder (→ NumericProgram) → LLVM IR emission → ORC JIT compilation → native kernel.
-
-JIT failures are **fatal** (no interpreter fallback). If a plan fails to compile, it throws.
-
-## Patch format
-
-Patches are JSON files in `patches/`. Schema version: `tropical_patch_1`.
-
-```json
-{
-  "schema": "tropical_patch_1",
-  "modules": [{"type": "VCO", "name": "VCO1"}, ...],
-  "outputs": [{"module": "VCA1", "output": "out"}, ...],
-  "input_exprs": [{"module": "VCA1", "input": "audio", "expr": {"op": "ref", "module": "VCO1", "output": "saw"}}, ...]
-}
+compiler/             TS: expression DSL, module library, flattening,
+                      instruction emission, type system, term IR
+  compiler/runtime/   FFI bridge to C++ (koffi bindings, Runtime, DAC, Param)
+engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio output
+  engine/c_api/       Stable C API — the boundary between TS and C++
+  engine/jit/         LLVM ORC JIT engine
+  engine/runtime/     FlatRuntime (plan loading, kernel execution)
+  engine/dac/         Audio output (RtAudio)
+  engine/expr/        C++ expression AST, rewriting, evaluation
+mcp/                  MCP server — primary agent interface over stdio
+patches/              Example patches (tropical_patch_1 JSON)
 ```
 
-## MCP server
+### Data flow
 
-`make mcp-ts` starts the MCP server on stdio. It exposes tools to: define module types, instantiate modules, connect them, set parameters, control audio, save/load patches. This is the primary agent interface for building patches at runtime.
+```
+Patch (JSON / MCP tools)
+  → Module instantiation (TS-only, no C++ calls)
+  → Expression tree construction (ExprNode)
+  → Flattening (inline all modules → single expression set)
+  → Array lowering (static-shape array ops → scalar primitives)
+  → Instruction emission (ExprNode → FlatProgram)
+  → JSON serialization (tropical_plan_4)
+  ─── C API boundary (tropical_c.h, koffi FFI) ───
+  → NumericProgramParser (JSON → FlatProgram struct)
+  → JIT compilation (FlatProgram → LLVM IR → native kernel)
+  → FlatRuntime (per-sample execution, double-buffered hot-swap)
+  → Audio output (RtAudio / CoreAudio)
+```
+
+### Schema versions
+
+There are three distinct JSON schemas — don't confuse them:
+
+| Schema | Produced by | Purpose |
+|--------|-------------|---------|
+| `tropical_patch_1` | `compiler/patch.ts` | User-facing patch format (modules, wiring, outputs) |
+| `tropical_plan_1` | `compiler/plan.ts` | Intermediate execution plan (legacy, used by some tests) |
+| `tropical_plan_4` | `compiler/flatten.ts` + `emit_numeric.ts` | Flat instruction stream sent to C++ JIT — the one that matters for audio |
+
+## Compiler layer (`compiler/`)
+
+The TypeScript layer handles everything from module definition through instruction emission. No audio processing happens here.
+
+**Expression system** (`expr.ts`) — `ExprNode` is the universal IR: a recursive JSON union type (number, boolean, array, or `{op, ...}` object). `SignalExpr` wraps it with static shape tracking. All module I/O is defined as expression trees.
+
+**Module DSL** (`module.ts`, `module_library.ts`) — `defineModule()` builds expression trees symbolically. 14 built-in types (VCO, Clock, ADEnvelope, Reverb, LadderFilter, etc.) plus private sub-modules for antialiasing (polyBLEP/polyBLAMP). Modules are TS-only — no C API calls for instantiation.
+
+**Flattening** (`flatten.ts`) — The critical step. Inlines all module expressions, resolves inter-module references, expands nested calls, converts delays to register ops. Output is a `tropical_plan_4` JSON. Uses WeakMap memoization for DAG sharing.
+
+**Array lowering** (`lower_arrays.ts`) — Lowers first-class array ops (zeros, reshape, transpose, slice, reduce, broadcast_to, map, matmul) to scalar primitives via static unrolling. All shapes are compile-time constants.
+
+**Instruction emission** (`emit_numeric.ts`) — Walks flattened ExprNode trees, emits `FlatProgram` instruction stream with typed operands (const, input, reg, array_reg, state_reg, param, rate, tick).
+
+**Term IR** (`term.ts`, `compiler.ts`) — Categorical IR (free monoidal category): morphism, compose, tensor, trace, id. The compiler builds terms from the dependency graph via topological sort (Kahn's) and cycle detection (Tarjan's SCC). Type checked via `type_check.ts`. Optimized via `optimizer.ts` (identity elimination, compose/tensor flattening).
+
+**FFI bridge** (`runtime/bindings.ts`, `runtime.ts`, `audio.ts`, `param.ts`) — koffi declarations mirroring `tropical_c.h`. `Runtime` wraps `tropical_runtime_t` with FinalizationRegistry. `Param`/`Trigger` provide `.asExpr()` for wiring control parameters into expression trees.
+
+## Engine (`engine/`)
+
+C++20, header-heavy (templates + inlining for audio-thread performance).
+
+**C API** (`c_api/tropical_c.h`) — Stable boundary. Opaque handles for FlatRuntime, ControlParam, DAC. Thread-local error string via `tropical_last_error()`. All external access goes through here.
+
+**Plan parsing** (`runtime/NumericProgramParser.hpp`) — Thin deserializer: reads `tropical_plan_4` JSON → `FlatProgram` struct. No expression tree walking — just reads the pre-compiled instruction stream.
+
+**JIT** (`jit/OrcJitEngine.hpp/.cpp`) — Singleton LLVM ORC engine. `compile_flat_program()` generates typed LLVM IR (f64/i64/i1 with explicit coercion), emits inline polynomial approximations for transcendentals (sin, cos, exp, log, tanh — no libm), and compiles to native code. Kernel object cache at `~/.cache/tropical/kernels/<build-id>/` with auto-invalidation on dylib rebuild.
+
+**FlatRuntime** (`runtime/FlatRuntime.hpp/.cpp`) — Double-buffered kernel hot-swap. `load_plan()` compiles to the inactive slot, transfers matching state by register/array name, atomically swaps. `process()` runs the kernel, snapshots trigger params, applies smoothstep fade envelope (2048-sample Hermite curve).
+
+**Audio output** (`dac/TropicalDAC.hpp`) — Templated RtAudio driver. Device watcher thread (50ms poll), disconnect recovery with 500ms backoff, callback timing stats.
+
+**Expression AST** (`expr/`) — C++ parallel to the TS expression system. `Value` (tagged union), `ExprSpec` (tree nodes), plus rewriting (constant folding, algebraic simplification) and structural hashing. Used during plan compilation, not at runtime.
+
+## MCP server (`mcp/server.ts`)
+
+Primary agent interface. Runs on stdio via `@modelcontextprotocol/sdk`. Maintains `SessionState` and exposes tools for module management, wiring, audio control, and patch I/O. Every wiring mutation triggers `wire()` → `applyFlatPlan()` → full recompile and hot-swap.
 
 ## Conventions
 
-- Commit messages: `type(scope): description` (e.g., `fix(jit):`, `feat(tui):`, `refactor:`)
-- Module types are PascalCase (`VCO`, `ADEnvelope`, `Clock`)
-- Input/output names are lowercase (`freq`, `signal`, `out`, `saw`)
+- Commit messages: `type(scope): description` (e.g., `fix(jit):`, `feat(compiler):`, `refactor:`)
+- Module types: PascalCase (`VCO`, `ADEnvelope`, `Clock`)
+- Input/output names: lowercase (`freq`, `signal`, `out`, `saw`)
 - C++ is header-heavy by design (templates, inlining for audio perf)
+- JIT failures are fatal — no interpreter fallback

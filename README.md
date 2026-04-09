@@ -1,98 +1,117 @@
 # tropical
 
-A C++ library for algorithmic and generative audio synthesis. You build a graph of modules — oscillators, envelopes, effects, sequencers — wire them together with expressions, and the engine runs them in realtime at 44.1 kHz through your audio interface. Load the 31-TET patch and you hear five microtonal sine voices stepping slowly through an otonal sequence, smeared by a 16-stage phaser and a long reverb tail.
+Realtime audio synthesis driven by Claude Code over MCP.
 
-Modules are defined using built-in or user-defined operations; connections are expressed using a symbolic expression syntax. An LLVM ORC JIT backend compiles module definitions to native code for realtime execution. Currently only tested on macOS.
+Describe a patch — oscillators, filters, envelopes, effects, wiring — and tropical compiles the entire signal graph into a single native kernel via LLVM ORC JIT. No interpreter, no module boundaries at runtime. Every wiring change hot-swaps a new kernel without interrupting playback.
 
-## Getting started
-
-Build the core and start the MCP server:
+## Install
 
 ```bash
-make build
-make mcp-ts
+brew install <tap>/tropical    # macOS — coming soon
 ```
 
-Then connect any MCP-compatible client — Claude or otherwise — and load a patch:
+Or [build from source](INSTALL.md). Requires LLVM >= 15, CMake, and Bun.
 
-> Load `patches/31tet_otonal_seq.json` and start audio.
+### Connect with Claude Code
 
-The MCP server exposes `load_patch` and `start_audio` tools; the client will call them automatically. Within a few seconds you should hear five microtonal sine voices cycling slowly through a 31-TET otonal sequence, passing through a 16-stage phaser and a long reverb tail.
+tropical ships with `.mcp.json` — open the repo in Claude Code and the `tropical` toolset is available immediately. Then:
 
-Two patches are included to start:
+> Load `patches/compressor_harmonics.json` and start audio.
 
-- **`31tet_otonal_seq.json`** — Five VCOs tuned to the overtone series in 31-tone equal temperament, with a slow global transposition sequence and a sub-bass voice. Additive drone synthesis; long reverb. Good for getting a feel for expression-based routing and multi-voice patches.
-- **`compressor_harmonics.json`** — Ten VCOs at the odd harmonics of 40 Hz (the spectral content of a square wave), each gated by its own compressor/envelope pair at a different clock rate. Spectral animation through dynamics rather than amplitude — each partial opens and closes independently.
+That's it. The MCP server handles compilation, kernel loading, and audio output. Claude can also build patches from scratch:
 
-## Build
+> Make a simple subtractive synth — sawtooth oscillator into a ladder filter, with an envelope on the cutoff. 200 Hz, slow filter sweep. Start audio.
 
-```bash
-make build
-```
+### MCP tools
 
-Configures and builds the C++ core via CMake. Requires [LLVM](https://llvm.org) (ORC JIT).
+The server exposes 20 tools covering the full workflow:
 
-## Graph
+**Build** — `instantiate_module`, `define_module`, `remove_module`, `list_module_types`, `list_modules`, `get_module_info`
 
-`Graph` stores modules, per-input expression trees, outputs, and the output buffer. Each input is represented by a single expression tree whose leaves are literals or references to module outputs. `Graph::process()` evaluates those input expressions sample-by-sample, processes modules, and mixes selected outputs into the output buffer.
+**Wire** — `connect_modules`, `disconnect_modules`, `set_module_input`, `set_inputs_batch`, `list_inputs`
 
-Top-level module references always read previous-sample outputs, so connected modules observe a single-sample boundary even when graph-level worker threads are enabled.
+**Output** — `add_graph_output`, `remove_graph_output`
 
-Modules expose named inputs and outputs plus an optional register bank. After each sample, the runtime applies register updates and resets inputs to their default values.
+**Control** — `set_param`, `list_params`
+
+**Patch I/O** — `load_patch`, `merge_patch`, `save_patch`
+
+**Audio** — `start_audio`, `stop_audio`, `audio_status`
+
+Every wiring mutation triggers a full recompile and atomic kernel swap.
+
+## Modules
+
+14 built-in DSP modules, all defined in TypeScript and compiled to native code at runtime:
+
+| Module | What it does |
+|--------|-------------|
+| **VCO** | Band-limited oscillator (saw, tri, sin, square) with FM |
+| **Clock** | Clock/trigger generator with ratio array |
+| **ADEnvelope** | Attack-decay envelope, polyBLAMP antialiased |
+| **ADSREnvelope** | Full ADSR envelope, polyBLAMP antialiased |
+| **VCA** | Voltage-controlled amplifier |
+| **LadderFilter** | 4-pole Moog-style resonant filter |
+| **Reverb** | Algorithmic reverb |
+| **Phaser / Phaser16** | 4 or 16 stage allpass phaser |
+| **Compressor** | Dynamics compressor with sidechain input |
+| **BassDrum** | Synthesized kick drum |
+| **BitCrusher** | Bit depth and sample rate reduction |
+| **NoiseLFSR** | Linear feedback shift register noise |
+| **TopoWaveguide** | 2D waveguide mesh physical model |
+| **Delay** | Fixed-length delay lines (8 to 44100 samples) |
+
+New module types can be defined at runtime via `define_module` — no rebuild required.
 
 ## Patches
 
-Patches are JSON files describing a graph: modules, input expressions, outputs, and parameter values. Sample patches live in `patches/`.
+JSON files in `patches/`. Two good starting points:
 
-The canonical format uses `input_exprs` to describe routing — each input holds an expression tree whose leaves reference other module outputs:
+- **`compressor_harmonics.json`** — Ten VCOs at the odd harmonics of 40 Hz, each gated by its own compressor/envelope pair at a different clock rate. Spectral animation through dynamics.
+- **`31tet_otonal_seq.json`** — Five VCOs tuned to the overtone series in 31-tone equal temperament, with a slow transposition sequence and a sub-bass voice.
+
+Patch format (`tropical_patch_1`):
 
 ```json
-"input_exprs": {
-  "freq": { "op": "ref", "module": "Clock1", "output": "out" },
-  "amp":  { "op": "mul", "a": { "op": "ref", "module": "Env1", "output": "out" }, "b": 0.8 }
+{
+  "schema": "tropical_patch_1",
+  "modules": [
+    {"type": "VCO", "name": "VCO1"},
+    {"type": "VCA", "name": "VCA1"}
+  ],
+  "outputs": [
+    {"module": "VCA1", "output": "out"}
+  ],
+  "input_exprs": [
+    {"module": "VCO1", "input": "freq", "expr": 440},
+    {"module": "VCA1", "input": "audio", "expr": {"op": "ref", "module": "VCO1", "output": "saw"}},
+    {"module": "VCA1", "input": "cv", "expr": 0.3}
+  ]
 }
 ```
 
-The legacy `connections` array is deprecated. Replace it with `input_exprs` entries on the receiving module.
+## How it works
 
-## C API
+TypeScript defines modules as symbolic expression trees. The compiler flattens all modules into a single instruction stream, lowers array operations to scalar primitives, and emits a typed program. This crosses a stable C API (via koffi FFI) as JSON, where the C++ engine JIT-compiles it to a native kernel using LLVM ORC. The kernel runs per-sample in an audio callback.
 
-A stable C API is exposed in `src/c_api/tropical_c.h`. This is the integration point for language bindings and external tools.
+Rewiring a connection recompiles the entire patch and atomically swaps the kernel — state is transferred by name, so registers and delay lines survive the swap. No click, no gap.
 
-## JIT
+See `design/architecture.md` for the full technical reference.
 
-Module kernels are compiled to native code on first use via LLVM ORC JIT and cached on disk across process restarts. The JIT uses a static type system (float/int/bool) derived from expression structure.
-
-## Testing
+## Development
 
 ```bash
-make debug
+make build                                          # build C++ engine
+cmake --build build -j4 && ctest --test-dir build   # C++ tests (JIT + C API)
+bun test                                            # TypeScript compiler tests
 ```
-
-Builds and runs the C++ test suite. Tests cover module processing, expression evaluation, and the JIT pipeline. No audio device is required.
-
-## Profiling
-
-```bash
-make profile
-```
-
-Builds with timing instrumentation. Profile stats are accessible via the C API and at runtime through the MCP server.
-
-## MCP Server (experimental)
-
-An MCP server in `tui/` exposes the full graph API as tools, allowing MCP-compatible clients to build and manipulate patches programmatically. Requires [Bun](https://bun.sh).
-
-```bash
-make mcp-ts
-```
-
-**The TUI and MCP server are experimental and unsupported.** The C++ core and C API are the stable surface.
 
 ## Troubleshooting
 
-**JIT compilation failure** — JIT failures are fatal; there is no interpreter fallback. If the engine throws on startup, check that your LLVM installation matches the version expected by the build (see `CMakeLists.txt`). Stale cached kernels can also cause issues; clear `~/.cache/tropical/kernels/` and rebuild.
+**JIT compilation failure** — JIT failures are fatal; there is no interpreter fallback. Check that your LLVM installation matches what CMakeLists.txt expects. Stale cached kernels can also cause issues — clear `~/.cache/tropical/kernels/` and rebuild.
+
+**No audio output** — Verify your default output device is set correctly in System Settings. `audio_status` reports device info and callback stats.
 
 ## License
 
-Free use of `tropical` is permitted under the terms of the MIT License.
+MIT

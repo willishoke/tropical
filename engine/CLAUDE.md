@@ -1,53 +1,101 @@
-# src/
+# engine/
 
-C++ core of tropical. C++17, header-heavy by design (templates + inlining for audio-thread performance).
+C++20 core. Header-heavy by design (templates + inlining for audio-thread performance).
 
 ## Layout
 
 ```
-runtime/  FlatRuntime, NumericProgramBuilder, PlanParser, ExprCompiler
-expr/     Expression AST, evaluation, structural ops, rewrite/optimization
-graph/    GraphTypes.hpp only (core Value/ExprKind type aliases)
-jit/      LLVM ORC JIT engine (OrcJitEngine.hpp/.cpp)
-dac/      Audio output via RtAudio (TropicalDAC.hpp)
-c_api/    Stable C API (tropical_c.h)
+c_api/    tropical_c.h / .cpp    Stable C API (opaque handles, thread-local errors)
+runtime/  FlatRuntime.hpp/.cpp   Plan loading, double-buffered kernel execution
+          NumericProgramParser.hpp   tropical_plan_4 JSON → FlatProgram struct
+jit/      OrcJitEngine.hpp/.cpp  LLVM ORC JIT (FlatProgram → native kernel)
+dac/      TropicalDAC.hpp        Audio output via RtAudio (templated driver)
+expr/     Expr.hpp               Expression AST: Value (tagged union), ExprSpec (tree), ExprKind enum
+          ExprEval.hpp           Value-level interpreter (used during compilation, not runtime)
+          ExprRewrite.hpp/.cpp   Constant folding, algebraic simplification, dead ref replacement
+          ExprStructural.hpp/.cpp  Structural hashing, equality, function inlining
+graph/    GraphTypes.hpp         Type alias hub (imports from tropical_expr namespaces)
+tests/    test_module_process.cpp  C API + JIT tests (no audio device)
 ```
 
-## C API boundary
+## C API boundary (`c_api/tropical_c.h`)
 
-All external access (TypeScript FFI, tests) goes through `c_api/tropical_c.h`. This exposes:
-- **FlatRuntime** — `tropical_runtime_*` (create, load plan, process, output buffer, fade control)
-- **ControlParam** — `tropical_param_*` (smoothed params and triggers for thread-safe control)
-- **DAC** — `tropical_dac_*` (audio output backed by FlatRuntime)
-- **Device enumeration** — `tropical_audio_*`
+All external access (TypeScript FFI, tests) goes through here. Handles are opaque `void*`.
 
-## Expression pipeline
+- **FlatRuntime** — `tropical_runtime_new`, `_load_plan`, `_process`, `_output_buffer`, fade control
+- **ControlParam** — `tropical_param_new` (smoothed, one-pole lowpass), `_new_trigger` (fire-once), `_set`/`_get` (atomic)
+- **DAC** — `tropical_dac_new_runtime`, `_start`/`_stop`, `_get_stats`, `_switch_device`, `_is_reconnecting`
+- **Device enumeration** — `tropical_audio_device_count`, `_get_device_ids`, `_get_device_info`, `_default_output_device`
+- **Errors** — `tropical_last_error()` returns thread-local error string
 
-1. **AST** (`expr/Expr.hpp`) — tagged union tree: literals, binary/unary ops, refs, arrays, delay nodes
-2. **Structural ops** (`expr/ExprStructural.hpp/.cpp`) — reference collection, substitution, structural equality
-3. **Rewrite** (`expr/ExprRewrite.cpp`) — constant folding, dead code elimination, algebraic simplification
-4. **Eval** (`expr/ExprEval.hpp`) — interpreter (used during module definition, not at runtime)
+## Plan loading (`runtime/`)
 
-## FlatRuntime compilation pipeline
+`FlatRuntime::load_plan()` receives a `tropical_plan_4` JSON string:
 
-When a plan is loaded via `tropical_runtime_load_plan()`:
+1. `NumericProgramParser::parse_plan4()` — thin deserializer, reads the pre-compiled instruction stream into a `FlatProgram` struct. No expression walking.
+2. `OrcJitEngine::compile_flat_program()` — JIT compiles the FlatProgram to a native kernel function.
+3. State initialization — registers are type-aware bit-cast (`int64_t[]` backing store, with float/int/bool coercion).
+4. Named state transfer — matching registers and arrays are copied from the active kernel by name for click-free hot-swap.
+5. Atomic swap — new kernel published to audio thread via `active_state_` store-release.
 
-1. **PlanParser** (`runtime/PlanParser.hpp`) — JSON → ExprSpec trees
-2. **ExprCompiler** (`runtime/ExprCompiler.hpp`) — ExprSpec → CompiledProgram (instruction stream)
-3. **NumericProgramBuilder** (`runtime/NumericProgramBuilder.hpp`) — CompiledProgram → NumericProgram (JIT IR)
-4. **OrcJitEngine** (`jit/OrcJitEngine.cpp`) — NumericProgram → native kernel via LLVM ORC
-5. **FlatRuntime** (`runtime/FlatRuntime.hpp`) — double-buffered kernel hot-swap, per-sample execution
+## JIT engine (`jit/OrcJitEngine.hpp/.cpp`)
 
-JIT failures are fatal (no interpreter fallback at runtime).
+Singleton LLVM ORC engine. `compile_flat_program()`:
 
-## Adding a new module type
+1. Build canonical cache key (MD5 of serialized program, param pointers replaced by ordinals)
+2. Check in-memory cache and disk cache (`~/.cache/tropical/kernels/<build-id>/`)
+3. Generate LLVM IR:
+   - Kernel signature: `(inputs, registers, arrays, array_sizes, temps, sample_rate, start_sample_index, param_ptrs, output_buffer, buffer_length) → void`
+   - Outer sample loop iterates `buffer_length` times
+   - Each instruction: resolve typed operands (f64/i64/i1), emit native ops with explicit coercion at type boundaries
+   - Array loops: `loop_count > 1` emits elementwise loop, `strides[i]` controls broadcast vs. iterate
+   - Output: sum of mix outputs written to `output_buffer[sample_idx]`
+   - State writeback after the loop
+4. Add module to LLJIT, look up symbol → `NumericKernelFn`
 
-Module types are defined in TypeScript (`tui/src/module_library.ts`), not in C++. The C++ core is generic — it processes arbitrary expression trees. To add a module:
+**Inline transcendentals** (no libm): sin (7th-order minimax), cos (sin(x+pi/2)), exp (Cody-Waite + 6th-order Pade), log (exponent extraction + Remez), tanh (Pade). Self-contained, deterministic across platforms.
 
-1. Define it in `tui/src/module_library.ts` using `defineModule()` or `definePureFunction()`
-2. Register it in `loadBuiltins()` in the same file
-3. No C++ changes needed unless you need a new expression node type
+**Cache invalidation**: build-id subdirectory derived from the binary's LC_UUID (macOS) / ELF build-id. Dylib rebuild auto-invalidates.
 
-## Type system
+## FlatRuntime (`runtime/FlatRuntime.hpp/.cpp`)
 
-`graph/GraphTypes.hpp` defines the core type aliases. Values are tagged unions supporting float, int, bool, array, and matrix types. The JIT pipeline infers static types to emit typed LLVM IR rather than falling back to dynamic dispatch.
+Execution container with two `KernelState` slots for lock-free hot-swap.
+
+`KernelState` holds: kernel fn ptr, registers (`int64_t[]`), temps, array storage/ptrs/sizes, trigger param pointers, sample rate, sample index, register/array names.
+
+**`process()`** (audio thread):
+1. Load active state (acquire)
+2. Snapshot trigger params (atomic exchange → frame_value)
+3. Call kernel (single invocation processes entire buffer)
+4. Advance sample_index
+5. Apply smoothstep fade envelope (Hermite curve, 2048 samples default)
+
+**Fade control**: `begin_fade_in()` / `begin_fade_out()` set atomic counters decremented per sample.
+
+## Audio output (`dac/TropicalDAC.hpp`)
+
+`TropicalDACImpl<AudioSource>` — templated RtAudio driver. FlatRuntime satisfies the `AudioSource` concept.
+
+- Audio callback copies mono output to all channels, tracks timing stats (avg/max callback ms, underrun/overrun counts)
+- Watcher thread polls every 50ms for device disconnect or default device change
+- Disconnect recovery: abort stream → 500ms backoff → reopen with fade-in
+- `switch_device(id)`: explicit switching with fade-in
+
+## Expression AST (`expr/`)
+
+C++ parallel to the TypeScript expression system. Used during plan compilation, not at audio runtime.
+
+- `Value` — tagged union: Float (f64), Int (i64), Bool, Array, Matrix (row-major with dimensions), Struct, Sum
+- `ExprSpec` — tree node with `ExprKind` discriminator (~40 kinds), `lhs`/`rhs`/`args` children
+- `ExprRewrite` — constant folding (literal arithmetic), algebraic identities (0*x→0, 1*x→x, x+0→x), dead reference replacement
+- `ExprStructural` — structural hashing with cache, structural equality, pure function inlining via clone-with-substitution (max depth 32)
+- `ExprEval` — value-level interpreter for `add_values`, `mul_values`, `matmul_values`, etc.
+
+## Adding expression ops
+
+To add a new operation to the engine:
+
+1. Add variant to `OpTag` enum in `jit/OrcJitEngine.hpp`
+2. Add tag string mapping in `NumericProgramParser.hpp` → `parse_op_tag()`
+3. Add LLVM IR emission case in `OrcJitEngine.cpp` → `compile_flat_program()`
+4. Add `ExprKind` variant in `expr/Expr.hpp` if needed by the C++ expression layer
