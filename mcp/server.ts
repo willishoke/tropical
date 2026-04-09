@@ -38,6 +38,30 @@ loadBuiltins(session.typeRegistry)
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
+ * Normalize incoming expressions: convert {op, a, b} shorthand to {op, args: [a, b]}.
+ * LLMs sometimes produce the shorthand form instead of the documented args-array format.
+ */
+function normalizeExprNode(node: ExprNode): ExprNode {
+  if (typeof node === 'number' || typeof node === 'boolean') return node
+  if (Array.isArray(node)) return node.map(normalizeExprNode)
+  if (typeof node !== 'object' || node === null) return node
+  const obj = node as Record<string, unknown>
+  // Convert {op, a, b} → {op, args: [a, b]} (binary shorthand)
+  if (obj.op && obj.a !== undefined && !obj.args) {
+    const args = obj.b !== undefined
+      ? [normalizeExprNode(obj.a as ExprNode), normalizeExprNode(obj.b as ExprNode)]
+      : [normalizeExprNode(obj.a as ExprNode)]
+    const { a: _a, b: _b, ...rest } = obj
+    return { ...rest, args } as ExprNode
+  }
+  // Recursively normalize args and other nested expressions
+  if (obj.args && Array.isArray(obj.args)) {
+    return { ...obj, args: (obj.args as ExprNode[]).map(normalizeExprNode) } as ExprNode
+  }
+  return node
+}
+
+/**
  * Type-check an input expression against a destination port type, inserting
  * a broadcast_to wrapper when the shapes are compatible but differ (e.g. scalar→array).
  * Throws if the connection is incompatible (e.g. array→scalar, shape mismatch).
@@ -567,7 +591,7 @@ function handleWire(args: Record<string, unknown>) {
       const inputId = typeof raw === 'number' ? raw
         : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
-      const { expr } = adaptInputExpr(s.expr, inst.inputPortType(inputId), s.instance, resolvedName)
+      const { expr } = adaptInputExpr(normalizeExprNode(s.expr), inst.inputPortType(inputId), s.instance, resolvedName)
       session.inputExprNodes.set(`${s.instance}:${resolvedName}`, expr)
       results.push({ instance: s.instance, input: resolvedName, expr })
     }
@@ -836,7 +860,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const inputId = typeof rawInput === 'number' ? rawInput
         : (rawInput.match(/^\d+$/) ? parseInt(rawInput, 10) : inst.inputIndex(rawInput))
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
-      const { expr: node, resultShape } = adaptInputExpr(args.expr as ExprNode, inst.inputPortType(inputId), instanceName, resolvedName)
+      const { expr: node, resultShape } = adaptInputExpr(normalizeExprNode(args.expr as ExprNode), inst.inputPortType(inputId), instanceName, resolvedName)
       session.inputExprNodes.set(`${instanceName}:${resolvedName}`, node)
       return { module: instanceName, input: resolvedName, expr: node,
                ...(resultShape ? { broadcast_shape: resultShape } : {}),
@@ -855,7 +879,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         const inputId = typeof raw === 'number' ? raw
           : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
         const resolvedName = inst.inputNames[inputId] ?? String(inputId)
-        const { expr } = adaptInputExpr(u.expr, inst.inputPortType(inputId), u.instance_name, resolvedName)
+        const { expr } = adaptInputExpr(normalizeExprNode(u.expr), inst.inputPortType(inputId), u.instance_name, resolvedName)
         session.inputExprNodes.set(`${u.instance_name}:${resolvedName}`, expr)
         results.push({ module: u.instance_name, input: resolvedName, expr })
       }
