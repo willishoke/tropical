@@ -87,6 +87,40 @@ export function lowerArrayOps(node: ExprNode, memo?: WeakMap<object, ExprNode>):
       result = lowerMatmul(obj, memo)
       break
 
+    // ── Compile-time combinators ──
+
+    case 'let':
+      result = lowerLet(obj, memo)
+      break
+
+    case 'generate':
+      result = lowerGenerate(obj, memo)
+      break
+
+    case 'iterate':
+      result = lowerIterate(obj, memo)
+      break
+
+    case 'fold':
+      result = lowerFold(obj, memo)
+      break
+
+    case 'scan':
+      result = lowerScan(obj, memo)
+      break
+
+    case 'map2':
+      result = lowerMap2(obj, memo)
+      break
+
+    case 'zip_with':
+      result = lowerZipWith(obj, memo)
+      break
+
+    case 'chain':
+      result = lowerChain(obj, memo)
+      break
+
     default:
       result = lowerChildren(obj, memo)
       break
@@ -349,4 +383,212 @@ function lowerMap(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>
 
   // Otherwise, keep as map (runtime resolves)
   return { op: 'map', callee, args: [arr] }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Compile-time combinator expansion
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Substitute all `{ op: 'binding', name }` nodes in a tree with values from `bindings`.
+ * Each call site should use a fresh memo to maintain correct DAG sharing per iteration.
+ */
+function substituteBindings(
+  node: ExprNode,
+  bindings: Map<string, ExprNode>,
+  memo?: WeakMap<object, ExprNode>,
+): ExprNode {
+  if (typeof node === 'number' || typeof node === 'boolean') return node
+  if (Array.isArray(node)) return node.map(n => substituteBindings(n, bindings, memo))
+  if (typeof node !== 'object' || node === null) return node
+
+  if (memo) {
+    const cached = memo.get(node as object)
+    if (cached !== undefined) return cached
+  }
+
+  const obj = node as { op: string; [k: string]: unknown }
+  if (obj.op === 'binding') {
+    const val = bindings.get(obj.name as string)
+    if (val !== undefined) return val
+    // Unresolved binding — leave as-is (may be resolved by an outer combinator)
+    return node
+  }
+
+  let changed = false
+  const result: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (Array.isArray(v)) {
+      const arr = v as ExprNode[]
+      const newArr = arr.map(n => substituteBindings(n, bindings, memo))
+      if (newArr.some((n, i) => n !== arr[i])) changed = true
+      result[k] = newArr
+    } else if (typeof v === 'object' && v !== null && 'op' in v) {
+      const newV = substituteBindings(v as ExprNode, bindings, memo)
+      if (newV !== v) changed = true
+      result[k] = newV
+    } else if (typeof v === 'object' && v !== null && !('op' in v)) {
+      // Record<string, ExprNode> fields (e.g. 'bind' in let nodes)
+      const rec = v as Record<string, ExprNode>
+      const newRec: Record<string, ExprNode> = {}
+      let recChanged = false
+      for (const [rk, rv] of Object.entries(rec)) {
+        const newRv = substituteBindings(rv, bindings, memo)
+        if (newRv !== rv) recChanged = true
+        newRec[rk] = newRv
+      }
+      if (recChanged) changed = true
+      result[k] = recChanged ? newRec : rec
+    } else {
+      result[k] = v
+    }
+  }
+  const out = changed ? result as ExprNode : node
+  if (memo) memo.set(node as object, out)
+  return out
+}
+
+/** let — sequential let* bindings, then substitute into body. */
+function lowerLet(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const bind = obj.bind as Record<string, ExprNode>
+  const body = obj.in as ExprNode
+
+  // Evaluate bindings sequentially — each can reference earlier ones
+  const resolved = new Map<string, ExprNode>()
+  for (const [name, expr] of Object.entries(bind)) {
+    let lowered = lowerArrayOps(expr, memo)
+    if (resolved.size > 0) {
+      lowered = substituteBindings(lowered, resolved, new WeakMap())
+    }
+    resolved.set(name, lowered)
+  }
+
+  const substituted = substituteBindings(body, resolved, new WeakMap())
+  return lowerArrayOps(substituted, memo)
+}
+
+/** generate(count, var, body) → [body[var=0], body[var=1], ...] */
+function lowerGenerate(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const count = obj.count as number
+  const varName = obj.var as string
+  const body = obj.body as ExprNode
+
+  const elements: ExprNode[] = []
+  for (let i = 0; i < count; i++) {
+    const bindings = new Map<string, ExprNode>([[varName, i]])
+    const substituted = substituteBindings(body, bindings, new WeakMap())
+    elements.push(lowerArrayOps(substituted, memo))
+  }
+  return elements
+}
+
+/** iterate(count, init, var, body) → [init, body[var=init], body[var=body[var=init]], ...] */
+function lowerIterate(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const count = obj.count as number
+  const varName = obj.var as string
+  const init = lowerArrayOps(obj.init as ExprNode, memo)
+  const body = obj.body as ExprNode
+
+  const elements: ExprNode[] = []
+  let current = init
+  for (let i = 0; i < count; i++) {
+    elements.push(current)
+    const bindings = new Map<string, ExprNode>([[varName, current]])
+    current = lowerArrayOps(substituteBindings(body, bindings, new WeakMap()), memo)
+  }
+  return elements
+}
+
+/** fold(over, init, acc_var, elem_var, body) → unrolled left fold to scalar. */
+function lowerFold(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const over = lowerArrayOps(obj.over as ExprNode, memo)
+  const accVar = obj.acc_var as string
+  const elemVar = obj.elem_var as string
+  const body = obj.body as ExprNode
+
+  if (!Array.isArray(over)) {
+    // Cannot statically fold — pass through
+    return lowerChildren(obj, memo)
+  }
+
+  let acc = lowerArrayOps(obj.init as ExprNode, memo)
+  for (const elem of over as ExprNode[]) {
+    const bindings = new Map<string, ExprNode>([[accVar, acc], [elemVar, elem]])
+    acc = lowerArrayOps(substituteBindings(body, bindings, new WeakMap()), memo)
+  }
+  return acc
+}
+
+/** scan(over, init, acc_var, elem_var, body) → array of fold intermediates. */
+function lowerScan(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const over = lowerArrayOps(obj.over as ExprNode, memo)
+  const accVar = obj.acc_var as string
+  const elemVar = obj.elem_var as string
+  const body = obj.body as ExprNode
+
+  if (!Array.isArray(over)) {
+    return lowerChildren(obj, memo)
+  }
+
+  const results: ExprNode[] = []
+  let acc = lowerArrayOps(obj.init as ExprNode, memo)
+  for (const elem of over as ExprNode[]) {
+    const bindings = new Map<string, ExprNode>([[accVar, acc], [elemVar, elem]])
+    acc = lowerArrayOps(substituteBindings(body, bindings, new WeakMap()), memo)
+    results.push(acc)
+  }
+  return results
+}
+
+/** map2(over, elem_var, body) → [body[elem=e0], body[elem=e1], ...] */
+function lowerMap2(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const over = lowerArrayOps(obj.over as ExprNode, memo)
+  const elemVar = obj.elem_var as string
+  const body = obj.body as ExprNode
+
+  if (!Array.isArray(over)) {
+    return lowerChildren(obj, memo)
+  }
+
+  return (over as ExprNode[]).map(elem => {
+    const bindings = new Map<string, ExprNode>([[elemVar, elem]])
+    return lowerArrayOps(substituteBindings(body, bindings, new WeakMap()), memo)
+  })
+}
+
+/** zip_with(a, b, x_var, y_var, body) → pointwise combination. */
+function lowerZipWith(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const a = lowerArrayOps(obj.a as ExprNode, memo)
+  const b = lowerArrayOps(obj.b as ExprNode, memo)
+  const xVar = obj.x_var as string
+  const yVar = obj.y_var as string
+  const body = obj.body as ExprNode
+
+  if (!Array.isArray(a) || !Array.isArray(b)) {
+    return lowerChildren(obj, memo)
+  }
+
+  const arrA = a as ExprNode[]
+  const arrB = b as ExprNode[]
+  const len = Math.min(arrA.length, arrB.length)
+  const results: ExprNode[] = []
+  for (let i = 0; i < len; i++) {
+    const bindings = new Map<string, ExprNode>([[xVar, arrA[i]], [yVar, arrB[i]]])
+    results.push(lowerArrayOps(substituteBindings(body, bindings, new WeakMap()), memo))
+  }
+  return results
+}
+
+/** chain(count, init, var, body) → apply body count times, threading result. */
+function lowerChain(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const count = obj.count as number
+  const varName = obj.var as string
+  const body = obj.body as ExprNode
+  let current = lowerArrayOps(obj.init as ExprNode, memo)
+
+  for (let i = 0; i < count; i++) {
+    const bindings = new Map<string, ExprNode>([[varName, current]])
+    current = lowerArrayOps(substituteBindings(body, bindings, new WeakMap()), memo)
+  }
+  return current
 }
