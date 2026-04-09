@@ -19,43 +19,40 @@ patch.test.ts   Patch round-trip tests
 
 ## How it works
 
-The server maintains a `SessionState` (from `compiler/patch.ts`) containing the type registry, module instances, wiring expressions, graph outputs, control parameters, and a `Runtime` handle.
+The server maintains a `SessionState` (from `compiler/patch.ts`) containing the type registry, program instances, wiring expressions, graph outputs, control parameters, and a `Runtime` handle.
 
 Every mutation that affects the signal graph calls `wire()`, which runs the full compilation pipeline: `flattenPatch()` → `JSON.stringify()` → `runtime.loadPlan()`. This recompiles and hot-swaps the kernel. Errors during compilation are caught and returned as tool error responses.
 
-`set_inputs_batch` batches multiple wiring changes into a single recompile.
-
 ## Tools
 
-### Module management
-- `define_module` — register a new module type from JSON definition
-- `instantiate_module` — create a named instance of a registered type
-- `remove_module` — remove an instance and its wiring
-- `list_module_types` — list all registered types
-- `list_modules` — list all live instances
-- `get_module_info` — type info, inputs, outputs for a module
+### Program management
+- `define_program` — register a reusable DSP program type (accepts ProgramJSON or ModuleDefJSON)
+- `add_instance` — create a named instance of a registered program type
+- `remove_instance` — remove an instance and cascade-clean wiring
+- `list_programs` — list all registered program types with ports and defaults
+- `list_instances` — list all live instances
+- `get_info` — detailed info about an instance (ports, wiring, registers)
 
 ### Wiring
-- `connect_modules` — wire source output → destination input (as ref expression)
-- `disconnect_modules` — remove a connection
-- `set_module_input` — set an input to an arbitrary expression (literal, ref, op tree)
-- `set_inputs_batch` — set multiple inputs in one recompile
-- `list_inputs` — show current input expressions for a module
+- `wire` — set and/or remove input wiring in a single recompile. Replaces connect_modules, disconnect_modules, set_module_input, set_inputs_batch.
+- `list_wiring` — show current input expressions, optionally filtered by instance
 
-### Audio graph
-- `add_graph_output` — add a module output to the audio mix
-- `remove_graph_output` — remove from mix
+### Audio output
+- `set_output` — declaratively set the full audio output list (replaces add/remove_graph_output)
 
 ### Control parameters
 - `set_param` — set a named smoothed or trigger parameter value
 - `list_params` — list all registered parameters
 
-### Patch I/O
-- `load_patch` — load a `tropical_patch_1` JSON file (replaces session)
-- `merge_patch` — merge a patch into the current session (additive)
-- `save_patch` — serialize current session to `tropical_patch_1` JSON
+### Program I/O
+- `load` — load a `tropical_program_1` or `tropical_patch_1` JSON (replaces session)
+- `save` — serialize current session to `tropical_program_1` JSON
+- `merge` — merge a program into the current session (additive)
 
 ### Audio control
 - `start_audio` — open audio device and begin playback
 - `stop_audio` — stop playback
 - `audio_status` — device info, callback stats, running state
+
+### Deprecated aliases
+Old tool names (`define_module`, `instantiate_module`, `connect_modules`, `load_patch`, etc.) still work via an alias layer for backward compatibility. Descriptions are prefixed with `[deprecated]`.

@@ -677,11 +677,11 @@ export function prettyExpr(
  */
 export function loadJSON(json: { schema: string; [k: string]: unknown }, session: SessionState): void {
   if (json.schema === 'tropical_program_1') {
-    loadProgramAsSession(json as ProgramJSON, session, loadPatchFromJSON)
+    loadProgramAsSession(json as unknown as ProgramJSON, session, loadPatchFromJSON)
     return
   }
   if (json.schema === 'tropical_patch_1') {
-    loadPatchFromJSON(json as PatchJSON, session)
+    loadPatchFromJSON(json as unknown as PatchJSON, session)
     return
   }
   throw new Error(`Unknown schema '${json.schema}'. Expected 'tropical_program_1' or 'tropical_patch_1'.`)
