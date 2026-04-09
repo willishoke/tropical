@@ -161,6 +161,7 @@ function walkExprRefs(node: ExprNode, deps: Set<string>): void {
 export function buildDependencyGraph(
   moduleNames: Iterable<string>,
   inputExprNodes: Map<string, ExprNode>,
+  cycleBreakers?: Set<string>,
 ): Map<string, Set<string>> {
   const nameSet = new Set(moduleNames)
   const graph = new Map<string, Set<string>>()
@@ -172,7 +173,12 @@ export function buildDependencyGraph(
     const refs = exprDependencies(expr)
     const deps = graph.get(moduleName)!
     for (const ref of refs) {
-      if (nameSet.has(ref) && ref !== moduleName) deps.add(ref)
+      if (nameSet.has(ref) && ref !== moduleName) {
+        // Skip edges to cycle-breaking modules — their outputs are
+        // previous-sample register reads, not combinational dependencies.
+        if (cycleBreakers?.has(ref)) continue
+        deps.add(ref)
+      }
     }
   }
 
