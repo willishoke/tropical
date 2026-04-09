@@ -21,6 +21,7 @@ import {
 import { Param, Trigger } from './runtime/param.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Runtime } from './runtime/runtime.js'
+import { loadProgramAsSession, type ProgramJSON } from './program.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -669,6 +670,22 @@ export function prettyExpr(
 // ─────────────────────────────────────────────────────────────
 // Patch loader
 // ─────────────────────────────────────────────────────────────
+
+/**
+ * Load any supported JSON schema into a session.
+ * Detects schema version and delegates to the appropriate loader.
+ */
+export function loadJSON(json: { schema: string; [k: string]: unknown }, session: SessionState): void {
+  if (json.schema === 'tropical_program_1') {
+    loadProgramAsSession(json as ProgramJSON, session, loadPatchFromJSON)
+    return
+  }
+  if (json.schema === 'tropical_patch_1') {
+    loadPatchFromJSON(json as PatchJSON, session)
+    return
+  }
+  throw new Error(`Unknown schema '${json.schema}'. Expected 'tropical_program_1' or 'tropical_patch_1'.`)
+}
 
 export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void {
   session.dac = null
