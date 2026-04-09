@@ -193,6 +193,7 @@ export function delayLine(delayLen: number, name = 'Delay'): ModuleType {
     },
     44100.0,
     { x: 0.0 },
+    { breaksCycles: true },
   )
 }
 

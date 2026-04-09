@@ -5,18 +5,19 @@ TypeScript layer. Handles module definition, expression construction, flattening
 ## Layout
 
 ```
-expr.ts               ExprNode type, SignalExpr wrapper, all named operations
+expr.ts               ExprNode type, SignalExpr wrapper, all named operations, combinator constructors
 module.ts             defineModule() DSL, delay(), feedback(), nested calls
 module_library.ts     14 built-in module types + private sub-modules
+program.ts            ProgramJSON (tropical_program_1) interface, conversions, load/save
 flatten.ts            Patch → tropical_plan_4 (inline all modules, resolve refs)
-lower_arrays.ts       Lower array ops to scalar primitives (static unrolling)
+lower_arrays.ts       Lower array ops + combinators to scalar primitives (static unrolling)
 emit_numeric.ts       ExprNode trees → FlatProgram instruction stream
 compiler.ts           Dependency graph, topological sort, term assembly
 term.ts               Categorical IR (morphism, compose, tensor, trace, id)
 type_check.ts         Type inference for terms, composition boundary validation
 optimizer.ts          Term rewriting (identity elimination, flattening)
-patch.ts              SessionState, patch load/save (tropical_patch_1)
-schema.ts             Zod validation schemas for patch/module JSON
+patch.ts              SessionState, patch load/save (tropical_patch_1), loadJSON schema detection
+schema.ts             Zod validation schemas for patch/module/program JSON
 apply_plan.ts         flattenPatch → JSON.stringify → runtime.loadPlan
 array_wiring.ts       Typed port validation, auto-broadcast insertion
 morphism_registry.ts  Named type coercion morphisms
@@ -48,6 +49,7 @@ type ExprNode = number | boolean | ExprNode[] | { op: string; ... }
 - **Ternary**: `clamp`, `select`
 - **Array**: `arrayPack`, `arraySet`, `index`, `zeros`, `ones`, `fill`, `reshape`, `transpose`, `slice`, `reduce`, `broadcastTo`, `mapArray`
 - **Matrix**: `matrix`, `matmul` (supports arbitrary semirings via `mul_op`/`add_op`)
+- **Combinators** (compile-time): `bindingExpr`, `let_`, `generate`, `repeat`, `iterate`, `fold`, `scan`, `map2`, `zipWith`, `chain`
 - **Leaf nodes**: `sampleRate`, `sampleIndex`, `inputExpr`, `registerExpr`, `refExpr`, `nestedOutputExpr`, `delayValueExpr`, `paramExpr`, `triggerParamExpr`
 
 ## Module DSL (`module.ts`)
@@ -83,7 +85,7 @@ The critical compilation step. Transforms a multi-module patch into a single fla
 
 WeakMap memoization maintains DAG sharing and prevents exponential blowup.
 
-### Array lowering (`lower_arrays.ts`)
+### Array lowering and combinator expansion (`lower_arrays.ts`)
 
 All shapes are static, so every operation fully unrolls:
 
@@ -92,6 +94,16 @@ All shapes are static, so every operation fully unrolls:
 - `reduce(axis, op)` → unrolled fold
 - `broadcast_to` → replicated elements
 - `matmul(a, b)` → unrolled dot products (semiring lowering with `mul_op`/`add_op`)
+
+Compile-time combinators expand via `substituteBindings` (replaces `{ op: 'binding', name }` nodes):
+- `let` → sequential let\* evaluation + substitution
+- `generate(n, i, body)` → inline array of body[i=0..n-1]
+- `iterate(n, init, x, body)` → [init, f(init), f(f(init)), ...]
+- `fold(arr, init, acc, elem, body)` → unrolled left fold to scalar
+- `scan` → like fold but keeps intermediates as array
+- `map2(arr, elem, body)` → substitute per element
+- `zip_with(a, b, x, y, body)` → zip + substitute
+- `chain(n, init, x, body)` → n serial applications
 
 ### Instruction emission (`emit_numeric.ts`)
 
@@ -145,6 +157,8 @@ Run with `bun test`. Test files:
 - `lower_arrays.test.ts` — array lowering to scalar primitives
 - `apply_plan.test.ts` — plan application integration
 - `term.test.ts` — term IR construction and type checking
+- `combinators.test.ts` — compile-time combinator expansion (22 tests)
+- `program.test.ts` — ProgramJSON schema conversions and Zod validation (14 tests)
 
 ## Adding a module type
 

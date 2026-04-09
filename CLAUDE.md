@@ -1,6 +1,6 @@
 # tropical
 
-Realtime audio synthesis with LLVM ORC JIT. The entire patch — a graph of DSP modules — compiles to a single native kernel that runs per-sample in an audio callback. No interpreter, no module boundaries at runtime.
+Realtime audio synthesis with LLVM ORC JIT. The entire program — a graph of DSP program instances — compiles to a single native kernel that runs per-sample in an audio callback. No interpreter, no module boundaries at runtime.
 
 ## Build
 
@@ -27,8 +27,8 @@ C++ tests (`engine/tests/test_module_process.cpp`) exercise the C API and JIT wi
 Three layers, one stable boundary:
 
 ```
-compiler/             TS: expression DSL, module library, flattening,
-                      instruction emission, type system, term IR
+compiler/             TS: expression DSL, module library, combinators,
+                      flattening, instruction emission, type system, term IR
   compiler/runtime/   FFI bridge to C++ (koffi bindings, Runtime, DAC, Param)
 engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio output
   engine/c_api/       Stable C API — the boundary between TS and C++
@@ -37,16 +37,17 @@ engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio o
   engine/dac/         Audio output (RtAudio)
   engine/expr/        C++ expression AST, rewriting, evaluation
 mcp/                  MCP server — primary agent interface over stdio
-patches/              Example patches (tropical_patch_1 JSON)
+patches/              Example patches (tropical_patch_1 / tropical_program_1 JSON)
 ```
 
 ### Data flow
 
 ```
-Patch (JSON / MCP tools)
+Program (JSON / MCP tools)
   → Module instantiation (TS-only, no C++ calls)
   → Expression tree construction (ExprNode)
   → Flattening (inline all modules → single expression set)
+  → Combinator expansion (unroll generate/fold/chain/etc.)
   → Array lowering (static-shape array ops → scalar primitives)
   → Instruction emission (ExprNode → FlatProgram)
   → JSON serialization (tropical_plan_4)
@@ -59,11 +60,12 @@ Patch (JSON / MCP tools)
 
 ### Schema versions
 
-There are three distinct JSON schemas — don't confuse them:
+There are four distinct JSON schemas — don't confuse them:
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_patch_1` | `compiler/patch.ts` | User-facing patch format (modules, wiring, outputs) |
+| `tropical_program_1` | `compiler/program.ts` | **Primary.** Unified program format (instances, wiring, subprograms, outputs) |
+| `tropical_patch_1` | `compiler/patch.ts` | Legacy patch format (modules, wiring, outputs). Still accepted on load. |
 | `tropical_plan_1` | `compiler/plan.ts` | Intermediate execution plan (legacy, used by some tests) |
 | `tropical_plan_4` | `compiler/flatten.ts` + `emit_numeric.ts` | Flat instruction stream sent to C++ JIT — the one that matters for audio |
 
@@ -71,13 +73,15 @@ There are three distinct JSON schemas — don't confuse them:
 
 The TypeScript layer handles everything from module definition through instruction emission. No audio processing happens here.
 
-**Expression system** (`expr.ts`) — `ExprNode` is the universal IR: a recursive JSON union type (number, boolean, array, or `{op, ...}` object). `SignalExpr` wraps it with static shape tracking. All module I/O is defined as expression trees.
+**Expression system** (`expr.ts`) — `ExprNode` is the universal IR: a recursive JSON union type (number, boolean, array, or `{op, ...}` object). `SignalExpr` wraps it with static shape tracking. All module I/O is defined as expression trees. Includes compile-time combinator constructors (`generate`, `fold`, `chain`, `map2`, etc.) for iteration and abstraction without manual unrolling.
+
+**Program schema** (`program.ts`) — `ProgramJSON` (`tropical_program_1`) is the unified representation. A program with `process` = leaf, with `instances` + `audio_outputs` = graph, with `instances` + `inputs` + `outputs` = reusable composite. Conversion functions bridge to/from legacy `PatchJSON`.
 
 **Module DSL** (`module.ts`, `module_library.ts`) — `defineModule()` builds expression trees symbolically. 14 built-in types (VCO, Clock, ADEnvelope, Reverb, LadderFilter, etc.) plus private sub-modules for antialiasing (polyBLEP/polyBLAMP). Modules are TS-only — no C API calls for instantiation.
 
 **Flattening** (`flatten.ts`) — The critical step. Inlines all module expressions, resolves inter-module references, expands nested calls, converts delays to register ops. Output is a `tropical_plan_4` JSON. Uses WeakMap memoization for DAG sharing.
 
-**Array lowering** (`lower_arrays.ts`) — Lowers first-class array ops (zeros, reshape, transpose, slice, reduce, broadcast_to, map, matmul) to scalar primitives via static unrolling. All shapes are compile-time constants.
+**Array lowering** (`lower_arrays.ts`) — Lowers first-class array ops (zeros, reshape, transpose, slice, reduce, broadcast_to, map, matmul) and compile-time combinators (generate, iterate, fold, scan, map2, zip_with, chain, let) to scalar primitives via static unrolling. All shapes are compile-time constants.
 
 **Instruction emission** (`emit_numeric.ts`) — Walks flattened ExprNode trees, emits `FlatProgram` instruction stream with typed operands (const, input, reg, array_reg, state_reg, param, rate, tick).
 
@@ -103,7 +107,7 @@ C++20, header-heavy (templates + inlining for audio-thread performance).
 
 ## MCP server (`mcp/server.ts`)
 
-Primary agent interface. Runs on stdio via `@modelcontextprotocol/sdk`. Maintains `SessionState` and exposes tools for module management, wiring, audio control, and patch I/O. Every wiring mutation triggers `wire()` → `applyFlatPlan()` → full recompile and hot-swap.
+Primary agent interface. Runs on stdio via `@modelcontextprotocol/sdk`. Maintains `SessionState` and exposes 16 consolidated tools for program management, wiring, audio control, and program I/O. Key tools: `define_program`, `add_instance`, `wire` (batched set/remove), `set_output`, `load`/`save`/`merge`. Old tool names (`define_module`, `connect_modules`, `load_patch`, etc.) are preserved as deprecated aliases. Every wiring mutation triggers `wire()` → `applyFlatPlan()` → full recompile and hot-swap.
 
 ## Conventions
 

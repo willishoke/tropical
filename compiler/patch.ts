@@ -12,6 +12,7 @@ import {
   clamp, select, arrayPack, arraySet, matrix,
   inputExpr, registerExpr, refExpr, sampleRate, sampleIndex,
   constructStruct, fieldAccess, constructVariant, matchVariant,
+  bindingExpr, let_, generate, iterate, fold, scan, map2, zipWith, chain,
 } from './expr.js'
 import {
   defineModule, ModuleType, ModuleInstance, delay,
@@ -20,6 +21,7 @@ import {
 import { Param, Trigger } from './runtime/param.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Runtime } from './runtime/runtime.js'
+import { loadProgramAsSession, type ProgramJSON } from './program.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -339,6 +341,47 @@ export function buildExpr(node: ExprNode, ctx: BuildCtx): SignalExpr {
     return matchVariant(n.type_name, buildExpr(n.scrutinee, ctx), n.branches.map(b => buildExpr(b, ctx)))
   }
 
+  // ── Compile-time combinators ──
+  // These pass through as ExprNode trees; actual expansion happens in lowerArrayOps.
+  if (op === 'binding') {
+    const n = node as { op: string; name: string }
+    return bindingExpr(n.name)
+  }
+  if (op === 'let') {
+    const n = node as { op: string; bind: Record<string, ExprNode>; in: ExprNode }
+    const bindings: Record<string, ExprCoercible> = {}
+    for (const [k, v] of Object.entries(n.bind)) bindings[k] = buildExpr(v, ctx)
+    return let_(bindings, buildExpr(n.in, ctx))
+  }
+  if (op === 'generate') {
+    const n = node as { op: string; count: number; var: string; body: ExprNode }
+    return generate(n.count, n.var, buildExpr(n.body, ctx))
+  }
+  if (op === 'iterate') {
+    const n = node as { op: string; count: number; init: ExprNode; var: string; body: ExprNode }
+    return iterate(n.count, buildExpr(n.init, ctx), n.var, buildExpr(n.body, ctx))
+  }
+  if (op === 'fold') {
+    const n = node as { op: string; over: ExprNode; init: ExprNode; acc_var: string; elem_var: string; body: ExprNode }
+    return fold(buildExpr(n.over, ctx), buildExpr(n.init, ctx), n.acc_var, n.elem_var, buildExpr(n.body, ctx))
+  }
+  if (op === 'scan') {
+    const n = node as { op: string; over: ExprNode; init: ExprNode; acc_var: string; elem_var: string; body: ExprNode }
+    return scan(buildExpr(n.over, ctx), buildExpr(n.init, ctx), n.acc_var, n.elem_var, buildExpr(n.body, ctx))
+  }
+  if (op === 'map2') {
+    const n = node as { op: string; over: ExprNode; elem_var: string; body: ExprNode }
+    return map2(buildExpr(n.over, ctx), n.elem_var, buildExpr(n.body, ctx))
+  }
+  if (op === 'zip_with') {
+    const n = node as { op: string; a: ExprNode; b: ExprNode; x_var: string; y_var: string; body: ExprNode }
+    return zipWith(buildExpr(n.a, ctx), buildExpr(n.b, ctx), n.x_var, n.y_var, buildExpr(n.body, ctx))
+  }
+  if (op === 'chain') {
+    const n = node as { op: string; count: number; init: ExprNode; var: string; body: ExprNode }
+    return chain(n.count, buildExpr(n.init, ctx), n.var, buildExpr(n.body, ctx))
+  }
+
   // ── Explicit literal forms (rarely needed, bare numbers are preferred) ──
   if (op === 'float') return coerce((node as { op: string; value: number }).value)
   if (op === 'int')   return coerce((node as { op: string; value: number }).value)
@@ -424,6 +467,13 @@ export function validateExpr(node: ExprNode, ctx: ValidateCtx): ExprType {
   if (op === 'field_access')      return 'scalar'
   if (op === 'construct_variant') return 'unknown'
   if (op === 'match_variant')     return 'unknown'
+  // Compile-time combinators
+  if (op === 'binding')  return 'unknown'
+  if (op === 'let')      return 'unknown'
+  if (op === 'generate' || op === 'iterate' || op === 'scan' || op === 'map2' || op === 'zip_with')
+    return 'array'
+  if (op === 'fold' || op === 'chain')
+    return 'unknown'
   throw new Error(`Unknown op '${op}'.`)
 }
 
@@ -620,6 +670,22 @@ export function prettyExpr(
 // ─────────────────────────────────────────────────────────────
 // Patch loader
 // ─────────────────────────────────────────────────────────────
+
+/**
+ * Load any supported JSON schema into a session.
+ * Detects schema version and delegates to the appropriate loader.
+ */
+export function loadJSON(json: { schema: string; [k: string]: unknown }, session: SessionState): void {
+  if (json.schema === 'tropical_program_1') {
+    loadProgramAsSession(json as unknown as ProgramJSON, session, loadPatchFromJSON)
+    return
+  }
+  if (json.schema === 'tropical_patch_1') {
+    loadPatchFromJSON(json as unknown as PatchJSON, session)
+    return
+  }
+  throw new Error(`Unknown schema '${json.schema}'. Expected 'tropical_program_1' or 'tropical_patch_1'.`)
+}
 
 export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void {
   session.dac = null

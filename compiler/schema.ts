@@ -161,6 +161,60 @@ export const PatchJSONSchema = z.object({
 })
 
 // ─────────────────────────────────────────────────────────────
+// ProgramJSON
+// ─────────────────────────────────────────────────────────────
+
+const ProgramInputSchema = z.union([
+  z.string(),
+  z.object({ name: z.string(), type: z.string().optional(), default: ExprNodeSchema.optional() }),
+])
+
+const ProgramOutputSchema = z.union([
+  z.string(),
+  z.object({ name: z.string(), type: z.string().optional() }),
+])
+
+const ProgramInstanceSchema = z.object({
+  program: z.string(),
+  inputs: z.record(z.string(), ExprNodeSchema).optional(),
+})
+
+export const ProgramJSONSchema: z.ZodType = z.lazy(() => z.object({
+  schema: z.literal('tropical_program_1'),
+  name: z.string().min(1),
+  inputs: z.array(ProgramInputSchema).optional(),
+  outputs: z.array(ProgramOutputSchema).optional(),
+  regs: z.record(z.string(), RegEntrySchema).optional(),
+  delays: z.record(z.string(), z.object({
+    update: ExprNodeSchema,
+    init: z.number().optional(),
+  })).optional(),
+  sample_rate: z.number().positive().optional(),
+  input_defaults: z.record(z.string(), ExprNodeSchema).optional(),
+  programs: z.record(z.string(), ProgramJSONSchema).optional(),
+  instances: z.record(z.string(), ProgramInstanceSchema).optional(),
+  process: z.object({
+    outputs: z.record(z.string(), ExprNodeSchema),
+    next_regs: z.record(z.string(), ExprNodeSchema).optional(),
+  }).optional(),
+  audio_outputs: z.array(z.union([
+    z.object({ instance: z.string(), output: z.union([z.string(), z.number()]) }),
+    z.object({ expr: ExprNodeSchema }),
+  ])).optional(),
+  params: z.array(z.object({
+    name: z.string(),
+    value: z.number().optional(),
+    time_const: z.number().optional(),
+    type: z.enum(['param', 'trigger']).optional(),
+  })).optional(),
+  config: z.object({
+    buffer_length: z.number().int().positive().optional(),
+    sample_rate: z.number().positive().optional(),
+  }).optional(),
+  type_defs: z.array(TypeDefSchema).optional(),
+}))
+
+// ─────────────────────────────────────────────────────────────
 // Validation helpers
 // ─────────────────────────────────────────────────────────────
 
@@ -183,5 +237,12 @@ export function parseModuleDef(raw: unknown): z.infer<typeof ModuleDefJSONSchema
 export function parsePatch(raw: unknown): z.infer<typeof PatchJSONSchema> {
   const result = PatchJSONSchema.safeParse(raw)
   if (!result.success) throw new Error(`Invalid patch: ${formatZodError(result.error)}`)
+  return result.data
+}
+
+/** Parse and validate a ProgramJSON, throwing a readable error on failure. */
+export function parseProgram(raw: unknown): z.infer<typeof ProgramJSONSchema> {
+  const result = ProgramJSONSchema.safeParse(raw)
+  if (!result.success) throw new Error(`Invalid program: ${formatZodError(result.error)}`)
   return result.data
 }

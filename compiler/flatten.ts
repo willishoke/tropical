@@ -714,10 +714,26 @@ export function flattenPatch(session: SessionState): FlatPlan {
   // inserts broadcast_to wrappers for shape mismatches from patch-file or direct wiring)
   const inputExprNodes = normalizeWiringTypes(moduleInfos, session.inputExprNodes)
 
-  // Topological sort
-  const deps = buildDependencyGraph(moduleInfos.keys(), inputExprNodes)
+  // Identify cycle-breaking modules (outputs depend only on registers, not current inputs).
+  // These can break feedback cycles: their outputs are previous-sample state reads.
+  const cycleBreakers = new Set<string>()
+  const cycleBreakerList: string[] = []
+  for (const [name, inst] of moduleInstances) {
+    if (inst._def.breaksCycles) {
+      cycleBreakers.add(name)
+      cycleBreakerList.push(name)
+    }
+  }
+
+  // Topological sort — edges to cycle-breaking modules are excluded since
+  // their outputs are previous-sample register reads, not combinational deps.
+  const deps = buildDependencyGraph(moduleInfos.keys(), inputExprNodes, cycleBreakers)
   const { order, complete } = topologicalSort(deps)
   if (!complete) throw new Error('flatten: topological sort incomplete — cycles exist')
+
+  // Split order: cycle-breaking modules first (output pre-computation),
+  // then non-cycle-breaking modules in topological order.
+  const nonCbOrder = order.filter(n => !cycleBreakers.has(n))
 
   // Flat register arrays
   const flatOutputExprs: ExprNode[] = []
@@ -731,9 +747,82 @@ export function flattenPatch(session: SessionState): FlatPlan {
   const resolvedOutputNames = new Map<string, string[]>()
   const moduleOutputBase = new Map<string, number>()
 
-  // Process each module in topological order
+  // ── Phase 1: Pre-compute cycle-breaking module outputs ──
+  // Their outputs are purely state-derived (register reads from previous sample),
+  // so they can be resolved before any other modules. Register updates are deferred.
+  const deferredCbUpdates: Array<{
+    name: string
+    registerBase: number
+    delayBase: number
+    nestedRegStart: number
+    regStartIdx: number
+  }> = []
+
   let registerBase = 0
-  for (const name of order) {
+  for (const name of cycleBreakerList) {
+    const inst = moduleInstances.get(name)!
+    const def = inst._def
+    const myRegBase = registerBase
+
+    moduleOutputBase.set(name, flatOutputExprs.length)
+    const delayBase = registerBase + def.registerNames.length
+    const nestedRegStart = def.registerNames.length + def.delayUpdateNodes.length
+
+    // Process output expressions — no input substitution or ref resolution needed
+    // (cycle-breaking module outputs are purely register-derived)
+    const moduleResolvedOutputs: ExprNode[] = []
+    for (const outputNode of def.outputExprNodes) {
+      const cloneMemo = new WeakMap<object, ExprNode>()
+      let expr = cloneExpr(outputNode, cloneMemo)
+      expr = resolveNestedOutputs(expr, def.nestedCalls, nestedRegStart)
+      const inlineMemo = new WeakMap<object, ExprNode>()
+      expr = inlineCalls(expr, inlineMemo)
+      const offsetMemo = new WeakMap<object, ExprNode>()
+      expr = offsetRegisters(expr, registerBase, offsetMemo)
+      const delayMemo = new WeakMap<object, ExprNode>()
+      expr = resolveDelayValues(expr, delayBase, delayMemo)
+      const lowerMemo = new WeakMap<object, ExprNode>()
+      expr = lowerArrayOps(expr, lowerMemo)
+      flatOutputExprs.push(expr)
+      moduleResolvedOutputs.push(expr)
+    }
+    resolvedOutputs.set(name, moduleResolvedOutputs)
+    resolvedOutputNames.set(name, [...def.outputNames])
+
+    // Push register metadata with placeholder update expressions (overwritten in phase 3)
+    const regStartIdx = flatRegisterExprs.length
+    for (let i = 0; i < def.registerNames.length; i++) {
+      flatRegisterExprs.push({ op: 'reg', id: registerBase + i })
+      flatRegisterNames.push(`${name}_${def.registerNames[i]}`)
+      const portType = def.registerPortTypes[i]
+      flatRegisterTypes.push(
+        portType === 'int' ? 'int' : portType === 'bool' ? 'bool' : 'float',
+      )
+      const initVal = def.registerInitValues[i]
+      if (typeof initVal === 'number' || typeof initVal === 'boolean') {
+        flatStateInit.push(initVal)
+      } else if (Array.isArray(initVal)) {
+        flatStateInit.push(initVal as number[])
+      } else {
+        flatStateInit.push(0)
+      }
+    }
+    for (let i = 0; i < def.delayUpdateNodes.length; i++) {
+      flatRegisterExprs.push({ op: 'reg', id: delayBase + i })
+      flatRegisterNames.push(`${name}_delay_${i}`)
+      flatRegisterTypes.push('float')
+      flatStateInit.push(def.delayInitValues[i] ?? 0)
+    }
+
+    deferredCbUpdates.push({ name, registerBase: myRegBase, delayBase, nestedRegStart, regStartIdx })
+
+    let totalNestedRegs = 0
+    for (const nc of def.nestedCalls) totalNestedRegs += nestedCallRegCount(nc)
+    registerBase += def.registerNames.length + def.delayUpdateNodes.length + totalNestedRegs
+  }
+
+  // ── Phase 2: Process non-cycle-breaking modules in topological order ──
+  for (const name of nonCbOrder) {
     const inst = moduleInstances.get(name)!
     const def = inst._def
 
@@ -899,13 +988,126 @@ export function flattenPatch(session: SessionState): FlatPlan {
     registerBase += def.registerNames.length + def.delayUpdateNodes.length + totalNestedRegs
   }
 
+  // ── Phase 3: Resolve deferred register updates for cycle-breaking modules ──
+  // Now that all non-cycle-breaking modules are resolved, we can compute
+  // the register update expressions (which depend on other modules' outputs).
+  for (const { name, registerBase: rBase, delayBase, nestedRegStart, regStartIdx } of deferredCbUpdates) {
+    const inst = moduleInstances.get(name)!
+    const def = inst._def
+
+    // Build input substitution map (all refs are now resolvable)
+    const inputMap = new Map<number, ExprNode>()
+    for (let i = 0; i < def.inputNames.length; i++) {
+      const key = `${name}:${def.inputNames[i]}`
+      const wiringExpr = inputExprNodes.get(key)
+      if (wiringExpr !== undefined) {
+        inputMap.set(i, resolveRefs(wiringExpr, resolvedOutputs, resolvedOutputNames))
+      } else {
+        const defaultExpr = def.inputDefaults[i]
+        const node = defaultExpr?._node ?? 0
+        inputMap.set(i, inlineCalls(typeof node === 'object' ? cloneExpr(node) : node))
+      }
+    }
+
+    const processExpr = (rawNode: ExprNode): ExprNode => {
+      const cloneMemo = new WeakMap<object, ExprNode>()
+      let expr = cloneExpr(rawNode, cloneMemo)
+      expr = resolveNestedOutputs(expr, def.nestedCalls, nestedRegStart)
+      const inlineMemo = new WeakMap<object, ExprNode>()
+      expr = inlineCalls(expr, inlineMemo)
+      const offsetMemo = new WeakMap<object, ExprNode>()
+      expr = offsetRegisters(expr, rBase, offsetMemo)
+      const delayMemo = new WeakMap<object, ExprNode>()
+      expr = resolveDelayValues(expr, delayBase, delayMemo)
+      const substMemo = new WeakMap<object, ExprNode>()
+      expr = substituteInputs(expr, inputMap, substMemo)
+      const refsMemo = new WeakMap<object, ExprNode>()
+      expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames, refsMemo)
+      const lowerMemo = new WeakMap<object, ExprNode>()
+      expr = lowerArrayOps(expr, lowerMemo)
+      return expr
+    }
+
+    // Overwrite register update placeholders
+    let regIdx = regStartIdx
+    for (let i = 0; i < def.registerExprNodes.length; i++) {
+      const regNode = def.registerExprNodes[i]
+      if (regNode !== null) {
+        flatRegisterExprs[regIdx] = processExpr(regNode)
+      }
+      regIdx++
+    }
+
+    // Delay state updates
+    for (let i = 0; i < def.delayUpdateNodes.length; i++) {
+      const updateNode = def.delayUpdateNodes[i]
+      if (updateNode !== null && updateNode !== undefined) {
+        flatRegisterExprs[regIdx] = processExpr(updateNode as ExprNode)
+      }
+      regIdx++
+    }
+
+    // Nested call register updates
+    if (def.nestedCalls.length > 0) {
+      const resolvedNestedOutputs = new Map<number, ExprNode[]>()
+      let ncRegCursor = nestedRegStart
+      for (let ncIdx = 0; ncIdx < def.nestedCalls.length; ncIdx++) {
+        const nc = def.nestedCalls[ncIdx]
+        const nd = nc.moduleDef
+        const ncRegBase = ncRegCursor
+        const ncDelayBase = ncRegBase + nd.registerNames.length
+        const ncNestedStart = ncDelayBase + nd.delayUpdateNodes.length
+
+        const resolved: ExprNode[] = []
+        for (let outId = 0; outId < nd.outputExprNodes.length; outId++) {
+          const cloneMemo = new WeakMap<object, ExprNode>()
+          let expr = cloneExpr(nd.outputExprNodes[outId], cloneMemo)
+          expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart)
+          const inlineMemo = new WeakMap<object, ExprNode>()
+          expr = inlineCalls(expr, inlineMemo)
+          const offsetMemo = new WeakMap<object, ExprNode>()
+          expr = offsetRegisters(expr, ncRegBase, offsetMemo)
+          const delayMemo = new WeakMap<object, ExprNode>()
+          expr = resolveDelayValues(expr, ncDelayBase, delayMemo)
+          const argMap = new Map<number, ExprNode>()
+          const argRefMemo = new WeakMap<object, ExprNode>()
+          for (let i = 0; i < nc.callArgNodes.length; i++) {
+            let arg = cloneExpr(nc.callArgNodes[i])
+            arg = substituteNestedOutputRefs(arg, resolvedNestedOutputs, argRefMemo)
+            argMap.set(i, arg)
+          }
+          const substMemo = new WeakMap<object, ExprNode>()
+          expr = substituteInputs(expr, argMap, substMemo)
+          resolved.push(expr)
+        }
+        resolvedNestedOutputs.set(ncIdx, resolved)
+        ncRegCursor += nestedCallRegCount(nc)
+      }
+
+      const nested = collectNestedRegisterExprs(def.nestedCalls, nestedRegStart, name, resolvedNestedOutputs)
+      for (let i = 0; i < nested.exprs.length; i++) {
+        let expr = nested.exprs[i]
+        const nestedOffsetMemo = new WeakMap<object, ExprNode>()
+        expr = offsetRegisters(expr, rBase, nestedOffsetMemo)
+        const nestedSubstMemo = new WeakMap<object, ExprNode>()
+        expr = substituteInputs(expr, inputMap, nestedSubstMemo)
+        const nestedRefsMemo = new WeakMap<object, ExprNode>()
+        expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames, nestedRefsMemo)
+        flatRegisterExprs[regIdx] = expr
+        regIdx++
+      }
+    }
+  }
+
   // Build output indices: map graphOutputs → flat output indices
+  // Combined order: cycle-breaking modules first, then topological order
+  const fullOrder = [...cycleBreakerList, ...nonCbOrder]
   const outputIndices: number[] = []
   let outputBase = 0
   const moduleOutputStart = new Map<string, number>()
 
   // Recompute output starts
-  for (const name of order) {
+  for (const name of fullOrder) {
     moduleOutputStart.set(name, outputBase)
     const inst = moduleInstances.get(name)!
     outputBase += inst._def.outputNames.length

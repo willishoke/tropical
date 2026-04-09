@@ -1,0 +1,73 @@
+{
+  "schema": "tropical_patch_1",
+  "modules": [
+    {"type": "VCO",    "name": "vco1"},
+    {"type": "VCO",    "name": "vco2"},
+    {"type": "VCO",    "name": "vco3"},
+    {"type": "VCO",    "name": "vco4"},
+    {"type": "Delay8", "name": "d1"},
+    {"type": "Delay8", "name": "d2"},
+    {"type": "Delay8", "name": "d3"},
+    {"type": "Delay8", "name": "d4"}
+  ],
+  "outputs": [
+    {"module": "vco1", "output": "sin"},
+    {"module": "vco2", "output": "sin"},
+    {"module": "vco3", "output": "sin"},
+    {"module": "vco4", "output": "sin"}
+  ],
+  "input_exprs": [
+    {"module": "d1", "input": "x", "expr": {"op": "ref", "module": "vco1", "output": "sin"}},
+    {"module": "d2", "input": "x", "expr": {"op": "ref", "module": "vco2", "output": "sin"}},
+    {"module": "d3", "input": "x", "expr": {"op": "ref", "module": "vco3", "output": "sin"}},
+    {"module": "d4", "input": "x", "expr": {"op": "ref", "module": "vco4", "output": "sin"}},
+
+    {"module": "vco1", "input": "freq",     "expr": 110.0},
+    {"module": "vco1", "input": "fm_index", "expr": 2.0},
+    {"module": "vco1", "input": "fm", "expr": {
+      "op": "add", "args": [
+        {"op": "add", "args": [
+          {"op": "ref", "module": "d2", "output": "y"},
+          {"op": "ref", "module": "d3", "output": "y"}
+        ]},
+        {"op": "ref", "module": "d4", "output": "y"}
+      ]
+    }},
+
+    {"module": "vco2", "input": "freq",     "expr": 165.0},
+    {"module": "vco2", "input": "fm_index", "expr": 2.0},
+    {"module": "vco2", "input": "fm", "expr": {
+      "op": "add", "args": [
+        {"op": "add", "args": [
+          {"op": "ref", "module": "d1", "output": "y"},
+          {"op": "ref", "module": "d3", "output": "y"}
+        ]},
+        {"op": "ref", "module": "d4", "output": "y"}
+      ]
+    }},
+
+    {"module": "vco3", "input": "freq",     "expr": 220.0},
+    {"module": "vco3", "input": "fm_index", "expr": 2.0},
+    {"module": "vco3", "input": "fm", "expr": {
+      "op": "add", "args": [
+        {"op": "add", "args": [
+          {"op": "ref", "module": "d1", "output": "y"},
+          {"op": "ref", "module": "d2", "output": "y"}
+        ]},
+        {"op": "ref", "module": "d4", "output": "y"}
+      ]
+    }},
+
+    {"module": "vco4", "input": "freq",     "expr": 330.0},
+    {"module": "vco4", "input": "fm_index", "expr": 2.0},
+    {"module": "vco4", "input": "fm", "expr": {
+      "op": "add", "args": [
+        {"op": "add", "args": [
+          {"op": "ref", "module": "d1", "output": "y"},
+          {"op": "ref", "module": "d2", "output": "y"}
+        ]},
+        {"op": "ref", "module": "d3", "output": "y"}
+      ]
+    }}
+  ]
+}

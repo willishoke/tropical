@@ -180,6 +180,9 @@ interface ModuleDef {
   delayUpdateNodes: ExprNode[]
   // Nested module call info — each entry records the nested module's def and the call arguments
   nestedCalls: NestedCallDef[]
+  // When true, outputs depend only on registers (previous-sample state), not current inputs.
+  // This allows the module to break feedback cycles in the dependency graph.
+  breaksCycles: boolean
 }
 
 /** Captured metadata for a nested ModuleType.call() inside a defineModule body. */
@@ -309,6 +312,7 @@ export function defineModule(
   process: ProcessFn,
   sampleRate = 44100.0,
   inputDefaults?: Record<string, ExprCoercible>,
+  options?: { breaksCycles?: boolean },
 ): ModuleType {
   const inputNames = inputs.map(_portName)
   const outputNames = outputs.map(_portName)
@@ -397,6 +401,7 @@ export function defineModule(
       moduleDef: nc.moduleDef,
       callArgNodes: nc.callArgNodes,
     })),
+    breaksCycles: options?.breaksCycles ?? false,
   }
 
   return new ModuleType(def)
