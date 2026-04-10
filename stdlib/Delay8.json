@@ -67,5 +67,6 @@
         ]
       }
     }
-  }
+  },
+  "breaks_cycles": true
 }

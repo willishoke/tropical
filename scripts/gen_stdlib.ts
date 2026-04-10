@@ -263,6 +263,8 @@ function defToProgram(def: ModuleDef, visitedDefs = new Set<ModuleDef>()): Progr
     ...(Object.keys(nextRegs).length > 0 ? { next_regs: nextRegs } : {}),
   }
 
+  if (def.breaksCycles) prog.breaks_cycles = true
+
   return prog
 }
 

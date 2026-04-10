@@ -1,74 +1,138 @@
 {
-  "schema": "tropical_patch_1",
-  "module_defs": [
-    {
+  "schema": "tropical_program_1",
+  "name": "int_seq_test",
+  "programs": {
+    "IntSeq": {
+      "schema": "tropical_program_1",
       "name": "IntSeq",
-      "inputs": ["trigger", "is_forward", "step", "seq_len", "sequence"],
-      "outputs": ["value", "index"],
-      "regs": {
-        "index": 0
-      },
+      "inputs": [
+        "trigger",
+        "is_forward",
+        "step",
+        "seq_len",
+        "sequence"
+      ],
+      "outputs": [
+        "value",
+        "index"
+      ],
       "process": {
         "outputs": {
           "value": {
             "op": "index",
             "args": [
-              {"op": "input", "name": "sequence"},
-              {"op": "reg", "name": "index"}
+              {
+                "op": "input",
+                "name": "sequence"
+              },
+              {
+                "op": "reg",
+                "name": "index"
+              }
             ]
           },
-          "index": {"op": "reg", "name": "index"}
+          "index": {
+            "op": "reg",
+            "name": "index"
+          }
         },
         "next_regs": {
           "index": {
             "op": "select",
             "args": [
-              {"op": "input", "name": "trigger"},
+              {
+                "op": "input",
+                "name": "trigger"
+              },
               {
                 "op": "mod",
                 "args": [
                   {
                     "op": "add",
                     "args": [
-                      {"op": "reg", "name": "index"},
+                      {
+                        "op": "reg",
+                        "name": "index"
+                      },
                       {
                         "op": "select",
                         "args": [
-                          {"op": "input", "name": "is_forward"},
-                          {"op": "input", "name": "step"},
+                          {
+                            "op": "input",
+                            "name": "is_forward"
+                          },
+                          {
+                            "op": "input",
+                            "name": "step"
+                          },
                           {
                             "op": "sub",
                             "args": [
-                              {"op": "input", "name": "seq_len"},
-                              {"op": "input", "name": "step"}
+                              {
+                                "op": "input",
+                                "name": "seq_len"
+                              },
+                              {
+                                "op": "input",
+                                "name": "step"
+                              }
                             ]
                           }
                         ]
                       }
                     ]
                   },
-                  {"op": "input", "name": "seq_len"}
+                  {
+                    "op": "input",
+                    "name": "seq_len"
+                  }
                 ]
               },
-              {"op": "reg", "name": "index"}
+              {
+                "op": "reg",
+                "name": "index"
+              }
             ]
           }
         }
+      },
+      "regs": {
+        "index": 0
       }
     }
-  ],
-  "modules": [
-    {"type": "IntSeq", "name": "Seq1"}
-  ],
-  "outputs": [
-    {"module": "Seq1", "output": "value"},
-    {"module": "Seq1", "output": "index"}
-  ],
-  "input_exprs": [
-    {"module": "Seq1", "input": "trigger",    "expr": false},
-    {"module": "Seq1", "input": "is_forward", "expr": true},
-    {"module": "Seq1", "input": "step",       "expr": 1},
-    {"module": "Seq1", "input": "seq_len",    "expr": 8},
-    {"module": "Seq1", "input": "sequence",   "expr": {"op": "array", "items": [100.0, 200.0, 300.0, 400.0, 500.0, 600.0, 700.0, 800.0]}}
+  },
+  "instances": {
+    "Seq1": {
+      "program": "IntSeq",
+      "inputs": {
+        "trigger": false,
+        "is_forward": true,
+        "step": 1,
+        "seq_len": 8,
+        "sequence": {
+          "op": "array",
+          "items": [
+            100,
+            200,
+            300,
+            400,
+            500,
+            600,
+            700,
+            800
+          ]
+        }
+      }
+    }
+  },
+  "audio_outputs": [
+    {
+      "instance": "Seq1",
+      "output": "value"
+    },
+    {
+      "instance": "Seq1",
+      "output": "index"
+    }
   ]
 }

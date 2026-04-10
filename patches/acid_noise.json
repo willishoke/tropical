@@ -1,82 +1,247 @@
 {
-  "schema": "tropical_patch_1",
-  "modules": [
-    {"type": "Clock",        "name": "ClockStep"},
-    {"type": "Clock",        "name": "ClockBeat"},
-    {"type": "Clock",        "name": "ClockHat"},
-    {"type": "Clock",        "name": "ClockFast"},
-    {"type": "VCO",          "name": "VCOBass"},
-    {"type": "VCO",          "name": "VCOBit0"},
-    {"type": "VCO",          "name": "VCOBit1"},
-    {"type": "ADSREnvelope", "name": "EnvBassAmp"},
-    {"type": "ADSREnvelope", "name": "EnvBassFilt"},
-    {"type": "LadderFilter", "name": "FiltBass"},
-    {"type": "BassDrum",     "name": "Kick"},
-    {"type": "NoiseLFSR",    "name": "HatNoise"},
-    {"type": "ADEnvelope",   "name": "EnvHat"},
-    {"type": "VCA",          "name": "VCABass"},
-    {"type": "VCA",          "name": "VCAHat"}
-  ],
-  "outputs": [
-    {"module": "VCABass", "output": "out"},
-    {"module": "Kick",    "output": "output"},
-    {"module": "VCAHat",  "output": "out"}
-  ],
-  "input_exprs": [
-    {"module": "ClockStep", "input": "freq", "expr": 8.0},
-    {"module": "ClockBeat", "input": "freq", "expr": 2.0},
-    {"module": "ClockHat",  "input": "freq", "expr": 4.0},
-    {"module": "ClockFast", "input": "freq", "expr": 8000.0},
-
-    {"module": "VCOBit0", "input": "freq", "expr": 0.47},
-    {"module": "VCOBit1", "input": "freq", "expr": 0.97},
-
-    {"module": "VCOBass", "input": "freq", "expr": {
-      "op": "mul", "args": [55.0, {
-        "op": "pow", "args": [2.0, {
-          "op": "add", "args": [
-            {"op": "mul", "args": [0.25,  {"op": "gt", "args": [{"op": "ref", "module": "VCOBit0", "output": "sqr"}, 0.0]}]},
-            {"op": "mul", "args": [0.583, {"op": "gt", "args": [{"op": "ref", "module": "VCOBit1", "output": "sqr"}, 0.0]}]}
+  "schema": "tropical_program_1",
+  "name": "acid_noise",
+  "instances": {
+    "ClockStep": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 8
+      }
+    },
+    "ClockBeat": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 2
+      }
+    },
+    "ClockHat": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 4
+      }
+    },
+    "ClockFast": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 8000
+      }
+    },
+    "VCOBass": {
+      "program": "VCO",
+      "inputs": {
+        "freq": {
+          "op": "mul",
+          "args": [
+            55,
+            {
+              "op": "pow",
+              "args": [
+                2,
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        0.25,
+                        {
+                          "op": "gt",
+                          "args": [
+                            {
+                              "op": "ref",
+                              "module": "VCOBit0",
+                              "output": "sqr"
+                            },
+                            0
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        0.583,
+                        {
+                          "op": "gt",
+                          "args": [
+                            {
+                              "op": "ref",
+                              "module": "VCOBit1",
+                              "output": "sqr"
+                            },
+                            0
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
           ]
-        }]
-      }]
-    }},
-
-    {"module": "EnvBassAmp",  "input": "gate",    "expr": {"op": "ref", "module": "ClockStep", "output": "output"}},
-    {"module": "EnvBassAmp",  "input": "attack",  "expr": 0.005},
-    {"module": "EnvBassAmp",  "input": "decay",   "expr": 0.18},
-    {"module": "EnvBassAmp",  "input": "sustain", "expr": 0.0},
-    {"module": "EnvBassAmp",  "input": "release", "expr": 0.04},
-
-    {"module": "EnvBassFilt", "input": "gate",    "expr": {"op": "ref", "module": "ClockStep", "output": "output"}},
-    {"module": "EnvBassFilt", "input": "attack",  "expr": 0.002},
-    {"module": "EnvBassFilt", "input": "decay",   "expr": 0.07},
-    {"module": "EnvBassFilt", "input": "sustain", "expr": 0.0},
-    {"module": "EnvBassFilt", "input": "release", "expr": 0.02},
-
-    {"module": "FiltBass", "input": "input",     "expr": {"op": "ref", "module": "VCOBass", "output": "saw"}},
-    {"module": "FiltBass", "input": "cutoff",    "expr": {
-      "op": "add", "args": [300.0, {"op": "mul", "args": [5200.0, {"op": "ref", "module": "EnvBassFilt", "output": "env"}]}]
-    }},
-    {"module": "FiltBass", "input": "resonance", "expr": 0.88},
-    {"module": "FiltBass", "input": "drive",     "expr": 3.5},
-
-    {"module": "VCABass", "input": "audio", "expr": {"op": "ref", "module": "FiltBass",   "output": "lp"}},
-    {"module": "VCABass", "input": "cv",    "expr": {"op": "mul", "args": [0.75, {"op": "ref", "module": "EnvBassAmp", "output": "env"}]}},
-
-    {"module": "Kick", "input": "gate",  "expr": {"op": "ref", "module": "ClockBeat", "output": "output"}},
-    {"module": "Kick", "input": "freq",  "expr": 55.0},
-    {"module": "Kick", "input": "punch", "expr": 0.75},
-    {"module": "Kick", "input": "decay", "expr": 0.38},
-    {"module": "Kick", "input": "tone",  "expr": 8.0},
-
-    {"module": "HatNoise", "input": "clock", "expr": {"op": "ref", "module": "ClockFast", "output": "output"}},
-
-    {"module": "EnvHat", "input": "gate",   "expr": {"op": "ref", "module": "ClockHat", "output": "output"}},
-    {"module": "EnvHat", "input": "attack", "expr": 0.001},
-    {"module": "EnvHat", "input": "decay",  "expr": 0.04},
-
-    {"module": "VCAHat", "input": "audio", "expr": {"op": "ref", "module": "HatNoise", "output": "out"}},
-    {"module": "VCAHat", "input": "cv",    "expr": {"op": "mul", "args": [0.25, {"op": "ref", "module": "EnvHat", "output": "env"}]}}
+        }
+      }
+    },
+    "VCOBit0": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 0.47
+      }
+    },
+    "VCOBit1": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 0.97
+      }
+    },
+    "EnvBassAmp": {
+      "program": "ADSREnvelope",
+      "inputs": {
+        "gate": {
+          "op": "ref",
+          "module": "ClockStep",
+          "output": "output"
+        },
+        "attack": 0.005,
+        "decay": 0.18,
+        "sustain": 0,
+        "release": 0.04
+      }
+    },
+    "EnvBassFilt": {
+      "program": "ADSREnvelope",
+      "inputs": {
+        "gate": {
+          "op": "ref",
+          "module": "ClockStep",
+          "output": "output"
+        },
+        "attack": 0.002,
+        "decay": 0.07,
+        "sustain": 0,
+        "release": 0.02
+      }
+    },
+    "FiltBass": {
+      "program": "LadderFilter",
+      "inputs": {
+        "input": {
+          "op": "ref",
+          "module": "VCOBass",
+          "output": "saw"
+        },
+        "cutoff": {
+          "op": "add",
+          "args": [
+            300,
+            {
+              "op": "mul",
+              "args": [
+                5200,
+                {
+                  "op": "ref",
+                  "module": "EnvBassFilt",
+                  "output": "env"
+                }
+              ]
+            }
+          ]
+        },
+        "resonance": 0.88,
+        "drive": 3.5
+      }
+    },
+    "Kick": {
+      "program": "BassDrum",
+      "inputs": {
+        "gate": {
+          "op": "ref",
+          "module": "ClockBeat",
+          "output": "output"
+        },
+        "freq": 55,
+        "punch": 0.75,
+        "decay": 0.38,
+        "tone": 8
+      }
+    },
+    "HatNoise": {
+      "program": "NoiseLFSR",
+      "inputs": {
+        "clock": {
+          "op": "ref",
+          "module": "ClockFast",
+          "output": "output"
+        }
+      }
+    },
+    "EnvHat": {
+      "program": "ADEnvelope",
+      "inputs": {
+        "gate": {
+          "op": "ref",
+          "module": "ClockHat",
+          "output": "output"
+        },
+        "attack": 0.001,
+        "decay": 0.04
+      }
+    },
+    "VCABass": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "ref",
+          "module": "FiltBass",
+          "output": "lp"
+        },
+        "cv": {
+          "op": "mul",
+          "args": [
+            0.75,
+            {
+              "op": "ref",
+              "module": "EnvBassAmp",
+              "output": "env"
+            }
+          ]
+        }
+      }
+    },
+    "VCAHat": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "ref",
+          "module": "HatNoise",
+          "output": "out"
+        },
+        "cv": {
+          "op": "mul",
+          "args": [
+            0.25,
+            {
+              "op": "ref",
+              "module": "EnvHat",
+              "output": "env"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "audio_outputs": [
+    {
+      "instance": "VCABass",
+      "output": "out"
+    },
+    {
+      "instance": "Kick",
+      "output": "output"
+    },
+    {
+      "instance": "VCAHat",
+      "output": "out"
+    }
   ]
 }

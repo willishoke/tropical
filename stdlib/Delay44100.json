@@ -44159,5 +44159,6 @@
         ]
       }
     }
-  }
+  },
+  "breaks_cycles": true
 }

@@ -67,6 +67,8 @@ export interface ProgramJSON {
   config?: { buffer_length?: number; sample_rate?: number }
   /** Inline ADT type definitions. */
   type_defs?: TypeDefJSON[]
+  /** When true, outputs depend only on previous-sample state — allows feedback cycles. */
+  breaks_cycles?: boolean
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -222,6 +224,7 @@ function convertProgramToModuleDef(prog: ProgramJSON): ModuleDefJSON {
   if (prog.delays)          def.delays = prog.delays
   if (prog.sample_rate)     def.sample_rate = prog.sample_rate
   if (prog.input_defaults)  def.input_defaults = prog.input_defaults
+  if (prog.breaks_cycles)   def.breaks_cycles = true
 
   // instances → nested
   if (prog.instances) {

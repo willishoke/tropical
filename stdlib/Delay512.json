@@ -571,5 +571,6 @@
         ]
       }
     }
-  }
+  },
+  "breaks_cycles": true
 }

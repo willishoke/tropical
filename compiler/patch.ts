@@ -52,6 +52,8 @@ export interface ModuleDefJSON {
     outputs: Record<string, ExprNode>
     next_regs?: Record<string, ExprNode>
   }
+  /** When true, outputs depend only on previous-sample state — allows feedback cycles. */
+  breaks_cycles?: boolean
 }
 
 export interface TypeDefFieldJSON {
@@ -579,6 +581,7 @@ export function loadModuleFromJSON(
     },
     def.sample_rate ?? 44100.0,
     inputDefaultsForDefine,
+    def.breaks_cycles ? { breaksCycles: true } : undefined,
   )
 }
 
