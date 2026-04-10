@@ -611,52 +611,42 @@
   "process": {
     "outputs": {
       "saw": {
-        "op": "mul",
+        "op": "sub",
         "args": [
-          5,
           {
             "op": "sub",
             "args": [
               {
-                "op": "sub",
+                "op": "mul",
                 "args": [
+                  2,
                   {
-                    "op": "mul",
-                    "args": [
-                      2,
-                      {
-                        "op": "nested_out",
-                        "ref": "_sub_0_0",
-                        "output": 0
-                      }
-                    ]
-                  },
-                  1
+                    "op": "nested_out",
+                    "ref": "_sub_0_0",
+                    "output": 0
+                  }
                 ]
               },
-              {
-                "op": "nested_out",
-                "ref": "_sub_1_0",
-                "output": 0
-              }
+              1
             ]
+          },
+          {
+            "op": "nested_out",
+            "ref": "_sub_1_0",
+            "output": 0
           }
         ]
       },
       "tri": {
-        "op": "mul",
+        "op": "clamp",
         "args": [
-          5,
           {
-            "op": "clamp",
+            "op": "add",
             "args": [
               {
-                "op": "add",
-                "args": [
-                  {
-                    "op": "reg",
-                    "name": "tri_state"
-                  },
+                "op": "reg",
+                "name": "tri_state"
+              },
                   {
                     "op": "mul",
                     "args": [
@@ -770,77 +760,63 @@
               -1,
               1
             ]
-          }
-        ]
       },
       "sin": {
-        "op": "mul",
+        "op": "sin",
         "args": [
-          5,
           {
-            "op": "sin",
+            "op": "mul",
             "args": [
+              6.283185307179586,
               {
-                "op": "mul",
-                "args": [
-                  6.283185307179586,
-                  {
-                    "op": "nested_out",
-                    "ref": "_sub_0_0",
-                    "output": 0
-                  }
-                ]
+                "op": "nested_out",
+                "ref": "_sub_0_0",
+                "output": 0
               }
             ]
           }
         ]
       },
       "sqr": {
-        "op": "mul",
+        "op": "sub",
         "args": [
-          5,
           {
-            "op": "sub",
+            "op": "add",
             "args": [
               {
-                "op": "add",
+                "op": "sub",
                 "args": [
+                  1,
                   {
-                    "op": "sub",
+                    "op": "mul",
                     "args": [
-                      1,
+                      2,
                       {
-                        "op": "mul",
+                        "op": "gte",
                         "args": [
-                          2,
                           {
-                            "op": "gte",
-                            "args": [
-                              {
-                                "op": "nested_out",
-                                "ref": "_sub_0_0",
-                                "output": 0
-                              },
-                              0.5
-                            ]
-                          }
+                            "op": "nested_out",
+                            "ref": "_sub_0_0",
+                            "output": 0
+                          },
+                          0.5
                         ]
                       }
                     ]
-                  },
-                  {
-                    "op": "nested_out",
-                    "ref": "_sub_1_1",
-                    "output": 0
                   }
                 ]
               },
               {
                 "op": "nested_out",
-                "ref": "_sub_1_2",
+                "ref": "_sub_1_1",
                 "output": 0
               }
             ]
+          },
+          {
+            "op": "nested_out",
+            "ref": "_sub_1_2",
+            "output": 0
           }
         ]
       }
