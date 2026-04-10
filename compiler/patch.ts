@@ -8,7 +8,7 @@ import {
   add, sub, mul, div, floorDiv, mod, pow_, matmul,
   lt, lte, gt, gte, eq, neq,
   bitAnd, bitOr, bitXor, lshift, rshift, bitNot,
-  neg, abs_, sin, log, logicalNot,
+  neg, abs_, sin, cos, exp, log, tanh, logicalNot,
   clamp, select, arrayPack, arraySet, matrix,
   inputExpr, registerExpr, refExpr, sampleRate, sampleIndex,
   constructStruct, fieldAccess, constructVariant, matchVariant,
@@ -172,7 +172,7 @@ const BINARY_OPS: Record<string, (l: ExprCoercible, r: ExprCoercible) => SignalE
 }
 
 const UNARY_OPS: Record<string, (x: ExprCoercible) => SignalExpr> = {
-  neg, abs: abs_, sin, log, not: logicalNot, bit_not: bitNot,
+  neg, abs: abs_, sin, cos, exp, log, tanh, not: logicalNot, bit_not: bitNot,
 }
 
 // ─────────────────────────────────────────────────────────────

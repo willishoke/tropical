@@ -397,4 +397,58 @@ describe('loadProgramAsType — stdlib equivalence', () => {
   test('VCO.json matches TypeScript VCO (tri)', () => {
     compareStdlib('VCO', 'VCO.json', { freq: 440.0, fm: 0.0, fm_index: 5.0 }, 'tri')
   })
+
+  test('Compressor.json matches TypeScript Compressor', () => {
+    compareStdlib('Compressor', 'Compressor.json', { input: 1.0, sidechain: 0.5, threshold: -12.0, ratio: 4.0, attack_ms: 10.0, release_ms: 100.0, makeup: 1.0 }, 'output')
+  })
+
+  test('BassDrum.json matches TypeScript BassDrum', () => {
+    compareStdlib('BassDrum', 'BassDrum.json', { gate: 1.0, freq: 60.0, punch: 0.5, decay: 0.35, tone: 8.0 }, 'output')
+  })
+
+  test('ADEnvelope.json matches TypeScript ADEnvelope', () => {
+    compareStdlib('ADEnvelope', 'ADEnvelope.json', { gate: 1.0, attack: 0.01, decay: 0.3 }, 'env')
+  })
+
+  test('ADSREnvelope.json matches TypeScript ADSREnvelope', () => {
+    compareStdlib('ADSREnvelope', 'ADSREnvelope.json', { gate: 1.0, attack: 0.01, decay: 0.1, sustain: 0.7, release: 0.3 }, 'env')
+  })
+
+  test('LadderFilter.json matches TypeScript LadderFilter', () => {
+    compareStdlib('LadderFilter', 'LadderFilter.json', { input: 1.0, cutoff: 1000.0, resonance: 0.5, drive: 1.0 }, 'lp')
+  })
+
+  test('Phaser.json matches TypeScript Phaser', () => {
+    compareStdlib('Phaser', 'Phaser.json', { input: 1.0, feedback: 0.4, lfo_speed: 0.2 }, 'output')
+  })
+
+  test('Phaser16.json matches TypeScript Phaser16', () => {
+    compareStdlib('Phaser16', 'Phaser16.json', { input: 1.0, feedback: 0.4, lfo_speed: 0.2 }, 'output')
+  })
+
+  test('Reverb.json matches TypeScript Reverb', () => {
+    compareStdlib('Reverb', 'Reverb.json', { input: 1.0, mix: 0.35, decay: 0.84, damp: 0.4 }, 'output')
+  })
+
+  test('Delay16.json matches TypeScript Delay16 (strict)', () => {
+    compareStdlibStrict('Delay16', 'Delay16.json', { x: 1.0 }, 'y')
+  })
+
+  test('Delay512.json matches TypeScript Delay512 (strict)', () => {
+    compareStdlibStrict('Delay512', 'Delay512.json', { x: 1.0 }, 'y')
+  })
+
+  test('Delay4410.json matches TypeScript Delay4410 (strict)', () => {
+    compareStdlibStrict('Delay4410', 'Delay4410.json', { x: 1.0 }, 'y')
+  })
+
+  test('Delay44100.json matches TypeScript Delay44100 (strict)', () => {
+    compareStdlibStrict('Delay44100', 'Delay44100.json', { x: 1.0 }, 'y')
+  })
+
+  test('TopoWaveguide.json matches TypeScript TopoWaveguide', () => {
+    compareStdlib('TopoWaveguide', 'TopoWaveguide.json', {
+      g: 0.035, decay: 0.9997, brightness: 0.88,
+    }, 'out')
+  })
 })

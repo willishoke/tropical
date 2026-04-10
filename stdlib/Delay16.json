@@ -1,6 +1,6 @@
 {
   "schema": "tropical_program_1",
-  "name": "Delay8",
+  "name": "Delay16",
   "inputs": [
     "x"
   ],
@@ -9,6 +9,14 @@
   ],
   "regs": {
     "buf": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
       0,
       0,
       0,
@@ -37,7 +45,7 @@
               {
                 "op": "sample_index"
               },
-              8
+              16
             ]
           }
         ]
@@ -57,7 +65,7 @@
               {
                 "op": "sample_index"
               },
-              8
+              16
             ]
           },
           {
