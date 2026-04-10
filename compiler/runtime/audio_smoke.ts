@@ -8,7 +8,7 @@
  */
 
 import { makeSession, loadPatchFromJSON } from '../patch'
-import { loadBuiltins } from '../module_library'
+import { loadStdlib as loadBuiltins } from '../program'
 import { applyFlatPlan } from '../apply_plan'
 
 const session = makeSession(512)

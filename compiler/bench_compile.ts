@@ -2,7 +2,7 @@
  * Quick benchmark: reproduce the 13-module patch compilation to find bottleneck.
  */
 import { makeSession, SessionState } from './patch.js'
-import { loadBuiltins } from './module_library.js'
+import { loadStdlib as loadBuiltins } from './program.js'
 import { flattenPatch } from './flatten.js'
 
 const session: SessionState = makeSession()

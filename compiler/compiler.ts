@@ -88,7 +88,7 @@ export interface ModuleInfo {
   registerTypes: PortType[]
 }
 
-/** The subset of ModuleDef the compiler reads. */
+/** The subset of ProgramDef the compiler reads. */
 interface ModuleDefLike {
   typeName: string
   inputNames: string[]

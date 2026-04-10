@@ -22,8 +22,7 @@ import {
   prettyExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
 } from '../compiler/patch.js'
 import { parseModuleDef, parsePatch, parseProgram } from '../compiler/schema.js'
-import { saveProgramFromSession, type ProgramJSON } from '../compiler/program.js'
-import { loadBuiltins }        from '../compiler/module_library.js'
+import { saveProgramFromSession, loadStdlib as loadBuiltins, type ProgramJSON } from '../compiler/program.js'
 import { DAC }                 from '../compiler/runtime/audio.js'
 import { Param, Trigger }      from '../compiler/runtime/param.js'
 import { applyFlatPlan }  from '../compiler/apply_plan.js'

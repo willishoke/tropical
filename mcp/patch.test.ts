@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { makeSession, loadPatchFromJSON } from '../compiler/patch.js'
-import { loadBuiltins } from '../compiler/module_library.js'
+import { loadStdlib as loadBuiltins } from '../compiler/program.js'
 import type { PatchJSON } from '../compiler/patch.js'
 import * as b from '../compiler/runtime/bindings.js'
 
