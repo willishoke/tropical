@@ -78,7 +78,7 @@ The TypeScript layer handles everything from module definition through instructi
 
 **Program schema** (`program.ts`) — `ProgramJSON` (`tropical_program_1`) is the unified representation. A program with `process` = leaf, with `instances` + `audio_outputs` = graph, with `instances` + `inputs` + `outputs` = reusable composite. `loadStdlib()` loads `stdlib/*.json` into the type registry.
 
-**Program types** (`module.ts`) — Pure data types: `ProgramDef` (slot-indexed IR for the flattener), `ModuleType`, `ModuleInstance`. No DSL — types are built from ProgramJSON by `loadModuleFromJSON()` in `patch.ts`.
+**Program types** (`module.ts`) — Pure data types: `ProgramDef` (slot-indexed IR for the flattener), `ModuleType`, `ModuleInstance`. No DSL — types are built from ProgramJSON by `loadProgramDef()` in `patch.ts`.
 
 **Standard library** (`stdlib/*.json`) — 19 built-in program types as ProgramJSON files (VCO, Clock, ADEnvelope, Reverb, LadderFilter, etc.). Loaded by `loadStdlib()` in `program.ts`.
 

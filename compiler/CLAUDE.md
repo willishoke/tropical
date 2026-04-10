@@ -15,8 +15,8 @@ compiler.ts           Dependency graph, topological sort, term assembly
 term.ts               Categorical IR (morphism, compose, tensor, trace, id)
 type_check.ts         Type inference for terms, composition boundary validation
 optimizer.ts          Term rewriting (identity elimination, flattening)
-patch.ts              SessionState, loadModuleFromJSON (ProgramJSON → ProgramDef), loadJSON schema detection
-schema.ts             Zod validation schemas for patch/module/program JSON
+patch.ts              SessionState, loadProgramDef (ProgramJSON → ProgramDef), loadJSON, prettyExpr
+schema.ts             Zod validation schemas for ProgramJSON
 apply_plan.ts         flattenPatch → JSON.stringify → runtime.loadPlan
 array_wiring.ts       Typed port validation, auto-broadcast insertion
 morphism_registry.ts  Named type coercion morphisms
@@ -55,7 +55,7 @@ type ExprNode = number | boolean | ExprNode[] | { op: string; ... }
 
 Pure data types — no DSL, no side effects:
 
-- **`ProgramDef`** — the compiler's slot-indexed IR consumed by the flattener. Fields: `outputExprNodes`, `registerExprNodes`, `delayUpdateNodes`, `nestedCalls`, etc. Built from ProgramJSON by `loadModuleFromJSON()` in `patch.ts` via `slottifyExpr()` (pure name→slot tree walk).
+- **`ProgramDef`** — the compiler's slot-indexed IR consumed by the flattener. Fields: `outputExprNodes`, `registerExprNodes`, `delayUpdateNodes`, `nestedCalls`, etc. Built from ProgramJSON by `loadProgramDef()` in `patch.ts` via `slottifyExpr()` (pure name→slot tree walk).
 - **`ModuleType`** — wraps a `ProgramDef`, registered in `SessionState.typeRegistry`
 - **`ModuleInstance`** — named instance of a type, with port accessors
 

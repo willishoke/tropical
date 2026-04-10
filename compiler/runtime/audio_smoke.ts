@@ -7,24 +7,22 @@
  * Plays a VCO → VCA patch for 3 seconds, then stops.
  */
 
-import { makeSession, loadPatchFromJSON } from '../patch'
+import { makeSession, loadJSON } from '../patch'
 import { loadStdlib as loadBuiltins } from '../program'
-import { applyFlatPlan } from '../apply_plan'
 
 const session = makeSession(512)
 loadBuiltins(session.typeRegistry)
-loadPatchFromJSON({
-  schema: 'tropical_patch_1',
-  modules: [
-    { type: 'VCO', name: 'VCO1' },
-    { type: 'VCA', name: 'VCA1' },
-  ],
-  input_exprs: [
-    { module: 'VCO1', input: 'freq', expr: 440 },
-    { module: 'VCA1', input: 'audio', expr: { op: 'ref', module: 'VCO1', output: 'saw' } },
-    { module: 'VCA1', input: 'cv', expr: 0.3 },
-  ],
-  outputs: [{ module: 'VCA1', output: 'out' }],
+loadJSON({
+  schema: 'tropical_program_1',
+  name: 'smoke_test',
+  instances: {
+    VCO1: { program: 'VCO', inputs: { freq: 440 } },
+    VCA1: { program: 'VCA', inputs: {
+      audio: { op: 'ref', module: 'VCO1', output: 'saw' },
+      cv: 0.3,
+    }},
+  },
+  audio_outputs: [{ instance: 'VCA1', output: 'out' }],
 }, session)
 
 console.log('Starting DAC (FlatRuntime)...')

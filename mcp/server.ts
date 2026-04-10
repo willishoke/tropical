@@ -18,11 +18,14 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 
 import {
-  makeSession, nextName, loadModuleFromJSON, loadPatchFromJSON, loadJSON, mergePatchFromJSON, savePatchToJSON,
-  prettyExpr, SessionState, ModuleDefJSON, ExprNode, PatchJSON,
+  makeSession, nextName, loadJSON,
+  prettyExpr, SessionState, ExprNode,
 } from '../compiler/patch.js'
-import { parseModuleDef, parsePatch, parseProgram } from '../compiler/schema.js'
-import { saveProgramFromSession, loadStdlib as loadBuiltins, type ProgramJSON } from '../compiler/program.js'
+import { parseProgram } from '../compiler/schema.js'
+import {
+  saveProgramFromSession, loadProgramAsType, mergeProgramIntoSession,
+  loadStdlib as loadBuiltins, type ProgramJSON,
+} from '../compiler/program.js'
 import { DAC }                 from '../compiler/runtime/audio.js'
 import { Param, Trigger }      from '../compiler/runtime/param.js'
 import { applyFlatPlan }  from '../compiler/apply_plan.js'
@@ -123,11 +126,11 @@ const TOOLS = [
 
   {
     name: 'define_program',
-    description: 'Define a reusable DSP program type and register it. Accepts a ProgramJSON (tropical_program_1) or ModuleDefJSON. Returns the type name and port names.',
+    description: 'Define a reusable DSP program type and register it. Accepts a ProgramJSON (tropical_program_1). Returns the type name and port names.',
     inputSchema: {
       type: 'object',
       properties: {
-        def: { type: 'object', description: 'ProgramJSON or ModuleDefJSON object defining the program' },
+        def: { type: 'object', description: 'ProgramJSON (tropical_program_1) object defining the program' },
       },
       required: ['def'],
     },
@@ -242,7 +245,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Path to a .json file on disk.' },
-        program: { type: 'object', description: 'Inline ProgramJSON or PatchJSON object.' },
+        program: { type: 'object', description: 'Inline ProgramJSON (tropical_program_1) object.' },
       },
     },
   },
@@ -257,7 +260,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        program: { type: 'object', description: 'ProgramJSON or PatchJSON object to merge.' },
+        program: { type: 'object', description: 'ProgramJSON (tropical_program_1) object to merge.' },
       },
       required: ['program'],
     },
@@ -464,8 +467,8 @@ const TOOLS = [
 
 function handleDefineProgram(args: Record<string, unknown>) {
   return wrap(() => {
-    const def = parseModuleDef(args.def) as ModuleDefJSON
-    const type = loadModuleFromJSON(def, session)
+    const prog = parseProgram(args.def) as ProgramJSON
+    const type = loadProgramAsType(prog, session)
     session.typeRegistry.set(type.name, type)
     return { program_name: type.name, inputs: type._def.inputNames, outputs: type._def.outputNames }
   })
@@ -639,23 +642,15 @@ function handleLoad(args: Record<string, unknown>) {
 }
 
 function handleSave() {
-  return wrap(() => ({ program: saveProgramFromSession(session, savePatchToJSON) }))
+  return wrap(() => ({ program: saveProgramFromSession(session) }))
 }
 
 function handleMerge(args: Record<string, unknown>) {
   return wrap(() => {
     const raw = args.program ?? args.patch
     if (!raw) throw new Error('Provide a program or patch object.')
-    const parsed = (raw as { schema?: string })
-    if (parsed.schema === 'tropical_program_1' || !parsed.schema) {
-      // If it looks like a program, convert to patch first
-      // For now, merge only supports patch format natively
-      const patch = parsePatch(raw) as PatchJSON
-      mergePatchFromJSON(patch, session)
-    } else {
-      const patch = parsePatch(raw) as PatchJSON
-      mergePatchFromJSON(patch, session)
-    }
+    const prog = parseProgram(raw) as ProgramJSON
+    mergeProgramIntoSession(prog, session)
     return {
       instances:   [...session.instanceRegistry.keys()],
       wiring:      session.inputExprNodes.size,
@@ -904,7 +899,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       return handleMerge({ program: args.patch })
 
     case 'save_patch':
-      return wrap(() => ({ patch: savePatchToJSON(session) }))
+      return handleSave()
 
     default:
       return fail(`Unknown tool: '${name}'`)

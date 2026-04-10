@@ -1,6 +1,5 @@
 /**
- * JSON patch / module definition schema, expression AST builder, and load/save.
- * Replaces tropical/yaml_schema.py with a clean-break JSON format.
+ * Session state, expression pretty-printer, JSON loading, and ProgramJSON → ProgramDef builder.
  */
 
 import {
@@ -10,8 +9,6 @@ import {
   ModuleType, ModuleInstance,
   type ProgramDef, type NestedCall, type ValueCoercible,
 } from './module.js'
-import { Param, Trigger } from './runtime/param.js'
-import { applyFlatPlan } from './apply_plan.js'
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type ProgramJSON } from './program.js'
 
@@ -24,29 +21,6 @@ export type { ExprNode } from './expr.js'
 import { validateExpr, type ExprNode } from './expr.js'
 
 
-export interface NestedModuleJSON {
-  type: string
-  inputs: Record<string, ExprNode>
-}
-
-export interface ModuleDefJSON {
-  name: string
-  inputs: (string | { name: string; type: string })[]
-  outputs: (string | { name: string; type: string })[]
-  regs?: Record<string, number | boolean | number[] | number[][] | { init: number | boolean | number[] | number[][]; type: string }>
-  /** Named delay nodes, declared before any expression that references them. */
-  delays?: Record<string, { update: ExprNode; init?: number }>
-  /** Named nested sub-module instances. */
-  nested?: Record<string, NestedModuleJSON>
-  sample_rate?: number
-  input_defaults?: Record<string, ExprNode>
-  process: {
-    outputs: Record<string, ExprNode>
-    next_regs?: Record<string, ExprNode>
-  }
-  /** When true, outputs depend only on previous-sample state — allows feedback cycles. */
-  breaks_cycles?: boolean
-}
 
 export interface TypeDefFieldJSON {
   name: string
@@ -72,37 +46,6 @@ export interface SumTypeDefJSON {
 
 export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON
 
-export interface PatchJSON {
-  schema: 'tropical_patch_1'
-  config?: {
-    buffer_length?: number
-  }
-  /** Inline ADT type definitions (loaded before module instantiation). */
-  type_defs?: TypeDefJSON[]
-  /** Inline module type definitions (loaded before instantiation). */
-  module_defs?: ModuleDefJSON[]
-  modules: Array<{ type: string; name?: string }>
-  connections?: Array<{
-    src: string; src_output: string | number
-    dst: string; dst_input: string | number
-  }>
-  /** Graph-level mix outputs. */
-  outputs?: Array<
-    | { module: string; output: string | number }
-    | { expr: ExprNode }
-  >
-  params?: Array<{
-    name: string
-    value?: number
-    time_const?: number
-    type?: 'param' | 'trigger'
-  }>
-  input_exprs?: Array<{
-    module: string
-    input: string | number
-    expr: ExprNode
-  }>
-}
 
 // ─────────────────────────────────────────────────────────────
 // Session state (shared by patch load/save and MCP server)
@@ -288,19 +231,19 @@ function slottifyExpr(
   return node
 }
 
-export function loadModuleFromJSON(
-  def: ModuleDefJSON,
+export function loadProgramDef(
+  def: ProgramJSON,
   session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
 ): ModuleType {
-  const inputSpecs  = def.inputs
-  const outputSpecs = def.outputs
+  const inputSpecs  = def.inputs ?? []
+  const outputSpecs = def.outputs ?? []
   const inputNames  = inputSpecs.map(i => typeof i === 'string' ? i : i.name)
   const outputNames = outputSpecs.map(o => typeof o === 'string' ? o : o.name)
   const inputPortTypes  = inputSpecs.map(i => typeof i === 'string' ? undefined : i.type)
   const outputPortTypes = outputSpecs.map(o => typeof o === 'string' ? undefined : o.type)
   const regsRaw     = def.regs ?? {}
   const delaysRaw   = def.delays ?? {}
-  const nestedRaw   = def.nested ?? {}
+  const nestedRaw   = def.instances ?? {}
 
   // ── Parse registers ──
   const regNames: string[] = []
@@ -331,14 +274,14 @@ export function loadModuleFromJSON(
 
   for (const alias of nestedAliases) {
     const spec = nestedRaw[alias]
-    const type = session.typeRegistry.get(spec.type)
-    if (!type) throw new Error(`Unknown module type '${spec.type}' in nested.`)
+    const type = session.typeRegistry.get(spec.program)
+    if (!type) throw new Error(`Unknown program type '${spec.program}' in instances.`)
     nestedAliasDef.set(alias, type._def)
 
     // Build call arg nodes — order inputs by the nested type's input order
     const callArgNodes: ExprNode[] = type._def.inputNames.map((name, idx) => {
-      if (name in spec.inputs) {
-        return slottifyExpr(spec.inputs[name], inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
+      if (name in (spec.inputs ?? {})) {
+        return slottifyExpr((spec.inputs ?? {})[name], inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
       }
       const defaultExpr = type._def.inputDefaults[idx]
       if (defaultExpr) return defaultExpr._node
@@ -354,15 +297,16 @@ export function loadModuleFromJSON(
   )
 
   // ── Convert output expressions ──
+  const process = def.process ?? { outputs: {} }
   const outputExprNodes = outputNames.map(name => {
-    const node = def.process.outputs[name]
+    const node = process.outputs[name]
     if (node === undefined) throw new Error(`Output '${name}' missing from process.outputs.`)
     return slottifyExpr(node, inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
   })
 
   // ── Convert register update expressions ──
   const registerExprNodes: (ExprNode | null)[] = regNames.map(name => {
-    const node = def.process.next_regs?.[name]
+    const node = process.next_regs?.[name]
     if (node === undefined) return null
     return slottifyExpr(node, inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
   })
@@ -498,211 +442,9 @@ export function prettyExpr(
  */
 export function loadJSON(json: { schema: string; [k: string]: unknown }, session: SessionState): void {
   if (json.schema === 'tropical_program_1') {
-    loadProgramAsSession(json as unknown as ProgramJSON, session, loadPatchFromJSON)
+    loadProgramAsSession(json as unknown as ProgramJSON, session)
     return
   }
-  if (json.schema === 'tropical_patch_1') {
-    loadPatchFromJSON(json as unknown as PatchJSON, session)
-    return
-  }
-  throw new Error(`Unknown schema '${json.schema}'. Expected 'tropical_program_1' or 'tropical_patch_1'.`)
+  throw new Error(`Unknown schema '${json.schema}'. Expected 'tropical_program_1'.`)
 }
 
-export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void {
-  session.dac = null
-  session.instanceRegistry.clear()
-  session.graphOutputs.length = 0
-  session.paramRegistry.clear()
-  session.triggerRegistry.clear()
-  session.inputExprNodes.clear()
-  session._nameCounters.clear()
-
-  // Load inline module type definitions
-  for (const def of json.module_defs ?? []) {
-    const type = loadModuleFromJSON(def, session)
-    session.typeRegistry.set(type.name, type)
-  }
-
-  // Create params and triggers before modules (modules may reference them)
-  for (const p of json.params ?? []) {
-    if (p.type === 'trigger') {
-      session.triggerRegistry.set(p.name, new Trigger())
-    } else {
-      session.paramRegistry.set(p.name, new Param(p.value ?? 0.0, p.time_const ?? 0.005))
-    }
-  }
-
-  // Instantiate modules (TS-only — no C API calls)
-  for (const entry of json.modules) {
-    const type = session.typeRegistry.get(entry.type)
-    if (!type) throw new Error(`Unknown module type '${entry.type}'.`)
-    const name = entry.name ?? nextName(session, type.name)
-    const inst = type.instantiateAs(name)
-    session.instanceRegistry.set(inst.name, inst)
-  }
-
-  // Populate wiring state — connections, input expressions, outputs
-  for (const conn of json.connections ?? []) {
-    const srcInst = session.instanceRegistry.get(conn.src)
-    const dstInst = session.instanceRegistry.get(conn.dst)
-    if (!srcInst) throw new Error(`Connection src module '${conn.src}' not found.`)
-    if (!dstInst) throw new Error(`Connection dst module '${conn.dst}' not found.`)
-    const srcId = typeof conn.src_output === 'number' ? conn.src_output : srcInst.outputIndex(conn.src_output)
-    const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
-    const srcOutName = srcInst.outputNames[srcId]
-    const dstInName  = dstInst.inputNames[dstId]
-    session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
-  }
-
-  for (const ie of json.input_exprs ?? []) {
-    const inst = session.instanceRegistry.get(ie.module)
-    if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
-    validateExpr(ie.expr, `${ie.module}.${ie.input}`)
-    session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
-  }
-
-  // Ensure module input defaults are included in the plan
-  for (const [name, inst] of session.instanceRegistry) {
-    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
-    for (const [inputName, value] of Object.entries(defaults)) {
-      const key = `${name}:${inputName}`
-      if (!session.inputExprNodes.has(key)) {
-        session.inputExprNodes.set(key, value)
-      }
-    }
-  }
-
-  for (const out of json.outputs ?? []) {
-    if ('expr' in out) {
-      throw new Error('Output expressions not supported in plan-based path. Use module output refs instead.')
-    }
-    const inst = session.instanceRegistry.get(out.module)
-    if (!inst) throw new Error(`Output module '${out.module}' not found.`)
-    session.graphOutputs.push({ module: out.module, output: String(out.output) })
-  }
-
-  // Apply wiring via FlatRuntime
-  applyFlatPlan(session, session.runtime)
-}
-
-// ─────────────────────────────────────────────────────────────
-// Patch merger (additive — no session teardown)
-// ─────────────────────────────────────────────────────────────
-
-export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void {
-  // Fail fast on name collisions before touching state
-  for (const entry of json.modules) {
-    if (entry.name && session.instanceRegistry.has(entry.name))
-      throw new Error(`merge_patch collision: module '${entry.name}' already exists.`)
-  }
-  for (const p of json.params ?? []) {
-    if (session.paramRegistry.has(p.name) || session.triggerRegistry.has(p.name))
-      throw new Error(`merge_patch collision: param/trigger '${p.name}' already exists.`)
-  }
-
-  // Load inline type definitions
-  for (const def of json.module_defs ?? []) {
-    const type = loadModuleFromJSON(def, session)
-    session.typeRegistry.set(type.name, type)
-  }
-
-  // Create params and triggers
-  for (const p of json.params ?? []) {
-    if (p.type === 'trigger') {
-      session.triggerRegistry.set(p.name, new Trigger())
-    } else {
-      session.paramRegistry.set(p.name, new Param(p.value ?? 0.0, p.time_const ?? 0.005))
-    }
-  }
-
-  // Instantiate modules (TS-only)
-  for (const entry of json.modules) {
-    const type = session.typeRegistry.get(entry.type)
-    if (!type) throw new Error(`Unknown module type '${entry.type}'.`)
-    const name = entry.name ?? nextName(session, type.name)
-    const inst = type.instantiateAs(name)
-    session.instanceRegistry.set(inst.name, inst)
-  }
-
-  // Populate wiring state — connections, input expressions, outputs
-  for (const conn of json.connections ?? []) {
-    const srcInst = session.instanceRegistry.get(conn.src)
-    const dstInst = session.instanceRegistry.get(conn.dst)
-    if (!srcInst) throw new Error(`Connection src module '${conn.src}' not found.`)
-    if (!dstInst) throw new Error(`Connection dst module '${conn.dst}' not found.`)
-    const srcId = typeof conn.src_output === 'number' ? conn.src_output : srcInst.outputIndex(conn.src_output)
-    const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
-    const srcOutName = srcInst.outputNames[srcId]
-    const dstInName  = dstInst.inputNames[dstId]
-    session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
-  }
-
-  for (const ie of json.input_exprs ?? []) {
-    const inst = session.instanceRegistry.get(ie.module)
-    if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
-    validateExpr(ie.expr, `${ie.module}.${ie.input}`)
-    session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
-  }
-
-  // Ensure module input defaults are included in the plan
-  for (const [name, inst] of session.instanceRegistry) {
-    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
-    for (const [inputName, value] of Object.entries(defaults)) {
-      const key = `${name}:${inputName}`
-      if (!session.inputExprNodes.has(key)) {
-        session.inputExprNodes.set(key, value)
-      }
-    }
-  }
-
-  for (const out of json.outputs ?? []) {
-    if ('expr' in out) {
-      throw new Error('Output expressions not supported in plan-based path. Use module output refs instead.')
-    }
-    const inst = session.instanceRegistry.get(out.module)
-    if (!inst) throw new Error(`Output module '${out.module}' not found.`)
-    session.graphOutputs.push({ module: out.module, output: String(out.output) })
-  }
-
-  // Apply wiring via FlatRuntime
-  applyFlatPlan(session, session.runtime)
-}
-
-// ─────────────────────────────────────────────────────────────
-// Patch saver
-// ─────────────────────────────────────────────────────────────
-
-export function savePatchToJSON(session: SessionState): PatchJSON {
-  const modules: PatchJSON['modules'] = []
-  for (const [name, inst] of session.instanceRegistry) {
-    modules.push({ type: inst.typeName, name })
-  }
-
-  const params: NonNullable<PatchJSON['params']> = []
-  for (const [name, p] of session.paramRegistry) {
-    params.push({ name, value: p.value, time_const: 0.005 })
-  }
-  for (const [name] of session.triggerRegistry) {
-    params.push({ name, type: 'trigger' })
-  }
-
-  const outputs: NonNullable<PatchJSON['outputs']> = session.graphOutputs.map(o => ({
-    module: o.module, output: o.output,
-  }))
-
-  const inputExprs: NonNullable<PatchJSON['input_exprs']> = []
-  for (const [key, node] of session.inputExprNodes) {
-    const [module, input] = key.split(':')
-    inputExprs.push({ module, input, expr: node })
-  }
-
-  const patch: PatchJSON = {
-    schema: 'tropical_patch_1',
-    modules,
-  }
-  if (params.length)      patch.params      = params
-  if (outputs.length)     patch.outputs     = outputs
-  if (inputExprs.length)  patch.input_exprs = inputExprs
-
-  return patch
-}

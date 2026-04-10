@@ -19,7 +19,6 @@ import {
 import { portTypeFromString } from './compiler'
 import { Float, Int, Bool, product } from './term'
 import type { ExprNode } from './patch'
-import type { PatchJSON } from './patch'
 
 // ─────────────────────────────────────────────────────────────
 // Helpers

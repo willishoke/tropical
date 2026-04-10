@@ -90,7 +90,7 @@ Supporting modules:
 
 ### 3.1 ProgramDef — the Compiler IR
 
-`ProgramDef` is the compiler's internal representation of a program — slot-indexed ExprNode trees ready for the flattener's register allocation. It is built from `ProgramJSON` (name-based) by `loadModuleFromJSON()` in `compiler/patch.ts`, which converts names to integer slot IDs via `slottifyExpr()` — a pure tree walk with no side effects.
+`ProgramDef` is the compiler's internal representation of a program — slot-indexed ExprNode trees ready for the flattener's register allocation. It is built from `ProgramJSON` (name-based) by `loadProgramDef()` in `compiler/patch.ts`, which converts names to integer slot IDs via `slottifyExpr()` — a pure tree walk with no side effects.
 
 ```typescript
 interface ProgramDef {
@@ -157,9 +157,9 @@ Complex modules use inline `programs` for subprogram composition (e.g., VCO defi
 - `params: Map<string, Param>` / `triggers: Map<string, Trigger>` — named control parameters
 - `runtime: Runtime` — the FlatRuntime wrapper
 
-Programs are loaded via `loadJSON()` which accepts both `tropical_program_1` and `tropical_patch_1`. Saved as `tropical_program_1` via `saveProgramFromSession()`.
+Programs are loaded via `loadJSON()` which accepts `tropical_program_1`. Saved as `tropical_program_1` via `saveProgramFromSession()`.
 
-`ProgramJSON` (`compiler/program.ts`) is the unified schema. Conversion functions bridge to/from the legacy `PatchJSON` format for backward compatibility.
+`ProgramJSON` (`compiler/program.ts`) is the sole schema. No legacy formats remain.
 
 ### 4.2 Compiler (`compiler/compiler.ts`)
 
