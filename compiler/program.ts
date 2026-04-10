@@ -11,7 +11,9 @@ import type { ExprNode } from './expr.js'
 import type {
   ModuleDefJSON, PatchJSON, TypeDefJSON, SessionState, NestedModuleJSON,
 } from './patch.js'
+import { loadModuleFromJSON } from './patch.js'
 import type { ValueCoercible, RegInit } from './module.js'
+import { ModuleType } from './module.js'
 
 // ─────────────────────────────────────────────────────────────
 // ProgramJSON schema
@@ -251,6 +253,27 @@ export function loadProgramAsSession(
 ): void {
   const patch = convertProgramToPatch(prog)
   loadPatch(patch, session)
+}
+
+/**
+ * Load a leaf ProgramJSON as a ModuleType (registerable in typeRegistry).
+ * Converts to ModuleDefJSON and delegates to loadModuleFromJSON.
+ * Programs with inline `programs` get their subprograms registered first.
+ */
+export function loadProgramAsType(
+  prog: ProgramJSON,
+  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
+): ModuleType {
+  // Register inline subprograms first
+  if (prog.programs) {
+    for (const [name, subProg] of Object.entries(prog.programs)) {
+      const subType = loadProgramAsType({ ...subProg, name }, session)
+      session.typeRegistry.set(name, subType)
+    }
+  }
+
+  const def = convertProgramToModuleDef(prog)
+  return loadModuleFromJSON(def, session)
 }
 
 // ─────────────────────────────────────────────────────────────

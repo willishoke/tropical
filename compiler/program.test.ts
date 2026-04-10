@@ -3,14 +3,20 @@
  */
 
 import { describe, test, expect } from 'bun:test'
+import { readFileSync } from 'fs'
+import { join } from 'path'
 import {
   convertPatchToProgram,
   convertModuleDefToProgram,
   convertProgramToPatch,
+  loadProgramAsType,
   type ProgramJSON,
 } from './program'
-import type { PatchJSON, ModuleDefJSON } from './patch'
+import type { PatchJSON, ModuleDefJSON, SessionState } from './patch'
+import { makeSession } from './patch'
 import { parseProgram } from './schema'
+import { loadBuiltins, vca } from './module_library'
+import { flattenPatch } from './flatten'
 
 // ─────────────────────────────────────────────────────────────
 // Conversion: PatchJSON → ProgramJSON
@@ -255,5 +261,47 @@ describe('parseProgram', () => {
 
   test('rejects missing name', () => {
     expect(() => parseProgram({ schema: 'tropical_program_1' })).toThrow('Invalid program')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// stdlib: ProgramJSON produces identical plans to TypeScript defs
+// ─────────────────────────────────────────────────────────────
+
+describe('loadProgramAsType', () => {
+  function makePlan(session: SessionState) {
+    return flattenPatch(session)
+  }
+
+  test('VCA.json produces identical plan to TypeScript VCA', () => {
+    // TypeScript-defined VCA
+    const tsSession = makeSession()
+    loadBuiltins(tsSession.typeRegistry)
+    const tsVca = tsSession.typeRegistry.get('VCA')!
+    tsVca.instantiateAs('VCA1').name // instantiate
+    tsSession.instanceRegistry.set('VCA1', tsVca.instantiateAs('VCA1'))
+    tsSession.inputExprNodes.set('VCA1:audio', 1.0)
+    tsSession.inputExprNodes.set('VCA1:cv', 0.5)
+    tsSession.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    const tsPlan = makePlan(tsSession)
+
+    // JSON-defined VCA
+    const jsonSession = makeSession()
+    loadBuiltins(jsonSession.typeRegistry) // load other builtins in case of deps
+    const vcaJson = JSON.parse(
+      readFileSync(join(__dirname, '../stdlib/VCA.json'), 'utf-8')
+    ) as ProgramJSON
+    const jsonVca = loadProgramAsType(vcaJson, jsonSession)
+    jsonSession.typeRegistry.set('VCA_JSON', jsonVca)
+    jsonSession.instanceRegistry.set('VCA1', jsonVca.instantiateAs('VCA1'))
+    jsonSession.inputExprNodes.set('VCA1:audio', 1.0)
+    jsonSession.inputExprNodes.set('VCA1:cv', 0.5)
+    jsonSession.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    const jsonPlan = makePlan(jsonSession)
+
+    // Compare the plans — instructions should be identical
+    expect(jsonPlan.instructions).toEqual(tsPlan.instructions)
+    expect(jsonPlan.register_count).toEqual(tsPlan.register_count)
+    expect(jsonPlan.output_targets).toEqual(tsPlan.output_targets)
   })
 })

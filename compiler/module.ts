@@ -160,7 +160,7 @@ export function feedback(
 
 // ---------- Definition shape ----------
 
-interface ModuleDef {
+export interface ModuleDef {
   typeName: string
   inputNames: string[]
   outputNames: string[]
