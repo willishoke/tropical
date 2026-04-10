@@ -268,40 +268,109 @@ describe('parseProgram', () => {
 // stdlib: ProgramJSON produces identical plans to TypeScript defs
 // ─────────────────────────────────────────────────────────────
 
-describe('loadProgramAsType', () => {
-  function makePlan(session: SessionState) {
-    return flattenPatch(session)
-  }
-
-  test('VCA.json produces identical plan to TypeScript VCA', () => {
-    // TypeScript-defined VCA
+describe('loadProgramAsType — stdlib equivalence', () => {
+  /**
+   * Load a stdlib JSON file as a ModuleType, verify it loads and flattens
+   * without error, and has the same structure (register count, output count,
+   * state init) as the TypeScript version.
+   *
+   * Instruction-level identity isn't guaranteed because JSON-parsed trees
+   * lack object-identity sharing across outputs/registers (TypeScript
+   * shares via local variables). The plans are semantically equivalent
+   * but may differ in instruction count due to redundant sub-expressions.
+   */
+  function compareStdlib(
+    typeName: string,
+    jsonFile: string,
+    wiring: Record<string, number | boolean>,
+    outputName: string,
+  ) {
+    // TypeScript-defined version
     const tsSession = makeSession()
     loadBuiltins(tsSession.typeRegistry)
-    const tsVca = tsSession.typeRegistry.get('VCA')!
-    tsVca.instantiateAs('VCA1').name // instantiate
-    tsSession.instanceRegistry.set('VCA1', tsVca.instantiateAs('VCA1'))
-    tsSession.inputExprNodes.set('VCA1:audio', 1.0)
-    tsSession.inputExprNodes.set('VCA1:cv', 0.5)
-    tsSession.graphOutputs.push({ module: 'VCA1', output: 'out' })
-    const tsPlan = makePlan(tsSession)
+    const tsType = tsSession.typeRegistry.get(typeName)!
+    tsSession.instanceRegistry.set('inst', tsType.instantiateAs('inst'))
+    for (const [k, v] of Object.entries(wiring)) {
+      tsSession.inputExprNodes.set(`inst:${k}`, v)
+    }
+    tsSession.graphOutputs.push({ module: 'inst', output: outputName })
+    const tsPlan = flattenPatch(tsSession)
 
-    // JSON-defined VCA
+    // JSON-defined version
     const jsonSession = makeSession()
-    loadBuiltins(jsonSession.typeRegistry) // load other builtins in case of deps
-    const vcaJson = JSON.parse(
-      readFileSync(join(__dirname, '../stdlib/VCA.json'), 'utf-8')
+    loadBuiltins(jsonSession.typeRegistry)
+    const prog = JSON.parse(
+      readFileSync(join(__dirname, `../stdlib/${jsonFile}`), 'utf-8')
     ) as ProgramJSON
-    const jsonVca = loadProgramAsType(vcaJson, jsonSession)
-    jsonSession.typeRegistry.set('VCA_JSON', jsonVca)
-    jsonSession.instanceRegistry.set('VCA1', jsonVca.instantiateAs('VCA1'))
-    jsonSession.inputExprNodes.set('VCA1:audio', 1.0)
-    jsonSession.inputExprNodes.set('VCA1:cv', 0.5)
-    jsonSession.graphOutputs.push({ module: 'VCA1', output: 'out' })
-    const jsonPlan = makePlan(jsonSession)
+    const jsonType = loadProgramAsType(prog, jsonSession)
+    jsonSession.typeRegistry.set(typeName, jsonType) // override the TS version
+    jsonSession.instanceRegistry.set('inst', jsonType.instantiateAs('inst'))
+    for (const [k, v] of Object.entries(wiring)) {
+      jsonSession.inputExprNodes.set(`inst:${k}`, v)
+    }
+    jsonSession.graphOutputs.push({ module: 'inst', output: outputName })
+    const jsonPlan = flattenPatch(jsonSession)
 
-    // Compare the plans — instructions should be identical
+    // Structural equivalence: same ports, same state shape
+    expect(jsonType._def.inputNames).toEqual(tsType._def.inputNames)
+    expect(jsonType._def.outputNames).toEqual(tsType._def.outputNames)
+    expect(jsonType._def.registerNames).toEqual(tsType._def.registerNames)
+    expect(jsonType._def.registerInitValues).toEqual(tsType._def.registerInitValues)
+    expect(jsonType._def.delayInitValues).toEqual(tsType._def.delayInitValues)
+
+    // Plan compiles and has correct output count
+    expect(jsonPlan.output_targets.length).toBe(tsPlan.output_targets.length)
+    expect(jsonPlan.schema).toBe('tropical_plan_4')
+
+    // For modules without cross-output sharing, instructions should match exactly
+    // (VCA, Clock have no shared sub-expressions across outputs/registers)
+  }
+
+  /** Strict comparison: plans must be instruction-identical. */
+  function compareStdlibStrict(
+    typeName: string,
+    jsonFile: string,
+    wiring: Record<string, number | boolean>,
+    outputName: string,
+  ) {
+    const tsSession = makeSession()
+    loadBuiltins(tsSession.typeRegistry)
+    const tsType = tsSession.typeRegistry.get(typeName)!
+    tsSession.instanceRegistry.set('inst', tsType.instantiateAs('inst'))
+    for (const [k, v] of Object.entries(wiring)) {
+      tsSession.inputExprNodes.set(`inst:${k}`, v)
+    }
+    tsSession.graphOutputs.push({ module: 'inst', output: outputName })
+    const tsPlan = flattenPatch(tsSession)
+
+    const jsonSession = makeSession()
+    loadBuiltins(jsonSession.typeRegistry)
+    const prog = JSON.parse(
+      readFileSync(join(__dirname, `../stdlib/${jsonFile}`), 'utf-8')
+    ) as ProgramJSON
+    const jsonType = loadProgramAsType(prog, jsonSession)
+    jsonSession.typeRegistry.set(typeName, jsonType)
+    jsonSession.instanceRegistry.set('inst', jsonType.instantiateAs('inst'))
+    for (const [k, v] of Object.entries(wiring)) {
+      jsonSession.inputExprNodes.set(`inst:${k}`, v)
+    }
+    jsonSession.graphOutputs.push({ module: 'inst', output: outputName })
+    const jsonPlan = flattenPatch(jsonSession)
+
     expect(jsonPlan.instructions).toEqual(tsPlan.instructions)
     expect(jsonPlan.register_count).toEqual(tsPlan.register_count)
     expect(jsonPlan.output_targets).toEqual(tsPlan.output_targets)
+  }
+
+  test('VCA.json matches TypeScript VCA (strict)', () => {
+    compareStdlibStrict('VCA', 'VCA.json', { audio: 1.0, cv: 0.5 }, 'out')
+  })
+
+  test('Clock.json matches TypeScript Clock (strict)', () => {
+    compareStdlibStrict('Clock', 'Clock.json', { freq: 2.0 }, 'output')
+  })
+
+  test('BitCrusher.json matches TypeScript BitCrusher', () => {
+    compareStdlib('BitCrusher', 'BitCrusher.json', { audio: 0.5, bit_depth: 8.0, sample_rate_hz: 22050.0 }, 'output')
   })
 })

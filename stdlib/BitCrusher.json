@@ -1,0 +1,95 @@
+{
+  "schema": "tropical_program_1",
+  "name": "BitCrusher",
+  "inputs": ["audio", "bit_depth", "sample_rate_hz"],
+  "outputs": ["output"],
+  "regs": {
+    "hold_sample": 0.0,
+    "hold_counter": 0.0
+  },
+  "input_defaults": {
+    "audio": 0.0,
+    "bit_depth": 24.0,
+    "sample_rate_hz": 44100.0
+  },
+  "process": {
+    "outputs": {
+      "output": { "op": "select", "args": [
+        { "op": "gte", "args": [
+          { "op": "add", "args": [{ "op": "reg", "name": "hold_counter" }, 1.0] },
+          { "op": "clamp", "args": [
+            { "op": "floor_div", "args": [
+              { "op": "sample_rate" },
+              { "op": "clamp", "args": [{ "op": "input", "name": "sample_rate_hz" }, 1.0, { "op": "sample_rate" }] }
+            ]},
+            1.0, 44100.0
+          ]}
+        ]},
+        { "op": "div", "args": [
+          { "op": "floor_div", "args": [
+            { "op": "add", "args": [
+              { "op": "mul", "args": [
+                { "op": "input", "name": "audio" },
+                { "op": "pow", "args": [2.0, { "op": "sub", "args": [
+                  { "op": "clamp", "args": [{ "op": "input", "name": "bit_depth" }, 1.0, 24.0] }, 1.0
+                ]}] }
+              ]},
+              0.5
+            ]},
+            1.0
+          ]},
+          { "op": "pow", "args": [2.0, { "op": "sub", "args": [
+            { "op": "clamp", "args": [{ "op": "input", "name": "bit_depth" }, 1.0, 24.0] }, 1.0
+          ]}] }
+        ]},
+        { "op": "reg", "name": "hold_sample" }
+      ]}
+    },
+    "next_regs": {
+      "hold_sample": { "op": "select", "args": [
+        { "op": "gte", "args": [
+          { "op": "add", "args": [{ "op": "reg", "name": "hold_counter" }, 1.0] },
+          { "op": "clamp", "args": [
+            { "op": "floor_div", "args": [
+              { "op": "sample_rate" },
+              { "op": "clamp", "args": [{ "op": "input", "name": "sample_rate_hz" }, 1.0, { "op": "sample_rate" }] }
+            ]},
+            1.0, 44100.0
+          ]}
+        ]},
+        { "op": "div", "args": [
+          { "op": "floor_div", "args": [
+            { "op": "add", "args": [
+              { "op": "mul", "args": [
+                { "op": "input", "name": "audio" },
+                { "op": "pow", "args": [2.0, { "op": "sub", "args": [
+                  { "op": "clamp", "args": [{ "op": "input", "name": "bit_depth" }, 1.0, 24.0] }, 1.0
+                ]}] }
+              ]},
+              0.5
+            ]},
+            1.0
+          ]},
+          { "op": "pow", "args": [2.0, { "op": "sub", "args": [
+            { "op": "clamp", "args": [{ "op": "input", "name": "bit_depth" }, 1.0, 24.0] }, 1.0
+          ]}] }
+        ]},
+        { "op": "reg", "name": "hold_sample" }
+      ]},
+      "hold_counter": { "op": "select", "args": [
+        { "op": "gte", "args": [
+          { "op": "add", "args": [{ "op": "reg", "name": "hold_counter" }, 1.0] },
+          { "op": "clamp", "args": [
+            { "op": "floor_div", "args": [
+              { "op": "sample_rate" },
+              { "op": "clamp", "args": [{ "op": "input", "name": "sample_rate_hz" }, 1.0, { "op": "sample_rate" }] }
+            ]},
+            1.0, 44100.0
+          ]}
+        ]},
+        0.0,
+        { "op": "add", "args": [{ "op": "reg", "name": "hold_counter" }, 1.0] }
+      ]}
+    }
+  }
+}
