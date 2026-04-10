@@ -27,6 +27,7 @@ import { DAC }                 from '../compiler/runtime/audio.js'
 import { Param, Trigger }      from '../compiler/runtime/param.js'
 import { applyFlatPlan }  from '../compiler/apply_plan.js'
 import { checkArrayConnection } from '../compiler/array_wiring.js'
+import { validateExpr }         from '../compiler/expr.js'
 import { exprDependencies }     from '../compiler/compiler.js'
 
 // ─── Session ──────────────────────────────────────────────────────────────────
@@ -566,6 +567,7 @@ function handleWire(args: Record<string, unknown>) {
       const inputId = typeof raw === 'number' ? raw
         : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
+      validateExpr(s.expr, `${s.instance}.${resolvedName}`)
       const { expr } = adaptInputExpr(s.expr, inst.inputPortType(inputId), s.instance, resolvedName)
       session.inputExprNodes.set(`${s.instance}:${resolvedName}`, expr)
       results.push({ instance: s.instance, input: resolvedName, expr })
@@ -835,6 +837,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const inputId = typeof rawInput === 'number' ? rawInput
         : (rawInput.match(/^\d+$/) ? parseInt(rawInput, 10) : inst.inputIndex(rawInput))
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
+      validateExpr(args.expr as ExprNode, `${instanceName}.${resolvedName}`)
       const { expr: node, resultShape } = adaptInputExpr(args.expr as ExprNode, inst.inputPortType(inputId), instanceName, resolvedName)
       session.inputExprNodes.set(`${instanceName}:${resolvedName}`, node)
       return { module: instanceName, input: resolvedName, expr: node,
@@ -854,6 +857,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         const inputId = typeof raw === 'number' ? raw
           : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
         const resolvedName = inst.inputNames[inputId] ?? String(inputId)
+        validateExpr(u.expr, `${u.instance_name}.${resolvedName}`)
         const { expr } = adaptInputExpr(u.expr, inst.inputPortType(inputId), u.instance_name, resolvedName)
         session.inputExprNodes.set(`${u.instance_name}:${resolvedName}`, expr)
         results.push({ module: u.instance_name, input: resolvedName, expr })

@@ -21,7 +21,7 @@ import { loadProgramAsSession, type ProgramJSON } from './program.js'
 
 // ExprNode is defined in expr.ts and re-exported here for backward compatibility.
 export type { ExprNode } from './expr.js'
-import type { ExprNode } from './expr.js'
+import { validateExpr, type ExprNode } from './expr.js'
 
 
 export interface NestedModuleJSON {
@@ -557,6 +557,7 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
   for (const ie of json.input_exprs ?? []) {
     const inst = session.instanceRegistry.get(ie.module)
     if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
+    validateExpr(ie.expr, `${ie.module}.${ie.input}`)
     session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
   }
 
@@ -639,6 +640,7 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
   for (const ie of json.input_exprs ?? []) {
     const inst = session.instanceRegistry.get(ie.module)
     if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
+    validateExpr(ie.expr, `${ie.module}.${ie.input}`)
     session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
   }
 
