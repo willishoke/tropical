@@ -373,4 +373,12 @@ describe('loadProgramAsType — stdlib equivalence', () => {
   test('BitCrusher.json matches TypeScript BitCrusher', () => {
     compareStdlib('BitCrusher', 'BitCrusher.json', { audio: 0.5, bit_depth: 8.0, sample_rate_hz: 22050.0 }, 'output')
   })
+
+  test('NoiseLFSR.json matches TypeScript NoiseLFSR', () => {
+    compareStdlib('NoiseLFSR', 'NoiseLFSR.json', { clock: 1.0 }, 'out')
+  })
+
+  test('Delay8.json matches TypeScript Delay8 (strict)', () => {
+    compareStdlibStrict('Delay8', 'Delay8.json', { x: 1.0 }, 'y')
+  })
 })
