@@ -743,14 +743,10 @@ export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void 
 
   // Ensure module input defaults are included in the plan
   for (const [name, inst] of session.instanceRegistry) {
-    const defaults = inst._def.rawInputDefaults as Record<string, unknown>
-    for (const [inputName, rawValue] of Object.entries(defaults)) {
+    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
+    for (const [inputName, value] of Object.entries(defaults)) {
       const key = `${name}:${inputName}`
       if (!session.inputExprNodes.has(key)) {
-        // Unwrap SignalExpr to its underlying ExprNode if needed
-        const value = (rawValue && typeof rawValue === 'object' && '_node' in rawValue)
-          ? (rawValue as { _node: ExprNode })._node
-          : rawValue as ExprNode
         session.inputExprNodes.set(key, value)
       }
     }
@@ -829,14 +825,10 @@ export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void
 
   // Ensure module input defaults are included in the plan
   for (const [name, inst] of session.instanceRegistry) {
-    const defaults = inst._def.rawInputDefaults as Record<string, unknown>
-    for (const [inputName, rawValue] of Object.entries(defaults)) {
+    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
+    for (const [inputName, value] of Object.entries(defaults)) {
       const key = `${name}:${inputName}`
       if (!session.inputExprNodes.has(key)) {
-        // Unwrap SignalExpr to its underlying ExprNode if needed
-        const value = (rawValue && typeof rawValue === 'object' && '_node' in rawValue)
-          ? (rawValue as { _node: ExprNode })._node
-          : rawValue as ExprNode
         session.inputExprNodes.set(key, value)
       }
     }

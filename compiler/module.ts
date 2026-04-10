@@ -391,7 +391,11 @@ export function defineModule(
     registerPortTypes: regPortTypes,
     registerInitValues: regInitValues,
     sampleRate,
-    rawInputDefaults: inputDefaults ?? {},
+    rawInputDefaults: Object.fromEntries(
+      Object.entries(inputDefaults ?? {}).map(([k, v]) =>
+        [k, v && typeof v === 'object' && '_node' in v ? (v as SignalExpr)._node : v]
+      ),
+    ),
     inputDefaults: parsedDefaults,
     delayInitValues: ctx.delayStates.map(d => d.initVal),
     outputExprNodes: outputExprs.map(e => e._node),
