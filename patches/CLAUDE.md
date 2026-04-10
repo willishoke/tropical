@@ -1,43 +1,40 @@
 # patches/
 
-Example patches in JSON format. Load via `make mcp-ts` → `load` tool (also accepts the deprecated `load_patch`), or from the TUI.
+Example patches in `tropical_program_1` JSON format. Load via `make mcp-ts` → `load` tool, or from the TUI.
 
-Both `tropical_program_1` and `tropical_patch_1` formats are accepted. Existing patches use the legacy `tropical_patch_1` schema.
-
-## Schema: `tropical_patch_1`
+## Schema: `tropical_program_1`
 
 ```json
 {
-  "schema": "tropical_patch_1",
-  "modules": [
-    {"type": "VCO", "name": "VCO1"}
-  ],
-  "outputs": [
-    {"module": "VCO1", "output": "sin"}
-  ],
-  "input_exprs": [
-    {"module": "VCO1", "input": "freq", "expr": 440}
+  "schema": "tropical_program_1",
+  "name": "MyPatch",
+  "instances": {
+    "VCO1": { "program": "VCO", "inputs": { "freq": 440 } }
+  },
+  "audio_outputs": [
+    { "instance": "VCO1", "output": "sin" }
   ]
 }
 ```
 
 ### Fields
 
-- **modules** — list of `{type, name}`. Type must match a registered module type (PascalCase: `VCO`, `Clock`, `ADEnvelope`, `VCA`, etc.). Name is a unique instance identifier.
-- **outputs** — list of `{module, output}` specifying which module outputs are mixed to the audio output buffer.
-- **input_exprs** — list of `{module, input, expr}` setting module input expressions.
+- **instances** — map of `name → { program, inputs }`. Program must match a registered type (PascalCase: `VCO`, `Clock`, `ADEnvelope`, `VCA`, etc.).
+- **audio_outputs** — list of `{ instance, output }` specifying which outputs are mixed to the audio output buffer.
+- **programs** — (optional) inline subprogram definitions, used before they appear in `instances`.
+- **params** — (optional) named control parameters with initial values and smoothing time constants.
 
 ### Expression format
 
-Expressions can be:
+Input expressions can be:
 - **Literal number** — `440`, `0.5`
-- **Module output reference** — `{"op": "ref", "module": "VCO1", "output": "sin"}`
+- **Instance output reference** — `{"op": "ref", "module": "VCO1", "output": "sin"}`
 - **Binary operation** — `{"op": "mul", "args": [<expr>, <expr>]}`
 - **Unary operation** — `{"op": "neg", "args": [<expr>]}`
 
 Available ops: `add`, `sub`, `mul`, `div`, `mod`, `pow`, `neg`, `abs`, `sin`, `log`, `lt`, `lte`, `gt`, `gte`, `clamp`, `array_pack`, `matmul`.
 
-### Common module types and their I/O
+### Common program types and their I/O
 
 | Type | Inputs | Outputs |
 |------|--------|---------|

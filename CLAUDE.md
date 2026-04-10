@@ -27,7 +27,7 @@ C++ tests (`engine/tests/test_module_process.cpp`) exercise the C API and JIT wi
 Three layers, one stable boundary:
 
 ```
-compiler/             TS: expression DSL, module library, combinators,
+compiler/             TS: expression system, JSON stdlib loading, combinators,
                       flattening, instruction emission, type system, term IR
   compiler/runtime/   FFI bridge to C++ (koffi bindings, Runtime, DAC, Param)
 engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio output
@@ -37,14 +37,15 @@ engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio o
   engine/dac/         Audio output (RtAudio)
   engine/expr/        C++ expression AST, rewriting, evaluation
 mcp/                  MCP server — primary agent interface over stdio
-patches/              Example patches (tropical_patch_1 / tropical_program_1 JSON)
+patches/              Example patches (tropical_program_1 JSON)
+stdlib/               Built-in program types as ProgramJSON files (19 types)
 ```
 
 ### Data flow
 
 ```
 Program (JSON / MCP tools)
-  → Module instantiation (TS-only, no C++ calls)
+  → ProgramJSON loading + type registration (TS-only, no C++ calls)
   → Expression tree construction (ExprNode)
   → Flattening (inline all modules → single expression set)
   → Combinator expansion (unroll generate/fold/chain/etc.)
@@ -75,9 +76,11 @@ The TypeScript layer handles everything from module definition through instructi
 
 **Expression system** (`expr.ts`) — `ExprNode` is the universal IR: a recursive JSON union type (number, boolean, array, or `{op, ...}` object). `SignalExpr` wraps it with static shape tracking. All module I/O is defined as expression trees. Includes compile-time combinator constructors (`generate`, `fold`, `chain`, `map2`, etc.) for iteration and abstraction without manual unrolling.
 
-**Program schema** (`program.ts`) — `ProgramJSON` (`tropical_program_1`) is the unified representation. A program with `process` = leaf, with `instances` + `audio_outputs` = graph, with `instances` + `inputs` + `outputs` = reusable composite. Conversion functions bridge to/from legacy `PatchJSON`.
+**Program schema** (`program.ts`) — `ProgramJSON` (`tropical_program_1`) is the unified representation. A program with `process` = leaf, with `instances` + `audio_outputs` = graph, with `instances` + `inputs` + `outputs` = reusable composite. `loadStdlib()` loads `stdlib/*.json` into the type registry.
 
-**Module DSL** (`module.ts`, `module_library.ts`) — `defineModule()` builds expression trees symbolically. 14 built-in types (VCO, Clock, ADEnvelope, Reverb, LadderFilter, etc.) plus private sub-modules for antialiasing (polyBLEP/polyBLAMP). Modules are TS-only — no C API calls for instantiation.
+**Program types** (`module.ts`) — Pure data types: `ProgramDef` (slot-indexed IR for the flattener), `ModuleType`, `ModuleInstance`. No DSL — types are built from ProgramJSON by `loadModuleFromJSON()` in `patch.ts`.
+
+**Standard library** (`stdlib/*.json`) — 19 built-in program types as ProgramJSON files (VCO, Clock, ADEnvelope, Reverb, LadderFilter, etc.). Loaded by `loadStdlib()` in `program.ts`.
 
 **Flattening** (`flatten.ts`) — The critical step. Inlines all module expressions, resolves inter-module references, expands nested calls, converts delays to register ops. Output is a `tropical_plan_4` JSON. Uses WeakMap memoization for DAG sharing.
 

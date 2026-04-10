@@ -14,7 +14,7 @@ The system has three layers:
 
 | Layer | Language | Directory | Role |
 |-------|----------|-----------|------|
-| **Compiler** | TypeScript | `compiler/` | DSL, module library, expression trees, combinators, flattening, instruction emission, type system |
+| **Compiler** | TypeScript | `compiler/` | Expression trees, JSON stdlib, combinators, flattening, instruction emission, type system |
 | **Engine** | C++20 | `engine/` | Plan parsing, JIT compilation (LLVM ORC), per-sample kernel execution, audio output |
 | **MCP Server** | TypeScript | `mcp/` | AI-native interface: tool-based program manipulation over stdio, backed by the compiler and engine |
 
@@ -23,8 +23,8 @@ The **C API** (`engine/c_api/tropical_c.h`) is the stable boundary between the T
 ### Data flow (high level)
 
 ```
-Program definition (JSON / MCP tools / DSL)
-    → Module instantiation (TS-only, no C++ calls)
+Program definition (JSON / MCP tools)
+    → ProgramJSON loading + type registration (TS-only, no C++ calls)
     → Expression tree construction (ExprNode JSON trees)
     → Flattening (inline all modules into one expression set)
     → Combinator expansion (unroll generate/fold/chain/etc. to scalar trees)
@@ -86,59 +86,61 @@ Supporting modules:
 
 ---
 
-## 3. Module System (`compiler/module.ts`, `compiler/module_library.ts`)
+## 3. Program System (`compiler/module.ts`, `stdlib/*.json`)
 
-### 3.1 Module Definition DSL
+### 3.1 ProgramDef — the Compiler IR
 
-Modules are defined entirely in TypeScript using `defineModule()`:
+`ProgramDef` is the compiler's internal representation of a program — slot-indexed ExprNode trees ready for the flattener's register allocation. It is built from `ProgramJSON` (name-based) by `loadModuleFromJSON()` in `compiler/patch.ts`, which converts names to integer slot IDs via `slottifyExpr()` — a pure tree walk with no side effects.
 
 ```typescript
-defineModule(
-  name: string,
-  inputs: PortSpec[],
-  outputs: PortSpec[],
-  regs: Record<string, RegInit>,
-  process: (inputs: SymbolMap, regs: SymbolMap) => ProcessResult,
-  sampleRate?: number,
-  inputDefaults?: Record<string, ExprCoercible>,
-)
+interface ProgramDef {
+  typeName: string
+  inputNames: string[]
+  outputNames: string[]
+  registerNames: string[]
+  registerInitValues: ValueCoercible[]
+  delayInitValues: number[]
+  outputExprNodes: ExprNode[]        // slot-indexed
+  registerExprNodes: (ExprNode | null)[]
+  delayUpdateNodes: ExprNode[]
+  nestedCalls: NestedCall[]          // inline subprogram calls
+  inputDefaults: (SignalExpr | null)[]
+  rawInputDefaults: Record<string, ExprCoercible>
+  // ... port type metadata
+}
 ```
 
-The `process` function builds expression trees symbolically — it does not compute values. It reads inputs and registers via `SymbolMap.get()` (which returns `inputExpr(slotId)` / `registerExpr(slotId)` nodes) and returns `{ outputs, nextRegs }` maps of expression trees.
-
-Key DSL features:
-- **`delay(value, init)`** — One-sample delay. Allocates a delay node, captures the update expression, and returns a `delayValueExpr` leaf.
-- **`feedback(f, init)`** — Helper that bundles a register init value with its update morphism.
-- **`ModuleType.call(...args)`** — Nested module invocation. Used inside `defineModule` bodies to compose modules. Creates `nestedOutputExpr` references that are resolved during flattening.
-- **`definePureFunction(inputs, outputs, process)`** — Stateless module shorthand. Wraps a `defineModule` with no registers.
+There is no build context, no side effects, no DSL. The conversion from ProgramJSON to ProgramDef is a pure function.
 
 ### 3.2 ModuleType and ModuleInstance
 
-- **`ModuleType`** holds the compiled `ModuleDef` (expression trees, port metadata, nested call info). It is a *type*, not an instance.
-- **`ModuleInstance`** is a named instance of a type, carrying a reference to its `ModuleDef` plus an instance name. Instances are TS-only — no C API calls.
+- **`ModuleType`** holds a `ProgramDef`. It is a *type*, not an instance. Registered in `SessionState.typeRegistry`.
+- **`ModuleInstance`** is a named instance of a type, carrying a reference to its `ProgramDef` plus an instance name. Instances are TS-only — no C API calls.
 
-### 3.3 Built-in Module Library
+### 3.3 Standard Library (`stdlib/*.json`)
 
-`compiler/module_library.ts` defines all built-in module types:
+All built-in program types are defined as `ProgramJSON` files in `stdlib/`. They are loaded by `loadStdlib()` in `compiler/program.ts`, which reads each JSON file, validates it, and registers a `ModuleType`.
 
-| Type | Description | Inputs | Outputs | Registers |
-|------|-------------|--------|---------|-----------|
-| **VCO** | Band-limited oscillator (polyBLEP antialiasing) | freq, fm, fm_index | saw, tri, sin, sqr | phase, tri_state |
-| **Clock** | Clock generator with ratio array | freq, ratios_in | output, ratios_out | (stateless via sampleIndex) |
-| **ADEnvelope** | Attack-decay envelope (polyBLAMP) | gate, attack, decay | env | stage, phase, startLevel |
-| **ADSREnvelope** | Full ADSR envelope (polyBLAMP) | gate, attack, decay, sustain, release | env | stage, phase, release_level |
-| **VCA** | Voltage-controlled amplifier | audio, cv | out | (stateless) |
-| **Reverb** | Freeverb-style (4 comb + 6 allpass) | input, mix, decay, damp | output | (nested module state) |
-| **Phaser** / **Phaser16** | 4 / 16 stage allpass phaser | input, feedback, lfo_speed | output, lfo | fb |
-| **Compressor** | Dynamic range compressor | input, sidechain, threshold, ratio, attack_ms, release_ms, makeup | output, gr | env, gr |
-| **BassDrum** | Synthesized kick drum | gate, freq, punch, decay | output | stage, phase |
-| **LadderFilter** | 4-pole Moog-style filter | input, cutoff, resonance | output | s1, s2, s3, s4 |
-| **BitCrusher** | Bit depth and sample rate reduction | input, bits, downsample | output | hold, counter |
-| **NoiseLFSR** | Linear feedback shift register noise | gate, rate | output | lfsr, counter |
-| **TopoWaveguide** | 2D waveguide mesh (default 4x4) | strike, damp, tension | output | (matrix state via registers) |
-| **Delay8/16/512/4410/44100** | Fixed-length delay lines | x | y | buf (array register) |
+19 built-in types:
 
-Private sub-modules used internally: `_wrap01`, `_polyBlep`, `_polyBlamp`, `_allpassStage`, `_defineCombFilter`.
+| Type | Description | File |
+|------|-------------|------|
+| **VCO** | Band-limited oscillator (polyBLEP antialiasing) | `VCO.json` |
+| **Clock** | Clock generator with ratio array | `Clock.json` |
+| **ADEnvelope** | Attack-decay envelope (polyBLAMP) | `ADEnvelope.json` |
+| **ADSREnvelope** | Full ADSR envelope (polyBLAMP) | `ADSREnvelope.json` |
+| **VCA** | Voltage-controlled amplifier | `VCA.json` |
+| **Reverb** | Freeverb-style (4 comb + 6 allpass) | `Reverb.json` |
+| **Phaser** / **Phaser16** | 4/16 stage allpass phaser | `Phaser.json`, `Phaser16.json` |
+| **Compressor** | Dynamic range compressor | `Compressor.json` |
+| **BassDrum** | Synthesized kick drum | `BassDrum.json` |
+| **LadderFilter** | 4-pole Moog-style filter | `LadderFilter.json` |
+| **BitCrusher** | Bit depth and sample rate reduction | `BitCrusher.json` |
+| **NoiseLFSR** | Linear feedback shift register noise | `NoiseLFSR.json` |
+| **TopoWaveguide** | 2D waveguide mesh (4x4) | `TopoWaveguide.json` |
+| **Delay8/16/512/4410/44100** | Fixed-length delay lines | `Delay*.json` |
+
+Complex modules use inline `programs` for subprogram composition (e.g., VCO defines `_wrap01` and `_polyBlep` as nested programs, Reverb defines comb filter and allpass stage subprograms).
 
 ---
 
@@ -157,7 +159,7 @@ Private sub-modules used internally: `_wrap01`, `_polyBlep`, `_polyBlamp`, `_all
 
 Programs are loaded via `loadJSON()` which accepts both `tropical_program_1` and `tropical_patch_1`. Saved as `tropical_program_1` via `saveProgramFromSession()`.
 
-`ProgramJSON` (`compiler/program.ts`) is the unified schema. Conversion functions bridge to/from the legacy `PatchJSON` format: `convertPatchToProgram`, `convertProgramToPatch`, `convertModuleDefToProgram`.
+`ProgramJSON` (`compiler/program.ts`) is the unified schema. Conversion functions bridge to/from the legacy `PatchJSON` format for backward compatibility.
 
 ### 4.2 Compiler (`compiler/compiler.ts`)
 
@@ -462,7 +464,7 @@ Key fields: `schema`, `name`, `inputs`/`outputs` (leaf/composite), `process` (le
 
 ### Legacy: `tropical_patch_1`
 
-The old patch format is still accepted by `loadJSON()` and converted internally via `convertPatchToProgram()`. The `save` MCP tool outputs `tropical_program_1`. Existing patches in `patches/` remain valid without modification.
+The old patch format is still accepted by `loadJSON()` and converted internally via `convertPatchToProgram()`. The `save` MCP tool always outputs `tropical_program_1`.
 ```
 
 ---
