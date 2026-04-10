@@ -381,4 +381,20 @@ describe('loadProgramAsType — stdlib equivalence', () => {
   test('Delay8.json matches TypeScript Delay8 (strict)', () => {
     compareStdlibStrict('Delay8', 'Delay8.json', { x: 1.0 }, 'y')
   })
+
+  test('VCO.json matches TypeScript VCO (saw)', () => {
+    compareStdlib('VCO', 'VCO.json', { freq: 440.0, fm: 0.0, fm_index: 5.0 }, 'saw')
+  })
+
+  test('VCO.json matches TypeScript VCO (sin)', () => {
+    compareStdlib('VCO', 'VCO.json', { freq: 440.0, fm: 0.0, fm_index: 5.0 }, 'sin')
+  })
+
+  test('VCO.json matches TypeScript VCO (sqr)', () => {
+    compareStdlib('VCO', 'VCO.json', { freq: 440.0, fm: 0.0, fm_index: 5.0 }, 'sqr')
+  })
+
+  test('VCO.json matches TypeScript VCO (tri)', () => {
+    compareStdlib('VCO', 'VCO.json', { freq: 440.0, fm: 0.0, fm_index: 5.0 }, 'tri')
+  })
 })
