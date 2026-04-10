@@ -15,7 +15,8 @@ import {
 import type { PatchJSON, ModuleDefJSON, SessionState } from './patch'
 import { makeSession } from './patch'
 import { parseProgram } from './schema'
-import { loadBuiltins, vca } from './module_library'
+import { loadBuiltinsTS } from './module_library'
+import { loadStdlib as loadBuiltins } from './program'
 import { flattenPatch } from './flatten'
 
 // ─────────────────────────────────────────────────────────────
@@ -287,7 +288,7 @@ describe('loadProgramAsType — stdlib equivalence', () => {
   ) {
     // TypeScript-defined version
     const tsSession = makeSession()
-    loadBuiltins(tsSession.typeRegistry)
+    loadBuiltinsTS(tsSession.typeRegistry)
     const tsType = tsSession.typeRegistry.get(typeName)!
     tsSession.instanceRegistry.set('inst', tsType.instantiateAs('inst'))
     for (const [k, v] of Object.entries(wiring)) {
@@ -296,14 +297,10 @@ describe('loadProgramAsType — stdlib equivalence', () => {
     tsSession.graphOutputs.push({ module: 'inst', output: outputName })
     const tsPlan = flattenPatch(tsSession)
 
-    // JSON-defined version
+    // JSON-defined version (loaded via loadStdlib)
     const jsonSession = makeSession()
     loadBuiltins(jsonSession.typeRegistry)
-    const prog = JSON.parse(
-      readFileSync(join(__dirname, `../stdlib/${jsonFile}`), 'utf-8')
-    ) as ProgramJSON
-    const jsonType = loadProgramAsType(prog, jsonSession)
-    jsonSession.typeRegistry.set(typeName, jsonType) // override the TS version
+    const jsonType = jsonSession.typeRegistry.get(typeName)!
     jsonSession.instanceRegistry.set('inst', jsonType.instantiateAs('inst'))
     for (const [k, v] of Object.entries(wiring)) {
       jsonSession.inputExprNodes.set(`inst:${k}`, v)
@@ -321,9 +318,6 @@ describe('loadProgramAsType — stdlib equivalence', () => {
     // Plan compiles and has correct output count
     expect(jsonPlan.output_targets.length).toBe(tsPlan.output_targets.length)
     expect(jsonPlan.schema).toBe('tropical_plan_4')
-
-    // For modules without cross-output sharing, instructions should match exactly
-    // (VCA, Clock have no shared sub-expressions across outputs/registers)
   }
 
   /** Strict comparison: plans must be instruction-identical. */
@@ -334,7 +328,7 @@ describe('loadProgramAsType — stdlib equivalence', () => {
     outputName: string,
   ) {
     const tsSession = makeSession()
-    loadBuiltins(tsSession.typeRegistry)
+    loadBuiltinsTS(tsSession.typeRegistry)
     const tsType = tsSession.typeRegistry.get(typeName)!
     tsSession.instanceRegistry.set('inst', tsType.instantiateAs('inst'))
     for (const [k, v] of Object.entries(wiring)) {
@@ -345,11 +339,7 @@ describe('loadProgramAsType — stdlib equivalence', () => {
 
     const jsonSession = makeSession()
     loadBuiltins(jsonSession.typeRegistry)
-    const prog = JSON.parse(
-      readFileSync(join(__dirname, `../stdlib/${jsonFile}`), 'utf-8')
-    ) as ProgramJSON
-    const jsonType = loadProgramAsType(prog, jsonSession)
-    jsonSession.typeRegistry.set(typeName, jsonType)
+    const jsonType = jsonSession.typeRegistry.get(typeName)!
     jsonSession.instanceRegistry.set('inst', jsonType.instantiateAs('inst'))
     for (const [k, v] of Object.entries(wiring)) {
       jsonSession.inputExprNodes.set(`inst:${k}`, v)

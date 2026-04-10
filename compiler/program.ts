@@ -213,8 +213,8 @@ export function convertProgramToPatch(prog: ProgramJSON): PatchJSON {
 function convertProgramToModuleDef(prog: ProgramJSON): ModuleDefJSON {
   const def: ModuleDefJSON = {
     name: prog.name,
-    inputs: (prog.inputs ?? []).map(i => typeof i === 'string' ? i : i.name),
-    outputs: (prog.outputs ?? []).map(o => typeof o === 'string' ? o : o.name),
+    inputs: prog.inputs ?? [],
+    outputs: prog.outputs ?? [],
     process: prog.process ?? { outputs: {} },
   }
 
@@ -274,6 +274,39 @@ export function loadProgramAsType(
 
   const def = convertProgramToModuleDef(prog)
   return loadModuleFromJSON(def, session)
+}
+
+// ─────────────────────────────────────────────────────────────
+// Stdlib loading
+// ─────────────────────────────────────────────────────────────
+
+import { readFileSync, readdirSync } from 'fs'
+import { join, dirname } from 'path'
+import { fileURLToPath } from 'url'
+
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+
+/**
+ * Load all stdlib ProgramJSON files into a type registry.
+ * Accepts either a full session or just a typeRegistry Map.
+ */
+export function loadStdlib(
+  target: Map<string, ModuleType> | Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
+): void {
+  // If given a bare Map, wrap it in a minimal session-like object
+  const session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> =
+    target instanceof Map
+      ? { typeRegistry: target, instanceRegistry: new Map(), paramRegistry: new Map(), triggerRegistry: new Map() }
+      : target
+
+  const stdlibDir = join(__dirname, '../stdlib')
+  const files = readdirSync(stdlibDir).filter(f => f.endsWith('.json')).sort()
+  for (const file of files) {
+    const prog = JSON.parse(readFileSync(join(stdlibDir, file), 'utf-8')) as ProgramJSON
+    const type = loadProgramAsType(prog, session)
+    session.typeRegistry.set(prog.name, type)
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

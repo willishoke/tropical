@@ -872,8 +872,11 @@ export const BUILTIN_NAMES = [
   'Delay8', 'Delay16', 'Delay512', 'Delay4410', 'Delay44100',
 ] as const
 
-/** Load all builtin module types into a type registry. */
-export function loadBuiltins(typeRegistry: Map<string, ModuleType>): void {
+/** Load all builtin module types into a type registry (from stdlib JSON). */
+export { loadStdlib as loadBuiltins } from './program.js'
+
+/** Load builtins from TypeScript definitions (for equivalence testing only). */
+export function loadBuiltinsTS(typeRegistry: Map<string, ModuleType>): void {
   typeRegistry.set('VCO',           vco())
   typeRegistry.set('Phaser',        phaser())
   typeRegistry.set('Phaser16',      phaser16())
