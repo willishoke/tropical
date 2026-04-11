@@ -31,7 +31,7 @@ export interface ProgramDef {
   registerPortTypes: (string | undefined)[]
   registerInitValues: ValueCoercible[]
   sampleRate: number
-  rawInputDefaults: Record<string, ExprCoercible>
+  rawInputDefaults: Record<string, ExprNode>
   inputDefaults: (SignalExpr | null)[]
   delayInitValues: number[]
   outputExprNodes: ExprNode[]

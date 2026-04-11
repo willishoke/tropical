@@ -126,7 +126,7 @@ export function loadProgramAsSession(
 
   // Apply input defaults from each instance's program definition
   for (const [name, inst] of session.instanceRegistry) {
-    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
+    const defaults = inst._def.rawInputDefaults
     for (const [inputName, value] of Object.entries(defaults)) {
       const key = `${name}:${inputName}`
       if (!session.inputExprNodes.has(key)) {
@@ -220,7 +220,7 @@ export function mergeProgramIntoSession(
 
   // Apply input defaults
   for (const [name, inst] of session.instanceRegistry) {
-    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
+    const defaults = inst._def.rawInputDefaults
     for (const [inputName, value] of Object.entries(defaults)) {
       const key = `${name}:${inputName}`
       if (!session.inputExprNodes.has(key)) {

@@ -3,7 +3,7 @@
  */
 
 import {
-  type SignalExpr, type ExprCoercible, coerce, type ExprNode,
+  type SignalExpr, type ExprCoercible, coerce, type ExprNode, validateExpr,
 } from './expr.js'
 import {
   ModuleType, ModuleInstance,
@@ -11,6 +11,7 @@ import {
 } from './module.js'
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type ProgramJSON } from './program.js'
+import { Param, Trigger } from './runtime/param.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -18,7 +19,6 @@ import { loadProgramAsSession, type ProgramJSON } from './program.js'
 
 // ExprNode is defined in expr.ts and re-exported here for backward compatibility.
 export type { ExprNode } from './expr.js'
-import { validateExpr, type ExprNode } from './expr.js'
 
 
 
@@ -190,7 +190,7 @@ function slottifyExpr(
   // Handle array-like containers that aren't in 'args'
   if (op === 'array') {
     const items = (obj.items as ExprNode[]).map(recurse)
-    return { ...obj, items } as ExprNode
+    return { ...obj, items } as unknown as ExprNode
   }
 
   // Combinator forms with nested expr fields
@@ -198,33 +198,33 @@ function slottifyExpr(
     const bind = obj.bind as Record<string, ExprNode>
     const converted: Record<string, ExprNode> = {}
     for (const [k, v] of Object.entries(bind)) converted[k] = recurse(v)
-    return { ...obj, bind: converted, in: recurse(obj.in as ExprNode) } as ExprNode
+    return { ...obj, bind: converted, in: recurse(obj.in as ExprNode) } as unknown as ExprNode
   }
   if (op === 'generate' || op === 'chain' || op === 'iterate') {
-    return { ...obj, ...(obj.init !== undefined ? { init: recurse(obj.init as ExprNode) } : {}), body: recurse(obj.body as ExprNode) } as ExprNode
+    return { ...obj, ...(obj.init !== undefined ? { init: recurse(obj.init as ExprNode) } : {}), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
   }
   if (op === 'fold' || op === 'scan') {
-    return { ...obj, over: recurse(obj.over as ExprNode), init: recurse(obj.init as ExprNode), body: recurse(obj.body as ExprNode) } as ExprNode
+    return { ...obj, over: recurse(obj.over as ExprNode), init: recurse(obj.init as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
   }
   if (op === 'map2') {
-    return { ...obj, over: recurse(obj.over as ExprNode), body: recurse(obj.body as ExprNode) } as ExprNode
+    return { ...obj, over: recurse(obj.over as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
   }
   if (op === 'zip_with') {
-    return { ...obj, a: recurse(obj.a as ExprNode), b: recurse(obj.b as ExprNode), body: recurse(obj.body as ExprNode) } as ExprNode
+    return { ...obj, a: recurse(obj.a as ExprNode), b: recurse(obj.b as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
   }
 
   // ADT ops
   if (op === 'construct_struct') {
-    return { ...obj, fields: (obj.fields as ExprNode[]).map(recurse) } as ExprNode
+    return { ...obj, fields: (obj.fields as ExprNode[]).map(recurse) } as unknown as ExprNode
   }
   if (op === 'field_access') {
-    return { ...obj, struct_expr: recurse(obj.struct_expr as ExprNode) } as ExprNode
+    return { ...obj, struct_expr: recurse(obj.struct_expr as ExprNode) } as unknown as ExprNode
   }
   if (op === 'construct_variant') {
-    return { ...obj, payload: (obj.payload as ExprNode[]).map(recurse) } as ExprNode
+    return { ...obj, payload: (obj.payload as ExprNode[]).map(recurse) } as unknown as ExprNode
   }
   if (op === 'match_variant') {
-    return { ...obj, scrutinee: recurse(obj.scrutinee as ExprNode), branches: (obj.branches as ExprNode[]).map(recurse) } as ExprNode
+    return { ...obj, scrutinee: recurse(obj.scrutinee as ExprNode), branches: (obj.branches as ExprNode[]).map(recurse) } as unknown as ExprNode
   }
 
   // Leaf ops (sample_rate, sample_index, binding, float, int, bool, matrix, etc.)
