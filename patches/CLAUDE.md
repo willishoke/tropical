@@ -28,7 +28,7 @@ Example patches in `tropical_program_1` JSON format. Load via `make mcp-ts` → 
 
 Input expressions can be:
 - **Literal number** — `440`, `0.5`
-- **Instance output reference** — `{"op": "ref", "module": "VCO1", "output": "sin"}`
+- **Instance output reference** — `{"op": "ref", "instance": "VCO1", "output": "sin"}`
 - **Binary operation** — `{"op": "mul", "args": [<expr>, <expr>]}`
 - **Unary operation** — `{"op": "neg", "args": [<expr>]}`
 

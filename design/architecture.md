@@ -8,7 +8,7 @@ Detailed reference for the internal architecture. Organized by functional unit.
 
 tropical is a realtime audio synthesis system. An LLM or human author defines a *program* — a graph of DSP program instances wired together — and the system compiles the entire program into a single native kernel that runs per-sample in an audio callback. There is no interpreter fallback and no module boundaries at runtime.
 
-The unified representation is `ProgramJSON` (`tropical_program_1`). A program with `process` is a leaf (direct computation); a program with `instances` and `audio_outputs` is a top-level graph; a program with `instances`, `inputs`, and `outputs` is a reusable composite. The legacy `tropical_patch_1` format is still accepted on load.
+The unified representation is `ProgramJSON` (`tropical_program_1`). A program with `process` is a leaf (direct computation); a program with `instances` and `audio_outputs` is a top-level graph; a program with `instances`, `inputs`, and `outputs` is a reusable composite.
 
 The system has three layers:
 
@@ -26,7 +26,7 @@ The **C API** (`engine/c_api/tropical_c.h`) is the stable boundary between the T
 Program definition (JSON / MCP tools)
     → ProgramJSON loading + type registration (TS-only, no C++ calls)
     → Expression tree construction (ExprNode JSON trees)
-    → Flattening (inline all modules into one expression set)
+    → Flattening (inline all instances into one expression set)
     → Combinator expansion (unroll generate/fold/chain/etc. to scalar trees)
     → Array lowering (expand static-shape array ops to scalar primitives)
     → Instruction emission (ExprNode → FlatProgram instruction stream)
@@ -80,17 +80,17 @@ The C++ side has a parallel expression representation in `tropical_expr`:
 - **`ExprKind`** enum covers ~40 node kinds including all arithmetic, comparison, bitwise, unary, array, ADT, and param operations
 
 Supporting modules:
-- **`ExprEval.hpp`** — Interpreter for `Value` operations (used during module definition, not at runtime)
+- **`ExprEval.hpp`** — Interpreter for `Value` operations (used during program definition, not at runtime)
 - **`ExprRewrite.cpp`** — Constant folding, algebraic simplification (0*x→0, 1*x→x, x+0→x), dead ref replacement
 - **`ExprStructural.cpp`** — Structural hashing, structural equality, pure function inlining with substitution
 
 ---
 
-## 3. Program System (`compiler/module.ts`, `stdlib/*.json`)
+## 3. Program System (`compiler/program_types.ts`, `stdlib/*.json`)
 
 ### 3.1 ProgramDef — the Compiler IR
 
-`ProgramDef` is the compiler's internal representation of a program — slot-indexed ExprNode trees ready for the flattener's register allocation. It is built from `ProgramJSON` (name-based) by `loadProgramDef()` in `compiler/patch.ts`, which converts names to integer slot IDs via `slottifyExpr()` — a pure tree walk with no side effects.
+`ProgramDef` is the compiler's internal representation of a program — slot-indexed ExprNode trees ready for the flattener's register allocation. It is built from `ProgramJSON` (name-based) by `loadProgramDef()` in `compiler/session.ts`, which converts names to integer slot IDs via `slottifyExpr()` — a pure tree walk with no side effects.
 
 ```typescript
 interface ProgramDef {
@@ -112,14 +112,14 @@ interface ProgramDef {
 
 There is no build context, no side effects, no DSL. The conversion from ProgramJSON to ProgramDef is a pure function.
 
-### 3.2 ModuleType and ModuleInstance
+### 3.2 ProgramType and ProgramInstance
 
-- **`ModuleType`** holds a `ProgramDef`. It is a *type*, not an instance. Registered in `SessionState.typeRegistry`.
-- **`ModuleInstance`** is a named instance of a type, carrying a reference to its `ProgramDef` plus an instance name. Instances are TS-only — no C API calls.
+- **`ProgramType`** holds a `ProgramDef`. It is a *type*, not an instance. Registered in `SessionState.typeRegistry`.
+- **`ProgramInstance`** is a named instance of a type, carrying a reference to its `ProgramDef` plus an instance name. Instances are TS-only — no C API calls.
 
 ### 3.3 Standard Library (`stdlib/*.json`)
 
-All built-in program types are defined as `ProgramJSON` files in `stdlib/`. They are loaded by `loadStdlib()` in `compiler/program.ts`, which reads each JSON file, validates it, and registers a `ModuleType`.
+All built-in program types are defined as `ProgramJSON` files in `stdlib/`. They are loaded by `loadStdlib()` in `compiler/program.ts`, which reads each JSON file, validates it, and registers a `ProgramType`.
 
 19 built-in types:
 
@@ -146,14 +146,14 @@ Complex modules use inline `programs` for subprogram composition (e.g., VCO defi
 
 ## 4. Compilation Pipeline
 
-### 4.1 Session State (`compiler/patch.ts`, `compiler/program.ts`)
+### 4.1 Session State (`compiler/session.ts`, `compiler/program.ts`)
 
 `SessionState` is the mutable in-memory representation of a live session:
 
-- `typeRegistry: Map<string, ModuleType>` — registered program types (builtins + user-defined)
-- `instanceRegistry: Map<string, ModuleInstance>` — live program instances by name
+- `typeRegistry: Map<string, ProgramType>` — registered program types (builtins + user-defined)
+- `instanceRegistry: Map<string, ProgramInstance>` — live program instances by name
 - `inputExprNodes: Map<string, ExprNode>` — wiring expressions keyed as `"InstanceName:inputName"`
-- `graphOutputs: Array<{ module, output }>` — which outputs are mixed to audio
+- `graphOutputs: Array<{ instance, output }>` — which outputs are mixed to audio
 - `params: Map<string, Param>` / `triggers: Map<string, Trigger>` — named control parameters
 - `runtime: Runtime` — the FlatRuntime wrapper
 
@@ -166,10 +166,10 @@ Programs are loaded via `loadJSON()` which accepts `tropical_program_1`. Saved a
 The compiler converts a `CompilerInput` (modules + wiring + outputs) into a `CompiledPatch` containing a well-typed categorical `Term`.
 
 Steps:
-1. **Dependency graph** — Extract module references from input expressions via `exprDependencies()`, build adjacency map
+1. **Dependency graph** — Extract instance references from input expressions via `exprDependencies()`, build adjacency map
 2. **Cycle detection** — Tarjan's SCC algorithm. Feedback cycles are errors (auto-trace not yet implemented)
 3. **Topological sort** — Kahn's algorithm with level grouping. Each level can execute in parallel
-4. **Term assembly** — For each level: build wiring morphism, build module terms (stateless → morphism, stateful → trace), compose/tensor them
+4. **Term assembly** — For each level: build wiring morphism, build instance terms (stateless → morphism, stateful → trace), compose/tensor them
 5. **Type checking** — Verify the assembled term via `inferType()`
 
 ### 4.3 Term Language (`compiler/term.ts`)
@@ -203,12 +203,12 @@ Structural rewrite passes on the term IR, iterated to fixed point:
 
 ### 4.6 Flattening (`compiler/flatten.ts`)
 
-The critical compilation step: transforms a multi-module patch into a single flat instruction stream (tropical_plan_4).
+The critical compilation step: transforms a multi-instance session into a single flat instruction stream (tropical_plan_4).
 
 Key operations:
 1. **Input substitution** — Replace `input(N)` nodes with wiring expressions
-2. **Reference resolution** — Inline `ref(module, output)` by recursively substituting the referenced module's output expression
-3. **Nested call resolution** — Expand `nested_output(nodeId, outputId)` by inlining the nested module's expressions with offset register IDs
+2. **Reference resolution** — Inline `ref(instance, output)` by recursively substituting the referenced instance's output expression
+3. **Nested call resolution** — Expand `nested_output(nodeId, outputId)` by inlining the nested instance's expressions with offset register IDs
 4. **Delay resolution** — Convert `delay_value(nodeId)` to register reads at computed offsets
 5. **Function inlining** — Expand `call(function(body), args)` by substituting input nodes with arguments
 6. **Wiring type normalization** — Validate type compatibility, insert `broadcast_to` wrappers for shape mismatches
@@ -262,7 +262,7 @@ The output `FlatProgram` also carries:
 ### 4.9 Plan Application (`compiler/apply_plan.ts`)
 
 `applyFlatPlan(session, runtime)` ties the pipeline together:
-1. `flattenPatch(session)` → `FlatPlan` JSON
+1. `flattenSession(session)` → `FlatPlan` JSON
 2. `JSON.stringify(plan)` → string
 3. `runtime.loadPlan(json)` → C API call
 
@@ -411,23 +411,21 @@ TypeScript classes wrapping the C API via koffi:
 
 The primary agent interface. Runs on stdio, uses `@modelcontextprotocol/sdk`.
 
-Maintains a `SessionState` and exposes 16 consolidated tools (plus 15 deprecated aliases for backward compatibility):
+Maintains a `SessionState` and exposes 16 tools:
 
 **Program management**: `define_program`, `add_instance`, `remove_instance`, `list_programs`, `list_instances`, `get_info`
 
-**Wiring**: `wire` (set and/or remove input wiring in a single recompile — replaces the former `connect_modules`, `disconnect_modules`, `set_module_input`, `set_inputs_batch`), `list_wiring`
+**Wiring**: `wire` (batched set/remove in a single recompile), `list_wiring`
 
-**Audio output**: `set_output` (declarative — replaces full output list, replaces former `add_graph_output` / `remove_graph_output`)
+**Audio output**: `set_output` (declaratively set the full output list)
 
 **Control parameters**: `set_param`, `list_params`
 
-**Program I/O**: `load` (accepts `tropical_program_1` or `tropical_patch_1`), `save` (outputs `tropical_program_1`), `merge`
+**Program I/O**: `load` (accepts `tropical_program_1`), `save` (outputs `tropical_program_1`), `merge`
 
 **Audio control**: `start_audio`, `stop_audio`, `audio_status`
 
 Every mutation that affects the signal graph calls `wire()` → `applyFlatPlan(session, runtime)`, which re-flattens and hot-swaps the kernel. The `wire` tool batches multiple set/remove operations into a single recompile.
-
-Old tool names (`define_module`, `instantiate_module`, `connect_modules`, `load_patch`, etc.) are preserved as deprecated aliases that delegate to the new handlers.
 
 ---
 
@@ -451,7 +449,7 @@ The unified JSON format for all DSP programs. Validated by Zod schemas in `compi
   "instances": {
     "osc": { "program": "VCO", "inputs": { "freq": 440 } },
     "amp": { "program": "Gain", "inputs": {
-      "audio": { "op": "ref", "module": "osc", "output": "sin" },
+      "audio": { "op": "ref", "instance": "osc", "output": "sin" },
       "cv": 0.5
     }}
   },
@@ -461,11 +459,6 @@ The unified JSON format for all DSP programs. Validated by Zod schemas in `compi
 ```
 
 Key fields: `schema`, `name`, `inputs`/`outputs` (leaf/composite), `process` (leaf body), `programs` (inline subprogram definitions), `instances` (instantiated subprograms with wiring in `inputs`), `audio_outputs` (graph output routing), `params`, `regs`, `delays`, `config`, `type_defs`.
-
-### Legacy: `tropical_patch_1`
-
-The old patch format is still accepted by `loadJSON()` and converted internally via `convertPatchToProgram()`. The `save` MCP tool always outputs `tropical_program_1`.
-```
 
 ---
 
@@ -522,7 +515,7 @@ Registry for named type coercion morphisms (e.g. equal-temperament realization f
 ### C++ Tests (`engine/tests/test_module_process.cpp`)
 Custom harness (no framework dependency). Exercises FlatRuntime C API and JIT code paths without an audio device. Tests build `tropical_plan_4` JSON strings directly and assert on output buffer values.
 
-Test cases cover: sawtooth oscillator, clock with array ratios, integer sequence stepping, multi-module fusion, smoothed params, trigger params.
+Test cases cover: sawtooth oscillator, clock with array ratios, integer sequence stepping, multi-instance fusion, smoothed params, trigger params.
 
 Run: `cmake --build build -j4 && ctest --test-dir build`
 
@@ -534,10 +527,10 @@ Unit tests for: optimizer, flatten wiring, array wiring, plan generation, compil
 ## 14. Key Design Decisions
 
 ### Single-kernel fusion
-The entire patch compiles to one native function. No module boundaries, no per-module dispatch, no interpreter. This eliminates call overhead and enables LLVM to optimize across the entire signal graph.
+The entire program compiles to one native function. No instance boundaries, no per-instance dispatch, no interpreter. This eliminates call overhead and enables LLVM to optimize across the entire signal graph.
 
 ### Expression trees as universal IR
-ExprNode JSON trees are the interchange format between all layers. Module definitions produce them, flattening manipulates them, emission converts them to instructions, and the C++ JIT compiles them to native code.
+ExprNode JSON trees are the interchange format between all layers. Program definitions produce them, flattening manipulates them, emission converts them to instructions, and the C++ JIT compiles them to native code.
 
 ### Hot-swap via double-buffered kernels
 Live audio never stops for recompilation. The new kernel is compiled on a background thread, state is transferred by matching register/array names, and a single atomic store switches the active kernel. At most one sample of stale state is read (inaudible).

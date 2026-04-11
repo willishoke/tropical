@@ -50,7 +50,7 @@ stdlib/               Built-in program types as ProgramJSON files (19 types)
 Program (JSON / MCP tools)
   → ProgramJSON loading + type registration (TS-only, no C++ calls)
   → Expression tree construction (ExprNode)
-  → Flattening (inline all modules → single expression set)
+  → Flattening (inline all instances → single expression set)
   → Combinator expansion (unroll generate/fold/chain/etc.)
   → Array lowering (static-shape array ops → scalar primitives)
   → Instruction emission (ExprNode → FlatProgram)
@@ -64,28 +64,27 @@ Program (JSON / MCP tools)
 
 ### Schema versions
 
-There are four distinct JSON schemas — don't confuse them:
+There are three distinct JSON schemas — don't confuse them:
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_1` | `compiler/program.ts` | **Primary.** Unified program format (instances, wiring, subprograms, outputs) |
-| `tropical_patch_1` | `compiler/patch.ts` | Legacy patch format (modules, wiring, outputs). Still accepted on load. |
 | `tropical_plan_1` | `compiler/plan.ts` | Intermediate execution plan (legacy, used by some tests) |
 | `tropical_plan_4` | `compiler/flatten.ts` + `emit_numeric.ts` | Flat instruction stream sent to C++ JIT — the one that matters for audio |
 
 ## Compiler layer (`compiler/`)
 
-The TypeScript layer handles everything from module definition through instruction emission. No audio processing happens here.
+The TypeScript layer handles everything from program definition through instruction emission. No audio processing happens here.
 
-**Expression system** (`expr.ts`) — `ExprNode` is the universal IR: a recursive JSON union type (number, boolean, array, or `{op, ...}` object). `SignalExpr` wraps it with static shape tracking. All module I/O is defined as expression trees. Includes compile-time combinator constructors (`generate`, `fold`, `chain`, `map2`, etc.) for iteration and abstraction without manual unrolling.
+**Expression system** (`expr.ts`) — `ExprNode` is the universal IR: a recursive JSON union type (number, boolean, array, or `{op, ...}` object). `SignalExpr` wraps it with static shape tracking. All program I/O is defined as expression trees. Includes compile-time combinator constructors (`generate`, `fold`, `chain`, `map2`, etc.) for iteration and abstraction without manual unrolling.
 
 **Program schema** (`program.ts`) — `ProgramJSON` (`tropical_program_1`) is the unified representation. A program with `process` = leaf, with `instances` + `audio_outputs` = graph, with `instances` + `inputs` + `outputs` = reusable composite. `loadStdlib()` loads `stdlib/*.json` into the type registry.
 
-**Program types** (`module.ts`) — Pure data types: `ProgramDef` (slot-indexed IR for the flattener), `ModuleType`, `ModuleInstance`. No DSL — types are built from ProgramJSON by `loadProgramDef()` in `patch.ts`.
+**Program types** (`program_types.ts`) — Pure data types: `ProgramDef` (slot-indexed IR for the flattener), `ProgramType`, `ProgramInstance`. No DSL — types are built from ProgramJSON by `loadProgramDef()` in `session.ts`.
 
 **Standard library** (`stdlib/*.json`) — 19 built-in program types as ProgramJSON files (VCO, Clock, ADEnvelope, Reverb, LadderFilter, etc.). Loaded by `loadStdlib()` in `program.ts`.
 
-**Flattening** (`flatten.ts`) — The critical step. Inlines all module expressions, resolves inter-module references, expands nested calls, converts delays to register ops. Output is a `tropical_plan_4` JSON. Uses WeakMap memoization for DAG sharing.
+**Flattening** (`flatten.ts`) — The critical step. Inlines all instance expressions, resolves inter-instance references, expands nested calls, converts delays to register ops. Output is a `tropical_plan_4` JSON. Uses WeakMap memoization for DAG sharing.
 
 **Array lowering** (`lower_arrays.ts`) — Lowers first-class array ops (zeros, reshape, transpose, slice, reduce, broadcast_to, map, matmul) and compile-time combinators (generate, iterate, fold, scan, map2, zip_with, chain, let) to scalar primitives via static unrolling. All shapes are compile-time constants.
 
@@ -113,12 +112,12 @@ C++20, header-heavy (templates + inlining for audio-thread performance).
 
 ## MCP server (`mcp/server.ts`)
 
-Primary agent interface. Runs on stdio via `@modelcontextprotocol/sdk`. Maintains `SessionState` and exposes 16 consolidated tools for program management, wiring, audio control, and program I/O. Key tools: `define_program`, `add_instance`, `wire` (batched set/remove), `set_output`, `load`/`save`/`merge`. Old tool names (`define_module`, `connect_modules`, `load_patch`, etc.) are preserved as deprecated aliases. Every wiring mutation triggers `wire()` → `applyFlatPlan()` → full recompile and hot-swap.
+Primary agent interface. Runs on stdio via `@modelcontextprotocol/sdk`. Maintains `SessionState` and exposes 16 tools for program management, wiring, audio control, and program I/O. Key tools: `define_program`, `add_instance`, `wire` (batched set/remove), `set_output`, `load`/`save`/`merge`. Every wiring mutation triggers `wire()` → `applyFlatPlan()` → full recompile and hot-swap.
 
 ## Conventions
 
 - Commit messages: `type(scope): description` (e.g., `fix(jit):`, `feat(compiler):`, `refactor:`)
-- Module types: PascalCase (`VCO`, `ADEnvelope`, `Clock`)
+- Program types: PascalCase (`VCO`, `ADEnvelope`, `Clock`)
 - Input/output names: lowercase (`freq`, `signal`, `out`, `saw`)
 - C++ is header-heavy by design (templates, inlining for audio perf)
 - JIT failures are fatal — no interpreter fallback

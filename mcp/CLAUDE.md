@@ -13,15 +13,15 @@ Also configured in `.mcp.json` for Claude Code integration.
 ## Layout
 
 ```
-server.ts       MCP server: session management, tool definitions, request handlers
-patch.test.ts   Patch round-trip tests
+server.ts        MCP server: session management, tool definitions, request handlers
+program.test.ts  Program round-trip tests
 ```
 
 ## How it works
 
-The server maintains a `SessionState` (from `compiler/patch.ts`) containing the type registry, program instances, wiring expressions, graph outputs, control parameters, and a `Runtime` handle.
+The server maintains a `SessionState` (from `compiler/session.ts`) containing the type registry, program instances, wiring expressions, graph outputs, control parameters, and a `Runtime` handle.
 
-Every mutation that affects the signal graph calls `wire()`, which runs the full compilation pipeline: `flattenPatch()` → `JSON.stringify()` → `runtime.loadPlan()`. This recompiles and hot-swaps the kernel. Errors during compilation are caught and returned as tool error responses.
+Every mutation that affects the signal graph calls `wire()`, which runs the full compilation pipeline: `flattenSession()` → `JSON.stringify()` → `runtime.loadPlan()`. This recompiles and hot-swaps the kernel. Errors during compilation are caught and returned as tool error responses.
 
 ## Tools
 
@@ -45,7 +45,7 @@ Every mutation that affects the signal graph calls `wire()`, which runs the full
 - `list_params` — list all registered parameters
 
 ### Program I/O
-- `load` — load a `tropical_program_1` or `tropical_patch_1` JSON (replaces session)
+- `load` — load a `tropical_program_1` JSON (replaces session)
 - `save` — serialize current session to `tropical_program_1` JSON
 - `merge` — merge a program into the current session (additive)
 
@@ -54,5 +54,3 @@ Every mutation that affects the signal graph calls `wire()`, which runs the full
 - `stop_audio` — stop playback
 - `audio_status` — device info, callback stats, running state
 
-### Deprecated aliases
-Old tool names (`define_module`, `instantiate_module`, `connect_modules`, `load_patch`, etc.) still work via an alias layer for backward compatibility. Descriptions are prefixed with `[deprecated]`.
