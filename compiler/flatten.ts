@@ -770,7 +770,7 @@ export function flattenSession(session: SessionState): FlatPlan {
 
     // Process output expressions — no input substitution or ref resolution needed
     // (cycle-breaking instance outputs are purely register-derived)
-    const resolvedOutputs: ExprNode[] = []
+    const cbOutputExprs: ExprNode[] = []
     for (const outputNode of def.outputExprNodes) {
       const cloneMemo = new WeakMap<object, ExprNode>()
       let expr = cloneExpr(outputNode, cloneMemo)
@@ -784,9 +784,9 @@ export function flattenSession(session: SessionState): FlatPlan {
       const lowerMemo = new WeakMap<object, ExprNode>()
       expr = lowerArrayOps(expr, lowerMemo)
       flatOutputExprs.push(expr)
-      resolvedOutputs.push(expr)
+      cbOutputExprs.push(expr)
     }
-    resolvedOutputs.set(name, resolvedOutputs)
+    resolvedOutputs.set(name, cbOutputExprs)
     resolvedOutputNames.set(name, [...def.outputNames])
 
     // Push register metadata with placeholder update expressions (overwritten in phase 3)
@@ -878,13 +878,13 @@ export function flattenSession(session: SessionState): FlatPlan {
     // Process each output expression
     // Order matters: offset registers BEFORE substituting inputs/resolving refs,
     // because wiring expressions already have globally-correct register IDs.
-    const resolvedOutputs: ExprNode[] = []
+    const instOutputExprs: ExprNode[] = []
     for (let i = 0; i < def.outputExprNodes.length; i++) {
       const expr = processExpr(def.outputExprNodes[i])
       flatOutputExprs.push(expr)
-      resolvedOutputs.push(expr)
+      instOutputExprs.push(expr)
     }
-    resolvedOutputs.set(name, resolvedOutputs)
+    resolvedOutputs.set(name, instOutputExprs)
     resolvedOutputNames.set(name, [...def.outputNames])
 
     // Process each named register expression
