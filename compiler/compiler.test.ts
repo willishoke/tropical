@@ -12,11 +12,11 @@ import {
   buildDependencyGraph,
   topologicalSort,
   tarjanSCC,
-  moduleToTerm,
+  instanceToTerm,
   compilePatch,
-  extractModuleInfo,
+  extractInstanceInfo,
   CompilerError,
-  type ModuleInfo,
+  type InstanceInfo,
   type CompilerInput,
 } from './compiler'
 import {
@@ -30,7 +30,7 @@ import type { ExprNode } from './session'
 // Helpers
 // ─────────────────────────────────────────────────────────────
 
-/** Build a simple ModuleInfo for testing. */
+/** Build a simple InstanceInfo for testing. */
 function modInfo(
   name: string,
   opts: {
@@ -42,7 +42,7 @@ function modInfo(
     outputTypes?: string[]
     registerTypes?: string[]
   } = {},
-): ModuleInfo {
+): InstanceInfo {
   const inputs = opts.inputs ?? ['in']
   const outputs = opts.outputs ?? ['out']
   const registers = opts.registers ?? []
@@ -338,13 +338,13 @@ describe('tarjanSCC', () => {
 })
 
 // ─────────────────────────────────────────────────────────────
-// moduleToTerm
+// instanceToTerm
 // ─────────────────────────────────────────────────────────────
 
-describe('moduleToTerm', () => {
+describe('instanceToTerm', () => {
   test('stateless module: morphism inputs → outputs', () => {
     const info = modInfo('Gain', { inputs: ['in'], outputs: ['out'] })
-    const term = moduleToTerm(info)
+    const term = instanceToTerm(info)
     expect(term.tag).toBe('morphism')
     const t = inferType(term)
     expect(portTypeEqual(t.dom, Float)).toBe(true)
@@ -356,7 +356,7 @@ describe('moduleToTerm', () => {
       inputs: ['freq'],
       outputs: ['saw', 'tri', 'sin', 'sqr'],
     })
-    const term = moduleToTerm(info)
+    const term = instanceToTerm(info)
     const t = inferType(term)
     expect(portTypeEqual(t.dom, Float)).toBe(true)
     expect(portTypeEqual(t.cod, product([Float, Float, Float, Float]))).toBe(true)
@@ -371,7 +371,7 @@ describe('moduleToTerm', () => {
       outputTypes: ['int'],
       registerTypes: ['int'],
     })
-    const term = moduleToTerm(info)
+    const term = instanceToTerm(info)
     expect(term.tag).toBe('trace')
     const t = inferType(term)
     // trace peels off state: (Bool⊗Int → Int⊗Int) becomes Bool → Int
@@ -385,7 +385,7 @@ describe('moduleToTerm', () => {
       outputs: ['saw', 'tri', 'sin', 'sqr'],
       registers: ['phase', 'tri_state'],
     })
-    const term = moduleToTerm(info)
+    const term = instanceToTerm(info)
     expect(term.tag).toBe('trace')
     const t = inferType(term)
     // domain: freq ⊗ fm ⊗ fm_index = Float ⊗ Float ⊗ Float
@@ -396,10 +396,10 @@ describe('moduleToTerm', () => {
 })
 
 // ─────────────────────────────────────────────────────────────
-// extractModuleInfo
+// extractInstanceInfo
 // ─────────────────────────────────────────────────────────────
 
-describe('extractModuleInfo', () => {
+describe('extractInstanceInfo', () => {
   test('converts port type strings', () => {
     const def = {
       typeName: 'Test',
@@ -410,7 +410,7 @@ describe('extractModuleInfo', () => {
       outputPortTypes: ['int'] as (string | undefined)[],
       registerPortTypes: [undefined] as (string | undefined)[],
     }
-    const info = extractModuleInfo('Test1', def)
+    const info = extractInstanceInfo('Test1', def)
     expect(info.name).toBe('Test1')
     expect(portTypeEqual(info.inputTypes[0], Float)).toBe(true)
     expect(portTypeEqual(info.inputTypes[1], Bool)).toBe(true)

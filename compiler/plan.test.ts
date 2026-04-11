@@ -14,7 +14,7 @@ import {
 import {
   compilePatch,
   type CompilerInput,
-  type ModuleInfo,
+  type InstanceInfo,
 } from './compiler'
 import { portTypeFromString } from './compiler'
 import { Float, Int, Bool, product } from './term'
@@ -32,7 +32,7 @@ function modInfo(
     outputs?: string[]
     registers?: string[]
   } = {},
-): ModuleInfo {
+): InstanceInfo {
   const inputs = opts.inputs ?? ['in']
   const outputs = opts.outputs ?? ['out']
   const registers = opts.registers ?? []

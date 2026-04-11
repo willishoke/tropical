@@ -12,8 +12,8 @@ import type { ExprNode } from './expr.js'
 import type { SessionState } from './session.js'
 import type { ProgramInstance, NestedCall } from './program_types.js'
 import {
-  type CompilerInput, type ModuleInfo,
-  compilerInputFromSession, extractModuleInfo,
+  type CompilerInput, type InstanceInfo,
+  compilerInputFromSession, extractInstanceInfo,
   buildDependencyGraph, topologicalSort,
 } from './compiler.js'
 import { lowerArrayOps } from './lower_arrays.js'
@@ -33,12 +33,12 @@ export class FlattenError extends Error {
 }
 
 /**
- * Infer the output type string of an ExprNode, given the module type context.
+ * Infer the output type string of an ExprNode, given the instance type context.
  * Returns undefined when the type cannot be statically determined.
  */
 function inferExprOutputType(
   expr: ExprNode,
-  moduleInfos: Map<string, ModuleInfo>,
+  instanceInfos: Map<string, InstanceInfo>,
 ): string | undefined {
   if (typeof expr === 'number') return 'float'
   if (typeof expr === 'boolean') return 'bool'
@@ -47,7 +47,7 @@ function inferExprOutputType(
   const obj = expr as Record<string, unknown>
   switch (obj.op as string) {
     case 'ref': {
-      const modInfo = moduleInfos.get(obj.module as string)
+      const modInfo = instanceInfos.get(obj.module as string)
       if (!modInfo) return undefined
       const outName = obj.output as string | number
       const outIdx = typeof outName === 'number' ? outName : modInfo.outputNames.indexOf(outName)
@@ -73,30 +73,30 @@ function inferExprOutputType(
  * Returns a new Map with any necessary broadcast wrappers applied.
  */
 export function normalizeWiringTypes(
-  moduleInfos: Map<string, ModuleInfo>,
+  instanceInfos: Map<string, InstanceInfo>,
   inputExprNodes: Map<string, ExprNode>,
 ): Map<string, ExprNode> {
   const result = new Map(inputExprNodes)
 
   for (const [key, expr] of inputExprNodes) {
     const colonIdx = key.indexOf(':')
-    const moduleName = key.slice(0, colonIdx)
+    const instanceName = key.slice(0, colonIdx)
     const inputName = key.slice(colonIdx + 1)
 
-    const modInfo = moduleInfos.get(moduleName)
+    const modInfo = instanceInfos.get(instanceName)
     if (!modInfo) continue
 
     const inputIdx = modInfo.inputNames.indexOf(inputName)
     if (inputIdx === -1) continue
 
     const dstTypeStr = portTypeToString(modInfo.inputTypes[inputIdx])
-    const srcTypeStr = inferExprOutputType(expr, moduleInfos)
+    const srcTypeStr = inferExprOutputType(expr, instanceInfos)
     if (srcTypeStr === undefined) continue
 
     const check = checkArrayConnection(srcTypeStr, dstTypeStr, expr)
     if (!check.compatible) {
       throw new FlattenError(
-        `Wiring type mismatch on '${moduleName}'.${inputName}: ${check.error}`
+        `Wiring type mismatch on '${instanceName}'.${inputName}: ${check.error}`
       )
     }
     if (check.broadcastExpr) {
@@ -337,8 +337,8 @@ function nestedCallRegCount(nc: NestedCall): number {
 /**
  * Resolve all nested_output(nodeId, outputId) nodes in an expression tree.
  *
- * For each nested call, the nested module's output expression is inlined with:
- *   - input(i) → call argument i (in the parent module's local expression space)
+ * For each nested call, the nested program's output expression is inlined with:
+ *   - input(i) → call argument i (in the parent program's local expression space)
  *   - reg(j) → reg(nestedRegBase + j)   (offset into parent's local register space)
  *   - delay_value(k) → reg(nestedDelayBase + k)
  *
@@ -369,7 +369,7 @@ function resolveNestedOutputs(
       // clone once and are referenced multiple times rather than copied exponentially.
       const cloneMemo = new WeakMap<object, ExprNode>()
       let expr = cloneExpr(nd.outputExprNodes[outId], cloneMemo)
-      // First resolve any nested calls within the nested module itself
+      // First resolve any nested calls within the nested program itself
       expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart)
       // Each pass uses its own identity memo to preserve DAG sharing through the pipeline.
       const inlineMemo = new WeakMap<object, ExprNode>()
@@ -378,7 +378,7 @@ function resolveNestedOutputs(
       expr = offsetRegisters(expr, ncRegBase, offsetMemo)
       const delayMemo = new WeakMap<object, ExprNode>()
       expr = resolveDelayValues(expr, ncDelayBase, delayMemo)
-      // Substitute nested module's input(i) → call argument i
+      // Substitute nested program's input(i) → call argument i
       // Call args may reference earlier nested_output nodes — resolve those first
       const argMap = new Map<number, ExprNode>()
       const argRefMemo = new WeakMap<object, ExprNode>()
@@ -461,9 +461,9 @@ function substituteNestedOutputRefs(
 }
 
 /**
- * Collect register update expressions for all nested calls within a module.
+ * Collect register update expressions for all nested calls within a program instance.
  * Returns { exprs, names, inits } arrays to append to the flat register lists.
- * The expressions are in the parent module's local space (0-based parent regs)
+ * The expressions are in the parent program's local space (0-based parent regs)
  * and still need the parent's processExpr pipeline applied.
  *
  * nestedRegStart: local offset where nested registers begin.
@@ -499,7 +499,7 @@ function collectNestedRegisterExprs(
       argMap.set(i, arg)
     }
 
-    // Process helper for nested module's expressions
+    // Process helper for nested program's expressions
     const processNestedExpr = (rawNode: ExprNode): ExprNode => {
       const cloneMemo = new WeakMap<object, ExprNode>()
       let expr = cloneExpr(rawNode, cloneMemo)
@@ -563,8 +563,8 @@ function collectNestedRegisterExprs(
 
 /**
  * Rewrite register(id) nodes with an offset.
- * Register IDs in a module's local expression tree are 0-based;
- * in the flat plan they need to be offset by the module's register base.
+ * Register IDs in a program's local expression tree are 0-based;
+ * in the flat plan they need to be offset by the instance's register base.
  */
 function offsetRegisters(node: ExprNode, offset: number, memo?: WeakMap<object, ExprNode>): ExprNode {
   if (offset === 0) return node
@@ -611,9 +611,9 @@ function offsetRegisters(node: ExprNode, offset: number, memo?: WeakMap<object, 
 }
 
 /**
- * Resolve all ref(module, output) nodes by inlining the referenced module's
- * output expression. outputExprs maps "moduleName" → array of output ExprNodes.
- * outputNames maps "moduleName" → array of output name strings (for name→index lookup).
+ * Resolve all ref(instance, output) nodes by inlining the referenced instance's
+ * output expression. outputExprs maps "instanceName" → array of output ExprNodes.
+ * outputNames maps "instanceName" → array of output name strings (for name→index lookup).
  */
 function resolveRefs(
   node: ExprNode,
@@ -633,25 +633,25 @@ function resolveRefs(
   const obj = node as { op: string; [k: string]: unknown }
 
   if (obj.op === 'ref') {
-    const moduleName = obj.module as string
-    const moduleOutputs = outputExprs.get(moduleName)
-    if (!moduleOutputs) throw new Error(`flatten: unresolved ref to unknown module '${moduleName}'`)
+    const instanceName = obj.module as string
+    const instanceOutputs = outputExprs.get(instanceName)
+    if (!instanceOutputs) throw new Error(`flatten: unresolved ref to unknown instance '${instanceName}'`)
 
     let outputId: number
     if (typeof obj.output === 'number') {
       outputId = obj.output
     } else {
       // String output name — resolve to index
-      const names = outputNames.get(moduleName)
-      if (!names) throw new Error(`flatten: no output names for module '${moduleName}'`)
+      const names = outputNames.get(instanceName)
+      if (!names) throw new Error(`flatten: no output names for instance '${instanceName}'`)
       outputId = names.indexOf(obj.output as string)
-      if (outputId === -1) throw new Error(`flatten: unknown output '${obj.output}' on module '${moduleName}'`)
+      if (outputId === -1) throw new Error(`flatten: unknown output '${obj.output}' on instance '${instanceName}'`)
     }
 
-    if (outputId >= moduleOutputs.length) throw new Error(`flatten: ref output ${outputId} out of range for '${moduleName}'`)
+    if (outputId >= instanceOutputs.length) throw new Error(`flatten: ref output ${outputId} out of range for '${instanceName}'`)
     // Return directly — the resolved output is already fully processed and immutable.
     // Sharing is safe; the emitter's identity-based CSE compiles each unique node once.
-    return moduleOutputs[outputId]
+    return instanceOutputs[outputId]
   }
 
   let changed = false
@@ -688,13 +688,13 @@ function resolveRefs(
  * Flatten a session's patch into a single tropical_plan_4 plan.
  *
  * Process:
- * 1. Topologically sort modules
- * 2. For each module in order:
+ * 1. Topologically sort instances
+ * 2. For each instance in order:
  *    a. Build input map: input(N) → wiring expression (with refs already resolved)
- *    b. Substitute inputs in the module's output and register expressions
- *    c. Offset register IDs to the module's base in the flat register array
- *    d. Resolve remaining refs (from wiring exprs that reference earlier modules)
- *    e. Record the resolved output expressions for use by later modules' refs
+ *    b. Substitute inputs in the instance's output and register expressions
+ *    c. Offset register IDs to the instance's base in the flat register array
+ *    d. Resolve remaining refs (from wiring exprs that reference earlier instances)
+ *    e. Record the resolved output expressions for use by later instances' refs
  * 3. Collect all outputs matching graphOutputs
  * 4. Compile expression trees → FlatProgram via emitNumericProgram
  * 5. Emit tropical_plan_4 JSON
@@ -702,37 +702,37 @@ function resolveRefs(
 export function flattenSession(session: SessionState): FlatPlan {
   const { instanceRegistry, graphOutputs } = session
 
-  // Build module info map
-  const moduleInfos = new Map<string, ModuleInfo>()
-  const moduleInstances = new Map<string, ProgramInstance>()
+  // Build instance info map
+  const instanceInfos = new Map<string, InstanceInfo>()
+  const instances = new Map<string, ProgramInstance>()
   for (const [name, inst] of instanceRegistry) {
-    moduleInfos.set(name, extractModuleInfo(name, inst._def))
-    moduleInstances.set(name, inst)
+    instanceInfos.set(name, extractInstanceInfo(name, inst._def))
+    instances.set(name, inst)
   }
 
   // Validate and normalize wiring types (throws FlattenError on incompatible connections,
   // inserts broadcast_to wrappers for shape mismatches from patch-file or direct wiring)
-  const inputExprNodes = normalizeWiringTypes(moduleInfos, session.inputExprNodes)
+  const inputExprNodes = normalizeWiringTypes(instanceInfos, session.inputExprNodes)
 
-  // Identify cycle-breaking modules (outputs depend only on registers, not current inputs).
+  // Identify cycle-breaking instances (outputs depend only on registers, not current inputs).
   // These can break feedback cycles: their outputs are previous-sample state reads.
   const cycleBreakers = new Set<string>()
   const cycleBreakerList: string[] = []
-  for (const [name, inst] of moduleInstances) {
+  for (const [name, inst] of instances) {
     if (inst._def.breaksCycles) {
       cycleBreakers.add(name)
       cycleBreakerList.push(name)
     }
   }
 
-  // Topological sort — edges to cycle-breaking modules are excluded since
+  // Topological sort — edges to cycle-breaking instances are excluded since
   // their outputs are previous-sample register reads, not combinational deps.
-  const deps = buildDependencyGraph(moduleInfos.keys(), inputExprNodes, cycleBreakers)
+  const deps = buildDependencyGraph(instanceInfos.keys(), inputExprNodes, cycleBreakers)
   const { order, complete } = topologicalSort(deps)
   if (!complete) throw new Error('flatten: topological sort incomplete — cycles exist')
 
-  // Split order: cycle-breaking modules first (output pre-computation),
-  // then non-cycle-breaking modules in topological order.
+  // Split order: cycle-breaking instances first (output pre-computation),
+  // then non-cycle-breaking instances in topological order.
   const nonCbOrder = order.filter(n => !cycleBreakers.has(n))
 
   // Flat register arrays
@@ -742,14 +742,14 @@ export function flattenSession(session: SessionState): FlatPlan {
   const flatRegisterNames: string[] = []
   const flatRegisterTypes: ScalarType[] = []
 
-  // Track each module's register base offset and resolved output expressions
+  // Track each instance's register base offset and resolved output expressions
   const resolvedOutputs = new Map<string, ExprNode[]>()
   const resolvedOutputNames = new Map<string, string[]>()
-  const moduleOutputBase = new Map<string, number>()
+  const exprBase = new Map<string, number>()
 
-  // ── Phase 1: Pre-compute cycle-breaking module outputs ──
+  // ── Phase 1: Pre-compute cycle-breaking instance outputs ──
   // Their outputs are purely state-derived (register reads from previous sample),
-  // so they can be resolved before any other modules. Register updates are deferred.
+  // so they can be resolved before any other instances. Register updates are deferred.
   const deferredCbUpdates: Array<{
     name: string
     registerBase: number
@@ -760,17 +760,17 @@ export function flattenSession(session: SessionState): FlatPlan {
 
   let registerBase = 0
   for (const name of cycleBreakerList) {
-    const inst = moduleInstances.get(name)!
+    const inst = instances.get(name)!
     const def = inst._def
     const myRegBase = registerBase
 
-    moduleOutputBase.set(name, flatOutputExprs.length)
+    exprBase.set(name, flatOutputExprs.length)
     const delayBase = registerBase + def.registerNames.length
     const nestedRegStart = def.registerNames.length + def.delayUpdateNodes.length
 
     // Process output expressions — no input substitution or ref resolution needed
-    // (cycle-breaking module outputs are purely register-derived)
-    const moduleResolvedOutputs: ExprNode[] = []
+    // (cycle-breaking instance outputs are purely register-derived)
+    const resolvedOutputs: ExprNode[] = []
     for (const outputNode of def.outputExprNodes) {
       const cloneMemo = new WeakMap<object, ExprNode>()
       let expr = cloneExpr(outputNode, cloneMemo)
@@ -784,9 +784,9 @@ export function flattenSession(session: SessionState): FlatPlan {
       const lowerMemo = new WeakMap<object, ExprNode>()
       expr = lowerArrayOps(expr, lowerMemo)
       flatOutputExprs.push(expr)
-      moduleResolvedOutputs.push(expr)
+      resolvedOutputs.push(expr)
     }
-    resolvedOutputs.set(name, moduleResolvedOutputs)
+    resolvedOutputs.set(name, resolvedOutputs)
     resolvedOutputNames.set(name, [...def.outputNames])
 
     // Push register metadata with placeholder update expressions (overwritten in phase 3)
@@ -821,14 +821,14 @@ export function flattenSession(session: SessionState): FlatPlan {
     registerBase += def.registerNames.length + def.delayUpdateNodes.length + totalNestedRegs
   }
 
-  // ── Phase 2: Process non-cycle-breaking modules in topological order ──
+  // ── Phase 2: Process non-cycle-breaking instances in topological order ──
   for (const name of nonCbOrder) {
-    const inst = moduleInstances.get(name)!
+    const inst = instances.get(name)!
     const def = inst._def
 
-    moduleOutputBase.set(name, flatOutputExprs.length)
+    exprBase.set(name, flatOutputExprs.length)
 
-    // Delay states occupy registers immediately after the module's named registers
+    // Delay states occupy registers immediately after the instance's named registers
     const delayBase = registerBase + def.registerNames.length
     // Nested call registers start after named registers + delay states
     const nestedRegStart = def.registerNames.length + def.delayUpdateNodes.length
@@ -839,7 +839,7 @@ export function flattenSession(session: SessionState): FlatPlan {
       const key = `${name}:${def.inputNames[i]}`
       const wiringExpr = inputExprNodes.get(key)
       if (wiringExpr !== undefined) {
-        // Resolve refs in the wiring expression (they reference earlier modules)
+        // Resolve refs in the wiring expression (they reference earlier instances)
         inputMap.set(i, resolveRefs(wiringExpr, resolvedOutputs, resolvedOutputNames))
       } else {
         // Use default value or 0
@@ -855,7 +855,7 @@ export function flattenSession(session: SessionState): FlatPlan {
     const processExpr = (rawNode: ExprNode): ExprNode => {
       const cloneMemo = new WeakMap<object, ExprNode>()
       let expr = cloneExpr(rawNode, cloneMemo)
-      // Resolve nested module calls (ModuleType.call()) before other transforms
+      // Resolve nested program calls (ProgramType.call()) before other transforms
       expr = resolveNestedOutputs(expr, def.nestedCalls, nestedRegStart)
       const inlineMemo = new WeakMap<object, ExprNode>()
       expr = inlineCalls(expr, inlineMemo)
@@ -878,13 +878,13 @@ export function flattenSession(session: SessionState): FlatPlan {
     // Process each output expression
     // Order matters: offset registers BEFORE substituting inputs/resolving refs,
     // because wiring expressions already have globally-correct register IDs.
-    const moduleResolvedOutputs: ExprNode[] = []
+    const resolvedOutputs: ExprNode[] = []
     for (let i = 0; i < def.outputExprNodes.length; i++) {
       const expr = processExpr(def.outputExprNodes[i])
       flatOutputExprs.push(expr)
-      moduleResolvedOutputs.push(expr)
+      resolvedOutputs.push(expr)
     }
-    resolvedOutputs.set(name, moduleResolvedOutputs)
+    resolvedOutputs.set(name, resolvedOutputs)
     resolvedOutputNames.set(name, [...def.outputNames])
 
     // Process each named register expression
@@ -967,7 +967,7 @@ export function flattenSession(session: SessionState): FlatPlan {
 
       const nested = collectNestedRegisterExprs(def.nestedCalls, nestedRegStart, name, resolvedNestedOutputs)
       for (let i = 0; i < nested.exprs.length; i++) {
-        // Apply the parent module's global transforms (offsetRegisters, substituteInputs, resolveRefs)
+        // Apply the parent instance's global transforms (offsetRegisters, substituteInputs, resolveRefs)
         let expr = nested.exprs[i]
         const nestedOffsetMemo = new WeakMap<object, ExprNode>()
         expr = offsetRegisters(expr, registerBase, nestedOffsetMemo)
@@ -982,17 +982,17 @@ export function flattenSession(session: SessionState): FlatPlan {
       }
     }
 
-    // Total registers for this module: named + delays + all nested calls
+    // Total registers for this instance: named + delays + all nested calls
     let totalNestedRegs = 0
     for (const nc of def.nestedCalls) totalNestedRegs += nestedCallRegCount(nc)
     registerBase += def.registerNames.length + def.delayUpdateNodes.length + totalNestedRegs
   }
 
-  // ── Phase 3: Resolve deferred register updates for cycle-breaking modules ──
-  // Now that all non-cycle-breaking modules are resolved, we can compute
-  // the register update expressions (which depend on other modules' outputs).
+  // ── Phase 3: Resolve deferred register updates for cycle-breaking instances ──
+  // Now that all non-cycle-breaking instances are resolved, we can compute
+  // the register update expressions (which depend on other instances' outputs).
   for (const { name, registerBase: rBase, delayBase, nestedRegStart, regStartIdx } of deferredCbUpdates) {
-    const inst = moduleInstances.get(name)!
+    const inst = instances.get(name)!
     const def = inst._def
 
     // Build input substitution map (all refs are now resolvable)
@@ -1100,25 +1100,25 @@ export function flattenSession(session: SessionState): FlatPlan {
   }
 
   // Build output indices: map graphOutputs → flat output indices
-  // Combined order: cycle-breaking modules first, then topological order
+  // Combined order: cycle-breaking instances first, then topological order
   const fullOrder = [...cycleBreakerList, ...nonCbOrder]
   const outputIndices: number[] = []
   let outputBase = 0
-  const moduleOutputStart = new Map<string, number>()
+  const outputStart = new Map<string, number>()
 
   // Recompute output starts
   for (const name of fullOrder) {
-    moduleOutputStart.set(name, outputBase)
-    const inst = moduleInstances.get(name)!
+    outputStart.set(name, outputBase)
+    const inst = instances.get(name)!
     outputBase += inst._def.outputNames.length
   }
 
   for (const { module, output } of graphOutputs) {
-    const inst = moduleInstances.get(module)
+    const inst = instances.get(module)
     if (!inst) continue
     const outputIdx = inst._def.outputNames.indexOf(output)
     if (outputIdx === -1) continue
-    const flatIdx = (moduleOutputStart.get(module) ?? 0) + outputIdx
+    const flatIdx = (outputStart.get(module) ?? 0) + outputIdx
     outputIndices.push(flatIdx)
   }
 

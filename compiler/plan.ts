@@ -13,7 +13,7 @@
  */
 
 import type { ExprNode } from './session'
-import type { CompiledPatch, ModuleInfo } from './compiler'
+import type { CompiledPatch, InstanceInfo } from './compiler'
 
 // ─────────────────────────────────────────────────────────────
 // Plan schema
