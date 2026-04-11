@@ -18,9 +18,12 @@ make clean          # remove build directories
 ```bash
 cmake --build build -j4 && ctest --test-dir build   # C++ tests (JIT + C API)
 bun test                                              # TS compiler tests
+bun test --exclude compiler/apply_plan.test.ts        # TS tests without native FFI
 ```
 
 C++ tests (`engine/tests/test_module_process.cpp`) exercise the C API and JIT without an audio device. TS tests (`compiler/*.test.ts`) cover the optimizer, flattening, array wiring, type checking, expression emission, and more.
+
+**Note:** `apply_plan.test.ts` loads `build/libtropical.dylib` via FFI. If the native lib isn't built, Bun will segfault (null dereference at load time — not a test failure, a crash). Run `make build` first, or use the `--exclude` form above to run only pure TS tests.
 
 ## Architecture
 
