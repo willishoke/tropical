@@ -13,7 +13,7 @@ import type { TypeDefJSON, SessionState } from './patch.js'
 import { loadProgramDef } from './patch.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
-import { ModuleType } from './module.js'
+import { ProgramType } from './program_types.js'
 
 // ─────────────────────────────────────────────────────────────
 // ProgramJSON schema
@@ -150,13 +150,13 @@ export function loadProgramAsSession(
 }
 
 /**
- * Load a leaf ProgramJSON as a ModuleType (registerable in typeRegistry).
+ * Load a leaf ProgramJSON as a ProgramType (registerable in typeRegistry).
  * Programs with inline `programs` get their subprograms registered first.
  */
 export function loadProgramAsType(
   prog: ProgramJSON,
   session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
-): ModuleType {
+): ProgramType {
   // Register inline subprograms first
   if (prog.programs) {
     for (const [name, subProg] of Object.entries(prog.programs)) {
@@ -259,7 +259,7 @@ const __dirname = dirname(__filename)
  * Accepts either a full session or just a typeRegistry Map.
  */
 export function loadStdlib(
-  target: Map<string, ModuleType> | Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
+  target: Map<string, ProgramType> | Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
 ): void {
   // If given a bare Map, wrap it in a minimal session-like object
   const session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> =

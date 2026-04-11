@@ -10,7 +10,7 @@
 
 import type { ExprNode } from './expr.js'
 import type { SessionState } from './patch.js'
-import type { ModuleInstance, NestedCall } from './module.js'
+import type { ProgramInstance, NestedCall } from './program_types.js'
 import {
   type CompilerInput, type ModuleInfo,
   compilerInputFromSession, extractModuleInfo,
@@ -704,7 +704,7 @@ export function flattenPatch(session: SessionState): FlatPlan {
 
   // Build module info map
   const moduleInfos = new Map<string, ModuleInfo>()
-  const moduleInstances = new Map<string, ModuleInstance>()
+  const moduleInstances = new Map<string, ProgramInstance>()
   for (const [name, inst] of instanceRegistry) {
     moduleInfos.set(name, extractModuleInfo(name, inst._def))
     moduleInstances.set(name, inst)

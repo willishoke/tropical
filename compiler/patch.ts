@@ -6,9 +6,9 @@ import {
   type SignalExpr, type ExprCoercible, coerce, type ExprNode, validateExpr,
 } from './expr.js'
 import {
-  ModuleType, ModuleInstance,
+  ProgramType, ProgramInstance,
   type ProgramDef, type NestedCall, type ValueCoercible,
-} from './module.js'
+} from './program_types.js'
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type ProgramJSON } from './program.js'
 import { Param, Trigger } from './runtime/param.js'
@@ -54,8 +54,8 @@ export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON
 export interface SessionState {
   bufferLength: number
   dac: import('./runtime/audio.js').DAC | null  // lazy type import to avoid circular dep
-  typeRegistry: Map<string, ModuleType>
-  instanceRegistry: Map<string, ModuleInstance>
+  typeRegistry: Map<string, ProgramType>
+  instanceRegistry: Map<string, ProgramInstance>
   graphOutputs: Array<{ module: string; output: string }>
   paramRegistry: Map<string, Param>
   triggerRegistry: Map<string, Trigger>
@@ -234,7 +234,7 @@ function slottifyExpr(
 export function loadProgramDef(
   def: ProgramJSON,
   session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
-): ModuleType {
+): ProgramType {
   const inputSpecs  = def.inputs ?? []
   const outputSpecs = def.outputs ?? []
   const inputNames  = inputSpecs.map(i => typeof i === 'string' ? i : i.name)
@@ -347,7 +347,7 @@ export function loadProgramDef(
     breaksCycles: def.breaks_cycles ?? false,
   }
 
-  return new ModuleType(programDef)
+  return new ProgramType(programDef)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -371,7 +371,7 @@ const UNARY_PREFIX: Record<string, string> = { neg: '-' }
  */
 export function prettyExpr(
   node: ExprNode,
-  instanceRegistry: Map<string, ModuleInstance>,
+  instanceRegistry: Map<string, ProgramInstance>,
 ): string {
   if (typeof node === 'number') return String(node)
   if (typeof node === 'boolean') return String(node)
