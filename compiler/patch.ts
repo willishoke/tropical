@@ -251,7 +251,12 @@ export function loadProgramDef(
   const regPortTypes: (string | undefined)[] = []
   for (const [name, val] of Object.entries(regsRaw)) {
     regNames.push(name)
-    if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'init' in val) {
+    if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'zeros' in val) {
+      // Compact form: {"zeros": N} → array of N zeros with inferred type
+      const n = (val as { zeros: number }).zeros
+      regInitValues.push(new Array(n).fill(0))
+      regPortTypes.push(`float[${n}]`)
+    } else if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'init' in val) {
       const typed = val as { init: ValueCoercible; type: string }
       regInitValues.push(typed.init)
       regPortTypes.push(typed.type)

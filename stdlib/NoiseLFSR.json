@@ -1,295 +1,63 @@
 {
   "schema": "tropical_program_1",
   "name": "NoiseLFSR",
-  "inputs": [
-    "clock"
-  ],
-  "outputs": [
-    "out"
-  ],
-  "regs": {
-    "state": {
-      "init": 44257,
-      "type": "int"
-    },
-    "value": 0
-  },
+  "inputs": ["clock"],
+  "outputs": ["out"],
+  "regs": { "state": { "init": 44257, "type": "int" }, "value": 0 },
   "delays": {
-    "delay_0": {
-      "update": {
-        "op": "input",
-        "name": "clock"
-      },
-      "init": 0
-    }
+    "prev_clock": { "update": { "op": "input", "name": "clock" }, "init": 0 }
   },
-  "input_defaults": {
-    "clock": 0
-  },
+  "input_defaults": { "clock": 0 },
   "process": {
     "outputs": {
       "out": {
-        "op": "select",
-        "args": [
-          {
-            "op": "mul",
-            "args": [
-              {
-                "op": "gt",
-                "args": [
-                  {
-                    "op": "input",
-                    "name": "clock"
-                  },
-                  0.5
-                ]
-              },
-              {
-                "op": "lte",
-                "args": [
-                  {
-                    "op": "delay_ref",
-                    "id": "delay_0"
-                  },
-                  0.5
-                ]
-              }
-            ]
+        "op": "let",
+        "bind": {
+          "tick": { "op": "mul", "args": [{ "op": "gt", "args": [{ "op": "input", "name": "clock" }, 0.5] }, { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_clock" }, 0.5] }] },
+          "lsb": { "op": "bitAnd", "args": [{ "op": "reg", "name": "state" }, 1] },
+          "shifted": { "op": "rshift", "args": [{ "op": "reg", "name": "state" }, 1] }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "newState": { "op": "select", "args": [{ "op": "binding", "name": "lsb" }, { "op": "bitXor", "args": [{ "op": "binding", "name": "shifted" }, 46080] }, { "op": "binding", "name": "shifted" }] },
+            "normalized": { "op": "sub", "args": [{ "op": "div", "args": [{ "op": "mul", "args": [{ "op": "select", "args": [{ "op": "binding", "name": "lsb" }, { "op": "bitXor", "args": [{ "op": "binding", "name": "shifted" }, 46080] }, { "op": "binding", "name": "shifted" }] }, 2] }, 65535] }, 1] }
           },
-          {
-            "op": "sub",
-            "args": [
-              {
-                "op": "div",
-                "args": [
-                  {
-                    "op": "mul",
-                    "args": [
-                      {
-                        "op": "select",
-                        "args": [
-                          {
-                            "op": "bit_and",
-                            "args": [
-                              {
-                                "op": "reg",
-                                "name": "state"
-                              },
-                              1
-                            ]
-                          },
-                          {
-                            "op": "bit_xor",
-                            "args": [
-                              {
-                                "op": "rshift",
-                                "args": [
-                                  {
-                                    "op": "reg",
-                                    "name": "state"
-                                  },
-                                  1
-                                ]
-                              },
-                              46080
-                            ]
-                          },
-                          {
-                            "op": "rshift",
-                            "args": [
-                              {
-                                "op": "reg",
-                                "name": "state"
-                              },
-                              1
-                            ]
-                          }
-                        ]
-                      },
-                      2
-                    ]
-                  },
-                  65535
-                ]
-              },
-              1
-            ]
-          },
-          {
-            "op": "reg",
-            "name": "value"
-          }
-        ]
+          "in": { "op": "select", "args": [{ "op": "binding", "name": "tick" }, { "op": "binding", "name": "normalized" }, { "op": "reg", "name": "value" }] }
+        }
       }
     },
     "next_regs": {
       "state": {
-        "op": "select",
-        "args": [
-          {
-            "op": "mul",
-            "args": [
-              {
-                "op": "gt",
-                "args": [
-                  {
-                    "op": "input",
-                    "name": "clock"
-                  },
-                  0.5
-                ]
-              },
-              {
-                "op": "lte",
-                "args": [
-                  {
-                    "op": "delay_ref",
-                    "id": "delay_0"
-                  },
-                  0.5
-                ]
-              }
-            ]
+        "op": "let",
+        "bind": {
+          "tick": { "op": "mul", "args": [{ "op": "gt", "args": [{ "op": "input", "name": "clock" }, 0.5] }, { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_clock" }, 0.5] }] },
+          "lsb": { "op": "bitAnd", "args": [{ "op": "reg", "name": "state" }, 1] },
+          "shifted": { "op": "rshift", "args": [{ "op": "reg", "name": "state" }, 1] }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "newState": { "op": "select", "args": [{ "op": "binding", "name": "lsb" }, { "op": "bitXor", "args": [{ "op": "binding", "name": "shifted" }, 46080] }, { "op": "binding", "name": "shifted" }] }
           },
-          {
-            "op": "select",
-            "args": [
-              {
-                "op": "bit_and",
-                "args": [
-                  {
-                    "op": "reg",
-                    "name": "state"
-                  },
-                  1
-                ]
-              },
-              {
-                "op": "bit_xor",
-                "args": [
-                  {
-                    "op": "rshift",
-                    "args": [
-                      {
-                        "op": "reg",
-                        "name": "state"
-                      },
-                      1
-                    ]
-                  },
-                  46080
-                ]
-              },
-              {
-                "op": "rshift",
-                "args": [
-                  {
-                    "op": "reg",
-                    "name": "state"
-                  },
-                  1
-                ]
-              }
-            ]
-          },
-          {
-            "op": "reg",
-            "name": "state"
-          }
-        ]
+          "in": { "op": "select", "args": [{ "op": "binding", "name": "tick" }, { "op": "binding", "name": "newState" }, { "op": "reg", "name": "state" }] }
+        }
       },
       "value": {
-        "op": "select",
-        "args": [
-          {
-            "op": "mul",
-            "args": [
-              {
-                "op": "gt",
-                "args": [
-                  {
-                    "op": "input",
-                    "name": "clock"
-                  },
-                  0.5
-                ]
-              },
-              {
-                "op": "lte",
-                "args": [
-                  {
-                    "op": "delay_ref",
-                    "id": "delay_0"
-                  },
-                  0.5
-                ]
-              }
-            ]
+        "op": "let",
+        "bind": {
+          "tick": { "op": "mul", "args": [{ "op": "gt", "args": [{ "op": "input", "name": "clock" }, 0.5] }, { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_clock" }, 0.5] }] },
+          "lsb": { "op": "bitAnd", "args": [{ "op": "reg", "name": "state" }, 1] },
+          "shifted": { "op": "rshift", "args": [{ "op": "reg", "name": "state" }, 1] }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "newState": { "op": "select", "args": [{ "op": "binding", "name": "lsb" }, { "op": "bitXor", "args": [{ "op": "binding", "name": "shifted" }, 46080] }, { "op": "binding", "name": "shifted" }] },
+            "normalized": { "op": "sub", "args": [{ "op": "div", "args": [{ "op": "mul", "args": [{ "op": "select", "args": [{ "op": "binding", "name": "lsb" }, { "op": "bitXor", "args": [{ "op": "binding", "name": "shifted" }, 46080] }, { "op": "binding", "name": "shifted" }] }, 2] }, 65535] }, 1] }
           },
-          {
-            "op": "sub",
-            "args": [
-              {
-                "op": "div",
-                "args": [
-                  {
-                    "op": "mul",
-                    "args": [
-                      {
-                        "op": "select",
-                        "args": [
-                          {
-                            "op": "bit_and",
-                            "args": [
-                              {
-                                "op": "reg",
-                                "name": "state"
-                              },
-                              1
-                            ]
-                          },
-                          {
-                            "op": "bit_xor",
-                            "args": [
-                              {
-                                "op": "rshift",
-                                "args": [
-                                  {
-                                    "op": "reg",
-                                    "name": "state"
-                                  },
-                                  1
-                                ]
-                              },
-                              46080
-                            ]
-                          },
-                          {
-                            "op": "rshift",
-                            "args": [
-                              {
-                                "op": "reg",
-                                "name": "state"
-                              },
-                              1
-                            ]
-                          }
-                        ]
-                      },
-                      2
-                    ]
-                  },
-                  65535
-                ]
-              },
-              1
-            ]
-          },
-          {
-            "op": "reg",
-            "name": "value"
-          }
-        ]
+          "in": { "op": "select", "args": [{ "op": "binding", "name": "tick" }, { "op": "binding", "name": "normalized" }, { "op": "reg", "name": "value" }] }
+        }
       }
     }
   }

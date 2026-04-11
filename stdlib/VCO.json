@@ -2,954 +2,142 @@
   "schema": "tropical_program_1",
   "name": "VCO",
   "inputs": [
-    {
-      "name": "freq",
-      "type": "float"
-    },
-    {
-      "name": "fm",
-      "type": "float"
-    },
-    {
-      "name": "fm_index",
-      "type": "float"
-    }
+    { "name": "freq", "type": "float" },
+    { "name": "fm", "type": "float" },
+    { "name": "fm_index", "type": "float" }
   ],
   "outputs": [
-    {
-      "name": "saw",
-      "type": "float"
-    },
-    {
-      "name": "tri",
-      "type": "float"
-    },
-    {
-      "name": "sin",
-      "type": "float"
-    },
-    {
-      "name": "sqr",
-      "type": "float"
-    }
+    { "name": "saw", "type": "float" },
+    { "name": "tri", "type": "float" },
+    { "name": "sin", "type": "float" },
+    { "name": "sqr", "type": "float" }
   ],
-  "regs": {
-    "phase": 0,
-    "tri_state": 0
-  },
-  "input_defaults": {
-    "freq": 100,
-    "fm": 0,
-    "fm_index": 5
-  },
+  "regs": { "phase": 0, "tri_state": 0 },
+  "input_defaults": { "freq": 100, "fm": 0, "fm_index": 5 },
   "programs": {
-    "_sub_0": {
+    "_wrap01": {
       "schema": "tropical_program_1",
-      "name": "_sub_0",
-      "inputs": [
-        "x"
-      ],
-      "outputs": [
-        "value"
-      ],
+      "name": "_wrap01",
+      "inputs": ["x"],
+      "outputs": ["value"],
       "process": {
         "outputs": {
-          "value": {
-            "op": "mod",
-            "args": [
-              {
-                "op": "add",
-                "args": [
-                  {
-                    "op": "mod",
-                    "args": [
-                      {
-                        "op": "input",
-                        "name": "x"
-                      },
-                      1
-                    ]
-                  },
-                  1
-                ]
-              },
-              1
-            ]
-          }
+          "value": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "mod", "args": [{ "op": "input", "name": "x" }, 1] }, 1] }, 1] }
         }
       }
     },
-    "_sub_1": {
+    "_polyBlep": {
       "schema": "tropical_program_1",
-      "name": "_sub_1",
-      "inputs": [
-        "t",
-        "dt"
-      ],
-      "outputs": [
-        "value"
-      ],
+      "name": "_polyBlep",
+      "inputs": ["t", "dt"],
+      "outputs": ["value"],
       "process": {
         "outputs": {
           "value": {
-            "op": "mul",
-            "args": [
-              {
-                "op": "mul",
-                "args": [
-                  {
-                    "op": "gt",
-                    "args": [
-                      {
-                        "op": "input",
-                        "name": "dt"
-                      },
-                      0
-                    ]
-                  },
-                  {
-                    "op": "lt",
-                    "args": [
-                      {
-                        "op": "input",
-                        "name": "dt"
-                      },
-                      1
-                    ]
-                  }
-                ]
+            "op": "let",
+            "bind": {
+              "t": { "op": "input", "name": "t" },
+              "dt": { "op": "input", "name": "dt" },
+              "leftT": { "op": "div", "args": [{ "op": "input", "name": "t" }, { "op": "input", "name": "dt" }] },
+              "rightT": { "op": "div", "args": [{ "op": "sub", "args": [{ "op": "input", "name": "t" }, 1] }, { "op": "input", "name": "dt" }] }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "left": { "op": "sub", "args": [{ "op": "sub", "args": [{ "op": "add", "args": [{ "op": "binding", "name": "leftT" }, { "op": "binding", "name": "leftT" }] }, { "op": "mul", "args": [{ "op": "binding", "name": "leftT" }, { "op": "binding", "name": "leftT" }] }] }, 1] },
+                "right": { "op": "add", "args": [{ "op": "add", "args": [{ "op": "mul", "args": [{ "op": "binding", "name": "rightT" }, { "op": "binding", "name": "rightT" }] }, { "op": "mul", "args": [2, { "op": "binding", "name": "rightT" }] }] }, 1] },
+                "valid": { "op": "mul", "args": [{ "op": "gt", "args": [{ "op": "binding", "name": "dt" }, 0] }, { "op": "lt", "args": [{ "op": "binding", "name": "dt" }, 1] }] },
+                "leftMask": { "op": "lt", "args": [{ "op": "binding", "name": "t" }, { "op": "binding", "name": "dt" }] },
+                "rightMask": { "op": "mul", "args": [{ "op": "gte", "args": [{ "op": "binding", "name": "t" }, { "op": "binding", "name": "dt" }] }, { "op": "gt", "args": [{ "op": "binding", "name": "t" }, { "op": "sub", "args": [1, { "op": "binding", "name": "dt" }] }] }] }
               },
-              {
-                "op": "add",
-                "args": [
-                  {
-                    "op": "mul",
-                    "args": [
-                      {
-                        "op": "lt",
-                        "args": [
-                          {
-                            "op": "input",
-                            "name": "t"
-                          },
-                          {
-                            "op": "input",
-                            "name": "dt"
-                          }
-                        ]
-                      },
-                      {
-                        "op": "sub",
-                        "args": [
-                          {
-                            "op": "sub",
-                            "args": [
-                              {
-                                "op": "add",
-                                "args": [
-                                  {
-                                    "op": "div",
-                                    "args": [
-                                      {
-                                        "op": "input",
-                                        "name": "t"
-                                      },
-                                      {
-                                        "op": "input",
-                                        "name": "dt"
-                                      }
-                                    ]
-                                  },
-                                  {
-                                    "op": "div",
-                                    "args": [
-                                      {
-                                        "op": "input",
-                                        "name": "t"
-                                      },
-                                      {
-                                        "op": "input",
-                                        "name": "dt"
-                                      }
-                                    ]
-                                  }
-                                ]
-                              },
-                              {
-                                "op": "mul",
-                                "args": [
-                                  {
-                                    "op": "div",
-                                    "args": [
-                                      {
-                                        "op": "input",
-                                        "name": "t"
-                                      },
-                                      {
-                                        "op": "input",
-                                        "name": "dt"
-                                      }
-                                    ]
-                                  },
-                                  {
-                                    "op": "div",
-                                    "args": [
-                                      {
-                                        "op": "input",
-                                        "name": "t"
-                                      },
-                                      {
-                                        "op": "input",
-                                        "name": "dt"
-                                      }
-                                    ]
-                                  }
-                                ]
-                              }
-                            ]
-                          },
-                          1
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "op": "mul",
-                    "args": [
-                      {
-                        "op": "mul",
-                        "args": [
-                          {
-                            "op": "gte",
-                            "args": [
-                              {
-                                "op": "input",
-                                "name": "t"
-                              },
-                              {
-                                "op": "input",
-                                "name": "dt"
-                              }
-                            ]
-                          },
-                          {
-                            "op": "gt",
-                            "args": [
-                              {
-                                "op": "input",
-                                "name": "t"
-                              },
-                              {
-                                "op": "sub",
-                                "args": [
-                                  1,
-                                  {
-                                    "op": "input",
-                                    "name": "dt"
-                                  }
-                                ]
-                              }
-                            ]
-                          }
-                        ]
-                      },
-                      {
-                        "op": "add",
-                        "args": [
-                          {
-                            "op": "add",
-                            "args": [
-                              {
-                                "op": "mul",
-                                "args": [
-                                  {
-                                    "op": "div",
-                                    "args": [
-                                      {
-                                        "op": "sub",
-                                        "args": [
-                                          {
-                                            "op": "input",
-                                            "name": "t"
-                                          },
-                                          1
-                                        ]
-                                      },
-                                      {
-                                        "op": "input",
-                                        "name": "dt"
-                                      }
-                                    ]
-                                  },
-                                  {
-                                    "op": "div",
-                                    "args": [
-                                      {
-                                        "op": "sub",
-                                        "args": [
-                                          {
-                                            "op": "input",
-                                            "name": "t"
-                                          },
-                                          1
-                                        ]
-                                      },
-                                      {
-                                        "op": "input",
-                                        "name": "dt"
-                                      }
-                                    ]
-                                  }
-                                ]
-                              },
-                              {
-                                "op": "mul",
-                                "args": [
-                                  2,
-                                  {
-                                    "op": "div",
-                                    "args": [
-                                      {
-                                        "op": "sub",
-                                        "args": [
-                                          {
-                                            "op": "input",
-                                            "name": "t"
-                                          },
-                                          1
-                                        ]
-                                      },
-                                      {
-                                        "op": "input",
-                                        "name": "dt"
-                                      }
-                                    ]
-                                  }
-                                ]
-                              }
-                            ]
-                          },
-                          1
-                        ]
-                      }
-                    ]
-                  }
-                ]
-              }
-            ]
+              "in": { "op": "mul", "args": [{ "op": "binding", "name": "valid" }, { "op": "add", "args": [{ "op": "mul", "args": [{ "op": "binding", "name": "leftMask" }, { "op": "binding", "name": "left" }] }, { "op": "mul", "args": [{ "op": "binding", "name": "rightMask" }, { "op": "binding", "name": "right" }] }] }] }
+            }
           }
         }
       }
     }
   },
   "instances": {
-    "_sub_0_0": {
-      "program": "_sub_0",
+    "phase_wrap": {
+      "program": "_wrap01",
       "inputs": {
-        "x": {
-          "op": "add",
-          "args": [
-            {
-              "op": "reg",
-              "name": "phase"
-            },
-            {
-              "op": "div",
-              "args": [
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "input",
-                      "name": "freq"
-                    },
-                    {
-                      "op": "pow",
-                      "args": [
-                        2,
-                        {
-                          "op": "div",
-                          "args": [
-                            {
-                              "op": "mul",
-                              "args": [
-                                {
-                                  "op": "input",
-                                  "name": "fm_index"
-                                },
-                                {
-                                  "op": "input",
-                                  "name": "fm"
-                                }
-                              ]
-                            },
-                            5
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "op": "sample_rate"
-                }
-              ]
-            }
-          ]
-        }
+        "x": { "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }, { "op": "sample_rate" }] }] }
       }
     },
-    "_sub_1_0": {
-      "program": "_sub_1",
+    "blep_saw": {
+      "program": "_polyBlep",
       "inputs": {
-        "t": {
-          "op": "nested_out",
-          "ref": "_sub_0_0",
-          "output": 0
-        },
-        "dt": {
-          "op": "clamp",
-          "args": [
-            {
-              "op": "div",
-              "args": [
-                {
-                  "op": "abs",
-                  "args": [
-                    {
-                      "op": "mul",
-                      "args": [
-                        {
-                          "op": "input",
-                          "name": "freq"
-                        },
-                        {
-                          "op": "pow",
-                          "args": [
-                            2,
-                            {
-                              "op": "div",
-                              "args": [
-                                {
-                                  "op": "mul",
-                                  "args": [
-                                    {
-                                      "op": "input",
-                                      "name": "fm_index"
-                                    },
-                                    {
-                                      "op": "input",
-                                      "name": "fm"
-                                    }
-                                  ]
-                                },
-                                5
-                              ]
-                            }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "op": "sample_rate"
-                }
-              ]
-            },
-            0,
-            0.5
-          ]
-        }
+        "t": { "op": "nested_out", "ref": "phase_wrap", "output": "value" },
+        "dt": { "op": "clamp", "args": [{ "op": "div", "args": [{ "op": "abs", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }] }, { "op": "sample_rate" }] }, 0, 0.5] }
       }
     },
-    "_sub_1_1": {
-      "program": "_sub_1",
+    "blep_sqr_0": {
+      "program": "_polyBlep",
       "inputs": {
-        "t": {
-          "op": "nested_out",
-          "ref": "_sub_0_0",
-          "output": 0
-        },
-        "dt": {
-          "op": "clamp",
-          "args": [
-            {
-              "op": "div",
-              "args": [
-                {
-                  "op": "abs",
-                  "args": [
-                    {
-                      "op": "mul",
-                      "args": [
-                        {
-                          "op": "input",
-                          "name": "freq"
-                        },
-                        {
-                          "op": "pow",
-                          "args": [
-                            2,
-                            {
-                              "op": "div",
-                              "args": [
-                                {
-                                  "op": "mul",
-                                  "args": [
-                                    {
-                                      "op": "input",
-                                      "name": "fm_index"
-                                    },
-                                    {
-                                      "op": "input",
-                                      "name": "fm"
-                                    }
-                                  ]
-                                },
-                                5
-                              ]
-                            }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "op": "sample_rate"
-                }
-              ]
-            },
-            0,
-            0.5
-          ]
-        }
+        "t": { "op": "nested_out", "ref": "phase_wrap", "output": "value" },
+        "dt": { "op": "clamp", "args": [{ "op": "div", "args": [{ "op": "abs", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }] }, { "op": "sample_rate" }] }, 0, 0.5] }
       }
     },
-    "_sub_0_1": {
-      "program": "_sub_0",
+    "sqr_phase_wrap": {
+      "program": "_wrap01",
       "inputs": {
-        "x": {
-          "op": "add",
-          "args": [
-            {
-              "op": "nested_out",
-              "ref": "_sub_0_0",
-              "output": 0
-            },
-            0.5
-          ]
-        }
+        "x": { "op": "add", "args": [{ "op": "nested_out", "ref": "phase_wrap", "output": "value" }, 0.5] }
       }
     },
-    "_sub_1_2": {
-      "program": "_sub_1",
+    "blep_sqr_1": {
+      "program": "_polyBlep",
       "inputs": {
-        "t": {
-          "op": "nested_out",
-          "ref": "_sub_0_1",
-          "output": 0
-        },
-        "dt": {
-          "op": "clamp",
-          "args": [
-            {
-              "op": "div",
-              "args": [
-                {
-                  "op": "abs",
-                  "args": [
-                    {
-                      "op": "mul",
-                      "args": [
-                        {
-                          "op": "input",
-                          "name": "freq"
-                        },
-                        {
-                          "op": "pow",
-                          "args": [
-                            2,
-                            {
-                              "op": "div",
-                              "args": [
-                                {
-                                  "op": "mul",
-                                  "args": [
-                                    {
-                                      "op": "input",
-                                      "name": "fm_index"
-                                    },
-                                    {
-                                      "op": "input",
-                                      "name": "fm"
-                                    }
-                                  ]
-                                },
-                                5
-                              ]
-                            }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "op": "sample_rate"
-                }
-              ]
-            },
-            0,
-            0.5
-          ]
-        }
+        "t": { "op": "nested_out", "ref": "sqr_phase_wrap", "output": "value" },
+        "dt": { "op": "clamp", "args": [{ "op": "div", "args": [{ "op": "abs", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }] }, { "op": "sample_rate" }] }, 0, 0.5] }
       }
     }
   },
   "process": {
     "outputs": {
       "saw": {
-        "op": "sub",
-        "args": [
-          {
-            "op": "sub",
-            "args": [
-              {
-                "op": "mul",
-                "args": [
-                  2,
-                  {
-                    "op": "nested_out",
-                    "ref": "_sub_0_0",
-                    "output": 0
-                  }
-                ]
-              },
-              1
-            ]
-          },
-          {
-            "op": "nested_out",
-            "ref": "_sub_1_0",
-            "output": 0
-          }
-        ]
+        "op": "let",
+        "bind": {
+          "phase": { "op": "nested_out", "ref": "phase_wrap", "output": "value" },
+          "saw0": { "op": "sub", "args": [{ "op": "mul", "args": [2, { "op": "nested_out", "ref": "phase_wrap", "output": "value" }] }, 1] }
+        },
+        "in": { "op": "sub", "args": [{ "op": "binding", "name": "saw0" }, { "op": "nested_out", "ref": "blep_saw", "output": "value" }] }
       },
       "tri": {
-        "op": "clamp",
-        "args": [
-          {
-            "op": "add",
-            "args": [
-              {
-                "op": "reg",
-                "name": "tri_state"
-              },
-                  {
-                    "op": "mul",
-                    "args": [
-                      {
-                        "op": "mul",
-                        "args": [
-                          {
-                            "op": "sub",
-                            "args": [
-                              {
-                                "op": "add",
-                                "args": [
-                                  {
-                                    "op": "sub",
-                                    "args": [
-                                      1,
-                                      {
-                                        "op": "mul",
-                                        "args": [
-                                          2,
-                                          {
-                                            "op": "gte",
-                                            "args": [
-                                              {
-                                                "op": "nested_out",
-                                                "ref": "_sub_0_0",
-                                                "output": 0
-                                              },
-                                              0.5
-                                            ]
-                                          }
-                                        ]
-                                      }
-                                    ]
-                                  },
-                                  {
-                                    "op": "nested_out",
-                                    "ref": "_sub_1_1",
-                                    "output": 0
-                                  }
-                                ]
-                              },
-                              {
-                                "op": "nested_out",
-                                "ref": "_sub_1_2",
-                                "output": 0
-                              }
-                            ]
-                          },
-                          {
-                            "op": "clamp",
-                            "args": [
-                              {
-                                "op": "div",
-                                "args": [
-                                  {
-                                    "op": "abs",
-                                    "args": [
-                                      {
-                                        "op": "mul",
-                                        "args": [
-                                          {
-                                            "op": "input",
-                                            "name": "freq"
-                                          },
-                                          {
-                                            "op": "pow",
-                                            "args": [
-                                              2,
-                                              {
-                                                "op": "div",
-                                                "args": [
-                                                  {
-                                                    "op": "mul",
-                                                    "args": [
-                                                      {
-                                                        "op": "input",
-                                                        "name": "fm_index"
-                                                      },
-                                                      {
-                                                        "op": "input",
-                                                        "name": "fm"
-                                                      }
-                                                    ]
-                                                  },
-                                                  5
-                                                ]
-                                              }
-                                            ]
-                                          }
-                                        ]
-                                      }
-                                    ]
-                                  },
-                                  {
-                                    "op": "sample_rate"
-                                  }
-                                ]
-                              },
-                              0,
-                              0.5
-                            ]
-                          }
-                        ]
-                      },
-                      4
-                    ]
-                  }
-                ]
-              },
-              -1,
-              1
-            ]
-      },
-      "sin": {
-        "op": "sin",
-        "args": [
-          {
-            "op": "mul",
-            "args": [
-              6.283185307179586,
-              {
-                "op": "nested_out",
-                "ref": "_sub_0_0",
-                "output": 0
-              }
-            ]
-          }
-        ]
-      },
-      "sqr": {
-        "op": "sub",
-        "args": [
-          {
-            "op": "add",
-            "args": [
-              {
-                "op": "sub",
-                "args": [
-                  1,
-                  {
-                    "op": "mul",
-                    "args": [
-                      2,
-                      {
-                        "op": "gte",
-                        "args": [
-                          {
-                            "op": "nested_out",
-                            "ref": "_sub_0_0",
-                            "output": 0
-                          },
-                          0.5
-                        ]
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "op": "nested_out",
-                "ref": "_sub_1_1",
-                "output": 0
-              }
-            ]
+        "op": "let",
+        "bind": {
+          "dt": { "op": "clamp", "args": [{ "op": "div", "args": [{ "op": "abs", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }] }, { "op": "sample_rate" }] }, 0, 0.5] },
+          "sqr0": { "op": "sub", "args": [1, { "op": "mul", "args": [2, { "op": "gte", "args": [{ "op": "nested_out", "ref": "phase_wrap", "output": "value" }, 0.5] }] }] },
+          "sqr1_blep": { "op": "nested_out", "ref": "blep_sqr_0", "output": "value" },
+          "sqr2_blep": { "op": "nested_out", "ref": "blep_sqr_1", "output": "value" }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "sqr": { "op": "sub", "args": [{ "op": "add", "args": [{ "op": "binding", "name": "sqr0" }, { "op": "binding", "name": "sqr1_blep" }] }, { "op": "binding", "name": "sqr2_blep" }] }
           },
-          {
-            "op": "nested_out",
-            "ref": "_sub_1_2",
-            "output": 0
-          }
+          "in": { "op": "clamp", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "tri_state" }, { "op": "mul", "args": [{ "op": "mul", "args": [{ "op": "binding", "name": "sqr" }, { "op": "binding", "name": "dt" }] }, 4] }] }, -1, 1] }
+        }
+      },
+      "sin": { "op": "sin", "args": [{ "op": "mul", "args": [6.283185307179586, { "op": "nested_out", "ref": "phase_wrap", "output": "value" }] }] },
+      "sqr": {
+        "op": "sub", "args": [
+          { "op": "add", "args": [
+            { "op": "sub", "args": [1, { "op": "mul", "args": [2, { "op": "gte", "args": [{ "op": "nested_out", "ref": "phase_wrap", "output": "value" }, 0.5] }] }] },
+            { "op": "nested_out", "ref": "blep_sqr_0", "output": "value" }
+          ]},
+          { "op": "nested_out", "ref": "blep_sqr_1", "output": "value" }
         ]
       }
     },
     "next_regs": {
-      "phase": {
-        "op": "nested_out",
-        "ref": "_sub_0_0",
-        "output": 0
-      },
+      "phase": { "op": "nested_out", "ref": "phase_wrap", "output": "value" },
       "tri_state": {
-        "op": "clamp",
-        "args": [
-          {
-            "op": "add",
-            "args": [
-              {
-                "op": "reg",
-                "name": "tri_state"
-              },
-              {
-                "op": "mul",
-                "args": [
-                  {
-                    "op": "mul",
-                    "args": [
-                      {
-                        "op": "sub",
-                        "args": [
-                          {
-                            "op": "add",
-                            "args": [
-                              {
-                                "op": "sub",
-                                "args": [
-                                  1,
-                                  {
-                                    "op": "mul",
-                                    "args": [
-                                      2,
-                                      {
-                                        "op": "gte",
-                                        "args": [
-                                          {
-                                            "op": "nested_out",
-                                            "ref": "_sub_0_0",
-                                            "output": 0
-                                          },
-                                          0.5
-                                        ]
-                                      }
-                                    ]
-                                  }
-                                ]
-                              },
-                              {
-                                "op": "nested_out",
-                                "ref": "_sub_1_1",
-                                "output": 0
-                              }
-                            ]
-                          },
-                          {
-                            "op": "nested_out",
-                            "ref": "_sub_1_2",
-                            "output": 0
-                          }
-                        ]
-                      },
-                      {
-                        "op": "clamp",
-                        "args": [
-                          {
-                            "op": "div",
-                            "args": [
-                              {
-                                "op": "abs",
-                                "args": [
-                                  {
-                                    "op": "mul",
-                                    "args": [
-                                      {
-                                        "op": "input",
-                                        "name": "freq"
-                                      },
-                                      {
-                                        "op": "pow",
-                                        "args": [
-                                          2,
-                                          {
-                                            "op": "div",
-                                            "args": [
-                                              {
-                                                "op": "mul",
-                                                "args": [
-                                                  {
-                                                    "op": "input",
-                                                    "name": "fm_index"
-                                                  },
-                                                  {
-                                                    "op": "input",
-                                                    "name": "fm"
-                                                  }
-                                                ]
-                                              },
-                                              5
-                                            ]
-                                          }
-                                        ]
-                                      }
-                                    ]
-                                  }
-                                ]
-                              },
-                              {
-                                "op": "sample_rate"
-                              }
-                            ]
-                          },
-                          0,
-                          0.5
-                        ]
-                      }
-                    ]
-                  },
-                  4
-                ]
-              }
-            ]
-          },
-          -1,
-          1
-        ]
+        "op": "let",
+        "bind": {
+          "dt": { "op": "clamp", "args": [{ "op": "div", "args": [{ "op": "abs", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }] }, { "op": "sample_rate" }] }, 0, 0.5] },
+          "sqr": { "op": "sub", "args": [{ "op": "add", "args": [{ "op": "sub", "args": [1, { "op": "mul", "args": [2, { "op": "gte", "args": [{ "op": "nested_out", "ref": "phase_wrap", "output": "value" }, 0.5] }] }] }, { "op": "nested_out", "ref": "blep_sqr_0", "output": "value" }] }, { "op": "nested_out", "ref": "blep_sqr_1", "output": "value" }] }
+        },
+        "in": { "op": "clamp", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "tri_state" }, { "op": "mul", "args": [{ "op": "mul", "args": [{ "op": "binding", "name": "sqr" }, { "op": "binding", "name": "dt" }] }, 4] }] }, -1, 1] }
       }
     }
   }
