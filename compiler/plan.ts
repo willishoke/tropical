@@ -291,13 +291,13 @@ export function validatePlan(plan: ExecutionPlan): void {
 }
 
 /** Extract all {instance, output} refs from an ExprNode. */
-function collectRefs(node: ExprNode): Array<{ module: string; output: string }> {
-  const refs: Array<{ module: string; output: string }> = []
+function collectRefs(node: ExprNode): Array<{ instance: string; output: string }> {
+  const refs: Array<{ instance: string; output: string }> = []
   walkRefs(node, refs)
   return refs
 }
 
-function walkRefs(node: ExprNode, refs: Array<{ module: string; output: string }>): void {
+function walkRefs(node: ExprNode, refs: Array<{ instance: string; output: string }>): void {
   if (typeof node === 'number' || typeof node === 'boolean') return
   if (Array.isArray(node)) {
     for (const item of node) walkRefs(item, refs)

@@ -40,7 +40,7 @@ for (const [typeName, instanceName] of modules) {
   loadBuiltins(solo.typeRegistry)
   const type = solo.typeRegistry.get(typeName)!
   solo.instanceRegistry.set(instanceName, type.instantiateAs(instanceName))
-  solo.graphOutputs.push({ module: instanceName, output: type._def.outputNames[0] })
+  solo.graphOutputs.push({ instance: instanceName, output: type._def.outputNames[0] })
   const t = performance.now()
   try {
     flattenSession(solo)
