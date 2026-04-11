@@ -188,6 +188,18 @@ function inlineCalls(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode
       const newV = inlineCalls(v as ExprNode, memo)
       if (newV !== v) changed = true
       result[k] = newV
+    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      // Record<string, ExprNode> fields (e.g. 'bind' in let nodes)
+      const rec = v as Record<string, ExprNode>
+      const newRec: Record<string, ExprNode> = {}
+      let recChanged = false
+      for (const [rk, rv] of Object.entries(rec)) {
+        const newRv = inlineCalls(rv, memo)
+        if (newRv !== rv) recChanged = true
+        newRec[rk] = newRv
+      }
+      if (recChanged) changed = true
+      result[k] = recChanged ? newRec : rec
     } else {
       result[k] = v
     }
@@ -260,6 +272,17 @@ function substituteInputs(node: ExprNode, inputMap: Map<number, ExprNode>, memo?
       const newV = substituteInputs(v as ExprNode, inputMap, memo)
       if (newV !== v) changed = true
       result[k] = newV
+    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      const rec = v as Record<string, ExprNode>
+      const newRec: Record<string, ExprNode> = {}
+      let recChanged = false
+      for (const [rk, rv] of Object.entries(rec)) {
+        const newRv = substituteInputs(rv, inputMap, memo)
+        if (newRv !== rv) recChanged = true
+        newRec[rk] = newRv
+      }
+      if (recChanged) changed = true
+      result[k] = recChanged ? newRec : rec
     } else {
       result[k] = v
     }
@@ -308,6 +331,17 @@ function resolveDelayValues(node: ExprNode, delayBase: number, memo?: WeakMap<ob
       const newV = resolveDelayValues(v as ExprNode, delayBase, memo)
       if (newV !== v) changed = true
       result[k] = newV
+    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      const rec = v as Record<string, ExprNode>
+      const newRec: Record<string, ExprNode> = {}
+      let recChanged = false
+      for (const [rk, rv] of Object.entries(rec)) {
+        const newRv = resolveDelayValues(rv, delayBase, memo)
+        if (newRv !== rv) recChanged = true
+        newRec[rk] = newRv
+      }
+      if (recChanged) changed = true
+      result[k] = recChanged ? newRec : rec
     } else {
       result[k] = v
     }
@@ -447,6 +481,17 @@ function substituteNestedOutputRefs(
       const newV = substituteNestedOutputRefs(v as ExprNode, resolved, memo)
       if (newV !== v) changed = true
       result[k] = newV
+    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      const rec = v as Record<string, ExprNode>
+      const newRec: Record<string, ExprNode> = {}
+      let recChanged = false
+      for (const [rk, rv] of Object.entries(rec)) {
+        const newRv = substituteNestedOutputRefs(rv, resolved, memo)
+        if (newRv !== rv) recChanged = true
+        newRec[rk] = newRv
+      }
+      if (recChanged) changed = true
+      result[k] = recChanged ? newRec : rec
     } else {
       result[k] = v
     }
@@ -597,6 +642,17 @@ function offsetRegisters(node: ExprNode, offset: number, memo?: WeakMap<object, 
       const newV = offsetRegisters(v as ExprNode, offset, memo)
       if (newV !== v) changed = true
       result[k] = newV
+    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      const rec = v as Record<string, ExprNode>
+      const newRec: Record<string, ExprNode> = {}
+      let recChanged = false
+      for (const [rk, rv] of Object.entries(rec)) {
+        const newRv = offsetRegisters(rv, offset, memo)
+        if (newRv !== rv) recChanged = true
+        newRec[rk] = newRv
+      }
+      if (recChanged) changed = true
+      result[k] = recChanged ? newRec : rec
     } else {
       result[k] = v
     }
@@ -667,6 +723,17 @@ function resolveRefs(
       const newV = resolveRefs(v as ExprNode, outputExprs, outputNames, memo)
       if (newV !== v) changed = true
       result[k] = newV
+    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      const rec = v as Record<string, ExprNode>
+      const newRec: Record<string, ExprNode> = {}
+      let recChanged = false
+      for (const [rk, rv] of Object.entries(rec)) {
+        const newRv = resolveRefs(rv, outputExprs, outputNames, memo)
+        if (newRv !== rv) recChanged = true
+        newRec[rk] = newRv
+      }
+      if (recChanged) changed = true
+      result[k] = recChanged ? newRec : rec
     } else {
       result[k] = v
     }
