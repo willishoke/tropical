@@ -20,7 +20,7 @@ import {
 import {
   makeSession, nextName, loadJSON,
   prettyExpr, SessionState, ExprNode,
-} from '../compiler/patch.js'
+} from '../compiler/session.js'
 import { parseProgram } from '../compiler/schema.js'
 import {
   saveProgramFromSession, loadProgramAsType, mergeProgramIntoSession,

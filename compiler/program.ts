@@ -9,8 +9,8 @@
 
 import type { ExprNode } from './expr.js'
 import { validateExpr } from './expr.js'
-import type { TypeDefJSON, SessionState } from './patch.js'
-import { loadProgramDef } from './patch.js'
+import type { TypeDefJSON, SessionState } from './session.js'
+import { loadProgramDef } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
 import { ProgramType } from './program_types.js'

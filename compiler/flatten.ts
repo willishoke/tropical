@@ -1,15 +1,15 @@
 /**
- * flatten.ts — Flatten a patch into a single tropical_plan_4 kernel.
+ * flatten.ts — Flatten a session into a single tropical_plan_4 kernel.
  *
- * Takes a SessionState and produces a flat plan JSON where all module
+ * Takes a SessionState and produces a flat plan JSON where all instance
  * expression trees are inlined: input() nodes are substituted with wiring
- * expressions, ref() nodes are resolved by inlining the referenced module's
- * output expression. The result has zero inter-module boundaries — just one
+ * expressions, ref() nodes are resolved by inlining the referenced instance's
+ * output expression. The result has zero inter-instance boundaries — just one
  * flat instruction stream (tropical_plan_4).
  */
 
 import type { ExprNode } from './expr.js'
-import type { SessionState } from './patch.js'
+import type { SessionState } from './session.js'
 import type { ProgramInstance, NestedCall } from './program_types.js'
 import {
   type CompilerInput, type ModuleInfo,
@@ -699,7 +699,7 @@ function resolveRefs(
  * 4. Compile expression trees → FlatProgram via emitNumericProgram
  * 5. Emit tropical_plan_4 JSON
  */
-export function flattenPatch(session: SessionState): FlatPlan {
+export function flattenSession(session: SessionState): FlatPlan {
   const { instanceRegistry, graphOutputs } = session
 
   // Build module info map

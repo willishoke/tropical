@@ -6,7 +6,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, loadJSON, type ExprNode } from './patch'
+import { makeSession, loadJSON, type ExprNode } from './session'
 import { loadStdlib as loadBuiltins, type ProgramJSON } from './program'
 import { applySessionWiring, applyFlatPlan } from './apply_plan'
 import { Runtime } from './runtime/runtime'

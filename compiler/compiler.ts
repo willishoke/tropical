@@ -13,7 +13,7 @@
  *    wiring morphisms route signals through the pipeline
  */
 
-import type { ExprNode, SessionState } from './patch'
+import type { ExprNode, SessionState } from './session'
 import {
   type PortType, type Term, type MorphismBody, type StateInit,
   Float, Int, Bool, Unit, StructType, ArrayType,

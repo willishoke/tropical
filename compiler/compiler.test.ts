@@ -24,7 +24,7 @@ import {
   product, portTypeEqual, portTypeToString,
 } from './term'
 import { inferType } from './type_check'
-import type { ExprNode } from './patch'
+import type { ExprNode } from './session'
 
 // ─────────────────────────────────────────────────────────────
 // Helpers

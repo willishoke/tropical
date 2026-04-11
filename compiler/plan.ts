@@ -12,7 +12,7 @@
  * and wiring expressions survive.
  */
 
-import type { ExprNode } from './patch'
+import type { ExprNode } from './session'
 import type { CompiledPatch, ModuleInfo } from './compiler'
 
 // ─────────────────────────────────────────────────────────────

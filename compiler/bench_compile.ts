@@ -1,9 +1,9 @@
 /**
  * Quick benchmark: reproduce the 13-module patch compilation to find bottleneck.
  */
-import { makeSession, SessionState } from './patch.js'
+import { makeSession, SessionState } from './session.js'
 import { loadStdlib as loadBuiltins } from './program.js'
-import { flattenPatch } from './flatten.js'
+import { flattenSession } from './flatten.js'
 
 const session: SessionState = makeSession()
 loadBuiltins(session.typeRegistry)
@@ -43,7 +43,7 @@ for (const [typeName, instanceName] of modules) {
   solo.graphOutputs.push({ module: instanceName, output: type._def.outputNames[0] })
   const t = performance.now()
   try {
-    flattenPatch(solo)
+    flattenSession(solo)
     console.log(`  ${instanceName} (${typeName}): ${(performance.now() - t).toFixed(1)}ms`)
   } catch (e: any) {
     console.log(`  ${instanceName} (${typeName}): ERROR ${e.message} (${(performance.now() - t).toFixed(1)}ms)`)
@@ -51,12 +51,12 @@ for (const [typeName, instanceName] of modules) {
 }
 
 console.log(`\nModules: ${session.instanceRegistry.size}`)
-console.log('Starting full flattenPatch...')
+console.log('Starting full flattenSession...')
 
 const t0 = performance.now()
-const plan = flattenPatch(session)
+const plan = flattenSession(session)
 const t1 = performance.now()
-console.log(`flattenPatch: ${(t1 - t0).toFixed(1)}ms`)
+console.log(`flattenSession: ${(t1 - t0).toFixed(1)}ms`)
 console.log(`  instructions: ${plan.instructions.length}`)
 console.log(`  registers: ${plan.register_targets.length}`)
 console.log(`  array_slots: ${plan.array_slot_sizes.length} (sizes: ${plan.array_slot_sizes.join(', ')})`)

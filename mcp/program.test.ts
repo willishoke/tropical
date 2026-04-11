@@ -9,7 +9,7 @@
 
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { makeSession, loadJSON } from '../compiler/patch.js'
+import { makeSession, loadJSON } from '../compiler/session.js'
 import { loadStdlib as loadBuiltins } from '../compiler/program.js'
 import * as b from '../compiler/runtime/bindings.js'
 

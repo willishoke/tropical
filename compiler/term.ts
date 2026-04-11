@@ -9,7 +9,7 @@
  * plan that the C++ runtime loads and JIT-compiles.
  */
 
-import type { ExprNode } from './patch'
+import type { ExprNode } from './session'
 
 // ─────────────────────────────────────────────────────────────
 // Port types (objects of the category)
