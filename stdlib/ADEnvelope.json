@@ -1,0 +1,1814 @@
+{
+  "schema": "tropical_program_1",
+  "name": "ADEnvelope",
+  "inputs": [
+    "gate",
+    "attack",
+    "decay"
+  ],
+  "outputs": [
+    "env"
+  ],
+  "regs": {
+    "stage": 0,
+    "phase": 0,
+    "startLevel": 0
+  },
+  "delays": {
+    "prev_gate": {
+      "update": {
+        "op": "input",
+        "name": "gate"
+      },
+      "init": 0
+    }
+  },
+  "input_defaults": {
+    "gate": 0,
+    "attack": 0.01,
+    "decay": 0.3
+  },
+  "programs": {
+    "_polyBlamp": {
+      "schema": "tropical_program_1",
+      "name": "_polyBlamp",
+      "inputs": [
+        "t",
+        "dt"
+      ],
+      "outputs": [
+        "value"
+      ],
+      "process": {
+        "outputs": {
+          "value": {
+            "op": "let",
+            "bind": {
+              "t": {
+                "op": "input",
+                "name": "t"
+              },
+              "dt": {
+                "op": "input",
+                "name": "dt"
+              },
+              "valid": {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "dt"
+                      },
+                      0
+                    ]
+                  },
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "dt"
+                      },
+                      1
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "u": {
+                  "op": "div",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "t"
+                    },
+                    {
+                      "op": "binding",
+                      "name": "dt"
+                    }
+                  ]
+                },
+                "v": {
+                  "op": "div",
+                  "args": [
+                    {
+                      "op": "sub",
+                      "args": [
+                        1,
+                        {
+                          "op": "binding",
+                          "name": "t"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "binding",
+                      "name": "dt"
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "u2": {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "u"
+                      },
+                      {
+                        "op": "binding",
+                        "name": "u"
+                      }
+                    ]
+                  },
+                  "v2": {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "v"
+                      },
+                      {
+                        "op": "binding",
+                        "name": "v"
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "u3": {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "u2"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "u"
+                        }
+                      ]
+                    },
+                    "v3": {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "v2"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "v"
+                        }
+                      ]
+                    },
+                    "leftMask": {
+                      "op": "lt",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "t"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "dt"
+                        }
+                      ]
+                    },
+                    "rightMask": {
+                      "op": "lt",
+                      "args": [
+                        {
+                          "op": "sub",
+                          "args": [
+                            1,
+                            {
+                              "op": "binding",
+                              "name": "t"
+                            }
+                          ]
+                        },
+                        {
+                          "op": "binding",
+                          "name": "dt"
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "left": {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "sub",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "u2"
+                              },
+                              {
+                                "op": "div",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "u3"
+                                  },
+                                  3
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "binding",
+                            "name": "u"
+                          }
+                        ]
+                      },
+                      "right": {
+                        "op": "neg",
+                        "args": [
+                          {
+                            "op": "sub",
+                            "args": [
+                              {
+                                "op": "sub",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "v2"
+                                  },
+                                  {
+                                    "op": "div",
+                                    "args": [
+                                      {
+                                        "op": "binding",
+                                        "name": "v3"
+                                      },
+                                      3
+                                    ]
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "binding",
+                                "name": "v"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "valid"
+                        },
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "leftMask"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "left"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "rightMask"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "right"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "instances": {
+    "blamp_start": {
+      "program": "_polyBlamp",
+      "inputs": {
+        "t": {
+          "op": "reg",
+          "name": "phase"
+        },
+        "dt": {
+          "op": "div",
+          "args": [
+            1,
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "clamp",
+                  "args": [
+                    {
+                      "op": "input",
+                      "name": "attack"
+                    },
+                    0.0001,
+                    10
+                  ]
+                },
+                {
+                  "op": "sample_rate"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "blamp_atk_end": {
+      "program": "_polyBlamp",
+      "inputs": {
+        "t": {
+          "op": "sub",
+          "args": [
+            1,
+            {
+              "op": "reg",
+              "name": "phase"
+            }
+          ]
+        },
+        "dt": {
+          "op": "div",
+          "args": [
+            1,
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "clamp",
+                  "args": [
+                    {
+                      "op": "input",
+                      "name": "attack"
+                    },
+                    0.0001,
+                    10
+                  ]
+                },
+                {
+                  "op": "sample_rate"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "blamp_dec_start": {
+      "program": "_polyBlamp",
+      "inputs": {
+        "t": {
+          "op": "reg",
+          "name": "phase"
+        },
+        "dt": {
+          "op": "div",
+          "args": [
+            1,
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "clamp",
+                  "args": [
+                    {
+                      "op": "input",
+                      "name": "decay"
+                    },
+                    0.0001,
+                    10
+                  ]
+                },
+                {
+                  "op": "sample_rate"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "blamp_end": {
+      "program": "_polyBlamp",
+      "inputs": {
+        "t": {
+          "op": "sub",
+          "args": [
+            1,
+            {
+              "op": "reg",
+              "name": "phase"
+            }
+          ]
+        },
+        "dt": {
+          "op": "div",
+          "args": [
+            1,
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "clamp",
+                  "args": [
+                    {
+                      "op": "input",
+                      "name": "decay"
+                    },
+                    0.0001,
+                    10
+                  ]
+                },
+                {
+                  "op": "sample_rate"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  },
+  "process": {
+    "outputs": {
+      "env": {
+        "op": "let",
+        "bind": {
+          "attack": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "attack"
+              },
+              0.0001,
+              10
+            ]
+          },
+          "decayT": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "decay"
+              },
+              0.0001,
+              10
+            ]
+          },
+          "trig": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "gt",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "gate"
+                  },
+                  0.5
+                ]
+              },
+              {
+                "op": "lte",
+                "args": [
+                  {
+                    "op": "delay_ref",
+                    "id": "prev_gate"
+                  },
+                  0.5
+                ]
+              }
+            ]
+          },
+          "stage": {
+            "op": "reg",
+            "name": "stage"
+          },
+          "phase": {
+            "op": "reg",
+            "name": "phase"
+          },
+          "startLevel": {
+            "op": "reg",
+            "name": "startLevel"
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "inAttack": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "gt",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "stage"
+                    },
+                    0.5
+                  ]
+                },
+                {
+                  "op": "lt",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "stage"
+                    },
+                    1.5
+                  ]
+                }
+              ]
+            },
+            "inDecay": {
+              "op": "gt",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "stage"
+                },
+                1.5
+              ]
+            },
+            "dtA": {
+              "op": "div",
+              "args": [
+                1,
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "attack"
+                    },
+                    {
+                      "op": "sample_rate"
+                    }
+                  ]
+                }
+              ]
+            },
+            "dtD": {
+              "op": "div",
+              "args": [
+                1,
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "decayT"
+                    },
+                    {
+                      "op": "sample_rate"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "attackSlope": {
+                "op": "sub",
+                "args": [
+                  1,
+                  {
+                    "op": "binding",
+                    "name": "startLevel"
+                  }
+                ]
+              },
+              "rawEnv": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "inAttack"
+                      },
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "startLevel"
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "phase"
+                              },
+                              {
+                                "op": "sub",
+                                "args": [
+                                  1,
+                                  {
+                                    "op": "binding",
+                                    "name": "startLevel"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "inDecay"
+                      },
+                      {
+                        "op": "sub",
+                        "args": [
+                          1,
+                          {
+                            "op": "binding",
+                            "name": "phase"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "env": {
+                  "op": "sub",
+                  "args": [
+                    {
+                      "op": "sub",
+                      "args": [
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "add",
+                                  "args": [
+                                    {
+                                      "op": "mul",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "inAttack"
+                                        },
+                                        {
+                                          "op": "add",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "startLevel"
+                                            },
+                                            {
+                                              "op": "mul",
+                                              "args": [
+                                                {
+                                                  "op": "binding",
+                                                  "name": "phase"
+                                                },
+                                                {
+                                                  "op": "binding",
+                                                  "name": "attackSlope"
+                                                }
+                                              ]
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "op": "mul",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "inDecay"
+                                        },
+                                        {
+                                          "op": "sub",
+                                          "args": [
+                                            1,
+                                            {
+                                              "op": "binding",
+                                              "name": "phase"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                },
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "mul",
+                                      "args": [
+                                        {
+                                          "op": "mul",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "inAttack"
+                                            },
+                                            {
+                                              "op": "binding",
+                                              "name": "dtA"
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "op": "binding",
+                                          "name": "attackSlope"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "op": "nested_out",
+                                      "ref": "blamp_atk_end",
+                                      "output": "value"
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "inDecay"
+                                    },
+                                    {
+                                      "op": "binding",
+                                      "name": "dtD"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "op": "nested_out",
+                                  "ref": "blamp_dec_start",
+                                  "output": "value"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "inAttack"
+                                    },
+                                    {
+                                      "op": "binding",
+                                      "name": "dtA"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "attackSlope"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "nested_out",
+                              "ref": "blamp_start",
+                              "output": "value"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "inDecay"
+                            },
+                            {
+                              "op": "binding",
+                              "name": "dtD"
+                            }
+                          ]
+                        },
+                        {
+                          "op": "nested_out",
+                          "ref": "blamp_end",
+                          "output": "value"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "binding",
+                    "name": "env"
+                  },
+                  0,
+                  1
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "next_regs": {
+      "stage": {
+        "op": "let",
+        "bind": {
+          "trig": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "gt",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "gate"
+                  },
+                  0.5
+                ]
+              },
+              {
+                "op": "lte",
+                "args": [
+                  {
+                    "op": "delay_ref",
+                    "id": "prev_gate"
+                  },
+                  0.5
+                ]
+              }
+            ]
+          },
+          "stage": {
+            "op": "reg",
+            "name": "stage"
+          },
+          "phase": {
+            "op": "reg",
+            "name": "phase"
+          },
+          "attack": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "attack"
+              },
+              0.0001,
+              10
+            ]
+          },
+          "decayT": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "decay"
+              },
+              0.0001,
+              10
+            ]
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "inAttack": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "gt",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "stage"
+                    },
+                    0.5
+                  ]
+                },
+                {
+                  "op": "lt",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "stage"
+                    },
+                    1.5
+                  ]
+                }
+              ]
+            },
+            "inDecay": {
+              "op": "gt",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "stage"
+                },
+                1.5
+              ]
+            },
+            "notTrig": {
+              "op": "sub",
+              "args": [
+                1,
+                {
+                  "op": "binding",
+                  "name": "trig"
+                }
+              ]
+            },
+            "dt": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "gt",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "stage"
+                            },
+                            0.5
+                          ]
+                        },
+                        {
+                          "op": "lt",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "stage"
+                            },
+                            1.5
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "op": "div",
+                      "args": [
+                        1,
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "attack"
+                            },
+                            {
+                              "op": "sample_rate"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "gt",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "stage"
+                        },
+                        1.5
+                      ]
+                    },
+                    {
+                      "op": "div",
+                      "args": [
+                        1,
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "decayT"
+                            },
+                            {
+                              "op": "sample_rate"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "newPhase": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "binding",
+                    "name": "phase"
+                  },
+                  {
+                    "op": "binding",
+                    "name": "dt"
+                  }
+                ]
+              },
+              "aToD": {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "binding",
+                    "name": "inAttack"
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "phase"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "dt"
+                          }
+                        ]
+                      },
+                      1
+                    ]
+                  }
+                ]
+              },
+              "dDone": {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "binding",
+                    "name": "inDecay"
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "phase"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "dt"
+                          }
+                        ]
+                      },
+                      1
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "trig"
+                    },
+                    1
+                  ]
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "notTrig"
+                    },
+                    {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "inAttack"
+                                    },
+                                    {
+                                      "op": "sub",
+                                      "args": [
+                                        1,
+                                        {
+                                          "op": "binding",
+                                          "name": "aToD"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                },
+                                1
+                              ]
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "aToD"
+                                },
+                                2
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "inDecay"
+                                },
+                                {
+                                  "op": "sub",
+                                  "args": [
+                                    1,
+                                    {
+                                      "op": "binding",
+                                      "name": "dDone"
+                                    }
+                                  ]
+                                }
+                              ]
+                            },
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      "phase": {
+        "op": "let",
+        "bind": {
+          "trig": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "gt",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "gate"
+                  },
+                  0.5
+                ]
+              },
+              {
+                "op": "lte",
+                "args": [
+                  {
+                    "op": "delay_ref",
+                    "id": "prev_gate"
+                  },
+                  0.5
+                ]
+              }
+            ]
+          },
+          "stage": {
+            "op": "reg",
+            "name": "stage"
+          },
+          "phase": {
+            "op": "reg",
+            "name": "phase"
+          },
+          "attack": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "attack"
+              },
+              0.0001,
+              10
+            ]
+          },
+          "decayT": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "decay"
+              },
+              0.0001,
+              10
+            ]
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "inAttack": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "gt",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "stage"
+                    },
+                    0.5
+                  ]
+                },
+                {
+                  "op": "lt",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "stage"
+                    },
+                    1.5
+                  ]
+                }
+              ]
+            },
+            "inDecay": {
+              "op": "gt",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "stage"
+                },
+                1.5
+              ]
+            },
+            "notTrig": {
+              "op": "sub",
+              "args": [
+                1,
+                {
+                  "op": "binding",
+                  "name": "trig"
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "dtA": {
+                "op": "div",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "attack"
+                      },
+                      {
+                        "op": "sample_rate"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "dtD": {
+                "op": "div",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "decayT"
+                      },
+                      {
+                        "op": "sample_rate"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "dt": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "inAttack"
+                      },
+                      {
+                        "op": "div",
+                        "args": [
+                          1,
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "attack"
+                              },
+                              {
+                                "op": "sample_rate"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "inDecay"
+                      },
+                      {
+                        "op": "div",
+                        "args": [
+                          1,
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "decayT"
+                              },
+                              {
+                                "op": "sample_rate"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "newPhase": {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "phase"
+                    },
+                    {
+                      "op": "binding",
+                      "name": "dt"
+                    }
+                  ]
+                },
+                "aToD": {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "inAttack"
+                    },
+                    {
+                      "op": "gte",
+                      "args": [
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "phase"
+                            },
+                            {
+                              "op": "binding",
+                              "name": "dt"
+                            }
+                          ]
+                        },
+                        1
+                      ]
+                    }
+                  ]
+                },
+                "dDone": {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "inDecay"
+                    },
+                    {
+                      "op": "gte",
+                      "args": [
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "phase"
+                            },
+                            {
+                              "op": "binding",
+                              "name": "dt"
+                            }
+                          ]
+                        },
+                        1
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "binding",
+                    "name": "notTrig"
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "aToD"
+                          },
+                          {
+                            "op": "clamp",
+                            "args": [
+                              {
+                                "op": "sub",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "newPhase"
+                                  },
+                                  1
+                                ]
+                              },
+                              0,
+                              1
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "sub",
+                                "args": [
+                                  1,
+                                  {
+                                    "op": "binding",
+                                    "name": "aToD"
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "sub",
+                                "args": [
+                                  1,
+                                  {
+                                    "op": "binding",
+                                    "name": "dDone"
+                                  }
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "clamp",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "newPhase"
+                              },
+                              0,
+                              1
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "startLevel": {
+        "op": "let",
+        "bind": {
+          "trig": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "gt",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "gate"
+                  },
+                  0.5
+                ]
+              },
+              {
+                "op": "lte",
+                "args": [
+                  {
+                    "op": "delay_ref",
+                    "id": "prev_gate"
+                  },
+                  0.5
+                ]
+              }
+            ]
+          },
+          "stage": {
+            "op": "reg",
+            "name": "stage"
+          },
+          "phase": {
+            "op": "reg",
+            "name": "phase"
+          },
+          "startLevel": {
+            "op": "reg",
+            "name": "startLevel"
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "inAttack": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "gt",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "stage"
+                    },
+                    0.5
+                  ]
+                },
+                {
+                  "op": "lt",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "stage"
+                    },
+                    1.5
+                  ]
+                }
+              ]
+            },
+            "inDecay": {
+              "op": "gt",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "stage"
+                },
+                1.5
+              ]
+            },
+            "notTrig": {
+              "op": "sub",
+              "args": [
+                1,
+                {
+                  "op": "binding",
+                  "name": "trig"
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "rawEnv": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "inAttack"
+                      },
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "startLevel"
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "phase"
+                              },
+                              {
+                                "op": "sub",
+                                "args": [
+                                  1,
+                                  {
+                                    "op": "binding",
+                                    "name": "startLevel"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "inDecay"
+                      },
+                      {
+                        "op": "sub",
+                        "args": [
+                          1,
+                          {
+                            "op": "binding",
+                            "name": "phase"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "trig"
+                    },
+                    {
+                      "op": "binding",
+                      "name": "rawEnv"
+                    }
+                  ]
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "notTrig"
+                    },
+                    {
+                      "op": "binding",
+                      "name": "startLevel"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

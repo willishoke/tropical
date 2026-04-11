@@ -1,129 +1,498 @@
 {
-  "schema": "tropical_patch_1",
-  "modules": [
-    {"type": "VCO", "name": "VCO1"},
-    {"type": "VCO", "name": "VCO2"},
-    {"type": "VCO", "name": "VCO3"},
-    {"type": "VCO", "name": "VCO4"},
-    {"type": "VCO", "name": "VCO5"},
-    {"type": "VCO", "name": "VCO6"},
-    {"type": "VCO", "name": "VCO7"},
-    {"type": "VCO", "name": "VCO8"},
-    {"type": "VCO", "name": "VCO9"},
-    {"type": "VCO", "name": "VCO10"},
-    {"type": "ADEnvelope", "name": "ADEnvelope1"},
-    {"type": "ADEnvelope", "name": "ADEnvelope2"},
-    {"type": "ADEnvelope", "name": "ADEnvelope3"},
-    {"type": "ADEnvelope", "name": "ADEnvelope4"},
-    {"type": "ADEnvelope", "name": "ADEnvelope5"},
-    {"type": "ADEnvelope", "name": "ADEnvelope6"},
-    {"type": "ADEnvelope", "name": "ADEnvelope7"},
-    {"type": "ADEnvelope", "name": "ADEnvelope8"},
-    {"type": "ADEnvelope", "name": "ADEnvelope9"},
-    {"type": "ADEnvelope", "name": "ADEnvelope10"},
-    {"type": "Clock", "name": "Clock1"},
-    {"type": "Clock", "name": "Clock2"},
-    {"type": "Clock", "name": "Clock3"},
-    {"type": "Clock", "name": "Clock4"},
-    {"type": "Clock", "name": "Clock5"},
-    {"type": "Clock", "name": "Clock6"},
-    {"type": "Clock", "name": "Clock7"},
-    {"type": "Clock", "name": "Clock8"},
-    {"type": "Clock", "name": "Clock9"},
-    {"type": "Clock", "name": "Clock10"},
-    {"type": "VCA", "name": "VCA1"},
-    {"type": "VCA", "name": "VCA2"},
-    {"type": "VCA", "name": "VCA3"},
-    {"type": "VCA", "name": "VCA4"},
-    {"type": "VCA", "name": "VCA5"},
-    {"type": "VCA", "name": "VCA6"},
-    {"type": "VCA", "name": "VCA7"},
-    {"type": "VCA", "name": "VCA8"},
-    {"type": "VCA", "name": "VCA9"},
-    {"type": "VCA", "name": "VCA10"}
-  ],
-  "outputs": [
-    {"module": "VCA1", "output": "out"},
-    {"module": "VCA2", "output": "out"},
-    {"module": "VCA3", "output": "out"},
-    {"module": "VCA4", "output": "out"},
-    {"module": "VCA5", "output": "out"},
-    {"module": "VCA6", "output": "out"},
-    {"module": "VCA7", "output": "out"},
-    {"module": "VCA8", "output": "out"},
-    {"module": "VCA9", "output": "out"},
-    {"module": "VCA10", "output": "out"}
-  ],
-  "input_exprs": [
-    {"module": "VCO1", "input": "freq", "expr": 40},
-    {"module": "VCO2", "input": "freq", "expr": 120},
-    {"module": "VCO3", "input": "freq", "expr": 200},
-    {"module": "VCO4", "input": "freq", "expr": 280},
-    {"module": "VCO5", "input": "freq", "expr": 360},
-    {"module": "VCO6", "input": "freq", "expr": 440},
-    {"module": "VCO7", "input": "freq", "expr": 520},
-    {"module": "VCO8", "input": "freq", "expr": 600},
-    {"module": "VCO9", "input": "freq", "expr": 680},
-    {"module": "VCO10", "input": "freq", "expr": 760},
-    {"module": "Clock1", "input": "freq", "expr": 0.1},
-    {"module": "Clock2", "input": "freq", "expr": 0.3},
-    {"module": "Clock3", "input": "freq", "expr": 0.5},
-    {"module": "Clock4", "input": "freq", "expr": 0.7},
-    {"module": "Clock5", "input": "freq", "expr": 0.9},
-    {"module": "Clock6", "input": "freq", "expr": 1.1},
-    {"module": "Clock7", "input": "freq", "expr": 1.3},
-    {"module": "Clock8", "input": "freq", "expr": 1.5},
-    {"module": "Clock9", "input": "freq", "expr": 1.7},
-    {"module": "Clock10", "input": "freq", "expr": 1.9},
-    {"module": "ADEnvelope1", "input": "attack", "expr": 0.043},
-    {"module": "ADEnvelope1", "input": "decay", "expr": 1.2},
-    {"module": "ADEnvelope2", "input": "attack", "expr": 0.002},
-    {"module": "ADEnvelope2", "input": "decay", "expr": 0.18},
-    {"module": "ADEnvelope3", "input": "attack", "expr": 0.15},
-    {"module": "ADEnvelope3", "input": "decay", "expr": 0.7},
-    {"module": "ADEnvelope4", "input": "attack", "expr": 0.008},
-    {"module": "ADEnvelope4", "input": "decay", "expr": 1.8},
-    {"module": "ADEnvelope5", "input": "attack", "expr": 0.09},
-    {"module": "ADEnvelope5", "input": "decay", "expr": 0.35},
-    {"module": "ADEnvelope6", "input": "attack", "expr": 0.001},
-    {"module": "ADEnvelope6", "input": "decay", "expr": 0.9},
-    {"module": "ADEnvelope7", "input": "attack", "expr": 0.22},
-    {"module": "ADEnvelope7", "input": "decay", "expr": 0.12},
-    {"module": "ADEnvelope8", "input": "attack", "expr": 0.05},
-    {"module": "ADEnvelope8", "input": "decay", "expr": 1.5},
-    {"module": "ADEnvelope9", "input": "attack", "expr": 0.003},
-    {"module": "ADEnvelope9", "input": "decay", "expr": 0.6},
-    {"module": "ADEnvelope10", "input": "attack", "expr": 0.18},
-    {"module": "ADEnvelope10", "input": "decay", "expr": 0.08},
-    {"module": "ADEnvelope1", "input": "gate", "expr": {"op": "ref", "module": "Clock1", "output": "output"}},
-    {"module": "ADEnvelope2", "input": "gate", "expr": {"op": "ref", "module": "Clock2", "output": "output"}},
-    {"module": "ADEnvelope3", "input": "gate", "expr": {"op": "ref", "module": "Clock3", "output": "output"}},
-    {"module": "ADEnvelope4", "input": "gate", "expr": {"op": "ref", "module": "Clock4", "output": "output"}},
-    {"module": "ADEnvelope5", "input": "gate", "expr": {"op": "ref", "module": "Clock5", "output": "output"}},
-    {"module": "ADEnvelope6", "input": "gate", "expr": {"op": "ref", "module": "Clock6", "output": "output"}},
-    {"module": "ADEnvelope7", "input": "gate", "expr": {"op": "ref", "module": "Clock7", "output": "output"}},
-    {"module": "ADEnvelope8", "input": "gate", "expr": {"op": "ref", "module": "Clock8", "output": "output"}},
-    {"module": "ADEnvelope9", "input": "gate", "expr": {"op": "ref", "module": "Clock9", "output": "output"}},
-    {"module": "ADEnvelope10", "input": "gate", "expr": {"op": "ref", "module": "Clock10", "output": "output"}},
-    {"module": "VCA1", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO1", "output": "sin"}, 0.1]}},
-    {"module": "VCA2", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO2", "output": "sin"}, 0.1]}},
-    {"module": "VCA3", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO3", "output": "sin"}, 0.1]}},
-    {"module": "VCA4", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO4", "output": "sin"}, 0.1]}},
-    {"module": "VCA5", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO5", "output": "sin"}, 0.1]}},
-    {"module": "VCA6", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO6", "output": "sin"}, 0.1]}},
-    {"module": "VCA7", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO7", "output": "sin"}, 0.1]}},
-    {"module": "VCA8", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO8", "output": "sin"}, 0.1]}},
-    {"module": "VCA9", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO9", "output": "sin"}, 0.1]}},
-    {"module": "VCA10", "input": "audio", "expr": {"op": "mul", "args": [{"op": "ref", "module": "VCO10", "output": "sin"}, 0.1]}},
-    {"module": "VCA1", "input": "cv", "expr": {"op": "ref", "module": "ADEnvelope1", "output": "env"}},
-    {"module": "VCA2", "input": "cv", "expr": {"op": "ref", "module": "ADEnvelope2", "output": "env"}},
-    {"module": "VCA3", "input": "cv", "expr": {"op": "ref", "module": "ADEnvelope3", "output": "env"}},
-    {"module": "VCA4", "input": "cv", "expr": {"op": "ref", "module": "ADEnvelope4", "output": "env"}},
-    {"module": "VCA5", "input": "cv", "expr": {"op": "ref", "module": "ADEnvelope5", "output": "env"}},
-    {"module": "VCA6", "input": "cv", "expr": {"op": "ref", "module": "ADEnvelope6", "output": "env"}},
-    {"module": "VCA7", "input": "cv", "expr": {"op": "ref", "module": "ADEnvelope7", "output": "env"}},
-    {"module": "VCA8", "input": "cv", "expr": {"op": "ref", "module": "ADEnvelope8", "output": "env"}},
-    {"module": "VCA9", "input": "cv", "expr": {"op": "ref", "module": "ADEnvelope9", "output": "env"}},
-    {"module": "VCA10", "input": "cv", "expr": {"op": "ref", "module": "ADEnvelope10", "output": "env"}}
+  "schema": "tropical_program_1",
+  "name": "odd_harmonics",
+  "instances": {
+    "VCO1": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 40
+      }
+    },
+    "VCO2": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 120
+      }
+    },
+    "VCO3": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 200
+      }
+    },
+    "VCO4": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 280
+      }
+    },
+    "VCO5": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 360
+      }
+    },
+    "VCO6": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 440
+      }
+    },
+    "VCO7": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 520
+      }
+    },
+    "VCO8": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 600
+      }
+    },
+    "VCO9": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 680
+      }
+    },
+    "VCO10": {
+      "program": "VCO",
+      "inputs": {
+        "freq": 760
+      }
+    },
+    "ADEnvelope1": {
+      "program": "ADEnvelope",
+      "inputs": {
+        "attack": 0.043,
+        "decay": 1.2,
+        "gate": {
+          "op": "ref",
+          "module": "Clock1",
+          "output": "output"
+        }
+      }
+    },
+    "ADEnvelope2": {
+      "program": "ADEnvelope",
+      "inputs": {
+        "attack": 0.002,
+        "decay": 0.18,
+        "gate": {
+          "op": "ref",
+          "module": "Clock2",
+          "output": "output"
+        }
+      }
+    },
+    "ADEnvelope3": {
+      "program": "ADEnvelope",
+      "inputs": {
+        "attack": 0.15,
+        "decay": 0.7,
+        "gate": {
+          "op": "ref",
+          "module": "Clock3",
+          "output": "output"
+        }
+      }
+    },
+    "ADEnvelope4": {
+      "program": "ADEnvelope",
+      "inputs": {
+        "attack": 0.008,
+        "decay": 1.8,
+        "gate": {
+          "op": "ref",
+          "module": "Clock4",
+          "output": "output"
+        }
+      }
+    },
+    "ADEnvelope5": {
+      "program": "ADEnvelope",
+      "inputs": {
+        "attack": 0.09,
+        "decay": 0.35,
+        "gate": {
+          "op": "ref",
+          "module": "Clock5",
+          "output": "output"
+        }
+      }
+    },
+    "ADEnvelope6": {
+      "program": "ADEnvelope",
+      "inputs": {
+        "attack": 0.001,
+        "decay": 0.9,
+        "gate": {
+          "op": "ref",
+          "module": "Clock6",
+          "output": "output"
+        }
+      }
+    },
+    "ADEnvelope7": {
+      "program": "ADEnvelope",
+      "inputs": {
+        "attack": 0.22,
+        "decay": 0.12,
+        "gate": {
+          "op": "ref",
+          "module": "Clock7",
+          "output": "output"
+        }
+      }
+    },
+    "ADEnvelope8": {
+      "program": "ADEnvelope",
+      "inputs": {
+        "attack": 0.05,
+        "decay": 1.5,
+        "gate": {
+          "op": "ref",
+          "module": "Clock8",
+          "output": "output"
+        }
+      }
+    },
+    "ADEnvelope9": {
+      "program": "ADEnvelope",
+      "inputs": {
+        "attack": 0.003,
+        "decay": 0.6,
+        "gate": {
+          "op": "ref",
+          "module": "Clock9",
+          "output": "output"
+        }
+      }
+    },
+    "ADEnvelope10": {
+      "program": "ADEnvelope",
+      "inputs": {
+        "attack": 0.18,
+        "decay": 0.08,
+        "gate": {
+          "op": "ref",
+          "module": "Clock10",
+          "output": "output"
+        }
+      }
+    },
+    "Clock1": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 0.1
+      }
+    },
+    "Clock2": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 0.3
+      }
+    },
+    "Clock3": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 0.5
+      }
+    },
+    "Clock4": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 0.7
+      }
+    },
+    "Clock5": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 0.9
+      }
+    },
+    "Clock6": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 1.1
+      }
+    },
+    "Clock7": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 1.3
+      }
+    },
+    "Clock8": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 1.5
+      }
+    },
+    "Clock9": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 1.7
+      }
+    },
+    "Clock10": {
+      "program": "Clock",
+      "inputs": {
+        "freq": 1.9
+      }
+    },
+    "VCA1": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "ref",
+              "module": "VCO1",
+              "output": "sin"
+            },
+            0.1
+          ]
+        },
+        "cv": {
+          "op": "ref",
+          "module": "ADEnvelope1",
+          "output": "env"
+        }
+      }
+    },
+    "VCA2": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "ref",
+              "module": "VCO2",
+              "output": "sin"
+            },
+            0.1
+          ]
+        },
+        "cv": {
+          "op": "ref",
+          "module": "ADEnvelope2",
+          "output": "env"
+        }
+      }
+    },
+    "VCA3": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "ref",
+              "module": "VCO3",
+              "output": "sin"
+            },
+            0.1
+          ]
+        },
+        "cv": {
+          "op": "ref",
+          "module": "ADEnvelope3",
+          "output": "env"
+        }
+      }
+    },
+    "VCA4": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "ref",
+              "module": "VCO4",
+              "output": "sin"
+            },
+            0.1
+          ]
+        },
+        "cv": {
+          "op": "ref",
+          "module": "ADEnvelope4",
+          "output": "env"
+        }
+      }
+    },
+    "VCA5": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "ref",
+              "module": "VCO5",
+              "output": "sin"
+            },
+            0.1
+          ]
+        },
+        "cv": {
+          "op": "ref",
+          "module": "ADEnvelope5",
+          "output": "env"
+        }
+      }
+    },
+    "VCA6": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "ref",
+              "module": "VCO6",
+              "output": "sin"
+            },
+            0.1
+          ]
+        },
+        "cv": {
+          "op": "ref",
+          "module": "ADEnvelope6",
+          "output": "env"
+        }
+      }
+    },
+    "VCA7": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "ref",
+              "module": "VCO7",
+              "output": "sin"
+            },
+            0.1
+          ]
+        },
+        "cv": {
+          "op": "ref",
+          "module": "ADEnvelope7",
+          "output": "env"
+        }
+      }
+    },
+    "VCA8": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "ref",
+              "module": "VCO8",
+              "output": "sin"
+            },
+            0.1
+          ]
+        },
+        "cv": {
+          "op": "ref",
+          "module": "ADEnvelope8",
+          "output": "env"
+        }
+      }
+    },
+    "VCA9": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "ref",
+              "module": "VCO9",
+              "output": "sin"
+            },
+            0.1
+          ]
+        },
+        "cv": {
+          "op": "ref",
+          "module": "ADEnvelope9",
+          "output": "env"
+        }
+      }
+    },
+    "VCA10": {
+      "program": "VCA",
+      "inputs": {
+        "audio": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "ref",
+              "module": "VCO10",
+              "output": "sin"
+            },
+            0.1
+          ]
+        },
+        "cv": {
+          "op": "ref",
+          "module": "ADEnvelope10",
+          "output": "env"
+        }
+      }
+    }
+  },
+  "audio_outputs": [
+    {
+      "instance": "VCA1",
+      "output": "out"
+    },
+    {
+      "instance": "VCA2",
+      "output": "out"
+    },
+    {
+      "instance": "VCA3",
+      "output": "out"
+    },
+    {
+      "instance": "VCA4",
+      "output": "out"
+    },
+    {
+      "instance": "VCA5",
+      "output": "out"
+    },
+    {
+      "instance": "VCA6",
+      "output": "out"
+    },
+    {
+      "instance": "VCA7",
+      "output": "out"
+    },
+    {
+      "instance": "VCA8",
+      "output": "out"
+    },
+    {
+      "instance": "VCA9",
+      "output": "out"
+    },
+    {
+      "instance": "VCA10",
+      "output": "out"
+    }
   ]
 }

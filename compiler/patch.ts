@@ -1,27 +1,17 @@
 /**
- * JSON patch / module definition schema, expression AST builder, and load/save.
- * Replaces tropical/yaml_schema.py with a clean-break JSON format.
+ * Session state, expression pretty-printer, JSON loading, and ProgramJSON → ProgramDef builder.
  */
 
 import {
-  SignalExpr, ExprCoercible, coerce,
-  add, sub, mul, div, floorDiv, mod, pow_, matmul,
-  lt, lte, gt, gte, eq, neq,
-  bitAnd, bitOr, bitXor, lshift, rshift, bitNot,
-  neg, abs_, sin, log, logicalNot,
-  clamp, select, arrayPack, arraySet, matrix,
-  inputExpr, registerExpr, refExpr, sampleRate, sampleIndex,
-  constructStruct, fieldAccess, constructVariant, matchVariant,
-  bindingExpr, let_, generate, iterate, fold, scan, map2, zipWith, chain,
+  type SignalExpr, type ExprCoercible, coerce, type ExprNode, validateExpr,
 } from './expr.js'
 import {
-  defineModule, ModuleType, ModuleInstance, delay,
-  SymbolMap, ValueCoercible, RegInit,
+  ModuleType, ModuleInstance,
+  type ProgramDef, type NestedCall, type ValueCoercible,
 } from './module.js'
-import { Param, Trigger } from './runtime/param.js'
-import { applyFlatPlan } from './apply_plan.js'
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type ProgramJSON } from './program.js'
+import { Param, Trigger } from './runtime/param.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -29,30 +19,8 @@ import { loadProgramAsSession, type ProgramJSON } from './program.js'
 
 // ExprNode is defined in expr.ts and re-exported here for backward compatibility.
 export type { ExprNode } from './expr.js'
-import type { ExprNode } from './expr.js'
 
 
-export interface NestedModuleJSON {
-  type: string
-  inputs: Record<string, ExprNode>
-}
-
-export interface ModuleDefJSON {
-  name: string
-  inputs: string[]
-  outputs: string[]
-  regs?: Record<string, number | boolean | number[] | number[][] | { init: number | boolean | number[] | number[][]; type: string }>
-  /** Named delay nodes, declared before any expression that references them. */
-  delays?: Record<string, { update: ExprNode; init?: number }>
-  /** Named nested sub-module instances. */
-  nested?: Record<string, NestedModuleJSON>
-  sample_rate?: number
-  input_defaults?: Record<string, ExprNode>
-  process: {
-    outputs: Record<string, ExprNode>
-    next_regs?: Record<string, ExprNode>
-  }
-}
 
 export interface TypeDefFieldJSON {
   name: string
@@ -78,37 +46,6 @@ export interface SumTypeDefJSON {
 
 export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON
 
-export interface PatchJSON {
-  schema: 'tropical_patch_1'
-  config?: {
-    buffer_length?: number
-  }
-  /** Inline ADT type definitions (loaded before module instantiation). */
-  type_defs?: TypeDefJSON[]
-  /** Inline module type definitions (loaded before instantiation). */
-  module_defs?: ModuleDefJSON[]
-  modules: Array<{ type: string; name?: string }>
-  connections?: Array<{
-    src: string; src_output: string | number
-    dst: string; dst_input: string | number
-  }>
-  /** Graph-level mix outputs. */
-  outputs?: Array<
-    | { module: string; output: string | number }
-    | { expr: ExprNode }
-  >
-  params?: Array<{
-    name: string
-    value?: number
-    time_const?: number
-    type?: 'param' | 'trigger'
-  }>
-  input_exprs?: Array<{
-    module: string
-    input: string | number
-    expr: ExprNode
-  }>
-}
 
 // ─────────────────────────────────────────────────────────────
 // Session state (shared by patch load/save and MCP server)
@@ -162,422 +99,255 @@ export function nextName(session: SessionState, prefix: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Op dispatch tables
+// Op name sets (used by pretty-printer)
 // ─────────────────────────────────────────────────────────────
 
-const BINARY_OPS: Record<string, (l: ExprCoercible, r: ExprCoercible) => SignalExpr> = {
-  add, sub, mul, div, floor_div: floorDiv, mod, pow: pow_,
-  lt, lte, gt, gte, eq, neq,
-  bit_and: bitAnd, bit_or: bitOr, bit_xor: bitXor, lshift, rshift,
-}
+const BINARY_OPS = new Set([
+  'add', 'sub', 'mul', 'div', 'floor_div', 'mod', 'pow',
+  'lt', 'lte', 'gt', 'gte', 'eq', 'neq',
+  'bit_and', 'bit_or', 'bit_xor', 'lshift', 'rshift',
+])
 
-const UNARY_OPS: Record<string, (x: ExprCoercible) => SignalExpr> = {
-  neg, abs: abs_, sin, log, not: logicalNot, bit_not: bitNot,
-}
-
-// ─────────────────────────────────────────────────────────────
-// Build context
-// ─────────────────────────────────────────────────────────────
-
-interface BuildCtx {
-  inputNames: string[]
-  regNames: string[]
-  paramRegistry: Map<string, Param>
-  triggerRegistry: Map<string, Trigger>
-  instanceRegistry: Map<string, ModuleInstance>
-  typeRegistry: Map<string, ModuleType>
-  /** Named delay value exprs, populated during the delay pre-pass. */
-  delayRefs: Map<string, SignalExpr>
-  /** Named nested sub-module output exprs, populated during the nested pre-pass. */
-  nestedAliases: Map<string, SignalExpr | SignalExpr[]>
-}
-
-// ─────────────────────────────────────────────────────────────
-// Expression builder
-// ─────────────────────────────────────────────────────────────
-
-/**
- * Recursively build a SignalExpr from a JSON ExprNode.
- * Throws with a descriptive message on invalid input (validates as it builds).
- */
-export function buildExpr(node: ExprNode, ctx: BuildCtx): SignalExpr {
-  // ── Scalar shorthand ──
-  if (typeof node === 'number' || typeof node === 'boolean') return coerce(node)
-  if (Array.isArray(node)) return arrayPack(node.map(n => buildExpr(n, ctx)))
-
-  const { op, args: rawArgs = [] } = node as { op: string; args?: ExprNode[]; [k: string]: unknown }
-  const args = rawArgs as ExprNode[]
-
-  // ── References ──
-  if (op === 'input') {
-    const n = node as { op: string; name?: string; id?: number }
-    if (n.name !== undefined) {
-      const idx = ctx.inputNames.indexOf(n.name)
-      if (idx === -1) throw new Error(`Unknown input '${n.name}'. Available: ${ctx.inputNames.join(', ')}`)
-      return inputExpr(idx)
-    }
-    return inputExpr(n.id!)
-  }
-
-  if (op === 'reg') {
-    const n = node as { op: string; name?: string; id?: number }
-    if (n.name !== undefined) {
-      const idx = ctx.regNames.indexOf(n.name)
-      if (idx === -1) throw new Error(`Unknown register '${n.name}'. Available: ${ctx.regNames.join(', ')}`)
-      return registerExpr(idx)
-    }
-    return registerExpr(n.id!)
-  }
-
-  if (op === 'ref') {
-    const n = node as { op: string; module: string; output: string | number }
-    const inst = ctx.instanceRegistry.get(n.module)
-    if (!inst) throw new Error(`Unknown module instance '${n.module}' in ref expression.`)
-    const outputId = typeof n.output === 'number' ? n.output : inst.outputIndex(n.output)
-    return refExpr(n.module, outputId)
-  }
-
-  if (op === 'param') {
-    const n = node as { op: string; name: string }
-    const p = ctx.paramRegistry.get(n.name)
-    if (!p) throw new Error(`Unknown param '${n.name}'.`)
-    return SignalExpr.fromNode({ op: 'smoothed_param', name: n.name, _ptr: true, _handle: p._h })
-  }
-
-  if (op === 'trigger') {
-    const n = node as { op: string; name: string }
-    const t = ctx.triggerRegistry.get(n.name)
-    if (!t) throw new Error(`Unknown trigger '${n.name}'.`)
-    return SignalExpr.fromNode({ op: 'trigger_param', name: n.name, _ptr: true, _handle: t._h })
-  }
-
-  if (op === 'sample_rate')  return sampleRate()
-  if (op === 'sample_index') return sampleIndex()
-
-  // ── Delay ──
-  if (op === 'delay') {
-    const n = node as { op: string; args: ExprNode[]; init?: number; id?: string }
-    const updateExpr = buildExpr(n.args[0], ctx)
-    const result = delay(updateExpr, n.init ?? 0.0)
-    if (n.id !== undefined) ctx.delayRefs.set(n.id, result)
-    return result
-  }
-
-  if (op === 'delay_ref') {
-    const n = node as { op: string; id: string }
-    const ref = ctx.delayRefs.get(n.id)
-    if (!ref) throw new Error(`delay_ref: no delay with id '${n.id}'. Declare it in 'delays' before use.`)
-    return ref
-  }
-
-  // ── Nested module output reference ──
-  if (op === 'nested_out') {
-    const n = node as { op: string; ref: string; output: string | number }
-    const alias = ctx.nestedAliases.get(n.ref)
-    if (!alias) throw new Error(`nested_out: no nested module named '${n.ref}'.`)
-    if (Array.isArray(alias)) {
-      const idx = typeof n.output === 'number' ? n.output : null
-      if (idx === null) {
-        throw new Error(`nested_out: use numeric index or provide type context for '${n.ref}.${n.output}'`)
-      }
-      return alias[idx]
-    }
-    return alias as SignalExpr
-  }
-
-  // ── Binary ops ──
-  if (op in BINARY_OPS) {
-    if (args.length !== 2) throw new Error(`Op '${op}' requires exactly 2 args, got ${args.length}.`)
-    return BINARY_OPS[op](buildExpr(args[0], ctx), buildExpr(args[1], ctx))
-  }
-
-  // ── Unary ops ──
-  if (op in UNARY_OPS) {
-    if (args.length !== 1) throw new Error(`Op '${op}' requires exactly 1 arg, got ${args.length}.`)
-    return UNARY_OPS[op](buildExpr(args[0], ctx))
-  }
-
-  // ── Multi-arg ──
-  if (op === 'clamp') {
-    if (args.length !== 3) throw new Error(`'clamp' requires 3 args.`)
-    return clamp(buildExpr(args[0], ctx), buildExpr(args[1], ctx), buildExpr(args[2], ctx))
-  }
-  if (op === 'select') {
-    if (args.length !== 3) throw new Error(`'select' requires 3 args.`)
-    return select(buildExpr(args[0], ctx), buildExpr(args[1], ctx), buildExpr(args[2], ctx))
-  }
-  if (op === 'index') {
-    if (args.length !== 2) throw new Error(`'index' requires 2 args.`)
-    return buildExpr(args[0], ctx).at(buildExpr(args[1], ctx))
-  }
-  if (op === 'array_set') {
-    if (args.length !== 3) throw new Error(`'array_set' requires 3 args.`)
-    return arraySet(buildExpr(args[0], ctx), buildExpr(args[1], ctx), buildExpr(args[2], ctx))
-  }
-  if (op === 'array') {
-    const n = node as { op: string; items: ExprNode[] }
-    return arrayPack(n.items.map(i => buildExpr(i, ctx)))
-  }
-  if (op === 'matrix') {
-    const n = node as { op: string; rows: number[][] }
-    return matrix(n.rows)
-  }
-
-  // ── ADT operations ──
-  if (op === 'construct_struct') {
-    const n = node as { op: string; type_name: string; fields: ExprNode[] }
-    return constructStruct(n.type_name, n.fields.map(f => buildExpr(f, ctx)))
-  }
-  if (op === 'field_access') {
-    const n = node as { op: string; type_name: string; struct_expr: ExprNode; field_index: number }
-    return fieldAccess(n.type_name, buildExpr(n.struct_expr, ctx), n.field_index)
-  }
-  if (op === 'construct_variant') {
-    const n = node as { op: string; type_name: string; variant_tag: number; payload: ExprNode[] }
-    return constructVariant(n.type_name, n.variant_tag, n.payload.map(p => buildExpr(p, ctx)))
-  }
-  if (op === 'match_variant') {
-    const n = node as { op: string; type_name: string; scrutinee: ExprNode; branches: ExprNode[] }
-    return matchVariant(n.type_name, buildExpr(n.scrutinee, ctx), n.branches.map(b => buildExpr(b, ctx)))
-  }
-
-  // ── Compile-time combinators ──
-  // These pass through as ExprNode trees; actual expansion happens in lowerArrayOps.
-  if (op === 'binding') {
-    const n = node as { op: string; name: string }
-    return bindingExpr(n.name)
-  }
-  if (op === 'let') {
-    const n = node as { op: string; bind: Record<string, ExprNode>; in: ExprNode }
-    const bindings: Record<string, ExprCoercible> = {}
-    for (const [k, v] of Object.entries(n.bind)) bindings[k] = buildExpr(v, ctx)
-    return let_(bindings, buildExpr(n.in, ctx))
-  }
-  if (op === 'generate') {
-    const n = node as { op: string; count: number; var: string; body: ExprNode }
-    return generate(n.count, n.var, buildExpr(n.body, ctx))
-  }
-  if (op === 'iterate') {
-    const n = node as { op: string; count: number; init: ExprNode; var: string; body: ExprNode }
-    return iterate(n.count, buildExpr(n.init, ctx), n.var, buildExpr(n.body, ctx))
-  }
-  if (op === 'fold') {
-    const n = node as { op: string; over: ExprNode; init: ExprNode; acc_var: string; elem_var: string; body: ExprNode }
-    return fold(buildExpr(n.over, ctx), buildExpr(n.init, ctx), n.acc_var, n.elem_var, buildExpr(n.body, ctx))
-  }
-  if (op === 'scan') {
-    const n = node as { op: string; over: ExprNode; init: ExprNode; acc_var: string; elem_var: string; body: ExprNode }
-    return scan(buildExpr(n.over, ctx), buildExpr(n.init, ctx), n.acc_var, n.elem_var, buildExpr(n.body, ctx))
-  }
-  if (op === 'map2') {
-    const n = node as { op: string; over: ExprNode; elem_var: string; body: ExprNode }
-    return map2(buildExpr(n.over, ctx), n.elem_var, buildExpr(n.body, ctx))
-  }
-  if (op === 'zip_with') {
-    const n = node as { op: string; a: ExprNode; b: ExprNode; x_var: string; y_var: string; body: ExprNode }
-    return zipWith(buildExpr(n.a, ctx), buildExpr(n.b, ctx), n.x_var, n.y_var, buildExpr(n.body, ctx))
-  }
-  if (op === 'chain') {
-    const n = node as { op: string; count: number; init: ExprNode; var: string; body: ExprNode }
-    return chain(n.count, buildExpr(n.init, ctx), n.var, buildExpr(n.body, ctx))
-  }
-
-  // ── Explicit literal forms (rarely needed, bare numbers are preferred) ──
-  if (op === 'float') return coerce((node as { op: string; value: number }).value)
-  if (op === 'int')   return coerce((node as { op: string; value: number }).value)
-  if (op === 'bool')  return coerce((node as { op: string; value: boolean }).value)
-
-  throw new Error(`Unknown expr op: '${op}'.`)
-}
-
-// ─────────────────────────────────────────────────────────────
-// Validator (structural only — no C API calls)
-// ─────────────────────────────────────────────────────────────
-
-export type ExprType = 'scalar' | 'array' | 'bool' | 'unknown'
-
-interface ValidateCtx {
-  inputNames: string[]
-  regNames: string[]
-  paramNames: Set<string>
-  triggerNames: Set<string>
-  instanceNames: Set<string>
-  delayIds: Set<string>
-  nestedIds: Set<string>
-}
-
-export function validateExpr(node: ExprNode, ctx: ValidateCtx): ExprType {
-  if (typeof node === 'number')  return 'scalar'
-  if (typeof node === 'boolean') return 'bool'
-  if (Array.isArray(node))       return 'array'
-
-  const { op } = node as { op: string; [k: string]: unknown }
-
-  if (op === 'input') {
-    const n = node as { op: string; name?: string; id?: number }
-    if (n.name !== undefined && !ctx.inputNames.includes(n.name))
-      throw new Error(`Unknown input '${n.name}'.`)
-    return 'scalar'
-  }
-  if (op === 'reg') {
-    const n = node as { op: string; name?: string; id?: number }
-    if (n.name !== undefined && !ctx.regNames.includes(n.name))
-      throw new Error(`Unknown register '${n.name}'.`)
-    return 'unknown'
-  }
-  if (op === 'ref') {
-    const n = node as { op: string; module: string }
-    if (!ctx.instanceNames.has(n.module))
-      throw new Error(`Unknown module instance '${n.module}' in ref.`)
-    return 'scalar'
-  }
-  if (op === 'param') {
-    const n = node as { op: string; name: string }
-    if (!ctx.paramNames.has(n.name)) throw new Error(`Unknown param '${n.name}'.`)
-    return 'scalar'
-  }
-  if (op === 'trigger') {
-    const n = node as { op: string; name: string }
-    if (!ctx.triggerNames.has(n.name)) throw new Error(`Unknown trigger '${n.name}'.`)
-    return 'scalar'
-  }
-  if (op === 'sample_rate' || op === 'sample_index') return 'scalar'
-  if (op === 'delay') {
-    const n = node as { op: string; id?: string }
-    if (n.id !== undefined) ctx.delayIds.add(n.id)
-    return 'scalar'
-  }
-  if (op === 'delay_ref') {
-    const n = node as { op: string; id: string }
-    if (!ctx.delayIds.has(n.id)) throw new Error(`delay_ref '${n.id}' has no matching delay declaration.`)
-    return 'scalar'
-  }
-  if (op === 'nested_out') {
-    const n = node as { op: string; ref: string }
-    if (!ctx.nestedIds.has(n.ref)) throw new Error(`nested_out '${n.ref}' has no matching nested declaration.`)
-    return 'scalar'
-  }
-  if (op in BINARY_OPS || op in UNARY_OPS || ['clamp','select','index','array_set'].includes(op))
-    return 'scalar'
-  if (op === 'array' || op === 'array_set') return 'array'
-  if (op === 'matrix') return 'array'
-  if (op === 'float' || op === 'int') return 'scalar'
-  if (op === 'bool') return 'bool'
-  if (op === 'construct_struct')  return 'unknown'
-  if (op === 'field_access')      return 'scalar'
-  if (op === 'construct_variant') return 'unknown'
-  if (op === 'match_variant')     return 'unknown'
-  // Compile-time combinators
-  if (op === 'binding')  return 'unknown'
-  if (op === 'let')      return 'unknown'
-  if (op === 'generate' || op === 'iterate' || op === 'scan' || op === 'map2' || op === 'zip_with')
-    return 'array'
-  if (op === 'fold' || op === 'chain')
-    return 'unknown'
-  throw new Error(`Unknown op '${op}'.`)
-}
+const UNARY_OPS = new Set([
+  'neg', 'abs', 'sin', 'cos', 'exp', 'log', 'tanh', 'not', 'bit_not',
+])
 
 // ─────────────────────────────────────────────────────────────
 // Module loader
 // ─────────────────────────────────────────────────────────────
+// Module loader
+// ─────────────────────────────────────────────────────────────
 
-export function loadModuleFromJSON(
-  def: ModuleDefJSON,
+/**
+ * Convert a name-based JSON ExprNode to a slot-based ExprNode.
+ * Pure tree walk — no side effects, no context stack.
+ */
+function slottifyExpr(
+  node: ExprNode,
+  inputNames: string[],
+  regNames: string[],
+  delayNameToId: Map<string, number>,
+  nestedAliasToId: Map<string, number>,
+  nestedAliasDef: Map<string, ProgramDef>,
+): ExprNode {
+  if (typeof node === 'number' || typeof node === 'boolean') return node
+  if (Array.isArray(node)) return node.map(n => slottifyExpr(n, inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef))
+
+  const obj = node as Record<string, unknown>
+  const op = obj.op as string
+  const recurse = (n: ExprNode) => slottifyExpr(n, inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
+
+  if (op === 'input') {
+    const name = obj.name as string | undefined
+    if (name !== undefined) {
+      const id = inputNames.indexOf(name)
+      if (id === -1) throw new Error(`Unknown input '${name}'. Available: ${inputNames.join(', ')}`)
+      return { op: 'input', id }
+    }
+    return node // already slot-based
+  }
+
+  if (op === 'reg') {
+    const name = obj.name as string | undefined
+    if (name !== undefined) {
+      const id = regNames.indexOf(name)
+      if (id === -1) throw new Error(`Unknown register '${name}'. Available: ${regNames.join(', ')}`)
+      return { op: 'reg', id }
+    }
+    return node
+  }
+
+  if (op === 'delay_ref') {
+    const id = obj.id as string
+    const nodeId = delayNameToId.get(id)
+    if (nodeId === undefined) throw new Error(`delay_ref: no delay with id '${id}'.`)
+    return { op: 'delay_value', node_id: nodeId }
+  }
+
+  if (op === 'nested_out') {
+    const ref = obj.ref as string
+    const nodeId = nestedAliasToId.get(ref)
+    if (nodeId === undefined) throw new Error(`nested_out: no nested program named '${ref}'.`)
+    const nestedDef = nestedAliasDef.get(ref)!
+    const output = obj.output as string | number
+    const outputId = typeof output === 'number' ? output : nestedDef.outputNames.indexOf(output)
+    if (outputId === -1) throw new Error(`nested_out: unknown output '${output}' on '${ref}'.`)
+    return { op: 'nested_output', node_id: nodeId, output_id: outputId }
+  }
+
+  // Generic op with args — recurse
+  if ('args' in obj) {
+    const args = (obj.args as ExprNode[]).map(recurse)
+    const result: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(obj)) {
+      if (k === 'args') continue
+      result[k] = v
+    }
+    result.args = args
+    return result as ExprNode
+  }
+
+  // Handle array-like containers that aren't in 'args'
+  if (op === 'array') {
+    const items = (obj.items as ExprNode[]).map(recurse)
+    return { ...obj, items } as unknown as ExprNode
+  }
+
+  // Combinator forms with nested expr fields
+  if (op === 'let') {
+    const bind = obj.bind as Record<string, ExprNode>
+    const converted: Record<string, ExprNode> = {}
+    for (const [k, v] of Object.entries(bind)) converted[k] = recurse(v)
+    return { ...obj, bind: converted, in: recurse(obj.in as ExprNode) } as unknown as ExprNode
+  }
+  if (op === 'generate' || op === 'chain' || op === 'iterate') {
+    return { ...obj, ...(obj.init !== undefined ? { init: recurse(obj.init as ExprNode) } : {}), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
+  }
+  if (op === 'fold' || op === 'scan') {
+    return { ...obj, over: recurse(obj.over as ExprNode), init: recurse(obj.init as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
+  }
+  if (op === 'map2') {
+    return { ...obj, over: recurse(obj.over as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
+  }
+  if (op === 'zip_with') {
+    return { ...obj, a: recurse(obj.a as ExprNode), b: recurse(obj.b as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
+  }
+
+  // ADT ops
+  if (op === 'construct_struct') {
+    return { ...obj, fields: (obj.fields as ExprNode[]).map(recurse) } as unknown as ExprNode
+  }
+  if (op === 'field_access') {
+    return { ...obj, struct_expr: recurse(obj.struct_expr as ExprNode) } as unknown as ExprNode
+  }
+  if (op === 'construct_variant') {
+    return { ...obj, payload: (obj.payload as ExprNode[]).map(recurse) } as unknown as ExprNode
+  }
+  if (op === 'match_variant') {
+    return { ...obj, scrutinee: recurse(obj.scrutinee as ExprNode), branches: (obj.branches as ExprNode[]).map(recurse) } as unknown as ExprNode
+  }
+
+  // Leaf ops (sample_rate, sample_index, binding, float, int, bool, matrix, etc.)
+  return node
+}
+
+export function loadProgramDef(
+  def: ProgramJSON,
   session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
 ): ModuleType {
-  const inputNames  = def.inputs
-  const outputNames = def.outputs
+  const inputSpecs  = def.inputs ?? []
+  const outputSpecs = def.outputs ?? []
+  const inputNames  = inputSpecs.map(i => typeof i === 'string' ? i : i.name)
+  const outputNames = outputSpecs.map(o => typeof o === 'string' ? o : o.name)
+  const inputPortTypes  = inputSpecs.map(i => typeof i === 'string' ? undefined : i.type)
+  const outputPortTypes = outputSpecs.map(o => typeof o === 'string' ? undefined : o.type)
   const regsRaw     = def.regs ?? {}
   const delaysRaw   = def.delays ?? {}
-  const nestedRaw   = def.nested ?? {}
+  const nestedRaw   = def.instances ?? {}
 
-  // Convert regs to defineModule format (supports bare values and { init, type })
-  const regsForDefine: Record<string, RegInit> = {}
+  // ── Parse registers ──
+  const regNames: string[] = []
+  const regInitValues: ValueCoercible[] = []
+  const regPortTypes: (string | undefined)[] = []
   for (const [name, val] of Object.entries(regsRaw)) {
-    if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'init' in val) {
-      regsForDefine[name] = { init: (val as { init: ValueCoercible; type: string }).init, type: (val as { init: ValueCoercible; type: string }).type }
+    regNames.push(name)
+    if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'zeros' in val) {
+      // Compact form: {"zeros": N} → array of N zeros with inferred type
+      const n = (val as { zeros: number }).zeros
+      regInitValues.push(new Array(n).fill(0))
+      regPortTypes.push(`float[${n}]`)
+    } else if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'init' in val) {
+      const typed = val as { init: ValueCoercible; type: string }
+      regInitValues.push(typed.init)
+      regPortTypes.push(typed.type)
     } else {
-      regsForDefine[name] = val as ValueCoercible
+      regInitValues.push(val as ValueCoercible)
+      regPortTypes.push(undefined)
     }
   }
 
-  // Parse input defaults (build each default through the expr builder so they become SignalExpr)
-  const inputDefaultsForDefine: Record<string, ExprCoercible> | undefined = def.input_defaults
-    ? Object.fromEntries(
-        Object.entries(def.input_defaults).map(([k, v]) => {
-          const ctx0: BuildCtx = {
-            inputNames: [], regNames: [],
-            paramRegistry: session.paramRegistry,
-            triggerRegistry: session.triggerRegistry,
-            instanceRegistry: session.instanceRegistry,
-            typeRegistry: session.typeRegistry,
-            delayRefs: new Map(), nestedAliases: new Map(),
-          }
-          return [k, buildExpr(v, ctx0)]
-        })
-      )
-    : undefined
+  // ── Assign delay IDs ──
+  const delayNames = Object.keys(delaysRaw)
+  const delayNameToId = new Map(delayNames.map((name, i) => [name, i]))
+  const delayInitValues = delayNames.map(name => delaysRaw[name].init ?? 0)
 
-  return defineModule(
-    def.name,
+  // ── Assign nested call IDs ──
+  const nestedAliases = Object.keys(nestedRaw)
+  const nestedAliasToId = new Map(nestedAliases.map((alias, i) => [alias, i]))
+  const nestedAliasDef = new Map<string, ProgramDef>()
+  const nestedCalls: NestedCall[] = []
+
+  for (const alias of nestedAliases) {
+    const spec = nestedRaw[alias]
+    const type = session.typeRegistry.get(spec.program)
+    if (!type) throw new Error(`Unknown program type '${spec.program}' in instances.`)
+    nestedAliasDef.set(alias, type._def)
+
+    // Build call arg nodes — order inputs by the nested type's input order
+    const callArgNodes: ExprNode[] = type._def.inputNames.map((name, idx) => {
+      if (name in (spec.inputs ?? {})) {
+        return slottifyExpr((spec.inputs ?? {})[name], inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
+      }
+      const defaultExpr = type._def.inputDefaults[idx]
+      if (defaultExpr) return defaultExpr._node
+      throw new Error(`Missing input '${name}' for nested module '${alias}'.`)
+    })
+
+    nestedCalls.push({ programDef: type._def, callArgNodes })
+  }
+
+  // ── Convert delay update expressions ──
+  const delayUpdateNodes = delayNames.map(name =>
+    slottifyExpr(delaysRaw[name].update, inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
+  )
+
+  // ── Convert output expressions ──
+  const process = def.process ?? { outputs: {} }
+  const outputExprNodes = outputNames.map(name => {
+    const node = process.outputs[name]
+    if (node === undefined) throw new Error(`Output '${name}' missing from process.outputs.`)
+    return slottifyExpr(node, inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
+  })
+
+  // ── Convert register update expressions ──
+  const registerExprNodes: (ExprNode | null)[] = regNames.map(name => {
+    const node = process.next_regs?.[name]
+    if (node === undefined) return null
+    return slottifyExpr(node, inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
+  })
+
+  // ── Parse input defaults ──
+  const rawInputDefaults: Record<string, ExprNode> = {}
+  const inputDefaults: (SignalExpr | null)[] = new Array(inputNames.length).fill(null)
+  if (def.input_defaults) {
+    for (const [k, v] of Object.entries(def.input_defaults)) {
+      rawInputDefaults[k] = v as ExprNode
+      const idx = inputNames.indexOf(k)
+      if (idx !== -1) inputDefaults[idx] = coerce(v as ExprCoercible)
+    }
+  }
+
+  const programDef: ProgramDef = {
+    typeName: def.name,
     inputNames,
     outputNames,
-    regsForDefine,
-    (inputsMap: SymbolMap, regsMap: SymbolMap) => {
-      const regNames = regsMap.names()
-      const ctx: BuildCtx = {
-        inputNames,
-        regNames,
-        paramRegistry: session.paramRegistry,
-        triggerRegistry: session.triggerRegistry,
-        instanceRegistry: session.instanceRegistry,
-        typeRegistry: session.typeRegistry,
-        delayRefs: new Map(),
-        nestedAliases: new Map(),
-      }
+    inputPortTypes,
+    outputPortTypes,
+    registerNames: regNames,
+    registerPortTypes: regPortTypes,
+    registerInitValues: regInitValues,
+    sampleRate: def.sample_rate ?? 44100.0,
+    rawInputDefaults,
+    inputDefaults,
+    delayInitValues,
+    outputExprNodes,
+    registerExprNodes,
+    delayUpdateNodes,
+    nestedCalls,
+    breaksCycles: def.breaks_cycles ?? false,
+  }
 
-      // ── Nested pre-pass ──
-      for (const [alias, spec] of Object.entries(nestedRaw)) {
-        const type = session.typeRegistry.get(spec.type)
-        if (!type) throw new Error(`Unknown module type '${spec.type}' in nested.`)
-        // Order inputs by position
-        const orderedInputs = type._def.inputNames.map((name) => {
-          if (name in spec.inputs) return buildExpr(spec.inputs[name], ctx)
-          const idx = type._def.inputNames.indexOf(name)
-          const def = type._def.inputDefaults[idx]
-          if (def) return def
-          throw new Error(`Missing input '${name}' for nested module '${alias}'.`)
-        })
-        const result = type.call(...orderedInputs)
-        ctx.nestedAliases.set(alias, result)
-      }
-
-      // ── Delay pre-pass ──
-      for (const [id, ds] of Object.entries(delaysRaw)) {
-        const updateExpr = buildExpr(ds.update, ctx)
-        const result = delay(updateExpr, ds.init ?? 0.0)
-        ctx.delayRefs.set(id, result)
-      }
-
-      // ── Build output expressions ──
-      const outputs: Record<string, ExprCoercible> = {}
-      for (const outName of outputNames) {
-        const node = def.process.outputs[outName]
-        if (node === undefined) throw new Error(`Output '${outName}' missing from process.outputs.`)
-        outputs[outName] = buildExpr(node, ctx)
-      }
-
-      // ── Build next_regs expressions ──
-      const nextRegs: Record<string, ExprCoercible> = {}
-      for (const [regName, node] of Object.entries(def.process.next_regs ?? {})) {
-        nextRegs[regName] = buildExpr(node, ctx)
-      }
-
-      return { outputs, nextRegs }
-    },
-    def.sample_rate ?? 44100.0,
-    inputDefaultsForDefine,
-  )
+  return new ModuleType(programDef)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -626,13 +396,13 @@ export function prettyExpr(
   if (op === 'float' || op === 'int')  return String(n.value)
   if (op === 'bool')  return String(n.value)
 
-  if (op in BINARY_OPS) {
+  if (BINARY_OPS.has(op)) {
     const sym = BINARY_INFIX[op]
     const l = prettyExpr(args[0], instanceRegistry)
     const r = prettyExpr(args[1], instanceRegistry)
     return sym ? `(${l} ${sym} ${r})` : `${op}(${l}, ${r})`
   }
-  if (op in UNARY_OPS) {
+  if (UNARY_OPS.has(op)) {
     const pfx = UNARY_PREFIX[op]
     const x = prettyExpr(args[0], instanceRegistry)
     return pfx ? `${pfx}${x}` : `${op}(${x})`
@@ -677,209 +447,9 @@ export function prettyExpr(
  */
 export function loadJSON(json: { schema: string; [k: string]: unknown }, session: SessionState): void {
   if (json.schema === 'tropical_program_1') {
-    loadProgramAsSession(json as unknown as ProgramJSON, session, loadPatchFromJSON)
+    loadProgramAsSession(json as unknown as ProgramJSON, session)
     return
   }
-  if (json.schema === 'tropical_patch_1') {
-    loadPatchFromJSON(json as unknown as PatchJSON, session)
-    return
-  }
-  throw new Error(`Unknown schema '${json.schema}'. Expected 'tropical_program_1' or 'tropical_patch_1'.`)
+  throw new Error(`Unknown schema '${json.schema}'. Expected 'tropical_program_1'.`)
 }
 
-export function loadPatchFromJSON(json: PatchJSON, session: SessionState): void {
-  session.dac = null
-  session.instanceRegistry.clear()
-  session.graphOutputs.length = 0
-  session.paramRegistry.clear()
-  session.triggerRegistry.clear()
-  session.inputExprNodes.clear()
-  session._nameCounters.clear()
-
-  // Load inline module type definitions
-  for (const def of json.module_defs ?? []) {
-    const type = loadModuleFromJSON(def, session)
-    session.typeRegistry.set(type.name, type)
-  }
-
-  // Create params and triggers before modules (modules may reference them)
-  for (const p of json.params ?? []) {
-    if (p.type === 'trigger') {
-      session.triggerRegistry.set(p.name, new Trigger())
-    } else {
-      session.paramRegistry.set(p.name, new Param(p.value ?? 0.0, p.time_const ?? 0.005))
-    }
-  }
-
-  // Instantiate modules (TS-only — no C API calls)
-  for (const entry of json.modules) {
-    const type = session.typeRegistry.get(entry.type)
-    if (!type) throw new Error(`Unknown module type '${entry.type}'.`)
-    const name = entry.name ?? nextName(session, type.name)
-    const inst = type.instantiateAs(name)
-    session.instanceRegistry.set(inst.name, inst)
-  }
-
-  // Populate wiring state — connections, input expressions, outputs
-  for (const conn of json.connections ?? []) {
-    const srcInst = session.instanceRegistry.get(conn.src)
-    const dstInst = session.instanceRegistry.get(conn.dst)
-    if (!srcInst) throw new Error(`Connection src module '${conn.src}' not found.`)
-    if (!dstInst) throw new Error(`Connection dst module '${conn.dst}' not found.`)
-    const srcId = typeof conn.src_output === 'number' ? conn.src_output : srcInst.outputIndex(conn.src_output)
-    const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
-    const srcOutName = srcInst.outputNames[srcId]
-    const dstInName  = dstInst.inputNames[dstId]
-    session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
-  }
-
-  for (const ie of json.input_exprs ?? []) {
-    const inst = session.instanceRegistry.get(ie.module)
-    if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
-    session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
-  }
-
-  // Ensure module input defaults are included in the plan
-  for (const [name, inst] of session.instanceRegistry) {
-    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
-    for (const [inputName, value] of Object.entries(defaults)) {
-      const key = `${name}:${inputName}`
-      if (!session.inputExprNodes.has(key)) {
-        session.inputExprNodes.set(key, value)
-      }
-    }
-  }
-
-  for (const out of json.outputs ?? []) {
-    if ('expr' in out) {
-      throw new Error('Output expressions not supported in plan-based path. Use module output refs instead.')
-    }
-    const inst = session.instanceRegistry.get(out.module)
-    if (!inst) throw new Error(`Output module '${out.module}' not found.`)
-    session.graphOutputs.push({ module: out.module, output: String(out.output) })
-  }
-
-  // Apply wiring via FlatRuntime
-  applyFlatPlan(session, session.runtime)
-}
-
-// ─────────────────────────────────────────────────────────────
-// Patch merger (additive — no session teardown)
-// ─────────────────────────────────────────────────────────────
-
-export function mergePatchFromJSON(json: PatchJSON, session: SessionState): void {
-  // Fail fast on name collisions before touching state
-  for (const entry of json.modules) {
-    if (entry.name && session.instanceRegistry.has(entry.name))
-      throw new Error(`merge_patch collision: module '${entry.name}' already exists.`)
-  }
-  for (const p of json.params ?? []) {
-    if (session.paramRegistry.has(p.name) || session.triggerRegistry.has(p.name))
-      throw new Error(`merge_patch collision: param/trigger '${p.name}' already exists.`)
-  }
-
-  // Load inline type definitions
-  for (const def of json.module_defs ?? []) {
-    const type = loadModuleFromJSON(def, session)
-    session.typeRegistry.set(type.name, type)
-  }
-
-  // Create params and triggers
-  for (const p of json.params ?? []) {
-    if (p.type === 'trigger') {
-      session.triggerRegistry.set(p.name, new Trigger())
-    } else {
-      session.paramRegistry.set(p.name, new Param(p.value ?? 0.0, p.time_const ?? 0.005))
-    }
-  }
-
-  // Instantiate modules (TS-only)
-  for (const entry of json.modules) {
-    const type = session.typeRegistry.get(entry.type)
-    if (!type) throw new Error(`Unknown module type '${entry.type}'.`)
-    const name = entry.name ?? nextName(session, type.name)
-    const inst = type.instantiateAs(name)
-    session.instanceRegistry.set(inst.name, inst)
-  }
-
-  // Populate wiring state — connections, input expressions, outputs
-  for (const conn of json.connections ?? []) {
-    const srcInst = session.instanceRegistry.get(conn.src)
-    const dstInst = session.instanceRegistry.get(conn.dst)
-    if (!srcInst) throw new Error(`Connection src module '${conn.src}' not found.`)
-    if (!dstInst) throw new Error(`Connection dst module '${conn.dst}' not found.`)
-    const srcId = typeof conn.src_output === 'number' ? conn.src_output : srcInst.outputIndex(conn.src_output)
-    const dstId = typeof conn.dst_input  === 'number' ? conn.dst_input  : dstInst.inputIndex(conn.dst_input)
-    const srcOutName = srcInst.outputNames[srcId]
-    const dstInName  = dstInst.inputNames[dstId]
-    session.inputExprNodes.set(`${conn.dst}:${dstInName}`, { op: 'ref', module: conn.src, output: srcOutName })
-  }
-
-  for (const ie of json.input_exprs ?? []) {
-    const inst = session.instanceRegistry.get(ie.module)
-    if (!inst) throw new Error(`input_expr module '${ie.module}' not found.`)
-    session.inputExprNodes.set(`${ie.module}:${ie.input}`, ie.expr)
-  }
-
-  // Ensure module input defaults are included in the plan
-  for (const [name, inst] of session.instanceRegistry) {
-    const defaults = inst._def.rawInputDefaults as Record<string, ExprNode>
-    for (const [inputName, value] of Object.entries(defaults)) {
-      const key = `${name}:${inputName}`
-      if (!session.inputExprNodes.has(key)) {
-        session.inputExprNodes.set(key, value)
-      }
-    }
-  }
-
-  for (const out of json.outputs ?? []) {
-    if ('expr' in out) {
-      throw new Error('Output expressions not supported in plan-based path. Use module output refs instead.')
-    }
-    const inst = session.instanceRegistry.get(out.module)
-    if (!inst) throw new Error(`Output module '${out.module}' not found.`)
-    session.graphOutputs.push({ module: out.module, output: String(out.output) })
-  }
-
-  // Apply wiring via FlatRuntime
-  applyFlatPlan(session, session.runtime)
-}
-
-// ─────────────────────────────────────────────────────────────
-// Patch saver
-// ─────────────────────────────────────────────────────────────
-
-export function savePatchToJSON(session: SessionState): PatchJSON {
-  const modules: PatchJSON['modules'] = []
-  for (const [name, inst] of session.instanceRegistry) {
-    modules.push({ type: inst.typeName, name })
-  }
-
-  const params: NonNullable<PatchJSON['params']> = []
-  for (const [name, p] of session.paramRegistry) {
-    params.push({ name, value: p.value, time_const: 0.005 })
-  }
-  for (const [name] of session.triggerRegistry) {
-    params.push({ name, type: 'trigger' })
-  }
-
-  const outputs: NonNullable<PatchJSON['outputs']> = session.graphOutputs.map(o => ({
-    module: o.module, output: o.output,
-  }))
-
-  const inputExprs: NonNullable<PatchJSON['input_exprs']> = []
-  for (const [key, node] of session.inputExprNodes) {
-    const [module, input] = key.split(':')
-    inputExprs.push({ module, input, expr: node })
-  }
-
-  const patch: PatchJSON = {
-    schema: 'tropical_patch_1',
-    modules,
-  }
-  if (params.length)      patch.params      = params
-  if (outputs.length)     patch.outputs     = outputs
-  if (inputExprs.length)  patch.input_exprs = inputExprs
-
-  return patch
-}

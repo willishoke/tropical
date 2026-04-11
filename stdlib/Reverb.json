@@ -1,0 +1,1501 @@
+{
+  "schema": "tropical_program_1",
+  "name": "Reverb",
+  "inputs": [
+    "input",
+    "mix",
+    "decay",
+    "damp"
+  ],
+  "outputs": [
+    "output"
+  ],
+  "input_defaults": {
+    "input": 0,
+    "mix": 0.35,
+    "decay": 0.84,
+    "damp": 0.4
+  },
+  "programs": {
+    "_allpassStage": {
+      "schema": "tropical_program_1",
+      "name": "_allpassStage",
+      "inputs": [
+        "x",
+        "a"
+      ],
+      "outputs": [
+        "y"
+      ],
+      "regs": {
+        "x_prev": 0,
+        "y_prev": 0
+      },
+      "process": {
+        "outputs": {
+          "y": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "neg",
+                        "args": [
+                          {
+                            "op": "input",
+                            "name": "a"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "input",
+                        "name": "x"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "reg",
+                    "name": "x_prev"
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "a"
+                  },
+                  {
+                    "op": "reg",
+                    "name": "y_prev"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "next_regs": {
+          "x_prev": {
+            "op": "input",
+            "name": "x"
+          },
+          "y_prev": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "neg",
+                        "args": [
+                          {
+                            "op": "input",
+                            "name": "a"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "input",
+                        "name": "x"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "reg",
+                    "name": "x_prev"
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "a"
+                  },
+                  {
+                    "op": "reg",
+                    "name": "y_prev"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "_comb0": {
+      "schema": "tropical_program_1",
+      "name": "_comb0",
+      "inputs": [
+        "x",
+        "decay",
+        "damp"
+      ],
+      "outputs": [
+        "y"
+      ],
+      "regs": {
+        "lpf": 0,
+        "buf": {
+          "zeros": 1557
+        }
+      },
+      "input_defaults": {
+        "x": 0,
+        "decay": 0.84,
+        "damp": 0.4
+      },
+      "process": {
+        "outputs": {
+          "y": {
+            "op": "index",
+            "args": [
+              {
+                "op": "reg",
+                "name": "buf"
+              },
+              {
+                "op": "mod",
+                "args": [
+                  {
+                    "op": "sample_index"
+                  },
+                  1557
+                ]
+              }
+            ]
+          }
+        },
+        "next_regs": {
+          "lpf": {
+            "op": "let",
+            "bind": {
+              "state": {
+                "op": "index",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "buf"
+                  },
+                  {
+                    "op": "mod",
+                    "args": [
+                      {
+                        "op": "sample_index"
+                      },
+                      1557
+                    ]
+                  }
+                ]
+              },
+              "damp_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "damp"
+                  },
+                  0,
+                  0.99
+                ]
+              }
+            },
+            "in": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "sub",
+                      "args": [
+                        1,
+                        {
+                          "op": "binding",
+                          "name": "damp_c"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "binding",
+                      "name": "state"
+                    }
+                  ]
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "damp_c"
+                    },
+                    {
+                      "op": "reg",
+                      "name": "lpf"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "buf": {
+            "op": "let",
+            "bind": {
+              "decay_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "decay"
+                  },
+                  0,
+                  0.98
+                ]
+              },
+              "state": {
+                "op": "index",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "buf"
+                  },
+                  {
+                    "op": "mod",
+                    "args": [
+                      {
+                        "op": "sample_index"
+                      },
+                      1557
+                    ]
+                  }
+                ]
+              },
+              "damp_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "damp"
+                  },
+                  0,
+                  0.99
+                ]
+              },
+              "lpfOut": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "sub",
+                        "args": [
+                          1,
+                          {
+                            "op": "clamp",
+                            "args": [
+                              {
+                                "op": "input",
+                                "name": "damp"
+                              },
+                              0,
+                              0.99
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "op": "index",
+                        "args": [
+                          {
+                            "op": "reg",
+                            "name": "buf"
+                          },
+                          {
+                            "op": "mod",
+                            "args": [
+                              {
+                                "op": "sample_index"
+                              },
+                              1557
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "clamp",
+                        "args": [
+                          {
+                            "op": "input",
+                            "name": "damp"
+                          },
+                          0,
+                          0.99
+                        ]
+                      },
+                      {
+                        "op": "reg",
+                        "name": "lpf"
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "array_set",
+              "args": [
+                {
+                  "op": "reg",
+                  "name": "buf"
+                },
+                {
+                  "op": "mod",
+                  "args": [
+                    {
+                      "op": "sample_index"
+                    },
+                    1557
+                  ]
+                },
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "input",
+                      "name": "x"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "decay_c"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "lpfOut"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "_comb1": {
+      "schema": "tropical_program_1",
+      "name": "_comb1",
+      "inputs": [
+        "x",
+        "decay",
+        "damp"
+      ],
+      "outputs": [
+        "y"
+      ],
+      "regs": {
+        "lpf": 0,
+        "buf": {
+          "zeros": 1617
+        }
+      },
+      "input_defaults": {
+        "x": 0,
+        "decay": 0.84,
+        "damp": 0.4
+      },
+      "process": {
+        "outputs": {
+          "y": {
+            "op": "index",
+            "args": [
+              {
+                "op": "reg",
+                "name": "buf"
+              },
+              {
+                "op": "mod",
+                "args": [
+                  {
+                    "op": "sample_index"
+                  },
+                  1617
+                ]
+              }
+            ]
+          }
+        },
+        "next_regs": {
+          "lpf": {
+            "op": "let",
+            "bind": {
+              "state": {
+                "op": "index",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "buf"
+                  },
+                  {
+                    "op": "mod",
+                    "args": [
+                      {
+                        "op": "sample_index"
+                      },
+                      1617
+                    ]
+                  }
+                ]
+              },
+              "damp_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "damp"
+                  },
+                  0,
+                  0.99
+                ]
+              }
+            },
+            "in": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "sub",
+                      "args": [
+                        1,
+                        {
+                          "op": "binding",
+                          "name": "damp_c"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "binding",
+                      "name": "state"
+                    }
+                  ]
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "damp_c"
+                    },
+                    {
+                      "op": "reg",
+                      "name": "lpf"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "buf": {
+            "op": "let",
+            "bind": {
+              "decay_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "decay"
+                  },
+                  0,
+                  0.98
+                ]
+              },
+              "state": {
+                "op": "index",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "buf"
+                  },
+                  {
+                    "op": "mod",
+                    "args": [
+                      {
+                        "op": "sample_index"
+                      },
+                      1617
+                    ]
+                  }
+                ]
+              },
+              "damp_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "damp"
+                  },
+                  0,
+                  0.99
+                ]
+              },
+              "lpfOut": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "sub",
+                        "args": [
+                          1,
+                          {
+                            "op": "clamp",
+                            "args": [
+                              {
+                                "op": "input",
+                                "name": "damp"
+                              },
+                              0,
+                              0.99
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "op": "index",
+                        "args": [
+                          {
+                            "op": "reg",
+                            "name": "buf"
+                          },
+                          {
+                            "op": "mod",
+                            "args": [
+                              {
+                                "op": "sample_index"
+                              },
+                              1617
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "clamp",
+                        "args": [
+                          {
+                            "op": "input",
+                            "name": "damp"
+                          },
+                          0,
+                          0.99
+                        ]
+                      },
+                      {
+                        "op": "reg",
+                        "name": "lpf"
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "array_set",
+              "args": [
+                {
+                  "op": "reg",
+                  "name": "buf"
+                },
+                {
+                  "op": "mod",
+                  "args": [
+                    {
+                      "op": "sample_index"
+                    },
+                    1617
+                  ]
+                },
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "input",
+                      "name": "x"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "decay_c"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "lpfOut"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "_comb2": {
+      "schema": "tropical_program_1",
+      "name": "_comb2",
+      "inputs": [
+        "x",
+        "decay",
+        "damp"
+      ],
+      "outputs": [
+        "y"
+      ],
+      "regs": {
+        "lpf": 0,
+        "buf": {
+          "zeros": 1491
+        }
+      },
+      "input_defaults": {
+        "x": 0,
+        "decay": 0.84,
+        "damp": 0.4
+      },
+      "process": {
+        "outputs": {
+          "y": {
+            "op": "index",
+            "args": [
+              {
+                "op": "reg",
+                "name": "buf"
+              },
+              {
+                "op": "mod",
+                "args": [
+                  {
+                    "op": "sample_index"
+                  },
+                  1491
+                ]
+              }
+            ]
+          }
+        },
+        "next_regs": {
+          "lpf": {
+            "op": "let",
+            "bind": {
+              "state": {
+                "op": "index",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "buf"
+                  },
+                  {
+                    "op": "mod",
+                    "args": [
+                      {
+                        "op": "sample_index"
+                      },
+                      1491
+                    ]
+                  }
+                ]
+              },
+              "damp_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "damp"
+                  },
+                  0,
+                  0.99
+                ]
+              }
+            },
+            "in": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "sub",
+                      "args": [
+                        1,
+                        {
+                          "op": "binding",
+                          "name": "damp_c"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "binding",
+                      "name": "state"
+                    }
+                  ]
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "damp_c"
+                    },
+                    {
+                      "op": "reg",
+                      "name": "lpf"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "buf": {
+            "op": "let",
+            "bind": {
+              "decay_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "decay"
+                  },
+                  0,
+                  0.98
+                ]
+              },
+              "state": {
+                "op": "index",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "buf"
+                  },
+                  {
+                    "op": "mod",
+                    "args": [
+                      {
+                        "op": "sample_index"
+                      },
+                      1491
+                    ]
+                  }
+                ]
+              },
+              "damp_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "damp"
+                  },
+                  0,
+                  0.99
+                ]
+              },
+              "lpfOut": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "sub",
+                        "args": [
+                          1,
+                          {
+                            "op": "clamp",
+                            "args": [
+                              {
+                                "op": "input",
+                                "name": "damp"
+                              },
+                              0,
+                              0.99
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "op": "index",
+                        "args": [
+                          {
+                            "op": "reg",
+                            "name": "buf"
+                          },
+                          {
+                            "op": "mod",
+                            "args": [
+                              {
+                                "op": "sample_index"
+                              },
+                              1491
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "clamp",
+                        "args": [
+                          {
+                            "op": "input",
+                            "name": "damp"
+                          },
+                          0,
+                          0.99
+                        ]
+                      },
+                      {
+                        "op": "reg",
+                        "name": "lpf"
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "array_set",
+              "args": [
+                {
+                  "op": "reg",
+                  "name": "buf"
+                },
+                {
+                  "op": "mod",
+                  "args": [
+                    {
+                      "op": "sample_index"
+                    },
+                    1491
+                  ]
+                },
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "input",
+                      "name": "x"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "decay_c"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "lpfOut"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "_comb3": {
+      "schema": "tropical_program_1",
+      "name": "_comb3",
+      "inputs": [
+        "x",
+        "decay",
+        "damp"
+      ],
+      "outputs": [
+        "y"
+      ],
+      "regs": {
+        "lpf": 0,
+        "buf": {
+          "zeros": 1422
+        }
+      },
+      "input_defaults": {
+        "x": 0,
+        "decay": 0.84,
+        "damp": 0.4
+      },
+      "process": {
+        "outputs": {
+          "y": {
+            "op": "index",
+            "args": [
+              {
+                "op": "reg",
+                "name": "buf"
+              },
+              {
+                "op": "mod",
+                "args": [
+                  {
+                    "op": "sample_index"
+                  },
+                  1422
+                ]
+              }
+            ]
+          }
+        },
+        "next_regs": {
+          "lpf": {
+            "op": "let",
+            "bind": {
+              "state": {
+                "op": "index",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "buf"
+                  },
+                  {
+                    "op": "mod",
+                    "args": [
+                      {
+                        "op": "sample_index"
+                      },
+                      1422
+                    ]
+                  }
+                ]
+              },
+              "damp_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "damp"
+                  },
+                  0,
+                  0.99
+                ]
+              }
+            },
+            "in": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "sub",
+                      "args": [
+                        1,
+                        {
+                          "op": "binding",
+                          "name": "damp_c"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "binding",
+                      "name": "state"
+                    }
+                  ]
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "damp_c"
+                    },
+                    {
+                      "op": "reg",
+                      "name": "lpf"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "buf": {
+            "op": "let",
+            "bind": {
+              "decay_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "decay"
+                  },
+                  0,
+                  0.98
+                ]
+              },
+              "state": {
+                "op": "index",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "buf"
+                  },
+                  {
+                    "op": "mod",
+                    "args": [
+                      {
+                        "op": "sample_index"
+                      },
+                      1422
+                    ]
+                  }
+                ]
+              },
+              "damp_c": {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "damp"
+                  },
+                  0,
+                  0.99
+                ]
+              },
+              "lpfOut": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "sub",
+                        "args": [
+                          1,
+                          {
+                            "op": "clamp",
+                            "args": [
+                              {
+                                "op": "input",
+                                "name": "damp"
+                              },
+                              0,
+                              0.99
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "op": "index",
+                        "args": [
+                          {
+                            "op": "reg",
+                            "name": "buf"
+                          },
+                          {
+                            "op": "mod",
+                            "args": [
+                              {
+                                "op": "sample_index"
+                              },
+                              1422
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "clamp",
+                        "args": [
+                          {
+                            "op": "input",
+                            "name": "damp"
+                          },
+                          0,
+                          0.99
+                        ]
+                      },
+                      {
+                        "op": "reg",
+                        "name": "lpf"
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "array_set",
+              "args": [
+                {
+                  "op": "reg",
+                  "name": "buf"
+                },
+                {
+                  "op": "mod",
+                  "args": [
+                    {
+                      "op": "sample_index"
+                    },
+                    1422
+                  ]
+                },
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "input",
+                      "name": "x"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "decay_c"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "lpfOut"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "instances": {
+    "ap_in_0": {
+      "program": "_allpassStage",
+      "inputs": {
+        "x": {
+          "op": "input",
+          "name": "input"
+        },
+        "a": 0.7
+      }
+    },
+    "ap_in_1": {
+      "program": "_allpassStage",
+      "inputs": {
+        "x": {
+          "op": "nested_out",
+          "ref": "ap_in_0",
+          "output": "y"
+        },
+        "a": 0.65
+      }
+    },
+    "comb0": {
+      "program": "_comb0",
+      "inputs": {
+        "x": {
+          "op": "nested_out",
+          "ref": "ap_in_1",
+          "output": "y"
+        },
+        "decay": {
+          "op": "clamp",
+          "args": [
+            {
+              "op": "input",
+              "name": "decay"
+            },
+            0,
+            0.99
+          ]
+        },
+        "damp": {
+          "op": "clamp",
+          "args": [
+            {
+              "op": "input",
+              "name": "damp"
+            },
+            0,
+            1
+          ]
+        }
+      }
+    },
+    "comb1": {
+      "program": "_comb1",
+      "inputs": {
+        "x": {
+          "op": "nested_out",
+          "ref": "ap_in_1",
+          "output": "y"
+        },
+        "decay": {
+          "op": "clamp",
+          "args": [
+            {
+              "op": "input",
+              "name": "decay"
+            },
+            0,
+            0.99
+          ]
+        },
+        "damp": {
+          "op": "clamp",
+          "args": [
+            {
+              "op": "input",
+              "name": "damp"
+            },
+            0,
+            1
+          ]
+        }
+      }
+    },
+    "comb2": {
+      "program": "_comb2",
+      "inputs": {
+        "x": {
+          "op": "nested_out",
+          "ref": "ap_in_1",
+          "output": "y"
+        },
+        "decay": {
+          "op": "clamp",
+          "args": [
+            {
+              "op": "input",
+              "name": "decay"
+            },
+            0,
+            0.99
+          ]
+        },
+        "damp": {
+          "op": "clamp",
+          "args": [
+            {
+              "op": "input",
+              "name": "damp"
+            },
+            0,
+            1
+          ]
+        }
+      }
+    },
+    "comb3": {
+      "program": "_comb3",
+      "inputs": {
+        "x": {
+          "op": "nested_out",
+          "ref": "ap_in_1",
+          "output": "y"
+        },
+        "decay": {
+          "op": "clamp",
+          "args": [
+            {
+              "op": "input",
+              "name": "decay"
+            },
+            0,
+            0.99
+          ]
+        },
+        "damp": {
+          "op": "clamp",
+          "args": [
+            {
+              "op": "input",
+              "name": "damp"
+            },
+            0,
+            1
+          ]
+        }
+      }
+    },
+    "ap_out_0": {
+      "program": "_allpassStage",
+      "inputs": {
+        "x": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "add",
+              "args": [
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "nested_out",
+                      "ref": "comb0",
+                      "output": "y"
+                    },
+                    {
+                      "op": "nested_out",
+                      "ref": "comb1",
+                      "output": "y"
+                    }
+                  ]
+                },
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "nested_out",
+                      "ref": "comb2",
+                      "output": "y"
+                    },
+                    {
+                      "op": "nested_out",
+                      "ref": "comb3",
+                      "output": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            0.25
+          ]
+        },
+        "a": 0.6
+      }
+    },
+    "ap_out_1": {
+      "program": "_allpassStage",
+      "inputs": {
+        "x": {
+          "op": "nested_out",
+          "ref": "ap_out_0",
+          "output": "y"
+        },
+        "a": 0.55
+      }
+    },
+    "ap_out_2": {
+      "program": "_allpassStage",
+      "inputs": {
+        "x": {
+          "op": "nested_out",
+          "ref": "ap_out_1",
+          "output": "y"
+        },
+        "a": 0.5
+      }
+    },
+    "ap_out_3": {
+      "program": "_allpassStage",
+      "inputs": {
+        "x": {
+          "op": "nested_out",
+          "ref": "ap_out_2",
+          "output": "y"
+        },
+        "a": 0.45
+      }
+    }
+  },
+  "process": {
+    "outputs": {
+      "output": {
+        "op": "let",
+        "bind": {
+          "mix": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "mix"
+              },
+              0,
+              1
+            ]
+          },
+          "wet": {
+            "op": "nested_out",
+            "ref": "ap_out_3",
+            "output": "y"
+          }
+        },
+        "in": {
+          "op": "add",
+          "args": [
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "sub",
+                  "args": [
+                    1,
+                    {
+                      "op": "binding",
+                      "name": "mix"
+                    }
+                  ]
+                },
+                {
+                  "op": "input",
+                  "name": "input"
+                }
+              ]
+            },
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "mix"
+                },
+                {
+                  "op": "binding",
+                  "name": "wet"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  }
+}

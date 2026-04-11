@@ -6,9 +6,8 @@ TypeScript layer. Handles module definition, expression construction, flattening
 
 ```
 expr.ts               ExprNode type, SignalExpr wrapper, all named operations, combinator constructors
-module.ts             defineModule() DSL, delay(), feedback(), nested calls
-module_library.ts     14 built-in module types + private sub-modules
-program.ts            ProgramJSON (tropical_program_1) interface, conversions, load/save
+module.ts             ProgramDef IR, ModuleType, ModuleInstance (pure data types, no DSL)
+program.ts            ProgramJSON (tropical_program_1) interface, conversions, stdlib loading
 flatten.ts            Patch → tropical_plan_4 (inline all modules, resolve refs)
 lower_arrays.ts       Lower array ops + combinators to scalar primitives (static unrolling)
 emit_numeric.ts       ExprNode trees → FlatProgram instruction stream
@@ -16,8 +15,8 @@ compiler.ts           Dependency graph, topological sort, term assembly
 term.ts               Categorical IR (morphism, compose, tensor, trace, id)
 type_check.ts         Type inference for terms, composition boundary validation
 optimizer.ts          Term rewriting (identity elimination, flattening)
-patch.ts              SessionState, patch load/save (tropical_patch_1), loadJSON schema detection
-schema.ts             Zod validation schemas for patch/module/program JSON
+patch.ts              SessionState, loadProgramDef (ProgramJSON → ProgramDef), loadJSON, prettyExpr
+schema.ts             Zod validation schemas for ProgramJSON
 apply_plan.ts         flattenPatch → JSON.stringify → runtime.loadPlan
 array_wiring.ts       Typed port validation, auto-broadcast insertion
 morphism_registry.ts  Named type coercion morphisms
@@ -52,23 +51,21 @@ type ExprNode = number | boolean | ExprNode[] | { op: string; ... }
 - **Combinators** (compile-time): `bindingExpr`, `let_`, `generate`, `repeat`, `iterate`, `fold`, `scan`, `map2`, `zipWith`, `chain`
 - **Leaf nodes**: `sampleRate`, `sampleIndex`, `inputExpr`, `registerExpr`, `refExpr`, `nestedOutputExpr`, `delayValueExpr`, `paramExpr`, `triggerParamExpr`
 
-## Module DSL (`module.ts`)
+## Program types (`module.ts`)
 
-`defineModule()` builds expression trees symbolically — the `process` function doesn't compute values, it constructs a graph.
+Pure data types — no DSL, no side effects:
 
-- Inputs and registers accessed via `SymbolMap.get()`, which returns `inputExpr(slot)` / `registerExpr(slot)` leaf nodes
-- `delay(value, init)` — allocates a delay register, returns a `delayValueExpr` leaf
-- `feedback(f, init)` — bundles register init with update morphism
-- `ModuleType.call(...args)` — nested invocation inside `defineModule` bodies; creates `nestedOutputExpr` references resolved during flattening
-- `definePureFunction(inputs, outputs, process)` — stateless module shorthand (no registers)
+- **`ProgramDef`** — the compiler's slot-indexed IR consumed by the flattener. Fields: `outputExprNodes`, `registerExprNodes`, `delayUpdateNodes`, `nestedCalls`, etc. Built from ProgramJSON by `loadProgramDef()` in `patch.ts` via `slottifyExpr()` (pure name→slot tree walk).
+- **`ModuleType`** — wraps a `ProgramDef`, registered in `SessionState.typeRegistry`
+- **`ModuleInstance`** — named instance of a type, with port accessors
 
-## Module library (`module_library.ts`)
+## Standard library (`stdlib/*.json`)
 
-14 built-in types registered by `loadBuiltins()`:
+19 built-in types as ProgramJSON files, loaded by `loadStdlib()` in `program.ts`:
 
 VCO (polyBLEP), Clock, ADEnvelope (polyBLAMP), ADSREnvelope (polyBLAMP), VCA, Reverb (Freeverb-style: 4 comb + 6 allpass), Phaser/Phaser16, Compressor, BassDrum, LadderFilter (4-pole Moog), BitCrusher, NoiseLFSR, TopoWaveguide (2D mesh), Delay variants (8/16/512/4410/44100).
 
-Private sub-modules: `_wrap01`, `_polyBlep`, `_polyBlamp`, `_allpassStage`, `_defineCombFilter`.
+Complex modules use inline `programs` for subprogram composition (e.g., VCO defines `_wrap01` and `_polyBlep` as nested programs).
 
 ## Compilation pipeline
 
@@ -158,10 +155,10 @@ Run with `bun test`. Test files:
 - `apply_plan.test.ts` — plan application integration
 - `term.test.ts` — term IR construction and type checking
 - `combinators.test.ts` — compile-time combinator expansion (22 tests)
-- `program.test.ts` — ProgramJSON schema conversions and Zod validation (14 tests)
+- `program.test.ts` — ProgramJSON schema conversions and Zod validation
 
-## Adding a module type
+## Adding a program type
 
-1. Define in `module_library.ts` using `defineModule()` or `definePureFunction()`
-2. Register in `loadBuiltins()`
+1. Create a `stdlib/MyType.json` file using the `tropical_program_1` schema
+2. The file is automatically loaded by `loadStdlib()` on startup
 3. No C++ changes needed unless you need a new expression op

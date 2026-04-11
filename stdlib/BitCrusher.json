@@ -1,0 +1,80 @@
+{
+  "schema": "tropical_program_1",
+  "name": "BitCrusher",
+  "inputs": ["audio", "bit_depth", "sample_rate_hz"],
+  "outputs": ["output"],
+  "regs": { "hold_sample": 0, "hold_counter": 0 },
+  "input_defaults": { "audio": 0, "bit_depth": 24, "sample_rate_hz": 44100 },
+  "process": {
+    "outputs": {
+      "output": {
+        "op": "let",
+        "bind": {
+          "bd": { "op": "clamp", "args": [{ "op": "input", "name": "bit_depth" }, 1, 24] },
+          "targetSr": { "op": "clamp", "args": [{ "op": "input", "name": "sample_rate_hz" }, 1, { "op": "sample_rate" }] }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "levels": { "op": "pow", "args": [2, { "op": "sub", "args": [{ "op": "binding", "name": "bd" }, 1] }] },
+            "samplesPerHold": { "op": "clamp", "args": [{ "op": "floorDiv", "args": [{ "op": "sample_rate" }, { "op": "binding", "name": "targetSr" }] }, 1, 44100] },
+            "incremented": { "op": "add", "args": [{ "op": "reg", "name": "hold_counter" }, 1] }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "quantized": { "op": "div", "args": [{ "op": "floorDiv", "args": [{ "op": "add", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "audio" }, { "op": "binding", "name": "levels" }] }, 0.5] }, 1] }, { "op": "binding", "name": "levels" }] },
+              "shouldCapture": { "op": "gte", "args": [{ "op": "binding", "name": "incremented" }, { "op": "binding", "name": "samplesPerHold" }] }
+            },
+            "in": { "op": "select", "args": [{ "op": "binding", "name": "shouldCapture" }, { "op": "binding", "name": "quantized" }, { "op": "reg", "name": "hold_sample" }] }
+          }
+        }
+      }
+    },
+    "next_regs": {
+      "hold_sample": {
+        "op": "let",
+        "bind": {
+          "bd": { "op": "clamp", "args": [{ "op": "input", "name": "bit_depth" }, 1, 24] },
+          "targetSr": { "op": "clamp", "args": [{ "op": "input", "name": "sample_rate_hz" }, 1, { "op": "sample_rate" }] }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "levels": { "op": "pow", "args": [2, { "op": "sub", "args": [{ "op": "binding", "name": "bd" }, 1] }] },
+            "samplesPerHold": { "op": "clamp", "args": [{ "op": "floorDiv", "args": [{ "op": "sample_rate" }, { "op": "binding", "name": "targetSr" }] }, 1, 44100] },
+            "incremented": { "op": "add", "args": [{ "op": "reg", "name": "hold_counter" }, 1] }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "quantized": { "op": "div", "args": [{ "op": "floorDiv", "args": [{ "op": "add", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "audio" }, { "op": "binding", "name": "levels" }] }, 0.5] }, 1] }, { "op": "binding", "name": "levels" }] },
+              "shouldCapture": { "op": "gte", "args": [{ "op": "binding", "name": "incremented" }, { "op": "binding", "name": "samplesPerHold" }] }
+            },
+            "in": { "op": "select", "args": [{ "op": "binding", "name": "shouldCapture" }, { "op": "binding", "name": "quantized" }, { "op": "reg", "name": "hold_sample" }] }
+          }
+        }
+      },
+      "hold_counter": {
+        "op": "let",
+        "bind": {
+          "targetSr": { "op": "clamp", "args": [{ "op": "input", "name": "sample_rate_hz" }, 1, { "op": "sample_rate" }] }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "samplesPerHold": { "op": "clamp", "args": [{ "op": "floorDiv", "args": [{ "op": "sample_rate" }, { "op": "binding", "name": "targetSr" }] }, 1, 44100] },
+            "incremented": { "op": "add", "args": [{ "op": "reg", "name": "hold_counter" }, 1] }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "shouldCapture": { "op": "gte", "args": [{ "op": "binding", "name": "incremented" }, { "op": "binding", "name": "samplesPerHold" }] }
+            },
+            "in": { "op": "select", "args": [{ "op": "binding", "name": "shouldCapture" }, 0, { "op": "binding", "name": "incremented" }] }
+          }
+        }
+      }
+    }
+  }
+}

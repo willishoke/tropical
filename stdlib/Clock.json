@@ -1,0 +1,46 @@
+{
+  "schema": "tropical_program_1",
+  "name": "Clock",
+  "inputs": [
+    "freq",
+    { "name": "ratios_in", "type": "float[1]" }
+  ],
+  "outputs": [
+    "output",
+    { "name": "ratios_out", "type": "float[1]" }
+  ],
+  "input_defaults": { "freq": 1, "ratios_in": [1] },
+  "programs": {
+    "_wrap01": {
+      "schema": "tropical_program_1",
+      "name": "_wrap01",
+      "inputs": ["x"],
+      "outputs": ["value"],
+      "process": {
+        "outputs": {
+          "value": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "mod", "args": [{ "op": "input", "name": "x" }, 1] }, 1] }, 1] }
+        }
+      }
+    }
+  },
+  "instances": {
+    "_wrap01_0": {
+      "program": "_wrap01",
+      "inputs": {
+        "x": { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "sample_index" }, { "op": "input", "name": "freq" }] }, { "op": "sample_rate" }] }
+      }
+    },
+    "_wrap01_1": {
+      "program": "_wrap01",
+      "inputs": {
+        "x": { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "mul", "args": [{ "op": "sample_index" }, { "op": "input", "name": "freq" }] }, { "op": "input", "name": "ratios_in" }] }, { "op": "sample_rate" }] }
+      }
+    }
+  },
+  "process": {
+    "outputs": {
+      "output": { "op": "mul", "args": [{ "op": "lt", "args": [{ "op": "nested_out", "ref": "_wrap01_0", "output": "value" }, 0.5] }, 1] },
+      "ratios_out": { "op": "mul", "args": [{ "op": "lt", "args": [{ "op": "nested_out", "ref": "_wrap01_1", "output": "value" }, 0.5] }, 1] }
+    }
+  }
+}

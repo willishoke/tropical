@@ -423,3 +423,195 @@ export function chain(count: number, init: ExprCoercible, varName: string, body:
     op: 'chain', count, init: coerce(init)._node, var: varName, body: coerce(body)._node,
   })
 }
+
+// ─────────────────────────────────────────────────────────────
+// Expression validation
+// ─────────────────────────────────────────────────────────────
+
+const BINARY_OPS = new Set([
+  'add', 'sub', 'mul', 'div', 'floor_div', 'mod', 'pow',
+  'lt', 'lte', 'gt', 'gte', 'eq', 'neq',
+  'bit_and', 'bit_or', 'bit_xor', 'lshift', 'rshift',
+  'and', 'or',
+])
+
+const UNARY_OPS = new Set([
+  'neg', 'abs', 'sin', 'cos', 'exp', 'log', 'tanh', 'not', 'bit_not',
+  'sqrt', 'floor', 'ceil', 'round',
+])
+
+const TERNARY_OPS = new Set(['clamp', 'select'])
+
+const LEAF_OPS = new Set([
+  'input', 'reg', 'sample_rate', 'sample_index',
+  'smoothed_param', 'trigger_param',
+  'delay_value', 'delay_ref',
+  'nested_output', 'nested_out',
+  'binding',
+])
+
+/**
+ * Validate an ExprNode tree structure. Throws on the first error with a path
+ * describing where in the tree the problem is.
+ *
+ * This is a structural check — it verifies that ops have the right fields
+ * and arg counts, not that module/output names resolve correctly.
+ */
+export function validateExpr(node: ExprNode, path = 'expr'): void {
+  if (typeof node === 'number' || typeof node === 'boolean') return
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++) validateExpr(node[i], `${path}[${i}]`)
+    return
+  }
+  if (typeof node !== 'object' || node === null) {
+    throw new Error(`${path}: expected number, boolean, array, or {op: ...}, got ${typeof node}`)
+  }
+
+  const obj = node as Record<string, unknown>
+  if (typeof obj.op !== 'string') {
+    throw new Error(`${path}: missing or non-string 'op' field (got ${JSON.stringify(obj).slice(0, 100)})`)
+  }
+  const op = obj.op
+
+  // Binary ops: require args array of length 2
+  if (BINARY_OPS.has(op)) {
+    if (!Array.isArray(obj.args)) {
+      throw new Error(`${path}: '${op}' requires 'args' array, got ${obj.args === undefined ? 'undefined' : typeof obj.args}. Use {op: "${op}", args: [left, right]}`)
+    }
+    if ((obj.args as unknown[]).length !== 2) {
+      throw new Error(`${path}: '${op}' requires exactly 2 args, got ${(obj.args as unknown[]).length}`)
+    }
+    validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
+    validateExpr((obj.args as ExprNode[])[1], `${path}.args[1]`)
+    return
+  }
+
+  // Unary ops: require args array of length 1
+  if (UNARY_OPS.has(op)) {
+    if (!Array.isArray(obj.args)) {
+      throw new Error(`${path}: '${op}' requires 'args' array, got ${obj.args === undefined ? 'undefined' : typeof obj.args}. Use {op: "${op}", args: [x]}`)
+    }
+    if ((obj.args as unknown[]).length !== 1) {
+      throw new Error(`${path}: '${op}' requires exactly 1 arg, got ${(obj.args as unknown[]).length}`)
+    }
+    validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
+    return
+  }
+
+  // Ternary ops: require args array of length 3
+  if (TERNARY_OPS.has(op)) {
+    if (!Array.isArray(obj.args)) {
+      throw new Error(`${path}: '${op}' requires 'args' array. Use {op: "${op}", args: [a, b, c]}`)
+    }
+    if ((obj.args as unknown[]).length !== 3) {
+      throw new Error(`${path}: '${op}' requires exactly 3 args, got ${(obj.args as unknown[]).length}`)
+    }
+    for (let i = 0; i < 3; i++) validateExpr((obj.args as ExprNode[])[i], `${path}.args[${i}]`)
+    return
+  }
+
+  // index / array_set: args array
+  if (op === 'index') {
+    if (!Array.isArray(obj.args) || (obj.args as unknown[]).length !== 2) {
+      throw new Error(`${path}: 'index' requires args: [array, index]`)
+    }
+    validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
+    validateExpr((obj.args as ExprNode[])[1], `${path}.args[1]`)
+    return
+  }
+  if (op === 'array_set') {
+    if (!Array.isArray(obj.args) || (obj.args as unknown[]).length !== 3) {
+      throw new Error(`${path}: 'array_set' requires args: [array, index, value]`)
+    }
+    for (let i = 0; i < 3; i++) validateExpr((obj.args as ExprNode[])[i], `${path}.args[${i}]`)
+    return
+  }
+
+  // ref: requires module and output
+  if (op === 'ref') {
+    if (typeof obj.module !== 'string') {
+      throw new Error(`${path}: 'ref' requires 'module' (string), got ${typeof obj.module}. Use {op: "ref", module: "name", output: "port"}`)
+    }
+    if (obj.output === undefined) {
+      throw new Error(`${path}: 'ref' requires 'output'. Use {op: "ref", module: "${obj.module}", output: "port_name"}`)
+    }
+    return
+  }
+
+  // array / array_pack: recurse into items/args
+  if (op === 'array' && Array.isArray(obj.items)) {
+    for (let i = 0; i < (obj.items as unknown[]).length; i++) {
+      validateExpr((obj.items as ExprNode[])[i], `${path}.items[${i}]`)
+    }
+    return
+  }
+  if (op === 'array_pack' && Array.isArray(obj.args)) {
+    for (let i = 0; i < (obj.args as unknown[]).length; i++) {
+      validateExpr((obj.args as ExprNode[])[i], `${path}.args[${i}]`)
+    }
+    return
+  }
+
+  // matmul: args array of length 2
+  if (op === 'matmul') {
+    if (!Array.isArray(obj.args) || (obj.args as unknown[]).length !== 2) {
+      throw new Error(`${path}: 'matmul' requires args: [a, b]`)
+    }
+    validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
+    validateExpr((obj.args as ExprNode[])[1], `${path}.args[1]`)
+    return
+  }
+
+  // call: callee + args
+  if (op === 'call') {
+    if (obj.callee !== undefined) validateExpr(obj.callee as ExprNode, `${path}.callee`)
+    if (Array.isArray(obj.args)) {
+      for (let i = 0; i < (obj.args as unknown[]).length; i++) {
+        validateExpr((obj.args as ExprNode[])[i], `${path}.args[${i}]`)
+      }
+    }
+    return
+  }
+
+  // Leaf ops: no recursion needed
+  if (LEAF_OPS.has(op)) return
+
+  // Combinators with nested expr fields
+  if (op === 'let') {
+    if (typeof obj.bind === 'object' && obj.bind !== null) {
+      for (const [k, v] of Object.entries(obj.bind as Record<string, unknown>)) {
+        validateExpr(v as ExprNode, `${path}.bind.${k}`)
+      }
+    }
+    if (obj.in !== undefined) validateExpr(obj.in as ExprNode, `${path}.in`)
+    return
+  }
+  if (op === 'generate' || op === 'chain' || op === 'iterate') {
+    if (obj.init !== undefined) validateExpr(obj.init as ExprNode, `${path}.init`)
+    if (obj.body !== undefined) validateExpr(obj.body as ExprNode, `${path}.body`)
+    return
+  }
+  if (op === 'fold' || op === 'scan') {
+    if (obj.arr !== undefined) validateExpr(obj.arr as ExprNode, `${path}.arr`)
+    if (obj.init !== undefined) validateExpr(obj.init as ExprNode, `${path}.init`)
+    if (obj.body !== undefined) validateExpr(obj.body as ExprNode, `${path}.body`)
+    return
+  }
+  if (op === 'map2') {
+    if (obj.arr !== undefined) validateExpr(obj.arr as ExprNode, `${path}.arr`)
+    if (obj.body !== undefined) validateExpr(obj.body as ExprNode, `${path}.body`)
+    return
+  }
+  if (op === 'zip_with') {
+    if (obj.a !== undefined) validateExpr(obj.a as ExprNode, `${path}.a`)
+    if (obj.b !== undefined) validateExpr(obj.b as ExprNode, `${path}.b`)
+    if (obj.body !== undefined) validateExpr(obj.body as ExprNode, `${path}.body`)
+    return
+  }
+
+  // broadcast_to, matrix, function, etc. — pass through
+  if (op === 'broadcast_to' || op === 'matrix' || op === 'function') return
+
+  // Unknown op
+  throw new Error(`${path}: unknown op '${op}'`)
+}

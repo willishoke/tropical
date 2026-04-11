@@ -1,0 +1,144 @@
+{
+  "schema": "tropical_program_1",
+  "name": "VCO",
+  "inputs": [
+    { "name": "freq", "type": "float" },
+    { "name": "fm", "type": "float" },
+    { "name": "fm_index", "type": "float" }
+  ],
+  "outputs": [
+    { "name": "saw", "type": "float" },
+    { "name": "tri", "type": "float" },
+    { "name": "sin", "type": "float" },
+    { "name": "sqr", "type": "float" }
+  ],
+  "regs": { "phase": 0, "tri_state": 0 },
+  "input_defaults": { "freq": 100, "fm": 0, "fm_index": 5 },
+  "programs": {
+    "_wrap01": {
+      "schema": "tropical_program_1",
+      "name": "_wrap01",
+      "inputs": ["x"],
+      "outputs": ["value"],
+      "process": {
+        "outputs": {
+          "value": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "mod", "args": [{ "op": "input", "name": "x" }, 1] }, 1] }, 1] }
+        }
+      }
+    },
+    "_polyBlep": {
+      "schema": "tropical_program_1",
+      "name": "_polyBlep",
+      "inputs": ["t", "dt"],
+      "outputs": ["value"],
+      "process": {
+        "outputs": {
+          "value": {
+            "op": "let",
+            "bind": {
+              "t": { "op": "input", "name": "t" },
+              "dt": { "op": "input", "name": "dt" },
+              "leftT": { "op": "div", "args": [{ "op": "input", "name": "t" }, { "op": "input", "name": "dt" }] },
+              "rightT": { "op": "div", "args": [{ "op": "sub", "args": [{ "op": "input", "name": "t" }, 1] }, { "op": "input", "name": "dt" }] }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "left": { "op": "sub", "args": [{ "op": "sub", "args": [{ "op": "add", "args": [{ "op": "binding", "name": "leftT" }, { "op": "binding", "name": "leftT" }] }, { "op": "mul", "args": [{ "op": "binding", "name": "leftT" }, { "op": "binding", "name": "leftT" }] }] }, 1] },
+                "right": { "op": "add", "args": [{ "op": "add", "args": [{ "op": "mul", "args": [{ "op": "binding", "name": "rightT" }, { "op": "binding", "name": "rightT" }] }, { "op": "mul", "args": [2, { "op": "binding", "name": "rightT" }] }] }, 1] },
+                "valid": { "op": "mul", "args": [{ "op": "gt", "args": [{ "op": "binding", "name": "dt" }, 0] }, { "op": "lt", "args": [{ "op": "binding", "name": "dt" }, 1] }] },
+                "leftMask": { "op": "lt", "args": [{ "op": "binding", "name": "t" }, { "op": "binding", "name": "dt" }] },
+                "rightMask": { "op": "mul", "args": [{ "op": "gte", "args": [{ "op": "binding", "name": "t" }, { "op": "binding", "name": "dt" }] }, { "op": "gt", "args": [{ "op": "binding", "name": "t" }, { "op": "sub", "args": [1, { "op": "binding", "name": "dt" }] }] }] }
+              },
+              "in": { "op": "mul", "args": [{ "op": "binding", "name": "valid" }, { "op": "add", "args": [{ "op": "mul", "args": [{ "op": "binding", "name": "leftMask" }, { "op": "binding", "name": "left" }] }, { "op": "mul", "args": [{ "op": "binding", "name": "rightMask" }, { "op": "binding", "name": "right" }] }] }] }
+            }
+          }
+        }
+      }
+    }
+  },
+  "instances": {
+    "phase_wrap": {
+      "program": "_wrap01",
+      "inputs": {
+        "x": { "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }, { "op": "sample_rate" }] }] }
+      }
+    },
+    "blep_saw": {
+      "program": "_polyBlep",
+      "inputs": {
+        "t": { "op": "nested_out", "ref": "phase_wrap", "output": "value" },
+        "dt": { "op": "clamp", "args": [{ "op": "div", "args": [{ "op": "abs", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }] }, { "op": "sample_rate" }] }, 0, 0.5] }
+      }
+    },
+    "blep_sqr_0": {
+      "program": "_polyBlep",
+      "inputs": {
+        "t": { "op": "nested_out", "ref": "phase_wrap", "output": "value" },
+        "dt": { "op": "clamp", "args": [{ "op": "div", "args": [{ "op": "abs", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }] }, { "op": "sample_rate" }] }, 0, 0.5] }
+      }
+    },
+    "sqr_phase_wrap": {
+      "program": "_wrap01",
+      "inputs": {
+        "x": { "op": "add", "args": [{ "op": "nested_out", "ref": "phase_wrap", "output": "value" }, 0.5] }
+      }
+    },
+    "blep_sqr_1": {
+      "program": "_polyBlep",
+      "inputs": {
+        "t": { "op": "nested_out", "ref": "sqr_phase_wrap", "output": "value" },
+        "dt": { "op": "clamp", "args": [{ "op": "div", "args": [{ "op": "abs", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }] }, { "op": "sample_rate" }] }, 0, 0.5] }
+      }
+    }
+  },
+  "process": {
+    "outputs": {
+      "saw": {
+        "op": "let",
+        "bind": {
+          "phase": { "op": "nested_out", "ref": "phase_wrap", "output": "value" },
+          "saw0": { "op": "sub", "args": [{ "op": "mul", "args": [2, { "op": "nested_out", "ref": "phase_wrap", "output": "value" }] }, 1] }
+        },
+        "in": { "op": "sub", "args": [{ "op": "binding", "name": "saw0" }, { "op": "nested_out", "ref": "blep_saw", "output": "value" }] }
+      },
+      "tri": {
+        "op": "let",
+        "bind": {
+          "dt": { "op": "clamp", "args": [{ "op": "div", "args": [{ "op": "abs", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }] }, { "op": "sample_rate" }] }, 0, 0.5] },
+          "sqr0": { "op": "sub", "args": [1, { "op": "mul", "args": [2, { "op": "gte", "args": [{ "op": "nested_out", "ref": "phase_wrap", "output": "value" }, 0.5] }] }] },
+          "sqr1_blep": { "op": "nested_out", "ref": "blep_sqr_0", "output": "value" },
+          "sqr2_blep": { "op": "nested_out", "ref": "blep_sqr_1", "output": "value" }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "sqr": { "op": "sub", "args": [{ "op": "add", "args": [{ "op": "binding", "name": "sqr0" }, { "op": "binding", "name": "sqr1_blep" }] }, { "op": "binding", "name": "sqr2_blep" }] }
+          },
+          "in": { "op": "clamp", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "tri_state" }, { "op": "mul", "args": [{ "op": "mul", "args": [{ "op": "binding", "name": "sqr" }, { "op": "binding", "name": "dt" }] }, 4] }] }, -1, 1] }
+        }
+      },
+      "sin": { "op": "sin", "args": [{ "op": "mul", "args": [6.283185307179586, { "op": "nested_out", "ref": "phase_wrap", "output": "value" }] }] },
+      "sqr": {
+        "op": "sub", "args": [
+          { "op": "add", "args": [
+            { "op": "sub", "args": [1, { "op": "mul", "args": [2, { "op": "gte", "args": [{ "op": "nested_out", "ref": "phase_wrap", "output": "value" }, 0.5] }] }] },
+            { "op": "nested_out", "ref": "blep_sqr_0", "output": "value" }
+          ]},
+          { "op": "nested_out", "ref": "blep_sqr_1", "output": "value" }
+        ]
+      }
+    },
+    "next_regs": {
+      "phase": { "op": "nested_out", "ref": "phase_wrap", "output": "value" },
+      "tri_state": {
+        "op": "let",
+        "bind": {
+          "dt": { "op": "clamp", "args": [{ "op": "div", "args": [{ "op": "abs", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "freq" }, { "op": "pow", "args": [2, { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "input", "name": "fm_index" }, { "op": "input", "name": "fm" }] }, 5] }] }] }] }, { "op": "sample_rate" }] }, 0, 0.5] },
+          "sqr": { "op": "sub", "args": [{ "op": "add", "args": [{ "op": "sub", "args": [1, { "op": "mul", "args": [2, { "op": "gte", "args": [{ "op": "nested_out", "ref": "phase_wrap", "output": "value" }, 0.5] }] }] }, { "op": "nested_out", "ref": "blep_sqr_0", "output": "value" }] }, { "op": "nested_out", "ref": "blep_sqr_1", "output": "value" }] }
+        },
+        "in": { "op": "clamp", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "tri_state" }, { "op": "mul", "args": [{ "op": "mul", "args": [{ "op": "binding", "name": "sqr" }, { "op": "binding", "name": "dt" }] }, 4] }] }, -1, 1] }
+      }
+    }
+  }
+}

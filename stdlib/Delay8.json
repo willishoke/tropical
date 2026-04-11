@@ -1,0 +1,17 @@
+{
+  "schema": "tropical_program_1",
+  "name": "Delay8",
+  "inputs": ["x"],
+  "outputs": ["y"],
+  "regs": { "buf": { "zeros": 8 } },
+  "input_defaults": { "x": 0 },
+  "breaks_cycles": true,
+  "process": {
+    "outputs": {
+      "y": { "op": "index", "args": [{ "op": "reg", "name": "buf" }, { "op": "mod", "args": [{ "op": "sample_index" }, 8] }] }
+    },
+    "next_regs": {
+      "buf": { "op": "array_set", "args": [{ "op": "reg", "name": "buf" }, { "op": "mod", "args": [{ "op": "sample_index" }, 8] }, { "op": "input", "name": "x" }] }
+    }
+  }
+}

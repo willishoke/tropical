@@ -1,0 +1,4348 @@
+{
+  "schema": "tropical_program_1",
+  "name": "LadderFilter",
+  "inputs": [
+    "input",
+    "cutoff",
+    "resonance",
+    "drive"
+  ],
+  "outputs": [
+    "lp",
+    "bp",
+    "hp",
+    "notch"
+  ],
+  "regs": {
+    "s1": 0,
+    "s2": 0,
+    "s3": 0,
+    "s4": 0
+  },
+  "input_defaults": {
+    "input": 0,
+    "cutoff": 1000,
+    "resonance": 0.5,
+    "drive": 1
+  },
+  "process": {
+    "outputs": {
+      "lp": {
+        "op": "let",
+        "bind": {
+          "cutoff": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "cutoff"
+              },
+              20,
+              20000
+            ]
+          },
+          "reso": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "resonance"
+                  },
+                  0,
+                  1
+                ]
+              },
+              4
+            ]
+          },
+          "driven": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "input",
+                "name": "input"
+              },
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "drive"
+                  },
+                  1,
+                  10
+                ]
+              }
+            ]
+          },
+          "g": {
+            "op": "sub",
+            "args": [
+              1,
+              {
+                "op": "pow",
+                "args": [
+                  2.718281828459045,
+                  {
+                    "op": "neg",
+                    "args": [
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              6.283185307179586,
+                              {
+                                "op": "clamp",
+                                "args": [
+                                  {
+                                    "op": "input",
+                                    "name": "cutoff"
+                                  },
+                                  20,
+                                  20000
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "sample_rate"
+                              },
+                              2
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "u1": {
+              "op": "sub",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "driven"
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "reso"
+                    },
+                    {
+                      "op": "tanh",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "s1_1": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "s1"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "u1"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "reg",
+                                "name": "s1"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2_1": {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "s2"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s1_1"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "reg",
+                                  "name": "s2"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "s3_1": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "s3"
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "sub",
+                            "args": [
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s2_1"
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "reg",
+                                    "name": "s3"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "s4_1": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "sub",
+                              "args": [
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "s3_1"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "reg",
+                                      "name": "s4"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "u2": {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "driven"
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "reso"
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "let",
+                      "bind": {
+                        "s1_2": {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "s1_1"
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "sub",
+                                  "args": [
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "u2"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "s1_1"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "in": {
+                        "op": "let",
+                        "bind": {
+                          "s2_2": {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "s2_1"
+                              },
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "g"
+                                  },
+                                  {
+                                    "op": "sub",
+                                    "args": [
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s1_2"
+                                          }
+                                        ]
+                                      },
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s2_1"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "in": {
+                          "op": "let",
+                          "bind": {
+                            "s3_2": {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s3_1"
+                                },
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "g"
+                                    },
+                                    {
+                                      "op": "sub",
+                                      "args": [
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s2_2"
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s3_1"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          "in": {
+                            "op": "let",
+                            "bind": {
+                              "s4_2": {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  },
+                                  {
+                                    "op": "mul",
+                                    "args": [
+                                      {
+                                        "op": "binding",
+                                        "name": "g"
+                                      },
+                                      {
+                                        "op": "sub",
+                                        "args": [
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s3_2"
+                                              }
+                                            ]
+                                          },
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s4_1"
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            },
+                            "in": {
+                              "op": "binding",
+                              "name": "s4_2"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "bp": {
+        "op": "let",
+        "bind": {
+          "cutoff": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "cutoff"
+              },
+              20,
+              20000
+            ]
+          },
+          "reso": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "resonance"
+                  },
+                  0,
+                  1
+                ]
+              },
+              4
+            ]
+          },
+          "driven": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "input",
+                "name": "input"
+              },
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "drive"
+                  },
+                  1,
+                  10
+                ]
+              }
+            ]
+          },
+          "g": {
+            "op": "sub",
+            "args": [
+              1,
+              {
+                "op": "pow",
+                "args": [
+                  2.718281828459045,
+                  {
+                    "op": "neg",
+                    "args": [
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              6.283185307179586,
+                              {
+                                "op": "clamp",
+                                "args": [
+                                  {
+                                    "op": "input",
+                                    "name": "cutoff"
+                                  },
+                                  20,
+                                  20000
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "sample_rate"
+                              },
+                              2
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "u1": {
+              "op": "sub",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "driven"
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "reso"
+                    },
+                    {
+                      "op": "tanh",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "s1_1": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "s1"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "u1"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "reg",
+                                "name": "s1"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2_1": {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "s2"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s1_1"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "reg",
+                                  "name": "s2"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "s3_1": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "s3"
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "sub",
+                            "args": [
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s2_1"
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "reg",
+                                    "name": "s3"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "s4_1": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "sub",
+                              "args": [
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "s3_1"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "reg",
+                                      "name": "s4"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "u2": {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "driven"
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "reso"
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "let",
+                      "bind": {
+                        "s1_2": {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "s1_1"
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "sub",
+                                  "args": [
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "u2"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "s1_1"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "in": {
+                        "op": "let",
+                        "bind": {
+                          "s2_2": {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "s2_1"
+                              },
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "g"
+                                  },
+                                  {
+                                    "op": "sub",
+                                    "args": [
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s1_2"
+                                          }
+                                        ]
+                                      },
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s2_1"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "in": {
+                          "op": "let",
+                          "bind": {
+                            "s3_2": {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s3_1"
+                                },
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "g"
+                                    },
+                                    {
+                                      "op": "sub",
+                                      "args": [
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s2_2"
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s3_1"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          "in": {
+                            "op": "let",
+                            "bind": {
+                              "s4_2": {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  },
+                                  {
+                                    "op": "mul",
+                                    "args": [
+                                      {
+                                        "op": "binding",
+                                        "name": "g"
+                                      },
+                                      {
+                                        "op": "sub",
+                                        "args": [
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s3_2"
+                                              }
+                                            ]
+                                          },
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s4_1"
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            },
+                            "in": {
+                              "op": "binding",
+                              "name": "s2_2"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "hp": {
+        "op": "let",
+        "bind": {
+          "cutoff": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "cutoff"
+              },
+              20,
+              20000
+            ]
+          },
+          "reso": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "resonance"
+                  },
+                  0,
+                  1
+                ]
+              },
+              4
+            ]
+          },
+          "driven": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "input",
+                "name": "input"
+              },
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "drive"
+                  },
+                  1,
+                  10
+                ]
+              }
+            ]
+          },
+          "g": {
+            "op": "sub",
+            "args": [
+              1,
+              {
+                "op": "pow",
+                "args": [
+                  2.718281828459045,
+                  {
+                    "op": "neg",
+                    "args": [
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              6.283185307179586,
+                              {
+                                "op": "clamp",
+                                "args": [
+                                  {
+                                    "op": "input",
+                                    "name": "cutoff"
+                                  },
+                                  20,
+                                  20000
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "sample_rate"
+                              },
+                              2
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "u1": {
+              "op": "sub",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "driven"
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "reso"
+                    },
+                    {
+                      "op": "tanh",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "s1_1": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "s1"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "u1"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "reg",
+                                "name": "s1"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2_1": {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "s2"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s1_1"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "reg",
+                                  "name": "s2"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "s3_1": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "s3"
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "sub",
+                            "args": [
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s2_1"
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "reg",
+                                    "name": "s3"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "s4_1": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "sub",
+                              "args": [
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "s3_1"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "reg",
+                                      "name": "s4"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "u2": {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "driven"
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "reso"
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "let",
+                      "bind": {
+                        "s1_2": {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "s1_1"
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "sub",
+                                  "args": [
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "u2"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "s1_1"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "in": {
+                        "op": "let",
+                        "bind": {
+                          "s2_2": {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "s2_1"
+                              },
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "g"
+                                  },
+                                  {
+                                    "op": "sub",
+                                    "args": [
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s1_2"
+                                          }
+                                        ]
+                                      },
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s2_1"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "in": {
+                          "op": "let",
+                          "bind": {
+                            "s3_2": {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s3_1"
+                                },
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "g"
+                                    },
+                                    {
+                                      "op": "sub",
+                                      "args": [
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s2_2"
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s3_1"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          "in": {
+                            "op": "let",
+                            "bind": {
+                              "s4_2": {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  },
+                                  {
+                                    "op": "mul",
+                                    "args": [
+                                      {
+                                        "op": "binding",
+                                        "name": "g"
+                                      },
+                                      {
+                                        "op": "sub",
+                                        "args": [
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s3_2"
+                                              }
+                                            ]
+                                          },
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s4_1"
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            },
+                            "in": {
+                              "op": "sub",
+                              "args": [
+                                {
+                                  "op": "input",
+                                  "name": "input"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "s4_2"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "notch": {
+        "op": "let",
+        "bind": {
+          "cutoff": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "cutoff"
+              },
+              20,
+              20000
+            ]
+          },
+          "reso": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "resonance"
+                  },
+                  0,
+                  1
+                ]
+              },
+              4
+            ]
+          },
+          "driven": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "input",
+                "name": "input"
+              },
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "drive"
+                  },
+                  1,
+                  10
+                ]
+              }
+            ]
+          },
+          "g": {
+            "op": "sub",
+            "args": [
+              1,
+              {
+                "op": "pow",
+                "args": [
+                  2.718281828459045,
+                  {
+                    "op": "neg",
+                    "args": [
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              6.283185307179586,
+                              {
+                                "op": "clamp",
+                                "args": [
+                                  {
+                                    "op": "input",
+                                    "name": "cutoff"
+                                  },
+                                  20,
+                                  20000
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "sample_rate"
+                              },
+                              2
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "u1": {
+              "op": "sub",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "driven"
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "reso"
+                    },
+                    {
+                      "op": "tanh",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "s1_1": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "s1"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "u1"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "reg",
+                                "name": "s1"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2_1": {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "s2"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s1_1"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "reg",
+                                  "name": "s2"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "s3_1": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "s3"
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "sub",
+                            "args": [
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s2_1"
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "reg",
+                                    "name": "s3"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "s4_1": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "sub",
+                              "args": [
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "s3_1"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "reg",
+                                      "name": "s4"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "u2": {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "driven"
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "reso"
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "let",
+                      "bind": {
+                        "s1_2": {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "s1_1"
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "sub",
+                                  "args": [
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "u2"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "s1_1"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "in": {
+                        "op": "let",
+                        "bind": {
+                          "s2_2": {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "s2_1"
+                              },
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "g"
+                                  },
+                                  {
+                                    "op": "sub",
+                                    "args": [
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s1_2"
+                                          }
+                                        ]
+                                      },
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s2_1"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "in": {
+                          "op": "let",
+                          "bind": {
+                            "s3_2": {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s3_1"
+                                },
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "g"
+                                    },
+                                    {
+                                      "op": "sub",
+                                      "args": [
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s2_2"
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s3_1"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          "in": {
+                            "op": "let",
+                            "bind": {
+                              "s4_2": {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  },
+                                  {
+                                    "op": "mul",
+                                    "args": [
+                                      {
+                                        "op": "binding",
+                                        "name": "g"
+                                      },
+                                      {
+                                        "op": "sub",
+                                        "args": [
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s3_2"
+                                              }
+                                            ]
+                                          },
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s4_1"
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            },
+                            "in": {
+                              "op": "sub",
+                              "args": [
+                                {
+                                  "op": "input",
+                                  "name": "input"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "s2_2"
+                                }
+                              ]
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "next_regs": {
+      "s1": {
+        "op": "let",
+        "bind": {
+          "cutoff": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "cutoff"
+              },
+              20,
+              20000
+            ]
+          },
+          "reso": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "resonance"
+                  },
+                  0,
+                  1
+                ]
+              },
+              4
+            ]
+          },
+          "driven": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "input",
+                "name": "input"
+              },
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "drive"
+                  },
+                  1,
+                  10
+                ]
+              }
+            ]
+          },
+          "g": {
+            "op": "sub",
+            "args": [
+              1,
+              {
+                "op": "pow",
+                "args": [
+                  2.718281828459045,
+                  {
+                    "op": "neg",
+                    "args": [
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              6.283185307179586,
+                              {
+                                "op": "clamp",
+                                "args": [
+                                  {
+                                    "op": "input",
+                                    "name": "cutoff"
+                                  },
+                                  20,
+                                  20000
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "sample_rate"
+                              },
+                              2
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "u1": {
+              "op": "sub",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "driven"
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "reso"
+                    },
+                    {
+                      "op": "tanh",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "s1_1": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "s1"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "u1"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "reg",
+                                "name": "s1"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2_1": {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "s2"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s1_1"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "reg",
+                                  "name": "s2"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "s3_1": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "s3"
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "sub",
+                            "args": [
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s2_1"
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "reg",
+                                    "name": "s3"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "s4_1": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "sub",
+                              "args": [
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "s3_1"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "reg",
+                                      "name": "s4"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "u2": {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "driven"
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "reso"
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "let",
+                      "bind": {
+                        "s1_2": {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "s1_1"
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "sub",
+                                  "args": [
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "u2"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "s1_1"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "in": {
+                        "op": "let",
+                        "bind": {
+                          "s2_2": {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "s2_1"
+                              },
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "g"
+                                  },
+                                  {
+                                    "op": "sub",
+                                    "args": [
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s1_2"
+                                          }
+                                        ]
+                                      },
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s2_1"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "in": {
+                          "op": "let",
+                          "bind": {
+                            "s3_2": {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s3_1"
+                                },
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "g"
+                                    },
+                                    {
+                                      "op": "sub",
+                                      "args": [
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s2_2"
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s3_1"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          "in": {
+                            "op": "let",
+                            "bind": {
+                              "s4_2": {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  },
+                                  {
+                                    "op": "mul",
+                                    "args": [
+                                      {
+                                        "op": "binding",
+                                        "name": "g"
+                                      },
+                                      {
+                                        "op": "sub",
+                                        "args": [
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s3_2"
+                                              }
+                                            ]
+                                          },
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s4_1"
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            },
+                            "in": {
+                              "op": "binding",
+                              "name": "s1_2"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "s2": {
+        "op": "let",
+        "bind": {
+          "cutoff": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "cutoff"
+              },
+              20,
+              20000
+            ]
+          },
+          "reso": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "resonance"
+                  },
+                  0,
+                  1
+                ]
+              },
+              4
+            ]
+          },
+          "driven": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "input",
+                "name": "input"
+              },
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "drive"
+                  },
+                  1,
+                  10
+                ]
+              }
+            ]
+          },
+          "g": {
+            "op": "sub",
+            "args": [
+              1,
+              {
+                "op": "pow",
+                "args": [
+                  2.718281828459045,
+                  {
+                    "op": "neg",
+                    "args": [
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              6.283185307179586,
+                              {
+                                "op": "clamp",
+                                "args": [
+                                  {
+                                    "op": "input",
+                                    "name": "cutoff"
+                                  },
+                                  20,
+                                  20000
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "sample_rate"
+                              },
+                              2
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "u1": {
+              "op": "sub",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "driven"
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "reso"
+                    },
+                    {
+                      "op": "tanh",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "s1_1": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "s1"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "u1"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "reg",
+                                "name": "s1"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2_1": {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "s2"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s1_1"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "reg",
+                                  "name": "s2"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "s3_1": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "s3"
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "sub",
+                            "args": [
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s2_1"
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "reg",
+                                    "name": "s3"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "s4_1": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "sub",
+                              "args": [
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "s3_1"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "reg",
+                                      "name": "s4"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "u2": {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "driven"
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "reso"
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "let",
+                      "bind": {
+                        "s1_2": {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "s1_1"
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "sub",
+                                  "args": [
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "u2"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "s1_1"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "in": {
+                        "op": "let",
+                        "bind": {
+                          "s2_2": {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "s2_1"
+                              },
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "g"
+                                  },
+                                  {
+                                    "op": "sub",
+                                    "args": [
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s1_2"
+                                          }
+                                        ]
+                                      },
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s2_1"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "in": {
+                          "op": "let",
+                          "bind": {
+                            "s3_2": {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s3_1"
+                                },
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "g"
+                                    },
+                                    {
+                                      "op": "sub",
+                                      "args": [
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s2_2"
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s3_1"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          "in": {
+                            "op": "let",
+                            "bind": {
+                              "s4_2": {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  },
+                                  {
+                                    "op": "mul",
+                                    "args": [
+                                      {
+                                        "op": "binding",
+                                        "name": "g"
+                                      },
+                                      {
+                                        "op": "sub",
+                                        "args": [
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s3_2"
+                                              }
+                                            ]
+                                          },
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s4_1"
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            },
+                            "in": {
+                              "op": "binding",
+                              "name": "s2_2"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "s3": {
+        "op": "let",
+        "bind": {
+          "cutoff": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "cutoff"
+              },
+              20,
+              20000
+            ]
+          },
+          "reso": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "resonance"
+                  },
+                  0,
+                  1
+                ]
+              },
+              4
+            ]
+          },
+          "driven": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "input",
+                "name": "input"
+              },
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "drive"
+                  },
+                  1,
+                  10
+                ]
+              }
+            ]
+          },
+          "g": {
+            "op": "sub",
+            "args": [
+              1,
+              {
+                "op": "pow",
+                "args": [
+                  2.718281828459045,
+                  {
+                    "op": "neg",
+                    "args": [
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              6.283185307179586,
+                              {
+                                "op": "clamp",
+                                "args": [
+                                  {
+                                    "op": "input",
+                                    "name": "cutoff"
+                                  },
+                                  20,
+                                  20000
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "sample_rate"
+                              },
+                              2
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "u1": {
+              "op": "sub",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "driven"
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "reso"
+                    },
+                    {
+                      "op": "tanh",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "s1_1": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "s1"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "u1"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "reg",
+                                "name": "s1"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2_1": {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "s2"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s1_1"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "reg",
+                                  "name": "s2"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "s3_1": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "s3"
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "sub",
+                            "args": [
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s2_1"
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "reg",
+                                    "name": "s3"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "s4_1": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "sub",
+                              "args": [
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "s3_1"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "reg",
+                                      "name": "s4"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "u2": {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "driven"
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "reso"
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "let",
+                      "bind": {
+                        "s1_2": {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "s1_1"
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "sub",
+                                  "args": [
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "u2"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "s1_1"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "in": {
+                        "op": "let",
+                        "bind": {
+                          "s2_2": {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "s2_1"
+                              },
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "g"
+                                  },
+                                  {
+                                    "op": "sub",
+                                    "args": [
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s1_2"
+                                          }
+                                        ]
+                                      },
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s2_1"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "in": {
+                          "op": "let",
+                          "bind": {
+                            "s3_2": {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s3_1"
+                                },
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "g"
+                                    },
+                                    {
+                                      "op": "sub",
+                                      "args": [
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s2_2"
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s3_1"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          "in": {
+                            "op": "let",
+                            "bind": {
+                              "s4_2": {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  },
+                                  {
+                                    "op": "mul",
+                                    "args": [
+                                      {
+                                        "op": "binding",
+                                        "name": "g"
+                                      },
+                                      {
+                                        "op": "sub",
+                                        "args": [
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s3_2"
+                                              }
+                                            ]
+                                          },
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s4_1"
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            },
+                            "in": {
+                              "op": "binding",
+                              "name": "s3_2"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "s4": {
+        "op": "let",
+        "bind": {
+          "cutoff": {
+            "op": "clamp",
+            "args": [
+              {
+                "op": "input",
+                "name": "cutoff"
+              },
+              20,
+              20000
+            ]
+          },
+          "reso": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "resonance"
+                  },
+                  0,
+                  1
+                ]
+              },
+              4
+            ]
+          },
+          "driven": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "input",
+                "name": "input"
+              },
+              {
+                "op": "clamp",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "drive"
+                  },
+                  1,
+                  10
+                ]
+              }
+            ]
+          },
+          "g": {
+            "op": "sub",
+            "args": [
+              1,
+              {
+                "op": "pow",
+                "args": [
+                  2.718281828459045,
+                  {
+                    "op": "neg",
+                    "args": [
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              6.283185307179586,
+                              {
+                                "op": "clamp",
+                                "args": [
+                                  {
+                                    "op": "input",
+                                    "name": "cutoff"
+                                  },
+                                  20,
+                                  20000
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "sample_rate"
+                              },
+                              2
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        "in": {
+          "op": "let",
+          "bind": {
+            "u1": {
+              "op": "sub",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "driven"
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "reso"
+                    },
+                    {
+                      "op": "tanh",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "s1_1": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "s1"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "u1"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "tanh",
+                            "args": [
+                              {
+                                "op": "reg",
+                                "name": "s1"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2_1": {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "s2"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s1_1"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "tanh",
+                              "args": [
+                                {
+                                  "op": "reg",
+                                  "name": "s2"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "s3_1": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "s3"
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "sub",
+                            "args": [
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s2_1"
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "reg",
+                                    "name": "s3"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "s4_1": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "s4"
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "sub",
+                              "args": [
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "s3_1"
+                                    }
+                                  ]
+                                },
+                                {
+                                  "op": "tanh",
+                                  "args": [
+                                    {
+                                      "op": "reg",
+                                      "name": "s4"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "u2": {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "driven"
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "reso"
+                              },
+                              {
+                                "op": "tanh",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "let",
+                      "bind": {
+                        "s1_2": {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "s1_1"
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "sub",
+                                  "args": [
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "u2"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "op": "tanh",
+                                      "args": [
+                                        {
+                                          "op": "binding",
+                                          "name": "s1_1"
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "in": {
+                        "op": "let",
+                        "bind": {
+                          "s2_2": {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "s2_1"
+                              },
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "g"
+                                  },
+                                  {
+                                    "op": "sub",
+                                    "args": [
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s1_2"
+                                          }
+                                        ]
+                                      },
+                                      {
+                                        "op": "tanh",
+                                        "args": [
+                                          {
+                                            "op": "binding",
+                                            "name": "s2_1"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        },
+                        "in": {
+                          "op": "let",
+                          "bind": {
+                            "s3_2": {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s3_1"
+                                },
+                                {
+                                  "op": "mul",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "g"
+                                    },
+                                    {
+                                      "op": "sub",
+                                      "args": [
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s2_2"
+                                            }
+                                          ]
+                                        },
+                                        {
+                                          "op": "tanh",
+                                          "args": [
+                                            {
+                                              "op": "binding",
+                                              "name": "s3_1"
+                                            }
+                                          ]
+                                        }
+                                      ]
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          },
+                          "in": {
+                            "op": "let",
+                            "bind": {
+                              "s4_2": {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "s4_1"
+                                  },
+                                  {
+                                    "op": "mul",
+                                    "args": [
+                                      {
+                                        "op": "binding",
+                                        "name": "g"
+                                      },
+                                      {
+                                        "op": "sub",
+                                        "args": [
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s3_2"
+                                              }
+                                            ]
+                                          },
+                                          {
+                                            "op": "tanh",
+                                            "args": [
+                                              {
+                                                "op": "binding",
+                                                "name": "s4_1"
+                                              }
+                                            ]
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            },
+                            "in": {
+                              "op": "binding",
+                              "name": "s4_2"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

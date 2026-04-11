@@ -26,7 +26,7 @@ Every mutation that affects the signal graph calls `wire()`, which runs the full
 ## Tools
 
 ### Program management
-- `define_program` — register a reusable DSP program type (accepts ProgramJSON or ModuleDefJSON)
+- `define_program` — register a reusable DSP program type (accepts ProgramJSON)
 - `add_instance` — create a named instance of a registered program type
 - `remove_instance` — remove an instance and cascade-clean wiring
 - `list_programs` — list all registered program types with ports and defaults

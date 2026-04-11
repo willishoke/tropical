@@ -1,0 +1,17 @@
+{
+  "schema": "tropical_program_1",
+  "name": "VCA",
+  "inputs": [
+    { "name": "audio", "type": "float" },
+    { "name": "cv", "type": "float" }
+  ],
+  "outputs": [
+    { "name": "out", "type": "float" }
+  ],
+  "input_defaults": { "audio": 0, "cv": 0 },
+  "process": {
+    "outputs": {
+      "out": { "op": "mul", "args": [{ "op": "input", "name": "audio" }, { "op": "input", "name": "cv" }] }
+    }
+  }
+}

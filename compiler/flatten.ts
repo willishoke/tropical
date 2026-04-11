@@ -10,7 +10,7 @@
 
 import type { ExprNode } from './expr.js'
 import type { SessionState } from './patch.js'
-import type { ModuleInstance, NestedCallDef } from './module.js'
+import type { ModuleInstance, NestedCall } from './module.js'
 import {
   type CompilerInput, type ModuleInfo,
   compilerInputFromSession, extractModuleInfo,
@@ -325,8 +325,8 @@ function resolveDelayValues(node: ExprNode, delayBase: number, memo?: WeakMap<ob
  * Compute the total register count for a nested call (including its own nested calls, recursively).
  * Returns: named registers + delay states + sum of all nested calls' totals.
  */
-function nestedCallRegCount(nc: NestedCallDef): number {
-  const d = nc.moduleDef
+function nestedCallRegCount(nc: NestedCall): number {
+  const d = nc.programDef
   let total = d.registerNames.length + d.delayUpdateNodes.length
   for (const sub of d.nestedCalls) {
     total += nestedCallRegCount(sub)
@@ -347,7 +347,7 @@ function nestedCallRegCount(nc: NestedCallDef): number {
  */
 function resolveNestedOutputs(
   node: ExprNode,
-  nestedCalls: NestedCallDef[],
+  nestedCalls: NestedCall[],
   nestedRegStart: number,
 ): ExprNode {
   if (nestedCalls.length === 0) return node
@@ -357,7 +357,7 @@ function resolveNestedOutputs(
 
   for (let ncIdx = 0; ncIdx < nestedCalls.length; ncIdx++) {
     const nc = nestedCalls[ncIdx]
-    const nd = nc.moduleDef
+    const nd = nc.programDef
     const ncRegBase = regCursor
     const ncDelayBase = ncRegBase + nd.registerNames.length
     // Base for this nested call's own nested calls
@@ -469,7 +469,7 @@ function substituteNestedOutputRefs(
  * nestedRegStart: local offset where nested registers begin.
  */
 function collectNestedRegisterExprs(
-  nestedCalls: NestedCallDef[],
+  nestedCalls: NestedCall[],
   nestedRegStart: number,
   parentName: string,
   resolvedNestedOutputs: Map<number, ExprNode[]>,
@@ -485,7 +485,7 @@ function collectNestedRegisterExprs(
 
   for (let ncIdx = 0; ncIdx < nestedCalls.length; ncIdx++) {
     const nc = nestedCalls[ncIdx]
-    const nd = nc.moduleDef
+    const nd = nc.programDef
     const ncRegBase = regCursor
     const ncDelayBase = ncRegBase + nd.registerNames.length
     const ncNestedStart = ncDelayBase + nd.delayUpdateNodes.length
@@ -927,14 +927,14 @@ export function flattenPatch(session: SessionState): FlatPlan {
       flatStateInit.push(def.delayInitValues[i] ?? 0)
     }
 
-    // Process nested module call registers (stateful ModuleType.call() inside defineModule)
+    // Process nested program call registers
     if (def.nestedCalls.length > 0) {
       // Build resolved nested outputs map for call-arg resolution
       const resolvedNestedOutputs = new Map<number, ExprNode[]>()
       let ncRegCursor = nestedRegStart
       for (let ncIdx = 0; ncIdx < def.nestedCalls.length; ncIdx++) {
         const nc = def.nestedCalls[ncIdx]
-        const nd = nc.moduleDef
+        const nd = nc.programDef
         const ncRegBase = ncRegCursor
         const ncDelayBase = ncRegBase + nd.registerNames.length
         const ncNestedStart = ncDelayBase + nd.delayUpdateNodes.length
@@ -1053,7 +1053,7 @@ export function flattenPatch(session: SessionState): FlatPlan {
       let ncRegCursor = nestedRegStart
       for (let ncIdx = 0; ncIdx < def.nestedCalls.length; ncIdx++) {
         const nc = def.nestedCalls[ncIdx]
-        const nd = nc.moduleDef
+        const nd = nc.programDef
         const ncRegBase = ncRegCursor
         const ncDelayBase = ncRegBase + nd.registerNames.length
         const ncNestedStart = ncDelayBase + nd.delayUpdateNodes.length

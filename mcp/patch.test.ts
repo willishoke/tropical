@@ -9,9 +9,8 @@
 
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { makeSession, loadPatchFromJSON } from '../compiler/patch.js'
-import { loadBuiltins } from '../compiler/module_library.js'
-import type { PatchJSON } from '../compiler/patch.js'
+import { makeSession, loadJSON } from '../compiler/patch.js'
+import { loadStdlib as loadBuiltins } from '../compiler/program.js'
 import * as b from '../compiler/runtime/bindings.js'
 
 const patchArg = process.argv[2]
@@ -26,11 +25,11 @@ const patchPath = resolve(patchArg)
 console.log(`Loading patch: ${patchPath}`)
 console.log(`Frames:        ${nFrames}`)
 
-const json: PatchJSON = JSON.parse(readFileSync(patchPath, 'utf-8'))
+const json = JSON.parse(readFileSync(patchPath, 'utf-8'))
 
 const session = makeSession(256)
 loadBuiltins(session.typeRegistry)
-loadPatchFromJSON(json, session)
+loadJSON(json, session)
 
 const runtime = session.runtime
 

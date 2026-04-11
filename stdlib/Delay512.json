@@ -1,0 +1,17 @@
+{
+  "schema": "tropical_program_1",
+  "name": "Delay512",
+  "inputs": ["x"],
+  "outputs": ["y"],
+  "regs": { "buf": { "zeros": 512 } },
+  "input_defaults": { "x": 0 },
+  "breaks_cycles": true,
+  "process": {
+    "outputs": {
+      "y": { "op": "index", "args": [{ "op": "reg", "name": "buf" }, { "op": "mod", "args": [{ "op": "sample_index" }, 512] }] }
+    },
+    "next_regs": {
+      "buf": { "op": "array_set", "args": [{ "op": "reg", "name": "buf" }, { "op": "mod", "args": [{ "op": "sample_index" }, 512] }, { "op": "input", "name": "x" }] }
+    }
+  }
+}
