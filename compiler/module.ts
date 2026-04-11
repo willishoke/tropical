@@ -41,9 +41,6 @@ export interface ProgramDef {
   breaksCycles: boolean
 }
 
-/** @deprecated Use ProgramDef instead */
-export type ModuleDef = ProgramDef
-
 // ---------- NestedCall ----------
 
 /** Captured metadata for a nested program call. */
@@ -51,9 +48,6 @@ export interface NestedCall {
   programDef: ProgramDef
   callArgNodes: ExprNode[]
 }
-
-/** @deprecated Use NestedCall instead */
-export type NestedCallDef = NestedCall
 
 // ---------- ModuleType ----------
 
