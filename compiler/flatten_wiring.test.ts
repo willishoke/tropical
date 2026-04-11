@@ -4,7 +4,7 @@
 
 import { describe, test, expect } from 'bun:test'
 import { normalizeWiringTypes, FlattenError } from './flatten'
-import type { ModuleInfo } from './compiler'
+import type { InstanceInfo } from './compiler'
 import { Float, ArrayType } from './term'
 import type { ExprNode } from './expr'
 
@@ -14,11 +14,11 @@ import type { ExprNode } from './expr'
 
 function makeInfo(
   name: string,
-  inputTypes: ModuleInfo['inputTypes'],
+  inputTypes: InstanceInfo['inputTypes'],
   inputNames: string[],
-  outputTypes: ModuleInfo['outputTypes'],
+  outputTypes: InstanceInfo['outputTypes'],
   outputNames: string[],
-): ModuleInfo {
+): InstanceInfo {
   return {
     name, typeName: name,
     inputNames, outputNames, registerNames: [],
@@ -26,8 +26,8 @@ function makeInfo(
   }
 }
 
-const ref = (module: string, output: string): ExprNode =>
-  ({ op: 'ref', module, output })
+const ref = (instance: string, output: string): ExprNode =>
+  ({ op: 'ref', instance, output })
 
 // ─────────────────────────────────────────────────────────────
 // Tests
@@ -129,7 +129,7 @@ describe('normalizeWiringTypes', () => {
   })
 
   test('skips unknown modules (no crash on stale keys)', () => {
-    const infos = new Map<string, ModuleInfo>()
+    const infos = new Map<string, InstanceInfo>()
     const exprs = new Map([['ghost:in', ref('src', 'out')]])
     expect(() => normalizeWiringTypes(infos, exprs)).not.toThrow()
   })

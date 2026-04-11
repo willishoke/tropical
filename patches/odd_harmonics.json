@@ -69,7 +69,7 @@
         "decay": 1.2,
         "gate": {
           "op": "ref",
-          "module": "Clock1",
+          "instance": "Clock1",
           "output": "output"
         }
       }
@@ -81,7 +81,7 @@
         "decay": 0.18,
         "gate": {
           "op": "ref",
-          "module": "Clock2",
+          "instance": "Clock2",
           "output": "output"
         }
       }
@@ -93,7 +93,7 @@
         "decay": 0.7,
         "gate": {
           "op": "ref",
-          "module": "Clock3",
+          "instance": "Clock3",
           "output": "output"
         }
       }
@@ -105,7 +105,7 @@
         "decay": 1.8,
         "gate": {
           "op": "ref",
-          "module": "Clock4",
+          "instance": "Clock4",
           "output": "output"
         }
       }
@@ -117,7 +117,7 @@
         "decay": 0.35,
         "gate": {
           "op": "ref",
-          "module": "Clock5",
+          "instance": "Clock5",
           "output": "output"
         }
       }
@@ -129,7 +129,7 @@
         "decay": 0.9,
         "gate": {
           "op": "ref",
-          "module": "Clock6",
+          "instance": "Clock6",
           "output": "output"
         }
       }
@@ -141,7 +141,7 @@
         "decay": 0.12,
         "gate": {
           "op": "ref",
-          "module": "Clock7",
+          "instance": "Clock7",
           "output": "output"
         }
       }
@@ -153,7 +153,7 @@
         "decay": 1.5,
         "gate": {
           "op": "ref",
-          "module": "Clock8",
+          "instance": "Clock8",
           "output": "output"
         }
       }
@@ -165,7 +165,7 @@
         "decay": 0.6,
         "gate": {
           "op": "ref",
-          "module": "Clock9",
+          "instance": "Clock9",
           "output": "output"
         }
       }
@@ -177,7 +177,7 @@
         "decay": 0.08,
         "gate": {
           "op": "ref",
-          "module": "Clock10",
+          "instance": "Clock10",
           "output": "output"
         }
       }
@@ -250,7 +250,7 @@
           "args": [
             {
               "op": "ref",
-              "module": "VCO1",
+              "instance": "VCO1",
               "output": "sin"
             },
             0.1
@@ -258,7 +258,7 @@
         },
         "cv": {
           "op": "ref",
-          "module": "ADEnvelope1",
+          "instance": "ADEnvelope1",
           "output": "env"
         }
       }
@@ -271,7 +271,7 @@
           "args": [
             {
               "op": "ref",
-              "module": "VCO2",
+              "instance": "VCO2",
               "output": "sin"
             },
             0.1
@@ -279,7 +279,7 @@
         },
         "cv": {
           "op": "ref",
-          "module": "ADEnvelope2",
+          "instance": "ADEnvelope2",
           "output": "env"
         }
       }
@@ -292,7 +292,7 @@
           "args": [
             {
               "op": "ref",
-              "module": "VCO3",
+              "instance": "VCO3",
               "output": "sin"
             },
             0.1
@@ -300,7 +300,7 @@
         },
         "cv": {
           "op": "ref",
-          "module": "ADEnvelope3",
+          "instance": "ADEnvelope3",
           "output": "env"
         }
       }
@@ -313,7 +313,7 @@
           "args": [
             {
               "op": "ref",
-              "module": "VCO4",
+              "instance": "VCO4",
               "output": "sin"
             },
             0.1
@@ -321,7 +321,7 @@
         },
         "cv": {
           "op": "ref",
-          "module": "ADEnvelope4",
+          "instance": "ADEnvelope4",
           "output": "env"
         }
       }
@@ -334,7 +334,7 @@
           "args": [
             {
               "op": "ref",
-              "module": "VCO5",
+              "instance": "VCO5",
               "output": "sin"
             },
             0.1
@@ -342,7 +342,7 @@
         },
         "cv": {
           "op": "ref",
-          "module": "ADEnvelope5",
+          "instance": "ADEnvelope5",
           "output": "env"
         }
       }
@@ -355,7 +355,7 @@
           "args": [
             {
               "op": "ref",
-              "module": "VCO6",
+              "instance": "VCO6",
               "output": "sin"
             },
             0.1
@@ -363,7 +363,7 @@
         },
         "cv": {
           "op": "ref",
-          "module": "ADEnvelope6",
+          "instance": "ADEnvelope6",
           "output": "env"
         }
       }
@@ -376,7 +376,7 @@
           "args": [
             {
               "op": "ref",
-              "module": "VCO7",
+              "instance": "VCO7",
               "output": "sin"
             },
             0.1
@@ -384,7 +384,7 @@
         },
         "cv": {
           "op": "ref",
-          "module": "ADEnvelope7",
+          "instance": "ADEnvelope7",
           "output": "env"
         }
       }
@@ -397,7 +397,7 @@
           "args": [
             {
               "op": "ref",
-              "module": "VCO8",
+              "instance": "VCO8",
               "output": "sin"
             },
             0.1
@@ -405,7 +405,7 @@
         },
         "cv": {
           "op": "ref",
-          "module": "ADEnvelope8",
+          "instance": "ADEnvelope8",
           "output": "env"
         }
       }
@@ -418,7 +418,7 @@
           "args": [
             {
               "op": "ref",
-              "module": "VCO9",
+              "instance": "VCO9",
               "output": "sin"
             },
             0.1
@@ -426,7 +426,7 @@
         },
         "cv": {
           "op": "ref",
-          "module": "ADEnvelope9",
+          "instance": "ADEnvelope9",
           "output": "env"
         }
       }
@@ -439,7 +439,7 @@
           "args": [
             {
               "op": "ref",
-              "module": "VCO10",
+              "instance": "VCO10",
               "output": "sin"
             },
             0.1
@@ -447,7 +447,7 @@
         },
         "cv": {
           "op": "ref",
-          "module": "ADEnvelope10",
+          "instance": "ADEnvelope10",
           "output": "env"
         }
       }

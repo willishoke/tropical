@@ -14,11 +14,11 @@ import {
 import {
   compilePatch,
   type CompilerInput,
-  type ModuleInfo,
+  type InstanceInfo,
 } from './compiler'
 import { portTypeFromString } from './compiler'
 import { Float, Int, Bool, product } from './term'
-import type { ExprNode } from './patch'
+import type { ExprNode } from './session'
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -32,7 +32,7 @@ function modInfo(
     outputs?: string[]
     registers?: string[]
   } = {},
-): ModuleInfo {
+): InstanceInfo {
   const inputs = opts.inputs ?? ['in']
   const outputs = opts.outputs ?? ['out']
   const registers = opts.registers ?? []
@@ -76,7 +76,7 @@ describe('generatePlan', () => {
         ['Gain1', modInfo('Gain1', { inputs: ['in'], outputs: ['out'] })],
       ]),
       inputExprNodes: new Map([['Gain1:in', 1.0]]),
-      graphOutputs: [{ module: 'Gain1', output: 'out' }],
+      graphOutputs: [{ instance: 'Gain1', output: 'out' }],
     })
 
     expect(plan.kernels.length).toBe(1)
@@ -104,9 +104,9 @@ describe('generatePlan', () => {
       ]),
       inputExprNodes: new Map<string, ExprNode>([
         ['A:freq', 440],
-        ['B:in', { op: 'ref', module: 'A', output: 'out' }],
+        ['B:in', { op: 'ref', instance: 'A', output: 'out' }],
       ]),
-      graphOutputs: [{ module: 'B', output: 'out' }],
+      graphOutputs: [{ instance: 'B', output: 'out' }],
     })
 
     expect(plan.kernels.length).toBe(2)
@@ -121,7 +121,7 @@ describe('generatePlan', () => {
     expect(plan.wiring.length).toBe(2)
     const bWiring = plan.wiring.find(w => w.kernel === 1)!
     expect(bWiring.input_name).toBe('in')
-    expect((bWiring.expr as { op: string; module: string }).module).toBe('A')
+    expect((bWiring.expr as { op: string; instance: string }).instance).toBe('A')
   })
 
   test('parallel modules share group', () => {
@@ -152,12 +152,12 @@ describe('generatePlan', () => {
       ]),
       inputExprNodes: new Map<string, ExprNode>([
         ['A:freq', 100],
-        ['B:in', { op: 'ref', module: 'A', output: 'out' }],
-        ['C:in', { op: 'ref', module: 'A', output: 'out' }],
-        ['D:x', { op: 'ref', module: 'B', output: 'out' }],
-        ['D:y', { op: 'ref', module: 'C', output: 'out' }],
+        ['B:in', { op: 'ref', instance: 'A', output: 'out' }],
+        ['C:in', { op: 'ref', instance: 'A', output: 'out' }],
+        ['D:x', { op: 'ref', instance: 'B', output: 'out' }],
+        ['D:y', { op: 'ref', instance: 'C', output: 'out' }],
       ]),
-      graphOutputs: [{ module: 'D', output: 'out' }],
+      graphOutputs: [{ instance: 'D', output: 'out' }],
     })
 
     expect(plan.kernels.length).toBe(4)
@@ -220,9 +220,9 @@ describe('validatePlan', () => {
       ]),
       inputExprNodes: new Map<string, ExprNode>([
         ['A:freq', 440],
-        ['B:in', { op: 'ref', module: 'A', output: 'out' }],
+        ['B:in', { op: 'ref', instance: 'A', output: 'out' }],
       ]),
-      graphOutputs: [{ module: 'B', output: 'out' }],
+      graphOutputs: [{ instance: 'B', output: 'out' }],
     })
     // Should not throw
     validatePlan(plan)
@@ -336,7 +336,7 @@ describe('planToJSON', () => {
         ['A', modInfo('A', { inputs: ['freq'], outputs: ['out'] })],
       ]),
       inputExprNodes: new Map([['A:freq', 440]]),
-      graphOutputs: [{ module: 'A', output: 'out' }],
+      graphOutputs: [{ instance: 'A', output: 'out' }],
     })
     const json = planToJSON(plan)
     const parsed = JSON.parse(json)
@@ -352,9 +352,9 @@ describe('planToJSON', () => {
       ]),
       inputExprNodes: new Map<string, ExprNode>([
         ['A:freq', 440],
-        ['B:in', { op: 'ref', module: 'A', output: 'out' }],
+        ['B:in', { op: 'ref', instance: 'A', output: 'out' }],
       ]),
-      graphOutputs: [{ module: 'B', output: 'out' }],
+      graphOutputs: [{ instance: 'B', output: 'out' }],
     })
     const json = planToJSON(plan)
     const parsed = JSON.parse(json) as ExecutionPlan
@@ -381,12 +381,12 @@ describe('planStats', () => {
       ]),
       inputExprNodes: new Map<string, ExprNode>([
         ['A:freq', 100],
-        ['B:in', { op: 'ref', module: 'A', output: 'out' }],
-        ['C:in', { op: 'ref', module: 'A', output: 'out' }],
-        ['D:x', { op: 'ref', module: 'B', output: 'out' }],
-        ['D:y', { op: 'ref', module: 'C', output: 'out' }],
+        ['B:in', { op: 'ref', instance: 'A', output: 'out' }],
+        ['C:in', { op: 'ref', instance: 'A', output: 'out' }],
+        ['D:x', { op: 'ref', instance: 'B', output: 'out' }],
+        ['D:y', { op: 'ref', instance: 'C', output: 'out' }],
       ]),
-      graphOutputs: [{ module: 'D', output: 'out' }],
+      graphOutputs: [{ instance: 'D', output: 'out' }],
     })
     const stats = planStats(plan)
     expect(stats.kernel_count).toBe(4)
@@ -446,13 +446,13 @@ describe('end-to-end: compile → plan → validate', () => {
         ['VCO1:fm', 0],
         ['VCO1:fm_index', 0],
         ['Clock1:freq', 2.0],
-        ['Env1:gate', { op: 'ref', module: 'Clock1', output: 'output' }],
+        ['Env1:gate', { op: 'ref', instance: 'Clock1', output: 'output' }],
         ['Env1:attack', 0.01],
         ['Env1:decay', 0.3],
-        ['VCA1:audio', { op: 'mul', args: [{ op: 'ref', module: 'VCO1', output: 'sin' }, 0.5] }],
-        ['VCA1:cv', { op: 'ref', module: 'Env1', output: 'env' }],
+        ['VCA1:audio', { op: 'mul', args: [{ op: 'ref', instance: 'VCO1', output: 'sin' }, 0.5] }],
+        ['VCA1:cv', { op: 'ref', instance: 'Env1', output: 'env' }],
       ]),
-      graphOutputs: [{ module: 'VCA1', output: 'out' }],
+      graphOutputs: [{ instance: 'VCA1', output: 'out' }],
     }
 
     const patch = compilePatch(input)

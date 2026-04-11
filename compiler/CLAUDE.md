@@ -1,23 +1,23 @@
 # compiler/
 
-TypeScript layer. Handles module definition, expression construction, flattening, instruction emission, and the FFI bridge to C++. No audio processing happens here — this layer produces the `tropical_plan_4` JSON that the C++ engine JIT-compiles.
+TypeScript layer. Handles program definition, expression construction, flattening, instruction emission, and the FFI bridge to C++. No audio processing happens here — this layer produces the `tropical_plan_4` JSON that the C++ engine JIT-compiles.
 
 ## Layout
 
 ```
 expr.ts               ExprNode type, SignalExpr wrapper, all named operations, combinator constructors
-module.ts             ProgramDef IR, ModuleType, ModuleInstance (pure data types, no DSL)
+program_types.ts      ProgramDef IR, ProgramType, ProgramInstance (pure data types, no DSL)
 program.ts            ProgramJSON (tropical_program_1) interface, conversions, stdlib loading
-flatten.ts            Patch → tropical_plan_4 (inline all modules, resolve refs)
+flatten.ts            Session → tropical_plan_4 (inline all instances, resolve refs)
 lower_arrays.ts       Lower array ops + combinators to scalar primitives (static unrolling)
 emit_numeric.ts       ExprNode trees → FlatProgram instruction stream
 compiler.ts           Dependency graph, topological sort, term assembly
 term.ts               Categorical IR (morphism, compose, tensor, trace, id)
 type_check.ts         Type inference for terms, composition boundary validation
 optimizer.ts          Term rewriting (identity elimination, flattening)
-patch.ts              SessionState, loadProgramDef (ProgramJSON → ProgramDef), loadJSON, prettyExpr
+session.ts            SessionState, loadProgramDef (ProgramJSON → ProgramDef), loadJSON, prettyExpr
 schema.ts             Zod validation schemas for ProgramJSON
-apply_plan.ts         flattenPatch → JSON.stringify → runtime.loadPlan
+apply_plan.ts         flattenSession → JSON.stringify → runtime.loadPlan
 array_wiring.ts       Typed port validation, auto-broadcast insertion
 morphism_registry.ts  Named type coercion morphisms
 plan.ts               ExecutionPlan (tropical_plan_1, intermediate/legacy)
@@ -51,13 +51,13 @@ type ExprNode = number | boolean | ExprNode[] | { op: string; ... }
 - **Combinators** (compile-time): `bindingExpr`, `let_`, `generate`, `repeat`, `iterate`, `fold`, `scan`, `map2`, `zipWith`, `chain`
 - **Leaf nodes**: `sampleRate`, `sampleIndex`, `inputExpr`, `registerExpr`, `refExpr`, `nestedOutputExpr`, `delayValueExpr`, `paramExpr`, `triggerParamExpr`
 
-## Program types (`module.ts`)
+## Program types (`program_types.ts`)
 
 Pure data types — no DSL, no side effects:
 
-- **`ProgramDef`** — the compiler's slot-indexed IR consumed by the flattener. Fields: `outputExprNodes`, `registerExprNodes`, `delayUpdateNodes`, `nestedCalls`, etc. Built from ProgramJSON by `loadProgramDef()` in `patch.ts` via `slottifyExpr()` (pure name→slot tree walk).
-- **`ModuleType`** — wraps a `ProgramDef`, registered in `SessionState.typeRegistry`
-- **`ModuleInstance`** — named instance of a type, with port accessors
+- **`ProgramDef`** — the compiler's slot-indexed IR consumed by the flattener. Fields: `outputExprNodes`, `registerExprNodes`, `delayUpdateNodes`, `nestedCalls`, etc. Built from ProgramJSON by `loadProgramDef()` in `session.ts` via `slottifyExpr()` (pure name→slot tree walk).
+- **`ProgramType`** — wraps a `ProgramDef`, registered in `SessionState.typeRegistry`
+- **`ProgramInstance`** — named instance of a type, with port accessors
 
 ## Standard library (`stdlib/*.json`)
 
@@ -65,17 +65,17 @@ Pure data types — no DSL, no side effects:
 
 VCO (polyBLEP), Clock, ADEnvelope (polyBLAMP), ADSREnvelope (polyBLAMP), VCA, Reverb (Freeverb-style: 4 comb + 6 allpass), Phaser/Phaser16, Compressor, BassDrum, LadderFilter (4-pole Moog), BitCrusher, NoiseLFSR, TopoWaveguide (2D mesh), Delay variants (8/16/512/4410/44100).
 
-Complex modules use inline `programs` for subprogram composition (e.g., VCO defines `_wrap01` and `_polyBlep` as nested programs).
+Complex programs use inline `programs` for subprogram composition (e.g., VCO defines `_wrap01` and `_polyBlep` as nested programs).
 
 ## Compilation pipeline
 
 ### Flattening (`flatten.ts`)
 
-The critical compilation step. Transforms a multi-module patch into a single flat instruction stream (`tropical_plan_4`).
+The critical compilation step. Transforms a multi-instance session into a single flat instruction stream (`tropical_plan_4`).
 
 1. **Input substitution** — replace `input(N)` with wiring expressions
-2. **Reference resolution** — inline `ref(module, output)` by recursively substituting the referenced module's output expression
-3. **Nested call resolution** — expand `nested_output(nodeId, outputId)` by inlining nested module expressions with offset register IDs
+2. **Reference resolution** — inline `ref(instance, output)` by recursively substituting the referenced instance's output expression
+3. **Nested call resolution** — expand `nested_output(nodeId, outputId)` by inlining nested instance expressions with offset register IDs
 4. **Delay resolution** — convert `delay_value(nodeId)` to register reads
 5. **Function inlining** — expand `call(function(body), args)` via input substitution
 6. **Wiring type normalization** — validate compatibility, insert `broadcast_to` for shape mismatches
@@ -115,10 +115,10 @@ Walks flattened ExprNode trees, emits a `FlatProgram`:
 
 The compiler builds categorical terms from the dependency graph:
 
-1. `buildDependencyGraph()` — extract module refs from input expressions
+1. `buildDependencyGraph()` — extract instance refs from input expressions
 2. `tarjanSCC()` — cycle detection (feedback cycles are errors)
 3. `topologicalSort()` — Kahn's algorithm with level grouping
-4. `moduleToTerm()` — stateless → morphism, stateful → trace
+4. `instanceToTerm()` — stateless → morphism, stateful → trace
 5. `inferType()` — validate composition boundaries, tensor products, trace state alignment
 
 Term constructors: `morphism`, `compose`, `tensor`, `trace`, `id`. Port types: `ScalarType`, `ArrayType`, `StructType`, `SumType`, `product`, `Unit`.
@@ -132,7 +132,7 @@ Structural rewrites iterated to fixed point:
 
 ### Plan application (`apply_plan.ts`)
 
-`applyFlatPlan(session, runtime)` ties it together: `flattenPatch()` → `JSON.stringify()` → `runtime.loadPlan()`. Called after any wiring mutation.
+`applyFlatPlan(session, runtime)` ties it together: `flattenSession()` → `JSON.stringify()` → `runtime.loadPlan()`. Called after any wiring mutation.
 
 ## FFI bridge (`runtime/`)
 

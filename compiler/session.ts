@@ -6,9 +6,9 @@ import {
   type SignalExpr, type ExprCoercible, coerce, type ExprNode, validateExpr,
 } from './expr.js'
 import {
-  ModuleType, ModuleInstance,
+  ProgramType, ProgramInstance,
   type ProgramDef, type NestedCall, type ValueCoercible,
-} from './module.js'
+} from './program_types.js'
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type ProgramJSON } from './program.js'
 import { Param, Trigger } from './runtime/param.js'
@@ -54,13 +54,13 @@ export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON
 export interface SessionState {
   bufferLength: number
   dac: import('./runtime/audio.js').DAC | null  // lazy type import to avoid circular dep
-  typeRegistry: Map<string, ModuleType>
-  instanceRegistry: Map<string, ModuleInstance>
-  graphOutputs: Array<{ module: string; output: string }>
+  typeRegistry: Map<string, ProgramType>
+  instanceRegistry: Map<string, ProgramInstance>
+  graphOutputs: Array<{ instance: string; output: string }>
   paramRegistry: Map<string, Param>
   triggerRegistry: Map<string, Trigger>
-  /** Canonical input wiring: key is `${module}:${input}`, value is the ExprNode for round-trip save. */
-  inputExprNodes: Map<string, ExprNode>  // key: `${module}:${input}`
+  /** Canonical input wiring: key is `${instance}:${input}`, value is the ExprNode for round-trip save. */
+  inputExprNodes: Map<string, ExprNode>  // key: `${instance}:${input}`
   /** FlatRuntime — all audio goes through this. */
   runtime: Runtime
   /** Thin proxy over runtime that matches the old Graph interface for tests and legacy callers. */
@@ -234,7 +234,7 @@ function slottifyExpr(
 export function loadProgramDef(
   def: ProgramJSON,
   session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
-): ModuleType {
+): ProgramType {
   const inputSpecs  = def.inputs ?? []
   const outputSpecs = def.outputs ?? []
   const inputNames  = inputSpecs.map(i => typeof i === 'string' ? i : i.name)
@@ -347,7 +347,7 @@ export function loadProgramDef(
     breaksCycles: def.breaks_cycles ?? false,
   }
 
-  return new ModuleType(programDef)
+  return new ProgramType(programDef)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -371,7 +371,7 @@ const UNARY_PREFIX: Record<string, string> = { neg: '-' }
  */
 export function prettyExpr(
   node: ExprNode,
-  instanceRegistry: Map<string, ModuleInstance>,
+  instanceRegistry: Map<string, ProgramInstance>,
 ): string {
   if (typeof node === 'number') return String(node)
   if (typeof node === 'boolean') return String(node)
@@ -382,7 +382,7 @@ export function prettyExpr(
   const args = (n.args as ExprNode[] | undefined) ?? []
 
   if (op === 'ref') {
-    const mod = n.module as string
+    const mod = n.instance as string
     const out = n.output
     const inst = instanceRegistry.get(mod)
     const outName = inst && typeof out === 'number' ? (inst.outputNames[out] ?? String(out)) : String(out)

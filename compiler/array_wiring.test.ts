@@ -6,7 +6,7 @@ import { describe, test, expect } from 'bun:test'
 import { checkArrayConnection } from './array_wiring'
 import type { ExprNode } from './expr'
 
-const ref: ExprNode = { op: 'ref', module: 'VCO1', output: 'saw' }
+const ref: ExprNode = { op: 'ref', instance: 'VCO1', output: 'saw' }
 
 describe('checkArrayConnection', () => {
   test('identical scalar types are compatible', () => {

@@ -58,10 +58,11 @@ export type FlatProgram = {
 
 const BINARY_TAG: Record<string, string> = {
   add: 'Add', sub: 'Sub', mul: 'Mul', div: 'Div', mod: 'Mod',
-  pow: 'Pow', floor_div: 'FloorDiv',
+  pow: 'Pow', floor_div: 'FloorDiv', floorDiv: 'FloorDiv',
   lt: 'Less', lte: 'LessEq', gt: 'Greater', gte: 'GreaterEq',
   eq: 'Equal', neq: 'NotEqual',
   bit_and: 'BitAnd', bit_or: 'BitOr', bit_xor: 'BitXor',
+  bitAnd: 'BitAnd', bitOr: 'BitOr', bitXor: 'BitXor',
   lshift: 'LShift', rshift: 'RShift',
   and: 'And', or: 'Or',
 }

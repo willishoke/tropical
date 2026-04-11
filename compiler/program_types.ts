@@ -1,8 +1,8 @@
 /**
- * module.ts — Data types for the compiler's internal program representation.
+ * program_types.ts — Data types for the compiler's internal program representation.
  *
  * ProgramDef is the slot-indexed IR that the flattener consumes.
- * ModuleType and ModuleInstance are thin wrappers used by the type/instance registries.
+ * ProgramType and ProgramInstance are thin wrappers used by the type/instance registries.
  */
 
 import type { SignalExpr, ExprCoercible, ExprNode } from './expr.js'
@@ -41,9 +41,6 @@ export interface ProgramDef {
   breaksCycles: boolean
 }
 
-/** @deprecated Use ProgramDef instead */
-export type ModuleDef = ProgramDef
-
 // ---------- NestedCall ----------
 
 /** Captured metadata for a nested program call. */
@@ -52,12 +49,9 @@ export interface NestedCall {
   callArgNodes: ExprNode[]
 }
 
-/** @deprecated Use NestedCall instead */
-export type NestedCallDef = NestedCall
+// ---------- ProgramType ----------
 
-// ---------- ModuleType ----------
-
-export class ModuleType {
+export class ProgramType {
   readonly _def: ProgramDef
 
   constructor(def: ProgramDef) {
@@ -67,14 +61,14 @@ export class ModuleType {
   get name(): string { return this._def.typeName }
 
   /** Instantiate with an explicit instance name. */
-  instantiateAs(name: string): ModuleInstance {
-    return new ModuleInstance(this._def, name)
+  instantiateAs(name: string): ProgramInstance {
+    return new ProgramInstance(this._def, name)
   }
 }
 
-// ---------- ModuleInstance ----------
+// ---------- ProgramInstance ----------
 
-export class ModuleInstance {
+export class ProgramInstance {
   readonly _def: ProgramDef
   readonly name: string
 
@@ -94,13 +88,13 @@ export class ModuleInstance {
 
   inputIndex(name: string): number {
     const idx = this._def.inputNames.indexOf(name)
-    if (idx === -1) throw new Error(`Unknown input '${name}' on module '${this.name}'.`)
+    if (idx === -1) throw new Error(`Unknown input '${name}' on instance '${this.name}'.`)
     return idx
   }
 
   outputIndex(name: string): number {
     const idx = this._def.outputNames.indexOf(name)
-    if (idx === -1) throw new Error(`Unknown output '${name}' on module '${this.name}'.`)
+    if (idx === -1) throw new Error(`Unknown output '${name}' on instance '${this.name}'.`)
     return idx
   }
 }

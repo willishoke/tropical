@@ -1,19 +1,19 @@
 /**
- * compiler.ts — Compile a patch into a well-typed categorical Term.
+ * compiler.ts — Compile a program graph into a well-typed categorical Term.
  *
  * Phase 1 of the compilation pipeline:
  *   CompilerInput → compilePatch() → CompiledPatch (containing a Term)
  *
  * The compiler:
- * 1. Converts module instances to morphism/trace terms
+ * 1. Converts program instances to morphism/trace terms
  * 2. Builds a dependency graph from input expressions
- * 3. Topologically sorts modules (Kahn's with level grouping)
+ * 3. Topologically sorts instances (Kahn's with level grouping)
  * 4. Detects feedback cycles (Tarjan's SCC)
  * 5. Assembles a well-typed Term: tensor within levels, compose between levels,
  *    wiring morphisms route signals through the pipeline
  */
 
-import type { ExprNode, SessionState } from './patch'
+import type { ExprNode, SessionState } from './session'
 import {
   type PortType, type Term, type MorphismBody, type StateInit,
   Float, Int, Bool, Unit, StructType, ArrayType,
@@ -37,7 +37,7 @@ export class CompilerError extends Error {
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Convert a string type annotation (from ModuleDef) to a PortType.
+ * Convert a string type annotation (from ProgramDef) to a PortType.
  *
  * Supports:
  *   'float', 'int', 'bool', 'unit'       — scalars
@@ -73,11 +73,11 @@ export function portTypeFromString(s: string | undefined): PortType {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Module info
+// Instance info
 // ─────────────────────────────────────────────────────────────
 
-/** Structural type information for a module instance — pure data, no C handles. */
-export interface ModuleInfo {
+/** Structural type information for a program instance — pure data, no C handles. */
+export interface InstanceInfo {
   name: string
   typeName: string
   inputNames: string[]
@@ -89,7 +89,7 @@ export interface ModuleInfo {
 }
 
 /** The subset of ProgramDef the compiler reads. */
-interface ModuleDefLike {
+interface ProgramDefLike {
   typeName: string
   inputNames: string[]
   outputNames: string[]
@@ -99,8 +99,8 @@ interface ModuleDefLike {
   registerPortTypes: (string | undefined)[]
 }
 
-/** Extract ModuleInfo from a module definition. */
-export function extractModuleInfo(name: string, def: ModuleDefLike): ModuleInfo {
+/** Extract InstanceInfo from a program definition. */
+export function extractInstanceInfo(name: string, def: ProgramDefLike): InstanceInfo {
   return {
     name,
     typeName: def.typeName,
@@ -117,7 +117,7 @@ export function extractModuleInfo(name: string, def: ModuleDefLike): ModuleInfo 
 // Expression dependency extraction
 // ─────────────────────────────────────────────────────────────
 
-/** Extract module names referenced via 'ref' ops in an ExprNode tree. */
+/** Extract instance names referenced via 'ref' ops in an ExprNode tree. */
 export function exprDependencies(node: ExprNode): Set<string> {
   const deps = new Set<string>()
   walkExprRefs(node, deps)
@@ -132,7 +132,7 @@ function walkExprRefs(node: ExprNode, deps: Set<string>): void {
   }
   const n = node as { op: string; [k: string]: unknown }
   if (n.op === 'ref') {
-    deps.add(n.module as string)
+    deps.add(n.instance as string)
     return
   }
   // Walk standard args
@@ -155,25 +155,25 @@ function walkExprRefs(node: ExprNode, deps: Set<string>): void {
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Build a dependency graph: module → set of modules it depends on.
+ * Build a dependency graph: instance → set of instances it depends on.
  * Dependencies come from 'ref' ops in inputExprNodes.
  */
 export function buildDependencyGraph(
-  moduleNames: Iterable<string>,
+  instanceNames: Iterable<string>,
   inputExprNodes: Map<string, ExprNode>,
   cycleBreakers?: Set<string>,
 ): Map<string, Set<string>> {
-  const nameSet = new Set(moduleNames)
+  const nameSet = new Set(instanceNames)
   const graph = new Map<string, Set<string>>()
   for (const name of nameSet) graph.set(name, new Set())
 
   for (const [key, expr] of inputExprNodes) {
-    const moduleName = key.split(':')[0]
-    if (!nameSet.has(moduleName)) continue
+    const instanceName = key.split(':')[0]
+    if (!nameSet.has(instanceName)) continue
     const refs = exprDependencies(expr)
-    const deps = graph.get(moduleName)!
+    const deps = graph.get(instanceName)!
     for (const ref of refs) {
-      if (nameSet.has(ref) && ref !== moduleName) {
+      if (nameSet.has(ref) && ref !== instanceName) {
         // Skip edges to cycle-breaking modules — their outputs are
         // previous-sample register reads, not combinational dependencies.
         if (cycleBreakers?.has(ref)) continue
@@ -288,20 +288,20 @@ export function tarjanSCC(deps: Map<string, Set<string>>): string[][] {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Module → Term conversion
+// Instance → Term conversion
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Convert a module's type info to a Term.
+ * Convert an instance.s type info to a Term.
  *
  * Stateless (no registers): morphism(inputs → outputs)
  * Stateful (has registers):  trace(S, morphism(inputs⊗S → outputs⊗S))
  *
- * The morphism body is a stub referencing the module name — actual
- * process expressions live in the ModuleDef and are resolved when
+ * The morphism body is a stub referencing the instance name — actual
+ * process expressions live in the ProgramDef and are resolved when
  * generating execution plans.
  */
-export function moduleToTerm(info: ModuleInfo): Term {
+export function instanceToTerm(info: InstanceInfo): Term {
   const dom = product(info.inputTypes)
   const cod = product(info.outputTypes)
 
@@ -334,7 +334,7 @@ export function moduleToTerm(info: ModuleInfo): Term {
 // ─────────────────────────────────────────────────────────────
 
 interface Wire {
-  module: string
+  instance: string
   output: string
   type: PortType
 }
@@ -353,10 +353,10 @@ function envType(env: SignalEnv): PortType {
 
 /**
  * Build the initial wiring for level 0: Unit → level_0_inputs.
- * All inputs are constants, params, or special forms (no module refs).
+ * All inputs are constants, params, or special forms (no instance refs).
  */
 function buildInitialWiring(
-  levelInfos: ModuleInfo[],
+  levelInfos: InstanceInfo[],
   inputExprNodes: Map<string, ExprNode>,
 ): Term {
   const inputTypes: PortType[] = []
@@ -387,15 +387,15 @@ function buildInitialWiring(
  */
 function buildWiringMorphism(
   env: SignalEnv,
-  levelInfos: ModuleInfo[],
+  levelInfos: InstanceInfo[],
   inputExprNodes: Map<string, ExprNode>,
 ): Term {
   const wiringExprs: Record<string, ExprNode> = {}
 
   // Passthrough: identity on each env signal
   for (const w of env.wires) {
-    wiringExprs[`_pass.${w.module}.${w.output}`] = {
-      op: 'ref', module: w.module, output: w.output,
+    wiringExprs[`_pass.${w.instance}.${w.output}`] = {
+      op: 'ref', instance: w.instance, output: w.output,
     }
   }
 
@@ -414,7 +414,7 @@ function buildWiringMorphism(
 
   return morphism('wiring', from, to, {
     tag: 'expr',
-    inputNames: env.wires.map(w => `${w.module}.${w.output}`),
+    inputNames: env.wires.map(w => `${w.instance}.${w.output}`),
     outputExprs: wiringExprs,
   })
 }
@@ -425,8 +425,8 @@ function buildWiringMorphism(
  */
 function buildOutputProjection(
   env: SignalEnv,
-  graphOutputs: Array<{ module: string; output: string }>,
-  modules: Map<string, ModuleInfo>,
+  graphOutputs: Array<{ instance: string; output: string }>,
+  modules: Map<string, InstanceInfo>,
 ): Term {
   if (graphOutputs.length === 0) {
     return morphism('output', envType(env), Unit, {
@@ -437,18 +437,18 @@ function buildOutputProjection(
   const outputTypes: PortType[] = []
   const projExprs: Record<string, ExprNode> = {}
 
-  for (const { module, output } of graphOutputs) {
-    const info = modules.get(module)
-    if (!info) throw new CompilerError(`Output references unknown module '${module}'`)
+  for (const { instance, output } of graphOutputs) {
+    const info = modules.get(instance)
+    if (!info) throw new CompilerError(`Output references unknown instance '${instance}'`)
     const idx = info.outputNames.indexOf(output)
-    if (idx === -1) throw new CompilerError(`Output references unknown output '${module}.${output}'`)
+    if (idx === -1) throw new CompilerError(`Output references unknown output '${instance}.${output}'`)
     outputTypes.push(info.outputTypes[idx])
-    projExprs[`${module}.${output}`] = { op: 'ref', module, output }
+    projExprs[`${instance}.${output}`] = { op: 'ref', instance, output }
   }
 
   return morphism('output', envType(env), product(outputTypes), {
     tag: 'expr',
-    inputNames: env.wires.map(w => `${w.module}.${w.output}`),
+    inputNames: env.wires.map(w => `${w.instance}.${w.output}`),
     outputExprs: projExprs,
   })
 }
@@ -459,25 +459,25 @@ function buildOutputProjection(
 
 /** Pure-data input to the compiler (no C handles). */
 export interface CompilerInput {
-  modules: Map<string, ModuleInfo>
+  modules: Map<string, InstanceInfo>
   inputExprNodes: Map<string, ExprNode>
-  graphOutputs: Array<{ module: string; output: string }>
+  graphOutputs: Array<{ instance: string; output: string }>
 }
 
 /** The result of compilation. */
 export interface CompiledPatch {
   /** The compiled term representing the entire patch. */
   term: Term
-  /** Module info, keyed by instance name. */
-  modules: Map<string, ModuleInfo>
+  /** Instance info, keyed by instance name. */
+  modules: Map<string, InstanceInfo>
   /** Topological execution levels. */
   levels: string[][]
-  /** Detected feedback cycles (each is a list of module names). */
+  /** Detected feedback cycles (each is a list of instance names). */
   cycles: string[][]
   /** Input wiring expressions (carried through for plan generation). */
   inputExprNodes: Map<string, ExprNode>
   /** Graph outputs (carried through for plan generation). */
-  graphOutputs: Array<{ module: string; output: string }>
+  graphOutputs: Array<{ instance: string; output: string }>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -541,7 +541,7 @@ export function compilePatch(input: CompilerInput): CompiledPatch {
     const levelInfos = level.map(n => modules.get(n)!)
 
     // Build module terms for this level
-    const moduleTerms = levelInfos.map(info => moduleToTerm(info))
+    const moduleTerms = levelInfos.map(info => instanceToTerm(info))
     const levelModules = moduleTerms.length === 1 ? moduleTerms[0] : tensorAll(moduleTerms)
 
     if (i === 0) {
@@ -562,7 +562,7 @@ export function compilePatch(input: CompilerInput): CompiledPatch {
     for (const info of levelInfos) {
       for (let j = 0; j < info.outputNames.length; j++) {
         env.wires.push({
-          module: info.name,
+          instance: info.name,
           output: info.outputNames[j],
           type: info.outputTypes[j],
         })
@@ -600,9 +600,9 @@ export function compilePatch(input: CompilerInput): CompiledPatch {
 
 /** Build a CompilerInput from a SessionState. */
 export function compilerInputFromSession(session: SessionState): CompilerInput {
-  const modules = new Map<string, ModuleInfo>()
+  const modules = new Map<string, InstanceInfo>()
   for (const [name, inst] of session.instanceRegistry) {
-    modules.set(name, extractModuleInfo(name, inst._def))
+    modules.set(name, extractInstanceInfo(name, inst._def))
   }
   return {
     modules,

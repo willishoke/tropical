@@ -9,11 +9,11 @@
 
 import type { ExprNode } from './expr.js'
 import { validateExpr } from './expr.js'
-import type { TypeDefJSON, SessionState } from './patch.js'
-import { loadProgramDef } from './patch.js'
+import type { TypeDefJSON, SessionState } from './session.js'
+import { loadProgramDef } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
-import { ModuleType } from './module.js'
+import { ProgramType } from './program_types.js'
 
 // ─────────────────────────────────────────────────────────────
 // ProgramJSON schema
@@ -142,7 +142,7 @@ export function loadProgramAsSession(
     }
     const inst = session.instanceRegistry.get(out.instance)
     if (!inst) throw new Error(`Output instance '${out.instance}' not found.`)
-    session.graphOutputs.push({ module: out.instance, output: String(out.output) })
+    session.graphOutputs.push({ instance: out.instance, output: String(out.output) })
   }
 
   // Compile and load
@@ -150,13 +150,13 @@ export function loadProgramAsSession(
 }
 
 /**
- * Load a leaf ProgramJSON as a ModuleType (registerable in typeRegistry).
+ * Load a leaf ProgramJSON as a ProgramType (registerable in typeRegistry).
  * Programs with inline `programs` get their subprograms registered first.
  */
 export function loadProgramAsType(
   prog: ProgramJSON,
   session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
-): ModuleType {
+): ProgramType {
   // Register inline subprograms first
   if (prog.programs) {
     for (const [name, subProg] of Object.entries(prog.programs)) {
@@ -236,7 +236,7 @@ export function mergeProgramIntoSession(
     }
     const inst = session.instanceRegistry.get(out.instance)
     if (!inst) throw new Error(`Output instance '${out.instance}' not found.`)
-    session.graphOutputs.push({ module: out.instance, output: String(out.output) })
+    session.graphOutputs.push({ instance: out.instance, output: String(out.output) })
   }
 
   // Recompile
@@ -259,7 +259,7 @@ const __dirname = dirname(__filename)
  * Accepts either a full session or just a typeRegistry Map.
  */
 export function loadStdlib(
-  target: Map<string, ModuleType> | Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
+  target: Map<string, ProgramType> | Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
 ): void {
   // If given a bare Map, wrap it in a minimal session-like object
   const session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> =
@@ -309,7 +309,7 @@ export function saveProgramFromSession(
   // Audio outputs
   if (session.graphOutputs.length) {
     prog.audio_outputs = session.graphOutputs.map(o => ({
-      instance: o.module, output: o.output,
+      instance: o.instance, output: o.output,
     }))
   }
 

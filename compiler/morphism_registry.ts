@@ -10,7 +10,7 @@
  * for explicit application.
  */
 
-import type { ExprNode } from './patch'
+import type { ExprNode } from './session'
 import type { PortType } from './term'
 import { portTypeEqual, portTypeToString } from './term'
 

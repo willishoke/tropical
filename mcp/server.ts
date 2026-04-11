@@ -20,7 +20,7 @@ import {
 import {
   makeSession, nextName, loadJSON,
   prettyExpr, SessionState, ExprNode,
-} from '../compiler/patch.js'
+} from '../compiler/session.js'
 import { parseProgram } from '../compiler/schema.js'
 import {
   saveProgramFromSession, loadProgramAsType, mergeProgramIntoSession,
@@ -63,7 +63,7 @@ function adaptInputExpr(
   } else if (typeof node === 'object' && node !== null) {
     const obj = node as Record<string, unknown>
     if (obj.op === 'ref') {
-      const srcInst = session.instanceRegistry.get(obj.module as string)
+      const srcInst = session.instanceRegistry.get(obj.instance as string)
       if (srcInst) {
         const outName = obj.output as string | number
         const outIdx = typeof outName === 'number' ? outName : srcInst.outputNames.indexOf(String(outName))
@@ -177,7 +177,7 @@ const TOOLS = [
   },
   {
     name: 'wire',
-    description: 'Set and/or remove input wiring in a single recompile. Use `set` to wire inputs (each is {instance, input, expr}), `remove` to disconnect (each is {instance, input}). This replaces connect_modules, disconnect_modules, set_module_input, and set_inputs_batch.',
+    description: 'Set and/or remove input wiring in a single recompile. Use `set` to wire inputs (each is {instance, input, expr}), `remove` to disconnect (each is {instance, input}).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -240,7 +240,7 @@ const TOOLS = [
   },
   {
     name: 'load',
-    description: 'Load a program or patch. Accepts tropical_program_1 or tropical_patch_1. Stops audio, recreates the session, and rebuilds state. Provide either path (preferred) or inline JSON.',
+    description: 'Load a program. Accepts tropical_program_1. Stops audio, recreates the session, and rebuilds state. Provide either path (preferred) or inline JSON.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -308,157 +308,6 @@ const TOOLS = [
     description: 'Return current audio status including callback statistics.',
     inputSchema: { type: 'object', properties: {} },
   },
-
-  // ── Deprecated aliases (backward compatibility) ────────────────────────────
-
-  {
-    name: 'define_module',
-    description: '[deprecated: use define_program] Define a reusable DSP module type from a JSON definition.',
-    inputSchema: {
-      type: 'object',
-      properties: { def: { type: 'object' } },
-      required: ['def'],
-    },
-  },
-  {
-    name: 'instantiate_module',
-    description: '[deprecated: use add_instance] Instantiate a registered module type.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        type_name:     { type: 'string' },
-        instance_name: { type: 'string' },
-      },
-      required: ['type_name', 'instance_name'],
-    },
-  },
-  {
-    name: 'remove_module',
-    description: '[deprecated: use remove_instance] Remove a module instance.',
-    inputSchema: {
-      type: 'object',
-      properties: { instance_name: { type: 'string' } },
-      required: ['instance_name'],
-    },
-  },
-  {
-    name: 'list_module_types',
-    description: '[deprecated: use list_programs] List all registered module types.',
-    inputSchema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'list_modules',
-    description: '[deprecated: use list_instances] List all live module instances.',
-    inputSchema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'get_module_info',
-    description: '[deprecated: use get_info] Return info about a module instance.',
-    inputSchema: {
-      type: 'object',
-      properties: { instance_name: { type: 'string' } },
-      required: ['instance_name'],
-    },
-  },
-  {
-    name: 'connect_modules',
-    description: '[deprecated: use wire] Connect module output to input.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        src_module: { type: 'string' }, src_output: {},
-        dst_module: { type: 'string' }, dst_input: {},
-      },
-      required: ['src_module', 'src_output', 'dst_module', 'dst_input'],
-    },
-  },
-  {
-    name: 'disconnect_modules',
-    description: '[deprecated: use wire with remove] Disconnect module ports.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        src_module: { type: 'string' }, src_output: {},
-        dst_module: { type: 'string' }, dst_input: {},
-      },
-      required: ['src_module', 'src_output', 'dst_module', 'dst_input'],
-    },
-  },
-  {
-    name: 'set_module_input',
-    description: '[deprecated: use wire] Set a module input to a value or expression.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        instance_name: { type: 'string' },
-        input_name:    {},
-        expr:          {},
-      },
-      required: ['instance_name', 'input_name', 'expr'],
-    },
-  },
-  {
-    name: 'set_inputs_batch',
-    description: '[deprecated: use wire] Set multiple module inputs in one recompile.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        updates: { type: 'array', items: { type: 'object' } },
-      },
-      required: ['updates'],
-    },
-  },
-  {
-    name: 'list_inputs',
-    description: '[deprecated: use list_wiring] List all wired inputs.',
-    inputSchema: {
-      type: 'object',
-      properties: { module: { type: 'string' } },
-    },
-  },
-  {
-    name: 'add_graph_output',
-    description: '[deprecated: use set_output] Add a module output to the audio mix.',
-    inputSchema: {
-      type: 'object',
-      properties: { module_name: { type: 'string' }, output_name: {} },
-      required: ['module_name', 'output_name'],
-    },
-  },
-  {
-    name: 'remove_graph_output',
-    description: '[deprecated: use set_output] Remove an output from the audio mix.',
-    inputSchema: {
-      type: 'object',
-      properties: { module_name: { type: 'string' }, output_name: {} },
-      required: ['module_name', 'output_name'],
-    },
-  },
-  {
-    name: 'load_patch',
-    description: '[deprecated: use load] Load a tropical_patch_1 patch.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        patch_path: { type: 'string' },
-        patch: { type: 'object' },
-      },
-    },
-  },
-  {
-    name: 'merge_patch',
-    description: '[deprecated: use merge] Merge a patch into the session.',
-    inputSchema: {
-      type: 'object',
-      properties: { patch: { type: 'object' } },
-      required: ['patch'],
-    },
-  },
-  {
-    name: 'save_patch',
-    description: '[deprecated: use save] Serialize session to tropical_patch_1.',
-    inputSchema: { type: 'object', properties: {} },
-  },
 ]
 
 // ─── Tool handlers ────────────────────────────────────────────────────────────
@@ -498,7 +347,7 @@ function handleRemoveInstance(instanceName: string) {
     for (const [key, expr] of [...session.inputExprNodes.entries()]) {
       if (exprDependencies(expr).has(instanceName)) session.inputExprNodes.delete(key)
     }
-    session.graphOutputs = session.graphOutputs.filter(o => o.module !== instanceName)
+    session.graphOutputs = session.graphOutputs.filter(o => o.instance !== instanceName)
     return { removed: instanceName, ...wire() }
   })
 }
@@ -604,7 +453,7 @@ function handleSetOutput(args: Record<string, unknown>) {
       const rawOut = o.output
       const outId = typeof rawOut === 'number' ? rawOut
         : (String(rawOut).match(/^\d+$/) ? parseInt(String(rawOut), 10) : inst.outputIndex(String(rawOut)))
-      session.graphOutputs.push({ module: o.instance, output: inst.outputNames[outId] })
+      session.graphOutputs.push({ instance: o.instance, output: inst.outputNames[outId] })
     }
     return { outputs: session.graphOutputs, ...wire() }
   })
@@ -617,11 +466,6 @@ function handleLoad(args: Record<string, unknown>) {
       raw = JSON.parse(readFileSync(args.path as string, 'utf-8'))
     } else if (args.program) {
       raw = args.program
-    } else if (args.patch_path) {
-      // backward compat for load_patch alias
-      raw = JSON.parse(readFileSync(args.patch_path as string, 'utf-8'))
-    } else if (args.patch) {
-      raw = args.patch
     } else {
       throw new Error('Provide either path (file) or program (inline JSON).')
     }
@@ -765,142 +609,6 @@ function handleTool(name: string, args: Record<string, unknown>) {
       return [...params, ...triggers]
     })
 
-    // ── Deprecated aliases ────────────────────────────────────────────────
-
-    case 'define_module':
-      return handleDefineProgram(args)
-
-    case 'instantiate_module':
-      return handleAddInstance(args.type_name as string, args.instance_name as string)
-
-    case 'remove_module':
-      return handleRemoveInstance(args.instance_name as string)
-
-    case 'list_module_types':
-      return handleListPrograms()
-
-    case 'list_modules':
-      return handleListInstances()
-
-    case 'get_module_info':
-      return handleGetInfo(args.instance_name as string)
-
-    case 'connect_modules': return wrap(() => {
-      const srcInst = session.instanceRegistry.get(args.src_module as string)
-      if (!srcInst) throw new Error(`No instance named '${args.src_module}'.`)
-      const dstInst = session.instanceRegistry.get(args.dst_module as string)
-      if (!dstInst) throw new Error(`No instance named '${args.dst_module}'.`)
-
-      const srcId = resolveOutputIdx(srcInst, args.src_output as string | number)
-      const dstId = resolveInputIdx(dstInst,  args.dst_input  as string | number)
-
-      const srcOut = srcInst.outputNames[srcId]
-      const dstIn  = dstInst.inputNames[dstId]
-      const refExpr: ExprNode = { op: 'ref', module: args.src_module as string, output: srcOut }
-
-      const srcType = srcInst.outputPortType(srcId)
-      const dstType = dstInst.inputPortType(dstId)
-      const check = checkArrayConnection(srcType, dstType, refExpr)
-      if (!check.compatible) {
-        throw new Error(
-          `Connection '${args.src_module as string}'.${srcOut} → '${args.dst_module as string}'.${dstIn}: ${check.error}`
-        )
-      }
-
-      const wiringExpr = check.broadcastExpr ?? refExpr
-      session.inputExprNodes.set(`${args.dst_module as string}:${dstIn}`, wiringExpr)
-
-      return { src: args.src_module, src_output: srcOut, dst: args.dst_module, dst_input: dstIn,
-               ...(check.resultShape ? { broadcast_shape: check.resultShape } : {}),
-               ...wire() }
-    })
-
-    case 'disconnect_modules': return wrap(() => {
-      const dstInst = session.instanceRegistry.get(args.dst_module as string)
-      if (!dstInst) throw new Error(`No instance named '${args.dst_module}'.`)
-      const dstId = resolveInputIdx(dstInst, args.dst_input as string | number)
-      const dstIn = dstInst.inputNames[dstId]
-      session.inputExprNodes.delete(`${args.dst_module as string}:${dstIn}`)
-      return { dst: args.dst_module, dst_input: dstIn, ...wire() }
-    })
-
-    case 'set_module_input': return wrap(() => {
-      const instanceName = args.instance_name as string
-      const inst = session.instanceRegistry.get(instanceName)
-      if (!inst) throw new Error(`No instance named '${instanceName}'.`)
-      const rawInput = args.input_name as string | number
-      const inputId = typeof rawInput === 'number' ? rawInput
-        : (rawInput.match(/^\d+$/) ? parseInt(rawInput, 10) : inst.inputIndex(rawInput))
-      const resolvedName = inst.inputNames[inputId] ?? String(inputId)
-      validateExpr(args.expr as ExprNode, `${instanceName}.${resolvedName}`)
-      const { expr: node, resultShape } = adaptInputExpr(args.expr as ExprNode, inst.inputPortType(inputId), instanceName, resolvedName)
-      session.inputExprNodes.set(`${instanceName}:${resolvedName}`, node)
-      return { module: instanceName, input: resolvedName, expr: node,
-               ...(resultShape ? { broadcast_shape: resultShape } : {}),
-               ...wire() }
-    })
-
-    case 'set_inputs_batch': return wrap(() => {
-      const updates = args.updates as Array<{
-        instance_name: string; input_name: string | number; expr: ExprNode
-      }>
-      const results = []
-      for (const u of updates) {
-        const inst = session.instanceRegistry.get(u.instance_name)
-        if (!inst) throw new Error(`No instance named '${u.instance_name}'.`)
-        const raw = u.input_name
-        const inputId = typeof raw === 'number' ? raw
-          : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
-        const resolvedName = inst.inputNames[inputId] ?? String(inputId)
-        validateExpr(u.expr, `${u.instance_name}.${resolvedName}`)
-        const { expr } = adaptInputExpr(u.expr, inst.inputPortType(inputId), u.instance_name, resolvedName)
-        session.inputExprNodes.set(`${u.instance_name}:${resolvedName}`, expr)
-        results.push({ module: u.instance_name, input: resolvedName, expr })
-      }
-      return { updates: results, ...wire() }
-    })
-
-    case 'list_inputs':
-      return handleListWiring(args.module as string | undefined)
-
-    case 'add_graph_output': return wrap(() => {
-      const moduleName = args.module_name as string
-      const inst = session.instanceRegistry.get(moduleName)
-      if (!inst) throw new Error(`No instance named '${moduleName}'.`)
-      const rawOut = args.output_name as string | number
-      const outId = typeof rawOut === 'number' ? rawOut
-        : (String(rawOut).match(/^\d+$/) ? parseInt(String(rawOut), 10) : inst.outputIndex(rawOut))
-      const resolvedName = inst.outputNames[outId]
-      const entry = { module: moduleName, output: resolvedName }
-      if (!session.graphOutputs.some(o => o.module === entry.module && o.output === entry.output))
-        session.graphOutputs.push(entry)
-      return { ...entry, ...wire() }
-    })
-
-    case 'remove_graph_output': return wrap(() => {
-      const moduleName = args.module_name as string
-      const inst = session.instanceRegistry.get(moduleName)
-      if (!inst) throw new Error(`No instance named '${moduleName}'.`)
-      const rawOut = args.output_name as string | number
-      const outId = typeof rawOut === 'number' ? rawOut
-        : (String(rawOut).match(/^\d+$/) ? parseInt(String(rawOut), 10) : inst.outputIndex(rawOut))
-      const resolvedName = inst.outputNames[outId]
-      const before = session.graphOutputs.length
-      session.graphOutputs = session.graphOutputs.filter(
-        o => !(o.module === moduleName && o.output === resolvedName),
-      )
-      return { removed: before - session.graphOutputs.length, ...wire() }
-    })
-
-    case 'load_patch':
-      return handleLoad(args)
-
-    case 'merge_patch':
-      return handleMerge({ program: args.patch })
-
-    case 'save_patch':
-      return handleSave()
-
     default:
       return fail(`Unknown tool: '${name}'`)
   }
@@ -918,7 +626,7 @@ const RESOURCES = [
   {
     uri:         'tropical://program-format',
     name:        'Program format',
-    description: 'Reference doc for the tropical_program_1 and tropical_patch_1 schemas with worked examples.',
+    description: 'Reference doc for the tropical_program_1 schema with worked examples.',
     mimeType:    'text/markdown',
   },
 ]
@@ -943,11 +651,11 @@ function renderProgramCatalog(): string {
 const PROGRAM_FORMAT_DOC = `# tropical program format
 
 Programs are the unified representation for all DSP in tropical. A program can be:
-- **A leaf program** (has process, computes directly — like a module definition)
-- **A graph program** (has instances and audio_outputs — like a patch)
+- **A leaf program** (has process, computes directly)
+- **A graph program** (has instances and audio_outputs)
 - **A composite** (has instances, inputs, and outputs — a reusable graph)
 
-## tropical_program_1 (preferred)
+## tropical_program_1
 
 A program with instances wired together:
 
@@ -958,7 +666,7 @@ A program with instances wired together:
   }},
   "instances": {
     "osc": { "program": "VCO", "inputs": { "freq": 440 } },
-    "amp": { "program": "Gain", "inputs": { "audio": { "op": "ref", "module": "osc", "output": "sin" }, "cv": 0.5 } }
+    "amp": { "program": "Gain", "inputs": { "audio": { "op": "ref", "instance": "osc", "output": "sin" }, "cv": 0.5 } }
   },
   "audio_outputs": [{ "instance": "amp", "output": "out" }]
 }
@@ -966,8 +674,6 @@ A program with instances wired together:
 Key fields: schema, name, inputs/outputs (leaf/composite), process (leaf body),
 programs (inline subprogram defs), instances (instantiated subprograms with wiring),
 audio_outputs (graph output routing), params, regs, delays.
-
-## tropical_patch_1 (legacy, still accepted by load tool)
 
 ## Combinators (compile-time expansion)
 
@@ -983,77 +689,11 @@ audio_outputs (graph output routing), params, regs, delays.
 
 ## Expression node format (ExprNode)
 
-# tropical_patch_1 patch format
-
-Patches are JSON objects with \`"schema": "tropical_patch_1"\`.
-
-## Top-level fields
-
-- \`schema\` (required): \`"tropical_patch_1"\`
-- \`types\` (optional): inline module type definitions (avoids a separate \`define_module\` call)
-- \`modules\`: list of \`{ type, name }\` objects
-- \`input_exprs\`: list of \`{ module, input, expr }\` objects — **canonical wiring mechanism**
-- \`connections\` (legacy): list of \`{ src, src_output, dst, dst_input }\` objects; equivalent to \`input_exprs\` entries with \`{ "op": "ref" }\` expressions. Accepted on load for backward compatibility, not emitted on save.
-- \`outputs\`: list of \`{ module, output }\` objects to route to the audio mix
-- \`params\`: map of \`param_name → value\`
-
-## Inline type definitions
-
-Embed simple arithmetic types directly in \`types\` instead of calling \`define_module\` separately:
-
-\`\`\`json
-"types": [
-  {
-    "name": "VCA",
-    "inputs": ["audio", "cv"],
-    "outputs": ["out"],
-    "regs": {},
-    "process": {
-      "outputs": { "out": { "op": "mul", "lhs": { "op": "input", "name": "audio" }, "rhs": { "op": "input", "name": "cv" } } },
-      "next_regs": {}
-    }
-  }
-]
-\`\`\`
-
-## Complete example: VCO → VCA → output
-
-\`\`\`json
-{
-  "schema": "tropical_patch_1",
-  "types": [
-    {
-      "name": "VCA",
-      "inputs": ["audio", "cv"],
-      "outputs": ["out"],
-      "regs": {},
-      "process": {
-        "outputs": { "out": { "op": "mul", "lhs": { "op": "input", "name": "audio" }, "rhs": { "op": "input", "name": "cv" } } },
-        "next_regs": {}
-      }
-    }
-  ],
-  "modules": [
-    { "type": "VCO", "name": "osc" },
-    { "type": "VCA", "name": "vca" }
-  ],
-  "input_exprs": [
-    { "module": "vca", "input": "audio", "expr": { "op": "ref", "module": "osc", "output": "sin" } }
-  ],
-  "outputs": [
-    { "module": "vca", "output": "out" }
-  ],
-  "params": {}
-}
-\`\`\`
-
-## Expression node format (ExprNode)
-
-Used in \`input_exprs\`, \`set_module_input\`, \`set_inputs_batch\`, and inline type process definitions.
+Used in instance input wiring and inline program process definitions.
 
 - **Literal**: \`3.14\` or \`true\`
-- **Reference**: \`{ "op": "ref", "module": "osc", "output": "sin" }\` — routes another module's output to this input
-- **Input port**: \`{ "op": "input", "name": "freq" }\` — (inside type definitions only)
+- **Reference**: \`{ "op": "ref", "instance": "osc", "output": "sin" }\` — routes another instance's output to this input
+- **Input port**: \`{ "op": "input", "name": "freq" }\` — (inside program definitions only)
 - **Param / Trigger**: \`{ "op": "param", "name": "cutoff" }\` / \`{ "op": "trigger", "name": "gate" }\`
 - **Binary**: \`{ "op": "mul", "args": [<expr>, <expr>] }\`
   - Arithmetic: \`add\`, \`sub\`, \`mul\`, \`div\`, \`floor_div\`, \`mod\`, \`pow\`, \`matmul\`

@@ -12,8 +12,8 @@
  * and wiring expressions survive.
  */
 
-import type { ExprNode } from './patch'
-import type { CompiledPatch, ModuleInfo } from './compiler'
+import type { ExprNode } from './session'
+import type { CompiledPatch, InstanceInfo } from './compiler'
 
 // ─────────────────────────────────────────────────────────────
 // Plan schema
@@ -144,10 +144,10 @@ export function generatePlan(
 
   // Build output entries
   const outputs: OutputEntry[] = []
-  for (const { module, output } of patch.graphOutputs) {
-    const kernelId = kernelIds.get(module)
+  for (const { instance, output } of patch.graphOutputs) {
+    const kernelId = kernelIds.get(instance)
     if (kernelId === undefined) continue
-    const info = patch.modules.get(module)!
+    const info = patch.modules.get(instance)!
     const outputIdx = info.outputNames.indexOf(output)
     if (outputIdx === -1) continue
     outputs.push({
@@ -240,14 +240,14 @@ export function validatePlan(plan: ExecutionPlan): void {
   for (const w of plan.wiring) {
     const refs = collectRefs(w.expr)
     for (const ref of refs) {
-      if (!nameMap.has(ref.module)) {
+      if (!nameMap.has(ref.instance)) {
         throw new PlanValidationError(
           `Wiring expr for '${kernelMap.get(w.kernel)!.name}.${w.input_name}' ` +
-          `references unknown module '${ref.module}'`
+          `references unknown instance '${ref.instance}'`
         )
       }
-      // Check that the referenced module is in a prior or same group (no forward refs)
-      const refKernelId = nameMap.get(ref.module)!
+      // Check that the referenced instance is in a prior or same group (no forward refs)
+      const refKernelId = nameMap.get(ref.instance)!
       const refKernel = kernelMap.get(refKernelId)!
       const targetKernel = kernelMap.get(w.kernel)!
       if (refKernel.group >= targetKernel.group && refKernel.id !== targetKernel.id) {
@@ -257,7 +257,7 @@ export function validatePlan(plan: ExecutionPlan): void {
         if (refKernel.group > targetKernel.group) {
           throw new PlanValidationError(
             `Wiring for '${targetKernel.name}.${w.input_name}' references ` +
-            `'${ref.module}' which executes in a later group (${refKernel.group} > ${targetKernel.group})`
+            `'${ref.instance}' which executes in a later group (${refKernel.group} > ${targetKernel.group})`
           )
         }
       }
@@ -290,14 +290,14 @@ export function validatePlan(plan: ExecutionPlan): void {
   }
 }
 
-/** Extract all {module, output} refs from an ExprNode. */
-function collectRefs(node: ExprNode): Array<{ module: string; output: string }> {
-  const refs: Array<{ module: string; output: string }> = []
+/** Extract all {instance, output} refs from an ExprNode. */
+function collectRefs(node: ExprNode): Array<{ instance: string; output: string }> {
+  const refs: Array<{ instance: string; output: string }> = []
   walkRefs(node, refs)
   return refs
 }
 
-function walkRefs(node: ExprNode, refs: Array<{ module: string; output: string }>): void {
+function walkRefs(node: ExprNode, refs: Array<{ instance: string; output: string }>): void {
   if (typeof node === 'number' || typeof node === 'boolean') return
   if (Array.isArray(node)) {
     for (const item of node) walkRefs(item, refs)
@@ -305,7 +305,7 @@ function walkRefs(node: ExprNode, refs: Array<{ module: string; output: string }
   }
   const n = node as { op: string; [k: string]: unknown }
   if (n.op === 'ref') {
-    refs.push({ module: n.module as string, output: n.output as string })
+    refs.push({ instance: n.instance as string, output: n.output as string })
     return
   }
   for (const arg of ((n.args as ExprNode[]) ?? [])) walkRefs(arg, refs)
