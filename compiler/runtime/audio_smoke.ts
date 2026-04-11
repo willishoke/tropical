@@ -18,7 +18,7 @@ loadJSON({
   instances: {
     VCO1: { program: 'VCO', inputs: { freq: 440 } },
     VCA1: { program: 'VCA', inputs: {
-      audio: { op: 'ref', module: 'VCO1', output: 'saw' },
+      audio: { op: 'ref', instance: 'VCO1', output: 'saw' },
       cv: 0.3,
     }},
   },

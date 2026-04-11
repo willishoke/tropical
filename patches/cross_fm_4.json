@@ -15,19 +15,19 @@
               "args": [
                 {
                   "op": "ref",
-                  "module": "d2",
+                  "instance": "d2",
                   "output": "y"
                 },
                 {
                   "op": "ref",
-                  "module": "d3",
+                  "instance": "d3",
                   "output": "y"
                 }
               ]
             },
             {
               "op": "ref",
-              "module": "d4",
+              "instance": "d4",
               "output": "y"
             }
           ]
@@ -47,19 +47,19 @@
               "args": [
                 {
                   "op": "ref",
-                  "module": "d1",
+                  "instance": "d1",
                   "output": "y"
                 },
                 {
                   "op": "ref",
-                  "module": "d3",
+                  "instance": "d3",
                   "output": "y"
                 }
               ]
             },
             {
               "op": "ref",
-              "module": "d4",
+              "instance": "d4",
               "output": "y"
             }
           ]
@@ -79,19 +79,19 @@
               "args": [
                 {
                   "op": "ref",
-                  "module": "d1",
+                  "instance": "d1",
                   "output": "y"
                 },
                 {
                   "op": "ref",
-                  "module": "d2",
+                  "instance": "d2",
                   "output": "y"
                 }
               ]
             },
             {
               "op": "ref",
-              "module": "d4",
+              "instance": "d4",
               "output": "y"
             }
           ]
@@ -111,19 +111,19 @@
               "args": [
                 {
                   "op": "ref",
-                  "module": "d1",
+                  "instance": "d1",
                   "output": "y"
                 },
                 {
                   "op": "ref",
-                  "module": "d2",
+                  "instance": "d2",
                   "output": "y"
                 }
               ]
             },
             {
               "op": "ref",
-              "module": "d3",
+              "instance": "d3",
               "output": "y"
             }
           ]
@@ -135,7 +135,7 @@
       "inputs": {
         "x": {
           "op": "ref",
-          "module": "vco1",
+          "instance": "vco1",
           "output": "sin"
         }
       }
@@ -145,7 +145,7 @@
       "inputs": {
         "x": {
           "op": "ref",
-          "module": "vco2",
+          "instance": "vco2",
           "output": "sin"
         }
       }
@@ -155,7 +155,7 @@
       "inputs": {
         "x": {
           "op": "ref",
-          "module": "vco3",
+          "instance": "vco3",
           "output": "sin"
         }
       }
@@ -165,7 +165,7 @@
       "inputs": {
         "x": {
           "op": "ref",
-          "module": "vco4",
+          "instance": "vco4",
           "output": "sin"
         }
       }

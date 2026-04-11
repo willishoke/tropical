@@ -56,11 +56,11 @@ export interface SessionState {
   dac: import('./runtime/audio.js').DAC | null  // lazy type import to avoid circular dep
   typeRegistry: Map<string, ProgramType>
   instanceRegistry: Map<string, ProgramInstance>
-  graphOutputs: Array<{ module: string; output: string }>
+  graphOutputs: Array<{ instance: string; output: string }>
   paramRegistry: Map<string, Param>
   triggerRegistry: Map<string, Trigger>
-  /** Canonical input wiring: key is `${module}:${input}`, value is the ExprNode for round-trip save. */
-  inputExprNodes: Map<string, ExprNode>  // key: `${module}:${input}`
+  /** Canonical input wiring: key is `${instance}:${input}`, value is the ExprNode for round-trip save. */
+  inputExprNodes: Map<string, ExprNode>  // key: `${instance}:${input}`
   /** FlatRuntime — all audio goes through this. */
   runtime: Runtime
   /** Thin proxy over runtime that matches the old Graph interface for tests and legacy callers. */
@@ -382,7 +382,7 @@ export function prettyExpr(
   const args = (n.args as ExprNode[] | undefined) ?? []
 
   if (op === 'ref') {
-    const mod = n.module as string
+    const mod = n.instance as string
     const out = n.output
     const inst = instanceRegistry.get(mod)
     const outName = inst && typeof out === 'number' ? (inst.outputNames[out] ?? String(out)) : String(out)

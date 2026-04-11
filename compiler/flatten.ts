@@ -47,7 +47,7 @@ function inferExprOutputType(
   const obj = expr as Record<string, unknown>
   switch (obj.op as string) {
     case 'ref': {
-      const modInfo = instanceInfos.get(obj.module as string)
+      const modInfo = instanceInfos.get(obj.instance as string)
       if (!modInfo) return undefined
       const outName = obj.output as string | number
       const outIdx = typeof outName === 'number' ? outName : modInfo.outputNames.indexOf(outName)
@@ -633,7 +633,7 @@ function resolveRefs(
   const obj = node as { op: string; [k: string]: unknown }
 
   if (obj.op === 'ref') {
-    const instanceName = obj.module as string
+    const instanceName = obj.instance as string
     const instanceOutputs = outputExprs.get(instanceName)
     if (!instanceOutputs) throw new Error(`flatten: unresolved ref to unknown instance '${instanceName}'`)
 
@@ -1113,12 +1113,12 @@ export function flattenSession(session: SessionState): FlatPlan {
     outputBase += inst._def.outputNames.length
   }
 
-  for (const { module, output } of graphOutputs) {
-    const inst = instances.get(module)
+  for (const { instance, output } of graphOutputs) {
+    const inst = instances.get(instance)
     if (!inst) continue
     const outputIdx = inst._def.outputNames.indexOf(output)
     if (outputIdx === -1) continue
-    const flatIdx = (outputStart.get(module) ?? 0) + outputIdx
+    const flatIdx = (outputStart.get(instance) ?? 0) + outputIdx
     outputIndices.push(flatIdx)
   }
 

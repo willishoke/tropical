@@ -171,7 +171,7 @@ describe('lowerMatmul', () => {
   test('identity @ vector leaves vector elements structurally correct', () => {
     // I2 = [[1,0],[0,1]], v = [a, b] — result should be [a, b]
     // With symbolic inputs, the index ops stay; check shape only
-    const ref: ExprNode = { op: 'ref', module: 'M', output: 'v' }
+    const ref: ExprNode = { op: 'ref', instance: 'M', output: 'v' }
     const I2 = [1, 0, 0, 1]
     const node: ExprNode = {
       op: 'matmul',

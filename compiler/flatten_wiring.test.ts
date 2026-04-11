@@ -26,8 +26,8 @@ function makeInfo(
   }
 }
 
-const ref = (module: string, output: string): ExprNode =>
-  ({ op: 'ref', module, output })
+const ref = (instance: string, output: string): ExprNode =>
+  ({ op: 'ref', instance, output })
 
 // ─────────────────────────────────────────────────────────────
 // Tests

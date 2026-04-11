@@ -142,7 +142,7 @@ export function loadProgramAsSession(
     }
     const inst = session.instanceRegistry.get(out.instance)
     if (!inst) throw new Error(`Output instance '${out.instance}' not found.`)
-    session.graphOutputs.push({ module: out.instance, output: String(out.output) })
+    session.graphOutputs.push({ instance: out.instance, output: String(out.output) })
   }
 
   // Compile and load
@@ -236,7 +236,7 @@ export function mergeProgramIntoSession(
     }
     const inst = session.instanceRegistry.get(out.instance)
     if (!inst) throw new Error(`Output instance '${out.instance}' not found.`)
-    session.graphOutputs.push({ module: out.instance, output: String(out.output) })
+    session.graphOutputs.push({ instance: out.instance, output: String(out.output) })
   }
 
   // Recompile
@@ -309,7 +309,7 @@ export function saveProgramFromSession(
   // Audio outputs
   if (session.graphOutputs.length) {
     prog.audio_outputs = session.graphOutputs.map(o => ({
-      instance: o.module, output: o.output,
+      instance: o.instance, output: o.output,
     }))
   }
 

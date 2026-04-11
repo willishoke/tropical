@@ -63,7 +63,7 @@ function adaptInputExpr(
   } else if (typeof node === 'object' && node !== null) {
     const obj = node as Record<string, unknown>
     if (obj.op === 'ref') {
-      const srcInst = session.instanceRegistry.get(obj.module as string)
+      const srcInst = session.instanceRegistry.get(obj.instance as string)
       if (srcInst) {
         const outName = obj.output as string | number
         const outIdx = typeof outName === 'number' ? outName : srcInst.outputNames.indexOf(String(outName))
@@ -347,7 +347,7 @@ function handleRemoveInstance(instanceName: string) {
     for (const [key, expr] of [...session.inputExprNodes.entries()]) {
       if (exprDependencies(expr).has(instanceName)) session.inputExprNodes.delete(key)
     }
-    session.graphOutputs = session.graphOutputs.filter(o => o.module !== instanceName)
+    session.graphOutputs = session.graphOutputs.filter(o => o.instance !== instanceName)
     return { removed: instanceName, ...wire() }
   })
 }
@@ -453,7 +453,7 @@ function handleSetOutput(args: Record<string, unknown>) {
       const rawOut = o.output
       const outId = typeof rawOut === 'number' ? rawOut
         : (String(rawOut).match(/^\d+$/) ? parseInt(String(rawOut), 10) : inst.outputIndex(String(rawOut)))
-      session.graphOutputs.push({ module: o.instance, output: inst.outputNames[outId] })
+      session.graphOutputs.push({ instance: o.instance, output: inst.outputNames[outId] })
     }
     return { outputs: session.graphOutputs, ...wire() }
   })
@@ -666,7 +666,7 @@ A program with instances wired together:
   }},
   "instances": {
     "osc": { "program": "VCO", "inputs": { "freq": 440 } },
-    "amp": { "program": "Gain", "inputs": { "audio": { "op": "ref", "module": "osc", "output": "sin" }, "cv": 0.5 } }
+    "amp": { "program": "Gain", "inputs": { "audio": { "op": "ref", "instance": "osc", "output": "sin" }, "cv": 0.5 } }
   },
   "audio_outputs": [{ "instance": "amp", "output": "out" }]
 }
@@ -692,7 +692,7 @@ audio_outputs (graph output routing), params, regs, delays.
 Used in instance input wiring and inline program process definitions.
 
 - **Literal**: \`3.14\` or \`true\`
-- **Reference**: \`{ "op": "ref", "module": "osc", "output": "sin" }\` — routes another instance's output to this input
+- **Reference**: \`{ "op": "ref", "instance": "osc", "output": "sin" }\` — routes another instance's output to this input
 - **Input port**: \`{ "op": "input", "name": "freq" }\` — (inside program definitions only)
 - **Param / Trigger**: \`{ "op": "param", "name": "cutoff" }\` / \`{ "op": "trigger", "name": "gate" }\`
 - **Binary**: \`{ "op": "mul", "args": [<expr>, <expr>] }\`

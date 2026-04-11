@@ -49,7 +49,7 @@
                           "args": [
                             {
                               "op": "ref",
-                              "module": "VCOBit0",
+                              "instance": "VCOBit0",
                               "output": "sqr"
                             },
                             0
@@ -66,7 +66,7 @@
                           "args": [
                             {
                               "op": "ref",
-                              "module": "VCOBit1",
+                              "instance": "VCOBit1",
                               "output": "sqr"
                             },
                             0
@@ -99,7 +99,7 @@
       "inputs": {
         "gate": {
           "op": "ref",
-          "module": "ClockStep",
+          "instance": "ClockStep",
           "output": "output"
         },
         "attack": 0.005,
@@ -113,7 +113,7 @@
       "inputs": {
         "gate": {
           "op": "ref",
-          "module": "ClockStep",
+          "instance": "ClockStep",
           "output": "output"
         },
         "attack": 0.002,
@@ -127,7 +127,7 @@
       "inputs": {
         "input": {
           "op": "ref",
-          "module": "VCOBass",
+          "instance": "VCOBass",
           "output": "saw"
         },
         "cutoff": {
@@ -140,7 +140,7 @@
                 5200,
                 {
                   "op": "ref",
-                  "module": "EnvBassFilt",
+                  "instance": "EnvBassFilt",
                   "output": "env"
                 }
               ]
@@ -156,7 +156,7 @@
       "inputs": {
         "gate": {
           "op": "ref",
-          "module": "ClockBeat",
+          "instance": "ClockBeat",
           "output": "output"
         },
         "freq": 55,
@@ -170,7 +170,7 @@
       "inputs": {
         "clock": {
           "op": "ref",
-          "module": "ClockFast",
+          "instance": "ClockFast",
           "output": "output"
         }
       }
@@ -180,7 +180,7 @@
       "inputs": {
         "gate": {
           "op": "ref",
-          "module": "ClockHat",
+          "instance": "ClockHat",
           "output": "output"
         },
         "attack": 0.001,
@@ -192,7 +192,7 @@
       "inputs": {
         "audio": {
           "op": "ref",
-          "module": "FiltBass",
+          "instance": "FiltBass",
           "output": "lp"
         },
         "cv": {
@@ -201,7 +201,7 @@
             0.75,
             {
               "op": "ref",
-              "module": "EnvBassAmp",
+              "instance": "EnvBassAmp",
               "output": "env"
             }
           ]
@@ -213,7 +213,7 @@
       "inputs": {
         "audio": {
           "op": "ref",
-          "module": "HatNoise",
+          "instance": "HatNoise",
           "output": "out"
         },
         "cv": {
@@ -222,7 +222,7 @@
             0.25,
             {
               "op": "ref",
-              "module": "EnvHat",
+              "instance": "EnvHat",
               "output": "env"
             }
           ]

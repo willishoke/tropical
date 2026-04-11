@@ -132,7 +132,7 @@ function walkExprRefs(node: ExprNode, deps: Set<string>): void {
   }
   const n = node as { op: string; [k: string]: unknown }
   if (n.op === 'ref') {
-    deps.add(n.module as string)
+    deps.add(n.instance as string)
     return
   }
   // Walk standard args
@@ -334,7 +334,7 @@ export function instanceToTerm(info: InstanceInfo): Term {
 // ─────────────────────────────────────────────────────────────
 
 interface Wire {
-  module: string
+  instance: string
   output: string
   type: PortType
 }
@@ -394,8 +394,8 @@ function buildWiringMorphism(
 
   // Passthrough: identity on each env signal
   for (const w of env.wires) {
-    wiringExprs[`_pass.${w.module}.${w.output}`] = {
-      op: 'ref', module: w.module, output: w.output,
+    wiringExprs[`_pass.${w.instance}.${w.output}`] = {
+      op: 'ref', instance: w.instance, output: w.output,
     }
   }
 
@@ -414,7 +414,7 @@ function buildWiringMorphism(
 
   return morphism('wiring', from, to, {
     tag: 'expr',
-    inputNames: env.wires.map(w => `${w.module}.${w.output}`),
+    inputNames: env.wires.map(w => `${w.instance}.${w.output}`),
     outputExprs: wiringExprs,
   })
 }
@@ -425,7 +425,7 @@ function buildWiringMorphism(
  */
 function buildOutputProjection(
   env: SignalEnv,
-  graphOutputs: Array<{ module: string; output: string }>,
+  graphOutputs: Array<{ instance: string; output: string }>,
   modules: Map<string, InstanceInfo>,
 ): Term {
   if (graphOutputs.length === 0) {
@@ -437,18 +437,18 @@ function buildOutputProjection(
   const outputTypes: PortType[] = []
   const projExprs: Record<string, ExprNode> = {}
 
-  for (const { module, output } of graphOutputs) {
-    const info = modules.get(module)
-    if (!info) throw new CompilerError(`Output references unknown instance '${module}'`)
+  for (const { instance, output } of graphOutputs) {
+    const info = modules.get(instance)
+    if (!info) throw new CompilerError(`Output references unknown instance '${instance}'`)
     const idx = info.outputNames.indexOf(output)
-    if (idx === -1) throw new CompilerError(`Output references unknown output '${module}.${output}'`)
+    if (idx === -1) throw new CompilerError(`Output references unknown output '${instance}.${output}'`)
     outputTypes.push(info.outputTypes[idx])
-    projExprs[`${module}.${output}`] = { op: 'ref', module, output }
+    projExprs[`${instance}.${output}`] = { op: 'ref', instance, output }
   }
 
   return morphism('output', envType(env), product(outputTypes), {
     tag: 'expr',
-    inputNames: env.wires.map(w => `${w.module}.${w.output}`),
+    inputNames: env.wires.map(w => `${w.instance}.${w.output}`),
     outputExprs: projExprs,
   })
 }
@@ -461,7 +461,7 @@ function buildOutputProjection(
 export interface CompilerInput {
   modules: Map<string, InstanceInfo>
   inputExprNodes: Map<string, ExprNode>
-  graphOutputs: Array<{ module: string; output: string }>
+  graphOutputs: Array<{ instance: string; output: string }>
 }
 
 /** The result of compilation. */
@@ -477,7 +477,7 @@ export interface CompiledPatch {
   /** Input wiring expressions (carried through for plan generation). */
   inputExprNodes: Map<string, ExprNode>
   /** Graph outputs (carried through for plan generation). */
-  graphOutputs: Array<{ module: string; output: string }>
+  graphOutputs: Array<{ instance: string; output: string }>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -562,7 +562,7 @@ export function compilePatch(input: CompilerInput): CompiledPatch {
     for (const info of levelInfos) {
       for (let j = 0; j < info.outputNames.length; j++) {
         env.wires.push({
-          module: info.name,
+          instance: info.name,
           output: info.outputNames[j],
           type: info.outputTypes[j],
         })

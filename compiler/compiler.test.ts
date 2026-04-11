@@ -123,7 +123,7 @@ describe('exprDependencies', () => {
   })
 
   test('ref extracts module name', () => {
-    const expr: ExprNode = { op: 'ref', module: 'VCO1', output: 'sin' }
+    const expr: ExprNode = { op: 'ref', instance: 'VCO1', output: 'sin' }
     const deps = exprDependencies(expr)
     expect(deps.size).toBe(1)
     expect(deps.has('VCO1')).toBe(true)
@@ -133,8 +133,8 @@ describe('exprDependencies', () => {
     const expr: ExprNode = {
       op: 'mul',
       args: [
-        { op: 'ref', module: 'VCO1', output: 'sin' },
-        { op: 'ref', module: 'LFO1', output: 'out' },
+        { op: 'ref', instance: 'VCO1', output: 'sin' },
+        { op: 'ref', instance: 'LFO1', output: 'out' },
       ],
     }
     const deps = exprDependencies(expr)
@@ -147,7 +147,7 @@ describe('exprDependencies', () => {
     const expr: ExprNode = {
       op: 'mul',
       args: [
-        { op: 'ref', module: 'VCO1', output: 'sin' },
+        { op: 'ref', instance: 'VCO1', output: 'sin' },
         0.5,
       ],
     }
@@ -158,8 +158,8 @@ describe('exprDependencies', () => {
 
   test('array expression', () => {
     const expr: ExprNode = [
-      { op: 'ref', module: 'A', output: 'x' },
-      { op: 'ref', module: 'B', output: 'y' },
+      { op: 'ref', instance: 'A', output: 'x' },
+      { op: 'ref', instance: 'B', output: 'y' },
     ]
     const deps = exprDependencies(expr)
     expect(deps.size).toBe(2)
@@ -179,7 +179,7 @@ describe('buildDependencyGraph', () => {
   test('simple chain A → B', () => {
     const exprs = new Map<string, ExprNode>([
       ['A:freq', 440],
-      ['B:in', { op: 'ref', module: 'A', output: 'out' }],
+      ['B:in', { op: 'ref', instance: 'A', output: 'out' }],
     ])
     const graph = buildDependencyGraph(['A', 'B'], exprs)
     expect(graph.get('A')!.size).toBe(0)
@@ -188,10 +188,10 @@ describe('buildDependencyGraph', () => {
 
   test('diamond: A → B, A → C, B → D, C → D', () => {
     const exprs = new Map<string, ExprNode>([
-      ['B:in', { op: 'ref', module: 'A', output: 'out' }],
-      ['C:in', { op: 'ref', module: 'A', output: 'out' }],
-      ['D:x', { op: 'ref', module: 'B', output: 'out' }],
-      ['D:y', { op: 'ref', module: 'C', output: 'out' }],
+      ['B:in', { op: 'ref', instance: 'A', output: 'out' }],
+      ['C:in', { op: 'ref', instance: 'A', output: 'out' }],
+      ['D:x', { op: 'ref', instance: 'B', output: 'out' }],
+      ['D:y', { op: 'ref', instance: 'C', output: 'out' }],
     ])
     const graph = buildDependencyGraph(['A', 'B', 'C', 'D'], exprs)
     expect(graph.get('A')!.size).toBe(0)
@@ -203,7 +203,7 @@ describe('buildDependencyGraph', () => {
 
   test('ignores self-references', () => {
     const exprs = new Map<string, ExprNode>([
-      ['A:in', { op: 'ref', module: 'A', output: 'out' }],
+      ['A:in', { op: 'ref', instance: 'A', output: 'out' }],
     ])
     const graph = buildDependencyGraph(['A'], exprs)
     expect(graph.get('A')!.size).toBe(0)
@@ -211,7 +211,7 @@ describe('buildDependencyGraph', () => {
 
   test('ignores refs to unknown modules', () => {
     const exprs = new Map<string, ExprNode>([
-      ['A:in', { op: 'ref', module: 'UNKNOWN', output: 'out' }],
+      ['A:in', { op: 'ref', instance: 'UNKNOWN', output: 'out' }],
     ])
     const graph = buildDependencyGraph(['A'], exprs)
     expect(graph.get('A')!.size).toBe(0)
@@ -440,7 +440,7 @@ describe('compilePatch', () => {
         ['Gain1', modInfo('Gain1', { inputs: ['in'], outputs: ['out'] })],
       ]),
       inputExprNodes: new Map([['Gain1:in', 1.0]]),
-      graphOutputs: [{ module: 'Gain1', output: 'out' }],
+      graphOutputs: [{ instance: 'Gain1', output: 'out' }],
     }
     const result = compilePatch(input)
     // Should type-check without error
@@ -459,9 +459,9 @@ describe('compilePatch', () => {
       ]),
       inputExprNodes: new Map([
         ['A:freq', 440],
-        ['B:in', { op: 'ref', module: 'A', output: 'out' }],
+        ['B:in', { op: 'ref', instance: 'A', output: 'out' }],
       ]),
-      graphOutputs: [{ module: 'B', output: 'out' }],
+      graphOutputs: [{ instance: 'B', output: 'out' }],
     }
     const result = compilePatch(input)
     const t = inferType(result.term)
@@ -481,8 +481,8 @@ describe('compilePatch', () => {
         ['B:freq', 880],
       ]),
       graphOutputs: [
-        { module: 'A', output: 'out' },
-        { module: 'B', output: 'out' },
+        { instance: 'A', output: 'out' },
+        { instance: 'B', output: 'out' },
       ],
     }
     const result = compilePatch(input)
@@ -503,12 +503,12 @@ describe('compilePatch', () => {
       ]),
       inputExprNodes: new Map<string, ExprNode>([
         ['A:freq', 100],
-        ['B:in', { op: 'ref', module: 'A', output: 'out' }],
-        ['C:in', { op: 'ref', module: 'A', output: 'out' }],
-        ['D:x', { op: 'ref', module: 'B', output: 'out' }],
-        ['D:y', { op: 'ref', module: 'C', output: 'out' }],
+        ['B:in', { op: 'ref', instance: 'A', output: 'out' }],
+        ['C:in', { op: 'ref', instance: 'A', output: 'out' }],
+        ['D:x', { op: 'ref', instance: 'B', output: 'out' }],
+        ['D:y', { op: 'ref', instance: 'C', output: 'out' }],
       ]),
-      graphOutputs: [{ module: 'D', output: 'out' }],
+      graphOutputs: [{ instance: 'D', output: 'out' }],
     }
     const result = compilePatch(input)
     const t = inferType(result.term)
@@ -529,7 +529,7 @@ describe('compilePatch', () => {
         })],
       ]),
       inputExprNodes: new Map([['Osc1:freq', 440]]),
-      graphOutputs: [{ module: 'Osc1', output: 'out' }],
+      graphOutputs: [{ instance: 'Osc1', output: 'out' }],
     }
     const result = compilePatch(input)
     const t = inferType(result.term)
@@ -546,11 +546,11 @@ describe('compilePatch', () => {
       inputExprNodes: new Map<string, ExprNode>([
         ['A:freq', 440],
         ['B:in', { op: 'mul', args: [
-          { op: 'ref', module: 'A', output: 'out' },
+          { op: 'ref', instance: 'A', output: 'out' },
           0.5,
         ]}],
       ]),
-      graphOutputs: [{ module: 'B', output: 'out' }],
+      graphOutputs: [{ instance: 'B', output: 'out' }],
     }
     const result = compilePatch(input)
     const t = inferType(result.term)
@@ -565,8 +565,8 @@ describe('compilePatch', () => {
         ['B', modInfo('B', { inputs: ['in'], outputs: ['out'] })],
       ]),
       inputExprNodes: new Map<string, ExprNode>([
-        ['A:in', { op: 'ref', module: 'B', output: 'out' }],
-        ['B:in', { op: 'ref', module: 'A', output: 'out' }],
+        ['A:in', { op: 'ref', instance: 'B', output: 'out' }],
+        ['B:in', { op: 'ref', instance: 'A', output: 'out' }],
       ]),
       graphOutputs: [],
     }
@@ -599,12 +599,12 @@ describe('compilePatch', () => {
       ]),
       inputExprNodes: new Map<string, ExprNode>([
         ['VCO:freq', 440],
-        ['FiltA:in', { op: 'ref', module: 'VCO', output: 'saw' }],
-        ['FiltB:in', { op: 'ref', module: 'VCO', output: 'sin' }],
+        ['FiltA:in', { op: 'ref', instance: 'VCO', output: 'saw' }],
+        ['FiltB:in', { op: 'ref', instance: 'VCO', output: 'sin' }],
       ]),
       graphOutputs: [
-        { module: 'FiltA', output: 'out' },
-        { module: 'FiltB', output: 'out' },
+        { instance: 'FiltA', output: 'out' },
+        { instance: 'FiltB', output: 'out' },
       ],
     }
     const result = compilePatch(input)
@@ -633,9 +633,9 @@ describe('compilePatch', () => {
       ]),
       inputExprNodes: new Map<string, ExprNode>([
         ['Gate:thresh', 0.5],
-        ['Counter:gate', { op: 'ref', module: 'Gate', output: 'out' }],
+        ['Counter:gate', { op: 'ref', instance: 'Gate', output: 'out' }],
       ]),
-      graphOutputs: [{ module: 'Counter', output: 'count' }],
+      graphOutputs: [{ instance: 'Counter', output: 'count' }],
     }
     const result = compilePatch(input)
     const t = inferType(result.term)
@@ -665,7 +665,7 @@ describe('compilePatch', () => {
         })],
       ]),
       inputExprNodes: new Map(),
-      graphOutputs: [{ module: 'M', output: 'out' }],
+      graphOutputs: [{ instance: 'M', output: 'out' }],
     }
     const result = compilePatch(input)
     const t = inferType(result.term)

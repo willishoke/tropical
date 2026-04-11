@@ -37,9 +37,9 @@ describe('applySessionWiring', () => {
 
     // Simulate connect_modules + set_module_input + add_graph_output
     session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
     session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
 
     applySessionWiring(session)
     session.graph.primeJit()
@@ -59,7 +59,7 @@ describe('applySessionWiring', () => {
       instances: {
         VCO1: { program: 'VCO', inputs: { freq: 440 } },
         VCA1: { program: 'VCA', inputs: {
-          audio: { op: 'ref', module: 'VCO1', output: 'saw' } as ExprNode,
+          audio: { op: 'ref', instance: 'VCO1', output: 'saw' } as ExprNode,
           cv: 1.0,
         }},
       },
@@ -79,9 +79,9 @@ describe('applySessionWiring', () => {
       VCA1: { program: 'VCA' },
     })
     session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
     session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
 
     applySessionWiring(session)
     session.graph.primeJit()
@@ -104,9 +104,9 @@ describe('applySessionWiring', () => {
 
     // Wire up
     session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
     session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
@@ -133,9 +133,9 @@ describe('applySessionWiring', () => {
 
     // Output from VCA1 via VCO1
     session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
     session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
@@ -144,7 +144,7 @@ describe('applySessionWiring', () => {
 
     // Switch output to VCO2 directly (simulates remove_graph_output + add_graph_output)
     session.inputExprNodes.set('VCO2:freq', 880)
-    session.graphOutputs = [{ module: 'VCO2', output: 'saw' }]
+    session.graphOutputs = [{ instance: 'VCO2', output: 'saw' }]
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
@@ -173,10 +173,10 @@ describe('applySessionWiring', () => {
     session.inputExprNodes.set('VCO2:freq', 880)
     session.inputExprNodes.set('VCA1:audio', {
       op: 'add',
-      args: [{ op: 'ref', module: 'VCO1', output: 'saw' }, { op: 'ref', module: 'VCO2', output: 'saw' }],
+      args: [{ op: 'ref', instance: 'VCO1', output: 'saw' }, { op: 'ref', instance: 'VCO2', output: 'saw' }],
     } as ExprNode)
     session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
 
     // Single applySessionWiring call
     applySessionWiring(session)
@@ -198,16 +198,16 @@ describe('applySessionWiring', () => {
     // Initial: VCO1 → VCA1
     session.inputExprNodes.set('VCO1:freq', 440)
     session.inputExprNodes.set('VCO2:freq', 880)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
     session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
     const buf1 = new Float64Array(session.graph.outputBuffer)
 
     // Rewire: VCO2 → VCA1 (different frequency, should produce different output)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO2', output: 'saw' })
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO2', output: 'saw' })
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
@@ -236,10 +236,10 @@ describe('applySessionWiring', () => {
     session.inputExprNodes.set('VCO1:freq', 440)
     session.inputExprNodes.set('VCA1:audio', {
       op: 'mul',
-      args: [{ op: 'ref', module: 'VCO1', output: 'saw' }, 0.5],
+      args: [{ op: 'ref', instance: 'VCO1', output: 'saw' }, 0.5],
     } as ExprNode)
     session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
 
     applySessionWiring(session)
     session.graph.primeJit()
@@ -261,9 +261,9 @@ describe('applyFlatPlan', () => {
     })
 
     session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
     session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
 
     const rt = new Runtime(256)
     applyFlatPlan(session, rt)
@@ -283,7 +283,7 @@ describe('applyFlatPlan', () => {
 
     session.inputExprNodes.set('Clock1:freq', 1.0)
     session.inputExprNodes.set('Clock1:ratios_in', [1.0])
-    session.graphOutputs.push({ module: 'Clock1', output: 'output' })
+    session.graphOutputs.push({ instance: 'Clock1', output: 'output' })
 
     const rt = new Runtime(256)
     applyFlatPlan(session, rt)
@@ -303,9 +303,9 @@ describe('applyFlatPlan', () => {
       VCA1: { program: 'VCA' },
     })
     session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
     session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
 
     const rt = new Runtime(256)
     applyFlatPlan(session, rt)
@@ -340,9 +340,9 @@ describe('applyFlatPlan', () => {
     })
 
     session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', module: 'VCO1', output: 'saw' })
+    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
     session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ module: 'VCA1', output: 'out' })
+    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
 
     const rt = new Runtime(256)
     applyFlatPlan(session, rt)

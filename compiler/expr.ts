@@ -323,8 +323,8 @@ export function registerExpr(regId: number): SignalExpr {
   return SignalExpr.fromNode({ op: 'reg', id: regId })
 }
 
-export function refExpr(moduleName: string, outputId: number): SignalExpr {
-  return SignalExpr.fromNode({ op: 'ref', module: moduleName, output: outputId })
+export function refExpr(instanceName: string, outputId: number): SignalExpr {
+  return SignalExpr.fromNode({ op: 'ref', instance: instanceName, output: outputId })
 }
 
 export function nestedOutputExpr(nodeId: number, outputId: number): SignalExpr {
@@ -527,13 +527,13 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
     return
   }
 
-  // ref: requires module and output
+  // ref: requires instance and output
   if (op === 'ref') {
-    if (typeof obj.module !== 'string') {
-      throw new Error(`${path}: 'ref' requires 'module' (string), got ${typeof obj.module}. Use {op: "ref", module: "name", output: "port"}`)
+    if (typeof obj.instance !== 'string') {
+      throw new Error(`${path}: 'ref' requires 'instance' (string), got ${typeof obj.instance}. Use {op: "ref", instance: "name", output: "port"}`)
     }
     if (obj.output === undefined) {
-      throw new Error(`${path}: 'ref' requires 'output'. Use {op: "ref", module: "${obj.module}", output: "port_name"}`)
+      throw new Error(`${path}: 'ref' requires 'output'. Use {op: "ref", instance: "${obj.instance}", output: "port_name"}`)
     }
     return
   }
