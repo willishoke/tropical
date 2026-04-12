@@ -10,11 +10,7 @@ runtime/  FlatRuntime.hpp/.cpp   Plan loading, double-buffered kernel execution
           NumericProgramParser.hpp   tropical_plan_4 JSON → FlatProgram struct
 jit/      OrcJitEngine.hpp/.cpp  LLVM ORC JIT (FlatProgram → native kernel)
 dac/      TropicalDAC.hpp        Audio output via RtAudio (templated driver)
-expr/     Expr.hpp               Expression AST: Value (tagged union), ExprSpec (tree), ExprKind enum
-          ExprEval.hpp           Value-level interpreter (used during compilation, not runtime)
-          ExprRewrite.hpp/.cpp   Constant folding, algebraic simplification, dead ref replacement
-          ExprStructural.hpp/.cpp  Structural hashing, equality, function inlining
-graph/    GraphTypes.hpp         Type alias hub (imports from tropical_expr namespaces)
+ControlParam.hpp                 Lock-free atomic parameter struct (shared by runtime + C API)
 tests/    test_module_process.cpp  C API + JIT tests (no audio device)
 ```
 
@@ -81,16 +77,6 @@ Execution container with two `KernelState` slots for lock-free hot-swap.
 - Disconnect recovery: abort stream → 500ms backoff → reopen with fade-in
 - `switch_device(id)`: explicit switching with fade-in
 
-## Expression AST (`expr/`)
-
-C++ parallel to the TypeScript expression system. Used during plan compilation, not at audio runtime.
-
-- `Value` — tagged union: Float (f64), Int (i64), Bool, Array, Matrix (row-major with dimensions), Struct, Sum
-- `ExprSpec` — tree node with `ExprKind` discriminator (~40 kinds), `lhs`/`rhs`/`args` children
-- `ExprRewrite` — constant folding (literal arithmetic), algebraic identities (0*x→0, 1*x→x, x+0→x), dead reference replacement
-- `ExprStructural` — structural hashing with cache, structural equality, pure function inlining via clone-with-substitution (max depth 32)
-- `ExprEval` — value-level interpreter for `add_values`, `mul_values`, `matmul_values`, etc.
-
 ## Adding expression ops
 
 To add a new operation to the engine:
@@ -98,4 +84,3 @@ To add a new operation to the engine:
 1. Add variant to `OpTag` enum in `jit/OrcJitEngine.hpp`
 2. Add tag string mapping in `NumericProgramParser.hpp` → `parse_op_tag()`
 3. Add LLVM IR emission case in `OrcJitEngine.cpp` → `compile_flat_program()`
-4. Add `ExprKind` variant in `expr/Expr.hpp` if needed by the C++ expression layer

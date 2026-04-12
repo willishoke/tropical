@@ -21,7 +21,7 @@ bun test                                              # TS compiler tests
 bun test --exclude compiler/apply_plan.test.ts        # TS tests without native FFI
 ```
 
-C++ tests (`engine/tests/test_module_process.cpp`) exercise the C API and JIT without an audio device. TS tests (`compiler/*.test.ts`) cover the optimizer, flattening, array wiring, type checking, expression emission, and more.
+C++ tests (`engine/tests/test_module_process.cpp`) exercise the C API and JIT without an audio device. TS tests (`compiler/*.test.ts`) cover flattening, array wiring, expression emission, and more.
 
 **Note:** `apply_plan.test.ts` loads `build/libtropical.dylib` via FFI. If the native lib isn't built, Bun will segfault (null dereference at load time — not a test failure, a crash). Run `make build` first, or use the `--exclude` form above to run only pure TS tests.
 
@@ -31,14 +31,13 @@ Three layers, one stable boundary:
 
 ```
 compiler/             TS: expression system, JSON stdlib loading, combinators,
-                      flattening, instruction emission, type system, term IR
+                      flattening, instruction emission
   compiler/runtime/   FFI bridge to C++ (koffi bindings, Runtime, DAC, Param)
 engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio output
   engine/c_api/       Stable C API — the boundary between TS and C++
   engine/jit/         LLVM ORC JIT engine
   engine/runtime/     FlatRuntime (plan loading, kernel execution)
   engine/dac/         Audio output (RtAudio)
-  engine/expr/        C++ expression AST, rewriting, evaluation
 mcp/                  MCP server — primary agent interface over stdio
 patches/              Example patches (tropical_program_1 JSON)
 stdlib/               Built-in program types as ProgramJSON files (19 types)
@@ -64,12 +63,11 @@ Program (JSON / MCP tools)
 
 ### Schema versions
 
-There are three distinct JSON schemas — don't confuse them:
+There are two distinct JSON schemas — don't confuse them:
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_1` | `compiler/program.ts` | **Primary.** Unified program format (instances, wiring, subprograms, outputs) |
-| `tropical_plan_1` | `compiler/plan.ts` | Intermediate execution plan (legacy, used by some tests) |
 | `tropical_plan_4` | `compiler/flatten.ts` + `emit_numeric.ts` | Flat instruction stream sent to C++ JIT — the one that matters for audio |
 
 ## Compiler layer (`compiler/`)
@@ -90,7 +88,7 @@ The TypeScript layer handles everything from program definition through instruct
 
 **Instruction emission** (`emit_numeric.ts`) — Walks flattened ExprNode trees, emits `FlatProgram` instruction stream with typed operands (const, input, reg, array_reg, state_reg, param, rate, tick).
 
-**Term IR** (`term.ts`, `compiler.ts`) — Categorical IR (free monoidal category): morphism, compose, tensor, trace, id. The compiler builds terms from the dependency graph via topological sort (Kahn's) and cycle detection (Tarjan's SCC). Type checked via `type_check.ts`. Optimized via `optimizer.ts` (identity elimination, compose/tensor flattening).
+**Port types and graph utilities** (`term.ts`, `compiler.ts`) — `PortType` describes signal port types (scalar, array, product). `compiler.ts` provides dependency graph construction, topological sort (Kahn's with level grouping), and cycle detection (Tarjan's SCC), used by the flattener to determine execution order.
 
 **FFI bridge** (`runtime/bindings.ts`, `runtime.ts`, `audio.ts`, `param.ts`) — koffi declarations mirroring `tropical_c.h`. `Runtime` wraps `tropical_runtime_t` with FinalizationRegistry. `Param`/`Trigger` provide `.asExpr()` for wiring control parameters into expression trees.
 
@@ -107,8 +105,6 @@ C++20, header-heavy (templates + inlining for audio-thread performance).
 **FlatRuntime** (`runtime/FlatRuntime.hpp/.cpp`) — Double-buffered kernel hot-swap. `load_plan()` compiles to the inactive slot, transfers matching state by register/array name, atomically swaps. `process()` runs the kernel, snapshots trigger params, applies smoothstep fade envelope (2048-sample Hermite curve).
 
 **Audio output** (`dac/TropicalDAC.hpp`) — Templated RtAudio driver. Device watcher thread (50ms poll), disconnect recovery with 500ms backoff, callback timing stats.
-
-**Expression AST** (`expr/`) — C++ parallel to the TS expression system. `Value` (tagged union), `ExprSpec` (tree nodes), plus rewriting (constant folding, algebraic simplification) and structural hashing. Used during plan compilation, not at runtime.
 
 ## MCP server (`mcp/server.ts`)
 
