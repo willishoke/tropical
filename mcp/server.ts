@@ -359,8 +359,17 @@ function handleListPrograms() {
       const defaultsMap = (d.rawInputDefaults ?? {}) as Record<string, unknown>
       return {
         program_name: typeName,
-        inputs:    d.inputNames.map(n => ({ name: n, default: defaultsMap[n] ?? null })),
-        outputs: d.outputNames,
+        inputs:    d.inputNames.map((n, i) => ({
+          name: n,
+          type: d.inputPortTypes[i] ?? null,
+          bounds: d.inputBounds[i] ?? null,
+          default: defaultsMap[n] ?? null,
+        })),
+        outputs: d.outputNames.map((n, i) => ({
+          name: n,
+          type: d.outputPortTypes[i] ?? null,
+          bounds: d.outputBounds[i] ?? null,
+        })),
         registers: d.registerNames.map((n, i) => ({ name: n, type: d.registerPortTypes[i] ?? null })),
       }
     }),
@@ -382,12 +391,18 @@ function handleGetInfo(instanceName: string) {
       program: inst.typeName,
       inputs:  inst.inputNames.map((n, i) => ({
         name: n, index: i,
+        type: inst._def.inputPortTypes[i] ?? null,
+        bounds: inst._def.inputBounds[i] ?? null,
         expr: session.inputExprNodes.get(`${instanceName}:${n}`) ?? null,
         pretty: session.inputExprNodes.has(`${instanceName}:${n}`)
           ? prettyExpr(session.inputExprNodes.get(`${instanceName}:${n}`)!, session.instanceRegistry)
           : null,
       })),
-      outputs: inst.outputNames.map((n, i) => ({ name: n, index: i })),
+      outputs: inst.outputNames.map((n, i) => ({
+        name: n, index: i,
+        type: inst._def.outputPortTypes[i] ?? null,
+        bounds: inst._def.outputBounds[i] ?? null,
+      })),
       registers: inst.registerNames.map((n, i) => ({
         name: n, index: i, type: inst.registerPortType(i) ?? null,
       })),
