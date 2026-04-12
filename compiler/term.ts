@@ -1,18 +1,13 @@
 /**
- * term.ts — Free monoidal category term language for tropical.
+ * term.ts — Port types and shape algebra for tropical.
  *
- * Objects are PortTypes, morphisms are modules, composition is patching,
- * tensor is parallel execution, trace is feedback with typed state.
- *
- * This is the categorical IR — constructed by the compiler from a mutable
- * patch graph, optimized by rewrite passes, then flattened to an execution
- * plan that the C++ runtime loads and JIT-compiles.
+ * PortType describes the type of a signal port (scalar, array, product, etc.).
+ * Shape algebra (broadcast, strides, size) follows numpy conventions with
+ * static shapes.
  */
 
-import type { ExprNode } from './session'
-
 // ─────────────────────────────────────────────────────────────
-// Port types (objects of the category)
+// Port types
 // ─────────────────────────────────────────────────────────────
 
 export type ScalarKind = 'float' | 'int' | 'bool'
@@ -184,75 +179,4 @@ export function shapesCompatible(a: PortType, b: PortType): number[] | null {
   if (a.tag === 'scalar' && b.tag === 'array') return b.shape
   if (a.tag === 'scalar' && b.tag === 'scalar') return []      // both scalar
   return null
-}
-
-// ─────────────────────────────────────────────────────────────
-// Terms (morphisms of the free monoidal category)
-// ─────────────────────────────────────────────────────────────
-
-export type StateInit = number | boolean | number[] | number[][]
-
-/** The body of a morphism — what it actually computes. */
-export type MorphismBody =
-  | { tag: 'expr'; inputNames: string[]; outputExprs: Record<string, ExprNode> }
-  | { tag: 'primitive'; kind: PrimitiveKind }
-
-export type PrimitiveKind =
-  | 'sample_rate'
-  | 'sample_index'
-
-/**
- * Term in the free traced symmetric monoidal category.
- *
- *   id        : A → A                       (identity / wire)
- *   morphism  : A → B                       (a named module or expression)
- *   compose   : (A → B) × (B → C) → (A → C)  (sequential)
- *   tensor    : (A → B) × (C → D) → (A⊗C → B⊗D)  (parallel)
- *   trace     : (A⊗S → B⊗S) → (A → B)      (feedback with typed state)
- */
-export type Term =
-  | { tag: 'id'; portType: PortType }
-  | { tag: 'morphism'; name: string; dom: PortType; cod: PortType; body: MorphismBody }
-  | { tag: 'compose'; first: Term; second: Term }
-  | { tag: 'tensor'; left: Term; right: Term }
-  | { tag: 'trace'; stateType: PortType; init: StateInit; body: Term }
-
-// Term constructors
-
-export const id = (portType: PortType): Term => ({ tag: 'id', portType })
-
-export const morphism = (
-  name: string,
-  dom: PortType,
-  cod: PortType,
-  body: MorphismBody,
-): Term => ({ tag: 'morphism', name, dom, cod, body })
-
-export function compose(first: Term, second: Term): Term {
-  return { tag: 'compose', first, second }
-}
-
-export function tensor(left: Term, right: Term): Term {
-  return { tag: 'tensor', left, right }
-}
-
-export function trace(stateType: PortType, init: StateInit, body: Term): Term {
-  return { tag: 'trace', stateType, init, body }
-}
-
-/**
- * Compose a sequence of terms left-to-right: composeAll([f, g, h]) = f ; g ; h
- */
-export function composeAll(terms: Term[]): Term {
-  if (terms.length === 0) throw new Error('composeAll: empty list')
-  return terms.reduce(compose)
-}
-
-/**
- * Tensor a list of terms: tensorAll([f, g, h]) = f ⊗ g ⊗ h
- * Returns id(Unit) for empty list.
- */
-export function tensorAll(terms: Term[]): Term {
-  if (terms.length === 0) return id(Unit)
-  return terms.reduce(tensor)
 }

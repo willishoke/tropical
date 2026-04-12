@@ -11,16 +11,12 @@ program.ts            ProgramJSON (tropical_program_1) interface, conversions, s
 flatten.ts            Session → tropical_plan_4 (inline all instances, resolve refs)
 lower_arrays.ts       Lower array ops + combinators to scalar primitives (static unrolling)
 emit_numeric.ts       ExprNode trees → FlatProgram instruction stream
-compiler.ts           Dependency graph, topological sort, term assembly
-term.ts               Categorical IR (morphism, compose, tensor, trace, id)
-type_check.ts         Type inference for terms, composition boundary validation
-optimizer.ts          Term rewriting (identity elimination, flattening)
+compiler.ts           Dependency graph, topological sort, SCC, port type conversion
+term.ts               Port types (PortType, ScalarKind), shape algebra, type utilities
 session.ts            SessionState, loadProgramDef (ProgramJSON → ProgramDef), loadJSON, prettyExpr
 schema.ts             Zod validation schemas for ProgramJSON
 apply_plan.ts         flattenSession → JSON.stringify → runtime.loadPlan
 array_wiring.ts       Typed port validation, auto-broadcast insertion
-morphism_registry.ts  Named type coercion morphisms
-plan.ts               ExecutionPlan (tropical_plan_1, intermediate/legacy)
 bench_compile.ts      Compilation benchmarks
 
 runtime/
@@ -111,24 +107,15 @@ Walks flattened ExprNode trees, emits a `FlatProgram`:
 - Terminals (literals, inputs, registers) are embedded as operands, not separate instructions
 - Output includes `register_count`, `array_slot_sizes`, `output_targets`, `register_targets`
 
-### Term IR and type system (`compiler.ts`, `term.ts`, `type_check.ts`)
+### Graph utilities (`compiler.ts`)
 
-The compiler builds categorical terms from the dependency graph:
+Used by the flattener to determine execution order:
 
 1. `buildDependencyGraph()` — extract instance refs from input expressions
 2. `tarjanSCC()` — cycle detection (feedback cycles are errors)
 3. `topologicalSort()` — Kahn's algorithm with level grouping
-4. `instanceToTerm()` — stateless → morphism, stateful → trace
-5. `inferType()` — validate composition boundaries, tensor products, trace state alignment
-
-Term constructors: `morphism`, `compose`, `tensor`, `trace`, `id`. Port types: `ScalarType`, `ArrayType`, `StructType`, `SumType`, `product`, `Unit`.
-
-### Optimizer (`optimizer.ts`)
-
-Structural rewrites iterated to fixed point:
-- Identity elimination: `compose(id, f) → f`
-- Compose flattening: right-associate nested compositions
-- Tensor flattening: right-associate nested tensors
+4. `extractInstanceInfo()` — convert ProgramDef to slot-indexed InstanceInfo
+5. `portTypeFromString()` — parse type annotations to PortType
 
 ### Plan application (`apply_plan.ts`)
 
@@ -145,17 +132,16 @@ Structural rewrites iterated to fixed point:
 
 Run with `bun test`. Test files:
 
-- `optimizer.test.ts` — term rewriting passes
 - `flatten_wiring.test.ts` — flattening and wiring resolution
 - `array_wiring.test.ts` — typed port validation, broadcast insertion
-- `plan.test.ts` — execution plan generation and validation
-- `compiler.test.ts` — dependency graph, topological sort, term assembly
+- `compiler.test.ts` — dependency graph, topological sort, SCC, port type conversion
 - `expr.test.ts` — expression construction and evaluation
 - `lower_arrays.test.ts` — array lowering to scalar primitives
-- `apply_plan.test.ts` — plan application integration
-- `term.test.ts` — term IR construction and type checking
-- `combinators.test.ts` — compile-time combinator expansion (22 tests)
+- `apply_plan.test.ts` — plan application integration (requires native lib)
+- `combinators.test.ts` — compile-time combinator expansion
 - `program.test.ts` — ProgramJSON schema conversions and Zod validation
+- `bounds.test.ts` — bounded type enforcement and clamp insertion
+- `emit_numeric.test.ts` — instruction emission
 
 ## Adding a program type
 

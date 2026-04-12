@@ -27,6 +27,8 @@ using RuntimeDAC = TropicalDACImpl<tropical_runtime::FlatRuntime>;
 
 // ---------- Opaque wrapper types ----------
 
+namespace expr = tropical_expr;
+
 struct TropicalParam
 {
   expr::ControlParam * param;

@@ -12,8 +12,8 @@ import type { ExprNode } from './expr.js'
 import type { SessionState } from './session.js'
 import type { ProgramInstance, NestedCall, Bounds } from './program_types.js'
 import {
-  type CompilerInput, type InstanceInfo,
-  compilerInputFromSession, extractInstanceInfo,
+  type InstanceInfo,
+  extractInstanceInfo,
   buildDependencyGraph, topologicalSort,
 } from './compiler.js'
 import { lowerArrayOps } from './lower_arrays.js'
