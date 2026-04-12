@@ -2,12 +2,12 @@
   "schema": "tropical_program_1",
   "name": "ADEnvelope",
   "inputs": [
-    "gate",
-    "attack",
-    "decay"
+    { "name": "gate", "type": "unipolar" },
+    { "name": "attack", "type": "float", "bounds": [0, null] },
+    { "name": "decay", "type": "float", "bounds": [0, null] }
   ],
   "outputs": [
-    "env"
+    { "name": "env", "type": "unipolar" }
   ],
   "regs": {
     "stage": 0,

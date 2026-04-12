@@ -7,7 +7,7 @@ import {
 } from './expr.js'
 import {
   ProgramType, ProgramInstance,
-  type ProgramDef, type NestedCall, type ValueCoercible,
+  type ProgramDef, type NestedCall, type ValueCoercible, type Bounds,
 } from './program_types.js'
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type ProgramJSON } from './program.js'
@@ -44,7 +44,14 @@ export interface SumTypeDefJSON {
   variants: SumVariantJSON[]
 }
 
-export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON
+export interface AliasTypeDefJSON {
+  kind: 'alias'
+  name: string
+  base: string
+  bounds: [number | null, number | null]
+}
+
+export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON | AliasTypeDefJSON
 
 
 // ─────────────────────────────────────────────────────────────
@@ -55,6 +62,7 @@ export interface SessionState {
   bufferLength: number
   dac: import('./runtime/audio.js').DAC | null  // lazy type import to avoid circular dep
   typeRegistry: Map<string, ProgramType>
+  typeAliasRegistry: Map<string, { base: string; bounds: Bounds }>
   instanceRegistry: Map<string, ProgramInstance>
   graphOutputs: Array<{ instance: string; output: string }>
   paramRegistry: Map<string, Param>
@@ -75,6 +83,7 @@ export function makeSession(bufferLength = 512): SessionState {
     bufferLength,
     dac: null,
     typeRegistry: new Map(),
+    typeAliasRegistry: new Map(),
     instanceRegistry: new Map(),
     graphOutputs: [],
     paramRegistry: new Map(),
@@ -231,16 +240,61 @@ function slottifyExpr(
   return node
 }
 
+// ─────────────────────────────────────────────────────────────
+// Bounded type aliases
+// ─────────────────────────────────────────────────────────────
+
+/** Built-in type aliases that map semantic names to a base type + bounds. */
+export const BOUNDED_TYPE_ALIASES: Record<string, { base: string; bounds: Bounds }> = {
+  signal:   { base: 'float', bounds: [-1, 1] },
+  bipolar:  { base: 'float', bounds: [-1, 1] },
+  unipolar: { base: 'float', bounds: [0, 1] },
+  phase:    { base: 'float', bounds: [0, 1] },
+  freq:     { base: 'float', bounds: [0, null] },
+}
+
+type AliasMap = Map<string, { base: string; bounds: Bounds }>
+
+/** Resolve a type string to its base type (stripping alias). Checks user aliases first. */
+export function resolveBaseType(typeStr: string | undefined, userAliases?: AliasMap): string | undefined {
+  if (!typeStr) return typeStr
+  const user = userAliases?.get(typeStr)
+  if (user) return user.base
+  if (typeStr in BOUNDED_TYPE_ALIASES) return BOUNDED_TYPE_ALIASES[typeStr].base
+  return typeStr
+}
+
+/** Extract bounds from a port spec. Explicit bounds override alias bounds. Checks user aliases first. */
+export function resolveBounds(
+  spec: string | { name: string; type?: string; bounds?: [number | null, number | null] },
+  userAliases?: AliasMap,
+): Bounds | null {
+  if (typeof spec === 'string') return null
+  if (spec.bounds) return spec.bounds
+  if (!spec.type) return null
+  const user = userAliases?.get(spec.type)
+  if (user) return user.bounds
+  if (spec.type in BOUNDED_TYPE_ALIASES) return BOUNDED_TYPE_ALIASES[spec.type].bounds
+  return null
+}
+
+// ─────────────────────────────────────────────────────────────
+// ProgramJSON → ProgramDef
+// ─────────────────────────────────────────────────────────────
+
 export function loadProgramDef(
   def: ProgramJSON,
-  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
+  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry'>>,
 ): ProgramType {
+  const aliases = session.typeAliasRegistry
   const inputSpecs  = def.inputs ?? []
   const outputSpecs = def.outputs ?? []
   const inputNames  = inputSpecs.map(i => typeof i === 'string' ? i : i.name)
   const outputNames = outputSpecs.map(o => typeof o === 'string' ? o : o.name)
-  const inputPortTypes  = inputSpecs.map(i => typeof i === 'string' ? undefined : i.type)
-  const outputPortTypes = outputSpecs.map(o => typeof o === 'string' ? undefined : o.type)
+  const inputPortTypes  = inputSpecs.map(i => resolveBaseType(typeof i === 'string' ? undefined : i.type, aliases))
+  const outputPortTypes = outputSpecs.map(o => resolveBaseType(typeof o === 'string' ? undefined : o.type, aliases))
+  const inputBounds     = inputSpecs.map(s => resolveBounds(s, aliases))
+  const outputBounds    = outputSpecs.map(s => resolveBounds(s, aliases))
   const regsRaw     = def.regs ?? {}
   const delaysRaw   = def.delays ?? {}
   const nestedRaw   = def.instances ?? {}
@@ -345,6 +399,8 @@ export function loadProgramDef(
     delayUpdateNodes,
     nestedCalls,
     breaksCycles: def.breaks_cycles ?? false,
+    inputBounds,
+    outputBounds,
   }
 
   return new ProgramType(programDef)

@@ -10,7 +10,7 @@
 
 import type { ExprNode } from './expr.js'
 import type { SessionState } from './session.js'
-import type { ProgramInstance, NestedCall } from './program_types.js'
+import type { ProgramInstance, NestedCall, Bounds } from './program_types.js'
 import {
   type CompilerInput, type InstanceInfo,
   compilerInputFromSession, extractInstanceInfo,
@@ -105,6 +105,24 @@ export function normalizeWiringTypes(
   }
 
   return result
+}
+
+// ─────────────────────────────────────────────────────────────
+// Bounds enforcement
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Wrap an expression with bounds enforcement.
+ * [lo, hi]   → clamp(expr, lo, hi)
+ * [lo, null] → max(expr, lo) via select
+ * [null, hi] → min(expr, hi) via select
+ */
+export function applyBounds(expr: ExprNode, bounds: Bounds): ExprNode {
+  const [lo, hi] = bounds
+  if (lo !== null && hi !== null) return { op: 'clamp', args: [expr, lo, hi] }
+  if (lo !== null) return { op: 'select', args: [{ op: 'gt', args: [expr, lo] }, expr, lo] }
+  if (hi !== null) return { op: 'select', args: [{ op: 'lt', args: [expr, hi] }, expr, hi] }
+  return expr
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -838,9 +856,9 @@ export function flattenSession(session: SessionState): FlatPlan {
     // Process output expressions — no input substitution or ref resolution needed
     // (cycle-breaking instance outputs are purely register-derived)
     const cbOutputExprs: ExprNode[] = []
-    for (const outputNode of def.outputExprNodes) {
+    for (let i = 0; i < def.outputExprNodes.length; i++) {
       const cloneMemo = new WeakMap<object, ExprNode>()
-      let expr = cloneExpr(outputNode, cloneMemo)
+      let expr = cloneExpr(def.outputExprNodes[i], cloneMemo)
       expr = resolveNestedOutputs(expr, def.nestedCalls, nestedRegStart)
       const inlineMemo = new WeakMap<object, ExprNode>()
       expr = inlineCalls(expr, inlineMemo)
@@ -850,6 +868,8 @@ export function flattenSession(session: SessionState): FlatPlan {
       expr = resolveDelayValues(expr, delayBase, delayMemo)
       const lowerMemo = new WeakMap<object, ExprNode>()
       expr = lowerArrayOps(expr, lowerMemo)
+      const bounds = def.outputBounds[i]
+      if (bounds) expr = applyBounds(expr, bounds)
       flatOutputExprs.push(expr)
       cbOutputExprs.push(expr)
     }
@@ -905,15 +925,19 @@ export function flattenSession(session: SessionState): FlatPlan {
     for (let i = 0; i < def.inputNames.length; i++) {
       const key = `${name}:${def.inputNames[i]}`
       const wiringExpr = inputExprNodes.get(key)
+      let resolved: ExprNode
       if (wiringExpr !== undefined) {
         // Resolve refs in the wiring expression (they reference earlier instances)
-        inputMap.set(i, resolveRefs(wiringExpr, resolvedOutputs, resolvedOutputNames))
+        resolved = resolveRefs(wiringExpr, resolvedOutputs, resolvedOutputNames)
       } else {
         // Use default value or 0
         const defaultExpr = def.inputDefaults[i]
         const node = defaultExpr?._node ?? 0
-        inputMap.set(i, inlineCalls(typeof node === 'object' ? cloneExpr(node) : node))
+        resolved = inlineCalls(typeof node === 'object' ? cloneExpr(node) : node)
       }
+      const inBounds = def.inputBounds[i]
+      if (inBounds) resolved = applyBounds(resolved, inBounds)
+      inputMap.set(i, resolved)
     }
 
     // Helper: full expression pipeline for a local module expression.
@@ -947,7 +971,9 @@ export function flattenSession(session: SessionState): FlatPlan {
     // because wiring expressions already have globally-correct register IDs.
     const instOutputExprs: ExprNode[] = []
     for (let i = 0; i < def.outputExprNodes.length; i++) {
-      const expr = processExpr(def.outputExprNodes[i])
+      let expr = processExpr(def.outputExprNodes[i])
+      const bounds = def.outputBounds[i]
+      if (bounds) expr = applyBounds(expr, bounds)
       flatOutputExprs.push(expr)
       instOutputExprs.push(expr)
     }
@@ -1067,13 +1093,17 @@ export function flattenSession(session: SessionState): FlatPlan {
     for (let i = 0; i < def.inputNames.length; i++) {
       const key = `${name}:${def.inputNames[i]}`
       const wiringExpr = inputExprNodes.get(key)
+      let resolved: ExprNode
       if (wiringExpr !== undefined) {
-        inputMap.set(i, resolveRefs(wiringExpr, resolvedOutputs, resolvedOutputNames))
+        resolved = resolveRefs(wiringExpr, resolvedOutputs, resolvedOutputNames)
       } else {
         const defaultExpr = def.inputDefaults[i]
         const node = defaultExpr?._node ?? 0
-        inputMap.set(i, inlineCalls(typeof node === 'object' ? cloneExpr(node) : node))
+        resolved = inlineCalls(typeof node === 'object' ? cloneExpr(node) : node)
       }
+      const inBounds = def.inputBounds[i]
+      if (inBounds) resolved = applyBounds(resolved, inBounds)
+      inputMap.set(i, resolved)
     }
 
     const processExpr = (rawNode: ExprNode): ExprNode => {
@@ -1186,6 +1216,17 @@ export function flattenSession(session: SessionState): FlatPlan {
     const outputIdx = inst._def.outputNames.indexOf(output)
     if (outputIdx === -1) continue
     const flatIdx = (outputStart.get(instance) ?? 0) + outputIdx
+
+    // Safety clamp: ensure audio outputs stay within [-1, 1].
+    // Skip if the output already has bounds that are within [-1, 1].
+    const bounds = inst._def.outputBounds[outputIdx]
+    const withinSafe = bounds
+      && bounds[0] !== null && bounds[0] >= -1
+      && bounds[1] !== null && bounds[1] <= 1
+    if (!withinSafe) {
+      flatOutputExprs[flatIdx] = applyBounds(flatOutputExprs[flatIdx], [-1, 1])
+    }
+
     outputIndices.push(flatIdx)
   }
 

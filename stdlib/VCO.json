@@ -2,15 +2,15 @@
   "schema": "tropical_program_1",
   "name": "VCO",
   "inputs": [
-    { "name": "freq", "type": "float" },
+    { "name": "freq", "type": "freq" },
     { "name": "fm", "type": "float" },
     { "name": "fm_index", "type": "float" }
   ],
   "outputs": [
-    { "name": "saw", "type": "float" },
-    { "name": "tri", "type": "float" },
-    { "name": "sin", "type": "float" },
-    { "name": "sqr", "type": "float" }
+    { "name": "saw", "type": "signal" },
+    { "name": "tri", "type": "signal" },
+    { "name": "sin", "type": "signal" },
+    { "name": "sqr", "type": "signal" }
   ],
   "regs": { "phase": 0, "tri_state": 0 },
   "input_defaults": { "freq": 100, "fm": 0, "fm_index": 5 },

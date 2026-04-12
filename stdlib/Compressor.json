@@ -12,7 +12,7 @@
   ],
   "outputs": [
     "output",
-    "gr"
+    { "name": "gr", "type": "unipolar" }
   ],
   "regs": {
     "env": 0,

@@ -24,9 +24,9 @@ export interface ProgramJSON {
   name: string
 
   /** Inputs to this program. Empty or absent = top-level (no external inputs). */
-  inputs?: Array<string | { name: string; type?: string; default?: ExprNode }>
+  inputs?: Array<string | { name: string; type?: string; default?: ExprNode; bounds?: [number | null, number | null] }>
   /** Output declarations — names for leaf programs, expressions for composites. */
-  outputs?: Array<string | { name: string; type?: string }>
+  outputs?: Array<string | { name: string; type?: string; bounds?: [number | null, number | null] }>
 
   /** Scalar/array state registers. */
   regs?: Record<string, number | boolean | number[] | number[][] | { init: number | boolean | number[] | number[][]; type: string }>
@@ -90,6 +90,14 @@ export function loadProgramAsSession(
   session.triggerRegistry.clear()
   session.inputExprNodes.clear()
   session._nameCounters.clear()
+  session.typeAliasRegistry.clear()
+
+  // Register type aliases from type_defs before anything else
+  for (const td of prog.type_defs ?? []) {
+    if (td.kind === 'alias') {
+      session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
+    }
+  }
 
   // Register inline program definitions
   if (prog.programs) {
@@ -155,8 +163,17 @@ export function loadProgramAsSession(
  */
 export function loadProgramAsType(
   prog: ProgramJSON,
-  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
+  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry'>>,
 ): ProgramType {
+  // Register type aliases from type_defs before processing subprograms
+  if (session.typeAliasRegistry) {
+    for (const td of prog.type_defs ?? []) {
+      if (td.kind === 'alias') {
+        session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
+      }
+    }
+  }
+
   // Register inline subprograms first
   if (prog.programs) {
     for (const [name, subProg] of Object.entries(prog.programs)) {
@@ -183,6 +200,13 @@ export function mergeProgramIntoSession(
   for (const p of prog.params ?? []) {
     if (session.paramRegistry.has(p.name) || session.triggerRegistry.has(p.name))
       throw new Error(`merge collision: param/trigger '${p.name}' already exists.`)
+  }
+
+  // Register type aliases from type_defs (additive)
+  for (const td of prog.type_defs ?? []) {
+    if (td.kind === 'alias') {
+      session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
+    }
   }
 
   // Register inline program definitions

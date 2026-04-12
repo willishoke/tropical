@@ -3,8 +3,8 @@
   "name": "LadderFilter",
   "inputs": [
     "input",
-    "cutoff",
-    "resonance",
+    { "name": "cutoff", "type": "freq" },
+    { "name": "resonance", "type": "unipolar" },
     "drive"
   ],
   "outputs": [
