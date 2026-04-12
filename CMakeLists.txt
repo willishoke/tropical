@@ -38,8 +38,6 @@ endif()
 
 # Core C++ sources shared by all targets
 set(TROPICAL_CORE_SOURCES
-    engine/expr/ExprStructural.cpp
-    engine/expr/ExprRewrite.cpp
     engine/runtime/FlatRuntime.cpp
     engine/c_api/tropical_c.cpp)
 

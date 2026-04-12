@@ -8,7 +8,7 @@
  * No module boundaries, no graph, no orchestration.
  */
 
-#include "graph/GraphTypes.hpp"
+#include "ControlParam.hpp"
 #include "jit/OrcJitEngine.hpp"
 
 #include <array>
