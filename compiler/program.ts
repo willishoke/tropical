@@ -24,9 +24,9 @@ export interface ProgramJSON {
   name: string
 
   /** Inputs to this program. Empty or absent = top-level (no external inputs). */
-  inputs?: Array<string | { name: string; type?: string; default?: ExprNode }>
+  inputs?: Array<string | { name: string; type?: string; default?: ExprNode; bounds?: [number | null, number | null] }>
   /** Output declarations — names for leaf programs, expressions for composites. */
-  outputs?: Array<string | { name: string; type?: string }>
+  outputs?: Array<string | { name: string; type?: string; bounds?: [number | null, number | null] }>
 
   /** Scalar/array state registers. */
   regs?: Record<string, number | boolean | number[] | number[][] | { init: number | boolean | number[] | number[][]; type: string }>

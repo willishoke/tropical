@@ -7,7 +7,7 @@ import {
 } from './expr.js'
 import {
   ProgramType, ProgramInstance,
-  type ProgramDef, type NestedCall, type ValueCoercible,
+  type ProgramDef, type NestedCall, type ValueCoercible, type Bounds,
 } from './program_types.js'
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type ProgramJSON } from './program.js'
@@ -231,6 +231,39 @@ function slottifyExpr(
   return node
 }
 
+// ─────────────────────────────────────────────────────────────
+// Bounded type aliases
+// ─────────────────────────────────────────────────────────────
+
+/** Built-in type aliases that map semantic names to a base type + bounds. */
+export const BOUNDED_TYPE_ALIASES: Record<string, { base: string; bounds: Bounds }> = {
+  signal:   { base: 'float', bounds: [-1, 1] },
+  bipolar:  { base: 'float', bounds: [-1, 1] },
+  unipolar: { base: 'float', bounds: [0, 1] },
+  phase:    { base: 'float', bounds: [0, 1] },
+  freq:     { base: 'float', bounds: [0, null] },
+}
+
+/** Resolve a type string to its base type (stripping alias). */
+export function resolveBaseType(typeStr: string | undefined): string | undefined {
+  if (typeStr && typeStr in BOUNDED_TYPE_ALIASES) return BOUNDED_TYPE_ALIASES[typeStr].base
+  return typeStr
+}
+
+/** Extract bounds from a port spec. Explicit bounds override alias bounds. */
+export function resolveBounds(
+  spec: string | { name: string; type?: string; bounds?: [number | null, number | null] },
+): Bounds | null {
+  if (typeof spec === 'string') return null
+  if (spec.bounds) return spec.bounds
+  if (spec.type && spec.type in BOUNDED_TYPE_ALIASES) return BOUNDED_TYPE_ALIASES[spec.type].bounds
+  return null
+}
+
+// ─────────────────────────────────────────────────────────────
+// ProgramJSON → ProgramDef
+// ─────────────────────────────────────────────────────────────
+
 export function loadProgramDef(
   def: ProgramJSON,
   session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
@@ -239,8 +272,10 @@ export function loadProgramDef(
   const outputSpecs = def.outputs ?? []
   const inputNames  = inputSpecs.map(i => typeof i === 'string' ? i : i.name)
   const outputNames = outputSpecs.map(o => typeof o === 'string' ? o : o.name)
-  const inputPortTypes  = inputSpecs.map(i => typeof i === 'string' ? undefined : i.type)
-  const outputPortTypes = outputSpecs.map(o => typeof o === 'string' ? undefined : o.type)
+  const inputPortTypes  = inputSpecs.map(i => resolveBaseType(typeof i === 'string' ? undefined : i.type))
+  const outputPortTypes = outputSpecs.map(o => resolveBaseType(typeof o === 'string' ? undefined : o.type))
+  const inputBounds     = inputSpecs.map(resolveBounds)
+  const outputBounds    = outputSpecs.map(resolveBounds)
   const regsRaw     = def.regs ?? {}
   const delaysRaw   = def.delays ?? {}
   const nestedRaw   = def.instances ?? {}
@@ -345,6 +380,8 @@ export function loadProgramDef(
     delayUpdateNodes,
     nestedCalls,
     breaksCycles: def.breaks_cycles ?? false,
+    inputBounds,
+    outputBounds,
   }
 
   return new ProgramType(programDef)
