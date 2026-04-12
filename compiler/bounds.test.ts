@@ -18,6 +18,7 @@ import { Param, Trigger } from './runtime/param'
 function mockSession() {
   return {
     typeRegistry: new Map<string, ProgramType>(),
+    typeAliasRegistry: new Map<string, { base: string; bounds: Bounds }>(),
     instanceRegistry: new Map<string, ProgramInstance>(),
     paramRegistry: new Map<string, Param>(),
     triggerRegistry: new Map<string, Trigger>(),
@@ -463,5 +464,74 @@ describe('audio output safety clamp', () => {
     const hasClamp = plan.instructions.some((instr: any) => instr.tag === 'Clamp')
     expect(hasSelect).toBe(true)
     expect(hasClamp).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// User-definable type aliases
+// ─────────────────────────────────────────────────────────────
+
+describe('user-definable type aliases', () => {
+  test('user alias resolved via resolveBounds', () => {
+    const aliases = new Map<string, { base: string; bounds: Bounds }>()
+    aliases.set('cv', { base: 'float', bounds: [0, 10] })
+    expect(resolveBounds({ name: 'out', type: 'cv' }, aliases)).toEqual([0, 10])
+  })
+
+  test('user alias resolved via resolveBaseType', () => {
+    const aliases = new Map<string, { base: string; bounds: Bounds }>()
+    aliases.set('cv', { base: 'float', bounds: [0, 10] })
+    expect(resolveBaseType('cv', aliases)).toBe('float')
+  })
+
+  test('explicit bounds override user alias', () => {
+    const aliases = new Map<string, { base: string; bounds: Bounds }>()
+    aliases.set('cv', { base: 'float', bounds: [0, 10] })
+    expect(resolveBounds({ name: 'out', type: 'cv', bounds: [-5, 5] }, aliases)).toEqual([-5, 5])
+  })
+
+  test('user alias takes precedence over built-in', () => {
+    const aliases = new Map<string, { base: string; bounds: Bounds }>()
+    aliases.set('signal', { base: 'float', bounds: [-2, 2] })
+    expect(resolveBounds({ name: 'out', type: 'signal' }, aliases)).toEqual([-2, 2])
+    expect(resolveBaseType('signal', aliases)).toBe('float')
+  })
+
+  test('loadProgramDef uses session typeAliasRegistry', () => {
+    const session = mockSession()
+    session.typeAliasRegistry.set('audio_level', { base: 'float', bounds: [-0.5, 0.5] })
+
+    const type = loadProgramDef(leafProgram({
+      inputs: [{ name: 'x', type: 'audio_level' }],
+      outputs: [{ name: 'out', type: 'audio_level' }],
+    }), session)
+    expect(type._def.inputBounds).toEqual([[-0.5, 0.5]])
+    expect(type._def.outputBounds).toEqual([[-0.5, 0.5]])
+    expect(type._def.inputPortTypes).toEqual(['float'])
+    expect(type._def.outputPortTypes).toEqual(['float'])
+  })
+
+  test('Zod schema accepts alias type_def', () => {
+    const { parseProgram } = require('./schema')
+    const prog = parseProgram({
+      schema: 'tropical_program_1',
+      name: 'Test',
+      type_defs: [{ kind: 'alias', name: 'cv', base: 'float', bounds: [0, 10] }],
+      inputs: [{ name: 'x', type: 'cv' }],
+      outputs: [{ name: 'out', type: 'cv' }],
+      process: { outputs: { out: 0 } },
+    })
+    expect(prog.type_defs).toHaveLength(1)
+    expect(prog.type_defs[0].kind).toBe('alias')
+  })
+
+  test('Zod schema rejects alias with invalid bounds', () => {
+    const { parseProgram } = require('./schema')
+    expect(() => parseProgram({
+      schema: 'tropical_program_1',
+      name: 'Test',
+      type_defs: [{ kind: 'alias', name: 'cv', base: 'float', bounds: 'wrong' }],
+      process: { outputs: {} },
+    })).toThrow()
   })
 })

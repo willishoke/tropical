@@ -84,14 +84,20 @@ const SumTypeDefSchema = z.object({
   variants: z.array(SumVariantSchema),
 })
 
-const TypeDefSchema = z.union([StructTypeDefSchema, SumTypeDefSchema])
-
-
 // ─────────────────────────────────────────────────────────────
 // Bounds — [lo, hi], null on either side = unbounded
 // ─────────────────────────────────────────────────────────────
 
 const BoundsSchema = z.tuple([z.number().nullable(), z.number().nullable()])
+
+const AliasTypeDefSchema = z.object({
+  kind: z.literal('alias'),
+  name: z.string(),
+  base: z.string(),
+  bounds: BoundsSchema,
+})
+
+const TypeDefSchema = z.union([StructTypeDefSchema, SumTypeDefSchema, AliasTypeDefSchema])
 
 // ─────────────────────────────────────────────────────────────
 // ProgramJSON
