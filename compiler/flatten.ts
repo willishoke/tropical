@@ -1216,6 +1216,17 @@ export function flattenSession(session: SessionState): FlatPlan {
     const outputIdx = inst._def.outputNames.indexOf(output)
     if (outputIdx === -1) continue
     const flatIdx = (outputStart.get(instance) ?? 0) + outputIdx
+
+    // Safety clamp: ensure audio outputs stay within [-1, 1].
+    // Skip if the output already has bounds that are within [-1, 1].
+    const bounds = inst._def.outputBounds[outputIdx]
+    const withinSafe = bounds
+      && bounds[0] !== null && bounds[0] >= -1
+      && bounds[1] !== null && bounds[1] <= 1
+    if (!withinSafe) {
+      flatOutputExprs[flatIdx] = applyBounds(flatOutputExprs[flatIdx], [-1, 1])
+    }
+
     outputIndices.push(flatIdx)
   }
 

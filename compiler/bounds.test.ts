@@ -218,7 +218,7 @@ describe('flattenSession output bounds', () => {
     expect(hasClamp).toBe(true)
   })
 
-  test('unbounded output has no clamp injection', () => {
+  test('unbounded output still gets audio safety clamp when routed to graph output', () => {
     const session = mockSession()
 
     const type = loadProgramDef(leafProgram(), session)
@@ -239,13 +239,14 @@ describe('flattenSession output bounds', () => {
     }
 
     const plan = flattenSession(fullSession)
+    // Audio safety clamp injects Clamp even with no declared bounds
     const hasClamp = plan.instructions.some(
       (instr: any) => instr.tag === 'Clamp'
     )
-    expect(hasClamp).toBe(false)
+    expect(hasClamp).toBe(true)
   })
 
-  test('one-sided lower bound produces Select (max pattern)', () => {
+  test('one-sided lower bound produces Select (max) plus audio safety Clamp', () => {
     const session = mockSession()
 
     const type = loadProgramDef(leafProgram({
@@ -268,11 +269,11 @@ describe('flattenSession output bounds', () => {
     }
 
     const plan = flattenSession(fullSession)
-    // Should have a Select instruction (for max) but no Clamp
+    // Select from output bounds [0, null] (max pattern), plus safety Clamp [-1, 1]
     const hasSelect = plan.instructions.some((instr: any) => instr.tag === 'Select')
     const hasClamp = plan.instructions.some((instr: any) => instr.tag === 'Clamp')
     expect(hasSelect).toBe(true)
-    expect(hasClamp).toBe(false)
+    expect(hasClamp).toBe(true)
   })
 })
 
@@ -363,8 +364,104 @@ describe('flattenSession cross-instance bounded output', () => {
     }
 
     const plan = flattenSession(fullSession)
-    // Source's bounded output should produce exactly one Clamp (shared via DAG)
+    // Source's bounded output: 1 Clamp (shared via DAG).
+    // d1 and d2 are unbounded graph outputs: each gets 1 audio safety Clamp.
+    // Total: 3 Clamps.
+    const clampCount = plan.instructions.filter((instr: any) => instr.tag === 'Clamp').length
+    expect(clampCount).toBe(3)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// Audio output safety clamp
+// ─────────────────────────────────────────────────────────────
+
+describe('audio output safety clamp', () => {
+  function makeFullSession(session: ReturnType<typeof mockSession>, graphOutputs: Array<{ instance: string; output: string }>) {
+    return {
+      ...session,
+      bufferLength: 1,
+      dac: null,
+      graphOutputs,
+      inputExprNodes: new Map<string, ExprNode>(),
+      runtime: null as any,
+      graph: null as any,
+      _nameCounters: new Map<string, number>(),
+    }
+  }
+
+  test('unbounded audio output gets safety clamp to [-1, 1]', () => {
+    const session = mockSession()
+    const type = loadProgramDef(leafProgram({
+      process: { outputs: { out: 999 } },
+    }), session)
+    session.typeRegistry.set('TestLeaf', type)
+    session.instanceRegistry.set('a', type.instantiateAs('a'))
+
+    const plan = flattenSession(makeFullSession(session, [{ instance: 'a', output: 'out' }]))
+    const hasClamp = plan.instructions.some((instr: any) => instr.tag === 'Clamp')
+    expect(hasClamp).toBe(true)
+  })
+
+  test('output bounded [-1, 1] gets no extra safety clamp', () => {
+    const session = mockSession()
+    const type = loadProgramDef(leafProgram({
+      outputs: [{ name: 'out', type: 'float', bounds: [-1, 1] }],
+      process: { outputs: { out: { op: 'input', name: 'x' } } },
+    }), session)
+    session.typeRegistry.set('TestLeaf', type)
+    session.instanceRegistry.set('a', type.instantiateAs('a'))
+
+    const plan = flattenSession(makeFullSession(session, [{ instance: 'a', output: 'out' }]))
+    // One Clamp from the output bounds, no extra from safety
     const clampCount = plan.instructions.filter((instr: any) => instr.tag === 'Clamp').length
     expect(clampCount).toBe(1)
+  })
+
+  test('output bounded [0, 1] (tighter) gets no extra safety clamp', () => {
+    const session = mockSession()
+    const type = loadProgramDef(leafProgram({
+      outputs: [{ name: 'out', type: 'float', bounds: [0, 1] }],
+      process: { outputs: { out: { op: 'input', name: 'x' } } },
+    }), session)
+    session.typeRegistry.set('TestLeaf', type)
+    session.instanceRegistry.set('a', type.instantiateAs('a'))
+
+    const plan = flattenSession(makeFullSession(session, [{ instance: 'a', output: 'out' }]))
+    // One Clamp from the output bounds, no extra from safety
+    const clampCount = plan.instructions.filter((instr: any) => instr.tag === 'Clamp').length
+    expect(clampCount).toBe(1)
+  })
+
+  test('output bounded [-5, 5] (wider) gets additional safety clamp', () => {
+    const session = mockSession()
+    const type = loadProgramDef(leafProgram({
+      outputs: [{ name: 'out', type: 'float', bounds: [-5, 5] }],
+      process: { outputs: { out: { op: 'input', name: 'x' } } },
+    }), session)
+    session.typeRegistry.set('TestLeaf', type)
+    session.instanceRegistry.set('a', type.instantiateAs('a'))
+
+    const plan = flattenSession(makeFullSession(session, [{ instance: 'a', output: 'out' }]))
+    // Two Clamps: one from output bounds [-5, 5], one from safety [-1, 1]
+    const clampCount = plan.instructions.filter((instr: any) => instr.tag === 'Clamp').length
+    expect(clampCount).toBe(2)
+  })
+
+  test('one-sided output bounds [0, null] gets safety clamp', () => {
+    const session = mockSession()
+    const type = loadProgramDef(leafProgram({
+      outputs: [{ name: 'out', type: 'float', bounds: [0, null] }],
+      process: { outputs: { out: { op: 'input', name: 'x' } } },
+    }), session)
+    session.typeRegistry.set('TestLeaf', type)
+    session.instanceRegistry.set('a', type.instantiateAs('a'))
+
+    const plan = flattenSession(makeFullSession(session, [{ instance: 'a', output: 'out' }]))
+    // Select from output bounds (max), plus Clamp from safety [-1, 1]
+    const hasSelect = plan.instructions.some((instr: any) => instr.tag === 'Select')
+    const hasClamp = plan.instructions.some((instr: any) => instr.tag === 'Clamp')
+    expect(hasSelect).toBe(true)
+    expect(hasClamp).toBe(true)
   })
 })
