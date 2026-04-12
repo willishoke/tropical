@@ -2,7 +2,7 @@
   "schema": "tropical_program_1",
   "name": "NoiseLFSR",
   "inputs": ["clock"],
-  "outputs": ["out"],
+  "outputs": [{ "name": "out", "type": "signal" }],
   "regs": { "state": { "init": 44257, "type": "int" }, "value": 0 },
   "delays": {
     "prev_clock": { "update": { "op": "input", "name": "clock" }, "init": 0 }

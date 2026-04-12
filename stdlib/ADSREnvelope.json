@@ -2,14 +2,14 @@
   "schema": "tropical_program_1",
   "name": "ADSREnvelope",
   "inputs": [
-    "gate",
-    "attack",
-    "decay",
-    "sustain",
-    "release"
+    { "name": "gate", "type": "unipolar" },
+    { "name": "attack", "type": "float", "bounds": [0, null] },
+    { "name": "decay", "type": "float", "bounds": [0, null] },
+    { "name": "sustain", "type": "unipolar" },
+    { "name": "release", "type": "float", "bounds": [0, null] }
   ],
   "outputs": [
-    "env"
+    { "name": "env", "type": "unipolar" }
   ],
   "regs": {
     "stage": 0,

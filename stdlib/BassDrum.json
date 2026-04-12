@@ -9,7 +9,7 @@
     "tone"
   ],
   "outputs": [
-    "output"
+    { "name": "output", "type": "signal" }
   ],
   "regs": {
     "amp_env": 0,

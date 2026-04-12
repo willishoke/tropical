@@ -2,11 +2,11 @@
   "schema": "tropical_program_1",
   "name": "Clock",
   "inputs": [
-    "freq",
+    { "name": "freq", "type": "freq" },
     { "name": "ratios_in", "type": "float[1]" }
   ],
   "outputs": [
-    "output",
+    { "name": "output", "type": "unipolar" },
     { "name": "ratios_out", "type": "float[1]" }
   ],
   "input_defaults": { "freq": 1, "ratios_in": [1] },
