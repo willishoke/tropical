@@ -19,6 +19,8 @@ import { join } from 'node:path'
 import { makeSession, loadJSON } from './session'
 import { loadStdlib as loadBuiltins, type ProgramJSON } from './program'
 import { applySessionWiring } from './apply_plan'
+import { flattenExpressions } from './flatten'
+import { interpretSamples } from './interpret'
 import {
   renderFrames,
   peak,
@@ -147,5 +149,118 @@ describe('renderFrames / buffer backend', () => {
 
     s32.graph.dispose()
     s512.graph.dispose()
+  })
+})
+
+// ─── differential tests: interpreter vs JIT ──────────────────────────────────
+
+/** Max absolute difference between two buffers. */
+function maxDiff(a: Float64Array, b: Float64Array): number {
+  let d = 0
+  for (let i = 0; i < Math.min(a.length, b.length); i++) {
+    d = Math.max(d, Math.abs(a[i] - b[i]))
+  }
+  return d
+}
+
+describe('interpreter vs JIT differential', () => {
+  test('VCO sawtooth matches within epsilon', () => {
+    const session = vcoSession(440, 'saw')
+    const flat = flattenExpressions(session)
+    const nSamples = 16 * 256  // 4096
+    const interp = interpretSamples(flat, nSamples)
+    const jit = renderFrames(session.runtime, 16)
+
+    expect(interp.length).toBe(nSamples)
+    expect(jit.length).toBe(nSamples)
+    expect(maxDiff(interp, jit)).toBeLessThan(1e-6)
+
+    session.graph.dispose()
+  })
+
+  test('VCO sine matches within epsilon', () => {
+    // Wider tolerance: JIT uses 7th-order minimax sin approximation that
+    // diverges from Math.sin by up to ~0.004 in the output range.
+    const session = vcoSession(440, 'sin')
+    const flat = flattenExpressions(session)
+    const nSamples = 16 * 256
+    const interp = interpretSamples(flat, nSamples)
+    const jit = renderFrames(session.runtime, 16)
+
+    expect(maxDiff(interp, jit)).toBeLessThan(0.005)
+
+    session.graph.dispose()
+  })
+
+  test('VCO triangle matches within epsilon', () => {
+    const session = vcoSession(440, 'tri')
+    const flat = flattenExpressions(session)
+    const nSamples = 16 * 256
+    const interp = interpretSamples(flat, nSamples)
+    const jit = renderFrames(session.runtime, 16)
+
+    expect(maxDiff(interp, jit)).toBeLessThan(1e-6)
+
+    session.graph.dispose()
+  })
+
+  test('VCO square matches within epsilon', () => {
+    const session = vcoSession(440, 'sqr')
+    const flat = flattenExpressions(session)
+    const nSamples = 16 * 256
+    const interp = interpretSamples(flat, nSamples)
+    const jit = renderFrames(session.runtime, 16)
+
+    expect(maxDiff(interp, jit)).toBeLessThan(1e-6)
+
+    session.graph.dispose()
+  })
+
+  test('VCO+VCA chain matches within epsilon', () => {
+    const session = makeSession(256)
+    loadBuiltins(session.typeRegistry)
+    loadJSON({
+      schema: 'tropical_program_1',
+      name: 'test',
+      instances: {
+        osc: { program: 'VCO', inputs: { freq: 440 } },
+        amp: { program: 'VCA', inputs: {
+          audio: { op: 'ref', instance: 'osc', output: 'saw' },
+          cv: 1.0,
+        }},
+      },
+      audio_outputs: [{ instance: 'amp', output: 'out' }],
+    } as ProgramJSON, session)
+
+    const flat = flattenExpressions(session)
+    const nSamples = 16 * 256
+    const interp = interpretSamples(flat, nSamples)
+    const jit = renderFrames(session.runtime, 16)
+
+    expect(maxDiff(interp, jit)).toBeLessThan(1e-6)
+
+    session.graph.dispose()
+  })
+
+  test('Clock module matches within epsilon', () => {
+    const session = makeSession(256)
+    loadBuiltins(session.typeRegistry)
+    loadJSON({
+      schema: 'tropical_program_1',
+      name: 'test',
+      instances: {
+        clk: { program: 'Clock', inputs: { freq: 1.0, ratios_in: [1.0] } },
+      },
+      audio_outputs: [{ instance: 'clk', output: 'output' }],
+    } as ProgramJSON, session)
+
+    const flat = flattenExpressions(session)
+    const nSamples = 16 * 256
+    const interp = interpretSamples(flat, nSamples)
+    const jit = renderFrames(session.runtime, 16)
+
+    expect(maxDiff(interp, jit)).toBeLessThan(1e-6)
+
+    session.graph.dispose()
   })
 })
