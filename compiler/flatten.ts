@@ -146,6 +146,17 @@ export interface FlatPlan {
   register_targets: number[]
 }
 
+/** Pre-emission representation: flattened ExprNode trees before instruction emission. */
+export interface FlatExpressions {
+  outputExprs: ExprNode[]
+  registerExprs: ExprNode[]
+  stateInit: (number | boolean | number[])[]
+  registerTypes: ScalarType[]
+  registerNames: string[]
+  outputIndices: number[]
+  sampleRate: number
+}
+
 // ─────────────────────────────────────────────────────────────
 // Expression tree manipulation
 // ─────────────────────────────────────────────────────────────
@@ -784,7 +795,12 @@ function resolveRefs(
  * 4. Compile expression trees → FlatProgram via emitNumericProgram
  * 5. Emit tropical_plan_4 JSON
  */
-export function flattenSession(session: SessionState): FlatPlan {
+/**
+ * Flatten a session into pre-emission ExprNode trees.
+ * Returns the flattened output/register expressions, state init, and metadata
+ * without compiling to instructions. Used by the interpreter for differential testing.
+ */
+export function flattenExpressions(session: SessionState): FlatExpressions {
   const { instanceRegistry, graphOutputs } = session
 
   // Build instance info map
@@ -1230,27 +1246,39 @@ export function flattenSession(session: SessionState): FlatPlan {
     outputIndices.push(flatIdx)
   }
 
-  // Compile expression trees → flat instruction stream
-  const program = emitNumericProgram(flatOutputExprs, flatRegisterExprs, flatStateInit, flatRegisterTypes)
+  return {
+    outputExprs: flatOutputExprs,
+    registerExprs: flatRegisterExprs,
+    stateInit: flatStateInit,
+    registerTypes: flatRegisterTypes,
+    registerNames: flatRegisterNames,
+    outputIndices,
+    sampleRate: 44100,
+  }
+}
+
+/** Flatten a session and compile to a tropical_plan_4 instruction stream. */
+export function flattenSession(session: SessionState): FlatPlan {
+  const flat = flattenExpressions(session)
+
+  const program = emitNumericProgram(flat.outputExprs, flat.registerExprs, flat.stateInit, flat.registerTypes)
 
   // Compute array slot names for state transfer on hot-swap.
-  // Array slots are allocated in the order array entries appear in flatStateInit,
-  // matching the order of program.array_slot_sizes.
   const arraySlotNames: string[] = []
-  for (let i = 0; i < flatStateInit.length; i++) {
-    if (Array.isArray(flatStateInit[i])) {
-      arraySlotNames.push(flatRegisterNames[i])
+  for (let i = 0; i < flat.stateInit.length; i++) {
+    if (Array.isArray(flat.stateInit[i])) {
+      arraySlotNames.push(flat.registerNames[i])
     }
   }
 
   return {
     schema: 'tropical_plan_4',
-    config: { sample_rate: 44100 },
-    state_init: flatStateInit as (number | boolean)[],
-    register_names: flatRegisterNames,
-    register_types: flatRegisterTypes,
+    config: { sample_rate: flat.sampleRate },
+    state_init: flat.stateInit as (number | boolean)[],
+    register_names: flat.registerNames,
+    register_types: flat.registerTypes,
     array_slot_names: arraySlotNames,
-    outputs: outputIndices,
+    outputs: flat.outputIndices,
     instructions:     program.instructions,
     register_count:   program.register_count,
     array_slot_count: program.array_slot_count,
