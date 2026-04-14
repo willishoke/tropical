@@ -795,6 +795,76 @@ function resolveRefs(
  * 4. Compile expression trees → FlatProgram via emitNumericProgram
  * 5. Emit tropical_plan_4 JSON
  */
+// ─────────────────────────────────────────────────────────────
+// Session-level delay extraction
+// ─────────────────────────────────────────────────────────────
+
+interface SessionDelayRecord {
+  regIdx:         number    // pre-allocated flat register index
+  rawUpdateExpr:  ExprNode  // the expression to store each sample (already delay-free)
+  init:           number    // initial register value
+  regName:        string    // stable name for hot-swap state matching
+}
+
+/**
+ * Walk a wiring ExprNode tree, replacing every {op:"delay", args:[expr], init?, id?}
+ * node with {op:"reg", id:N} where N is the index into `out`.
+ *
+ * The replacement register reads from the *previous* sample's value, breaking any
+ * algebraic cycle without requiring a named breaks_cycles instance. Nested delays
+ * are extracted depth-first so inner delays get lower indices than outer ones.
+ */
+function extractSessionDelays(node: ExprNode, out: SessionDelayRecord[]): ExprNode {
+  if (typeof node === 'number' || typeof node === 'boolean') return node
+  if (Array.isArray(node)) return (node as ExprNode[]).map(n => extractSessionDelays(n, out))
+  if (typeof node !== 'object' || node === null) return node
+
+  const obj = node as Record<string, unknown>
+  if (typeof obj.op !== 'string') return node
+
+  if (obj.op === 'delay') {
+    const regIdx = out.length
+    const init   = (obj.init as number | undefined) ?? 0
+    const id     = obj.id   as string | undefined
+    // Recurse into the update expression first so inner delays get lower indices
+    const rawUpdate = extractSessionDelays((obj.args as ExprNode[])[0], out)
+    out.push({ regIdx, rawUpdateExpr: rawUpdate, init, regName: id ?? `wiring_delay_${regIdx}` })
+    return { op: 'reg' as const, id: regIdx }
+  }
+
+  // Generic recursion — mirrors the pattern used by resolveRefs / inlineCalls
+  let changed = false
+  const result: Record<string, unknown> = { op: obj.op }
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === 'op') continue
+    if (Array.isArray(v)) {
+      const arr = v as ExprNode[]
+      const newArr = arr.map(n => extractSessionDelays(n, out))
+      if (newArr.some((n, i) => n !== arr[i])) changed = true
+      result[k] = newArr
+    } else if (typeof v === 'object' && v !== null && 'op' in v) {
+      const newV = extractSessionDelays(v as ExprNode, out)
+      if (newV !== v) changed = true
+      result[k] = newV
+    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      // Record<string, ExprNode> fields (e.g. 'bind' in let nodes)
+      const rec = v as Record<string, ExprNode>
+      const newRec: Record<string, ExprNode> = {}
+      let recChanged = false
+      for (const [rk, rv] of Object.entries(rec)) {
+        const newRv = extractSessionDelays(rv, out)
+        if (newRv !== rv) recChanged = true
+        newRec[rk] = newRv
+      }
+      if (recChanged) changed = true
+      result[k] = recChanged ? newRec : rec
+    } else {
+      result[k] = v
+    }
+  }
+  return changed ? result as ExprNode : node
+}
+
 /**
  * Flatten a session into pre-emission ExprNode trees.
  * Returns the flattened output/register expressions, state init, and metadata
@@ -813,7 +883,20 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
 
   // Validate and normalize wiring types (throws FlattenError on incompatible connections,
   // inserts broadcast_to wrappers for shape mismatches from patch-file or direct wiring)
-  const inputExprNodes = normalizeWiringTypes(instanceInfos, session.inputExprNodes)
+  let inputExprNodes = normalizeWiringTypes(instanceInfos, session.inputExprNodes)
+
+  // ── Phase 0: Extract session-level {op:"delay"} nodes from wiring expressions ──
+  // Each delay node is replaced with a {op:"reg", id:N} read from a pre-allocated register.
+  // The delay's update expression (args[0]) is recorded for deferred resolution after all
+  // instances are processed. This lets delay nodes appear anywhere in a wiring expression —
+  // including in cycles — without requiring a named breaks_cycles instance.
+  const sessionDelays: SessionDelayRecord[] = []
+  {
+    const transformed = new Map<string, ExprNode>()
+    for (const [key, expr] of inputExprNodes)
+      transformed.set(key, extractSessionDelays(expr, sessionDelays))
+    inputExprNodes = transformed
+  }
 
   // Identify cycle-breaking instances (outputs depend only on registers, not current inputs).
   // These can break feedback cycles: their outputs are previous-sample state reads.
@@ -859,7 +942,15 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     regStartIdx: number
   }> = []
 
-  let registerBase = 0
+  // Pre-allocate session-level delay registers at the front of the register array
+  // (indices 0..N-1). Instance registers follow, so registerBase starts at N.
+  for (const d of sessionDelays) {
+    flatRegisterExprs.push({ op: 'reg' as const, id: d.regIdx })  // placeholder — Phase 4 fills in
+    flatRegisterNames.push(d.regName)
+    flatRegisterTypes.push('float')
+    flatStateInit.push(d.init)
+  }
+  let registerBase = sessionDelays.length
   for (const name of cycleBreakerList) {
     const inst = instances.get(name)!
     const def = inst._def
@@ -1210,6 +1301,17 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
         regIdx++
       }
     }
+  }
+
+  // ── Phase 4: Resolve session-level delay update expressions ──
+  // Now that all instance outputs are in resolvedOutputs, resolve the raw update
+  // expressions (which may ref any instance) and overwrite the placeholder entries.
+  for (const d of sessionDelays) {
+    const refsMemo  = new WeakMap<object, ExprNode>()
+    let expr = resolveRefs(d.rawUpdateExpr, resolvedOutputs, resolvedOutputNames, refsMemo)
+    const lowerMemo = new WeakMap<object, ExprNode>()
+    expr = lowerArrayOps(expr, lowerMemo)
+    flatRegisterExprs[d.regIdx] = expr
   }
 
   // Build output indices: map graphOutputs → flat output indices

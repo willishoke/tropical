@@ -609,6 +609,18 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
     return
   }
 
+  // delay: args[0] is the expression to delay; init is a number; id is an optional string name
+  if (op === 'delay') {
+    if (!Array.isArray(obj.args) || (obj.args as unknown[]).length !== 1)
+      throw new Error(`${path}: 'delay' requires args: [expr] — the expression whose value will be read next sample`)
+    validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
+    if (obj.init !== undefined && typeof obj.init !== 'number')
+      throw new Error(`${path}: 'delay' init must be a number, got ${typeof obj.init}`)
+    if (obj.id !== undefined && typeof obj.id !== 'string')
+      throw new Error(`${path}: 'delay' id must be a string, got ${typeof obj.id}`)
+    return
+  }
+
   // broadcast_to, matrix, function, etc. — pass through
   if (op === 'broadcast_to' || op === 'matrix' || op === 'function') return
 
