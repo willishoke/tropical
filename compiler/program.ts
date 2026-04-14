@@ -14,7 +14,7 @@ import { loadProgramDef } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
 import { ProgramType } from './program_types.js'
-import { exprDependencies, reachableInstances } from './compiler.js'
+import { exprDependencies, reachableInstances, buildDependencyGraph, topologicalSort } from './compiler.js'
 
 // ─────────────────────────────────────────────────────────────
 // ProgramJSON schema
@@ -471,11 +471,22 @@ export function exportSessionAsProgram(
     outputs: outputNames,
   }
 
-  // Build instance map — only include reachable instances, preserving
-  // session insertion order so loadProgramDef processes dependencies first
+  // Topologically sort reachable instances so dependencies come first.
+  // loadProgramDef and the flattener both process nested calls sequentially,
+  // so a call arg referencing a later call would fail.
+  const depGraph = buildDependencyGraph(reachable, session.inputExprNodes)
+  const { order, complete } = topologicalSort(depGraph)
+  if (!complete) {
+    // Cycles exist — they need a breaks_cycles annotation to resolve.
+    // For now, include all reachable instances in whatever order topo produced,
+    // plus any that weren't reached (cycle members).
+    for (const instName of reachable) {
+      if (!order.includes(instName)) order.push(instName)
+    }
+  }
+
   prog.instances = {}
-  for (const instName of session.instanceRegistry.keys()) {
-    if (!reachable.has(instName)) continue
+  for (const instName of order) {
     const inst = session.instanceRegistry.get(instName)!
     const entry: { program: string; inputs?: Record<string, ExprNode> } = {
       program: inst.typeName,
