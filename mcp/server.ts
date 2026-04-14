@@ -211,14 +211,12 @@ const TOOLS = [
   },
   {
     name: 'fan_out',
-    description: 'Wire one source output to many target inputs. One recompile.',
+    description: 'Wire one source to many target inputs. Source can be an instance output ({instance, output}) or any ExprNode (literal, param, arithmetic expression, etc.). One recompile.',
     inputSchema: {
       type: 'object',
       properties: {
         source: {
-          type: 'object',
-          properties: { instance: { type: 'string' }, output: { description: 'Output port name or index' } },
-          required: ['instance', 'output'],
+          description: 'Either {instance, output} for an instance output, or any ExprNode (number, {op:"param",...}, {op:"mul",...}, etc.)',
         },
         targets: {
           type: 'array',
@@ -230,6 +228,58 @@ const TOOLS = [
         },
       },
       required: ['source', 'targets'],
+    },
+  },
+  {
+    name: 'fan_in',
+    description: 'Sum N instance outputs and wire the result to one input. Optional per-source gain. One recompile.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sources: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              instance: { type: 'string' },
+              output:   { description: 'Output port name or index' },
+              gain:     { type: 'number', description: 'Optional scale factor for this source' },
+            },
+            required: ['instance', 'output'],
+          },
+        },
+        target: {
+          type: 'object',
+          properties: {
+            instance: { type: 'string' },
+            input:    { description: 'Input port name or index' },
+          },
+          required: ['instance', 'input'],
+        },
+      },
+      required: ['sources', 'target'],
+    },
+  },
+  {
+    name: 'feedback',
+    description: 'Route a signal back through a cycle-breaking delay instance, creating a feedback loop. Auto-creates a Delay1 (1-sample) by default; use delay_type to choose a longer delay (Delay8, Delay16, Delay512, Delay4410, Delay44100). One recompile.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: {
+          type: 'object',
+          properties: { instance: { type: 'string' }, output: { description: 'Output port name or index' } },
+          required: ['instance', 'output'],
+        },
+        to: {
+          type: 'object',
+          properties: { instance: { type: 'string' }, input: { description: 'Input port name or index' } },
+          required: ['instance', 'input'],
+        },
+        delay_type: { type: 'string', description: 'Delay program type to use (default: Delay1)' },
+        delay_name: { type: 'string', description: 'Name for the auto-created delay instance (default: auto-generated)' },
+      },
+      required: ['from', 'to'],
     },
   },
   {
@@ -522,25 +572,123 @@ function handleWireZip(args: Record<string, unknown>) {
 
 function handleFanOut(args: Record<string, unknown>) {
   return wrap(() => {
-    const source  = args.source  as { instance: string; output: string | number }
-    const targets = args.targets as Array<{ instance: string; input: string | number }>
+    const rawSource = args.source as { instance?: string; output?: string | number } | ExprNode
+    const targets   = args.targets as Array<{ instance: string; input: string | number }>
 
-    const srcInst = session.instanceRegistry.get(source.instance)
-    if (!srcInst) throw new Error(`No instance named '${source.instance}'`)
-    const outName = resolveOutputName(srcInst, source.output)
-    const refExpr = { op: 'ref' as const, instance: source.instance, output: outName }
+    // Resolve source to a canonical ExprNode plus a display label
+    let sourceExpr: ExprNode
+    let sourceLabel: string
+    if (
+      rawSource !== null &&
+      typeof rawSource === 'object' &&
+      !Array.isArray(rawSource) &&
+      typeof (rawSource as Record<string, unknown>).instance === 'string' &&
+      (rawSource as Record<string, unknown>).output !== undefined
+    ) {
+      const s       = rawSource as { instance: string; output: string | number }
+      const srcInst = session.instanceRegistry.get(s.instance)
+      if (!srcInst) throw new Error(`No instance named '${s.instance}'`)
+      const outName = resolveOutputName(srcInst, s.output)
+      sourceExpr  = { op: 'ref' as const, instance: s.instance, output: outName }
+      sourceLabel = `${s.instance}.${outName}`
+    } else {
+      sourceExpr  = rawSource as ExprNode
+      sourceLabel = JSON.stringify(sourceExpr)
+    }
 
     const linked = []
     for (const dst of targets) {
       const dstInst = session.instanceRegistry.get(dst.instance)
       if (!dstInst) throw new Error(`No instance named '${dst.instance}'`)
       const inName   = resolveInputName(dstInst, dst.input)
-      const { expr } = adaptInputExpr(refExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), dst.instance, inName)
+      const { expr } = adaptInputExpr(sourceExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), dst.instance, inName)
       session.inputExprNodes.set(`${dst.instance}:${inName}`, expr)
-      linked.push(`${source.instance}.${outName} → ${dst.instance}.${inName}`)
+      linked.push(`${sourceLabel} → ${dst.instance}.${inName}`)
     }
 
     return { linked, ...wire() }
+  })
+}
+
+function handleFanIn(args: Record<string, unknown>) {
+  return wrap(() => {
+    const sources = args.sources as Array<{ instance: string; output: string | number; gain?: number }>
+    const target  = args.target  as { instance: string; input: string | number }
+
+    if (sources.length === 0) throw new Error('sources must be non-empty')
+
+    const dstInst = session.instanceRegistry.get(target.instance)
+    if (!dstInst) throw new Error(`No instance named '${target.instance}'`)
+
+    // Build one term per source: ref, optionally scaled
+    const terms: ExprNode[] = sources.map(src => {
+      const srcInst = session.instanceRegistry.get(src.instance)
+      if (!srcInst) throw new Error(`No instance named '${src.instance}'`)
+      const outName = resolveOutputName(srcInst, src.output)
+      const ref: ExprNode = { op: 'ref' as const, instance: src.instance, output: outName }
+      return src.gain !== undefined
+        ? { op: 'mul' as const, args: [ref, src.gain] }
+        : ref
+    })
+
+    // Left-fold into a binary add tree
+    const sumExpr = terms.slice(1).reduce<ExprNode>(
+      (acc, t) => ({ op: 'add' as const, args: [acc, t] }),
+      terms[0],
+    )
+
+    const inName   = resolveInputName(dstInst, target.input)
+    const { expr } = adaptInputExpr(sumExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), target.instance, inName)
+    session.inputExprNodes.set(`${target.instance}:${inName}`, expr)
+
+    return { mixed: sources.length, target: `${target.instance}.${inName}`, ...wire() }
+  })
+}
+
+function handleFeedback(args: Record<string, unknown>) {
+  return wrap(() => {
+    const from      = args.from       as { instance: string; output: string | number }
+    const to        = args.to         as { instance: string; input:  string | number }
+    const delayType = (args.delay_type as string | undefined) ?? 'Delay1'
+    const delayName = (args.delay_name as string | undefined) ?? nextName(session, delayType.toLowerCase())
+
+    if (session.instanceRegistry.has(delayName))
+      throw new Error(`Instance '${delayName}' already exists — provide a different delay_name`)
+
+    const type = session.typeRegistry.get(delayType)
+    if (!type)
+      throw new Error(`Delay type '${delayType}' not found. Available: ${[...session.typeRegistry.keys()].join(', ')}`)
+
+    const srcInst = session.instanceRegistry.get(from.instance)
+    if (!srcInst) throw new Error(`No instance named '${from.instance}'`)
+    const dstInst = session.instanceRegistry.get(to.instance)
+    if (!dstInst) throw new Error(`No instance named '${to.instance}'`)
+
+    const outName      = resolveOutputName(srcInst, from.output)
+    const inName       = resolveInputName(dstInst, to.input)
+    const delayInInst  = type._def.inputNames[0]
+    const delayOutInst = type._def.outputNames[0]
+    if (!delayInInst || !delayOutInst)
+      throw new Error(`'${delayType}' must have at least one input and one output`)
+
+    // Create the delay instance
+    const delayInst = type.instantiateAs(delayName)
+    session.instanceRegistry.set(delayName, delayInst)
+
+    // from → delay.in
+    const refToSrc: ExprNode = { op: 'ref' as const, instance: from.instance, output: outName }
+    session.inputExprNodes.set(`${delayName}:${delayInInst}`, refToSrc)
+
+    // delay.out → to
+    const refFromDelay: ExprNode = { op: 'ref' as const, instance: delayName, output: delayOutInst }
+    const { expr } = adaptInputExpr(refFromDelay, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), to.instance, inName)
+    session.inputExprNodes.set(`${to.instance}:${inName}`, expr)
+
+    return {
+      feedback: `${from.instance}.${outName} → ${delayName}(${delayType}) → ${to.instance}.${inName}`,
+      delay_instance: delayName,
+      ...wire(),
+    }
   })
 }
 
@@ -759,6 +907,12 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
     case 'fan_out':
       return handleFanOut(args)
+
+    case 'fan_in':
+      return handleFanIn(args)
+
+    case 'feedback':
+      return handleFeedback(args)
 
     case 'list_programs':
       return handleListPrograms()
