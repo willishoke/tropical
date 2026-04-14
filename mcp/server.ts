@@ -262,7 +262,7 @@ const TOOLS = [
   },
   {
     name: 'feedback',
-    description: 'Route a signal back through a cycle-breaking delay instance, creating a feedback loop. Auto-creates a Delay1 (1-sample) by default; use delay_type to choose a longer delay (Delay8, Delay16, Delay512, Delay4410, Delay44100). One recompile.',
+    description: 'Wire an instance output back to an input through a 1-sample delay, creating a feedback loop. The delay is inserted inline — no extra instance is created. One recompile.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -276,8 +276,8 @@ const TOOLS = [
           properties: { instance: { type: 'string' }, input: { description: 'Input port name or index' } },
           required: ['instance', 'input'],
         },
-        delay_type: { type: 'string', description: 'Delay program type to use (default: Delay1)' },
-        delay_name: { type: 'string', description: 'Name for the auto-created delay instance (default: auto-generated)' },
+        init:     { type: 'number', description: 'Initial delay register value (default 0)' },
+        delay_id: { type: 'string', description: 'Stable name for this delay register — preserves its state across hot-swaps' },
       },
       required: ['from', 'to'],
     },
@@ -647,46 +647,30 @@ function handleFanIn(args: Record<string, unknown>) {
 
 function handleFeedback(args: Record<string, unknown>) {
   return wrap(() => {
-    const from      = args.from       as { instance: string; output: string | number }
-    const to        = args.to         as { instance: string; input:  string | number }
-    const delayType = (args.delay_type as string | undefined) ?? 'Delay1'
-    const delayName = (args.delay_name as string | undefined) ?? nextName(session, delayType.toLowerCase())
-
-    if (session.instanceRegistry.has(delayName))
-      throw new Error(`Instance '${delayName}' already exists — provide a different delay_name`)
-
-    const type = session.typeRegistry.get(delayType)
-    if (!type)
-      throw new Error(`Delay type '${delayType}' not found. Available: ${[...session.typeRegistry.keys()].join(', ')}`)
+    const from    = args.from     as { instance: string; output: string | number }
+    const to      = args.to       as { instance: string; input:  string | number }
+    const init    = (args.init    as number | undefined) ?? 0
+    const delayId = args.delay_id as string | undefined
 
     const srcInst = session.instanceRegistry.get(from.instance)
     if (!srcInst) throw new Error(`No instance named '${from.instance}'`)
     const dstInst = session.instanceRegistry.get(to.instance)
     if (!dstInst) throw new Error(`No instance named '${to.instance}'`)
 
-    const outName      = resolveOutputName(srcInst, from.output)
-    const inName       = resolveInputName(dstInst, to.input)
-    const delayInInst  = type._def.inputNames[0]
-    const delayOutInst = type._def.outputNames[0]
-    if (!delayInInst || !delayOutInst)
-      throw new Error(`'${delayType}' must have at least one input and one output`)
+    const outName = resolveOutputName(srcInst, from.output)
+    const inName  = resolveInputName(dstInst, to.input)
 
-    // Create the delay instance
-    const delayInst = type.instantiateAs(delayName)
-    session.instanceRegistry.set(delayName, delayInst)
+    const refExpr: ExprNode = { op: 'ref' as const, instance: from.instance, output: outName }
+    const delayExpr: ExprNode = delayId !== undefined
+      ? { op: 'delay' as const, args: [refExpr], init, id: delayId }
+      : { op: 'delay' as const, args: [refExpr], init }
 
-    // from → delay.in
-    const refToSrc: ExprNode = { op: 'ref' as const, instance: from.instance, output: outName }
-    session.inputExprNodes.set(`${delayName}:${delayInInst}`, refToSrc)
-
-    // delay.out → to
-    const refFromDelay: ExprNode = { op: 'ref' as const, instance: delayName, output: delayOutInst }
-    const { expr } = adaptInputExpr(refFromDelay, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), to.instance, inName)
+    validateExpr(delayExpr, `${to.instance}.${inName}`)
+    const { expr } = adaptInputExpr(delayExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), to.instance, inName)
     session.inputExprNodes.set(`${to.instance}:${inName}`, expr)
 
     return {
-      feedback: `${from.instance}.${outName} → ${delayName}(${delayType}) → ${to.instance}.${inName}`,
-      delay_instance: delayName,
+      feedback: `${from.instance}.${outName} →[delay init=${init}]→ ${to.instance}.${inName}`,
       ...wire(),
     }
   })
