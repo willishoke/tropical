@@ -24,7 +24,7 @@ import {
 import { parseProgram } from '../compiler/schema.js'
 import {
   saveProgramFromSession, loadProgramAsType, mergeProgramIntoSession,
-  loadStdlib as loadBuiltins, type ProgramJSON,
+  exportSessionAsProgram, loadStdlib as loadBuiltins, type ProgramJSON,
 } from '../compiler/program.js'
 import { DAC }                 from '../compiler/runtime/audio.js'
 import { Param, Trigger }      from '../compiler/runtime/param.js'
@@ -280,6 +280,41 @@ const TOOLS = [
         delay_id: { type: 'string', description: 'Stable name for this delay register — preserves its state across hot-swaps' },
       },
       required: ['from', 'to'],
+    },
+  },
+  {
+    name: 'export_program',
+    description: 'Crystallize the current session (or a subset) into a reusable program type. ' +
+      'Specify which instance ports become the new program\'s inputs and outputs. ' +
+      'Current wiring becomes input_defaults. The new type is registered and can be instantiated immediately. ' +
+      'Optionally remove the exported instances from the session afterward.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name:   { type: 'string', description: 'Name for the new program type (PascalCase recommended)' },
+        inputs: {
+          type: 'object',
+          description: 'Map from new input name → "instance:port". The current wiring for each port becomes the default.',
+          additionalProperties: { type: 'string' },
+        },
+        outputs: {
+          type: 'object',
+          description: 'Map from new output name → {instance, output}.',
+          additionalProperties: {
+            type: 'object',
+            properties: {
+              instance: { type: 'string' },
+              output:   { type: 'string' },
+            },
+            required: ['instance', 'output'],
+          },
+        },
+        remove_exported: {
+          type: 'boolean',
+          description: 'If true, remove the exported instances from the session after registration (default false).',
+        },
+      },
+      required: ['name', 'inputs', 'outputs'],
     },
   },
   {
@@ -676,6 +711,54 @@ function handleFeedback(args: Record<string, unknown>) {
   })
 }
 
+function handleExportProgram(args: Record<string, unknown>) {
+  return wrap(() => {
+    const name      = args.name as string
+    const inputs    = (args.inputs ?? {}) as Record<string, string>
+    const outputs   = args.outputs as Record<string, { instance: string; output: string }>
+    const removeExported = (args.remove_exported as boolean) ?? false
+
+    if (!name) throw new Error('name is required')
+    if (!outputs || Object.keys(outputs).length === 0) throw new Error('outputs is required (at least one)')
+
+    const prog = exportSessionAsProgram(session, { name, inputs, outputs })
+
+    // Register as a usable type
+    const type = loadProgramAsType(prog, session)
+    session.typeRegistry.set(name, type)
+
+    // Optionally clean up exported instances from the session
+    if (removeExported) {
+      // Collect all instances that were included in the export
+      const exportedInstances = new Set(Object.keys(prog.instances ?? {}))
+      for (const instName of exportedInstances) {
+        session.instanceRegistry.delete(instName)
+        for (const key of [...session.inputExprNodes.keys()]) {
+          if (key.startsWith(`${instName}:`)) session.inputExprNodes.delete(key)
+        }
+        session.graphOutputs = session.graphOutputs.filter(o => o.instance !== instName)
+      }
+      // Clean up dangling refs in remaining wiring
+      for (const [key, expr] of [...session.inputExprNodes.entries()]) {
+        if (exprDependencies(expr).intersection(exportedInstances).size > 0) {
+          session.inputExprNodes.delete(key)
+        }
+      }
+      if (session.instanceRegistry.size > 0 || session.graphOutputs.length > 0) {
+        wire()
+      }
+    }
+
+    return {
+      program_name: name,
+      inputs: type._def.inputNames,
+      outputs: type._def.outputNames,
+      instances_included: Object.keys(prog.instances ?? {}),
+      program: prog,
+    }
+  })
+}
+
 function handleRemoveInstance(instanceName: string) {
   return wrap(() => {
     if (!session.instanceRegistry.has(instanceName))
@@ -897,6 +980,9 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
     case 'feedback':
       return handleFeedback(args)
+
+    case 'export_program':
+      return handleExportProgram(args)
 
     case 'list_programs':
       return handleListPrograms()
