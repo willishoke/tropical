@@ -157,6 +157,132 @@ const TOOLS = [
     },
   },
   {
+    name: 'replicate',
+    description: 'Create N instances of a program type in one call. Returns the list of created instance names and their ports. Does NOT trigger recompilation — follow up with wire and/or set_output.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        program:     { type: 'string', description: 'Registered program type name' },
+        count:       { type: 'number', description: 'Number of instances to create' },
+        name_prefix: { type: 'string', description: 'Name prefix for instances (default: lowercase program name). Instances are named prefix1, prefix2, …' },
+      },
+      required: ['program', 'count'],
+    },
+  },
+  {
+    name: 'wire_chain',
+    description: 'Wire N instances in series: instances[i].output → instances[i+1].input. Optionally set the first instance\'s input from an expression. One recompile.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        instances:    { type: 'array', items: { type: 'string' }, description: 'Ordered list of instance names to chain' },
+        output:       { description: 'Output port name or index to read from each instance' },
+        input:        { description: 'Input port name or index to feed on each instance' },
+        initial_expr: { description: 'Optional ExprNode to wire into the first instance\'s input' },
+      },
+      required: ['instances', 'output', 'input'],
+    },
+  },
+  {
+    name: 'wire_zip',
+    description: 'Wire two equal-length lists of ports pairwise: sources[i].output → targets[i].input. One recompile.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sources: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { instance: { type: 'string' }, output: { description: 'Output port name or index' } },
+            required: ['instance', 'output'],
+          },
+        },
+        targets: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { instance: { type: 'string' }, input: { description: 'Input port name or index' } },
+            required: ['instance', 'input'],
+          },
+        },
+      },
+      required: ['sources', 'targets'],
+    },
+  },
+  {
+    name: 'fan_out',
+    description: 'Wire one source to many target inputs. Source can be an instance output ({instance, output}) or any ExprNode (literal, param, arithmetic expression, etc.). One recompile.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source: {
+          description: 'Either {instance, output} for an instance output, or any ExprNode (number, {op:"param",...}, {op:"mul",...}, etc.)',
+        },
+        targets: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { instance: { type: 'string' }, input: { description: 'Input port name or index' } },
+            required: ['instance', 'input'],
+          },
+        },
+      },
+      required: ['source', 'targets'],
+    },
+  },
+  {
+    name: 'fan_in',
+    description: 'Sum N instance outputs and wire the result to one input. Optional per-source gain. One recompile.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sources: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              instance: { type: 'string' },
+              output:   { description: 'Output port name or index' },
+              gain:     { type: 'number', description: 'Optional scale factor for this source' },
+            },
+            required: ['instance', 'output'],
+          },
+        },
+        target: {
+          type: 'object',
+          properties: {
+            instance: { type: 'string' },
+            input:    { description: 'Input port name or index' },
+          },
+          required: ['instance', 'input'],
+        },
+      },
+      required: ['sources', 'target'],
+    },
+  },
+  {
+    name: 'feedback',
+    description: 'Wire an instance output back to an input through a 1-sample delay, creating a feedback loop. The delay is inserted inline — no extra instance is created. One recompile.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        from: {
+          type: 'object',
+          properties: { instance: { type: 'string' }, output: { description: 'Output port name or index' } },
+          required: ['instance', 'output'],
+        },
+        to: {
+          type: 'object',
+          properties: { instance: { type: 'string' }, input: { description: 'Input port name or index' } },
+          required: ['instance', 'input'],
+        },
+        init:     { type: 'number', description: 'Initial delay register value (default 0)' },
+        delay_id: { type: 'string', description: 'Stable name for this delay register — preserves its state across hot-swaps' },
+      },
+      required: ['from', 'to'],
+    },
+  },
+  {
     name: 'list_programs',
     description: 'List all registered program types (builtins + user-defined) with their input/output port names and input defaults. Call this before building a program to discover what is available.',
     inputSchema: { type: 'object', properties: {} },
@@ -333,6 +459,220 @@ function handleAddInstance(programName: string, instanceName: string) {
     const inst = type.instantiateAs(instanceName)
     session.instanceRegistry.set(instanceName, inst)
     return instanceSummary(instanceName)
+  })
+}
+
+function handleReplicate(programName: string, count: number, namePrefix?: string) {
+  return wrap(() => {
+    const type = session.typeRegistry.get(programName)
+    if (!type)
+      throw new Error(`Unknown program '${programName}'. Known: ${[...session.typeRegistry.keys()].join(', ')}`)
+    if (!Number.isInteger(count) || count < 1)
+      throw new Error(`count must be a positive integer, got ${count}`)
+
+    const prefix = namePrefix ?? programName.toLowerCase()
+    const created = []
+    for (let i = 0; i < count; i++) {
+      const name = nextName(session, prefix)
+      if (session.instanceRegistry.has(name))
+        throw new Error(`Instance '${name}' already exists — pick a different name_prefix`)
+      const inst = type.instantiateAs(name)
+      session.instanceRegistry.set(name, inst)
+      created.push(instanceSummary(name))
+    }
+    return { created }
+  })
+}
+
+/** Resolve an output name/index on an instance and return the canonical name string. */
+function resolveOutputName(inst: { outputNames: string[] }, nameOrIdx: string | number): string {
+  const idx = resolveOutputIdx(inst, nameOrIdx)
+  return inst.outputNames[idx]
+}
+
+/** Resolve an input name/index on an instance and return the canonical name string. */
+function resolveInputName(inst: { inputNames: string[] }, nameOrIdx: string | number): string {
+  const idx = resolveInputIdx(inst, nameOrIdx)
+  return inst.inputNames[idx]
+}
+
+function handleWireChain(args: Record<string, unknown>) {
+  return wrap(() => {
+    const instanceNames = args.instances as string[]
+    const outputPort    = args.output as string | number
+    const inputPort     = args.input  as string | number
+    const initialExpr   = args.initial_expr as import('../compiler/expr.js').ExprNode | undefined
+
+    if (instanceNames.length < 2 && initialExpr === undefined)
+      throw new Error('wire_chain needs at least 2 instances, or 1 instance with initial_expr')
+
+    // Validate all instances upfront
+    const insts = instanceNames.map(n => {
+      const inst = session.instanceRegistry.get(n)
+      if (!inst) throw new Error(`No instance named '${n}'`)
+      return inst
+    })
+
+    // Optionally set first instance's input
+    if (initialExpr !== undefined) {
+      const firstName  = instanceNames[0]
+      const firstInst  = insts[0]
+      const inputName  = resolveInputName(firstInst, inputPort)
+      const { expr }   = adaptInputExpr(initialExpr, firstInst.inputPortType(firstInst.inputNames.indexOf(inputName)), firstName, inputName)
+      session.inputExprNodes.set(`${firstName}:${inputName}`, expr)
+    }
+
+    // Wire instances[i].output → instances[i+1].input
+    const linked = []
+    for (let i = 0; i < instanceNames.length - 1; i++) {
+      const srcInst  = insts[i]
+      const dstInst  = insts[i + 1]
+      const srcName  = instanceNames[i]
+      const dstName  = instanceNames[i + 1]
+      const outName  = resolveOutputName(srcInst, outputPort)
+      const inName   = resolveInputName(dstInst, inputPort)
+      const refExpr  = { op: 'ref' as const, instance: srcName, output: outName }
+      const { expr } = adaptInputExpr(refExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), dstName, inName)
+      session.inputExprNodes.set(`${dstName}:${inName}`, expr)
+      linked.push(`${srcName}.${outName} → ${dstName}.${inName}`)
+    }
+
+    return { linked, ...wire() }
+  })
+}
+
+function handleWireZip(args: Record<string, unknown>) {
+  return wrap(() => {
+    const sources = args.sources as Array<{ instance: string; output: string | number }>
+    const targets = args.targets as Array<{ instance: string; input:  string | number }>
+
+    if (sources.length !== targets.length)
+      throw new Error(`sources and targets must be the same length (got ${sources.length} vs ${targets.length})`)
+
+    const linked = []
+    for (let i = 0; i < sources.length; i++) {
+      const src     = sources[i]
+      const dst     = targets[i]
+      const srcInst = session.instanceRegistry.get(src.instance)
+      if (!srcInst) throw new Error(`No instance named '${src.instance}'`)
+      const dstInst = session.instanceRegistry.get(dst.instance)
+      if (!dstInst) throw new Error(`No instance named '${dst.instance}'`)
+
+      const outName  = resolveOutputName(srcInst, src.output)
+      const inName   = resolveInputName(dstInst, dst.input)
+      const refExpr  = { op: 'ref' as const, instance: src.instance, output: outName }
+      const { expr } = adaptInputExpr(refExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), dst.instance, inName)
+      session.inputExprNodes.set(`${dst.instance}:${inName}`, expr)
+      linked.push(`${src.instance}.${outName} → ${dst.instance}.${inName}`)
+    }
+
+    return { linked, ...wire() }
+  })
+}
+
+function handleFanOut(args: Record<string, unknown>) {
+  return wrap(() => {
+    const rawSource = args.source as { instance?: string; output?: string | number } | ExprNode
+    const targets   = args.targets as Array<{ instance: string; input: string | number }>
+
+    // Resolve source to a canonical ExprNode plus a display label
+    let sourceExpr: ExprNode
+    let sourceLabel: string
+    if (
+      rawSource !== null &&
+      typeof rawSource === 'object' &&
+      !Array.isArray(rawSource) &&
+      typeof (rawSource as Record<string, unknown>).instance === 'string' &&
+      (rawSource as Record<string, unknown>).output !== undefined
+    ) {
+      const s       = rawSource as { instance: string; output: string | number }
+      const srcInst = session.instanceRegistry.get(s.instance)
+      if (!srcInst) throw new Error(`No instance named '${s.instance}'`)
+      const outName = resolveOutputName(srcInst, s.output)
+      sourceExpr  = { op: 'ref' as const, instance: s.instance, output: outName }
+      sourceLabel = `${s.instance}.${outName}`
+    } else {
+      sourceExpr  = rawSource as ExprNode
+      sourceLabel = JSON.stringify(sourceExpr)
+    }
+
+    const linked = []
+    for (const dst of targets) {
+      const dstInst = session.instanceRegistry.get(dst.instance)
+      if (!dstInst) throw new Error(`No instance named '${dst.instance}'`)
+      const inName   = resolveInputName(dstInst, dst.input)
+      const { expr } = adaptInputExpr(sourceExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), dst.instance, inName)
+      session.inputExprNodes.set(`${dst.instance}:${inName}`, expr)
+      linked.push(`${sourceLabel} → ${dst.instance}.${inName}`)
+    }
+
+    return { linked, ...wire() }
+  })
+}
+
+function handleFanIn(args: Record<string, unknown>) {
+  return wrap(() => {
+    const sources = args.sources as Array<{ instance: string; output: string | number; gain?: number }>
+    const target  = args.target  as { instance: string; input: string | number }
+
+    if (sources.length === 0) throw new Error('sources must be non-empty')
+
+    const dstInst = session.instanceRegistry.get(target.instance)
+    if (!dstInst) throw new Error(`No instance named '${target.instance}'`)
+
+    // Build one term per source: ref, optionally scaled
+    const terms: ExprNode[] = sources.map(src => {
+      const srcInst = session.instanceRegistry.get(src.instance)
+      if (!srcInst) throw new Error(`No instance named '${src.instance}'`)
+      const outName = resolveOutputName(srcInst, src.output)
+      const ref: ExprNode = { op: 'ref' as const, instance: src.instance, output: outName }
+      return src.gain !== undefined
+        ? { op: 'mul' as const, args: [ref, src.gain] }
+        : ref
+    })
+
+    // Left-fold into a binary add tree
+    const sumExpr = terms.slice(1).reduce<ExprNode>(
+      (acc, t) => ({ op: 'add' as const, args: [acc, t] }),
+      terms[0],
+    )
+
+    const inName   = resolveInputName(dstInst, target.input)
+    const { expr } = adaptInputExpr(sumExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), target.instance, inName)
+    session.inputExprNodes.set(`${target.instance}:${inName}`, expr)
+
+    return { mixed: sources.length, target: `${target.instance}.${inName}`, ...wire() }
+  })
+}
+
+function handleFeedback(args: Record<string, unknown>) {
+  return wrap(() => {
+    const from    = args.from     as { instance: string; output: string | number }
+    const to      = args.to       as { instance: string; input:  string | number }
+    const init    = (args.init    as number | undefined) ?? 0
+    const delayId = args.delay_id as string | undefined
+
+    const srcInst = session.instanceRegistry.get(from.instance)
+    if (!srcInst) throw new Error(`No instance named '${from.instance}'`)
+    const dstInst = session.instanceRegistry.get(to.instance)
+    if (!dstInst) throw new Error(`No instance named '${to.instance}'`)
+
+    const outName = resolveOutputName(srcInst, from.output)
+    const inName  = resolveInputName(dstInst, to.input)
+
+    const refExpr: ExprNode = { op: 'ref' as const, instance: from.instance, output: outName }
+    const delayExpr: ExprNode = delayId !== undefined
+      ? { op: 'delay' as const, args: [refExpr], init, id: delayId }
+      : { op: 'delay' as const, args: [refExpr], init }
+
+    validateExpr(delayExpr, `${to.instance}.${inName}`)
+    const { expr } = adaptInputExpr(delayExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), to.instance, inName)
+    session.inputExprNodes.set(`${to.instance}:${inName}`, expr)
+
+    return {
+      feedback: `${from.instance}.${outName} →[delay init=${init}]→ ${to.instance}.${inName}`,
+      ...wire(),
+    }
   })
 }
 
@@ -535,6 +875,28 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
     case 'remove_instance':
       return handleRemoveInstance(args.instance_name as string)
+
+    case 'replicate':
+      return handleReplicate(
+        args.program as string,
+        args.count as number,
+        args.name_prefix as string | undefined,
+      )
+
+    case 'wire_chain':
+      return handleWireChain(args)
+
+    case 'wire_zip':
+      return handleWireZip(args)
+
+    case 'fan_out':
+      return handleFanOut(args)
+
+    case 'fan_in':
+      return handleFanIn(args)
+
+    case 'feedback':
+      return handleFeedback(args)
 
     case 'list_programs':
       return handleListPrograms()

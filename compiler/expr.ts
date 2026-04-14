@@ -609,8 +609,81 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
     return
   }
 
-  // broadcast_to, matrix, function, etc. — pass through
-  if (op === 'broadcast_to' || op === 'matrix' || op === 'function') return
+  // delay: args[0] is the expression to delay; init is a number; id is an optional string name
+  if (op === 'delay') {
+    if (!Array.isArray(obj.args) || (obj.args as unknown[]).length !== 1)
+      throw new Error(`${path}: 'delay' requires args: [expr] — the expression whose value will be read next sample`)
+    validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
+    if (obj.init !== undefined && typeof obj.init !== 'number')
+      throw new Error(`${path}: 'delay' init must be a number, got ${typeof obj.init}`)
+    if (obj.id !== undefined && typeof obj.id !== 'string')
+      throw new Error(`${path}: 'delay' id must be a string, got ${typeof obj.id}`)
+    return
+  }
+
+  // ── Array construction ops ────────────────────────────────────────────────
+
+  if (op === 'zeros' || op === 'ones') {
+    if (!Array.isArray(obj.shape))
+      throw new Error(`${path}: '${op}' requires shape: number[]`)
+    return
+  }
+  if (op === 'fill') {
+    if (!Array.isArray(obj.shape))
+      throw new Error(`${path}: 'fill' requires shape: number[]`)
+    if (obj.value === undefined)
+      throw new Error(`${path}: 'fill' requires value: ExprNode`)
+    validateExpr(obj.value as ExprNode, `${path}.value`)
+    return
+  }
+  if (op === 'array_literal') {
+    if (!Array.isArray(obj.values))
+      throw new Error(`${path}: 'array_literal' requires values: ExprNode[]`)
+    for (let i = 0; i < (obj.values as unknown[]).length; i++)
+      validateExpr((obj.values as ExprNode[])[i], `${path}.values[${i}]`)
+    return
+  }
+
+  // ── Array manipulation ops ────────────────────────────────────────────────
+
+  if (op === 'reshape' || op === 'transpose') {
+    if (!Array.isArray(obj.args) || (obj.args as unknown[]).length < 1)
+      throw new Error(`${path}: '${op}' requires args: [arr]`)
+    validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
+    return
+  }
+  if (op === 'slice') {
+    if (!Array.isArray(obj.args) || (obj.args as unknown[]).length < 1)
+      throw new Error(`${path}: 'slice' requires args: [arr]`)
+    validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
+    if (typeof obj.start !== 'number') throw new Error(`${path}: 'slice' requires start: number`)
+    if (typeof obj.end   !== 'number') throw new Error(`${path}: 'slice' requires end: number`)
+    return
+  }
+  if (op === 'reduce') {
+    if (!Array.isArray(obj.args) || (obj.args as unknown[]).length < 1)
+      throw new Error(`${path}: 'reduce' requires args: [arr]`)
+    validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
+    if (typeof obj.reduce_op !== 'string')
+      throw new Error(`${path}: 'reduce' requires reduce_op: string`)
+    return
+  }
+  if (op === 'broadcast_to') {
+    if (!Array.isArray(obj.args) || (obj.args as unknown[]).length < 1)
+      throw new Error(`${path}: 'broadcast_to' requires args: [arr]`)
+    validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
+    return
+  }
+  if (op === 'map') {
+    if (!Array.isArray(obj.args) || (obj.args as unknown[]).length < 1)
+      throw new Error(`${path}: 'map' requires args: [arr]`)
+    validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
+    if (obj.callee !== undefined) validateExpr(obj.callee as ExprNode, `${path}.callee`)
+    return
+  }
+
+  // matrix, function — structural pass-through
+  if (op === 'matrix' || op === 'function') return
 
   // Unknown op
   throw new Error(`${path}: unknown op '${op}'`)
