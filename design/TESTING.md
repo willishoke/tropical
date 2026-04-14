@@ -16,13 +16,13 @@ A test is a function `t : S -> {pass, fail}` where S is some subset of the syste
 |-------|------|-----------|
 | O0 | Liveness | Does not crash, does not hang |
 | O1 | Range | Output is in some expected set (e.g. peak in (0, 100)) |
-| O2 | Relational | Output satisfies a structural invariant (type preservation, idempotence, categorical law) |
+| O2 | Relational | Output satisfies a structural invariant (type preservation, idempotence) |
 | O3 | Differential | Output matches a reference implementation within epsilon |
 | O4 | Exact | Output matches a known-good value to machine precision |
 
 Most smoke tests are O0-O1. Most DSP correctness tests need O3-O4. The useful insight: you can have an O4 oracle for structure (exact instruction match) and only an O1 oracle for numerics (peak level) on the same test — oracle strength is per-assertion, not per-test.
 
-**Observability.** When `t(s) = fail`, how many bits does the failure message carry? Low: "test failed." High: "at stage Flatten, module VCO1, expression `{op:'ref', module:'VCO1', output:'saw'}`, expected type `float` but got `float[4]`." Observability is orthogonal to scope and oracle strength.
+**Observability.** When `t(s) = fail`, how many bits does the failure message carry? Low: "test failed." High: "at stage Flatten, instance VCO1, expression `{op:'ref', instance:'VCO1', output:'saw'}`, expected type `float` but got `float[4]`." Observability is orthogonal to scope and oracle strength.
 
 **Covering.** A test suite covers a behavior region R if for every behavior b in R, there exists a test whose scope includes b and whose oracle is strong enough to distinguish correct from incorrect. Gaps in the covering are undertested behaviors. You can ask: is there a region covered by only O0? That's more honest than counting "unit tests."
 
@@ -36,10 +36,10 @@ Tropical's compilation pipeline is a linear chain. Each boundary between stages 
 
 ```
 Stage 0:  ProgramJSON            tropical_program_1 schema (stdlib or user-defined)
-Stage 1:  loadModuleFromJSON     JSON -> ProgramDef via slottifyExpr (name -> slot)
+Stage 1:  loadProgramDef         JSON -> ProgramDef via slottifyExpr (name -> slot)
 Stage 2:  Session assembly       type/instance registries, wiring, input expressions
 Stage 3:  ExprNode trees         recursive JSON union -- the universal IR
-Stage 4:  Flattening             multi-module -> single expression set, ref resolution
+Stage 4:  Flattening             multi-instance -> single expression set, ref resolution
 Stage 5:  Combinator expansion   generate/fold/chain/scan/iterate -> scalar trees
 Stage 6:  Array lowering         array ops -> scalar primitives (static unrolling)
 Stage 7:  Instruction emission   ExprNode -> FlatProgram NInstr stream
@@ -51,9 +51,7 @@ Stage 11: FlatRuntime            kernel execution, double-buffered state managem
 Stage 12: Audio output           RtAudio callback
 ```
 
-The **Term IR** path is a parallel branch (`ExprNode -> Term -> optimized Term`) used for type-checking and structural reasoning. It does not feed the audio path directly.
-
-**Key property: stages 0-8 are all JSON-serializable.** This is what makes the interpreter strategy viable — an interpreter can consume any intermediate representation up through the plan and produce numerical output, bypassing the JIT entirely.
+**Key property: stages 0-8 are all JSON-serializable.** An interpreter at any of these stages could produce numerical output without the JIT.
 
 ### Boundary types
 
@@ -73,26 +71,32 @@ The **Term IR** path is a parallel branch (`ExprNode -> Term -> optimized Term`)
 
 ---
 
-## 3. Oracle Taxonomy per Stage
+## 3. Current Test Suite
 
-What the strongest available oracle is for each stage, what exists today, and where the gaps are.
+**199 tests total** — 189 TS tests across 11 files (1152 expect() calls), 10 C++ tests.
 
-| Stage | Transfer function | Strongest oracle | Current tests | Gap |
-|-------|-------------------|------------------|---------------|-----|
-| ProgramJSON schema | Zod parse + roundtrip | O4 | `program.test.ts` (14) | No fuzz of malformed JSON |
-| loadModuleFromJSON | slottifyExpr (name -> slot) | O4 (structural) | None dedicated | **No tests for slottifyExpr** |
-| ExprNode construction | expr.ts operations | O4 | `expr.test.ts` (14) | Only construction, no evaluation |
-| Term IR | Categorical laws | O4 + O2 (PBT) | `term.test.ts` (45+, 200-500 PBT runs) | Excellent |
-| Term optimization | Structural rewrites | O2 (PBT) | `optimizer.test.ts` (26, 300 PBT runs) | Excellent |
-| Flattening | Inline + resolve refs | O4 | `flatten_wiring.test.ts` (12) | No nested call resolution tests |
-| Combinator expansion | Unroll to scalars | O4 | `combinators.test.ts` (22) | Good |
-| Array lowering | Static unroll | O4 | `lower_arrays.test.ts` (25) | Good |
-| Instruction emission | emitNumericProgram() | O4 (structural) | **None** | **Critical: no emit_numeric.test.ts** |
-| Plan serialization | JSON.stringify | O4 | `plan.test.ts` (20, plan_1) | plan_4 not directly tested |
-| Plan parsing (C++) | JSON -> struct | O2 | `test_module_process.cpp` (implicit) | No dedicated parsing tests |
-| JIT compilation | LLVM codegen | O3 (differential) | **No interpreter exists** | **Critical: no reference oracle** |
-| FlatRuntime | Kernel execution | O3 (epsilon) | `test_module_process.cpp` (10), `apply_plan.test.ts` (11) | Only handwritten plans |
-| Audio output | RtAudio callback | O0 | `mcp/patch.test.ts` (range check) | Inherently limited |
+### Test inventory
+
+| File | Tests | Scope | Oracle | What it covers |
+|------|------:|-------|--------|----------------|
+| `program.test.ts` | 5 | [ProgramJSON] | O4 | Zod schema validation: minimal, graph, nested programs, rejects |
+| `expr.test.ts` | 20 | [ExprNode] | O4 | Array construction, shape inference, operations, matmul, broadcasting, coercion |
+| `compiler.test.ts` | 30 | [Session assembly] | O4 | portTypeFromString, exprDependencies, buildDependencyGraph, topologicalSort, tarjanSCC, extractInstanceInfo |
+| `flatten_wiring.test.ts` | 11 | [Flattening] | O4 | Wiring type validation: scalar/array compatibility, broadcast insertion, shape mismatches |
+| `array_wiring.test.ts` | 13 | [Wiring validation] | O4 | checkArrayConnection: scalar compat, auto-broadcast, struct types, 2D shapes |
+| `combinators.test.ts` | 22 | [Combinator expansion] | O4 | let, generate, iterate, fold, scan, map2, zip_with, chain, binding passthrough |
+| `lower_arrays.test.ts` | 22 | [Array lowering] | O4 | zeros, ones, fill, reshape, transpose, slice, reduce, broadcast_to, map, matmul, nested lowering |
+| `bounds.test.ts` | 35 | [Flattening + bounds] | O4 | applyBounds, resolveBounds, resolveBaseType, loadProgramDef bounds, flattenSession clamp injection, audio safety clamp, type aliases |
+| `emit_numeric.test.ts` | 15 | [Instruction emission] | O4 | Terminals, scalar binary/unary/ternary, type inference/promotion, arrays (Pack, stride patterns, size-1 unboxing, index, array_set), output/register targets, typed state registers, CSE memoization |
+| `apply_plan.test.ts` | 12 | [ProgramJSON → FlatRuntime] | O1-O4 | Session wiring (connect, disconnect, switch output, batch update, rewire, arithmetic expressions), FlatRuntime execution (VCO+VCA, Clock, continuous output, hot-swap state preservation) |
+| `render.test.ts` | 5 | [ProgramJSON → Audio samples] | O1-O3 | Sawtooth peak/RMS range, sine dominant frequency (FFT), hot-swap frequency change, WAV output, buffer-size determinism (bit-exact cross-config) |
+| `test_module_process.cpp` | 10 | [Plan JSON → FlatRuntime] | O4 | Sawtooth oscillator, two-output mix, hot-swap state transfer, array literals, integer counter with modular wrap, select/conditional, multi-register clock, multiple outputs summed, typed int bitwise (LFSR), typed bool comparison + select |
+
+### Test infrastructure
+
+**Buffer backend** (`compiler/test_utils/audio.ts`) — Device-free audio rendering for integration tests. `renderFrames(runtime, nCalls)` drives `process()` synchronously and returns collected samples. Signal analysis: `peak()`, `rms()`, `dominantFrequency()` (Cooley-Tukey FFT), `magnitudeSpectrum()`. WAV output via `writeWav()`.
+
+**C++ test harness** (`engine/tests/test_module_process.cpp`) — Custom `run_test()` / `ASSERT()` / `ASSERT_NEAR()` macros. Each test builds `tropical_plan_4` JSON by hand and exercises the C API directly.
 
 ### Module type coverage
 
@@ -102,7 +106,31 @@ Untested numerically: ADEnvelope, ADSREnvelope, Reverb, Phaser, Phaser16, Compre
 
 ---
 
-## 4. Coverage Map
+## 4. Oracle Taxonomy per Stage
+
+What the strongest available oracle is for each stage, what exists today, and where the gaps are.
+
+| Stage | Transfer function | Strongest oracle | Current tests | Gap |
+|-------|-------------------|------------------|---------------|-----|
+| ProgramJSON schema | Zod parse + roundtrip | O4 | `program.test.ts` (5) | No fuzz of malformed JSON |
+| loadProgramDef / slottifyExpr | Name -> slot conversion | O4 (structural) | Indirect via `bounds.test.ts` | **No isolated slottifyExpr tests** |
+| ExprNode construction | expr.ts operations | O4 | `expr.test.ts` (20) | Only construction, no evaluation |
+| Graph utilities | Dep graph, topo sort, SCC | O4 | `compiler.test.ts` (30) | Good |
+| Wiring validation | Type compat + broadcast | O4 | `array_wiring.test.ts` (13), `flatten_wiring.test.ts` (11) | Good |
+| Flattening | Inline + resolve refs | O4 | `flatten_wiring.test.ts` (11), `bounds.test.ts` (35) | No nested call resolution tests |
+| Combinator expansion | Unroll to scalars | O4 | `combinators.test.ts` (22) | Good |
+| Array lowering | Static unroll | O4 | `lower_arrays.test.ts` (22) | Good |
+| Bounds enforcement | Clamp insertion | O4 | `bounds.test.ts` (35) | Thorough |
+| Instruction emission | emitNumericProgram() | O4 (structural) | `emit_numeric.test.ts` (15) | Good structural coverage; no numerical oracle |
+| Plan serialization | JSON.stringify | O4 | Implicit via apply_plan | No dedicated tests |
+| Plan parsing (C++) | JSON -> struct | O2 | `test_module_process.cpp` (implicit) | No dedicated parsing tests |
+| JIT compilation | LLVM codegen | O4 (handwritten) | `test_module_process.cpp` (10) | Only handwritten plans; no cross-boundary roundtrip |
+| FlatRuntime | Kernel execution | O1-O4 | `apply_plan.test.ts` (12), `render.test.ts` (5), `test_module_process.cpp` (10) | Only 3/19 modules |
+| Audio output | RtAudio callback | O0 | None | No automated audio device test |
+
+---
+
+## 5. Coverage Map
 
 Current test suite as a covering of (scope interval) x (oracle strength). Each cell: `*` = well-covered, `~` = partial, `.` = no coverage.
 
@@ -110,34 +138,36 @@ Current test suite as a covering of (scope interval) x (oracle strength). Each c
 Scope (interval)                     O0  O1  O2  O3  O4
 -------------------------------------------------------
 [ProgramJSON schema]                  .   .   *   .   *
-[loadModuleFromJSON / slottifyExpr]   ~   .   .   .   .
+[loadProgramDef / slottifyExpr]       ~   .   .   .   .
 [ExprNode construction]               .   .   *   .   *
-[Term IR + type checking]             .   .   *   .   *
-[Term optimization]                   .   .   *   .   *
+[Graph utilities]                     .   .   *   .   *
+[Wiring validation]                   .   .   *   .   *
 [Flattening]                          .   .   *   .   *
 [Combinator expansion]                .   .   .   .   *
 [Array lowering]                      .   .   .   .   *
-[Instruction emission]                .   .   .   .   .   <- EMPTY
-[Plan serialization]                  .   .   *   .   *
+[Bounds enforcement]                  .   .   *   .   *
+[Instruction emission]                .   .   .   .   *
 [Plan parsing (C++)]                  *   .   .   .   .
-[JIT + Runtime]                       *   .   .   .   ~
+[JIT + Runtime (handwritten plans)]   .   .   .   .   *
 [ProgramJSON -> FlatRuntime]          *   *   .   .   ~
-[ProgramJSON -> Audio]                *   *   .   .   .
+[ProgramJSON -> Audio samples]        *   *   .   ~   ~
 ```
 
 ### Critical gaps, ranked
 
-**1. Instruction emission (stage 7).** No `emit_numeric.test.ts` exists. This stage translates ExprNode trees into `FlatProgram` instruction streams. If it has a bug, tests downstream either catch it at O1 (range check on audio output) or miss it entirely. A structural oracle (O4) here would dramatically improve fault localization.
+**1. No interpreter for differential testing.** No ExprNode interpreter exists. This would enable O3 testing across the entire pipeline: for any program, run the interpreter on the lowered ExprNode tree, run the JIT path, compare sample-by-sample. This single addition would convert every integration test from O1 to O3.
 
-**2. No interpreter for differential testing.** No ExprNode interpreter exists. This would enable O3 testing across the entire pipeline: for any program, run the interpreter on the lowered ExprNode tree, run the JIT path, compare sample-by-sample. This single addition would convert every integration test from O1 to O3.
+**2. Only 3/19 modules tested numerically.** The stdlib JSON files are frozen artifacts. Their correctness was validated once during generation. There is no ongoing regression oracle — if the flattener or emitter changes behavior, 16 modules could silently break.
 
-**3. slottifyExpr / loadModuleFromJSON untested.** These are the new functions (from the stdlib-as-JSON migration) that convert named references in ProgramJSON to slot-indexed ProgramDef. They're exercised indirectly through integration tests, but a bug in name resolution would be hard to diagnose without isolated tests.
+**3. slottifyExpr untested in isolation.** `loadProgramDef` is exercised indirectly through `bounds.test.ts` and integration tests, but `slottifyExpr` itself (the pure name→slot tree walk) has no dedicated tests. A bug in name resolution would be hard to diagnose.
 
-**4. Only 3/19 modules tested numerically.** The stdlib JSON files are frozen artifacts. Their correctness was validated once during generation (against the now-deleted TypeScript factories). There is no ongoing regression oracle — if the flattener or emitter changes behavior, 16 modules could silently break.
+**4. No cross-boundary roundtrip tests.** The TS emitter and C++ parser are tested independently but never against each other. A serialization mismatch would only surface as a mysterious audio bug in integration tests.
+
+**5. No plan serialization tests.** The `tropical_plan_4` JSON schema is implicit — defined by whatever `emit_numeric.ts` produces and `NumericProgramParser.hpp` accepts. No test verifies this contract directly.
 
 ---
 
-## 5. The Interpreter Strategy
+## 6. The Interpreter Strategy
 
 The single highest-impact addition to the test suite. A reference evaluator for ExprNode trees that serves as a universal differential oracle.
 
@@ -187,11 +217,11 @@ The interpreter uses JavaScript's `Math.sin`, `Math.cos`, etc. The JIT uses inli
 
 ### What it enables
 
-Every test in `apply_plan.test.ts` can be upgraded: instead of checking `peak(buf) > 0` (O1), check `|jit_output[i] - interp_output[i]| < 1e-6 for all i` (O3). Every stdlib module gets tested by loading the JSON, flattening, interpreting N samples, and comparing against JIT output. The interpreter is the ongoing regression oracle that replaces the deleted TypeScript module factories.
+Every test in `apply_plan.test.ts` and `render.test.ts` can be upgraded: instead of checking `peak(buf) > 0` (O1), check `|jit_output[i] - interp_output[i]| < 1e-6 for all i` (O3). Every stdlib module gets tested by loading the JSON, flattening, interpreting N samples, and comparing against JIT output. The interpreter is the ongoing regression oracle for all 19 stdlib modules.
 
 ---
 
-## 6. Concrete Next Steps
+## 7. Concrete Next Steps
 
 Ranked by coverage impact — which regions of behavior space each addition covers.
 
@@ -211,22 +241,21 @@ For each of the 19 `stdlib/*.json` files: load -> flatten -> JIT -> process N sa
 - **Dependency**: interpreter (for O3), or standalone with snapshotted output (O4)
 - **Impact**: covers 16 currently untested module types; catches regressions in flattener/emitter/JIT
 
-### Priority 3: Create `emit_numeric.test.ts`
-
-Feed ExprNode trees in, assert on emitted `NInstr[]`. Same pattern as `lower_arrays.test.ts`.
-
-- **Scope**: `[ExprNode, FlatProgram]` — stage 7 only
-- **Oracle**: O4 (exact structural match)
-- **Start with**: arithmetic, register read/write, array pack/index, select, sample_rate/sample_index
-- **Impact**: fills the completely empty row in the coverage grid
-
-### Priority 4: `slottifyExpr` unit tests
+### Priority 3: `slottifyExpr` unit tests
 
 Exercise name-to-slot conversion edge cases: unknown names, nested calls, delay refs, array registers.
 
 - **Scope**: `[ProgramJSON, ProgramDef]` — stage 1 only
 - **Oracle**: O4 (exact structural match on output ExprNode)
-- **Impact**: tests the new code path from the stdlib-as-JSON migration
+- **Impact**: tests a critical path in the stdlib-as-JSON migration
+
+### Priority 4: Cross-boundary roundtrip tests
+
+Emit a `FlatProgram` in TS, serialize to `tropical_plan_4` JSON, parse in C++ via `NumericProgramParser`, verify field-by-field.
+
+- **Scope**: `[FlatProgram TS, FlatProgram C++]` — stages 7-9
+- **Oracle**: O4 (structural match after JSON roundtrip)
+- **Impact**: catches serialization/parsing mismatches at the FFI boundary
 
 ### Priority 5: Property-based tests for instruction emission
 
@@ -235,36 +264,32 @@ Exercise name-to-slot conversion edge cases: unknown names, nested calls, delay 
 - **Properties**: output_targets.length matches expected output count; all register_targets are valid temp indices; instruction count bounded by ExprNode tree size
 - **Pairs with**: interpreter differential tests (O2 + O3 together)
 
-### Priority 6: Cross-boundary roundtrip tests
-
-Emit a `FlatProgram` in TS, serialize to `tropical_plan_4` JSON, parse in C++ via `NumericProgramParser`, verify field-by-field.
-
-- **Scope**: `[FlatProgram TS, FlatProgram C++]` — stages 7-9
-- **Oracle**: O4 (structural match after JSON roundtrip)
-- **Impact**: catches serialization/parsing mismatches at the FFI boundary
-
 ---
 
-## 7. Determinism
+## 8. Determinism
 
 Stages 0-9 (all TS + C++ parsing) are **fully deterministic** — pure functions from input to output. Same ExprNode in, same FlatProgram out. O4 oracles apply freely.
 
 Stage 10 (JIT) is **functionally deterministic.** The kernel function is deterministic for a given FlatProgram. Inline transcendental approximations (sin, cos, exp, log, tanh) produce bit-identical results across runs on the same platform (no libm dependency). Cross-platform reproducibility is a non-goal (macOS/ARM64 only in practice).
 
-Stage 11 (FlatRuntime) with **hot-swap** introduces observable non-determinism: the output of buffer N+1 depends on whether a hot-swap occurred between N and N+1. Tests exercising hot-swap must account for this (and `test_module_process.cpp` test 3 already does).
+Stage 11 (FlatRuntime) with **hot-swap** introduces observable non-determinism: the output of buffer N+1 depends on whether a hot-swap occurred between N and N+1. Tests exercising hot-swap must account for this (and both `test_module_process.cpp` test 3 and `render.test.ts` test 3 already do).
 
 Stage 12 (Audio) is **inherently non-deterministic** — callback timing, device latency, buffer underruns. No O3/O4 oracle is possible. O0 (liveness) and O1 (range) are the strongest practical oracles.
 
+**Buffer-size determinism**: `render.test.ts` verifies that the same program produces bit-identical output regardless of buffer size (32×16 vs 512×1). This holds because the JIT kernel is per-sample with state register updates between samples — no vectorization across samples.
+
 ---
 
-## 8. Maintaining the Covering
+## 9. Maintaining the Covering
 
 Rules for keeping the coverage map current as the codebase evolves.
 
 **New stdlib module.** Add JSON to `stdlib/`. Add golden-output test (load -> flatten -> process N samples). Verify interpreter match once interpreter exists.
 
-**New ExprNode op.** Four tests required: (a) construction test in `expr.test.ts`, (b) emission test in `emit_numeric.test.ts`, (c) interpreter case in `interpret.ts`, (d) C++ OpTag test in `test_module_process.cpp` with handwritten `tropical_plan_4` JSON.
+**New ExprNode op.** Three tests required: (a) construction test in `expr.test.ts`, (b) emission test in `emit_numeric.test.ts`, (c) C++ OpTag test in `test_module_process.cpp` with handwritten `tropical_plan_4` JSON. Plus: interpreter case in `interpret.ts` once it exists.
 
 **Modifying flattener or emitter.** Run full stdlib golden-output suite. Any change to `flatten.ts`, `lower_arrays.ts`, or `emit_numeric.ts` can silently alter the behavior of all 19 modules.
 
 **New pipeline stage.** Add at least one O2+ test in isolation, plus verify existing end-to-end tests still pass. Update this document's lattice diagram.
+
+**New bounded type or alias.** Add test cases in `bounds.test.ts` for both `resolveBounds` and `flattenSession` clamp injection paths.

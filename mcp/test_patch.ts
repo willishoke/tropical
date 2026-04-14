@@ -1,7 +1,7 @@
 /**
  * test_patch.ts — standalone patch smoke-test, no audio device required.
  *
- * Usage:  bun run src/test_patch.ts <patch.json> [n_frames]
+ * Usage:  bun run mcp/test_patch.ts <patch.json> [n_frames]
  *
  * Loads a patch, calls runtime.process() n_frames times,
  * and reports pass/fail. Exits non-zero on any thrown exception.
@@ -17,7 +17,7 @@ const patchArg = process.argv[2]
 const nFrames  = parseInt(process.argv[3] ?? '128', 10)
 
 if (!patchArg) {
-  console.error('Usage: bun run src/test_patch.ts <patch.json> [n_frames]')
+  console.error('Usage: bun run mcp/test_patch.ts <patch.json> [n_frames]')
   process.exit(1)
 }
 

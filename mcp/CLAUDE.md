@@ -13,8 +13,8 @@ Also configured in `.mcp.json` for Claude Code integration.
 ## Layout
 
 ```
-server.ts        MCP server: session management, tool definitions, request handlers
-program.test.ts  Program round-trip tests
+server.ts      MCP server: session management, tool definitions, request handlers
+test_patch.ts  Standalone CLI smoke-tester: bun run mcp/test_patch.ts <patch.json> [n_frames]
 ```
 
 ## How it works
