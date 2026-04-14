@@ -12,6 +12,7 @@
  *   await writeWav('/tmp/out.wav', samples, 44100)
  */
 
+import { writeFile } from 'node:fs/promises'
 import type { Runtime } from '../runtime/runtime'
 
 // ─── Buffer backend ───────────────────────────────────────────────────────────
@@ -189,5 +190,5 @@ export async function writeWav(
   cc('data'); u32(dataBytes)
   for (let i = 0; i < samples.length; i++) { v.setFloat32(off, samples[i], true); off += 4 }
 
-  await Bun.write(path, buf)
+  await writeFile(path, new Uint8Array(buf))
 }
