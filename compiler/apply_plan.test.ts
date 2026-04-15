@@ -7,13 +7,42 @@
 
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON, type ExprNode } from './session'
-import { loadStdlib as loadBuiltins, type ProgramJSON } from './program'
+import { loadStdlib as loadBuiltins, loadProgramAsType, type ProgramJSON } from './program'
 import { applySessionWiring, applyFlatPlan } from './apply_plan'
 import { Runtime } from './runtime/runtime'
+
+/** Minimal test oscillator — naive saw + sin, phase accumulator. */
+const TEST_OSC: ProgramJSON = {
+  schema: 'tropical_program_1',
+  name: 'TestOsc',
+  inputs: [{ name: 'freq', type: 'freq' }],
+  outputs: [
+    { name: 'saw', type: 'signal' },
+    { name: 'sin', type: 'signal' },
+  ],
+  regs: { phase: 0 },
+  input_defaults: { freq: 440 },
+  process: {
+    outputs: {
+      saw: { op: 'sub', args: [{ op: 'mul', args: [2, { op: 'reg', name: 'phase' }] }, 1] },
+      sin: { op: 'sin', args: [{ op: 'mul', args: [6.283185307179586, { op: 'reg', name: 'phase' }] }] },
+    },
+    next_regs: {
+      phase: { op: 'mod', args: [
+        { op: 'add', args: [
+          { op: 'reg', name: 'phase' },
+          { op: 'div', args: [{ op: 'input', name: 'freq' }, { op: 'sample_rate' }] },
+        ]},
+        1,
+      ]},
+    },
+  },
+} as ProgramJSON
 
 function setupSession(instances: Record<string, { program: string }>, bufferLength = 256) {
   const session = makeSession(bufferLength)
   loadBuiltins(session.typeRegistry)
+  session.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, session))
   loadJSON({
     schema: 'tropical_program_1',
     name: 'test',
@@ -31,15 +60,14 @@ function peak(buf: Float64Array): number {
 describe('applySessionWiring', () => {
   test('connect two modules and get output', () => {
     const session = setupSession({
-      VCO1: { program: 'VCO' },
-      VCA1: { program: 'VCA' },
+      osc1: { program: 'TestOsc' },
+      amp1: { program: 'VCA' },
     })
 
-    // Simulate connect_modules + set_module_input + add_graph_output
-    session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
-    session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
+    session.inputExprNodes.set('osc1:freq', 440)
+    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     applySessionWiring(session)
     session.graph.primeJit()
@@ -52,36 +80,34 @@ describe('applySessionWiring', () => {
   })
 
   test('matches reference output from loadJSON path', () => {
-    // Reference path: loadJSON with full wiring
+    const refSession = makeSession(256)
+    loadBuiltins(refSession.typeRegistry)
+    refSession.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, refSession))
     const prog: ProgramJSON = {
       schema: 'tropical_program_1',
       name: 'ref',
       instances: {
-        VCO1: { program: 'VCO', inputs: { freq: 440 } },
-        VCA1: { program: 'VCA', inputs: {
-          audio: { op: 'ref', instance: 'VCO1', output: 'saw' } as ExprNode,
+        osc1: { program: 'TestOsc', inputs: { freq: 440 } },
+        amp1: { program: 'VCA', inputs: {
+          audio: { op: 'ref', instance: 'osc1', output: 'saw' } as ExprNode,
           cv: 1.0,
         }},
       },
-      audio_outputs: [{ instance: 'VCA1', output: 'out' }],
+      audio_outputs: [{ instance: 'amp1', output: 'out' }],
     }
-
-    const refSession = makeSession(256)
-    loadBuiltins(refSession.typeRegistry)
     loadJSON(prog, refSession)
     refSession.graph.primeJit()
     refSession.graph.process()
     const refBuf = new Float64Array(refSession.graph.outputBuffer)
 
-    // New path: modules only, then mutate + applySessionWiring
     const session = setupSession({
-      VCO1: { program: 'VCO' },
-      VCA1: { program: 'VCA' },
+      osc1: { program: 'TestOsc' },
+      amp1: { program: 'VCA' },
     })
-    session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
-    session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
+    session.inputExprNodes.set('osc1:freq', 440)
+    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     applySessionWiring(session)
     session.graph.primeJit()
@@ -98,27 +124,24 @@ describe('applySessionWiring', () => {
 
   test('disconnect produces silence', () => {
     const session = setupSession({
-      VCO1: { program: 'VCO' },
-      VCA1: { program: 'VCA' },
+      osc1: { program: 'TestOsc' },
+      amp1: { program: 'VCA' },
     })
 
-    // Wire up
-    session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
-    session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
+    session.inputExprNodes.set('osc1:freq', 440)
+    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.graphOutputs.push({ instance: 'amp1', output: 'out' })
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
     expect(peak(session.graph.outputBuffer)).toBeGreaterThan(0)
 
-    // Disconnect VCA1:audio (simulates disconnect_modules)
-    session.inputExprNodes.delete('VCA1:audio')
+    session.inputExprNodes.delete('amp1:audio')
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
 
-    // VCA with no audio input should produce silence (default audio = 0)
     expect(peak(session.graph.outputBuffer)).toBe(0)
 
     session.graph.dispose()
@@ -126,32 +149,29 @@ describe('applySessionWiring', () => {
 
   test('switch output to different module', () => {
     const session = setupSession({
-      VCO1: { program: 'VCO' },
-      VCO2: { program: 'VCO' },
-      VCA1: { program: 'VCA' },
+      osc1: { program: 'TestOsc' },
+      osc2: { program: 'TestOsc' },
+      amp1: { program: 'VCA' },
     })
 
-    // Output from VCA1 via VCO1
-    session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
-    session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
+    session.inputExprNodes.set('osc1:freq', 440)
+    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.graphOutputs.push({ instance: 'amp1', output: 'out' })
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
     const buf1 = new Float64Array(session.graph.outputBuffer)
     expect(peak(buf1)).toBeGreaterThan(0)
 
-    // Switch output to VCO2 directly (simulates remove_graph_output + add_graph_output)
-    session.inputExprNodes.set('VCO2:freq', 880)
-    session.graphOutputs = [{ instance: 'VCO2', output: 'saw' }]
+    session.inputExprNodes.set('osc2:freq', 880)
+    session.graphOutputs = [{ instance: 'osc2', output: 'saw' }]
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
     const buf2 = new Float64Array(session.graph.outputBuffer)
     expect(peak(buf2)).toBeGreaterThan(0)
 
-    // Different output source should produce different signal
     let differs = false
     for (let i = 0; i < Math.min(buf1.length, buf2.length); i++) {
       if (Math.abs(buf1[i] - buf2[i]) > 1e-10) { differs = true; break }
@@ -163,22 +183,20 @@ describe('applySessionWiring', () => {
 
   test('batch update — multiple inputs then single apply', () => {
     const session = setupSession({
-      VCO1: { program: 'VCO' },
-      VCO2: { program: 'VCO' },
-      VCA1: { program: 'VCA' },
+      osc1: { program: 'TestOsc' },
+      osc2: { program: 'TestOsc' },
+      amp1: { program: 'VCA' },
     })
 
-    // Batch: set all inputs at once (simulates set_inputs_batch)
-    session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCO2:freq', 880)
-    session.inputExprNodes.set('VCA1:audio', {
+    session.inputExprNodes.set('osc1:freq', 440)
+    session.inputExprNodes.set('osc2:freq', 880)
+    session.inputExprNodes.set('amp1:audio', {
       op: 'add',
-      args: [{ op: 'ref', instance: 'VCO1', output: 'saw' }, { op: 'ref', instance: 'VCO2', output: 'saw' }],
+      args: [{ op: 'ref', instance: 'osc1', output: 'saw' }, { op: 'ref', instance: 'osc2', output: 'saw' }],
     } as ExprNode)
-    session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
+    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
-    // Single applySessionWiring call
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
@@ -190,34 +208,30 @@ describe('applySessionWiring', () => {
 
   test('rewire — change connection source', () => {
     const session = setupSession({
-      VCO1: { program: 'VCO' },
-      VCO2: { program: 'VCO' },
-      VCA1: { program: 'VCA' },
+      osc1: { program: 'TestOsc' },
+      osc2: { program: 'TestOsc' },
+      amp1: { program: 'VCA' },
     })
 
-    // Initial: VCO1 → VCA1
-    session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCO2:freq', 880)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
-    session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
+    session.inputExprNodes.set('osc1:freq', 440)
+    session.inputExprNodes.set('osc2:freq', 880)
+    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.graphOutputs.push({ instance: 'amp1', output: 'out' })
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
     const buf1 = new Float64Array(session.graph.outputBuffer)
 
-    // Rewire: VCO2 → VCA1 (different frequency, should produce different output)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO2', output: 'saw' })
+    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc2', output: 'saw' })
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
     const buf2 = session.graph.outputBuffer
 
-    // Both should be non-silent
     expect(peak(buf1)).toBeGreaterThan(0)
     expect(peak(buf2)).toBeGreaterThan(0)
 
-    // They should differ (different frequencies)
     let differs = false
     for (let i = 0; i < Math.min(buf1.length, buf2.length); i++) {
       if (Math.abs(buf1[i] - buf2[i]) > 1e-10) { differs = true; break }
@@ -229,17 +243,17 @@ describe('applySessionWiring', () => {
 
   test('expression with arithmetic — mul(ref, literal)', () => {
     const session = setupSession({
-      VCO1: { program: 'VCO' },
-      VCA1: { program: 'VCA' },
+      osc1: { program: 'TestOsc' },
+      amp1: { program: 'VCA' },
     })
 
-    session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', {
+    session.inputExprNodes.set('osc1:freq', 440)
+    session.inputExprNodes.set('amp1:audio', {
       op: 'mul',
-      args: [{ op: 'ref', instance: 'VCO1', output: 'saw' }, 0.5],
+      args: [{ op: 'ref', instance: 'osc1', output: 'saw' }, 0.5],
     } as ExprNode)
-    session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
+    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     applySessionWiring(session)
     session.graph.primeJit()
@@ -254,16 +268,16 @@ describe('applySessionWiring', () => {
 // ─── FlatRuntime tests ───────────────────────────────────────────────────
 
 describe('applyFlatPlan', () => {
-  test('VCO → VCA through flat runtime produces audio', () => {
+  test('TestOsc → VCA through flat runtime produces audio', () => {
     const session = setupSession({
-      VCO1: { program: 'VCO' },
-      VCA1: { program: 'VCA' },
+      osc1: { program: 'TestOsc' },
+      amp1: { program: 'VCA' },
     })
 
-    session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
-    session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
+    session.inputExprNodes.set('osc1:freq', 440)
+    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     const rt = new Runtime(256)
     applyFlatPlan(session, rt)
@@ -290,7 +304,6 @@ describe('applyFlatPlan', () => {
     rt.process()
 
     const buf = rt.outputBuffer
-    // Clock output is a square wave — should have nonzero samples
     expect(peak(buf)).toBeGreaterThan(0)
 
     rt.dispose()
@@ -299,13 +312,13 @@ describe('applyFlatPlan', () => {
 
   test('flat runtime produces continuous output over two buffers', () => {
     const session = setupSession({
-      VCO1: { program: 'VCO' },
-      VCA1: { program: 'VCA' },
+      osc1: { program: 'TestOsc' },
+      amp1: { program: 'VCA' },
     })
-    session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
-    session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
+    session.inputExprNodes.set('osc1:freq', 440)
+    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     const rt = new Runtime(256)
     applyFlatPlan(session, rt)
@@ -314,12 +327,10 @@ describe('applyFlatPlan', () => {
     const buf1 = new Float64Array(rt.outputBuffer)
     expect(peak(buf1)).toBeGreaterThan(0)
 
-    // Second buffer should also produce audio (registers persist)
     rt.process()
     const buf2 = new Float64Array(rt.outputBuffer)
     expect(peak(buf2)).toBeGreaterThan(0)
 
-    // The two buffers should be different (phase advances)
     let differs = false
     for (let i = 0; i < buf1.length; i++) {
       if (Math.abs(buf1[i] - buf2[i]) > 1e-10) { differs = true; break }
@@ -330,37 +341,30 @@ describe('applyFlatPlan', () => {
     session.graph.dispose()
   })
 
-  // TODO: three-module FM chain times out — investigate JIT compilation bottleneck
-  // test('three-module chain: VCO → VCO (FM) → VCA', ...)
-
   test('hot-swap preserves register state across rewiring', () => {
     const session = setupSession({
-      VCO1: { program: 'VCO' },
-      VCA1: { program: 'VCA' },
+      osc1: { program: 'TestOsc' },
+      amp1: { program: 'VCA' },
     })
 
-    session.inputExprNodes.set('VCO1:freq', 440)
-    session.inputExprNodes.set('VCA1:audio', { op: 'ref', instance: 'VCO1', output: 'saw' })
-    session.inputExprNodes.set('VCA1:cv', 1.0)
-    session.graphOutputs.push({ instance: 'VCA1', output: 'out' })
+    session.inputExprNodes.set('osc1:freq', 440)
+    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     const rt = new Runtime(256)
     applyFlatPlan(session, rt)
 
-    // Process several buffers to advance VCO phase
     for (let i = 0; i < 10; i++) rt.process()
     const buf1 = new Float64Array(rt.outputBuffer)
 
-    // Rewire: change VCA cv from 1.0 to 0.5 (VCO registers should persist)
-    session.inputExprNodes.set('VCA1:cv', 0.5)
+    session.inputExprNodes.set('amp1:cv', 0.5)
     applyFlatPlan(session, rt)
     rt.process()
     const buf2 = rt.outputBuffer
 
-    // Output should be non-silent (VCO kept running thanks to register transfer)
     expect(peak(buf2)).toBeGreaterThan(0)
 
-    // Should be roughly half amplitude of what buf1 was (cv halved)
     const ratio = peak(buf2) / peak(buf1)
     expect(ratio).toBeGreaterThan(0.3)
     expect(ratio).toBeLessThan(0.7)

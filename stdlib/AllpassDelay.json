@@ -1,0 +1,51 @@
+{
+  "schema": "tropical_program_1",
+  "name": "AllpassDelay",
+  "inputs": [
+    { "name": "input", "type": "signal" },
+    { "name": "coeff", "type": "float" }
+  ],
+  "outputs": [
+    { "name": "out", "type": "signal" }
+  ],
+  "regs": { "s": 0 },
+  "input_defaults": { "input": 0, "coeff": 0.5 },
+  "process": {
+    "outputs": {
+      "out": {
+        "op": "add", "args": [
+          { "op": "mul", "args": [
+            { "op": "input", "name": "coeff" },
+            { "op": "input", "name": "input" }
+          ]},
+          { "op": "reg", "name": "s" }
+        ]
+      }
+    },
+    "next_regs": {
+      "s": {
+        "op": "let",
+        "bind": {
+          "y": {
+            "op": "add", "args": [
+              { "op": "mul", "args": [
+                { "op": "input", "name": "coeff" },
+                { "op": "input", "name": "input" }
+              ]},
+              { "op": "reg", "name": "s" }
+            ]
+          }
+        },
+        "in": {
+          "op": "sub", "args": [
+            { "op": "input", "name": "input" },
+            { "op": "mul", "args": [
+              { "op": "input", "name": "coeff" },
+              { "op": "binding", "name": "y" }
+            ]}
+          ]
+        }
+      }
+    }
+  }
+}

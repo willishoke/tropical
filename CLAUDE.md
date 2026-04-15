@@ -40,7 +40,7 @@ engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio o
   engine/dac/         Audio output (RtAudio)
 mcp/                  MCP server — primary agent interface over stdio
 patches/              Example patches (tropical_program_1 JSON)
-stdlib/               Built-in program types as ProgramJSON files (19 types)
+stdlib/               Built-in program types as ProgramJSON files (18 types)
 ```
 
 ### Data flow
@@ -74,21 +74,21 @@ There are two distinct JSON schemas — don't confuse them:
 
 The TypeScript layer handles everything from program definition through instruction emission. No audio processing happens here.
 
-**Expression system** (`expr.ts`) — `ExprNode` is the universal IR: a recursive JSON union type (number, boolean, array, or `{op, ...}` object). `SignalExpr` wraps it with static shape tracking. All program I/O is defined as expression trees. Includes compile-time combinator constructors (`generate`, `fold`, `chain`, `map2`, etc.) for iteration and abstraction without manual unrolling.
+**Expression system** (`expr.ts`) — `ExprNode` is the universal IR: a recursive JSON union type (number, boolean, array, or `{op, ...}` object). `SignalExpr` wraps it with static shape tracking. All program I/O is defined as expression trees. Compile-time combinators (`generate`, `fold`, `chain`, `map2`, etc.) are embedded directly in JSON and lowered by `lower_arrays.ts` — no TS wrapper functions needed.
 
-**Program schema** (`program.ts`) — `ProgramJSON` (`tropical_program_1`) is the unified representation. A program with `process` = leaf, with `instances` + `audio_outputs` = graph, with `instances` + `inputs` + `outputs` = reusable composite. `loadStdlib()` loads `stdlib/*.json` into the type registry.
+**Program schema** (`program.ts`) — `ProgramJSON` (`tropical_program_1`) is the unified representation. A program with `process` = leaf, with `instances` + `audio_outputs` = graph, with `instances` + `inputs` + `outputs` = reusable composite. `loadStdlib()` indexes all stdlib files by name, then loads them on demand via a `typeResolver` callback — dependencies resolve recursively regardless of file ordering, with circular dependency detection.
 
 **Program types** (`program_types.ts`) — Pure data types: `ProgramDef` (slot-indexed IR for the flattener), `ProgramType`, `ProgramInstance`. No DSL — types are built from ProgramJSON by `loadProgramDef()` in `session.ts`.
 
-**Standard library** (`stdlib/*.json`) — 19 built-in program types as ProgramJSON files (VCO, Clock, ADEnvelope, Reverb, LadderFilter, etc.). Loaded by `loadStdlib()` in `program.ts`.
+**Standard library** (`stdlib/*.json`) — 18 built-in program types as human-readable ProgramJSON files. Shared primitives (OnePole, AllpassDelay, CombDelay, SoftClip, CrossFade) compose into higher-level types (e.g. LadderFilter uses 4 OnePole instances). Also includes Clock, LadderFilter, NoiseLFSR, BitCrusher, VCA, Phaser/Phaser16, and Delay variants (1/8/16/512/4410/44100 samples).
 
-**Flattening** (`flatten.ts`) — The critical step. Inlines all instance expressions, resolves inter-instance references, expands nested calls, converts delays to register ops. Output is a `tropical_plan_4` JSON. Uses WeakMap memoization for DAG sharing.
+**Flattening** (`flatten.ts`) — The critical step. Inlines all instance expressions, resolves inter-instance references, expands nested calls, converts delays to register ops. Output is a `tropical_plan_4` JSON. Uses WeakMap memoization for DAG sharing. Automatically resolves feedback cycles (A→B→A or A→A) by inserting synthetic one-sample delay registers — self-refs are detected in a pre-pass, inter-instance cycles via Tarjan's SCC.
 
 **Array lowering** (`lower_arrays.ts`) — Lowers first-class array ops (zeros, reshape, transpose, slice, reduce, broadcast_to, map, matmul) and compile-time combinators (generate, iterate, fold, scan, map2, zip_with, chain, let) to scalar primitives via static unrolling. All shapes are compile-time constants.
 
 **Instruction emission** (`emit_numeric.ts`) — Walks flattened ExprNode trees, emits `FlatProgram` instruction stream with typed operands (const, input, reg, array_reg, state_reg, param, rate, tick).
 
-**Port types and graph utilities** (`term.ts`, `compiler.ts`) — `PortType` describes signal port types (scalar, array, product). `compiler.ts` provides dependency graph construction, topological sort (Kahn's with level grouping), and cycle detection (Tarjan's SCC), used by the flattener to determine execution order.
+**Port types and graph utilities** (`term.ts`, `compiler.ts`) — `PortType` describes signal port types (scalar, array, product). `compiler.ts` provides dependency graph construction, topological sort (Kahn's with level grouping), and cycle detection (Tarjan's SCC). The flattener uses these for execution ordering and automatic feedback cycle resolution.
 
 **FFI bridge** (`runtime/bindings.ts`, `runtime.ts`, `audio.ts`, `param.ts`) — koffi declarations mirroring `tropical_c.h`. `Runtime` wraps `tropical_runtime_t` with FinalizationRegistry. `Param`/`Trigger` provide `.asExpr()` for wiring control parameters into expression trees.
 

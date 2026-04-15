@@ -1,0 +1,24 @@
+{
+  "schema": "tropical_program_1",
+  "name": "SoftClip",
+  "inputs": [
+    { "name": "input", "type": "signal" },
+    { "name": "drive", "type": "float" }
+  ],
+  "outputs": [
+    { "name": "out", "type": "signal" }
+  ],
+  "input_defaults": { "input": 0, "drive": 1 },
+  "process": {
+    "outputs": {
+      "out": {
+        "op": "tanh", "args": [
+          { "op": "mul", "args": [
+            { "op": "input", "name": "drive" },
+            { "op": "input", "name": "input" }
+          ]}
+        ]
+      }
+    }
+  }
+}

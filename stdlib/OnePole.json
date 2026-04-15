@@ -1,0 +1,43 @@
+{
+  "schema": "tropical_program_1",
+  "name": "OnePole",
+  "inputs": [
+    { "name": "input", "type": "signal" },
+    { "name": "g", "type": "float" }
+  ],
+  "outputs": [
+    { "name": "out", "type": "signal" }
+  ],
+  "regs": { "s": 0 },
+  "input_defaults": { "input": 0, "g": 0.1 },
+  "process": {
+    "outputs": {
+      "out": {
+        "op": "add", "args": [
+          { "op": "reg", "name": "s" },
+          { "op": "mul", "args": [
+            { "op": "input", "name": "g" },
+            { "op": "sub", "args": [
+              { "op": "tanh", "args": [{ "op": "input", "name": "input" }] },
+              { "op": "tanh", "args": [{ "op": "reg", "name": "s" }] }
+            ]}
+          ]}
+        ]
+      }
+    },
+    "next_regs": {
+      "s": {
+        "op": "add", "args": [
+          { "op": "reg", "name": "s" },
+          { "op": "mul", "args": [
+            { "op": "input", "name": "g" },
+            { "op": "sub", "args": [
+              { "op": "tanh", "args": [{ "op": "input", "name": "input" }] },
+              { "op": "tanh", "args": [{ "op": "reg", "name": "s" }] }
+            ]}
+          ]}
+        ]
+      }
+    }
+  }
+}

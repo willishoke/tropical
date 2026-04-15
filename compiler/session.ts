@@ -73,6 +73,8 @@ export interface SessionState {
   runtime: Runtime
   /** Thin proxy over runtime that matches the old Graph interface for tests and legacy callers. */
   graph: { primeJit(): void; process(): void; readonly outputBuffer: Float64Array; dispose(): void }
+  /** On-demand type resolver (set by loadStdlib for lazy loading). */
+  typeResolver?: (name: string) => ProgramType | undefined
   /** Name counter for auto-generated instance names. */
   _nameCounters: Map<string, number>
 }
@@ -284,7 +286,7 @@ export function resolveBounds(
 
 export function loadProgramDef(
   def: ProgramJSON,
-  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry'>>,
+  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>,
 ): ProgramType {
   const aliases = session.typeAliasRegistry
   const inputSpecs  = def.inputs ?? []
@@ -335,7 +337,7 @@ export function loadProgramDef(
   // nested_out references regardless of instance ordering
   for (const alias of nestedAliases) {
     const spec = nestedRaw[alias]
-    const type = session.typeRegistry.get(spec.program)
+    const type = session.typeRegistry.get(spec.program) ?? session.typeResolver?.(spec.program)
     if (!type) throw new Error(`Unknown program type '${spec.program}' in instances.`)
     nestedAliasDef.set(alias, type._def)
   }

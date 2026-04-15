@@ -3,10 +3,14 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { normalizeWiringTypes, FlattenError } from './flatten'
+import { normalizeWiringTypes, FlattenError, flattenSession } from './flatten'
 import type { InstanceInfo } from './compiler'
 import { Float, ArrayType } from './term'
 import type { ExprNode } from './expr'
+import { loadProgramDef } from './session'
+import type { ProgramType, ProgramInstance, Bounds } from './program_types'
+import type { ProgramJSON } from './program'
+import { Param, Trigger } from './runtime/param'
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -144,5 +148,92 @@ describe('normalizeWiringTypes', () => {
     const node = result.get('dst:in') as Record<string, unknown>
     expect(node.op).toBe('broadcast_to')
     expect(node.shape).toEqual([3, 4])
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// Feedback cycle auto-delay
+// ─────────────────────────────────────────────────────────────
+
+describe('feedback cycle auto-delay', () => {
+  /** Minimal session with no FFI. */
+  function mockSession() {
+    return {
+      typeRegistry: new Map<string, ProgramType>(),
+      typeAliasRegistry: new Map<string, { base: string; bounds: Bounds }>(),
+      instanceRegistry: new Map<string, ProgramInstance>(),
+      paramRegistry: new Map<string, Param>(),
+      triggerRegistry: new Map<string, Trigger>(),
+    }
+  }
+
+  /** Simple passthrough program: output = input. */
+  function passthrough(): ProgramJSON {
+    return {
+      schema: 'tropical_program_1',
+      name: 'Pass',
+      inputs: ['in'],
+      outputs: ['out'],
+      input_defaults: { in: 0 },
+      process: { outputs: { out: { op: 'input', name: 'in' } } },
+    } as ProgramJSON
+  }
+
+  test('A → B → A feedback cycle flattens without throwing', () => {
+    const session = mockSession()
+
+    const type = loadProgramDef(passthrough(), session)
+    session.typeRegistry.set('Pass', type)
+
+    const a = type.instantiateAs('a')
+    const b = type.instantiateAs('b')
+    session.instanceRegistry.set('a', a)
+    session.instanceRegistry.set('b', b)
+
+    const fullSession = {
+      ...session,
+      bufferLength: 1,
+      dac: null,
+      // A.in ← B.out, B.in ← A.out — direct feedback loop, no delay
+      inputExprNodes: new Map<string, ExprNode>([
+        ['a:in', { op: 'ref', instance: 'b', output: 'out' }],
+        ['b:in', { op: 'ref', instance: 'a', output: 'out' }],
+      ]),
+      graphOutputs: [{ instance: 'a', output: 'out' }],
+      runtime: null as any,
+      graph: null as any,
+      _nameCounters: new Map<string, number>(),
+    }
+
+    // Should NOT throw — the flattener should auto-insert a one-sample delay
+    // to break the cycle, just like hardware propagation delay.
+    const plan = flattenSession(fullSession)
+    expect(plan.instructions.length).toBeGreaterThan(0)
+  })
+
+  test('self-feedback (A.out → A.in) flattens without throwing', () => {
+    const session = mockSession()
+
+    const type = loadProgramDef(passthrough(), session)
+    session.typeRegistry.set('Pass', type)
+
+    const a = type.instantiateAs('a')
+    session.instanceRegistry.set('a', a)
+
+    const fullSession = {
+      ...session,
+      bufferLength: 1,
+      dac: null,
+      inputExprNodes: new Map<string, ExprNode>([
+        ['a:in', { op: 'ref', instance: 'a', output: 'out' }],
+      ]),
+      graphOutputs: [{ instance: 'a', output: 'out' }],
+      runtime: null as any,
+      graph: null as any,
+      _nameCounters: new Map<string, number>(),
+    }
+
+    const plan = flattenSession(fullSession)
+    expect(plan.instructions.length).toBeGreaterThan(0)
   })
 })

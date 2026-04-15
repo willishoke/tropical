@@ -263,3 +263,47 @@ describe('exportSessionAsProgram', () => {
     expect(plan.outputs.length).toBeGreaterThan(0)
   })
 })
+
+// ─────────────────────────────────────────────────────────────
+// On-demand type resolution
+// ─────────────────────────────────────────────────────────────
+
+describe('typeResolver', () => {
+  test('circular stdlib dependency throws with cycle path', () => {
+    const session = makeSession()
+
+    const fakeTypes = new Map<string, ProgramJSON>([
+      ['CycleA', {
+        schema: 'tropical_program_1', name: 'CycleA',
+        inputs: [], outputs: ['out'],
+        instances: { b: { program: 'CycleB' } },
+        process: { outputs: { out: 0 } },
+      } as ProgramJSON],
+      ['CycleB', {
+        schema: 'tropical_program_1', name: 'CycleB',
+        inputs: [], outputs: ['out'],
+        instances: { a: { program: 'CycleA' } },
+        process: { outputs: { out: 0 } },
+      } as ProgramJSON],
+    ])
+
+    const loading = new Set<string>()
+    session.typeResolver = (name: string) => {
+      const existing = session.typeRegistry.get(name)
+      if (existing) return existing
+      if (loading.has(name))
+        throw new Error(`Circular stdlib dependency: ${[...loading, name].join(' → ')}`)
+      const prog = fakeTypes.get(name)
+      if (!prog) return undefined
+      loading.add(name)
+      const type = loadProgramAsType(prog, session)
+      session.typeRegistry.set(name, type)
+      loading.delete(name)
+      return type
+    }
+
+    expect(() => session.typeResolver!('CycleA')).toThrow('Circular stdlib dependency: CycleA → CycleB → CycleA')
+
+    session.graph.dispose()
+  })
+})

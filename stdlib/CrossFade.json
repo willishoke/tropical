@@ -1,0 +1,29 @@
+{
+  "schema": "tropical_program_1",
+  "name": "CrossFade",
+  "inputs": [
+    { "name": "a", "type": "signal" },
+    { "name": "b", "type": "signal" },
+    { "name": "mix", "type": "unipolar" }
+  ],
+  "outputs": [
+    { "name": "out", "type": "signal" }
+  ],
+  "input_defaults": { "a": 0, "b": 0, "mix": 0.5 },
+  "process": {
+    "outputs": {
+      "out": {
+        "op": "add", "args": [
+          { "op": "mul", "args": [
+            { "op": "sub", "args": [1, { "op": "input", "name": "mix" }] },
+            { "op": "input", "name": "a" }
+          ]},
+          { "op": "mul", "args": [
+            { "op": "input", "name": "mix" },
+            { "op": "input", "name": "b" }
+          ]}
+        ]
+      }
+    }
+  }
+}

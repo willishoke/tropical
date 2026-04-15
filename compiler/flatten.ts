@@ -14,7 +14,7 @@ import type { ProgramInstance, NestedCall, Bounds } from './program_types.js'
 import {
   type InstanceInfo,
   extractInstanceInfo,
-  buildDependencyGraph, topologicalSort,
+  buildDependencyGraph, topologicalSort, tarjanSCC,
 } from './compiler.js'
 import { lowerArrayOps } from './lower_arrays.js'
 import { portTypeToString } from './term.js'
@@ -842,10 +842,10 @@ function resolveRefs(
 // ─────────────────────────────────────────────────────────────
 
 interface SessionDelayRecord {
-  regIdx:         number    // pre-allocated flat register index
-  rawUpdateExpr:  ExprNode  // the expression to store each sample (already delay-free)
-  init:           number    // initial register value
-  regName:        string    // stable name for hot-swap state matching
+  regIdx:         number          // pre-allocated flat register index
+  rawUpdateExpr:  ExprNode | null // the expression to store each sample (null for synthetic feedback delays)
+  init:           number          // initial register value
+  regName:        string          // stable name for hot-swap state matching
 }
 
 /**
@@ -907,6 +907,122 @@ function extractSessionDelays(node: ExprNode, out: SessionDelayRecord[]): ExprNo
   return changed ? result as ExprNode : node
 }
 
+// ─────────────────────────────────────────────────────────────
+// Auto-feedback: synthetic delay insertion helpers
+// ─────────────────────────────────────────────────────────────
+
+interface SyntheticFeedbackDelay {
+  regIdx: number          // index into sessionDelays (and later the flat register array)
+  instanceName: string    // the instance whose output feeds back
+  outputRef: string       // output port name
+}
+
+/**
+ * Rewrite self-references (A.out → A.in) to delay register reads.
+ * For each ref(instanceName, output), allocate a synthetic delay register
+ * and replace the ref with {op:"reg", id:N}. The register's update expression
+ * (= the instance's resolved output) is deferred to Phase 4b.
+ */
+function rewriteSelfRefs(
+  node: ExprNode,
+  instanceName: string,
+  sessionDelays: SessionDelayRecord[],
+  syntheticDelays: SyntheticFeedbackDelay[],
+): ExprNode {
+  if (typeof node === 'number' || typeof node === 'boolean') return node
+  if (Array.isArray(node)) return node.map(n => rewriteSelfRefs(n, instanceName, sessionDelays, syntheticDelays))
+  if (typeof node !== 'object' || node === null) return node
+
+  const obj = node as { op: string; [k: string]: unknown }
+
+  if (obj.op === 'ref' && obj.instance === instanceName) {
+    const outputRef = String(obj.output)
+    // Reuse existing delay if this instance+output pair was already encountered
+    let existing = syntheticDelays.find(
+      sd => sd.instanceName === instanceName && sd.outputRef === outputRef,
+    )
+    if (!existing) {
+      const regIdx = sessionDelays.length
+      sessionDelays.push({
+        regIdx,
+        rawUpdateExpr: null,  // deferred — resolved after instance outputs are known
+        init: 0,
+        regName: `_feedback_${instanceName}_${outputRef}`,
+      })
+      existing = { regIdx, instanceName, outputRef }
+      syntheticDelays.push(existing)
+    }
+    return { op: 'reg', id: existing.regIdx }
+  }
+
+  // Generic recursion
+  let changed = false
+  const result: Record<string, unknown> = { op: obj.op }
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === 'op') continue
+    if (Array.isArray(v)) {
+      const arr = v as ExprNode[]
+      const newArr = arr.map(n => rewriteSelfRefs(n, instanceName, sessionDelays, syntheticDelays))
+      if (newArr.some((n, i) => n !== arr[i])) changed = true
+      result[k] = newArr
+    } else if (typeof v === 'object' && v !== null && 'op' in v) {
+      const newV = rewriteSelfRefs(v as ExprNode, instanceName, sessionDelays, syntheticDelays)
+      if (newV !== v) changed = true
+      result[k] = newV
+    } else {
+      result[k] = v
+    }
+  }
+  return changed ? result as ExprNode : node
+}
+
+/**
+ * Rewrite refs to a specific target instance as delay register reads.
+ * Used by Pass 2 (SCC cycle breaking) to redirect refs from cycle members
+ * to the chosen break target's synthetic delay registers.
+ */
+function rewriteRefsToDelays(
+  node: ExprNode,
+  targetInstance: string,
+  _outputNames: string[],
+  sessionDelays: SessionDelayRecord[],
+  syntheticDelays: SyntheticFeedbackDelay[],
+): ExprNode {
+  if (typeof node === 'number' || typeof node === 'boolean') return node
+  if (Array.isArray(node)) return node.map(n => rewriteRefsToDelays(n, targetInstance, _outputNames, sessionDelays, syntheticDelays))
+  if (typeof node !== 'object' || node === null) return node
+
+  const obj = node as { op: string; [k: string]: unknown }
+
+  if (obj.op === 'ref' && obj.instance === targetInstance) {
+    const outputRef = String(obj.output)
+    const existing = syntheticDelays.find(
+      sd => sd.instanceName === targetInstance && sd.outputRef === outputRef,
+    )
+    if (!existing) throw new Error(`flatten: synthetic delay not found for ${targetInstance}.${outputRef}`)
+    return { op: 'reg', id: existing.regIdx }
+  }
+
+  let changed = false
+  const result: Record<string, unknown> = { op: obj.op }
+  for (const [k, v] of Object.entries(obj)) {
+    if (k === 'op') continue
+    if (Array.isArray(v)) {
+      const arr = v as ExprNode[]
+      const newArr = arr.map(n => rewriteRefsToDelays(n, targetInstance, _outputNames, sessionDelays, syntheticDelays))
+      if (newArr.some((n, i) => n !== arr[i])) changed = true
+      result[k] = newArr
+    } else if (typeof v === 'object' && v !== null && 'op' in v) {
+      const newV = rewriteRefsToDelays(v as ExprNode, targetInstance, _outputNames, sessionDelays, syntheticDelays)
+      if (newV !== v) changed = true
+      result[k] = newV
+    } else {
+      result[k] = v
+    }
+  }
+  return changed ? result as ExprNode : node
+}
+
 /**
  * Flatten a session into pre-emission ExprNode trees.
  * Returns the flattened output/register expressions, state init, and metadata
@@ -951,11 +1067,83 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     }
   }
 
-  // Topological sort — edges to cycle-breaking instances are excluded since
-  // their outputs are previous-sample register reads, not combinational deps.
-  const deps = buildDependencyGraph(instanceInfos.keys(), inputExprNodes, cycleBreakers)
-  const { order, complete } = topologicalSort(deps)
-  if (!complete) throw new Error('flatten: topological sort incomplete — cycles exist')
+  // ── Auto-feedback: detect self-references and inter-instance cycles ──
+  // Any ref from an instance to itself, or a cycle among instances with no
+  // breaks_cycles delay in the loop, gets a synthetic one-sample delay register
+  // inserted automatically. This is the digital equivalent of hardware
+  // propagation delay — feedback loops just work.
+
+  // Pass 1: Rewrite self-references (A.out → A.in).
+  // Self-edges are invisible to the dependency graph (buildDependencyGraph skips
+  // ref === instanceName), so the topo sort won't catch them. We detect them here
+  // and rewrite each self-ref to read from a synthetic delay register whose update
+  // expression will be the instance's actual output (resolved later in Phase 3).
+  const syntheticDelays: SyntheticFeedbackDelay[] = []
+
+  {
+    const transformed = new Map<string, ExprNode>()
+    for (const [key, expr] of inputExprNodes) {
+      const instanceName = key.split(':')[0]
+      transformed.set(key, rewriteSelfRefs(expr, instanceName, sessionDelays, syntheticDelays))
+    }
+    inputExprNodes = transformed
+  }
+
+  // Pass 2: Detect inter-instance cycles via topological sort + Tarjan's SCC.
+  // For each cycle found, pick one back-edge and insert a synthetic delay register,
+  // then add the target to cycleBreakers so the topo sort excludes it.
+  let deps = buildDependencyGraph(instanceInfos.keys(), inputExprNodes, cycleBreakers)
+  let { order, complete } = topologicalSort(deps)
+
+  if (!complete) {
+    // Find cycles with Tarjan's SCC
+    const sccs = tarjanSCC(deps)
+    for (const scc of sccs) {
+      if (scc.length < 2) continue
+      // Pick one instance in the cycle to become a synthetic cycle breaker.
+      // Its refs in other cycle members' inputs get rewritten to delay register reads.
+      const breakTarget = scc[0]
+
+      // For each output of the break target, allocate a delay register
+      const inst = instances.get(breakTarget)!
+      const outputNames = inst._def.outputNames
+      for (let i = 0; i < outputNames.length; i++) {
+        const regIdx = sessionDelays.length
+        sessionDelays.push({
+          regIdx,
+          rawUpdateExpr: null,  // deferred — resolved in Phase 4b
+          init: 0,
+          regName: `_feedback_${breakTarget}_${outputNames[i]}`,
+        })
+        syntheticDelays.push({ regIdx, instanceName: breakTarget, outputRef: outputNames[i] })
+      }
+
+      // Rewrite refs to breakTarget in other cycle members' wiring expressions
+      const cycleSet = new Set(scc)
+      const transformed = new Map<string, ExprNode>()
+      for (const [key, expr] of inputExprNodes) {
+        const owner = key.split(':')[0]
+        if (cycleSet.has(owner) && owner !== breakTarget) {
+          transformed.set(key, rewriteRefsToDelays(expr, breakTarget, inst._def.outputNames, sessionDelays, syntheticDelays))
+        } else {
+          transformed.set(key, expr)
+        }
+      }
+      inputExprNodes = transformed
+
+      // Mark as cycle breaker so the dependency graph excludes edges to it
+      cycleBreakers.add(breakTarget)
+      cycleBreakerList.push(breakTarget)
+    }
+
+    // Rebuild and retry
+    deps = buildDependencyGraph(instanceInfos.keys(), inputExprNodes, cycleBreakers)
+    const retry = topologicalSort(deps)
+    order = retry.order
+    complete = retry.complete
+  }
+
+  if (!complete) throw new Error('flatten: topological sort incomplete — unresolvable cycles exist')
 
   // Split order: cycle-breaking instances first (output pre-computation),
   // then non-cycle-breaking instances in topological order.
@@ -1348,12 +1536,27 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
   // ── Phase 4: Resolve session-level delay update expressions ──
   // Now that all instance outputs are in resolvedOutputs, resolve the raw update
   // expressions (which may ref any instance) and overwrite the placeholder entries.
+  // Skip synthetic feedback delays (rawUpdateExpr === null) — handled in Phase 4b.
   for (const d of sessionDelays) {
+    if (d.rawUpdateExpr === null) continue
     const refsMemo  = new WeakMap<object, ExprNode>()
     let expr = resolveRefs(d.rawUpdateExpr, resolvedOutputs, resolvedOutputNames, refsMemo)
     const lowerMemo = new WeakMap<object, ExprNode>()
     expr = lowerArrayOps(expr, lowerMemo)
     flatRegisterExprs[d.regIdx] = expr
+  }
+
+  // ── Phase 4b: Resolve synthetic feedback delay update expressions ──
+  // Each synthetic delay stores the current sample's output of the referenced instance.
+  // On the next sample, the {op:"reg"} nodes that replaced the original refs read this
+  // value — providing a one-sample delay, just like hardware propagation delay.
+  for (const sd of syntheticDelays) {
+    const outputs = resolvedOutputs.get(sd.instanceName)
+    if (!outputs) throw new Error(`flatten: synthetic delay references unresolved instance '${sd.instanceName}'`)
+    const names = resolvedOutputNames.get(sd.instanceName)!
+    const outputIdx = names.indexOf(sd.outputRef)
+    if (outputIdx === -1) throw new Error(`flatten: synthetic delay references unknown output '${sd.outputRef}' on '${sd.instanceName}'`)
+    flatRegisterExprs[sd.regIdx] = outputs[outputIdx]
   }
 
   // Build output indices: map graphOutputs → flat output indices
