@@ -20,7 +20,7 @@ tropical ships with `.mcp.json` — open the repo in Claude Code and the `tropic
 
 That's it. The MCP server handles compilation, kernel loading, and audio output. Claude can also build patches from scratch:
 
-> Make a simple subtractive synth — sawtooth oscillator into a ladder filter, with an envelope on the cutoff. 200 Hz, slow filter sweep. Start audio.
+> Define a sine oscillator, run it through a ladder filter with resonance at 0.8, and start audio.
 
 ### MCP tools
 
@@ -42,33 +42,28 @@ Every wiring mutation triggers a full recompile and atomic kernel swap.
 
 ## Programs
 
-19 built-in DSP program types, all defined as JSON and compiled to native code at runtime:
+18 built-in DSP program types, all defined as human-readable JSON and compiled to native code at runtime:
 
 | Program | What it does |
 |---------|-------------|
-| **VCO** | Band-limited oscillator (saw, tri, sin, square) with FM |
+| **OnePole** | One-pole lowpass filter with tanh saturation |
+| **AllpassDelay** | First-order allpass, transposed direct form II |
+| **CombDelay** | Feedback comb filter |
+| **SoftClip** | Soft clipper (tanh waveshaper) |
+| **CrossFade** | Linear crossfade between two signals |
+| **LadderFilter** | 4-pole Moog-style resonant filter (composed from 4 OnePole instances) |
 | **Clock** | Clock/trigger generator with ratio array |
-| **ADEnvelope** | Attack-decay envelope, polyBLAMP antialiased |
-| **ADSREnvelope** | Full ADSR envelope, polyBLAMP antialiased |
 | **VCA** | Voltage-controlled amplifier |
-| **LadderFilter** | 4-pole Moog-style resonant filter |
-| **Reverb** | Algorithmic reverb (Freeverb-style) |
 | **Phaser / Phaser16** | 4 or 16 stage allpass phaser |
-| **Compressor** | Dynamics compressor with sidechain input |
-| **BassDrum** | Synthesized kick drum |
 | **BitCrusher** | Bit depth and sample rate reduction |
 | **NoiseLFSR** | Linear feedback shift register noise |
-| **TopoWaveguide** | 2D waveguide mesh physical model |
-| **Delay8/16/512/4410/44100** | Fixed-length delay lines |
+| **Delay1/8/16/512/4410/44100** | Fixed-length delay lines |
 
-New program types can be defined at runtime via `define_program` — no rebuild required.
+Complex types compose from simpler ones — LadderFilter is 160 lines of JSON using OnePole instances, not an opaque blob. New program types can be defined at runtime via `define_program` — no rebuild required.
 
 ## Patches
 
-JSON files in `patches/`. Two good starting points:
-
-- **`compressor_harmonics.json`** — Ten VCOs at the odd harmonics of 40 Hz, each gated by its own compressor/envelope pair at a different clock rate. Spectral animation through dynamics.
-- **`31tet_otonal_seq.json`** — Five VCOs tuned to the overtone series in 31-tone equal temperament, with a slow transposition sequence and a sub-bass voice.
+JSON files in `patches/`. Examples include cross-FM synthesis, acid noise, and microtonal sequencing.
 
 Program format (`tropical_program_1`):
 
@@ -76,15 +71,33 @@ Program format (`tropical_program_1`):
 {
   "schema": "tropical_program_1",
   "name": "Example",
+  "programs": {
+    "Sine": {
+      "schema": "tropical_program_1",
+      "name": "Sine",
+      "inputs": ["freq"],
+      "outputs": ["out"],
+      "regs": { "phase": 0 },
+      "input_defaults": { "freq": 440 },
+      "process": {
+        "outputs": {
+          "out": { "op": "sin", "args": [{ "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }] }
+        },
+        "next_regs": {
+          "phase": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sample_rate" }] }] }, 1] }
+        }
+      }
+    }
+  },
   "instances": {
-    "VCO1": { "program": "VCO", "inputs": { "freq": 440 } },
-    "VCA1": { "program": "VCA", "inputs": {
-      "audio": { "op": "ref", "instance": "VCO1", "output": "saw" },
-      "cv": 0.3
+    "osc": { "program": "Sine", "inputs": { "freq": 440 } },
+    "filt": { "program": "LadderFilter", "inputs": {
+      "input": { "op": "ref", "instance": "osc", "output": "out" },
+      "cutoff": 2000, "resonance": 0.7
     }}
   },
   "audio_outputs": [
-    { "instance": "VCA1", "output": "out" }
+    { "instance": "filt", "output": "lp" }
   ]
 }
 ```
@@ -93,7 +106,7 @@ Program format (`tropical_program_1`):
 
 TypeScript defines programs as symbolic expression trees. The compiler flattens all instances into a single instruction stream, lowers array operations to scalar primitives, and emits a typed program. This crosses a stable C API (via koffi FFI) as JSON, where the C++ engine JIT-compiles it to a native kernel using LLVM ORC. The kernel runs per-sample in an audio callback.
 
-Rewiring a connection recompiles the entire program and atomically swaps the kernel — state is transferred by name, so registers and delay lines survive the swap. No click, no gap.
+Rewiring a connection recompiles the entire program and atomically swaps the kernel — state is transferred by name, so registers and delay lines survive the swap. No click, no gap. Feedback loops (A→B→A or A→A) resolve automatically with a one-sample delay, just like hardware propagation — no special configuration needed.
 
 See `design/architecture.md` for the full technical reference.
 

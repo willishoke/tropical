@@ -5,7 +5,7 @@ TypeScript layer. Handles program definition, expression construction, flattenin
 ## Layout
 
 ```
-expr.ts               ExprNode type, SignalExpr wrapper, all named operations, combinator constructors
+expr.ts               ExprNode type, SignalExpr wrapper, all named operations
 program_types.ts      ProgramDef IR, ProgramType, ProgramInstance (pure data types, no DSL)
 program.ts            ProgramJSON (tropical_program_1) interface, conversions, stdlib loading
 flatten.ts            Session → tropical_plan_4 (inline all instances, resolve refs)
@@ -44,8 +44,9 @@ type ExprNode = number | boolean | ExprNode[] | { op: string; ... }
 - **Ternary**: `clamp`, `select`
 - **Array**: `arrayPack`, `arraySet`, `index`, `zeros`, `ones`, `fill`, `reshape`, `transpose`, `slice`, `reduce`, `broadcastTo`, `mapArray`
 - **Matrix**: `matrix`, `matmul` (supports arbitrary semirings via `mul_op`/`add_op`)
-- **Combinators** (compile-time): `bindingExpr`, `let_`, `generate`, `repeat`, `iterate`, `fold`, `scan`, `map2`, `zipWith`, `chain`
 - **Leaf nodes**: `sampleRate`, `sampleIndex`, `inputExpr`, `registerExpr`, `refExpr`, `nestedOutputExpr`, `delayValueExpr`, `paramExpr`, `triggerParamExpr`
+
+Compile-time combinators (`let`, `generate`, `iterate`, `fold`, `scan`, `map2`, `zip_with`, `chain`) are embedded directly in JSON as ExprNode ops and lowered by `lower_arrays.ts` — no TS wrapper functions needed.
 
 ## Program types (`program_types.ts`)
 
