@@ -1,0 +1,37 @@
+{
+  "schema": "tropical_program_1",
+  "name": "CombDelay",
+  "inputs": [
+    { "name": "input", "type": "signal" },
+    { "name": "feedback", "type": "float" }
+  ],
+  "outputs": [
+    { "name": "out", "type": "signal" }
+  ],
+  "regs": { "s": 0 },
+  "input_defaults": { "input": 0, "feedback": 0.7 },
+  "process": {
+    "outputs": {
+      "out": {
+        "op": "add", "args": [
+          { "op": "input", "name": "input" },
+          { "op": "mul", "args": [
+            { "op": "input", "name": "feedback" },
+            { "op": "reg", "name": "s" }
+          ]}
+        ]
+      }
+    },
+    "next_regs": {
+      "s": {
+        "op": "add", "args": [
+          { "op": "input", "name": "input" },
+          { "op": "mul", "args": [
+            { "op": "input", "name": "feedback" },
+            { "op": "reg", "name": "s" }
+          ]}
+        ]
+      }
+    }
+  }
+}
