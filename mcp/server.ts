@@ -1037,15 +1037,16 @@ Programs are the unified representation for all DSP in tropical. A program can b
 A program with instances wired together:
 
 { "schema": "tropical_program_1", "name": "MyPatch",
-  "programs": { "Gain": { "schema": "tropical_program_1", "name": "Gain",
-    "inputs": ["audio", "cv"], "outputs": ["out"],
-    "process": { "outputs": { "out": { "op": "mul", "args": [{ "op": "input", "name": "audio" }, { "op": "input", "name": "cv" }] } } }
+  "programs": { "Sine": { "schema": "tropical_program_1", "name": "Sine",
+    "inputs": ["freq"], "outputs": ["out"], "regs": { "phase": 0 },
+    "process": { "outputs": { "out": { "op": "sin", "args": [{ "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }] } },
+      "next_regs": { "phase": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sample_rate" }] }] }, 1] } } }
   }},
   "instances": {
-    "osc": { "program": "VCO", "inputs": { "freq": 440 } },
-    "amp": { "program": "Gain", "inputs": { "audio": { "op": "ref", "instance": "osc", "output": "sin" }, "cv": 0.5 } }
+    "osc": { "program": "Sine", "inputs": { "freq": 440 } },
+    "filt": { "program": "LadderFilter", "inputs": { "input": { "op": "ref", "instance": "osc", "output": "out" }, "cutoff": 2000 } }
   },
-  "audio_outputs": [{ "instance": "amp", "output": "out" }]
+  "audio_outputs": [{ "instance": "filt", "output": "lp" }]
 }
 
 Key fields: schema, name, inputs/outputs (leaf/composite), process (leaf body),

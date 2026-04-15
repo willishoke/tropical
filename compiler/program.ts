@@ -118,7 +118,7 @@ export function loadProgramAsSession(
 
   // Instantiate programs
   for (const [name, inst] of Object.entries(prog.instances ?? {})) {
-    const type = session.typeRegistry.get(inst.program)
+    const type = session.typeRegistry.get(inst.program) ?? session.typeResolver?.(inst.program)
     if (!type) throw new Error(`Unknown program type '${inst.program}'.`)
     const instance = type.instantiateAs(name)
     session.instanceRegistry.set(instance.name, instance)
@@ -163,7 +163,7 @@ export function loadProgramAsSession(
  */
 export function loadProgramAsType(
   prog: ProgramJSON,
-  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry'>>,
+  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>,
 ): ProgramType {
   // Register type aliases from type_defs before processing subprograms
   if (session.typeAliasRegistry) {
@@ -228,7 +228,7 @@ export function mergeProgramIntoSession(
 
   // Instantiate programs
   for (const [name, inst] of Object.entries(prog.instances ?? {})) {
-    const type = session.typeRegistry.get(inst.program)
+    const type = session.typeRegistry.get(inst.program) ?? session.typeResolver?.(inst.program)
     if (!type) throw new Error(`Unknown program type '${inst.program}'.`)
     const instance = type.instantiateAs(name)
     session.instanceRegistry.set(instance.name, instance)
@@ -280,23 +280,51 @@ const __dirname = dirname(__filename)
 
 /**
  * Load all stdlib ProgramJSON files into a type registry.
+ * Types are indexed first, then loaded on demand — dependencies resolve
+ * recursively regardless of alphabetical file ordering.
  * Accepts either a full session or just a typeRegistry Map.
  */
 export function loadStdlib(
   target: Map<string, ProgramType> | Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
 ): void {
   // If given a bare Map, wrap it in a minimal session-like object
-  const session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> =
+  const session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> & Partial<Pick<SessionState, 'typeResolver'>> =
     target instanceof Map
       ? { typeRegistry: target, instanceRegistry: new Map(), paramRegistry: new Map(), triggerRegistry: new Map() }
       : target
 
   const stdlibDir = join(__dirname, '../stdlib')
   const files = readdirSync(stdlibDir).filter(f => f.endsWith('.json')).sort()
+
+  // Index all stdlib files by program name
+  const index = new Map<string, string>()
   for (const file of files) {
-    const prog = JSON.parse(readFileSync(join(stdlibDir, file), 'utf-8')) as ProgramJSON
+    const path = join(stdlibDir, file)
+    const prog = JSON.parse(readFileSync(path, 'utf-8')) as ProgramJSON
+    index.set(prog.name, path)
+  }
+
+  // Set up on-demand resolver — loads a stdlib type (and its deps) on first reference
+  const loading = new Set<string>()
+  session.typeResolver = (name: string): ProgramType | undefined => {
+    const existing = session.typeRegistry.get(name)
+    if (existing) return existing
+    if (loading.has(name)) throw new Error(`Circular stdlib dependency: ${[...loading, name].join(' → ')}`)
+    const path = index.get(name)
+    if (!path) return undefined
+    loading.add(name)
+    const prog = JSON.parse(readFileSync(path, 'utf-8')) as ProgramJSON
     const type = loadProgramAsType(prog, session)
     session.typeRegistry.set(prog.name, type)
+    loading.delete(name)
+    return type
+  }
+
+  // Eagerly load all indexed types (resolver handles dependency order)
+  for (const name of index.keys()) {
+    if (!session.typeRegistry.has(name)) {
+      session.typeResolver(name)
+    }
   }
 }
 
