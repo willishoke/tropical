@@ -621,9 +621,51 @@ function collectNestedRegisterExprs(
       inits.push(nd.delayInitValues[i] ?? 0)
     }
 
-    // Recursively collect from sub-nested calls
+    // Recursively collect from sub-nested calls.
+    // Build a LOCAL resolved map for this program's nested calls — the parent's
+    // resolvedNestedOutputs uses different node IDs and would cause misresolution.
     if (nd.nestedCalls.length > 0) {
-      const sub = collectNestedRegisterExprs(nd.nestedCalls, ncNestedStart, `${parentName}_nested${ncIdx}`, resolvedNestedOutputs)
+      const localResolved = new Map<number, ExprNode[]>()
+      let subCursor = ncNestedStart
+      for (let subIdx = 0; subIdx < nd.nestedCalls.length; subIdx++) {
+        const subNc = nd.nestedCalls[subIdx]
+        const subDef = subNc.programDef
+        const subRegBase = subCursor
+        const subDelayBase = subRegBase + subDef.registerNames.length
+        const subNestedStart = subDelayBase + subDef.delayUpdateNodes.length
+
+        const subResolved: ExprNode[] = []
+        for (let outId = 0; outId < subDef.outputExprNodes.length; outId++) {
+          const cloneMemo = new WeakMap<object, ExprNode>()
+          let expr = cloneExpr(subDef.outputExprNodes[outId], cloneMemo)
+          expr = resolveNestedOutputs(expr, subDef.nestedCalls, subNestedStart)
+          const inlineMemo = new WeakMap<object, ExprNode>()
+          expr = inlineCalls(expr, inlineMemo)
+          const offsetMemo = new WeakMap<object, ExprNode>()
+          expr = offsetRegisters(expr, subRegBase, offsetMemo)
+          const delayMemo = new WeakMap<object, ExprNode>()
+          expr = resolveDelayValues(expr, subDelayBase, delayMemo)
+
+          // Substitute sub-nested program's input(i) → call arg i
+          const subArgMap = new Map<number, ExprNode>()
+          const subArgMemo = new WeakMap<object, ExprNode>()
+          for (let ai = 0; ai < subNc.callArgNodes.length; ai++) {
+            let arg = cloneExpr(subNc.callArgNodes[ai])
+            arg = substituteNestedOutputRefs(arg, localResolved, subArgMemo)
+            // Also resolve parent-scope inputs and registers
+            const parentSubstMemo = new WeakMap<object, ExprNode>()
+            arg = substituteInputs(arg, argMap, parentSubstMemo)
+            subArgMap.set(ai, arg)
+          }
+          const substMemo = new WeakMap<object, ExprNode>()
+          expr = substituteInputs(expr, subArgMap, substMemo)
+          subResolved.push(expr)
+        }
+        localResolved.set(subIdx, subResolved)
+        subCursor += nestedCallRegCount(subNc)
+      }
+
+      const sub = collectNestedRegisterExprs(nd.nestedCalls, ncNestedStart, `${parentName}_nested${ncIdx}`, localResolved)
       for (const e of sub.exprs) exprs.push(e)
       for (const n of sub.names) names.push(n)
       for (const v of sub.inits) inits.push(v)

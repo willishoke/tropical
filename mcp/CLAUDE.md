@@ -33,6 +33,9 @@ Every mutation that affects the signal graph calls `wire()`, which runs the full
 - `list_instances` — list all live instances
 - `get_info` — detailed info about an instance (ports, wiring, registers)
 
+### Export
+- `export_program` — crystallize session instances into a reusable program type. Specify input/output mappings; current wiring becomes defaults. Optionally removes exported instances from the session.
+
 ### Wiring
 - `wire` — set and/or remove input wiring in a single recompile. Replaces connect_modules, disconnect_modules, set_module_input, set_inputs_batch.
 - `list_wiring` — show current input expressions, optionally filtered by instance

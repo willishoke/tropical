@@ -14,6 +14,7 @@ import { loadProgramDef } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
 import { ProgramType } from './program_types.js'
+import { exprDependencies, reachableInstances, buildDependencyGraph, topologicalSort } from './compiler.js'
 
 // ─────────────────────────────────────────────────────────────
 // ProgramJSON schema
@@ -374,6 +375,191 @@ export function saveProgramFromSession(
     params.push({ name, type: 'trigger' })
   }
   if (params.length) prog.params = params
+
+  return prog
+}
+
+// ─────────────────────────────────────────────────────────────
+// Export session as reusable composite program
+// ─────────────────────────────────────────────────────────────
+
+export interface ExportProgramOpts {
+  /** Name for the new program type. */
+  name: string
+  /**
+   * Declared inputs: map from new input name → "instance:port" in the session.
+   * The current wiring expression for that port becomes the input_default.
+   */
+  inputs: Record<string, string>
+  /**
+   * Declared outputs: map from new output name → { instance, output }.
+   */
+  outputs: Record<string, { instance: string; output: string }>
+}
+
+/**
+ * Crystallize part of a live session into a reusable composite ProgramJSON.
+ *
+ * Walks backward from the declared outputs to find all reachable instances.
+ * Rewrites wiring so that exposed ports become program inputs (with the
+ * current wiring as input_defaults), and instance refs stay internal.
+ *
+ * Returns a ProgramJSON that can be registered as a type and instantiated.
+ */
+export function exportSessionAsProgram(
+  session: SessionState,
+  opts: ExportProgramOpts,
+): ProgramJSON {
+  const { name, inputs, outputs } = opts
+
+  // Validate output mappings and build output ref expressions
+  const outputNames = Object.keys(outputs)
+  const outputExprs: Record<string, ExprNode> = {}
+  const rootExprs: ExprNode[] = []
+  for (const [outName, ref] of Object.entries(outputs)) {
+    const inst = session.instanceRegistry.get(ref.instance)
+    if (!inst) throw new Error(`export: output '${outName}' references unknown instance '${ref.instance}'.`)
+    if (!inst.outputNames.includes(ref.output))
+      throw new Error(`export: instance '${ref.instance}' has no output '${ref.output}'. Available: ${inst.outputNames.join(', ')}`)
+    const refExpr: ExprNode = { op: 'ref', instance: ref.instance, output: ref.output }
+    outputExprs[outName] = refExpr
+    rootExprs.push(refExpr)
+  }
+
+  // Validate input mappings
+  const inputNames = Object.keys(inputs)
+  const exposedKeys = new Set<string>()   // "instance:port" keys being exposed as inputs
+  for (const [inputName, target] of Object.entries(inputs)) {
+    const [instName, portName] = target.split(':')
+    if (!portName) throw new Error(`export: input '${inputName}' target must be "instance:port", got '${target}'.`)
+    const inst = session.instanceRegistry.get(instName)
+    if (!inst) throw new Error(`export: input '${inputName}' references unknown instance '${instName}'.`)
+    if (!inst.inputNames.includes(portName))
+      throw new Error(`export: instance '${instName}' has no input '${portName}'. Available: ${inst.inputNames.join(', ')}`)
+    exposedKeys.add(target)
+  }
+
+  // Walk backward from outputs to find all needed instances
+  const allInstances = new Set(session.instanceRegistry.keys())
+  const reachable = reachableInstances(rootExprs, session.inputExprNodes, allInstances)
+
+  // Also include instances reachable from exposed input wiring defaults,
+  // since those expressions will become input_defaults and may reference
+  // internal instances.
+  for (const target of exposedKeys) {
+    const currentExpr = session.inputExprNodes.get(target)
+    if (currentExpr) {
+      for (const dep of exprDependencies(currentExpr)) {
+        if (allInstances.has(dep) && !reachable.has(dep)) {
+          // Add dep and its transitive deps
+          const extra = reachableInstances([currentExpr], session.inputExprNodes, allInstances)
+          for (const e of extra) reachable.add(e)
+        }
+      }
+    }
+  }
+
+  // Check for dangling references — inputs that reference instances outside
+  // the reachable set and are not being exposed as program inputs
+  for (const instName of reachable) {
+    for (const [key, expr] of session.inputExprNodes) {
+      if (!key.startsWith(`${instName}:`)) continue
+      if (exposedKeys.has(key)) continue  // will be replaced with {op:"input"}
+      for (const dep of exprDependencies(expr)) {
+        if (!reachable.has(dep) && allInstances.has(dep)) {
+          throw new Error(
+            `export: instance '${instName}' wiring '${key}' references '${dep}' which is outside the exported subgraph. ` +
+            `Either expose it as an input or include '${dep}' in the output dependency chain.`
+          )
+        }
+      }
+    }
+  }
+
+  // Rewrite session-level ref nodes to nested_out for internal instances
+  function rewriteRefs(node: ExprNode): ExprNode {
+    if (typeof node === 'number' || typeof node === 'boolean') return node
+    if (Array.isArray(node)) return node.map(rewriteRefs)
+    const obj = node as Record<string, unknown>
+    if (obj.op === 'ref' && reachable.has(obj.instance as string)) {
+      return { op: 'nested_out', ref: obj.instance, output: obj.output } as unknown as ExprNode
+    }
+    // Recurse into args
+    if ('args' in obj) {
+      return { ...obj, args: (obj.args as ExprNode[]).map(rewriteRefs) } as unknown as ExprNode
+    }
+    return node
+  }
+
+  // Build the exported ProgramJSON
+  const prog: ProgramJSON = {
+    schema: 'tropical_program_1',
+    name,
+    inputs: inputNames,
+    outputs: outputNames,
+  }
+
+  // Topologically sort reachable instances so dependencies come first.
+  // loadProgramDef and the flattener both process nested calls sequentially,
+  // so a call arg referencing a later call would fail.
+  const depGraph = buildDependencyGraph(reachable, session.inputExprNodes)
+  const { order, complete } = topologicalSort(depGraph)
+  if (!complete) {
+    // Cycles exist — they need a breaks_cycles annotation to resolve.
+    // For now, include all reachable instances in whatever order topo produced,
+    // plus any that weren't reached (cycle members).
+    for (const instName of reachable) {
+      if (!order.includes(instName)) order.push(instName)
+    }
+  }
+
+  prog.instances = {}
+  for (const instName of order) {
+    const inst = session.instanceRegistry.get(instName)!
+    const entry: { program: string; inputs?: Record<string, ExprNode> } = {
+      program: inst.typeName,
+    }
+
+    // Copy wiring, rewriting exposed ports to {op:"input", name:...}
+    // and ref→nested_out for sibling instances
+    for (const portName of inst.inputNames) {
+      const key = `${instName}:${portName}`
+      if (exposedKeys.has(key)) {
+        // Find which program input maps to this port
+        const inputName = Object.entries(inputs).find(([_, t]) => t === key)![0]
+        if (!entry.inputs) entry.inputs = {}
+        entry.inputs[portName] = { op: 'input', name: inputName }
+      } else {
+        const expr = session.inputExprNodes.get(key)
+        if (expr !== undefined) {
+          if (!entry.inputs) entry.inputs = {}
+          entry.inputs[portName] = rewriteRefs(expr)
+        }
+      }
+    }
+
+    prog.instances[instName] = entry
+  }
+
+  // Output expressions — loadProgramDef reads these from process.outputs
+  const processOutputs: Record<string, ExprNode> = {}
+  for (const [outName, ref] of Object.entries(outputs)) {
+    // Use nested_out referencing an internal instance via its alias name
+    processOutputs[outName] = { op: 'nested_out', ref: ref.instance, output: ref.output }
+  }
+  prog.process = { outputs: processOutputs }
+
+  // Set input_defaults from current wiring of exposed ports
+  const inputDefaults: Record<string, ExprNode> = {}
+  for (const [inputName, target] of Object.entries(inputs)) {
+    const currentExpr = session.inputExprNodes.get(target)
+    if (currentExpr !== undefined) {
+      inputDefaults[inputName] = rewriteRefs(currentExpr)
+    }
+  }
+  if (Object.keys(inputDefaults).length > 0) {
+    prog.input_defaults = inputDefaults
+  }
 
   return prog
 }

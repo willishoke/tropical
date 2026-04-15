@@ -108,7 +108,9 @@ C++20, header-heavy (templates + inlining for audio-thread performance).
 
 ## MCP server (`mcp/server.ts`)
 
-Primary agent interface. Runs on stdio via `@modelcontextprotocol/sdk`. Maintains `SessionState` and exposes 16 tools for program management, wiring, audio control, and program I/O. Key tools: `define_program`, `add_instance`, `wire` (batched set/remove), `set_output`, `load`/`save`/`merge`. Every wiring mutation triggers `wire()` → `applyFlatPlan()` → full recompile and hot-swap.
+Primary agent interface. Runs on stdio via `@modelcontextprotocol/sdk`. Maintains `SessionState` and exposes tools for program management, wiring, audio control, and program I/O. Key tools: `define_program`, `add_instance`, `wire` (batched set/remove), `set_output`, `export_program`, `load`/`save`/`merge`. Every wiring mutation triggers `wire()` → `applyFlatPlan()` → full recompile and hot-swap.
+
+The core workflow: **patch → listen → export**. Agents add instances and wire them up, listen to the result via `start_audio`, then call `export_program` to crystallize the session into a reusable program type that can be instantiated, replicated, or saved.
 
 ## Conventions
 

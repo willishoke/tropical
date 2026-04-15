@@ -333,13 +333,20 @@ export function loadProgramDef(
   const nestedAliasDef = new Map<string, ProgramDef>()
   const nestedCalls: NestedCall[] = []
 
+  // First pass: register all nested aliases so slottifyExpr can resolve
+  // nested_out references regardless of instance ordering
   for (const alias of nestedAliases) {
     const spec = nestedRaw[alias]
     const type = session.typeRegistry.get(spec.program) ?? session.typeResolver?.(spec.program)
     if (!type) throw new Error(`Unknown program type '${spec.program}' in instances.`)
     nestedAliasDef.set(alias, type._def)
+  }
 
-    // Build call arg nodes — order inputs by the nested type's input order
+  // Second pass: build call arg nodes (may reference any sibling via nested_out)
+  for (const alias of nestedAliases) {
+    const spec = nestedRaw[alias]
+    const type = session.typeRegistry.get(spec.program)!
+
     const callArgNodes: ExprNode[] = type._def.inputNames.map((name, idx) => {
       if (name in (spec.inputs ?? {})) {
         return slottifyExpr((spec.inputs ?? {})[name], inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)

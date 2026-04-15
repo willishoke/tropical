@@ -142,6 +142,50 @@ function walkExprRefs(node: ExprNode, deps: Set<string>): void {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Reverse reachability — find all instances needed for a set of outputs
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Walk backward from a set of root expressions to find all instances they
+ * transitively depend on. Used by export_program to scope which instances
+ * are included in an exported composite.
+ */
+export function reachableInstances(
+  rootExprs: ExprNode[],
+  inputExprNodes: Map<string, ExprNode>,
+  allInstances: Set<string>,
+): Set<string> {
+  const reachable = new Set<string>()
+  const queue: string[] = []
+
+  // Seed from roots
+  for (const expr of rootExprs) {
+    for (const dep of exprDependencies(expr)) {
+      if (allInstances.has(dep) && !reachable.has(dep)) {
+        reachable.add(dep)
+        queue.push(dep)
+      }
+    }
+  }
+
+  // BFS through wiring
+  while (queue.length > 0) {
+    const name = queue.pop()!
+    for (const [key, expr] of inputExprNodes) {
+      if (!key.startsWith(`${name}:`)) continue
+      for (const dep of exprDependencies(expr)) {
+        if (allInstances.has(dep) && !reachable.has(dep)) {
+          reachable.add(dep)
+          queue.push(dep)
+        }
+      }
+    }
+  }
+
+  return reachable
+}
+
+// ─────────────────────────────────────────────────────────────
 // Dependency graph
 // ─────────────────────────────────────────────────────────────
 
