@@ -65,6 +65,7 @@ const BINARY_TAG: Record<string, string> = {
   bitAnd: 'BitAnd', bitOr: 'BitOr', bitXor: 'BitXor',
   lshift: 'LShift', rshift: 'RShift',
   and: 'And', or: 'Or',
+  ldexp: 'Ldexp',
 }
 
 const UNARY_TAG: Record<string, string> = {
@@ -72,6 +73,7 @@ const UNARY_TAG: Record<string, string> = {
   log: 'Log', exp: 'Exp', sqrt: 'Sqrt',
   floor: 'Floor', ceil: 'Ceil', round: 'Round',
   not: 'Not', bit_not: 'BitNot',
+  float_exponent: 'FloatExponent',
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -80,7 +82,7 @@ const UNARY_TAG: Record<string, string> = {
 
 const BITWISE_TAGS = new Set(['BitAnd', 'BitOr', 'BitXor', 'LShift', 'RShift', 'BitNot'])
 const COMPARISON_TAGS = new Set(['Less', 'LessEq', 'Greater', 'GreaterEq', 'Equal', 'NotEqual', 'Not', 'And', 'Or'])
-const TRANSCENDENTAL_TAGS = new Set(['Sin', 'Cos', 'Tanh', 'Log', 'Exp', 'Sqrt', 'Floor', 'Ceil', 'Round'])
+const TRANSCENDENTAL_TAGS = new Set(['Sin', 'Cos', 'Tanh', 'Log', 'Exp', 'Sqrt', 'Floor', 'Ceil', 'Round', 'Ldexp', 'FloatExponent'])
 
 /** Promotion order: float > int > bool. */
 function promoteTypes(a: ScalarType, b: ScalarType): ScalarType {

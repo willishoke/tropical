@@ -37,6 +37,9 @@ enum class OpTag : uint8_t
   And, Or,  // logical (truthy coercion: float/int → bool, then and/or)
   // arity 1
   Neg, Abs, Sin, Cos, Log, Exp, Sqrt, Floor, Ceil, Round, Not, BitNot, Tanh,
+  FloatExponent,  // extract IEEE-754 unbiased exponent of a float as a float-valued integer
+  // arity 2 (listed here for locality with FloatExponent; Ldexp is binary)
+  Ldexp,          // x * 2^n (n is a float-valued integer)
   // arity 3
   Clamp, Select,
   SetElement,  // args[0]=ArrayReg, args[1]=idx, args[2]=val; no dst slot written

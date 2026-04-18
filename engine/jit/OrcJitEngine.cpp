@@ -751,6 +751,25 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       case OpTag::Ceil:   return {builder.CreateCall(llvm_ceil,  {arg_as(0, ST::Float)}), ST::Float};
       case OpTag::Round:  return {builder.CreateCall(llvm_round, {arg_as(0, ST::Float)}), ST::Float};
 
+      // ── Float bit-level ops (range reconstruction for pure-ExprNode exp/log) ──
+      // Ldexp(x, n): x * 2^n where n is a float-valued integer.
+      // Builds the 2^n scale via IEEE-754 exponent injection (single fmul, no libm).
+      case OpTag::Ldexp:
+      {
+        llvm::Value * x  = arg_as(0, ST::Float);
+        llvm::Value * ni = builder.CreateFPToSI(arg_as(1, ST::Float), i64_ty);
+        llvm::Value * bias  = builder.CreateShl(builder.CreateAdd(ni, builder.getInt64(1023)), 52);
+        llvm::Value * scale = builder.CreateBitCast(bias, f64_ty);
+        return {builder.CreateFMul(x, scale), ST::Float};
+      }
+      // FloatExponent(x): unbiased IEEE-754 exponent of x, returned as a float-valued integer.
+      case OpTag::FloatExponent:
+      {
+        llvm::Value * bits = builder.CreateBitCast(arg_as(0, ST::Float), i64_ty);
+        llvm::Value * e    = builder.CreateSub(builder.CreateAShr(bits, 52), builder.getInt64(1023));
+        return {builder.CreateSIToFP(e, f64_ty), ST::Float};
+      }
+
       // ── Boolean/bitwise unary ──
       case OpTag::Not:
       {
