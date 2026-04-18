@@ -1,0 +1,53 @@
+{
+  "schema": "tropical_program_1",
+  "name": "Sin",
+  "inputs": [
+    { "name": "x", "type": "float" }
+  ],
+  "outputs": [
+    { "name": "out", "type": "float" }
+  ],
+  "input_defaults": { "x": 0 },
+  "process": {
+    "outputs": {
+      "out": {
+        "op": "let",
+        "bind": {
+          "n": { "op": "round", "args": [
+            { "op": "mul", "args": [{ "op": "input", "name": "x" }, 0.15915494309189533] }
+          ]},
+          "r": { "op": "sub", "args": [
+            { "op": "input", "name": "x" },
+            { "op": "mul", "args": [{ "op": "binding", "name": "n" }, 6.283185307179586] }
+          ]},
+          "r2": { "op": "mul", "args": [
+            { "op": "binding", "name": "r" },
+            { "op": "binding", "name": "r" }
+          ]},
+          "poly": {
+            "op": "fold",
+            "over": [-1.9515295891e-4, 8.3321608736e-3, -1.6666654611e-1, 9.9999999967e-1],
+            "init": 0,
+            "acc_var": "a",
+            "elem_var": "c",
+            "body": {
+              "op": "add", "args": [
+                { "op": "binding", "name": "c" },
+                { "op": "mul", "args": [
+                  { "op": "binding", "name": "a" },
+                  { "op": "binding", "name": "r2" }
+                ]}
+              ]
+            }
+          }
+        },
+        "in": {
+          "op": "mul", "args": [
+            { "op": "binding", "name": "r" },
+            { "op": "binding", "name": "poly" }
+          ]
+        }
+      }
+    }
+  }
+}
