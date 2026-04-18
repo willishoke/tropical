@@ -1,0 +1,76 @@
+{
+  "schema": "tropical_program_1",
+  "name": "Log",
+  "inputs": [
+    { "name": "x", "type": "float" }
+  ],
+  "outputs": [
+    { "name": "out", "type": "float" }
+  ],
+  "input_defaults": { "x": 1 },
+  "process": {
+    "outputs": {
+      "out": {
+        "op": "let",
+        "bind": {
+          "safe_x": { "op": "select", "args": [
+            { "op": "lte", "args": [{ "op": "input", "name": "x" }, 0] },
+            1e-45,
+            { "op": "input", "name": "x" }
+          ]},
+          "e": { "op": "float_exponent", "args": [
+            { "op": "binding", "name": "safe_x" }
+          ]},
+          "m": { "op": "ldexp", "args": [
+            { "op": "binding", "name": "safe_x" },
+            { "op": "neg", "args": [{ "op": "binding", "name": "e" }] }
+          ]},
+          "f": { "op": "sub", "args": [{ "op": "binding", "name": "m" }, 1.0] },
+          "f2": { "op": "mul", "args": [
+            { "op": "binding", "name": "f" },
+            { "op": "binding", "name": "f" }
+          ]},
+          "p": {
+            "op": "fold",
+            "over": [
+              7.40148531e-2,
+              -1.24421087e-1,
+              1.42493233e-1,
+              -1.66680575e-1,
+              2.00007403e-1,
+              -2.49999403e-1
+            ],
+            "init": 0,
+            "acc_var": "a",
+            "elem_var": "c",
+            "body": {
+              "op": "add", "args": [
+                { "op": "binding", "name": "c" },
+                { "op": "mul", "args": [
+                  { "op": "binding", "name": "a" },
+                  { "op": "binding", "name": "f" }
+                ]}
+              ]
+            }
+          },
+          "log_m": { "op": "add", "args": [
+            { "op": "binding", "name": "f" },
+            { "op": "mul", "args": [
+              { "op": "binding", "name": "f2" },
+              { "op": "binding", "name": "p" }
+            ]}
+          ]}
+        },
+        "in": {
+          "op": "add", "args": [
+            { "op": "binding", "name": "log_m" },
+            { "op": "mul", "args": [
+              { "op": "binding", "name": "e" },
+              0.6931471805599453
+            ]}
+          ]
+        }
+      }
+    }
+  }
+}
