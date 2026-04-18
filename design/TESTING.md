@@ -73,7 +73,7 @@ Stage 12: Audio output           RtAudio callback
 
 ## 3. Current Test Suite
 
-**199 tests total** — 189 TS tests across 11 files (1152 expect() calls), 10 C++ tests.
+**~255 tests total** — 246 TS tests across 12 files (1274 expect() calls), plus the C++ test suite. Exact numbers drift; run `bun test compiler` and `ctest --test-dir build` for current counts.
 
 ### Test inventory
 
@@ -100,9 +100,9 @@ Stage 12: Audio output           RtAudio callback
 
 ### Module type coverage
 
-19 built-in module types exist as `stdlib/*.json`. Integration tests exercise only **VCO, VCA, Clock** (3/19) through the full pipeline with numerical output. All 19 load and flatten successfully, but no test verifies that the remaining 16 produce numerically correct audio.
+24 built-in module types exist as `stdlib/*.json` (see the compiler/CLAUDE.md stdlib table for the full list). Integration tests exercise only a handful (e.g. **VCA, Clock**, plus an inline test oscillator that instantiates **Sin**) through the full pipeline with numerical output. All 24 load and flatten successfully, but most have no test that verifies numerically-correct audio.
 
-Untested numerically: ADEnvelope, ADSREnvelope, Reverb, Phaser, Phaser16, Compressor, BassDrum, LadderFilter, BitCrusher, NoiseLFSR, TopoWaveguide, Delay8/16/512/4410/44100.
+Untested numerically: most filters, delays, and effects — Tanh, Exp, Log, Pow, OnePole, LadderFilter, AllpassDelay, CombDelay, Phaser/Phaser16, BitCrusher, NoiseLFSR, Delay8/16/512/4410/44100, SoftClip, CrossFade.
 
 ---
 
@@ -157,7 +157,7 @@ Scope (interval)                     O0  O1  O2  O3  O4
 
 **1. No interpreter for differential testing.** No ExprNode interpreter exists. This would enable O3 testing across the entire pipeline: for any program, run the interpreter on the lowered ExprNode tree, run the JIT path, compare sample-by-sample. This single addition would convert every integration test from O1 to O3.
 
-**2. Only 3/19 modules tested numerically.** The stdlib JSON files are frozen artifacts. Their correctness was validated once during generation. There is no ongoing regression oracle — if the flattener or emitter changes behavior, 16 modules could silently break.
+**2. Most stdlib modules untested numerically.** The stdlib JSON files are frozen artifacts. Their correctness was validated once during generation. There is no ongoing regression oracle — if the flattener or emitter changes behavior, most of the 24 modules could silently break.
 
 **3. slottifyExpr untested in isolation.** `loadProgramDef` is exercised indirectly through `bounds.test.ts` and integration tests, but `slottifyExpr` itself (the pure name→slot tree walk) has no dedicated tests. A bug in name resolution would be hard to diagnose.
 
@@ -217,7 +217,7 @@ The interpreter uses JavaScript's `Math.sin`, `Math.cos`, etc. The JIT uses inli
 
 ### What it enables
 
-Every test in `apply_plan.test.ts` and `render.test.ts` can be upgraded: instead of checking `peak(buf) > 0` (O1), check `|jit_output[i] - interp_output[i]| < 1e-6 for all i` (O3). Every stdlib module gets tested by loading the JSON, flattening, interpreting N samples, and comparing against JIT output. The interpreter is the ongoing regression oracle for all 19 stdlib modules.
+Every test in `apply_plan.test.ts` and `render.test.ts` can be upgraded: instead of checking `peak(buf) > 0` (O1), check `|jit_output[i] - interp_output[i]| < 1e-6 for all i` (O3). Every stdlib module gets tested by loading the JSON, flattening, interpreting N samples, and comparing against JIT output. The interpreter is the ongoing regression oracle for all 24 stdlib modules.
 
 ---
 
@@ -235,11 +235,11 @@ Ranked by coverage impact — which regions of behavior space each addition cove
 
 ### Priority 2: Stdlib golden-output tests
 
-For each of the 19 `stdlib/*.json` files: load -> flatten -> JIT -> process N samples -> compare against interpreter output (O3) or snapshot as golden reference (O4).
+For each of the 24 `stdlib/*.json` files: load -> flatten -> JIT -> process N samples -> compare against interpreter output (O3) or snapshot as golden reference (O4).
 
 - **Scope**: `[ProgramJSON, FlatRuntime]` per module type
 - **Dependency**: interpreter (for O3), or standalone with snapshotted output (O4)
-- **Impact**: covers 16 currently untested module types; catches regressions in flattener/emitter/JIT
+- **Impact**: covers most currently untested module types; catches regressions in flattener/emitter/JIT
 
 ### Priority 3: `slottifyExpr` unit tests
 
@@ -270,7 +270,7 @@ Emit a `FlatProgram` in TS, serialize to `tropical_plan_4` JSON, parse in C++ vi
 
 Stages 0-9 (all TS + C++ parsing) are **fully deterministic** — pure functions from input to output. Same ExprNode in, same FlatProgram out. O4 oracles apply freely.
 
-Stage 10 (JIT) is **functionally deterministic.** The kernel function is deterministic for a given FlatProgram. Inline transcendental approximations (sin, cos, exp, log, tanh) produce bit-identical results across runs on the same platform (no libm dependency). Cross-platform reproducibility is a non-goal (macOS/ARM64 only in practice).
+Stage 10 (JIT) is **functionally deterministic.** The kernel function is deterministic for a given FlatProgram. Transcendentals are polynomial approximations inlined at flatten time (from `stdlib/Sin.json`, `Cos.json`, etc.), so they produce bit-identical results across runs on the same platform (no libm dependency). Cross-platform reproducibility is a non-goal (macOS/ARM64 only in practice).
 
 Stage 11 (FlatRuntime) with **hot-swap** introduces observable non-determinism: the output of buffer N+1 depends on whether a hot-swap occurred between N and N+1. Tests exercising hot-swap must account for this (and both `test_module_process.cpp` test 3 and `render.test.ts` test 3 already do).
 
@@ -288,7 +288,7 @@ Rules for keeping the coverage map current as the codebase evolves.
 
 **New ExprNode op.** Three tests required: (a) construction test in `expr.test.ts`, (b) emission test in `emit_numeric.test.ts`, (c) C++ OpTag test in `test_module_process.cpp` with handwritten `tropical_plan_4` JSON. Plus: interpreter case in `interpret.ts` once it exists.
 
-**Modifying flattener or emitter.** Run full stdlib golden-output suite. Any change to `flatten.ts`, `lower_arrays.ts`, or `emit_numeric.ts` can silently alter the behavior of all 19 modules.
+**Modifying flattener or emitter.** Run full stdlib golden-output suite. Any change to `flatten.ts`, `lower_arrays.ts`, or `emit_numeric.ts` can silently alter the behavior of all 24 modules.
 
 **New pipeline stage.** Add at least one O2+ test in isolation, plus verify existing end-to-end tests still pass. Update this document's lattice diagram.
 
