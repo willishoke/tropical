@@ -9,16 +9,22 @@
     { "name": "out", "type": "signal" }
   ],
   "input_defaults": { "input": 0, "drive": 1 },
-  "process": {
-    "outputs": {
-      "out": {
-        "op": "tanh", "args": [
-          { "op": "mul", "args": [
+  "instances": {
+    "tanh": {
+      "program": "Tanh",
+      "inputs": {
+        "x": {
+          "op": "mul", "args": [
             { "op": "input", "name": "drive" },
             { "op": "input", "name": "input" }
-          ]}
-        ]
+          ]
+        }
       }
+    }
+  },
+  "process": {
+    "outputs": {
+      "out": { "op": "nested_out", "ref": "tanh", "output": "out" }
     }
   }
 }

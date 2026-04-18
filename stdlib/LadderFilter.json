@@ -21,17 +21,41 @@
     }
   },
   "instances": {
+    "tanh_in": {
+      "program": "Tanh",
+      "inputs": {
+        "x": {
+          "op": "mul", "args": [
+            { "op": "input", "name": "drive" },
+            { "op": "input", "name": "input" }
+          ]
+        }
+      }
+    },
+    "sin_g": {
+      "program": "Sin",
+      "inputs": {
+        "x": {
+          "op": "mul", "args": [
+            3.141592653589793,
+            { "op": "div", "args": [
+              { "op": "clamp", "args": [
+                { "op": "input", "name": "cutoff" },
+                20,
+                { "op": "mul", "args": [0.49, { "op": "sample_rate" }] }
+              ]},
+              { "op": "sample_rate" }
+            ]}
+          ]
+        }
+      }
+    },
     "pole1": {
       "program": "OnePole",
       "inputs": {
         "input": {
           "op": "sub", "args": [
-            { "op": "tanh", "args": [
-              { "op": "mul", "args": [
-                { "op": "input", "name": "drive" },
-                { "op": "input", "name": "input" }
-              ]}
-            ]},
+            { "op": "nested_out", "ref": "tanh_in", "output": "out" },
             { "op": "mul", "args": [
               { "op": "mul", "args": [4, { "op": "input", "name": "resonance" }] },
               { "op": "delay_ref", "id": "prev_lp" }
@@ -41,19 +65,7 @@
         "g": {
           "op": "mul", "args": [
             2,
-            { "op": "sin", "args": [
-              { "op": "mul", "args": [
-                3.141592653589793,
-                { "op": "div", "args": [
-                  { "op": "clamp", "args": [
-                    { "op": "input", "name": "cutoff" },
-                    20,
-                    { "op": "mul", "args": [0.49, { "op": "sample_rate" }] }
-                  ]},
-                  { "op": "sample_rate" }
-                ]}
-              ]}
-            ]}
+            { "op": "nested_out", "ref": "sin_g", "output": "out" }
           ]
         }
       }
@@ -65,19 +77,7 @@
         "g": {
           "op": "mul", "args": [
             2,
-            { "op": "sin", "args": [
-              { "op": "mul", "args": [
-                3.141592653589793,
-                { "op": "div", "args": [
-                  { "op": "clamp", "args": [
-                    { "op": "input", "name": "cutoff" },
-                    20,
-                    { "op": "mul", "args": [0.49, { "op": "sample_rate" }] }
-                  ]},
-                  { "op": "sample_rate" }
-                ]}
-              ]}
-            ]}
+            { "op": "nested_out", "ref": "sin_g", "output": "out" }
           ]
         }
       }
@@ -89,19 +89,7 @@
         "g": {
           "op": "mul", "args": [
             2,
-            { "op": "sin", "args": [
-              { "op": "mul", "args": [
-                3.141592653589793,
-                { "op": "div", "args": [
-                  { "op": "clamp", "args": [
-                    { "op": "input", "name": "cutoff" },
-                    20,
-                    { "op": "mul", "args": [0.49, { "op": "sample_rate" }] }
-                  ]},
-                  { "op": "sample_rate" }
-                ]}
-              ]}
-            ]}
+            { "op": "nested_out", "ref": "sin_g", "output": "out" }
           ]
         }
       }
@@ -113,19 +101,7 @@
         "g": {
           "op": "mul", "args": [
             2,
-            { "op": "sin", "args": [
-              { "op": "mul", "args": [
-                3.141592653589793,
-                { "op": "div", "args": [
-                  { "op": "clamp", "args": [
-                    { "op": "input", "name": "cutoff" },
-                    20,
-                    { "op": "mul", "args": [0.49, { "op": "sample_rate" }] }
-                  ]},
-                  { "op": "sample_rate" }
-                ]}
-              ]}
-            ]}
+            { "op": "nested_out", "ref": "sin_g", "output": "out" }
           ]
         }
       }
