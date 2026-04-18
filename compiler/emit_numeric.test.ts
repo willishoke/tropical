@@ -70,13 +70,13 @@ describe('emitNumericProgram', () => {
     expect(prog.register_count).toBeGreaterThanOrEqual(2)
   })
 
-  test('scalar unary: sin(1.0)', () => {
-    const prog = emitNumericProgram([{ op: 'sin', args: [1.0] }], [])
-    const sin = findInstr(prog, 'Sin')!
-    expect(sin).toBeDefined()
-    expect(sin.loop_count).toBe(1)
-    expect(sin.args[0]).toMatchObject({ kind: 'const', val: 1.0 })
-    expect(sin.result_type).toBe('float')
+  test('scalar unary: sqrt(4.0)', () => {
+    const prog = emitNumericProgram([{ op: 'sqrt', args: [4.0] }], [])
+    const sq = findInstr(prog, 'Sqrt')!
+    expect(sq).toBeDefined()
+    expect(sq.loop_count).toBe(1)
+    expect(sq.args[0]).toMatchObject({ kind: 'const', val: 4.0 })
+    expect(sq.result_type).toBe('float')
   })
 
   test('scalar ternary: select and clamp', () => {
@@ -98,15 +98,15 @@ describe('emitNumericProgram', () => {
 
   // ── Type inference ─────────────────────────────────────────
 
-  test('type categories: bitwise→int, comparison→bool, transcendental→float', () => {
+  test('type categories: bitwise→int, comparison→bool, sqrt→float', () => {
     const bitProg = emitNumericProgram([{ op: 'bit_and', args: [1, 2] }], [])
     expect(findInstr(bitProg, 'BitAnd')!.result_type).toBe('int')
 
     const cmpProg = emitNumericProgram([{ op: 'lt', args: [1, 2] }], [])
     expect(findInstr(cmpProg, 'Less')!.result_type).toBe('bool')
 
-    const sinProg = emitNumericProgram([{ op: 'sin', args: [1] }], [])
-    expect(findInstr(sinProg, 'Sin')!.result_type).toBe('float')
+    const sqProg = emitNumericProgram([{ op: 'sqrt', args: [1] }], [])
+    expect(findInstr(sqProg, 'Sqrt')!.result_type).toBe('float')
   })
 
   test('type promotion in arithmetic', () => {

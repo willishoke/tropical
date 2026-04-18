@@ -42,10 +42,18 @@ const TEST_OSC: ProgramJSON = {
   ],
   regs: { phase: 0 },
   input_defaults: { freq: 440 },
+  instances: {
+    sin1: {
+      program: 'Sin',
+      inputs: {
+        x: { op: 'mul', args: [6.283185307179586, { op: 'reg', name: 'phase' }] },
+      },
+    },
+  },
   process: {
     outputs: {
       saw: { op: 'sub', args: [{ op: 'mul', args: [2, { op: 'reg', name: 'phase' }] }, 1] },
-      sin: { op: 'sin', args: [{ op: 'mul', args: [6.283185307179586, { op: 'reg', name: 'phase' }] }] },
+      sin: { op: 'nested_out', ref: 'sin1', output: 'out' },
     },
     next_regs: {
       phase: { op: 'mod', args: [

@@ -110,10 +110,6 @@ describe('evalExpr binary arithmetic', () => {
     expect(evalExpr({ op: 'mod', args: [1, 0] }, env())).toBe(0) // mod by zero
   })
 
-  test('pow', () => {
-    expect(evalExpr({ op: 'pow', args: [2, 10] }, env())).toBe(1024)
-  })
-
   test('floor_div', () => {
     expect(evalExpr({ op: 'floor_div', args: [7, 2] }, env())).toBe(3)
     expect(evalExpr({ op: 'floorDiv', args: [7, 2] }, env())).toBe(3)
@@ -183,12 +179,7 @@ describe('evalExpr unary', () => {
     expect(evalExpr({ op: 'abs', args: [-3] }, env())).toBe(3)
   })
 
-  test('transcendentals', () => {
-    expect(evalExpr({ op: 'sin', args: [0] }, env())).toBeCloseTo(0, 10)
-    expect(evalExpr({ op: 'cos', args: [0] }, env())).toBeCloseTo(1, 10)
-    expect(evalExpr({ op: 'tanh', args: [0] }, env())).toBeCloseTo(0, 10)
-    expect(evalExpr({ op: 'exp', args: [0] }, env())).toBeCloseTo(1, 10)
-    expect(evalExpr({ op: 'log', args: [1] }, env())).toBeCloseTo(0, 10)
+  test('sqrt', () => {
     expect(evalExpr({ op: 'sqrt', args: [9] }, env())).toBeCloseTo(3, 10)
   })
 

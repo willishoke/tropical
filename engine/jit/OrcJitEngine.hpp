@@ -30,13 +30,13 @@ enum class JitScalarType : uint8_t { Float, Int, Bool };
 enum class OpTag : uint8_t
 {
   // arity 2
-  Add, Sub, Mul, Div, Mod, Pow, FloorDiv,
+  Add, Sub, Mul, Div, Mod, FloorDiv,
   Less, LessEq, Greater, GreaterEq, Equal, NotEqual,
   BitAnd, BitOr, BitXor, LShift, RShift,
   Index,    // args[0]=ArrayReg, args[1]=scalar idx → scalar element
   And, Or,  // logical (truthy coercion: float/int → bool, then and/or)
   // arity 1
-  Neg, Abs, Sin, Cos, Log, Exp, Sqrt, Floor, Ceil, Round, Not, BitNot, Tanh,
+  Neg, Abs, Sqrt, Floor, Ceil, Round, Not, BitNot,
   FloatExponent,  // extract IEEE-754 unbiased exponent of a float as a float-valued integer
   // arity 2 (listed here for locality with FloatExponent; Ldexp is binary)
   Ldexp,          // x * 2^n (n is a float-valued integer)

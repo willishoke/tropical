@@ -116,7 +116,6 @@ export const mul      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('mul'
 export const div      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('div',       lhs, rhs)
 export const floorDiv = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('floor_div', lhs, rhs)
 export const mod      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('mod',       lhs, rhs)
-export const pow_     = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('pow',       lhs, rhs)
 export const matmul = (
   lhs: ExprCoercible,
   rhs: ExprCoercible,
@@ -158,11 +157,6 @@ export const bitNot  = (operand: ExprCoercible) => unary('bit_not', operand)
 
 export const neg        = (operand: ExprCoercible) => unary('neg', operand)
 export const abs_       = (operand: ExprCoercible) => unary('abs', operand)
-export const sin        = (operand: ExprCoercible) => unary('sin', operand)
-export const cos        = (operand: ExprCoercible) => unary('cos', operand)
-export const exp        = (operand: ExprCoercible) => unary('exp', operand)
-export const log        = (operand: ExprCoercible) => unary('log', operand)
-export const tanh       = (operand: ExprCoercible) => unary('tanh', operand)
 export const floatExponent = (operand: ExprCoercible) => unary('float_exponent', operand)
 export const ldexp      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('ldexp', lhs, rhs)
 export const logicalNot = (operand: ExprCoercible) => unary('not', operand)
@@ -352,7 +346,7 @@ export function triggerParamExpr(paramHandle: unknown): SignalExpr {
 // ─────────────────────────────────────────────────────────────
 
 const BINARY_OPS = new Set([
-  'add', 'sub', 'mul', 'div', 'floor_div', 'mod', 'pow',
+  'add', 'sub', 'mul', 'div', 'floor_div', 'mod',
   'lt', 'lte', 'gt', 'gte', 'eq', 'neq',
   'bit_and', 'bit_or', 'bit_xor', 'lshift', 'rshift',
   'and', 'or',
@@ -360,7 +354,7 @@ const BINARY_OPS = new Set([
 ])
 
 const UNARY_OPS = new Set([
-  'neg', 'abs', 'sin', 'cos', 'exp', 'log', 'tanh', 'not', 'bit_not',
+  'neg', 'abs', 'not', 'bit_not',
   'sqrt', 'floor', 'ceil', 'round',
   'float_exponent',
 ])
