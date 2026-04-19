@@ -10,11 +10,12 @@
 import type { ExprNode } from './expr.js'
 import { validateExpr } from './expr.js'
 import type { TypeDefJSON, SessionState } from './session.js'
-import { loadProgramDef } from './session.js'
+import { loadProgramDef, resolveProgramType } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
 import { ProgramType } from './program_types.js'
 import { exprDependencies, reachableInstances, buildDependencyGraph, topologicalSort } from './compiler.js'
+import type { RawTypeArgs } from './specialize.js'
 
 // ─────────────────────────────────────────────────────────────
 // ProgramJSON schema
@@ -106,11 +107,10 @@ export function loadProgramAsSession(
     }
   }
 
-  // Register inline program definitions
+  // Register inline program definitions (loadProgramAsType handles registration)
   if (prog.programs) {
     for (const [name, subProg] of Object.entries(prog.programs)) {
-      const type = loadProgramAsType({ ...subProg, name }, session)
-      session.typeRegistry.set(name, type)
+      loadProgramAsType({ ...subProg, name }, session)
     }
   }
 
@@ -125,9 +125,8 @@ export function loadProgramAsSession(
 
   // Instantiate programs
   for (const [name, inst] of Object.entries(prog.instances ?? {})) {
-    const type = session.typeRegistry.get(inst.program) ?? session.typeResolver?.(inst.program)
-    if (!type) throw new Error(`Unknown program type '${inst.program}'.`)
-    const instance = type.instantiateAs(name)
+    const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
+    const instance = type.instantiateAs(name, { baseTypeName: inst.program, typeArgs })
     session.instanceRegistry.set(instance.name, instance)
 
     // Populate wiring from instance inputs
@@ -167,11 +166,16 @@ export function loadProgramAsSession(
 /**
  * Load a leaf ProgramJSON as a ProgramType (registerable in typeRegistry).
  * Programs with inline `programs` get their subprograms registered first.
+ *
+ * Generic programs (with `type_params`) are stored in `genericTemplates`
+ * instead of being eagerly compiled; they materialize on instantiation via
+ * `resolveProgramType`. For non-generic programs the ProgramType is both
+ * registered in `typeRegistry` and returned.
  */
 export function loadProgramAsType(
   prog: ProgramJSON,
-  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>,
-): ProgramType {
+  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>,
+): ProgramType | undefined {
   // Register type aliases from type_defs before processing subprograms
   if (session.typeAliasRegistry) {
     for (const td of prog.type_defs ?? []) {
@@ -181,15 +185,22 @@ export function loadProgramAsType(
     }
   }
 
-  // Register inline subprograms first
+  // Register inline subprograms first (each handles its own registration)
   if (prog.programs) {
     for (const [name, subProg] of Object.entries(prog.programs)) {
-      const subType = loadProgramAsType({ ...subProg, name }, session)
-      session.typeRegistry.set(name, subType)
+      loadProgramAsType({ ...subProg, name }, session)
     }
   }
 
-  return loadProgramDef(prog, session)
+  // Generic: stash the template, defer compilation to instantiation time.
+  if (prog.type_params && Object.keys(prog.type_params).length > 0) {
+    session.genericTemplates.set(prog.name, prog)
+    return undefined
+  }
+
+  const type = loadProgramDef(prog, session)
+  session.typeRegistry.set(prog.name, type)
+  return type
 }
 
 /**
@@ -216,11 +227,10 @@ export function mergeProgramIntoSession(
     }
   }
 
-  // Register inline program definitions
+  // Register inline program definitions (loadProgramAsType handles registration)
   if (prog.programs) {
     for (const [name, subProg] of Object.entries(prog.programs)) {
-      const type = loadProgramAsType({ ...subProg, name }, session)
-      session.typeRegistry.set(name, type)
+      loadProgramAsType({ ...subProg, name }, session)
     }
   }
 
@@ -235,9 +245,8 @@ export function mergeProgramIntoSession(
 
   // Instantiate programs
   for (const [name, inst] of Object.entries(prog.instances ?? {})) {
-    const type = session.typeRegistry.get(inst.program) ?? session.typeResolver?.(inst.program)
-    if (!type) throw new Error(`Unknown program type '${inst.program}'.`)
-    const instance = type.instantiateAs(name)
+    const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
+    const instance = type.instantiateAs(name, { baseTypeName: inst.program, typeArgs })
     session.instanceRegistry.set(instance.name, instance)
 
     // Populate wiring from instance inputs
@@ -292,12 +301,12 @@ const __dirname = dirname(__filename)
  * Accepts either a full session or just a typeRegistry Map.
  */
 export function loadStdlib(
-  target: Map<string, ProgramType> | Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'>,
+  target: Map<string, ProgramType> | Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'>,
 ): void {
   // If given a bare Map, wrap it in a minimal session-like object
-  const session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> & Partial<Pick<SessionState, 'typeResolver'>> =
+  const session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'> & Partial<Pick<SessionState, 'typeResolver'>> =
     target instanceof Map
-      ? { typeRegistry: target, instanceRegistry: new Map(), paramRegistry: new Map(), triggerRegistry: new Map() }
+      ? { typeRegistry: target, instanceRegistry: new Map(), paramRegistry: new Map(), triggerRegistry: new Map(), specializationCache: new Map(), genericTemplates: new Map() }
       : target
 
   const stdlibDir = join(__dirname, '../stdlib')
@@ -311,25 +320,27 @@ export function loadStdlib(
     index.set(prog.name, path)
   }
 
-  // Set up on-demand resolver — loads a stdlib type (and its deps) on first reference
+  // Set up on-demand resolver — loads a stdlib type (and its deps) on first reference.
+  // Returns the concrete ProgramType for non-generic types; for generics it
+  // registers the template and returns undefined (instantiation requires type_args).
   const loading = new Set<string>()
   session.typeResolver = (name: string): ProgramType | undefined => {
     const existing = session.typeRegistry.get(name)
     if (existing) return existing
+    if (session.genericTemplates.has(name)) return undefined
     if (loading.has(name)) throw new Error(`Circular stdlib dependency: ${[...loading, name].join(' → ')}`)
     const path = index.get(name)
     if (!path) return undefined
     loading.add(name)
     const prog = JSON.parse(readFileSync(path, 'utf-8')) as ProgramJSON
     const type = loadProgramAsType(prog, session)
-    session.typeRegistry.set(prog.name, type)
     loading.delete(name)
     return type
   }
 
   // Eagerly load all indexed types (resolver handles dependency order)
   for (const name of index.keys()) {
-    if (!session.typeRegistry.has(name)) {
+    if (!session.typeRegistry.has(name) && !session.genericTemplates.has(name)) {
       session.typeResolver(name)
     }
   }

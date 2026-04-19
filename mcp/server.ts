@@ -19,7 +19,7 @@ import {
 
 import {
   makeSession, nextName, loadJSON,
-  prettyExpr, SessionState, ExprNode,
+  prettyExpr, resolveProgramType, SessionState, ExprNode,
 } from '../compiler/session.js'
 import { parseProgram } from '../compiler/schema.js'
 import {
@@ -479,29 +479,41 @@ function handleDefineProgram(args: Record<string, unknown>) {
   return wrap(() => {
     const prog = parseProgram(args.def) as ProgramJSON
     const type = loadProgramAsType(prog, session)
-    session.typeRegistry.set(type.name, type)
-    return { program_name: type.name, inputs: type._def.inputNames, outputs: type._def.outputNames }
+    if (type) {
+      return { program_name: type.name, inputs: type._def.inputNames, outputs: type._def.outputNames }
+    }
+    // Generic — template only, no concrete ports until instantiation.
+    return {
+      program_name: prog.name,
+      inputs: (prog.inputs ?? []).map(i => typeof i === 'string' ? i : i.name),
+      outputs: (prog.outputs ?? []).map(o => typeof o === 'string' ? o : o.name),
+      type_params: prog.type_params,
+    }
   })
 }
 
-function handleAddInstance(programName: string, instanceName: string) {
+function handleAddInstance(
+  programName: string,
+  instanceName: string,
+  typeArgs?: Record<string, number>,
+) {
   return wrap(() => {
     if (session.instanceRegistry.has(instanceName))
       throw new Error(`Instance '${instanceName}' already exists.`)
-    const type = session.typeRegistry.get(programName)
-    if (!type)
-      throw new Error(`Unknown program '${programName}'. Known: ${[...session.typeRegistry.keys()].join(', ')}`)
-    const inst = type.instantiateAs(instanceName)
+    const { type, typeArgs: resolved } = resolveProgramType(session, programName, typeArgs, undefined)
+    const inst = type.instantiateAs(instanceName, { baseTypeName: programName, typeArgs: resolved })
     session.instanceRegistry.set(instanceName, inst)
     return instanceSummary(instanceName)
   })
 }
 
-function handleReplicate(programName: string, count: number, namePrefix?: string) {
+function handleReplicate(
+  programName: string,
+  count: number,
+  namePrefix?: string,
+  typeArgs?: Record<string, number>,
+) {
   return wrap(() => {
-    const type = session.typeRegistry.get(programName)
-    if (!type)
-      throw new Error(`Unknown program '${programName}'. Known: ${[...session.typeRegistry.keys()].join(', ')}`)
     if (!Number.isInteger(count) || count < 1)
       throw new Error(`count must be a positive integer, got ${count}`)
 
@@ -511,7 +523,8 @@ function handleReplicate(programName: string, count: number, namePrefix?: string
       const name = nextName(session, prefix)
       if (session.instanceRegistry.has(name))
         throw new Error(`Instance '${name}' already exists — pick a different name_prefix`)
-      const inst = type.instantiateAs(name)
+      const { type, typeArgs: resolved } = resolveProgramType(session, programName, typeArgs, undefined)
+      const inst = type.instantiateAs(name, { baseTypeName: programName, typeArgs: resolved })
       session.instanceRegistry.set(name, inst)
       created.push(instanceSummary(name))
     }
@@ -954,7 +967,11 @@ function handleTool(name: string, args: Record<string, unknown>) {
       return handleDefineProgram(args)
 
     case 'add_instance':
-      return handleAddInstance(args.program as string, args.instance_name as string)
+      return handleAddInstance(
+        args.program as string,
+        args.instance_name as string,
+        args.type_args as Record<string, number> | undefined,
+      )
 
     case 'remove_instance':
       return handleRemoveInstance(args.instance_name as string)
@@ -964,6 +981,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         args.program as string,
         args.count as number,
         args.name_prefix as string | undefined,
+        args.type_args as Record<string, number> | undefined,
       )
 
     case 'wire_chain':

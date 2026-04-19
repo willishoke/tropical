@@ -31,6 +31,8 @@ loadStdlib({
   instanceRegistry: new Map<string, ProgramInstance>(),
   paramRegistry: new Map<string, Param>(),
   triggerRegistry: new Map<string, Trigger>(),
+  specializationCache: new Map<string, ProgramType>(),
+  genericTemplates: new Map(),
 })
 
 /**
