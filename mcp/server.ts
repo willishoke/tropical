@@ -20,11 +20,11 @@ import {
 import {
   makeSession, nextName, loadJSON,
   prettyExpr, resolveProgramType, SessionState, ExprNode,
+  normalizeProgramFile, v1ProgramJSONToV2Node, v2NodeToFile,
 } from '../compiler/session.js'
-import { parseProgram } from '../compiler/schema.js'
 import {
   saveProgramFromSession, loadProgramAsType, mergeProgramIntoSession,
-  exportSessionAsProgram, loadStdlib as loadBuiltins, type ProgramJSON,
+  exportSessionAsProgram, loadStdlib as loadBuiltins,
 } from '../compiler/program.js'
 import { DAC }                 from '../compiler/runtime/audio.js'
 import { Param, Trigger }      from '../compiler/runtime/param.js'
@@ -136,11 +136,11 @@ const TOOLS = [
 
   {
     name: 'define_program',
-    description: 'Define a reusable DSP program type and register it. Accepts a ProgramJSON (tropical_program_1). Returns the type name and port names.',
+    description: 'Define a reusable DSP program type and register it. Accepts a program object in tropical_program_2 (preferred) or tropical_program_1 (legacy). Returns the type name and port names.',
     inputSchema: {
       type: 'object',
       properties: {
-        def: { type: 'object', description: 'ProgramJSON (tropical_program_1) object defining the program' },
+        def: { type: 'object', description: 'Program object (tropical_program_2 or tropical_program_1) defining the program' },
       },
       required: ['def'],
     },
@@ -413,18 +413,18 @@ const TOOLS = [
   },
   {
     name: 'load',
-    description: 'Load a program. Accepts tropical_program_1. Stops audio, recreates the session, and rebuilds state. Provide either path (preferred) or inline JSON.',
+    description: 'Load a program. Accepts tropical_program_2 (preferred) or tropical_program_1 (legacy). Stops audio, recreates the session, and rebuilds state. Provide either path (preferred) or inline JSON.',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Path to a .json file on disk.' },
-        program: { type: 'object', description: 'Inline ProgramJSON (tropical_program_1) object.' },
+        program: { type: 'object', description: 'Inline program object (tropical_program_2 or tropical_program_1).' },
       },
     },
   },
   {
     name: 'save',
-    description: 'Serialize the current session to a tropical_program_1 JSON object.',
+    description: 'Serialize the current session to a tropical_program_2 JSON object.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -433,7 +433,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        program: { type: 'object', description: 'ProgramJSON (tropical_program_1) object to merge.' },
+        program: { type: 'object', description: 'Program object (tropical_program_2 or tropical_program_1) to merge.' },
       },
       required: ['program'],
     },
@@ -489,7 +489,7 @@ const TOOLS = [
 
 function handleDefineProgram(args: Record<string, unknown>) {
   return wrap(() => {
-    const prog = parseProgram(args.def) as ProgramJSON
+    const prog = normalizeProgramFile(args.def as { schema?: string; [k: string]: unknown })
     const type = loadProgramAsType(prog, session)
     if (type) {
       return { program_name: type.name, inputs: type._def.inputNames, outputs: type._def.outputNames }
@@ -775,12 +775,13 @@ function handleExportProgram(args: Record<string, unknown>) {
       }
     }
 
+    const { node, topLevel } = v1ProgramJSONToV2Node(prog)
     return {
       program_name: name,
       inputs: type._def.inputNames,
       outputs: type._def.outputNames,
       instances_included: Object.keys(prog.instances ?? {}),
-      program: prog,
+      program: v2NodeToFile(node, topLevel),
     }
   })
 }
@@ -966,14 +967,18 @@ function handleLoad(args: Record<string, unknown>) {
 }
 
 function handleSave() {
-  return wrap(() => ({ program: saveProgramFromSession(session) }))
+  return wrap(() => {
+    const v1 = saveProgramFromSession(session)
+    const { node, topLevel } = v1ProgramJSONToV2Node(v1)
+    return { program: v2NodeToFile(node, topLevel) }
+  })
 }
 
 function handleMerge(args: Record<string, unknown>) {
   return wrap(() => {
     const raw = args.program ?? args.patch
     if (!raw) throw new Error('Provide a program or patch object.')
-    const prog = parseProgram(raw) as ProgramJSON
+    const prog = normalizeProgramFile(raw as { schema?: string; [k: string]: unknown })
     mergeProgramIntoSession(prog, session)
     return {
       instances:   [...session.instanceRegistry.keys()],
@@ -1136,7 +1141,7 @@ const RESOURCES = [
   {
     uri:         'tropical://program-format',
     name:        'Program format',
-    description: 'Reference doc for the tropical_program_1 schema with worked examples.',
+    description: 'Reference doc for the tropical_program_2 schema (with tropical_program_1 legacy notes).',
     mimeType:    'text/markdown',
   },
 ]
@@ -1160,31 +1165,61 @@ function renderProgramCatalog(): string {
 
 const PROGRAM_FORMAT_DOC = `# tropical program format
 
-Programs are the unified representation for all DSP in tropical. A program can be:
-- **A leaf program** (has process, computes directly)
-- **A graph program** (has instances and audio_outputs)
-- **A composite** (has instances, inputs, and outputs — a reusable graph)
+Programs are the unified representation for all DSP in tropical. A program is an
+expression with declared ports and a body that declares regs/delays/instances
+and assigns outputs and next-tick register updates.
 
-## tropical_program_1
+## tropical_program_2 (preferred)
 
-A program with instances wired together:
+The body is a \`block\` of \`decls\` (reg_decl, delay_decl, instance_decl,
+program_decl) and \`assigns\` (output_assign, next_update). Ports, type_params,
+and breaks_cycles sit alongside the body. Session metadata — \`params\`,
+\`audio_outputs\`, \`config\` — is top-level.
 
-{ "schema": "tropical_program_1", "name": "MyPatch",
-  "programs": { "Sine": { "schema": "tropical_program_1", "name": "Sine",
-    "inputs": ["freq"], "outputs": ["out"], "regs": { "phase": 0 },
-    "process": { "outputs": { "out": { "op": "sin", "args": [{ "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }] } },
-      "next_regs": { "phase": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sample_rate" }] }] }, 1] } } }
-  }},
-  "instances": {
-    "osc": { "program": "Sine", "inputs": { "freq": 440 } },
-    "filt": { "program": "LadderFilter", "inputs": { "input": { "op": "ref", "instance": "osc", "output": "out" }, "cutoff": 2000 } }
+{ "schema": "tropical_program_2", "name": "MyPatch",
+  "body": { "op": "block",
+    "decls": [
+      { "op": "program_decl", "name": "Sine", "program": { "op": "program", "name": "Sine",
+        "ports": { "inputs": ["freq"], "outputs": ["out"] },
+        "body": { "op": "block",
+          "decls": [{ "op": "reg_decl", "name": "phase", "init": 0 }],
+          "assigns": [
+            { "op": "output_assign", "name": "out",
+              "expr": { "op": "sin", "args": [{ "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }] } },
+            { "op": "next_update", "target": { "kind": "reg", "name": "phase" },
+              "expr": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sample_rate" }] }] }, 1] } }
+          ],
+          "value": null
+        }
+      }},
+      { "op": "instance_decl", "name": "osc", "program": "Sine", "inputs": { "freq": 440 } },
+      { "op": "instance_decl", "name": "filt", "program": "LadderFilter",
+        "inputs": { "input": { "op": "ref", "instance": "osc", "output": "out" }, "cutoff": 2000 } }
+    ],
+    "assigns": [],
+    "value": null
   },
   "audio_outputs": [{ "instance": "filt", "output": "lp" }]
 }
 
-Key fields: schema, name, inputs/outputs (leaf/composite), process (leaf body),
-programs (inline subprogram defs), instances (instantiated subprograms with wiring),
-audio_outputs (graph output routing), params, regs, delays.
+Key fields: schema, name, ports (inputs/outputs/type_defs), body (block),
+type_params, sample_rate, breaks_cycles, and top-level session metadata
+(params, audio_outputs, config).
+
+Decl node shapes:
+- reg_decl:      { op, name, init, type?, bounds? }
+- delay_decl:    { op, name, update, init? }
+- instance_decl: { op, name, program, inputs?, type_args? }
+- program_decl:  { op, name, program: <program node> }
+
+Assign node shapes:
+- output_assign: { op, name, expr }
+- next_update:   { op, target: { kind: "reg"|"delay", name }, expr }
+
+## tropical_program_1 (legacy — still accepted on input)
+
+The legacy format used \`instances\`/\`process\`/\`regs\`/\`delays\` maps. It is
+normalized to tropical_program_2 internally; new output is always v2.
 
 ## Combinators (compile-time expansion)
 
@@ -1233,12 +1268,12 @@ const BUILD_PATCH_PROMPT = `# build-patch workflow
 
 Before writing any program, always fetch both resources:
 - \`tropical://programs\` — full catalog of available program types with inputs, defaults, and outputs
-- \`tropical://program-format\` — tropical_program_1 schema reference with worked examples
+- \`tropical://program-format\` — tropical_program_2 schema reference with worked examples
 
 ## Choose the right tool for the job
 
 ### New program (starting from scratch)
-Use \`load\` with a **complete** tropical_program_1 JSON object in a single call.
+Use \`load\` with a **complete** tropical_program_2 JSON object in a single call.
 Do not call \`add_instance\` and \`wire\` one-by-one —
 that requires many round trips and recompiles the JIT kernel on every change.
 

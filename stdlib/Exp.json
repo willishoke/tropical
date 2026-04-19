@@ -1,86 +1,178 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "Exp",
-  "inputs": [
-    { "name": "x", "type": "float" }
-  ],
-  "outputs": [
-    { "name": "out", "type": "float" }
-  ],
-  "input_defaults": { "x": 0 },
-  "process": {
-    "outputs": {
-      "out": {
-        "op": "let",
-        "bind": {
-          "clamped": { "op": "clamp", "args": [
-            { "op": "input", "name": "x" }, -87.0, 88.0
-          ]},
-          "n": { "op": "round", "args": [
-            { "op": "mul", "args": [
-              { "op": "binding", "name": "clamped" },
-              1.4426950408889634
-            ]}
-          ]},
-          "r": { "op": "sub", "args": [
-            { "op": "sub", "args": [
-              { "op": "binding", "name": "clamped" },
-              { "op": "mul", "args": [
-                { "op": "binding", "name": "n" },
-                0.693145751953125
-              ]}
-            ]},
-            { "op": "mul", "args": [
-              { "op": "binding", "name": "n" },
-              1.42860682030941723212e-6
-            ]}
-          ]},
-          "p": {
-            "op": "fold",
-            "over": [
-              1.9875691500e-4,
-              1.3981999507e-3,
-              8.3334519073e-3,
-              4.1665795894e-2,
-              1.6666665459e-1,
-              5.0000001201e-1
-            ],
-            "init": 0,
-            "acc_var": "a",
-            "elem_var": "c",
-            "body": {
-              "op": "add", "args": [
-                { "op": "binding", "name": "c" },
-                { "op": "mul", "args": [
-                  { "op": "binding", "name": "a" },
-                  { "op": "binding", "name": "r" }
-                ]}
+  "body": {
+    "op": "block",
+    "decls": [],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "out",
+        "expr": {
+          "op": "let",
+          "bind": {
+            "clamped": {
+              "op": "clamp",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "x"
+                },
+                -87,
+                88
+              ]
+            },
+            "n": {
+              "op": "round",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "clamped"
+                    },
+                    1.4426950408889634
+                  ]
+                }
+              ]
+            },
+            "r": {
+              "op": "sub",
+              "args": [
+                {
+                  "op": "sub",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "clamped"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "n"
+                        },
+                        0.693145751953125
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "n"
+                    },
+                    0.0000014286068203094173
+                  ]
+                }
+              ]
+            },
+            "p": {
+              "op": "fold",
+              "over": [
+                0.000198756915,
+                0.0013981999507,
+                0.0083334519073,
+                0.041665795894,
+                0.16666665459,
+                0.50000001201
+              ],
+              "init": 0,
+              "acc_var": "a",
+              "elem_var": "c",
+              "body": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "binding",
+                    "name": "c"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "a"
+                      },
+                      {
+                        "op": "binding",
+                        "name": "r"
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "exp_r": {
+              "op": "add",
+              "args": [
+                1,
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "r"
+                    },
+                    {
+                      "op": "add",
+                      "args": [
+                        1,
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "r"
+                            },
+                            {
+                              "op": "binding",
+                              "name": "p"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
               ]
             }
           },
-          "exp_r": {
-            "op": "add", "args": [
-              1.0,
-              { "op": "mul", "args": [
-                { "op": "binding", "name": "r" },
-                { "op": "add", "args": [
-                  1.0,
-                  { "op": "mul", "args": [
-                    { "op": "binding", "name": "r" },
-                    { "op": "binding", "name": "p" }
-                  ]}
-                ]}
-              ]}
+          "in": {
+            "op": "ldexp",
+            "args": [
+              {
+                "op": "binding",
+                "name": "exp_r"
+              },
+              {
+                "op": "binding",
+                "name": "n"
+              }
             ]
           }
-        },
-        "in": {
-          "op": "ldexp", "args": [
-            { "op": "binding", "name": "exp_r" },
-            { "op": "binding", "name": "n" }
-          ]
         }
       }
-    }
+    ],
+    "value": null
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "x",
+        "type": "float",
+        "default": 0
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": "float"
+      }
+    ]
   }
 }

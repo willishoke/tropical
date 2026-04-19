@@ -1,27 +1,53 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "Cos",
-  "inputs": [
-    { "name": "x", "type": "float" }
-  ],
-  "outputs": [
-    { "name": "out", "type": "float" }
-  ],
-  "input_defaults": { "x": 0 },
-  "instances": {
-    "sin": {
-      "program": "Sin",
-      "inputs": {
-        "x": { "op": "add", "args": [
-          { "op": "input", "name": "x" },
-          1.5707963267948966
-        ]}
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instance_decl",
+        "name": "sin",
+        "program": "Sin",
+        "inputs": {
+          "x": {
+            "op": "add",
+            "args": [
+              {
+                "op": "input",
+                "name": "x"
+              },
+              1.5707963267948966
+            ]
+          }
+        }
       }
-    }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "out",
+        "expr": {
+          "op": "nested_out",
+          "ref": "sin",
+          "output": "out"
+        }
+      }
+    ],
+    "value": null
   },
-  "process": {
-    "outputs": {
-      "out": { "op": "nested_out", "ref": "sin", "output": "out" }
-    }
+  "ports": {
+    "inputs": [
+      {
+        "name": "x",
+        "type": "float",
+        "default": 0
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": "float"
+      }
+    ]
   }
 }

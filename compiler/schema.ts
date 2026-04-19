@@ -186,6 +186,7 @@ export const ProgramJSONSchema: z.ZodType = z.lazy(() => z.object({
     type: z.literal('int'),
     default: z.number().int().optional(),
   })).optional(),
+  breaks_cycles: z.boolean().optional(),
 }))
 
 // ─────────────────────────────────────────────────────────────

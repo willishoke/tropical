@@ -1,46 +1,204 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "Clock",
-  "inputs": [
-    { "name": "freq", "type": "freq" },
-    { "name": "ratios_in", "type": { "kind": "array", "element": "float", "shape": [1] } }
-  ],
-  "outputs": [
-    { "name": "output", "type": "unipolar" },
-    { "name": "ratios_out", "type": { "kind": "array", "element": "float", "shape": [1] } }
-  ],
-  "input_defaults": { "freq": 1, "ratios_in": [1] },
-  "programs": {
-    "_wrap01": {
-      "schema": "tropical_program_1",
-      "name": "_wrap01",
-      "inputs": ["x"],
-      "outputs": ["value"],
-      "process": {
-        "outputs": {
-          "value": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "mod", "args": [{ "op": "input", "name": "x" }, 1] }, 1] }, 1] }
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "program_decl",
+        "name": "_wrap01",
+        "program": {
+          "op": "program",
+          "name": "_wrap01",
+          "body": {
+            "op": "block",
+            "decls": [],
+            "assigns": [
+              {
+                "op": "output_assign",
+                "name": "value",
+                "expr": {
+                  "op": "mod",
+                  "args": [
+                    {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "mod",
+                          "args": [
+                            {
+                              "op": "input",
+                              "name": "x"
+                            },
+                            1
+                          ]
+                        },
+                        1
+                      ]
+                    },
+                    1
+                  ]
+                }
+              }
+            ],
+            "value": null
+          },
+          "ports": {
+            "inputs": [
+              "x"
+            ],
+            "outputs": [
+              "value"
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "_wrap01_0",
+        "program": "_wrap01",
+        "inputs": {
+          "x": {
+            "op": "div",
+            "args": [
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "sample_index"
+                  },
+                  {
+                    "op": "input",
+                    "name": "freq"
+                  }
+                ]
+              },
+              {
+                "op": "sample_rate"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "_wrap01_1",
+        "program": "_wrap01",
+        "inputs": {
+          "x": {
+            "op": "div",
+            "args": [
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "sample_index"
+                      },
+                      {
+                        "op": "input",
+                        "name": "freq"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "input",
+                    "name": "ratios_in"
+                  }
+                ]
+              },
+              {
+                "op": "sample_rate"
+              }
+            ]
+          }
         }
       }
-    }
-  },
-  "instances": {
-    "_wrap01_0": {
-      "program": "_wrap01",
-      "inputs": {
-        "x": { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "sample_index" }, { "op": "input", "name": "freq" }] }, { "op": "sample_rate" }] }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "output",
+        "expr": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "lt",
+              "args": [
+                {
+                  "op": "nested_out",
+                  "ref": "_wrap01_0",
+                  "output": "value"
+                },
+                0.5
+              ]
+            },
+            1
+          ]
+        }
+      },
+      {
+        "op": "output_assign",
+        "name": "ratios_out",
+        "expr": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "lt",
+              "args": [
+                {
+                  "op": "nested_out",
+                  "ref": "_wrap01_1",
+                  "output": "value"
+                },
+                0.5
+              ]
+            },
+            1
+          ]
+        }
       }
-    },
-    "_wrap01_1": {
-      "program": "_wrap01",
-      "inputs": {
-        "x": { "op": "div", "args": [{ "op": "mul", "args": [{ "op": "mul", "args": [{ "op": "sample_index" }, { "op": "input", "name": "freq" }] }, { "op": "input", "name": "ratios_in" }] }, { "op": "sample_rate" }] }
-      }
-    }
+    ],
+    "value": null
   },
-  "process": {
-    "outputs": {
-      "output": { "op": "mul", "args": [{ "op": "lt", "args": [{ "op": "nested_out", "ref": "_wrap01_0", "output": "value" }, 0.5] }, 1] },
-      "ratios_out": { "op": "mul", "args": [{ "op": "lt", "args": [{ "op": "nested_out", "ref": "_wrap01_1", "output": "value" }, 0.5] }, 1] }
-    }
+  "ports": {
+    "inputs": [
+      {
+        "name": "freq",
+        "type": "freq",
+        "default": 1
+      },
+      {
+        "name": "ratios_in",
+        "type": {
+          "kind": "array",
+          "element": "float",
+          "shape": [
+            1
+          ]
+        },
+        "default": [
+          1
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "output",
+        "type": "unipolar"
+      },
+      {
+        "name": "ratios_out",
+        "type": {
+          "kind": "array",
+          "element": "float",
+          "shape": [
+            1
+          ]
+        }
+      }
+    ]
   }
 }

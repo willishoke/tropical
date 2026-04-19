@@ -1,25 +1,96 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "Delay",
-  "type_params": { "N": { "type": "int", "default": 44100 } },
-  "inputs": ["x"],
-  "outputs": ["y"],
-  "regs": { "buf": { "zeros": { "type_param": "N" } } },
-  "input_defaults": { "x": 0 },
-  "breaks_cycles": true,
-  "process": {
-    "outputs": {
-      "y": { "op": "index", "args": [
-        { "op": "reg", "name": "buf" },
-        { "op": "mod", "args": [{ "op": "sample_index" }, { "op": "type_param", "name": "N" }] }
-      ]}
-    },
-    "next_regs": {
-      "buf": { "op": "array_set", "args": [
-        { "op": "reg", "name": "buf" },
-        { "op": "mod", "args": [{ "op": "sample_index" }, { "op": "type_param", "name": "N" }] },
-        { "op": "input", "name": "x" }
-      ]}
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "reg_decl",
+        "name": "buf",
+        "init": {
+          "zeros": {
+            "type_param": "N"
+          }
+        }
+      }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "y",
+        "expr": {
+          "op": "index",
+          "args": [
+            {
+              "op": "reg",
+              "name": "buf"
+            },
+            {
+              "op": "mod",
+              "args": [
+                {
+                  "op": "sample_index"
+                },
+                {
+                  "op": "type_param",
+                  "name": "N"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "op": "next_update",
+        "target": {
+          "kind": "reg",
+          "name": "buf"
+        },
+        "expr": {
+          "op": "array_set",
+          "args": [
+            {
+              "op": "reg",
+              "name": "buf"
+            },
+            {
+              "op": "mod",
+              "args": [
+                {
+                  "op": "sample_index"
+                },
+                {
+                  "op": "type_param",
+                  "name": "N"
+                }
+              ]
+            },
+            {
+              "op": "input",
+              "name": "x"
+            }
+          ]
+        }
+      }
+    ],
+    "value": null
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "x",
+        "default": 0
+      }
+    ],
+    "outputs": [
+      "y"
+    ]
+  },
+  "type_params": {
+    "N": {
+      "type": "int",
+      "default": 44100
     }
-  }
+  },
+  "breaks_cycles": true
 }

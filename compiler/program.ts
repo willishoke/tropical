@@ -10,7 +10,7 @@
 import type { ExprNode } from './expr.js'
 import { validateExpr } from './expr.js'
 import type { TypeDefJSON, SessionState } from './session.js'
-import { loadProgramDef, resolveProgramType } from './session.js'
+import { loadProgramDef, resolveProgramType, normalizeProgramFile } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
 import { ProgramType } from './program_types.js'
@@ -322,12 +322,13 @@ export function loadStdlib(
   const stdlibDir = join(__dirname, '../stdlib')
   const files = readdirSync(stdlibDir).filter(f => f.endsWith('.json')).sort()
 
-  // Index all stdlib files by program name
+  // Index all stdlib files by program name (handles either schema version)
   const index = new Map<string, string>()
   for (const file of files) {
     const path = join(stdlibDir, file)
-    const prog = JSON.parse(readFileSync(path, 'utf-8')) as ProgramJSON
-    index.set(prog.name, path)
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as { schema?: string; name?: string }
+    if (typeof raw.name !== 'string') throw new Error(`${path}: missing 'name' field`)
+    index.set(raw.name, path)
   }
 
   // Set up on-demand resolver — loads a stdlib type (and its deps) on first reference.
@@ -342,7 +343,8 @@ export function loadStdlib(
     const path = index.get(name)
     if (!path) return undefined
     loading.add(name)
-    const prog = JSON.parse(readFileSync(path, 'utf-8')) as ProgramJSON
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as { schema?: string; [k: string]: unknown }
+    const prog = normalizeProgramFile(raw)
     const type = loadProgramAsType(prog, session)
     loading.delete(name)
     return type

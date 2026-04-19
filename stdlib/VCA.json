@@ -1,17 +1,48 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "VCA",
-  "inputs": [
-    { "name": "audio", "type": "float" },
-    { "name": "cv", "type": "float" }
-  ],
-  "outputs": [
-    { "name": "out", "type": "float" }
-  ],
-  "input_defaults": { "audio": 0, "cv": 0 },
-  "process": {
-    "outputs": {
-      "out": { "op": "mul", "args": [{ "op": "input", "name": "audio" }, { "op": "input", "name": "cv" }] }
-    }
+  "body": {
+    "op": "block",
+    "decls": [],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "out",
+        "expr": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "input",
+              "name": "audio"
+            },
+            {
+              "op": "input",
+              "name": "cv"
+            }
+          ]
+        }
+      }
+    ],
+    "value": null
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "audio",
+        "type": "float",
+        "default": 0
+      },
+      {
+        "name": "cv",
+        "type": "float",
+        "default": 0
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": "float"
+      }
+    ]
   }
 }

@@ -624,6 +624,19 @@ export function v2ProgramNodeToV1(
   if (ports.inputs !== undefined)     result.inputs     = ports.inputs     as ProgramJSON['inputs']
   if (ports.outputs !== undefined)    result.outputs    = ports.outputs    as ProgramJSON['outputs']
   if (ports.type_defs !== undefined)  result.type_defs  = ports.type_defs  as ProgramJSON['type_defs']
+
+  // loadProgramDef reads input defaults from `def.input_defaults`, not from
+  // `inputs[i].default`. v2 carries defaults on the port objects, so rehydrate
+  // an input_defaults map so the v1 loader sees them.
+  if (ports.inputs) {
+    const inputDefaults: Record<string, ExprNode> = {}
+    for (const i of ports.inputs as NonNullable<ProgramJSON['inputs']>) {
+      if (typeof i !== 'string' && i.default !== undefined) {
+        inputDefaults[i.name] = i.default
+      }
+    }
+    if (Object.keys(inputDefaults).length > 0) result.input_defaults = inputDefaults
+  }
   if (p.type_params !== undefined)    result.type_params = p.type_params   as ProgramJSON['type_params']
   if (p.sample_rate !== undefined)    result.sample_rate = p.sample_rate   as number
   if (p.breaks_cycles !== undefined)  result.breaks_cycles = p.breaks_cycles as boolean
@@ -743,6 +756,29 @@ export function v1ProgramJSONToV2Node(
   return { node: node as ExprNode, topLevel }
 }
 
+/** Accept a program file of either schema version, return a v1 ProgramJSON.
+ *  Used by every file-reading entry point (loadJSON, loadStdlib, MCP load). */
+export function normalizeProgramFile(
+  raw: { schema?: string; [k: string]: unknown },
+): ProgramJSON {
+  if (raw.schema === 'tropical_program_1') {
+    return raw as unknown as ProgramJSON
+  }
+  if (raw.schema === 'tropical_program_2') {
+    const v2 = parseProgramV2(raw)
+    const { schema: _schema, params, audio_outputs, config, ...progFields } = v2 as Record<string, unknown> & {
+      schema: 'tropical_program_2'
+      params?: ProgramJSON['params']
+      audio_outputs?: ProgramJSON['audio_outputs']
+      config?: ProgramJSON['config']
+    }
+    void _schema
+    const programNode: ExprNode = { op: 'program', ...progFields }
+    return v2ProgramNodeToV1(programNode, { params, audio_outputs, config })
+  }
+  throw new Error(`Unknown schema '${raw.schema}'. Expected 'tropical_program_1' or 'tropical_program_2'.`)
+}
+
 /** Wrap a v2 program node + top-level metadata as a serializable v2 file. */
 export function v2NodeToFile(
   node: ExprNode,
@@ -856,26 +892,6 @@ export function prettyExpr(
  * Detects schema version and delegates to the appropriate loader.
  */
 export function loadJSON(json: { schema: string; [k: string]: unknown }, session: SessionState): void {
-  if (json.schema === 'tropical_program_1') {
-    loadProgramAsSession(json as unknown as ProgramJSON, session)
-    return
-  }
-  if (json.schema === 'tropical_program_2') {
-    const v2 = parseProgramV2(json)
-    // Build a `{op:'program'}` ExprNode from the v2 file (drop schema tag
-    // and lift session metadata for the top-level reduction to v1).
-    const { schema: _schema, params, audio_outputs, config, ...progFields } = v2 as Record<string, unknown> & {
-      schema: 'tropical_program_2'
-      params?: ProgramJSON['params']
-      audio_outputs?: ProgramJSON['audio_outputs']
-      config?: ProgramJSON['config']
-    }
-    void _schema
-    const programNode: ExprNode = { op: 'program', ...progFields }
-    const v1 = v2ProgramNodeToV1(programNode, { params, audio_outputs, config })
-    loadProgramAsSession(v1, session)
-    return
-  }
-  throw new Error(`Unknown schema '${json.schema}'. Expected 'tropical_program_1' or 'tropical_program_2'.`)
+  loadProgramAsSession(normalizeProgramFile(json), session)
 }
 
