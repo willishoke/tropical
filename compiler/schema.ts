@@ -35,12 +35,21 @@ const ArrayStateJSONSchema = z.object({
 // Register value — scalar, bool, array, nested array, or array_state
 // ─────────────────────────────────────────────────────────────
 
+/** Compact form: `{ zeros: N }` or `{ zeros: { type_param: 'N' } }`. */
+const ZerosInitSchema = z.object({
+  zeros: z.union([
+    z.number().int().nonnegative(),
+    z.object({ type_param: z.string() }),
+  ]),
+})
+
 const RegValueSchema = z.union([
   z.number(),
   z.boolean(),
   z.array(z.number()),
   z.array(z.array(z.number())),
   ArrayStateJSONSchema,
+  ZerosInitSchema,
 ])
 
 /** Typed register entry: { init, type } */
@@ -116,6 +125,7 @@ const ProgramOutputSchema = z.union([
 const ProgramInstanceSchema = z.object({
   program: z.string(),
   inputs: z.record(z.string(), ExprNodeSchema).optional(),
+  type_args: z.record(z.string(), z.union([z.number().int(), ExprNodeSchema])).optional(),
 })
 
 export const ProgramJSONSchema: z.ZodType = z.lazy(() => z.object({
@@ -151,6 +161,10 @@ export const ProgramJSONSchema: z.ZodType = z.lazy(() => z.object({
     sample_rate: z.number().positive().optional(),
   }).optional(),
   type_defs: z.array(TypeDefSchema).optional(),
+  type_params: z.record(z.string(), z.object({
+    type: z.literal('int'),
+    default: z.number().int().optional(),
+  })).optional(),
 }))
 
 // ─────────────────────────────────────────────────────────────

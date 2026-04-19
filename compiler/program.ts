@@ -44,6 +44,9 @@ export interface ProgramJSON {
   instances?: Record<string, {
     program: string
     inputs?: Record<string, ExprNode>
+    /** Compile-time type args for generic programs. Numeric literals, or
+     *  `{op:"type_param",name}` to forward from the outer program's type_params. */
+    type_args?: Record<string, number | ExprNode>
   }>
 
   /** Process body for leaf programs (direct computation). */
@@ -70,6 +73,9 @@ export interface ProgramJSON {
   type_defs?: TypeDefJSON[]
   /** When true, outputs depend only on previous-sample state — allows feedback cycles. */
   breaks_cycles?: boolean
+  /** Compile-time type parameters. Each instance of a program with type_params must supply
+   *  a matching type_arg (or the declared default is used). */
+  type_params?: Record<string, { type: 'int'; default?: number }>
 }
 
 // ─────────────────────────────────────────────────────────────

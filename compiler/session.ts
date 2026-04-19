@@ -75,6 +75,11 @@ export interface SessionState {
   graph: { primeJit(): void; process(): void; readonly outputBuffer: Float64Array; dispose(): void }
   /** On-demand type resolver (set by loadStdlib for lazy loading). */
   typeResolver?: (name: string) => ProgramType | undefined
+  /** Monomorphized specializations of generic programs, keyed by `Type<k1=v1,k2=v2>`. */
+  specializationCache: Map<string, ProgramType>
+  /** Raw ProgramJSON templates for generic programs (pre-specialization). Keyed by type name.
+   *  Only populated for programs declaring type_params. */
+  genericTemplates: Map<string, import('./program.js').ProgramJSON>
   /** Name counter for auto-generated instance names. */
   _nameCounters: Map<string, number>
 }
@@ -91,6 +96,8 @@ export function makeSession(bufferLength = 512): SessionState {
     paramRegistry: new Map(),
     triggerRegistry: new Map(),
     inputExprNodes: new Map(),
+    specializationCache: new Map(),
+    genericTemplates: new Map(),
     runtime,
     graph: {
       primeJit: () => {},

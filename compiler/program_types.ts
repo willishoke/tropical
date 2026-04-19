@@ -68,8 +68,8 @@ export class ProgramType {
   get name(): string { return this._def.typeName }
 
   /** Instantiate with an explicit instance name. */
-  instantiateAs(name: string): ProgramInstance {
-    return new ProgramInstance(this._def, name)
+  instantiateAs(name: string, opts?: { baseTypeName?: string; typeArgs?: Record<string, number> }): ProgramInstance {
+    return new ProgramInstance(this._def, name, opts?.baseTypeName, opts?.typeArgs)
   }
 }
 
@@ -78,16 +78,22 @@ export class ProgramType {
 export class ProgramInstance {
   readonly _def: ProgramDef
   readonly name: string
+  /** Base (pre-specialization) type name. Equals _def.typeName for non-generic types. */
+  readonly baseTypeName: string
+  /** Resolved compile-time args if this instance was specialized. */
+  readonly typeArgs?: Record<string, number>
 
-  constructor(def: ProgramDef, name: string) {
+  constructor(def: ProgramDef, name: string, baseTypeName?: string, typeArgs?: Record<string, number>) {
     this._def = def
     this.name = name
+    this.baseTypeName = baseTypeName ?? def.typeName
+    this.typeArgs = typeArgs
   }
 
   get inputNames(): string[] { return this._def.inputNames }
   get outputNames(): string[] { return this._def.outputNames }
   get registerNames(): string[] { return this._def.registerNames }
-  get typeName(): string { return this._def.typeName }
+  get typeName(): string { return this.baseTypeName }
 
   inputPortType(idx: number): string | undefined { return this._def.inputPortTypes[idx] }
   outputPortType(idx: number): string | undefined { return this._def.outputPortTypes[idx] }
