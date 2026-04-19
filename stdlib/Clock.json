@@ -3,11 +3,11 @@
   "name": "Clock",
   "inputs": [
     { "name": "freq", "type": "freq" },
-    { "name": "ratios_in", "type": "float[1]" }
+    { "name": "ratios_in", "type": { "kind": "array", "element": "float", "shape": [1] } }
   ],
   "outputs": [
     { "name": "output", "type": "unipolar" },
-    { "name": "ratios_out", "type": "float[1]" }
+    { "name": "ratios_out", "type": { "kind": "array", "element": "float", "shape": [1] } }
   ],
   "input_defaults": { "freq": 1, "ratios_in": [1] },
   "programs": {

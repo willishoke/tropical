@@ -87,8 +87,8 @@ describe('exportSessionAsProgram — port type round-trip', () => {
     const typedLeaf: ProgramJSON = {
       schema: 'tropical_program_1',
       name: 'TypedLeaf',
-      inputs: [{ name: 'a', type: 'float[4]' }],
-      outputs: [{ name: 'out', type: 'float[4]' }],
+      inputs: [{ name: 'a', type: { kind: 'array', element: 'float', shape: [4] } }],
+      outputs: [{ name: 'out', type: { kind: 'array', element: 'float', shape: [4] } }],
       process: { outputs: { out: { op: 'input', name: 'a' } } },
     }
     loadProgramAsType(typedLeaf, session)
@@ -105,8 +105,8 @@ describe('exportSessionAsProgram — port type round-trip', () => {
     const reparsed = parseProgram(exported) as ProgramJSON
     const inputEntry = reparsed.inputs![0]
     const outputEntry = reparsed.outputs![0]
-    expect(typeof inputEntry === 'object' && inputEntry.type).toBe('float[4]')
-    expect(typeof outputEntry === 'object' && outputEntry.type).toBe('float[4]')
+    expect(typeof inputEntry === 'object' && inputEntry.type).toEqual({ kind: 'array', element: 'float', shape: [4] })
+    expect(typeof outputEntry === 'object' && outputEntry.type).toEqual({ kind: 'array', element: 'float', shape: [4] })
 
     // Load the exported program into a fresh session and check port types survive.
     // The nested TypedLeaf must be registered before the exported composite that uses it.

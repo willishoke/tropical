@@ -101,4 +101,28 @@ describe('resolveProgramType — generic instantiation', () => {
     expect(type).toBeDefined()
     expect(typeArgs).toBeUndefined()
   })
+
+  test('type_param refs in array port shapes become concrete PortTypes after instantiation', () => {
+    const prog: ProgramJSON = {
+      schema: 'tropical_program_1',
+      name: 'Bus',
+      type_params: { N: { type: 'int', default: 4 } },
+      inputs: [
+        { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
+      ],
+      outputs: [
+        { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
+      ],
+      process: { outputs: { out: { op: 'input', name: 'values' } } },
+    }
+    const session = makeSession()
+    loadProgramAsType(prog, session)
+
+    const { type: t8 } = resolveProgramType(session, 'Bus', { N: 8 }, undefined)
+    expect(t8._def.inputPortTypes[0]).toEqual(ArrayType(Float, [8]))
+    expect(t8._def.outputPortTypes[0]).toEqual(ArrayType(Float, [8]))
+
+    const { type: tdef } = resolveProgramType(session, 'Bus', undefined, undefined)
+    expect(tdef._def.inputPortTypes[0]).toEqual(ArrayType(Float, [4]))
+  })
 })

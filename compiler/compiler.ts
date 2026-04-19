@@ -2,15 +2,12 @@
  * compiler.ts — Graph utilities for the compilation pipeline.
  *
  * Provides dependency graph construction, topological sorting (Kahn's with
- * level grouping), cycle detection (Tarjan's SCC), and port type conversion.
+ * level grouping), and cycle detection (Tarjan's SCC).
  * Used by flatten.ts to determine execution order.
  */
 
 import type { ExprNode } from './session'
-import {
-  type PortType,
-  Float, Int, Bool, Unit, StructType, ArrayType,
-} from './term'
+import { type PortType, Float } from './term'
 
 // ─────────────────────────────────────────────────────────────
 // Errors
@@ -20,46 +17,6 @@ export class CompilerError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'CompilerError'
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// Port type conversion
-// ─────────────────────────────────────────────────────────────
-
-/**
- * Convert a string type annotation (from ProgramDef) to a PortType.
- *
- * Supports:
- *   'float', 'int', 'bool', 'unit'       — scalars
- *   'float[4]', 'float[4,4]'             — arrays with static shapes
- *   'array'                                — float[1] (legacy compat)
- *   'matrix'                               — float[1,1] (legacy compat)
- *   anything else                          — struct type
- */
-export function portTypeFromString(s: string | undefined): PortType {
-  if (s === undefined) return Float
-
-  // Check for array syntax: type[d1,d2,...] e.g. float[8], int[4,4]
-  const arrayMatch = s.match(/^(\w+)\[([^\]]+)\]$/)
-  if (arrayMatch) {
-    const elementType = portTypeFromString(arrayMatch[1])
-    const shape = arrayMatch[2].split(',').map(d => {
-      const n = parseInt(d.trim(), 10)
-      if (isNaN(n) || n <= 0) throw new Error(`Invalid array dimension '${d.trim()}' in type '${s}'`)
-      return n
-    })
-    return ArrayType(elementType, shape)
-  }
-
-  switch (s) {
-    case 'float': return Float
-    case 'int':   return Int
-    case 'bool':  return Bool
-    case 'unit':  return Unit
-    case 'array': return ArrayType(Float, [1])  // legacy: bare 'array' — shape from init value
-    case 'matrix': return ArrayType(Float, [1, 1])  // legacy: bare 'matrix'
-    default:      return StructType(s)
   }
 }
 

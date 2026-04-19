@@ -196,4 +196,49 @@ describe('specializeProgramJSON', () => {
     const y = spec.process!.outputs.y as any
     expect(y.n).toBe(4)
   })
+
+  test('substitutes type_param refs in input port type shapes', () => {
+    const prog: ProgramJSON = {
+      schema: 'tropical_program_1',
+      name: 'ArrIn',
+      type_params: { N: { type: 'int' } },
+      inputs: [
+        { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
+      ],
+      outputs: ['y'],
+      process: { outputs: { y: 0 } },
+    }
+    const spec = specializeProgramJSON(prog, { N: 8 })
+    const input = spec.inputs![0] as { name: string; type: any }
+    expect(input.type).toEqual({ kind: 'array', element: 'float', shape: [8] })
+  })
+
+  test('substitutes type_param refs in output port type shapes', () => {
+    const prog: ProgramJSON = {
+      schema: 'tropical_program_1',
+      name: 'ArrOut',
+      type_params: { N: { type: 'int' } },
+      outputs: [
+        { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }, 2] } },
+      ],
+      process: { outputs: { out: 0 } },
+    }
+    const spec = specializeProgramJSON(prog, { N: 3 })
+    const out = spec.outputs![0] as { name: string; type: any }
+    expect(out.type).toEqual({ kind: 'array', element: 'float', shape: [3, 2] })
+  })
+
+  test('rejects a port type shape referencing an undeclared type_param', () => {
+    const prog: ProgramJSON = {
+      schema: 'tropical_program_1',
+      name: 'BadArr',
+      type_params: { N: { type: 'int' } },
+      inputs: [
+        { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'M' }] } },
+      ],
+      outputs: ['y'],
+      process: { outputs: { y: 0 } },
+    }
+    expect(() => specializeProgramJSON(prog, { N: 4 })).toThrow(/undeclared type_param 'M'/)
+  })
 })
