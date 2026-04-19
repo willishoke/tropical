@@ -189,6 +189,73 @@ export const ProgramJSONSchema: z.ZodType = z.lazy(() => z.object({
 }))
 
 // ─────────────────────────────────────────────────────────────
+// Unified IR — tropical_program_2
+// ─────────────────────────────────────────────────────────────
+//
+// A program is an ExprNode of op `program` whose `body` is a `block` of
+// `decls` (reg_decl, delay_decl, instance_decl, program_decl) and `assigns`
+// (output_assign, next_update). Session-level metadata — `params`,
+// `audio_outputs`, `config` — sits on the file root alongside the program
+// fields but is not part of the program definition itself.
+
+const ProgramPortsSchema = z.object({
+  inputs: z.array(ProgramInputSchema).optional(),
+  outputs: z.array(ProgramOutputSchema).optional(),
+  type_defs: z.array(TypeDefSchema).optional(),
+})
+
+const TypeParamsSchema = z.record(z.string(), z.object({
+  type: z.literal('int'),
+  default: z.number().int().optional(),
+}))
+
+const BlockNodeSchema = z.object({
+  op: z.literal('block'),
+  decls: z.array(ExprNodeSchema).optional(),
+  assigns: z.array(ExprNodeSchema).optional(),
+  value: ExprNodeSchema.nullable().optional(),
+})
+
+/** Schema for a `program` ExprNode. Appears at the file root (together with
+ *  a `schema` tag) and inside nested `program_decl` nodes. */
+export const ProgramNodeSchema: z.ZodType = z.lazy(() => z.object({
+  op: z.literal('program'),
+  name: z.string().min(1),
+  type_params: TypeParamsSchema.optional(),
+  sample_rate: z.number().positive().optional(),
+  breaks_cycles: z.boolean().optional(),
+  ports: ProgramPortsSchema.optional(),
+  body: BlockNodeSchema,
+}))
+
+/** Schema for an on-disk tropical_program_2 file — program fields plus the
+ *  session metadata (params, audio_outputs, config) that only applies at the
+ *  top level. Does not carry an `op` field (the schema tag implies `program`). */
+export const ProgramFileSchemaV2: z.ZodType = z.lazy(() => z.object({
+  schema: z.literal('tropical_program_2'),
+  name: z.string().min(1),
+  type_params: TypeParamsSchema.optional(),
+  sample_rate: z.number().positive().optional(),
+  breaks_cycles: z.boolean().optional(),
+  ports: ProgramPortsSchema.optional(),
+  body: BlockNodeSchema,
+  params: z.array(z.object({
+    name: z.string(),
+    value: z.number().optional(),
+    time_const: z.number().optional(),
+    type: z.enum(['param', 'trigger']).optional(),
+  })).optional(),
+  audio_outputs: z.array(z.union([
+    z.object({ instance: z.string(), output: z.union([z.string(), z.number()]) }),
+    z.object({ expr: ExprNodeSchema }),
+  ])).optional(),
+  config: z.object({
+    buffer_length: z.number().int().positive().optional(),
+    sample_rate: z.number().positive().optional(),
+  }).optional(),
+}))
+
+// ─────────────────────────────────────────────────────────────
 // Validation helpers
 // ─────────────────────────────────────────────────────────────
 
@@ -205,4 +272,11 @@ export function parseProgram(raw: unknown): z.infer<typeof ProgramJSONSchema> {
   const result = ProgramJSONSchema.safeParse(raw)
   if (!result.success) throw new Error(`Invalid program: ${formatZodError(result.error)}`)
   return result.data
+}
+
+/** Parse and validate a v2 program file (tropical_program_2). */
+export function parseProgramV2(raw: unknown): z.infer<typeof ProgramFileSchemaV2> {
+  const result = ProgramFileSchemaV2.safeParse(raw)
+  if (!result.success) throw new Error(`Invalid program (v2): ${formatZodError(result.error)}`)
+  return result.data as z.infer<typeof ProgramFileSchemaV2>
 }

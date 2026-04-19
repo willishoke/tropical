@@ -11,6 +11,7 @@ import {
 } from './program_types.js'
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type ProgramJSON, type PortTypeDecl } from './program.js'
+import { parseProgramV2 } from './schema.js'
 import { Param, Trigger } from './runtime/param.js'
 import {
   specializeProgramJSON, specializationCacheKey, resolveTypeArgs,
@@ -514,6 +515,252 @@ export function loadProgramDef(
 }
 
 // ─────────────────────────────────────────────────────────────
+// Unified IR (tropical_program_2) — v2 → v1 reduction
+// ─────────────────────────────────────────────────────────────
+//
+// Phase A strategy: accept v2 inputs by mechanically converting them to v1
+// ProgramJSON, then reusing the existing loaders. Keeps ProgramDef output
+// byte-identical by construction. Phase C rewrites this to walk blocks
+// directly and deletes the v1 schema.
+
+interface V2TopLevelMeta {
+  params?: ProgramJSON['params']
+  audio_outputs?: ProgramJSON['audio_outputs']
+  config?: ProgramJSON['config']
+}
+
+/** Convert a `{op:'program'}` ExprNode (v2 shape) to a ProgramJSON (v1). */
+export function v2ProgramNodeToV1(
+  node: ExprNode,
+  topLevel: V2TopLevelMeta = {},
+): ProgramJSON {
+  if (typeof node !== 'object' || node === null || Array.isArray(node))
+    throw new Error(`v2: expected {op:'program'}, got ${typeof node}`)
+  const p = node as Record<string, unknown>
+  if (p.op !== 'program')
+    throw new Error(`v2: expected op='program', got '${String(p.op)}'`)
+  if (typeof p.name !== 'string')
+    throw new Error(`v2: program requires name: string`)
+
+  const ports = (p.ports as Record<string, unknown> | undefined) ?? {}
+  const body = p.body as Record<string, unknown> | undefined
+  if (!body || body.op !== 'block')
+    throw new Error(`v2: program '${p.name}' body must be a block, got ${body === undefined ? 'undefined' : String((body as Record<string, unknown>).op)}`)
+
+  const decls = (body.decls as ExprNode[] | undefined) ?? []
+  const assigns = (body.assigns as ExprNode[] | undefined) ?? []
+
+  const regs: NonNullable<ProgramJSON['regs']> = {}
+  const delays: NonNullable<ProgramJSON['delays']> = {}
+  const instances: NonNullable<ProgramJSON['instances']> = {}
+  const programs: NonNullable<ProgramJSON['programs']> = {}
+
+  for (const d of decls) {
+    if (typeof d !== 'object' || d === null || Array.isArray(d))
+      throw new Error(`v2: block.decls entries must be objects`)
+    const dObj = d as Record<string, unknown>
+    const op = dObj.op as string
+    const name = dObj.name as string
+
+    if (op === 'reg_decl') {
+      if (dObj.type !== undefined) {
+        regs[name] = {
+          init: dObj.init as NonNullable<ProgramJSON['regs']>[string] extends { init: infer T } ? T : never,
+          type: dObj.type as PortTypeDecl,
+        }
+      } else {
+        regs[name] = dObj.init as NonNullable<ProgramJSON['regs']>[string]
+      }
+    } else if (op === 'delay_decl') {
+      delays[name] = {
+        update: (dObj.update ?? 0) as ExprNode,
+        init: dObj.init as number | undefined,
+      }
+    } else if (op === 'instance_decl') {
+      const entry: NonNullable<ProgramJSON['instances']>[string] = {
+        program: dObj.program as string,
+      }
+      if (dObj.inputs !== undefined) entry.inputs = dObj.inputs as Record<string, ExprNode>
+      if (dObj.type_args !== undefined) entry.type_args = dObj.type_args as Record<string, number | ExprNode>
+      instances[name] = entry
+    } else if (op === 'program_decl') {
+      programs[name] = v2ProgramNodeToV1(dObj.program as ExprNode)
+    } else {
+      throw new Error(`v2: unexpected decl op '${op}' in block.decls`)
+    }
+  }
+
+  const processOutputs: Record<string, ExprNode> = {}
+  const processNextRegs: Record<string, ExprNode> = {}
+
+  for (const a of assigns) {
+    if (typeof a !== 'object' || a === null || Array.isArray(a))
+      throw new Error(`v2: block.assigns entries must be objects`)
+    const aObj = a as Record<string, unknown>
+    const op = aObj.op as string
+
+    if (op === 'output_assign') {
+      processOutputs[aObj.name as string] = aObj.expr as ExprNode
+    } else if (op === 'next_update') {
+      const target = aObj.target as { kind: string; name: string }
+      if (target.kind === 'reg') {
+        processNextRegs[target.name] = aObj.expr as ExprNode
+      } else if (target.kind === 'delay') {
+        if (!delays[target.name])
+          throw new Error(`v2: next_update targets delay '${target.name}' but no delay_decl found`)
+        delays[target.name] = { ...delays[target.name], update: aObj.expr as ExprNode }
+      } else {
+        throw new Error(`v2: next_update target.kind must be 'reg' or 'delay', got '${target.kind}'`)
+      }
+    } else {
+      throw new Error(`v2: unexpected assign op '${op}' in block.assigns`)
+    }
+  }
+
+  const result: ProgramJSON = {
+    schema: 'tropical_program_1',
+    name: p.name,
+  }
+  if (ports.inputs !== undefined)     result.inputs     = ports.inputs     as ProgramJSON['inputs']
+  if (ports.outputs !== undefined)    result.outputs    = ports.outputs    as ProgramJSON['outputs']
+  if (ports.type_defs !== undefined)  result.type_defs  = ports.type_defs  as ProgramJSON['type_defs']
+  if (p.type_params !== undefined)    result.type_params = p.type_params   as ProgramJSON['type_params']
+  if (p.sample_rate !== undefined)    result.sample_rate = p.sample_rate   as number
+  if (p.breaks_cycles !== undefined)  result.breaks_cycles = p.breaks_cycles as boolean
+
+  if (Object.keys(regs).length > 0)       result.regs = regs
+  if (Object.keys(delays).length > 0)     result.delays = delays
+  if (Object.keys(instances).length > 0)  result.instances = instances
+  if (Object.keys(programs).length > 0)   result.programs = programs
+
+  if (Object.keys(processOutputs).length > 0 || Object.keys(processNextRegs).length > 0) {
+    result.process = { outputs: processOutputs }
+    if (Object.keys(processNextRegs).length > 0) result.process.next_regs = processNextRegs
+  }
+
+  if (topLevel.params !== undefined)        result.params        = topLevel.params
+  if (topLevel.audio_outputs !== undefined) result.audio_outputs = topLevel.audio_outputs
+  if (topLevel.config !== undefined)        result.config        = topLevel.config
+
+  return result
+}
+
+/** Elaborate a v2 program node to a ProgramDef. Phase A: goes through v1. */
+export function elaborateProgramNode(
+  node: ExprNode,
+  session: Parameters<typeof loadProgramDef>[1],
+): ProgramType {
+  return loadProgramDef(v2ProgramNodeToV1(node), session)
+}
+
+/** Migrate a v1 ProgramJSON to a v2 `{op:'program'}` ExprNode. Inverse of
+ *  `v2ProgramNodeToV1` for nested program bodies — session metadata (params,
+ *  audio_outputs, config) is returned separately. */
+export function v1ProgramJSONToV2Node(
+  prog: ProgramJSON,
+): { node: ExprNode; topLevel: V2TopLevelMeta } {
+  const decls: ExprNode[] = []
+  const assigns: ExprNode[] = []
+
+  for (const [name, val] of Object.entries(prog.regs ?? {})) {
+    const d: Record<string, unknown> = { op: 'reg_decl', name }
+    if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'init' in val && 'type' in val) {
+      d.init = val.init
+      d.type = val.type
+    } else {
+      d.init = val
+    }
+    decls.push(d as ExprNode)
+  }
+
+  for (const [name, { update, init }] of Object.entries(prog.delays ?? {})) {
+    const d: Record<string, unknown> = { op: 'delay_decl', name, update }
+    if (init !== undefined) d.init = init
+    decls.push(d as ExprNode)
+  }
+
+  for (const [name, sub] of Object.entries(prog.programs ?? {})) {
+    decls.push({ op: 'program_decl', name, program: v1ProgramJSONToV2Node(sub).node } as ExprNode)
+  }
+
+  for (const [name, inst] of Object.entries(prog.instances ?? {})) {
+    const d: Record<string, unknown> = { op: 'instance_decl', name, program: inst.program }
+    if (inst.inputs !== undefined) d.inputs = inst.inputs
+    if (inst.type_args !== undefined) d.type_args = inst.type_args
+    decls.push(d as ExprNode)
+  }
+
+  for (const [name, expr] of Object.entries(prog.process?.outputs ?? {})) {
+    assigns.push({ op: 'output_assign', name, expr } as ExprNode)
+  }
+  for (const [name, expr] of Object.entries(prog.process?.next_regs ?? {})) {
+    assigns.push({ op: 'next_update', target: { kind: 'reg', name }, expr } as ExprNode)
+  }
+
+  // Ports: keep only the keys that were set on v1
+  const ports: Record<string, unknown> = {}
+  if (prog.inputs    !== undefined) ports.inputs    = prog.inputs
+  if (prog.outputs   !== undefined) ports.outputs   = prog.outputs
+  if (prog.type_defs !== undefined) ports.type_defs = prog.type_defs
+
+  // input_defaults: fold into ports.inputs[].default, matching by name
+  if (prog.input_defaults && ports.inputs) {
+    const byName = new Map((ports.inputs as ProgramJSON['inputs'])!.map(i => [
+      typeof i === 'string' ? i : i.name,
+      i,
+    ]))
+    const newInputs: ProgramJSON['inputs'] = (ports.inputs as ProgramJSON['inputs'])!.map(i => {
+      const name = typeof i === 'string' ? i : i.name
+      const def = prog.input_defaults?.[name]
+      if (def === undefined) return i
+      const obj = typeof i === 'string' ? { name } : { ...i }
+      obj.default = def
+      return obj
+    })
+    ports.inputs = newInputs
+    void byName
+  } else if (prog.input_defaults && !ports.inputs) {
+    // Edge case: input_defaults without declared inputs. Carry inputs list.
+    const inputs = Object.entries(prog.input_defaults).map(([name, def]) => ({ name, default: def }))
+    ports.inputs = inputs as NonNullable<ProgramJSON['inputs']>
+  }
+
+  const node: Record<string, unknown> = {
+    op: 'program',
+    name: prog.name,
+    body: { op: 'block', decls, assigns, value: null },
+  }
+  if (Object.keys(ports).length > 0)  node.ports = ports
+  if (prog.type_params !== undefined)    node.type_params   = prog.type_params
+  if (prog.sample_rate !== undefined)    node.sample_rate   = prog.sample_rate
+  if (prog.breaks_cycles !== undefined)  node.breaks_cycles = prog.breaks_cycles
+
+  const topLevel: V2TopLevelMeta = {}
+  if (prog.params        !== undefined) topLevel.params        = prog.params
+  if (prog.audio_outputs !== undefined) topLevel.audio_outputs = prog.audio_outputs
+  if (prog.config        !== undefined) topLevel.config        = prog.config
+
+  return { node: node as ExprNode, topLevel }
+}
+
+/** Wrap a v2 program node + top-level metadata as a serializable v2 file. */
+export function v2NodeToFile(
+  node: ExprNode,
+  topLevel: V2TopLevelMeta = {},
+): { schema: 'tropical_program_2'; [k: string]: unknown } {
+  if (typeof node !== 'object' || node === null || Array.isArray(node))
+    throw new Error('v2NodeToFile: expected program object')
+  const p = node as Record<string, unknown>
+  const { op: _op, ...fields } = p
+  void _op
+  const file: Record<string, unknown> = { schema: 'tropical_program_2', ...fields }
+  if (topLevel.params !== undefined)        file.params        = topLevel.params
+  if (topLevel.audio_outputs !== undefined) file.audio_outputs = topLevel.audio_outputs
+  if (topLevel.config !== undefined)        file.config        = topLevel.config
+  return file as { schema: 'tropical_program_2'; [k: string]: unknown }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Expression pretty-printer
 // ─────────────────────────────────────────────────────────────
 
@@ -613,6 +860,22 @@ export function loadJSON(json: { schema: string; [k: string]: unknown }, session
     loadProgramAsSession(json as unknown as ProgramJSON, session)
     return
   }
-  throw new Error(`Unknown schema '${json.schema}'. Expected 'tropical_program_1'.`)
+  if (json.schema === 'tropical_program_2') {
+    const v2 = parseProgramV2(json)
+    // Build a `{op:'program'}` ExprNode from the v2 file (drop schema tag
+    // and lift session metadata for the top-level reduction to v1).
+    const { schema: _schema, params, audio_outputs, config, ...progFields } = v2 as Record<string, unknown> & {
+      schema: 'tropical_program_2'
+      params?: ProgramJSON['params']
+      audio_outputs?: ProgramJSON['audio_outputs']
+      config?: ProgramJSON['config']
+    }
+    void _schema
+    const programNode: ExprNode = { op: 'program', ...progFields }
+    const v1 = v2ProgramNodeToV1(programNode, { params, audio_outputs, config })
+    loadProgramAsSession(v1, session)
+    return
+  }
+  throw new Error(`Unknown schema '${json.schema}'. Expected 'tropical_program_1' or 'tropical_program_2'.`)
 }
 

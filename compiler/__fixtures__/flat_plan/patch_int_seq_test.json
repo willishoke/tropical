@@ -1,0 +1,451 @@
+{
+  "input": {
+    "schema": "tropical_program_1",
+    "name": "int_seq_test",
+    "programs": {
+      "IntSeq": {
+        "schema": "tropical_program_1",
+        "name": "IntSeq",
+        "inputs": [
+          "trigger",
+          "is_forward",
+          "step",
+          "seq_len",
+          "sequence"
+        ],
+        "outputs": [
+          "value",
+          "index"
+        ],
+        "process": {
+          "outputs": {
+            "value": {
+              "op": "index",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "sequence"
+                },
+                {
+                  "op": "reg",
+                  "name": "index"
+                }
+              ]
+            },
+            "index": {
+              "op": "reg",
+              "name": "index"
+            }
+          },
+          "next_regs": {
+            "index": {
+              "op": "select",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "trigger"
+                },
+                {
+                  "op": "mod",
+                  "args": [
+                    {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "index"
+                        },
+                        {
+                          "op": "select",
+                          "args": [
+                            {
+                              "op": "input",
+                              "name": "is_forward"
+                            },
+                            {
+                              "op": "input",
+                              "name": "step"
+                            },
+                            {
+                              "op": "sub",
+                              "args": [
+                                {
+                                  "op": "input",
+                                  "name": "seq_len"
+                                },
+                                {
+                                  "op": "input",
+                                  "name": "step"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "op": "input",
+                      "name": "seq_len"
+                    }
+                  ]
+                },
+                {
+                  "op": "reg",
+                  "name": "index"
+                }
+              ]
+            }
+          }
+        },
+        "regs": {
+          "index": 0
+        }
+      }
+    },
+    "instances": {
+      "Seq1": {
+        "program": "IntSeq",
+        "inputs": {
+          "trigger": false,
+          "is_forward": true,
+          "step": 1,
+          "seq_len": 8,
+          "sequence": {
+            "op": "array",
+            "items": [
+              100,
+              200,
+              300,
+              400,
+              500,
+              600,
+              700,
+              800
+            ]
+          }
+        }
+      }
+    },
+    "audio_outputs": [
+      {
+        "instance": "Seq1",
+        "output": "value"
+      },
+      {
+        "instance": "Seq1",
+        "output": "index"
+      }
+    ]
+  },
+  "expected_plan": {
+    "schema": "tropical_plan_4",
+    "config": {
+      "sample_rate": 44100
+    },
+    "state_init": [
+      0
+    ],
+    "register_names": [
+      "Seq1_index"
+    ],
+    "register_types": [
+      "float"
+    ],
+    "array_slot_names": [],
+    "outputs": [
+      0,
+      1
+    ],
+    "instructions": [
+      {
+        "tag": "Pack",
+        "dst": 0,
+        "args": [
+          {
+            "kind": "const",
+            "val": 100,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 200,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 300,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 400,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 500,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 600,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 700,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 800,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Index",
+        "dst": 0,
+        "args": [
+          {
+            "kind": "array_reg",
+            "slot": 0
+          },
+          {
+            "kind": "state_reg",
+            "slot": 0,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Clamp",
+        "dst": 1,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 0,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": -1,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Add",
+        "dst": 2,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 1,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Clamp",
+        "dst": 3,
+        "args": [
+          {
+            "kind": "state_reg",
+            "slot": 0,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": -1,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Add",
+        "dst": 4,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 3,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Sub",
+        "dst": 5,
+        "args": [
+          {
+            "kind": "const",
+            "val": 8,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Select",
+        "dst": 6,
+        "args": [
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "bool"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "reg",
+            "slot": 5,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Add",
+        "dst": 7,
+        "args": [
+          {
+            "kind": "state_reg",
+            "slot": 0,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "reg",
+            "slot": 6,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Mod",
+        "dst": 8,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 7,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 8,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Select",
+        "dst": 9,
+        "args": [
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "bool"
+          },
+          {
+            "kind": "reg",
+            "slot": 8,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "state_reg",
+            "slot": 0,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Add",
+        "dst": 10,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 9,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      }
+    ],
+    "register_count": 11,
+    "array_slot_count": 1,
+    "array_slot_sizes": [
+      8
+    ],
+    "output_targets": [
+      2,
+      4
+    ],
+    "register_targets": [
+      10
+    ]
+  }
+}
