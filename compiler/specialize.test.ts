@@ -241,4 +241,36 @@ describe('specializeProgramJSON', () => {
     }
     expect(() => specializeProgramJSON(prog, { N: 4 })).toThrow(/undeclared type_param 'M'/)
   })
+
+  // ── Typed-const substitution (Phase 1) ──────────────────────
+  //
+  // type_params with declared `type: 'int'` (or 'bool') must emit a typed
+  // const ExprNode `{op:'const', val:N, type:'int'}`, not a bare JS number.
+  // The bare-number path forces emit_numeric to type it as float.
+
+  test("int type_param ref inside ExprNode position substitutes to a typed-int const node", () => {
+    const prog: ProgramJSON = {
+      schema: 'tropical_program_1',
+      name: 'X',
+      type_params: { N: { type: 'int', default: 8 } },
+      regs: { step: { init: 0, type: 'int' } as any },
+      outputs: ['y'],
+      process: {
+        outputs: { y: { op: 'reg', name: 'step' } },
+        next_regs: {
+          step: {
+            op: 'mod',
+            args: [
+              { op: 'add', args: [{ op: 'reg', name: 'step' }, 1] },
+              { op: 'type_param', name: 'N' },
+            ],
+          },
+        },
+      },
+    }
+    const spec = specializeProgramJSON(prog, { N: 4 })
+    const stepExpr = spec.process!.next_regs!.step as any
+    // mod(args[0], args[1]) where args[1] was `{op:'type_param',name:'N'}`.
+    expect(stepExpr.args[1]).toEqual({ op: 'const', val: 4, type: 'int' })
+  })
 })

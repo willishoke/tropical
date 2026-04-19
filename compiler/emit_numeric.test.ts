@@ -277,4 +277,100 @@ describe('emitNumericProgram', () => {
     expect(mul).toBeDefined()
     expect(mul.args[0]).toEqual(mul.args[1])
   })
+
+  // ── Bidirectional type inference (Phase 2) ──────────────────
+
+  describe('literal resolution from register target context', () => {
+    // Expected types flow from declared register slot types down through
+    // register update expressions to numeric literals at the leaves.
+    // Without this, `mod(int_reg, 8)` emits a float literal → float result,
+    // then silently bitcasts into the int register on writeback (miscompile).
+
+    test('literal in mod(int_reg, N) with int state register resolves to int', () => {
+      const prog = emitNumericProgram(
+        [],
+        [{ op: 'mod', args: [
+          { op: 'add', args: [{ op: 'reg', id: 0 }, 1] },
+          8,
+        ] }],
+        [0],        // stateInit: int 0
+        ['int'],    // stateRegTypes: int
+      )
+      const modI = findInstr(prog, 'Mod')!
+      expect(modI).toBeDefined()
+      expect(modI.result_type).toBe('int')
+      // Literal 8 at position args[1] of Mod should carry int type, not float.
+      expect(modI.args[1]).toMatchObject({ kind: 'const', val: 8, scalar_type: 'int' })
+
+      // And the inner Add literal (1) should also resolve int from context.
+      const addIs = findAll(prog, 'Add')
+      const innerAdd = addIs.find(a =>
+        a.args.length === 2
+        && a.args[0]?.kind === 'state_reg'
+        && a.args[1]?.kind === 'const'
+        && (a.args[1] as { val: number }).val === 1,
+      )
+      expect(innerAdd).toBeDefined()
+      expect(innerAdd!.result_type).toBe('int')
+      expect(innerAdd!.args[1]).toMatchObject({ kind: 'const', val: 1, scalar_type: 'int' })
+    })
+
+    test('literal in comparison with float input stays float', () => {
+      // gt(float_input, 0.5): the literal 0.5 must stay float — context peek
+      // should read the first arg's type and pass it to the second.
+      const prog = emitNumericProgram(
+        [{ op: 'gt', args: [{ op: 'input', id: 0 }, 0.5] }],
+        [],
+      )
+      const gt = findInstr(prog, 'Greater')!
+      expect(gt).toBeDefined()
+      expect(gt.args[1]).toMatchObject({ kind: 'const', val: 0.5, scalar_type: 'float' })
+    })
+
+    test('fractional literal in int context throws (lossy narrowing)', () => {
+      // Writing 0.5 directly into an int register target is not representable;
+      // the compiler must refuse rather than silently truncate.
+      expect(() => {
+        emitNumericProgram(
+          [],
+          [0.5 as ExprNode],
+          [0],
+          ['int'],
+        )
+      }).toThrow(/Lossy|narrow|int/)
+    })
+  })
+
+  describe('typed-const operand (Phase 1)', () => {
+    // A const ExprNode may carry an explicit `type` field (emitted by
+    // specialize.ts for int/bool type_params). The emitter must honor it.
+
+    test('typed-int const node produces int scalar_type operand', () => {
+      const prog = emitNumericProgram(
+        [{ op: 'add', args: [
+          { op: 'reg', id: 0 },
+          { op: 'const', val: 8, type: 'int' } as ExprNode,
+        ] }],
+        [],
+        [0],
+        ['int'],
+      )
+      const add = findInstr(prog, 'Add')!
+      expect(add.args[1]).toMatchObject({ kind: 'const', val: 8, scalar_type: 'int' })
+      expect(add.result_type).toBe('int')
+    })
+
+    test('typed-bool const node produces bool scalar_type operand', () => {
+      const prog = emitNumericProgram(
+        [{ op: 'select', args: [
+          { op: 'const', val: 1, type: 'bool' } as ExprNode,
+          10,
+          20,
+        ] }],
+        [],
+      )
+      const sel = findInstr(prog, 'Select')!
+      expect(sel.args[0]).toMatchObject({ kind: 'const', val: 1, scalar_type: 'bool' })
+    })
+  })
 })
