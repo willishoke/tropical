@@ -4,106 +4,14 @@
 
 import { describe, test, expect } from 'bun:test'
 import {
-  portTypeFromString,
   exprDependencies,
   buildDependencyGraph,
   topologicalSort,
   tarjanSCC,
   extractInstanceInfo,
-  CompilerError,
-  type InstanceInfo,
 } from './compiler'
-import {
-  Float, Int, Bool, Unit, StructType, ArrayType,
-  portTypeEqual,
-} from './term'
+import { Float, Int, Bool, portTypeEqual } from './term'
 import type { ExprNode } from './session'
-
-// ─────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────
-
-/** Build a simple InstanceInfo for testing. */
-function modInfo(
-  name: string,
-  opts: {
-    typeName?: string
-    inputs?: string[]
-    outputs?: string[]
-    registers?: string[]
-    inputTypes?: string[]
-    outputTypes?: string[]
-    registerTypes?: string[]
-  } = {},
-): InstanceInfo {
-  const inputs = opts.inputs ?? ['in']
-  const outputs = opts.outputs ?? ['out']
-  const registers = opts.registers ?? []
-  return {
-    name,
-    typeName: opts.typeName ?? name,
-    inputNames: inputs,
-    outputNames: outputs,
-    registerNames: registers,
-    inputTypes: (opts.inputTypes ?? inputs.map(() => 'float')).map(s => portTypeFromString(s)),
-    outputTypes: (opts.outputTypes ?? outputs.map(() => 'float')).map(s => portTypeFromString(s)),
-    registerTypes: (opts.registerTypes ?? registers.map(() => 'float')).map(s => portTypeFromString(s)),
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// portTypeFromString
-// ─────────────────────────────────────────────────────────────
-
-describe('portTypeFromString', () => {
-  test('scalar types', () => {
-    expect(portTypeEqual(portTypeFromString('float'), Float)).toBe(true)
-    expect(portTypeEqual(portTypeFromString('int'), Int)).toBe(true)
-    expect(portTypeEqual(portTypeFromString('bool'), Bool)).toBe(true)
-  })
-
-  test('unit type', () => {
-    expect(portTypeEqual(portTypeFromString('unit'), Unit)).toBe(true)
-  })
-
-  test('undefined defaults to float', () => {
-    expect(portTypeEqual(portTypeFromString(undefined), Float)).toBe(true)
-  })
-
-  test('unknown name becomes struct type', () => {
-    const t = portTypeFromString('MyStruct')
-    expect(t.tag).toBe('struct')
-    expect(portTypeEqual(t, StructType('MyStruct'))).toBe(true)
-  })
-
-  test('array type with shape', () => {
-    const t = portTypeFromString('float[4]')
-    expect(portTypeEqual(t, ArrayType(Float, [4]))).toBe(true)
-  })
-
-  test('array type multi-dimensional', () => {
-    const t = portTypeFromString('float[4,4]')
-    expect(portTypeEqual(t, ArrayType(Float, [4, 4]))).toBe(true)
-  })
-
-  test('array type with int element', () => {
-    const t = portTypeFromString('int[8]')
-    expect(portTypeEqual(t, ArrayType(Int, [8]))).toBe(true)
-  })
-
-  test('legacy array string', () => {
-    const t = portTypeFromString('array')
-    expect(t.tag).toBe('array')
-  })
-
-  test('legacy matrix string', () => {
-    const t = portTypeFromString('matrix')
-    expect(t.tag).toBe('array')
-    if (t.tag === 'array') {
-      expect(t.shape.length).toBe(2)
-    }
-  })
-})
 
 // ─────────────────────────────────────────────────────────────
 // exprDependencies
@@ -335,15 +243,15 @@ describe('tarjanSCC', () => {
 // ─────────────────────────────────────────────────────────────
 
 describe('extractInstanceInfo', () => {
-  test('converts port type strings', () => {
+  test('forwards PortTypes, defaulting undefined to Float', () => {
     const def = {
       typeName: 'Test',
       inputNames: ['a', 'b'],
       outputNames: ['out'],
       registerNames: ['state'],
-      inputPortTypes: ['float', 'bool'] as (string | undefined)[],
-      outputPortTypes: ['int'] as (string | undefined)[],
-      registerPortTypes: [undefined] as (string | undefined)[],
+      inputPortTypes: [Float, Bool],
+      outputPortTypes: [Int],
+      registerPortTypes: [undefined],
     }
     const info = extractInstanceInfo('Test1', def)
     expect(info.name).toBe('Test1')

@@ -23,6 +23,33 @@ export const ExprNodeSchema: z.ZodType = z.lazy(() =>
 )
 
 // ─────────────────────────────────────────────────────────────
+// Bounds + PortType declaration (used by regs and ports)
+// ─────────────────────────────────────────────────────────────
+
+const BoundsSchema = z.tuple([z.number().nullable(), z.number().nullable()])
+
+const ShapeDimSchema = z.union([
+  z.number().int().nonnegative(),
+  z.object({ op: z.literal('type_param'), name: z.string() }),
+])
+
+const ArrayTypeDeclSchema = z.object({
+  kind: z.literal('array'),
+  element: z.string(),
+  shape: z.array(ShapeDimSchema).min(1),
+})
+
+/** A port/reg type declaration. Scalar/alias names are bare strings; array
+ *  types must use the structured form. Old bracketed strings like "float[4]"
+ *  are rejected with a clear error. */
+const PortTypeDeclSchema = z.union([
+  z.string().refine(s => !s.includes('['), {
+    message: 'Bracketed array types like "float[4]" are not supported. Use {kind:"array", element:"float", shape:[4]}.',
+  }),
+  ArrayTypeDeclSchema,
+])
+
+// ─────────────────────────────────────────────────────────────
 // ArrayStateJSON
 // ─────────────────────────────────────────────────────────────
 
@@ -55,7 +82,7 @@ const RegValueSchema = z.union([
 /** Typed register entry: { init, type } */
 const TypedRegValueSchema = z.object({
   init: RegValueSchema,
-  type: z.string(),
+  type: PortTypeDeclSchema,
 })
 
 /** A register entry is either a bare value or a typed { init, type } object. */
@@ -93,12 +120,6 @@ const SumTypeDefSchema = z.object({
   variants: z.array(SumVariantSchema),
 })
 
-// ─────────────────────────────────────────────────────────────
-// Bounds — [lo, hi], null on either side = unbounded
-// ─────────────────────────────────────────────────────────────
-
-const BoundsSchema = z.tuple([z.number().nullable(), z.number().nullable()])
-
 const AliasTypeDefSchema = z.object({
   kind: z.literal('alias'),
   name: z.string(),
@@ -114,12 +135,12 @@ const TypeDefSchema = z.union([StructTypeDefSchema, SumTypeDefSchema, AliasTypeD
 
 const ProgramInputSchema = z.union([
   z.string(),
-  z.object({ name: z.string(), type: z.string().optional(), default: ExprNodeSchema.optional(), bounds: BoundsSchema.optional() }),
+  z.object({ name: z.string(), type: PortTypeDeclSchema.optional(), default: ExprNodeSchema.optional(), bounds: BoundsSchema.optional() }),
 ])
 
 const ProgramOutputSchema = z.union([
   z.string(),
-  z.object({ name: z.string(), type: z.string().optional(), bounds: BoundsSchema.optional() }),
+  z.object({ name: z.string(), type: PortTypeDeclSchema.optional(), bounds: BoundsSchema.optional() }),
 ])
 
 const ProgramInstanceSchema = z.object({

@@ -10,12 +10,13 @@ import {
   type ProgramDef, type NestedCall, type ValueCoercible, type Bounds,
 } from './program_types.js'
 import { Runtime } from './runtime/runtime.js'
-import { loadProgramAsSession, type ProgramJSON } from './program.js'
+import { loadProgramAsSession, type ProgramJSON, type PortTypeDecl } from './program.js'
 import { Param, Trigger } from './runtime/param.js'
 import {
   specializeProgramJSON, specializationCacheKey, resolveTypeArgs,
   type RawTypeArgs, type ResolvedTypeArgs,
 } from './specialize.js'
+import { type PortType, Float, Int, Bool, Unit, ArrayType, StructType } from './term.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -277,14 +278,49 @@ export function resolveBaseType(typeStr: string | undefined, userAliases?: Alias
   return typeStr
 }
 
-/** Extract bounds from a port spec. Explicit bounds override alias bounds. Checks user aliases first. */
+/** Convert a scalar or alias name to a PortType. Unknown names become struct refs. */
+function scalarNameToPortType(name: string): PortType {
+  switch (name) {
+    case 'float': return Float
+    case 'int':   return Int
+    case 'bool':  return Bool
+    case 'unit':  return Unit
+    default:      return StructType(name)
+  }
+}
+
+/** Decode a structured port type declaration to a PortType, resolving aliases.
+ *  Throws if the shape still contains an unresolved type_param ref — callers that
+ *  use type_params must run `specializeProgramJSON` first. */
+export function decodePortTypeDecl(
+  t: PortTypeDecl,
+  aliases: AliasMap | undefined,
+  contextName: string,
+): PortType {
+  if (typeof t === 'string') {
+    return scalarNameToPortType(resolveBaseType(t, aliases) ?? t)
+  }
+  const elemName = resolveBaseType(t.element, aliases) ?? t.element
+  const elem = scalarNameToPortType(elemName)
+  const shape = t.shape.map(dim => {
+    if (typeof dim === 'number') return dim
+    throw new Error(
+      `${contextName}: array port type shape contains unresolved type_param '${dim.name}'. ` +
+      `This should have been substituted at specialization time.`,
+    )
+  })
+  return ArrayType(elem, shape)
+}
+
+/** Extract bounds from a port spec. Explicit bounds override alias bounds. Checks user aliases first.
+ *  Only string type names can carry alias-derived bounds; structured array types do not. */
 export function resolveBounds(
-  spec: string | { name: string; type?: string; bounds?: [number | null, number | null] },
+  spec: string | { name: string; type?: PortTypeDecl; bounds?: [number | null, number | null] },
   userAliases?: AliasMap,
 ): Bounds | null {
   if (typeof spec === 'string') return null
   if (spec.bounds) return spec.bounds
-  if (!spec.type) return null
+  if (!spec.type || typeof spec.type !== 'string') return null
   const user = userAliases?.get(spec.type)
   if (user) return user.bounds
   if (spec.type in BOUNDED_TYPE_ALIASES) return BOUNDED_TYPE_ALIASES[spec.type].bounds
@@ -349,8 +385,12 @@ export function loadProgramDef(
   const outputSpecs = def.outputs ?? []
   const inputNames  = inputSpecs.map(i => typeof i === 'string' ? i : i.name)
   const outputNames = outputSpecs.map(o => typeof o === 'string' ? o : o.name)
-  const inputPortTypes  = inputSpecs.map(i => resolveBaseType(typeof i === 'string' ? undefined : i.type, aliases))
-  const outputPortTypes = outputSpecs.map(o => resolveBaseType(typeof o === 'string' ? undefined : o.type, aliases))
+  const decodeType = (t: PortTypeDecl | undefined): PortType | undefined => {
+    if (t === undefined) return undefined
+    return decodePortTypeDecl(t, aliases, def.name)
+  }
+  const inputPortTypes  = inputSpecs.map(i => decodeType(typeof i === 'string' ? undefined : i.type))
+  const outputPortTypes = outputSpecs.map(o => decodeType(typeof o === 'string' ? undefined : o.type))
   const inputBounds     = inputSpecs.map(s => resolveBounds(s, aliases))
   const outputBounds    = outputSpecs.map(s => resolveBounds(s, aliases))
   const regsRaw     = def.regs ?? {}
@@ -360,18 +400,18 @@ export function loadProgramDef(
   // ── Parse registers ──
   const regNames: string[] = []
   const regInitValues: ValueCoercible[] = []
-  const regPortTypes: (string | undefined)[] = []
+  const regPortTypes: (PortType | undefined)[] = []
   for (const [name, val] of Object.entries(regsRaw)) {
     regNames.push(name)
     if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'zeros' in val) {
-      // Compact form: {"zeros": N} → array of N zeros with inferred type
+      // Compact form: {"zeros": N} → array of N zeros, float element
       const n = (val as { zeros: number }).zeros
       regInitValues.push(new Array(n).fill(0))
-      regPortTypes.push(`float[${n}]`)
+      regPortTypes.push(ArrayType(Float, [n]))
     } else if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'init' in val) {
-      const typed = val as { init: ValueCoercible; type: string }
+      const typed = val as { init: ValueCoercible; type: PortTypeDecl }
       regInitValues.push(typed.init)
-      regPortTypes.push(typed.type)
+      regPortTypes.push(decodePortTypeDecl(typed.type, aliases, def.name))
     } else {
       regInitValues.push(val as ValueCoercible)
       regPortTypes.push(undefined)

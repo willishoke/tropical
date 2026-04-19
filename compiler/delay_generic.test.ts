@@ -2,6 +2,7 @@ import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON, resolveProgramType } from './session'
 import { loadStdlib } from './program'
 import { flattenSession } from './flatten'
+import { Float, ArrayType } from './term'
 
 describe('stdlib Delay<N>', () => {
   test('Delay with N=8 resolves to a distinct type from Delay with N=44100', () => {
@@ -10,8 +11,8 @@ describe('stdlib Delay<N>', () => {
     const a = resolveProgramType(session, 'Delay', { N: 8 }, undefined)
     const b = resolveProgramType(session, 'Delay', { N: 44100 }, undefined)
     expect(a.type).not.toBe(b.type)
-    expect(a.type._def.registerPortTypes[0]).toBe('float[8]')
-    expect(b.type._def.registerPortTypes[0]).toBe('float[44100]')
+    expect(a.type._def.registerPortTypes[0]).toEqual(ArrayType(Float, [8]))
+    expect(b.type._def.registerPortTypes[0]).toEqual(ArrayType(Float, [44100]))
   })
 
   test('Delay with default N=44100 matches explicit N=44100', () => {

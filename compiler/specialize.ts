@@ -110,7 +110,20 @@ export function specializeProgramJSON(
           ;(clone.regs as Record<string, unknown>)[name] = { zeros: args[paramName] }
         }
       }
+      // Typed reg: { init: ..., type: <structured-array> } — substitute shape.
+      if (val && typeof val === 'object' && !Array.isArray(val) && 'type' in val) {
+        const typed = val as { init: unknown; type: unknown }
+        typed.type = substituteTypeInDecl(typed.type, args, prog.name, `reg '${name}'`)
+      }
     }
+  }
+
+  // Port type declarations on inputs/outputs
+  if (clone.inputs) {
+    clone.inputs = clone.inputs.map(i => substituteTypeOnPortSpec(i, args, prog.name, 'input')) as typeof clone.inputs
+  }
+  if (clone.outputs) {
+    clone.outputs = clone.outputs.map(o => substituteTypeOnPortSpec(o, args, prog.name, 'output')) as typeof clone.outputs
   }
 
   // ExprNode-bearing fields
@@ -175,6 +188,53 @@ export function specializeProgramJSON(
   // when that nested instance is resolved.
 
   return clone
+}
+
+/** Substitute {op:'type_param',name} refs inside a port-type declaration's
+ *  shape array with their resolved integer values. Scalars pass through. */
+function substituteTypeInDecl(
+  t: unknown,
+  args: ResolvedTypeArgs,
+  progName: string,
+  context: string,
+): unknown {
+  if (t === undefined || typeof t === 'string') return t
+  if (t && typeof t === 'object' && !Array.isArray(t)) {
+    const o = t as { kind?: string; shape?: unknown[]; element?: string }
+    if (o.kind === 'array' && Array.isArray(o.shape)) {
+      const newShape = o.shape.map((dim, i) => {
+        if (typeof dim === 'number') return dim
+        if (dim && typeof dim === 'object' && (dim as { op?: string }).op === 'type_param') {
+          const name = (dim as { name: string }).name
+          if (!(name in args)) {
+            throw new Error(
+              `${progName}: ${context} type shape[${i}] references undeclared type_param '${name}'`,
+            )
+          }
+          return args[name]
+        }
+        return dim
+      })
+      return { ...o, shape: newShape }
+    }
+  }
+  return t
+}
+
+function substituteTypeOnPortSpec(
+  spec: unknown,
+  args: ResolvedTypeArgs,
+  progName: string,
+  kind: string,
+): unknown {
+  if (typeof spec === 'string') return spec
+  if (spec && typeof spec === 'object') {
+    const o = spec as { name: string; type?: unknown }
+    if (o.type !== undefined) {
+      return { ...o, type: substituteTypeInDecl(o.type, args, progName, `${kind} '${o.name}'`) }
+    }
+  }
+  return spec
 }
 
 function substituteTypeParams(

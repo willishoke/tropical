@@ -1,0 +1,27 @@
+{
+  "schema": "tropical_program_1",
+  "name": "sequencer_demo",
+  "instances": {
+    "clk": {
+      "program": "Clock",
+      "inputs": { "freq": 4, "ratios_in": [1] }
+    },
+    "seq": {
+      "program": "Sequencer",
+      "type_args": { "N": 8 },
+      "inputs": {
+        "clock": { "op": "ref", "instance": "clk", "output": "output" },
+        "values": [110, 138.59, 164.81, 220, 261.63, 329.63, 220, 164.81]
+      }
+    },
+    "osc": {
+      "program": "BlepSaw",
+      "inputs": {
+        "freq": { "op": "ref", "instance": "seq", "output": "value" }
+      }
+    }
+  },
+  "audio_outputs": [
+    { "instance": "osc", "output": "saw" }
+  ]
+}

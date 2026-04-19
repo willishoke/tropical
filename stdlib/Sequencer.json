@@ -1,0 +1,49 @@
+{
+  "schema": "tropical_program_1",
+  "name": "Sequencer",
+  "type_params": { "N": { "type": "int", "default": 8 } },
+  "inputs": [
+    { "name": "clock", "type": "unipolar" },
+    { "name": "values", "type": { "kind": "array", "element": "float", "shape": [{ "op": "type_param", "name": "N" }] } }
+  ],
+  "outputs": [
+    { "name": "value", "type": "float" }
+  ],
+  "regs": { "step": 0 },
+  "delays": {
+    "prev_clock": { "update": { "op": "input", "name": "clock" }, "init": 0 }
+  },
+  "input_defaults": { "clock": 0 },
+  "process": {
+    "outputs": {
+      "value": {
+        "op": "index",
+        "args": [
+          { "op": "input", "name": "values" },
+          { "op": "reg", "name": "step" }
+        ]
+      }
+    },
+    "next_regs": {
+      "step": {
+        "op": "mod",
+        "args": [
+          {
+            "op": "add",
+            "args": [
+              { "op": "reg", "name": "step" },
+              {
+                "op": "mul",
+                "args": [
+                  { "op": "gt", "args": [{ "op": "input", "name": "clock" }, 0.5] },
+                  { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_clock" }, 0.5] }
+                ]
+              }
+            ]
+          },
+          { "op": "type_param", "name": "N" }
+        ]
+      }
+    }
+  }
+}

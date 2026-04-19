@@ -16,22 +16,32 @@ import { Param, Trigger } from './runtime/param.js'
 import { ProgramType } from './program_types.js'
 import { exprDependencies, reachableInstances, buildDependencyGraph, topologicalSort } from './compiler.js'
 import type { RawTypeArgs } from './specialize.js'
+import { Float, portTypeEqual, type PortType } from './term.js'
+import type { Bounds } from './program_types.js'
 
 // ─────────────────────────────────────────────────────────────
 // ProgramJSON schema
 // ─────────────────────────────────────────────────────────────
+
+/** Compile-time shape dimension: a concrete int or a reference to an
+ *  outer type parameter to be substituted during specialization. */
+export type ShapeDim = number | { op: 'type_param'; name: string }
+
+/** Structured port/reg type declaration. Scalars and aliases are bare strings;
+ *  arrays use the structured form so type_param refs can appear in shapes. */
+export type PortTypeDecl = string | { kind: 'array'; element: string; shape: ShapeDim[] }
 
 export interface ProgramJSON {
   schema: 'tropical_program_1'
   name: string
 
   /** Inputs to this program. Empty or absent = top-level (no external inputs). */
-  inputs?: Array<string | { name: string; type?: string; default?: ExprNode; bounds?: [number | null, number | null] }>
+  inputs?: Array<string | { name: string; type?: PortTypeDecl; default?: ExprNode; bounds?: [number | null, number | null] }>
   /** Output declarations — names for leaf programs, expressions for composites. */
-  outputs?: Array<string | { name: string; type?: string; bounds?: [number | null, number | null] }>
+  outputs?: Array<string | { name: string; type?: PortTypeDecl; bounds?: [number | null, number | null] }>
 
   /** Scalar/array state registers. */
-  regs?: Record<string, number | boolean | number[] | number[][] | { init: number | boolean | number[] | number[][]; type: string }>
+  regs?: Record<string, number | boolean | number[] | number[][] | { init: number | boolean | number[] | number[][]; type: PortTypeDecl }>
   /** Named delay nodes. */
   delays?: Record<string, { update: ExprNode; init?: number }>
   /** Sample rate override. */
@@ -510,12 +520,61 @@ export function exportSessionAsProgram(
     return node
   }
 
+  // Gather port type + bounds metadata from the source instances so exported
+  // inputs/outputs round-trip through re-parse.
+  const isDefaultPortType = (t: PortType | undefined): boolean =>
+    t === undefined || portTypeEqual(t, Float)
+  const boundsProvided = (b: Bounds | null | undefined): b is Bounds =>
+    !!b && (b[0] !== null || b[1] !== null)
+
+  const portTypeToDecl = (t: PortType): PortTypeDecl => {
+    switch (t.tag) {
+      case 'scalar': return t.scalar
+      case 'array': {
+        if (t.element.tag !== 'scalar') {
+          throw new Error(`export: cannot serialize nested array element type (${t.element.tag})`)
+        }
+        return { kind: 'array', element: t.element.scalar, shape: t.shape }
+      }
+      case 'struct': return t.name
+      case 'sum': return t.name
+      case 'unit': return 'unit'
+      case 'product':
+        throw new Error(`export: product port types cannot be serialized (no ProgramJSON form)`)
+    }
+  }
+
+  const inputEntries: NonNullable<ProgramJSON['inputs']> = inputNames.map(inputName => {
+    const target = inputs[inputName]
+    const [instName, portName] = target.split(':')
+    const inst = session.instanceRegistry.get(instName)!
+    const idx = inst.inputIndex(portName)
+    const pt = inst.inputPortType(idx)
+    const bnds = inst._def.inputBounds[idx]
+    const entry: { name: string; type?: PortTypeDecl; bounds?: Bounds } = { name: inputName }
+    if (!isDefaultPortType(pt)) entry.type = portTypeToDecl(pt!)
+    if (boundsProvided(bnds)) entry.bounds = bnds
+    return entry.type === undefined && entry.bounds === undefined ? inputName : entry
+  })
+
+  const outputEntries: NonNullable<ProgramJSON['outputs']> = outputNames.map(outName => {
+    const ref = outputs[outName]
+    const inst = session.instanceRegistry.get(ref.instance)!
+    const idx = inst.outputIndex(ref.output)
+    const pt = inst.outputPortType(idx)
+    const bnds = inst._def.outputBounds[idx]
+    const entry: { name: string; type?: PortTypeDecl; bounds?: Bounds } = { name: outName }
+    if (!isDefaultPortType(pt)) entry.type = portTypeToDecl(pt!)
+    if (boundsProvided(bnds)) entry.bounds = bnds
+    return entry.type === undefined && entry.bounds === undefined ? outName : entry
+  })
+
   // Build the exported ProgramJSON
   const prog: ProgramJSON = {
     schema: 'tropical_program_1',
     name,
-    inputs: inputNames,
-    outputs: outputNames,
+    inputs: inputEntries,
+    outputs: outputEntries,
   }
 
   // Topologically sort reachable instances so dependencies come first.
