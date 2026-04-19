@@ -1405,6 +1405,8 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
         expr = substituteInputs(expr, inputMap, nestedSubstMemo)
         const nestedRefsMemo = new WeakMap<object, ExprNode>()
         expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames, nestedRefsMemo)
+        const nestedLowerMemo = new WeakMap<object, ExprNode>()
+        expr = lowerArrayOps(expr, nestedLowerMemo)
         flatRegisterExprs.push(expr)
         flatRegisterNames.push(nested.names[i])
         flatRegisterTypes.push('float')
@@ -1527,6 +1529,8 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
         expr = substituteInputs(expr, inputMap, nestedSubstMemo)
         const nestedRefsMemo = new WeakMap<object, ExprNode>()
         expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames, nestedRefsMemo)
+        const nestedLowerMemo = new WeakMap<object, ExprNode>()
+        expr = lowerArrayOps(expr, nestedLowerMemo)
         flatRegisterExprs[regIdx] = expr
         regIdx++
       }

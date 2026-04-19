@@ -40,7 +40,7 @@ engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio o
   engine/dac/         Audio output (RtAudio)
 mcp/                  MCP server — primary agent interface over stdio
 patches/              Example patches (tropical_program_1 JSON)
-stdlib/               Built-in program types as ProgramJSON files (18 types)
+stdlib/               Built-in program types as ProgramJSON files (24 types)
 ```
 
 ### Data flow
@@ -80,7 +80,7 @@ The TypeScript layer handles everything from program definition through instruct
 
 **Program types** (`program_types.ts`) — Pure data types: `ProgramDef` (slot-indexed IR for the flattener), `ProgramType`, `ProgramInstance`. No DSL — types are built from ProgramJSON by `loadProgramDef()` in `session.ts`.
 
-**Standard library** (`stdlib/*.json`) — 18 built-in program types as human-readable ProgramJSON files. Shared primitives (OnePole, AllpassDelay, CombDelay, SoftClip, CrossFade) compose into higher-level types (e.g. LadderFilter uses 4 OnePole instances). Also includes Clock, LadderFilter, NoiseLFSR, BitCrusher, VCA, Phaser/Phaser16, and Delay variants (1/8/16/512/4410/44100 samples).
+**Standard library** (`stdlib/*.json`) — 24 built-in program types as human-readable ProgramJSON files. Transcendentals (Sin, Cos, Tanh, Exp, Log, Pow) are programs, not primitives — swap the JSON to change the approximation. Shared primitives (OnePole, AllpassDelay, CombDelay, SoftClip, CrossFade) compose into higher-level types (e.g. LadderFilter uses 4 OnePole instances). Also includes Clock, LadderFilter, NoiseLFSR, BitCrusher, VCA, Phaser/Phaser16, and Delay variants (1/8/16/512/4410/44100 samples).
 
 **Flattening** (`flatten.ts`) — The critical step. Inlines all instance expressions, resolves inter-instance references, expands nested calls, converts delays to register ops. Output is a `tropical_plan_4` JSON. Uses WeakMap memoization for DAG sharing. Automatically resolves feedback cycles (A→B→A or A→A) by inserting synthetic one-sample delay registers — self-refs are detected in a pre-pass, inter-instance cycles via Tarjan's SCC.
 
@@ -100,7 +100,7 @@ C++20, header-heavy (templates + inlining for audio-thread performance).
 
 **Plan parsing** (`runtime/NumericProgramParser.hpp`) — Thin deserializer: reads `tropical_plan_4` JSON → `FlatProgram` struct. No expression tree walking — just reads the pre-compiled instruction stream.
 
-**JIT** (`jit/OrcJitEngine.hpp/.cpp`) — Singleton LLVM ORC engine. `compile_flat_program()` generates typed LLVM IR (f64/i64/i1 with explicit coercion), emits inline polynomial approximations for transcendentals (sin, cos, exp, log, tanh — no libm), and compiles to native code. Kernel object cache at `~/.cache/tropical/kernels/<build-id>/` with auto-invalidation on dylib rebuild.
+**JIT** (`jit/OrcJitEngine.hpp/.cpp`) — Singleton LLVM ORC engine. `compile_flat_program()` generates typed LLVM IR (f64/i64/i1 with explicit coercion) and compiles to native code. Transcendentals are not a JIT primitive — they are stdlib ProgramJSON files that inline at flatten time. Kernel object cache at `~/.cache/tropical/kernels/<build-id>/` with auto-invalidation on dylib rebuild.
 
 **FlatRuntime** (`runtime/FlatRuntime.hpp/.cpp`) — Double-buffered kernel hot-swap. `load_plan()` compiles to the inactive slot, transfers matching state by register/array name, atomically swaps. `process()` runs the kernel, snapshots trigger params, applies smoothstep fade envelope (2048-sample Hermite curve).
 
@@ -115,7 +115,7 @@ The core workflow: **patch → listen → export**. Agents add instances and wir
 ## Conventions
 
 - Commit messages: `type(scope): description` (e.g., `fix(jit):`, `feat(compiler):`, `refactor:`)
-- Program types: PascalCase (`VCO`, `ADEnvelope`, `Clock`)
+- Program types: PascalCase (`LadderFilter`, `OnePole`, `Clock`)
 - Input/output names: lowercase (`freq`, `signal`, `out`, `saw`)
 - C++ is header-heavy by design (templates, inlining for audio perf)
 - JIT failures are fatal — no interpreter fallback

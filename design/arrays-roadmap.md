@@ -89,7 +89,7 @@ Program definitions can include array-typed expressions in their process bodies.
 | `broadcast_to(expr, shape)` | Explicit broadcast (usually implicit) |
 | `map(fn, ...arrays)` | Element-wise apply |
 
-Existing `add`, `mul`, `sin`, etc. become **shape-polymorphic**: when operands are arrays, the compiler wraps them in element-wise map + broadcast.
+Existing `add`, `mul`, `sqrt`, etc. become **shape-polymorphic**: when operands are arrays, the compiler wraps them in element-wise map + broadcast.
 
 `matmul` (already exists) gets shape validation: `[m,k] @ [k,n] → [m,n]`, `[m,k] @ [k] → [m]`.
 

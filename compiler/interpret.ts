@@ -110,7 +110,7 @@ export function evalExpr(node: ExprNode, env: InterpretEnv): Value {
     case 'mul':       return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => a * b)
     case 'div':       return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => b !== 0 ? a / b : 0)
     case 'mod':       return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => b !== 0 ? a % b : 0)
-    case 'pow':       return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => Math.pow(a, b))
+    case 'ldexp':     return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => a * Math.pow(2, Math.trunc(b)))
     case 'floor_div':
     case 'floorDiv':  return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => b !== 0 ? Math.floor(a / b) : 0)
 
@@ -139,15 +139,14 @@ export function evalExpr(node: ExprNode, env: InterpretEnv): Value {
     // ── Unary math ────────────────────────────────────────
     case 'neg':   return unOp(evalExpr(args![0], env), x => -x)
     case 'abs':   return unOp(evalExpr(args![0], env), x => Math.abs(x))
-    case 'sin':   return unOp(evalExpr(args![0], env), x => Math.sin(x))
-    case 'cos':   return unOp(evalExpr(args![0], env), x => Math.cos(x))
-    case 'tanh':  return unOp(evalExpr(args![0], env), x => Math.tanh(x))
-    case 'log':   return unOp(evalExpr(args![0], env), x => Math.log(x))
-    case 'exp':   return unOp(evalExpr(args![0], env), x => Math.exp(x))
     case 'sqrt':  return unOp(evalExpr(args![0], env), x => Math.sqrt(x))
     case 'floor': return unOp(evalExpr(args![0], env), x => Math.floor(x))
     case 'ceil':  return unOp(evalExpr(args![0], env), x => Math.ceil(x))
     case 'round': return unOp(evalExpr(args![0], env), x => Math.round(x))
+    case 'float_exponent': return unOp(evalExpr(args![0], env), x => {
+      if (x === 0 || !isFinite(x)) return 0
+      return Math.floor(Math.log2(Math.abs(x)))
+    })
 
     // ── Unary logical/bitwise ─────────────────────────────
     case 'not':     return unOp(evalExpr(args![0], env), x => !toBool(x))

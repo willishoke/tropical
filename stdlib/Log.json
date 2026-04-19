@@ -1,0 +1,90 @@
+{
+  "schema": "tropical_program_1",
+  "name": "Log",
+  "inputs": [
+    { "name": "x", "type": "float" }
+  ],
+  "outputs": [
+    { "name": "out", "type": "float" }
+  ],
+  "input_defaults": { "x": 1 },
+  "process": {
+    "outputs": {
+      "out": {
+        "op": "let",
+        "bind": {
+          "safe_x": { "op": "select", "args": [
+            { "op": "lte", "args": [{ "op": "input", "name": "x" }, 0] },
+            1e-45,
+            { "op": "input", "name": "x" }
+          ]},
+          "e0": { "op": "float_exponent", "args": [
+            { "op": "binding", "name": "safe_x" }
+          ]},
+          "m0": { "op": "ldexp", "args": [
+            { "op": "binding", "name": "safe_x" },
+            { "op": "neg", "args": [{ "op": "binding", "name": "e0" }] }
+          ]},
+          "is_big": { "op": "gt", "args": [
+            { "op": "binding", "name": "m0" },
+            1.4142135623730951
+          ]},
+          "e": { "op": "add", "args": [
+            { "op": "binding", "name": "e0" },
+            { "op": "select", "args": [{ "op": "binding", "name": "is_big" }, 1, 0] }
+          ]},
+          "m": { "op": "select", "args": [
+            { "op": "binding", "name": "is_big" },
+            { "op": "mul", "args": [{ "op": "binding", "name": "m0" }, 0.5] },
+            { "op": "binding", "name": "m0" }
+          ]},
+          "f": { "op": "sub", "args": [{ "op": "binding", "name": "m" }, 1.0] },
+          "poly": {
+            "op": "fold",
+            "over": [
+              0.06666666666666667,
+              -0.07142857142857142,
+              0.07692307692307693,
+              -0.08333333333333333,
+              0.09090909090909091,
+              -0.1,
+              0.1111111111111111,
+              -0.125,
+              0.14285714285714285,
+              -0.16666666666666666,
+              0.2,
+              -0.25,
+              0.3333333333333333,
+              -0.5,
+              1.0
+            ],
+            "init": 0,
+            "acc_var": "a",
+            "elem_var": "c",
+            "body": {
+              "op": "add", "args": [
+                { "op": "binding", "name": "c" },
+                { "op": "mul", "args": [
+                  { "op": "binding", "name": "a" },
+                  { "op": "binding", "name": "f" }
+                ]}
+              ]
+            }
+          }
+        },
+        "in": {
+          "op": "add", "args": [
+            { "op": "mul", "args": [
+              { "op": "binding", "name": "f" },
+              { "op": "binding", "name": "poly" }
+            ]},
+            { "op": "mul", "args": [
+              { "op": "binding", "name": "e" },
+              0.6931471805599453
+            ]}
+          ]
+        }
+      }
+    }
+  }
+}

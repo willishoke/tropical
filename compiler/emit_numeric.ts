@@ -58,20 +58,21 @@ export type FlatProgram = {
 
 const BINARY_TAG: Record<string, string> = {
   add: 'Add', sub: 'Sub', mul: 'Mul', div: 'Div', mod: 'Mod',
-  pow: 'Pow', floor_div: 'FloorDiv', floorDiv: 'FloorDiv',
+  floor_div: 'FloorDiv', floorDiv: 'FloorDiv',
   lt: 'Less', lte: 'LessEq', gt: 'Greater', gte: 'GreaterEq',
   eq: 'Equal', neq: 'NotEqual',
   bit_and: 'BitAnd', bit_or: 'BitOr', bit_xor: 'BitXor',
   bitAnd: 'BitAnd', bitOr: 'BitOr', bitXor: 'BitXor',
   lshift: 'LShift', rshift: 'RShift',
   and: 'And', or: 'Or',
+  ldexp: 'Ldexp',
 }
 
 const UNARY_TAG: Record<string, string> = {
-  neg: 'Neg', abs: 'Abs', sin: 'Sin', cos: 'Cos', tanh: 'Tanh',
-  log: 'Log', exp: 'Exp', sqrt: 'Sqrt',
+  neg: 'Neg', abs: 'Abs', sqrt: 'Sqrt',
   floor: 'Floor', ceil: 'Ceil', round: 'Round',
   not: 'Not', bit_not: 'BitNot',
+  float_exponent: 'FloatExponent',
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -80,7 +81,7 @@ const UNARY_TAG: Record<string, string> = {
 
 const BITWISE_TAGS = new Set(['BitAnd', 'BitOr', 'BitXor', 'LShift', 'RShift', 'BitNot'])
 const COMPARISON_TAGS = new Set(['Less', 'LessEq', 'Greater', 'GreaterEq', 'Equal', 'NotEqual', 'Not', 'And', 'Or'])
-const TRANSCENDENTAL_TAGS = new Set(['Sin', 'Cos', 'Tanh', 'Log', 'Exp', 'Sqrt', 'Floor', 'Ceil', 'Round'])
+const TRANSCENDENTAL_TAGS = new Set(['Sqrt', 'Floor', 'Ceil', 'Round', 'Ldexp', 'FloatExponent'])
 
 /** Promotion order: float > int > bool. */
 function promoteTypes(a: ScalarType, b: ScalarType): ScalarType {
@@ -98,7 +99,7 @@ function inferResultType(tag: string, argTypes: ScalarType[]): ScalarType {
   if (tag === 'Select') return promoteTypes(argTypes[1] ?? 'float', argTypes[2] ?? 'float')
   // Clamp: type of value (args[0])
   if (tag === 'Clamp') return argTypes[0] ?? 'float'
-  // Arithmetic (Add, Sub, Mul, Div, Mod, Pow, FloorDiv, Neg, Abs): promote all args
+  // Arithmetic (Add, Sub, Mul, Div, Mod, FloorDiv, Neg, Abs): promote all args
   if (argTypes.length === 0) return 'float'
   return argTypes.reduce(promoteTypes)
 }

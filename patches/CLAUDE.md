@@ -9,17 +9,17 @@ Example patches in `tropical_program_1` JSON format. Load via `make mcp-ts` → 
   "schema": "tropical_program_1",
   "name": "MyPatch",
   "instances": {
-    "VCO1": { "program": "VCO", "inputs": { "freq": 440 } }
+    "Osc1": { "program": "Sin", "inputs": { "x": 440 } }
   },
   "audio_outputs": [
-    { "instance": "VCO1", "output": "sin" }
+    { "instance": "Osc1", "output": "out" }
   ]
 }
 ```
 
 ### Fields
 
-- **instances** — map of `name → { program, inputs }`. Program must match a registered type (PascalCase: `VCO`, `Clock`, `ADEnvelope`, `VCA`, etc.).
+- **instances** — map of `name → { program, inputs }`. Program must match a registered type (PascalCase: `Sin`, `Clock`, `LadderFilter`, `VCA`, etc.).
 - **audio_outputs** — list of `{ instance, output }` specifying which outputs are mixed to the audio output buffer.
 - **programs** — (optional) inline subprogram definitions, used before they appear in `instances`.
 - **params** — (optional) named control parameters with initial values and smoothing time constants.
@@ -28,17 +28,21 @@ Example patches in `tropical_program_1` JSON format. Load via `make mcp-ts` → 
 
 Input expressions can be:
 - **Literal number** — `440`, `0.5`
-- **Instance output reference** — `{"op": "ref", "instance": "VCO1", "output": "sin"}`
+- **Instance output reference** — `{"op": "ref", "instance": "Osc1", "output": "out"}`
 - **Binary operation** — `{"op": "mul", "args": [<expr>, <expr>]}`
 - **Unary operation** — `{"op": "neg", "args": [<expr>]}`
 
-Available ops: `add`, `sub`, `mul`, `div`, `mod`, `pow`, `neg`, `abs`, `sin`, `log`, `lt`, `lte`, `gt`, `gte`, `clamp`, `array_pack`, `matmul`.
+Available ops: `add`, `sub`, `mul`, `div`, `mod`, `neg`, `abs`, `sqrt`, `ldexp`, `float_exponent`, `lt`, `lte`, `gt`, `gte`, `clamp`, `select`, `array_pack`, `matmul`. Transcendentals (`sin`, `cos`, `tanh`, `exp`, `log`, `pow`) are stdlib programs — instantiate them and read via `nested_out`.
 
 ### Common program types and their I/O
 
 | Type | Inputs | Outputs |
 |------|--------|---------|
-| VCO | freq | sin, saw, tri, square |
+| Sin / Cos / Tanh | x | out |
+| Exp / Log | x | out |
+| Pow | x, y | out |
 | Clock | freq | output |
-| ADEnvelope | gate, attack, decay | env |
 | VCA | audio, cv | out |
+| LadderFilter | input, cutoff, resonance, drive | lp |
+| OnePole | input, cutoff | out |
+| SoftClip | input, drive | out |

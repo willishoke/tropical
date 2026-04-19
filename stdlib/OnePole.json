@@ -10,6 +10,16 @@
   ],
   "regs": { "s": 0 },
   "input_defaults": { "input": 0, "g": 0.1 },
+  "instances": {
+    "tanh_in": {
+      "program": "Tanh",
+      "inputs": { "x": { "op": "input", "name": "input" } }
+    },
+    "tanh_s": {
+      "program": "Tanh",
+      "inputs": { "x": { "op": "reg", "name": "s" } }
+    }
+  },
   "process": {
     "outputs": {
       "out": {
@@ -18,8 +28,8 @@
           { "op": "mul", "args": [
             { "op": "input", "name": "g" },
             { "op": "sub", "args": [
-              { "op": "tanh", "args": [{ "op": "input", "name": "input" }] },
-              { "op": "tanh", "args": [{ "op": "reg", "name": "s" }] }
+              { "op": "nested_out", "ref": "tanh_in", "output": "out" },
+              { "op": "nested_out", "ref": "tanh_s", "output": "out" }
             ]}
           ]}
         ]
@@ -32,8 +42,8 @@
           { "op": "mul", "args": [
             { "op": "input", "name": "g" },
             { "op": "sub", "args": [
-              { "op": "tanh", "args": [{ "op": "input", "name": "input" }] },
-              { "op": "tanh", "args": [{ "op": "reg", "name": "s" }] }
+              { "op": "nested_out", "ref": "tanh_in", "output": "out" },
+              { "op": "nested_out", "ref": "tanh_s", "output": "out" }
             ]}
           ]}
         ]

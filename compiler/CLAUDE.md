@@ -37,10 +37,10 @@ type ExprNode = number | boolean | ExprNode[] | { op: string; ... }
 
 `SignalExpr` wraps `ExprNode` with optional static shape metadata. All operations are free functions (no operator overloading in TS):
 
-- **Arithmetic**: `add`, `sub`, `mul`, `div`, `mod`, `pow`, `floorDiv`
+- **Arithmetic**: `add`, `sub`, `mul`, `div`, `mod`, `floorDiv`, `ldexp`
 - **Comparison**: `lt`, `lte`, `gt`, `gte`, `eq`, `neq`
 - **Bitwise**: `bitAnd`, `bitOr`, `bitXor`, `lshift`, `rshift`, `bitNot`
-- **Math**: `neg`, `abs`, `sin`, `cos`, `exp`, `log`, `tanh`, `logicalNot`
+- **Math**: `neg`, `abs`, `sqrt`, `float_exponent`, `logicalNot` (transcendentals — sin, cos, tanh, exp, log, pow — live in `stdlib/` as programs, not primitives)
 - **Ternary**: `clamp`, `select`
 - **Array**: `arrayPack`, `arraySet`, `index`, `zeros`, `ones`, `fill`, `reshape`, `transpose`, `slice`, `reduce`, `broadcastTo`, `mapArray`
 - **Matrix**: `matrix`, `matmul` (supports arbitrary semirings via `mul_op`/`add_op`)
@@ -58,11 +58,15 @@ Pure data types — no DSL, no side effects:
 
 ## Standard library (`stdlib/*.json`)
 
-19 built-in types as ProgramJSON files, loaded by `loadStdlib()` in `program.ts`:
+24 built-in types as ProgramJSON files, loaded by `loadStdlib()` in `program.ts`:
 
-VCO (polyBLEP), Clock, ADEnvelope (polyBLAMP), ADSREnvelope (polyBLAMP), VCA, Reverb (Freeverb-style: 4 comb + 6 allpass), Phaser/Phaser16, Compressor, BassDrum, LadderFilter (4-pole Moog), BitCrusher, NoiseLFSR, TopoWaveguide (2D mesh), Delay variants (8/16/512/4410/44100).
+- **Transcendentals** (polynomial approximations): Sin, Cos, Tanh, Exp, Log, Pow
+- **Filters / shapers**: OnePole, LadderFilter (4-pole Moog), SoftClip, BitCrusher
+- **Delays**: AllpassDelay, CombDelay, Delay1/8/16/512/4410/44100
+- **Effects**: Phaser, Phaser16
+- **Utility**: VCA, CrossFade, Clock, NoiseLFSR
 
-Complex programs use inline `programs` for subprogram composition (e.g., VCO defines `_wrap01` and `_polyBlep` as nested programs).
+Complex programs use inline `programs` for subprogram composition (e.g., Phaser defines `_allpassStage` as a nested program) and reference stdlib types via `instances: { name: { program: 'Sin', ... } }`.
 
 ## Compilation pipeline
 

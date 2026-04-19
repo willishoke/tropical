@@ -56,33 +56,22 @@ type ExprNode =
   | { op: string; ... } // named operation
 ```
 
-`SignalExpr` is a thin wrapper around `ExprNode` that tracks optional static shape metadata and provides named construction functions (`add`, `mul`, `sin`, etc.). TypeScript has no operator overloading, so all operations are free functions.
+`SignalExpr` is a thin wrapper around `ExprNode` that tracks optional static shape metadata and provides named construction functions (`add`, `mul`, `sqrt`, etc.). TypeScript has no operator overloading, so all operations are free functions.
 
 Operations available:
-- **Arithmetic**: `add`, `sub`, `mul`, `div`, `mod`, `pow`, `floorDiv`
+- **Arithmetic**: `add`, `sub`, `mul`, `div`, `mod`, `floorDiv`, `ldexp`
 - **Comparison**: `lt`, `lte`, `gt`, `gte`, `eq`, `neq`
 - **Bitwise**: `bitAnd`, `bitOr`, `bitXor`, `lshift`, `rshift`, `bitNot`
-- **Unary/math**: `neg`, `abs`, `sin`, `cos`, `exp`, `log`, `tanh`, `logicalNot`
+- **Unary/math**: `neg`, `abs`, `sqrt`, `float_exponent`, `logicalNot`. Transcendentals (sin, cos, tanh, exp, log, pow) are not primitives — they live in `stdlib/` as ProgramJSON files and are inlined at flatten time.
 - **Ternary**: `clamp`, `select`
 - **Array**: `arrayPack`, `arraySet`, `index`, `zeros`, `ones`, `fill`, `reshape`, `transpose`, `slice`, `reduce`, `broadcastTo`, `mapArray`
 - **Matrix**: `matrix`, `matmul`
-- **Function**: `exprFunction`, `exprCall`
-- **ADT**: `constructStruct`, `fieldAccess`, `constructVariant`, `matchVariant`
 - **Combinators** (compile-time expansion): `bindingExpr`, `let_`, `generate`, `repeat`, `iterate`, `fold`, `scan`, `map2`, `zipWith`, `chain`
 - **Leaf nodes**: `sampleRate`, `sampleIndex`, `inputExpr`, `registerExpr`, `refExpr`, `nestedOutputExpr`, `delayValueExpr`, `paramExpr`, `triggerParamExpr`
 
-### 2.2 C++ Expression AST (`engine/expr/Expr.hpp`)
+### 2.2 No C++ expression AST
 
-The C++ side has a parallel expression representation in `tropical_expr`:
-
-- **`Value`** — tagged union: `Int` (i64), `Float` (f64), `Bool`, `Array` (vector of Values), `Matrix` (row-major flat vector with dimensions), `Struct`, `Sum`
-- **`ExprSpec`** — tree node with `ExprKind` discriminator, `lhs`/`rhs`/`args` children, literal value, module name, slot IDs, control param pointer
-- **`ExprKind`** enum covers ~40 node kinds including all arithmetic, comparison, bitwise, unary, array, ADT, and param operations
-
-Supporting modules:
-- **`ExprEval.hpp`** — Interpreter for `Value` operations (used during program definition, not at runtime)
-- **`ExprRewrite.cpp`** — Constant folding, algebraic simplification (0*x→0, 1*x→x, x+0→x), dead ref replacement
-- **`ExprStructural.cpp`** — Structural hashing, structural equality, pure function inlining with substitution
+The C++ side has no expression AST. `NumericProgramParser.hpp` is a thin JSON deserializer that reads the pre-compiled `tropical_plan_4` instruction stream into a `FlatProgram` struct. All expression rewriting, constant folding, and structural work happens in TypeScript, upstream of emission.
 
 ---
 
@@ -121,26 +110,26 @@ There is no build context, no side effects, no DSL. The conversion from ProgramJ
 
 All built-in program types are defined as `ProgramJSON` files in `stdlib/`. They are loaded by `loadStdlib()` in `compiler/program.ts`, which reads each JSON file, validates it, and registers a `ProgramType`.
 
-19 built-in types:
+24 built-in types:
 
 | Type | Description | File |
 |------|-------------|------|
-| **VCO** | Band-limited oscillator (polyBLEP antialiasing) | `VCO.json` |
+| **Sin / Cos / Tanh** | Polynomial approximations (7th-order minimax for sin/cos, Padé for tanh) | `Sin.json`, `Cos.json`, `Tanh.json` |
+| **Exp / Log / Pow** | Cody-Waite + Horner for exp; exponent extraction + Remez for log; Exp∘Log for pow | `Exp.json`, `Log.json`, `Pow.json` |
 | **Clock** | Clock generator with ratio array | `Clock.json` |
-| **ADEnvelope** | Attack-decay envelope (polyBLAMP) | `ADEnvelope.json` |
-| **ADSREnvelope** | Full ADSR envelope (polyBLAMP) | `ADSREnvelope.json` |
 | **VCA** | Voltage-controlled amplifier | `VCA.json` |
-| **Reverb** | Freeverb-style (4 comb + 6 allpass) | `Reverb.json` |
-| **Phaser** / **Phaser16** | 4/16 stage allpass phaser | `Phaser.json`, `Phaser16.json` |
-| **Compressor** | Dynamic range compressor | `Compressor.json` |
-| **BassDrum** | Synthesized kick drum | `BassDrum.json` |
-| **LadderFilter** | 4-pole Moog-style filter | `LadderFilter.json` |
+| **OnePole** | One-pole lowpass with tanh saturation | `OnePole.json` |
+| **LadderFilter** | 4-pole Moog-style filter (4 OnePoles + Sin + Tanh) | `LadderFilter.json` |
+| **SoftClip** | Soft clipper (Tanh waveshaper) | `SoftClip.json` |
+| **CrossFade** | Linear crossfade between two signals | `CrossFade.json` |
+| **AllpassDelay** | First-order allpass, transposed direct form II | `AllpassDelay.json` |
+| **CombDelay** | Feedback comb filter | `CombDelay.json` |
+| **Phaser / Phaser16** | 4/16 stage allpass phaser (shared Sin) | `Phaser.json`, `Phaser16.json` |
 | **BitCrusher** | Bit depth and sample rate reduction | `BitCrusher.json` |
 | **NoiseLFSR** | Linear feedback shift register noise | `NoiseLFSR.json` |
-| **TopoWaveguide** | 2D waveguide mesh (4x4) | `TopoWaveguide.json` |
-| **Delay8/16/512/4410/44100** | Fixed-length delay lines | `Delay*.json` |
+| **Delay1/8/16/512/4410/44100** | Fixed-length delay lines | `Delay*.json` |
 
-Complex modules use inline `programs` for subprogram composition (e.g., VCO defines `_wrap01` and `_polyBlep` as nested programs, Reverb defines comb filter and allpass stage subprograms).
+Complex modules use inline `programs` for subprogram composition (e.g., Phaser defines `_allpassStage` as a nested program) and reference stdlib types via `instances: { sin1: { program: 'Sin', ... } }`. Even transcendentals are programs: swap a stdlib JSON file to change the approximation.
 
 ---
 
@@ -161,47 +150,22 @@ Programs are loaded via `loadJSON()` which accepts `tropical_program_1`. Saved a
 
 `ProgramJSON` (`compiler/program.ts`) is the sole schema. No legacy formats remain.
 
-### 4.2 Compiler (`compiler/compiler.ts`)
+### 4.2 Graph utilities (`compiler/compiler.ts`)
 
-The compiler converts a `CompilerInput` (modules + wiring + outputs) into a `CompiledPatch` containing a well-typed categorical `Term`.
+Graph primitives used by the flattener to determine execution order:
 
-Steps:
 1. **Dependency graph** — Extract instance references from input expressions via `exprDependencies()`, build adjacency map
-2. **Cycle detection** — Tarjan's SCC algorithm. Feedback cycles are errors (auto-trace not yet implemented)
-3. **Topological sort** — Kahn's algorithm with level grouping. Each level can execute in parallel
-4. **Term assembly** — For each level: build wiring morphism, build instance terms (stateless → morphism, stateful → trace), compose/tensor them
-5. **Type checking** — Verify the assembled term via `inferType()`
+2. **Cycle detection** — Tarjan's SCC algorithm (`tarjanSCC()`). Inter-instance feedback cycles and self-refs are resolved automatically by inserting synthetic one-sample delay registers in the flattener.
+3. **Topological sort** — Kahn's algorithm with level grouping
+4. **Port type conversion** — `portTypeFromString()` parses type annotations to `PortType`
 
-### 4.3 Term Language (`compiler/term.ts`)
+There is no separate term / morphism / optimizer pass in the current codebase. The pipeline goes directly from ExprNode → flatten → lower_arrays → emit_numeric, with ExprNode as the sole IR.
 
-The categorical IR — a free monoidal category:
+### 4.3 Port types (`compiler/term.ts`)
 
-**Objects** (types):
-- `ScalarType('float' | 'int' | 'bool')` — scalar types
-- `ArrayType(element, shape)` — static-shape arrays
-- `StructType(name)`, `SumType(name)` — algebraic data types
-- `product(factors)` — tensor product of types
-- `Unit` — monoidal unit
+`term.ts` provides `PortType` — a discriminated union describing signal port shapes (scalar, array, product) plus shape algebra helpers (`broadcastShapes`, `shapeStrides`, `shapeSize`, `flattenIndex`). It is pure data — no category-theoretic constructors, no optimizer, no type-checker at this layer. Type compatibility is enforced at wiring time by `array_wiring.ts`.
 
-**Morphisms** (terms):
-- `morphism(name, dom, cod, body)` — named function with expression body
-- `compose(first, second)` — sequential composition (f ; g)
-- `tensor(left, right)` — parallel execution (f x g)
-- `trace(stateType, init, body)` — feedback with typed state
-- `id(portType)` — identity morphism
-
-### 4.4 Type Checking (`compiler/type_check.ts`)
-
-Infers `{dom, cod}` for every term, validating composition boundaries (`cod(f) = dom(g)`), tensor products, and trace state alignment. Supports numpy-style shape broadcasting for array types.
-
-### 4.5 Optimizer (`compiler/optimizer.ts`)
-
-Structural rewrite passes on the term IR, iterated to fixed point:
-1. **Identity elimination** — `compose(id, f) → f`, `tensor(f, id(Unit)) → f`
-2. **Compose flattening** — right-associate nested compositions
-3. **Tensor flattening** — right-associate nested tensors
-
-### 4.6 Flattening (`compiler/flatten.ts`)
+### 4.4 Flattening (`compiler/flatten.ts`)
 
 The critical compilation step: transforms a multi-instance session into a single flat instruction stream (tropical_plan_4).
 
@@ -215,7 +179,7 @@ Key operations:
 
 All operations use WeakMap-based memoization to maintain DAG sharing and prevent exponential blowup.
 
-### 4.7 Array Lowering and Combinator Expansion (`compiler/lower_arrays.ts`)
+### 4.5 Array Lowering and Combinator Expansion (`compiler/lower_arrays.ts`)
 
 Lowers first-class array operations and compile-time combinators to scalar primitives. All shapes are static, so every expansion is fully unrolled.
 
@@ -239,7 +203,7 @@ Lowers first-class array operations and compile-time combinators to scalar primi
 
 Combinators are organized by intent to help LLMs narrow their search: **generative** (generate, repeat, iterate), **reductive** (fold, scan), **transformative** (map2, zip_with), **compositional** (chain, let).
 
-### 4.8 Instruction Emission (`compiler/emit_numeric.ts`)
+### 4.6 Instruction Emission (`compiler/emit_numeric.ts`)
 
 Walks the flattened ExprNode trees and emits a `FlatProgram` — a flat instruction stream for the C++ JIT.
 
@@ -259,7 +223,7 @@ The output `FlatProgram` also carries:
 - `output_targets` — which temps hold output values
 - `register_targets` — which temps hold updated register values
 
-### 4.9 Plan Application (`compiler/apply_plan.ts`)
+### 4.7 Plan Application (`compiler/apply_plan.ts`)
 
 `applyFlatPlan(session, runtime)` ties the pipeline together:
 1. `flattenSession(session)` → `FlatPlan` JSON
@@ -314,7 +278,7 @@ Singleton LLVM ORC JIT engine. Compiles `FlatProgram` → native kernel.
 
 **Type-directed code generation**: Every operand and instruction carries a scalar type (`Float`/`Int`/`Bool`). The JIT emits native `f64`/`i64`/`i1` operations with explicit coercion at type boundaries.
 
-**Inline transcendentals**: `sin`, `cos`, `exp`, `log`, `tanh` are implemented as inline polynomial approximations (no libm calls), making kernels self-contained and deterministic across platforms.
+**No transcendentals in the JIT**: sin, cos, tanh, exp, log, and pow are defined as ProgramJSON files in `stdlib/` (polynomial approximations using only arithmetic + `Ldexp` + `FloatExponent`). They inline at flatten time. The kernel contains no libm calls — kernels remain self-contained and deterministic across platforms.
 
 **Kernel object cache**: Compiled object code is persisted to `~/.cache/tropical/kernels/<build-id>/`. Cache key is MD5 of the canonical program; the build-id subdirectory (derived from the binary's LC_UUID / ELF build-id) auto-invalidates when the dylib is rebuilt.
 
@@ -447,9 +411,9 @@ The unified JSON format for all DSP programs. Validated by Zod schemas in `compi
     }
   },
   "instances": {
-    "osc": { "program": "VCO", "inputs": { "freq": 440 } },
+    "sin1": { "program": "Sin", "inputs": { "x": { "op": "mul", "args": [6.283185307179586, { "op": "sample_index" }] } } },
     "amp": { "program": "Gain", "inputs": {
-      "audio": { "op": "ref", "instance": "osc", "output": "sin" },
+      "audio": { "op": "ref", "instance": "sin1", "output": "out" },
       "cv": 0.5
     }}
   },
@@ -462,9 +426,9 @@ Key fields: `schema`, `name`, `inputs`/`outputs` (leaf/composite), `process` (le
 
 ---
 
-## 11. Type System (`compiler/term.ts`, `compiler/type_check.ts`, `compiler/morphism_registry.ts`)
+## 11. Type System (`compiler/term.ts`, `compiler/array_wiring.ts`)
 
-### Port Types (objects of the category)
+### Port Types
 - `Float`, `Int`, `Bool` — scalar types
 - `ArrayType(element, shape)` — static-shape arrays with numpy-style broadcasting
 - `StructType(name)`, `SumType(name)` — named algebraic data types
@@ -476,9 +440,6 @@ Numpy-style static broadcasting: shapes are right-aligned, dimension pairs must 
 
 ### Array Wiring (`compiler/array_wiring.ts`)
 Validates connections between typed ports. Scalar-to-array connections auto-broadcast. Array-to-scalar connections are errors. Shape mismatches within compatible broadcast rules insert `broadcast_to` wrappers.
-
-### Morphism Registry (`compiler/morphism_registry.ts`)
-Registry for named type coercion morphisms (e.g. equal-temperament realization from integer pitch classes to float frequencies). The compiler can auto-insert canonical morphisms at composition boundaries.
 
 ---
 
@@ -541,8 +502,8 @@ JIT failures are fatal. This simplifies the runtime (no dual code paths) and ens
 ### Static shapes for arrays
 All array shapes are known at compile time. This enables complete loop unrolling during array lowering and typed LLVM IR emission. No dynamic allocation on the audio thread.
 
-### Inline transcendentals
-sin, cos, exp, log, tanh are polynomial approximations emitted as inline LLVM IR. No libm dependency in kernels. Deterministic across platforms. Sufficient precision for audio (~1e-7 to 1e-10 max error).
+### Transcendentals as programs
+sin, cos, tanh, exp, log, pow are ProgramJSON files in `stdlib/`, implementing polynomial approximations (minimax / Padé / Cody-Waite + Horner) via arithmetic primitives plus `Ldexp` and `FloatExponent` for IEEE-754 2^n range reduction. They inline at flatten time. No libm dependency in kernels. Deterministic across platforms. Sufficient precision for audio (~1e-7 to 1e-10 max error). Swapping `stdlib/Sin.json` changes the sin approximation everywhere.
 
 ### Thread-safe control parameters
 `ControlParam` uses atomic load/store (relaxed ordering). Smoothed params apply one-pole lowpass per sample. Triggers use atomic exchange for fire-once semantics. Both are safe to write from any thread.

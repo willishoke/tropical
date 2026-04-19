@@ -42,10 +42,12 @@ Every wiring mutation triggers a full recompile and atomic kernel swap.
 
 ## Programs
 
-18 built-in DSP program types, all defined as human-readable JSON and compiled to native code at runtime:
+24 built-in DSP program types, all defined as human-readable JSON and compiled to native code at runtime:
 
 | Program | What it does |
 |---------|-------------|
+| **Sin / Cos / Tanh** | Polynomial approximations (7th-order minimax for sin/cos, Padé for tanh) |
+| **Exp / Log / Pow** | Cody-Waite + Horner polynomial for exp; exponent extraction + Remez for log; `exp(y · log(x))` for pow |
 | **OnePole** | One-pole lowpass filter with tanh saturation |
 | **AllpassDelay** | First-order allpass, transposed direct form II |
 | **CombDelay** | Feedback comb filter |
@@ -59,7 +61,7 @@ Every wiring mutation triggers a full recompile and atomic kernel swap.
 | **NoiseLFSR** | Linear feedback shift register noise |
 | **Delay1/8/16/512/4410/44100** | Fixed-length delay lines |
 
-Complex types compose from simpler ones — LadderFilter is 160 lines of JSON using OnePole instances, not an opaque blob. New program types can be defined at runtime via `define_program` — no rebuild required.
+Complex types compose from simpler ones — LadderFilter is a few hundred lines of JSON using OnePole and Sin instances, not an opaque blob. Even transcendentals are programs: swap `stdlib/Sin.json` to change the approximation. New program types can be defined at runtime via `define_program` — no rebuild required.
 
 ## Patches
 
@@ -79,9 +81,14 @@ Program format (`tropical_program_1`):
       "outputs": ["out"],
       "regs": { "phase": 0 },
       "input_defaults": { "freq": 440 },
+      "instances": {
+        "sin1": { "program": "Sin", "inputs": {
+          "x": { "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }
+        }}
+      },
       "process": {
         "outputs": {
-          "out": { "op": "sin", "args": [{ "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }] }
+          "out": { "op": "nested_out", "ref": "sin1", "output": "out" }
         },
         "next_regs": {
           "phase": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sample_rate" }] }] }, 1] }
