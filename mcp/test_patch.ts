@@ -28,7 +28,7 @@ console.log(`Frames:        ${nFrames}`)
 const json = JSON.parse(readFileSync(patchPath, 'utf-8'))
 
 const session = makeSession(256)
-loadBuiltins(session.typeRegistry)
+loadBuiltins(session)
 loadJSON(json, session)
 
 const runtime = session.runtime
