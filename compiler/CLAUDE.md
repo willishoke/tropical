@@ -58,11 +58,11 @@ Pure data types — no DSL, no side effects:
 
 ## Standard library (`stdlib/*.json`)
 
-24 built-in types as ProgramJSON files, loaded by `loadStdlib()` in `program.ts`:
+19 built-in types as ProgramJSON files, loaded by `loadStdlib()` in `program.ts`:
 
 - **Transcendentals** (polynomial approximations): Sin, Cos, Tanh, Exp, Log, Pow
 - **Filters / shapers**: OnePole, LadderFilter (4-pole Moog), SoftClip, BitCrusher
-- **Delays**: AllpassDelay, CombDelay, Delay1/8/16/512/4410/44100
+- **Delays**: AllpassDelay, CombDelay, Delay (generic — `type_args: {N}`, default 44100)
 - **Effects**: Phaser, Phaser16
 - **Utility**: VCA, CrossFade, Clock, NoiseLFSR
 
