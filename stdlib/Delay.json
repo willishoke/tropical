@@ -1,0 +1,25 @@
+{
+  "schema": "tropical_program_1",
+  "name": "Delay",
+  "type_params": { "N": { "type": "int", "default": 44100 } },
+  "inputs": ["x"],
+  "outputs": ["y"],
+  "regs": { "buf": { "zeros": { "type_param": "N" } } },
+  "input_defaults": { "x": 0 },
+  "breaks_cycles": true,
+  "process": {
+    "outputs": {
+      "y": { "op": "index", "args": [
+        { "op": "reg", "name": "buf" },
+        { "op": "mod", "args": [{ "op": "sample_index" }, { "op": "type_param", "name": "N" }] }
+      ]}
+    },
+    "next_regs": {
+      "buf": { "op": "array_set", "args": [
+        { "op": "reg", "name": "buf" },
+        { "op": "mod", "args": [{ "op": "sample_index" }, { "op": "type_param", "name": "N" }] },
+        { "op": "input", "name": "x" }
+      ]}
+    }
+  }
+}

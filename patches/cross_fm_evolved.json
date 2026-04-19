@@ -97,10 +97,10 @@
       ]}
     }},
 
-    "d1": {"program": "Delay8", "inputs": {"x": {"op": "ref", "instance": "vco1", "output": "sin"}}},
-    "d2": {"program": "Delay8", "inputs": {"x": {"op": "ref", "instance": "vco2", "output": "sin"}}},
-    "d3": {"program": "Delay8", "inputs": {"x": {"op": "ref", "instance": "vco3", "output": "sin"}}},
-    "d4": {"program": "Delay8", "inputs": {"x": {"op": "ref", "instance": "vco4", "output": "sin"}}},
+    "d1": {"program": "Delay", "type_args": {"N": 8}, "inputs": {"x": {"op": "ref", "instance": "vco1", "output": "sin"}}},
+    "d2": {"program": "Delay", "type_args": {"N": 8}, "inputs": {"x": {"op": "ref", "instance": "vco2", "output": "sin"}}},
+    "d3": {"program": "Delay", "type_args": {"N": 8}, "inputs": {"x": {"op": "ref", "instance": "vco3", "output": "sin"}}},
+    "d4": {"program": "Delay", "type_args": {"N": 8}, "inputs": {"x": {"op": "ref", "instance": "vco4", "output": "sin"}}},
 
     "v1": {"program": "VoiceChannel", "inputs": {
       "audio": {"op": "ref", "instance": "vco1", "output": "sin"},
