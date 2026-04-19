@@ -362,7 +362,9 @@ export function saveProgramFromSession(
   if (session.instanceRegistry.size) {
     prog.instances = {}
     for (const [name, inst] of session.instanceRegistry) {
-      prog.instances[name] = { program: inst.typeName }
+      const entry: { program: string; type_args?: Record<string, number> } = { program: inst.typeName }
+      if (inst.typeArgs) entry.type_args = inst.typeArgs
+      prog.instances[name] = entry
     }
 
     // Merge wiring into instance inputs
@@ -533,9 +535,10 @@ export function exportSessionAsProgram(
   prog.instances = {}
   for (const instName of order) {
     const inst = session.instanceRegistry.get(instName)!
-    const entry: { program: string; inputs?: Record<string, ExprNode> } = {
+    const entry: { program: string; type_args?: Record<string, number>; inputs?: Record<string, ExprNode> } = {
       program: inst.typeName,
     }
+    if (inst.typeArgs) entry.type_args = inst.typeArgs
 
     // Copy wiring, rewriting exposed ports to {op:"input", name:...}
     // and ref→nested_out for sibling instances

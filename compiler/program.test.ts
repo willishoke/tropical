@@ -6,9 +6,10 @@ import { describe, test, expect } from 'bun:test'
 import { parseProgram } from './schema'
 import { makeSession, loadJSON } from './session'
 import {
-  loadStdlib as loadBuiltins, loadProgramAsType,
-  exportSessionAsProgram, type ProgramJSON,
+  loadStdlib as loadBuiltins, loadProgramAsType, loadProgramAsSession,
+  saveProgramFromSession, exportSessionAsProgram, type ProgramJSON,
 } from './program'
+import { resolveProgramType } from './session'
 import { validateExpr } from './expr'
 
 // ─────────────────────────────────────────────────────────────
@@ -102,6 +103,76 @@ describe('exportSessionAsProgram', () => {
 // ─────────────────────────────────────────────────────────────
 // On-demand type resolution
 // ─────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────
+// Generic programs — save/load round-trip
+// ─────────────────────────────────────────────────────────────
+
+describe('generic programs round-trip', () => {
+  function genericDelay(): ProgramJSON {
+    return {
+      schema: 'tropical_program_1',
+      name: 'Delay',
+      type_params: { N: { type: 'int', default: 44100 } },
+      inputs: ['x'],
+      outputs: ['y'],
+      regs: { buf: { zeros: { type_param: 'N' } } as any },
+      input_defaults: { x: 0 },
+      breaks_cycles: true,
+      process: {
+        outputs: {
+          y: {
+            op: 'index',
+            args: [
+              { op: 'reg', name: 'buf' },
+              { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
+            ],
+          },
+        },
+        next_regs: {
+          buf: {
+            op: 'array_set',
+            args: [
+              { op: 'reg', name: 'buf' },
+              { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
+              { op: 'input', name: 'x' },
+            ],
+          },
+        },
+      },
+    }
+  }
+
+  test('saveProgramFromSession emits type_args on instance entries', () => {
+    const session = makeSession()
+    loadProgramAsType(genericDelay(), session)
+    const { type, typeArgs } = resolveProgramType(session, 'Delay', { N: 8 }, undefined)
+    const inst = type.instantiateAs('d1', { baseTypeName: 'Delay', typeArgs })
+    session.instanceRegistry.set('d1', inst)
+
+    const saved = saveProgramFromSession(session)
+    expect(saved.instances!['d1'].program).toBe('Delay')
+    expect(saved.instances!['d1'].type_args).toEqual({ N: 8 })
+  })
+
+  test('saveProgramFromSession omits type_args on non-generic instances', () => {
+    const session = makeSession()
+    const p: ProgramJSON = {
+      schema: 'tropical_program_1',
+      name: 'Passthrough',
+      inputs: ['x'],
+      outputs: ['y'],
+      process: { outputs: { y: { op: 'input', name: 'x' } } },
+    }
+    loadProgramAsType(p, session)
+    const { type } = resolveProgramType(session, 'Passthrough', undefined, undefined)
+    session.instanceRegistry.set('p1', type.instantiateAs('p1', { baseTypeName: 'Passthrough' }))
+
+    const saved = saveProgramFromSession(session)
+    expect(saved.instances!['p1'].program).toBe('Passthrough')
+    expect(saved.instances!['p1'].type_args).toBeUndefined()
+  })
+})
 
 describe('typeResolver', () => {
   test('circular stdlib dependency throws with cycle path', () => {

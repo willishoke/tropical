@@ -295,8 +295,8 @@ export function resolveBounds(
 // Generic program resolution
 // ─────────────────────────────────────────────────────────────
 
-type ResolveSession = Pick<SessionState, 'typeRegistry' | 'specializationCache' | 'genericTemplates'> &
-  Partial<Pick<SessionState, 'typeResolver' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'typeAliasRegistry'>>
+type ResolveSession = Pick<SessionState, 'typeRegistry' | 'specializationCache' | 'genericTemplates' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> &
+  Partial<Pick<SessionState, 'typeResolver' | 'typeAliasRegistry'>>
 
 /**
  * Resolve a (baseName, type_args) pair to a concrete ProgramType.

@@ -67,7 +67,7 @@ function resolveValue(
 ): number {
   if (typeof v === 'number') return v
   if (v && typeof v === 'object' && !Array.isArray(v) && (v as { op?: string }).op === 'type_param') {
-    const name = (v as { name: string }).name
+    const name = (v as unknown as { name: string }).name
     if (!outerArgs || !(name in outerArgs)) {
       throw new Error(`${context}: unresolved type_param '${name}' (no outer frame provides it)`)
     }
@@ -156,7 +156,7 @@ export function specializeProgramJSON(
           if (typeof v === 'number') {
             resolved[k] = v
           } else if (v && typeof v === 'object' && !Array.isArray(v) && (v as { op?: string }).op === 'type_param') {
-            const pn = (v as { name: string }).name
+            const pn = (v as unknown as { name: string }).name
             if (!(pn in args)) {
               throw new Error(`${prog.name}: instance '${alias}' forwards unknown type_param '${pn}'`)
             }

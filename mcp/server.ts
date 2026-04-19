@@ -110,7 +110,13 @@ function resolveInputIdx(inst: { inputNames: string[] }, nameOrIdx: string | num
 
 function instanceSummary(name: string) {
   const inst = session.instanceRegistry.get(name)!
-  return { name, type_name: inst.typeName, inputs: inst.inputNames, outputs: inst.outputNames }
+  return {
+    name,
+    type_name: inst.typeName,
+    type_args: inst.typeArgs ?? null,
+    inputs: inst.inputNames,
+    outputs: inst.outputNames,
+  }
 }
 
 /** Apply wiring via FlatRuntime. */
@@ -137,12 +143,13 @@ const TOOLS = [
   },
   {
     name: 'add_instance',
-    description: 'Create a named instance of a registered program type.',
+    description: 'Create a named instance of a registered program type. For generic programs (those declaring type_params — see list_programs), supply type_args with concrete integer values (e.g. {"N": 44100}).',
     inputSchema: {
       type: 'object',
       properties: {
         program:       { type: 'string', description: 'Registered program/type name (builtin or user-defined)' },
         instance_name: { type: 'string', description: 'Unique name for this instance' },
+        type_args:     { type: 'object', description: 'Compile-time type args for generic programs, e.g. {"N": 44100}. Omit for non-generic programs.' },
       },
       required: ['program', 'instance_name'],
     },
@@ -165,6 +172,7 @@ const TOOLS = [
         program:     { type: 'string', description: 'Registered program type name' },
         count:       { type: 'number', description: 'Number of instances to create' },
         name_prefix: { type: 'string', description: 'Name prefix for instances (default: lowercase program name). Instances are named prefix1, prefix2, …' },
+        type_args:   { type: 'object', description: 'Compile-time type args applied to every created instance, e.g. {"N": 8}. Omit for non-generic programs.' },
       },
       required: ['program', 'count'],
     },
@@ -736,8 +744,9 @@ function handleExportProgram(args: Record<string, unknown>) {
 
     const prog = exportSessionAsProgram(session, { name, inputs, outputs })
 
-    // Register as a usable type
+    // Register as a usable type (exported programs are never generic)
     const type = loadProgramAsType(prog, session)
+    if (!type) throw new Error(`export_program produced a generic program — not supported`)
     session.typeRegistry.set(name, type)
 
     // Optionally clean up exported instances from the session
@@ -789,8 +798,8 @@ function handleRemoveInstance(instanceName: string) {
 }
 
 function handleListPrograms() {
-  return wrap(() =>
-    [...session.typeRegistry.entries()].map(([typeName, type]) => {
+  return wrap(() => {
+    const concrete = [...session.typeRegistry.entries()].map(([typeName, type]) => {
       const d = type._def
       const defaultsMap = (d.rawInputDefaults ?? {}) as Record<string, unknown>
       return {
@@ -807,9 +816,24 @@ function handleListPrograms() {
           bounds: d.outputBounds[i] ?? null,
         })),
         registers: d.registerNames.map((n, i) => ({ name: n, type: d.registerPortTypes[i] ?? null })),
+        type_params: null as Record<string, { type: 'int'; default?: number }> | null,
       }
-    }),
-  )
+    })
+
+    const generic = [...session.genericTemplates.entries()].map(([typeName, prog]) => ({
+      program_name: typeName,
+      inputs: (prog.inputs ?? []).map(i => typeof i === 'string'
+        ? { name: i, type: null, bounds: null, default: prog.input_defaults?.[i] ?? null }
+        : { name: i.name, type: i.type ?? null, bounds: i.bounds ?? null, default: prog.input_defaults?.[i.name] ?? i.default ?? null }),
+      outputs: (prog.outputs ?? []).map(o => typeof o === 'string'
+        ? { name: o, type: null, bounds: null }
+        : { name: o.name, type: o.type ?? null, bounds: o.bounds ?? null }),
+      registers: [] as Array<{ name: string; type: string | null }>,
+      type_params: prog.type_params ?? null,
+    }))
+
+    return [...concrete, ...generic]
+  })
 }
 
 function handleListInstances() {
@@ -825,6 +849,7 @@ function handleGetInfo(instanceName: string) {
     return {
       name: instanceName,
       program: inst.typeName,
+      type_args: inst.typeArgs ?? null,
       inputs:  inst.inputNames.map((n, i) => ({
         name: n, index: i,
         type: inst._def.inputPortTypes[i] ?? null,
