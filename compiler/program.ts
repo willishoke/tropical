@@ -269,9 +269,9 @@ export function loadProgramAsType(
     }
   }
 
-  // Generic: stash the template, defer compilation to instantiation time.
+  // Generic: stash the template as a ProgramNode, defer compilation to instantiation time.
   if (prog.type_params && Object.keys(prog.type_params).length > 0) {
-    session.genericTemplates.set(prog.name, prog)
+    session.genericTemplates.set(prog.name, v1ProgramJSONToV2Node(prog).node)
     return undefined
   }
 

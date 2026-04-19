@@ -1,41 +1,75 @@
 import { describe, test, expect } from 'bun:test'
 import {
-  specializeProgramJSON,
+  specializeProgramNode,
   specializationCacheKey,
   resolveTypeArgs,
 } from './specialize.js'
-import type { ProgramJSON } from './program.js'
+import type { ExprNode } from './expr.js'
+import type { ProgramNode } from './program.js'
 
-function makeGenericDelay(): ProgramJSON {
+type RegDecl = { op: 'reg_decl'; name: string; init: unknown; type?: unknown }
+type InstanceDecl = { op: 'instance_decl'; name: string; program: string; inputs?: Record<string, ExprNode>; type_args?: Record<string, number | ExprNode> }
+type OutputAssign = { op: 'output_assign'; name: string; expr: ExprNode }
+type NextUpdate = { op: 'next_update'; target: { kind: 'reg' | 'delay'; name: string }; expr: ExprNode }
+
+function findDecl<T extends { op: string; name: string }>(prog: ProgramNode, op: T['op'], name: string): T {
+  const decl = (prog.body.decls ?? []).find(d =>
+    typeof d === 'object' && d !== null && !Array.isArray(d) &&
+    (d as { op?: string }).op === op && (d as { name?: string }).name === name,
+  )
+  if (!decl) throw new Error(`no ${op} named '${name}'`)
+  return decl as T
+}
+
+function findAssign<T extends { op: string }>(prog: ProgramNode, op: T['op'], matcher: (a: T) => boolean): T {
+  const a = (prog.body.assigns ?? []).find(x =>
+    typeof x === 'object' && x !== null && !Array.isArray(x) &&
+    (x as { op?: string }).op === op && matcher(x as T),
+  )
+  if (!a) throw new Error(`no ${op} matching predicate`)
+  return a as T
+}
+
+function makeGenericDelay(): ProgramNode {
   return {
-    schema: 'tropical_program_1',
+    op: 'program',
     name: 'Delay',
     type_params: { N: { type: 'int', default: 44100 } },
-    inputs: ['x'],
-    outputs: ['y'],
-    regs: { buf: { zeros: { type_param: 'N' } } },
-    input_defaults: { x: 0 },
     breaks_cycles: true,
-    process: {
-      outputs: {
-        y: {
-          op: 'index',
-          args: [
-            { op: 'reg', name: 'buf' },
-            { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
-          ],
-        },
-      },
-      next_regs: {
-        buf: {
-          op: 'array_set',
-          args: [
-            { op: 'reg', name: 'buf' },
-            { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
-            { op: 'input', name: 'x' },
-          ],
-        },
-      },
+    ports: {
+      inputs: [{ name: 'x', default: 0 }],
+      outputs: ['y'],
+    },
+    body: {
+      op: 'block',
+      decls: [
+        { op: 'reg_decl', name: 'buf', init: { zeros: { type_param: 'N' } } } as unknown as ExprNode,
+      ],
+      assigns: [
+        {
+          op: 'output_assign',
+          name: 'y',
+          expr: {
+            op: 'index',
+            args: [
+              { op: 'reg', name: 'buf' },
+              { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
+            ],
+          },
+        } as unknown as ExprNode,
+        {
+          op: 'next_update',
+          target: { kind: 'reg', name: 'buf' },
+          expr: {
+            op: 'array_set',
+            args: [
+              { op: 'reg', name: 'buf' },
+              { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
+              { op: 'input', name: 'x' },
+            ],
+          },
+        } as unknown as ExprNode,
+      ],
     },
   }
 }
@@ -91,191 +125,236 @@ describe('specializationCacheKey', () => {
   })
 })
 
-describe('specializeProgramJSON', () => {
-  test('substitutes type_param in process outputs and next_regs', () => {
+describe('specializeProgramNode', () => {
+  test('substitutes type_param in output and next_update exprs', () => {
     const prog = makeGenericDelay()
-    const spec = specializeProgramJSON(prog, { N: 8 })
+    const spec = specializeProgramNode(prog, { N: 8 })
 
     // N is declared `type: 'int'`, so substitutions emit typed-const nodes.
-    const yExpr = spec.process!.outputs.y as any
-    expect(yExpr.args[1].args[1]).toEqual({ op: 'const', val: 8, type: 'int' })
+    const yAssign = findAssign<OutputAssign>(spec, 'output_assign', a => a.name === 'y')
+    const yExpr = yAssign.expr as { args: [unknown, { args: [unknown, unknown] }] }
+    expect(yExpr.args[1].args[1]).toEqual({ op: 'const', val: 8, type: 'int' } as ExprNode)
 
-    const bufExpr = spec.process!.next_regs!.buf as any
-    expect(bufExpr.args[1].args[1]).toEqual({ op: 'const', val: 8, type: 'int' })
+    const bufUpdate = findAssign<NextUpdate>(spec, 'next_update', a => a.target.name === 'buf')
+    const bufExpr = bufUpdate.expr as { args: [unknown, { args: [unknown, unknown] }, unknown] }
+    expect(bufExpr.args[1].args[1]).toEqual({ op: 'const', val: 8, type: 'int' } as ExprNode)
   })
 
   test('substitutes { zeros: { type_param } } to { zeros: N }', () => {
     const prog = makeGenericDelay()
-    const spec = specializeProgramJSON(prog, { N: 512 })
-    expect(spec.regs!.buf).toEqual({ zeros: 512 })
+    const spec = specializeProgramNode(prog, { N: 512 })
+    const buf = findDecl<RegDecl>(spec, 'reg_decl', 'buf')
+    expect(buf.init).toEqual({ zeros: 512 })
   })
 
   test('leaves { zeros: N } literal untouched', () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramNode = {
+      op: 'program',
       name: 'Fixed',
-      regs: { buf: { zeros: 100 } as any },
-      process: { outputs: { y: 0 } },
-      outputs: ['y'],
+      ports: { outputs: ['y'] },
+      body: {
+        op: 'block',
+        decls: [{ op: 'reg_decl', name: 'buf', init: { zeros: 100 } } as unknown as ExprNode],
+        assigns: [{ op: 'output_assign', name: 'y', expr: 0 } as unknown as ExprNode],
+      },
     }
-    const spec = specializeProgramJSON(prog, {})
-    expect(spec.regs!.buf).toEqual({ zeros: 100 })
+    const spec = specializeProgramNode(prog, {})
+    const buf = findDecl<RegDecl>(spec, 'reg_decl', 'buf')
+    expect(buf.init).toEqual({ zeros: 100 })
   })
 
   test('is a deep clone — mutating output does not affect input', () => {
     const prog = makeGenericDelay()
-    const spec = specializeProgramJSON(prog, { N: 8 })
-    ;(spec.process!.outputs.y as any).op = 'mutated'
-    const yExpr = prog.process!.outputs.y as any
-    expect(yExpr.op).toBe('index')
+    const spec = specializeProgramNode(prog, { N: 8 })
+    const yAssign = findAssign<OutputAssign>(spec, 'output_assign', a => a.name === 'y')
+    ;(yAssign.expr as { op: string }).op = 'mutated'
+    const origAssign = findAssign<OutputAssign>(prog, 'output_assign', a => a.name === 'y')
+    expect((origAssign.expr as { op: string }).op).toBe('index')
   })
 
-  test('substitutes in input_defaults', () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+  test('substitutes in input port defaults', () => {
+    const prog: ProgramNode = {
+      op: 'program',
       name: 'X',
       type_params: { N: { type: 'int' } },
-      inputs: ['x'],
-      outputs: ['y'],
-      input_defaults: { x: { op: 'type_param', name: 'N' } },
-      process: { outputs: { y: { op: 'input', name: 'x' } } },
+      ports: {
+        inputs: [{ name: 'x', default: { op: 'type_param', name: 'N' } }],
+        outputs: ['y'],
+      },
+      body: {
+        op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } } as unknown as ExprNode],
+      },
     }
-    const spec = specializeProgramJSON(prog, { N: 42 })
-    // N: int — typed-const form
-    expect(spec.input_defaults!.x).toEqual({ op: 'const', val: 42, type: 'int' })
+    const spec = specializeProgramNode(prog, { N: 42 })
+    const xSpec = spec.ports!.inputs![0] as { name: string; default: ExprNode }
+    expect(xSpec.default).toEqual({ op: 'const', val: 42, type: 'int' } as ExprNode)
   })
 
   test('substitutes in instance inputs and type_args', () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramNode = {
+      op: 'program',
       name: 'Outer',
       type_params: { N: { type: 'int' } },
-      inputs: [],
-      outputs: ['y'],
-      instances: {
-        d: {
-          program: 'Delay',
-          inputs: { x: { op: 'type_param', name: 'N' } },
-          type_args: { N: { op: 'type_param', name: 'N' } },
-        },
+      ports: { inputs: [], outputs: ['y'] },
+      body: {
+        op: 'block',
+        decls: [
+          {
+            op: 'instance_decl',
+            name: 'd',
+            program: 'Delay',
+            inputs: { x: { op: 'type_param', name: 'N' } },
+            type_args: { N: { op: 'type_param', name: 'N' } },
+          } as unknown as ExprNode,
+        ],
+        assigns: [
+          { op: 'output_assign', name: 'y', expr: { op: 'nested_out', ref: 'd', output: 'y' } } as unknown as ExprNode,
+        ],
       },
-      process: { outputs: { y: { op: 'nested_out', ref: 'd', output: 'y' } } },
     }
-    const spec = specializeProgramJSON(prog, { N: 256 })
-    // N: int — typed-const in ExprNode slot; raw integer in type_args slot.
-    expect(spec.instances!.d.inputs!.x).toEqual({ op: 'const', val: 256, type: 'int' })
-    expect((spec.instances!.d as any).type_args).toEqual({ N: 256 })
+    const spec = specializeProgramNode(prog, { N: 256 })
+    const d = findDecl<InstanceDecl>(spec, 'instance_decl', 'd')
+    expect(d.inputs!.x).toEqual({ op: 'const', val: 256, type: 'int' } as ExprNode)
+    expect(d.type_args).toEqual({ N: 256 })
   })
 
   test('throws on type_param ref with undeclared name', () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramNode = {
+      op: 'program',
       name: 'X',
       type_params: { N: { type: 'int' } },
-      outputs: ['y'],
-      process: { outputs: { y: { op: 'type_param', name: 'Z' } } },
+      ports: { outputs: ['y'] },
+      body: {
+        op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'type_param', name: 'Z' } } as unknown as ExprNode],
+      },
     }
-    expect(() => specializeProgramJSON(prog, { N: 8 })).toThrow(/undeclared type_param 'Z'/)
+    expect(() => specializeProgramNode(prog, { N: 8 })).toThrow(/undeclared type_param 'Z'/)
   })
 
   test('substitutes type_param inside combinator body', () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramNode = {
+      op: 'program',
       name: 'X',
       type_params: { N: { type: 'int' } },
-      outputs: ['y'],
-      process: {
-        outputs: {
-          y: {
-            op: 'generate',
-            n: { op: 'type_param', name: 'N' } as any,
-            i: 'i',
-            body: { op: 'binding', name: 'i' },
-          } as any,
-        },
+      ports: { outputs: ['y'] },
+      body: {
+        op: 'block',
+        assigns: [
+          {
+            op: 'output_assign',
+            name: 'y',
+            expr: {
+              op: 'generate',
+              n: { op: 'type_param', name: 'N' },
+              i: 'i',
+              body: { op: 'binding', name: 'i' },
+            },
+          } as unknown as ExprNode,
+        ],
       },
     }
-    const spec = specializeProgramJSON(prog, { N: 4 })
-    const y = spec.process!.outputs.y as any
-    // N: int — typed-const. (The combinator lowerer reads `count`, not `n`,
-    // so this test only confirms structural recursion through `n`.)
-    expect(y.n).toEqual({ op: 'const', val: 4, type: 'int' })
+    const spec = specializeProgramNode(prog, { N: 4 })
+    const yAssign = findAssign<OutputAssign>(spec, 'output_assign', a => a.name === 'y')
+    const y = yAssign.expr as { n: ExprNode }
+    expect(y.n).toEqual({ op: 'const', val: 4, type: 'int' } as ExprNode)
   })
 
   test('substitutes type_param refs in input port type shapes', () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramNode = {
+      op: 'program',
       name: 'ArrIn',
       type_params: { N: { type: 'int' } },
-      inputs: [
-        { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
-      ],
-      outputs: ['y'],
-      process: { outputs: { y: 0 } },
+      ports: {
+        inputs: [
+          { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
+        ],
+        outputs: ['y'],
+      },
+      body: {
+        op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: 0 } as unknown as ExprNode],
+      },
     }
-    const spec = specializeProgramJSON(prog, { N: 8 })
-    const input = spec.inputs![0] as { name: string; type: any }
+    const spec = specializeProgramNode(prog, { N: 8 })
+    const input = spec.ports!.inputs![0] as { name: string; type: unknown }
     expect(input.type).toEqual({ kind: 'array', element: 'float', shape: [8] })
   })
 
   test('substitutes type_param refs in output port type shapes', () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramNode = {
+      op: 'program',
       name: 'ArrOut',
       type_params: { N: { type: 'int' } },
-      outputs: [
-        { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }, 2] } },
-      ],
-      process: { outputs: { out: 0 } },
+      ports: {
+        outputs: [
+          { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }, 2] } },
+        ],
+      },
+      body: {
+        op: 'block',
+        assigns: [{ op: 'output_assign', name: 'out', expr: 0 } as unknown as ExprNode],
+      },
     }
-    const spec = specializeProgramJSON(prog, { N: 3 })
-    const out = spec.outputs![0] as { name: string; type: any }
+    const spec = specializeProgramNode(prog, { N: 3 })
+    const out = spec.ports!.outputs![0] as { name: string; type: unknown }
     expect(out.type).toEqual({ kind: 'array', element: 'float', shape: [3, 2] })
   })
 
   test('rejects a port type shape referencing an undeclared type_param', () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramNode = {
+      op: 'program',
       name: 'BadArr',
       type_params: { N: { type: 'int' } },
-      inputs: [
-        { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'M' }] } },
-      ],
-      outputs: ['y'],
-      process: { outputs: { y: 0 } },
+      ports: {
+        inputs: [
+          { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'M' }] } },
+        ],
+        outputs: ['y'],
+      },
+      body: {
+        op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: 0 } as unknown as ExprNode],
+      },
     }
-    expect(() => specializeProgramJSON(prog, { N: 4 })).toThrow(/undeclared type_param 'M'/)
+    expect(() => specializeProgramNode(prog, { N: 4 })).toThrow(/undeclared type_param 'M'/)
   })
 
-  // ── Typed-const substitution (Phase 1) ──────────────────────
+  // ── Typed-const substitution ─────────────────────────────────
   //
   // type_params with declared `type: 'int'` (or 'bool') must emit a typed
   // const ExprNode `{op:'const', val:N, type:'int'}`, not a bare JS number.
   // The bare-number path forces emit_numeric to type it as float.
 
   test("int type_param ref inside ExprNode position substitutes to a typed-int const node", () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramNode = {
+      op: 'program',
       name: 'X',
       type_params: { N: { type: 'int', default: 8 } },
-      regs: { step: { init: 0, type: 'int' } as any },
-      outputs: ['y'],
-      process: {
-        outputs: { y: { op: 'reg', name: 'step' } },
-        next_regs: {
-          step: {
-            op: 'mod',
-            args: [
-              { op: 'add', args: [{ op: 'reg', name: 'step' }, 1] },
-              { op: 'type_param', name: 'N' },
-            ],
-          },
-        },
+      ports: { outputs: ['y'] },
+      body: {
+        op: 'block',
+        decls: [{ op: 'reg_decl', name: 'step', init: 0, type: 'int' } as unknown as ExprNode],
+        assigns: [
+          { op: 'output_assign', name: 'y', expr: { op: 'reg', name: 'step' } } as unknown as ExprNode,
+          {
+            op: 'next_update',
+            target: { kind: 'reg', name: 'step' },
+            expr: {
+              op: 'mod',
+              args: [
+                { op: 'add', args: [{ op: 'reg', name: 'step' }, 1] },
+                { op: 'type_param', name: 'N' },
+              ],
+            },
+          } as unknown as ExprNode,
+        ],
       },
     }
-    const spec = specializeProgramJSON(prog, { N: 4 })
-    const stepExpr = spec.process!.next_regs!.step as any
-    // mod(args[0], args[1]) where args[1] was `{op:'type_param',name:'N'}`.
-    expect(stepExpr.args[1]).toEqual({ op: 'const', val: 4, type: 'int' })
+    const spec = specializeProgramNode(prog, { N: 4 })
+    const stepUpdate = findAssign<NextUpdate>(spec, 'next_update', a => a.target.name === 'step')
+    const stepExpr = stepUpdate.expr as { args: [unknown, unknown] }
+    expect(stepExpr.args[1]).toEqual({ op: 'const', val: 4, type: 'int' } as ExprNode)
   })
 })

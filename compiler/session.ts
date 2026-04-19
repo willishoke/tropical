@@ -14,7 +14,7 @@ import { loadProgramAsSession, type ProgramJSON, type PortTypeDecl, type Program
 import { parseProgramV2 } from './schema.js'
 import { Param, Trigger } from './runtime/param.js'
 import {
-  specializeProgramJSON, specializationCacheKey, resolveTypeArgs,
+  specializeProgramNode, specializationCacheKey, resolveTypeArgs,
   type RawTypeArgs, type ResolvedTypeArgs,
 } from './specialize.js'
 import { type PortType, Float, Int, Bool, Unit, ArrayType, StructType } from './term.js'
@@ -83,9 +83,9 @@ export interface SessionState {
   typeResolver?: (name: string) => ProgramType | undefined
   /** Monomorphized specializations of generic programs, keyed by `Type<k1=v1,k2=v2>`. */
   specializationCache: Map<string, ProgramType>
-  /** Raw ProgramJSON templates for generic programs (pre-specialization). Keyed by type name.
+  /** ProgramNode templates for generic programs (pre-specialization). Keyed by type name.
    *  Only populated for programs declaring type_params. */
-  genericTemplates: Map<string, import('./program.js').ProgramJSON>
+  genericTemplates: Map<string, import('./program.js').ProgramNode>
   /** Name counter for auto-generated instance names. */
   _nameCounters: Map<string, number>
 }
@@ -352,9 +352,9 @@ export function resolveProgramType(
     const key = specializationCacheKey(baseName, resolved)
     const cached = session.specializationCache.get(key)
     if (cached) return { type: cached, typeArgs: resolved }
-    const specialized = specializeProgramJSON(template, resolved)
+    const specialized = specializeProgramNode(template, resolved)
     specialized.name = key
-    const type = loadProgramDef(v1ProgramJSONToV2Node(specialized).node, session)
+    const type = loadProgramDef(specialized, session)
     session.specializationCache.set(key, type)
     return { type, typeArgs: resolved }
   }

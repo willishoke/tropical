@@ -1,18 +1,18 @@
 /**
- * specialize.ts — Monomorphization of type-parameterized ProgramJSON.
+ * specialize.ts — Monomorphization of type-parameterized ProgramNode.
  *
  * A program declares `type_params` (e.g. { N: { type: 'int', default: 44100 } }).
  * An instance supplies `type_args` (e.g. { N: 8 } or, in nested contexts,
  * { N: { op: 'type_param', name: 'N' } } to forward from the outer frame).
  *
- * `specializeProgramJSON` clones the template and substitutes every
+ * `specializeProgramNode` clones the template and substitutes every
  * `{ op: 'type_param', name }` ExprNode with the integer literal, and every
- * `{ zeros: { type_param: name } }` reg value with the resolved integer count.
- * The result is a normal ProgramJSON that `loadProgramDef` can consume
- * without any awareness of type parameters.
+ * `{ zeros: { type_param: name } }` reg init with the resolved integer count.
+ * The result is a ProgramNode that `loadProgramDef` can consume without any
+ * awareness of type parameters.
  */
 import type { ExprNode } from './expr.js'
-import type { ProgramJSON } from './program.js'
+import type { ProgramNode } from './program.js'
 
 export type TypeArgValue = number | ExprNode
 
@@ -83,114 +83,130 @@ export function specializationCacheKey(typeName: string, args: ResolvedTypeArgs)
 }
 
 /**
- * Deep-clone a ProgramJSON and substitute all type_param refs with their
+ * Deep-clone a ProgramNode and substitute all type_param refs with their
  * resolved integer values. The output contains no `type_param` nodes and
- * no `{ zeros: { type_param } }` forms — it is a plain ProgramJSON ready
+ * no `{ zeros: { type_param } }` forms — it is a plain ProgramNode ready
  * for `loadProgramDef`.
  *
  * The top-level `type_params` declaration is retained on the clone so the
- * cache can inspect it; `loadProgramDef` ignores unknown fields.
+ * cache can inspect it; `loadProgramDef` ignores it.
  */
-export function specializeProgramJSON(
-  prog: ProgramJSON,
+export function specializeProgramNode(
+  prog: ProgramNode,
   args: ResolvedTypeArgs,
-): ProgramJSON {
-  const clone = structuredClone(prog) as ProgramJSON
-
-  // regs: { foo: { zeros: { type_param: 'N' } } } → { foo: { zeros: 44100 } }
-  if (clone.regs) {
-    for (const [name, val] of Object.entries(clone.regs)) {
-      if (val && typeof val === 'object' && !Array.isArray(val) && 'zeros' in val) {
-        const zeros = (val as { zeros: unknown }).zeros
-        if (zeros && typeof zeros === 'object' && !Array.isArray(zeros) && 'type_param' in (zeros as Record<string, unknown>)) {
-          const paramName = (zeros as { type_param: string }).type_param
-          if (!(paramName in args)) {
-            throw new Error(`${prog.name}: reg '${name}' references undeclared type_param '${paramName}'`)
-          }
-          ;(clone.regs as Record<string, unknown>)[name] = { zeros: args[paramName] }
-        }
-      }
-      // Typed reg: { init: ..., type: <structured-array> } — substitute shape.
-      if (val && typeof val === 'object' && !Array.isArray(val) && 'type' in val) {
-        const typed = val as { init: unknown; type: unknown }
-        typed.type = substituteTypeInDecl(typed.type, args, prog.name, `reg '${name}'`)
-      }
-    }
-  }
-
-  // Port type declarations on inputs/outputs
-  if (clone.inputs) {
-    clone.inputs = clone.inputs.map(i => substituteTypeOnPortSpec(i, args, prog.name, 'input')) as typeof clone.inputs
-  }
-  if (clone.outputs) {
-    clone.outputs = clone.outputs.map(o => substituteTypeOnPortSpec(o, args, prog.name, 'output')) as typeof clone.outputs
-  }
-
-  // ExprNode-bearing fields. Pass the template's type_params so substitutions
-  // inside ExprNodes can emit typed-const for int/bool type_params (otherwise
-  // emit_numeric would default every literal to float and defeat int typing).
+): ProgramNode {
+  const clone = structuredClone(prog) as ProgramNode
   const typeParams = (prog.type_params ?? {}) as Record<string, { type?: string }>
   const substNode = (n: ExprNode): ExprNode => substituteTypeParams(n, args, prog.name, typeParams)
 
-  if (clone.process) {
-    const out: Record<string, ExprNode> = {}
-    for (const [k, v] of Object.entries(clone.process.outputs)) out[k] = substNode(v)
-    clone.process.outputs = out
-    if (clone.process.next_regs) {
-      const nr: Record<string, ExprNode> = {}
-      for (const [k, v] of Object.entries(clone.process.next_regs)) nr[k] = substNode(v)
-      clone.process.next_regs = nr
-    }
+  // Ports
+  if (clone.ports?.inputs) {
+    clone.ports.inputs = clone.ports.inputs.map(
+      i => substituteTypeOnInputPortSpec(i, args, prog.name, substNode),
+    ) as typeof clone.ports.inputs
+  }
+  if (clone.ports?.outputs) {
+    clone.ports.outputs = clone.ports.outputs.map(
+      o => substituteTypeOnPortSpec(o, args, prog.name, 'output'),
+    ) as typeof clone.ports.outputs
   }
 
-  if (clone.delays) {
-    for (const [k, d] of Object.entries(clone.delays)) {
-      d.update = substNode(d.update)
-    }
+  // Body decls
+  if (clone.body?.decls) {
+    clone.body.decls = clone.body.decls.map(d => specializeDecl(d, args, prog.name, substNode))
   }
 
-  if (clone.input_defaults) {
-    const defs: Record<string, ExprNode> = {}
-    for (const [k, v] of Object.entries(clone.input_defaults)) defs[k] = substNode(v)
-    clone.input_defaults = defs
+  // Body assigns
+  if (clone.body?.assigns) {
+    clone.body.assigns = clone.body.assigns.map(a => specializeAssign(a, substNode))
   }
-
-  // instances: substitute type_args and input expressions in this frame
-  if (clone.instances) {
-    for (const [alias, spec] of Object.entries(clone.instances)) {
-      if (spec.inputs) {
-        const newInputs: Record<string, ExprNode> = {}
-        for (const [k, v] of Object.entries(spec.inputs)) newInputs[k] = substNode(v)
-        spec.inputs = newInputs
-      }
-      // type_args that reference outer type_params get resolved to integers;
-      // numeric args stay numeric. Downstream resolution will call resolveTypeArgs again.
-      const ta = (spec as { type_args?: RawTypeArgs }).type_args
-      if (ta) {
-        const resolved: RawTypeArgs = {}
-        for (const [k, v] of Object.entries(ta)) {
-          if (typeof v === 'number') {
-            resolved[k] = v
-          } else if (v && typeof v === 'object' && !Array.isArray(v) && (v as { op?: string }).op === 'type_param') {
-            const pn = (v as unknown as { name: string }).name
-            if (!(pn in args)) {
-              throw new Error(`${prog.name}: instance '${alias}' forwards unknown type_param '${pn}'`)
-            }
-            resolved[k] = args[pn]
-          } else {
-            resolved[k] = v
-          }
-        }
-        ;(spec as { type_args?: RawTypeArgs }).type_args = resolved
-      }
-    }
-  }
-
-  // Inline subprograms are left alone — they're independent type definitions.
-  // If an outer program references one as an instance, specialization happens
-  // when that nested instance is resolved.
 
   return clone
+}
+
+/** Substitute type_params inside a single block decl. Inline subprograms
+ *  (program_decl) are left alone — they are independent type definitions. */
+function specializeDecl(
+  rawDecl: ExprNode,
+  args: ResolvedTypeArgs,
+  progName: string,
+  substNode: (n: ExprNode) => ExprNode,
+): ExprNode {
+  if (typeof rawDecl !== 'object' || rawDecl === null || Array.isArray(rawDecl)) return rawDecl
+  const d = rawDecl as Record<string, unknown>
+  const op = d.op as string
+  const out: Record<string, unknown> = { ...d }
+
+  if (op === 'reg_decl') {
+    const init = d.init
+    if (init && typeof init === 'object' && !Array.isArray(init) && 'zeros' in (init as Record<string, unknown>)) {
+      const zeros = (init as { zeros: unknown }).zeros
+      if (zeros && typeof zeros === 'object' && !Array.isArray(zeros) && 'type_param' in (zeros as Record<string, unknown>)) {
+        const paramName = (zeros as { type_param: string }).type_param
+        if (!(paramName in args)) {
+          throw new Error(`${progName}: reg '${String(d.name)}' references undeclared type_param '${paramName}'`)
+        }
+        out.init = { zeros: args[paramName] }
+      }
+    } else if (init !== undefined) {
+      // Init may itself be an ExprNode (e.g. a typed literal referencing type_param).
+      out.init = substNode(init as ExprNode)
+    }
+    if (d.type !== undefined) {
+      out.type = substituteTypeInDecl(d.type, args, progName, `reg '${String(d.name)}'`)
+    }
+    return out as ExprNode
+  }
+
+  if (op === 'delay_decl') {
+    if (d.update !== undefined) out.update = substNode(d.update as ExprNode)
+    // init is a numeric literal — nothing to substitute
+    return out as ExprNode
+  }
+
+  if (op === 'instance_decl') {
+    if (d.inputs && typeof d.inputs === 'object' && !Array.isArray(d.inputs)) {
+      const newInputs: Record<string, ExprNode> = {}
+      for (const [k, v] of Object.entries(d.inputs as Record<string, ExprNode>)) {
+        newInputs[k] = substNode(v)
+      }
+      out.inputs = newInputs
+    }
+    // type_args referencing outer type_params get resolved to integers;
+    // numeric args stay numeric. Downstream resolveTypeArgs re-validates.
+    if (d.type_args && typeof d.type_args === 'object' && !Array.isArray(d.type_args)) {
+      const resolved: RawTypeArgs = {}
+      for (const [k, v] of Object.entries(d.type_args as RawTypeArgs)) {
+        if (typeof v === 'number') {
+          resolved[k] = v
+        } else if (v && typeof v === 'object' && !Array.isArray(v) && (v as { op?: string }).op === 'type_param') {
+          const pn = (v as unknown as { name: string }).name
+          if (!(pn in args)) {
+            throw new Error(`${progName}: instance '${String(d.name)}' forwards unknown type_param '${pn}'`)
+          }
+          resolved[k] = args[pn]
+        } else {
+          resolved[k] = v
+        }
+      }
+      out.type_args = resolved
+    }
+    return out as ExprNode
+  }
+
+  // program_decl and any future decl forms pass through
+  return rawDecl
+}
+
+/** Substitute type_params inside a single block assign. */
+function specializeAssign(rawAssign: ExprNode, substNode: (n: ExprNode) => ExprNode): ExprNode {
+  if (typeof rawAssign !== 'object' || rawAssign === null || Array.isArray(rawAssign)) return rawAssign
+  const a = rawAssign as Record<string, unknown>
+  const op = a.op as string
+  if (op === 'output_assign' || op === 'next_update') {
+    return { ...a, expr: substNode(a.expr as ExprNode) } as ExprNode
+  }
+  return rawAssign
 }
 
 /** Substitute {op:'type_param',name} refs inside a port-type declaration's
@@ -236,6 +252,27 @@ function substituteTypeOnPortSpec(
     if (o.type !== undefined) {
       return { ...o, type: substituteTypeInDecl(o.type, args, progName, `${kind} '${o.name}'`) }
     }
+  }
+  return spec
+}
+
+function substituteTypeOnInputPortSpec(
+  spec: unknown,
+  args: ResolvedTypeArgs,
+  progName: string,
+  substNode: (n: ExprNode) => ExprNode,
+): unknown {
+  if (typeof spec === 'string') return spec
+  if (spec && typeof spec === 'object') {
+    const o = spec as { name: string; type?: unknown; default?: ExprNode }
+    const out: { name: string; type?: unknown; default?: ExprNode } = { ...o }
+    if (out.type !== undefined) {
+      out.type = substituteTypeInDecl(out.type, args, progName, `input '${out.name}'`)
+    }
+    if (out.default !== undefined) {
+      out.default = substNode(out.default)
+    }
+    return out
   }
   return spec
 }
