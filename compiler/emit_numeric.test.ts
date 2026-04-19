@@ -373,4 +373,37 @@ describe('emitNumericProgram', () => {
       expect(sel.args[0]).toMatchObject({ kind: 'const', val: 1, scalar_type: 'bool' })
     })
   })
+
+  describe('cast ops (Phase 3)', () => {
+    // to_int / to_bool / to_float force their result type regardless of arg type.
+
+    test('to_int on a float expression yields int result_type', () => {
+      const prog = emitNumericProgram(
+        [{ op: 'to_int', args: [{ op: 'add', args: [1.5, 2.5] }] }],
+        [],
+      )
+      const cast = findInstr(prog, 'ToInt')!
+      expect(cast.result_type).toBe('int')
+    })
+
+    test('to_float on an int register yields float result_type', () => {
+      const prog = emitNumericProgram(
+        [{ op: 'to_float', args: [{ op: 'reg', id: 0 }] }],
+        [],
+        [0],
+        ['int'],
+      )
+      const cast = findInstr(prog, 'ToFloat')!
+      expect(cast.result_type).toBe('float')
+    })
+
+    test('to_bool on an int constant yields bool result_type', () => {
+      const prog = emitNumericProgram(
+        [{ op: 'to_bool', args: [{ op: 'const', val: 3, type: 'int' } as ExprNode] }],
+        [],
+      )
+      const cast = findInstr(prog, 'ToBool')!
+      expect(cast.result_type).toBe('bool')
+    })
+  })
 })

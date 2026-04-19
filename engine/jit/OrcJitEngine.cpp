@@ -673,6 +673,16 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       case OpTag::BitNot:
         return {builder.CreateNot(arg_as(0, ST::Int)), ST::Int};
 
+      // ── Scalar-type cast ops (explicit narrowing) ──
+      // FPToSI semantics: truncate toward zero. For floor-to-int, use
+      // to_int(floor(x)); for round-to-nearest, use to_int(round(x)).
+      case OpTag::ToInt:
+        return {coerce(tv[0].first, tv[0].second, ST::Int), ST::Int};
+      case OpTag::ToBool:
+        return {coerce(tv[0].first, tv[0].second, ST::Bool), ST::Bool};
+      case OpTag::ToFloat:
+        return {coerce(tv[0].first, tv[0].second, ST::Float), ST::Float};
+
       // ── Ternary ──
       case OpTag::Clamp:
       {

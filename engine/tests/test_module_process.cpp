@@ -744,6 +744,106 @@ static void test_float_to_int_register_writeback()
   tropical_runtime_free(rt);
 }
 
+/**
+ * 12. Cast ops: to_int / to_bool / to_float
+ *
+ * Verifies truncate-toward-zero (FPToSI) semantics of ToInt, not floor:
+ *   to_int(-0.5) == 0  (not -1)
+ *   to_int( 0.5) == 0
+ *   to_int(-1.7) == -1 (not -2)
+ *   to_int( 1.7) == 1
+ * to_float/to_bool round-trip correctness.
+ *
+ * Single-step plan: sweeps a 4-case switch driven by sample_index.
+ * Output: to_float(to_int(cand)) / 10 — so we can read back the cast int.
+ */
+static void test_cast_ops()
+{
+  const unsigned int buf_len = 1;
+  tropical_runtime_t rt = tropical_runtime_new(buf_len);
+  ASSERT(rt != nullptr);
+
+  // One plan per value we want to test; keep it simple and iterate.
+  struct Case { double in; double expected_int; };
+  Case cases[] = {
+    { -0.5,  0.0},   // FPToSI truncs toward zero
+    {  0.5,  0.0},
+    { -1.7, -1.0},
+    {  1.7,  1.0},
+    {  3.0,  3.0},
+  };
+
+  for (const auto & c : cases) {
+    char plan_buf[2048];
+    snprintf(plan_buf, sizeof(plan_buf), R"({
+      "schema": "tropical_plan_4",
+      "config": { "sample_rate": 44100.0 },
+      "state_init": [],
+      "register_names": [],
+      "register_types": [],
+      "outputs": [0],
+      "instructions": [
+        {"tag":"ToInt","dst":0,"result_type":"int","args":[
+          {"kind":"const","val":%.6f,"scalar_type":"float"}
+        ],"loop_count":1,"strides":[]},
+        {"tag":"ToFloat","dst":1,"result_type":"float","args":[
+          {"kind":"reg","slot":0,"scalar_type":"int"}
+        ],"loop_count":1,"strides":[]}
+      ],
+      "register_count": 2,
+      "array_slot_sizes": [],
+      "output_targets": [1],
+      "register_targets": []
+    })", c.in);
+
+    ASSERT_OK(tropical_runtime_load_plan(rt, plan_buf, strlen(plan_buf)));
+    tropical_runtime_process(rt);
+    const double* buf = tropical_runtime_output_buffer(rt);
+    ASSERT(buf != nullptr);
+    // Output mix divides by 20 (standard mix).
+    ASSERT_NEAR(buf[0], c.expected_int / 20.0, 1e-9);
+  }
+
+  // to_bool: any nonzero → 1, zero → 0. Then to_float brings it back.
+  struct BoolCase { double in; double expected; };
+  BoolCase bool_cases[] = {
+    { 0.0, 0.0},
+    {-3.2, 1.0},
+    { 7.5, 1.0},
+  };
+  for (const auto & c : bool_cases) {
+    char plan_buf[2048];
+    snprintf(plan_buf, sizeof(plan_buf), R"({
+      "schema": "tropical_plan_4",
+      "config": { "sample_rate": 44100.0 },
+      "state_init": [],
+      "register_names": [],
+      "register_types": [],
+      "outputs": [0],
+      "instructions": [
+        {"tag":"ToBool","dst":0,"result_type":"bool","args":[
+          {"kind":"const","val":%.6f,"scalar_type":"float"}
+        ],"loop_count":1,"strides":[]},
+        {"tag":"ToFloat","dst":1,"result_type":"float","args":[
+          {"kind":"reg","slot":0,"scalar_type":"bool"}
+        ],"loop_count":1,"strides":[]}
+      ],
+      "register_count": 2,
+      "array_slot_sizes": [],
+      "output_targets": [1],
+      "register_targets": []
+    })", c.in);
+
+    ASSERT_OK(tropical_runtime_load_plan(rt, plan_buf, strlen(plan_buf)));
+    tropical_runtime_process(rt);
+    const double* buf = tropical_runtime_output_buffer(rt);
+    ASSERT(buf != nullptr);
+    ASSERT_NEAR(buf[0], c.expected / 20.0, 1e-9);
+  }
+
+  tropical_runtime_free(rt);
+}
+
 // ---- main -------------------------------------------------------------------
 
 int main()
@@ -761,6 +861,7 @@ int main()
   run_test("typed int bitwise (LFSR)",       test_typed_int_bitwise);
   run_test("typed bool comparison + select", test_typed_bool_select);
   run_test("float→int register writeback coercion", test_float_to_int_register_writeback);
+  run_test("cast ops (to_int/to_bool/to_float)", test_cast_ops);
 
   printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;

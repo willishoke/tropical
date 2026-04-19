@@ -38,6 +38,9 @@ enum class OpTag : uint8_t
   // arity 1
   Neg, Abs, Sqrt, Floor, Ceil, Round, Not, BitNot,
   FloatExponent,  // extract IEEE-754 unbiased exponent of a float as a float-valued integer
+  // Scalar-type cast ops. Truncate-toward-zero semantics (FPToSI), not floor —
+  // a stdlib author wanting floor-to-int writes `to_int(floor(x))`.
+  ToInt, ToBool, ToFloat,
   // arity 2 (listed here for locality with FloatExponent; Ldexp is binary)
   Ldexp,          // x * 2^n (n is a float-valued integer)
   // arity 3

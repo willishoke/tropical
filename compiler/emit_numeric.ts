@@ -73,6 +73,13 @@ const UNARY_TAG: Record<string, string> = {
   floor: 'Floor', ceil: 'Ceil', round: 'Round',
   not: 'Not', bit_not: 'BitNot',
   float_exponent: 'FloatExponent',
+  to_int: 'ToInt', to_bool: 'ToBool', to_float: 'ToFloat',
+}
+
+// Cast ops force their result type regardless of arg type. They bypass
+// the usual `inferResultType(tag, argTypes)` promotion lattice.
+const CAST_RESULT: Record<string, ScalarType> = {
+  ToInt: 'int', ToBool: 'bool', ToFloat: 'float',
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -92,6 +99,7 @@ function promoteTypes(a: ScalarType, b: ScalarType): ScalarType {
 
 /** Infer the result ScalarType of an op from its tag and argument types. */
 function inferResultType(tag: string, argTypes: ScalarType[]): ScalarType {
+  if (CAST_RESULT[tag]) return CAST_RESULT[tag]
   if (BITWISE_TAGS.has(tag)) return 'int'
   if (COMPARISON_TAGS.has(tag)) return 'bool'
   if (TRANSCENDENTAL_TAGS.has(tag)) return 'float'

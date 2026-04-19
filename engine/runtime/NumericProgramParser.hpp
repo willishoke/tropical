@@ -61,6 +61,9 @@ inline tropical_jit::OpTag parse_op_tag(const std::string & s)
     {"Pack",        T::Pack},
     {"Ldexp",         T::Ldexp},
     {"FloatExponent", T::FloatExponent},
+    {"ToInt",       T::ToInt},
+    {"ToBool",      T::ToBool},
+    {"ToFloat",     T::ToFloat},
     {"SmoothParam", T::SmoothParam},
     {"TriggerParam",T::TriggerParam},
   };
