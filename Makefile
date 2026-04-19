@@ -1,4 +1,4 @@
-.PHONY: build profile repl run mcp-ts clean
+.PHONY: build profile repl run mcp-ts clean validate validate-write
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -36,3 +36,11 @@ mcp-ts: build
 clean:
 	rm -rf $(BUILD_DIR)
 	rm -rf $(PROFILE_BUILD_DIR)
+
+validate: build
+	bun test
+	ctest --test-dir $(BUILD_DIR) --output-on-failure
+	bun run scripts/validate_stdlib.ts
+
+validate-write: build
+	bun run scripts/validate_stdlib.ts --write
