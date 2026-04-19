@@ -148,6 +148,9 @@ inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
     for (const auto & t : plan["register_types"])
       result.register_types.push_back(parse_scalar_type(t.get<std::string>()));
 
+  // Forward register_types onto FlatProgram so the JIT can coerce at writeback.
+  result.program.register_types = result.register_types;
+
   if (plan.contains("array_slot_names"))
     for (const auto & n : plan["array_slot_names"])
       result.array_slot_names.push_back(n.get<std::string>());

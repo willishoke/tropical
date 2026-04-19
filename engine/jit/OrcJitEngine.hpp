@@ -109,6 +109,10 @@ struct FlatProgram
   std::vector<uint32_t>  output_targets;
   std::vector<int32_t>   register_targets;
   std::vector<uint32_t>  mix_output_temps;  // temp indices whose values mix to audio
+  // Declared scalar type per state register, indexed parallel to register_targets.
+  // Drives FPToSI/SIToFP coercion at writeback so a float temp landing in an
+  // int register doesn't reinterpret-bitcast into garbage.
+  std::vector<JitScalarType> register_types;
 };
 
 using NumericKernelFn = void (*)(

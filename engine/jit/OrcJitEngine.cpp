@@ -327,6 +327,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     for (const auto & instr : program.instructions)
     {
       append(&instr.tag,        sizeof(OpTag));
+      append(&instr.result_type, sizeof(JitScalarType));
       append(&instr.dst,        sizeof(uint32_t));
       append(&instr.loop_count, sizeof(uint32_t));
       uint32_t na = static_cast<uint32_t>(instr.args.size());
@@ -354,6 +355,16 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     append(&nm, sizeof(uint32_t));
     for (uint32_t mt : program.mix_output_temps)
       append(&mt, sizeof(uint32_t));
+    // register_targets + register_types also feed IR generation (writeback coerce),
+    // so differences there must produce distinct cached kernels.
+    uint32_t nrt = static_cast<uint32_t>(program.register_targets.size());
+    append(&nrt, sizeof(uint32_t));
+    for (int32_t rt : program.register_targets)
+      append(&rt, sizeof(int32_t));
+    uint32_t nrty = static_cast<uint32_t>(program.register_types.size());
+    append(&nrty, sizeof(uint32_t));
+    for (JitScalarType t : program.register_types)
+      append(&t, sizeof(JitScalarType));
   }
 
   auto cache_it = kernel_cache_.find(cache_key);
@@ -923,15 +934,37 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   // ── Register writeback: temps[register_targets[i]] → registers[i] ──
   // Emitted as fixed stores after all computation, so all reads of old
   // state (via StateReg operands) have already completed.
+  //
+  // Load the temp using its tracked IR type, coerce to the register's declared
+  // type (FPToSI / SIToFP / zext etc. via `coerce()`), then bit-cast the typed
+  // payload to i64 for the storage slot. This closes the silent float→int
+  // reinterpret miscompile that produced garbage when a float expression
+  // targeted an int register.
   for (uint32_t ri = 0; ri < program.register_targets.size(); ++ri)
   {
     const int32_t ti = program.register_targets[ri];
-    if (ti >= 0)
-    {
-      llvm::Value * val     = builder.CreateLoad(i64_ty, gep_temp(static_cast<uint32_t>(ti)));
-      llvm::Value * reg_ptr = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(ri));
-      builder.CreateStore(val, reg_ptr);
-    }
+    if (ti < 0) continue;
+
+    const ST src_ty = temp_types[static_cast<uint32_t>(ti)];
+    const ST dst_ty = (ri < program.register_types.size())
+      ? program.register_types[ri]
+      : ST::Float;
+
+    llvm::Value * typed_val = load_temp_typed(static_cast<uint32_t>(ti), src_ty);
+    llvm::Value * coerced   = coerce(typed_val, src_ty, dst_ty);
+
+    // Encode the typed scalar into the i64 register slot matching FlatRuntime's
+    // initialization: int/bool → sext/zext to i64, float → bitcast to i64.
+    llvm::Value * as_i64 = nullptr;
+    if (dst_ty == ST::Float)
+      as_i64 = builder.CreateBitCast(coerced, i64_ty);
+    else if (dst_ty == ST::Int)
+      as_i64 = builder.CreateSExtOrBitCast(coerced, i64_ty);
+    else // Bool
+      as_i64 = builder.CreateZExt(coerced, i64_ty);
+
+    llvm::Value * reg_ptr = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(ri));
+    builder.CreateStore(as_i64, reg_ptr);
   }
 
   // ── Output mixing: accumulate mix_output_temps, scale, store to output_buffer[s] ──
