@@ -61,6 +61,9 @@ inline tropical_jit::OpTag parse_op_tag(const std::string & s)
     {"Pack",        T::Pack},
     {"Ldexp",         T::Ldexp},
     {"FloatExponent", T::FloatExponent},
+    {"ToInt",       T::ToInt},
+    {"ToBool",      T::ToBool},
+    {"ToFloat",     T::ToFloat},
     {"SmoothParam", T::SmoothParam},
     {"TriggerParam",T::TriggerParam},
   };
@@ -144,6 +147,9 @@ inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
   if (plan.contains("register_types"))
     for (const auto & t : plan["register_types"])
       result.register_types.push_back(parse_scalar_type(t.get<std::string>()));
+
+  // Forward register_types onto FlatProgram so the JIT can coerce at writeback.
+  result.program.register_types = result.register_types;
 
   if (plan.contains("array_slot_names"))
     for (const auto & n : plan["array_slot_names"])

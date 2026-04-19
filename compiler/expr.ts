@@ -160,6 +160,11 @@ export const abs_       = (operand: ExprCoercible) => unary('abs', operand)
 export const floatExponent = (operand: ExprCoercible) => unary('float_exponent', operand)
 export const ldexp      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('ldexp', lhs, rhs)
 export const logicalNot = (operand: ExprCoercible) => unary('not', operand)
+
+// Scalar-type cast ops. Truncate-toward-zero (FPToSI) for to_int — not floor.
+export const toInt   = (operand: ExprCoercible) => unary('to_int',   operand)
+export const toBool  = (operand: ExprCoercible) => unary('to_bool',  operand)
+export const toFloat = (operand: ExprCoercible) => unary('to_float', operand)
 export const logicalAnd = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('and', lhs, rhs)
 export const logicalOr  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('or',  lhs, rhs)
 
@@ -357,6 +362,7 @@ const UNARY_OPS = new Set([
   'neg', 'abs', 'not', 'bit_not',
   'sqrt', 'floor', 'ceil', 'round',
   'float_exponent',
+  'to_int', 'to_bool', 'to_float',
 ])
 
 const TERNARY_OPS = new Set(['clamp', 'select'])

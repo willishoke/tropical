@@ -7,12 +7,25 @@
 
 import {
   type PortType,
+  type ScalarKind,
   Float,
   portTypeEqual,
   portTypeToString,
   broadcastShapes,
 } from './term.js'
 import type { ExprNode } from './expr.js'
+
+// Widening lattice: bool → int → float. A source kind widens to a dest kind
+// when RANK[src] <= RANK[dst]. Narrowing must be explicit via to_int/to_bool.
+const KIND_RANK: Record<ScalarKind, number> = { bool: 0, int: 1, float: 2 }
+
+function widens(src: ScalarKind, dst: ScalarKind): boolean {
+  return KIND_RANK[src] <= KIND_RANK[dst]
+}
+
+function narrowingHint(dst: ScalarKind): string {
+  return dst === 'int' ? 'to_int()' : dst === 'bool' ? 'to_bool()' : 'to_float()'
+}
 
 export interface ConnectionCheck {
   compatible: boolean
@@ -47,13 +60,13 @@ export function checkArrayConnection(
     return { compatible: true }
   }
 
-  // Scalar → scalar: same kind always passes; bool→float is safe (bool = 0.0/1.0 in JIT)
+  // Scalar → scalar: widening (bool→int→float) is implicit, narrowing is explicit.
   if (srcType.tag === 'scalar' && dstType.tag === 'scalar') {
     if (srcType.scalar === dstType.scalar) return { compatible: true }
-    if (srcType.scalar === 'bool' && dstType.scalar === 'float') return { compatible: true }
+    if (widens(srcType.scalar, dstType.scalar)) return { compatible: true }
     return {
       compatible: false,
-      error: `Type mismatch: source is ${portTypeToString(srcType)} but destination expects ${portTypeToString(dstType)}`,
+      error: `Lossy conversion: cannot narrow ${portTypeToString(srcType)} to ${portTypeToString(dstType)} — wrap source in ${narrowingHint(dstType.scalar)} to narrow explicitly`,
     }
   }
 
@@ -74,8 +87,25 @@ export function checkArrayConnection(
     }
   }
 
-  // Array → array: check shape compatibility
+  // Array → array: check element-kind and shape compatibility.
   if (srcType.tag === 'array' && dstType.tag === 'array') {
+    // Element kind must widen (bool→int→float). We only track scalar element kinds.
+    if (srcType.element.tag === 'scalar' && dstType.element.tag === 'scalar') {
+      const sk = srcType.element.scalar
+      const dk = dstType.element.scalar
+      if (sk !== dk && !widens(sk, dk)) {
+        return {
+          compatible: false,
+          error: `Lossy conversion: cannot narrow ${portTypeToString(srcType)} to ${portTypeToString(dstType)} — wrap source in ${narrowingHint(dk)} to narrow explicitly`,
+        }
+      }
+    } else if (!portTypeEqual(srcType.element, dstType.element)) {
+      return {
+        compatible: false,
+        error: `Element type mismatch: source is ${portTypeToString(srcType)} but destination expects ${portTypeToString(dstType)}`,
+      }
+    }
+
     const resultShape = broadcastShapes(srcType.shape, dstType.shape)
     if (resultShape === null) {
       return {

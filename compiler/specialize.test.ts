@@ -96,11 +96,12 @@ describe('specializeProgramJSON', () => {
     const prog = makeGenericDelay()
     const spec = specializeProgramJSON(prog, { N: 8 })
 
+    // N is declared `type: 'int'`, so substitutions emit typed-const nodes.
     const yExpr = spec.process!.outputs.y as any
-    expect(yExpr.args[1].args[1]).toBe(8)
+    expect(yExpr.args[1].args[1]).toEqual({ op: 'const', val: 8, type: 'int' })
 
     const bufExpr = spec.process!.next_regs!.buf as any
-    expect(bufExpr.args[1].args[1]).toBe(8)
+    expect(bufExpr.args[1].args[1]).toEqual({ op: 'const', val: 8, type: 'int' })
   })
 
   test('substitutes { zeros: { type_param } } to { zeros: N }', () => {
@@ -140,7 +141,8 @@ describe('specializeProgramJSON', () => {
       process: { outputs: { y: { op: 'input', name: 'x' } } },
     }
     const spec = specializeProgramJSON(prog, { N: 42 })
-    expect(spec.input_defaults!.x).toBe(42)
+    // N: int — typed-const form
+    expect(spec.input_defaults!.x).toEqual({ op: 'const', val: 42, type: 'int' })
   })
 
   test('substitutes in instance inputs and type_args', () => {
@@ -160,7 +162,8 @@ describe('specializeProgramJSON', () => {
       process: { outputs: { y: { op: 'nested_out', ref: 'd', output: 'y' } } },
     }
     const spec = specializeProgramJSON(prog, { N: 256 })
-    expect(spec.instances!.d.inputs!.x).toBe(256)
+    // N: int — typed-const in ExprNode slot; raw integer in type_args slot.
+    expect(spec.instances!.d.inputs!.x).toEqual({ op: 'const', val: 256, type: 'int' })
     expect((spec.instances!.d as any).type_args).toEqual({ N: 256 })
   })
 
@@ -194,7 +197,9 @@ describe('specializeProgramJSON', () => {
     }
     const spec = specializeProgramJSON(prog, { N: 4 })
     const y = spec.process!.outputs.y as any
-    expect(y.n).toBe(4)
+    // N: int — typed-const. (The combinator lowerer reads `count`, not `n`,
+    // so this test only confirms structural recursion through `n`.)
+    expect(y.n).toEqual({ op: 'const', val: 4, type: 'int' })
   })
 
   test('substitutes type_param refs in input port type shapes', () => {
@@ -240,5 +245,37 @@ describe('specializeProgramJSON', () => {
       process: { outputs: { y: 0 } },
     }
     expect(() => specializeProgramJSON(prog, { N: 4 })).toThrow(/undeclared type_param 'M'/)
+  })
+
+  // ── Typed-const substitution (Phase 1) ──────────────────────
+  //
+  // type_params with declared `type: 'int'` (or 'bool') must emit a typed
+  // const ExprNode `{op:'const', val:N, type:'int'}`, not a bare JS number.
+  // The bare-number path forces emit_numeric to type it as float.
+
+  test("int type_param ref inside ExprNode position substitutes to a typed-int const node", () => {
+    const prog: ProgramJSON = {
+      schema: 'tropical_program_1',
+      name: 'X',
+      type_params: { N: { type: 'int', default: 8 } },
+      regs: { step: { init: 0, type: 'int' } as any },
+      outputs: ['y'],
+      process: {
+        outputs: { y: { op: 'reg', name: 'step' } },
+        next_regs: {
+          step: {
+            op: 'mod',
+            args: [
+              { op: 'add', args: [{ op: 'reg', name: 'step' }, 1] },
+              { op: 'type_param', name: 'N' },
+            ],
+          },
+        },
+      },
+    }
+    const spec = specializeProgramJSON(prog, { N: 4 })
+    const stepExpr = spec.process!.next_regs!.step as any
+    // mod(args[0], args[1]) where args[1] was `{op:'type_param',name:'N'}`.
+    expect(stepExpr.args[1]).toEqual({ op: 'const', val: 4, type: 'int' })
   })
 })

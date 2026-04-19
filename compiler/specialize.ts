@@ -126,8 +126,11 @@ export function specializeProgramJSON(
     clone.outputs = clone.outputs.map(o => substituteTypeOnPortSpec(o, args, prog.name, 'output')) as typeof clone.outputs
   }
 
-  // ExprNode-bearing fields
-  const substNode = (n: ExprNode): ExprNode => substituteTypeParams(n, args, prog.name)
+  // ExprNode-bearing fields. Pass the template's type_params so substitutions
+  // inside ExprNodes can emit typed-const for int/bool type_params (otherwise
+  // emit_numeric would default every literal to float and defeat int typing).
+  const typeParams = (prog.type_params ?? {}) as Record<string, { type?: string }>
+  const substNode = (n: ExprNode): ExprNode => substituteTypeParams(n, args, prog.name, typeParams)
 
   if (clone.process) {
     const out: Record<string, ExprNode> = {}
@@ -241,15 +244,23 @@ function substituteTypeParams(
   node: ExprNode,
   args: ResolvedTypeArgs,
   progName: string,
+  typeParams: Record<string, { type?: string }>,
 ): ExprNode {
   if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => substituteTypeParams(n, args, progName))
+  if (Array.isArray(node)) return node.map(n => substituteTypeParams(n, args, progName, typeParams))
 
   const obj = node as Record<string, unknown>
   if (obj.op === 'type_param') {
     const name = obj.name as string
     if (!(name in args)) {
       throw new Error(`${progName}: ExprNode references undeclared type_param '${name}'`)
+    }
+    // The declared type of the type_param drives the scalar kind of the
+    // substituted const. Int/bool emit a typed-const ExprNode so the emitter
+    // preserves integral semantics (vs. float-by-default for a bare number).
+    const declType = typeParams[name]?.type
+    if (declType === 'int' || declType === 'bool') {
+      return { op: 'const', val: args[name], type: declType }
     }
     return args[name]
   }
@@ -259,18 +270,18 @@ function substituteTypeParams(
   // fields/payload/branches/scrutinee/struct_expr (ADT ops).
   const out: Record<string, unknown> = { ...obj }
   const recurseNodeField = (key: string) => {
-    if (out[key] !== undefined) out[key] = substituteTypeParams(out[key] as ExprNode, args, progName)
+    if (out[key] !== undefined) out[key] = substituteTypeParams(out[key] as ExprNode, args, progName, typeParams)
   }
   const recurseArrayField = (key: string) => {
     if (Array.isArray(out[key])) {
-      out[key] = (out[key] as ExprNode[]).map(n => substituteTypeParams(n, args, progName))
+      out[key] = (out[key] as ExprNode[]).map(n => substituteTypeParams(n, args, progName, typeParams))
     }
   }
   const recurseRecordField = (key: string) => {
     if (out[key] && typeof out[key] === 'object' && !Array.isArray(out[key])) {
       const rec: Record<string, ExprNode> = {}
       for (const [k, v] of Object.entries(out[key] as Record<string, ExprNode>)) {
-        rec[k] = substituteTypeParams(v, args, progName)
+        rec[k] = substituteTypeParams(v, args, progName, typeParams)
       }
       out[key] = rec
     }

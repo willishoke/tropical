@@ -4,7 +4,7 @@
 
 import { describe, test, expect } from 'bun:test'
 import { checkArrayConnection } from './array_wiring'
-import { Float, Bool, ArrayType, StructType } from './term'
+import { Float, Int, Bool, ArrayType, StructType } from './term'
 import type { ExprNode } from './expr'
 
 const ref: ExprNode = { op: 'ref', instance: 'VCO1', output: 'saw' }
@@ -90,5 +90,50 @@ describe('checkArrayConnection', () => {
   test('same struct types are compatible', () => {
     const check = checkArrayConnection(StructType('MyStruct'), StructType('MyStruct'), ref)
     expect(check.compatible).toBe(true)
+  })
+
+  // ── Scalar-kind widening lattice (Phase 4) ───────────────────
+  //
+  // Implicit widening chain: bool → int → float. Narrowing
+  // (float → int, float → bool, int → bool) must be rejected with
+  // an actionable error telling the user to wrap the source in a cast.
+
+  test('int scalar widens to float scalar', () => {
+    const check = checkArrayConnection(Int, Float, ref)
+    expect(check.compatible).toBe(true)
+  })
+
+  test('bool scalar widens to int scalar', () => {
+    const check = checkArrayConnection(Bool, Int, ref)
+    expect(check.compatible).toBe(true)
+  })
+
+  test('float scalar to int scalar rejected with to_int hint', () => {
+    const check = checkArrayConnection(Float, Int, ref)
+    expect(check.compatible).toBe(false)
+    expect(check.error).toMatch(/to_int|narrow|lossy/i)
+  })
+
+  test('float scalar to bool scalar rejected', () => {
+    const check = checkArrayConnection(Float, Bool, ref)
+    expect(check.compatible).toBe(false)
+    expect(check.error).toMatch(/to_bool|narrow|lossy/i)
+  })
+
+  test('int scalar to bool scalar rejected', () => {
+    const check = checkArrayConnection(Int, Bool, ref)
+    expect(check.compatible).toBe(false)
+    expect(check.error).toMatch(/to_bool|narrow|lossy/i)
+  })
+
+  test('same-shape int array widens to float array', () => {
+    const check = checkArrayConnection(ArrayType(Int, [4]), ArrayType(Float, [4]), ref)
+    expect(check.compatible).toBe(true)
+  })
+
+  test('same-shape float array to int array rejected', () => {
+    const check = checkArrayConnection(ArrayType(Float, [4]), ArrayType(Int, [4]), ref)
+    expect(check.compatible).toBe(false)
+    expect(check.error).toMatch(/to_int|narrow|lossy/i)
   })
 })
