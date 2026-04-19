@@ -7,7 +7,7 @@ import { normalizeWiringTypes, FlattenError, flattenSession } from './flatten'
 import type { InstanceInfo } from './compiler'
 import { Float, ArrayType } from './term'
 import type { ExprNode } from './expr'
-import { loadProgramDef } from './session'
+import { loadProgramDef, v1ProgramJSONToV2Node } from './session'
 import type { ProgramType, ProgramInstance, Bounds } from './program_types'
 import type { ProgramJSON } from './program'
 import { Param, Trigger } from './runtime/param'
@@ -182,7 +182,7 @@ describe('feedback cycle auto-delay', () => {
   test('A → B → A feedback cycle flattens without throwing', () => {
     const session = mockSession()
 
-    const type = loadProgramDef(passthrough(), session)
+    const type = loadProgramDef(v1ProgramJSONToV2Node(passthrough()).node, session)
     session.typeRegistry.set('Pass', type)
 
     const a = type.instantiateAs('a')
@@ -214,7 +214,7 @@ describe('feedback cycle auto-delay', () => {
   test('self-feedback (A.out → A.in) flattens without throwing', () => {
     const session = mockSession()
 
-    const type = loadProgramDef(passthrough(), session)
+    const type = loadProgramDef(v1ProgramJSONToV2Node(passthrough()).node, session)
     session.typeRegistry.set('Pass', type)
 
     const a = type.instantiateAs('a')

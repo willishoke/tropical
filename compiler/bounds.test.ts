@@ -4,7 +4,7 @@
 
 import { describe, test, expect } from 'bun:test'
 import { applyBounds, flattenSession } from './flatten'
-import { loadProgramDef, resolveBounds, resolveBaseType, BOUNDED_TYPE_ALIASES } from './session'
+import { loadProgramDef as loadProgramDefV2, resolveBounds, resolveBaseType, BOUNDED_TYPE_ALIASES, v1ProgramJSONToV2Node } from './session'
 import type { ExprNode } from './expr'
 import type { ProgramJSON } from './program'
 import type { ProgramType, ProgramInstance, Bounds } from './program_types'
@@ -14,6 +14,11 @@ import { Float } from './term'
 // ─────────────────────────────────────────────────────────────
 // Helpers
 // ────────���────────────────────────────────────────────────────
+
+/** Bridge v1 ProgramJSON → loadProgramDef's ProgramNode input. */
+function loadProgramDef(prog: ProgramJSON, session: Parameters<typeof loadProgramDefV2>[1]): ProgramType {
+  return loadProgramDefV2(v1ProgramJSONToV2Node(prog).node, session)
+}
 
 /** Minimal session for loadProgramDef (no FFI). */
 function mockSession() {

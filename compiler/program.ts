@@ -10,7 +10,7 @@
 import type { ExprNode } from './expr.js'
 import { validateExpr } from './expr.js'
 import type { TypeDefJSON, SessionState } from './session.js'
-import { loadProgramDef, resolveProgramType, normalizeProgramFile } from './session.js'
+import { loadProgramDef, resolveProgramType, normalizeProgramFile, v1ProgramJSONToV2Node } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
 import { ProgramType } from './program_types.js'
@@ -30,6 +30,73 @@ export type ShapeDim = number | { op: 'type_param'; name: string }
 /** Structured port/reg type declaration. Scalars and aliases are bare strings;
  *  arrays use the structured form so type_param refs can appear in shapes. */
 export type PortTypeDecl = string | { kind: 'array'; element: string; shape: ShapeDim[] }
+
+// ─────────────────────────────────────────────────────────────
+// Unified IR (tropical_program_2) — typed view of the v2 ExprNode shape
+// ─────────────────────────────────────────────────────────────
+//
+// A program is an ExprNode of op `program`. The types below are a typed
+// view of that JSON — the runtime value is a plain object; the TypeScript
+// types only constrain the fields we care about.
+
+/** Port declaration: scalar/alias name or `{name, type?, default?, bounds?}`. */
+export interface ProgramPortSpec {
+  name: string
+  type?: PortTypeDecl
+  default?: ExprNode
+  bounds?: [number | null, number | null]
+}
+
+export interface ProgramPorts {
+  inputs?: Array<string | ProgramPortSpec>
+  outputs?: Array<string | ProgramPortSpec>
+  type_defs?: TypeDefJSON[]
+}
+
+/** Body block: ordered decls + assigns. `value` is unused (assigns-canonical). */
+export interface BlockNode {
+  op: 'block'
+  decls?: ExprNode[]
+  assigns?: ExprNode[]
+  value?: ExprNode | null
+}
+
+/** Program — the unified IR. Same shape whether nested (inside `program_decl`)
+ *  or at the top level of a `tropical_program_2` file. */
+export interface ProgramNode {
+  op: 'program'
+  name: string
+  type_params?: Record<string, { type: 'int'; default?: number }>
+  sample_rate?: number
+  breaks_cycles?: boolean
+  ports?: ProgramPorts
+  body: BlockNode
+}
+
+/** Top-level session metadata carried alongside a root program in a v2 file. */
+export interface ProgramTopLevel {
+  params?: Array<{ name: string; value?: number; time_const?: number; type?: 'param' | 'trigger' }>
+  audio_outputs?: Array<
+    | { instance: string; output: string | number }
+    | { expr: ExprNode }
+  >
+  config?: { buffer_length?: number; sample_rate?: number }
+}
+
+/** On-disk `tropical_program_2` file shape: a program plus session metadata. */
+export interface ProgramFile extends ProgramTopLevel {
+  schema: 'tropical_program_2'
+  name: string
+  type_params?: ProgramNode['type_params']
+  sample_rate?: number
+  breaks_cycles?: boolean
+  ports?: ProgramPorts
+  body: BlockNode
+}
+
+// ─────────────────────────────────────────────────────────────
+// Legacy v1 ProgramJSON — kept as an internal bridge only
+// ─────────────────────────────────────────────────────────────
 
 export interface ProgramJSON {
   schema: 'tropical_program_1'
@@ -208,7 +275,7 @@ export function loadProgramAsType(
     return undefined
   }
 
-  const type = loadProgramDef(prog, session)
+  const type = loadProgramDef(v1ProgramJSONToV2Node(prog).node, session)
   session.typeRegistry.set(prog.name, type)
   return type
 }
