@@ -12,6 +12,10 @@ import {
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type ProgramJSON } from './program.js'
 import { Param, Trigger } from './runtime/param.js'
+import {
+  specializeProgramJSON, specializationCacheKey, resolveTypeArgs,
+  type RawTypeArgs, type ResolvedTypeArgs,
+} from './specialize.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -75,6 +79,11 @@ export interface SessionState {
   graph: { primeJit(): void; process(): void; readonly outputBuffer: Float64Array; dispose(): void }
   /** On-demand type resolver (set by loadStdlib for lazy loading). */
   typeResolver?: (name: string) => ProgramType | undefined
+  /** Monomorphized specializations of generic programs, keyed by `Type<k1=v1,k2=v2>`. */
+  specializationCache: Map<string, ProgramType>
+  /** Raw ProgramJSON templates for generic programs (pre-specialization). Keyed by type name.
+   *  Only populated for programs declaring type_params. */
+  genericTemplates: Map<string, import('./program.js').ProgramJSON>
   /** Name counter for auto-generated instance names. */
   _nameCounters: Map<string, number>
 }
@@ -91,6 +100,8 @@ export function makeSession(bufferLength = 512): SessionState {
     paramRegistry: new Map(),
     triggerRegistry: new Map(),
     inputExprNodes: new Map(),
+    specializationCache: new Map(),
+    genericTemplates: new Map(),
     runtime,
     graph: {
       primeJit: () => {},
@@ -281,12 +292,57 @@ export function resolveBounds(
 }
 
 // ─────────────────────────────────────────────────────────────
+// Generic program resolution
+// ─────────────────────────────────────────────────────────────
+
+type ResolveSession = Pick<SessionState, 'typeRegistry' | 'specializationCache' | 'genericTemplates' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> &
+  Partial<Pick<SessionState, 'typeResolver' | 'typeAliasRegistry'>>
+
+/**
+ * Resolve a (baseName, type_args) pair to a concrete ProgramType.
+ * Generic types monomorphize on demand, keyed by fully-resolved integer args.
+ * Non-generic types reject non-empty type_args.
+ */
+export function resolveProgramType(
+  session: ResolveSession,
+  baseName: string,
+  rawTypeArgs: RawTypeArgs | undefined,
+  outerArgs: ResolvedTypeArgs | undefined,
+): { type: ProgramType; typeArgs?: ResolvedTypeArgs } {
+  const template = session.genericTemplates.get(baseName)
+  if (template) {
+    const resolved = resolveTypeArgs(rawTypeArgs, outerArgs, template.type_params, `instance of '${baseName}'`)
+    const key = specializationCacheKey(baseName, resolved)
+    const cached = session.specializationCache.get(key)
+    if (cached) return { type: cached, typeArgs: resolved }
+    const specialized = specializeProgramJSON(template, resolved)
+    specialized.name = key
+    const type = loadProgramDef(specialized, session)
+    session.specializationCache.set(key, type)
+    return { type, typeArgs: resolved }
+  }
+
+  const type = session.typeRegistry.get(baseName) ?? session.typeResolver?.(baseName)
+  if (!type) {
+    const known = [
+      ...session.typeRegistry.keys(),
+      ...session.genericTemplates.keys(),
+    ].join(', ')
+    throw new Error(`Unknown program type '${baseName}'. Known: ${known || '(none)'}`)
+  }
+  if (rawTypeArgs && Object.keys(rawTypeArgs).length > 0) {
+    throw new Error(`Program '${baseName}' does not declare type_params; got type_args: ${Object.keys(rawTypeArgs).join(', ')}`)
+  }
+  return { type }
+}
+
+// ─────────────────────────────────────────────────────────────
 // ProgramJSON → ProgramDef
 // ─────────────────────────────────────────────────────────────
 
 export function loadProgramDef(
   def: ProgramJSON,
-  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>,
+  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>,
 ): ProgramType {
   const aliases = session.typeAliasRegistry
   const inputSpecs  = def.inputs ?? []
@@ -333,19 +389,21 @@ export function loadProgramDef(
   const nestedAliasDef = new Map<string, ProgramDef>()
   const nestedCalls: NestedCall[] = []
 
-  // First pass: register all nested aliases so slottifyExpr can resolve
-  // nested_out references regardless of instance ordering
+  // Resolve nested instance types up-front, monomorphizing generics.
+  // Callers above us (for a generic outer program) have already specialized
+  // the outer frame, so spec.type_args here contains only concrete integers.
+  const nestedResolved = new Map<string, ProgramType>()
   for (const alias of nestedAliases) {
     const spec = nestedRaw[alias]
-    const type = session.typeRegistry.get(spec.program) ?? session.typeResolver?.(spec.program)
-    if (!type) throw new Error(`Unknown program type '${spec.program}' in instances.`)
+    const { type } = resolveProgramType(session, spec.program, spec.type_args as RawTypeArgs | undefined, undefined)
+    nestedResolved.set(alias, type)
     nestedAliasDef.set(alias, type._def)
   }
 
   // Second pass: build call arg nodes (may reference any sibling via nested_out)
   for (const alias of nestedAliases) {
     const spec = nestedRaw[alias]
-    const type = session.typeRegistry.get(spec.program)!
+    const type = nestedResolved.get(alias)!
 
     const callArgNodes: ExprNode[] = type._def.inputNames.map((name, idx) => {
       if (name in (spec.inputs ?? {})) {

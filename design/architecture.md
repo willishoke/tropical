@@ -110,7 +110,7 @@ There is no build context, no side effects, no DSL. The conversion from ProgramJ
 
 All built-in program types are defined as `ProgramJSON` files in `stdlib/`. They are loaded by `loadStdlib()` in `compiler/program.ts`, which reads each JSON file, validates it, and registers a `ProgramType`.
 
-24 built-in types:
+19 built-in types:
 
 | Type | Description | File |
 |------|-------------|------|
@@ -127,7 +127,7 @@ All built-in program types are defined as `ProgramJSON` files in `stdlib/`. They
 | **Phaser / Phaser16** | 4/16 stage allpass phaser (shared Sin) | `Phaser.json`, `Phaser16.json` |
 | **BitCrusher** | Bit depth and sample rate reduction | `BitCrusher.json` |
 | **NoiseLFSR** | Linear feedback shift register noise | `NoiseLFSR.json` |
-| **Delay1/8/16/512/4410/44100** | Fixed-length delay lines | `Delay*.json` |
+| **Delay** | Fixed-length delay line parameterized by `type_args: {N}` (default N=44100) | `Delay.json` |
 
 Complex modules use inline `programs` for subprogram composition (e.g., Phaser defines `_allpassStage` as a nested program) and reference stdlib types via `instances: { sin1: { program: 'Sin', ... } }`. Even transcendentals are programs: swap a stdlib JSON file to change the approximation.
 

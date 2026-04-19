@@ -19,7 +19,7 @@ import {
 
 import {
   makeSession, nextName, loadJSON,
-  prettyExpr, SessionState, ExprNode,
+  prettyExpr, resolveProgramType, SessionState, ExprNode,
 } from '../compiler/session.js'
 import { parseProgram } from '../compiler/schema.js'
 import {
@@ -110,7 +110,13 @@ function resolveInputIdx(inst: { inputNames: string[] }, nameOrIdx: string | num
 
 function instanceSummary(name: string) {
   const inst = session.instanceRegistry.get(name)!
-  return { name, type_name: inst.typeName, inputs: inst.inputNames, outputs: inst.outputNames }
+  return {
+    name,
+    type_name: inst.typeName,
+    type_args: inst.typeArgs ?? null,
+    inputs: inst.inputNames,
+    outputs: inst.outputNames,
+  }
 }
 
 /** Apply wiring via FlatRuntime. */
@@ -137,12 +143,13 @@ const TOOLS = [
   },
   {
     name: 'add_instance',
-    description: 'Create a named instance of a registered program type.',
+    description: 'Create a named instance of a registered program type. For generic programs (those declaring type_params — see list_programs), supply type_args with concrete integer values (e.g. {"N": 44100}).',
     inputSchema: {
       type: 'object',
       properties: {
         program:       { type: 'string', description: 'Registered program/type name (builtin or user-defined)' },
         instance_name: { type: 'string', description: 'Unique name for this instance' },
+        type_args:     { type: 'object', description: 'Compile-time type args for generic programs, e.g. {"N": 44100}. Omit for non-generic programs.' },
       },
       required: ['program', 'instance_name'],
     },
@@ -165,6 +172,7 @@ const TOOLS = [
         program:     { type: 'string', description: 'Registered program type name' },
         count:       { type: 'number', description: 'Number of instances to create' },
         name_prefix: { type: 'string', description: 'Name prefix for instances (default: lowercase program name). Instances are named prefix1, prefix2, …' },
+        type_args:   { type: 'object', description: 'Compile-time type args applied to every created instance, e.g. {"N": 8}. Omit for non-generic programs.' },
       },
       required: ['program', 'count'],
     },
@@ -479,29 +487,41 @@ function handleDefineProgram(args: Record<string, unknown>) {
   return wrap(() => {
     const prog = parseProgram(args.def) as ProgramJSON
     const type = loadProgramAsType(prog, session)
-    session.typeRegistry.set(type.name, type)
-    return { program_name: type.name, inputs: type._def.inputNames, outputs: type._def.outputNames }
+    if (type) {
+      return { program_name: type.name, inputs: type._def.inputNames, outputs: type._def.outputNames }
+    }
+    // Generic — template only, no concrete ports until instantiation.
+    return {
+      program_name: prog.name,
+      inputs: (prog.inputs ?? []).map(i => typeof i === 'string' ? i : i.name),
+      outputs: (prog.outputs ?? []).map(o => typeof o === 'string' ? o : o.name),
+      type_params: prog.type_params,
+    }
   })
 }
 
-function handleAddInstance(programName: string, instanceName: string) {
+function handleAddInstance(
+  programName: string,
+  instanceName: string,
+  typeArgs?: Record<string, number>,
+) {
   return wrap(() => {
     if (session.instanceRegistry.has(instanceName))
       throw new Error(`Instance '${instanceName}' already exists.`)
-    const type = session.typeRegistry.get(programName)
-    if (!type)
-      throw new Error(`Unknown program '${programName}'. Known: ${[...session.typeRegistry.keys()].join(', ')}`)
-    const inst = type.instantiateAs(instanceName)
+    const { type, typeArgs: resolved } = resolveProgramType(session, programName, typeArgs, undefined)
+    const inst = type.instantiateAs(instanceName, { baseTypeName: programName, typeArgs: resolved })
     session.instanceRegistry.set(instanceName, inst)
     return instanceSummary(instanceName)
   })
 }
 
-function handleReplicate(programName: string, count: number, namePrefix?: string) {
+function handleReplicate(
+  programName: string,
+  count: number,
+  namePrefix?: string,
+  typeArgs?: Record<string, number>,
+) {
   return wrap(() => {
-    const type = session.typeRegistry.get(programName)
-    if (!type)
-      throw new Error(`Unknown program '${programName}'. Known: ${[...session.typeRegistry.keys()].join(', ')}`)
     if (!Number.isInteger(count) || count < 1)
       throw new Error(`count must be a positive integer, got ${count}`)
 
@@ -511,7 +531,8 @@ function handleReplicate(programName: string, count: number, namePrefix?: string
       const name = nextName(session, prefix)
       if (session.instanceRegistry.has(name))
         throw new Error(`Instance '${name}' already exists — pick a different name_prefix`)
-      const inst = type.instantiateAs(name)
+      const { type, typeArgs: resolved } = resolveProgramType(session, programName, typeArgs, undefined)
+      const inst = type.instantiateAs(name, { baseTypeName: programName, typeArgs: resolved })
       session.instanceRegistry.set(name, inst)
       created.push(instanceSummary(name))
     }
@@ -723,8 +744,9 @@ function handleExportProgram(args: Record<string, unknown>) {
 
     const prog = exportSessionAsProgram(session, { name, inputs, outputs })
 
-    // Register as a usable type
+    // Register as a usable type (exported programs are never generic)
     const type = loadProgramAsType(prog, session)
+    if (!type) throw new Error(`export_program produced a generic program — not supported`)
     session.typeRegistry.set(name, type)
 
     // Optionally clean up exported instances from the session
@@ -776,8 +798,8 @@ function handleRemoveInstance(instanceName: string) {
 }
 
 function handleListPrograms() {
-  return wrap(() =>
-    [...session.typeRegistry.entries()].map(([typeName, type]) => {
+  return wrap(() => {
+    const concrete = [...session.typeRegistry.entries()].map(([typeName, type]) => {
       const d = type._def
       const defaultsMap = (d.rawInputDefaults ?? {}) as Record<string, unknown>
       return {
@@ -794,9 +816,24 @@ function handleListPrograms() {
           bounds: d.outputBounds[i] ?? null,
         })),
         registers: d.registerNames.map((n, i) => ({ name: n, type: d.registerPortTypes[i] ?? null })),
+        type_params: null as Record<string, { type: 'int'; default?: number }> | null,
       }
-    }),
-  )
+    })
+
+    const generic = [...session.genericTemplates.entries()].map(([typeName, prog]) => ({
+      program_name: typeName,
+      inputs: (prog.inputs ?? []).map(i => typeof i === 'string'
+        ? { name: i, type: null, bounds: null, default: prog.input_defaults?.[i] ?? null }
+        : { name: i.name, type: i.type ?? null, bounds: i.bounds ?? null, default: prog.input_defaults?.[i.name] ?? i.default ?? null }),
+      outputs: (prog.outputs ?? []).map(o => typeof o === 'string'
+        ? { name: o, type: null, bounds: null }
+        : { name: o.name, type: o.type ?? null, bounds: o.bounds ?? null }),
+      registers: [] as Array<{ name: string; type: string | null }>,
+      type_params: prog.type_params ?? null,
+    }))
+
+    return [...concrete, ...generic]
+  })
 }
 
 function handleListInstances() {
@@ -812,6 +849,7 @@ function handleGetInfo(instanceName: string) {
     return {
       name: instanceName,
       program: inst.typeName,
+      type_args: inst.typeArgs ?? null,
       inputs:  inst.inputNames.map((n, i) => ({
         name: n, index: i,
         type: inst._def.inputPortTypes[i] ?? null,
@@ -954,7 +992,11 @@ function handleTool(name: string, args: Record<string, unknown>) {
       return handleDefineProgram(args)
 
     case 'add_instance':
-      return handleAddInstance(args.program as string, args.instance_name as string)
+      return handleAddInstance(
+        args.program as string,
+        args.instance_name as string,
+        args.type_args as Record<string, number> | undefined,
+      )
 
     case 'remove_instance':
       return handleRemoveInstance(args.instance_name as string)
@@ -964,6 +1006,7 @@ function handleTool(name: string, args: Record<string, unknown>) {
         args.program as string,
         args.count as number,
         args.name_prefix as string | undefined,
+        args.type_args as Record<string, number> | undefined,
       )
 
     case 'wire_chain':

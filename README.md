@@ -42,7 +42,7 @@ Every wiring mutation triggers a full recompile and atomic kernel swap.
 
 ## Programs
 
-24 built-in DSP program types, all defined as human-readable JSON and compiled to native code at runtime:
+19 built-in DSP program types, all defined as human-readable JSON and compiled to native code at runtime:
 
 | Program | What it does |
 |---------|-------------|
@@ -59,7 +59,7 @@ Every wiring mutation triggers a full recompile and atomic kernel swap.
 | **Phaser / Phaser16** | 4 or 16 stage allpass phaser |
 | **BitCrusher** | Bit depth and sample rate reduction |
 | **NoiseLFSR** | Linear feedback shift register noise |
-| **Delay1/8/16/512/4410/44100** | Fixed-length delay lines |
+| **Delay** | Fixed-length delay line, parameterized by `N` samples (e.g. `{program:"Delay", type_args:{N:8}}`) |
 
 Complex types compose from simpler ones — LadderFilter is a few hundred lines of JSON using OnePole and Sin instances, not an opaque blob. Even transcendentals are programs: swap `stdlib/Sin.json` to change the approximation. New program types can be defined at runtime via `define_program` — no rebuild required.
 

@@ -40,7 +40,7 @@ engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio o
   engine/dac/         Audio output (RtAudio)
 mcp/                  MCP server — primary agent interface over stdio
 patches/              Example patches (tropical_program_1 JSON)
-stdlib/               Built-in program types as ProgramJSON files (24 types)
+stdlib/               Built-in program types as ProgramJSON files (19 types)
 ```
 
 ### Data flow
@@ -80,7 +80,7 @@ The TypeScript layer handles everything from program definition through instruct
 
 **Program types** (`program_types.ts`) — Pure data types: `ProgramDef` (slot-indexed IR for the flattener), `ProgramType`, `ProgramInstance`. No DSL — types are built from ProgramJSON by `loadProgramDef()` in `session.ts`.
 
-**Standard library** (`stdlib/*.json`) — 24 built-in program types as human-readable ProgramJSON files. Transcendentals (Sin, Cos, Tanh, Exp, Log, Pow) are programs, not primitives — swap the JSON to change the approximation. Shared primitives (OnePole, AllpassDelay, CombDelay, SoftClip, CrossFade) compose into higher-level types (e.g. LadderFilter uses 4 OnePole instances). Also includes Clock, LadderFilter, NoiseLFSR, BitCrusher, VCA, Phaser/Phaser16, and Delay variants (1/8/16/512/4410/44100 samples).
+**Standard library** (`stdlib/*.json`) — 19 built-in program types as human-readable ProgramJSON files. Transcendentals (Sin, Cos, Tanh, Exp, Log, Pow) are programs, not primitives — swap the JSON to change the approximation. Shared primitives (OnePole, AllpassDelay, CombDelay, SoftClip, CrossFade) compose into higher-level types (e.g. LadderFilter uses 4 OnePole instances). Also includes Clock, LadderFilter, NoiseLFSR, BitCrusher, VCA, Phaser/Phaser16, and a generic `Delay` parameterized by `type_args: {N}` (default N=44100).
 
 **Flattening** (`flatten.ts`) — The critical step. Inlines all instance expressions, resolves inter-instance references, expands nested calls, converts delays to register ops. Output is a `tropical_plan_4` JSON. Uses WeakMap memoization for DAG sharing. Automatically resolves feedback cycles (A→B→A or A→A) by inserting synthetic one-sample delay registers — self-refs are detected in a pre-pass, inter-instance cycles via Tarjan's SCC.
 

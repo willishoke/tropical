@@ -131,7 +131,8 @@
       }
     },
     "d1": {
-      "program": "Delay8",
+      "program": "Delay",
+      "type_args": {"N": 8},
       "inputs": {
         "x": {
           "op": "ref",
@@ -141,7 +142,8 @@
       }
     },
     "d2": {
-      "program": "Delay8",
+      "program": "Delay",
+      "type_args": {"N": 8},
       "inputs": {
         "x": {
           "op": "ref",
@@ -151,7 +153,8 @@
       }
     },
     "d3": {
-      "program": "Delay8",
+      "program": "Delay",
+      "type_args": {"N": 8},
       "inputs": {
         "x": {
           "op": "ref",
@@ -161,7 +164,8 @@
       }
     },
     "d4": {
-      "program": "Delay8",
+      "program": "Delay",
+      "type_args": {"N": 8},
       "inputs": {
         "x": {
           "op": "ref",

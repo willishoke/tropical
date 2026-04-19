@@ -365,7 +365,8 @@
       }
     },
     "Delay_pad": {
-      "program": "Delay44100",
+      "program": "Delay",
+      "type_args": {"N": 44100},
       "inputs": {
         "x": {
           "op": "ref",
