@@ -9,7 +9,7 @@
   "outputs": [
     { "name": "value", "type": "float" }
   ],
-  "regs": { "step": 0 },
+  "regs": { "step": { "init": 0, "type": "int" } },
   "delays": {
     "prev_clock": { "update": { "op": "input", "name": "clock" }, "init": 0 }
   },
