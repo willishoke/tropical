@@ -121,23 +121,34 @@ class Emitter {
   private nextArraySlot = 0
   private arraySizes:   number[] = []
   private instrs:       NInstr[] = []
-  // CSE: memoize compiled results by object identity (WeakMap keyed on the ExprNode object).
+  // CSE: memoize compiled results by (node identity, expected type).
+  //
   // Identity-based lookup is O(1) vs O(JSON size) for structural hashing, which matters
   // when expression DAGs have many shared subexpressions (e.g. nested module call chains).
+  //
+  // The inner key is the `expected` ScalarType (or '' for unconstrained). Bidirectional
+  // inference means the same ExprNode may compile differently under different expected
+  // types (literal 8 is float unconstrained, int under expected='int'). Collapsing those
+  // into a single memo entry would produce wrong-type operands at subsequent uses.
+  //
   // Terminals are not memoized — they allocate nothing and return an Operand directly.
-  private memo = new WeakMap<object, CompileResult>()
+  private memo = new WeakMap<object, Map<string, CompileResult>>()
   // Map register ID → pre-allocated array slot for registers whose init value is an array.
   private arrayRegMap = new Map<number, { slot: number, size: number }>()
   // Type tracking: temp register slot → ScalarType
   private regTypes = new Map<number, ScalarType>()
   // Type annotations for state registers (from module registerPortTypes)
   private stateRegTypes: ScalarType[]
+  // Type annotations for input ports (from flatten.ts inputPortTypes). Indexed by slot.
+  private inputPortTypes: ScalarType[]
 
   constructor(
     stateInit?: (number | boolean | number[])[],
     stateRegTypes?: ScalarType[],
+    inputPortTypes?: ScalarType[],
   ) {
     this.stateRegTypes = stateRegTypes ?? []
+    this.inputPortTypes = inputPortTypes ?? []
     if (stateInit) {
       for (let i = 0; i < stateInit.length; i++) {
         const init = stateInit[i]
@@ -162,21 +173,41 @@ class Emitter {
   private emit(instr: NInstr): void { this.instrs.push(instr) }
 
   // ── Terminal check: if node is a leaf, return its Operand + type directly. ──
-  private tryTerminal(node: ExprNode): { op: NOperand; scalarType: ScalarType } | null {
-    if (typeof node === 'number')  return { op: { kind: 'const', val: node, scalar_type: 'float' }, scalarType: 'float' }
+  //
+  // `expected` is the bidirectional type hint from the caller (destination port,
+  // register target, parent op's peeked type). It steers literal resolution so
+  // `mod(int_reg, 8)` treats `8` as int rather than defaulting to float.
+  //
+  // Narrowing a fractional literal into an int slot is a hard error — wrap the
+  // source in an explicit cast op (to_int) at the call site instead.
+  private tryTerminal(node: ExprNode, expected?: ScalarType): { op: NOperand; scalarType: ScalarType } | null {
+    if (typeof node === 'number') {
+      const t = this.resolveNumericLiteralType(node, expected)
+      return { op: { kind: 'const', val: node, scalar_type: t }, scalarType: t }
+    }
     if (typeof node === 'boolean') return { op: { kind: 'const', val: node ? 1 : 0, scalar_type: 'bool' }, scalarType: 'bool' }
     if (typeof node !== 'object' || node === null) return { op: { kind: 'const', val: 0, scalar_type: 'float' }, scalarType: 'float' }
     const obj = node as { op: string; [k: string]: unknown }
     switch (obj.op) {
       case 'const': {
         // Typed const form emitted by specialize.ts for int/bool type_params.
-        // Honors an explicit `type` field; defaults to float for bare const.
+        // Honors an explicit `type` field; defaults to context-resolved type
+        // for bare const (matching raw JS number behavior).
         const val = obj.val as number | boolean
-        const t = (obj.type as ScalarType | undefined) ?? 'float'
+        const rawT = obj.type as ScalarType | undefined
         const numericVal = typeof val === 'boolean' ? (val ? 1 : 0) : val
+        const t = rawT ?? this.resolveNumericLiteralType(numericVal, expected)
         return { op: { kind: 'const', val: numericVal, scalar_type: t }, scalarType: t }
       }
-      case 'input':        return { op: { kind: 'input', slot: obj.id as number, scalar_type: 'float' }, scalarType: 'float' }
+      case 'input': {
+        const slot = obj.id as number
+        // Input port type comes from the module's declared port type lattice,
+        // threaded in via the Emitter ctor. `expected` does not override — the
+        // declared type is authoritative, and a mismatch at the destination
+        // has already been filtered by array_wiring.
+        const portT = this.inputPortTypes[slot] ?? 'float'
+        return { op: { kind: 'input', slot, scalar_type: portT }, scalarType: portT }
+      }
       case 'reg': {
         if (this.arrayRegMap.has(obj.id as number)) return null  // array register — handled in compileNodeUncached
         const regType = this.stateRegTypes[obj.id as number] ?? 'float'
@@ -195,25 +226,54 @@ class Emitter {
     return null  // not a terminal
   }
 
+  // Pick the scalar type for a numeric literal under the caller's `expected`.
+  private resolveNumericLiteralType(val: number, expected?: ScalarType): ScalarType {
+    if (expected === 'int') {
+      if (!Number.isInteger(val)) {
+        throw new Error(
+          `Lossy conversion: literal ${val} cannot narrow to int. ` +
+          `Wrap the source in to_int() to narrow explicitly.`,
+        )
+      }
+      return 'int'
+    }
+    if (expected === 'bool') {
+      if (val !== 0 && val !== 1) {
+        throw new Error(
+          `Lossy conversion: literal ${val} cannot narrow to bool. ` +
+          `Wrap the source in to_bool() to narrow explicitly.`,
+        )
+      }
+      return 'bool'
+    }
+    return 'float'
+  }
+
   // ── Compile a node to an operand (emitting instructions as needed). ──
-  compileNode(node: ExprNode): CompileResult {
+  compileNode(node: ExprNode, expected?: ScalarType): CompileResult {
     // Terminal shortcut — no allocation, skip memo
-    const terminal = this.tryTerminal(node)
+    const terminal = this.tryTerminal(node, expected)
     if (terminal !== null) return { isArray: false, op: terminal.op, scalarType: terminal.scalarType }
 
-    // CSE: check memo before allocating anything
-    const cached = this.memo.get(node as object)
+    // CSE: check memo before allocating anything. Key by (node, expected).
+    const key = expected ?? ''
+    let bucket = this.memo.get(node as object)
+    const cached = bucket?.get(key)
     if (cached !== undefined) return cached
 
-    const result = this.compileNodeUncached(node)
-    this.memo.set(node as object, result)
+    const result = this.compileNodeUncached(node, expected)
+    if (!bucket) {
+      bucket = new Map()
+      this.memo.set(node as object, bucket)
+    }
+    bucket.set(key, result)
     return result
   }
 
-  private compileNodeUncached(node: ExprNode): CompileResult {
+  private compileNodeUncached(node: ExprNode, expected?: ScalarType): CompileResult {
     // Inline JS array → Pack instruction
     if (Array.isArray(node)) {
-      return this.compilePack(node as ExprNode[])
+      return this.compilePack(node as ExprNode[], expected)
     }
 
     const obj = node as { op: string; [k: string]: unknown }
@@ -226,30 +286,30 @@ class Emitter {
 
     // {"op":"array","items":[...]} — JSON patch format for inline arrays
     if (obj.op === 'array' && Array.isArray(obj.items)) {
-      return this.compilePack(obj.items as ExprNode[])
+      return this.compilePack(obj.items as ExprNode[], expected)
     }
 
     // Binary ops
     const binTag = BINARY_TAG[obj.op]
-    if (binTag) return this.compileBinary(binTag, obj.args as ExprNode[])
+    if (binTag) return this.compileBinary(binTag, obj.args as ExprNode[], expected)
 
     // Unary ops
     const uniTag = UNARY_TAG[obj.op]
-    if (uniTag) return this.compileUnary(uniTag, (obj.args as ExprNode[])[0])
+    if (uniTag) return this.compileUnary(uniTag, (obj.args as ExprNode[])[0], expected)
 
     // Ternary ops
-    if (obj.op === 'clamp')  return this.compileTernary('Clamp',  obj.args as ExprNode[])
-    if (obj.op === 'select') return this.compileTernary('Select', obj.args as ExprNode[])
+    if (obj.op === 'clamp')  return this.compileTernary('Clamp',  obj.args as ExprNode[], expected)
+    if (obj.op === 'select') return this.compileTernary('Select', obj.args as ExprNode[], expected)
 
     // Array ops
-    if (obj.op === 'index')     return this.compileIndex(obj.args as ExprNode[])
+    if (obj.op === 'index')     return this.compileIndex(obj.args as ExprNode[], expected)
     if (obj.op === 'array_set') return this.compileSetElement(obj.args as ExprNode[])
 
     // Matrix literal → flatten rows → Pack
     if (obj.op === 'matrix') {
       const rows = obj.rows as ExprNode[][]
       const flat = rows.flat() as ExprNode[]
-      return this.compilePack(flat)
+      return this.compilePack(flat, expected)
     }
 
     // broadcast_to surviving lower_arrays (dynamic, non-literal src)
@@ -273,11 +333,11 @@ class Emitter {
   }
 
   // ── Compile an inline JS array to a Pack instruction. ──
-  private compilePack(elements: ExprNode[]): ArrayResult {
+  private compilePack(elements: ExprNode[], expected?: ScalarType): ArrayResult {
     const size = elements.length
     const slot = this.allocArraySlot(size)
     const args: NOperand[] = elements.map(e => {
-      const r = this.compileNode(e)
+      const r = this.compileNode(e, expected)
       // Pack expects scalar operands; if element is array, flatten is unsupported here
       return r.isArray ? { kind: 'const' as const, val: 0, scalar_type: 'float' as ScalarType } : r.op
     })
@@ -286,9 +346,26 @@ class Emitter {
   }
 
   // ── Compile a binary op, routing to scalar or elementwise. ──
-  private compileBinary(tag: string, argNodes: ExprNode[]): CompileResult {
-    let l = this.compileNode(argNodes[0])
-    let r = this.compileNode(argNodes[1])
+  //
+  // Expected-type propagation rules:
+  //   - Bitwise ops (BitAnd, etc.) override `expected` to 'int' — they force
+  //     integer semantics regardless of the outer context.
+  //   - Comparison ops peek the first arg's natural type, then pass it to the
+  //     second arg as expected. This keeps `gt(float_input, 0.5)` well-typed
+  //     (literal 0.5 stays float) without special-casing the literal side.
+  //   - Arithmetic ops propagate `expected` to both args so downstream literals
+  //     can resolve to int when the destination (e.g. state_reg int) demands it.
+  private compileBinary(tag: string, argNodes: ExprNode[], expected?: ScalarType): CompileResult {
+    const argExpected = BITWISE_TAGS.has(tag) ? 'int' as ScalarType
+      : COMPARISON_TAGS.has(tag) ? undefined
+      : expected
+    let l = this.compileNode(argNodes[0], argExpected)
+    // For comparisons, the second arg inherits the first arg's natural type so
+    // a literal matches the signal it is being compared against.
+    const secondExpected = COMPARISON_TAGS.has(tag)
+      ? (l.isArray ? 'float' : l.scalarType)
+      : argExpected
+    let r = this.compileNode(argNodes[1], secondExpected)
 
     // Unbox size-1 arrays: loop_count==1 is the scalar signal; don't emit ArrayReg into it.
     if (l.isArray && l.size === 1) l = this.unboxArray(l)
@@ -312,8 +389,14 @@ class Emitter {
     return { isArray: true, op: { kind: 'array_reg', slot }, size, scalarType: rt }
   }
 
-  private compileUnary(tag: string, argNode: ExprNode): CompileResult {
-    let a = this.compileNode(argNode)
+  private compileUnary(tag: string, argNode: ExprNode, expected?: ScalarType): CompileResult {
+    // Ops whose natural result is fixed (sqrt, floor, etc.) don't propagate
+    // expected down. Neg/Abs preserve arg type, so expected passes through.
+    const argExpected = TRANSCENDENTAL_TAGS.has(tag) ? undefined
+      : COMPARISON_TAGS.has(tag) ? undefined  // 'not' → bool input
+      : tag === 'BitNot' ? 'int' as ScalarType
+      : expected
+    let a = this.compileNode(argNode, argExpected)
     if (a.isArray && a.size === 1) a = this.unboxArray(a)
 
     const rt = inferResultType(tag, [a.scalarType])
@@ -330,10 +413,14 @@ class Emitter {
     return { isArray: true, op: { kind: 'array_reg', slot }, size: a.size, scalarType: rt }
   }
 
-  private compileTernary(tag: string, argNodes: ExprNode[]): CompileResult {
-    let a = this.compileNode(argNodes[0])
-    let b = this.compileNode(argNodes[1])
-    let c = this.compileNode(argNodes[2])
+  private compileTernary(tag: string, argNodes: ExprNode[], expected?: ScalarType): CompileResult {
+    // Clamp(value, min, max): all three arms share the value arm's type; propagate.
+    // Select(cond, then, else): then/else inherit expected; cond is bool.
+    const condExpected: ScalarType | undefined = tag === 'Select' ? 'bool' : expected
+    const armExpected = expected
+    let a = this.compileNode(argNodes[0], condExpected)
+    let b = this.compileNode(argNodes[1], armExpected)
+    let c = this.compileNode(argNodes[2], armExpected)
 
     // Unbox size-1 arrays before checking array path
     if (a.isArray && a.size === 1) a = this.unboxArray(a)
@@ -357,9 +444,11 @@ class Emitter {
   }
 
   // ── index(arr, idx) → scalar element ──
-  private compileIndex(argNodes: ExprNode[]): ScalarResult {
+  private compileIndex(argNodes: ExprNode[], _expected?: ScalarType): ScalarResult {
+    // Array element type is authoritative for the result; we don't thread
+    // `expected` into the array arg. The index arg is always int-semantic.
     const arr = this.compileNode(argNodes[0])
-    const idx = this.compileNode(argNodes[1])
+    const idx = this.compileNode(argNodes[1], 'int')
     const dst = this.allocReg()
     const rt = arr.scalarType  // element type of the array
     this.regTypes.set(dst, rt)
@@ -438,7 +527,8 @@ class Emitter {
     const register_targets: number[] = []
 
     for (const expr of outputExprs) {
-      const r = this.compileNode(expr)
+      // Audio outputs are always float at the mix bus — hint literals that way.
+      const r = this.compileNode(expr, 'float')
       if (r.isArray) {
         // Array output → index element 0 as scalar output (always float for audio)
         const dst = this.allocReg()
@@ -454,12 +544,18 @@ class Emitter {
       }
     }
 
-    for (const expr of registerExprs) {
+    for (let ri = 0; ri < registerExprs.length; ri++) {
+      const expr = registerExprs[ri]
       if (expr === null) {
         register_targets.push(-1)
         continue
       }
-      const r = this.compileNode(expr)
+      // Register update: expected type is the declared state reg type, so
+      // literals and typed-consts inside the expression resolve consistently
+      // with the destination slot. Float writeback coercion (JIT side,
+      // Phase 5) handles the rare case where natural type > declared type.
+      const regExpected = this.stateRegTypes[ri]
+      const r = this.compileNode(expr, regExpected)
       if (r.isArray) {
         register_targets.push(-1)  // array registers not supported as state reg targets yet
       } else {
@@ -493,12 +589,15 @@ class Emitter {
  * @param registerExprs   One expression per state register; null = no update.
  * @param stateInit       Initial values for state registers.
  * @param stateRegTypes   ScalarType per state register (from module registerPortTypes).
+ * @param inputPortTypes  ScalarType per input slot. Drives input-operand typing so
+ *                        declared bool/int inputs don't get silently floated.
  */
 export function emitNumericProgram(
   outputExprs: ExprNode[],
   registerExprs: (ExprNode | null)[],
   stateInit?: (number | boolean | number[])[],
   stateRegTypes?: ScalarType[],
+  inputPortTypes?: ScalarType[],
 ): FlatProgram {
-  return new Emitter(stateInit, stateRegTypes).emitProgram(outputExprs, registerExprs)
+  return new Emitter(stateInit, stateRegTypes, inputPortTypes).emitProgram(outputExprs, registerExprs)
 }
