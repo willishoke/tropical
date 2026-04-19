@@ -32,6 +32,10 @@ import { applyFlatPlan }  from '../compiler/apply_plan.js'
 import { checkArrayConnection } from '../compiler/array_wiring.js'
 import { validateExpr }         from '../compiler/expr.js'
 import { exprDependencies }     from '../compiler/compiler.js'
+import { portTypeToString, type PortType } from '../compiler/term.js'
+
+const portTypeOrNull = (t: PortType | undefined): string | null =>
+  t === undefined ? null : portTypeToString(t)
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
@@ -48,18 +52,18 @@ loadBuiltins(session.typeRegistry)
  */
 function adaptInputExpr(
   node: ExprNode,
-  dstTypeStr: string | undefined,
+  dstType: PortType | undefined,
   instanceName: string,
   inputName: string,
 ): { expr: ExprNode; resultShape?: number[] } {
-  let srcTypeStr: string | undefined
+  let srcType: PortType | undefined
 
   if (typeof node === 'number') {
-    srcTypeStr = 'float'
+    srcType = { tag: 'scalar', scalar: 'float' }
   } else if (typeof node === 'boolean') {
-    srcTypeStr = 'bool'
+    srcType = { tag: 'scalar', scalar: 'bool' }
   } else if (Array.isArray(node)) {
-    srcTypeStr = `float[${(node as unknown[]).length}]`
+    srcType = { tag: 'array', element: { tag: 'scalar', scalar: 'float' }, shape: [(node as unknown[]).length] }
   } else if (typeof node === 'object' && node !== null) {
     const obj = node as Record<string, unknown>
     if (obj.op === 'ref') {
@@ -67,14 +71,14 @@ function adaptInputExpr(
       if (srcInst) {
         const outName = obj.output as string | number
         const outIdx = typeof outName === 'number' ? outName : srcInst.outputNames.indexOf(String(outName))
-        if (outIdx !== -1) srcTypeStr = srcInst.outputPortType(outIdx)
+        if (outIdx !== -1) srcType = srcInst.outputPortType(outIdx)
       }
     }
   }
 
-  if (srcTypeStr === undefined) return { expr: node }
+  if (srcType === undefined) return { expr: node }
 
-  const check = checkArrayConnection(srcTypeStr, dstTypeStr, node)
+  const check = checkArrayConnection(srcType, dstType, node)
   if (!check.compatible) {
     throw new Error(
       `Type mismatch on '${instanceName}'.${inputName}: ${check.error}`
@@ -806,16 +810,16 @@ function handleListPrograms() {
         program_name: typeName,
         inputs:    d.inputNames.map((n, i) => ({
           name: n,
-          type: d.inputPortTypes[i] ?? null,
+          type: portTypeOrNull(d.inputPortTypes[i]),
           bounds: d.inputBounds[i] ?? null,
           default: defaultsMap[n] ?? null,
         })),
         outputs: d.outputNames.map((n, i) => ({
           name: n,
-          type: d.outputPortTypes[i] ?? null,
+          type: portTypeOrNull(d.outputPortTypes[i]),
           bounds: d.outputBounds[i] ?? null,
         })),
-        registers: d.registerNames.map((n, i) => ({ name: n, type: d.registerPortTypes[i] ?? null })),
+        registers: d.registerNames.map((n, i) => ({ name: n, type: portTypeOrNull(d.registerPortTypes[i]) })),
         type_params: null as Record<string, { type: 'int'; default?: number }> | null,
       }
     })

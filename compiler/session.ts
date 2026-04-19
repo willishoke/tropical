@@ -16,6 +16,8 @@ import {
   specializeProgramJSON, specializationCacheKey, resolveTypeArgs,
   type RawTypeArgs, type ResolvedTypeArgs,
 } from './specialize.js'
+import { portTypeFromString } from './compiler.js'
+import { type PortType, Float, ArrayType } from './term.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -349,8 +351,10 @@ export function loadProgramDef(
   const outputSpecs = def.outputs ?? []
   const inputNames  = inputSpecs.map(i => typeof i === 'string' ? i : i.name)
   const outputNames = outputSpecs.map(o => typeof o === 'string' ? o : o.name)
-  const inputPortTypes  = inputSpecs.map(i => resolveBaseType(typeof i === 'string' ? undefined : i.type, aliases))
-  const outputPortTypes = outputSpecs.map(o => resolveBaseType(typeof o === 'string' ? undefined : o.type, aliases))
+  const declaredTypeToPortType = (t: string | undefined): PortType | undefined =>
+    t === undefined ? undefined : portTypeFromString(resolveBaseType(t, aliases))
+  const inputPortTypes  = inputSpecs.map(i => declaredTypeToPortType(typeof i === 'string' ? undefined : i.type))
+  const outputPortTypes = outputSpecs.map(o => declaredTypeToPortType(typeof o === 'string' ? undefined : o.type))
   const inputBounds     = inputSpecs.map(s => resolveBounds(s, aliases))
   const outputBounds    = outputSpecs.map(s => resolveBounds(s, aliases))
   const regsRaw     = def.regs ?? {}
@@ -360,18 +364,18 @@ export function loadProgramDef(
   // ── Parse registers ──
   const regNames: string[] = []
   const regInitValues: ValueCoercible[] = []
-  const regPortTypes: (string | undefined)[] = []
+  const regPortTypes: (PortType | undefined)[] = []
   for (const [name, val] of Object.entries(regsRaw)) {
     regNames.push(name)
     if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'zeros' in val) {
-      // Compact form: {"zeros": N} → array of N zeros with inferred type
+      // Compact form: {"zeros": N} → array of N zeros, float element
       const n = (val as { zeros: number }).zeros
       regInitValues.push(new Array(n).fill(0))
-      regPortTypes.push(`float[${n}]`)
+      regPortTypes.push(ArrayType(Float, [n]))
     } else if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'init' in val) {
       const typed = val as { init: ValueCoercible; type: string }
       regInitValues.push(typed.init)
-      regPortTypes.push(typed.type)
+      regPortTypes.push(portTypeFromString(typed.type))
     } else {
       regInitValues.push(val as ValueCoercible)
       regPortTypes.push(undefined)

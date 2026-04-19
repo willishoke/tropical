@@ -85,22 +85,23 @@ interface ProgramDefLike {
   inputNames: string[]
   outputNames: string[]
   registerNames: string[]
-  inputPortTypes: (string | undefined)[]
-  outputPortTypes: (string | undefined)[]
-  registerPortTypes: (string | undefined)[]
+  inputPortTypes: (PortType | undefined)[]
+  outputPortTypes: (PortType | undefined)[]
+  registerPortTypes: (PortType | undefined)[]
 }
 
-/** Extract InstanceInfo from a program definition. */
+/** Extract InstanceInfo from a program definition. Undeclared ports default to Float. */
 export function extractInstanceInfo(name: string, def: ProgramDefLike): InstanceInfo {
+  const fillFloat = (t: PortType | undefined): PortType => t ?? Float
   return {
     name,
     typeName: def.typeName,
     inputNames: [...def.inputNames],
     outputNames: [...def.outputNames],
     registerNames: [...def.registerNames],
-    inputTypes: def.inputPortTypes.map(portTypeFromString),
-    outputTypes: def.outputPortTypes.map(portTypeFromString),
-    registerTypes: def.registerPortTypes.map(portTypeFromString),
+    inputTypes: def.inputPortTypes.map(fillFloat),
+    outputTypes: def.outputPortTypes.map(fillFloat),
+    registerTypes: def.registerPortTypes.map(fillFloat),
   }
 }
 

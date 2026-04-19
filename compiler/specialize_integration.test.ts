@@ -2,6 +2,7 @@ import { describe, test, expect } from 'bun:test'
 import { makeSession, resolveProgramType } from './session.js'
 import { loadProgramAsType } from './program.js'
 import type { ProgramJSON } from './program.js'
+import { Float, ArrayType } from './term.js'
 
 function genericDelay(): ProgramJSON {
   return {
@@ -56,8 +57,8 @@ describe('resolveProgramType — generic instantiation', () => {
     expect(a3).toEqual({ N: 8 })
 
     // Specialized regs have concrete sizes
-    expect(t1._def.registerPortTypes[0]).toBe('float[8]')
-    expect(t2._def.registerPortTypes[0]).toBe('float[16]')
+    expect(t1._def.registerPortTypes[0]).toEqual(ArrayType(Float, [8]))
+    expect(t2._def.registerPortTypes[0]).toEqual(ArrayType(Float, [16]))
   })
 
   test('applies declared default when type_args absent', () => {
@@ -65,7 +66,7 @@ describe('resolveProgramType — generic instantiation', () => {
     loadProgramAsType(genericDelay(), session)
     const { type, typeArgs } = resolveProgramType(session, 'Delay', undefined, undefined)
     expect(typeArgs).toEqual({ N: 44100 })
-    expect(type._def.registerPortTypes[0]).toBe('float[44100]')
+    expect(type._def.registerPortTypes[0]).toEqual(ArrayType(Float, [44100]))
   })
 
   test('rejects type_args on non-generic programs', () => {

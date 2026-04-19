@@ -6,6 +6,7 @@
  */
 
 import type { SignalExpr, ExprCoercible, ExprNode } from './expr.js'
+import type { PortType } from './term.js'
 
 // ---------- Value helpers ----------
 
@@ -30,10 +31,10 @@ export interface ProgramDef {
   typeName: string
   inputNames: string[]
   outputNames: string[]
-  inputPortTypes: (string | undefined)[]
-  outputPortTypes: (string | undefined)[]
+  inputPortTypes: (PortType | undefined)[]
+  outputPortTypes: (PortType | undefined)[]
   registerNames: string[]
-  registerPortTypes: (string | undefined)[]
+  registerPortTypes: (PortType | undefined)[]
   registerInitValues: ValueCoercible[]
   sampleRate: number
   rawInputDefaults: Record<string, ExprNode>
@@ -95,9 +96,9 @@ export class ProgramInstance {
   get registerNames(): string[] { return this._def.registerNames }
   get typeName(): string { return this.baseTypeName }
 
-  inputPortType(idx: number): string | undefined { return this._def.inputPortTypes[idx] }
-  outputPortType(idx: number): string | undefined { return this._def.outputPortTypes[idx] }
-  registerPortType(idx: number): string | undefined { return this._def.registerPortTypes[idx] }
+  inputPortType(idx: number): PortType | undefined { return this._def.inputPortTypes[idx] }
+  outputPortType(idx: number): PortType | undefined { return this._def.outputPortTypes[idx] }
+  registerPortType(idx: number): PortType | undefined { return this._def.registerPortTypes[idx] }
 
   inputIndex(name: string): number {
     const idx = this._def.inputNames.indexOf(name)

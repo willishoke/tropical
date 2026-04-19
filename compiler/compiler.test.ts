@@ -335,15 +335,15 @@ describe('tarjanSCC', () => {
 // ─────────────────────────────────────────────────────────────
 
 describe('extractInstanceInfo', () => {
-  test('converts port type strings', () => {
+  test('forwards PortTypes, defaulting undefined to Float', () => {
     const def = {
       typeName: 'Test',
       inputNames: ['a', 'b'],
       outputNames: ['out'],
       registerNames: ['state'],
-      inputPortTypes: ['float', 'bool'] as (string | undefined)[],
-      outputPortTypes: ['int'] as (string | undefined)[],
-      registerPortTypes: [undefined] as (string | undefined)[],
+      inputPortTypes: [Float, Bool],
+      outputPortTypes: [Int],
+      registerPortTypes: [undefined],
     }
     const info = extractInstanceInfo('Test1', def)
     expect(info.name).toBe('Test1')

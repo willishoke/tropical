@@ -9,6 +9,7 @@ import type { ExprNode } from './expr'
 import type { ProgramJSON } from './program'
 import type { ProgramType, ProgramInstance, Bounds } from './program_types'
 import { Param, Trigger } from './runtime/param'
+import { Float } from './term'
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -154,7 +155,7 @@ describe('loadProgramDef bounds', () => {
     }), session)
     expect(type._def.outputBounds).toEqual([[-1, 1]])
     // Base type resolved to float
-    expect(type._def.outputPortTypes).toEqual(['float'])
+    expect(type._def.outputPortTypes).toEqual([Float])
   })
 
   test('extracts explicit input bounds', () => {
@@ -507,8 +508,8 @@ describe('user-definable type aliases', () => {
     }), session)
     expect(type._def.inputBounds).toEqual([[-0.5, 0.5]])
     expect(type._def.outputBounds).toEqual([[-0.5, 0.5]])
-    expect(type._def.inputPortTypes).toEqual(['float'])
-    expect(type._def.outputPortTypes).toEqual(['float'])
+    expect(type._def.inputPortTypes).toEqual([Float])
+    expect(type._def.outputPortTypes).toEqual([Float])
   })
 
   test('Zod schema accepts alias type_def', () => {

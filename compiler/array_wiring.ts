@@ -5,9 +5,9 @@
  * compatible and inserts broadcast_to nodes when needed.
  */
 
-import { portTypeFromString } from './compiler.js'
 import {
   type PortType,
+  Float,
   portTypeEqual,
   portTypeToString,
   broadcastShapes,
@@ -35,17 +35,12 @@ export interface ConnectionCheck {
  * - error: human-readable explanation if incompatible
  */
 export function checkArrayConnection(
-  srcTypeStr: string | undefined,
-  dstTypeStr: string | undefined,
+  srcTypeIn: PortType | undefined,
+  dstTypeIn: PortType | undefined,
   refExpr: ExprNode,
 ): ConnectionCheck {
-  const srcType = portTypeFromString(srcTypeStr)
-  const dstType = portTypeFromString(dstTypeStr)
-
-  // If both are undefined or identical strings, allow (backwards compat)
-  if (srcTypeStr === dstTypeStr) {
-    return { compatible: true }
-  }
+  const srcType = srcTypeIn ?? Float
+  const dstType = dstTypeIn ?? Float
 
   // If port types are structurally equal, pass through
   if (portTypeEqual(srcType, dstType)) {

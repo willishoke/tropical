@@ -17,7 +17,7 @@ import {
   buildDependencyGraph, topologicalSort, tarjanSCC,
 } from './compiler.js'
 import { lowerArrayOps } from './lower_arrays.js'
-import { portTypeToString } from './term.js'
+import { type PortType, Float, Bool, ArrayType } from './term.js'
 import { checkArrayConnection } from './array_wiring.js'
 import { emitNumericProgram, type NInstr, type ScalarType } from './emit_numeric.js'
 
@@ -33,16 +33,16 @@ export class FlattenError extends Error {
 }
 
 /**
- * Infer the output type string of an ExprNode, given the instance type context.
+ * Infer the output PortType of an ExprNode, given the instance type context.
  * Returns undefined when the type cannot be statically determined.
  */
 function inferExprOutputType(
   expr: ExprNode,
   instanceInfos: Map<string, InstanceInfo>,
-): string | undefined {
-  if (typeof expr === 'number') return 'float'
-  if (typeof expr === 'boolean') return 'bool'
-  if (Array.isArray(expr)) return `float[${(expr as unknown[]).length}]`
+): PortType | undefined {
+  if (typeof expr === 'number') return Float
+  if (typeof expr === 'boolean') return Bool
+  if (Array.isArray(expr)) return ArrayType(Float, [(expr as unknown[]).length])
   if (typeof expr !== 'object' || expr === null) return undefined
   const obj = expr as Record<string, unknown>
   switch (obj.op as string) {
@@ -52,15 +52,15 @@ function inferExprOutputType(
       const outName = obj.output as string | number
       const outIdx = typeof outName === 'number' ? outName : modInfo.outputNames.indexOf(outName)
       if (outIdx === -1 || outIdx >= modInfo.outputTypes.length) return undefined
-      return portTypeToString(modInfo.outputTypes[outIdx])
+      return modInfo.outputTypes[outIdx]
     }
     case 'broadcast_to':
-      return `float[${(obj.shape as number[]).join(',')}]`
+      return ArrayType(Float, obj.shape as number[])
     case 'zeros':
     case 'ones':
     case 'fill':
     case 'array_literal':
-      return `float[${(obj.shape as number[]).join(',')}]`
+      return ArrayType(Float, obj.shape as number[])
     default:
       return undefined
   }
@@ -89,11 +89,11 @@ export function normalizeWiringTypes(
     const inputIdx = modInfo.inputNames.indexOf(inputName)
     if (inputIdx === -1) continue
 
-    const dstTypeStr = portTypeToString(modInfo.inputTypes[inputIdx])
-    const srcTypeStr = inferExprOutputType(expr, instanceInfos)
-    if (srcTypeStr === undefined) continue
+    const dstType = modInfo.inputTypes[inputIdx]
+    const srcType = inferExprOutputType(expr, instanceInfos)
+    if (srcType === undefined) continue
 
-    const check = checkArrayConnection(srcTypeStr, dstTypeStr, expr)
+    const check = checkArrayConnection(srcType, dstType, expr)
     if (!check.compatible) {
       throw new FlattenError(
         `Wiring type mismatch on '${instanceName}'.${inputName}: ${check.error}`
@@ -105,6 +105,12 @@ export function normalizeWiringTypes(
   }
 
   return result
+}
+
+/** Map a register's PortType to the scalar tag carried in FlatRegister metadata. */
+function registerScalarTag(t: PortType | undefined): ScalarType {
+  const scalar = t?.tag === 'scalar' ? t.scalar : t?.tag === 'array' && t.element.tag === 'scalar' ? t.element.scalar : 'float'
+  return scalar === 'int' ? 'int' : scalar === 'bool' ? 'bool' : 'float'
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1218,10 +1224,7 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     for (let i = 0; i < def.registerNames.length; i++) {
       flatRegisterExprs.push({ op: 'reg', id: registerBase + i })
       flatRegisterNames.push(`${name}_${def.registerNames[i]}`)
-      const portType = def.registerPortTypes[i]
-      flatRegisterTypes.push(
-        portType === 'int' ? 'int' : portType === 'bool' ? 'bool' : 'float',
-      )
+      flatRegisterTypes.push(registerScalarTag(def.registerPortTypes[i]))
       const initVal = def.registerInitValues[i]
       if (typeof initVal === 'number' || typeof initVal === 'boolean') {
         flatStateInit.push(initVal)
@@ -1329,10 +1332,7 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
 
       // Register name, init value, and type
       flatRegisterNames.push(`${name}_${def.registerNames[i]}`)
-      const portType = def.registerPortTypes[i]
-      flatRegisterTypes.push(
-        portType === 'int' ? 'int' : portType === 'bool' ? 'bool' : 'float',
-      )
+      flatRegisterTypes.push(registerScalarTag(def.registerPortTypes[i]))
       const initVal = def.registerInitValues[i]
       if (typeof initVal === 'number' || typeof initVal === 'boolean') {
         flatStateInit.push(initVal)
