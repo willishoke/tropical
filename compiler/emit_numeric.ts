@@ -168,6 +168,14 @@ class Emitter {
     if (typeof node !== 'object' || node === null) return { op: { kind: 'const', val: 0, scalar_type: 'float' }, scalarType: 'float' }
     const obj = node as { op: string; [k: string]: unknown }
     switch (obj.op) {
+      case 'const': {
+        // Typed const form emitted by specialize.ts for int/bool type_params.
+        // Honors an explicit `type` field; defaults to float for bare const.
+        const val = obj.val as number | boolean
+        const t = (obj.type as ScalarType | undefined) ?? 'float'
+        const numericVal = typeof val === 'boolean' ? (val ? 1 : 0) : val
+        return { op: { kind: 'const', val: numericVal, scalar_type: t }, scalarType: t }
+      }
       case 'input':        return { op: { kind: 'input', slot: obj.id as number, scalar_type: 'float' }, scalarType: 'float' }
       case 'reg': {
         if (this.arrayRegMap.has(obj.id as number)) return null  // array register — handled in compileNodeUncached
