@@ -80,6 +80,71 @@ function makeTestSession() {
   return session
 }
 
+describe('exportSessionAsProgram — port type round-trip', () => {
+  test('emits typed inputs/outputs matching source instance port types', () => {
+    const session = makeSession(256)
+    // Register a leaf type with typed inputs and outputs
+    const typedLeaf: ProgramJSON = {
+      schema: 'tropical_program_1',
+      name: 'TypedLeaf',
+      inputs: [{ name: 'a', type: 'float[4]' }],
+      outputs: [{ name: 'out', type: 'float[4]' }],
+      process: { outputs: { out: { op: 'input', name: 'a' } } },
+    }
+    loadProgramAsType(typedLeaf, session)
+    const { type } = resolveProgramType(session, 'TypedLeaf', undefined, undefined)
+    session.instanceRegistry.set('t1', type.instantiateAs('t1', { baseTypeName: 'TypedLeaf' }))
+
+    const exported = exportSessionAsProgram(session, {
+      name: 'Exported',
+      inputs: { a: 't1:a' },
+      outputs: { out: { instance: 't1', output: 'out' } },
+    })
+
+    // Re-parse through the schema to confirm it's well-formed
+    const reparsed = parseProgram(exported) as ProgramJSON
+    const inputEntry = reparsed.inputs![0]
+    const outputEntry = reparsed.outputs![0]
+    expect(typeof inputEntry === 'object' && inputEntry.type).toBe('float[4]')
+    expect(typeof outputEntry === 'object' && outputEntry.type).toBe('float[4]')
+
+    // Load the exported program into a fresh session and check port types survive.
+    // The nested TypedLeaf must be registered before the exported composite that uses it.
+    const session2 = makeSession(256)
+    loadProgramAsType(typedLeaf, session2)
+    loadProgramAsType(exported, session2)
+    const { type: exportedType } = resolveProgramType(session2, 'Exported', undefined, undefined)
+    const srcPt = exportedType._def.inputPortTypes[0]
+    const dstPt = exportedType._def.outputPortTypes[0]
+    expect(srcPt?.tag).toBe('array')
+    expect(dstPt?.tag).toBe('array')
+    if (srcPt?.tag === 'array') expect(srcPt.shape).toEqual([4])
+    if (dstPt?.tag === 'array') expect(dstPt.shape).toEqual([4])
+  })
+
+  test('emits bare string names when no type or bounds are declared', () => {
+    const session = makeSession(256)
+    const plain: ProgramJSON = {
+      schema: 'tropical_program_1',
+      name: 'Plain',
+      inputs: ['x'],
+      outputs: ['y'],
+      process: { outputs: { y: { op: 'input', name: 'x' } } },
+    }
+    loadProgramAsType(plain, session)
+    const { type } = resolveProgramType(session, 'Plain', undefined, undefined)
+    session.instanceRegistry.set('p1', type.instantiateAs('p1', { baseTypeName: 'Plain' }))
+
+    const exported = exportSessionAsProgram(session, {
+      name: 'Exported',
+      inputs: { x: 'p1:x' },
+      outputs: { y: { instance: 'p1', output: 'y' } },
+    })
+    expect(exported.inputs![0]).toBe('x')
+    expect(exported.outputs![0]).toBe('y')
+  })
+})
+
 describe('exportSessionAsProgram', () => {
   test('errors on unknown instance in outputs', () => {
     const session = makeTestSession()
