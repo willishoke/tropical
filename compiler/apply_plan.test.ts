@@ -6,7 +6,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, loadJSON, type ExprNode } from './session'
+import { makeSession, loadJSON, v1ProgramJSONToV2Node, type ExprNode } from './session'
 import { loadStdlib as loadBuiltins, loadProgramAsType, type ProgramJSON } from './program'
 import { applySessionWiring, applyFlatPlan } from './apply_plan'
 import { Runtime } from './runtime/runtime'
@@ -50,7 +50,7 @@ const TEST_OSC: ProgramJSON = {
 function setupSession(instances: Record<string, { program: string }>, bufferLength = 256) {
   const session = makeSession(bufferLength)
   loadBuiltins(session.typeRegistry)
-  session.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, session))
+  session.typeRegistry.set('TestOsc', loadProgramAsType(v1ProgramJSONToV2Node(TEST_OSC).node,session))
   loadJSON({
     schema: 'tropical_program_1',
     name: 'test',
@@ -90,7 +90,7 @@ describe('applySessionWiring', () => {
   test('matches reference output from loadJSON path', () => {
     const refSession = makeSession(256)
     loadBuiltins(refSession.typeRegistry)
-    refSession.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, refSession))
+    refSession.typeRegistry.set('TestOsc', loadProgramAsType(v1ProgramJSONToV2Node(TEST_OSC).node,refSession))
     const prog: ProgramJSON = {
       schema: 'tropical_program_1',
       name: 'ref',

@@ -160,11 +160,43 @@ export interface ProgramJSON {
 // Program loading
 // ─────────────────────────────────────────────────────────────
 
+/** Iterate instance_decl entries in a ProgramNode's body. */
+function* instanceDecls(prog: ProgramNode): Iterable<{
+  name: string
+  program: string
+  inputs?: Record<string, ExprNode>
+  type_args?: Record<string, number | ExprNode>
+}> {
+  for (const d of prog.body?.decls ?? []) {
+    if (typeof d !== 'object' || d === null || Array.isArray(d)) continue
+    const obj = d as Record<string, unknown>
+    if (obj.op !== 'instance_decl') continue
+    yield {
+      name: obj.name as string,
+      program: obj.program as string,
+      inputs: obj.inputs as Record<string, ExprNode> | undefined,
+      type_args: obj.type_args as Record<string, number | ExprNode> | undefined,
+    }
+  }
+}
+
+/** Iterate program_decl entries in a ProgramNode's body. */
+function* programDecls(prog: ProgramNode): Iterable<{ name: string; program: ProgramNode }> {
+  for (const d of prog.body?.decls ?? []) {
+    if (typeof d !== 'object' || d === null || Array.isArray(d)) continue
+    const obj = d as Record<string, unknown>
+    if (obj.op !== 'program_decl') continue
+    yield { name: obj.name as string, program: obj.program as ProgramNode }
+  }
+}
+
 /**
- * Load a ProgramJSON into a session, replacing all existing state.
+ * Load a ProgramNode into a session, replacing all existing state.
+ * `topLevel` carries session-scoped metadata (params, audio_outputs, config).
  */
 export function loadProgramAsSession(
-  prog: ProgramJSON,
+  prog: ProgramNode,
+  topLevel: ProgramTopLevel,
   session: SessionState,
 ): void {
   // Clear session state
@@ -178,21 +210,19 @@ export function loadProgramAsSession(
   session.typeAliasRegistry.clear()
 
   // Register type aliases from type_defs before anything else
-  for (const td of prog.type_defs ?? []) {
+  for (const td of prog.ports?.type_defs ?? []) {
     if (td.kind === 'alias') {
       session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
     }
   }
 
   // Register inline program definitions (loadProgramAsType handles registration)
-  if (prog.programs) {
-    for (const [name, subProg] of Object.entries(prog.programs)) {
-      loadProgramAsType({ ...subProg, name }, session)
-    }
+  for (const sub of programDecls(prog)) {
+    loadProgramAsType({ ...sub.program, name: sub.name }, session)
   }
 
   // Create params and triggers before instances (instances may reference them)
-  for (const p of prog.params ?? []) {
+  for (const p of topLevel.params ?? []) {
     if (p.type === 'trigger') {
       session.triggerRegistry.set(p.name, new Trigger())
     } else {
@@ -201,16 +231,16 @@ export function loadProgramAsSession(
   }
 
   // Instantiate programs
-  for (const [name, inst] of Object.entries(prog.instances ?? {})) {
+  for (const inst of instanceDecls(prog)) {
     const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
-    const instance = type.instantiateAs(name, { baseTypeName: inst.program, typeArgs })
+    const instance = type.instantiateAs(inst.name, { baseTypeName: inst.program, typeArgs })
     session.instanceRegistry.set(instance.name, instance)
 
     // Populate wiring from instance inputs
     if (inst.inputs) {
       for (const [input, expr] of Object.entries(inst.inputs)) {
-        validateExpr(expr, `${name}.${input}`)
-        session.inputExprNodes.set(`${name}:${input}`, expr)
+        validateExpr(expr, `${inst.name}.${input}`)
+        session.inputExprNodes.set(`${inst.name}:${input}`, expr)
       }
     }
   }
@@ -227,7 +257,7 @@ export function loadProgramAsSession(
   }
 
   // Set audio outputs
-  for (const out of prog.audio_outputs ?? []) {
+  for (const out of topLevel.audio_outputs ?? []) {
     if ('expr' in out) {
       throw new Error('Output expressions not supported in plan-based path. Use instance output refs instead.')
     }
@@ -241,8 +271,8 @@ export function loadProgramAsSession(
 }
 
 /**
- * Load a leaf ProgramJSON as a ProgramType (registerable in typeRegistry).
- * Programs with inline `programs` get their subprograms registered first.
+ * Load a ProgramNode as a ProgramType (registerable in typeRegistry).
+ * Programs with inline `program_decl` entries get their subprograms registered first.
  *
  * Generic programs (with `type_params`) are stored in `genericTemplates`
  * instead of being eagerly compiled; they materialize on instantiation via
@@ -250,12 +280,12 @@ export function loadProgramAsSession(
  * registered in `typeRegistry` and returned.
  */
 export function loadProgramAsType(
-  prog: ProgramJSON,
+  prog: ProgramNode,
   session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>,
 ): ProgramType | undefined {
   // Register type aliases from type_defs before processing subprograms
   if (session.typeAliasRegistry) {
-    for (const td of prog.type_defs ?? []) {
+    for (const td of prog.ports?.type_defs ?? []) {
       if (td.kind === 'alias') {
         session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
       }
@@ -263,56 +293,53 @@ export function loadProgramAsType(
   }
 
   // Register inline subprograms first (each handles its own registration)
-  if (prog.programs) {
-    for (const [name, subProg] of Object.entries(prog.programs)) {
-      loadProgramAsType({ ...subProg, name }, session)
-    }
+  for (const sub of programDecls(prog)) {
+    loadProgramAsType({ ...sub.program, name: sub.name }, session)
   }
 
-  // Generic: stash the template as a ProgramNode, defer compilation to instantiation time.
+  // Generic: stash the template, defer compilation to instantiation time.
   if (prog.type_params && Object.keys(prog.type_params).length > 0) {
-    session.genericTemplates.set(prog.name, v1ProgramJSONToV2Node(prog).node)
+    session.genericTemplates.set(prog.name, prog)
     return undefined
   }
 
-  const type = loadProgramDef(v1ProgramJSONToV2Node(prog).node, session)
+  const type = loadProgramDef(prog, session)
   session.typeRegistry.set(prog.name, type)
   return type
 }
 
 /**
- * Merge a ProgramJSON into an existing session (additive — no state clearing).
+ * Merge a ProgramNode into an existing session (additive — no state clearing).
  */
 export function mergeProgramIntoSession(
-  prog: ProgramJSON,
+  prog: ProgramNode,
+  topLevel: ProgramTopLevel,
   session: SessionState,
 ): void {
   // Fail fast on name collisions
-  for (const name of Object.keys(prog.instances ?? {})) {
-    if (session.instanceRegistry.has(name))
-      throw new Error(`merge collision: instance '${name}' already exists.`)
+  for (const inst of instanceDecls(prog)) {
+    if (session.instanceRegistry.has(inst.name))
+      throw new Error(`merge collision: instance '${inst.name}' already exists.`)
   }
-  for (const p of prog.params ?? []) {
+  for (const p of topLevel.params ?? []) {
     if (session.paramRegistry.has(p.name) || session.triggerRegistry.has(p.name))
       throw new Error(`merge collision: param/trigger '${p.name}' already exists.`)
   }
 
   // Register type aliases from type_defs (additive)
-  for (const td of prog.type_defs ?? []) {
+  for (const td of prog.ports?.type_defs ?? []) {
     if (td.kind === 'alias') {
       session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
     }
   }
 
   // Register inline program definitions (loadProgramAsType handles registration)
-  if (prog.programs) {
-    for (const [name, subProg] of Object.entries(prog.programs)) {
-      loadProgramAsType({ ...subProg, name }, session)
-    }
+  for (const sub of programDecls(prog)) {
+    loadProgramAsType({ ...sub.program, name: sub.name }, session)
   }
 
   // Create params and triggers
-  for (const p of prog.params ?? []) {
+  for (const p of topLevel.params ?? []) {
     if (p.type === 'trigger') {
       session.triggerRegistry.set(p.name, new Trigger())
     } else {
@@ -321,16 +348,16 @@ export function mergeProgramIntoSession(
   }
 
   // Instantiate programs
-  for (const [name, inst] of Object.entries(prog.instances ?? {})) {
+  for (const inst of instanceDecls(prog)) {
     const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
-    const instance = type.instantiateAs(name, { baseTypeName: inst.program, typeArgs })
+    const instance = type.instantiateAs(inst.name, { baseTypeName: inst.program, typeArgs })
     session.instanceRegistry.set(instance.name, instance)
 
     // Populate wiring from instance inputs
     if (inst.inputs) {
       for (const [input, expr] of Object.entries(inst.inputs)) {
-        validateExpr(expr, `${name}.${input}`)
-        session.inputExprNodes.set(`${name}:${input}`, expr)
+        validateExpr(expr, `${inst.name}.${input}`)
+        session.inputExprNodes.set(`${inst.name}:${input}`, expr)
       }
     }
   }
@@ -347,7 +374,7 @@ export function mergeProgramIntoSession(
   }
 
   // Append audio outputs
-  for (const out of prog.audio_outputs ?? []) {
+  for (const out of topLevel.audio_outputs ?? []) {
     if ('expr' in out) {
       throw new Error('Output expressions not supported in plan-based path. Use instance output refs instead.')
     }
@@ -411,8 +438,8 @@ export function loadStdlib(
     if (!path) return undefined
     loading.add(name)
     const raw = JSON.parse(readFileSync(path, 'utf-8')) as { schema?: string; [k: string]: unknown }
-    const prog = normalizeProgramFile(raw)
-    const type = loadProgramAsType(prog, session)
+    const { node } = normalizeProgramFile(raw)
+    const type = loadProgramAsType(node, session)
     loading.delete(name)
     return type
   }

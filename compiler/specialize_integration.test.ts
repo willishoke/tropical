@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test'
-import { makeSession, resolveProgramType } from './session.js'
+import { makeSession, resolveProgramType, v1ProgramJSONToV2Node } from './session.js'
 import { loadProgramAsType } from './program.js'
 import type { ProgramJSON } from './program.js'
 import { Float, ArrayType } from './term.js'
@@ -41,7 +41,7 @@ function genericDelay(): ProgramJSON {
 describe('resolveProgramType — generic instantiation', () => {
   test('monomorphizes and caches a generic type', () => {
     const session = makeSession()
-    loadProgramAsType(genericDelay(), session)
+    loadProgramAsType(v1ProgramJSONToV2Node(genericDelay()).node, session)
     // Generic programs go into genericTemplates, not typeRegistry
     expect(session.typeRegistry.has('Delay')).toBe(false)
     expect(session.genericTemplates.has('Delay')).toBe(true)
@@ -63,7 +63,7 @@ describe('resolveProgramType — generic instantiation', () => {
 
   test('applies declared default when type_args absent', () => {
     const session = makeSession()
-    loadProgramAsType(genericDelay(), session)
+    loadProgramAsType(v1ProgramJSONToV2Node(genericDelay()).node, session)
     const { type, typeArgs } = resolveProgramType(session, 'Delay', undefined, undefined)
     expect(typeArgs).toEqual({ N: 44100 })
     expect(type._def.registerPortTypes[0]).toEqual(ArrayType(Float, [44100]))
@@ -78,7 +78,7 @@ describe('resolveProgramType — generic instantiation', () => {
       outputs: ['y'],
       process: { outputs: { y: { op: 'input', name: 'x' } } },
     }
-    loadProgramAsType(onePole, session)
+    loadProgramAsType(v1ProgramJSONToV2Node(onePole).node, session)
     expect(() => resolveProgramType(session, 'Identity', { N: 8 }, undefined)).toThrow(/does not declare type_params/)
   })
 
@@ -96,7 +96,7 @@ describe('resolveProgramType — generic instantiation', () => {
       outputs: ['y'],
       process: { outputs: { y: { op: 'input', name: 'x' } } },
     }
-    loadProgramAsType(p, session)
+    loadProgramAsType(v1ProgramJSONToV2Node(p).node, session)
     const { type, typeArgs } = resolveProgramType(session, 'Passthrough', undefined, undefined)
     expect(type).toBeDefined()
     expect(typeArgs).toBeUndefined()
@@ -116,7 +116,7 @@ describe('resolveProgramType — generic instantiation', () => {
       process: { outputs: { out: { op: 'input', name: 'values' } } },
     }
     const session = makeSession()
-    loadProgramAsType(prog, session)
+    loadProgramAsType(v1ProgramJSONToV2Node(prog).node, session)
 
     const { type: t8 } = resolveProgramType(session, 'Bus', { N: 8 }, undefined)
     expect(t8._def.inputPortTypes[0]).toEqual(ArrayType(Float, [8]))

@@ -16,7 +16,7 @@ import { describe, test, expect } from 'bun:test'
 import { statSync, existsSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { makeSession, loadJSON } from './session'
+import { makeSession, loadJSON, v1ProgramJSONToV2Node } from './session'
 import { loadStdlib as loadBuiltins, loadProgramAsType, type ProgramJSON } from './program'
 import { applySessionWiring } from './apply_plan'
 import { flattenExpressions } from './flatten'
@@ -71,7 +71,7 @@ const TEST_OSC: ProgramJSON = {
 function oscSession(freq: number, output: 'saw' | 'sin', bufferLength = 256) {
   const session = makeSession(bufferLength)
   loadBuiltins(session.typeRegistry)
-  session.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, session))
+  session.typeRegistry.set('TestOsc', loadProgramAsType(v1ProgramJSONToV2Node(TEST_OSC).node,session))
   loadJSON({
     schema: 'tropical_program_1',
     name: 'test',
@@ -110,7 +110,7 @@ describe('renderFrames / buffer backend', () => {
   test('hot-swap updates frequency while preserving phase state', () => {
     const session = makeSession(256)
     loadBuiltins(session.typeRegistry)
-    session.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, session))
+    session.typeRegistry.set('TestOsc', loadProgramAsType(v1ProgramJSONToV2Node(TEST_OSC).node,session))
     loadJSON({
       schema: 'tropical_program_1',
       name: 'test',
@@ -156,13 +156,13 @@ describe('renderFrames / buffer backend', () => {
 
     const s32 = makeSession(32)
     loadBuiltins(s32.typeRegistry)
-    s32.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, s32))
+    s32.typeRegistry.set('TestOsc', loadProgramAsType(v1ProgramJSONToV2Node(TEST_OSC).node,s32))
     loadJSON(prog, s32)
     const a = renderFrames(s32.runtime, 16)  // 16 × 32 = 512
 
     const s512 = makeSession(512)
     loadBuiltins(s512.typeRegistry)
-    s512.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, s512))
+    s512.typeRegistry.set('TestOsc', loadProgramAsType(v1ProgramJSONToV2Node(TEST_OSC).node,s512))
     loadJSON(prog, s512)
     const b = renderFrames(s512.runtime, 1)  // 1 × 512 = 512
 

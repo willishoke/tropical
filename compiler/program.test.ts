@@ -4,7 +4,7 @@
 
 import { describe, test, expect } from 'bun:test'
 import { parseProgram } from './schema'
-import { makeSession, loadJSON } from './session'
+import { makeSession, loadJSON, v1ProgramJSONToV2Node } from './session'
 import {
   loadStdlib as loadBuiltins, loadProgramAsType, loadProgramAsSession,
   saveProgramFromSession, exportSessionAsProgram, type ProgramJSON,
@@ -91,7 +91,7 @@ describe('exportSessionAsProgram — port type round-trip', () => {
       outputs: [{ name: 'out', type: { kind: 'array', element: 'float', shape: [4] } }],
       process: { outputs: { out: { op: 'input', name: 'a' } } },
     }
-    loadProgramAsType(typedLeaf, session)
+    loadProgramAsType(v1ProgramJSONToV2Node(typedLeaf).node, session)
     const { type } = resolveProgramType(session, 'TypedLeaf', undefined, undefined)
     session.instanceRegistry.set('t1', type.instantiateAs('t1', { baseTypeName: 'TypedLeaf' }))
 
@@ -111,8 +111,8 @@ describe('exportSessionAsProgram — port type round-trip', () => {
     // Load the exported program into a fresh session and check port types survive.
     // The nested TypedLeaf must be registered before the exported composite that uses it.
     const session2 = makeSession(256)
-    loadProgramAsType(typedLeaf, session2)
-    loadProgramAsType(exported, session2)
+    loadProgramAsType(v1ProgramJSONToV2Node(typedLeaf).node, session2)
+    loadProgramAsType(v1ProgramJSONToV2Node(exported).node, session2)
     const { type: exportedType } = resolveProgramType(session2, 'Exported', undefined, undefined)
     const srcPt = exportedType._def.inputPortTypes[0]
     const dstPt = exportedType._def.outputPortTypes[0]
@@ -131,7 +131,7 @@ describe('exportSessionAsProgram — port type round-trip', () => {
       outputs: ['y'],
       process: { outputs: { y: { op: 'input', name: 'x' } } },
     }
-    loadProgramAsType(plain, session)
+    loadProgramAsType(v1ProgramJSONToV2Node(plain).node, session)
     const { type } = resolveProgramType(session, 'Plain', undefined, undefined)
     session.instanceRegistry.set('p1', type.instantiateAs('p1', { baseTypeName: 'Plain' }))
 
@@ -210,7 +210,7 @@ describe('generic programs round-trip', () => {
 
   test('saveProgramFromSession emits type_args on instance entries', () => {
     const session = makeSession()
-    loadProgramAsType(genericDelay(), session)
+    loadProgramAsType(v1ProgramJSONToV2Node(genericDelay()).node, session)
     const { type, typeArgs } = resolveProgramType(session, 'Delay', { N: 8 }, undefined)
     const inst = type.instantiateAs('d1', { baseTypeName: 'Delay', typeArgs })
     session.instanceRegistry.set('d1', inst)
@@ -229,7 +229,7 @@ describe('generic programs round-trip', () => {
       outputs: ['y'],
       process: { outputs: { y: { op: 'input', name: 'x' } } },
     }
-    loadProgramAsType(p, session)
+    loadProgramAsType(v1ProgramJSONToV2Node(p).node, session)
     const { type } = resolveProgramType(session, 'Passthrough', undefined, undefined)
     session.instanceRegistry.set('p1', type.instantiateAs('p1', { baseTypeName: 'Passthrough' }))
 
@@ -267,7 +267,7 @@ describe('typeResolver', () => {
       const prog = fakeTypes.get(name)
       if (!prog) return undefined
       loading.add(name)
-      const type = loadProgramAsType(prog, session)
+      const type = loadProgramAsType(v1ProgramJSONToV2Node(prog).node, session)
       session.typeRegistry.set(name, type)
       loading.delete(name)
       return type

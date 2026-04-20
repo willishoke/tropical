@@ -489,17 +489,17 @@ const TOOLS = [
 
 function handleDefineProgram(args: Record<string, unknown>) {
   return wrap(() => {
-    const prog = normalizeProgramFile(args.def as { schema?: string; [k: string]: unknown })
-    const type = loadProgramAsType(prog, session)
+    const { node } = normalizeProgramFile(args.def as { schema?: string; [k: string]: unknown })
+    const type = loadProgramAsType(node, session)
     if (type) {
       return { program_name: type.name, inputs: type._def.inputNames, outputs: type._def.outputNames }
     }
     // Generic — template only, no concrete ports until instantiation.
     return {
-      program_name: prog.name,
-      inputs: (prog.inputs ?? []).map(i => typeof i === 'string' ? i : i.name),
-      outputs: (prog.outputs ?? []).map(o => typeof o === 'string' ? o : o.name),
-      type_params: prog.type_params,
+      program_name: node.name,
+      inputs: (node.ports?.inputs ?? []).map(i => typeof i === 'string' ? i : i.name),
+      outputs: (node.ports?.outputs ?? []).map(o => typeof o === 'string' ? o : o.name),
+      type_params: node.type_params,
     }
   })
 }
@@ -747,9 +747,10 @@ function handleExportProgram(args: Record<string, unknown>) {
     if (!outputs || Object.keys(outputs).length === 0) throw new Error('outputs is required (at least one)')
 
     const prog = exportSessionAsProgram(session, { name, inputs, outputs })
+    const { node: exportedNode, topLevel: exportedTop } = v1ProgramJSONToV2Node(prog)
 
     // Register as a usable type (exported programs are never generic)
-    const type = loadProgramAsType(prog, session)
+    const type = loadProgramAsType(exportedNode, session)
     if (!type) throw new Error(`export_program produced a generic program — not supported`)
     session.typeRegistry.set(name, type)
 
@@ -775,13 +776,12 @@ function handleExportProgram(args: Record<string, unknown>) {
       }
     }
 
-    const { node, topLevel } = v1ProgramJSONToV2Node(prog)
     return {
       program_name: name,
       inputs: type._def.inputNames,
       outputs: type._def.outputNames,
       instances_included: Object.keys(prog.instances ?? {}),
-      program: v2NodeToFile(node, topLevel),
+      program: v2NodeToFile(exportedNode as unknown as ExprNode, exportedTop),
     }
   })
 }
@@ -827,10 +827,10 @@ function handleListPrograms() {
 
     const generic = [...session.genericTemplates.entries()].map(([typeName, prog]) => ({
       program_name: typeName,
-      inputs: (prog.inputs ?? []).map(i => typeof i === 'string'
-        ? { name: i, type: null, bounds: null, default: prog.input_defaults?.[i] ?? null }
-        : { name: i.name, type: i.type ?? null, bounds: i.bounds ?? null, default: prog.input_defaults?.[i.name] ?? i.default ?? null }),
-      outputs: (prog.outputs ?? []).map(o => typeof o === 'string'
+      inputs: (prog.ports?.inputs ?? []).map(i => typeof i === 'string'
+        ? { name: i, type: null, bounds: null, default: null }
+        : { name: i.name, type: i.type ?? null, bounds: i.bounds ?? null, default: i.default ?? null }),
+      outputs: (prog.ports?.outputs ?? []).map(o => typeof o === 'string'
         ? { name: o, type: null, bounds: null }
         : { name: o.name, type: o.type ?? null, bounds: o.bounds ?? null }),
       registers: [] as Array<{ name: string; type: string | null }>,
@@ -970,7 +970,7 @@ function handleSave() {
   return wrap(() => {
     const v1 = saveProgramFromSession(session)
     const { node, topLevel } = v1ProgramJSONToV2Node(v1)
-    return { program: v2NodeToFile(node, topLevel) }
+    return { program: v2NodeToFile(node as unknown as ExprNode, topLevel) }
   })
 }
 
@@ -978,8 +978,8 @@ function handleMerge(args: Record<string, unknown>) {
   return wrap(() => {
     const raw = args.program ?? args.patch
     if (!raw) throw new Error('Provide a program or patch object.')
-    const prog = normalizeProgramFile(raw as { schema?: string; [k: string]: unknown })
-    mergeProgramIntoSession(prog, session)
+    const { node, topLevel } = normalizeProgramFile(raw as { schema?: string; [k: string]: unknown })
+    mergeProgramIntoSession(node, topLevel, session)
     return {
       instances:   [...session.instanceRegistry.keys()],
       wiring:      session.inputExprNodes.size,

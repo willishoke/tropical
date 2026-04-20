@@ -204,7 +204,7 @@ function specializeAssign(rawAssign: ExprNode, substNode: (n: ExprNode) => ExprN
   const a = rawAssign as Record<string, unknown>
   const op = a.op as string
   if (op === 'output_assign' || op === 'next_update') {
-    return { ...a, expr: substNode(a.expr as ExprNode) } as ExprNode
+    return { ...a, expr: substNode(a.expr as ExprNode) } as unknown as ExprNode
   }
   return rawAssign
 }

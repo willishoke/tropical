@@ -812,28 +812,37 @@ export function v1ProgramJSONToV2Node(
   return { node: node as unknown as ProgramNode, topLevel }
 }
 
-/** Accept a program file of either schema version, return a v1 ProgramJSON.
- *  Used by every file-reading entry point (loadJSON, loadStdlib, MCP load). */
+/** Accept a program file of either schema version, return a ProgramNode +
+ *  top-level session metadata. Used by every file-reading entry point
+ *  (loadJSON, loadStdlib, MCP load/merge/define). */
 export function normalizeProgramFile(
   raw: { schema?: string; [k: string]: unknown },
-): ProgramJSON {
+): { node: ProgramNode; topLevel: V2TopLevelMeta } {
   if (raw.schema === 'tropical_program_1') {
-    return raw as unknown as ProgramJSON
+    return v1ProgramJSONToV2Node(raw as unknown as ProgramJSON)
   }
   if (raw.schema === 'tropical_program_2') {
     const v2 = parseProgramV2(raw)
     const { schema: _schema, params, audio_outputs, config, ...progFields } = v2 as Record<string, unknown> & {
       schema: 'tropical_program_2'
-      params?: ProgramJSON['params']
-      audio_outputs?: ProgramJSON['audio_outputs']
-      config?: ProgramJSON['config']
+      params?: ProgramTopLevelMetaParams
+      audio_outputs?: ProgramTopLevelMetaAudioOutputs
+      config?: ProgramTopLevelMetaConfig
     }
     void _schema
-    const programNode: ExprNode = { op: 'program', ...progFields }
-    return v2ProgramNodeToV1(programNode, { params, audio_outputs, config })
+    const node: ProgramNode = { op: 'program', ...progFields } as unknown as ProgramNode
+    const topLevel: V2TopLevelMeta = {}
+    if (params !== undefined)        topLevel.params        = params
+    if (audio_outputs !== undefined) topLevel.audio_outputs = audio_outputs
+    if (config !== undefined)        topLevel.config        = config
+    return { node, topLevel }
   }
   throw new Error(`Unknown schema '${raw.schema}'. Expected 'tropical_program_1' or 'tropical_program_2'.`)
 }
+
+type ProgramTopLevelMetaParams    = NonNullable<V2TopLevelMeta['params']>
+type ProgramTopLevelMetaAudioOutputs = NonNullable<V2TopLevelMeta['audio_outputs']>
+type ProgramTopLevelMetaConfig    = NonNullable<V2TopLevelMeta['config']>
 
 /** Wrap a v2 program node + top-level metadata as a serializable v2 file. */
 export function v2NodeToFile(
@@ -948,6 +957,7 @@ export function prettyExpr(
  * Detects schema version and delegates to the appropriate loader.
  */
 export function loadJSON(json: { schema: string; [k: string]: unknown }, session: SessionState): void {
-  loadProgramAsSession(normalizeProgramFile(json), session)
+  const { node, topLevel } = normalizeProgramFile(json)
+  loadProgramAsSession(node, topLevel, session)
 }
 
