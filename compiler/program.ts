@@ -161,7 +161,7 @@ export interface ProgramJSON {
 // ─────────────────────────────────────────────────────────────
 
 /** Iterate instance_decl entries in a ProgramNode's body. */
-function* instanceDecls(prog: ProgramNode): Iterable<{
+export function* instanceDecls(prog: ProgramNode): Iterable<{
   name: string
   program: string
   inputs?: Record<string, ExprNode>
@@ -457,51 +457,50 @@ export function loadStdlib(
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Serialize the current session to a ProgramJSON.
+ * Serialize the current session to a v2 ProgramNode + top-level metadata.
  */
 export function saveProgramFromSession(
   session: SessionState,
-): ProgramJSON {
-  const prog: ProgramJSON = { schema: 'tropical_program_1', name: 'patch' }
+): { node: ProgramNode; topLevel: ProgramTopLevel } {
+  const decls: ExprNode[] = []
+  for (const [name, inst] of session.instanceRegistry) {
+    const entry: Record<string, unknown> = { op: 'instance_decl', name, program: inst.typeName }
+    if (inst.typeArgs) entry.type_args = inst.typeArgs
 
-  // Instances
-  if (session.instanceRegistry.size) {
-    prog.instances = {}
-    for (const [name, inst] of session.instanceRegistry) {
-      const entry: { program: string; type_args?: Record<string, number> } = { program: inst.typeName }
-      if (inst.typeArgs) entry.type_args = inst.typeArgs
-      prog.instances[name] = entry
+    // Merge wiring for this instance
+    const inputs: Record<string, ExprNode> = {}
+    for (const portName of inst.inputNames) {
+      const key = `${name}:${portName}`
+      const expr = session.inputExprNodes.get(key)
+      if (expr !== undefined) inputs[portName] = expr
     }
-
-    // Merge wiring into instance inputs
-    for (const [key, node] of session.inputExprNodes) {
-      const [module, input] = key.split(':')
-      const inst = prog.instances[module]
-      if (inst) {
-        if (!inst.inputs) inst.inputs = {}
-        inst.inputs[input] = node
-      }
-    }
+    if (Object.keys(inputs).length > 0) entry.inputs = inputs
+    decls.push(entry as ExprNode)
   }
 
-  // Audio outputs
+  const node: ProgramNode = {
+    op: 'program',
+    name: 'patch',
+    body: { op: 'block', decls },
+  }
+
+  const topLevel: ProgramTopLevel = {}
   if (session.graphOutputs.length) {
-    prog.audio_outputs = session.graphOutputs.map(o => ({
+    topLevel.audio_outputs = session.graphOutputs.map(o => ({
       instance: o.instance, output: o.output,
     }))
   }
 
-  // Params and triggers
-  const params: NonNullable<ProgramJSON['params']> = []
+  const params: NonNullable<ProgramTopLevel['params']> = []
   for (const [name, p] of session.paramRegistry) {
     params.push({ name, value: p.value, time_const: 0.005 })
   }
   for (const [name] of session.triggerRegistry) {
     params.push({ name, type: 'trigger' })
   }
-  if (params.length) prog.params = params
+  if (params.length) topLevel.params = params
 
-  return prog
+  return { node, topLevel }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -523,18 +522,19 @@ export interface ExportProgramOpts {
 }
 
 /**
- * Crystallize part of a live session into a reusable composite ProgramJSON.
+ * Crystallize part of a live session into a reusable composite ProgramNode.
  *
  * Walks backward from the declared outputs to find all reachable instances.
  * Rewrites wiring so that exposed ports become program inputs (with the
- * current wiring as input_defaults), and instance refs stay internal.
+ * current wiring folded into each port's `default`), and instance refs
+ * stay internal.
  *
- * Returns a ProgramJSON that can be registered as a type and instantiated.
+ * Returns a ProgramNode that can be registered as a type and instantiated.
  */
 export function exportSessionAsProgram(
   session: SessionState,
   opts: ExportProgramOpts,
-): ProgramJSON {
+): ProgramNode {
   const { name, inputs, outputs } = opts
 
   // Validate output mappings and build output ref expressions
@@ -640,38 +640,43 @@ export function exportSessionAsProgram(
     }
   }
 
-  const inputEntries: NonNullable<ProgramJSON['inputs']> = inputNames.map(inputName => {
+  // Collect per-port defaults from current wiring of exposed ports
+  const inputDefaults: Record<string, ExprNode> = {}
+  for (const [inputName, target] of Object.entries(inputs)) {
+    const currentExpr = session.inputExprNodes.get(target)
+    if (currentExpr !== undefined) {
+      inputDefaults[inputName] = rewriteRefs(currentExpr)
+    }
+  }
+
+  const inputEntries: Array<string | ProgramPortSpec> = inputNames.map(inputName => {
     const target = inputs[inputName]
     const [instName, portName] = target.split(':')
     const inst = session.instanceRegistry.get(instName)!
     const idx = inst.inputIndex(portName)
     const pt = inst.inputPortType(idx)
     const bnds = inst._def.inputBounds[idx]
-    const entry: { name: string; type?: PortTypeDecl; bounds?: Bounds } = { name: inputName }
+    const dflt = inputDefaults[inputName]
+    const entry: ProgramPortSpec = { name: inputName }
     if (!isDefaultPortType(pt)) entry.type = portTypeToDecl(pt!)
     if (boundsProvided(bnds)) entry.bounds = bnds
-    return entry.type === undefined && entry.bounds === undefined ? inputName : entry
+    if (dflt !== undefined) entry.default = dflt
+    return entry.type === undefined && entry.bounds === undefined && entry.default === undefined
+      ? inputName
+      : entry
   })
 
-  const outputEntries: NonNullable<ProgramJSON['outputs']> = outputNames.map(outName => {
+  const outputEntries: Array<string | ProgramPortSpec> = outputNames.map(outName => {
     const ref = outputs[outName]
     const inst = session.instanceRegistry.get(ref.instance)!
     const idx = inst.outputIndex(ref.output)
     const pt = inst.outputPortType(idx)
     const bnds = inst._def.outputBounds[idx]
-    const entry: { name: string; type?: PortTypeDecl; bounds?: Bounds } = { name: outName }
+    const entry: ProgramPortSpec = { name: outName }
     if (!isDefaultPortType(pt)) entry.type = portTypeToDecl(pt!)
     if (boundsProvided(bnds)) entry.bounds = bnds
     return entry.type === undefined && entry.bounds === undefined ? outName : entry
   })
-
-  // Build the exported ProgramJSON
-  const prog: ProgramJSON = {
-    schema: 'tropical_program_1',
-    name,
-    inputs: inputEntries,
-    outputs: outputEntries,
-  }
 
   // Topologically sort reachable instances so dependencies come first.
   // loadProgramDef and the flattener both process nested calls sequentially,
@@ -687,54 +692,48 @@ export function exportSessionAsProgram(
     }
   }
 
-  prog.instances = {}
+  const decls: ExprNode[] = []
   for (const instName of order) {
     const inst = session.instanceRegistry.get(instName)!
-    const entry: { program: string; type_args?: Record<string, number>; inputs?: Record<string, ExprNode> } = {
+    const entry: Record<string, unknown> = {
+      op: 'instance_decl',
+      name: instName,
       program: inst.typeName,
     }
     if (inst.typeArgs) entry.type_args = inst.typeArgs
 
     // Copy wiring, rewriting exposed ports to {op:"input", name:...}
     // and ref→nested_out for sibling instances
+    const instInputs: Record<string, ExprNode> = {}
     for (const portName of inst.inputNames) {
       const key = `${instName}:${portName}`
       if (exposedKeys.has(key)) {
-        // Find which program input maps to this port
         const inputName = Object.entries(inputs).find(([_, t]) => t === key)![0]
-        if (!entry.inputs) entry.inputs = {}
-        entry.inputs[portName] = { op: 'input', name: inputName }
+        instInputs[portName] = { op: 'input', name: inputName }
       } else {
         const expr = session.inputExprNodes.get(key)
-        if (expr !== undefined) {
-          if (!entry.inputs) entry.inputs = {}
-          entry.inputs[portName] = rewriteRefs(expr)
-        }
+        if (expr !== undefined) instInputs[portName] = rewriteRefs(expr)
       }
     }
+    if (Object.keys(instInputs).length > 0) entry.inputs = instInputs
 
-    prog.instances[instName] = entry
+    decls.push(entry as ExprNode)
   }
 
-  // Output expressions — loadProgramDef reads these from process.outputs
-  const processOutputs: Record<string, ExprNode> = {}
+  // Output assigns — reference internal instances via nested_out
+  const assigns: ExprNode[] = []
   for (const [outName, ref] of Object.entries(outputs)) {
-    // Use nested_out referencing an internal instance via its alias name
-    processOutputs[outName] = { op: 'nested_out', ref: ref.instance, output: ref.output }
-  }
-  prog.process = { outputs: processOutputs }
-
-  // Set input_defaults from current wiring of exposed ports
-  const inputDefaults: Record<string, ExprNode> = {}
-  for (const [inputName, target] of Object.entries(inputs)) {
-    const currentExpr = session.inputExprNodes.get(target)
-    if (currentExpr !== undefined) {
-      inputDefaults[inputName] = rewriteRefs(currentExpr)
-    }
-  }
-  if (Object.keys(inputDefaults).length > 0) {
-    prog.input_defaults = inputDefaults
+    assigns.push({
+      op: 'output_assign',
+      name: outName,
+      expr: { op: 'nested_out', ref: ref.instance, output: ref.output },
+    } as ExprNode)
   }
 
-  return prog
+  return {
+    op: 'program',
+    name,
+    ports: { inputs: inputEntries, outputs: outputEntries },
+    body: { op: 'block', decls, assigns },
+  }
 }

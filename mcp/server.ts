@@ -20,11 +20,11 @@ import {
 import {
   makeSession, nextName, loadJSON,
   prettyExpr, resolveProgramType, SessionState, ExprNode,
-  normalizeProgramFile, v1ProgramJSONToV2Node, v2NodeToFile,
+  normalizeProgramFile, v2NodeToFile,
 } from '../compiler/session.js'
 import {
   saveProgramFromSession, loadProgramAsType, mergeProgramIntoSession,
-  exportSessionAsProgram, loadStdlib as loadBuiltins,
+  exportSessionAsProgram, loadStdlib as loadBuiltins, instanceDecls,
 } from '../compiler/program.js'
 import { DAC }                 from '../compiler/runtime/audio.js'
 import { Param, Trigger }      from '../compiler/runtime/param.js'
@@ -746,8 +746,8 @@ function handleExportProgram(args: Record<string, unknown>) {
     if (!name) throw new Error('name is required')
     if (!outputs || Object.keys(outputs).length === 0) throw new Error('outputs is required (at least one)')
 
-    const prog = exportSessionAsProgram(session, { name, inputs, outputs })
-    const { node: exportedNode, topLevel: exportedTop } = v1ProgramJSONToV2Node(prog)
+    const exportedNode = exportSessionAsProgram(session, { name, inputs, outputs })
+    const exportedInstanceNames = [...instanceDecls(exportedNode)].map(d => d.name)
 
     // Register as a usable type (exported programs are never generic)
     const type = loadProgramAsType(exportedNode, session)
@@ -756,8 +756,7 @@ function handleExportProgram(args: Record<string, unknown>) {
 
     // Optionally clean up exported instances from the session
     if (removeExported) {
-      // Collect all instances that were included in the export
-      const exportedInstances = new Set(Object.keys(prog.instances ?? {}))
+      const exportedInstances = new Set(exportedInstanceNames)
       for (const instName of exportedInstances) {
         session.instanceRegistry.delete(instName)
         for (const key of [...session.inputExprNodes.keys()]) {
@@ -780,8 +779,8 @@ function handleExportProgram(args: Record<string, unknown>) {
       program_name: name,
       inputs: type._def.inputNames,
       outputs: type._def.outputNames,
-      instances_included: Object.keys(prog.instances ?? {}),
-      program: v2NodeToFile(exportedNode as unknown as ExprNode, exportedTop),
+      instances_included: exportedInstanceNames,
+      program: v2NodeToFile(exportedNode as unknown as ExprNode),
     }
   })
 }
@@ -968,8 +967,7 @@ function handleLoad(args: Record<string, unknown>) {
 
 function handleSave() {
   return wrap(() => {
-    const v1 = saveProgramFromSession(session)
-    const { node, topLevel } = v1ProgramJSONToV2Node(v1)
+    const { node, topLevel } = saveProgramFromSession(session)
     return { program: v2NodeToFile(node as unknown as ExprNode, topLevel) }
   })
 }

@@ -3,11 +3,12 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { parseProgram } from './schema'
-import { makeSession, loadJSON, v1ProgramJSONToV2Node } from './session'
+import { parseProgram, parseProgramV2 } from './schema'
+import { makeSession, loadJSON, v1ProgramJSONToV2Node, v2NodeToFile, type ExprNode } from './session'
 import {
   loadStdlib as loadBuiltins, loadProgramAsType, loadProgramAsSession,
-  saveProgramFromSession, exportSessionAsProgram, type ProgramJSON,
+  saveProgramFromSession, exportSessionAsProgram, instanceDecls,
+  type ProgramJSON, type ProgramPortSpec,
 } from './program'
 import { resolveProgramType } from './session'
 import { validateExpr } from './expr'
@@ -101,10 +102,10 @@ describe('exportSessionAsProgram — port type round-trip', () => {
       outputs: { out: { instance: 't1', output: 'out' } },
     })
 
-    // Re-parse through the schema to confirm it's well-formed
-    const reparsed = parseProgram(exported) as ProgramJSON
-    const inputEntry = reparsed.inputs![0]
-    const outputEntry = reparsed.outputs![0]
+    // Re-parse through the v2 schema to confirm it's well-formed
+    const reparsed = parseProgramV2(v2NodeToFile(exported as unknown as ExprNode))
+    const inputEntry = (reparsed.ports?.inputs ?? [])[0] as ProgramPortSpec
+    const outputEntry = (reparsed.ports?.outputs ?? [])[0] as ProgramPortSpec
     expect(typeof inputEntry === 'object' && inputEntry.type).toEqual({ kind: 'array', element: 'float', shape: [4] })
     expect(typeof outputEntry === 'object' && outputEntry.type).toEqual({ kind: 'array', element: 'float', shape: [4] })
 
@@ -112,7 +113,7 @@ describe('exportSessionAsProgram — port type round-trip', () => {
     // The nested TypedLeaf must be registered before the exported composite that uses it.
     const session2 = makeSession(256)
     loadProgramAsType(v1ProgramJSONToV2Node(typedLeaf).node, session2)
-    loadProgramAsType(v1ProgramJSONToV2Node(exported).node, session2)
+    loadProgramAsType(exported, session2)
     const { type: exportedType } = resolveProgramType(session2, 'Exported', undefined, undefined)
     const srcPt = exportedType._def.inputPortTypes[0]
     const dstPt = exportedType._def.outputPortTypes[0]
@@ -140,8 +141,8 @@ describe('exportSessionAsProgram — port type round-trip', () => {
       inputs: { x: 'p1:x' },
       outputs: { y: { instance: 'p1', output: 'y' } },
     })
-    expect(exported.inputs![0]).toBe('x')
-    expect(exported.outputs![0]).toBe('y')
+    expect(exported.ports?.inputs?.[0]).toBe('x')
+    expect(exported.ports?.outputs?.[0]).toBe('y')
   })
 })
 
@@ -215,9 +216,10 @@ describe('generic programs round-trip', () => {
     const inst = type.instantiateAs('d1', { baseTypeName: 'Delay', typeArgs })
     session.instanceRegistry.set('d1', inst)
 
-    const saved = saveProgramFromSession(session)
-    expect(saved.instances!['d1'].program).toBe('Delay')
-    expect(saved.instances!['d1'].type_args).toEqual({ N: 8 })
+    const { node: saved } = saveProgramFromSession(session)
+    const d1 = [...instanceDecls(saved)].find(d => d.name === 'd1')!
+    expect(d1.program).toBe('Delay')
+    expect(d1.type_args).toEqual({ N: 8 })
   })
 
   test('saveProgramFromSession omits type_args on non-generic instances', () => {
@@ -233,9 +235,10 @@ describe('generic programs round-trip', () => {
     const { type } = resolveProgramType(session, 'Passthrough', undefined, undefined)
     session.instanceRegistry.set('p1', type.instantiateAs('p1', { baseTypeName: 'Passthrough' }))
 
-    const saved = saveProgramFromSession(session)
-    expect(saved.instances!['p1'].program).toBe('Passthrough')
-    expect(saved.instances!['p1'].type_args).toBeUndefined()
+    const { node: saved } = saveProgramFromSession(session)
+    const p1 = [...instanceDecls(saved)].find(d => d.name === 'p1')!
+    expect(p1.program).toBe('Passthrough')
+    expect(p1.type_args).toBeUndefined()
   })
 })
 
