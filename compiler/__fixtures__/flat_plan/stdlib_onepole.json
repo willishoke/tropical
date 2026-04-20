@@ -1,25 +1,34 @@
 {
   "input": {
-    "schema": "tropical_program_1",
+    "schema": "tropical_program_2",
     "name": "stdlib_onepole_scenario",
-    "instances": {
-      "osc": {
-        "program": "SinOsc",
-        "inputs": {
-          "freq": 440
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "instance_decl",
+          "name": "osc",
+          "program": "SinOsc",
+          "inputs": {
+            "freq": 440
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "filt",
+          "program": "OnePole",
+          "inputs": {
+            "input": {
+              "op": "ref",
+              "instance": "osc",
+              "output": "sine"
+            },
+            "g": 0.3
+          }
         }
-      },
-      "filt": {
-        "program": "OnePole",
-        "inputs": {
-          "input": {
-            "op": "ref",
-            "instance": "osc",
-            "output": "sine"
-          },
-          "g": 0.3
-        }
-      }
+      ],
+      "assigns": [],
+      "value": null
     },
     "audio_outputs": [
       {

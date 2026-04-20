@@ -3,7 +3,7 @@
  *
  * These tests exercise the full TS compiler pipeline:
  *   makeSession + loadStdlib
- *   → loadJSON (tropical_program_1 schema)
+ *   → loadJSON (tropical_program_2 schema)
  *   → applyFlatPlan (flatten + emit + JIT compile)
  *   → renderFrames (synchronous audio rendering, no audio device)
  *   → peak / rms / dominantFrequency (signal-level assertions)

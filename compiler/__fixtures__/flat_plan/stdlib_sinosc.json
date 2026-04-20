@@ -1,14 +1,21 @@
 {
   "input": {
-    "schema": "tropical_program_1",
+    "schema": "tropical_program_2",
     "name": "stdlib_sinosc_scenario",
-    "instances": {
-      "osc": {
-        "program": "SinOsc",
-        "inputs": {
-          "freq": 440
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "instance_decl",
+          "name": "osc",
+          "program": "SinOsc",
+          "inputs": {
+            "freq": 440
+          }
         }
-      }
+      ],
+      "assigns": [],
+      "value": null
     },
     "audio_outputs": [
       {

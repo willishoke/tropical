@@ -1,27 +1,36 @@
 {
   "input": {
-    "schema": "tropical_program_1",
+    "schema": "tropical_program_2",
     "name": "stdlib_ladder_scenario",
-    "instances": {
-      "osc": {
-        "program": "BlepSaw",
-        "inputs": {
-          "freq": 220
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "instance_decl",
+          "name": "osc",
+          "program": "BlepSaw",
+          "inputs": {
+            "freq": 220
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "filt",
+          "program": "LadderFilter",
+          "inputs": {
+            "input": {
+              "op": "ref",
+              "instance": "osc",
+              "output": "saw"
+            },
+            "cutoff": 1200,
+            "resonance": 0.7,
+            "drive": 1
+          }
         }
-      },
-      "filt": {
-        "program": "LadderFilter",
-        "inputs": {
-          "input": {
-            "op": "ref",
-            "instance": "osc",
-            "output": "saw"
-          },
-          "cutoff": 1200,
-          "resonance": 0.7,
-          "drive": 1
-        }
-      }
+      ],
+      "assigns": [],
+      "value": null
     },
     "audio_outputs": [
       {

@@ -1,5 +1,5 @@
 /**
- * Session state, expression pretty-printer, JSON loading, and ProgramJSON → ProgramDef builder.
+ * Session state, expression pretty-printer, JSON loading, and ProgramNode → ProgramDef builder.
  */
 
 import {
@@ -10,7 +10,7 @@ import {
   type ProgramDef, type NestedCall, type ValueCoercible, type Bounds,
 } from './program_types.js'
 import { Runtime } from './runtime/runtime.js'
-import { loadProgramAsSession, type ProgramJSON, type PortTypeDecl, type ProgramNode, type ProgramPortSpec } from './program.js'
+import { loadProgramAsSession, type PortTypeDecl, type ProgramNode, type ProgramPortSpec, type ProgramTopLevel } from './program.js'
 import { parseProgramV2 } from './schema.js'
 import { Param, Trigger } from './runtime/param.js'
 import {
@@ -292,7 +292,7 @@ function scalarNameToPortType(name: string): PortType {
 
 /** Decode a structured port type declaration to a PortType, resolving aliases.
  *  Throws if the shape still contains an unresolved type_param ref — callers that
- *  use type_params must run `specializeProgramJSON` first. */
+ *  use type_params must run `specializeProgramNode` first. */
 export function decodePortTypeDecl(
   t: PortTypeDecl,
   aliases: AliasMap | undefined,
@@ -579,275 +579,36 @@ export function loadProgramDef(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Unified IR (tropical_program_2) — v2 → v1 reduction
+// Program file I/O
 // ─────────────────────────────────────────────────────────────
-//
-// Phase A strategy: accept v2 inputs by mechanically converting them to v1
-// ProgramJSON, then reusing the existing loaders. Keeps ProgramDef output
-// byte-identical by construction. Phase C rewrites this to walk blocks
-// directly and deletes the v1 schema.
 
-interface V2TopLevelMeta {
-  params?: ProgramJSON['params']
-  audio_outputs?: ProgramJSON['audio_outputs']
-  config?: ProgramJSON['config']
-}
-
-/** Convert a `{op:'program'}` ExprNode (v2 shape) to a ProgramJSON (v1). */
-export function v2ProgramNodeToV1(
-  node: ExprNode,
-  topLevel: V2TopLevelMeta = {},
-): ProgramJSON {
-  if (typeof node !== 'object' || node === null || Array.isArray(node))
-    throw new Error(`v2: expected {op:'program'}, got ${typeof node}`)
-  const p = node as Record<string, unknown>
-  if (p.op !== 'program')
-    throw new Error(`v2: expected op='program', got '${String(p.op)}'`)
-  if (typeof p.name !== 'string')
-    throw new Error(`v2: program requires name: string`)
-
-  const ports = (p.ports as Record<string, unknown> | undefined) ?? {}
-  const body = p.body as Record<string, unknown> | undefined
-  if (!body || body.op !== 'block')
-    throw new Error(`v2: program '${p.name}' body must be a block, got ${body === undefined ? 'undefined' : String((body as Record<string, unknown>).op)}`)
-
-  const decls = (body.decls as ExprNode[] | undefined) ?? []
-  const assigns = (body.assigns as ExprNode[] | undefined) ?? []
-
-  const regs: NonNullable<ProgramJSON['regs']> = {}
-  const delays: NonNullable<ProgramJSON['delays']> = {}
-  const instances: NonNullable<ProgramJSON['instances']> = {}
-  const programs: NonNullable<ProgramJSON['programs']> = {}
-
-  for (const d of decls) {
-    if (typeof d !== 'object' || d === null || Array.isArray(d))
-      throw new Error(`v2: block.decls entries must be objects`)
-    const dObj = d as Record<string, unknown>
-    const op = dObj.op as string
-    const name = dObj.name as string
-
-    if (op === 'reg_decl') {
-      if (dObj.type !== undefined) {
-        regs[name] = {
-          init: dObj.init as NonNullable<ProgramJSON['regs']>[string] extends { init: infer T } ? T : never,
-          type: dObj.type as PortTypeDecl,
-        }
-      } else {
-        regs[name] = dObj.init as NonNullable<ProgramJSON['regs']>[string]
-      }
-    } else if (op === 'delay_decl') {
-      delays[name] = {
-        update: (dObj.update ?? 0) as ExprNode,
-        init: dObj.init as number | undefined,
-      }
-    } else if (op === 'instance_decl') {
-      const entry: NonNullable<ProgramJSON['instances']>[string] = {
-        program: dObj.program as string,
-      }
-      if (dObj.inputs !== undefined) entry.inputs = dObj.inputs as Record<string, ExprNode>
-      if (dObj.type_args !== undefined) entry.type_args = dObj.type_args as Record<string, number | ExprNode>
-      instances[name] = entry
-    } else if (op === 'program_decl') {
-      programs[name] = v2ProgramNodeToV1(dObj.program as ExprNode)
-    } else {
-      throw new Error(`v2: unexpected decl op '${op}' in block.decls`)
-    }
-  }
-
-  const processOutputs: Record<string, ExprNode> = {}
-  const processNextRegs: Record<string, ExprNode> = {}
-
-  for (const a of assigns) {
-    if (typeof a !== 'object' || a === null || Array.isArray(a))
-      throw new Error(`v2: block.assigns entries must be objects`)
-    const aObj = a as Record<string, unknown>
-    const op = aObj.op as string
-
-    if (op === 'output_assign') {
-      processOutputs[aObj.name as string] = aObj.expr as ExprNode
-    } else if (op === 'next_update') {
-      const target = aObj.target as { kind: string; name: string }
-      if (target.kind === 'reg') {
-        processNextRegs[target.name] = aObj.expr as ExprNode
-      } else if (target.kind === 'delay') {
-        if (!delays[target.name])
-          throw new Error(`v2: next_update targets delay '${target.name}' but no delay_decl found`)
-        delays[target.name] = { ...delays[target.name], update: aObj.expr as ExprNode }
-      } else {
-        throw new Error(`v2: next_update target.kind must be 'reg' or 'delay', got '${target.kind}'`)
-      }
-    } else {
-      throw new Error(`v2: unexpected assign op '${op}' in block.assigns`)
-    }
-  }
-
-  const result: ProgramJSON = {
-    schema: 'tropical_program_1',
-    name: p.name,
-  }
-  if (ports.inputs !== undefined)     result.inputs     = ports.inputs     as ProgramJSON['inputs']
-  if (ports.outputs !== undefined)    result.outputs    = ports.outputs    as ProgramJSON['outputs']
-  if (ports.type_defs !== undefined)  result.type_defs  = ports.type_defs  as ProgramJSON['type_defs']
-
-  // loadProgramDef reads input defaults from `def.input_defaults`, not from
-  // `inputs[i].default`. v2 carries defaults on the port objects, so rehydrate
-  // an input_defaults map so the v1 loader sees them.
-  if (ports.inputs) {
-    const inputDefaults: Record<string, ExprNode> = {}
-    for (const i of ports.inputs as NonNullable<ProgramJSON['inputs']>) {
-      if (typeof i !== 'string' && i.default !== undefined) {
-        inputDefaults[i.name] = i.default
-      }
-    }
-    if (Object.keys(inputDefaults).length > 0) result.input_defaults = inputDefaults
-  }
-  if (p.type_params !== undefined)    result.type_params = p.type_params   as ProgramJSON['type_params']
-  if (p.sample_rate !== undefined)    result.sample_rate = p.sample_rate   as number
-  if (p.breaks_cycles !== undefined)  result.breaks_cycles = p.breaks_cycles as boolean
-
-  if (Object.keys(regs).length > 0)       result.regs = regs
-  if (Object.keys(delays).length > 0)     result.delays = delays
-  if (Object.keys(instances).length > 0)  result.instances = instances
-  if (Object.keys(programs).length > 0)   result.programs = programs
-
-  if (Object.keys(processOutputs).length > 0 || Object.keys(processNextRegs).length > 0) {
-    result.process = { outputs: processOutputs }
-    if (Object.keys(processNextRegs).length > 0) result.process.next_regs = processNextRegs
-  }
-
-  if (topLevel.params !== undefined)        result.params        = topLevel.params
-  if (topLevel.audio_outputs !== undefined) result.audio_outputs = topLevel.audio_outputs
-  if (topLevel.config !== undefined)        result.config        = topLevel.config
-
-  return result
-}
-
-/** Migrate a v1 ProgramJSON to a v2 `{op:'program'}` ExprNode. Inverse of
- *  `v2ProgramNodeToV1` for nested program bodies — session metadata (params,
- *  audio_outputs, config) is returned separately. */
-export function v1ProgramJSONToV2Node(
-  prog: ProgramJSON,
-): { node: ProgramNode; topLevel: V2TopLevelMeta } {
-  const decls: ExprNode[] = []
-  const assigns: ExprNode[] = []
-
-  for (const [name, val] of Object.entries(prog.regs ?? {})) {
-    const d: Record<string, unknown> = { op: 'reg_decl', name }
-    if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'init' in val && 'type' in val) {
-      d.init = val.init
-      d.type = val.type
-    } else {
-      d.init = val
-    }
-    decls.push(d as ExprNode)
-  }
-
-  for (const [name, { update, init }] of Object.entries(prog.delays ?? {})) {
-    const d: Record<string, unknown> = { op: 'delay_decl', name, update }
-    if (init !== undefined) d.init = init
-    decls.push(d as ExprNode)
-  }
-
-  for (const [name, sub] of Object.entries(prog.programs ?? {})) {
-    decls.push({ op: 'program_decl', name, program: v1ProgramJSONToV2Node(sub).node } as ExprNode)
-  }
-
-  for (const [name, inst] of Object.entries(prog.instances ?? {})) {
-    const d: Record<string, unknown> = { op: 'instance_decl', name, program: inst.program }
-    if (inst.inputs !== undefined) d.inputs = inst.inputs
-    if (inst.type_args !== undefined) d.type_args = inst.type_args
-    decls.push(d as ExprNode)
-  }
-
-  for (const [name, expr] of Object.entries(prog.process?.outputs ?? {})) {
-    assigns.push({ op: 'output_assign', name, expr } as ExprNode)
-  }
-  for (const [name, expr] of Object.entries(prog.process?.next_regs ?? {})) {
-    assigns.push({ op: 'next_update', target: { kind: 'reg', name }, expr } as ExprNode)
-  }
-
-  // Ports: keep only the keys that were set on v1
-  const ports: Record<string, unknown> = {}
-  if (prog.inputs    !== undefined) ports.inputs    = prog.inputs
-  if (prog.outputs   !== undefined) ports.outputs   = prog.outputs
-  if (prog.type_defs !== undefined) ports.type_defs = prog.type_defs
-
-  // input_defaults: fold into ports.inputs[].default, matching by name
-  if (prog.input_defaults && ports.inputs) {
-    const byName = new Map((ports.inputs as ProgramJSON['inputs'])!.map(i => [
-      typeof i === 'string' ? i : i.name,
-      i,
-    ]))
-    const newInputs: ProgramJSON['inputs'] = (ports.inputs as ProgramJSON['inputs'])!.map(i => {
-      const name = typeof i === 'string' ? i : i.name
-      const def = prog.input_defaults?.[name]
-      if (def === undefined) return i
-      const obj = typeof i === 'string' ? { name } : { ...i }
-      obj.default = def
-      return obj
-    })
-    ports.inputs = newInputs
-    void byName
-  } else if (prog.input_defaults && !ports.inputs) {
-    // Edge case: input_defaults without declared inputs. Carry inputs list.
-    const inputs = Object.entries(prog.input_defaults).map(([name, def]) => ({ name, default: def }))
-    ports.inputs = inputs as NonNullable<ProgramJSON['inputs']>
-  }
-
-  const node: Record<string, unknown> = {
-    op: 'program',
-    name: prog.name,
-    body: { op: 'block', decls, assigns, value: null },
-  }
-  if (Object.keys(ports).length > 0)  node.ports = ports
-  if (prog.type_params !== undefined)    node.type_params   = prog.type_params
-  if (prog.sample_rate !== undefined)    node.sample_rate   = prog.sample_rate
-  if (prog.breaks_cycles !== undefined)  node.breaks_cycles = prog.breaks_cycles
-
-  const topLevel: V2TopLevelMeta = {}
-  if (prog.params        !== undefined) topLevel.params        = prog.params
-  if (prog.audio_outputs !== undefined) topLevel.audio_outputs = prog.audio_outputs
-  if (prog.config        !== undefined) topLevel.config        = prog.config
-
-  return { node: node as unknown as ProgramNode, topLevel }
-}
-
-/** Accept a program file of either schema version, return a ProgramNode +
- *  top-level session metadata. Used by every file-reading entry point
- *  (loadJSON, loadStdlib, MCP load/merge/define). */
+/** Parse a tropical_program_2 file, split it into program + top-level metadata. */
 export function normalizeProgramFile(
   raw: { schema?: string; [k: string]: unknown },
-): { node: ProgramNode; topLevel: V2TopLevelMeta } {
-  if (raw.schema === 'tropical_program_1') {
-    return v1ProgramJSONToV2Node(raw as unknown as ProgramJSON)
+): { node: ProgramNode; topLevel: ProgramTopLevel } {
+  if (raw.schema !== 'tropical_program_2') {
+    throw new Error(`Unknown schema '${raw.schema}'. Expected 'tropical_program_2'.`)
   }
-  if (raw.schema === 'tropical_program_2') {
-    const v2 = parseProgramV2(raw)
-    const { schema: _schema, params, audio_outputs, config, ...progFields } = v2 as Record<string, unknown> & {
-      schema: 'tropical_program_2'
-      params?: ProgramTopLevelMetaParams
-      audio_outputs?: ProgramTopLevelMetaAudioOutputs
-      config?: ProgramTopLevelMetaConfig
-    }
-    void _schema
-    const node: ProgramNode = { op: 'program', ...progFields } as unknown as ProgramNode
-    const topLevel: V2TopLevelMeta = {}
-    if (params !== undefined)        topLevel.params        = params
-    if (audio_outputs !== undefined) topLevel.audio_outputs = audio_outputs
-    if (config !== undefined)        topLevel.config        = config
-    return { node, topLevel }
+  const v2 = parseProgramV2(raw) as Record<string, unknown> & {
+    schema: 'tropical_program_2'
+    params?: ProgramTopLevel['params']
+    audio_outputs?: ProgramTopLevel['audio_outputs']
+    config?: ProgramTopLevel['config']
   }
-  throw new Error(`Unknown schema '${raw.schema}'. Expected 'tropical_program_1' or 'tropical_program_2'.`)
+  const { schema: _schema, params, audio_outputs, config, ...progFields } = v2
+  void _schema
+  const node: ProgramNode = { op: 'program', ...progFields } as unknown as ProgramNode
+  const topLevel: ProgramTopLevel = {}
+  if (params !== undefined)        topLevel.params        = params
+  if (audio_outputs !== undefined) topLevel.audio_outputs = audio_outputs
+  if (config !== undefined)        topLevel.config        = config
+  return { node, topLevel }
 }
-
-type ProgramTopLevelMetaParams    = NonNullable<V2TopLevelMeta['params']>
-type ProgramTopLevelMetaAudioOutputs = NonNullable<V2TopLevelMeta['audio_outputs']>
-type ProgramTopLevelMetaConfig    = NonNullable<V2TopLevelMeta['config']>
 
 /** Wrap a v2 program node + top-level metadata as a serializable v2 file. */
 export function v2NodeToFile(
   node: ExprNode,
-  topLevel: V2TopLevelMeta = {},
+  topLevel: ProgramTopLevel = {},
 ): { schema: 'tropical_program_2'; [k: string]: unknown } {
   if (typeof node !== 'object' || node === null || Array.isArray(node))
     throw new Error('v2NodeToFile: expected program object')

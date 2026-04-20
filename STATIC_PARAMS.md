@@ -1,16 +1,18 @@
 # Generic `Delay<N>` via Compile-Time Type Parameters
 
+> **Historical note.** This plan was written against the `tropical_program_1` schema. The feature shipped; the schema was subsequently replaced by `tropical_program_2`. The substitution mechanism (`type_params` / `type_args` / `{op:"type_param",name}`) carries over unchanged — it now operates on `ProgramNode` instead of `ProgramJSON`, and symbol names in the code (e.g. `specializeProgramJSON` → `specializeProgramNode`) have shifted accordingly.
+
 ## Context
 
-The stdlib currently ships six structurally identical delay types — `Delay1`, `Delay8`, `Delay16`, `Delay512`, `Delay4410`, `Delay44100` — differing only in buffer size. Each is a separate JSON file with the buffer length hardcoded in both the `regs.buf.zeros` count and the `mod` operator inside the process body. This is ugly, not extensible, and defeats the point of the ProgramJSON abstraction.
+The stdlib currently ships six structurally identical delay types — `Delay1`, `Delay8`, `Delay16`, `Delay512`, `Delay4410`, `Delay44100` — differing only in buffer size. Each is a separate JSON file with the buffer length hardcoded in both the `regs.buf.zeros` count and the `mod` operator inside the process body. This is ugly, not extensible, and defeats the point of the program-type abstraction.
 
-Introduce **compile-time type parameters** so a single `stdlib/Delay.json` parameterized by integer `N` replaces the whole family. The mechanism is general: `type_params` on a program declaration, `type_args` on an instance, and a new `{op:"type_param",name}` ExprNode. Monomorphization happens at type-resolution time by cloning the ProgramJSON template, substituting `type_param` refs, and running through the existing `loadProgramDef` pipeline. Downstream (flatten, emit, JIT) is untouched.
+Introduce **compile-time type parameters** so a single `stdlib/Delay.json` parameterized by integer `N` replaces the whole family. The mechanism is general: `type_params` on a program declaration, `type_args` on an instance, and a new `{op:"type_param",name}` ExprNode. Monomorphization happens at type-resolution time by cloning the ProgramNode template, substituting `type_param` refs, and running through the existing `loadProgramDef` pipeline. Downstream (flatten, emit, JIT) is untouched.
 
 This branch is named `feat/static_params`. Intended outcome: the six Delay files are gone, one generic `Delay` with `type_params: {N: {type:"int", default: 44100}}` remains, and the mechanism is available for future generic types.
 
 ## Naming
 
-- `type_params` — on program declarations (ProgramJSON)
+- `type_params` — on program declarations
 - `type_args` — on instance entries
 - `{op: "type_param", name: "N"}` — ExprNode op substituted at specialization time
 

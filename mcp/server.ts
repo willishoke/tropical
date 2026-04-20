@@ -136,11 +136,11 @@ const TOOLS = [
 
   {
     name: 'define_program',
-    description: 'Define a reusable DSP program type and register it. Accepts a program object in tropical_program_2 (preferred) or tropical_program_1 (legacy). Returns the type name and port names.',
+    description: 'Define a reusable DSP program type and register it. Accepts a tropical_program_2 object. Returns the type name and port names.',
     inputSchema: {
       type: 'object',
       properties: {
-        def: { type: 'object', description: 'Program object (tropical_program_2 or tropical_program_1) defining the program' },
+        def: { type: 'object', description: 'tropical_program_2 object defining the program' },
       },
       required: ['def'],
     },
@@ -413,12 +413,12 @@ const TOOLS = [
   },
   {
     name: 'load',
-    description: 'Load a program. Accepts tropical_program_2 (preferred) or tropical_program_1 (legacy). Stops audio, recreates the session, and rebuilds state. Provide either path (preferred) or inline JSON.',
+    description: 'Load a tropical_program_2 program. Stops audio, recreates the session, and rebuilds state. Provide either path (preferred) or inline JSON.',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Path to a .json file on disk.' },
-        program: { type: 'object', description: 'Inline program object (tropical_program_2 or tropical_program_1).' },
+        program: { type: 'object', description: 'Inline tropical_program_2 object.' },
       },
     },
   },
@@ -433,7 +433,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        program: { type: 'object', description: 'Program object (tropical_program_2 or tropical_program_1) to merge.' },
+        program: { type: 'object', description: 'tropical_program_2 object to merge.' },
       },
       required: ['program'],
     },
@@ -1139,7 +1139,7 @@ const RESOURCES = [
   {
     uri:         'tropical://program-format',
     name:        'Program format',
-    description: 'Reference doc for the tropical_program_2 schema (with tropical_program_1 legacy notes).',
+    description: 'Reference doc for the tropical_program_2 schema.',
     mimeType:    'text/markdown',
   },
 ]
@@ -1167,7 +1167,7 @@ Programs are the unified representation for all DSP in tropical. A program is an
 expression with declared ports and a body that declares regs/delays/instances
 and assigns outputs and next-tick register updates.
 
-## tropical_program_2 (preferred)
+## tropical_program_2
 
 The body is a \`block\` of \`decls\` (reg_decl, delay_decl, instance_decl,
 program_decl) and \`assigns\` (output_assign, next_update). Ports, type_params,
@@ -1213,11 +1213,6 @@ Decl node shapes:
 Assign node shapes:
 - output_assign: { op, name, expr }
 - next_update:   { op, target: { kind: "reg"|"delay", name }, expr }
-
-## tropical_program_1 (legacy — still accepted on input)
-
-The legacy format used \`instances\`/\`process\`/\`regs\`/\`delays\` maps. It is
-normalized to tropical_program_2 internally; new output is always v2.
 
 ## Combinators (compile-time expansion)
 

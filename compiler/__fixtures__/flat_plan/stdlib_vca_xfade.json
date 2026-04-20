@@ -1,47 +1,60 @@
 {
   "input": {
-    "schema": "tropical_program_1",
+    "schema": "tropical_program_2",
     "name": "stdlib_vca_xfade_scenario",
-    "instances": {
-      "a": {
-        "program": "SinOsc",
-        "inputs": {
-          "freq": 220
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "instance_decl",
+          "name": "a",
+          "program": "SinOsc",
+          "inputs": {
+            "freq": 220
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "b",
+          "program": "SinOsc",
+          "inputs": {
+            "freq": 330
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "xf",
+          "program": "CrossFade",
+          "inputs": {
+            "a": {
+              "op": "ref",
+              "instance": "a",
+              "output": "sine"
+            },
+            "b": {
+              "op": "ref",
+              "instance": "b",
+              "output": "sine"
+            },
+            "mix": 0.5
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "vca",
+          "program": "VCA",
+          "inputs": {
+            "audio": {
+              "op": "ref",
+              "instance": "xf",
+              "output": "out"
+            },
+            "cv": 0.6
+          }
         }
-      },
-      "b": {
-        "program": "SinOsc",
-        "inputs": {
-          "freq": 330
-        }
-      },
-      "xf": {
-        "program": "CrossFade",
-        "inputs": {
-          "a": {
-            "op": "ref",
-            "instance": "a",
-            "output": "sine"
-          },
-          "b": {
-            "op": "ref",
-            "instance": "b",
-            "output": "sine"
-          },
-          "mix": 0.5
-        }
-      },
-      "vca": {
-        "program": "VCA",
-        "inputs": {
-          "audio": {
-            "op": "ref",
-            "instance": "xf",
-            "output": "out"
-          },
-          "cv": 0.6
-        }
-      }
+      ],
+      "assigns": [],
+      "value": null
     },
     "audio_outputs": [
       {

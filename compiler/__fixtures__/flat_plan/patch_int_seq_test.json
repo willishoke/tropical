@@ -1,130 +1,160 @@
 {
   "input": {
-    "schema": "tropical_program_1",
+    "schema": "tropical_program_2",
     "name": "int_seq_test",
-    "programs": {
-      "IntSeq": {
-        "schema": "tropical_program_1",
-        "name": "IntSeq",
-        "inputs": [
-          "trigger",
-          "is_forward",
-          "step",
-          "seq_len",
-          "sequence"
-        ],
-        "outputs": [
-          "value",
-          "index"
-        ],
-        "process": {
-          "outputs": {
-            "value": {
-              "op": "index",
-              "args": [
-                {
-                  "op": "input",
-                  "name": "sequence"
-                },
-                {
-                  "op": "reg",
-                  "name": "index"
-                }
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "program_decl",
+          "name": "IntSeq",
+          "program": {
+            "op": "program",
+            "name": "IntSeq",
+            "ports": {
+              "inputs": [
+                "trigger",
+                "is_forward",
+                "step",
+                "seq_len",
+                "sequence"
+              ],
+              "outputs": [
+                "value",
+                "index"
               ]
             },
-            "index": {
-              "op": "reg",
-              "name": "index"
-            }
-          },
-          "next_regs": {
-            "index": {
-              "op": "select",
-              "args": [
+            "body": {
+              "op": "block",
+              "decls": [
                 {
-                  "op": "input",
-                  "name": "trigger"
-                },
-                {
-                  "op": "mod",
-                  "args": [
-                    {
-                      "op": "add",
-                      "args": [
-                        {
-                          "op": "reg",
-                          "name": "index"
-                        },
-                        {
-                          "op": "select",
-                          "args": [
-                            {
-                              "op": "input",
-                              "name": "is_forward"
-                            },
-                            {
-                              "op": "input",
-                              "name": "step"
-                            },
-                            {
-                              "op": "sub",
-                              "args": [
-                                {
-                                  "op": "input",
-                                  "name": "seq_len"
-                                },
-                                {
-                                  "op": "input",
-                                  "name": "step"
-                                }
-                              ]
-                            }
-                          ]
-                        }
-                      ]
-                    },
-                    {
-                      "op": "input",
-                      "name": "seq_len"
-                    }
-                  ]
-                },
-                {
-                  "op": "reg",
-                  "name": "index"
+                  "op": "reg_decl",
+                  "name": "index",
+                  "init": 0
                 }
-              ]
+              ],
+              "assigns": [
+                {
+                  "op": "output_assign",
+                  "name": "value",
+                  "expr": {
+                    "op": "index",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "sequence"
+                      },
+                      {
+                        "op": "reg",
+                        "name": "index"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "op": "output_assign",
+                  "name": "index",
+                  "expr": {
+                    "op": "reg",
+                    "name": "index"
+                  }
+                },
+                {
+                  "op": "next_update",
+                  "target": {
+                    "kind": "reg",
+                    "name": "index"
+                  },
+                  "expr": {
+                    "op": "select",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "trigger"
+                      },
+                      {
+                        "op": "mod",
+                        "args": [
+                          {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "reg",
+                                "name": "index"
+                              },
+                              {
+                                "op": "select",
+                                "args": [
+                                  {
+                                    "op": "input",
+                                    "name": "is_forward"
+                                  },
+                                  {
+                                    "op": "input",
+                                    "name": "step"
+                                  },
+                                  {
+                                    "op": "sub",
+                                    "args": [
+                                      {
+                                        "op": "input",
+                                        "name": "seq_len"
+                                      },
+                                      {
+                                        "op": "input",
+                                        "name": "step"
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          },
+                          {
+                            "op": "input",
+                            "name": "seq_len"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "reg",
+                        "name": "index"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "value": null
             }
           }
         },
-        "regs": {
-          "index": 0
-        }
-      }
-    },
-    "instances": {
-      "Seq1": {
-        "program": "IntSeq",
-        "inputs": {
-          "trigger": false,
-          "is_forward": true,
-          "step": 1,
-          "seq_len": 8,
-          "sequence": {
-            "op": "array",
-            "items": [
-              100,
-              200,
-              300,
-              400,
-              500,
-              600,
-              700,
-              800
-            ]
+        {
+          "op": "instance_decl",
+          "name": "Seq1",
+          "program": "IntSeq",
+          "inputs": {
+            "trigger": false,
+            "is_forward": true,
+            "step": 1,
+            "seq_len": 8,
+            "sequence": {
+              "op": "array",
+              "items": [
+                100,
+                200,
+                300,
+                400,
+                500,
+                600,
+                700,
+                800
+              ]
+            }
           }
         }
-      }
+      ],
+      "assigns": [],
+      "value": null
     },
     "audio_outputs": [
       {

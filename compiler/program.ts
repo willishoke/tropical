@@ -1,16 +1,15 @@
 /**
- * program.ts — ProgramJSON schema, loading, saving, and stdlib.
+ * program.ts — tropical_program_2 (ProgramNode) types, loading, saving, and stdlib.
  *
- * A program has inputs, outputs, state, subprograms, and a process body.
- * - A program with `process` and no `instances` is a leaf.
- * - A program with `instances` and `audio_outputs` is a top-level graph.
- * - A program with `instances`, `inputs`, and computed `outputs` is a reusable composite.
+ * A program is an ExprNode of op `program`: a named set of ports wrapping a
+ * body `block` that declares regs, delays, instances, and nested programs,
+ * and carries output assignments plus per-tick reg/delay updates.
  */
 
 import type { ExprNode } from './expr.js'
 import { validateExpr } from './expr.js'
 import type { TypeDefJSON, SessionState } from './session.js'
-import { loadProgramDef, resolveProgramType, normalizeProgramFile, v1ProgramJSONToV2Node } from './session.js'
+import { loadProgramDef, resolveProgramType, normalizeProgramFile } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
 import { ProgramType } from './program_types.js'
@@ -20,7 +19,7 @@ import { Float, portTypeEqual, type PortType } from './term.js'
 import type { Bounds } from './program_types.js'
 
 // ─────────────────────────────────────────────────────────────
-// ProgramJSON schema
+// Program schema
 // ─────────────────────────────────────────────────────────────
 
 /** Compile-time shape dimension: a concrete int or a reference to an
@@ -32,7 +31,7 @@ export type ShapeDim = number | { op: 'type_param'; name: string }
 export type PortTypeDecl = string | { kind: 'array'; element: string; shape: ShapeDim[] }
 
 // ─────────────────────────────────────────────────────────────
-// Unified IR (tropical_program_2) — typed view of the v2 ExprNode shape
+// ProgramNode — typed view of the tropical_program_2 ExprNode shape
 // ─────────────────────────────────────────────────────────────
 //
 // A program is an ExprNode of op `program`. The types below are a typed
@@ -92,68 +91,6 @@ export interface ProgramFile extends ProgramTopLevel {
   breaks_cycles?: boolean
   ports?: ProgramPorts
   body: BlockNode
-}
-
-// ─────────────────────────────────────────────────────────────
-// Legacy v1 ProgramJSON — kept as an internal bridge only
-// ─────────────────────────────────────────────────────────────
-
-export interface ProgramJSON {
-  schema: 'tropical_program_1'
-  name: string
-
-  /** Inputs to this program. Empty or absent = top-level (no external inputs). */
-  inputs?: Array<string | { name: string; type?: PortTypeDecl; default?: ExprNode; bounds?: [number | null, number | null] }>
-  /** Output declarations — names for leaf programs, expressions for composites. */
-  outputs?: Array<string | { name: string; type?: PortTypeDecl; bounds?: [number | null, number | null] }>
-
-  /** Scalar/array state registers. */
-  regs?: Record<string, number | boolean | number[] | number[][] | { init: number | boolean | number[] | number[][]; type: PortTypeDecl }>
-  /** Named delay nodes. */
-  delays?: Record<string, { update: ExprNode; init?: number }>
-  /** Sample rate override. */
-  sample_rate?: number
-  /** Default values for inputs. */
-  input_defaults?: Record<string, ExprNode>
-
-  /** Inline subprogram definitions (reusable within this program). */
-  programs?: Record<string, ProgramJSON>
-  /** Instantiated subprograms. */
-  instances?: Record<string, {
-    program: string
-    inputs?: Record<string, ExprNode>
-    /** Compile-time type args for generic programs. Numeric literals, or
-     *  `{op:"type_param",name}` to forward from the outer program's type_params. */
-    type_args?: Record<string, number | ExprNode>
-  }>
-
-  /** Process body for leaf programs (direct computation). */
-  process?: {
-    outputs: Record<string, ExprNode>
-    next_regs?: Record<string, ExprNode>
-  }
-
-  /** Audio output routing (top-level programs only). */
-  audio_outputs?: Array<
-    | { instance: string; output: string | number }
-    | { expr: ExprNode }
-  >
-  /** Control parameters (top-level programs only). */
-  params?: Array<{
-    name: string
-    value?: number
-    time_const?: number
-    type?: 'param' | 'trigger'
-  }>
-  /** Runtime configuration. */
-  config?: { buffer_length?: number; sample_rate?: number }
-  /** Inline ADT type definitions. */
-  type_defs?: TypeDefJSON[]
-  /** When true, outputs depend only on previous-sample state — allows feedback cycles. */
-  breaks_cycles?: boolean
-  /** Compile-time type parameters. Each instance of a program with type_params must supply
-   *  a matching type_arg (or the declared default is used). */
-  type_params?: Record<string, { type: 'int'; default?: number }>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -399,7 +336,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 /**
- * Load all stdlib ProgramJSON files into a type registry.
+ * Load all stdlib program files (tropical_program_2) into a type registry.
  * Types are indexed first, then loaded on demand — dependencies resolve
  * recursively regardless of alphabetical file ordering.
  * Accepts either a full session or just a typeRegistry Map.
@@ -636,7 +573,7 @@ export function exportSessionAsProgram(
       case 'sum': return t.name
       case 'unit': return 'unit'
       case 'product':
-        throw new Error(`export: product port types cannot be serialized (no ProgramJSON form)`)
+        throw new Error(`export: product port types cannot be serialized`)
     }
   }
 

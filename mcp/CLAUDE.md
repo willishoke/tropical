@@ -26,7 +26,7 @@ Every mutation that affects the signal graph calls `wire()`, which runs the full
 ## Tools
 
 ### Program management
-- `define_program` — register a reusable DSP program type (accepts ProgramJSON); generic programs declaring `type_params` are stored as templates and monomorphize on instantiation
+- `define_program` — register a reusable DSP program type (accepts a `tropical_program_2` object); generic programs declaring `type_params` are stored as templates and monomorphize on instantiation
 - `add_instance` — create a named instance of a registered program type; pass `type_args` (e.g. `{"N": 8}`) for generic programs
 - `remove_instance` — remove an instance and cascade-clean wiring
 - `list_programs` — list all registered program types with ports and defaults; generic programs also surface their `type_params`
@@ -48,8 +48,8 @@ Every mutation that affects the signal graph calls `wire()`, which runs the full
 - `list_params` — list all registered parameters
 
 ### Program I/O
-- `load` — load a `tropical_program_1` JSON (replaces session)
-- `save` — serialize current session to `tropical_program_1` JSON
+- `load` — load a `tropical_program_2` JSON (replaces session)
+- `save` — serialize current session to `tropical_program_2` JSON
 - `merge` — merge a program into the current session (additive)
 
 ### Audio control

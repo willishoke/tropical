@@ -1,23 +1,32 @@
 {
   "input": {
-    "schema": "tropical_program_1",
+    "schema": "tropical_program_2",
     "name": "stdlib_noise_crush_scenario",
-    "instances": {
-      "n": {
-        "program": "NoiseLFSR",
-        "inputs": {}
-      },
-      "bc": {
-        "program": "BitCrusher",
-        "inputs": {
-          "audio": {
-            "op": "ref",
-            "instance": "n",
-            "output": "out"
-          },
-          "bit_depth": 6
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "instance_decl",
+          "name": "n",
+          "program": "NoiseLFSR",
+          "inputs": {}
+        },
+        {
+          "op": "instance_decl",
+          "name": "bc",
+          "program": "BitCrusher",
+          "inputs": {
+            "audio": {
+              "op": "ref",
+              "instance": "n",
+              "output": "out"
+            },
+            "bit_depth": 6
+          }
         }
-      }
+      ],
+      "assigns": [],
+      "value": null
     },
     "audio_outputs": [
       {

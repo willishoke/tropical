@@ -1,15 +1,19 @@
 # patches/
 
-Example patches in `tropical_program_1` JSON format. Load via `make mcp-ts` → `load` tool, or from the TUI.
+Example patches in `tropical_program_2` JSON format. Load via `make mcp-ts` → `load` tool, or from the TUI.
 
-## Schema: `tropical_program_1`
+## Schema: `tropical_program_2`
 
 ```json
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "MyPatch",
-  "instances": {
-    "Osc1": { "program": "Sin", "inputs": { "x": 440 } }
+  "body": {
+    "op": "block",
+    "decls": [
+      { "op": "instance_decl", "name": "Osc1", "program": "Sin", "inputs": { "x": 440 } }
+    ],
+    "assigns": []
   },
   "audio_outputs": [
     { "instance": "Osc1", "output": "out" }
@@ -19,10 +23,11 @@ Example patches in `tropical_program_1` JSON format. Load via `make mcp-ts` → 
 
 ### Fields
 
-- **instances** — map of `name → { program, inputs }`. Program must match a registered type (PascalCase: `Sin`, `Clock`, `LadderFilter`, `VCA`, etc.).
+- **body.decls** — ordered list of `reg_decl`, `delay_decl`, `instance_decl`, `program_decl`. Instance programs must match a registered type (PascalCase: `Sin`, `Clock`, `LadderFilter`, `VCA`, etc.).
+- **body.assigns** — `output_assign` and `next_update` entries. Empty at the top level of a patch.
 - **audio_outputs** — list of `{ instance, output }` specifying which outputs are mixed to the audio output buffer.
-- **programs** — (optional) inline subprogram definitions, used before they appear in `instances`.
 - **params** — (optional) named control parameters with initial values and smoothing time constants.
+- **ports** — (optional) port declarations for reusable composite programs.
 
 ### Expression format
 
