@@ -1,39 +1,40 @@
 import { describe, test, expect } from 'bun:test'
-import { makeSession, resolveProgramType, v1ProgramJSONToV2Node } from './session.js'
+import { makeSession, resolveProgramType } from './session.js'
 import { loadProgramAsType } from './program.js'
-import type { ProgramJSON } from './program.js'
+import type { ProgramNode } from './program.js'
 import { Float, ArrayType } from './term.js'
 
-function genericDelay(): ProgramJSON {
+function genericDelay(): ProgramNode {
   return {
-    schema: 'tropical_program_1',
+    op: 'program',
     name: 'Delay',
     type_params: { N: { type: 'int', default: 44100 } },
-    inputs: ['x'],
-    outputs: ['y'],
-    regs: { buf: { zeros: { type_param: 'N' } } as any },
-    input_defaults: { x: 0 },
     breaks_cycles: true,
-    process: {
-      outputs: {
-        y: {
+    ports: {
+      inputs: [{ name: 'x', default: 0 }],
+      outputs: ['y'],
+    },
+    body: { op: 'block',
+      decls: [
+        { op: 'reg_decl', name: 'buf', init: { zeros: { type_param: 'N' } } as any },
+      ],
+      assigns: [
+        { op: 'output_assign', name: 'y', expr: {
           op: 'index',
           args: [
             { op: 'reg', name: 'buf' },
             { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
           ],
-        },
-      },
-      next_regs: {
-        buf: {
+        }},
+        { op: 'next_update', target: { kind: 'reg', name: 'buf' }, expr: {
           op: 'array_set',
           args: [
             { op: 'reg', name: 'buf' },
             { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
             { op: 'input', name: 'x' },
           ],
-        },
-      },
+        }},
+      ],
     },
   }
 }
@@ -41,7 +42,7 @@ function genericDelay(): ProgramJSON {
 describe('resolveProgramType — generic instantiation', () => {
   test('monomorphizes and caches a generic type', () => {
     const session = makeSession()
-    loadProgramAsType(v1ProgramJSONToV2Node(genericDelay()).node, session)
+    loadProgramAsType(genericDelay(), session)
     // Generic programs go into genericTemplates, not typeRegistry
     expect(session.typeRegistry.has('Delay')).toBe(false)
     expect(session.genericTemplates.has('Delay')).toBe(true)
@@ -63,7 +64,7 @@ describe('resolveProgramType — generic instantiation', () => {
 
   test('applies declared default when type_args absent', () => {
     const session = makeSession()
-    loadProgramAsType(v1ProgramJSONToV2Node(genericDelay()).node, session)
+    loadProgramAsType(genericDelay(), session)
     const { type, typeArgs } = resolveProgramType(session, 'Delay', undefined, undefined)
     expect(typeArgs).toEqual({ N: 44100 })
     expect(type._def.registerPortTypes[0]).toEqual(ArrayType(Float, [44100]))
@@ -71,14 +72,15 @@ describe('resolveProgramType — generic instantiation', () => {
 
   test('rejects type_args on non-generic programs', () => {
     const session = makeSession()
-    const onePole: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const identity: ProgramNode = {
+      op: 'program',
       name: 'Identity',
-      inputs: ['x'],
-      outputs: ['y'],
-      process: { outputs: { y: { op: 'input', name: 'x' } } },
+      ports: { inputs: ['x'], outputs: ['y'] },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+      },
     }
-    loadProgramAsType(v1ProgramJSONToV2Node(onePole).node, session)
+    loadProgramAsType(identity, session)
     expect(() => resolveProgramType(session, 'Identity', { N: 8 }, undefined)).toThrow(/does not declare type_params/)
   })
 
@@ -89,34 +91,39 @@ describe('resolveProgramType — generic instantiation', () => {
 
   test('non-generic programs still resolve through typeRegistry', () => {
     const session = makeSession()
-    const p: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const p: ProgramNode = {
+      op: 'program',
       name: 'Passthrough',
-      inputs: ['x'],
-      outputs: ['y'],
-      process: { outputs: { y: { op: 'input', name: 'x' } } },
+      ports: { inputs: ['x'], outputs: ['y'] },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+      },
     }
-    loadProgramAsType(v1ProgramJSONToV2Node(p).node, session)
+    loadProgramAsType(p, session)
     const { type, typeArgs } = resolveProgramType(session, 'Passthrough', undefined, undefined)
     expect(type).toBeDefined()
     expect(typeArgs).toBeUndefined()
   })
 
   test('type_param refs in array port shapes become concrete PortTypes after instantiation', () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramNode = {
+      op: 'program',
       name: 'Bus',
       type_params: { N: { type: 'int', default: 4 } },
-      inputs: [
-        { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
-      ],
-      outputs: [
-        { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
-      ],
-      process: { outputs: { out: { op: 'input', name: 'values' } } },
+      ports: {
+        inputs: [
+          { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
+        ],
+        outputs: [
+          { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
+        ],
+      },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'out', expr: { op: 'input', name: 'values' } }],
+      },
     }
     const session = makeSession()
-    loadProgramAsType(v1ProgramJSONToV2Node(prog).node, session)
+    loadProgramAsType(prog, session)
 
     const { type: t8 } = resolveProgramType(session, 'Bus', { N: 8 }, undefined)
     expect(t8._def.inputPortTypes[0]).toEqual(ArrayType(Float, [8]))
