@@ -8,7 +8,7 @@
  *   bun web/build_patches.ts
  */
 
-import { writeFileSync, mkdirSync } from 'fs'
+import { writeFileSync, mkdirSync, readdirSync, unlinkSync, existsSync } from 'fs'
 import { dirname, resolve, join } from 'path'
 import { fileURLToPath } from 'url'
 import { makeSession, loadJSON } from '../compiler/session.js'
@@ -20,6 +20,11 @@ const distDir = resolve(__dirname, 'dist/patches')
 
 type Patch = { slug: string; title: string; description: string; program: unknown }
 
+// Curated list. Patches that use programs with delay lines or `pow`
+// (OnePole, LadderFilter, Phaser, BitCrusher, ...) are excluded on this
+// branch because the TS flattener on origin/main emits unresolved
+// delay_value / pow ops; both native and WASM backends render them as
+// zero. See project_testing_gaps.md.
 const PATCHES: Patch[] = [
   {
     slug: 'pure-sine-440',
@@ -35,104 +40,81 @@ const PATCHES: Patch[] = [
     },
   },
   {
-    slug: 'sine-lowpass',
-    title: 'Filtered Sine',
-    description: 'SinOsc at 220 Hz through a OnePole lowpass at 1 kHz.',
+    slug: 'ring-mod',
+    title: 'Ring Mod',
+    description: 'Two SinOscs (220 Hz × 331 Hz) multiplied through a VCA — dissonant partials.',
     program: {
       schema: 'tropical_program_2',
-      name: 'sine_lowpass',
+      name: 'ring_mod',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'osc', program: 'SinOsc', inputs: { freq: 220 } },
-        { op: 'instance_decl', name: 'lp',  program: 'OnePole', inputs: {
-          signal: { op: 'ref', instance: 'osc', output: 'sine' },
-          cutoff: 1000,
+        { op: 'instance_decl', name: 'a', program: 'SinOsc', inputs: { freq: 220 } },
+        { op: 'instance_decl', name: 'b', program: 'SinOsc', inputs: { freq: 331 } },
+        { op: 'instance_decl', name: 'm', program: 'VCA', inputs: {
+          audio: { op: 'ref', instance: 'a', output: 'sine' },
+          cv:    { op: 'ref', instance: 'b', output: 'sine' },
         }},
       ]},
-      audio_outputs: [{ instance: 'lp', output: 'out' }],
+      audio_outputs: [{ instance: 'm', output: 'out' }],
     },
   },
   {
-    slug: 'ladder-sawlike',
-    title: 'Ladder Filter',
-    description: 'SinOsc (tri-like at 110 Hz) driving a Moog-style LadderFilter.',
+    slug: 'fm-pair',
+    title: 'FM Pair',
+    description: 'Simple 2-op FM: a 73 Hz modulator shaping a ~220 Hz carrier.',
     program: {
       schema: 'tropical_program_2',
-      name: 'ladder_saw',
+      name: 'fm_pair',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'osc', program: 'SinOsc', inputs: { freq: 110 } },
-        { op: 'instance_decl', name: 'lp',  program: 'LadderFilter', inputs: {
-          signal: { op: 'ref', instance: 'osc', output: 'sine' },
-          cutoff: 1200,
-          resonance: 0.7,
+        { op: 'instance_decl', name: 'mod', program: 'SinOsc', inputs: { freq: 73 } },
+        { op: 'instance_decl', name: 'car', program: 'SinOsc', inputs: {
+          freq: { op: 'add', args: [220, { op: 'mul', args: [80, { op: 'ref', instance: 'mod', output: 'sine' }] }] },
         }},
       ]},
-      audio_outputs: [{ instance: 'lp', output: 'out' }],
+      audio_outputs: [{ instance: 'car', output: 'sine' }],
     },
   },
   {
-    slug: 'noise-crush',
-    title: 'Crushed Noise',
-    description: 'NoiseLFSR through a BitCrusher — rough digital hiss.',
+    slug: 'fm-stack',
+    title: 'FM Stack',
+    description: '3-op FM with a slow LFO on the modulator depth — evolves gently.',
     program: {
       schema: 'tropical_program_2',
-      name: 'noise_crush',
+      name: 'fm_stack',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'noise', program: 'NoiseLFSR' },
-        { op: 'instance_decl', name: 'crush', program: 'BitCrusher', inputs: {
-          signal: { op: 'ref', instance: 'noise', output: 'out' },
-          bits: 4,
-          rate: 8000,
+        { op: 'instance_decl', name: 'm1', program: 'SinOsc', inputs: { freq: 0.5 } },
+        { op: 'instance_decl', name: 'm2', program: 'SinOsc', inputs: {
+          freq: { op: 'add', args: [11, { op: 'mul', args: [5, { op: 'ref', instance: 'm1', output: 'sine' }] }] },
+        }},
+        { op: 'instance_decl', name: 'c',  program: 'SinOsc', inputs: {
+          freq: { op: 'add', args: [220, { op: 'mul', args: [200, { op: 'ref', instance: 'm2', output: 'sine' }] }] },
         }},
       ]},
-      audio_outputs: [{ instance: 'crush', output: 'out' }],
+      audio_outputs: [{ instance: 'c', output: 'sine' }],
     },
   },
   {
-    slug: 'sine-phaser',
-    title: 'Phaser Sine',
-    description: 'SinOsc at 165 Hz through a Phaser with LFO sweep.',
+    slug: 'blepsaw',
+    title: 'Band-Limited Saw',
+    description: 'A 110 Hz BlepSaw — anti-aliased classic subtractive waveform.',
     program: {
       schema: 'tropical_program_2',
-      name: 'sine_phaser',
+      name: 'blepsaw',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'osc', program: 'SinOsc', inputs: { freq: 165 } },
-        { op: 'instance_decl', name: 'ph',  program: 'Phaser', inputs: {
-          signal: { op: 'ref', instance: 'osc', output: 'sine' },
-          rate: 0.3,
-          depth: 0.8,
-          feedback: 0.5,
-        }},
+        { op: 'instance_decl', name: 'o', program: 'BlepSaw', inputs: { freq: 110 } },
       ]},
-      audio_outputs: [{ instance: 'ph', output: 'out' }],
-    },
-  },
-  {
-    slug: 'sequencer-saw',
-    title: 'Sequenced Saw',
-    description: 'A 4-step sequencer advancing a BlepSaw through a OnePole.',
-    program: {
-      schema: 'tropical_program_2',
-      name: 'sequencer_saw',
-      body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'clk',  program: 'Clock', inputs: { freq: 4 } },
-        { op: 'instance_decl', name: 'seq',  program: 'Sequencer', type_args: { N: 4 }, inputs: {
-          tick:   { op: 'ref', instance: 'clk', output: 'pulse' },
-          values: { op: 'array_literal', shape: [4], values: [110, 165, 147, 220] },
-        }},
-        { op: 'instance_decl', name: 'osc',  program: 'BlepSaw', inputs: {
-          freq: { op: 'ref', instance: 'seq', output: 'value' },
-        }},
-        { op: 'instance_decl', name: 'lp',   program: 'OnePole', inputs: {
-          signal: { op: 'ref', instance: 'osc', output: 'saw' },
-          cutoff: 1500,
-        }},
-      ]},
-      audio_outputs: [{ instance: 'lp', output: 'out' }],
+      audio_outputs: [{ instance: 'o', output: 'saw' }],
     },
   },
 ]
 
 mkdirSync(distDir, { recursive: true })
+
+// Clear any stale .plan.json from a prior build (keep index.json; we rewrite it).
+if (existsSync(distDir)) {
+  for (const f of readdirSync(distDir)) {
+    if (f.endsWith('.plan.json')) unlinkSync(join(distDir, f))
+  }
+}
 
 const manifest: Array<{ slug: string; title: string; description: string; planPath: string }> = []
 
