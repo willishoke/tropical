@@ -1,0 +1,35 @@
+{
+  "schema": "tropical_program_2",
+  "name": "bubble_cloud",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instance_decl",
+        "name": "clk",
+        "program": "Clock",
+        "inputs": {
+          "freq": 8,
+          "ratios_in": [1]
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "cloud",
+        "program": "BubbleCloud",
+        "inputs": {
+          "trigger": { "op": "ref", "instance": "clk", "output": "output" },
+          "radius": 0.003,
+          "q": 30,
+          "sigma": 0.3,
+          "decay_scale": 12,
+          "amp_scale": 0.05
+        }
+      }
+    ],
+    "assigns": []
+  },
+  "audio_outputs": [
+    { "instance": "cloud", "output": "out" }
+  ]
+}
