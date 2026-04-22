@@ -54,9 +54,11 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
   node.port.onmessage = (e) => {
     const d = e.data
     if (d?.type === 'error') {
-      // Surface runtime-side errors to the console for diagnostics.
       // eslint-disable-next-line no-console
       console.error('[tropical-worklet]', d.error)
+    } else if (d?.type === 'diag') {
+      // eslint-disable-next-line no-console
+      console.log('[tropical-worklet]', d.text, d.data ?? '')
     }
   }
 

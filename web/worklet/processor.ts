@@ -13,7 +13,7 @@
 import { WasmRuntime, type LoadedPlan } from './runtime.js'
 
 type WorkletMsg =
-  | { type: 'init'; paramsSab: SharedArrayBuffer; maxParams: number }
+  | { type: 'init'; paramsSab: SharedArrayBuffer | ArrayBuffer; maxParams: number }
   | { type: 'load'; plan: LoadedPlan }
   | { type: 'fadeIn' }
   | { type: 'fadeOut' }
@@ -32,41 +32,46 @@ interface AudioWorkletProcessor {
 class TropicalProcessor extends AudioWorkletProcessor {
   private runtime: WasmRuntime | null = null
   private pendingLoad: LoadedPlan | null = null
+  private blockCount = 0
+  private loadCompleted = false
 
   constructor() {
     super()
     this.port.onmessage = (e: MessageEvent<WorkletMsg>) => this.onMessage(e.data)
+    this.diag('ctor — processor instantiated')
+  }
+
+  private diag(text: string, data?: unknown): void {
+    this.port.postMessage({ type: 'diag', text, data })
   }
 
   private onMessage(msg: WorkletMsg): void {
     if (msg.type === 'init') {
       const view = new Float64Array(msg.paramsSab)
       this.runtime = new WasmRuntime(view, msg.maxParams)
+      this.diag(`init — runtime created, maxParams=${msg.maxParams}, sab.byteLength=${msg.paramsSab.byteLength}`)
     } else if (msg.type === 'load') {
-      // Defer until next process() tick so the swap happens on the audio thread.
       this.pendingLoad = msg.plan
+      this.diag(`load message queued — layout.outputOffset=${msg.plan.layout.outputOffset}, maxBlockSize=${msg.plan.layout.maxBlockSize}, pageCount=${msg.plan.layout.pageCount}, registers=${msg.plan.layout.registerCount}`)
     } else if (msg.type === 'fadeIn' && this.runtime) {
       this.runtime.beginFadeIn()
+      this.diag('beginFadeIn')
     } else if (msg.type === 'fadeOut' && this.runtime) {
       this.runtime.beginFadeOut()
+      this.diag('beginFadeOut')
     }
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][], _parameters: Record<string, Float32Array>): boolean {
-    if (!this.runtime) {
-      // No runtime yet — emit silence.
-      return true
-    }
+    if (!this.runtime) return true
+
     if (this.pendingLoad) {
       const plan = this.pendingLoad
       this.pendingLoad = null
-      // Fire-and-forget — WebAssembly.instantiate from a Module is synchronous
-      // enough in practice, but it's typed async. We handle it here by
-      // kicking off the promise and letting this block render silence.
-      this.runtime.loadPlan(plan).catch((err) => {
-        this.port.postMessage({ type: 'error', error: String(err) })
-      })
-      // First block after swap: emit silence to avoid using the not-yet-ready instance.
+      this.loadCompleted = false
+      this.runtime.loadPlan(plan)
+        .then(() => { this.loadCompleted = true; this.diag('loadPlan resolved') })
+        .catch((err) => { this.port.postMessage({ type: 'error', error: String(err) }) })
       const out0 = outputs[0]?.[0]
       if (out0) out0.fill(0)
       return true
@@ -79,13 +84,21 @@ class TropicalProcessor extends AudioWorkletProcessor {
 
     const rendered = this.runtime.process(mono, n)
     if (rendered > 0) {
-      // Duplicate mono → all channels
       for (let ch = 1; ch < output.length; ch++) {
         output[ch]!.set(mono)
       }
     } else {
       mono.fill(0)
       for (let ch = 1; ch < output.length; ch++) output[ch]!.fill(0)
+    }
+
+    // Emit block peak every ~1 s at 48k (~375 blocks) so we can see what's
+    // actually reaching the output channel in DevTools console.
+    this.blockCount++
+    if (this.blockCount === 1 || this.blockCount === 20 || this.blockCount === 100 || this.blockCount % 400 === 0) {
+      let peak = 0
+      for (let i = 0; i < n; i++) peak = Math.max(peak, Math.abs(mono[i]!))
+      this.diag(`block=${this.blockCount} rendered=${rendered} peak=${peak.toExponential(3)} loadDone=${this.loadCompleted}`)
     }
     return true
   }

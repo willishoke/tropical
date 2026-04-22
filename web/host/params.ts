@@ -15,14 +15,22 @@ import { SignalExpr } from '../../compiler/expr.js'
 export class ParamBank {
   /** SAB view, f64. Each param owns `[value, frame_value]`. */
   readonly view: Float64Array
-  readonly shared: SharedArrayBuffer
+  readonly shared: SharedArrayBuffer | ArrayBuffer
   /** Max params this bank supports. */
   readonly capacity: number
   private nextSlot = 0
 
   constructor(capacity = 256) {
     this.capacity = capacity
-    this.shared = new SharedArrayBuffer(capacity * 2 * 8)
+    // SharedArrayBuffer requires COOP/COEP (crossOriginIsolated). Fall back
+    // to a plain ArrayBuffer when unavailable — the worklet will still
+    // receive a snapshot via postMessage at init time; live param updates
+    // won't cross the thread boundary but static params will work.
+    const ok =
+      typeof SharedArrayBuffer !== 'undefined' &&
+      (typeof (globalThis as { crossOriginIsolated?: boolean }).crossOriginIsolated === 'undefined' ||
+       (globalThis as { crossOriginIsolated: boolean }).crossOriginIsolated)
+    this.shared = ok ? new SharedArrayBuffer(capacity * 2 * 8) : new ArrayBuffer(capacity * 2 * 8)
     this.view = new Float64Array(this.shared)
   }
 

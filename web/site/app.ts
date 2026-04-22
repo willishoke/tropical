@@ -75,10 +75,13 @@ playBtn.addEventListener('click', async () => {
     const t0 = performance.now()
     const loaded = await compilePlanJson(planJson, 2048)
     const dt = performance.now() - t0
+    const crossOK = (window as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated
     setInfo(
       `memory: ${(loaded.layout.pageCount * 65536 / 1024).toFixed(0)} KB · ` +
       `registers: ${loaded.layout.registerCount} · arrays: ${loaded.layout.arraySlotCount} · ` +
-      `params: ${loaded.layout.paramCount} · compile: ${dt.toFixed(1)} ms`,
+      `params: ${loaded.layout.paramCount} · compile: ${dt.toFixed(1)} ms · ` +
+      `audioCtx: ${host.context.sampleRate}Hz ${host.context.state} · ` +
+      `crossOriginIsolated: ${crossOK ? 'yes' : 'NO'}`,
     )
 
     host.loadPlan(loaded)

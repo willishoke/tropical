@@ -771,17 +771,23 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
     return
   }
 
-  // ── Arithmetic: Add/Sub/Mul/Div/Mod/FloorDiv/Neg/Abs at result type ──
+  // ── Arithmetic: Add/Sub/Mul/Div/Mod/FloorDiv/Neg/Abs ──
+  // Native OrcJitEngine falls through non-int result_types to float and
+  // coerces back. We do the same: computation happens in `opT` (int or
+  // float), then we coerce from opT to rt before storing.
+  const opT: ScalarType = rt === 'int' ? 'int' : 'float'
+
   if (tag === 'Neg') {
-    pushAs(c, instr.args[0]!, rt, ctx)
-    if (rt === 'int') { c.i64c(-1); c.u8(OP.I64_MUL) }
-    else              { c.u8(OP.F64_NEG) }
+    pushAs(c, instr.args[0]!, opT, ctx)
+    if (opT === 'int') { c.i64c(-1); c.u8(OP.I64_MUL) }
+    else               { c.u8(OP.F64_NEG) }
+    coerce(c, opT, rt)
     storeTempAt(c, instr.dst, rt, ctx)
     return
   }
   if (tag === 'Abs') {
-    pushAs(c, instr.args[0]!, rt, ctx)
-    if (rt === 'int') {
+    pushAs(c, instr.args[0]!, opT, ctx)
+    if (opT === 'int') {
       c.localTee(L_AI)
       c.i64c(0); c.u8(OP.I64_LT_S)
       c.if_()
@@ -791,31 +797,32 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
     } else {
       c.u8(OP.F64_ABS)
     }
+    coerce(c, opT, rt)
     storeTempAt(c, instr.dst, rt, ctx)
     return
   }
   // Binary arithmetic: use locals to safely guard Div/Mod against zero.
   {
-    pushAs(c, instr.args[0]!, rt, ctx)
-    if (rt === 'int') c.localSet(L_AI); else c.localSet(L_AF)
-    pushAs(c, instr.args[1]!, rt, ctx)
-    if (rt === 'int') c.localSet(L_BI); else c.localSet(L_BF)
+    pushAs(c, instr.args[0]!, opT, ctx)
+    if (opT === 'int') c.localSet(L_AI); else c.localSet(L_AF)
+    pushAs(c, instr.args[1]!, opT, ctx)
+    if (opT === 'int') c.localSet(L_BI); else c.localSet(L_BF)
 
     switch (tag) {
       case 'Add':
-        if (rt === 'int') { c.localGet(L_AI); c.localGet(L_BI); c.u8(OP.I64_ADD) }
-        else              { c.localGet(L_AF); c.localGet(L_BF); c.u8(OP.F64_ADD) }
+        if (opT === 'int') { c.localGet(L_AI); c.localGet(L_BI); c.u8(OP.I64_ADD) }
+        else               { c.localGet(L_AF); c.localGet(L_BF); c.u8(OP.F64_ADD) }
         break
       case 'Sub':
-        if (rt === 'int') { c.localGet(L_AI); c.localGet(L_BI); c.u8(OP.I64_SUB) }
-        else              { c.localGet(L_AF); c.localGet(L_BF); c.u8(OP.F64_SUB) }
+        if (opT === 'int') { c.localGet(L_AI); c.localGet(L_BI); c.u8(OP.I64_SUB) }
+        else               { c.localGet(L_AF); c.localGet(L_BF); c.u8(OP.F64_SUB) }
         break
       case 'Mul':
-        if (rt === 'int') { c.localGet(L_AI); c.localGet(L_BI); c.u8(OP.I64_MUL) }
-        else              { c.localGet(L_AF); c.localGet(L_BF); c.u8(OP.F64_MUL) }
+        if (opT === 'int') { c.localGet(L_AI); c.localGet(L_BI); c.u8(OP.I64_MUL) }
+        else               { c.localGet(L_AF); c.localGet(L_BF); c.u8(OP.F64_MUL) }
         break
       case 'Div':
-        if (rt === 'int') {
+        if (opT === 'int') {
           // (b==0) ? 0 : a/b  — WASM i64.div_s traps on b==0, so guard via if/else.
           c.localGet(L_BI); c.u8(OP.I64_EQZ)
           c.if_()
@@ -836,7 +843,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
         }
         break
       case 'Mod':
-        if (rt === 'int') {
+        if (opT === 'int') {
           c.localGet(L_BI); c.u8(OP.I64_EQZ)
           c.if_()
           c.i64c(0); c.localSet(L_CI)
@@ -860,7 +867,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
         }
         break
       case 'FloorDiv':
-        if (rt === 'int') {
+        if (opT === 'int') {
           c.localGet(L_BI); c.u8(OP.I64_EQZ)
           c.if_()
           c.i64c(0); c.localSet(L_CI)
@@ -881,6 +888,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
       default:
         throw new Error(`emit_wasm: scalar op ${tag} not supported`)
     }
+    coerce(c, opT, rt)
     storeTempAt(c, instr.dst, rt, ctx)
   }
 }
