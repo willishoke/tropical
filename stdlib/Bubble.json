@@ -1,0 +1,184 @@
+{
+  "schema": "tropical_program_2",
+  "name": "Bubble",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instance_decl",
+        "name": "hold",
+        "program": "SampleHold",
+        "inputs": {
+          "trigger": { "op": "input", "name": "trigger" },
+          "input": { "op": "input", "name": "radius" }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ramp",
+        "program": "TriggerRamp",
+        "inputs": {
+          "trigger": { "op": "input", "name": "trigger" }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "decay_calc",
+        "program": "Exp",
+        "inputs": {
+          "x": {
+            "op": "div",
+            "args": [
+              -1,
+              {
+                "op": "mul",
+                "args": [
+                  { "op": "sample_rate" },
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          { "op": "input", "name": "decay_scale" },
+                          { "op": "nested_out", "ref": "hold", "output": "value" }
+                        ]
+                      },
+                      1e-6
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "env_gen",
+        "program": "EnvExpDecay",
+        "inputs": {
+          "trigger": { "op": "input", "name": "trigger" },
+          "decay": { "op": "nested_out", "ref": "decay_calc", "output": "out" }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "svf",
+        "program": "SVF",
+        "inputs": {
+          "input": { "op": "input", "name": "trigger" },
+          "cutoff": {
+            "op": "let",
+            "bind": {
+              "r_held": { "op": "nested_out", "ref": "hold", "output": "value" },
+              "t_eff": { "op": "nested_out", "ref": "ramp", "output": "frames" }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "tau": {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        { "op": "input", "name": "decay_scale" },
+                        { "op": "binding", "name": "r_held" }
+                      ]
+                    },
+                    1e-6
+                  ]
+                },
+                "f0": {
+                  "op": "div",
+                  "args": [
+                    3.26,
+                    { "op": "add", "args": [{ "op": "binding", "name": "r_held" }, 1e-6] }
+                  ]
+                }
+              },
+              "in": {
+                "op": "mul",
+                "args": [
+                  { "op": "binding", "name": "f0" },
+                  {
+                    "op": "add",
+                    "args": [
+                      1,
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              { "op": "input", "name": "sigma" },
+                              { "op": "binding", "name": "t_eff" }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              { "op": "sample_rate" },
+                              { "op": "binding", "name": "tau" }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "q": { "op": "input", "name": "q" }
+        }
+      }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "out",
+        "expr": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "mul",
+              "args": [
+                { "op": "nested_out", "ref": "env_gen", "output": "env" },
+                { "op": "nested_out", "ref": "svf", "output": "bp" }
+              ]
+            },
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    { "op": "nested_out", "ref": "hold", "output": "value" },
+                    1000
+                  ]
+                },
+                { "op": "input", "name": "amp_scale" }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "value": null
+  },
+  "ports": {
+    "inputs": [
+      { "name": "trigger", "type": "signal", "default": 0 },
+      { "name": "radius", "type": "float", "default": 0.001 },
+      { "name": "q", "type": "float", "default": 30 },
+      { "name": "sigma", "type": "float", "default": 0.3 },
+      { "name": "decay_scale", "type": "float", "default": 10 },
+      { "name": "amp_scale", "type": "float", "default": 1 }
+    ],
+    "outputs": [
+      { "name": "out", "type": "signal" }
+    ]
+  }
+}

@@ -1,0 +1,76 @@
+{
+  "schema": "tropical_program_2",
+  "name": "TriggerRamp",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "reg_decl",
+        "name": "t",
+        "init": 0,
+        "type": "int"
+      },
+      {
+        "op": "delay_decl",
+        "name": "prev_trigger",
+        "update": { "op": "input", "name": "trigger" },
+        "init": 0
+      }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "frames",
+        "expr": { "op": "reg", "name": "t" }
+      },
+      {
+        "op": "next_update",
+        "target": { "kind": "reg", "name": "t" },
+        "expr": {
+          "op": "let",
+          "bind": {
+            "tick": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "gt",
+                  "args": [
+                    { "op": "input", "name": "trigger" },
+                    0.5
+                  ]
+                },
+                {
+                  "op": "lte",
+                  "args": [
+                    { "op": "delay_ref", "id": "prev_trigger" },
+                    0.5
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "select",
+            "args": [
+              { "op": "binding", "name": "tick" },
+              0,
+              {
+                "op": "add",
+                "args": [{ "op": "reg", "name": "t" }, 1]
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "value": null
+  },
+  "ports": {
+    "inputs": [
+      { "name": "trigger", "type": "signal", "default": 0 }
+    ],
+    "outputs": [
+      { "name": "frames", "type": "float" }
+    ]
+  }
+}
