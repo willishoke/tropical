@@ -1,0 +1,154 @@
+{
+  "schema": "tropical_program_2",
+  "name": "PoissonEvent",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "reg_decl",
+        "name": "state",
+        "init": 2685821657736338717,
+        "type": "int"
+      }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "trigger",
+        "expr": {
+          "op": "let",
+          "bind": {
+            "s1": {
+              "op": "bitXor",
+              "args": [
+                { "op": "reg", "name": "state" },
+                { "op": "lshift", "args": [{ "op": "reg", "name": "state" }, 13] }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "s2": {
+                "op": "bitXor",
+                "args": [
+                  { "op": "binding", "name": "s1" },
+                  { "op": "rshift", "args": [{ "op": "binding", "name": "s1" }, 7] }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s3": {
+                  "op": "bitXor",
+                  "args": [
+                    { "op": "binding", "name": "s2" },
+                    { "op": "lshift", "args": [{ "op": "binding", "name": "s2" }, 17] }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "noise": {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              { "op": "bitAnd", "args": [{ "op": "binding", "name": "s3" }, 65535] },
+                              2
+                            ]
+                          },
+                          65535
+                        ]
+                      },
+                      1
+                    ]
+                  },
+                  "threshold": {
+                    "op": "sub",
+                    "args": [
+                      1,
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [2, { "op": "input", "name": "rate" }]
+                          },
+                          { "op": "sample_rate" }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "gt",
+                      "args": [
+                        { "op": "binding", "name": "noise" },
+                        { "op": "binding", "name": "threshold" }
+                      ]
+                    },
+                    1
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "op": "next_update",
+        "target": { "kind": "reg", "name": "state" },
+        "expr": {
+          "op": "let",
+          "bind": {
+            "s1": {
+              "op": "bitXor",
+              "args": [
+                { "op": "reg", "name": "state" },
+                { "op": "lshift", "args": [{ "op": "reg", "name": "state" }, 13] }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "s2": {
+                "op": "bitXor",
+                "args": [
+                  { "op": "binding", "name": "s1" },
+                  { "op": "rshift", "args": [{ "op": "binding", "name": "s1" }, 7] }
+                ]
+              }
+            },
+            "in": {
+              "op": "bitXor",
+              "args": [
+                { "op": "binding", "name": "s2" },
+                { "op": "lshift", "args": [{ "op": "binding", "name": "s2" }, 17] }
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "value": null
+  },
+  "ports": {
+    "inputs": [
+      { "name": "rate", "type": "float", "default": 4 }
+    ],
+    "outputs": [
+      { "name": "trigger", "type": "signal" }
+    ]
+  }
+}

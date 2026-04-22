@@ -1677,7 +1677,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 2,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -2010,7 +2010,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 3,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -2343,7 +2343,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 4,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -2676,7 +2676,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 5,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -3889,7 +3889,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 2,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -4222,7 +4222,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 3,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -4593,7 +4593,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 4,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -4926,7 +4926,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 5,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -6172,7 +6172,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 2,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -6505,7 +6505,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 3,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -6838,7 +6838,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 4,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -7171,7 +7171,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 5,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -8417,7 +8417,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 2,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -8750,7 +8750,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 3,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -9083,7 +9083,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 4,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -9416,7 +9416,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 5,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -10756,7 +10756,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 2,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -11089,7 +11089,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 3,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -11422,7 +11422,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 4,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -11755,7 +11755,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 5,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -12753,8 +12753,8 @@
             "scalar_type": "float"
           },
           {
-            "kind": "const",
-            "val": 0,
+            "kind": "state_reg",
+            "slot": 1,
             "scalar_type": "float"
           }
         ],
@@ -12925,7 +12925,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 2,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -13906,8 +13906,8 @@
             "scalar_type": "float"
           },
           {
-            "kind": "const",
-            "val": 0,
+            "kind": "state_reg",
+            "slot": 1,
             "scalar_type": "float"
           }
         ],
@@ -14078,7 +14078,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 2,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -14411,7 +14411,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 3,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -15411,8 +15411,8 @@
             "scalar_type": "float"
           },
           {
-            "kind": "const",
-            "val": 0,
+            "kind": "state_reg",
+            "slot": 1,
             "scalar_type": "float"
           }
         ],
@@ -15583,7 +15583,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 2,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -15916,7 +15916,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 3,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -16249,7 +16249,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 4,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -17268,8 +17268,8 @@
             "scalar_type": "float"
           },
           {
-            "kind": "const",
-            "val": 0,
+            "kind": "state_reg",
+            "slot": 1,
             "scalar_type": "float"
           }
         ],
@@ -17440,7 +17440,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 2,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -17773,7 +17773,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 3,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -18106,7 +18106,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 4,
+            "slot": 1,
             "scalar_type": "float"
           },
           {
@@ -18439,7 +18439,7 @@
         "args": [
           {
             "kind": "state_reg",
-            "slot": 5,
+            "slot": 1,
             "scalar_type": "float"
           },
           {

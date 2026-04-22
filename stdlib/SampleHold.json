@@ -1,0 +1,104 @@
+{
+  "schema": "tropical_program_2",
+  "name": "SampleHold",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "reg_decl",
+        "name": "held",
+        "init": 0
+      },
+      {
+        "op": "delay_decl",
+        "name": "prev_trigger",
+        "update": { "op": "input", "name": "trigger" },
+        "init": 0
+      }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "value",
+        "expr": {
+          "op": "let",
+          "bind": {
+            "tick": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "gt",
+                  "args": [
+                    { "op": "input", "name": "trigger" },
+                    0.5
+                  ]
+                },
+                {
+                  "op": "lte",
+                  "args": [
+                    { "op": "delay_ref", "id": "prev_trigger" },
+                    0.5
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "select",
+            "args": [
+              { "op": "binding", "name": "tick" },
+              { "op": "input", "name": "input" },
+              { "op": "reg", "name": "held" }
+            ]
+          }
+        }
+      },
+      {
+        "op": "next_update",
+        "target": { "kind": "reg", "name": "held" },
+        "expr": {
+          "op": "let",
+          "bind": {
+            "tick": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "gt",
+                  "args": [
+                    { "op": "input", "name": "trigger" },
+                    0.5
+                  ]
+                },
+                {
+                  "op": "lte",
+                  "args": [
+                    { "op": "delay_ref", "id": "prev_trigger" },
+                    0.5
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "select",
+            "args": [
+              { "op": "binding", "name": "tick" },
+              { "op": "input", "name": "input" },
+              { "op": "reg", "name": "held" }
+            ]
+          }
+        }
+      }
+    ],
+    "value": null
+  },
+  "ports": {
+    "inputs": [
+      { "name": "trigger", "type": "signal", "default": 0 },
+      { "name": "input", "type": "signal", "default": 0 }
+    ],
+    "outputs": [
+      { "name": "value", "type": "signal" }
+    ]
+  }
+}

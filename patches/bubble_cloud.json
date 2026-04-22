@@ -1,0 +1,58 @@
+{
+  "schema": "tropical_program_2",
+  "name": "bubble_cloud",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instance_decl",
+        "name": "events",
+        "program": "PoissonEvent",
+        "inputs": { "rate": 20 }
+      },
+      {
+        "op": "instance_decl",
+        "name": "noise",
+        "program": "WhiteNoise",
+        "inputs": {}
+      },
+      {
+        "op": "instance_decl",
+        "name": "radius_exp",
+        "program": "Exp",
+        "inputs": {
+          "x": {
+            "op": "mul",
+            "args": [
+              0.7,
+              { "op": "ref", "instance": "noise", "output": "out" }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "cloud",
+        "program": "BubbleCloud",
+        "inputs": {
+          "trigger": { "op": "ref", "instance": "events", "output": "trigger" },
+          "radius": {
+            "op": "mul",
+            "args": [
+              0.003,
+              { "op": "ref", "instance": "radius_exp", "output": "out" }
+            ]
+          },
+          "q": 30,
+          "sigma": 0.3,
+          "decay_scale": 12,
+          "amp_scale": 0.08
+        }
+      }
+    ],
+    "assigns": []
+  },
+  "audio_outputs": [
+    { "instance": "cloud", "output": "out" }
+  ]
+}
