@@ -7,14 +7,14 @@ TypeScript layer. Handles program definition, expression construction, flattenin
 ```
 expr.ts               ExprNode type, SignalExpr wrapper, all named operations
 program_types.ts      ProgramDef IR, ProgramType, ProgramInstance (pure data types, no DSL)
-program.ts            ProgramJSON (tropical_program_1) interface, conversions, stdlib loading
+program.ts            ProgramNode (tropical_program_2) types, conversions, stdlib loading
 flatten.ts            Session → tropical_plan_4 (inline all instances, resolve refs)
 lower_arrays.ts       Lower array ops + combinators to scalar primitives (static unrolling)
 emit_numeric.ts       ExprNode trees → FlatProgram instruction stream
 compiler.ts           Dependency graph, topological sort, SCC, port type conversion
 term.ts               Port types (PortType, ScalarKind), shape algebra, type utilities
-session.ts            SessionState, loadProgramDef (ProgramJSON → ProgramDef), loadJSON, prettyExpr
-schema.ts             Zod validation schemas for ProgramJSON
+session.ts            SessionState, loadProgramDef (ProgramNode → ProgramDef), loadJSON, prettyExpr
+schema.ts             Zod validation schemas for tropical_program_2
 apply_plan.ts         flattenSession → JSON.stringify → runtime.loadPlan
 array_wiring.ts       Typed port validation, auto-broadcast insertion
 bench_compile.ts      Compilation benchmarks
@@ -52,13 +52,13 @@ Compile-time combinators (`let`, `generate`, `iterate`, `fold`, `scan`, `map2`, 
 
 Pure data types — no DSL, no side effects:
 
-- **`ProgramDef`** — the compiler's slot-indexed IR consumed by the flattener. Fields: `outputExprNodes`, `registerExprNodes`, `delayUpdateNodes`, `nestedCalls`, etc. Built from ProgramJSON by `loadProgramDef()` in `session.ts` via `slottifyExpr()` (pure name→slot tree walk).
+- **`ProgramDef`** — the compiler's slot-indexed IR consumed by the flattener. Fields: `outputExprNodes`, `registerExprNodes`, `delayUpdateNodes`, `nestedCalls`, etc. Built from ProgramNode by `loadProgramDef()` in `session.ts` via `slottifyExpr()` (pure name→slot tree walk).
 - **`ProgramType`** — wraps a `ProgramDef`, registered in `SessionState.typeRegistry`
 - **`ProgramInstance`** — named instance of a type, with port accessors
 
 ## Standard library (`stdlib/*.json`)
 
-19 built-in types as ProgramJSON files, loaded by `loadStdlib()` in `program.ts`:
+19 built-in types as `tropical_program_2` files, loaded by `loadStdlib()` in `program.ts`:
 
 - **Transcendentals** (polynomial approximations): Sin, Cos, Tanh, Exp, Log, Pow
 - **Filters / shapers**: OnePole, LadderFilter (4-pole Moog), SoftClip, BitCrusher
@@ -144,12 +144,12 @@ Run with `bun test`. Test files:
 - `lower_arrays.test.ts` — array lowering to scalar primitives
 - `apply_plan.test.ts` — plan application integration (requires native lib)
 - `combinators.test.ts` — compile-time combinator expansion
-- `program.test.ts` — ProgramJSON schema conversions and Zod validation
+- `program.test.ts` — ProgramNode schema conversions and Zod validation
 - `bounds.test.ts` — bounded type enforcement and clamp insertion
 - `emit_numeric.test.ts` — instruction emission
 
 ## Adding a program type
 
-1. Create a `stdlib/MyType.json` file using the `tropical_program_1` schema
+1. Create a `stdlib/MyType.json` file using the `tropical_program_2` schema
 2. The file is automatically loaded by `loadStdlib()` on startup
 3. No C++ changes needed unless you need a new expression op

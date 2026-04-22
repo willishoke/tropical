@@ -1,49 +1,128 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "Sequencer",
-  "type_params": { "N": { "type": "int", "default": 8 } },
-  "inputs": [
-    { "name": "clock", "type": "unipolar" },
-    { "name": "values", "type": { "kind": "array", "element": "float", "shape": [{ "op": "type_param", "name": "N" }] } }
-  ],
-  "outputs": [
-    { "name": "value", "type": "float" }
-  ],
-  "regs": { "step": { "init": 0, "type": "int" } },
-  "delays": {
-    "prev_clock": { "update": { "op": "input", "name": "clock" }, "init": 0 }
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "reg_decl",
+        "name": "step",
+        "init": 0,
+        "type": "int"
+      },
+      {
+        "op": "delay_decl",
+        "name": "prev_clock",
+        "update": {
+          "op": "input",
+          "name": "clock"
+        },
+        "init": 0
+      }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "value",
+        "expr": {
+          "op": "index",
+          "args": [
+            {
+              "op": "input",
+              "name": "values"
+            },
+            {
+              "op": "reg",
+              "name": "step"
+            }
+          ]
+        }
+      },
+      {
+        "op": "next_update",
+        "target": {
+          "kind": "reg",
+          "name": "step"
+        },
+        "expr": {
+          "op": "mod",
+          "args": [
+            {
+              "op": "add",
+              "args": [
+                {
+                  "op": "reg",
+                  "name": "step"
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "gt",
+                      "args": [
+                        {
+                          "op": "input",
+                          "name": "clock"
+                        },
+                        0.5
+                      ]
+                    },
+                    {
+                      "op": "lte",
+                      "args": [
+                        {
+                          "op": "delay_ref",
+                          "id": "prev_clock"
+                        },
+                        0.5
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "op": "type_param",
+              "name": "N"
+            }
+          ]
+        }
+      }
+    ],
+    "value": null
   },
-  "input_defaults": { "clock": 0 },
-  "process": {
-    "outputs": {
-      "value": {
-        "op": "index",
-        "args": [
-          { "op": "input", "name": "values" },
-          { "op": "reg", "name": "step" }
-        ]
+  "ports": {
+    "inputs": [
+      {
+        "name": "clock",
+        "type": "unipolar",
+        "default": 0
+      },
+      {
+        "name": "values",
+        "type": {
+          "kind": "array",
+          "element": "float",
+          "shape": [
+            {
+              "op": "type_param",
+              "name": "N"
+            }
+          ]
+        }
       }
-    },
-    "next_regs": {
-      "step": {
-        "op": "mod",
-        "args": [
-          {
-            "op": "add",
-            "args": [
-              { "op": "reg", "name": "step" },
-              {
-                "op": "mul",
-                "args": [
-                  { "op": "gt", "args": [{ "op": "input", "name": "clock" }, 0.5] },
-                  { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_clock" }, 0.5] }
-                ]
-              }
-            ]
-          },
-          { "op": "type_param", "name": "N" }
-        ]
+    ],
+    "outputs": [
+      {
+        "name": "value",
+        "type": "float"
       }
+    ]
+  },
+  "type_params": {
+    "N": {
+      "type": "int",
+      "default": 8
     }
   }
 }

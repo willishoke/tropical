@@ -67,41 +67,51 @@ Complex types compose from simpler ones — LadderFilter is a few hundred lines 
 
 JSON files in `patches/`. Examples include cross-FM synthesis, acid noise, and microtonal sequencing.
 
-Program format (`tropical_program_1`):
+Program format (`tropical_program_2`):
 
 ```json
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "Example",
-  "programs": {
-    "Sine": {
-      "schema": "tropical_program_1",
-      "name": "Sine",
-      "inputs": ["freq"],
-      "outputs": ["out"],
-      "regs": { "phase": 0 },
-      "input_defaults": { "freq": 440 },
-      "instances": {
-        "sin1": { "program": "Sin", "inputs": {
-          "x": { "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }
-        }}
-      },
-      "process": {
-        "outputs": {
-          "out": { "op": "nested_out", "ref": "sin1", "output": "out" }
+  "body": {
+    "op": "block",
+    "decls": [
+      { "op": "program_decl", "name": "Sine", "program": {
+        "op": "program",
+        "name": "Sine",
+        "ports": {
+          "inputs": [{ "name": "freq", "default": 440 }],
+          "outputs": [{ "name": "out" }]
         },
-        "next_regs": {
-          "phase": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sample_rate" }] }] }, 1] }
+        "body": {
+          "op": "block",
+          "decls": [
+            { "op": "reg_decl", "name": "phase", "init": 0 },
+            { "op": "instance_decl", "name": "sin1", "program": "Sin", "inputs": {
+              "x": { "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }
+            }}
+          ],
+          "assigns": [
+            { "op": "output_assign", "name": "out", "expr": { "op": "nested_out", "ref": "sin1", "output": "out" } },
+            { "op": "next_update", "target": { "kind": "reg", "name": "phase" }, "expr": {
+              "op": "mod", "args": [
+                { "op": "add", "args": [
+                  { "op": "reg", "name": "phase" },
+                  { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sample_rate" }] }
+                ]},
+                1
+              ]
+            }}
+          ]
         }
-      }
-    }
-  },
-  "instances": {
-    "osc": { "program": "Sine", "inputs": { "freq": 440 } },
-    "filt": { "program": "LadderFilter", "inputs": {
-      "input": { "op": "ref", "instance": "osc", "output": "out" },
-      "cutoff": 2000, "resonance": 0.7
-    }}
+      }},
+      { "op": "instance_decl", "name": "osc", "program": "Sine", "inputs": { "freq": 440 } },
+      { "op": "instance_decl", "name": "filt", "program": "LadderFilter", "inputs": {
+        "input": { "op": "ref", "instance": "osc", "output": "out" },
+        "cutoff": 2000, "resonance": 0.7
+      }}
+    ],
+    "assigns": []
   },
   "audio_outputs": [
     { "instance": "filt", "output": "lp" }

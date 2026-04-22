@@ -49,7 +49,7 @@ Singleton LLVM ORC engine. `compile_flat_program()`:
    - State writeback after the loop
 4. Add module to LLJIT, look up symbol → `NumericKernelFn`
 
-**No transcendentals in the JIT.** sin / cos / tanh / exp / log / pow are defined as ProgramJSON files in `stdlib/` and inlined at flatten time from arithmetic primitives plus `Ldexp` / `FloatExponent` (single-instruction IEEE-754 bit ops for 2^n range reduction). Swap `stdlib/Sin.json` to change the approximation.
+**No transcendentals in the JIT.** sin / cos / tanh / exp / log / pow are defined as `tropical_program_2` files in `stdlib/` and inlined at flatten time from arithmetic primitives plus `Ldexp` / `FloatExponent` (single-instruction IEEE-754 bit ops for 2^n range reduction). Swap `stdlib/Sin.json` to change the approximation.
 
 **Cache invalidation**: build-id subdirectory derived from the binary's LC_UUID (macOS) / ELF build-id. Dylib rebuild auto-invalidates.
 

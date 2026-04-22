@@ -39,15 +39,15 @@ engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio o
   engine/runtime/     FlatRuntime (plan loading, kernel execution)
   engine/dac/         Audio output (RtAudio)
 mcp/                  MCP server — primary agent interface over stdio
-patches/              Example patches (tropical_program_1 JSON)
-stdlib/               Built-in program types as ProgramJSON files (19 types)
+patches/              Example patches (tropical_program_2 JSON)
+stdlib/               Built-in program types as tropical_program_2 files (19 types)
 ```
 
 ### Data flow
 
 ```
 Program (JSON / MCP tools)
-  → ProgramJSON loading + type registration (TS-only, no C++ calls)
+  → ProgramNode loading + type registration (TS-only, no C++ calls)
   → Expression tree construction (ExprNode)
   → Flattening (inline all instances → single expression set)
   → Combinator expansion (unroll generate/fold/chain/etc.)
@@ -67,7 +67,7 @@ There are two distinct JSON schemas — don't confuse them:
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_program_1` | `compiler/program.ts` | **Primary.** Unified program format (instances, wiring, subprograms, outputs) |
+| `tropical_program_2` | `compiler/program.ts` | **Primary.** Unified ExprNode-shaped program (ports + body block of decls/assigns) |
 | `tropical_plan_4` | `compiler/flatten.ts` + `emit_numeric.ts` | Flat instruction stream sent to C++ JIT — the one that matters for audio |
 
 ## Compiler layer (`compiler/`)
@@ -76,11 +76,11 @@ The TypeScript layer handles everything from program definition through instruct
 
 **Expression system** (`expr.ts`) — `ExprNode` is the universal IR: a recursive JSON union type (number, boolean, array, or `{op, ...}` object). `SignalExpr` wraps it with static shape tracking. All program I/O is defined as expression trees. Compile-time combinators (`generate`, `fold`, `chain`, `map2`, etc.) are embedded directly in JSON and lowered by `lower_arrays.ts` — no TS wrapper functions needed.
 
-**Program schema** (`program.ts`) — `ProgramJSON` (`tropical_program_1`) is the unified representation. A program with `process` = leaf, with `instances` + `audio_outputs` = graph, with `instances` + `inputs` + `outputs` = reusable composite. `loadStdlib()` indexes all stdlib files by name, then loads them on demand via a `typeResolver` callback — dependencies resolve recursively regardless of file ordering, with circular dependency detection.
+**Program schema** (`program.ts`) — `ProgramNode` (`tropical_program_2`) is the unified IR: an ExprNode of op `program` with typed ports and a body `block` of decls (reg_decl, delay_decl, instance_decl, program_decl) and assigns (output_assign, next_update). `loadStdlib()` indexes all stdlib files by name, then loads them on demand via a `typeResolver` callback — dependencies resolve recursively regardless of file ordering, with circular dependency detection.
 
-**Program types** (`program_types.ts`) — Pure data types: `ProgramDef` (slot-indexed IR for the flattener), `ProgramType`, `ProgramInstance`. No DSL — types are built from ProgramJSON by `loadProgramDef()` in `session.ts`.
+**Program types** (`program_types.ts`) — Pure data types: `ProgramDef` (slot-indexed IR for the flattener), `ProgramType`, `ProgramInstance`. No DSL — types are built from ProgramNode by `loadProgramDef()` in `session.ts`.
 
-**Standard library** (`stdlib/*.json`) — 19 built-in program types as human-readable ProgramJSON files. Transcendentals (Sin, Cos, Tanh, Exp, Log, Pow) are programs, not primitives — swap the JSON to change the approximation. Shared primitives (OnePole, AllpassDelay, CombDelay, SoftClip, CrossFade) compose into higher-level types (e.g. LadderFilter uses 4 OnePole instances). Also includes Clock, LadderFilter, NoiseLFSR, BitCrusher, VCA, Phaser/Phaser16, and a generic `Delay` parameterized by `type_args: {N}` (default N=44100).
+**Standard library** (`stdlib/*.json`) — 19 built-in program types as human-readable `tropical_program_2` files. Transcendentals (Sin, Cos, Tanh, Exp, Log, Pow) are programs, not primitives — swap the JSON to change the approximation. Shared primitives (OnePole, AllpassDelay, CombDelay, SoftClip, CrossFade) compose into higher-level types (e.g. LadderFilter uses 4 OnePole instances). Also includes Clock, LadderFilter, NoiseLFSR, BitCrusher, VCA, Phaser/Phaser16, and a generic `Delay` parameterized by `type_args: {N}` (default N=44100).
 
 **Flattening** (`flatten.ts`) — The critical step. Inlines all instance expressions, resolves inter-instance references, expands nested calls, converts delays to register ops. Output is a `tropical_plan_4` JSON. Uses WeakMap memoization for DAG sharing. Automatically resolves feedback cycles (A→B→A or A→A) by inserting synthetic one-sample delay registers — self-refs are detected in a pre-pass, inter-instance cycles via Tarjan's SCC.
 
@@ -100,7 +100,7 @@ C++20, header-heavy (templates + inlining for audio-thread performance).
 
 **Plan parsing** (`runtime/NumericProgramParser.hpp`) — Thin deserializer: reads `tropical_plan_4` JSON → `FlatProgram` struct. No expression tree walking — just reads the pre-compiled instruction stream.
 
-**JIT** (`jit/OrcJitEngine.hpp/.cpp`) — Singleton LLVM ORC engine. `compile_flat_program()` generates typed LLVM IR (f64/i64/i1 with explicit coercion) and compiles to native code. Transcendentals are not a JIT primitive — they are stdlib ProgramJSON files that inline at flatten time. Kernel object cache at `~/.cache/tropical/kernels/<build-id>/` with auto-invalidation on dylib rebuild.
+**JIT** (`jit/OrcJitEngine.hpp/.cpp`) — Singleton LLVM ORC engine. `compile_flat_program()` generates typed LLVM IR (f64/i64/i1 with explicit coercion) and compiles to native code. Transcendentals are not a JIT primitive — they are stdlib program files that inline at flatten time. Kernel object cache at `~/.cache/tropical/kernels/<build-id>/` with auto-invalidation on dylib rebuild.
 
 **FlatRuntime** (`runtime/FlatRuntime.hpp/.cpp`) — Double-buffered kernel hot-swap. `load_plan()` compiles to the inactive slot, transfers matching state by register/array name, atomically swaps. `process()` runs the kernel, snapshots trigger params, applies smoothstep fade envelope (2048-sample Hermite curve).
 

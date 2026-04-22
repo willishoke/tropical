@@ -1,149 +1,685 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "cross_fm_evolved",
-
-  "programs": {
-    "VoiceChannel": {
-      "schema": "tropical_program_1",
-      "name": "VoiceChannel",
-      "inputs": ["audio", "gate", "phaser_speed", "phaser_feedback", "attack", "decay"],
-      "outputs": ["out"],
-      "input_defaults": {
-        "phaser_feedback": 0.4,
-        "attack": 0.05,
-        "decay": 0.2
-      },
-      "instances": {
-        "phaser": {
-          "program": "Phaser",
-          "inputs": {
-            "input": {"op": "input", "name": "audio"},
-            "feedback": {"op": "input", "name": "phaser_feedback"},
-            "lfo_speed": {"op": "input", "name": "phaser_speed"}
-          }
-        },
-        "env": {
-          "program": "ADEnvelope",
-          "inputs": {
-            "gate": {"op": "input", "name": "gate"},
-            "attack": {"op": "input", "name": "attack"},
-            "decay": {"op": "input", "name": "decay"}
-          }
-        },
-        "vca": {
-          "program": "VCA",
-          "inputs": {
-            "audio": {"op": "nested_out", "ref": "phaser", "output": 0},
-            "cv": {"op": "nested_out", "ref": "env", "output": 0}
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "program_decl",
+        "name": "VoiceChannel",
+        "program": {
+          "op": "program",
+          "name": "VoiceChannel",
+          "body": {
+            "op": "block",
+            "decls": [
+              {
+                "op": "instance_decl",
+                "name": "phaser",
+                "program": "Phaser",
+                "inputs": {
+                  "input": {
+                    "op": "input",
+                    "name": "audio"
+                  },
+                  "feedback": {
+                    "op": "input",
+                    "name": "phaser_feedback"
+                  },
+                  "lfo_speed": {
+                    "op": "input",
+                    "name": "phaser_speed"
+                  }
+                }
+              },
+              {
+                "op": "instance_decl",
+                "name": "env",
+                "program": "ADEnvelope",
+                "inputs": {
+                  "gate": {
+                    "op": "input",
+                    "name": "gate"
+                  },
+                  "attack": {
+                    "op": "input",
+                    "name": "attack"
+                  },
+                  "decay": {
+                    "op": "input",
+                    "name": "decay"
+                  }
+                }
+              },
+              {
+                "op": "instance_decl",
+                "name": "vca",
+                "program": "VCA",
+                "inputs": {
+                  "audio": {
+                    "op": "nested_out",
+                    "ref": "phaser",
+                    "output": 0
+                  },
+                  "cv": {
+                    "op": "nested_out",
+                    "ref": "env",
+                    "output": 0
+                  }
+                }
+              }
+            ],
+            "assigns": [
+              {
+                "op": "output_assign",
+                "name": "out",
+                "expr": {
+                  "op": "nested_out",
+                  "ref": "vca",
+                  "output": 0
+                }
+              }
+            ],
+            "value": null
+          },
+          "ports": {
+            "inputs": [
+              "audio",
+              "gate",
+              "phaser_speed",
+              {
+                "name": "phaser_feedback",
+                "default": 0.4
+              },
+              {
+                "name": "attack",
+                "default": 0.05
+              },
+              {
+                "name": "decay",
+                "default": 0.2
+              }
+            ],
+            "outputs": [
+              "out"
+            ]
           }
         }
       },
-      "process": {
-        "outputs": {
-          "out": {"op": "nested_out", "ref": "vca", "output": 0}
+      {
+        "op": "instance_decl",
+        "name": "lfo",
+        "program": "VCO",
+        "inputs": {
+          "freq": 2
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "seq",
+        "program": "NoiseLFSR",
+        "inputs": {
+          "clock": {
+            "op": "lte",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "lfo",
+                "output": "tri"
+              },
+              0
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "vco1",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              48.5,
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "select",
+                    "args": [
+                      {
+                        "op": "gt",
+                        "args": [
+                          {
+                            "op": "ref",
+                            "instance": "seq",
+                            "output": "out"
+                          },
+                          0
+                        ]
+                      },
+                      1,
+                      0.6667
+                    ]
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      1.25,
+                      {
+                        "op": "mul",
+                        "args": [
+                          0.25,
+                          {
+                            "op": "ref",
+                            "instance": "lfo",
+                            "output": "tri"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "fm_index": 1,
+          "fm": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "ref",
+                    "instance": "d2",
+                    "output": "y"
+                  },
+                  {
+                    "op": "ref",
+                    "instance": "d3",
+                    "output": "y"
+                  }
+                ]
+              },
+              {
+                "op": "ref",
+                "instance": "d4",
+                "output": "y"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "vco2",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              90.5,
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "select",
+                    "args": [
+                      {
+                        "op": "gt",
+                        "args": [
+                          {
+                            "op": "ref",
+                            "instance": "seq",
+                            "output": "out"
+                          },
+                          0
+                        ]
+                      },
+                      1,
+                      0.6667
+                    ]
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      1.25,
+                      {
+                        "op": "mul",
+                        "args": [
+                          0.25,
+                          {
+                            "op": "ref",
+                            "instance": "lfo",
+                            "output": "tri"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "fm_index": 1,
+          "fm": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "ref",
+                    "instance": "d1",
+                    "output": "y"
+                  },
+                  {
+                    "op": "ref",
+                    "instance": "d3",
+                    "output": "y"
+                  }
+                ]
+              },
+              {
+                "op": "ref",
+                "instance": "d4",
+                "output": "y"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "vco3",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              131.5,
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "select",
+                    "args": [
+                      {
+                        "op": "gt",
+                        "args": [
+                          {
+                            "op": "ref",
+                            "instance": "seq",
+                            "output": "out"
+                          },
+                          0
+                        ]
+                      },
+                      1,
+                      0.6667
+                    ]
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      1.25,
+                      {
+                        "op": "mul",
+                        "args": [
+                          0.25,
+                          {
+                            "op": "ref",
+                            "instance": "lfo",
+                            "output": "tri"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "fm_index": 1,
+          "fm": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "ref",
+                    "instance": "d1",
+                    "output": "y"
+                  },
+                  {
+                    "op": "ref",
+                    "instance": "d2",
+                    "output": "y"
+                  }
+                ]
+              },
+              {
+                "op": "ref",
+                "instance": "d4",
+                "output": "y"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "vco4",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              173.5,
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "select",
+                    "args": [
+                      {
+                        "op": "gt",
+                        "args": [
+                          {
+                            "op": "ref",
+                            "instance": "seq",
+                            "output": "out"
+                          },
+                          0
+                        ]
+                      },
+                      1,
+                      0.6667
+                    ]
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      1.25,
+                      {
+                        "op": "mul",
+                        "args": [
+                          0.25,
+                          {
+                            "op": "ref",
+                            "instance": "lfo",
+                            "output": "tri"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "fm_index": 1,
+          "fm": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "ref",
+                    "instance": "d1",
+                    "output": "y"
+                  },
+                  {
+                    "op": "ref",
+                    "instance": "d2",
+                    "output": "y"
+                  }
+                ]
+              },
+              {
+                "op": "ref",
+                "instance": "d3",
+                "output": "y"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "d1",
+        "program": "Delay",
+        "inputs": {
+          "x": {
+            "op": "ref",
+            "instance": "vco1",
+            "output": "sin"
+          }
+        },
+        "type_args": {
+          "N": 8
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "d2",
+        "program": "Delay",
+        "inputs": {
+          "x": {
+            "op": "ref",
+            "instance": "vco2",
+            "output": "sin"
+          }
+        },
+        "type_args": {
+          "N": 8
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "d3",
+        "program": "Delay",
+        "inputs": {
+          "x": {
+            "op": "ref",
+            "instance": "vco3",
+            "output": "sin"
+          }
+        },
+        "type_args": {
+          "N": 8
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "d4",
+        "program": "Delay",
+        "inputs": {
+          "x": {
+            "op": "ref",
+            "instance": "vco4",
+            "output": "sin"
+          }
+        },
+        "type_args": {
+          "N": 8
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "v1",
+        "program": "VoiceChannel",
+        "inputs": {
+          "audio": {
+            "op": "ref",
+            "instance": "vco1",
+            "output": "sin"
+          },
+          "gate": {
+            "op": "gt",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "lfo",
+                "output": "tri"
+              },
+              0
+            ]
+          },
+          "phaser_speed": 0.1
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "v2",
+        "program": "VoiceChannel",
+        "inputs": {
+          "audio": {
+            "op": "ref",
+            "instance": "vco2",
+            "output": "sin"
+          },
+          "gate": {
+            "op": "gt",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "lfo",
+                "output": "tri"
+              },
+              0
+            ]
+          },
+          "phaser_speed": 0.2
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "v3",
+        "program": "VoiceChannel",
+        "inputs": {
+          "audio": {
+            "op": "ref",
+            "instance": "vco3",
+            "output": "sin"
+          },
+          "gate": {
+            "op": "gt",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "lfo",
+                "output": "tri"
+              },
+              0
+            ]
+          },
+          "phaser_speed": 0.3
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "v4",
+        "program": "VoiceChannel",
+        "inputs": {
+          "audio": {
+            "op": "ref",
+            "instance": "vco4",
+            "output": "sin"
+          },
+          "gate": {
+            "op": "gt",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "lfo",
+                "output": "tri"
+              },
+              0
+            ]
+          },
+          "phaser_speed": 0.4
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "bass_vco",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "select",
+            "args": [
+              {
+                "op": "gt",
+                "args": [
+                  {
+                    "op": "ref",
+                    "instance": "seq",
+                    "output": "out"
+                  },
+                  0
+                ]
+              },
+              30,
+              20
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "bass",
+        "program": "VoiceChannel",
+        "inputs": {
+          "audio": {
+            "op": "ref",
+            "instance": "bass_vco",
+            "output": "saw"
+          },
+          "gate": {
+            "op": "lte",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "lfo",
+                "output": "tri"
+              },
+              0
+            ]
+          },
+          "phaser_speed": 0.08,
+          "phaser_feedback": 0.5,
+          "attack": 0.01,
+          "decay": 0.35
         }
       }
-    }
+    ],
+    "assigns": [],
+    "value": null
   },
-
-  "instances": {
-    "lfo": {"program": "VCO", "inputs": {"freq": 2}},
-    "seq": {"program": "NoiseLFSR", "inputs": {
-      "clock": {"op": "lte", "args": [{"op": "ref", "instance": "lfo", "output": "tri"}, 0]}
-    }},
-
-    "vco1": {"program": "VCO", "inputs": {
-      "freq": {"op": "mul", "args": [48.5, {"op": "mul", "args": [
-        {"op": "select", "args": [{"op": "gt", "args": [{"op": "ref", "instance": "seq", "output": "out"}, 0]}, 1, 0.6667]},
-        {"op": "add", "args": [1.25, {"op": "mul", "args": [0.25, {"op": "ref", "instance": "lfo", "output": "tri"}]}]}
-      ]}]},
-      "fm_index": 1,
-      "fm": {"op": "add", "args": [
-        {"op": "add", "args": [{"op": "ref", "instance": "d2", "output": "y"}, {"op": "ref", "instance": "d3", "output": "y"}]},
-        {"op": "ref", "instance": "d4", "output": "y"}
-      ]}
-    }},
-    "vco2": {"program": "VCO", "inputs": {
-      "freq": {"op": "mul", "args": [90.5, {"op": "mul", "args": [
-        {"op": "select", "args": [{"op": "gt", "args": [{"op": "ref", "instance": "seq", "output": "out"}, 0]}, 1, 0.6667]},
-        {"op": "add", "args": [1.25, {"op": "mul", "args": [0.25, {"op": "ref", "instance": "lfo", "output": "tri"}]}]}
-      ]}]},
-      "fm_index": 1,
-      "fm": {"op": "add", "args": [
-        {"op": "add", "args": [{"op": "ref", "instance": "d1", "output": "y"}, {"op": "ref", "instance": "d3", "output": "y"}]},
-        {"op": "ref", "instance": "d4", "output": "y"}
-      ]}
-    }},
-    "vco3": {"program": "VCO", "inputs": {
-      "freq": {"op": "mul", "args": [131.5, {"op": "mul", "args": [
-        {"op": "select", "args": [{"op": "gt", "args": [{"op": "ref", "instance": "seq", "output": "out"}, 0]}, 1, 0.6667]},
-        {"op": "add", "args": [1.25, {"op": "mul", "args": [0.25, {"op": "ref", "instance": "lfo", "output": "tri"}]}]}
-      ]}]},
-      "fm_index": 1,
-      "fm": {"op": "add", "args": [
-        {"op": "add", "args": [{"op": "ref", "instance": "d1", "output": "y"}, {"op": "ref", "instance": "d2", "output": "y"}]},
-        {"op": "ref", "instance": "d4", "output": "y"}
-      ]}
-    }},
-    "vco4": {"program": "VCO", "inputs": {
-      "freq": {"op": "mul", "args": [173.5, {"op": "mul", "args": [
-        {"op": "select", "args": [{"op": "gt", "args": [{"op": "ref", "instance": "seq", "output": "out"}, 0]}, 1, 0.6667]},
-        {"op": "add", "args": [1.25, {"op": "mul", "args": [0.25, {"op": "ref", "instance": "lfo", "output": "tri"}]}]}
-      ]}]},
-      "fm_index": 1,
-      "fm": {"op": "add", "args": [
-        {"op": "add", "args": [{"op": "ref", "instance": "d1", "output": "y"}, {"op": "ref", "instance": "d2", "output": "y"}]},
-        {"op": "ref", "instance": "d3", "output": "y"}
-      ]}
-    }},
-
-    "d1": {"program": "Delay", "type_args": {"N": 8}, "inputs": {"x": {"op": "ref", "instance": "vco1", "output": "sin"}}},
-    "d2": {"program": "Delay", "type_args": {"N": 8}, "inputs": {"x": {"op": "ref", "instance": "vco2", "output": "sin"}}},
-    "d3": {"program": "Delay", "type_args": {"N": 8}, "inputs": {"x": {"op": "ref", "instance": "vco3", "output": "sin"}}},
-    "d4": {"program": "Delay", "type_args": {"N": 8}, "inputs": {"x": {"op": "ref", "instance": "vco4", "output": "sin"}}},
-
-    "v1": {"program": "VoiceChannel", "inputs": {
-      "audio": {"op": "ref", "instance": "vco1", "output": "sin"},
-      "gate": {"op": "gt", "args": [{"op": "ref", "instance": "lfo", "output": "tri"}, 0]},
-      "phaser_speed": 0.1
-    }},
-    "v2": {"program": "VoiceChannel", "inputs": {
-      "audio": {"op": "ref", "instance": "vco2", "output": "sin"},
-      "gate": {"op": "gt", "args": [{"op": "ref", "instance": "lfo", "output": "tri"}, 0]},
-      "phaser_speed": 0.2
-    }},
-    "v3": {"program": "VoiceChannel", "inputs": {
-      "audio": {"op": "ref", "instance": "vco3", "output": "sin"},
-      "gate": {"op": "gt", "args": [{"op": "ref", "instance": "lfo", "output": "tri"}, 0]},
-      "phaser_speed": 0.3
-    }},
-    "v4": {"program": "VoiceChannel", "inputs": {
-      "audio": {"op": "ref", "instance": "vco4", "output": "sin"},
-      "gate": {"op": "gt", "args": [{"op": "ref", "instance": "lfo", "output": "tri"}, 0]},
-      "phaser_speed": 0.4
-    }},
-
-    "bass_vco": {"program": "VCO", "inputs": {
-      "freq": {"op": "select", "args": [
-        {"op": "gt", "args": [{"op": "ref", "instance": "seq", "output": "out"}, 0]},
-        30, 20
-      ]}
-    }},
-    "bass": {"program": "VoiceChannel", "inputs": {
-      "audio": {"op": "ref", "instance": "bass_vco", "output": "saw"},
-      "gate": {"op": "lte", "args": [{"op": "ref", "instance": "lfo", "output": "tri"}, 0]},
-      "phaser_speed": 0.08,
-      "phaser_feedback": 0.5,
-      "attack": 0.01,
-      "decay": 0.35
-    }}
-  },
-
   "audio_outputs": [
-    {"instance": "v1", "output": "out"},
-    {"instance": "v2", "output": "out"},
-    {"instance": "v3", "output": "out"},
-    {"instance": "v4", "output": "out"},
-    {"instance": "bass", "output": "out"}
+    {
+      "instance": "v1",
+      "output": "out"
+    },
+    {
+      "instance": "v2",
+      "output": "out"
+    },
+    {
+      "instance": "v3",
+      "output": "out"
+    },
+    {
+      "instance": "v4",
+      "output": "out"
+    },
+    {
+      "instance": "bass",
+      "output": "out"
+    }
   ]
 }

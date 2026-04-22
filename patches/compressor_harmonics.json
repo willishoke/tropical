@@ -1,703 +1,790 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "compressor_harmonics",
-  "instances": {
-    "VCO1": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            40,
-            {
-              "op": "add",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.5,
-                    {
-                      "op": "ref",
-                      "instance": "SeqClock",
-                      "output": "output"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instance_decl",
+        "name": "VCO1",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              40,
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      0.5,
+                      {
+                        "op": "ref",
+                        "instance": "SeqClock",
+                        "output": "output"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO2",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              120,
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      0.5,
+                      {
+                        "op": "ref",
+                        "instance": "SeqClock",
+                        "output": "output"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO3",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              200,
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      0.5,
+                      {
+                        "op": "ref",
+                        "instance": "SeqClock",
+                        "output": "output"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO4",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              280,
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      0.5,
+                      {
+                        "op": "ref",
+                        "instance": "SeqClock",
+                        "output": "output"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO5",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              360,
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      0.5,
+                      {
+                        "op": "ref",
+                        "instance": "SeqClock",
+                        "output": "output"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO6",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              440,
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      0.5,
+                      {
+                        "op": "ref",
+                        "instance": "SeqClock",
+                        "output": "output"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO7",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              520,
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      0.5,
+                      {
+                        "op": "ref",
+                        "instance": "SeqClock",
+                        "output": "output"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO8",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              600,
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      0.5,
+                      {
+                        "op": "ref",
+                        "instance": "SeqClock",
+                        "output": "output"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO9",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              680,
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      0.5,
+                      {
+                        "op": "ref",
+                        "instance": "SeqClock",
+                        "output": "output"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO10",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              760,
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      0.5,
+                      {
+                        "op": "ref",
+                        "instance": "SeqClock",
+                        "output": "output"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ADEnvelope1",
+        "program": "ADEnvelope",
+        "inputs": {
+          "attack": 0.043,
+          "decay": 1.2,
+          "gate": {
+            "op": "ref",
+            "instance": "Clock1",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ADEnvelope2",
+        "program": "ADEnvelope",
+        "inputs": {
+          "attack": 0.002,
+          "decay": 0.18,
+          "gate": {
+            "op": "ref",
+            "instance": "Clock2",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ADEnvelope3",
+        "program": "ADEnvelope",
+        "inputs": {
+          "attack": 0.15,
+          "decay": 0.7,
+          "gate": {
+            "op": "ref",
+            "instance": "Clock3",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ADEnvelope4",
+        "program": "ADEnvelope",
+        "inputs": {
+          "attack": 0.008,
+          "decay": 1.8,
+          "gate": {
+            "op": "ref",
+            "instance": "Clock4",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ADEnvelope5",
+        "program": "ADEnvelope",
+        "inputs": {
+          "attack": 0.09,
+          "decay": 0.35,
+          "gate": {
+            "op": "ref",
+            "instance": "Clock5",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ADEnvelope6",
+        "program": "ADEnvelope",
+        "inputs": {
+          "attack": 0.001,
+          "decay": 0.9,
+          "gate": {
+            "op": "ref",
+            "instance": "Clock6",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ADEnvelope7",
+        "program": "ADEnvelope",
+        "inputs": {
+          "attack": 0.22,
+          "decay": 0.12,
+          "gate": {
+            "op": "ref",
+            "instance": "Clock7",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ADEnvelope8",
+        "program": "ADEnvelope",
+        "inputs": {
+          "attack": 0.05,
+          "decay": 1.5,
+          "gate": {
+            "op": "ref",
+            "instance": "Clock8",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ADEnvelope9",
+        "program": "ADEnvelope",
+        "inputs": {
+          "attack": 0.003,
+          "decay": 0.6,
+          "gate": {
+            "op": "ref",
+            "instance": "Clock9",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ADEnvelope10",
+        "program": "ADEnvelope",
+        "inputs": {
+          "attack": 0.18,
+          "decay": 0.08,
+          "gate": {
+            "op": "ref",
+            "instance": "Clock10",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock1",
+        "program": "Clock",
+        "inputs": {
+          "freq": 0.1
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock2",
+        "program": "Clock",
+        "inputs": {
+          "freq": 0.3
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock3",
+        "program": "Clock",
+        "inputs": {
+          "freq": 0.5
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock4",
+        "program": "Clock",
+        "inputs": {
+          "freq": 0.7
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock5",
+        "program": "Clock",
+        "inputs": {
+          "freq": 0.9
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock6",
+        "program": "Clock",
+        "inputs": {
+          "freq": 1.1
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock7",
+        "program": "Clock",
+        "inputs": {
+          "freq": 1.3
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock8",
+        "program": "Clock",
+        "inputs": {
+          "freq": 1.5
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock9",
+        "program": "Clock",
+        "inputs": {
+          "freq": 1.7
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock10",
+        "program": "Clock",
+        "inputs": {
+          "freq": 1.9
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Comp1",
+        "program": "Compressor",
+        "inputs": {
+          "input": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO1",
+                "output": "sin"
+              },
+              0.1
+            ]
+          },
+          "sidechain": {
+            "op": "ref",
+            "instance": "ADEnvelope1",
+            "output": "env"
+          },
+          "threshold": -60,
+          "ratio": 20
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Comp2",
+        "program": "Compressor",
+        "inputs": {
+          "input": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO2",
+                "output": "sin"
+              },
+              0.1
+            ]
+          },
+          "sidechain": {
+            "op": "ref",
+            "instance": "ADEnvelope2",
+            "output": "env"
+          },
+          "threshold": -60,
+          "ratio": 20
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Comp3",
+        "program": "Compressor",
+        "inputs": {
+          "input": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO3",
+                "output": "sin"
+              },
+              0.1
+            ]
+          },
+          "sidechain": {
+            "op": "ref",
+            "instance": "ADEnvelope3",
+            "output": "env"
+          },
+          "threshold": -60,
+          "ratio": 20
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Comp4",
+        "program": "Compressor",
+        "inputs": {
+          "input": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO4",
+                "output": "sin"
+              },
+              0.1
+            ]
+          },
+          "sidechain": {
+            "op": "ref",
+            "instance": "ADEnvelope4",
+            "output": "env"
+          },
+          "threshold": -60,
+          "ratio": 20
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Comp5",
+        "program": "Compressor",
+        "inputs": {
+          "input": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO5",
+                "output": "sin"
+              },
+              0.1
+            ]
+          },
+          "sidechain": {
+            "op": "ref",
+            "instance": "ADEnvelope5",
+            "output": "env"
+          },
+          "threshold": -60,
+          "ratio": 20
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Comp6",
+        "program": "Compressor",
+        "inputs": {
+          "input": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO6",
+                "output": "sin"
+              },
+              0.1
+            ]
+          },
+          "sidechain": {
+            "op": "ref",
+            "instance": "ADEnvelope6",
+            "output": "env"
+          },
+          "threshold": -60,
+          "ratio": 20
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Comp7",
+        "program": "Compressor",
+        "inputs": {
+          "input": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO7",
+                "output": "sin"
+              },
+              0.1
+            ]
+          },
+          "sidechain": {
+            "op": "ref",
+            "instance": "ADEnvelope7",
+            "output": "env"
+          },
+          "threshold": -60,
+          "ratio": 20
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Comp8",
+        "program": "Compressor",
+        "inputs": {
+          "input": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO8",
+                "output": "sin"
+              },
+              0.1
+            ]
+          },
+          "sidechain": {
+            "op": "ref",
+            "instance": "ADEnvelope8",
+            "output": "env"
+          },
+          "threshold": -60,
+          "ratio": 20
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Comp9",
+        "program": "Compressor",
+        "inputs": {
+          "input": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO9",
+                "output": "sin"
+              },
+              0.1
+            ]
+          },
+          "sidechain": {
+            "op": "ref",
+            "instance": "ADEnvelope9",
+            "output": "env"
+          },
+          "threshold": -60,
+          "ratio": 20
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Comp10",
+        "program": "Compressor",
+        "inputs": {
+          "input": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO10",
+                "output": "sin"
+              },
+              0.1
+            ]
+          },
+          "sidechain": {
+            "op": "ref",
+            "instance": "ADEnvelope10",
+            "output": "env"
+          },
+          "threshold": -60,
+          "ratio": 20
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "SeqClock",
+        "program": "Clock",
+        "inputs": {
+          "freq": 1
         }
       }
-    },
-    "VCO2": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            120,
-            {
-              "op": "add",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.5,
-                    {
-                      "op": "ref",
-                      "instance": "SeqClock",
-                      "output": "output"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCO3": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            200,
-            {
-              "op": "add",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.5,
-                    {
-                      "op": "ref",
-                      "instance": "SeqClock",
-                      "output": "output"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCO4": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            280,
-            {
-              "op": "add",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.5,
-                    {
-                      "op": "ref",
-                      "instance": "SeqClock",
-                      "output": "output"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCO5": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            360,
-            {
-              "op": "add",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.5,
-                    {
-                      "op": "ref",
-                      "instance": "SeqClock",
-                      "output": "output"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCO6": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            440,
-            {
-              "op": "add",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.5,
-                    {
-                      "op": "ref",
-                      "instance": "SeqClock",
-                      "output": "output"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCO7": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            520,
-            {
-              "op": "add",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.5,
-                    {
-                      "op": "ref",
-                      "instance": "SeqClock",
-                      "output": "output"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCO8": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            600,
-            {
-              "op": "add",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.5,
-                    {
-                      "op": "ref",
-                      "instance": "SeqClock",
-                      "output": "output"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCO9": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            680,
-            {
-              "op": "add",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.5,
-                    {
-                      "op": "ref",
-                      "instance": "SeqClock",
-                      "output": "output"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCO10": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            760,
-            {
-              "op": "add",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.5,
-                    {
-                      "op": "ref",
-                      "instance": "SeqClock",
-                      "output": "output"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "ADEnvelope1": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "attack": 0.043,
-        "decay": 1.2,
-        "gate": {
-          "op": "ref",
-          "instance": "Clock1",
-          "output": "output"
-        }
-      }
-    },
-    "ADEnvelope2": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "attack": 0.002,
-        "decay": 0.18,
-        "gate": {
-          "op": "ref",
-          "instance": "Clock2",
-          "output": "output"
-        }
-      }
-    },
-    "ADEnvelope3": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "attack": 0.15,
-        "decay": 0.7,
-        "gate": {
-          "op": "ref",
-          "instance": "Clock3",
-          "output": "output"
-        }
-      }
-    },
-    "ADEnvelope4": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "attack": 0.008,
-        "decay": 1.8,
-        "gate": {
-          "op": "ref",
-          "instance": "Clock4",
-          "output": "output"
-        }
-      }
-    },
-    "ADEnvelope5": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "attack": 0.09,
-        "decay": 0.35,
-        "gate": {
-          "op": "ref",
-          "instance": "Clock5",
-          "output": "output"
-        }
-      }
-    },
-    "ADEnvelope6": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "attack": 0.001,
-        "decay": 0.9,
-        "gate": {
-          "op": "ref",
-          "instance": "Clock6",
-          "output": "output"
-        }
-      }
-    },
-    "ADEnvelope7": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "attack": 0.22,
-        "decay": 0.12,
-        "gate": {
-          "op": "ref",
-          "instance": "Clock7",
-          "output": "output"
-        }
-      }
-    },
-    "ADEnvelope8": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "attack": 0.05,
-        "decay": 1.5,
-        "gate": {
-          "op": "ref",
-          "instance": "Clock8",
-          "output": "output"
-        }
-      }
-    },
-    "ADEnvelope9": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "attack": 0.003,
-        "decay": 0.6,
-        "gate": {
-          "op": "ref",
-          "instance": "Clock9",
-          "output": "output"
-        }
-      }
-    },
-    "ADEnvelope10": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "attack": 0.18,
-        "decay": 0.08,
-        "gate": {
-          "op": "ref",
-          "instance": "Clock10",
-          "output": "output"
-        }
-      }
-    },
-    "Clock1": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 0.1
-      }
-    },
-    "Clock2": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 0.3
-      }
-    },
-    "Clock3": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 0.5
-      }
-    },
-    "Clock4": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 0.7
-      }
-    },
-    "Clock5": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 0.9
-      }
-    },
-    "Clock6": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 1.1
-      }
-    },
-    "Clock7": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 1.3
-      }
-    },
-    "Clock8": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 1.5
-      }
-    },
-    "Clock9": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 1.7
-      }
-    },
-    "Clock10": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 1.9
-      }
-    },
-    "Comp1": {
-      "program": "Compressor",
-      "inputs": {
-        "input": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO1",
-              "output": "sin"
-            },
-            0.1
-          ]
-        },
-        "sidechain": {
-          "op": "ref",
-          "instance": "ADEnvelope1",
-          "output": "env"
-        },
-        "threshold": -60,
-        "ratio": 20
-      }
-    },
-    "Comp2": {
-      "program": "Compressor",
-      "inputs": {
-        "input": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO2",
-              "output": "sin"
-            },
-            0.1
-          ]
-        },
-        "sidechain": {
-          "op": "ref",
-          "instance": "ADEnvelope2",
-          "output": "env"
-        },
-        "threshold": -60,
-        "ratio": 20
-      }
-    },
-    "Comp3": {
-      "program": "Compressor",
-      "inputs": {
-        "input": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO3",
-              "output": "sin"
-            },
-            0.1
-          ]
-        },
-        "sidechain": {
-          "op": "ref",
-          "instance": "ADEnvelope3",
-          "output": "env"
-        },
-        "threshold": -60,
-        "ratio": 20
-      }
-    },
-    "Comp4": {
-      "program": "Compressor",
-      "inputs": {
-        "input": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO4",
-              "output": "sin"
-            },
-            0.1
-          ]
-        },
-        "sidechain": {
-          "op": "ref",
-          "instance": "ADEnvelope4",
-          "output": "env"
-        },
-        "threshold": -60,
-        "ratio": 20
-      }
-    },
-    "Comp5": {
-      "program": "Compressor",
-      "inputs": {
-        "input": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO5",
-              "output": "sin"
-            },
-            0.1
-          ]
-        },
-        "sidechain": {
-          "op": "ref",
-          "instance": "ADEnvelope5",
-          "output": "env"
-        },
-        "threshold": -60,
-        "ratio": 20
-      }
-    },
-    "Comp6": {
-      "program": "Compressor",
-      "inputs": {
-        "input": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO6",
-              "output": "sin"
-            },
-            0.1
-          ]
-        },
-        "sidechain": {
-          "op": "ref",
-          "instance": "ADEnvelope6",
-          "output": "env"
-        },
-        "threshold": -60,
-        "ratio": 20
-      }
-    },
-    "Comp7": {
-      "program": "Compressor",
-      "inputs": {
-        "input": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO7",
-              "output": "sin"
-            },
-            0.1
-          ]
-        },
-        "sidechain": {
-          "op": "ref",
-          "instance": "ADEnvelope7",
-          "output": "env"
-        },
-        "threshold": -60,
-        "ratio": 20
-      }
-    },
-    "Comp8": {
-      "program": "Compressor",
-      "inputs": {
-        "input": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO8",
-              "output": "sin"
-            },
-            0.1
-          ]
-        },
-        "sidechain": {
-          "op": "ref",
-          "instance": "ADEnvelope8",
-          "output": "env"
-        },
-        "threshold": -60,
-        "ratio": 20
-      }
-    },
-    "Comp9": {
-      "program": "Compressor",
-      "inputs": {
-        "input": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO9",
-              "output": "sin"
-            },
-            0.1
-          ]
-        },
-        "sidechain": {
-          "op": "ref",
-          "instance": "ADEnvelope9",
-          "output": "env"
-        },
-        "threshold": -60,
-        "ratio": 20
-      }
-    },
-    "Comp10": {
-      "program": "Compressor",
-      "inputs": {
-        "input": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO10",
-              "output": "sin"
-            },
-            0.1
-          ]
-        },
-        "sidechain": {
-          "op": "ref",
-          "instance": "ADEnvelope10",
-          "output": "env"
-        },
-        "threshold": -60,
-        "ratio": 20
-      }
-    },
-    "SeqClock": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 1
-      }
-    }
+    ],
+    "assigns": [],
+    "value": null
   },
   "audio_outputs": [
     {

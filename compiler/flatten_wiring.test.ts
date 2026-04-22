@@ -9,7 +9,7 @@ import { Float, ArrayType } from './term'
 import type { ExprNode } from './expr'
 import { loadProgramDef } from './session'
 import type { ProgramType, ProgramInstance, Bounds } from './program_types'
-import type { ProgramJSON } from './program'
+import type { ProgramNode } from './program'
 import { Param, Trigger } from './runtime/param'
 
 // ─────────────────────────────────────────────────────────────
@@ -168,15 +168,15 @@ describe('feedback cycle auto-delay', () => {
   }
 
   /** Simple passthrough program: output = input. */
-  function passthrough(): ProgramJSON {
+  function passthrough(): ProgramNode {
     return {
-      schema: 'tropical_program_1',
+      op: 'program',
       name: 'Pass',
-      inputs: ['in'],
-      outputs: ['out'],
-      input_defaults: { in: 0 },
-      process: { outputs: { out: { op: 'input', name: 'in' } } },
-    } as ProgramJSON
+      ports: { inputs: [{ name: 'in', default: 0 }], outputs: ['out'] },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'out', expr: { op: 'input', name: 'in' } }],
+      },
+    }
   }
 
   test('A → B → A feedback cycle flattens without throwing', () => {

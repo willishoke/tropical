@@ -8,7 +8,7 @@ An algebra for reasoning about what tests do, where they apply, and what's missi
 
 A test is a function `t : S -> {pass, fail}` where S is some subset of the system's state space. Everything else follows from how you compose and constrain that function.
 
-**Scope.** The scope of a test is a contiguous interval `[stage_i, stage_j]` in the pipeline. A test with scope `[ExprNode, ExprNode]` observes one stage; a test with scope `[ProgramJSON, Audio]` observes the whole pipeline. Scopes form a lattice under subset ordering on pipeline intervals. A test with smaller scope fails closer to the fault.
+**Scope.** The scope of a test is a contiguous interval `[stage_i, stage_j]` in the pipeline. A test with scope `[ExprNode, ExprNode]` observes one stage; a test with scope `[ProgramNode, Audio]` observes the whole pipeline. Scopes form a lattice under subset ordering on pipeline intervals. A test with smaller scope fails closer to the fault.
 
 **Oracle strength.** Every test's predicate falls on a spectrum:
 
@@ -35,7 +35,7 @@ Most smoke tests are O0-O1. Most DSP correctness tests need O3-O4. The useful in
 Tropical's compilation pipeline is a linear chain. Each boundary between stages has a concrete type that serves as the testable observable.
 
 ```
-Stage 0:  ProgramJSON            tropical_program_1 schema (stdlib or user-defined)
+Stage 0:  ProgramNode            tropical_program_2 schema (stdlib or user-defined)
 Stage 1:  loadProgramDef         JSON -> ProgramDef via slottifyExpr (name -> slot)
 Stage 2:  Session assembly       type/instance registries, wiring, input expressions
 Stage 3:  ExprNode trees         recursive JSON union -- the universal IR
@@ -57,7 +57,7 @@ Stage 12: Audio output           RtAudio callback
 
 | Boundary | Type | Serializable |
 |----------|------|:---:|
-| 0 -> 1 | `ProgramJSON` | yes |
+| 0 -> 1 | `ProgramNode` | yes |
 | 1 -> 2 | `ProgramDef` (slot-indexed IR) | yes |
 | 2 -> 3 | `ExprNode` trees per instance | yes |
 | 3 -> 4 | flattened `ExprNode` set | yes |
@@ -79,7 +79,7 @@ Stage 12: Audio output           RtAudio callback
 
 | File | Tests | Scope | Oracle | What it covers |
 |------|------:|-------|--------|----------------|
-| `program.test.ts` | 5 | [ProgramJSON] | O4 | Zod schema validation: minimal, graph, nested programs, rejects |
+| `program.test.ts` | 5 | [ProgramNode] | O4 | Zod schema validation: minimal, graph, nested programs, rejects |
 | `expr.test.ts` | 20 | [ExprNode] | O4 | Array construction, shape inference, operations, matmul, broadcasting, coercion |
 | `compiler.test.ts` | 30 | [Session assembly] | O4 | portTypeFromString, exprDependencies, buildDependencyGraph, topologicalSort, tarjanSCC, extractInstanceInfo |
 | `flatten_wiring.test.ts` | 11 | [Flattening] | O4 | Wiring type validation: scalar/array compatibility, broadcast insertion, shape mismatches |
@@ -88,8 +88,8 @@ Stage 12: Audio output           RtAudio callback
 | `lower_arrays.test.ts` | 22 | [Array lowering] | O4 | zeros, ones, fill, reshape, transpose, slice, reduce, broadcast_to, map, matmul, nested lowering |
 | `bounds.test.ts` | 35 | [Flattening + bounds] | O4 | applyBounds, resolveBounds, resolveBaseType, loadProgramDef bounds, flattenSession clamp injection, audio safety clamp, type aliases |
 | `emit_numeric.test.ts` | 15 | [Instruction emission] | O4 | Terminals, scalar binary/unary/ternary, type inference/promotion, arrays (Pack, stride patterns, size-1 unboxing, index, array_set), output/register targets, typed state registers, CSE memoization |
-| `apply_plan.test.ts` | 12 | [ProgramJSON → FlatRuntime] | O1-O4 | Session wiring (connect, disconnect, switch output, batch update, rewire, arithmetic expressions), FlatRuntime execution (VCO+VCA, Clock, continuous output, hot-swap state preservation) |
-| `render.test.ts` | 5 | [ProgramJSON → Audio samples] | O1-O3 | Sawtooth peak/RMS range, sine dominant frequency (FFT), hot-swap frequency change, WAV output, buffer-size determinism (bit-exact cross-config) |
+| `apply_plan.test.ts` | 12 | [ProgramNode → FlatRuntime] | O1-O4 | Session wiring (connect, disconnect, switch output, batch update, rewire, arithmetic expressions), FlatRuntime execution (VCO+VCA, Clock, continuous output, hot-swap state preservation) |
+| `render.test.ts` | 5 | [ProgramNode → Audio samples] | O1-O3 | Sawtooth peak/RMS range, sine dominant frequency (FFT), hot-swap frequency change, WAV output, buffer-size determinism (bit-exact cross-config) |
 | `test_module_process.cpp` | 10 | [Plan JSON → FlatRuntime] | O4 | Sawtooth oscillator, two-output mix, hot-swap state transfer, array literals, integer counter with modular wrap, select/conditional, multi-register clock, multiple outputs summed, typed int bitwise (LFSR), typed bool comparison + select |
 
 ### Test infrastructure
@@ -112,7 +112,7 @@ What the strongest available oracle is for each stage, what exists today, and wh
 
 | Stage | Transfer function | Strongest oracle | Current tests | Gap |
 |-------|-------------------|------------------|---------------|-----|
-| ProgramJSON schema | Zod parse + roundtrip | O4 | `program.test.ts` (5) | No fuzz of malformed JSON |
+| ProgramNode schema | Zod parse + roundtrip | O4 | `program.test.ts` (5) | No fuzz of malformed JSON |
 | loadProgramDef / slottifyExpr | Name -> slot conversion | O4 (structural) | Indirect via `bounds.test.ts` | **No isolated slottifyExpr tests** |
 | ExprNode construction | expr.ts operations | O4 | `expr.test.ts` (20) | Only construction, no evaluation |
 | Graph utilities | Dep graph, topo sort, SCC | O4 | `compiler.test.ts` (30) | Good |
@@ -137,7 +137,7 @@ Current test suite as a covering of (scope interval) x (oracle strength). Each c
 ```
 Scope (interval)                     O0  O1  O2  O3  O4
 -------------------------------------------------------
-[ProgramJSON schema]                  .   .   *   .   *
+[ProgramNode schema]                  .   .   *   .   *
 [loadProgramDef / slottifyExpr]       ~   .   .   .   .
 [ExprNode construction]               .   .   *   .   *
 [Graph utilities]                     .   .   *   .   *
@@ -149,8 +149,8 @@ Scope (interval)                     O0  O1  O2  O3  O4
 [Instruction emission]                .   .   .   .   *
 [Plan parsing (C++)]                  *   .   .   .   .
 [JIT + Runtime (handwritten plans)]   .   .   .   .   *
-[ProgramJSON -> FlatRuntime]          *   *   .   .   ~
-[ProgramJSON -> Audio samples]        *   *   .   ~   ~
+[ProgramNode -> FlatRuntime]          *   *   .   .   ~
+[ProgramNode -> Audio samples]        *   *   .   ~   ~
 ```
 
 ### Critical gaps, ranked
@@ -237,7 +237,7 @@ Ranked by coverage impact — which regions of behavior space each addition cove
 
 For each of the 24 `stdlib/*.json` files: load -> flatten -> JIT -> process N samples -> compare against interpreter output (O3) or snapshot as golden reference (O4).
 
-- **Scope**: `[ProgramJSON, FlatRuntime]` per module type
+- **Scope**: `[ProgramNode, FlatRuntime]` per module type
 - **Dependency**: interpreter (for O3), or standalone with snapshotted output (O4)
 - **Impact**: covers most currently untested module types; catches regressions in flattener/emitter/JIT
 
@@ -245,7 +245,7 @@ For each of the 24 `stdlib/*.json` files: load -> flatten -> JIT -> process N sa
 
 Exercise name-to-slot conversion edge cases: unknown names, nested calls, delay refs, array registers.
 
-- **Scope**: `[ProgramJSON, ProgramDef]` — stage 1 only
+- **Scope**: `[ProgramNode, ProgramDef]` — stage 1 only
 - **Oracle**: O4 (exact structural match on output ExprNode)
 - **Impact**: tests a critical path in the stdlib-as-JSON migration
 

@@ -1,29 +1,77 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "CrossFade",
-  "inputs": [
-    { "name": "a", "type": "signal" },
-    { "name": "b", "type": "signal" },
-    { "name": "mix", "type": "unipolar" }
-  ],
-  "outputs": [
-    { "name": "out", "type": "signal" }
-  ],
-  "input_defaults": { "a": 0, "b": 0, "mix": 0.5 },
-  "process": {
-    "outputs": {
-      "out": {
-        "op": "add", "args": [
-          { "op": "mul", "args": [
-            { "op": "sub", "args": [1, { "op": "input", "name": "mix" }] },
-            { "op": "input", "name": "a" }
-          ]},
-          { "op": "mul", "args": [
-            { "op": "input", "name": "mix" },
-            { "op": "input", "name": "b" }
-          ]}
-        ]
+  "body": {
+    "op": "block",
+    "decls": [],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "out",
+        "expr": {
+          "op": "add",
+          "args": [
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "sub",
+                  "args": [
+                    1,
+                    {
+                      "op": "input",
+                      "name": "mix"
+                    }
+                  ]
+                },
+                {
+                  "op": "input",
+                  "name": "a"
+                }
+              ]
+            },
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "mix"
+                },
+                {
+                  "op": "input",
+                  "name": "b"
+                }
+              ]
+            }
+          ]
+        }
       }
-    }
+    ],
+    "value": null
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "a",
+        "type": "signal",
+        "default": 0
+      },
+      {
+        "name": "b",
+        "type": "signal",
+        "default": 0
+      },
+      {
+        "name": "mix",
+        "type": "unipolar",
+        "default": 0.5
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": "signal"
+      }
+    ]
   }
 }

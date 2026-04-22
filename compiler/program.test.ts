@@ -1,72 +1,74 @@
 /**
- * program.test.ts — Tests for ProgramJSON schema validation and export.
+ * program.test.ts — Tests for program schema validation and export.
  */
 
 import { describe, test, expect } from 'bun:test'
-import { parseProgram } from './schema'
-import { makeSession, loadJSON } from './session'
+import { parseProgramV2 } from './schema'
+import { makeSession, loadJSON, v2NodeToFile, type ExprNode } from './session'
 import {
-  loadStdlib as loadBuiltins, loadProgramAsType, loadProgramAsSession,
-  saveProgramFromSession, exportSessionAsProgram, type ProgramJSON,
+  loadStdlib as loadBuiltins, loadProgramAsType,
+  saveProgramFromSession, exportSessionAsProgram, instanceDecls,
+  type ProgramNode, type ProgramPortSpec,
 } from './program'
 import { resolveProgramType } from './session'
-import { validateExpr } from './expr'
 
 // ─────────────────────────────────────────────────────────────
 // Schema validation
 // ─────────────────────────────────────────────────────────────
 
-describe('parseProgram', () => {
+describe('parseProgramV2', () => {
   test('validates a minimal program', () => {
     const raw = {
-      schema: 'tropical_program_1',
+      schema: 'tropical_program_2',
       name: 'Test',
-      outputs: ['out'],
-      process: { outputs: { out: 42 } },
+      ports: { outputs: ['out'] },
+      body: { op: 'block', assigns: [{ op: 'output_assign', name: 'out', expr: 42 }] },
     }
-    const prog = parseProgram(raw)
+    const prog = parseProgramV2(raw)
     expect(prog.name).toBe('Test')
   })
 
   test('validates a graph program', () => {
     const raw = {
-      schema: 'tropical_program_1',
+      schema: 'tropical_program_2',
       name: 'TestPatch',
-      instances: {
-        VCO1: { program: 'VCO', inputs: { freq: 440 } },
-      },
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'VCO1', program: 'VCO', inputs: { freq: 440 } },
+      ]},
       audio_outputs: [{ instance: 'VCO1', output: 'sin' }],
     }
-    const prog = parseProgram(raw)
-    expect(prog.instances!['VCO1'].program).toBe('VCO')
+    const prog = parseProgramV2(raw)
+    const vco1 = [...instanceDecls(prog as unknown as ProgramNode)].find(d => d.name === 'VCO1')!
+    expect(vco1.program).toBe('VCO')
   })
 
   test('validates nested programs', () => {
     const raw = {
-      schema: 'tropical_program_1',
+      schema: 'tropical_program_2',
       name: 'Composite',
-      programs: {
-        MyOsc: {
-          schema: 'tropical_program_1',
+      body: { op: 'block', decls: [
+        { op: 'program_decl', name: 'MyOsc', program: {
+          op: 'program',
           name: 'MyOsc',
-          inputs: ['freq'],
-          outputs: ['out'],
-          process: { outputs: { out: { op: 'input', name: 'freq' } } },
-        },
-      },
-      instances: { o1: { program: 'MyOsc', inputs: { freq: 440 } } },
+          ports: { inputs: ['freq'], outputs: ['out'] },
+          body: { op: 'block',
+            assigns: [{ op: 'output_assign', name: 'out', expr: { op: 'input', name: 'freq' } }],
+          },
+        }},
+        { op: 'instance_decl', name: 'o1', program: 'MyOsc', inputs: { freq: 440 } },
+      ]},
       audio_outputs: [{ instance: 'o1', output: 'out' }],
     }
-    const prog = parseProgram(raw)
-    expect(prog.programs!['MyOsc'].name).toBe('MyOsc')
+    const prog = parseProgramV2(raw)
+    expect(prog.name).toBe('Composite')
   })
 
   test('rejects invalid schema', () => {
-    expect(() => parseProgram({ schema: 'wrong', name: 'X' })).toThrow('Invalid program')
+    expect(() => parseProgramV2({ schema: 'wrong', name: 'X' })).toThrow('Invalid program')
   })
 
   test('rejects missing name', () => {
-    expect(() => parseProgram({ schema: 'tropical_program_1' })).toThrow('Invalid program')
+    expect(() => parseProgramV2({ schema: 'tropical_program_2' })).toThrow('Invalid program')
   })
 })
 
@@ -83,13 +85,16 @@ function makeTestSession() {
 describe('exportSessionAsProgram — port type round-trip', () => {
   test('emits typed inputs/outputs matching source instance port types', () => {
     const session = makeSession(256)
-    // Register a leaf type with typed inputs and outputs
-    const typedLeaf: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const typedLeaf: ProgramNode = {
+      op: 'program',
       name: 'TypedLeaf',
-      inputs: [{ name: 'a', type: { kind: 'array', element: 'float', shape: [4] } }],
-      outputs: [{ name: 'out', type: { kind: 'array', element: 'float', shape: [4] } }],
-      process: { outputs: { out: { op: 'input', name: 'a' } } },
+      ports: {
+        inputs: [{ name: 'a', type: { kind: 'array', element: 'float', shape: [4] } }],
+        outputs: [{ name: 'out', type: { kind: 'array', element: 'float', shape: [4] } }],
+      },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'out', expr: { op: 'input', name: 'a' } }],
+      },
     }
     loadProgramAsType(typedLeaf, session)
     const { type } = resolveProgramType(session, 'TypedLeaf', undefined, undefined)
@@ -101,15 +106,12 @@ describe('exportSessionAsProgram — port type round-trip', () => {
       outputs: { out: { instance: 't1', output: 'out' } },
     })
 
-    // Re-parse through the schema to confirm it's well-formed
-    const reparsed = parseProgram(exported) as ProgramJSON
-    const inputEntry = reparsed.inputs![0]
-    const outputEntry = reparsed.outputs![0]
+    const reparsed = parseProgramV2(v2NodeToFile(exported as unknown as ExprNode))
+    const inputEntry = (reparsed.ports?.inputs ?? [])[0] as ProgramPortSpec
+    const outputEntry = (reparsed.ports?.outputs ?? [])[0] as ProgramPortSpec
     expect(typeof inputEntry === 'object' && inputEntry.type).toEqual({ kind: 'array', element: 'float', shape: [4] })
     expect(typeof outputEntry === 'object' && outputEntry.type).toEqual({ kind: 'array', element: 'float', shape: [4] })
 
-    // Load the exported program into a fresh session and check port types survive.
-    // The nested TypedLeaf must be registered before the exported composite that uses it.
     const session2 = makeSession(256)
     loadProgramAsType(typedLeaf, session2)
     loadProgramAsType(exported, session2)
@@ -124,12 +126,13 @@ describe('exportSessionAsProgram — port type round-trip', () => {
 
   test('emits bare string names when no type or bounds are declared', () => {
     const session = makeSession(256)
-    const plain: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const plain: ProgramNode = {
+      op: 'program',
       name: 'Plain',
-      inputs: ['x'],
-      outputs: ['y'],
-      process: { outputs: { y: { op: 'input', name: 'x' } } },
+      ports: { inputs: ['x'], outputs: ['y'] },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+      },
     }
     loadProgramAsType(plain, session)
     const { type } = resolveProgramType(session, 'Plain', undefined, undefined)
@@ -140,8 +143,8 @@ describe('exportSessionAsProgram — port type round-trip', () => {
       inputs: { x: 'p1:x' },
       outputs: { y: { instance: 'p1', output: 'y' } },
     })
-    expect(exported.inputs![0]).toBe('x')
-    expect(exported.outputs![0]).toBe('y')
+    expect(exported.ports?.inputs?.[0]).toBe('x')
+    expect(exported.ports?.outputs?.[0]).toBe('y')
   })
 })
 
@@ -166,44 +169,41 @@ describe('exportSessionAsProgram', () => {
 })
 
 // ─────────────────────────────────────────────────────────────
-// On-demand type resolution
-// ─────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────
 // Generic programs — save/load round-trip
 // ─────────────────────────────────────────────────────────────
 
 describe('generic programs round-trip', () => {
-  function genericDelay(): ProgramJSON {
+  function genericDelay(): ProgramNode {
     return {
-      schema: 'tropical_program_1',
+      op: 'program',
       name: 'Delay',
       type_params: { N: { type: 'int', default: 44100 } },
-      inputs: ['x'],
-      outputs: ['y'],
-      regs: { buf: { zeros: { type_param: 'N' } } as any },
-      input_defaults: { x: 0 },
       breaks_cycles: true,
-      process: {
-        outputs: {
-          y: {
+      ports: {
+        inputs: [{ name: 'x', default: 0 }],
+        outputs: ['y'],
+      },
+      body: { op: 'block',
+        decls: [
+          { op: 'reg_decl', name: 'buf', init: { zeros: { type_param: 'N' } } as any },
+        ],
+        assigns: [
+          { op: 'output_assign', name: 'y', expr: {
             op: 'index',
             args: [
               { op: 'reg', name: 'buf' },
               { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
             ],
-          },
-        },
-        next_regs: {
-          buf: {
+          }},
+          { op: 'next_update', target: { kind: 'reg', name: 'buf' }, expr: {
             op: 'array_set',
             args: [
               { op: 'reg', name: 'buf' },
               { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
               { op: 'input', name: 'x' },
             ],
-          },
-        },
+          }},
+        ],
       },
     }
   }
@@ -215,27 +215,30 @@ describe('generic programs round-trip', () => {
     const inst = type.instantiateAs('d1', { baseTypeName: 'Delay', typeArgs })
     session.instanceRegistry.set('d1', inst)
 
-    const saved = saveProgramFromSession(session)
-    expect(saved.instances!['d1'].program).toBe('Delay')
-    expect(saved.instances!['d1'].type_args).toEqual({ N: 8 })
+    const { node: saved } = saveProgramFromSession(session)
+    const d1 = [...instanceDecls(saved)].find(d => d.name === 'd1')!
+    expect(d1.program).toBe('Delay')
+    expect(d1.type_args).toEqual({ N: 8 })
   })
 
   test('saveProgramFromSession omits type_args on non-generic instances', () => {
     const session = makeSession()
-    const p: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const p: ProgramNode = {
+      op: 'program',
       name: 'Passthrough',
-      inputs: ['x'],
-      outputs: ['y'],
-      process: { outputs: { y: { op: 'input', name: 'x' } } },
+      ports: { inputs: ['x'], outputs: ['y'] },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+      },
     }
     loadProgramAsType(p, session)
     const { type } = resolveProgramType(session, 'Passthrough', undefined, undefined)
     session.instanceRegistry.set('p1', type.instantiateAs('p1', { baseTypeName: 'Passthrough' }))
 
-    const saved = saveProgramFromSession(session)
-    expect(saved.instances!['p1'].program).toBe('Passthrough')
-    expect(saved.instances!['p1'].type_args).toBeUndefined()
+    const { node: saved } = saveProgramFromSession(session)
+    const p1 = [...instanceDecls(saved)].find(d => d.name === 'p1')!
+    expect(p1.program).toBe('Passthrough')
+    expect(p1.type_args).toBeUndefined()
   })
 })
 
@@ -243,19 +246,21 @@ describe('typeResolver', () => {
   test('circular stdlib dependency throws with cycle path', () => {
     const session = makeSession()
 
-    const fakeTypes = new Map<string, ProgramJSON>([
+    const fakeTypes = new Map<string, ProgramNode>([
       ['CycleA', {
-        schema: 'tropical_program_1', name: 'CycleA',
-        inputs: [], outputs: ['out'],
-        instances: { b: { program: 'CycleB' } },
-        process: { outputs: { out: 0 } },
-      } as ProgramJSON],
+        op: 'program', name: 'CycleA',
+        ports: { inputs: [], outputs: ['out'] },
+        body: { op: 'block', decls: [
+          { op: 'instance_decl', name: 'b', program: 'CycleB' },
+        ], assigns: [{ op: 'output_assign', name: 'out', expr: 0 }] },
+      }],
       ['CycleB', {
-        schema: 'tropical_program_1', name: 'CycleB',
-        inputs: [], outputs: ['out'],
-        instances: { a: { program: 'CycleA' } },
-        process: { outputs: { out: 0 } },
-      } as ProgramJSON],
+        op: 'program', name: 'CycleB',
+        ports: { inputs: [], outputs: ['out'] },
+        body: { op: 'block', decls: [
+          { op: 'instance_decl', name: 'a', program: 'CycleA' },
+        ], assigns: [{ op: 'output_assign', name: 'out', expr: 0 }] },
+      }],
     ])
 
     const loading = new Set<string>()

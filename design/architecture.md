@@ -8,7 +8,7 @@ Detailed reference for the internal architecture. Organized by functional unit.
 
 tropical is a realtime audio synthesis system. An LLM or human author defines a *program* — a graph of DSP program instances wired together — and the system compiles the entire program into a single native kernel that runs per-sample in an audio callback. There is no interpreter fallback and no module boundaries at runtime.
 
-The unified representation is `ProgramJSON` (`tropical_program_1`). A program with `process` is a leaf (direct computation); a program with `instances` and `audio_outputs` is a top-level graph; a program with `instances`, `inputs`, and `outputs` is a reusable composite.
+The unified representation is `ProgramNode` (`tropical_program_2`). A program is a lambda with typed ports whose body is a block of decls (`reg_decl`, `delay_decl`, `instance_decl`, `program_decl`) and assigns (`output_assign`, `next_update`). Leaf programs contain no `instance_decl` nodes; top-level graphs include `audio_outputs` metadata at the file root; reusable composites declare `ports.inputs` / `ports.outputs`.
 
 The system has three layers:
 
@@ -24,7 +24,7 @@ The **C API** (`engine/c_api/tropical_c.h`) is the stable boundary between the T
 
 ```
 Program definition (JSON / MCP tools)
-    → ProgramJSON loading + type registration (TS-only, no C++ calls)
+    → ProgramNode loading + type registration (TS-only, no C++ calls)
     → Expression tree construction (ExprNode JSON trees)
     → Flattening (inline all instances into one expression set)
     → Combinator expansion (unroll generate/fold/chain/etc. to scalar trees)
@@ -62,7 +62,7 @@ Operations available:
 - **Arithmetic**: `add`, `sub`, `mul`, `div`, `mod`, `floorDiv`, `ldexp`
 - **Comparison**: `lt`, `lte`, `gt`, `gte`, `eq`, `neq`
 - **Bitwise**: `bitAnd`, `bitOr`, `bitXor`, `lshift`, `rshift`, `bitNot`
-- **Unary/math**: `neg`, `abs`, `sqrt`, `float_exponent`, `logicalNot`. Transcendentals (sin, cos, tanh, exp, log, pow) are not primitives — they live in `stdlib/` as ProgramJSON files and are inlined at flatten time.
+- **Unary/math**: `neg`, `abs`, `sqrt`, `float_exponent`, `logicalNot`. Transcendentals (sin, cos, tanh, exp, log, pow) are not primitives — they live in `stdlib/` as `tropical_program_2` files and are inlined at flatten time.
 - **Ternary**: `clamp`, `select`
 - **Array**: `arrayPack`, `arraySet`, `index`, `zeros`, `ones`, `fill`, `reshape`, `transpose`, `slice`, `reduce`, `broadcastTo`, `mapArray`
 - **Matrix**: `matrix`, `matmul`
@@ -79,7 +79,7 @@ The C++ side has no expression AST. `NumericProgramParser.hpp` is a thin JSON de
 
 ### 3.1 ProgramDef — the Compiler IR
 
-`ProgramDef` is the compiler's internal representation of a program — slot-indexed ExprNode trees ready for the flattener's register allocation. It is built from `ProgramJSON` (name-based) by `loadProgramDef()` in `compiler/session.ts`, which converts names to integer slot IDs via `slottifyExpr()` — a pure tree walk with no side effects.
+`ProgramDef` is the compiler's internal representation of a program — slot-indexed ExprNode trees ready for the flattener's register allocation. It is built from `ProgramNode` (name-based) by `loadProgramDef()` in `compiler/session.ts`, which walks the block body and converts names to integer slot IDs via `slottifyExpr()` — a pure tree walk with no side effects.
 
 ```typescript
 interface ProgramDef {
@@ -99,7 +99,7 @@ interface ProgramDef {
 }
 ```
 
-There is no build context, no side effects, no DSL. The conversion from ProgramJSON to ProgramDef is a pure function.
+There is no build context, no side effects, no DSL. The conversion from ProgramNode to ProgramDef is a pure function.
 
 ### 3.2 ProgramType and ProgramInstance
 
@@ -108,7 +108,7 @@ There is no build context, no side effects, no DSL. The conversion from ProgramJ
 
 ### 3.3 Standard Library (`stdlib/*.json`)
 
-All built-in program types are defined as `ProgramJSON` files in `stdlib/`. They are loaded by `loadStdlib()` in `compiler/program.ts`, which reads each JSON file, validates it, and registers a `ProgramType`.
+All built-in program types are defined as `tropical_program_2` files in `stdlib/`. They are loaded by `loadStdlib()` in `compiler/program.ts`, which reads each JSON file, validates it, and registers a `ProgramType`.
 
 19 built-in types:
 
@@ -146,9 +146,9 @@ Complex modules use inline `programs` for subprogram composition (e.g., Phaser d
 - `params: Map<string, Param>` / `triggers: Map<string, Trigger>` — named control parameters
 - `runtime: Runtime` — the FlatRuntime wrapper
 
-Programs are loaded via `loadJSON()` which accepts `tropical_program_1`. Saved as `tropical_program_1` via `saveProgramFromSession()`.
+Programs are loaded via `loadJSON()` which accepts `tropical_program_2`. Saved as `tropical_program_2` via `saveProgramFromSession()`.
 
-`ProgramJSON` (`compiler/program.ts`) is the sole schema. No legacy formats remain.
+`ProgramNode` (`compiler/program.ts`) is the sole schema. No legacy formats remain.
 
 ### 4.2 Graph utilities (`compiler/compiler.ts`)
 
@@ -278,7 +278,7 @@ Singleton LLVM ORC JIT engine. Compiles `FlatProgram` → native kernel.
 
 **Type-directed code generation**: Every operand and instruction carries a scalar type (`Float`/`Int`/`Bool`). The JIT emits native `f64`/`i64`/`i1` operations with explicit coercion at type boundaries.
 
-**No transcendentals in the JIT**: sin, cos, tanh, exp, log, and pow are defined as ProgramJSON files in `stdlib/` (polynomial approximations using only arithmetic + `Ldexp` + `FloatExponent`). They inline at flatten time. The kernel contains no libm calls — kernels remain self-contained and deterministic across platforms.
+**No transcendentals in the JIT**: sin, cos, tanh, exp, log, and pow are defined as `tropical_program_2` files in `stdlib/` (polynomial approximations using only arithmetic + `Ldexp` + `FloatExponent`). They inline at flatten time. The kernel contains no libm calls — kernels remain self-contained and deterministic across platforms.
 
 **Kernel object cache**: Compiled object code is persisted to `~/.cache/tropical/kernels/<build-id>/`. Cache key is MD5 of the canonical program; the build-id subdirectory (derived from the binary's LC_UUID / ELF build-id) auto-invalidates when the dylib is rebuilt.
 
@@ -385,7 +385,7 @@ Maintains a `SessionState` and exposes 16 tools:
 
 **Control parameters**: `set_param`, `list_params`
 
-**Program I/O**: `load` (accepts `tropical_program_1`), `save` (outputs `tropical_program_1`), `merge`
+**Program I/O**: `load` (accepts `tropical_program_2`), `save` (outputs `tropical_program_2`), `merge`
 
 **Audio control**: `start_audio`, `stop_audio`, `audio_status`
 
@@ -393,36 +393,49 @@ Every mutation that affects the signal graph calls `wire()` → `applyFlatPlan(s
 
 ---
 
-## 10. Program Format (`tropical_program_1`)
+## 10. Program Format (`tropical_program_2`)
 
 The unified JSON format for all DSP programs. Validated by Zod schemas in `compiler/schema.ts`. Defined in `compiler/program.ts`.
 
+A program is a `{op:'program'}` node with typed `ports` and a `body` block. The block declares registers, delays, nested programs, and instances, and assigns output expressions and next-tick register updates.
+
 ```json
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "MyPatch",
-  "programs": {
-    "Gain": {
-      "schema": "tropical_program_1",
-      "name": "Gain",
-      "inputs": ["audio", "cv"],
-      "outputs": ["out"],
-      "process": { "outputs": { "out": { "op": "mul", "args": [{"op":"input","name":"audio"}, {"op":"input","name":"cv"}] } } }
-    }
-  },
-  "instances": {
-    "sin1": { "program": "Sin", "inputs": { "x": { "op": "mul", "args": [6.283185307179586, { "op": "sample_index" }] } } },
-    "amp": { "program": "Gain", "inputs": {
-      "audio": { "op": "ref", "instance": "sin1", "output": "out" },
-      "cv": 0.5
-    }}
+  "body": {
+    "op": "block",
+    "decls": [
+      { "op": "program_decl", "name": "Gain", "program": {
+        "op": "program",
+        "name": "Gain",
+        "ports": {
+          "inputs":  [{ "name": "audio" }, { "name": "cv" }],
+          "outputs": [{ "name": "out" }]
+        },
+        "body": { "op": "block", "decls": [], "assigns": [
+          { "op": "output_assign", "name": "out", "expr": {
+            "op": "mul",
+            "args": [{ "op": "input", "name": "audio" }, { "op": "input", "name": "cv" }]
+          }}
+        ]}
+      }},
+      { "op": "instance_decl", "name": "sin1", "program": "Sin", "inputs": {
+        "x": { "op": "mul", "args": [6.283185307179586, { "op": "sample_index" }] }
+      }},
+      { "op": "instance_decl", "name": "amp", "program": "Gain", "inputs": {
+        "audio": { "op": "ref", "instance": "sin1", "output": "out" },
+        "cv": 0.5
+      }}
+    ],
+    "assigns": []
   },
   "audio_outputs": [{ "instance": "amp", "output": "out" }],
   "params": [{ "name": "freq", "value": 440, "time_const": 0.005 }]
 }
 ```
 
-Key fields: `schema`, `name`, `inputs`/`outputs` (leaf/composite), `process` (leaf body), `programs` (inline subprogram definitions), `instances` (instantiated subprograms with wiring in `inputs`), `audio_outputs` (graph output routing), `params`, `regs`, `delays`, `config`, `type_defs`.
+Key fields: `schema`, `name`, `ports` (typed `inputs`/`outputs`/`type_defs`), `body` (block with `decls` and `assigns`), `type_params` (for generic programs). Block decls include `reg_decl`, `delay_decl`, `instance_decl`, `program_decl`; block assigns include `output_assign` and `next_update`. File-level metadata: `audio_outputs` (graph output routing), `params`, `config`.
 
 ---
 
@@ -503,7 +516,7 @@ JIT failures are fatal. This simplifies the runtime (no dual code paths) and ens
 All array shapes are known at compile time. This enables complete loop unrolling during array lowering and typed LLVM IR emission. No dynamic allocation on the audio thread.
 
 ### Transcendentals as programs
-sin, cos, tanh, exp, log, pow are ProgramJSON files in `stdlib/`, implementing polynomial approximations (minimax / Padé / Cody-Waite + Horner) via arithmetic primitives plus `Ldexp` and `FloatExponent` for IEEE-754 2^n range reduction. They inline at flatten time. No libm dependency in kernels. Deterministic across platforms. Sufficient precision for audio (~1e-7 to 1e-10 max error). Swapping `stdlib/Sin.json` changes the sin approximation everywhere.
+sin, cos, tanh, exp, log, pow are `tropical_program_2` files in `stdlib/`, implementing polynomial approximations (minimax / Padé / Cody-Waite + Horner) via arithmetic primitives plus `Ldexp` and `FloatExponent` for IEEE-754 2^n range reduction. They inline at flatten time. No libm dependency in kernels. Deterministic across platforms. Sufficient precision for audio (~1e-7 to 1e-10 max error). Swapping `stdlib/Sin.json` changes the sin approximation everywhere.
 
 ### Thread-safe control parameters
 `ControlParam` uses atomic load/store (relaxed ordering). Smoothed params apply one-pole lowpass per sample. Triggers use atomic exchange for fire-once semantics. Both are safe to write from any thread.
