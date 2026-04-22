@@ -37,7 +37,14 @@ class TropicalProcessor extends AudioWorkletProcessor {
 
   constructor() {
     super()
-    this.port.onmessage = (e: MessageEvent<WorkletMsg>) => this.onMessage(e.data)
+    this.port.onmessage = (e: MessageEvent<WorkletMsg>) => {
+      try {
+        this.diag(`raw message received type=${(e.data as { type?: string })?.type ?? '<no type>'} keys=${Object.keys(e.data as object).join(',')}`)
+        this.onMessage(e.data)
+      } catch (err) {
+        this.port.postMessage({ type: 'error', error: `onMessage threw: ${(err as Error).message ?? String(err)}` })
+      }
+    }
     this.diag('ctor — processor instantiated')
   }
 

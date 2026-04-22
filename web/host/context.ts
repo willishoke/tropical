@@ -69,7 +69,17 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
     node,
     bank,
     loadPlan(plan) {
-      node.port.postMessage({ type: 'load', plan })
+      try {
+        // eslint-disable-next-line no-console
+        console.log('[host] posting load plan — bytes=', plan.bytes.byteLength, 'layout keys=', Object.keys(plan.layout).join(','))
+        node.port.postMessage({ type: 'load', plan })
+        // eslint-disable-next-line no-console
+        console.log('[host] load postMessage returned without throwing')
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[host] load postMessage threw:', err)
+        throw err
+      }
     },
     fadeIn() { node.port.postMessage({ type: 'fadeIn' }) },
     fadeOut() { node.port.postMessage({ type: 'fadeOut' }) },

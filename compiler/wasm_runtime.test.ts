@@ -21,9 +21,8 @@ const distDir = resolve(__dirname, '../web/dist/patches')
 
 async function compile(plan: FlatPlan, maxBlockSize: number): Promise<LoadedPlan> {
   const { bytes, layout, paramPtrs } = emitWasm(plan, { maxBlockSize })
-  const module = await WebAssembly.compile(bytes)
   return {
-    module,
+    bytes,
     layout,
     paramPtrs,
     stateInit: plan.state_init,

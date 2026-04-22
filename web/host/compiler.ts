@@ -16,12 +16,17 @@ import type { FlatPlan } from '../../compiler/flatten.js'
 import { emitWasm } from '../../compiler/emit_wasm.js'
 import type { LoadedPlan } from '../worklet/runtime.js'
 
-/** Compile a pre-flattened FlatPlan to a LoadedPlan for the worklet. */
+/**
+ * Compile a pre-flattened FlatPlan to a LoadedPlan for the worklet.
+ *
+ * Note: we post the raw WASM bytes (not a WebAssembly.Module) because
+ * Chrome silently drops AudioWorklet port messages that contain
+ * WebAssembly.Module — compilation happens inside the worklet.
+ */
 export async function compilePlan(plan: FlatPlan, maxBlockSize = 2048): Promise<LoadedPlan> {
   const { bytes, layout, paramPtrs } = emitWasm(plan, { maxBlockSize })
-  const module = await WebAssembly.compile(bytes)
   return {
-    module,
+    bytes,
     layout,
     paramPtrs,
     stateInit: plan.state_init,

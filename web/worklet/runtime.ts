@@ -16,7 +16,10 @@
 import type { WasmLayout } from '../../compiler/wasm_memory_layout.js'
 
 export type LoadedPlan = {
-  module: WebAssembly.Module
+  /** Raw WASM bytes. Compiled inside the worklet to avoid a Chrome quirk
+   *  where port.postMessage silently drops messages containing a
+   *  WebAssembly.Module to an AudioWorklet. */
+  bytes: Uint8Array
   layout: WasmLayout
   paramPtrs: string[]
   stateInit: (number | boolean)[]
@@ -54,7 +57,7 @@ export class WasmRuntime {
 
   /** Swap in a freshly compiled plan. Transfers matching state by name. */
   async loadPlan(plan: LoadedPlan): Promise<void> {
-    const instance = await WebAssembly.instantiate(plan.module, {})
+    const { instance } = await WebAssembly.instantiate(plan.bytes, {})
     const memory = instance.exports.memory as WebAssembly.Memory
     const processFn = instance.exports.process as (blen: number, sidx: bigint) => void
 
