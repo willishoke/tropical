@@ -7,7 +7,7 @@
       {
         "op": "reg_decl",
         "name": "state",
-        "init": 12345,
+        "init": 2685821657736338717,
         "type": "int"
       }
     ],
@@ -18,76 +18,89 @@
         "expr": {
           "op": "let",
           "bind": {
-            "lsb": {
-              "op": "bitAnd",
-              "args": [{ "op": "reg", "name": "state" }, 1]
-            },
-            "shifted": {
-              "op": "rshift",
-              "args": [{ "op": "reg", "name": "state" }, 1]
+            "s1": {
+              "op": "bitXor",
+              "args": [
+                { "op": "reg", "name": "state" },
+                { "op": "lshift", "args": [{ "op": "reg", "name": "state" }, 13] }
+              ]
             }
           },
           "in": {
             "op": "let",
             "bind": {
-              "noise": {
-                "op": "sub",
+              "s2": {
+                "op": "bitXor",
                 "args": [
-                  {
-                    "op": "div",
-                    "args": [
-                      {
-                        "op": "mul",
-                        "args": [
-                          {
-                            "op": "select",
-                            "args": [
-                              { "op": "binding", "name": "lsb" },
-                              {
-                                "op": "bitXor",
-                                "args": [{ "op": "binding", "name": "shifted" }, 46080]
-                              },
-                              { "op": "binding", "name": "shifted" }
-                            ]
-                          },
-                          2
-                        ]
-                      },
-                      65535
-                    ]
-                  },
-                  1
-                ]
-              },
-              "threshold": {
-                "op": "sub",
-                "args": [
-                  1,
-                  {
-                    "op": "div",
-                    "args": [
-                      {
-                        "op": "mul",
-                        "args": [2, { "op": "input", "name": "rate" }]
-                      },
-                      { "op": "sample_rate" }
-                    ]
-                  }
+                  { "op": "binding", "name": "s1" },
+                  { "op": "rshift", "args": [{ "op": "binding", "name": "s1" }, 7] }
                 ]
               }
             },
             "in": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "gt",
+              "op": "let",
+              "bind": {
+                "s3": {
+                  "op": "bitXor",
                   "args": [
-                    { "op": "binding", "name": "noise" },
-                    { "op": "binding", "name": "threshold" }
+                    { "op": "binding", "name": "s2" },
+                    { "op": "lshift", "args": [{ "op": "binding", "name": "s2" }, 17] }
                   ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "noise": {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              { "op": "bitAnd", "args": [{ "op": "binding", "name": "s3" }, 65535] },
+                              2
+                            ]
+                          },
+                          65535
+                        ]
+                      },
+                      1
+                    ]
+                  },
+                  "threshold": {
+                    "op": "sub",
+                    "args": [
+                      1,
+                      {
+                        "op": "div",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [2, { "op": "input", "name": "rate" }]
+                          },
+                          { "op": "sample_rate" }
+                        ]
+                      }
+                    ]
+                  }
                 },
-                1
-              ]
+                "in": {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "gt",
+                      "args": [
+                        { "op": "binding", "name": "noise" },
+                        { "op": "binding", "name": "threshold" }
+                      ]
+                    },
+                    1
+                  ]
+                }
+              }
             }
           }
         }
@@ -98,25 +111,32 @@
         "expr": {
           "op": "let",
           "bind": {
-            "lsb": {
-              "op": "bitAnd",
-              "args": [{ "op": "reg", "name": "state" }, 1]
-            },
-            "shifted": {
-              "op": "rshift",
-              "args": [{ "op": "reg", "name": "state" }, 1]
+            "s1": {
+              "op": "bitXor",
+              "args": [
+                { "op": "reg", "name": "state" },
+                { "op": "lshift", "args": [{ "op": "reg", "name": "state" }, 13] }
+              ]
             }
           },
           "in": {
-            "op": "select",
-            "args": [
-              { "op": "binding", "name": "lsb" },
-              {
+            "op": "let",
+            "bind": {
+              "s2": {
                 "op": "bitXor",
-                "args": [{ "op": "binding", "name": "shifted" }, 46080]
-              },
-              { "op": "binding", "name": "shifted" }
-            ]
+                "args": [
+                  { "op": "binding", "name": "s1" },
+                  { "op": "rshift", "args": [{ "op": "binding", "name": "s1" }, 7] }
+                ]
+              }
+            },
+            "in": {
+              "op": "bitXor",
+              "args": [
+                { "op": "binding", "name": "s2" },
+                { "op": "lshift", "args": [{ "op": "binding", "name": "s2" }, 17] }
+              ]
+            }
           }
         }
       }

@@ -7,7 +7,7 @@
       {
         "op": "reg_decl",
         "name": "state",
-        "init": 44257,
+        "init": 88172645463325252,
         "type": "int"
       }
     ],
@@ -18,43 +18,56 @@
         "expr": {
           "op": "let",
           "bind": {
-            "lsb": {
-              "op": "bitAnd",
-              "args": [{ "op": "reg", "name": "state" }, 1]
-            },
-            "shifted": {
-              "op": "rshift",
-              "args": [{ "op": "reg", "name": "state" }, 1]
+            "s1": {
+              "op": "bitXor",
+              "args": [
+                { "op": "reg", "name": "state" },
+                { "op": "lshift", "args": [{ "op": "reg", "name": "state" }, 13] }
+              ]
             }
           },
           "in": {
-            "op": "sub",
-            "args": [
-              {
-                "op": "div",
+            "op": "let",
+            "bind": {
+              "s2": {
+                "op": "bitXor",
+                "args": [
+                  { "op": "binding", "name": "s1" },
+                  { "op": "rshift", "args": [{ "op": "binding", "name": "s1" }, 7] }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s3": {
+                  "op": "bitXor",
+                  "args": [
+                    { "op": "binding", "name": "s2" },
+                    { "op": "lshift", "args": [{ "op": "binding", "name": "s2" }, 17] }
+                  ]
+                }
+              },
+              "in": {
+                "op": "sub",
                 "args": [
                   {
-                    "op": "mul",
+                    "op": "div",
                     "args": [
                       {
-                        "op": "select",
+                        "op": "mul",
                         "args": [
-                          { "op": "binding", "name": "lsb" },
-                          {
-                            "op": "bitXor",
-                            "args": [{ "op": "binding", "name": "shifted" }, 46080]
-                          },
-                          { "op": "binding", "name": "shifted" }
+                          { "op": "bitAnd", "args": [{ "op": "binding", "name": "s3" }, 65535] },
+                          2
                         ]
                       },
-                      2
+                      65535
                     ]
                   },
-                  65535
+                  1
                 ]
-              },
-              1
-            ]
+              }
+            }
           }
         }
       },
@@ -64,25 +77,32 @@
         "expr": {
           "op": "let",
           "bind": {
-            "lsb": {
-              "op": "bitAnd",
-              "args": [{ "op": "reg", "name": "state" }, 1]
-            },
-            "shifted": {
-              "op": "rshift",
-              "args": [{ "op": "reg", "name": "state" }, 1]
+            "s1": {
+              "op": "bitXor",
+              "args": [
+                { "op": "reg", "name": "state" },
+                { "op": "lshift", "args": [{ "op": "reg", "name": "state" }, 13] }
+              ]
             }
           },
           "in": {
-            "op": "select",
-            "args": [
-              { "op": "binding", "name": "lsb" },
-              {
+            "op": "let",
+            "bind": {
+              "s2": {
                 "op": "bitXor",
-                "args": [{ "op": "binding", "name": "shifted" }, 46080]
-              },
-              { "op": "binding", "name": "shifted" }
-            ]
+                "args": [
+                  { "op": "binding", "name": "s1" },
+                  { "op": "rshift", "args": [{ "op": "binding", "name": "s1" }, 7] }
+                ]
+              }
+            },
+            "in": {
+              "op": "bitXor",
+              "args": [
+                { "op": "binding", "name": "s2" },
+                { "op": "lshift", "args": [{ "op": "binding", "name": "s2" }, 17] }
+              ]
+            }
           }
         }
       }
