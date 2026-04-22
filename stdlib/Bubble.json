@@ -67,7 +67,7 @@
         "name": "svf",
         "program": "SVF",
         "inputs": {
-          "input": { "op": "input", "name": "trigger" },
+          "input": { "op": "nested_out", "ref": "ramp", "output": "edge" },
           "cutoff": {
             "op": "let",
             "bind": {
@@ -178,7 +178,7 @@
       { "name": "amp_scale", "type": "float", "default": 1 }
     ],
     "outputs": [
-      { "name": "out", "type": "signal" }
+      { "name": "out", "type": "float" }
     ]
   }
 }

@@ -24,6 +24,29 @@
         "expr": { "op": "reg", "name": "t" }
       },
       {
+        "op": "output_assign",
+        "name": "edge",
+        "expr": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "gt",
+              "args": [
+                { "op": "input", "name": "trigger" },
+                0.5
+              ]
+            },
+            {
+              "op": "lte",
+              "args": [
+                { "op": "delay_ref", "id": "prev_trigger" },
+                0.5
+              ]
+            }
+          ]
+        }
+      },
+      {
         "op": "next_update",
         "target": { "kind": "reg", "name": "t" },
         "expr": {
@@ -70,7 +93,8 @@
       { "name": "trigger", "type": "signal", "default": 0 }
     ],
     "outputs": [
-      { "name": "frames", "type": "float" }
+      { "name": "frames", "type": "float" },
+      { "name": "edge", "type": "float" }
     ]
   }
 }
