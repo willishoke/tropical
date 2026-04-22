@@ -4,7 +4,7 @@
  * Inlines every stdlib/*.json program as a raw object, keyed by program name.
  * Consumed by loadStdlibFromMap() in browser builds where fs is unavailable.
  *
- * Source files (22): AllpassDelay.json, BitCrusher.json, BlepSaw.json, Clock.json, CombDelay.json, Cos.json, CrossFade.json, Delay.json, Exp.json, LadderFilter.json, Log.json, NoiseLFSR.json, OnePole.json, Phaser.json, Phaser16.json, Pow.json, Sequencer.json, Sin.json, SinOsc.json, SoftClip.json, Tanh.json, VCA.json
+ * Source files (30): AllpassDelay.json, BitCrusher.json, BlepSaw.json, Bubble.json, BubbleCloud.json, Clock.json, CombDelay.json, Cos.json, CrossFade.json, Delay.json, EnvExpDecay.json, Exp.json, LadderFilter.json, Log.json, NoiseLFSR.json, OnePole.json, Phaser.json, Phaser16.json, PoissonEvent.json, Pow.json, SVF.json, SampleHold.json, Sequencer.json, Sin.json, SinOsc.json, SoftClip.json, Tanh.json, TriggerRamp.json, VCA.json, WhiteNoise.json
  */
 
 export const STDLIB: Record<string, unknown> = {
@@ -843,6 +843,919 @@ export const STDLIB: Record<string, unknown> = {
       ]
     }
   },
+  "Bubble": {
+    "schema": "tropical_program_2",
+    "name": "Bubble",
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "reg_decl",
+          "name": "env_smooth",
+          "init": 0
+        },
+        {
+          "op": "instance_decl",
+          "name": "hold",
+          "program": "SampleHold",
+          "inputs": {
+            "trigger": {
+              "op": "input",
+              "name": "trigger"
+            },
+            "input": {
+              "op": "input",
+              "name": "radius"
+            }
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "ramp",
+          "program": "TriggerRamp",
+          "inputs": {
+            "trigger": {
+              "op": "input",
+              "name": "trigger"
+            }
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "decay_calc",
+          "program": "Exp",
+          "inputs": {
+            "x": {
+              "op": "div",
+              "args": [
+                -1,
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "sample_rate"
+                    },
+                    {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "input",
+                              "name": "decay_scale"
+                            },
+                            {
+                              "op": "nested_out",
+                              "ref": "hold",
+                              "output": "value"
+                            }
+                          ]
+                        },
+                        0.000001
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "env_gen",
+          "program": "EnvExpDecay",
+          "inputs": {
+            "trigger": {
+              "op": "input",
+              "name": "trigger"
+            },
+            "decay": {
+              "op": "nested_out",
+              "ref": "decay_calc",
+              "output": "out"
+            }
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "svf",
+          "program": "SVF",
+          "inputs": {
+            "input": {
+              "op": "nested_out",
+              "ref": "ramp",
+              "output": "edge"
+            },
+            "cutoff": {
+              "op": "let",
+              "bind": {
+                "r_held": {
+                  "op": "nested_out",
+                  "ref": "hold",
+                  "output": "value"
+                },
+                "t_eff": {
+                  "op": "nested_out",
+                  "ref": "ramp",
+                  "output": "frames"
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "tau": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "input",
+                            "name": "decay_scale"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "r_held"
+                          }
+                        ]
+                      },
+                      0.000001
+                    ]
+                  },
+                  "f0": {
+                    "op": "div",
+                    "args": [
+                      3.26,
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "r_held"
+                          },
+                          0.000001
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "f0"
+                    },
+                    {
+                      "op": "add",
+                      "args": [
+                        1,
+                        {
+                          "op": "div",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "input",
+                                  "name": "sigma"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "t_eff"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "sample_rate"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "tau"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            },
+            "q": {
+              "op": "input",
+              "name": "q"
+            }
+          }
+        }
+      ],
+      "assigns": [
+        {
+          "op": "output_assign",
+          "name": "out",
+          "expr": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "env_smooth"
+                  },
+                  {
+                    "op": "nested_out",
+                    "ref": "svf",
+                    "output": "bp"
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "nested_out",
+                        "ref": "hold",
+                        "output": "value"
+                      },
+                      1000
+                    ]
+                  },
+                  {
+                    "op": "input",
+                    "name": "amp_scale"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "op": "next_update",
+          "target": {
+            "kind": "reg",
+            "name": "env_smooth"
+          },
+          "expr": {
+            "op": "add",
+            "args": [
+              {
+                "op": "reg",
+                "name": "env_smooth"
+              },
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "attack_g"
+                  },
+                  {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "nested_out",
+                        "ref": "env_gen",
+                        "output": "env"
+                      },
+                      {
+                        "op": "reg",
+                        "name": "env_smooth"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "value": null
+    },
+    "ports": {
+      "inputs": [
+        {
+          "name": "trigger",
+          "type": "signal",
+          "default": 0
+        },
+        {
+          "name": "radius",
+          "type": "float",
+          "default": 0.001
+        },
+        {
+          "name": "q",
+          "type": "float",
+          "default": 30
+        },
+        {
+          "name": "sigma",
+          "type": "float",
+          "default": 0.3
+        },
+        {
+          "name": "decay_scale",
+          "type": "float",
+          "default": 10
+        },
+        {
+          "name": "amp_scale",
+          "type": "float",
+          "default": 1
+        },
+        {
+          "name": "attack_g",
+          "type": "float",
+          "default": 0.05
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out",
+          "type": "float"
+        }
+      ]
+    }
+  },
+  "BubbleCloud": {
+    "schema": "tropical_program_2",
+    "name": "BubbleCloud",
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "reg_decl",
+          "name": "voice_idx",
+          "init": 0,
+          "type": "int"
+        },
+        {
+          "op": "delay_decl",
+          "name": "prev_trigger",
+          "update": {
+            "op": "input",
+            "name": "trigger"
+          },
+          "init": 0
+        },
+        {
+          "op": "instance_decl",
+          "name": "v0",
+          "program": "Bubble",
+          "inputs": {
+            "trigger": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "trigger"
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "voice_idx"
+                    },
+                    0
+                  ]
+                }
+              ]
+            },
+            "radius": {
+              "op": "input",
+              "name": "radius"
+            },
+            "q": {
+              "op": "input",
+              "name": "q"
+            },
+            "sigma": {
+              "op": "input",
+              "name": "sigma"
+            },
+            "decay_scale": {
+              "op": "input",
+              "name": "decay_scale"
+            },
+            "amp_scale": {
+              "op": "input",
+              "name": "amp_scale"
+            }
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "v1",
+          "program": "Bubble",
+          "inputs": {
+            "trigger": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "trigger"
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "voice_idx"
+                    },
+                    1
+                  ]
+                }
+              ]
+            },
+            "radius": {
+              "op": "input",
+              "name": "radius"
+            },
+            "q": {
+              "op": "input",
+              "name": "q"
+            },
+            "sigma": {
+              "op": "input",
+              "name": "sigma"
+            },
+            "decay_scale": {
+              "op": "input",
+              "name": "decay_scale"
+            },
+            "amp_scale": {
+              "op": "input",
+              "name": "amp_scale"
+            }
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "v2",
+          "program": "Bubble",
+          "inputs": {
+            "trigger": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "trigger"
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "voice_idx"
+                    },
+                    2
+                  ]
+                }
+              ]
+            },
+            "radius": {
+              "op": "input",
+              "name": "radius"
+            },
+            "q": {
+              "op": "input",
+              "name": "q"
+            },
+            "sigma": {
+              "op": "input",
+              "name": "sigma"
+            },
+            "decay_scale": {
+              "op": "input",
+              "name": "decay_scale"
+            },
+            "amp_scale": {
+              "op": "input",
+              "name": "amp_scale"
+            }
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "v3",
+          "program": "Bubble",
+          "inputs": {
+            "trigger": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "trigger"
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "voice_idx"
+                    },
+                    3
+                  ]
+                }
+              ]
+            },
+            "radius": {
+              "op": "input",
+              "name": "radius"
+            },
+            "q": {
+              "op": "input",
+              "name": "q"
+            },
+            "sigma": {
+              "op": "input",
+              "name": "sigma"
+            },
+            "decay_scale": {
+              "op": "input",
+              "name": "decay_scale"
+            },
+            "amp_scale": {
+              "op": "input",
+              "name": "amp_scale"
+            }
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "v4",
+          "program": "Bubble",
+          "inputs": {
+            "trigger": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "trigger"
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "voice_idx"
+                    },
+                    4
+                  ]
+                }
+              ]
+            },
+            "radius": {
+              "op": "input",
+              "name": "radius"
+            },
+            "q": {
+              "op": "input",
+              "name": "q"
+            },
+            "sigma": {
+              "op": "input",
+              "name": "sigma"
+            },
+            "decay_scale": {
+              "op": "input",
+              "name": "decay_scale"
+            },
+            "amp_scale": {
+              "op": "input",
+              "name": "amp_scale"
+            }
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "v5",
+          "program": "Bubble",
+          "inputs": {
+            "trigger": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "trigger"
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "voice_idx"
+                    },
+                    5
+                  ]
+                }
+              ]
+            },
+            "radius": {
+              "op": "input",
+              "name": "radius"
+            },
+            "q": {
+              "op": "input",
+              "name": "q"
+            },
+            "sigma": {
+              "op": "input",
+              "name": "sigma"
+            },
+            "decay_scale": {
+              "op": "input",
+              "name": "decay_scale"
+            },
+            "amp_scale": {
+              "op": "input",
+              "name": "amp_scale"
+            }
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "v6",
+          "program": "Bubble",
+          "inputs": {
+            "trigger": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "trigger"
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "voice_idx"
+                    },
+                    6
+                  ]
+                }
+              ]
+            },
+            "radius": {
+              "op": "input",
+              "name": "radius"
+            },
+            "q": {
+              "op": "input",
+              "name": "q"
+            },
+            "sigma": {
+              "op": "input",
+              "name": "sigma"
+            },
+            "decay_scale": {
+              "op": "input",
+              "name": "decay_scale"
+            },
+            "amp_scale": {
+              "op": "input",
+              "name": "amp_scale"
+            }
+          }
+        },
+        {
+          "op": "instance_decl",
+          "name": "v7",
+          "program": "Bubble",
+          "inputs": {
+            "trigger": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "trigger"
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "voice_idx"
+                    },
+                    7
+                  ]
+                }
+              ]
+            },
+            "radius": {
+              "op": "input",
+              "name": "radius"
+            },
+            "q": {
+              "op": "input",
+              "name": "q"
+            },
+            "sigma": {
+              "op": "input",
+              "name": "sigma"
+            },
+            "decay_scale": {
+              "op": "input",
+              "name": "decay_scale"
+            },
+            "amp_scale": {
+              "op": "input",
+              "name": "amp_scale"
+            }
+          }
+        }
+      ],
+      "assigns": [
+        {
+          "op": "output_assign",
+          "name": "out",
+          "expr": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "nested_out",
+                        "ref": "v0",
+                        "output": "out"
+                      },
+                      {
+                        "op": "nested_out",
+                        "ref": "v1",
+                        "output": "out"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "nested_out",
+                        "ref": "v2",
+                        "output": "out"
+                      },
+                      {
+                        "op": "nested_out",
+                        "ref": "v3",
+                        "output": "out"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "nested_out",
+                        "ref": "v4",
+                        "output": "out"
+                      },
+                      {
+                        "op": "nested_out",
+                        "ref": "v5",
+                        "output": "out"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "nested_out",
+                        "ref": "v6",
+                        "output": "out"
+                      },
+                      {
+                        "op": "nested_out",
+                        "ref": "v7",
+                        "output": "out"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "op": "next_update",
+          "target": {
+            "kind": "reg",
+            "name": "voice_idx"
+          },
+          "expr": {
+            "op": "let",
+            "bind": {
+              "tick": {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "trigger"
+                      },
+                      0.5
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "op": "delay_ref",
+                        "id": "prev_trigger"
+                      },
+                      0.5
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "mod",
+              "args": [
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "voice_idx"
+                    },
+                    {
+                      "op": "binding",
+                      "name": "tick"
+                    }
+                  ]
+                },
+                8
+              ]
+            }
+          }
+        }
+      ],
+      "value": null
+    },
+    "ports": {
+      "inputs": [
+        {
+          "name": "trigger",
+          "type": "signal",
+          "default": 0
+        },
+        {
+          "name": "radius",
+          "type": "float",
+          "default": 0.001
+        },
+        {
+          "name": "q",
+          "type": "float",
+          "default": 30
+        },
+        {
+          "name": "sigma",
+          "type": "float",
+          "default": 0.3
+        },
+        {
+          "name": "decay_scale",
+          "type": "float",
+          "default": 10
+        },
+        {
+          "name": "amp_scale",
+          "type": "float",
+          "default": 0.05
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out",
+          "type": "float"
+        }
+      ]
+    }
+  },
   "Clock": {
     "schema": "tropical_program_2",
     "name": "Clock",
@@ -1364,6 +2277,120 @@ export const STDLIB: Record<string, unknown> = {
       }
     },
     "breaks_cycles": true
+  },
+  "EnvExpDecay": {
+    "schema": "tropical_program_2",
+    "name": "EnvExpDecay",
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "reg_decl",
+          "name": "env",
+          "init": 0
+        },
+        {
+          "op": "delay_decl",
+          "name": "prev_trigger",
+          "update": {
+            "op": "input",
+            "name": "trigger"
+          },
+          "init": 0
+        }
+      ],
+      "assigns": [
+        {
+          "op": "output_assign",
+          "name": "env",
+          "expr": {
+            "op": "reg",
+            "name": "env"
+          }
+        },
+        {
+          "op": "next_update",
+          "target": {
+            "kind": "reg",
+            "name": "env"
+          },
+          "expr": {
+            "op": "let",
+            "bind": {
+              "tick": {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "trigger"
+                      },
+                      0.5
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "op": "delay_ref",
+                        "id": "prev_trigger"
+                      },
+                      0.5
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "select",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "tick"
+                },
+                1,
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "env"
+                    },
+                    {
+                      "op": "input",
+                      "name": "decay"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "value": null
+    },
+    "ports": {
+      "inputs": [
+        {
+          "name": "trigger",
+          "type": "signal",
+          "default": 0
+        },
+        {
+          "name": "decay",
+          "type": "float",
+          "default": 0.999
+        }
+      ],
+      "outputs": [
+        {
+          "name": "env",
+          "type": "signal"
+        }
+      ]
+    }
   },
   "Exp": {
     "schema": "tropical_program_2",
@@ -3778,6 +4805,265 @@ export const STDLIB: Record<string, unknown> = {
       ]
     }
   },
+  "PoissonEvent": {
+    "schema": "tropical_program_2",
+    "name": "PoissonEvent",
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "reg_decl",
+          "name": "state",
+          "init": 2685821657736339000,
+          "type": "int"
+        }
+      ],
+      "assigns": [
+        {
+          "op": "output_assign",
+          "name": "trigger",
+          "expr": {
+            "op": "let",
+            "bind": {
+              "s1": {
+                "op": "bitXor",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "state"
+                  },
+                  {
+                    "op": "lshift",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "state"
+                      },
+                      13
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2": {
+                  "op": "bitXor",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "s1"
+                    },
+                    {
+                      "op": "rshift",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "s1"
+                        },
+                        7
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "s3": {
+                    "op": "bitXor",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "s2"
+                      },
+                      {
+                        "op": "lshift",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "s2"
+                          },
+                          17
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "noise": {
+                      "op": "sub",
+                      "args": [
+                        {
+                          "op": "div",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "bitAnd",
+                                  "args": [
+                                    {
+                                      "op": "binding",
+                                      "name": "s3"
+                                    },
+                                    65535
+                                  ]
+                                },
+                                2
+                              ]
+                            },
+                            65535
+                          ]
+                        },
+                        1
+                      ]
+                    },
+                    "threshold": {
+                      "op": "sub",
+                      "args": [
+                        1,
+                        {
+                          "op": "div",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                2,
+                                {
+                                  "op": "input",
+                                  "name": "rate"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "sample_rate"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "gt",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "noise"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "threshold"
+                          }
+                        ]
+                      },
+                      1
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "next_update",
+          "target": {
+            "kind": "reg",
+            "name": "state"
+          },
+          "expr": {
+            "op": "let",
+            "bind": {
+              "s1": {
+                "op": "bitXor",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "state"
+                  },
+                  {
+                    "op": "lshift",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "state"
+                      },
+                      13
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2": {
+                  "op": "bitXor",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "s1"
+                    },
+                    {
+                      "op": "rshift",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "s1"
+                        },
+                        7
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "bitXor",
+                "args": [
+                  {
+                    "op": "binding",
+                    "name": "s2"
+                  },
+                  {
+                    "op": "lshift",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "s2"
+                      },
+                      17
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "value": null
+    },
+    "ports": {
+      "inputs": [
+        {
+          "name": "rate",
+          "type": "float",
+          "default": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "trigger",
+          "type": "signal"
+        }
+      ]
+    }
+  },
   "Pow": {
     "schema": "tropical_program_2",
     "name": "Pow",
@@ -3847,6 +5133,1148 @@ export const STDLIB: Record<string, unknown> = {
         {
           "name": "out",
           "type": "float"
+        }
+      ]
+    }
+  },
+  "SVF": {
+    "schema": "tropical_program_2",
+    "name": "SVF",
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "reg_decl",
+          "name": "ic1eq",
+          "init": 0
+        },
+        {
+          "op": "reg_decl",
+          "name": "ic2eq",
+          "init": 0
+        }
+      ],
+      "assigns": [
+        {
+          "op": "output_assign",
+          "name": "lp",
+          "expr": {
+            "op": "let",
+            "bind": {
+              "g": {
+                "op": "div",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      3.141592653589793,
+                      {
+                        "op": "input",
+                        "name": "cutoff"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "sample_rate"
+                  }
+                ]
+              },
+              "k": {
+                "op": "div",
+                "args": [
+                  1,
+                  {
+                    "op": "input",
+                    "name": "q"
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "a1": {
+                  "op": "div",
+                  "args": [
+                    1,
+                    {
+                      "op": "add",
+                      "args": [
+                        1,
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "k"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "a2": {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "binding",
+                        "name": "a1"
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "a3": {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "a2"
+                        }
+                      ]
+                    },
+                    "v3": {
+                      "op": "sub",
+                      "args": [
+                        {
+                          "op": "input",
+                          "name": "input"
+                        },
+                        {
+                          "op": "reg",
+                          "name": "ic2eq"
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "v1": {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "a1"
+                              },
+                              {
+                                "op": "reg",
+                                "name": "ic1eq"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "a2"
+                              },
+                              {
+                                "op": "binding",
+                                "name": "v3"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "ic2eq"
+                        },
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "a2"
+                                },
+                                {
+                                  "op": "reg",
+                                  "name": "ic1eq"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "a3"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "v3"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "output_assign",
+          "name": "bp",
+          "expr": {
+            "op": "let",
+            "bind": {
+              "g": {
+                "op": "div",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      3.141592653589793,
+                      {
+                        "op": "input",
+                        "name": "cutoff"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "sample_rate"
+                  }
+                ]
+              },
+              "k": {
+                "op": "div",
+                "args": [
+                  1,
+                  {
+                    "op": "input",
+                    "name": "q"
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "a1": {
+                  "op": "div",
+                  "args": [
+                    1,
+                    {
+                      "op": "add",
+                      "args": [
+                        1,
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "k"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "a2": {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "binding",
+                        "name": "a1"
+                      }
+                    ]
+                  },
+                  "v3": {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "input"
+                      },
+                      {
+                        "op": "reg",
+                        "name": "ic2eq"
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "a1"
+                        },
+                        {
+                          "op": "reg",
+                          "name": "ic1eq"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "a2"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "v3"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "output_assign",
+          "name": "hp",
+          "expr": {
+            "op": "let",
+            "bind": {
+              "g": {
+                "op": "div",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      3.141592653589793,
+                      {
+                        "op": "input",
+                        "name": "cutoff"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "sample_rate"
+                  }
+                ]
+              },
+              "k": {
+                "op": "div",
+                "args": [
+                  1,
+                  {
+                    "op": "input",
+                    "name": "q"
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "a1": {
+                  "op": "div",
+                  "args": [
+                    1,
+                    {
+                      "op": "add",
+                      "args": [
+                        1,
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "k"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "a2": {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "binding",
+                        "name": "a1"
+                      }
+                    ]
+                  },
+                  "a3": {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "a1"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "v3": {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "input"
+                      },
+                      {
+                        "op": "reg",
+                        "name": "ic2eq"
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "v1": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "a1"
+                            },
+                            {
+                              "op": "reg",
+                              "name": "ic1eq"
+                            }
+                          ]
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "a2"
+                            },
+                            {
+                              "op": "binding",
+                              "name": "v3"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    "v2": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "ic2eq"
+                        },
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "a2"
+                                },
+                                {
+                                  "op": "reg",
+                                  "name": "ic1eq"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "a3"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "v3"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "input",
+                            "name": "input"
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "k"
+                              },
+                              {
+                                "op": "binding",
+                                "name": "v1"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "op": "binding",
+                        "name": "v2"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "next_update",
+          "target": {
+            "kind": "reg",
+            "name": "ic1eq"
+          },
+          "expr": {
+            "op": "let",
+            "bind": {
+              "g": {
+                "op": "div",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      3.141592653589793,
+                      {
+                        "op": "input",
+                        "name": "cutoff"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "sample_rate"
+                  }
+                ]
+              },
+              "k": {
+                "op": "div",
+                "args": [
+                  1,
+                  {
+                    "op": "input",
+                    "name": "q"
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "a1": {
+                  "op": "div",
+                  "args": [
+                    1,
+                    {
+                      "op": "add",
+                      "args": [
+                        1,
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "k"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "a2": {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "binding",
+                        "name": "a1"
+                      }
+                    ]
+                  },
+                  "v3": {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "input"
+                      },
+                      {
+                        "op": "reg",
+                        "name": "ic2eq"
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "v1": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "a1"
+                            },
+                            {
+                              "op": "reg",
+                              "name": "ic1eq"
+                            }
+                          ]
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "a2"
+                            },
+                            {
+                              "op": "binding",
+                              "name": "v3"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          2,
+                          {
+                            "op": "binding",
+                            "name": "v1"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "reg",
+                        "name": "ic1eq"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "next_update",
+          "target": {
+            "kind": "reg",
+            "name": "ic2eq"
+          },
+          "expr": {
+            "op": "let",
+            "bind": {
+              "g": {
+                "op": "div",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      3.141592653589793,
+                      {
+                        "op": "input",
+                        "name": "cutoff"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "sample_rate"
+                  }
+                ]
+              },
+              "k": {
+                "op": "div",
+                "args": [
+                  1,
+                  {
+                    "op": "input",
+                    "name": "q"
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "a1": {
+                  "op": "div",
+                  "args": [
+                    1,
+                    {
+                      "op": "add",
+                      "args": [
+                        1,
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "add",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "g"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "k"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "a2": {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "binding",
+                        "name": "a1"
+                      }
+                    ]
+                  },
+                  "a3": {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "g"
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "a1"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "v3": {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "input"
+                      },
+                      {
+                        "op": "reg",
+                        "name": "ic2eq"
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "v2": {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "ic2eq"
+                        },
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "a2"
+                                },
+                                {
+                                  "op": "reg",
+                                  "name": "ic1eq"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "a3"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "v3"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          2,
+                          {
+                            "op": "binding",
+                            "name": "v2"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "reg",
+                        "name": "ic2eq"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
+      "value": null
+    },
+    "ports": {
+      "inputs": [
+        {
+          "name": "input",
+          "type": "signal",
+          "default": 0
+        },
+        {
+          "name": "cutoff",
+          "type": "freq",
+          "default": 1000
+        },
+        {
+          "name": "q",
+          "type": "float",
+          "default": 0.707
+        }
+      ],
+      "outputs": [
+        {
+          "name": "lp",
+          "type": "signal"
+        },
+        {
+          "name": "bp",
+          "type": "signal"
+        },
+        {
+          "name": "hp",
+          "type": "signal"
+        }
+      ]
+    }
+  },
+  "SampleHold": {
+    "schema": "tropical_program_2",
+    "name": "SampleHold",
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "reg_decl",
+          "name": "held",
+          "init": 0
+        },
+        {
+          "op": "delay_decl",
+          "name": "prev_trigger",
+          "update": {
+            "op": "input",
+            "name": "trigger"
+          },
+          "init": 0
+        }
+      ],
+      "assigns": [
+        {
+          "op": "output_assign",
+          "name": "value",
+          "expr": {
+            "op": "let",
+            "bind": {
+              "tick": {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "trigger"
+                      },
+                      0.5
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "op": "delay_ref",
+                        "id": "prev_trigger"
+                      },
+                      0.5
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "select",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "tick"
+                },
+                {
+                  "op": "input",
+                  "name": "input"
+                },
+                {
+                  "op": "reg",
+                  "name": "held"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "op": "next_update",
+          "target": {
+            "kind": "reg",
+            "name": "held"
+          },
+          "expr": {
+            "op": "let",
+            "bind": {
+              "tick": {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "trigger"
+                      },
+                      0.5
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "op": "delay_ref",
+                        "id": "prev_trigger"
+                      },
+                      0.5
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "select",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "tick"
+                },
+                {
+                  "op": "input",
+                  "name": "input"
+                },
+                {
+                  "op": "reg",
+                  "name": "held"
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "value": null
+    },
+    "ports": {
+      "inputs": [
+        {
+          "name": "trigger",
+          "type": "signal",
+          "default": 0
+        },
+        {
+          "name": "input",
+          "type": "signal",
+          "default": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "value",
+          "type": "signal"
         }
       ]
     }
@@ -4374,6 +6802,146 @@ export const STDLIB: Record<string, unknown> = {
       ]
     }
   },
+  "TriggerRamp": {
+    "schema": "tropical_program_2",
+    "name": "TriggerRamp",
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "reg_decl",
+          "name": "t",
+          "init": 0,
+          "type": "int"
+        },
+        {
+          "op": "delay_decl",
+          "name": "prev_trigger",
+          "update": {
+            "op": "input",
+            "name": "trigger"
+          },
+          "init": 0
+        }
+      ],
+      "assigns": [
+        {
+          "op": "output_assign",
+          "name": "frames",
+          "expr": {
+            "op": "reg",
+            "name": "t"
+          }
+        },
+        {
+          "op": "output_assign",
+          "name": "edge",
+          "expr": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "gt",
+                "args": [
+                  {
+                    "op": "input",
+                    "name": "trigger"
+                  },
+                  0.5
+                ]
+              },
+              {
+                "op": "lte",
+                "args": [
+                  {
+                    "op": "delay_ref",
+                    "id": "prev_trigger"
+                  },
+                  0.5
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "op": "next_update",
+          "target": {
+            "kind": "reg",
+            "name": "t"
+          },
+          "expr": {
+            "op": "let",
+            "bind": {
+              "tick": {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "op": "input",
+                        "name": "trigger"
+                      },
+                      0.5
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "op": "delay_ref",
+                        "id": "prev_trigger"
+                      },
+                      0.5
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "select",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "tick"
+                },
+                0,
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "reg",
+                      "name": "t"
+                    },
+                    1
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "value": null
+    },
+    "ports": {
+      "inputs": [
+        {
+          "name": "trigger",
+          "type": "signal",
+          "default": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "frames",
+          "type": "float"
+        },
+        {
+          "name": "edge",
+          "type": "float"
+        }
+      ]
+    }
+  },
   "VCA": {
     "schema": "tropical_program_2",
     "name": "VCA",
@@ -4414,6 +6982,211 @@ export const STDLIB: Record<string, unknown> = {
           "default": 0
         }
       ],
+      "outputs": [
+        {
+          "name": "out",
+          "type": "float"
+        }
+      ]
+    }
+  },
+  "WhiteNoise": {
+    "schema": "tropical_program_2",
+    "name": "WhiteNoise",
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "reg_decl",
+          "name": "state",
+          "init": 88172645463325250,
+          "type": "int"
+        }
+      ],
+      "assigns": [
+        {
+          "op": "output_assign",
+          "name": "out",
+          "expr": {
+            "op": "let",
+            "bind": {
+              "s1": {
+                "op": "bitXor",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "state"
+                  },
+                  {
+                    "op": "lshift",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "state"
+                      },
+                      13
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2": {
+                  "op": "bitXor",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "s1"
+                    },
+                    {
+                      "op": "rshift",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "s1"
+                        },
+                        7
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "s3": {
+                    "op": "bitXor",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "s2"
+                      },
+                      {
+                        "op": "lshift",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "s2"
+                          },
+                          17
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "sub",
+                  "args": [
+                    {
+                      "op": "div",
+                      "args": [
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "bitAnd",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "s3"
+                                },
+                                65535
+                              ]
+                            },
+                            2
+                          ]
+                        },
+                        65535
+                      ]
+                    },
+                    1
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "op": "next_update",
+          "target": {
+            "kind": "reg",
+            "name": "state"
+          },
+          "expr": {
+            "op": "let",
+            "bind": {
+              "s1": {
+                "op": "bitXor",
+                "args": [
+                  {
+                    "op": "reg",
+                    "name": "state"
+                  },
+                  {
+                    "op": "lshift",
+                    "args": [
+                      {
+                        "op": "reg",
+                        "name": "state"
+                      },
+                      13
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "s2": {
+                  "op": "bitXor",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "s1"
+                    },
+                    {
+                      "op": "rshift",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "s1"
+                        },
+                        7
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "bitXor",
+                "args": [
+                  {
+                    "op": "binding",
+                    "name": "s2"
+                  },
+                  {
+                    "op": "lshift",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "s2"
+                      },
+                      17
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "value": null
+    },
+    "ports": {
+      "inputs": [],
       "outputs": [
         {
           "name": "out",
