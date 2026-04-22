@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>tropical — browser demo</title>
+  <style>
+    :root {
+      --bg: #0b0f14;
+      --fg: #e6e9ec;
+      --muted: #7c8894;
+      --accent: #5ee1c0;
+      --accent-dim: #2d6b5b;
+      --panel: #121821;
+      --border: #1f2a36;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 2rem 1.5rem;
+      background: var(--bg); color: var(--fg);
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, 'SF Mono', Menlo, monospace;
+      max-width: 720px; margin-inline: auto;
+    }
+    h1 { font-size: 1.4rem; letter-spacing: 0.02em; margin: 0 0 0.5rem; }
+    header p { color: var(--muted); margin: 0 0 2rem; }
+    .controls { display: flex; gap: 0.5rem; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    button {
+      background: var(--panel); color: var(--fg);
+      border: 1px solid var(--border);
+      padding: 0.5rem 1rem; border-radius: 4px;
+      font: inherit; cursor: pointer;
+    }
+    button:hover { border-color: var(--accent-dim); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.primary { border-color: var(--accent); color: var(--accent); }
+    select {
+      background: var(--panel); color: var(--fg);
+      border: 1px solid var(--border);
+      padding: 0.5rem; border-radius: 4px;
+      font: inherit; min-width: 200px;
+    }
+    .patch-meta { color: var(--muted); margin-top: 0.5rem; font-size: 13px; }
+    .status {
+      border-top: 1px solid var(--border);
+      margin-top: 2rem; padding-top: 1rem;
+      color: var(--muted); font-size: 12px;
+    }
+    .status strong { color: var(--accent); font-weight: normal; }
+    .error { color: #ff6b6b; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>tropical</h1>
+    <p>Realtime audio synthesis — running in your browser via WebAssembly.</p>
+  </header>
+
+  <div class="controls">
+    <select id="patch-select"></select>
+    <button id="play-btn" class="primary" disabled>Start audio</button>
+    <button id="stop-btn" disabled>Stop</button>
+  </div>
+
+  <p id="patch-meta" class="patch-meta"></p>
+
+  <div class="status">
+    <div>Status: <strong id="status">loading</strong></div>
+    <div id="info"></div>
+    <div id="error" class="error"></div>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
