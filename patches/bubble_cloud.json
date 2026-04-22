@@ -6,11 +6,28 @@
     "decls": [
       {
         "op": "instance_decl",
-        "name": "clk",
-        "program": "Clock",
+        "name": "events",
+        "program": "PoissonEvent",
+        "inputs": { "rate": 20 }
+      },
+      {
+        "op": "instance_decl",
+        "name": "noise",
+        "program": "WhiteNoise",
+        "inputs": {}
+      },
+      {
+        "op": "instance_decl",
+        "name": "radius_exp",
+        "program": "Exp",
         "inputs": {
-          "freq": 8,
-          "ratios_in": [1]
+          "x": {
+            "op": "mul",
+            "args": [
+              0.7,
+              { "op": "ref", "instance": "noise", "output": "out" }
+            ]
+          }
         }
       },
       {
@@ -18,12 +35,18 @@
         "name": "cloud",
         "program": "BubbleCloud",
         "inputs": {
-          "trigger": { "op": "ref", "instance": "clk", "output": "output" },
-          "radius": 0.003,
+          "trigger": { "op": "ref", "instance": "events", "output": "trigger" },
+          "radius": {
+            "op": "mul",
+            "args": [
+              0.003,
+              { "op": "ref", "instance": "radius_exp", "output": "out" }
+            ]
+          },
           "q": 30,
           "sigma": 0.3,
           "decay_scale": 12,
-          "amp_scale": 0.05
+          "amp_scale": 0.08
         }
       }
     ],

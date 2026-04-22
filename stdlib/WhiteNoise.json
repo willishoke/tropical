@@ -1,0 +1,98 @@
+{
+  "schema": "tropical_program_2",
+  "name": "WhiteNoise",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "reg_decl",
+        "name": "state",
+        "init": 44257,
+        "type": "int"
+      }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "out",
+        "expr": {
+          "op": "let",
+          "bind": {
+            "lsb": {
+              "op": "bitAnd",
+              "args": [{ "op": "reg", "name": "state" }, 1]
+            },
+            "shifted": {
+              "op": "rshift",
+              "args": [{ "op": "reg", "name": "state" }, 1]
+            }
+          },
+          "in": {
+            "op": "sub",
+            "args": [
+              {
+                "op": "div",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "select",
+                        "args": [
+                          { "op": "binding", "name": "lsb" },
+                          {
+                            "op": "bitXor",
+                            "args": [{ "op": "binding", "name": "shifted" }, 46080]
+                          },
+                          { "op": "binding", "name": "shifted" }
+                        ]
+                      },
+                      2
+                    ]
+                  },
+                  65535
+                ]
+              },
+              1
+            ]
+          }
+        }
+      },
+      {
+        "op": "next_update",
+        "target": { "kind": "reg", "name": "state" },
+        "expr": {
+          "op": "let",
+          "bind": {
+            "lsb": {
+              "op": "bitAnd",
+              "args": [{ "op": "reg", "name": "state" }, 1]
+            },
+            "shifted": {
+              "op": "rshift",
+              "args": [{ "op": "reg", "name": "state" }, 1]
+            }
+          },
+          "in": {
+            "op": "select",
+            "args": [
+              { "op": "binding", "name": "lsb" },
+              {
+                "op": "bitXor",
+                "args": [{ "op": "binding", "name": "shifted" }, 46080]
+              },
+              { "op": "binding", "name": "shifted" }
+            ]
+          }
+        }
+      }
+    ],
+    "value": null
+  },
+  "ports": {
+    "inputs": [],
+    "outputs": [
+      { "name": "out", "type": "float" }
+    ]
+  }
+}
