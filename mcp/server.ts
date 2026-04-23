@@ -294,6 +294,7 @@ function requireInstance(name: string, param: string) {
 
 function resolveOutputIdx(inst: { outputNames: string[] }, nameOrIdx: string | number): number {
   if (typeof nameOrIdx === 'number') return nameOrIdx
+  if (typeof nameOrIdx === 'string' && /^\d+$/.test(nameOrIdx)) return parseInt(nameOrIdx, 10)
   const idx = inst.outputNames.indexOf(nameOrIdx)
   if (idx === -1)
     failEnum({
@@ -307,6 +308,7 @@ function resolveOutputIdx(inst: { outputNames: string[] }, nameOrIdx: string | n
 
 function resolveInputIdx(inst: { inputNames: string[] }, nameOrIdx: string | number): number {
   if (typeof nameOrIdx === 'number') return nameOrIdx
+  if (typeof nameOrIdx === 'string' && /^\d+$/.test(nameOrIdx)) return parseInt(nameOrIdx, 10)
   const idx = inst.inputNames.indexOf(nameOrIdx)
   if (idx === -1)
     failEnum({
@@ -1107,8 +1109,7 @@ function handleWire(args: Record<string, unknown>) {
     // Process removes first
     for (const r of removeOps) {
       const inst = requireInstance(r.instance, 'remove[].instance')
-      const inputId = typeof r.input === 'number' ? r.input
-        : (String(r.input).match(/^\d+$/) ? parseInt(String(r.input), 10) : inst.inputIndex(String(r.input)))
+      const inputId = resolveInputIdx(inst, r.input)
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
       session.inputExprNodes.delete(`${r.instance}:${resolvedName}`)
     }
@@ -1117,9 +1118,7 @@ function handleWire(args: Record<string, unknown>) {
     const results = []
     for (const s of setOps) {
       const inst = requireInstance(s.instance, 'set[].instance')
-      const raw = s.input
-      const inputId = typeof raw === 'number' ? raw
-        : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
+      const inputId = resolveInputIdx(inst, s.input)
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
       validateExpr(s.expr, `${s.instance}.${resolvedName}`)
       const { expr } = adaptInputExpr(s.expr, inst.inputPortType(inputId), s.instance, resolvedName)
@@ -1151,9 +1150,7 @@ function handleSetOutput(args: Record<string, unknown>) {
     session.graphOutputs.length = 0
     for (const o of outputs) {
       const inst = requireInstance(o.instance, 'outputs[].instance')
-      const rawOut = o.output
-      const outId = typeof rawOut === 'number' ? rawOut
-        : (String(rawOut).match(/^\d+$/) ? parseInt(String(rawOut), 10) : inst.outputIndex(String(rawOut)))
+      const outId = resolveOutputIdx(inst, o.output)
       session.graphOutputs.push({ instance: o.instance, output: inst.outputNames[outId] })
     }
     return { outputs: session.graphOutputs, ...wire() }
