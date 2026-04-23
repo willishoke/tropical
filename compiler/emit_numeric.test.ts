@@ -406,4 +406,20 @@ describe('emitNumericProgram', () => {
       expect(cast.result_type).toBe('bool')
     })
   })
+
+  describe('source_tag pass-through (Phase 2)', () => {
+    // Phase 2 plumbing: source_tag wraps an inner expression and must emit
+    // exactly as the inner would. Phase 6 replaces this with group_id tagging.
+
+    test('tagged add emits an Add, not a substitute zero', () => {
+      const tagged: ExprNode = {
+        op: 'source_tag',
+        source_instance: 'voice_0',
+        gate_expr: true,
+        expr: { op: 'add', args: [{ op: 'input', id: 0 }, 1] },
+      }
+      const prog = emitNumericProgram([tagged], [])
+      expect(findInstr(prog, 'Add')).toBeTruthy()
+    })
+  })
 })

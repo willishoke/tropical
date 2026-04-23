@@ -323,6 +323,10 @@ class Emitter {
     // broadcast_to surviving lower_arrays (dynamic, non-literal src)
     if (obj.op === 'broadcast_to') return this.compileBroadcastTo(obj)
 
+    // Instance-lineage marker emitted by flatten.ts for gateable instances.
+    // Phase 2: pass-through. Phase 6 replaces with group_id tagging.
+    if (obj.op === 'source_tag') return this.compileNode(obj.expr as ExprNode, expected)
+
     // Fallthrough: emit a zero constant (unknown op — safe stub)
     console.warn(`emit_numeric: unhandled op '${obj.op}', substituting 0`)
     return { isArray: false, op: { kind: 'const', val: 0, scalar_type: 'float' }, scalarType: 'float' }

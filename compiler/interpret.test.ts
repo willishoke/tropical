@@ -437,6 +437,19 @@ describe('interpretSamples', () => {
     expect(buf[3]).toBeCloseTo(3 / 20.0, 10)
   })
 
+  test('source_tag is pass-through (Phase 2)', () => {
+    // source_tag wraps an inner expression without altering its value.
+    // Gate semantics are added in Phase 5; for now the tag is inert metadata.
+    const tagged: ExprNode = {
+      op: 'source_tag',
+      source_instance: 'voice_0',
+      gate_expr: true,
+      expr: { op: 'add', args: [{ op: 'input', id: 0 }, 10] },
+    }
+    expect(evalExpr(tagged, env({ inputs: [5] }))).toBe(15)
+    expect(evalExpr(tagged, env({ inputs: [-3] }))).toBe(7)
+  })
+
   test('array register state preserved across samples', () => {
     // Register 0: array [1, 2, 3], update = identity (reg(0))
     // Output: index(reg(0), 1)  → should always be 2

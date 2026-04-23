@@ -222,6 +222,11 @@ export function evalExpr(node: ExprNode, env: InterpretEnv): Value {
       return flat
     }
 
+    // Instance-lineage marker emitted by flatten.ts for gateable instances.
+    // Phase 2: pass-through. Phase 5 replaces with gate semantics.
+    case 'source_tag':
+      return evalExpr(obj.expr as ExprNode, env)
+
     default:
       throw new Error(`interpret: unsupported op '${op}'`)
   }
