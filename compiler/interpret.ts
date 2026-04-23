@@ -222,10 +222,16 @@ export function evalExpr(node: ExprNode, env: InterpretEnv): Value {
       return flat
     }
 
-    // Instance-lineage marker emitted by flatten.ts for gateable instances.
-    // Phase 2: pass-through. Phase 5 replaces with gate semantics.
-    case 'source_tag':
-      return evalExpr(obj.expr as ExprNode, env)
+    // Instance-lineage marker for gateable instances: evaluate `expr` if the
+    // gate is true, otherwise evaluate `on_skip` (default 0). This is the
+    // reference semantics the JIT optimizes into a real br-i1-guarded block.
+    case 'source_tag': {
+      const gate = toBool(evalExpr(obj.gate_expr as ExprNode, env) as number | boolean)
+      if (gate) return evalExpr(obj.expr as ExprNode, env)
+      const onSkip = obj.on_skip as ExprNode | undefined
+      if (onSkip === undefined) return 0
+      return evalExpr(onSkip, env)
+    }
 
     default:
       throw new Error(`interpret: unsupported op '${op}'`)

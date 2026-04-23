@@ -437,9 +437,7 @@ describe('interpretSamples', () => {
     expect(buf[3]).toBeCloseTo(3 / 20.0, 10)
   })
 
-  test('source_tag is pass-through (Phase 2)', () => {
-    // source_tag wraps an inner expression without altering its value.
-    // Gate semantics are added in Phase 5; for now the tag is inert metadata.
+  test('source_tag evaluates inner expr when gate is true (Phase 5)', () => {
     const tagged: ExprNode = {
       op: 'source_tag',
       source_instance: 'voice_0',
@@ -448,6 +446,41 @@ describe('interpretSamples', () => {
     }
     expect(evalExpr(tagged, env({ inputs: [5] }))).toBe(15)
     expect(evalExpr(tagged, env({ inputs: [-3] }))).toBe(7)
+  })
+
+  test('source_tag returns 0 when gate is false and no on_skip (Phase 5)', () => {
+    // This is the output-position semantic: silent on skip.
+    const tagged: ExprNode = {
+      op: 'source_tag',
+      source_instance: 'voice_0',
+      gate_expr: false,
+      expr: { op: 'add', args: [{ op: 'input', id: 0 }, 10] },
+    }
+    expect(evalExpr(tagged, env({ inputs: [5] }))).toBe(0)
+  })
+
+  test('source_tag returns on_skip expr when gate is false (Phase 5)', () => {
+    // This is the register-update semantic: hold previous value on skip.
+    const tagged: ExprNode = {
+      op: 'source_tag',
+      source_instance: 'voice_0',
+      gate_expr: false,
+      expr: { op: 'add', args: [{ op: 'reg', id: 0 }, 1] },  // would increment
+      on_skip: { op: 'reg', id: 0 },                         // instead, hold
+    }
+    expect(evalExpr(tagged, env({ registers: [42] }))).toBe(42)
+  })
+
+  test('source_tag with dynamic gate flips behavior across samples (Phase 5)', () => {
+    // gate_expr can be any expression; here it reads input(1).
+    const tagged: ExprNode = {
+      op: 'source_tag',
+      source_instance: 'voice_0',
+      gate_expr: { op: 'input', id: 1 },
+      expr: { op: 'input', id: 0 },
+    }
+    expect(evalExpr(tagged, env({ inputs: [7, 1] }))).toBe(7)
+    expect(evalExpr(tagged, env({ inputs: [7, 0] }))).toBe(0)
   })
 
   test('array register state preserved across samples', () => {
