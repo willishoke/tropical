@@ -772,21 +772,14 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   builder.SetInsertPoint(loop_body_bb);
 
   // ── Gateable-subgraph setup ──
-  // Resolve each group's gate operand once per sample, coerce to i1, cache
-  // by group_id. When the instruction loop enters a tagged group, we branch
-  // on the cached value; on the skip path we fall through to a merge block
-  // where subsequent writeback / Select fallbacks read stale temp memory
-  // (semantically discarded by the Select's gate arg).
-  std::unordered_map<std::string, llvm::Value *> group_gate_cond;
+  // Gate operands are resolved LAZILY at the group-open point, not up front:
+  // the gate's value often comes from a temp (e.g. a ToBool instruction)
+  // that's only stored once we reach the right point in the instruction
+  // stream. Resolving eagerly at the top of loop_body would read a stale
+  // previous-sample value.
+  std::unordered_map<std::string, Operand> group_operand_by_id;
   for (const auto & g : program.groups)
-  {
-    auto [gv, gt] = resolve_typed(g.gate_operand);
-    if (gv == nullptr)
-      return llvm::createStringError(
-        llvm::inconvertibleErrorCode(),
-        "compile_flat_program: unresolvable gate operand for group '" + g.id + "'");
-    group_gate_cond[g.id] = coerce(gv, gt, ST::Bool);
-  }
+    group_operand_by_id.emplace(g.id, g.gate_operand);
 
   // Current group state. Tagged instructions from the same group flow into
   // the same exec block; when group_id changes, we br into the merge block
@@ -803,14 +796,20 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   };
 
   auto open_group = [&](const std::string & gid) -> llvm::Error {
-    auto it = group_gate_cond.find(gid);
-    if (it == group_gate_cond.end())
+    auto it = group_operand_by_id.find(gid);
+    if (it == group_operand_by_id.end())
       return llvm::createStringError(
         llvm::inconvertibleErrorCode(),
         "compile_flat_program: instruction references unknown group '" + gid + "'");
+    auto [gv, gt] = resolve_typed(it->second);
+    if (gv == nullptr)
+      return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "compile_flat_program: unresolvable gate operand for group '" + gid + "'");
+    llvm::Value * gate_cond = coerce(gv, gt, ST::Bool);
     llvm::BasicBlock * exec_bb  = llvm::BasicBlock::Create(*context, "gate_" + gid + "_exec",  fn);
     llvm::BasicBlock * merge_bb = llvm::BasicBlock::Create(*context, "gate_" + gid + "_merge", fn);
-    builder.CreateCondBr(it->second, exec_bb, merge_bb);
+    builder.CreateCondBr(gate_cond, exec_bb, merge_bb);
     builder.SetInsertPoint(exec_bb);
     current_group_id = gid;
     current_merge_bb = merge_bb;
@@ -1073,6 +1072,11 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   // Loop end
   builder.SetInsertPoint(loop_end_bb);
   builder.CreateRetVoid();
+
+  if (std::getenv("TROPICAL_DUMP_IR"))
+  {
+    module->print(llvm::errs(), nullptr);
+  }
 
   if (llvm::verifyFunction(*fn, &llvm::errs()) || llvm::verifyModule(*module, &llvm::errs()))
   {
