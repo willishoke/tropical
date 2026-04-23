@@ -200,7 +200,24 @@ inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
         for (const auto & s : ji["strides"])
           instr.strides.push_back(s.get<uint8_t>());
 
+      if (ji.contains("group_id") && ji["group_id"].is_string())
+        instr.group_id = ji["group_id"].get<std::string>();
+
       prog.instructions.push_back(std::move(instr));
+    }
+  }
+
+  // Gateable-subgraph groups table — present only when source_tag wrappers
+  // survived the pipeline. Phase 7 reads the field; Phase 8 consumes it at
+  // codegen time.
+  if (plan.contains("groups"))
+  {
+    for (const auto & jg : plan["groups"])
+    {
+      tropical_jit::GroupInfo g;
+      g.id = jg.at("id").get<std::string>();
+      g.gate_operand = parse_operand(jg.at("gate_operand"));
+      prog.groups.push_back(std::move(g));
     }
   }
 

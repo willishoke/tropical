@@ -99,6 +99,19 @@ struct FlatInstr
   std::vector<Operand> args;
   uint32_t             loop_count  = 1;       // 1 = scalar; N > 1 = elementwise loop
   std::vector<uint8_t> strides;               // per-arg: 1 = iterate, 0 = broadcast
+  // Gateable-subgraph tag. Empty = ungated. Instructions with the same non-empty
+  // group_id belong to one conditional block (Phase 8). Phase 7 is serialization
+  // only — codegen ignores this field until Phase 8 lands.
+  std::string          group_id;
+};
+
+// Gateable-subgraph group: all instructions whose group_id == id are emitted
+// inside a single conditional basic block guarded by gate_operand. Paired
+// with FlatProgram::groups.
+struct GroupInfo
+{
+  std::string id;
+  Operand     gate_operand;
 };
 
 struct FlatProgram
@@ -113,6 +126,8 @@ struct FlatProgram
   // Drives FPToSI/SIToFP coercion at writeback so a float temp landing in an
   // int register doesn't reinterpret-bitcast into garbage.
   std::vector<JitScalarType> register_types;
+  // Gateable-subgraph metadata. Empty when the plan contains no source_tag wrappers.
+  std::vector<GroupInfo>     groups;
 };
 
 using NumericKernelFn = void (*)(
