@@ -9,7 +9,7 @@
 import type { ExprNode } from './expr.js'
 import { validateExpr } from './expr.js'
 import type { TypeDefJSON, SessionState } from './session.js'
-import { loadProgramDef, resolveProgramType, normalizeProgramFile } from './session.js'
+import { loadProgramDef, resolveProgramType } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
 import { ProgramType } from './program_types.js'
@@ -331,62 +331,32 @@ export function mergeProgramIntoSession(
 import { readFileSync, readdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { loadStdlibFromMap } from './stdlib_loader.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 /**
  * Load all stdlib program files (tropical_program_2) into a type registry.
- * Types are indexed first, then loaded on demand — dependencies resolve
- * recursively regardless of alphabetical file ordering.
- * Accepts either a full session or just a typeRegistry Map.
+ * Reads `../stdlib/*.json` from disk, then delegates to `loadStdlibFromMap`
+ * for registration. Browser builds use `loadStdlibFromMap` directly with a
+ * bundled JSON map (see compiler/stdlib_bundled.ts).
  */
 export function loadStdlib(
   target: Map<string, ProgramType> | Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'>,
 ): void {
-  // If given a bare Map, wrap it in a minimal session-like object
-  const session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'> & Partial<Pick<SessionState, 'typeResolver'>> =
-    target instanceof Map
-      ? { typeRegistry: target, instanceRegistry: new Map(), paramRegistry: new Map(), triggerRegistry: new Map(), specializationCache: new Map(), genericTemplates: new Map() }
-      : target
-
   const stdlibDir = join(__dirname, '../stdlib')
   const files = readdirSync(stdlibDir).filter(f => f.endsWith('.json')).sort()
 
-  // Index all stdlib files by program name (handles either schema version)
-  const index = new Map<string, string>()
+  const rawByName = new Map<string, unknown>()
   for (const file of files) {
     const path = join(stdlibDir, file)
     const raw = JSON.parse(readFileSync(path, 'utf-8')) as { schema?: string; name?: string }
     if (typeof raw.name !== 'string') throw new Error(`${path}: missing 'name' field`)
-    index.set(raw.name, path)
+    rawByName.set(raw.name, raw)
   }
 
-  // Set up on-demand resolver — loads a stdlib type (and its deps) on first reference.
-  // Returns the concrete ProgramType for non-generic types; for generics it
-  // registers the template and returns undefined (instantiation requires type_args).
-  const loading = new Set<string>()
-  session.typeResolver = (name: string): ProgramType | undefined => {
-    const existing = session.typeRegistry.get(name)
-    if (existing) return existing
-    if (session.genericTemplates.has(name)) return undefined
-    if (loading.has(name)) throw new Error(`Circular stdlib dependency: ${[...loading, name].join(' → ')}`)
-    const path = index.get(name)
-    if (!path) return undefined
-    loading.add(name)
-    const raw = JSON.parse(readFileSync(path, 'utf-8')) as { schema?: string; [k: string]: unknown }
-    const { node } = normalizeProgramFile(raw)
-    const type = loadProgramAsType(node, session)
-    loading.delete(name)
-    return type
-  }
-
-  // Eagerly load all indexed types (resolver handles dependency order)
-  for (const name of index.keys()) {
-    if (!session.typeRegistry.has(name) && !session.genericTemplates.has(name)) {
-      session.typeResolver(name)
-    }
-  }
+  loadStdlibFromMap(target, rawByName)
 }
 
 // ─────────────────────────────────────────────────────────────
