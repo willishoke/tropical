@@ -19,7 +19,7 @@ import {
 import { lowerArrayOps } from './lower_arrays.js'
 import { type PortType, Float, Bool, ArrayType } from './term.js'
 import { checkArrayConnection } from './array_wiring.js'
-import { emitNumericProgram, type NInstr, type ScalarType } from './emit_numeric.js'
+import { emitNumericProgram, type NInstr, type ScalarType, type GroupInfo } from './emit_numeric.js'
 
 // ─────────────────────────────────────────────────────────────
 // Wiring type validation
@@ -150,6 +150,8 @@ export interface FlatPlan {
   array_slot_sizes: number[]
   output_targets:  number[]
   register_targets: number[]
+  /** Gateable-subgraph metadata, if any source_tag wrappers were emitted. */
+  groups?:         GroupInfo[]
 }
 
 /** Pre-emission representation: flattened ExprNode trees before instruction emission. */
@@ -1686,7 +1688,7 @@ export function flattenSession(session: SessionState): FlatPlan {
     }
   }
 
-  return {
+  const plan: FlatPlan = {
     schema: 'tropical_plan_4',
     config: { sample_rate: flat.sampleRate },
     state_init: flat.stateInit as (number | boolean)[],
@@ -1701,5 +1703,7 @@ export function flattenSession(session: SessionState): FlatPlan {
     output_targets:   program.output_targets,
     register_targets: program.register_targets,
   }
+  if (program.groups) plan.groups = program.groups
+  return plan
 }
 

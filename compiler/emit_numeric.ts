@@ -41,6 +41,19 @@ export type NInstr = {
   loop_count:  number       // 1 = scalar; N > 1 = elementwise loop over N elements
   strides:     number[]     // per-arg: 1 = iterate (arr[i]), 0 = broadcast
   result_type: ScalarType   // scalar type of the result written to dst
+  /** Instance-lineage tag for gateable subgraphs. Empty/absent = ungated.
+   *  The JIT emits tagged instructions inside a br-i1-guarded basic block
+   *  per unique group_id (Phase 8). Phase 6 emits an ungated Select fallback
+   *  so the semantics are correct even before the JIT optimization. */
+  group_id?:   string
+}
+
+/** A gateable-subgraph group: inner expressions tagged with `id` are emitted
+ *  inside a conditional block guarded by `gate_temp`. Outputs merge to
+ *  `on_skip_operand` when the gate is false. */
+export type GroupInfo = {
+  id:               string
+  gate_operand:     NOperand   // scalar operand holding the gate value (bool)
 }
 
 export type FlatProgram = {
@@ -50,6 +63,7 @@ export type FlatProgram = {
   instructions:     NInstr[]
   output_targets:   number[]   // temps[output_targets[i]] holds output i
   register_targets: number[]   // temps[register_targets[i]] holds new value for register i; -1 = unchanged
+  groups?:          GroupInfo[]  // gateable-subgraph metadata; absent when no source_tag was emitted
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -129,6 +143,14 @@ class Emitter {
   private nextArraySlot = 0
   private arraySizes:   number[] = []
   private instrs:       NInstr[] = []
+  // Group-id stack for nested source_tag wrappers. The innermost (top) tag
+  // determines which group an emitted instruction belongs to. Empty = ungated.
+  private groupStack: string[] = []
+  // Unique group suffix counter per source_instance so multi-output instances
+  // and multi-wrap sites each get distinct group ids.
+  private groupCounter = 0
+  // Registered groups, exposed on FlatProgram.groups for the JIT to consume.
+  private groups: GroupInfo[] = []
   // CSE: memoize compiled results by (node identity, expected type).
   //
   // Identity-based lookup is O(1) vs O(JSON size) for structural hashing, which matters
@@ -178,7 +200,10 @@ class Emitter {
     return slot
   }
 
-  private emit(instr: NInstr): void { this.instrs.push(instr) }
+  private emit(instr: NInstr): void {
+    if (this.groupStack.length > 0) instr.group_id = this.groupStack[this.groupStack.length - 1]
+    this.instrs.push(instr)
+  }
 
   // ── Terminal check: if node is a leaf, return its Operand + type directly. ──
   //
@@ -324,8 +349,14 @@ class Emitter {
     if (obj.op === 'broadcast_to') return this.compileBroadcastTo(obj)
 
     // Instance-lineage marker emitted by flatten.ts for gateable instances.
-    // Phase 2: pass-through. Phase 6 replaces with group_id tagging.
-    if (obj.op === 'source_tag') return this.compileNode(obj.expr as ExprNode, expected)
+    // Emit gate_expr and on_skip UNGATED (they live outside the group);
+    // tag the inner expr's instructions with a unique group_id so Phase 8
+    // can wrap them in a conditional basic block.
+    //
+    // For Phase 6 JIT correctness, emit an ungated Select(gate, expr, on_skip)
+    // after the tagged block — this matches the interpreter's source_tag
+    // semantics even before the JIT optimization recognizes groups.
+    if (obj.op === 'source_tag') return this.compileSourceTag(obj, expected)
 
     // Fallthrough: emit a zero constant (unknown op — safe stub)
     console.warn(`emit_numeric: unhandled op '${obj.op}', substituting 0`)
@@ -455,6 +486,70 @@ class Emitter {
     return { isArray: true, op: { kind: 'array_reg', slot }, size, scalarType: rt }
   }
 
+  // ── source_tag { gate_expr, expr, on_skip? } → Select(gate, expr, on_skip) ──
+  //
+  // Compiles gate_expr and on_skip ungated (outside the group), tags the
+  // inner expr's instructions with a fresh group_id, and emits an ungated
+  // Select as the merge point. The JIT (Phase 8) will recognize the group
+  // and replace this with a real br-i1 + phi; until then, Select is the
+  // semantic fallback.
+  private compileSourceTag(obj: { op: string; [k: string]: unknown }, expected?: ScalarType): CompileResult {
+    const sourceInstance = (obj.source_instance as string | undefined) ?? 'unknown'
+    const groupId = `${sourceInstance}#${this.groupCounter++}`
+
+    // 1. Compile gate_expr ungated. Force result into a reg so it's a stable temp.
+    const gateNode = obj.gate_expr as ExprNode
+    let gateResult = this.compileNode(gateNode, 'bool')
+    if (gateResult.isArray) gateResult = this.unboxArray(gateResult)
+    let gateOperand: NOperand = gateResult.op
+    if (gateOperand.kind !== 'reg' && gateOperand.kind !== 'state_reg' && gateOperand.kind !== 'input') {
+      // Materialize into a reg so the JIT has a reliable slot to load from.
+      const dst = this.allocReg()
+      this.regTypes.set(dst, 'bool')
+      this.emit({ tag: 'ToBool', dst, args: [gateOperand], loop_count: 1, strides: [], result_type: 'bool' })
+      gateOperand = { kind: 'reg', slot: dst, scalar_type: 'bool' }
+    }
+
+    // 2. Compile on_skip ungated (default 0 of the expected type).
+    let onSkipResult: CompileResult
+    if (obj.on_skip !== undefined) {
+      onSkipResult = this.compileNode(obj.on_skip as ExprNode, expected)
+    } else {
+      const t = expected ?? 'float'
+      onSkipResult = { isArray: false, op: { kind: 'const', val: 0, scalar_type: t }, scalarType: t }
+    }
+    if (onSkipResult.isArray && onSkipResult.size === 1) onSkipResult = this.unboxArray(onSkipResult)
+
+    // 3. Compile inner expr INSIDE the group so its instructions get tagged.
+    this.groupStack.push(groupId)
+    let exprResult: CompileResult
+    try {
+      exprResult = this.compileNode(obj.expr as ExprNode, expected)
+    } finally {
+      this.groupStack.pop()
+    }
+    if (exprResult.isArray && exprResult.size === 1) exprResult = this.unboxArray(exprResult)
+
+    // 4. Record the group metadata.
+    this.groups.push({ id: groupId, gate_operand: gateOperand })
+
+    // 5. Emit an ungated Select(gate, expr, on_skip) as the merge point.
+    const rt = inferResultType('Select', ['bool', exprResult.scalarType, onSkipResult.scalarType])
+    const anyArray = exprResult.isArray || onSkipResult.isArray
+    if (!anyArray) {
+      const dst = this.allocReg()
+      this.regTypes.set(dst, rt)
+      this.emit({ tag: 'Select', dst, args: [gateOperand, exprResult.op, onSkipResult.op], loop_count: 1, strides: [], result_type: rt })
+      return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
+    }
+    // Elementwise path for array expr (rare but supported).
+    const size = exprResult.isArray ? exprResult.size : (onSkipResult as ArrayResult).size
+    const slot = this.allocArraySlot(size)
+    const strides = [0, exprResult.isArray ? 1 : 0, onSkipResult.isArray ? 1 : 0]
+    this.emit({ tag: 'Select', dst: slot, args: [gateOperand, exprResult.op, onSkipResult.op], loop_count: size, strides, result_type: rt })
+    return { isArray: true, op: { kind: 'array_reg', slot }, size, scalarType: rt }
+  }
+
   // ── index(arr, idx) → scalar element ──
   private compileIndex(argNodes: ExprNode[], _expected?: ScalarType): ScalarResult {
     // Array element type is authoritative for the result; we don't thread
@@ -579,7 +674,7 @@ class Emitter {
       }
     }
 
-    return {
+    const out: FlatProgram = {
       register_count:   this.nextReg,
       array_slot_count: this.nextArraySlot,
       array_slot_sizes: this.arraySizes,
@@ -587,6 +682,8 @@ class Emitter {
       output_targets,
       register_targets,
     }
+    if (this.groups.length > 0) out.groups = this.groups
+    return out
   }
 }
 
