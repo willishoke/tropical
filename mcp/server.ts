@@ -80,9 +80,15 @@ function adaptInputExpr(
 
   const check = checkArrayConnection(srcType, dstType, node)
   if (!check.compatible) {
-    throw new Error(
-      `Type mismatch on '${instanceName}'.${inputName}: ${check.error}`
-    )
+    failPredicate({
+      code:      'type_mismatch',
+      param:     'expr',
+      value:     node,
+      predicate: 'type_compatible',
+      expected:  dstType,
+      got:       srcType,
+      message:   `Type mismatch on '${instanceName}'.${inputName}: ${check.error}`,
+    })
   }
   return { expr: check.broadcastExpr ?? node, resultShape: check.resultShape }
 }
