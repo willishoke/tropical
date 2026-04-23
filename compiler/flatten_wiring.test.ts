@@ -3,7 +3,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { normalizeWiringTypes, FlattenError, flattenSession } from './flatten'
+import { normalizeWiringTypes, FlattenError, flattenSession, flattenExpressions } from './flatten'
 import type { InstanceInfo } from './compiler'
 import { Float, ArrayType } from './term'
 import type { ExprNode } from './expr'
@@ -235,5 +235,136 @@ describe('feedback cycle auto-delay', () => {
 
     const plan = flattenSession(fullSession)
     expect(plan.instructions.length).toBeGreaterThan(0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// Gateable subgraphs (Phase 4)
+// ─────────────────────────────────────────────────────────────
+
+describe('gateable instances wrap outputs in source_tag', () => {
+  function mockSession() {
+    return {
+      typeRegistry: new Map<string, ProgramType>(),
+      typeAliasRegistry: new Map<string, { base: string; bounds: Bounds }>(),
+      instanceRegistry: new Map<string, ProgramInstance>(),
+      paramRegistry: new Map<string, Param>(),
+      triggerRegistry: new Map<string, Trigger>(),
+    }
+  }
+
+  // Passthrough with a one-register state to exercise both output wrapping
+  // and register-update wrapping (the latter uses on_skip for hold-on-skip).
+  function passthroughWithState(): ProgramJSON {
+    return {
+      schema: 'tropical_program_1',
+      name: 'Pass',
+      inputs: ['in'],
+      outputs: ['out'],
+      regs: { last: 0 },
+      input_defaults: { in: 0 },
+      process: {
+        outputs: { out: { op: 'input', name: 'in' } },
+        next_regs: { last: { op: 'input', name: 'in' } },
+      },
+    } as ProgramJSON
+  }
+
+  test('gateable instance emits source_tag on outputs and register updates', () => {
+    const session = mockSession()
+
+    const type = loadProgramDef(passthroughWithState(), session)
+    session.typeRegistry.set('Pass', type)
+
+    const voice = type.instantiateAs('voice_0')
+    voice.gateable = true
+    voice.gateInput = true  // always-on gate (constant true)
+    session.instanceRegistry.set('voice_0', voice)
+
+    const fullSession = {
+      ...session,
+      bufferLength: 1,
+      dac: null,
+      inputExprNodes: new Map<string, ExprNode>([
+        ['voice_0:in', 1.0 as ExprNode],
+      ]),
+      graphOutputs: [{ instance: 'voice_0', output: 'out' }],
+      runtime: null as unknown as import('./runtime/runtime').Runtime,
+      graph: null as unknown as ReturnType<typeof import('./session').makeSession>['graph'],
+      _nameCounters: new Map<string, number>(),
+    }
+
+    const flat = flattenExpressions(fullSession)
+
+    // Output expression is wrapped in source_tag. An outer safety clamp
+    // (added for graph outputs) sits around it — unwrap once.
+    expect(flat.outputExprs.length).toBe(1)
+    const outer = flat.outputExprs[0] as { op: string; args: unknown[] }
+    expect(outer.op).toBe('clamp')  // safety clamp
+    const tag = outer.args[0] as { op: string; source_instance: string; gate_expr: unknown }
+    expect(tag.op).toBe('source_tag')
+    expect(tag.source_instance).toBe('voice_0')
+    expect(tag.gate_expr).toBe(true)
+
+    // Register update is also wrapped, with on_skip = reg(id). No safety
+    // clamp on the register path.
+    expect(flat.registerExprs.length).toBe(1)
+    const reg = flat.registerExprs[0] as { op: string; on_skip: { op: string; id: number } }
+    expect(reg.op).toBe('source_tag')
+    expect(reg.on_skip.op).toBe('reg')
+    expect(reg.on_skip.id).toBe(0)  // the only register's flat id
+  })
+
+  test('gateable=true without gate_input rejected at flatten time', () => {
+    const session = mockSession()
+
+    const type = loadProgramDef(passthroughWithState(), session)
+    session.typeRegistry.set('Pass', type)
+
+    const voice = type.instantiateAs('voice_0')
+    voice.gateable = true
+    // gateInput left undefined on purpose
+    session.instanceRegistry.set('voice_0', voice)
+
+    const fullSession = {
+      ...session,
+      bufferLength: 1,
+      dac: null,
+      inputExprNodes: new Map<string, ExprNode>(),
+      graphOutputs: [{ instance: 'voice_0', output: 'out' }],
+      runtime: null as unknown as import('./runtime/runtime').Runtime,
+      graph: null as unknown as ReturnType<typeof import('./session').makeSession>['graph'],
+      _nameCounters: new Map<string, number>(),
+    }
+
+    expect(() => flattenExpressions(fullSession)).toThrow(FlattenError)
+  })
+
+  test('non-gateable instances emit outputs without source_tag wrapping', () => {
+    const session = mockSession()
+
+    const type = loadProgramDef(passthroughWithState(), session)
+    session.typeRegistry.set('Pass', type)
+
+    const voice = type.instantiateAs('voice_0')
+    // gateable left false
+    session.instanceRegistry.set('voice_0', voice)
+
+    const fullSession = {
+      ...session,
+      bufferLength: 1,
+      dac: null,
+      inputExprNodes: new Map<string, ExprNode>([
+        ['voice_0:in', 1.0 as ExprNode],
+      ]),
+      graphOutputs: [{ instance: 'voice_0', output: 'out' }],
+      runtime: null as unknown as import('./runtime/runtime').Runtime,
+      graph: null as unknown as ReturnType<typeof import('./session').makeSession>['graph'],
+      _nameCounters: new Map<string, number>(),
+    }
+
+    const flat = flattenExpressions(fullSession)
+    const out = flat.outputExprs[0] as { op: string }
+    expect(out.op).not.toBe('source_tag')
   })
 })
