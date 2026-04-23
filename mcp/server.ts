@@ -87,11 +87,158 @@ function adaptInputExpr(
   return { expr: check.broadcastExpr ?? node, resultShape: check.resultShape }
 }
 
-const ok  = (data: unknown) =>
-  ({ content: [{ type: 'text' as const, text: JSON.stringify({ ok: true,  data  }) }] })
+// ─── Error envelope ───────────────────────────────────────────────────────────
+// Spec: mcp/ERRORS.md
 
-const fail = (e: unknown) =>
-  ({ content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: String(e) }) }], isError: true as const })
+type ErrorCode =
+  | 'unknown_program'
+  | 'unknown_instance'
+  | 'unknown_input'
+  | 'unknown_output'
+  | 'unknown_param'
+  | 'unknown_device'
+  | 'instance_exists'
+  | 'invalid_type_args'
+  | 'type_mismatch'
+  | 'shape_mismatch'
+  | 'length_mismatch'
+  | 'arity_error'
+  | 'missing_argument'
+  | 'invalid_value'
+  | 'invalid_state'
+  | 'compile_failed'
+  | 'audio_error'
+  | 'internal_error'
+
+type FieldSpec = {
+  type:     'int' | 'float' | 'string' | 'bool'
+  required: boolean
+  min?:     number
+  max?:     number
+  options?: string[]
+}
+
+type Valid =
+  | { kind: 'enum';      options: string[] }
+  | { kind: 'record';    fields: Record<string, FieldSpec> }
+  | { kind: 'predicate'; predicate: string; expected: unknown; got: unknown }
+
+type ErrorEnvelope = {
+  code:        ErrorCode
+  message:     string
+  retryable:   boolean
+  param?:      string
+  value?:      unknown
+  valid?:      Valid
+  suggestion?: unknown
+}
+
+class ToolError extends Error {
+  envelope: ErrorEnvelope
+  constructor(envelope: ErrorEnvelope) {
+    super(envelope.message)
+    this.envelope = envelope
+  }
+}
+
+function nearestMatch(value: string, candidates: string[]): string | undefined {
+  if (candidates.length === 0 || typeof value !== 'string') return undefined
+  const dist = (a: string, b: string): number => {
+    const m = a.length, n = b.length
+    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0))
+    for (let i = 0; i <= m; i++) dp[i][0] = i
+    for (let j = 0; j <= n; j++) dp[0][j] = j
+    for (let i = 1; i <= m; i++)
+      for (let j = 1; j <= n; j++)
+        dp[i][j] = a[i - 1] === b[j - 1]
+          ? dp[i - 1][j - 1]
+          : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1])
+    return dp[m][n]
+  }
+  let best = candidates[0], bestD = dist(value, best)
+  for (const c of candidates.slice(1)) {
+    const d = dist(value, c)
+    if (d < bestD) { best = c; bestD = d }
+  }
+  return bestD <= Math.max(2, Math.floor(value.length / 3)) ? best : undefined
+}
+
+function failEnum(opts: {
+  code: ErrorCode; param: string; value: unknown;
+  options: string[]; message?: string;
+}): never {
+  const suggestion = typeof opts.value === 'string'
+    ? nearestMatch(opts.value, opts.options)
+    : undefined
+  const message = opts.message
+    ?? `Invalid ${opts.param}: ${JSON.stringify(opts.value)}${suggestion ? `. Did you mean '${suggestion}'?` : ''}`
+  throw new ToolError({
+    code:      opts.code,
+    message,
+    retryable: false,
+    param:     opts.param,
+    value:     opts.value,
+    valid:     { kind: 'enum', options: opts.options },
+    ...(suggestion !== undefined ? { suggestion } : {}),
+  })
+}
+
+function failRecord(opts: {
+  code: ErrorCode; param: string; value: unknown;
+  fields: Record<string, FieldSpec>; message?: string; suggestion?: unknown;
+}): never {
+  throw new ToolError({
+    code:      opts.code,
+    message:   opts.message ?? `Invalid ${opts.param}`,
+    retryable: false,
+    param:     opts.param,
+    value:     opts.value,
+    valid:     { kind: 'record', fields: opts.fields },
+    ...(opts.suggestion !== undefined ? { suggestion: opts.suggestion } : {}),
+  })
+}
+
+function failPredicate(opts: {
+  code: ErrorCode; param: string; value: unknown;
+  predicate: string; expected: unknown; got: unknown;
+  suggestion?: unknown; message?: string;
+}): never {
+  throw new ToolError({
+    code:      opts.code,
+    message:   opts.message ?? `${opts.predicate} failed on ${opts.param}`,
+    retryable: false,
+    param:     opts.param,
+    value:     opts.value,
+    valid:     { kind: 'predicate', predicate: opts.predicate, expected: opts.expected, got: opts.got },
+    ...(opts.suggestion !== undefined ? { suggestion: opts.suggestion } : {}),
+  })
+}
+
+function failBare(opts: {
+  code: ErrorCode; message: string; retryable?: boolean;
+  param?: string; value?: unknown;
+}): never {
+  throw new ToolError({
+    code:      opts.code,
+    message:   opts.message,
+    retryable: opts.retryable ?? false,
+    ...(opts.param !== undefined ? { param: opts.param } : {}),
+    ...(opts.value !== undefined ? { value: opts.value } : {}),
+  })
+}
+
+const ok  = (data: unknown) =>
+  ({ content: [{ type: 'text' as const, text: JSON.stringify({ status: 'ok', data }) }] })
+
+const fail = (e: unknown) => {
+  const envelope: ErrorEnvelope = e instanceof ToolError
+    ? e.envelope
+    : { code: 'internal_error', message: e instanceof Error ? e.message : String(e), retryable: false }
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify({ status: 'error', error: envelope }) }],
+    isError: true as const,
+  }
+}
 
 function wrap(fn: () => unknown) {
   try   { return ok(fn())         }
