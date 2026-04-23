@@ -711,7 +711,12 @@ function handleWireChain(args: Record<string, unknown>) {
     const initialExpr   = args.initial_expr as import('../compiler/expr.js').ExprNode | undefined
 
     if (instanceNames.length < 2 && initialExpr === undefined)
-      throw new Error('wire_chain needs at least 2 instances, or 1 instance with initial_expr')
+      failBare({
+        code: 'arity_error',
+        message: 'wire_chain needs at least 2 instances, or 1 instance with initial_expr',
+        param: 'instances',
+        value: instanceNames,
+      })
 
     // Validate all instances upfront
     const insts = instanceNames.map(n => {
@@ -754,7 +759,12 @@ function handleWireZip(args: Record<string, unknown>) {
     const targets = args.targets as Array<{ instance: string; input:  string | number }>
 
     if (sources.length !== targets.length)
-      throw new Error(`sources and targets must be the same length (got ${sources.length} vs ${targets.length})`)
+      failBare({
+        code: 'length_mismatch',
+        message: `sources and targets must be the same length (got ${sources.length} vs ${targets.length})`,
+        param: 'sources',
+        value: { sources: sources.length, targets: targets.length },
+      })
 
     const linked = []
     for (let i = 0; i < sources.length; i++) {
@@ -822,7 +832,8 @@ function handleFanIn(args: Record<string, unknown>) {
     const sources = args.sources as Array<{ instance: string; output: string | number; gain?: number }>
     const target  = args.target  as { instance: string; input: string | number }
 
-    if (sources.length === 0) throw new Error('sources must be non-empty')
+    if (sources.length === 0)
+      failBare({ code: 'arity_error', message: 'sources must be non-empty', param: 'sources', value: sources })
 
     const dstInst = session.instanceRegistry.get(target.instance)
     if (!dstInst) throw new Error(`No instance named '${target.instance}'`)
@@ -890,8 +901,9 @@ function handleExportProgram(args: Record<string, unknown>) {
     const outputs   = args.outputs as Record<string, { instance: string; output: string }>
     const removeExported = (args.remove_exported as boolean) ?? false
 
-    if (!name) throw new Error('name is required')
-    if (!outputs || Object.keys(outputs).length === 0) throw new Error('outputs is required (at least one)')
+    if (!name) failBare({ code: 'missing_argument', message: 'name is required', param: 'name' })
+    if (!outputs || Object.keys(outputs).length === 0)
+      failBare({ code: 'missing_argument', message: 'outputs is required (at least one)', param: 'outputs' })
 
     const exportedNode = exportSessionAsProgram(session, { name, inputs, outputs })
     const exportedInstanceNames = [...instanceDecls(exportedNode)].map(d => d.name)
@@ -1094,7 +1106,7 @@ function handleLoad(args: Record<string, unknown>) {
     } else if (args.program) {
       raw = args.program
     } else {
-      throw new Error('Provide either path (file) or program (inline JSON).')
+      failBare({ code: 'missing_argument', message: 'Provide either path (file) or program (inline JSON).' })
     }
 
     if (session.dac?.isRunning) session.dac.stop()
@@ -1122,7 +1134,7 @@ function handleSave() {
 function handleMerge(args: Record<string, unknown>) {
   return wrap(() => {
     const raw = args.program ?? args.patch
-    if (!raw) throw new Error('Provide a program or patch object.')
+    if (!raw) failBare({ code: 'missing_argument', message: 'Provide a program or patch object.' })
     const { node, topLevel } = normalizeProgramFile(raw as { schema?: string; [k: string]: unknown })
     mergeProgramIntoSession(node, topLevel, session)
     return {
