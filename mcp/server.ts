@@ -260,14 +260,26 @@ function requireInstance(name: string, param: string) {
 function resolveOutputIdx(inst: { outputNames: string[] }, nameOrIdx: string | number): number {
   if (typeof nameOrIdx === 'number') return nameOrIdx
   const idx = inst.outputNames.indexOf(nameOrIdx)
-  if (idx === -1) throw new Error(`Unknown output '${nameOrIdx}'. Available: ${inst.outputNames.join(', ')}`)
+  if (idx === -1)
+    failEnum({
+      code:    'unknown_output',
+      param:   'output',
+      value:   nameOrIdx,
+      options: inst.outputNames,
+    })
   return idx
 }
 
 function resolveInputIdx(inst: { inputNames: string[] }, nameOrIdx: string | number): number {
   if (typeof nameOrIdx === 'number') return nameOrIdx
   const idx = inst.inputNames.indexOf(nameOrIdx)
-  if (idx === -1) throw new Error(`Unknown input '${nameOrIdx}'. Available: ${inst.inputNames.join(', ')}`)
+  if (idx === -1)
+    failEnum({
+      code:    'unknown_input',
+      param:   'input',
+      value:   nameOrIdx,
+      options: inst.inputNames,
+    })
   return idx
 }
 
