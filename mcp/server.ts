@@ -1312,7 +1312,11 @@ function handleTool(name: string, args: Record<string, unknown>) {
     })
 
     case 'stop_audio': return wrap(() => {
-      if (!session.dac) throw new Error('DAC has not been created yet.')
+      if (!session.dac)
+        failBare({
+          code:    'invalid_state',
+          message: 'DAC has not been created yet.',
+        })
       session.dac.stop()
       return { is_running: session.dac.isRunning }
     })
