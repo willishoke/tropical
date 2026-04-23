@@ -147,6 +147,8 @@ const ProgramInstanceSchema = z.object({
   program: z.string(),
   inputs: z.record(z.string(), ExprNodeSchema).optional(),
   type_args: z.record(z.string(), z.union([z.number().int(), ExprNodeSchema])).optional(),
+  gateable: z.boolean().optional(),
+  gate_input: ExprNodeSchema.optional(),
 })
 
 export const ProgramJSONSchema: z.ZodType = z.lazy(() => z.object({

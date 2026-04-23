@@ -58,6 +58,13 @@ export interface ProgramJSON {
     /** Compile-time type args for generic programs. Numeric literals, or
      *  `{op:"type_param",name}` to forward from the outer program's type_params. */
     type_args?: Record<string, number | ExprNode>
+    /** When true, this instance's instructions are wrapped in a conditional
+     *  basic block at JIT time. If `gate_input` is false, the instance's
+     *  computation is skipped, state is held, and outputs appear as zero. */
+    gateable?: boolean
+    /** Expression producing a Bool-typed scalar signal. Required when
+     *  `gateable` is true. Type-checked at flatten time. */
+    gate_input?: ExprNode
   }>
 
   /** Process body for leaf programs (direct computation). */
@@ -137,6 +144,14 @@ export function loadProgramAsSession(
   for (const [name, inst] of Object.entries(prog.instances ?? {})) {
     const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
     const instance = type.instantiateAs(name, { baseTypeName: inst.program, typeArgs })
+    if (inst.gateable) {
+      if (inst.gate_input === undefined) {
+        throw new Error(`Instance '${name}' has gateable=true but no gate_input expression.`)
+      }
+      instance.gateable = true
+      instance.gateInput = inst.gate_input
+      validateExpr(inst.gate_input, `${name}.__gate__`)
+    }
     session.instanceRegistry.set(instance.name, instance)
 
     // Populate wiring from instance inputs
@@ -257,6 +272,14 @@ export function mergeProgramIntoSession(
   for (const [name, inst] of Object.entries(prog.instances ?? {})) {
     const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
     const instance = type.instantiateAs(name, { baseTypeName: inst.program, typeArgs })
+    if (inst.gateable) {
+      if (inst.gate_input === undefined) {
+        throw new Error(`Instance '${name}' has gateable=true but no gate_input expression.`)
+      }
+      instance.gateable = true
+      instance.gateInput = inst.gate_input
+      validateExpr(inst.gate_input, `${name}.__gate__`)
+    }
     session.instanceRegistry.set(instance.name, instance)
 
     // Populate wiring from instance inputs
@@ -372,8 +395,12 @@ export function saveProgramFromSession(
   if (session.instanceRegistry.size) {
     prog.instances = {}
     for (const [name, inst] of session.instanceRegistry) {
-      const entry: { program: string; type_args?: Record<string, number> } = { program: inst.typeName }
+      const entry: { program: string; type_args?: Record<string, number>; gateable?: boolean; gate_input?: ExprNode } = { program: inst.typeName }
       if (inst.typeArgs) entry.type_args = inst.typeArgs
+      if (inst.gateable) {
+        entry.gateable = true
+        entry.gate_input = inst.gateInput
+      }
       prog.instances[name] = entry
     }
 
@@ -594,10 +621,14 @@ export function exportSessionAsProgram(
   prog.instances = {}
   for (const instName of order) {
     const inst = session.instanceRegistry.get(instName)!
-    const entry: { program: string; type_args?: Record<string, number>; inputs?: Record<string, ExprNode> } = {
+    const entry: { program: string; type_args?: Record<string, number>; inputs?: Record<string, ExprNode>; gateable?: boolean; gate_input?: ExprNode } = {
       program: inst.typeName,
     }
     if (inst.typeArgs) entry.type_args = inst.typeArgs
+    if (inst.gateable) {
+      entry.gateable = true
+      entry.gate_input = inst.gateInput !== undefined ? rewriteRefs(inst.gateInput) : undefined
+    }
 
     // Copy wiring, rewriting exposed ports to {op:"input", name:...}
     // and ref→nested_out for sibling instances

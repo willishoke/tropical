@@ -237,6 +237,78 @@ describe('generic programs round-trip', () => {
     expect(saved.instances!['p1'].program).toBe('Passthrough')
     expect(saved.instances!['p1'].type_args).toBeUndefined()
   })
+
+  test('gateable round-trips through schema, loader, and saver (Phase 3)', () => {
+    const session = makeSession()
+    const raw = {
+      schema: 'tropical_program_1',
+      name: 'Patch',
+      programs: {
+        Passthrough: {
+          schema: 'tropical_program_1',
+          name: 'Passthrough',
+          inputs: ['x'],
+          outputs: ['y'],
+          process: { outputs: { y: { op: 'input', name: 'x' } } },
+        },
+      },
+      instances: {
+        voice_0: {
+          program: 'Passthrough',
+          inputs: { x: 1.0 },
+          gateable: true,
+          gate_input: true,
+        },
+      },
+      audio_outputs: [{ instance: 'voice_0', output: 'y' }],
+    }
+
+    // Pass through schema validation
+    const prog = parseProgram(raw)
+    expect((prog.instances as Record<string, { gateable?: boolean }>)['voice_0'].gateable).toBe(true)
+
+    // Load into a session, verify the ProgramInstance carries the flag
+    loadProgramAsSession(prog as ProgramJSON, session)
+    const inst = session.instanceRegistry.get('voice_0')!
+    expect(inst.gateable).toBe(true)
+    expect(inst.gateInput).toBe(true)
+
+    // Save back — gateable and gate_input should survive
+    const saved = saveProgramFromSession(session)
+    const savedInst = saved.instances!['voice_0'] as { gateable?: boolean; gate_input?: unknown }
+    expect(savedInst.gateable).toBe(true)
+    expect(savedInst.gate_input).toBe(true)
+
+    session.graph.dispose()
+  })
+
+  test('gateable=true without gate_input is rejected at load (Phase 3)', () => {
+    const session = makeSession()
+    const bad: ProgramJSON = {
+      schema: 'tropical_program_1',
+      name: 'Patch',
+      programs: {
+        Passthrough: {
+          schema: 'tropical_program_1',
+          name: 'Passthrough',
+          inputs: ['x'],
+          outputs: ['y'],
+          process: { outputs: { y: { op: 'input', name: 'x' } } },
+        },
+      },
+      instances: {
+        voice_0: {
+          program: 'Passthrough',
+          inputs: { x: 1.0 },
+          gateable: true,
+          // gate_input intentionally missing
+        },
+      },
+      audio_outputs: [{ instance: 'voice_0', output: 'y' }],
+    }
+    expect(() => loadProgramAsSession(bad, session)).toThrow(/gate_input/)
+    session.graph.dispose()
+  })
 })
 
 describe('typeResolver', () => {
