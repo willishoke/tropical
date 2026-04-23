@@ -245,6 +245,35 @@ function wrap(fn: () => unknown) {
   catch (e) { return fail(e) }
 }
 
+function resolveProgramTypeOrFail(
+  programName: string,
+  typeArgs: Record<string, number> | undefined,
+  programParam: string,
+) {
+  try {
+    return resolveProgramType(session, programName, typeArgs, undefined)
+  } catch (e) {
+    const registered = session.typeRegistry.has(programName) || session.genericTemplates.has(programName)
+    if (!registered) {
+      failEnum({
+        code:    'unknown_program',
+        param:   programParam,
+        value:   programName,
+        options: [
+          ...session.typeRegistry.keys(),
+          ...session.genericTemplates.keys(),
+        ],
+      })
+    }
+    failBare({
+      code:    'invalid_type_args',
+      message: e instanceof Error ? e.message : String(e),
+      param:   'type_args',
+      value:   typeArgs,
+    })
+  }
+}
+
 function requireInstance(name: string, param: string) {
   const inst = session.instanceRegistry.get(name)
   if (!inst)
@@ -682,8 +711,13 @@ function handleAddInstance(
 ) {
   return wrap(() => {
     if (session.instanceRegistry.has(instanceName))
-      throw new Error(`Instance '${instanceName}' already exists.`)
-    const { type, typeArgs: resolved } = resolveProgramType(session, programName, typeArgs, undefined)
+      failBare({
+        code:    'instance_exists',
+        message: `Instance '${instanceName}' already exists.`,
+        param:   'instance_name',
+        value:   instanceName,
+      })
+    const { type, typeArgs: resolved } = resolveProgramTypeOrFail(programName, typeArgs, 'program')
     const inst = type.instantiateAs(instanceName, { baseTypeName: programName, typeArgs: resolved })
     session.instanceRegistry.set(instanceName, inst)
     return instanceSummary(instanceName)
@@ -698,15 +732,26 @@ function handleReplicate(
 ) {
   return wrap(() => {
     if (!Number.isInteger(count) || count < 1)
-      throw new Error(`count must be a positive integer, got ${count}`)
+      failRecord({
+        code:    'invalid_value',
+        param:   'count',
+        value:   count,
+        message: `count must be a positive integer, got ${count}`,
+        fields:  { count: { type: 'int', required: true, min: 1 } },
+      })
 
     const prefix = namePrefix ?? programName.toLowerCase()
     const created = []
     for (let i = 0; i < count; i++) {
       const name = nextName(session, prefix)
       if (session.instanceRegistry.has(name))
-        throw new Error(`Instance '${name}' already exists — pick a different name_prefix`)
-      const { type, typeArgs: resolved } = resolveProgramType(session, programName, typeArgs, undefined)
+        failBare({
+          code:    'instance_exists',
+          message: `Instance '${name}' already exists — pick a different name_prefix`,
+          param:   'name_prefix',
+          value:   namePrefix,
+        })
+      const { type, typeArgs: resolved } = resolveProgramTypeOrFail(programName, typeArgs, 'program')
       const inst = type.instantiateAs(name, { baseTypeName: programName, typeArgs: resolved })
       session.instanceRegistry.set(name, inst)
       created.push(instanceSummary(name))
@@ -922,7 +967,11 @@ function handleExportProgram(args: Record<string, unknown>) {
 
     // Register as a usable type (exported programs are never generic)
     const type = loadProgramAsType(exportedNode, session)
-    if (!type) throw new Error(`export_program produced a generic program — not supported`)
+    if (!type)
+      failBare({
+        code:    'internal_error',
+        message: 'export_program produced a generic program — not supported',
+      })
     session.typeRegistry.set(name, type)
 
     // Optionally clean up exported instances from the session
