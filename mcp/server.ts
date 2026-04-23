@@ -245,6 +245,18 @@ function wrap(fn: () => unknown) {
   catch (e) { return fail(e) }
 }
 
+function requireInstance(name: string, param: string) {
+  const inst = session.instanceRegistry.get(name)
+  if (!inst)
+    failEnum({
+      code:    'unknown_instance',
+      param,
+      value:   name,
+      options: [...session.instanceRegistry.keys()],
+    })
+  return inst
+}
+
 function resolveOutputIdx(inst: { outputNames: string[] }, nameOrIdx: string | number): number {
   if (typeof nameOrIdx === 'number') return nameOrIdx
   const idx = inst.outputNames.indexOf(nameOrIdx)
@@ -719,11 +731,7 @@ function handleWireChain(args: Record<string, unknown>) {
       })
 
     // Validate all instances upfront
-    const insts = instanceNames.map(n => {
-      const inst = session.instanceRegistry.get(n)
-      if (!inst) throw new Error(`No instance named '${n}'`)
-      return inst
-    })
+    const insts = instanceNames.map(n => requireInstance(n, 'instances'))
 
     // Optionally set first instance's input
     if (initialExpr !== undefined) {
@@ -770,10 +778,8 @@ function handleWireZip(args: Record<string, unknown>) {
     for (let i = 0; i < sources.length; i++) {
       const src     = sources[i]
       const dst     = targets[i]
-      const srcInst = session.instanceRegistry.get(src.instance)
-      if (!srcInst) throw new Error(`No instance named '${src.instance}'`)
-      const dstInst = session.instanceRegistry.get(dst.instance)
-      if (!dstInst) throw new Error(`No instance named '${dst.instance}'`)
+      const srcInst = requireInstance(src.instance, 'sources[].instance')
+      const dstInst = requireInstance(dst.instance, 'targets[].instance')
 
       const outName  = resolveOutputName(srcInst, src.output)
       const inName   = resolveInputName(dstInst, dst.input)
@@ -803,8 +809,7 @@ function handleFanOut(args: Record<string, unknown>) {
       (rawSource as Record<string, unknown>).output !== undefined
     ) {
       const s       = rawSource as { instance: string; output: string | number }
-      const srcInst = session.instanceRegistry.get(s.instance)
-      if (!srcInst) throw new Error(`No instance named '${s.instance}'`)
+      const srcInst = requireInstance(s.instance, 'source.instance')
       const outName = resolveOutputName(srcInst, s.output)
       sourceExpr  = { op: 'ref' as const, instance: s.instance, output: outName }
       sourceLabel = `${s.instance}.${outName}`
@@ -815,8 +820,7 @@ function handleFanOut(args: Record<string, unknown>) {
 
     const linked = []
     for (const dst of targets) {
-      const dstInst = session.instanceRegistry.get(dst.instance)
-      if (!dstInst) throw new Error(`No instance named '${dst.instance}'`)
+      const dstInst = requireInstance(dst.instance, 'targets[].instance')
       const inName   = resolveInputName(dstInst, dst.input)
       const { expr } = adaptInputExpr(sourceExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), dst.instance, inName)
       session.inputExprNodes.set(`${dst.instance}:${inName}`, expr)
@@ -835,13 +839,11 @@ function handleFanIn(args: Record<string, unknown>) {
     if (sources.length === 0)
       failBare({ code: 'arity_error', message: 'sources must be non-empty', param: 'sources', value: sources })
 
-    const dstInst = session.instanceRegistry.get(target.instance)
-    if (!dstInst) throw new Error(`No instance named '${target.instance}'`)
+    const dstInst = requireInstance(target.instance, 'target.instance')
 
     // Build one term per source: ref, optionally scaled
     const terms: ExprNode[] = sources.map(src => {
-      const srcInst = session.instanceRegistry.get(src.instance)
-      if (!srcInst) throw new Error(`No instance named '${src.instance}'`)
+      const srcInst = requireInstance(src.instance, 'sources[].instance')
       const outName = resolveOutputName(srcInst, src.output)
       const ref: ExprNode = { op: 'ref' as const, instance: src.instance, output: outName }
       return src.gain !== undefined
@@ -870,10 +872,8 @@ function handleFeedback(args: Record<string, unknown>) {
     const init    = (args.init    as number | undefined) ?? 0
     const delayId = args.delay_id as string | undefined
 
-    const srcInst = session.instanceRegistry.get(from.instance)
-    if (!srcInst) throw new Error(`No instance named '${from.instance}'`)
-    const dstInst = session.instanceRegistry.get(to.instance)
-    if (!dstInst) throw new Error(`No instance named '${to.instance}'`)
+    const srcInst = requireInstance(from.instance, 'from.instance')
+    const dstInst = requireInstance(to.instance, 'to.instance')
 
     const outName = resolveOutputName(srcInst, from.output)
     const inName  = resolveInputName(dstInst, to.input)
@@ -946,8 +946,7 @@ function handleExportProgram(args: Record<string, unknown>) {
 
 function handleRemoveInstance(instanceName: string) {
   return wrap(() => {
-    if (!session.instanceRegistry.has(instanceName))
-      throw new Error(`No instance named '${instanceName}'.`)
+    requireInstance(instanceName, 'instance_name')
     session.instanceRegistry.delete(instanceName)
     for (const key of [...session.inputExprNodes.keys()]) {
       if (key.startsWith(`${instanceName}:`)) session.inputExprNodes.delete(key)
@@ -1007,8 +1006,7 @@ function handleListInstances() {
 
 function handleGetInfo(instanceName: string) {
   return wrap(() => {
-    const inst = session.instanceRegistry.get(instanceName)
-    if (!inst) throw new Error(`No instance named '${instanceName}'.`)
+    const inst = requireInstance(instanceName, 'instance_name')
     return {
       name: instanceName,
       program: inst.typeName,
@@ -1041,8 +1039,7 @@ function handleWire(args: Record<string, unknown>) {
 
     // Process removes first
     for (const r of removeOps) {
-      const inst = session.instanceRegistry.get(r.instance)
-      if (!inst) throw new Error(`No instance named '${r.instance}'.`)
+      const inst = requireInstance(r.instance, 'remove[].instance')
       const inputId = typeof r.input === 'number' ? r.input
         : (String(r.input).match(/^\d+$/) ? parseInt(String(r.input), 10) : inst.inputIndex(String(r.input)))
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
@@ -1052,8 +1049,7 @@ function handleWire(args: Record<string, unknown>) {
     // Process sets
     const results = []
     for (const s of setOps) {
-      const inst = session.instanceRegistry.get(s.instance)
-      if (!inst) throw new Error(`No instance named '${s.instance}'.`)
+      const inst = requireInstance(s.instance, 'set[].instance')
       const raw = s.input
       const inputId = typeof raw === 'number' ? raw
         : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
@@ -1087,8 +1083,7 @@ function handleSetOutput(args: Record<string, unknown>) {
     const outputs = args.outputs as Array<{ instance: string; output: string | number }>
     session.graphOutputs.length = 0
     for (const o of outputs) {
-      const inst = session.instanceRegistry.get(o.instance)
-      if (!inst) throw new Error(`No instance named '${o.instance}'.`)
+      const inst = requireInstance(o.instance, 'outputs[].instance')
       const rawOut = o.output
       const outId = typeof rawOut === 'number' ? rawOut
         : (String(rawOut).match(/^\d+$/) ? parseInt(String(rawOut), 10) : inst.outputIndex(String(rawOut)))
@@ -1230,7 +1225,12 @@ function handleTool(name: string, args: Record<string, unknown>) {
         const devices = DAC.listDevices()
         const match = devices.find(d => d.name.toLowerCase().includes(deviceName.toLowerCase()))
         if (!match)
-          throw new Error(`No device matching '${deviceName}'. Available: ${devices.map(d => d.name).join(', ')}`)
+          failEnum({
+            code:    'unknown_device',
+            param:   'device_name',
+            value:   deviceName,
+            options: devices.map(d => d.name),
+          })
         if (session.dac.isRunning) {
           session.dac.switchDevice(match.id)
         } else {
@@ -1263,10 +1263,13 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const paramName = args.name as string
       const value     = args.value as number
       const p = session.paramRegistry.get(paramName)
-      if (!p) {
-        const known = [...session.paramRegistry.keys()].join(', ')
-        throw new Error(`No param named '${paramName}'. Known: ${known || '(none)'}`)
-      }
+      if (!p)
+        failEnum({
+          code:    'unknown_param',
+          param:   'name',
+          value:   paramName,
+          options: [...session.paramRegistry.keys()],
+        })
       p.value = value
       return { name: paramName, value: p.value }
     })
