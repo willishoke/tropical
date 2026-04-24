@@ -398,8 +398,59 @@ function lowerMap(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>
 // ─────────────────────────────────────────────────────────────
 
 /**
+ * Shadowed-bindings descriptor per binder op. `bodyFields` names fields whose
+ * subtree is inside the binder's scope (so shadowed variables must be removed
+ * from the substitution map before recursing into them). `nonBodyFields` are
+ * fields outside the scope (count, init, the bind-value map of `let`, etc.)
+ * that must see the outer bindings unchanged.
+ *
+ * Kept adjacent to the binder lowerings so it's easy to keep in sync.
+ */
+interface BinderInfo {
+  /** Keys on the binder node that name shadowed variables (strings). */
+  shadowingKeys: string[]
+  /** Fields whose children are inside the binder body. */
+  bodyFields: string[]
+}
+
+const BINDER_OPS: Record<string, BinderInfo> = {
+  let:            { shadowingKeys: [], bodyFields: ['in'] },  // 'bind' handled specially
+  generate:       { shadowingKeys: ['var'],            bodyFields: ['body'] },
+  iterate:        { shadowingKeys: ['var'],            bodyFields: ['body'] },
+  fold:           { shadowingKeys: ['acc', 'elem'],    bodyFields: ['body'] },
+  scan:           { shadowingKeys: ['acc', 'elem'],    bodyFields: ['body'] },
+  map2:           { shadowingKeys: ['elem'],           bodyFields: ['body'] },
+  zip_with:       { shadowingKeys: ['x', 'y'],         bodyFields: ['body'] },
+  chain:          { shadowingKeys: ['var'],            bodyFields: ['body'] },
+  generate_decls: { shadowingKeys: ['var'],            bodyFields: ['decls'] },
+}
+
+/** Build a substitution map with the given names removed. Returns the input
+ *  map unchanged when none of the names are bound, for pointer-identity
+ *  short-circuiting in the common case. */
+function shieldBindings(
+  bindings: Map<string, ExprNode>,
+  shadowed: readonly string[],
+): Map<string, ExprNode> {
+  let copy: Map<string, ExprNode> | null = null
+  for (const name of shadowed) {
+    if (bindings.has(name)) {
+      if (copy === null) copy = new Map(bindings)
+      copy.delete(name)
+    }
+  }
+  return copy ?? bindings
+}
+
+/**
  * Substitute all `{ op: 'binding', name }` nodes in a tree with values from `bindings`.
  * Each call site should use a fresh memo to maintain correct DAG sharing per iteration.
+ *
+ * Scope-aware: when encountering a binder node (see `BINDER_OPS`), the
+ * shadowed variables are removed from the substitution map before recursing
+ * into the binder's body fields. Non-body fields still see the outer bindings.
+ * For `let`, the `bind` values see the outer scope; only `in` is shielded from
+ * any name bound in `bind`.
  */
 function substituteBindings(
   node: ExprNode,
@@ -419,24 +470,40 @@ function substituteBindings(
   if (obj.op === 'binding') {
     const val = bindings.get(obj.name as string)
     if (val !== undefined) return val
-    // Unresolved binding — leave as-is (may be resolved by an outer combinator)
+    // Unresolved binding — leave as-is (may be resolved by an outer combinator).
+    // expandDeclGenerators rejects residuals after expansion; other lowerings
+    // produce them transiently and resolve during subsequent passes.
     return node
   }
+
+  // Determine per-field substitution maps for binder nodes.
+  const binder = BINDER_OPS[obj.op]
+  const letBindNames: string[] = obj.op === 'let' && obj.bind && typeof obj.bind === 'object' && !Array.isArray(obj.bind)
+    ? Object.keys(obj.bind as Record<string, unknown>)
+    : []
+  const bodyShielded: Map<string, ExprNode> = binder
+    ? shieldBindings(bindings, [...binder.shadowingKeys.flatMap(k => {
+        const v = obj[k]; return typeof v === 'string' ? [v] : []
+      }), ...letBindNames])
+    : bindings
 
   let changed = false
   const result: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(obj)) {
+    const inBody = binder?.bodyFields.includes(k) ?? false
+    const activeBindings = inBody ? bodyShielded : bindings
     if (Array.isArray(v)) {
       const arr = v as ExprNode[]
-      const newArr = arr.map(n => substituteBindings(n, bindings, memo))
+      const newArr = arr.map(n => substituteBindings(n, activeBindings, memo))
       if (newArr.some((n, i) => n !== arr[i])) changed = true
       result[k] = newArr
     } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = substituteBindings(v as ExprNode, bindings, memo)
+      const newV = substituteBindings(v as ExprNode, activeBindings, memo)
       if (newV !== v) changed = true
       result[k] = newV
     } else if (typeof v === 'object' && v !== null && !('op' in v)) {
-      // Record<string, ExprNode> fields (e.g. 'bind' in let nodes)
+      // Record<string, ExprNode> fields (e.g. 'bind' in let nodes — these
+      // evaluate in the outer scope and are NOT shielded).
       const rec = v as Record<string, ExprNode>
       const newRec: Record<string, ExprNode> = {}
       let recChanged = false
@@ -659,6 +726,68 @@ function resolveStrConcats(node: unknown): unknown {
   return result
 }
 
+/** Decls that carry a unique `name` field — used for collision detection. */
+const NAMED_DECL_OPS = new Set(['instance_decl', 'reg_decl', 'delay_decl', 'program_decl'])
+
+/**
+ * Walk a tree and throw if any `{op:'binding'}` node's name is NOT bound by
+ * an enclosing binder in the tree itself. Names shielded by inner binders
+ * (let, generate, iterate, ...) are legitimate — they'll be resolved by
+ * the normal array-lowering pass later.
+ *
+ * This catches the typo case (`{binding j}` in a generator bound to `i`
+ * with no inner binder rebinding `j`) while letting inner-combinator
+ * bindings through.
+ */
+function assertNoResidualBindings(
+  node: unknown,
+  pathHint: string,
+  scope: ReadonlySet<string> = new Set(),
+): void {
+  if (typeof node !== 'object' || node === null) return
+  if (Array.isArray(node)) {
+    for (const item of node) assertNoResidualBindings(item, pathHint, scope)
+    return
+  }
+  const obj = node as Record<string, unknown>
+
+  if (obj.op === 'binding') {
+    const name = String(obj.name)
+    if (!scope.has(name)) {
+      throw new Error(
+        `generate_decls: unresolved binding '${name}' in expanded decl ${pathHint}. ` +
+        `Check the generator's 'var' matches the binding name and that no inner binders accidentally shadow it.`,
+      )
+    }
+    return
+  }
+
+  // For binder ops, extend the scope with the names they bind before
+  // recursing into their body fields. Non-body fields see the outer scope.
+  const binder = BINDER_OPS[obj.op as string]
+  let bodyScope: ReadonlySet<string> = scope
+  if (binder) {
+    const shadowed: string[] = []
+    for (const key of binder.shadowingKeys) {
+      const v = obj[key]
+      if (typeof v === 'string') shadowed.push(v)
+    }
+    if (obj.op === 'let' && obj.bind && typeof obj.bind === 'object' && !Array.isArray(obj.bind)) {
+      for (const k of Object.keys(obj.bind as Record<string, unknown>)) shadowed.push(k)
+    }
+    if (shadowed.length > 0) {
+      const merged = new Set(scope)
+      for (const n of shadowed) merged.add(n)
+      bodyScope = merged
+    }
+  }
+
+  for (const [k, v] of Object.entries(obj)) {
+    const inBody = binder?.bodyFields.includes(k) ?? false
+    assertNoResidualBindings(v, pathHint, inBody ? bodyScope : scope)
+  }
+}
+
 /**
  * Expand any `generate_decls` entries in a block's decl list to concrete instance_decl / reg_decl / delay_decl entries.
  *
@@ -679,6 +808,17 @@ function resolveStrConcats(node: unknown): unknown {
  * }
  * ```
  *
+ * Semantics:
+ * - Nested `generate_decls` in a template expand recursively (outer loop first,
+ *   then inner).
+ * - `substituteBindings` is scope-aware — an inner `let` / `generate` / etc.
+ *   rebinding `var` shields the outer substitution.
+ * - Names produced by expanded `instance_decl` / `reg_decl` / `delay_decl` /
+ *   `program_decl` entries must be unique across the whole block (including
+ *   pre-existing sibling decls); collisions throw.
+ * - Any residual `{op:'binding'}` node after substitution + str_concat
+ *   resolution is rejected (likely a typo between `var` and a binding name).
+ *
  * Returns the original BlockNode unchanged if no generate_decls entries are present.
  */
 export function expandDeclGenerators(block: BlockNode): BlockNode {
@@ -687,6 +827,24 @@ export function expandDeclGenerators(block: BlockNode): BlockNode {
 
   let changed = false
   const expanded: ExprNode[] = []
+  const seenNames = new Set<string>()
+
+  /** Push a decl, checking it for name collisions with earlier decls in the block. */
+  const pushChecked = (decl: ExprNode, pathHint: string): void => {
+    if (typeof decl === 'object' && decl !== null && !Array.isArray(decl)) {
+      const d = decl as Record<string, unknown>
+      if (typeof d.op === 'string' && NAMED_DECL_OPS.has(d.op) && typeof d.name === 'string') {
+        if (seenNames.has(d.name)) {
+          throw new Error(
+            `generate_decls: duplicate decl name '${d.name}' produced by ${pathHint}. ` +
+            `Two entries in the block (generator output or explicit sibling) resolved to the same name.`,
+          )
+        }
+        seenNames.add(d.name)
+      }
+    }
+    expanded.push(decl)
+  }
 
   for (const rawDecl of decls) {
     if (typeof rawDecl !== 'object' || rawDecl === null || Array.isArray(rawDecl)) {
@@ -695,7 +853,7 @@ export function expandDeclGenerators(block: BlockNode): BlockNode {
     }
     const d = rawDecl as Record<string, unknown>
     if (d.op !== 'generate_decls') {
-      expanded.push(rawDecl)
+      pushChecked(rawDecl, 'explicit decl')
       continue
     }
 
@@ -706,14 +864,36 @@ export function expandDeclGenerators(block: BlockNode): BlockNode {
 
     for (let i = 0; i < count; i++) {
       const bindings = new Map<string, ExprNode>([[varName, i]])
-      for (const template of templates) {
+      for (let t = 0; t < templates.length; t++) {
+        const template = templates[t]
         const substituted = substituteBindings(template, bindings, new WeakMap())
-        // Resolve any str_concat nodes to strings (covers `name`, `ref.instance`, etc.)
-        const resolved = resolveStrConcats(substituted) as Record<string, unknown>
-        // Validate that instance/reg/delay decl names resolved to plain strings
-        if (typeof resolved.name !== 'string')
-          throw new Error(`generate_decls: cannot evaluate string expression with op '${(resolved.name as Record<string, unknown>)?.op}': ${JSON.stringify(resolved.name)}`)
-        expanded.push(resolved as unknown as ExprNode)
+        const hint = `generate_decls(var='${varName}') iteration ${varName}=${i}, template[${t}]`
+
+        // Nested generate_decls: recurse before str_concat resolution or
+        // residual-binding checks. The inner expansion resolves its own
+        // bindings and str_concats; running them at this level would
+        // misinterpret inner-scoped `{binding innerVar}` nodes.
+        if (typeof substituted === 'object' && substituted !== null && !Array.isArray(substituted)
+            && (substituted as Record<string, unknown>).op === 'generate_decls') {
+          const inner = expandDeclGenerators({ op: 'block', decls: [substituted as ExprNode] })
+          for (const innerDecl of inner.decls ?? []) pushChecked(innerDecl, hint)
+          continue
+        }
+
+        // Non-generator decl: resolve str_concats to strings and reject
+        // any residual binding that isn't shielded by an inner binder.
+        const resolved = resolveStrConcats(substituted)
+        assertNoResidualBindings(resolved, hint)
+
+        const resolvedObj = resolved as Record<string, unknown>
+        // Named decls must have their `name` field reduced to a plain string.
+        if (typeof resolvedObj.op === 'string' && NAMED_DECL_OPS.has(resolvedObj.op)
+            && typeof resolvedObj.name !== 'string') {
+          throw new Error(
+            `generate_decls: '${resolvedObj.op}' name did not resolve to a string in ${hint}: ${JSON.stringify(resolvedObj.name)}`,
+          )
+        }
+        pushChecked(resolvedObj as unknown as ExprNode, hint)
       }
     }
   }
