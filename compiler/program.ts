@@ -11,6 +11,7 @@ import { validateExpr } from './expr.js'
 import type { TypeDefJSON, SessionState } from './session.js'
 import { loadProgramDef, resolveProgramType } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
+import { expandDeclGenerators } from './lower_arrays.js'
 import { Param, Trigger } from './runtime/param.js'
 import { ProgramType } from './program_types.js'
 import { exprDependencies, reachableInstances, buildDependencyGraph, topologicalSort } from './compiler.js'
@@ -140,6 +141,9 @@ export function loadProgramAsSession(
   topLevel: ProgramTopLevel,
   session: SessionState,
 ): void {
+  // Expand any generate_decls entries before any iteration over body.decls
+  prog = { ...prog, body: expandDeclGenerators(prog.body) }
+
   // Clear session state
   session.dac = null
   session.instanceRegistry.clear()

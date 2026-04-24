@@ -11,6 +11,7 @@ import {
 } from './program_types.js'
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type PortTypeDecl, type ProgramNode, type ProgramPortSpec, type ProgramTopLevel } from './program.js'
+import { expandDeclGenerators } from './lower_arrays.js'
 import { parseProgramV2 } from './schema.js'
 import { Param, Trigger } from './runtime/param.js'
 import {
@@ -406,6 +407,7 @@ export function loadProgramDef(
   const outputBounds    = outputSpecs.map(s => resolveBounds(s, aliases))
 
   // ── First pass over decls: assign IDs in source order ──
+  const body = expandDeclGenerators(def.body)
   const regNames: string[] = []
   const regInitValues: ValueCoercible[] = []
   const regPortTypes: (PortType | undefined)[] = []
@@ -419,7 +421,7 @@ export function loadProgramDef(
     type_args?: Record<string, number | ExprNode>
   }>()
 
-  for (const rawDecl of def.body?.decls ?? []) {
+  for (const rawDecl of body.decls ?? []) {
     if (typeof rawDecl !== 'object' || rawDecl === null || Array.isArray(rawDecl))
       throw new Error(`${def.name}: block.decls entries must be objects`)
     const d = rawDecl as Record<string, unknown>
