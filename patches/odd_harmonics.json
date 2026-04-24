@@ -5,579 +5,78 @@
     "op": "block",
     "decls": [
       {
-        "op": "instance_decl",
-        "name": "VCO1",
-        "program": "VCO",
-        "inputs": {
-          "freq": 40
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCO2",
-        "program": "VCO",
-        "inputs": {
-          "freq": 120
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCO3",
-        "program": "VCO",
-        "inputs": {
-          "freq": 200
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCO4",
-        "program": "VCO",
-        "inputs": {
-          "freq": 280
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCO5",
-        "program": "VCO",
-        "inputs": {
-          "freq": 360
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCO6",
-        "program": "VCO",
-        "inputs": {
-          "freq": 440
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCO7",
-        "program": "VCO",
-        "inputs": {
-          "freq": 520
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCO8",
-        "program": "VCO",
-        "inputs": {
-          "freq": 600
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCO9",
-        "program": "VCO",
-        "inputs": {
-          "freq": 680
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCO10",
-        "program": "VCO",
-        "inputs": {
-          "freq": 760
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "ADEnvelope1",
-        "program": "ADEnvelope",
-        "inputs": {
-          "attack": 0.043,
-          "decay": 1.2,
-          "gate": {
-            "op": "ref",
-            "instance": "Clock1",
-            "output": "output"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "ADEnvelope2",
-        "program": "ADEnvelope",
-        "inputs": {
-          "attack": 0.002,
-          "decay": 0.18,
-          "gate": {
-            "op": "ref",
-            "instance": "Clock2",
-            "output": "output"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "ADEnvelope3",
-        "program": "ADEnvelope",
-        "inputs": {
-          "attack": 0.15,
-          "decay": 0.7,
-          "gate": {
-            "op": "ref",
-            "instance": "Clock3",
-            "output": "output"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "ADEnvelope4",
-        "program": "ADEnvelope",
-        "inputs": {
-          "attack": 0.008,
-          "decay": 1.8,
-          "gate": {
-            "op": "ref",
-            "instance": "Clock4",
-            "output": "output"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "ADEnvelope5",
-        "program": "ADEnvelope",
-        "inputs": {
-          "attack": 0.09,
-          "decay": 0.35,
-          "gate": {
-            "op": "ref",
-            "instance": "Clock5",
-            "output": "output"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "ADEnvelope6",
-        "program": "ADEnvelope",
-        "inputs": {
-          "attack": 0.001,
-          "decay": 0.9,
-          "gate": {
-            "op": "ref",
-            "instance": "Clock6",
-            "output": "output"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "ADEnvelope7",
-        "program": "ADEnvelope",
-        "inputs": {
-          "attack": 0.22,
-          "decay": 0.12,
-          "gate": {
-            "op": "ref",
-            "instance": "Clock7",
-            "output": "output"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "ADEnvelope8",
-        "program": "ADEnvelope",
-        "inputs": {
-          "attack": 0.05,
-          "decay": 1.5,
-          "gate": {
-            "op": "ref",
-            "instance": "Clock8",
-            "output": "output"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "ADEnvelope9",
-        "program": "ADEnvelope",
-        "inputs": {
-          "attack": 0.003,
-          "decay": 0.6,
-          "gate": {
-            "op": "ref",
-            "instance": "Clock9",
-            "output": "output"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "ADEnvelope10",
-        "program": "ADEnvelope",
-        "inputs": {
-          "attack": 0.18,
-          "decay": 0.08,
-          "gate": {
-            "op": "ref",
-            "instance": "Clock10",
-            "output": "output"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "Clock1",
-        "program": "Clock",
-        "inputs": {
-          "freq": 0.1
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "Clock2",
-        "program": "Clock",
-        "inputs": {
-          "freq": 0.3
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "Clock3",
-        "program": "Clock",
-        "inputs": {
-          "freq": 0.5
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "Clock4",
-        "program": "Clock",
-        "inputs": {
-          "freq": 0.7
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "Clock5",
-        "program": "Clock",
-        "inputs": {
-          "freq": 0.9
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "Clock6",
-        "program": "Clock",
-        "inputs": {
-          "freq": 1.1
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "Clock7",
-        "program": "Clock",
-        "inputs": {
-          "freq": 1.3
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "Clock8",
-        "program": "Clock",
-        "inputs": {
-          "freq": 1.5
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "Clock9",
-        "program": "Clock",
-        "inputs": {
-          "freq": 1.7
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "Clock10",
-        "program": "Clock",
-        "inputs": {
-          "freq": 1.9
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCA1",
-        "program": "VCA",
-        "inputs": {
-          "audio": {
-            "op": "mul",
-            "args": [
-              {
-                "op": "ref",
-                "instance": "VCO1",
-                "output": "sin"
-              },
-              0.1
-            ]
+        "op": "generate_decls",
+        "count": 10,
+        "var": "i",
+        "decls": [
+          {
+            "op": "instance_decl",
+            "name": { "op": "str_concat", "parts": ["VCO", { "op": "add", "args": [{ "op": "binding", "name": "i" }, 1] }] },
+            "program": "SinOsc",
+            "inputs": {
+              "freq": { "op": "mul", "args": [{ "op": "add", "args": [{ "op": "mul", "args": [{ "op": "binding", "name": "i" }, 2] }, 1] }, 40] }
+            }
           },
-          "cv": {
-            "op": "ref",
-            "instance": "ADEnvelope1",
-            "output": "env"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCA2",
-        "program": "VCA",
-        "inputs": {
-          "audio": {
-            "op": "mul",
-            "args": [
-              {
-                "op": "ref",
-                "instance": "VCO2",
-                "output": "sin"
-              },
-              0.1
-            ]
+          {
+            "op": "instance_decl",
+            "name": { "op": "str_concat", "parts": ["Clock", { "op": "add", "args": [{ "op": "binding", "name": "i" }, 1] }] },
+            "program": "Clock",
+            "inputs": {
+              "freq": { "op": "add", "args": [{ "op": "mul", "args": [{ "op": "binding", "name": "i" }, 0.2] }, 0.1] }
+            }
           },
-          "cv": {
-            "op": "ref",
-            "instance": "ADEnvelope2",
-            "output": "env"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCA3",
-        "program": "VCA",
-        "inputs": {
-          "audio": {
-            "op": "mul",
-            "args": [
-              {
+          {
+            "op": "instance_decl",
+            "name": { "op": "str_concat", "parts": ["Env", { "op": "add", "args": [{ "op": "binding", "name": "i" }, 1] }] },
+            "program": "EnvExpDecay",
+            "inputs": {
+              "trigger": {
                 "op": "ref",
-                "instance": "VCO3",
-                "output": "sin"
+                "instance": { "op": "str_concat", "parts": ["Clock", { "op": "add", "args": [{ "op": "binding", "name": "i" }, 1] }] },
+                "output": "output"
               },
-              0.1
-            ]
+              "decay": 0.9999
+            }
           },
-          "cv": {
-            "op": "ref",
-            "instance": "ADEnvelope3",
-            "output": "env"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCA4",
-        "program": "VCA",
-        "inputs": {
-          "audio": {
-            "op": "mul",
-            "args": [
-              {
+          {
+            "op": "instance_decl",
+            "name": { "op": "str_concat", "parts": ["VCA", { "op": "add", "args": [{ "op": "binding", "name": "i" }, 1] }] },
+            "program": "VCA",
+            "inputs": {
+              "audio": {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "ref",
+                    "instance": { "op": "str_concat", "parts": ["VCO", { "op": "add", "args": [{ "op": "binding", "name": "i" }, 1] }] },
+                    "output": "sine"
+                  },
+                  0.1
+                ]
+              },
+              "cv": {
                 "op": "ref",
-                "instance": "VCO4",
-                "output": "sin"
-              },
-              0.1
-            ]
-          },
-          "cv": {
-            "op": "ref",
-            "instance": "ADEnvelope4",
-            "output": "env"
+                "instance": { "op": "str_concat", "parts": ["Env", { "op": "add", "args": [{ "op": "binding", "name": "i" }, 1] }] },
+                "output": "env"
+              }
+            }
           }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCA5",
-        "program": "VCA",
-        "inputs": {
-          "audio": {
-            "op": "mul",
-            "args": [
-              {
-                "op": "ref",
-                "instance": "VCO5",
-                "output": "sin"
-              },
-              0.1
-            ]
-          },
-          "cv": {
-            "op": "ref",
-            "instance": "ADEnvelope5",
-            "output": "env"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCA6",
-        "program": "VCA",
-        "inputs": {
-          "audio": {
-            "op": "mul",
-            "args": [
-              {
-                "op": "ref",
-                "instance": "VCO6",
-                "output": "sin"
-              },
-              0.1
-            ]
-          },
-          "cv": {
-            "op": "ref",
-            "instance": "ADEnvelope6",
-            "output": "env"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCA7",
-        "program": "VCA",
-        "inputs": {
-          "audio": {
-            "op": "mul",
-            "args": [
-              {
-                "op": "ref",
-                "instance": "VCO7",
-                "output": "sin"
-              },
-              0.1
-            ]
-          },
-          "cv": {
-            "op": "ref",
-            "instance": "ADEnvelope7",
-            "output": "env"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCA8",
-        "program": "VCA",
-        "inputs": {
-          "audio": {
-            "op": "mul",
-            "args": [
-              {
-                "op": "ref",
-                "instance": "VCO8",
-                "output": "sin"
-              },
-              0.1
-            ]
-          },
-          "cv": {
-            "op": "ref",
-            "instance": "ADEnvelope8",
-            "output": "env"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCA9",
-        "program": "VCA",
-        "inputs": {
-          "audio": {
-            "op": "mul",
-            "args": [
-              {
-                "op": "ref",
-                "instance": "VCO9",
-                "output": "sin"
-              },
-              0.1
-            ]
-          },
-          "cv": {
-            "op": "ref",
-            "instance": "ADEnvelope9",
-            "output": "env"
-          }
-        }
-      },
-      {
-        "op": "instance_decl",
-        "name": "VCA10",
-        "program": "VCA",
-        "inputs": {
-          "audio": {
-            "op": "mul",
-            "args": [
-              {
-                "op": "ref",
-                "instance": "VCO10",
-                "output": "sin"
-              },
-              0.1
-            ]
-          },
-          "cv": {
-            "op": "ref",
-            "instance": "ADEnvelope10",
-            "output": "env"
-          }
-        }
+        ]
       }
     ],
     "assigns": [],
     "value": null
   },
   "audio_outputs": [
-    {
-      "instance": "VCA1",
-      "output": "out"
-    },
-    {
-      "instance": "VCA2",
-      "output": "out"
-    },
-    {
-      "instance": "VCA3",
-      "output": "out"
-    },
-    {
-      "instance": "VCA4",
-      "output": "out"
-    },
-    {
-      "instance": "VCA5",
-      "output": "out"
-    },
-    {
-      "instance": "VCA6",
-      "output": "out"
-    },
-    {
-      "instance": "VCA7",
-      "output": "out"
-    },
-    {
-      "instance": "VCA8",
-      "output": "out"
-    },
-    {
-      "instance": "VCA9",
-      "output": "out"
-    },
-    {
-      "instance": "VCA10",
-      "output": "out"
-    }
+    { "instance": "VCA1",  "output": "out" },
+    { "instance": "VCA2",  "output": "out" },
+    { "instance": "VCA3",  "output": "out" },
+    { "instance": "VCA4",  "output": "out" },
+    { "instance": "VCA5",  "output": "out" },
+    { "instance": "VCA6",  "output": "out" },
+    { "instance": "VCA7",  "output": "out" },
+    { "instance": "VCA8",  "output": "out" },
+    { "instance": "VCA9",  "output": "out" },
+    { "instance": "VCA10", "output": "out" }
   ]
 }

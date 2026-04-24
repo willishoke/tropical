@@ -11,6 +11,14 @@
 import type { ExprNode } from './expr.js'
 import { shapeSize, shapeStrides } from './term.js'
 
+// Minimal local BlockNode — mirrors program.ts's BlockNode without creating a circular import.
+interface BlockNode {
+  op: 'block'
+  decls?: ExprNode[]
+  assigns?: ExprNode[]
+  value?: ExprNode | null
+}
+
 // ─────────────────────────────────────────────────────────────
 // Layout table for array slot allocation
 // ─────────────────────────────────────────────────────────────
@@ -591,4 +599,124 @@ function lowerChain(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNod
     current = lowerArrayOps(substituteBindings(body, bindings, new WeakMap()), memo)
   }
   return current
+}
+
+// ─────────────────────────────────────────────────────────────
+// Decl-level generate combinator
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * Evaluate a str_concat-bearing expression to a string after binding substitution.
+ * Handles: string literals, integer literals, str_concat, and constant arithmetic (add/sub/mul).
+ * Called only during generate_decls expansion, where binding variables are already
+ * substituted to concrete integers — so arithmetic nodes contain only literals.
+ */
+function evaluateStrExpr(node: ExprNode): string {
+  if (typeof node === 'number') return String(node)
+  if (typeof node === 'string') return node
+  if (typeof node !== 'object' || node === null || Array.isArray(node))
+    throw new Error(`generate_decls: cannot use array or boolean as string value: ${JSON.stringify(node)}`)
+
+  const obj = node as Record<string, unknown>
+
+  if (obj.op === 'str_concat') {
+    const parts = obj.parts as ExprNode[]
+    return parts.map(evaluateStrExpr).join('')
+  }
+  if (obj.op === 'add') {
+    const args = obj.args as ExprNode[]
+    const l = Number(evaluateStrExpr(args[0])), r = Number(evaluateStrExpr(args[1]))
+    if (isNaN(l) || isNaN(r))
+      throw new Error(`generate_decls: 'add' args must be numbers in string expression`)
+    return String(l + r)
+  }
+  if (obj.op === 'sub') {
+    const args = obj.args as ExprNode[]
+    return String(Number(evaluateStrExpr(args[0])) - Number(evaluateStrExpr(args[1])))
+  }
+  if (obj.op === 'mul') {
+    const args = obj.args as ExprNode[]
+    return String(Number(evaluateStrExpr(args[0])) * Number(evaluateStrExpr(args[1])))
+  }
+
+  throw new Error(`generate_decls: cannot evaluate string expression with op '${obj.op}': ${JSON.stringify(node)}`)
+}
+
+/**
+ * Recursively walk an expanded decl and replace any str_concat nodes with their
+ * evaluated string values. This resolves both the `name` field of instance_decl
+ * and `instance` fields inside `ref` nodes that used str_concat templates.
+ */
+function resolveStrConcats(node: unknown): unknown {
+  if (typeof node !== 'object' || node === null) return node
+  if (Array.isArray(node)) return (node as unknown[]).map(resolveStrConcats)
+  const obj = node as Record<string, unknown>
+  if (obj.op === 'str_concat') return evaluateStrExpr(node as ExprNode)
+  const result: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    result[k] = resolveStrConcats(v)
+  }
+  return result
+}
+
+/**
+ * Expand any `generate_decls` entries in a block's decl list to concrete instance_decl / reg_decl / delay_decl entries.
+ *
+ * generate_decls schema:
+ * ```json
+ * {
+ *   "op": "generate_decls",
+ *   "count": 10,
+ *   "var": "i",
+ *   "decls": [
+ *     {
+ *       "op": "instance_decl",
+ *       "name": { "op": "str_concat", "parts": ["VCO", { "op": "binding", "name": "i" }] },
+ *       "program": "SinOsc",
+ *       "inputs": { "freq": { "op": "mul", "args": [{ "op": "binding", "name": "i" }, 80] } }
+ *     }
+ *   ]
+ * }
+ * ```
+ *
+ * Returns the original BlockNode unchanged if no generate_decls entries are present.
+ */
+export function expandDeclGenerators(block: BlockNode): BlockNode {
+  const decls = block.decls
+  if (!decls || decls.length === 0) return block
+
+  let changed = false
+  const expanded: ExprNode[] = []
+
+  for (const rawDecl of decls) {
+    if (typeof rawDecl !== 'object' || rawDecl === null || Array.isArray(rawDecl)) {
+      expanded.push(rawDecl)
+      continue
+    }
+    const d = rawDecl as Record<string, unknown>
+    if (d.op !== 'generate_decls') {
+      expanded.push(rawDecl)
+      continue
+    }
+
+    changed = true
+    const count = d.count as number
+    const varName = d.var as string
+    const templates = d.decls as ExprNode[]
+
+    for (let i = 0; i < count; i++) {
+      const bindings = new Map<string, ExprNode>([[varName, i]])
+      for (const template of templates) {
+        const substituted = substituteBindings(template, bindings, new WeakMap())
+        // Resolve any str_concat nodes to strings (covers `name`, `ref.instance`, etc.)
+        const resolved = resolveStrConcats(substituted) as Record<string, unknown>
+        // Validate that instance/reg/delay decl names resolved to plain strings
+        if (typeof resolved.name !== 'string')
+          throw new Error(`generate_decls: cannot evaluate string expression with op '${(resolved.name as Record<string, unknown>)?.op}': ${JSON.stringify(resolved.name)}`)
+        expanded.push(resolved as unknown as ExprNode)
+      }
+    }
+  }
+
+  return changed ? { ...block, decls: expanded } : block
 }

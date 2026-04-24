@@ -3,7 +3,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { lowerArrayOps } from './lower_arrays'
+import { lowerArrayOps, expandDeclGenerators } from './lower_arrays'
 import type { ExprNode } from './expr'
 
 describe('lowerArrayOps', () => {
@@ -210,5 +210,149 @@ describe('lowerMatmul', () => {
     expect(json).toContain('"mul"')
     expect(json).toContain('"add"')
     expect(json).not.toContain('"and"')
+  })
+})
+
+describe('expandDeclGenerators', () => {
+  test('passes through block with no generate_decls', () => {
+    const block = {
+      op: 'block' as const,
+      decls: [{ op: 'instance_decl', name: 'Osc', program: 'SinOsc', inputs: { freq: 440 } } as ExprNode],
+      assigns: [],
+    }
+    expect(expandDeclGenerators(block)).toBe(block)
+  })
+
+  test('expands generate_decls with string name prefix and binding var', () => {
+    const block = {
+      op: 'block' as const,
+      decls: [{
+        op: 'generate_decls',
+        count: 3,
+        var: 'i',
+        decls: [{
+          op: 'instance_decl',
+          name: { op: 'str_concat', parts: ['Osc', { op: 'binding', name: 'i' }] },
+          program: 'SinOsc',
+          inputs: { freq: { op: 'mul', args: [{ op: 'binding', name: 'i' }, 100] } },
+        }],
+      } as ExprNode],
+      assigns: [],
+    }
+    const result = expandDeclGenerators(block)
+    expect(result.decls).toHaveLength(3)
+    const decls = result.decls as Record<string, unknown>[]
+    expect(decls[0].name).toBe('Osc0')
+    expect(decls[1].name).toBe('Osc1')
+    expect(decls[2].name).toBe('Osc2')
+    expect((decls[0].inputs as Record<string, unknown>).freq).toEqual({ op: 'mul', args: [0, 100] })
+    expect((decls[1].inputs as Record<string, unknown>).freq).toEqual({ op: 'mul', args: [1, 100] })
+    expect((decls[2].inputs as Record<string, unknown>).freq).toEqual({ op: 'mul', args: [2, 100] })
+  })
+
+  test('1-indexed names via add in str_concat', () => {
+    const block = {
+      op: 'block' as const,
+      decls: [{
+        op: 'generate_decls',
+        count: 3,
+        var: 'i',
+        decls: [{
+          op: 'instance_decl',
+          name: { op: 'str_concat', parts: ['VCO', { op: 'add', args: [{ op: 'binding', name: 'i' }, 1] }] },
+          program: 'SinOsc',
+          inputs: {},
+        }],
+      } as ExprNode],
+      assigns: [],
+    }
+    const result = expandDeclGenerators(block)
+    const decls = result.decls as Record<string, unknown>[]
+    expect(decls.map(d => d.name)).toEqual(['VCO1', 'VCO2', 'VCO3'])
+  })
+
+  test('count 0 produces no decls', () => {
+    const block = {
+      op: 'block' as const,
+      decls: [{
+        op: 'generate_decls',
+        count: 0,
+        var: 'i',
+        decls: [{ op: 'instance_decl', name: 'X', program: 'SinOsc', inputs: {} }],
+      } as ExprNode],
+      assigns: [],
+    }
+    const result = expandDeclGenerators(block)
+    expect(result.decls).toHaveLength(0)
+  })
+
+  test('multiple template decls per generate_decls iteration', () => {
+    const block = {
+      op: 'block' as const,
+      decls: [{
+        op: 'generate_decls',
+        count: 2,
+        var: 'i',
+        decls: [
+          {
+            op: 'instance_decl',
+            name: { op: 'str_concat', parts: ['Osc', { op: 'binding', name: 'i' }] },
+            program: 'SinOsc',
+            inputs: {},
+          },
+          {
+            op: 'instance_decl',
+            name: { op: 'str_concat', parts: ['Env', { op: 'binding', name: 'i' }] },
+            program: 'EnvExpDecay',
+            inputs: {},
+          },
+        ],
+      } as ExprNode],
+      assigns: [],
+    }
+    const result = expandDeclGenerators(block)
+    const names = (result.decls as Record<string, unknown>[]).map(d => d.name)
+    expect(names).toEqual(['Osc0', 'Env0', 'Osc1', 'Env1'])
+  })
+
+  test('preserves non-generate_decls entries alongside expanded ones', () => {
+    const existing = { op: 'instance_decl', name: 'Static', program: 'Clock', inputs: {} } as ExprNode
+    const block = {
+      op: 'block' as const,
+      decls: [
+        existing,
+        {
+          op: 'generate_decls',
+          count: 2,
+          var: 'i',
+          decls: [{ op: 'instance_decl', name: { op: 'str_concat', parts: ['G', { op: 'binding', name: 'i' }] }, program: 'SinOsc', inputs: {} }],
+        } as ExprNode,
+      ],
+      assigns: [],
+    }
+    const result = expandDeclGenerators(block)
+    expect(result.decls).toHaveLength(3)
+    expect((result.decls as Record<string, unknown>[])[0]).toBe(existing)
+    expect((result.decls as Record<string, unknown>[])[1].name).toBe('G0')
+    expect((result.decls as Record<string, unknown>[])[2].name).toBe('G1')
+  })
+
+  test('throws on unevaluable name expression', () => {
+    const block = {
+      op: 'block' as const,
+      decls: [{
+        op: 'generate_decls',
+        count: 1,
+        var: 'i',
+        decls: [{
+          op: 'instance_decl',
+          name: { op: 'sin', args: [{ op: 'binding', name: 'i' }] },
+          program: 'SinOsc',
+          inputs: {},
+        }],
+      } as ExprNode],
+      assigns: [],
+    }
+    expect(() => expandDeclGenerators(block)).toThrow("generate_decls: cannot evaluate string expression with op 'sin'")
   })
 })
