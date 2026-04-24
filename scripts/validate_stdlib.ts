@@ -1,7 +1,7 @@
 /**
  * validate_stdlib.ts — deterministic render + golden-hash regression check.
  *
- * Loads each target (a ProgramJSON patch), renders N frames through the
+ * Loads each target (a tropical_program_2 patch), renders N frames through the
  * native JIT, hashes the mono output, and compares against a committed
  * golden under `tests/golden/<name>.hash`.
  *

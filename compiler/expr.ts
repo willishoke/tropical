@@ -610,6 +610,93 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
   // matrix, function — structural pass-through
   if (op === 'matrix' || op === 'function') return
 
+  // ── Unified IR: program / block / decls / assigns ────────────────────────
+  // See `tropical_program_2` (design/surface-syntax.md). These nodes let a
+  // program be represented as a single ExprNode tree whose body is a block
+  // of declarations and assignments.
+
+  if (op === 'program') {
+    if (typeof obj.name !== 'string')
+      throw new Error(`${path}: 'program' requires name: string`)
+    if (obj.body !== undefined) validateExpr(obj.body as ExprNode, `${path}.body`)
+    return
+  }
+
+  if (op === 'block') {
+    if (obj.decls !== undefined) {
+      if (!Array.isArray(obj.decls))
+        throw new Error(`${path}: 'block' decls must be an array`)
+      for (let i = 0; i < (obj.decls as unknown[]).length; i++)
+        validateExpr((obj.decls as ExprNode[])[i], `${path}.decls[${i}]`)
+    }
+    if (obj.assigns !== undefined) {
+      if (!Array.isArray(obj.assigns))
+        throw new Error(`${path}: 'block' assigns must be an array`)
+      for (let i = 0; i < (obj.assigns as unknown[]).length; i++)
+        validateExpr((obj.assigns as ExprNode[])[i], `${path}.assigns[${i}]`)
+    }
+    if (obj.value !== undefined && obj.value !== null)
+      validateExpr(obj.value as ExprNode, `${path}.value`)
+    return
+  }
+
+  if (op === 'reg_decl') {
+    if (typeof obj.name !== 'string')
+      throw new Error(`${path}: 'reg_decl' requires name: string`)
+    if (obj.init !== undefined) validateExpr(obj.init as ExprNode, `${path}.init`)
+    return
+  }
+
+  if (op === 'delay_decl') {
+    if (typeof obj.name !== 'string')
+      throw new Error(`${path}: 'delay_decl' requires name: string`)
+    if (obj.update !== undefined) validateExpr(obj.update as ExprNode, `${path}.update`)
+    if (obj.init !== undefined) validateExpr(obj.init as ExprNode, `${path}.init`)
+    return
+  }
+
+  if (op === 'instance_decl') {
+    if (typeof obj.name !== 'string')
+      throw new Error(`${path}: 'instance_decl' requires name: string`)
+    if (typeof obj.program !== 'string')
+      throw new Error(`${path}: 'instance_decl' requires program: string`)
+    if (obj.inputs !== undefined && typeof obj.inputs === 'object' && obj.inputs !== null) {
+      for (const [k, v] of Object.entries(obj.inputs as Record<string, unknown>))
+        validateExpr(v as ExprNode, `${path}.inputs.${k}`)
+    }
+    if (obj.gateable !== undefined && typeof obj.gateable !== 'boolean')
+      throw new Error(`${path}: 'instance_decl' gateable must be boolean`)
+    if (obj.gate_input !== undefined)
+      validateExpr(obj.gate_input as ExprNode, `${path}.gate_input`)
+    return
+  }
+
+  if (op === 'program_decl') {
+    if (typeof obj.name !== 'string')
+      throw new Error(`${path}: 'program_decl' requires name: string`)
+    if (obj.program !== undefined) validateExpr(obj.program as ExprNode, `${path}.program`)
+    return
+  }
+
+  if (op === 'output_assign') {
+    if (typeof obj.name !== 'string')
+      throw new Error(`${path}: 'output_assign' requires name: string`)
+    if (obj.expr !== undefined) validateExpr(obj.expr as ExprNode, `${path}.expr`)
+    return
+  }
+
+  if (op === 'next_update') {
+    if (typeof obj.target !== 'object' || obj.target === null)
+      throw new Error(`${path}: 'next_update' requires target: {kind, name}`)
+    const tgt = obj.target as Record<string, unknown>
+    if (tgt.kind !== 'reg' && tgt.kind !== 'delay')
+      throw new Error(`${path}: 'next_update' target.kind must be 'reg' or 'delay', got ${String(tgt.kind)}`)
+    if (typeof tgt.name !== 'string')
+      throw new Error(`${path}: 'next_update' target.name must be a string`)
+    if (obj.expr !== undefined) validateExpr(obj.expr as ExprNode, `${path}.expr`)
+    return
+  }
+
   // Unknown op
   throw new Error(`${path}: unknown op '${op}'`)
 }

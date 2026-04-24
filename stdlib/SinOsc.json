@@ -1,36 +1,69 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "SinOsc",
-  "inputs": [
-    { "name": "freq", "type": "freq" }
-  ],
-  "outputs": [
-    { "name": "sine", "type": "float" }
-  ],
-  "input_defaults": { "freq": 440 },
-  "instances": {
-    "sin": {
-      "program": "Sin",
-      "inputs": {
-        "x": {
-          "op": "mul",
-          "args": [
-            6.283185307179586,
-            { "op": "div", "args": [
-              { "op": "mul", "args": [
-                { "op": "sample_index" },
-                { "op": "input", "name": "freq" }
-              ]},
-              { "op": "sample_rate" }
-            ]}
-          ]
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instance_decl",
+        "name": "sin",
+        "program": "Sin",
+        "inputs": {
+          "x": {
+            "op": "mul",
+            "args": [
+              6.283185307179586,
+              {
+                "op": "div",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "sample_index"
+                      },
+                      {
+                        "op": "input",
+                        "name": "freq"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "sample_rate"
+                  }
+                ]
+              }
+            ]
+          }
         }
       }
-    }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "sine",
+        "expr": {
+          "op": "nested_out",
+          "ref": "sin",
+          "output": "out"
+        }
+      }
+    ],
+    "value": null
   },
-  "process": {
-    "outputs": {
-      "sine": { "op": "nested_out", "ref": "sin", "output": "out" }
-    }
+  "ports": {
+    "inputs": [
+      {
+        "name": "freq",
+        "type": "freq",
+        "default": 440
+      }
+    ],
+    "outputs": [
+      {
+        "name": "sine",
+        "type": "float"
+      }
+    ]
   }
 }

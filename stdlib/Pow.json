@@ -1,34 +1,73 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "Pow",
-  "inputs": [
-    { "name": "x", "type": "float" },
-    { "name": "y", "type": "float" }
-  ],
-  "outputs": [
-    { "name": "out", "type": "float" }
-  ],
-  "input_defaults": { "x": 1, "y": 1 },
-  "instances": {
-    "log_x": {
-      "program": "Log",
-      "inputs": { "x": { "op": "input", "name": "x" } }
-    },
-    "exp": {
-      "program": "Exp",
-      "inputs": {
-        "x": {
-          "op": "mul", "args": [
-            { "op": "input", "name": "y" },
-            { "op": "nested_out", "ref": "log_x", "output": "out" }
-          ]
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instance_decl",
+        "name": "log_x",
+        "program": "Log",
+        "inputs": {
+          "x": {
+            "op": "input",
+            "name": "x"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "exp",
+        "program": "Exp",
+        "inputs": {
+          "x": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "input",
+                "name": "y"
+              },
+              {
+                "op": "nested_out",
+                "ref": "log_x",
+                "output": "out"
+              }
+            ]
+          }
         }
       }
-    }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "out",
+        "expr": {
+          "op": "nested_out",
+          "ref": "exp",
+          "output": "out"
+        }
+      }
+    ],
+    "value": null
   },
-  "process": {
-    "outputs": {
-      "out": { "op": "nested_out", "ref": "exp", "output": "out" }
-    }
+  "ports": {
+    "inputs": [
+      {
+        "name": "x",
+        "type": "float",
+        "default": 1
+      },
+      {
+        "name": "y",
+        "type": "float",
+        "default": 1
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": "float"
+      }
+    ]
   }
 }

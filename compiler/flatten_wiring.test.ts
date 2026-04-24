@@ -9,7 +9,7 @@ import { Float, ArrayType } from './term'
 import type { ExprNode } from './expr'
 import { loadProgramDef } from './session'
 import type { ProgramType, ProgramInstance, Bounds } from './program_types'
-import type { ProgramJSON } from './program'
+import type { ProgramNode } from './program'
 import { Param, Trigger } from './runtime/param'
 
 // ─────────────────────────────────────────────────────────────
@@ -168,15 +168,15 @@ describe('feedback cycle auto-delay', () => {
   }
 
   /** Simple passthrough program: output = input. */
-  function passthrough(): ProgramJSON {
+  function passthrough(): ProgramNode {
     return {
-      schema: 'tropical_program_1',
+      op: 'program',
       name: 'Pass',
-      inputs: ['in'],
-      outputs: ['out'],
-      input_defaults: { in: 0 },
-      process: { outputs: { out: { op: 'input', name: 'in' } } },
-    } as ProgramJSON
+      ports: { inputs: [{ name: 'in', default: 0 }], outputs: ['out'] },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'out', expr: { op: 'input', name: 'in' } }],
+      },
+    }
   }
 
   test('A → B → A feedback cycle flattens without throwing', () => {
@@ -255,19 +255,20 @@ describe('gateable instances wrap outputs in source_tag', () => {
 
   // Passthrough with a one-register state to exercise both output wrapping
   // and register-update wrapping (the latter uses on_skip for hold-on-skip).
-  function passthroughWithState(): ProgramJSON {
+  function passthroughWithState(): ProgramNode {
     return {
-      schema: 'tropical_program_1',
+      op: 'program',
       name: 'Pass',
-      inputs: ['in'],
-      outputs: ['out'],
-      regs: { last: 0 },
-      input_defaults: { in: 0 },
-      process: {
-        outputs: { out: { op: 'input', name: 'in' } },
-        next_regs: { last: { op: 'input', name: 'in' } },
+      ports: { inputs: [{ name: 'in', default: 0 }], outputs: ['out'] },
+      body: { op: 'block',
+        decls: [{ op: 'reg_decl', name: 'last', init: 0 }],
+        assigns: [
+          { op: 'output_assign', name: 'out', expr: { op: 'input', name: 'in' } },
+          { op: 'next_update', target: { kind: 'reg', name: 'last' },
+            expr: { op: 'input', name: 'in' } },
+        ],
       },
-    } as ProgramJSON
+    }
   }
 
   test('gateable instance emits source_tag on outputs and register updates', () => {

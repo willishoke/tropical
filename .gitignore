@@ -16,3 +16,4 @@ build-jit-profile/
 # Node
 node_modules/
 package-lock.json
+web/dist/

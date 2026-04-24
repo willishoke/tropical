@@ -28,19 +28,15 @@ describe('stdlib Sequencer<N>', () => {
     const session = makeSession(64)
     loadStdlib(session)
     loadJSON({
-      schema: 'tropical_program_1',
+      schema: 'tropical_program_2',
       name: 'test',
-      instances: {
-        clk: { program: 'Clock', inputs: { freq: 4, ratios_in: [1] } },
-        seq: {
-          program: 'Sequencer',
-          type_args: { N: 4 },
-          inputs: {
-            clock: { op: 'ref', instance: 'clk', output: 'output' },
-            values: [110, 220, 330, 440],
-          },
-        },
-      },
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'clk', program: 'Clock', inputs: { freq: 4, ratios_in: [1] } },
+        { op: 'instance_decl', name: 'seq', program: 'Sequencer', type_args: { N: 4 }, inputs: {
+          clock: { op: 'ref', instance: 'clk', output: 'output' },
+          values: [110, 220, 330, 440],
+        }},
+      ]},
       audio_outputs: [{ instance: 'seq', output: 'value' }],
     }, session)
     const plan = flattenSession(session)

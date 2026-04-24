@@ -14,41 +14,43 @@
 
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON, type ExprNode } from './session'
-import { loadStdlib as loadBuiltins, loadProgramAsType, type ProgramJSON } from './program'
+import { loadStdlib as loadBuiltins, loadProgramAsType, type ProgramNode } from './program'
 import { applySessionWiring } from './apply_plan'
 import { flattenExpressions } from './flatten'
 import { interpretSamples } from './interpret'
 
 // A trivial leaf program: one input, one state register, output = reg; reg updates
 // to (reg + input). Exercises both output and register-update wrapping paths.
-const ACCUM: ProgramJSON = {
-  schema: 'tropical_program_1',
+const ACCUM: ProgramNode = {
+  op: 'program',
   name: 'Accum',
-  inputs: ['x'],
-  outputs: ['out'],
-  regs: { acc: 0 },
-  input_defaults: { x: 0 },
-  process: {
-    outputs: { out: { op: 'reg', name: 'acc' } },
-    next_regs: { acc: { op: 'add', args: [{ op: 'reg', name: 'acc' }, { op: 'input', name: 'x' }] } },
+  ports: { inputs: [{ name: 'x', default: 0 }], outputs: ['out'] },
+  body: { op: 'block',
+    decls: [{ op: 'reg_decl', name: 'acc', init: 0 }],
+    assigns: [
+      { op: 'output_assign', name: 'out', expr: { op: 'reg', name: 'acc' } },
+      { op: 'next_update', target: { kind: 'reg', name: 'acc' },
+        expr: { op: 'add', args: [{ op: 'reg', name: 'acc' }, { op: 'input', name: 'x' }] } },
+    ],
   },
-} as ProgramJSON
+}
 
 function setupGated(gateInput: ExprNode, bufferLength = 32) {
   const session = makeSession(bufferLength)
-  loadBuiltins(session.typeRegistry)
-  session.typeRegistry.set('Accum', loadProgramAsType(ACCUM, session))
+  loadBuiltins(session)
+  loadProgramAsType(ACCUM, session)
 
   // Patch: one gated Accum. x drives the register; output is the register value,
   // wrapped in source_tag (zero on skip) / state update wrapped with on_skip=reg.
   loadJSON({
-    schema: 'tropical_program_1',
+    schema: 'tropical_program_2',
     name: 'patch',
-    instances: {
-      a1: { program: 'Accum', inputs: { x: 1.0 }, gateable: true, gate_input: gateInput },
-    },
+    body: { op: 'block', decls: [
+      { op: 'instance_decl', name: 'a1', program: 'Accum',
+        inputs: { x: 1.0 }, gateable: true, gate_input: gateInput },
+    ]},
     audio_outputs: [{ instance: 'a1', output: 'out' }],
-  } as ProgramJSON, session)
+  }, session)
 
   return session
 }
@@ -77,14 +79,16 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
     // No source_tag at all — direct Accum instance. Sanity check the test
     // harness itself before asserting anything about gateable semantics.
     const session = makeSession(16)
-    loadBuiltins(session.typeRegistry)
-    session.typeRegistry.set('Accum', loadProgramAsType(ACCUM, session))
+    loadBuiltins(session)
+    loadProgramAsType(ACCUM, session)
     loadJSON({
-      schema: 'tropical_program_1',
+      schema: 'tropical_program_2',
       name: 'patch',
-      instances: { a1: { program: 'Accum', inputs: { x: 1.0 } } },
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'a1', program: 'Accum', inputs: { x: 1.0 } },
+      ]},
       audio_outputs: [{ instance: 'a1', output: 'out' }],
-    } as ProgramJSON, session)
+    }, session)
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()

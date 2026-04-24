@@ -1,39 +1,40 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, resolveProgramType } from './session.js'
 import { loadProgramAsType } from './program.js'
-import type { ProgramJSON } from './program.js'
+import type { ProgramNode } from './program.js'
 import { Float, ArrayType } from './term.js'
 
-function genericDelay(): ProgramJSON {
+function genericDelay(): ProgramNode {
   return {
-    schema: 'tropical_program_1',
+    op: 'program',
     name: 'Delay',
     type_params: { N: { type: 'int', default: 44100 } },
-    inputs: ['x'],
-    outputs: ['y'],
-    regs: { buf: { zeros: { type_param: 'N' } } as any },
-    input_defaults: { x: 0 },
     breaks_cycles: true,
-    process: {
-      outputs: {
-        y: {
+    ports: {
+      inputs: [{ name: 'x', default: 0 }],
+      outputs: ['y'],
+    },
+    body: { op: 'block',
+      decls: [
+        { op: 'reg_decl', name: 'buf', init: { zeros: { type_param: 'N' } } as any },
+      ],
+      assigns: [
+        { op: 'output_assign', name: 'y', expr: {
           op: 'index',
           args: [
             { op: 'reg', name: 'buf' },
             { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
           ],
-        },
-      },
-      next_regs: {
-        buf: {
+        }},
+        { op: 'next_update', target: { kind: 'reg', name: 'buf' }, expr: {
           op: 'array_set',
           args: [
             { op: 'reg', name: 'buf' },
             { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
             { op: 'input', name: 'x' },
           ],
-        },
-      },
+        }},
+      ],
     },
   }
 }
@@ -71,14 +72,15 @@ describe('resolveProgramType — generic instantiation', () => {
 
   test('rejects type_args on non-generic programs', () => {
     const session = makeSession()
-    const onePole: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const identity: ProgramNode = {
+      op: 'program',
       name: 'Identity',
-      inputs: ['x'],
-      outputs: ['y'],
-      process: { outputs: { y: { op: 'input', name: 'x' } } },
+      ports: { inputs: ['x'], outputs: ['y'] },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+      },
     }
-    loadProgramAsType(onePole, session)
+    loadProgramAsType(identity, session)
     expect(() => resolveProgramType(session, 'Identity', { N: 8 }, undefined)).toThrow(/does not declare type_params/)
   })
 
@@ -89,12 +91,13 @@ describe('resolveProgramType — generic instantiation', () => {
 
   test('non-generic programs still resolve through typeRegistry', () => {
     const session = makeSession()
-    const p: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const p: ProgramNode = {
+      op: 'program',
       name: 'Passthrough',
-      inputs: ['x'],
-      outputs: ['y'],
-      process: { outputs: { y: { op: 'input', name: 'x' } } },
+      ports: { inputs: ['x'], outputs: ['y'] },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+      },
     }
     loadProgramAsType(p, session)
     const { type, typeArgs } = resolveProgramType(session, 'Passthrough', undefined, undefined)
@@ -103,17 +106,21 @@ describe('resolveProgramType — generic instantiation', () => {
   })
 
   test('type_param refs in array port shapes become concrete PortTypes after instantiation', () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramNode = {
+      op: 'program',
       name: 'Bus',
       type_params: { N: { type: 'int', default: 4 } },
-      inputs: [
-        { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
-      ],
-      outputs: [
-        { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
-      ],
-      process: { outputs: { out: { op: 'input', name: 'values' } } },
+      ports: {
+        inputs: [
+          { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
+        ],
+        outputs: [
+          { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
+        ],
+      },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'out', expr: { op: 'input', name: 'values' } }],
+      },
     }
     const session = makeSession()
     loadProgramAsType(prog, session)

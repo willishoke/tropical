@@ -1,390 +1,467 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "melancholy_house",
-  "programs": {
-    "ChordSeq": {
-      "schema": "tropical_program_1",
-      "name": "ChordSeq",
-      "inputs": [
-        "gate"
-      ],
-      "outputs": [
-        "freq_a",
-        "freq_c",
-        "freq_e",
-        "freq_g"
-      ],
-      "process": {
-        "outputs": {
-          "freq_a": {
-            "op": "select",
-            "args": [
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "program_decl",
+        "name": "ChordSeq",
+        "program": {
+          "op": "program",
+          "name": "ChordSeq",
+          "body": {
+            "op": "block",
+            "decls": [
               {
-                "op": "eq",
-                "args": [
-                  {
-                    "op": "reg",
-                    "name": "step"
-                  },
-                  0
-                ]
+                "op": "reg_decl",
+                "name": "step",
+                "init": 0
               },
-              146.83,
-              116.54
-            ]
+              {
+                "op": "reg_decl",
+                "name": "prev_gate",
+                "init": 0
+              }
+            ],
+            "assigns": [
+              {
+                "op": "output_assign",
+                "name": "freq_a",
+                "expr": {
+                  "op": "select",
+                  "args": [
+                    {
+                      "op": "eq",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "step"
+                        },
+                        0
+                      ]
+                    },
+                    146.83,
+                    116.54
+                  ]
+                }
+              },
+              {
+                "op": "output_assign",
+                "name": "freq_c",
+                "expr": {
+                  "op": "select",
+                  "args": [
+                    {
+                      "op": "eq",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "step"
+                        },
+                        0
+                      ]
+                    },
+                    174.61,
+                    146.83
+                  ]
+                }
+              },
+              {
+                "op": "output_assign",
+                "name": "freq_e",
+                "expr": {
+                  "op": "select",
+                  "args": [
+                    {
+                      "op": "eq",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "step"
+                        },
+                        0
+                      ]
+                    },
+                    220,
+                    174.61
+                  ]
+                }
+              },
+              {
+                "op": "output_assign",
+                "name": "freq_g",
+                "expr": {
+                  "op": "select",
+                  "args": [
+                    {
+                      "op": "eq",
+                      "args": [
+                        {
+                          "op": "reg",
+                          "name": "step"
+                        },
+                        0
+                      ]
+                    },
+                    261.63,
+                    220
+                  ]
+                }
+              },
+              {
+                "op": "next_update",
+                "target": {
+                  "kind": "reg",
+                  "name": "step"
+                },
+                "expr": {
+                  "op": "select",
+                  "args": [
+                    {
+                      "op": "select",
+                      "args": [
+                        {
+                          "op": "gt",
+                          "args": [
+                            {
+                              "op": "input",
+                              "name": "gate"
+                            },
+                            0.5
+                          ]
+                        },
+                        {
+                          "op": "lte",
+                          "args": [
+                            {
+                              "op": "reg",
+                              "name": "prev_gate"
+                            },
+                            0.5
+                          ]
+                        },
+                        false
+                      ]
+                    },
+                    {
+                      "op": "mod",
+                      "args": [
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "reg",
+                              "name": "step"
+                            },
+                            1
+                          ]
+                        },
+                        2
+                      ]
+                    },
+                    {
+                      "op": "reg",
+                      "name": "step"
+                    }
+                  ]
+                }
+              },
+              {
+                "op": "next_update",
+                "target": {
+                  "kind": "reg",
+                  "name": "prev_gate"
+                },
+                "expr": {
+                  "op": "input",
+                  "name": "gate"
+                }
+              }
+            ],
+            "value": null
           },
-          "freq_c": {
-            "op": "select",
-            "args": [
-              {
-                "op": "eq",
-                "args": [
-                  {
-                    "op": "reg",
-                    "name": "step"
-                  },
-                  0
-                ]
-              },
-              174.61,
-              146.83
-            ]
-          },
-          "freq_e": {
-            "op": "select",
-            "args": [
-              {
-                "op": "eq",
-                "args": [
-                  {
-                    "op": "reg",
-                    "name": "step"
-                  },
-                  0
-                ]
-              },
-              220,
-              174.61
-            ]
-          },
-          "freq_g": {
-            "op": "select",
-            "args": [
-              {
-                "op": "eq",
-                "args": [
-                  {
-                    "op": "reg",
-                    "name": "step"
-                  },
-                  0
-                ]
-              },
-              261.63,
-              220
+          "ports": {
+            "inputs": [
+              "gate"
+            ],
+            "outputs": [
+              "freq_a",
+              "freq_c",
+              "freq_e",
+              "freq_g"
             ]
           }
-        },
-        "next_regs": {
-          "step": {
-            "op": "select",
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock",
+        "program": "Clock",
+        "inputs": {
+          "freq": 2.3333
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO_bass",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
             "args": [
               {
-                "op": "select",
-                "args": [
-                  {
-                    "op": "gt",
-                    "args": [
-                      {
-                        "op": "input",
-                        "name": "gate"
-                      },
-                      0.5
-                    ]
-                  },
-                  {
-                    "op": "lte",
-                    "args": [
-                      {
-                        "op": "reg",
-                        "name": "prev_gate"
-                      },
-                      0.5
-                    ]
-                  },
-                  false
-                ]
+                "op": "ref",
+                "instance": "Seq",
+                "output": "freq_a"
               },
+              0.5
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Env_bass",
+        "program": "ADEnvelope",
+        "inputs": {
+          "attack": 0.06,
+          "decay": 0.32,
+          "gate": {
+            "op": "ref",
+            "instance": "Clock",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCA_bass",
+        "program": "VCA",
+        "inputs": {
+          "audio": {
+            "op": "ref",
+            "instance": "VCO_bass",
+            "output": "sin"
+          },
+          "cv": {
+            "op": "ref",
+            "instance": "Env_bass",
+            "output": "env"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO_pad_A",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "ref",
+            "instance": "Seq",
+            "output": "freq_a"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO_pad_C",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "ref",
+            "instance": "Seq",
+            "output": "freq_c"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO_pad_E",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "ref",
+            "instance": "Seq",
+            "output": "freq_e"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO_pad_G",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "ref",
+            "instance": "Seq",
+            "output": "freq_g"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Env_pad",
+        "program": "ADSREnvelope",
+        "inputs": {
+          "gate": 1,
+          "attack": 1.5,
+          "decay": 0.3,
+          "sustain": 0.9,
+          "release": 2
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCA_pad",
+        "program": "VCA",
+        "inputs": {
+          "cv": {
+            "op": "ref",
+            "instance": "Env_pad",
+            "output": "env"
+          },
+          "audio": {
+            "op": "mul",
+            "args": [
               {
-                "op": "mod",
+                "op": "add",
                 "args": [
                   {
                     "op": "add",
                     "args": [
                       {
-                        "op": "reg",
-                        "name": "step"
+                        "op": "ref",
+                        "instance": "VCO_pad_A",
+                        "output": "sin"
                       },
-                      1
+                      {
+                        "op": "ref",
+                        "instance": "VCO_pad_C",
+                        "output": "sin"
+                      }
                     ]
                   },
-                  2
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "ref",
+                        "instance": "VCO_pad_E",
+                        "output": "sin"
+                      },
+                      {
+                        "op": "ref",
+                        "instance": "VCO_pad_G",
+                        "output": "sin"
+                      }
+                    ]
+                  }
                 ]
               },
-              {
-                "op": "reg",
-                "name": "step"
-              }
+              0.25
             ]
-          },
-          "prev_gate": {
-            "op": "input",
-            "name": "gate"
           }
         }
       },
-      "regs": {
-        "step": 0,
-        "prev_gate": 0
-      }
-    }
-  },
-  "instances": {
-    "Clock": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 2.3333
-      }
-    },
-    "VCO_bass": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "Seq",
-              "output": "freq_a"
-            },
-            0.5
-          ]
+      {
+        "op": "instance_decl",
+        "name": "Sidechain",
+        "program": "Compressor",
+        "inputs": {
+          "threshold": -20,
+          "ratio": 8,
+          "attack_ms": 2,
+          "release_ms": 120,
+          "makeup": 2.5,
+          "input": {
+            "op": "add",
+            "args": [
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "ref",
+                    "instance": "VCA_bass",
+                    "output": "out"
+                  },
+                  0.9
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "ref",
+                        "instance": "VCA_pad",
+                        "output": "out"
+                      },
+                      0.45
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "ref",
+                        "instance": "Delay_pad",
+                        "output": "y"
+                      },
+                      0.35
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "sidechain": {
+            "op": "ref",
+            "instance": "Clock",
+            "output": "output"
+          }
         }
-      }
-    },
-    "Env_bass": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "attack": 0.06,
-        "decay": 0.32,
-        "gate": {
-          "op": "ref",
-          "instance": "Clock",
-          "output": "output"
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock_chord",
+        "program": "Clock",
+        "inputs": {
+          "freq": 0.1458
         }
-      }
-    },
-    "VCA_bass": {
-      "program": "VCA",
-      "inputs": {
-        "audio": {
-          "op": "ref",
-          "instance": "VCO_bass",
-          "output": "sin"
+      },
+      {
+        "op": "instance_decl",
+        "name": "Delay_pad",
+        "program": "Delay",
+        "inputs": {
+          "x": {
+            "op": "ref",
+            "instance": "VCA_pad",
+            "output": "out"
+          }
         },
-        "cv": {
-          "op": "ref",
-          "instance": "Env_bass",
-          "output": "env"
+        "type_args": {
+          "N": 44100
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Seq",
+        "program": "ChordSeq",
+        "inputs": {
+          "gate": {
+            "op": "ref",
+            "instance": "Clock_chord",
+            "output": "output"
+          }
         }
       }
-    },
-    "VCO_pad_A": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "ref",
-          "instance": "Seq",
-          "output": "freq_a"
-        }
-      }
-    },
-    "VCO_pad_C": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "ref",
-          "instance": "Seq",
-          "output": "freq_c"
-        }
-      }
-    },
-    "VCO_pad_E": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "ref",
-          "instance": "Seq",
-          "output": "freq_e"
-        }
-      }
-    },
-    "VCO_pad_G": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "ref",
-          "instance": "Seq",
-          "output": "freq_g"
-        }
-      }
-    },
-    "Env_pad": {
-      "program": "ADSREnvelope",
-      "inputs": {
-        "gate": 1,
-        "attack": 1.5,
-        "decay": 0.3,
-        "sustain": 0.9,
-        "release": 2
-      }
-    },
-    "VCA_pad": {
-      "program": "VCA",
-      "inputs": {
-        "cv": {
-          "op": "ref",
-          "instance": "Env_pad",
-          "output": "env"
-        },
-        "audio": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "add",
-                  "args": [
-                    {
-                      "op": "ref",
-                      "instance": "VCO_pad_A",
-                      "output": "sin"
-                    },
-                    {
-                      "op": "ref",
-                      "instance": "VCO_pad_C",
-                      "output": "sin"
-                    }
-                  ]
-                },
-                {
-                  "op": "add",
-                  "args": [
-                    {
-                      "op": "ref",
-                      "instance": "VCO_pad_E",
-                      "output": "sin"
-                    },
-                    {
-                      "op": "ref",
-                      "instance": "VCO_pad_G",
-                      "output": "sin"
-                    }
-                  ]
-                }
-              ]
-            },
-            0.25
-          ]
-        }
-      }
-    },
-    "Sidechain": {
-      "program": "Compressor",
-      "inputs": {
-        "threshold": -20,
-        "ratio": 8,
-        "attack_ms": 2,
-        "release_ms": 120,
-        "makeup": 2.5,
-        "input": {
-          "op": "add",
-          "args": [
-            {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "ref",
-                  "instance": "VCA_bass",
-                  "output": "out"
-                },
-                0.9
-              ]
-            },
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "ref",
-                      "instance": "VCA_pad",
-                      "output": "out"
-                    },
-                    0.45
-                  ]
-                },
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "ref",
-                      "instance": "Delay_pad",
-                      "output": "y"
-                    },
-                    0.35
-                  ]
-                }
-              ]
-            }
-          ]
-        },
-        "sidechain": {
-          "op": "ref",
-          "instance": "Clock",
-          "output": "output"
-        }
-      }
-    },
-    "Clock_chord": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 0.1458
-      }
-    },
-    "Delay_pad": {
-      "program": "Delay",
-      "type_args": {"N": 44100},
-      "inputs": {
-        "x": {
-          "op": "ref",
-          "instance": "VCA_pad",
-          "output": "out"
-        }
-      }
-    },
-    "Seq": {
-      "program": "ChordSeq",
-      "inputs": {
-        "gate": {
-          "op": "ref",
-          "instance": "Clock_chord",
-          "output": "output"
-        }
-      }
-    }
+    ],
+    "assigns": [],
+    "value": null
   },
   "audio_outputs": [
     {

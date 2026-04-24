@@ -1,41 +1,99 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "Tanh",
-  "inputs": [
-    { "name": "x", "type": "float" }
-  ],
-  "outputs": [
-    { "name": "out", "type": "float" }
-  ],
-  "input_defaults": { "x": 0 },
-  "process": {
-    "outputs": {
-      "out": {
-        "op": "let",
-        "bind": {
-          "c": { "op": "clamp", "args": [
-            { "op": "input", "name": "x" },
-            -3.0,
-            3.0
-          ]},
-          "c2": { "op": "mul", "args": [
-            { "op": "binding", "name": "c" },
-            { "op": "binding", "name": "c" }
-          ]}
-        },
-        "in": {
-          "op": "div", "args": [
-            { "op": "mul", "args": [
-              { "op": "binding", "name": "c" },
-              { "op": "add", "args": [27.0, { "op": "binding", "name": "c2" }] }
-            ]},
-            { "op": "add", "args": [
-              27.0,
-              { "op": "mul", "args": [9.0, { "op": "binding", "name": "c2" }] }
-            ]}
-          ]
+  "body": {
+    "op": "block",
+    "decls": [],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "out",
+        "expr": {
+          "op": "let",
+          "bind": {
+            "c": {
+              "op": "clamp",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "x"
+                },
+                -3,
+                3
+              ]
+            },
+            "c2": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "binding",
+                  "name": "c"
+                },
+                {
+                  "op": "binding",
+                  "name": "c"
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "div",
+            "args": [
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "binding",
+                    "name": "c"
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      27,
+                      {
+                        "op": "binding",
+                        "name": "c2"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  27,
+                  {
+                    "op": "mul",
+                    "args": [
+                      9,
+                      {
+                        "op": "binding",
+                        "name": "c2"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
         }
       }
-    }
+    ],
+    "value": null
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "x",
+        "type": "float",
+        "default": 0
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": "float"
+      }
+    ]
   }
 }

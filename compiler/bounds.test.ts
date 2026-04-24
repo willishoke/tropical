@@ -6,14 +6,15 @@ import { describe, test, expect } from 'bun:test'
 import { applyBounds, flattenSession } from './flatten'
 import { loadProgramDef, resolveBounds, resolveBaseType, BOUNDED_TYPE_ALIASES } from './session'
 import type { ExprNode } from './expr'
-import type { ProgramJSON } from './program'
+import type { ProgramNode, ProgramPortSpec } from './program'
+import type { TypeDefJSON } from './session'
 import type { ProgramType, ProgramInstance, Bounds } from './program_types'
 import { Param, Trigger } from './runtime/param'
 import { Float } from './term'
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
-// ────────���────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
 
 /** Minimal session for loadProgramDef (no FFI). */
 function mockSession() {
@@ -26,18 +27,30 @@ function mockSession() {
   }
 }
 
+interface LeafOverrides {
+  name?: string
+  inputs?: Array<string | ProgramPortSpec>
+  outputs?: Array<string | ProgramPortSpec>
+  outputsExpr?: Record<string, ExprNode>
+  type_defs?: TypeDefJSON[]
+}
+
 /** Leaf program that computes output = input * 2. */
-function leafProgram(overrides: Partial<ProgramJSON> = {}): ProgramJSON {
+function leafProgram(overrides: LeafOverrides = {}): ProgramNode {
+  const inputs = overrides.inputs ?? [{ name: 'x', type: 'float', default: 0 }]
+  const outputs = overrides.outputs ?? [{ name: 'out', type: 'float' }]
+  const outputExprs = overrides.outputsExpr ?? {
+    out: { op: 'mul', args: [{ op: 'input', name: 'x' }, 2] },
+  }
+  const assigns: ExprNode[] = Object.entries(outputExprs).map(([name, expr]) =>
+    ({ op: 'output_assign', name, expr } as ExprNode))
+  const ports: ProgramNode['ports'] = { inputs, outputs }
+  if (overrides.type_defs !== undefined) ports.type_defs = overrides.type_defs
   return {
-    schema: 'tropical_program_1',
-    name: 'TestLeaf',
-    inputs: [{ name: 'x', type: 'float' }],
-    outputs: [{ name: 'out', type: 'float' }],
-    input_defaults: { x: 0 },
-    process: {
-      outputs: { out: { op: 'mul', args: [{ op: 'input', name: 'x' }, 2] } },
-    },
-    ...overrides,
+    op: 'program',
+    name: overrides.name ?? 'TestLeaf',
+    ports,
+    body: { op: 'block', assigns },
   }
 }
 
@@ -287,8 +300,7 @@ describe('flattenSession input bounds', () => {
     const srcType = loadProgramDef(leafProgram({
       name: 'Source',
       inputs: [],
-      input_defaults: {},
-      process: { outputs: { out: 999 } },
+      outputsExpr: { out: 999 },
     }), session)
     session.typeRegistry.set('Source', srcType)
 
@@ -332,9 +344,8 @@ describe('flattenSession cross-instance bounded output', () => {
     const srcType = loadProgramDef(leafProgram({
       name: 'Source',
       inputs: [],
-      input_defaults: {},
       outputs: [{ name: 'out', type: 'float', bounds: [-1, 1] }],
-      process: { outputs: { out: 999 } },
+      outputsExpr: { out: 999 },
     }), session)
     session.typeRegistry.set('Source', srcType)
 
@@ -395,7 +406,7 @@ describe('audio output safety clamp', () => {
   test('unbounded audio output gets safety clamp to [-1, 1]', () => {
     const session = mockSession()
     const type = loadProgramDef(leafProgram({
-      process: { outputs: { out: 999 } },
+      outputsExpr: { out: 999 },
     }), session)
     session.typeRegistry.set('TestLeaf', type)
     session.instanceRegistry.set('a', type.instantiateAs('a'))
@@ -409,7 +420,7 @@ describe('audio output safety clamp', () => {
     const session = mockSession()
     const type = loadProgramDef(leafProgram({
       outputs: [{ name: 'out', type: 'float', bounds: [-1, 1] }],
-      process: { outputs: { out: { op: 'input', name: 'x' } } },
+      outputsExpr: { out: { op: 'input', name: 'x' } },
     }), session)
     session.typeRegistry.set('TestLeaf', type)
     session.instanceRegistry.set('a', type.instantiateAs('a'))
@@ -424,7 +435,7 @@ describe('audio output safety clamp', () => {
     const session = mockSession()
     const type = loadProgramDef(leafProgram({
       outputs: [{ name: 'out', type: 'float', bounds: [0, 1] }],
-      process: { outputs: { out: { op: 'input', name: 'x' } } },
+      outputsExpr: { out: { op: 'input', name: 'x' } },
     }), session)
     session.typeRegistry.set('TestLeaf', type)
     session.instanceRegistry.set('a', type.instantiateAs('a'))
@@ -439,7 +450,7 @@ describe('audio output safety clamp', () => {
     const session = mockSession()
     const type = loadProgramDef(leafProgram({
       outputs: [{ name: 'out', type: 'float', bounds: [-5, 5] }],
-      process: { outputs: { out: { op: 'input', name: 'x' } } },
+      outputsExpr: { out: { op: 'input', name: 'x' } },
     }), session)
     session.typeRegistry.set('TestLeaf', type)
     session.instanceRegistry.set('a', type.instantiateAs('a'))
@@ -454,7 +465,7 @@ describe('audio output safety clamp', () => {
     const session = mockSession()
     const type = loadProgramDef(leafProgram({
       outputs: [{ name: 'out', type: 'float', bounds: [0, null] }],
-      process: { outputs: { out: { op: 'input', name: 'x' } } },
+      outputsExpr: { out: { op: 'input', name: 'x' } },
     }), session)
     session.typeRegistry.set('TestLeaf', type)
     session.instanceRegistry.set('a', type.instantiateAs('a'))
@@ -513,26 +524,30 @@ describe('user-definable type aliases', () => {
   })
 
   test('Zod schema accepts alias type_def', () => {
-    const { parseProgram } = require('./schema')
-    const prog = parseProgram({
-      schema: 'tropical_program_1',
+    const { parseProgramV2 } = require('./schema')
+    const prog = parseProgramV2({
+      schema: 'tropical_program_2',
       name: 'Test',
-      type_defs: [{ kind: 'alias', name: 'cv', base: 'float', bounds: [0, 10] }],
-      inputs: [{ name: 'x', type: 'cv' }],
-      outputs: [{ name: 'out', type: 'cv' }],
-      process: { outputs: { out: 0 } },
+      ports: {
+        type_defs: [{ kind: 'alias', name: 'cv', base: 'float', bounds: [0, 10] }],
+        inputs: [{ name: 'x', type: 'cv' }],
+        outputs: [{ name: 'out', type: 'cv' }],
+      },
+      body: { op: 'block', assigns: [{ op: 'output_assign', name: 'out', expr: 0 }] },
     })
-    expect(prog.type_defs).toHaveLength(1)
-    expect(prog.type_defs[0].kind).toBe('alias')
+    expect(prog.ports?.type_defs).toHaveLength(1)
+    expect(prog.ports.type_defs[0].kind).toBe('alias')
   })
 
   test('Zod schema rejects alias with invalid bounds', () => {
-    const { parseProgram } = require('./schema')
-    expect(() => parseProgram({
-      schema: 'tropical_program_1',
+    const { parseProgramV2 } = require('./schema')
+    expect(() => parseProgramV2({
+      schema: 'tropical_program_2',
       name: 'Test',
-      type_defs: [{ kind: 'alias', name: 'cv', base: 'float', bounds: 'wrong' }],
-      process: { outputs: {} },
+      ports: {
+        type_defs: [{ kind: 'alias', name: 'cv', base: 'float', bounds: 'wrong' }],
+      },
+      body: { op: 'block' },
     })).toThrow()
   })
 })

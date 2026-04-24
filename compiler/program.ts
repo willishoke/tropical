@@ -1,10 +1,9 @@
 /**
- * program.ts — ProgramJSON schema, loading, saving, and stdlib.
+ * program.ts — tropical_program_2 (ProgramNode) types, loading, saving, and stdlib.
  *
- * A program has inputs, outputs, state, subprograms, and a process body.
- * - A program with `process` and no `instances` is a leaf.
- * - A program with `instances` and `audio_outputs` is a top-level graph.
- * - A program with `instances`, `inputs`, and computed `outputs` is a reusable composite.
+ * A program is an ExprNode of op `program`: a named set of ports wrapping a
+ * body `block` that declares regs, delays, instances, and nested programs,
+ * and carries output assignments plus per-tick reg/delay updates.
  */
 
 import type { ExprNode } from './expr.js'
@@ -20,7 +19,7 @@ import { Float, portTypeEqual, type PortType } from './term.js'
 import type { Bounds } from './program_types.js'
 
 // ─────────────────────────────────────────────────────────────
-// ProgramJSON schema
+// Program schema
 // ─────────────────────────────────────────────────────────────
 
 /** Compile-time shape dimension: a concrete int or a reference to an
@@ -31,80 +30,114 @@ export type ShapeDim = number | { op: 'type_param'; name: string }
  *  arrays use the structured form so type_param refs can appear in shapes. */
 export type PortTypeDecl = string | { kind: 'array'; element: string; shape: ShapeDim[] }
 
-export interface ProgramJSON {
-  schema: 'tropical_program_1'
+// ─────────────────────────────────────────────────────────────
+// ProgramNode — typed view of the tropical_program_2 ExprNode shape
+// ─────────────────────────────────────────────────────────────
+//
+// A program is an ExprNode of op `program`. The types below are a typed
+// view of that JSON — the runtime value is a plain object; the TypeScript
+// types only constrain the fields we care about.
+
+/** Port declaration: scalar/alias name or `{name, type?, default?, bounds?}`. */
+export interface ProgramPortSpec {
   name: string
+  type?: PortTypeDecl
+  default?: ExprNode
+  bounds?: [number | null, number | null]
+}
 
-  /** Inputs to this program. Empty or absent = top-level (no external inputs). */
-  inputs?: Array<string | { name: string; type?: PortTypeDecl; default?: ExprNode; bounds?: [number | null, number | null] }>
-  /** Output declarations — names for leaf programs, expressions for composites. */
-  outputs?: Array<string | { name: string; type?: PortTypeDecl; bounds?: [number | null, number | null] }>
+export interface ProgramPorts {
+  inputs?: Array<string | ProgramPortSpec>
+  outputs?: Array<string | ProgramPortSpec>
+  type_defs?: TypeDefJSON[]
+}
 
-  /** Scalar/array state registers. */
-  regs?: Record<string, number | boolean | number[] | number[][] | { init: number | boolean | number[] | number[][]; type: PortTypeDecl }>
-  /** Named delay nodes. */
-  delays?: Record<string, { update: ExprNode; init?: number }>
-  /** Sample rate override. */
+/** Body block: ordered decls + assigns. `value` is unused (assigns-canonical). */
+export interface BlockNode {
+  op: 'block'
+  decls?: ExprNode[]
+  assigns?: ExprNode[]
+  value?: ExprNode | null
+}
+
+/** Program — the unified IR. Same shape whether nested (inside `program_decl`)
+ *  or at the top level of a `tropical_program_2` file. */
+export interface ProgramNode {
+  op: 'program'
+  name: string
+  type_params?: Record<string, { type: 'int'; default?: number }>
   sample_rate?: number
-  /** Default values for inputs. */
-  input_defaults?: Record<string, ExprNode>
+  breaks_cycles?: boolean
+  ports?: ProgramPorts
+  body: BlockNode
+}
 
-  /** Inline subprogram definitions (reusable within this program). */
-  programs?: Record<string, ProgramJSON>
-  /** Instantiated subprograms. */
-  instances?: Record<string, {
-    program: string
-    inputs?: Record<string, ExprNode>
-    /** Compile-time type args for generic programs. Numeric literals, or
-     *  `{op:"type_param",name}` to forward from the outer program's type_params. */
-    type_args?: Record<string, number | ExprNode>
-    /** When true, this instance's instructions are wrapped in a conditional
-     *  basic block at JIT time. If `gate_input` is false, the instance's
-     *  computation is skipped, state is held, and outputs appear as zero. */
-    gateable?: boolean
-    /** Expression producing a Bool-typed scalar signal. Required when
-     *  `gateable` is true. Type-checked at flatten time. */
-    gate_input?: ExprNode
-  }>
-
-  /** Process body for leaf programs (direct computation). */
-  process?: {
-    outputs: Record<string, ExprNode>
-    next_regs?: Record<string, ExprNode>
-  }
-
-  /** Audio output routing (top-level programs only). */
+/** Top-level session metadata carried alongside a root program in a v2 file. */
+export interface ProgramTopLevel {
+  params?: Array<{ name: string; value?: number; time_const?: number; type?: 'param' | 'trigger' }>
   audio_outputs?: Array<
     | { instance: string; output: string | number }
     | { expr: ExprNode }
   >
-  /** Control parameters (top-level programs only). */
-  params?: Array<{
-    name: string
-    value?: number
-    time_const?: number
-    type?: 'param' | 'trigger'
-  }>
-  /** Runtime configuration. */
   config?: { buffer_length?: number; sample_rate?: number }
-  /** Inline ADT type definitions. */
-  type_defs?: TypeDefJSON[]
-  /** When true, outputs depend only on previous-sample state — allows feedback cycles. */
+}
+
+/** On-disk `tropical_program_2` file shape: a program plus session metadata. */
+export interface ProgramFile extends ProgramTopLevel {
+  schema: 'tropical_program_2'
+  name: string
+  type_params?: ProgramNode['type_params']
+  sample_rate?: number
   breaks_cycles?: boolean
-  /** Compile-time type parameters. Each instance of a program with type_params must supply
-   *  a matching type_arg (or the declared default is used). */
-  type_params?: Record<string, { type: 'int'; default?: number }>
+  ports?: ProgramPorts
+  body: BlockNode
 }
 
 // ─────────────────────────────────────────────────────────────
 // Program loading
 // ─────────────────────────────────────────────────────────────
 
+/** Iterate instance_decl entries in a ProgramNode's body. */
+export function* instanceDecls(prog: ProgramNode): Iterable<{
+  name: string
+  program: string
+  inputs?: Record<string, ExprNode>
+  type_args?: Record<string, number | ExprNode>
+  gateable?: boolean
+  gate_input?: ExprNode
+}> {
+  for (const d of prog.body?.decls ?? []) {
+    if (typeof d !== 'object' || d === null || Array.isArray(d)) continue
+    const obj = d as Record<string, unknown>
+    if (obj.op !== 'instance_decl') continue
+    yield {
+      name: obj.name as string,
+      program: obj.program as string,
+      inputs: obj.inputs as Record<string, ExprNode> | undefined,
+      type_args: obj.type_args as Record<string, number | ExprNode> | undefined,
+      gateable: obj.gateable as boolean | undefined,
+      gate_input: obj.gate_input as ExprNode | undefined,
+    }
+  }
+}
+
+/** Iterate program_decl entries in a ProgramNode's body. */
+function* programDecls(prog: ProgramNode): Iterable<{ name: string; program: ProgramNode }> {
+  for (const d of prog.body?.decls ?? []) {
+    if (typeof d !== 'object' || d === null || Array.isArray(d)) continue
+    const obj = d as Record<string, unknown>
+    if (obj.op !== 'program_decl') continue
+    yield { name: obj.name as string, program: obj.program as ProgramNode }
+  }
+}
+
 /**
- * Load a ProgramJSON into a session, replacing all existing state.
+ * Load a ProgramNode into a session, replacing all existing state.
+ * `topLevel` carries session-scoped metadata (params, audio_outputs, config).
  */
 export function loadProgramAsSession(
-  prog: ProgramJSON,
+  prog: ProgramNode,
+  topLevel: ProgramTopLevel,
   session: SessionState,
 ): void {
   // Clear session state
@@ -118,21 +151,19 @@ export function loadProgramAsSession(
   session.typeAliasRegistry.clear()
 
   // Register type aliases from type_defs before anything else
-  for (const td of prog.type_defs ?? []) {
+  for (const td of prog.ports?.type_defs ?? []) {
     if (td.kind === 'alias') {
       session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
     }
   }
 
   // Register inline program definitions (loadProgramAsType handles registration)
-  if (prog.programs) {
-    for (const [name, subProg] of Object.entries(prog.programs)) {
-      loadProgramAsType({ ...subProg, name }, session)
-    }
+  for (const sub of programDecls(prog)) {
+    loadProgramAsType({ ...sub.program, name: sub.name }, session)
   }
 
   // Create params and triggers before instances (instances may reference them)
-  for (const p of prog.params ?? []) {
+  for (const p of topLevel.params ?? []) {
     if (p.type === 'trigger') {
       session.triggerRegistry.set(p.name, new Trigger())
     } else {
@@ -141,24 +172,23 @@ export function loadProgramAsSession(
   }
 
   // Instantiate programs
-  for (const [name, inst] of Object.entries(prog.instances ?? {})) {
+  for (const inst of instanceDecls(prog)) {
     const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
-    const instance = type.instantiateAs(name, { baseTypeName: inst.program, typeArgs })
+    const instance = type.instantiateAs(inst.name, { baseTypeName: inst.program, typeArgs })
     if (inst.gateable) {
-      if (inst.gate_input === undefined) {
-        throw new Error(`Instance '${name}' has gateable=true but no gate_input expression.`)
-      }
+      if (inst.gate_input === undefined)
+        throw new Error(`Instance '${inst.name}' has gateable=true but no gate_input expression.`)
+      validateExpr(inst.gate_input, `${inst.name}.__gate__`)
       instance.gateable = true
       instance.gateInput = inst.gate_input
-      validateExpr(inst.gate_input, `${name}.__gate__`)
     }
     session.instanceRegistry.set(instance.name, instance)
 
     // Populate wiring from instance inputs
     if (inst.inputs) {
       for (const [input, expr] of Object.entries(inst.inputs)) {
-        validateExpr(expr, `${name}.${input}`)
-        session.inputExprNodes.set(`${name}:${input}`, expr)
+        validateExpr(expr, `${inst.name}.${input}`)
+        session.inputExprNodes.set(`${inst.name}:${input}`, expr)
       }
     }
   }
@@ -175,7 +205,7 @@ export function loadProgramAsSession(
   }
 
   // Set audio outputs
-  for (const out of prog.audio_outputs ?? []) {
+  for (const out of topLevel.audio_outputs ?? []) {
     if ('expr' in out) {
       throw new Error('Output expressions not supported in plan-based path. Use instance output refs instead.')
     }
@@ -189,8 +219,8 @@ export function loadProgramAsSession(
 }
 
 /**
- * Load a leaf ProgramJSON as a ProgramType (registerable in typeRegistry).
- * Programs with inline `programs` get their subprograms registered first.
+ * Load a ProgramNode as a ProgramType (registerable in typeRegistry).
+ * Programs with inline `program_decl` entries get their subprograms registered first.
  *
  * Generic programs (with `type_params`) are stored in `genericTemplates`
  * instead of being eagerly compiled; they materialize on instantiation via
@@ -198,12 +228,12 @@ export function loadProgramAsSession(
  * registered in `typeRegistry` and returned.
  */
 export function loadProgramAsType(
-  prog: ProgramJSON,
+  prog: ProgramNode,
   session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>,
 ): ProgramType | undefined {
   // Register type aliases from type_defs before processing subprograms
   if (session.typeAliasRegistry) {
-    for (const td of prog.type_defs ?? []) {
+    for (const td of prog.ports?.type_defs ?? []) {
       if (td.kind === 'alias') {
         session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
       }
@@ -211,10 +241,8 @@ export function loadProgramAsType(
   }
 
   // Register inline subprograms first (each handles its own registration)
-  if (prog.programs) {
-    for (const [name, subProg] of Object.entries(prog.programs)) {
-      loadProgramAsType({ ...subProg, name }, session)
-    }
+  for (const sub of programDecls(prog)) {
+    loadProgramAsType({ ...sub.program, name: sub.name }, session)
   }
 
   // Generic: stash the template, defer compilation to instantiation time.
@@ -229,38 +257,37 @@ export function loadProgramAsType(
 }
 
 /**
- * Merge a ProgramJSON into an existing session (additive — no state clearing).
+ * Merge a ProgramNode into an existing session (additive — no state clearing).
  */
 export function mergeProgramIntoSession(
-  prog: ProgramJSON,
+  prog: ProgramNode,
+  topLevel: ProgramTopLevel,
   session: SessionState,
 ): void {
   // Fail fast on name collisions
-  for (const name of Object.keys(prog.instances ?? {})) {
-    if (session.instanceRegistry.has(name))
-      throw new Error(`merge collision: instance '${name}' already exists.`)
+  for (const inst of instanceDecls(prog)) {
+    if (session.instanceRegistry.has(inst.name))
+      throw new Error(`merge collision: instance '${inst.name}' already exists.`)
   }
-  for (const p of prog.params ?? []) {
+  for (const p of topLevel.params ?? []) {
     if (session.paramRegistry.has(p.name) || session.triggerRegistry.has(p.name))
       throw new Error(`merge collision: param/trigger '${p.name}' already exists.`)
   }
 
   // Register type aliases from type_defs (additive)
-  for (const td of prog.type_defs ?? []) {
+  for (const td of prog.ports?.type_defs ?? []) {
     if (td.kind === 'alias') {
       session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
     }
   }
 
   // Register inline program definitions (loadProgramAsType handles registration)
-  if (prog.programs) {
-    for (const [name, subProg] of Object.entries(prog.programs)) {
-      loadProgramAsType({ ...subProg, name }, session)
-    }
+  for (const sub of programDecls(prog)) {
+    loadProgramAsType({ ...sub.program, name: sub.name }, session)
   }
 
   // Create params and triggers
-  for (const p of prog.params ?? []) {
+  for (const p of topLevel.params ?? []) {
     if (p.type === 'trigger') {
       session.triggerRegistry.set(p.name, new Trigger())
     } else {
@@ -269,24 +296,23 @@ export function mergeProgramIntoSession(
   }
 
   // Instantiate programs
-  for (const [name, inst] of Object.entries(prog.instances ?? {})) {
+  for (const inst of instanceDecls(prog)) {
     const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
-    const instance = type.instantiateAs(name, { baseTypeName: inst.program, typeArgs })
+    const instance = type.instantiateAs(inst.name, { baseTypeName: inst.program, typeArgs })
     if (inst.gateable) {
-      if (inst.gate_input === undefined) {
-        throw new Error(`Instance '${name}' has gateable=true but no gate_input expression.`)
-      }
+      if (inst.gate_input === undefined)
+        throw new Error(`Instance '${inst.name}' has gateable=true but no gate_input expression.`)
+      validateExpr(inst.gate_input, `${inst.name}.__gate__`)
       instance.gateable = true
       instance.gateInput = inst.gate_input
-      validateExpr(inst.gate_input, `${name}.__gate__`)
     }
     session.instanceRegistry.set(instance.name, instance)
 
     // Populate wiring from instance inputs
     if (inst.inputs) {
       for (const [input, expr] of Object.entries(inst.inputs)) {
-        validateExpr(expr, `${name}.${input}`)
-        session.inputExprNodes.set(`${name}:${input}`, expr)
+        validateExpr(expr, `${inst.name}.${input}`)
+        session.inputExprNodes.set(`${inst.name}:${input}`, expr)
       }
     }
   }
@@ -303,7 +329,7 @@ export function mergeProgramIntoSession(
   }
 
   // Append audio outputs
-  for (const out of prog.audio_outputs ?? []) {
+  for (const out of topLevel.audio_outputs ?? []) {
     if ('expr' in out) {
       throw new Error('Output expressions not supported in plan-based path. Use instance output refs instead.')
     }
@@ -323,60 +349,32 @@ export function mergeProgramIntoSession(
 import { readFileSync, readdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
+import { loadStdlibFromMap } from './stdlib_loader.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 /**
- * Load all stdlib ProgramJSON files into a type registry.
- * Types are indexed first, then loaded on demand — dependencies resolve
- * recursively regardless of alphabetical file ordering.
- * Accepts either a full session or just a typeRegistry Map.
+ * Load all stdlib program files (tropical_program_2) into a type registry.
+ * Reads `../stdlib/*.json` from disk, then delegates to `loadStdlibFromMap`
+ * for registration. Browser builds use `loadStdlibFromMap` directly with a
+ * bundled JSON map (see compiler/stdlib_bundled.ts).
  */
 export function loadStdlib(
   target: Map<string, ProgramType> | Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'>,
 ): void {
-  // If given a bare Map, wrap it in a minimal session-like object
-  const session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'> & Partial<Pick<SessionState, 'typeResolver'>> =
-    target instanceof Map
-      ? { typeRegistry: target, instanceRegistry: new Map(), paramRegistry: new Map(), triggerRegistry: new Map(), specializationCache: new Map(), genericTemplates: new Map() }
-      : target
-
   const stdlibDir = join(__dirname, '../stdlib')
   const files = readdirSync(stdlibDir).filter(f => f.endsWith('.json')).sort()
 
-  // Index all stdlib files by program name
-  const index = new Map<string, string>()
+  const rawByName = new Map<string, unknown>()
   for (const file of files) {
     const path = join(stdlibDir, file)
-    const prog = JSON.parse(readFileSync(path, 'utf-8')) as ProgramJSON
-    index.set(prog.name, path)
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as { schema?: string; name?: string }
+    if (typeof raw.name !== 'string') throw new Error(`${path}: missing 'name' field`)
+    rawByName.set(raw.name, raw)
   }
 
-  // Set up on-demand resolver — loads a stdlib type (and its deps) on first reference.
-  // Returns the concrete ProgramType for non-generic types; for generics it
-  // registers the template and returns undefined (instantiation requires type_args).
-  const loading = new Set<string>()
-  session.typeResolver = (name: string): ProgramType | undefined => {
-    const existing = session.typeRegistry.get(name)
-    if (existing) return existing
-    if (session.genericTemplates.has(name)) return undefined
-    if (loading.has(name)) throw new Error(`Circular stdlib dependency: ${[...loading, name].join(' → ')}`)
-    const path = index.get(name)
-    if (!path) return undefined
-    loading.add(name)
-    const prog = JSON.parse(readFileSync(path, 'utf-8')) as ProgramJSON
-    const type = loadProgramAsType(prog, session)
-    loading.delete(name)
-    return type
-  }
-
-  // Eagerly load all indexed types (resolver handles dependency order)
-  for (const name of index.keys()) {
-    if (!session.typeRegistry.has(name) && !session.genericTemplates.has(name)) {
-      session.typeResolver(name)
-    }
-  }
+  loadStdlibFromMap(target, rawByName)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -384,55 +382,54 @@ export function loadStdlib(
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Serialize the current session to a ProgramJSON.
+ * Serialize the current session to a v2 ProgramNode + top-level metadata.
  */
 export function saveProgramFromSession(
   session: SessionState,
-): ProgramJSON {
-  const prog: ProgramJSON = { schema: 'tropical_program_1', name: 'patch' }
-
-  // Instances
-  if (session.instanceRegistry.size) {
-    prog.instances = {}
-    for (const [name, inst] of session.instanceRegistry) {
-      const entry: { program: string; type_args?: Record<string, number>; gateable?: boolean; gate_input?: ExprNode } = { program: inst.typeName }
-      if (inst.typeArgs) entry.type_args = inst.typeArgs
-      if (inst.gateable) {
-        entry.gateable = true
-        entry.gate_input = inst.gateInput
-      }
-      prog.instances[name] = entry
+): { node: ProgramNode; topLevel: ProgramTopLevel } {
+  const decls: ExprNode[] = []
+  for (const [name, inst] of session.instanceRegistry) {
+    const entry: Record<string, unknown> = { op: 'instance_decl', name, program: inst.typeName }
+    if (inst.typeArgs) entry.type_args = inst.typeArgs
+    if (inst.gateable) {
+      entry.gateable = true
+      if (inst.gateInput !== undefined) entry.gate_input = inst.gateInput
     }
 
-    // Merge wiring into instance inputs
-    for (const [key, node] of session.inputExprNodes) {
-      const [module, input] = key.split(':')
-      const inst = prog.instances[module]
-      if (inst) {
-        if (!inst.inputs) inst.inputs = {}
-        inst.inputs[input] = node
-      }
+    // Merge wiring for this instance
+    const inputs: Record<string, ExprNode> = {}
+    for (const portName of inst.inputNames) {
+      const key = `${name}:${portName}`
+      const expr = session.inputExprNodes.get(key)
+      if (expr !== undefined) inputs[portName] = expr
     }
+    if (Object.keys(inputs).length > 0) entry.inputs = inputs
+    decls.push(entry as ExprNode)
   }
 
-  // Audio outputs
+  const node: ProgramNode = {
+    op: 'program',
+    name: 'patch',
+    body: { op: 'block', decls },
+  }
+
+  const topLevel: ProgramTopLevel = {}
   if (session.graphOutputs.length) {
-    prog.audio_outputs = session.graphOutputs.map(o => ({
+    topLevel.audio_outputs = session.graphOutputs.map(o => ({
       instance: o.instance, output: o.output,
     }))
   }
 
-  // Params and triggers
-  const params: NonNullable<ProgramJSON['params']> = []
+  const params: NonNullable<ProgramTopLevel['params']> = []
   for (const [name, p] of session.paramRegistry) {
     params.push({ name, value: p.value, time_const: 0.005 })
   }
   for (const [name] of session.triggerRegistry) {
     params.push({ name, type: 'trigger' })
   }
-  if (params.length) prog.params = params
+  if (params.length) topLevel.params = params
 
-  return prog
+  return { node, topLevel }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -454,18 +451,19 @@ export interface ExportProgramOpts {
 }
 
 /**
- * Crystallize part of a live session into a reusable composite ProgramJSON.
+ * Crystallize part of a live session into a reusable composite ProgramNode.
  *
  * Walks backward from the declared outputs to find all reachable instances.
  * Rewrites wiring so that exposed ports become program inputs (with the
- * current wiring as input_defaults), and instance refs stay internal.
+ * current wiring folded into each port's `default`), and instance refs
+ * stay internal.
  *
- * Returns a ProgramJSON that can be registered as a type and instantiated.
+ * Returns a ProgramNode that can be registered as a type and instantiated.
  */
 export function exportSessionAsProgram(
   session: SessionState,
   opts: ExportProgramOpts,
-): ProgramJSON {
+): ProgramNode {
   const { name, inputs, outputs } = opts
 
   // Validate output mappings and build output ref expressions
@@ -567,42 +565,47 @@ export function exportSessionAsProgram(
       case 'sum': return t.name
       case 'unit': return 'unit'
       case 'product':
-        throw new Error(`export: product port types cannot be serialized (no ProgramJSON form)`)
+        throw new Error(`export: product port types cannot be serialized`)
     }
   }
 
-  const inputEntries: NonNullable<ProgramJSON['inputs']> = inputNames.map(inputName => {
+  // Collect per-port defaults from current wiring of exposed ports
+  const inputDefaults: Record<string, ExprNode> = {}
+  for (const [inputName, target] of Object.entries(inputs)) {
+    const currentExpr = session.inputExprNodes.get(target)
+    if (currentExpr !== undefined) {
+      inputDefaults[inputName] = rewriteRefs(currentExpr)
+    }
+  }
+
+  const inputEntries: Array<string | ProgramPortSpec> = inputNames.map(inputName => {
     const target = inputs[inputName]
     const [instName, portName] = target.split(':')
     const inst = session.instanceRegistry.get(instName)!
     const idx = inst.inputIndex(portName)
     const pt = inst.inputPortType(idx)
     const bnds = inst._def.inputBounds[idx]
-    const entry: { name: string; type?: PortTypeDecl; bounds?: Bounds } = { name: inputName }
+    const dflt = inputDefaults[inputName]
+    const entry: ProgramPortSpec = { name: inputName }
     if (!isDefaultPortType(pt)) entry.type = portTypeToDecl(pt!)
     if (boundsProvided(bnds)) entry.bounds = bnds
-    return entry.type === undefined && entry.bounds === undefined ? inputName : entry
+    if (dflt !== undefined) entry.default = dflt
+    return entry.type === undefined && entry.bounds === undefined && entry.default === undefined
+      ? inputName
+      : entry
   })
 
-  const outputEntries: NonNullable<ProgramJSON['outputs']> = outputNames.map(outName => {
+  const outputEntries: Array<string | ProgramPortSpec> = outputNames.map(outName => {
     const ref = outputs[outName]
     const inst = session.instanceRegistry.get(ref.instance)!
     const idx = inst.outputIndex(ref.output)
     const pt = inst.outputPortType(idx)
     const bnds = inst._def.outputBounds[idx]
-    const entry: { name: string; type?: PortTypeDecl; bounds?: Bounds } = { name: outName }
+    const entry: ProgramPortSpec = { name: outName }
     if (!isDefaultPortType(pt)) entry.type = portTypeToDecl(pt!)
     if (boundsProvided(bnds)) entry.bounds = bnds
     return entry.type === undefined && entry.bounds === undefined ? outName : entry
   })
-
-  // Build the exported ProgramJSON
-  const prog: ProgramJSON = {
-    schema: 'tropical_program_1',
-    name,
-    inputs: inputEntries,
-    outputs: outputEntries,
-  }
 
   // Topologically sort reachable instances so dependencies come first.
   // loadProgramDef and the flattener both process nested calls sequentially,
@@ -618,58 +621,52 @@ export function exportSessionAsProgram(
     }
   }
 
-  prog.instances = {}
+  const decls: ExprNode[] = []
   for (const instName of order) {
     const inst = session.instanceRegistry.get(instName)!
-    const entry: { program: string; type_args?: Record<string, number>; inputs?: Record<string, ExprNode>; gateable?: boolean; gate_input?: ExprNode } = {
+    const entry: Record<string, unknown> = {
+      op: 'instance_decl',
+      name: instName,
       program: inst.typeName,
     }
     if (inst.typeArgs) entry.type_args = inst.typeArgs
     if (inst.gateable) {
       entry.gateable = true
-      entry.gate_input = inst.gateInput !== undefined ? rewriteRefs(inst.gateInput) : undefined
+      if (inst.gateInput !== undefined) entry.gate_input = rewriteRefs(inst.gateInput)
     }
 
     // Copy wiring, rewriting exposed ports to {op:"input", name:...}
     // and ref→nested_out for sibling instances
+    const instInputs: Record<string, ExprNode> = {}
     for (const portName of inst.inputNames) {
       const key = `${instName}:${portName}`
       if (exposedKeys.has(key)) {
-        // Find which program input maps to this port
         const inputName = Object.entries(inputs).find(([_, t]) => t === key)![0]
-        if (!entry.inputs) entry.inputs = {}
-        entry.inputs[portName] = { op: 'input', name: inputName }
+        instInputs[portName] = { op: 'input', name: inputName }
       } else {
         const expr = session.inputExprNodes.get(key)
-        if (expr !== undefined) {
-          if (!entry.inputs) entry.inputs = {}
-          entry.inputs[portName] = rewriteRefs(expr)
-        }
+        if (expr !== undefined) instInputs[portName] = rewriteRefs(expr)
       }
     }
+    if (Object.keys(instInputs).length > 0) entry.inputs = instInputs
 
-    prog.instances[instName] = entry
+    decls.push(entry as ExprNode)
   }
 
-  // Output expressions — loadProgramDef reads these from process.outputs
-  const processOutputs: Record<string, ExprNode> = {}
+  // Output assigns — reference internal instances via nested_out
+  const assigns: ExprNode[] = []
   for (const [outName, ref] of Object.entries(outputs)) {
-    // Use nested_out referencing an internal instance via its alias name
-    processOutputs[outName] = { op: 'nested_out', ref: ref.instance, output: ref.output }
-  }
-  prog.process = { outputs: processOutputs }
-
-  // Set input_defaults from current wiring of exposed ports
-  const inputDefaults: Record<string, ExprNode> = {}
-  for (const [inputName, target] of Object.entries(inputs)) {
-    const currentExpr = session.inputExprNodes.get(target)
-    if (currentExpr !== undefined) {
-      inputDefaults[inputName] = rewriteRefs(currentExpr)
-    }
-  }
-  if (Object.keys(inputDefaults).length > 0) {
-    prog.input_defaults = inputDefaults
+    assigns.push({
+      op: 'output_assign',
+      name: outName,
+      expr: { op: 'nested_out', ref: ref.instance, output: ref.output },
+    } as ExprNode)
   }
 
-  return prog
+  return {
+    op: 'program',
+    name,
+    ports: { inputs: inputEntries, outputs: outputEntries },
+    body: { op: 'block', decls, assigns },
+  }
 }

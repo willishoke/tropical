@@ -1,30 +1,61 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "SoftClip",
-  "inputs": [
-    { "name": "input", "type": "signal" },
-    { "name": "drive", "type": "float" }
-  ],
-  "outputs": [
-    { "name": "out", "type": "signal" }
-  ],
-  "input_defaults": { "input": 0, "drive": 1 },
-  "instances": {
-    "tanh": {
-      "program": "Tanh",
-      "inputs": {
-        "x": {
-          "op": "mul", "args": [
-            { "op": "input", "name": "drive" },
-            { "op": "input", "name": "input" }
-          ]
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instance_decl",
+        "name": "tanh",
+        "program": "Tanh",
+        "inputs": {
+          "x": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "input",
+                "name": "drive"
+              },
+              {
+                "op": "input",
+                "name": "input"
+              }
+            ]
+          }
         }
       }
-    }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "out",
+        "expr": {
+          "op": "nested_out",
+          "ref": "tanh",
+          "output": "out"
+        }
+      }
+    ],
+    "value": null
   },
-  "process": {
-    "outputs": {
-      "out": { "op": "nested_out", "ref": "tanh", "output": "out" }
-    }
+  "ports": {
+    "inputs": [
+      {
+        "name": "input",
+        "type": "signal",
+        "default": 0
+      },
+      {
+        "name": "drive",
+        "type": "float",
+        "default": 1
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": "signal"
+      }
+    ]
   }
 }

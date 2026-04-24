@@ -24,8 +24,8 @@ export type Bounds = [number | null, number | null]
 
 /**
  * The compiler's internal representation of a program — slot-indexed ExprNode trees
- * ready for the flattener's register allocation. Built from ProgramJSON (name-based)
- * by converting names to integer slot IDs.
+ * ready for the flattener's register allocation. Built from a ProgramNode
+ * (tropical_program_2) by converting names to integer slot IDs.
  */
 export interface ProgramDef {
   typeName: string

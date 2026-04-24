@@ -1,53 +1,136 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "OnePole",
-  "inputs": [
-    { "name": "input", "type": "signal" },
-    { "name": "g", "type": "float" }
-  ],
-  "outputs": [
-    { "name": "out", "type": "signal" }
-  ],
-  "regs": { "s": 0 },
-  "input_defaults": { "input": 0, "g": 0.1 },
-  "instances": {
-    "tanh_in": {
-      "program": "Tanh",
-      "inputs": { "x": { "op": "input", "name": "input" } }
-    },
-    "tanh_s": {
-      "program": "Tanh",
-      "inputs": { "x": { "op": "reg", "name": "s" } }
-    }
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "reg_decl",
+        "name": "s",
+        "init": 0
+      },
+      {
+        "op": "instance_decl",
+        "name": "tanh_in",
+        "program": "Tanh",
+        "inputs": {
+          "x": {
+            "op": "input",
+            "name": "input"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "tanh_s",
+        "program": "Tanh",
+        "inputs": {
+          "x": {
+            "op": "reg",
+            "name": "s"
+          }
+        }
+      }
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "out",
+        "expr": {
+          "op": "add",
+          "args": [
+            {
+              "op": "reg",
+              "name": "s"
+            },
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "g"
+                },
+                {
+                  "op": "sub",
+                  "args": [
+                    {
+                      "op": "nested_out",
+                      "ref": "tanh_in",
+                      "output": "out"
+                    },
+                    {
+                      "op": "nested_out",
+                      "ref": "tanh_s",
+                      "output": "out"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "op": "next_update",
+        "target": {
+          "kind": "reg",
+          "name": "s"
+        },
+        "expr": {
+          "op": "add",
+          "args": [
+            {
+              "op": "reg",
+              "name": "s"
+            },
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "g"
+                },
+                {
+                  "op": "sub",
+                  "args": [
+                    {
+                      "op": "nested_out",
+                      "ref": "tanh_in",
+                      "output": "out"
+                    },
+                    {
+                      "op": "nested_out",
+                      "ref": "tanh_s",
+                      "output": "out"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "value": null
   },
-  "process": {
-    "outputs": {
-      "out": {
-        "op": "add", "args": [
-          { "op": "reg", "name": "s" },
-          { "op": "mul", "args": [
-            { "op": "input", "name": "g" },
-            { "op": "sub", "args": [
-              { "op": "nested_out", "ref": "tanh_in", "output": "out" },
-              { "op": "nested_out", "ref": "tanh_s", "output": "out" }
-            ]}
-          ]}
-        ]
+  "ports": {
+    "inputs": [
+      {
+        "name": "input",
+        "type": "signal",
+        "default": 0
+      },
+      {
+        "name": "g",
+        "type": "float",
+        "default": 0.1
       }
-    },
-    "next_regs": {
-      "s": {
-        "op": "add", "args": [
-          { "op": "reg", "name": "s" },
-          { "op": "mul", "args": [
-            { "op": "input", "name": "g" },
-            { "op": "sub", "args": [
-              { "op": "nested_out", "ref": "tanh_in", "output": "out" },
-              { "op": "nested_out", "ref": "tanh_s", "output": "out" }
-            ]}
-          ]}
-        ]
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": "signal"
       }
-    }
+    ]
   }
 }

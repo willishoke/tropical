@@ -13,15 +13,15 @@ import { loadStdlib as loadBuiltins } from '../program'
 const session = makeSession(512)
 loadBuiltins(session.typeRegistry)
 loadJSON({
-  schema: 'tropical_program_1',
+  schema: 'tropical_program_2',
   name: 'smoke_test',
-  instances: {
-    VCO1: { program: 'VCO', inputs: { freq: 440 } },
-    VCA1: { program: 'VCA', inputs: {
+  body: { op: 'block', decls: [
+    { op: 'instance_decl', name: 'VCO1', program: 'VCO', inputs: { freq: 440 } },
+    { op: 'instance_decl', name: 'VCA1', program: 'VCA', inputs: {
       audio: { op: 'ref', instance: 'VCO1', output: 'saw' },
       cv: 0.3,
     }},
-  },
+  ]},
   audio_outputs: [{ instance: 'VCA1', output: 'out' }],
 }, session)
 

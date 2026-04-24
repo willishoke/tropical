@@ -3,7 +3,7 @@
  *
  * These tests exercise the full TS compiler pipeline:
  *   makeSession + loadStdlib
- *   → loadJSON (tropical_program_1 schema)
+ *   → loadJSON (tropical_program_2 schema)
  *   → applyFlatPlan (flatten + emit + JIT compile)
  *   → renderFrames (synchronous audio rendering, no audio device)
  *   → peak / rms / dominantFrequency (signal-level assertions)
@@ -17,7 +17,8 @@ import { statSync, existsSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { makeSession, loadJSON } from './session'
-import { loadStdlib as loadBuiltins, loadProgramAsType, type ProgramJSON } from './program'
+import { loadStdlib as loadBuiltins, loadProgramAsType } from './program'
+import type { ProgramNode, ProgramFile } from './program'
 import { applySessionWiring } from './apply_plan'
 import { flattenExpressions } from './flatten'
 import { interpretSamples } from './interpret'
@@ -32,52 +33,50 @@ import {
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 /** Minimal test oscillator — naive saw + sin, phase accumulator. */
-const TEST_OSC: ProgramJSON = {
-  schema: 'tropical_program_1',
+const TEST_OSC: ProgramNode = {
+  op: 'program',
   name: 'TestOsc',
-  inputs: [{ name: 'freq', type: 'freq' }],
-  outputs: [
-    { name: 'saw', type: 'signal' },
-    { name: 'sin', type: 'signal' },
-  ],
-  regs: { phase: 0 },
-  input_defaults: { freq: 440 },
-  instances: {
-    sin1: {
-      program: 'Sin',
-      inputs: {
-        x: { op: 'mul', args: [6.283185307179586, { op: 'reg', name: 'phase' }] },
-      },
-    },
+  ports: {
+    inputs: [{ name: 'freq', type: 'freq', default: 440 }],
+    outputs: [
+      { name: 'saw', type: 'signal' },
+      { name: 'sin', type: 'signal' },
+    ],
   },
-  process: {
-    outputs: {
-      saw: { op: 'sub', args: [{ op: 'mul', args: [2, { op: 'reg', name: 'phase' }] }, 1] },
-      sin: { op: 'nested_out', ref: 'sin1', output: 'out' },
-    },
-    next_regs: {
-      phase: { op: 'mod', args: [
+  body: { op: 'block',
+    decls: [
+      { op: 'reg_decl', name: 'phase', init: 0 },
+      { op: 'instance_decl', name: 'sin1', program: 'Sin', inputs: {
+        x: { op: 'mul', args: [6.283185307179586, { op: 'reg', name: 'phase' }] },
+      }},
+    ],
+    assigns: [
+      { op: 'output_assign', name: 'saw', expr: { op: 'sub', args: [{ op: 'mul', args: [2, { op: 'reg', name: 'phase' }] }, 1] } },
+      { op: 'output_assign', name: 'sin', expr: { op: 'nested_out', ref: 'sin1', output: 'out' } },
+      { op: 'next_update', target: { kind: 'reg', name: 'phase' }, expr: { op: 'mod', args: [
         { op: 'add', args: [
           { op: 'reg', name: 'phase' },
           { op: 'div', args: [{ op: 'input', name: 'freq' }, { op: 'sample_rate' }] },
         ]},
         1,
-      ]},
-    },
+      ]}},
+    ],
   },
-} as ProgramJSON
+}
 
 /** Build and compile a single-oscillator session outputting the named waveform. */
 function oscSession(freq: number, output: 'saw' | 'sin', bufferLength = 256) {
   const session = makeSession(bufferLength)
   loadBuiltins(session.typeRegistry)
-  session.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, session))
+  session.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC,session))
   loadJSON({
-    schema: 'tropical_program_1',
+    schema: 'tropical_program_2',
     name: 'test',
-    instances: { osc: { program: 'TestOsc', inputs: { freq } } },
+    body: { op: 'block', decls: [
+      { op: 'instance_decl', name: 'osc', program: 'TestOsc', inputs: { freq } },
+    ]},
     audio_outputs: [{ instance: 'osc', output }],
-  } as ProgramJSON, session)
+  } as ProgramFile, session)
   return session
 }
 
@@ -110,13 +109,15 @@ describe('renderFrames / buffer backend', () => {
   test('hot-swap updates frequency while preserving phase state', () => {
     const session = makeSession(256)
     loadBuiltins(session.typeRegistry)
-    session.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, session))
+    session.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC,session))
     loadJSON({
-      schema: 'tropical_program_1',
+      schema: 'tropical_program_2',
       name: 'test',
-      instances: { osc: { program: 'TestOsc', inputs: { freq: 220 } } },
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'osc', program: 'TestOsc', inputs: { freq: 220 } },
+      ]},
       audio_outputs: [{ instance: 'osc', output: 'sin' }],
-    } as ProgramJSON, session)
+    } as ProgramFile, session)
 
     renderFrames(session.runtime, 8)
 
@@ -147,22 +148,24 @@ describe('renderFrames / buffer backend', () => {
   })
 
   test('sample count equals nCalls * bufferLength regardless of buffer size', () => {
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramFile = {
+      schema: 'tropical_program_2',
       name: 'test',
-      instances: { osc: { program: 'TestOsc', inputs: { freq: 440 } } },
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'osc', program: 'TestOsc', inputs: { freq: 440 } },
+      ]},
       audio_outputs: [{ instance: 'osc', output: 'sin' }],
     }
 
     const s32 = makeSession(32)
     loadBuiltins(s32.typeRegistry)
-    s32.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, s32))
+    s32.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC,s32))
     loadJSON(prog, s32)
     const a = renderFrames(s32.runtime, 16)  // 16 × 32 = 512
 
     const s512 = makeSession(512)
     loadBuiltins(s512.typeRegistry)
-    s512.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, s512))
+    s512.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC,s512))
     loadJSON(prog, s512)
     const b = renderFrames(s512.runtime, 1)  // 1 × 512 = 512
 

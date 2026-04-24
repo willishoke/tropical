@@ -1,37 +1,92 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "CombDelay",
-  "inputs": [
-    { "name": "input", "type": "signal" },
-    { "name": "feedback", "type": "float" }
-  ],
-  "outputs": [
-    { "name": "out", "type": "signal" }
-  ],
-  "regs": { "s": 0 },
-  "input_defaults": { "input": 0, "feedback": 0.7 },
-  "process": {
-    "outputs": {
-      "out": {
-        "op": "add", "args": [
-          { "op": "input", "name": "input" },
-          { "op": "mul", "args": [
-            { "op": "input", "name": "feedback" },
-            { "op": "reg", "name": "s" }
-          ]}
-        ]
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "reg_decl",
+        "name": "s",
+        "init": 0
       }
-    },
-    "next_regs": {
-      "s": {
-        "op": "add", "args": [
-          { "op": "input", "name": "input" },
-          { "op": "mul", "args": [
-            { "op": "input", "name": "feedback" },
-            { "op": "reg", "name": "s" }
-          ]}
-        ]
+    ],
+    "assigns": [
+      {
+        "op": "output_assign",
+        "name": "out",
+        "expr": {
+          "op": "add",
+          "args": [
+            {
+              "op": "input",
+              "name": "input"
+            },
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "feedback"
+                },
+                {
+                  "op": "reg",
+                  "name": "s"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "op": "next_update",
+        "target": {
+          "kind": "reg",
+          "name": "s"
+        },
+        "expr": {
+          "op": "add",
+          "args": [
+            {
+              "op": "input",
+              "name": "input"
+            },
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "input",
+                  "name": "feedback"
+                },
+                {
+                  "op": "reg",
+                  "name": "s"
+                }
+              ]
+            }
+          ]
+        }
       }
-    }
+    ],
+    "value": null
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "input",
+        "type": "signal",
+        "default": 0
+      },
+      {
+        "name": "feedback",
+        "type": "float",
+        "default": 0.7
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": "signal"
+      }
+    ]
   }
 }

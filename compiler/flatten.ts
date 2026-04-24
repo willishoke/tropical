@@ -420,6 +420,12 @@ function resolveNestedOutputs(
   node: ExprNode,
   nestedCalls: NestedCall[],
   nestedRegStart: number,
+  // Local delay base of the *enclosing* program — the scope whose `callArgNodes` we're
+  // about to substitute. Outer-scope delay_refs appearing inside those call args are
+  // slottified to delay_value(node_id) in that enclosing scope and need to be resolved
+  // with this base BEFORE substitution, otherwise they leak into the flat plan as
+  // unresolved delay_value ops.
+  parentDelayBase: number,
 ): ExprNode {
   if (nestedCalls.length === 0) return node
   // Pre-compute each nested call's local register base and resolved output expressions
@@ -440,23 +446,31 @@ function resolveNestedOutputs(
       // clone once and are referenced multiple times rather than copied exponentially.
       const cloneMemo = new WeakMap<object, ExprNode>()
       let expr = cloneExpr(nd.outputExprNodes[outId], cloneMemo)
-      // First resolve any nested calls within the nested program itself
-      expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart)
-      // Each pass uses its own identity memo to preserve DAG sharing through the pipeline.
-      const inlineMemo = new WeakMap<object, ExprNode>()
-      expr = inlineCalls(expr, inlineMemo)
+      // Offset *this* program's local regs BEFORE inlining sub-nested outputs —
+      // otherwise the sub-nested regs (which come pre-positioned in the current
+      // frame from the recursion) would get ncRegBase added again (double offset).
       const offsetMemo = new WeakMap<object, ExprNode>()
       expr = offsetRegisters(expr, ncRegBase, offsetMemo)
       const delayMemo = new WeakMap<object, ExprNode>()
       expr = resolveDelayValues(expr, ncDelayBase, delayMemo)
+      // Now resolve any nested calls within the nested program itself.
+      // Parent delay base for that recursion is the current iteration's ncDelayBase —
+      // sub-nested call args may reference this program's (nd's) delays.
+      expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart, ncDelayBase)
+      // Each pass uses its own identity memo to preserve DAG sharing through the pipeline.
+      const inlineMemo = new WeakMap<object, ExprNode>()
+      expr = inlineCalls(expr, inlineMemo)
       // Substitute nested program's input(i) → call argument i
       // Call args may reference earlier nested_output nodes — resolve those first
       const argMap = new Map<number, ExprNode>()
       const argRefMemo = new WeakMap<object, ExprNode>()
+      const argDelayMemo = new WeakMap<object, ExprNode>()
       for (let i = 0; i < nc.callArgNodes.length; i++) {
         let arg = cloneExpr(nc.callArgNodes[i])
         // Resolve any nested_output refs in the call args (e.g., chained allpass stages)
         arg = substituteNestedOutputRefs(arg, resolvedNestedOutputs, argRefMemo)
+        // Resolve enclosing-scope delay_values with the parent's local delay base.
+        arg = resolveDelayValues(arg, parentDelayBase, argDelayMemo)
         argMap.set(i, arg)
       }
       // Identity memo: if input(N) appears multiple times in the template body (via shared
@@ -555,6 +569,11 @@ function collectNestedRegisterExprs(
   nestedRegStart: number,
   parentName: string,
   resolvedNestedOutputs: Map<number, ExprNode[]>,
+  // Local delay base of the *enclosing* program — see the same note on
+  // resolveNestedOutputs. Delay_refs inside callArgNodes are slottified in the
+  // enclosing program's scope, so we must resolve them with its local delay base
+  // before inlining via substituteInputs.
+  parentDelayBase: number,
 ): {
   exprs: ExprNode[]
   names: string[]
@@ -575,9 +594,11 @@ function collectNestedRegisterExprs(
     // Build input substitution map for this nested call
     const argMap = new Map<number, ExprNode>()
     const argRefMemo = new WeakMap<object, ExprNode>()
+    const argDelayMemo = new WeakMap<object, ExprNode>()
     for (let i = 0; i < nc.callArgNodes.length; i++) {
       let arg = cloneExpr(nc.callArgNodes[i])
       arg = substituteNestedOutputRefs(arg, resolvedNestedOutputs, argRefMemo)
+      arg = resolveDelayValues(arg, parentDelayBase, argDelayMemo)
       argMap.set(i, arg)
     }
 
@@ -585,13 +606,16 @@ function collectNestedRegisterExprs(
     const processNestedExpr = (rawNode: ExprNode): ExprNode => {
       const cloneMemo = new WeakMap<object, ExprNode>()
       let expr = cloneExpr(rawNode, cloneMemo)
-      expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart)
-      const inlineMemo = new WeakMap<object, ExprNode>()
-      expr = inlineCalls(expr, inlineMemo)
+      // Offset THIS program's local regs first, THEN inline sub-nested outputs —
+      // otherwise the sub-nested regs (positioned absolutely by the recursion)
+      // get ncRegBase added again (double offset).
       const offsetMemo = new WeakMap<object, ExprNode>()
       expr = offsetRegisters(expr, ncRegBase, offsetMemo)
       const delayMemo = new WeakMap<object, ExprNode>()
       expr = resolveDelayValues(expr, ncDelayBase, delayMemo)
+      expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart, ncDelayBase)
+      const inlineMemo = new WeakMap<object, ExprNode>()
+      expr = inlineCalls(expr, inlineMemo)
       const substMemo = new WeakMap<object, ExprNode>()
       expr = substituteInputs(expr, argMap, substMemo)
       return expr
@@ -646,20 +670,24 @@ function collectNestedRegisterExprs(
         for (let outId = 0; outId < subDef.outputExprNodes.length; outId++) {
           const cloneMemo = new WeakMap<object, ExprNode>()
           let expr = cloneExpr(subDef.outputExprNodes[outId], cloneMemo)
-          expr = resolveNestedOutputs(expr, subDef.nestedCalls, subNestedStart)
-          const inlineMemo = new WeakMap<object, ExprNode>()
-          expr = inlineCalls(expr, inlineMemo)
           const offsetMemo = new WeakMap<object, ExprNode>()
           expr = offsetRegisters(expr, subRegBase, offsetMemo)
           const delayMemo = new WeakMap<object, ExprNode>()
           expr = resolveDelayValues(expr, subDelayBase, delayMemo)
+          expr = resolveNestedOutputs(expr, subDef.nestedCalls, subNestedStart, subDelayBase)
+          const inlineMemo = new WeakMap<object, ExprNode>()
+          expr = inlineCalls(expr, inlineMemo)
 
           // Substitute sub-nested program's input(i) → call arg i
           const subArgMap = new Map<number, ExprNode>()
           const subArgMemo = new WeakMap<object, ExprNode>()
+          const subArgDelayMemo = new WeakMap<object, ExprNode>()
           for (let ai = 0; ai < subNc.callArgNodes.length; ai++) {
             let arg = cloneExpr(subNc.callArgNodes[ai])
             arg = substituteNestedOutputRefs(arg, localResolved, subArgMemo)
+            // Resolve enclosing-scope delay_values (subNc's parent is nd;
+            // its delays live at ncDelayBase in our local frame).
+            arg = resolveDelayValues(arg, ncDelayBase, subArgDelayMemo)
             // Also resolve parent-scope inputs and registers
             const parentSubstMemo = new WeakMap<object, ExprNode>()
             arg = substituteInputs(arg, argMap, parentSubstMemo)
@@ -673,8 +701,16 @@ function collectNestedRegisterExprs(
         subCursor += nestedCallRegCount(subNc)
       }
 
-      const sub = collectNestedRegisterExprs(nd.nestedCalls, ncNestedStart, `${parentName}_nested${ncIdx}`, localResolved)
-      for (const e of sub.exprs) exprs.push(e)
+      const sub = collectNestedRegisterExprs(nd.nestedCalls, ncNestedStart, `${parentName}_nested${ncIdx}`, localResolved, ncDelayBase)
+      // Substitute *this* program's inputs into the sub-nested register updates —
+      // those sub-expressions contain input(N) refs in nd's scope that need nd's
+      // own argMap applied. Without this, nd's input refs leak all the way up
+      // to the flat plan (where the outer caller substitutes its own inputMap,
+      // which has no entry for nd's inputs).
+      for (const e of sub.exprs) {
+        const subSubstMemo = new WeakMap<object, ExprNode>()
+        exprs.push(substituteInputs(e, argMap, subSubstMemo))
+      }
       for (const n of sub.names) names.push(n)
       for (const v of sub.inits) inits.push(v)
     }
@@ -1228,7 +1264,7 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     for (let i = 0; i < def.outputExprNodes.length; i++) {
       const cloneMemo = new WeakMap<object, ExprNode>()
       let expr = cloneExpr(def.outputExprNodes[i], cloneMemo)
-      expr = resolveNestedOutputs(expr, def.nestedCalls, nestedRegStart)
+      expr = resolveNestedOutputs(expr, def.nestedCalls, nestedRegStart, def.registerNames.length)
       const inlineMemo = new WeakMap<object, ExprNode>()
       expr = inlineCalls(expr, inlineMemo)
       const offsetMemo = new WeakMap<object, ExprNode>()
@@ -1313,7 +1349,7 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
       const cloneMemo = new WeakMap<object, ExprNode>()
       let expr = cloneExpr(rawNode, cloneMemo)
       // Resolve nested program calls (ProgramType.call()) before other transforms
-      expr = resolveNestedOutputs(expr, def.nestedCalls, nestedRegStart)
+      expr = resolveNestedOutputs(expr, def.nestedCalls, nestedRegStart, def.registerNames.length)
       const inlineMemo = new WeakMap<object, ExprNode>()
       expr = inlineCalls(expr, inlineMemo)
       const offsetMemo = new WeakMap<object, ExprNode>()
@@ -1434,18 +1470,22 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
         for (let outId = 0; outId < nd.outputExprNodes.length; outId++) {
           const cloneMemo = new WeakMap<object, ExprNode>()
           let expr = cloneExpr(nd.outputExprNodes[outId], cloneMemo)
-          expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart)
-          const inlineMemo = new WeakMap<object, ExprNode>()
-          expr = inlineCalls(expr, inlineMemo)
           const offsetMemo = new WeakMap<object, ExprNode>()
           expr = offsetRegisters(expr, ncRegBase, offsetMemo)
           const delayMemo = new WeakMap<object, ExprNode>()
           expr = resolveDelayValues(expr, ncDelayBase, delayMemo)
+          expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart, ncDelayBase)
+          const inlineMemo = new WeakMap<object, ExprNode>()
+          expr = inlineCalls(expr, inlineMemo)
           const argMap = new Map<number, ExprNode>()
           const argRefMemo = new WeakMap<object, ExprNode>()
+          const argDelayMemo = new WeakMap<object, ExprNode>()
           for (let i = 0; i < nc.callArgNodes.length; i++) {
             let arg = cloneExpr(nc.callArgNodes[i])
             arg = substituteNestedOutputRefs(arg, resolvedNestedOutputs, argRefMemo)
+            // Resolve enclosing-scope delay_values: nc's parent is def, whose delays
+            // live at def.registerNames.length in def's local frame.
+            arg = resolveDelayValues(arg, def.registerNames.length, argDelayMemo)
             argMap.set(i, arg)
           }
           const substMemo = new WeakMap<object, ExprNode>()
@@ -1456,7 +1496,7 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
         ncRegCursor += nestedCallRegCount(nc)
       }
 
-      const nested = collectNestedRegisterExprs(def.nestedCalls, nestedRegStart, name, resolvedNestedOutputs)
+      const nested = collectNestedRegisterExprs(def.nestedCalls, nestedRegStart, name, resolvedNestedOutputs, def.registerNames.length)
       for (let i = 0; i < nested.exprs.length; i++) {
         // Apply the parent instance's global transforms (offsetRegisters, substituteInputs, resolveRefs)
         let expr = nested.exprs[i]
@@ -1514,7 +1554,7 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     const processExpr = (rawNode: ExprNode): ExprNode => {
       const cloneMemo = new WeakMap<object, ExprNode>()
       let expr = cloneExpr(rawNode, cloneMemo)
-      expr = resolveNestedOutputs(expr, def.nestedCalls, nestedRegStart)
+      expr = resolveNestedOutputs(expr, def.nestedCalls, nestedRegStart, def.registerNames.length)
       const inlineMemo = new WeakMap<object, ExprNode>()
       expr = inlineCalls(expr, inlineMemo)
       const offsetMemo = new WeakMap<object, ExprNode>()
@@ -1564,18 +1604,20 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
         for (let outId = 0; outId < nd.outputExprNodes.length; outId++) {
           const cloneMemo = new WeakMap<object, ExprNode>()
           let expr = cloneExpr(nd.outputExprNodes[outId], cloneMemo)
-          expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart)
-          const inlineMemo = new WeakMap<object, ExprNode>()
-          expr = inlineCalls(expr, inlineMemo)
           const offsetMemo = new WeakMap<object, ExprNode>()
           expr = offsetRegisters(expr, ncRegBase, offsetMemo)
           const delayMemo = new WeakMap<object, ExprNode>()
           expr = resolveDelayValues(expr, ncDelayBase, delayMemo)
+          expr = resolveNestedOutputs(expr, nd.nestedCalls, ncNestedStart, ncDelayBase)
+          const inlineMemo = new WeakMap<object, ExprNode>()
+          expr = inlineCalls(expr, inlineMemo)
           const argMap = new Map<number, ExprNode>()
           const argRefMemo = new WeakMap<object, ExprNode>()
+          const argDelayMemo = new WeakMap<object, ExprNode>()
           for (let i = 0; i < nc.callArgNodes.length; i++) {
             let arg = cloneExpr(nc.callArgNodes[i])
             arg = substituteNestedOutputRefs(arg, resolvedNestedOutputs, argRefMemo)
+            arg = resolveDelayValues(arg, def.registerNames.length, argDelayMemo)
             argMap.set(i, arg)
           }
           const substMemo = new WeakMap<object, ExprNode>()
@@ -1586,7 +1628,7 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
         ncRegCursor += nestedCallRegCount(nc)
       }
 
-      const nested = collectNestedRegisterExprs(def.nestedCalls, nestedRegStart, name, resolvedNestedOutputs)
+      const nested = collectNestedRegisterExprs(def.nestedCalls, nestedRegStart, name, resolvedNestedOutputs, def.registerNames.length)
       for (let i = 0; i < nested.exprs.length; i++) {
         let expr = nested.exprs[i]
         const nestedOffsetMemo = new WeakMap<object, ExprNode>()

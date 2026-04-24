@@ -7,55 +7,55 @@
 
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON, type ExprNode } from './session'
-import { loadStdlib as loadBuiltins, loadProgramAsType, type ProgramJSON } from './program'
+import { loadStdlib as loadBuiltins, loadProgramAsType } from './program'
+import type { ProgramNode, ProgramFile } from './program'
 import { applySessionWiring, applyFlatPlan } from './apply_plan'
 import { Runtime } from './runtime/runtime'
 
 /** Minimal test oscillator — naive saw + sin, phase accumulator. */
-const TEST_OSC: ProgramJSON = {
-  schema: 'tropical_program_1',
+const TEST_OSC: ProgramNode = {
+  op: 'program',
   name: 'TestOsc',
-  inputs: [{ name: 'freq', type: 'freq' }],
-  outputs: [
-    { name: 'saw', type: 'signal' },
-    { name: 'sin', type: 'signal' },
-  ],
-  regs: { phase: 0 },
-  input_defaults: { freq: 440 },
-  instances: {
-    sin1: {
-      program: 'Sin',
-      inputs: {
-        x: { op: 'mul', args: [6.283185307179586, { op: 'reg', name: 'phase' }] },
-      },
-    },
+  ports: {
+    inputs: [{ name: 'freq', type: 'freq', default: 440 }],
+    outputs: [
+      { name: 'saw', type: 'signal' },
+      { name: 'sin', type: 'signal' },
+    ],
   },
-  process: {
-    outputs: {
-      saw: { op: 'sub', args: [{ op: 'mul', args: [2, { op: 'reg', name: 'phase' }] }, 1] },
-      sin: { op: 'nested_out', ref: 'sin1', output: 'out' },
-    },
-    next_regs: {
-      phase: { op: 'mod', args: [
+  body: { op: 'block',
+    decls: [
+      { op: 'reg_decl', name: 'phase', init: 0 },
+      { op: 'instance_decl', name: 'sin1', program: 'Sin', inputs: {
+        x: { op: 'mul', args: [6.283185307179586, { op: 'reg', name: 'phase' }] },
+      }},
+    ],
+    assigns: [
+      { op: 'output_assign', name: 'saw', expr: { op: 'sub', args: [{ op: 'mul', args: [2, { op: 'reg', name: 'phase' }] }, 1] } },
+      { op: 'output_assign', name: 'sin', expr: { op: 'nested_out', ref: 'sin1', output: 'out' } },
+      { op: 'next_update', target: { kind: 'reg', name: 'phase' }, expr: { op: 'mod', args: [
         { op: 'add', args: [
           { op: 'reg', name: 'phase' },
           { op: 'div', args: [{ op: 'input', name: 'freq' }, { op: 'sample_rate' }] },
         ]},
         1,
-      ]},
-    },
+      ]}},
+    ],
   },
-} as ProgramJSON
+}
 
 function setupSession(instances: Record<string, { program: string }>, bufferLength = 256) {
   const session = makeSession(bufferLength)
   loadBuiltins(session.typeRegistry)
   session.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, session))
+  const decls = Object.entries(instances).map(([name, { program }]) => ({
+    op: 'instance_decl' as const, name, program,
+  }))
   loadJSON({
-    schema: 'tropical_program_1',
+    schema: 'tropical_program_2',
     name: 'test',
-    instances,
-  } as ProgramJSON, session)
+    body: { op: 'block', decls },
+  } as ProgramFile, session)
   return session
 }
 
@@ -91,16 +91,16 @@ describe('applySessionWiring', () => {
     const refSession = makeSession(256)
     loadBuiltins(refSession.typeRegistry)
     refSession.typeRegistry.set('TestOsc', loadProgramAsType(TEST_OSC, refSession))
-    const prog: ProgramJSON = {
-      schema: 'tropical_program_1',
+    const prog: ProgramFile = {
+      schema: 'tropical_program_2',
       name: 'ref',
-      instances: {
-        osc1: { program: 'TestOsc', inputs: { freq: 440 } },
-        amp1: { program: 'VCA', inputs: {
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'osc1', program: 'TestOsc', inputs: { freq: 440 } },
+        { op: 'instance_decl', name: 'amp1', program: 'VCA', inputs: {
           audio: { op: 'ref', instance: 'osc1', output: 'saw' } as ExprNode,
           cv: 1.0,
         }},
-      },
+      ]},
       audio_outputs: [{ instance: 'amp1', output: 'out' }],
     }
     loadJSON(prog, refSession)

@@ -1,5 +1,5 @@
 /**
- * Session state, expression pretty-printer, JSON loading, and ProgramJSON → ProgramDef builder.
+ * Session state, expression pretty-printer, JSON loading, and ProgramNode → ProgramDef builder.
  */
 
 import {
@@ -10,10 +10,11 @@ import {
   type ProgramDef, type NestedCall, type ValueCoercible, type Bounds,
 } from './program_types.js'
 import { Runtime } from './runtime/runtime.js'
-import { loadProgramAsSession, type ProgramJSON, type PortTypeDecl } from './program.js'
+import { loadProgramAsSession, type PortTypeDecl, type ProgramNode, type ProgramPortSpec, type ProgramTopLevel } from './program.js'
+import { parseProgramV2 } from './schema.js'
 import { Param, Trigger } from './runtime/param.js'
 import {
-  specializeProgramJSON, specializationCacheKey, resolveTypeArgs,
+  specializeProgramNode, specializationCacheKey, resolveTypeArgs,
   type RawTypeArgs, type ResolvedTypeArgs,
 } from './specialize.js'
 import { type PortType, Float, Int, Bool, Unit, ArrayType, StructType } from './term.js'
@@ -82,9 +83,9 @@ export interface SessionState {
   typeResolver?: (name: string) => ProgramType | undefined
   /** Monomorphized specializations of generic programs, keyed by `Type<k1=v1,k2=v2>`. */
   specializationCache: Map<string, ProgramType>
-  /** Raw ProgramJSON templates for generic programs (pre-specialization). Keyed by type name.
+  /** ProgramNode templates for generic programs (pre-specialization). Keyed by type name.
    *  Only populated for programs declaring type_params. */
-  genericTemplates: Map<string, import('./program.js').ProgramJSON>
+  genericTemplates: Map<string, import('./program.js').ProgramNode>
   /** Name counter for auto-generated instance names. */
   _nameCounters: Map<string, number>
 }
@@ -291,7 +292,7 @@ function scalarNameToPortType(name: string): PortType {
 
 /** Decode a structured port type declaration to a PortType, resolving aliases.
  *  Throws if the shape still contains an unresolved type_param ref — callers that
- *  use type_params must run `specializeProgramJSON` first. */
+ *  use type_params must run `specializeProgramNode` first. */
 export function decodePortTypeDecl(
   t: PortTypeDecl,
   aliases: AliasMap | undefined,
@@ -351,7 +352,7 @@ export function resolveProgramType(
     const key = specializationCacheKey(baseName, resolved)
     const cached = session.specializationCache.get(key)
     if (cached) return { type: cached, typeArgs: resolved }
-    const specialized = specializeProgramJSON(template, resolved)
+    const specialized = specializeProgramNode(template, resolved)
     specialized.name = key
     const type = loadProgramDef(specialized, session)
     session.specializationCache.set(key, type)
@@ -373,16 +374,26 @@ export function resolveProgramType(
 }
 
 // ─────────────────────────────────────────────────────────────
-// ProgramJSON → ProgramDef
+// ProgramNode → ProgramDef
 // ─────────────────────────────────────────────────────────────
 
+/**
+ * Elaborate a v2 ProgramNode into a slot-indexed ProgramDef.
+ *
+ * Walks `body.decls` once to assign register/delay/instance IDs in source
+ * order (preserving insertion-order semantics), then walks `body.assigns`
+ * to attach output and next-state expressions. Nested `program_decl`
+ * entries are ignored here — `loadProgramAsType` registers them before
+ * this function runs.
+ */
 export function loadProgramDef(
-  def: ProgramJSON,
+  def: ProgramNode,
   session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>,
 ): ProgramType {
   const aliases = session.typeAliasRegistry
-  const inputSpecs  = def.inputs ?? []
-  const outputSpecs = def.outputs ?? []
+  const ports = def.ports ?? {}
+  const inputSpecs  = ports.inputs  ?? []
+  const outputSpecs = ports.outputs ?? []
   const inputNames  = inputSpecs.map(i => typeof i === 'string' ? i : i.name)
   const outputNames = outputSpecs.map(o => typeof o === 'string' ? o : o.name)
   const decodeType = (t: PortTypeDecl | undefined): PortType | undefined => {
@@ -393,38 +404,64 @@ export function loadProgramDef(
   const outputPortTypes = outputSpecs.map(o => decodeType(typeof o === 'string' ? undefined : o.type))
   const inputBounds     = inputSpecs.map(s => resolveBounds(s, aliases))
   const outputBounds    = outputSpecs.map(s => resolveBounds(s, aliases))
-  const regsRaw     = def.regs ?? {}
-  const delaysRaw   = def.delays ?? {}
-  const nestedRaw   = def.instances ?? {}
 
-  // ── Parse registers ──
+  // ── First pass over decls: assign IDs in source order ──
   const regNames: string[] = []
   const regInitValues: ValueCoercible[] = []
   const regPortTypes: (PortType | undefined)[] = []
-  for (const [name, val] of Object.entries(regsRaw)) {
-    regNames.push(name)
-    if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'zeros' in val) {
-      // Compact form: {"zeros": N} → array of N zeros, float element
-      const n = (val as { zeros: number }).zeros
-      regInitValues.push(new Array(n).fill(0))
-      regPortTypes.push(ArrayType(Float, [n]))
-    } else if (typeof val === 'object' && val !== null && !Array.isArray(val) && 'init' in val) {
-      const typed = val as { init: ValueCoercible; type: PortTypeDecl }
-      regInitValues.push(typed.init)
-      regPortTypes.push(decodePortTypeDecl(typed.type, aliases, def.name))
+  const delayNames: string[] = []
+  const delayInitValues: number[] = []
+  const delayUpdateByName = new Map<string, ExprNode>()
+  const nestedAliases: string[] = []
+  const nestedSpecByAlias = new Map<string, {
+    program: string
+    inputs?: Record<string, ExprNode>
+    type_args?: Record<string, number | ExprNode>
+  }>()
+
+  for (const rawDecl of def.body?.decls ?? []) {
+    if (typeof rawDecl !== 'object' || rawDecl === null || Array.isArray(rawDecl))
+      throw new Error(`${def.name}: block.decls entries must be objects`)
+    const d = rawDecl as Record<string, unknown>
+    const op = d.op as string
+
+    if (op === 'reg_decl') {
+      const name = d.name as string
+      regNames.push(name)
+      const init = d.init as unknown
+      const typeDecl = d.type as PortTypeDecl | undefined
+      if (typeof init === 'object' && init !== null && !Array.isArray(init) && 'zeros' in (init as Record<string, unknown>)) {
+        const n = (init as { zeros: number }).zeros
+        regInitValues.push(new Array(n).fill(0))
+        regPortTypes.push(ArrayType(Float, [n]))
+      } else if (typeDecl !== undefined) {
+        regInitValues.push(init as ValueCoercible)
+        regPortTypes.push(decodePortTypeDecl(typeDecl, aliases, def.name))
+      } else {
+        regInitValues.push(init as ValueCoercible)
+        regPortTypes.push(undefined)
+      }
+    } else if (op === 'delay_decl') {
+      const name = d.name as string
+      delayNames.push(name)
+      delayInitValues.push((d.init as number | undefined) ?? 0)
+      if (d.update !== undefined) delayUpdateByName.set(name, d.update as ExprNode)
+    } else if (op === 'instance_decl') {
+      const alias = d.name as string
+      nestedAliases.push(alias)
+      nestedSpecByAlias.set(alias, {
+        program: d.program as string,
+        inputs: d.inputs as Record<string, ExprNode> | undefined,
+        type_args: d.type_args as Record<string, number | ExprNode> | undefined,
+      })
+    } else if (op === 'program_decl') {
+      // Registered by loadProgramAsType; nothing to do here.
     } else {
-      regInitValues.push(val as ValueCoercible)
-      regPortTypes.push(undefined)
+      throw new Error(`${def.name}: unexpected decl op '${op}' in block.decls`)
     }
   }
 
-  // ── Assign delay IDs ──
-  const delayNames = Object.keys(delaysRaw)
   const delayNameToId = new Map(delayNames.map((name, i) => [name, i]))
-  const delayInitValues = delayNames.map(name => delaysRaw[name].init ?? 0)
-
-  // ── Assign nested call IDs ──
-  const nestedAliases = Object.keys(nestedRaw)
   const nestedAliasToId = new Map(nestedAliases.map((alias, i) => [alias, i]))
   const nestedAliasDef = new Map<string, ProgramDef>()
   const nestedCalls: NestedCall[] = []
@@ -434,7 +471,7 @@ export function loadProgramDef(
   // the outer frame, so spec.type_args here contains only concrete integers.
   const nestedResolved = new Map<string, ProgramType>()
   for (const alias of nestedAliases) {
-    const spec = nestedRaw[alias]
+    const spec = nestedSpecByAlias.get(alias)!
     const { type } = resolveProgramType(session, spec.program, spec.type_args as RawTypeArgs | undefined, undefined)
     nestedResolved.set(alias, type)
     nestedAliasDef.set(alias, type._def)
@@ -442,7 +479,7 @@ export function loadProgramDef(
 
   // Second pass: build call arg nodes (may reference any sibling via nested_out)
   for (const alias of nestedAliases) {
-    const spec = nestedRaw[alias]
+    const spec = nestedSpecByAlias.get(alias)!
     const type = nestedResolved.get(alias)!
 
     const callArgNodes: ExprNode[] = type._def.inputNames.map((name, idx) => {
@@ -457,35 +494,63 @@ export function loadProgramDef(
     nestedCalls.push({ programDef: type._def, callArgNodes })
   }
 
+  // ── Walk assigns: collect output_assign + next_update entries ──
+  const outputExprByName = new Map<string, ExprNode>()
+  const registerExprByName = new Map<string, ExprNode>()
+
+  for (const rawAssign of def.body?.assigns ?? []) {
+    if (typeof rawAssign !== 'object' || rawAssign === null || Array.isArray(rawAssign))
+      throw new Error(`${def.name}: block.assigns entries must be objects`)
+    const a = rawAssign as Record<string, unknown>
+    const op = a.op as string
+
+    if (op === 'output_assign') {
+      outputExprByName.set(a.name as string, a.expr as ExprNode)
+    } else if (op === 'next_update') {
+      const target = a.target as { kind: string; name: string }
+      if (target.kind === 'reg') {
+        registerExprByName.set(target.name, a.expr as ExprNode)
+      } else if (target.kind === 'delay') {
+        delayUpdateByName.set(target.name, a.expr as ExprNode)
+      } else {
+        throw new Error(`${def.name}: next_update target.kind must be 'reg' or 'delay', got '${target.kind}'`)
+      }
+    } else {
+      throw new Error(`${def.name}: unexpected assign op '${op}' in block.assigns`)
+    }
+  }
+
   // ── Convert delay update expressions ──
-  const delayUpdateNodes = delayNames.map(name =>
-    slottifyExpr(delaysRaw[name].update, inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
-  )
+  const delayUpdateNodes = delayNames.map(name => {
+    const update = delayUpdateByName.get(name)
+    if (update === undefined) throw new Error(`${def.name}: delay '${name}' has no update expression`)
+    return slottifyExpr(update, inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
+  })
 
   // ── Convert output expressions ──
-  const process = def.process ?? { outputs: {} }
   const outputExprNodes = outputNames.map(name => {
-    const node = process.outputs[name]
-    if (node === undefined) throw new Error(`Output '${name}' missing from process.outputs.`)
+    const node = outputExprByName.get(name)
+    if (node === undefined) throw new Error(`${def.name}: Output '${name}' missing from block.assigns.`)
     return slottifyExpr(node, inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
   })
 
   // ── Convert register update expressions ──
   const registerExprNodes: (ExprNode | null)[] = regNames.map(name => {
-    const node = process.next_regs?.[name]
+    const node = registerExprByName.get(name)
     if (node === undefined) return null
     return slottifyExpr(node, inputNames, regNames, delayNameToId, nestedAliasToId, nestedAliasDef)
   })
 
-  // ── Parse input defaults ──
+  // ── Parse input defaults (carried on port specs in v2) ──
   const rawInputDefaults: Record<string, ExprNode> = {}
   const inputDefaults: (SignalExpr | null)[] = new Array(inputNames.length).fill(null)
-  if (def.input_defaults) {
-    for (const [k, v] of Object.entries(def.input_defaults)) {
-      rawInputDefaults[k] = v as ExprNode
-      const idx = inputNames.indexOf(k)
-      if (idx !== -1) inputDefaults[idx] = coerce(v as ExprCoercible)
-    }
+  for (let i = 0; i < inputSpecs.length; i++) {
+    const spec = inputSpecs[i] as string | ProgramPortSpec
+    if (typeof spec === 'string') continue
+    if (spec.default === undefined) continue
+    const name = spec.name
+    rawInputDefaults[name] = spec.default as ExprNode
+    inputDefaults[i] = coerce(spec.default as ExprCoercible)
   }
 
   const programDef: ProgramDef = {
@@ -511,6 +576,50 @@ export function loadProgramDef(
   }
 
   return new ProgramType(programDef)
+}
+
+// ─────────────────────────────────────────────────────────────
+// Program file I/O
+// ─────────────────────────────────────────────────────────────
+
+/** Parse a tropical_program_2 file, split it into program + top-level metadata. */
+export function normalizeProgramFile(
+  raw: { schema?: string; [k: string]: unknown },
+): { node: ProgramNode; topLevel: ProgramTopLevel } {
+  if (raw.schema !== 'tropical_program_2') {
+    throw new Error(`Unknown schema '${raw.schema}'. Expected 'tropical_program_2'.`)
+  }
+  const v2 = parseProgramV2(raw) as Record<string, unknown> & {
+    schema: 'tropical_program_2'
+    params?: ProgramTopLevel['params']
+    audio_outputs?: ProgramTopLevel['audio_outputs']
+    config?: ProgramTopLevel['config']
+  }
+  const { schema: _schema, params, audio_outputs, config, ...progFields } = v2
+  void _schema
+  const node: ProgramNode = { op: 'program', ...progFields } as unknown as ProgramNode
+  const topLevel: ProgramTopLevel = {}
+  if (params !== undefined)        topLevel.params        = params
+  if (audio_outputs !== undefined) topLevel.audio_outputs = audio_outputs
+  if (config !== undefined)        topLevel.config        = config
+  return { node, topLevel }
+}
+
+/** Wrap a v2 program node + top-level metadata as a serializable v2 file. */
+export function v2NodeToFile(
+  node: ExprNode,
+  topLevel: ProgramTopLevel = {},
+): { schema: 'tropical_program_2'; [k: string]: unknown } {
+  if (typeof node !== 'object' || node === null || Array.isArray(node))
+    throw new Error('v2NodeToFile: expected program object')
+  const p = node as Record<string, unknown>
+  const { op: _op, ...fields } = p
+  void _op
+  const file: Record<string, unknown> = { schema: 'tropical_program_2', ...fields }
+  if (topLevel.params !== undefined)        file.params        = topLevel.params
+  if (topLevel.audio_outputs !== undefined) file.audio_outputs = topLevel.audio_outputs
+  if (topLevel.config !== undefined)        file.config        = topLevel.config
+  return file as { schema: 'tropical_program_2'; [k: string]: unknown }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -609,10 +718,7 @@ export function prettyExpr(
  * Detects schema version and delegates to the appropriate loader.
  */
 export function loadJSON(json: { schema: string; [k: string]: unknown }, session: SessionState): void {
-  if (json.schema === 'tropical_program_1') {
-    loadProgramAsSession(json as unknown as ProgramJSON, session)
-    return
-  }
-  throw new Error(`Unknown schema '${json.schema}'. Expected 'tropical_program_1'.`)
+  const { node, topLevel } = normalizeProgramFile(json)
+  loadProgramAsSession(node, topLevel, session)
 }
 

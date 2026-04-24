@@ -1,179 +1,208 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "cross_fm_4",
-  "instances": {
-    "vco1": {
-      "program": "VCO",
-      "inputs": {
-        "freq": 110,
-        "fm_index": 2,
-        "fm": {
-          "op": "add",
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "ref",
-                  "instance": "d2",
-                  "output": "y"
-                },
-                {
-                  "op": "ref",
-                  "instance": "d3",
-                  "output": "y"
-                }
-              ]
-            },
-            {
-              "op": "ref",
-              "instance": "d4",
-              "output": "y"
-            }
-          ]
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instance_decl",
+        "name": "vco1",
+        "program": "VCO",
+        "inputs": {
+          "freq": 110,
+          "fm_index": 2,
+          "fm": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "ref",
+                    "instance": "d2",
+                    "output": "y"
+                  },
+                  {
+                    "op": "ref",
+                    "instance": "d3",
+                    "output": "y"
+                  }
+                ]
+              },
+              {
+                "op": "ref",
+                "instance": "d4",
+                "output": "y"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "vco2",
+        "program": "VCO",
+        "inputs": {
+          "freq": 165,
+          "fm_index": 2,
+          "fm": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "ref",
+                    "instance": "d1",
+                    "output": "y"
+                  },
+                  {
+                    "op": "ref",
+                    "instance": "d3",
+                    "output": "y"
+                  }
+                ]
+              },
+              {
+                "op": "ref",
+                "instance": "d4",
+                "output": "y"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "vco3",
+        "program": "VCO",
+        "inputs": {
+          "freq": 220,
+          "fm_index": 2,
+          "fm": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "ref",
+                    "instance": "d1",
+                    "output": "y"
+                  },
+                  {
+                    "op": "ref",
+                    "instance": "d2",
+                    "output": "y"
+                  }
+                ]
+              },
+              {
+                "op": "ref",
+                "instance": "d4",
+                "output": "y"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "vco4",
+        "program": "VCO",
+        "inputs": {
+          "freq": 330,
+          "fm_index": 2,
+          "fm": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "ref",
+                    "instance": "d1",
+                    "output": "y"
+                  },
+                  {
+                    "op": "ref",
+                    "instance": "d2",
+                    "output": "y"
+                  }
+                ]
+              },
+              {
+                "op": "ref",
+                "instance": "d3",
+                "output": "y"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "d1",
+        "program": "Delay",
+        "inputs": {
+          "x": {
+            "op": "ref",
+            "instance": "vco1",
+            "output": "sin"
+          }
+        },
+        "type_args": {
+          "N": 8
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "d2",
+        "program": "Delay",
+        "inputs": {
+          "x": {
+            "op": "ref",
+            "instance": "vco2",
+            "output": "sin"
+          }
+        },
+        "type_args": {
+          "N": 8
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "d3",
+        "program": "Delay",
+        "inputs": {
+          "x": {
+            "op": "ref",
+            "instance": "vco3",
+            "output": "sin"
+          }
+        },
+        "type_args": {
+          "N": 8
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "d4",
+        "program": "Delay",
+        "inputs": {
+          "x": {
+            "op": "ref",
+            "instance": "vco4",
+            "output": "sin"
+          }
+        },
+        "type_args": {
+          "N": 8
         }
       }
-    },
-    "vco2": {
-      "program": "VCO",
-      "inputs": {
-        "freq": 165,
-        "fm_index": 2,
-        "fm": {
-          "op": "add",
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "ref",
-                  "instance": "d1",
-                  "output": "y"
-                },
-                {
-                  "op": "ref",
-                  "instance": "d3",
-                  "output": "y"
-                }
-              ]
-            },
-            {
-              "op": "ref",
-              "instance": "d4",
-              "output": "y"
-            }
-          ]
-        }
-      }
-    },
-    "vco3": {
-      "program": "VCO",
-      "inputs": {
-        "freq": 220,
-        "fm_index": 2,
-        "fm": {
-          "op": "add",
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "ref",
-                  "instance": "d1",
-                  "output": "y"
-                },
-                {
-                  "op": "ref",
-                  "instance": "d2",
-                  "output": "y"
-                }
-              ]
-            },
-            {
-              "op": "ref",
-              "instance": "d4",
-              "output": "y"
-            }
-          ]
-        }
-      }
-    },
-    "vco4": {
-      "program": "VCO",
-      "inputs": {
-        "freq": 330,
-        "fm_index": 2,
-        "fm": {
-          "op": "add",
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "ref",
-                  "instance": "d1",
-                  "output": "y"
-                },
-                {
-                  "op": "ref",
-                  "instance": "d2",
-                  "output": "y"
-                }
-              ]
-            },
-            {
-              "op": "ref",
-              "instance": "d3",
-              "output": "y"
-            }
-          ]
-        }
-      }
-    },
-    "d1": {
-      "program": "Delay",
-      "type_args": {"N": 8},
-      "inputs": {
-        "x": {
-          "op": "ref",
-          "instance": "vco1",
-          "output": "sin"
-        }
-      }
-    },
-    "d2": {
-      "program": "Delay",
-      "type_args": {"N": 8},
-      "inputs": {
-        "x": {
-          "op": "ref",
-          "instance": "vco2",
-          "output": "sin"
-        }
-      }
-    },
-    "d3": {
-      "program": "Delay",
-      "type_args": {"N": 8},
-      "inputs": {
-        "x": {
-          "op": "ref",
-          "instance": "vco3",
-          "output": "sin"
-        }
-      }
-    },
-    "d4": {
-      "program": "Delay",
-      "type_args": {"N": 8},
-      "inputs": {
-        "x": {
-          "op": "ref",
-          "instance": "vco4",
-          "output": "sin"
-        }
-      }
-    }
+    ],
+    "assigns": [],
+    "value": null
   },
   "audio_outputs": [
     {

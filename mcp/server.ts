@@ -20,11 +20,11 @@ import {
 import {
   makeSession, nextName, loadJSON,
   prettyExpr, resolveProgramType, SessionState, ExprNode,
+  normalizeProgramFile, v2NodeToFile,
 } from '../compiler/session.js'
-import { parseProgram } from '../compiler/schema.js'
 import {
   saveProgramFromSession, loadProgramAsType, mergeProgramIntoSession,
-  exportSessionAsProgram, loadStdlib as loadBuiltins, type ProgramJSON,
+  exportSessionAsProgram, loadStdlib as loadBuiltins, instanceDecls,
 } from '../compiler/program.js'
 import { DAC }                 from '../compiler/runtime/audio.js'
 import { Param, Trigger }      from '../compiler/runtime/param.js'
@@ -80,35 +80,243 @@ function adaptInputExpr(
 
   const check = checkArrayConnection(srcType, dstType, node)
   if (!check.compatible) {
-    throw new Error(
-      `Type mismatch on '${instanceName}'.${inputName}: ${check.error}`
-    )
+    failPredicate({
+      code:      'type_mismatch',
+      param:     'expr',
+      value:     node,
+      predicate: 'type_compatible',
+      expected:  dstType,
+      got:       srcType,
+      message:   `Type mismatch on '${instanceName}'.${inputName}: ${check.error}`,
+    })
   }
   return { expr: check.broadcastExpr ?? node, resultShape: check.resultShape }
 }
 
-const ok  = (data: unknown) =>
-  ({ content: [{ type: 'text' as const, text: JSON.stringify({ ok: true,  data  }) }] })
+// ─── Error envelope ───────────────────────────────────────────────────────────
+// Spec: mcp/ERRORS.md
 
-const fail = (e: unknown) =>
-  ({ content: [{ type: 'text' as const, text: JSON.stringify({ ok: false, error: String(e) }) }], isError: true as const })
+type ErrorCode =
+  | 'unknown_program'
+  | 'unknown_instance'
+  | 'unknown_input'
+  | 'unknown_output'
+  | 'unknown_param'
+  | 'unknown_device'
+  | 'instance_exists'
+  | 'invalid_type_args'
+  | 'type_mismatch'
+  | 'shape_mismatch'
+  | 'length_mismatch'
+  | 'arity_error'
+  | 'missing_argument'
+  | 'invalid_value'
+  | 'invalid_state'
+  | 'compile_failed'
+  | 'audio_error'
+  | 'internal_error'
+
+type FieldSpec = {
+  type:     'int' | 'float' | 'string' | 'bool'
+  required: boolean
+  min?:     number
+  max?:     number
+  options?: string[]
+}
+
+type Valid =
+  | { kind: 'enum';      options: string[] }
+  | { kind: 'record';    fields: Record<string, FieldSpec> }
+  | { kind: 'predicate'; predicate: string; expected: unknown; got: unknown }
+
+type ErrorEnvelope = {
+  code:        ErrorCode
+  message:     string
+  retryable:   boolean
+  param?:      string
+  value?:      unknown
+  valid?:      Valid
+  suggestion?: unknown
+}
+
+class ToolError extends Error {
+  envelope: ErrorEnvelope
+  constructor(envelope: ErrorEnvelope) {
+    super(envelope.message)
+    this.envelope = envelope
+  }
+}
+
+function nearestMatch(value: string, candidates: string[]): string | undefined {
+  if (candidates.length === 0 || typeof value !== 'string') return undefined
+  const dist = (a: string, b: string): number => {
+    const m = a.length, n = b.length
+    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0))
+    for (let i = 0; i <= m; i++) dp[i][0] = i
+    for (let j = 0; j <= n; j++) dp[0][j] = j
+    for (let i = 1; i <= m; i++)
+      for (let j = 1; j <= n; j++)
+        dp[i][j] = a[i - 1] === b[j - 1]
+          ? dp[i - 1][j - 1]
+          : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1])
+    return dp[m][n]
+  }
+  let best = candidates[0], bestD = dist(value, best)
+  for (const c of candidates.slice(1)) {
+    const d = dist(value, c)
+    if (d < bestD) { best = c; bestD = d }
+  }
+  return bestD <= Math.max(2, Math.floor(value.length / 3)) ? best : undefined
+}
+
+function failEnum(opts: {
+  code: ErrorCode; param: string; value: unknown;
+  options: string[]; message?: string;
+}): never {
+  const suggestion = typeof opts.value === 'string'
+    ? nearestMatch(opts.value, opts.options)
+    : undefined
+  const message = opts.message
+    ?? `Invalid ${opts.param}: ${JSON.stringify(opts.value)}${suggestion ? `. Did you mean '${suggestion}'?` : ''}`
+  throw new ToolError({
+    code:      opts.code,
+    message,
+    retryable: false,
+    param:     opts.param,
+    value:     opts.value,
+    valid:     { kind: 'enum', options: opts.options },
+    ...(suggestion !== undefined ? { suggestion } : {}),
+  })
+}
+
+function failRecord(opts: {
+  code: ErrorCode; param: string; value: unknown;
+  fields: Record<string, FieldSpec>; message?: string; suggestion?: unknown;
+}): never {
+  throw new ToolError({
+    code:      opts.code,
+    message:   opts.message ?? `Invalid ${opts.param}`,
+    retryable: false,
+    param:     opts.param,
+    value:     opts.value,
+    valid:     { kind: 'record', fields: opts.fields },
+    ...(opts.suggestion !== undefined ? { suggestion: opts.suggestion } : {}),
+  })
+}
+
+function failPredicate(opts: {
+  code: ErrorCode; param: string; value: unknown;
+  predicate: string; expected: unknown; got: unknown;
+  suggestion?: unknown; message?: string;
+}): never {
+  throw new ToolError({
+    code:      opts.code,
+    message:   opts.message ?? `${opts.predicate} failed on ${opts.param}`,
+    retryable: false,
+    param:     opts.param,
+    value:     opts.value,
+    valid:     { kind: 'predicate', predicate: opts.predicate, expected: opts.expected, got: opts.got },
+    ...(opts.suggestion !== undefined ? { suggestion: opts.suggestion } : {}),
+  })
+}
+
+function failBare(opts: {
+  code: ErrorCode; message: string; retryable?: boolean;
+  param?: string; value?: unknown;
+}): never {
+  throw new ToolError({
+    code:      opts.code,
+    message:   opts.message,
+    retryable: opts.retryable ?? false,
+    ...(opts.param !== undefined ? { param: opts.param } : {}),
+    ...(opts.value !== undefined ? { value: opts.value } : {}),
+  })
+}
+
+const ok  = (data: unknown) =>
+  ({ content: [{ type: 'text' as const, text: JSON.stringify({ status: 'ok', data }) }] })
+
+const fail = (e: unknown) => {
+  const envelope: ErrorEnvelope = e instanceof ToolError
+    ? e.envelope
+    : { code: 'internal_error', message: e instanceof Error ? e.message : String(e), retryable: false }
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify({ status: 'error', error: envelope }) }],
+    isError: true as const,
+  }
+}
 
 function wrap(fn: () => unknown) {
   try   { return ok(fn())         }
   catch (e) { return fail(e) }
 }
 
+function resolveProgramTypeOrFail(
+  programName: string,
+  typeArgs: Record<string, number> | undefined,
+  programParam: string,
+) {
+  try {
+    return resolveProgramType(session, programName, typeArgs, undefined)
+  } catch (e) {
+    const registered = session.typeRegistry.has(programName) || session.genericTemplates.has(programName)
+    if (!registered) {
+      failEnum({
+        code:    'unknown_program',
+        param:   programParam,
+        value:   programName,
+        options: [
+          ...session.typeRegistry.keys(),
+          ...session.genericTemplates.keys(),
+        ],
+      })
+    }
+    failBare({
+      code:    'invalid_type_args',
+      message: e instanceof Error ? e.message : String(e),
+      param:   'type_args',
+      value:   typeArgs,
+    })
+  }
+}
+
+function requireInstance(name: string, param: string) {
+  const inst = session.instanceRegistry.get(name)
+  if (!inst)
+    failEnum({
+      code:    'unknown_instance',
+      param,
+      value:   name,
+      options: [...session.instanceRegistry.keys()],
+    })
+  return inst
+}
+
 function resolveOutputIdx(inst: { outputNames: string[] }, nameOrIdx: string | number): number {
   if (typeof nameOrIdx === 'number') return nameOrIdx
+  if (typeof nameOrIdx === 'string' && /^\d+$/.test(nameOrIdx)) return parseInt(nameOrIdx, 10)
   const idx = inst.outputNames.indexOf(nameOrIdx)
-  if (idx === -1) throw new Error(`Unknown output '${nameOrIdx}'. Available: ${inst.outputNames.join(', ')}`)
+  if (idx === -1)
+    failEnum({
+      code:    'unknown_output',
+      param:   'output',
+      value:   nameOrIdx,
+      options: inst.outputNames,
+    })
   return idx
 }
 
 function resolveInputIdx(inst: { inputNames: string[] }, nameOrIdx: string | number): number {
   if (typeof nameOrIdx === 'number') return nameOrIdx
+  if (typeof nameOrIdx === 'string' && /^\d+$/.test(nameOrIdx)) return parseInt(nameOrIdx, 10)
   const idx = inst.inputNames.indexOf(nameOrIdx)
-  if (idx === -1) throw new Error(`Unknown input '${nameOrIdx}'. Available: ${inst.inputNames.join(', ')}`)
+  if (idx === -1)
+    failEnum({
+      code:    'unknown_input',
+      param:   'input',
+      value:   nameOrIdx,
+      options: inst.inputNames,
+    })
   return idx
 }
 
@@ -136,11 +344,11 @@ const TOOLS = [
 
   {
     name: 'define_program',
-    description: 'Define a reusable DSP program type and register it. Accepts a ProgramJSON (tropical_program_1). Returns the type name and port names.',
+    description: 'Define a reusable DSP program type and register it. Accepts a tropical_program_2 object. Returns the type name and port names.',
     inputSchema: {
       type: 'object',
       properties: {
-        def: { type: 'object', description: 'ProgramJSON (tropical_program_1) object defining the program' },
+        def: { type: 'object', description: 'tropical_program_2 object defining the program' },
       },
       required: ['def'],
     },
@@ -415,18 +623,18 @@ const TOOLS = [
   },
   {
     name: 'load',
-    description: 'Load a program. Accepts tropical_program_1. Stops audio, recreates the session, and rebuilds state. Provide either path (preferred) or inline JSON.',
+    description: 'Load a tropical_program_2 program. Stops audio, recreates the session, and rebuilds state. Provide either path (preferred) or inline JSON.',
     inputSchema: {
       type: 'object',
       properties: {
         path: { type: 'string', description: 'Path to a .json file on disk.' },
-        program: { type: 'object', description: 'Inline ProgramJSON (tropical_program_1) object.' },
+        program: { type: 'object', description: 'Inline tropical_program_2 object.' },
       },
     },
   },
   {
     name: 'save',
-    description: 'Serialize the current session to a tropical_program_1 JSON object.',
+    description: 'Serialize the current session to a tropical_program_2 JSON object.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -435,7 +643,7 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        program: { type: 'object', description: 'ProgramJSON (tropical_program_1) object to merge.' },
+        program: { type: 'object', description: 'tropical_program_2 object to merge.' },
       },
       required: ['program'],
     },
@@ -491,17 +699,17 @@ const TOOLS = [
 
 function handleDefineProgram(args: Record<string, unknown>) {
   return wrap(() => {
-    const prog = parseProgram(args.def) as ProgramJSON
-    const type = loadProgramAsType(prog, session)
+    const { node } = normalizeProgramFile(args.def as { schema?: string; [k: string]: unknown })
+    const type = loadProgramAsType(node, session)
     if (type) {
       return { program_name: type.name, inputs: type._def.inputNames, outputs: type._def.outputNames }
     }
     // Generic — template only, no concrete ports until instantiation.
     return {
-      program_name: prog.name,
-      inputs: (prog.inputs ?? []).map(i => typeof i === 'string' ? i : i.name),
-      outputs: (prog.outputs ?? []).map(o => typeof o === 'string' ? o : o.name),
-      type_params: prog.type_params,
+      program_name: node.name,
+      inputs: (node.ports?.inputs ?? []).map(i => typeof i === 'string' ? i : i.name),
+      outputs: (node.ports?.outputs ?? []).map(o => typeof o === 'string' ? o : o.name),
+      type_params: node.type_params,
     }
   })
 }
@@ -515,12 +723,21 @@ function handleAddInstance(
 ) {
   return wrap(() => {
     if (session.instanceRegistry.has(instanceName))
-      throw new Error(`Instance '${instanceName}' already exists.`)
-    const { type, typeArgs: resolved } = resolveProgramType(session, programName, typeArgs, undefined)
+      failBare({
+        code:    'instance_exists',
+        message: `Instance '${instanceName}' already exists.`,
+        param:   'instance_name',
+        value:   instanceName,
+      })
+    const { type, typeArgs: resolved } = resolveProgramTypeOrFail(programName, typeArgs, 'program')
     const inst = type.instantiateAs(instanceName, { baseTypeName: programName, typeArgs: resolved })
     if (gateable) {
       if (gateInput === undefined)
-        throw new Error(`Instance '${instanceName}' has gateable=true but no gate_input expression.`)
+        failBare({
+          code:    'missing_argument',
+          message: 'gateable=true requires gate_input expression.',
+          param:   'gate_input',
+        })
       inst.gateable = true
       inst.gateInput = gateInput
     }
@@ -537,15 +754,26 @@ function handleReplicate(
 ) {
   return wrap(() => {
     if (!Number.isInteger(count) || count < 1)
-      throw new Error(`count must be a positive integer, got ${count}`)
+      failRecord({
+        code:    'invalid_value',
+        param:   'count',
+        value:   count,
+        message: `count must be a positive integer, got ${count}`,
+        fields:  { count: { type: 'int', required: true, min: 1 } },
+      })
 
     const prefix = namePrefix ?? programName.toLowerCase()
     const created = []
     for (let i = 0; i < count; i++) {
       const name = nextName(session, prefix)
       if (session.instanceRegistry.has(name))
-        throw new Error(`Instance '${name}' already exists — pick a different name_prefix`)
-      const { type, typeArgs: resolved } = resolveProgramType(session, programName, typeArgs, undefined)
+        failBare({
+          code:    'instance_exists',
+          message: `Instance '${name}' already exists — pick a different name_prefix`,
+          param:   'name_prefix',
+          value:   namePrefix,
+        })
+      const { type, typeArgs: resolved } = resolveProgramTypeOrFail(programName, typeArgs, 'program')
       const inst = type.instantiateAs(name, { baseTypeName: programName, typeArgs: resolved })
       session.instanceRegistry.set(name, inst)
       created.push(instanceSummary(name))
@@ -574,14 +802,15 @@ function handleWireChain(args: Record<string, unknown>) {
     const initialExpr   = args.initial_expr as import('../compiler/expr.js').ExprNode | undefined
 
     if (instanceNames.length < 2 && initialExpr === undefined)
-      throw new Error('wire_chain needs at least 2 instances, or 1 instance with initial_expr')
+      failBare({
+        code: 'arity_error',
+        message: 'wire_chain needs at least 2 instances, or 1 instance with initial_expr',
+        param: 'instances',
+        value: instanceNames,
+      })
 
     // Validate all instances upfront
-    const insts = instanceNames.map(n => {
-      const inst = session.instanceRegistry.get(n)
-      if (!inst) throw new Error(`No instance named '${n}'`)
-      return inst
-    })
+    const insts = instanceNames.map(n => requireInstance(n, 'instances'))
 
     // Optionally set first instance's input
     if (initialExpr !== undefined) {
@@ -617,16 +846,19 @@ function handleWireZip(args: Record<string, unknown>) {
     const targets = args.targets as Array<{ instance: string; input:  string | number }>
 
     if (sources.length !== targets.length)
-      throw new Error(`sources and targets must be the same length (got ${sources.length} vs ${targets.length})`)
+      failBare({
+        code: 'length_mismatch',
+        message: `sources and targets must be the same length (got ${sources.length} vs ${targets.length})`,
+        param: 'sources',
+        value: { sources: sources.length, targets: targets.length },
+      })
 
     const linked = []
     for (let i = 0; i < sources.length; i++) {
       const src     = sources[i]
       const dst     = targets[i]
-      const srcInst = session.instanceRegistry.get(src.instance)
-      if (!srcInst) throw new Error(`No instance named '${src.instance}'`)
-      const dstInst = session.instanceRegistry.get(dst.instance)
-      if (!dstInst) throw new Error(`No instance named '${dst.instance}'`)
+      const srcInst = requireInstance(src.instance, 'sources[].instance')
+      const dstInst = requireInstance(dst.instance, 'targets[].instance')
 
       const outName  = resolveOutputName(srcInst, src.output)
       const inName   = resolveInputName(dstInst, dst.input)
@@ -656,8 +888,7 @@ function handleFanOut(args: Record<string, unknown>) {
       (rawSource as Record<string, unknown>).output !== undefined
     ) {
       const s       = rawSource as { instance: string; output: string | number }
-      const srcInst = session.instanceRegistry.get(s.instance)
-      if (!srcInst) throw new Error(`No instance named '${s.instance}'`)
+      const srcInst = requireInstance(s.instance, 'source.instance')
       const outName = resolveOutputName(srcInst, s.output)
       sourceExpr  = { op: 'ref' as const, instance: s.instance, output: outName }
       sourceLabel = `${s.instance}.${outName}`
@@ -668,8 +899,7 @@ function handleFanOut(args: Record<string, unknown>) {
 
     const linked = []
     for (const dst of targets) {
-      const dstInst = session.instanceRegistry.get(dst.instance)
-      if (!dstInst) throw new Error(`No instance named '${dst.instance}'`)
+      const dstInst = requireInstance(dst.instance, 'targets[].instance')
       const inName   = resolveInputName(dstInst, dst.input)
       const { expr } = adaptInputExpr(sourceExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), dst.instance, inName)
       session.inputExprNodes.set(`${dst.instance}:${inName}`, expr)
@@ -685,15 +915,14 @@ function handleFanIn(args: Record<string, unknown>) {
     const sources = args.sources as Array<{ instance: string; output: string | number; gain?: number }>
     const target  = args.target  as { instance: string; input: string | number }
 
-    if (sources.length === 0) throw new Error('sources must be non-empty')
+    if (sources.length === 0)
+      failBare({ code: 'arity_error', message: 'sources must be non-empty', param: 'sources', value: sources })
 
-    const dstInst = session.instanceRegistry.get(target.instance)
-    if (!dstInst) throw new Error(`No instance named '${target.instance}'`)
+    const dstInst = requireInstance(target.instance, 'target.instance')
 
     // Build one term per source: ref, optionally scaled
     const terms: ExprNode[] = sources.map(src => {
-      const srcInst = session.instanceRegistry.get(src.instance)
-      if (!srcInst) throw new Error(`No instance named '${src.instance}'`)
+      const srcInst = requireInstance(src.instance, 'sources[].instance')
       const outName = resolveOutputName(srcInst, src.output)
       const ref: ExprNode = { op: 'ref' as const, instance: src.instance, output: outName }
       return src.gain !== undefined
@@ -722,10 +951,8 @@ function handleFeedback(args: Record<string, unknown>) {
     const init    = (args.init    as number | undefined) ?? 0
     const delayId = args.delay_id as string | undefined
 
-    const srcInst = session.instanceRegistry.get(from.instance)
-    if (!srcInst) throw new Error(`No instance named '${from.instance}'`)
-    const dstInst = session.instanceRegistry.get(to.instance)
-    if (!dstInst) throw new Error(`No instance named '${to.instance}'`)
+    const srcInst = requireInstance(from.instance, 'from.instance')
+    const dstInst = requireInstance(to.instance, 'to.instance')
 
     const outName = resolveOutputName(srcInst, from.output)
     const inName  = resolveInputName(dstInst, to.input)
@@ -753,20 +980,25 @@ function handleExportProgram(args: Record<string, unknown>) {
     const outputs   = args.outputs as Record<string, { instance: string; output: string }>
     const removeExported = (args.remove_exported as boolean) ?? false
 
-    if (!name) throw new Error('name is required')
-    if (!outputs || Object.keys(outputs).length === 0) throw new Error('outputs is required (at least one)')
+    if (!name) failBare({ code: 'missing_argument', message: 'name is required', param: 'name' })
+    if (!outputs || Object.keys(outputs).length === 0)
+      failBare({ code: 'missing_argument', message: 'outputs is required (at least one)', param: 'outputs' })
 
-    const prog = exportSessionAsProgram(session, { name, inputs, outputs })
+    const exportedNode = exportSessionAsProgram(session, { name, inputs, outputs })
+    const exportedInstanceNames = [...instanceDecls(exportedNode)].map(d => d.name)
 
     // Register as a usable type (exported programs are never generic)
-    const type = loadProgramAsType(prog, session)
-    if (!type) throw new Error(`export_program produced a generic program — not supported`)
+    const type = loadProgramAsType(exportedNode, session)
+    if (!type)
+      failBare({
+        code:    'internal_error',
+        message: 'export_program produced a generic program — not supported',
+      })
     session.typeRegistry.set(name, type)
 
     // Optionally clean up exported instances from the session
     if (removeExported) {
-      // Collect all instances that were included in the export
-      const exportedInstances = new Set(Object.keys(prog.instances ?? {}))
+      const exportedInstances = new Set(exportedInstanceNames)
       for (const instName of exportedInstances) {
         session.instanceRegistry.delete(instName)
         for (const key of [...session.inputExprNodes.keys()]) {
@@ -789,16 +1021,15 @@ function handleExportProgram(args: Record<string, unknown>) {
       program_name: name,
       inputs: type._def.inputNames,
       outputs: type._def.outputNames,
-      instances_included: Object.keys(prog.instances ?? {}),
-      program: prog,
+      instances_included: exportedInstanceNames,
+      program: v2NodeToFile(exportedNode as unknown as ExprNode),
     }
   })
 }
 
 function handleRemoveInstance(instanceName: string) {
   return wrap(() => {
-    if (!session.instanceRegistry.has(instanceName))
-      throw new Error(`No instance named '${instanceName}'.`)
+    requireInstance(instanceName, 'instance_name')
     session.instanceRegistry.delete(instanceName)
     for (const key of [...session.inputExprNodes.keys()]) {
       if (key.startsWith(`${instanceName}:`)) session.inputExprNodes.delete(key)
@@ -836,10 +1067,10 @@ function handleListPrograms() {
 
     const generic = [...session.genericTemplates.entries()].map(([typeName, prog]) => ({
       program_name: typeName,
-      inputs: (prog.inputs ?? []).map(i => typeof i === 'string'
-        ? { name: i, type: null, bounds: null, default: prog.input_defaults?.[i] ?? null }
-        : { name: i.name, type: i.type ?? null, bounds: i.bounds ?? null, default: prog.input_defaults?.[i.name] ?? i.default ?? null }),
-      outputs: (prog.outputs ?? []).map(o => typeof o === 'string'
+      inputs: (prog.ports?.inputs ?? []).map(i => typeof i === 'string'
+        ? { name: i, type: null, bounds: null, default: null }
+        : { name: i.name, type: i.type ?? null, bounds: i.bounds ?? null, default: i.default ?? null }),
+      outputs: (prog.ports?.outputs ?? []).map(o => typeof o === 'string'
         ? { name: o, type: null, bounds: null }
         : { name: o.name, type: o.type ?? null, bounds: o.bounds ?? null }),
       registers: [] as Array<{ name: string; type: string | null }>,
@@ -858,8 +1089,7 @@ function handleListInstances() {
 
 function handleGetInfo(instanceName: string) {
   return wrap(() => {
-    const inst = session.instanceRegistry.get(instanceName)
-    if (!inst) throw new Error(`No instance named '${instanceName}'.`)
+    const inst = requireInstance(instanceName, 'instance_name')
     return {
       name: instanceName,
       program: inst.typeName,
@@ -892,10 +1122,8 @@ function handleWire(args: Record<string, unknown>) {
 
     // Process removes first
     for (const r of removeOps) {
-      const inst = session.instanceRegistry.get(r.instance)
-      if (!inst) throw new Error(`No instance named '${r.instance}'.`)
-      const inputId = typeof r.input === 'number' ? r.input
-        : (String(r.input).match(/^\d+$/) ? parseInt(String(r.input), 10) : inst.inputIndex(String(r.input)))
+      const inst = requireInstance(r.instance, 'remove[].instance')
+      const inputId = resolveInputIdx(inst, r.input)
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
       session.inputExprNodes.delete(`${r.instance}:${resolvedName}`)
     }
@@ -903,11 +1131,8 @@ function handleWire(args: Record<string, unknown>) {
     // Process sets
     const results = []
     for (const s of setOps) {
-      const inst = session.instanceRegistry.get(s.instance)
-      if (!inst) throw new Error(`No instance named '${s.instance}'.`)
-      const raw = s.input
-      const inputId = typeof raw === 'number' ? raw
-        : (String(raw).match(/^\d+$/) ? parseInt(String(raw), 10) : inst.inputIndex(String(raw)))
+      const inst = requireInstance(s.instance, 'set[].instance')
+      const inputId = resolveInputIdx(inst, s.input)
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
       validateExpr(s.expr, `${s.instance}.${resolvedName}`)
       const { expr } = adaptInputExpr(s.expr, inst.inputPortType(inputId), s.instance, resolvedName)
@@ -938,11 +1163,8 @@ function handleSetOutput(args: Record<string, unknown>) {
     const outputs = args.outputs as Array<{ instance: string; output: string | number }>
     session.graphOutputs.length = 0
     for (const o of outputs) {
-      const inst = session.instanceRegistry.get(o.instance)
-      if (!inst) throw new Error(`No instance named '${o.instance}'.`)
-      const rawOut = o.output
-      const outId = typeof rawOut === 'number' ? rawOut
-        : (String(rawOut).match(/^\d+$/) ? parseInt(String(rawOut), 10) : inst.outputIndex(String(rawOut)))
+      const inst = requireInstance(o.instance, 'outputs[].instance')
+      const outId = resolveOutputIdx(inst, o.output)
       session.graphOutputs.push({ instance: o.instance, output: inst.outputNames[outId] })
     }
     return { outputs: session.graphOutputs, ...wire() }
@@ -957,7 +1179,7 @@ function handleLoad(args: Record<string, unknown>) {
     } else if (args.program) {
       raw = args.program
     } else {
-      throw new Error('Provide either path (file) or program (inline JSON).')
+      failBare({ code: 'missing_argument', message: 'Provide either path (file) or program (inline JSON).' })
     }
 
     if (session.dac?.isRunning) session.dac.stop()
@@ -976,15 +1198,18 @@ function handleLoad(args: Record<string, unknown>) {
 }
 
 function handleSave() {
-  return wrap(() => ({ program: saveProgramFromSession(session) }))
+  return wrap(() => {
+    const { node, topLevel } = saveProgramFromSession(session)
+    return { program: v2NodeToFile(node as unknown as ExprNode, topLevel) }
+  })
 }
 
 function handleMerge(args: Record<string, unknown>) {
   return wrap(() => {
     const raw = args.program ?? args.patch
-    if (!raw) throw new Error('Provide a program or patch object.')
-    const prog = parseProgram(raw) as ProgramJSON
-    mergeProgramIntoSession(prog, session)
+    if (!raw) failBare({ code: 'missing_argument', message: 'Provide a program or patch object.' })
+    const { node, topLevel } = normalizeProgramFile(raw as { schema?: string; [k: string]: unknown })
+    mergeProgramIntoSession(node, topLevel, session)
     return {
       instances:   [...session.instanceRegistry.keys()],
       wiring:      session.inputExprNodes.size,
@@ -1080,7 +1305,12 @@ function handleTool(name: string, args: Record<string, unknown>) {
         const devices = DAC.listDevices()
         const match = devices.find(d => d.name.toLowerCase().includes(deviceName.toLowerCase()))
         if (!match)
-          throw new Error(`No device matching '${deviceName}'. Available: ${devices.map(d => d.name).join(', ')}`)
+          failEnum({
+            code:    'unknown_device',
+            param:   'device_name',
+            value:   deviceName,
+            options: devices.map(d => d.name),
+          })
         if (session.dac.isRunning) {
           session.dac.switchDevice(match.id)
         } else {
@@ -1095,7 +1325,11 @@ function handleTool(name: string, args: Record<string, unknown>) {
     })
 
     case 'stop_audio': return wrap(() => {
-      if (!session.dac) throw new Error('DAC has not been created yet.')
+      if (!session.dac)
+        failBare({
+          code:    'invalid_state',
+          message: 'DAC has not been created yet.',
+        })
       session.dac.stop()
       return { is_running: session.dac.isRunning }
     })
@@ -1113,10 +1347,13 @@ function handleTool(name: string, args: Record<string, unknown>) {
       const paramName = args.name as string
       const value     = args.value as number
       const p = session.paramRegistry.get(paramName)
-      if (!p) {
-        const known = [...session.paramRegistry.keys()].join(', ')
-        throw new Error(`No param named '${paramName}'. Known: ${known || '(none)'}`)
-      }
+      if (!p)
+        failEnum({
+          code:    'unknown_param',
+          param:   'name',
+          value:   paramName,
+          options: [...session.paramRegistry.keys()],
+        })
       p.value = value
       return { name: paramName, value: p.value }
     })
@@ -1148,7 +1385,7 @@ const RESOURCES = [
   {
     uri:         'tropical://program-format',
     name:        'Program format',
-    description: 'Reference doc for the tropical_program_1 schema with worked examples.',
+    description: 'Reference doc for the tropical_program_2 schema.',
     mimeType:    'text/markdown',
   },
 ]
@@ -1172,31 +1409,56 @@ function renderProgramCatalog(): string {
 
 const PROGRAM_FORMAT_DOC = `# tropical program format
 
-Programs are the unified representation for all DSP in tropical. A program can be:
-- **A leaf program** (has process, computes directly)
-- **A graph program** (has instances and audio_outputs)
-- **A composite** (has instances, inputs, and outputs — a reusable graph)
+Programs are the unified representation for all DSP in tropical. A program is an
+expression with declared ports and a body that declares regs/delays/instances
+and assigns outputs and next-tick register updates.
 
-## tropical_program_1
+## tropical_program_2
 
-A program with instances wired together:
+The body is a \`block\` of \`decls\` (reg_decl, delay_decl, instance_decl,
+program_decl) and \`assigns\` (output_assign, next_update). Ports, type_params,
+and breaks_cycles sit alongside the body. Session metadata — \`params\`,
+\`audio_outputs\`, \`config\` — is top-level.
 
-{ "schema": "tropical_program_1", "name": "MyPatch",
-  "programs": { "Sine": { "schema": "tropical_program_1", "name": "Sine",
-    "inputs": ["freq"], "outputs": ["out"], "regs": { "phase": 0 },
-    "process": { "outputs": { "out": { "op": "sin", "args": [{ "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }] } },
-      "next_regs": { "phase": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sample_rate" }] }] }, 1] } } }
-  }},
-  "instances": {
-    "osc": { "program": "Sine", "inputs": { "freq": 440 } },
-    "filt": { "program": "LadderFilter", "inputs": { "input": { "op": "ref", "instance": "osc", "output": "out" }, "cutoff": 2000 } }
+{ "schema": "tropical_program_2", "name": "MyPatch",
+  "body": { "op": "block",
+    "decls": [
+      { "op": "program_decl", "name": "Sine", "program": { "op": "program", "name": "Sine",
+        "ports": { "inputs": ["freq"], "outputs": ["out"] },
+        "body": { "op": "block",
+          "decls": [{ "op": "reg_decl", "name": "phase", "init": 0 }],
+          "assigns": [
+            { "op": "output_assign", "name": "out",
+              "expr": { "op": "sin", "args": [{ "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }] } },
+            { "op": "next_update", "target": { "kind": "reg", "name": "phase" },
+              "expr": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sample_rate" }] }] }, 1] } }
+          ],
+          "value": null
+        }
+      }},
+      { "op": "instance_decl", "name": "osc", "program": "Sine", "inputs": { "freq": 440 } },
+      { "op": "instance_decl", "name": "filt", "program": "LadderFilter",
+        "inputs": { "input": { "op": "ref", "instance": "osc", "output": "out" }, "cutoff": 2000 } }
+    ],
+    "assigns": [],
+    "value": null
   },
   "audio_outputs": [{ "instance": "filt", "output": "lp" }]
 }
 
-Key fields: schema, name, inputs/outputs (leaf/composite), process (leaf body),
-programs (inline subprogram defs), instances (instantiated subprograms with wiring),
-audio_outputs (graph output routing), params, regs, delays.
+Key fields: schema, name, ports (inputs/outputs/type_defs), body (block),
+type_params, sample_rate, breaks_cycles, and top-level session metadata
+(params, audio_outputs, config).
+
+Decl node shapes:
+- reg_decl:      { op, name, init, type?, bounds? }
+- delay_decl:    { op, name, update, init? }
+- instance_decl: { op, name, program, inputs?, type_args? }
+- program_decl:  { op, name, program: <program node> }
+
+Assign node shapes:
+- output_assign: { op, name, expr }
+- next_update:   { op, target: { kind: "reg"|"delay", name }, expr }
 
 ## Combinators (compile-time expansion)
 
@@ -1245,12 +1507,12 @@ const BUILD_PATCH_PROMPT = `# build-patch workflow
 
 Before writing any program, always fetch both resources:
 - \`tropical://programs\` — full catalog of available program types with inputs, defaults, and outputs
-- \`tropical://program-format\` — tropical_program_1 schema reference with worked examples
+- \`tropical://program-format\` — tropical_program_2 schema reference with worked examples
 
 ## Choose the right tool for the job
 
 ### New program (starting from scratch)
-Use \`load\` with a **complete** tropical_program_1 JSON object in a single call.
+Use \`load\` with a **complete** tropical_program_2 JSON object in a single call.
 Do not call \`add_instance\` and \`wire\` one-by-one —
 that requires many round trips and recompiles the JIT kernel on every change.
 

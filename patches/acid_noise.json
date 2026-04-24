@@ -1,234 +1,269 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "acid_noise",
-  "instances": {
-    "ClockStep": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 8
-      }
-    },
-    "ClockBeat": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 2
-      }
-    },
-    "ClockHat": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 4
-      }
-    },
-    "ClockFast": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 8000
-      }
-    },
-    "VCOBass": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            55,
-            {
-              "op": "pow",
-              "args": [
-                2,
-                {
-                  "op": "add",
-                  "args": [
-                    {
-                      "op": "mul",
-                      "args": [
-                        0.25,
-                        {
-                          "op": "gt",
-                          "args": [
-                            {
-                              "op": "ref",
-                              "instance": "VCOBit0",
-                              "output": "sqr"
-                            },
-                            0
-                          ]
-                        }
-                      ]
-                    },
-                    {
-                      "op": "mul",
-                      "args": [
-                        0.583,
-                        {
-                          "op": "gt",
-                          "args": [
-                            {
-                              "op": "ref",
-                              "instance": "VCOBit1",
-                              "output": "sqr"
-                            },
-                            0
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instance_decl",
+        "name": "ClockStep",
+        "program": "Clock",
+        "inputs": {
+          "freq": 8
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ClockBeat",
+        "program": "Clock",
+        "inputs": {
+          "freq": 2
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ClockHat",
+        "program": "Clock",
+        "inputs": {
+          "freq": 4
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "ClockFast",
+        "program": "Clock",
+        "inputs": {
+          "freq": 8000
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCOBass",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              55,
+              {
+                "op": "pow",
+                "args": [
+                  2,
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          0.25,
+                          {
+                            "op": "gt",
+                            "args": [
+                              {
+                                "op": "ref",
+                                "instance": "VCOBit0",
+                                "output": "sqr"
+                              },
+                              0
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          0.583,
+                          {
+                            "op": "gt",
+                            "args": [
+                              {
+                                "op": "ref",
+                                "instance": "VCOBit1",
+                                "output": "sqr"
+                              },
+                              0
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCOBit0",
+        "program": "VCO",
+        "inputs": {
+          "freq": 0.47
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCOBit1",
+        "program": "VCO",
+        "inputs": {
+          "freq": 0.97
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "EnvBassAmp",
+        "program": "ADSREnvelope",
+        "inputs": {
+          "gate": {
+            "op": "ref",
+            "instance": "ClockStep",
+            "output": "output"
+          },
+          "attack": 0.005,
+          "decay": 0.18,
+          "sustain": 0,
+          "release": 0.04
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "EnvBassFilt",
+        "program": "ADSREnvelope",
+        "inputs": {
+          "gate": {
+            "op": "ref",
+            "instance": "ClockStep",
+            "output": "output"
+          },
+          "attack": 0.002,
+          "decay": 0.07,
+          "sustain": 0,
+          "release": 0.02
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "FiltBass",
+        "program": "LadderFilter",
+        "inputs": {
+          "input": {
+            "op": "ref",
+            "instance": "VCOBass",
+            "output": "saw"
+          },
+          "cutoff": {
+            "op": "add",
+            "args": [
+              300,
+              {
+                "op": "mul",
+                "args": [
+                  5200,
+                  {
+                    "op": "ref",
+                    "instance": "EnvBassFilt",
+                    "output": "env"
+                  }
+                ]
+              }
+            ]
+          },
+          "resonance": 0.88,
+          "drive": 3.5
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Kick",
+        "program": "BassDrum",
+        "inputs": {
+          "gate": {
+            "op": "ref",
+            "instance": "ClockBeat",
+            "output": "output"
+          },
+          "freq": 55,
+          "punch": 0.75,
+          "decay": 0.38,
+          "tone": 8
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "HatNoise",
+        "program": "NoiseLFSR",
+        "inputs": {
+          "clock": {
+            "op": "ref",
+            "instance": "ClockFast",
+            "output": "output"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "EnvHat",
+        "program": "ADEnvelope",
+        "inputs": {
+          "gate": {
+            "op": "ref",
+            "instance": "ClockHat",
+            "output": "output"
+          },
+          "attack": 0.001,
+          "decay": 0.04
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCABass",
+        "program": "VCA",
+        "inputs": {
+          "audio": {
+            "op": "ref",
+            "instance": "FiltBass",
+            "output": "lp"
+          },
+          "cv": {
+            "op": "mul",
+            "args": [
+              0.75,
+              {
+                "op": "ref",
+                "instance": "EnvBassAmp",
+                "output": "env"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCAHat",
+        "program": "VCA",
+        "inputs": {
+          "audio": {
+            "op": "ref",
+            "instance": "HatNoise",
+            "output": "out"
+          },
+          "cv": {
+            "op": "mul",
+            "args": [
+              0.25,
+              {
+                "op": "ref",
+                "instance": "EnvHat",
+                "output": "env"
+              }
+            ]
+          }
         }
       }
-    },
-    "VCOBit0": {
-      "program": "VCO",
-      "inputs": {
-        "freq": 0.47
-      }
-    },
-    "VCOBit1": {
-      "program": "VCO",
-      "inputs": {
-        "freq": 0.97
-      }
-    },
-    "EnvBassAmp": {
-      "program": "ADSREnvelope",
-      "inputs": {
-        "gate": {
-          "op": "ref",
-          "instance": "ClockStep",
-          "output": "output"
-        },
-        "attack": 0.005,
-        "decay": 0.18,
-        "sustain": 0,
-        "release": 0.04
-      }
-    },
-    "EnvBassFilt": {
-      "program": "ADSREnvelope",
-      "inputs": {
-        "gate": {
-          "op": "ref",
-          "instance": "ClockStep",
-          "output": "output"
-        },
-        "attack": 0.002,
-        "decay": 0.07,
-        "sustain": 0,
-        "release": 0.02
-      }
-    },
-    "FiltBass": {
-      "program": "LadderFilter",
-      "inputs": {
-        "input": {
-          "op": "ref",
-          "instance": "VCOBass",
-          "output": "saw"
-        },
-        "cutoff": {
-          "op": "add",
-          "args": [
-            300,
-            {
-              "op": "mul",
-              "args": [
-                5200,
-                {
-                  "op": "ref",
-                  "instance": "EnvBassFilt",
-                  "output": "env"
-                }
-              ]
-            }
-          ]
-        },
-        "resonance": 0.88,
-        "drive": 3.5
-      }
-    },
-    "Kick": {
-      "program": "BassDrum",
-      "inputs": {
-        "gate": {
-          "op": "ref",
-          "instance": "ClockBeat",
-          "output": "output"
-        },
-        "freq": 55,
-        "punch": 0.75,
-        "decay": 0.38,
-        "tone": 8
-      }
-    },
-    "HatNoise": {
-      "program": "NoiseLFSR",
-      "inputs": {
-        "clock": {
-          "op": "ref",
-          "instance": "ClockFast",
-          "output": "output"
-        }
-      }
-    },
-    "EnvHat": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "gate": {
-          "op": "ref",
-          "instance": "ClockHat",
-          "output": "output"
-        },
-        "attack": 0.001,
-        "decay": 0.04
-      }
-    },
-    "VCABass": {
-      "program": "VCA",
-      "inputs": {
-        "audio": {
-          "op": "ref",
-          "instance": "FiltBass",
-          "output": "lp"
-        },
-        "cv": {
-          "op": "mul",
-          "args": [
-            0.75,
-            {
-              "op": "ref",
-              "instance": "EnvBassAmp",
-              "output": "env"
-            }
-          ]
-        }
-      }
-    },
-    "VCAHat": {
-      "program": "VCA",
-      "inputs": {
-        "audio": {
-          "op": "ref",
-          "instance": "HatNoise",
-          "output": "out"
-        },
-        "cv": {
-          "op": "mul",
-          "args": [
-            0.25,
-            {
-              "op": "ref",
-              "instance": "EnvHat",
-              "output": "env"
-            }
-          ]
-        }
-      }
-    }
+    ],
+    "assigns": [],
+    "value": null
   },
   "audio_outputs": [
     {

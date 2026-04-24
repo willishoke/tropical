@@ -1,668 +1,753 @@
 {
-  "schema": "tropical_program_1",
+  "schema": "tropical_program_2",
   "name": "31tet_otonal_seq",
-  "programs": {
-    "IntSeq": {
-      "schema": "tropical_program_1",
-      "name": "IntSeq",
-      "inputs": [
-        "trigger",
-        "is_forward",
-        "step",
-        "seq_len",
-        "sequence"
-      ],
-      "outputs": [
-        "value",
-        "index"
-      ],
-      "process": {
-        "outputs": {
-          "value": {
-            "op": "index",
-            "args": [
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "program_decl",
+        "name": "IntSeq",
+        "program": {
+          "op": "program",
+          "name": "IntSeq",
+          "body": {
+            "op": "block",
+            "decls": [
               {
-                "op": "input",
-                "name": "sequence"
+                "op": "reg_decl",
+                "name": "index",
+                "init": 0
               },
               {
-                "op": "reg",
-                "name": "index"
+                "op": "reg_decl",
+                "name": "prev_trig",
+                "init": 0
               }
+            ],
+            "assigns": [
+              {
+                "op": "output_assign",
+                "name": "value",
+                "expr": {
+                  "op": "index",
+                  "args": [
+                    {
+                      "op": "input",
+                      "name": "sequence"
+                    },
+                    {
+                      "op": "reg",
+                      "name": "index"
+                    }
+                  ]
+                }
+              },
+              {
+                "op": "output_assign",
+                "name": "index",
+                "expr": {
+                  "op": "reg",
+                  "name": "index"
+                }
+              },
+              {
+                "op": "next_update",
+                "target": {
+                  "kind": "reg",
+                  "name": "prev_trig"
+                },
+                "expr": {
+                  "op": "input",
+                  "name": "trigger"
+                }
+              },
+              {
+                "op": "next_update",
+                "target": {
+                  "kind": "reg",
+                  "name": "index"
+                },
+                "expr": {
+                  "op": "select",
+                  "args": [
+                    {
+                      "op": "bit_and",
+                      "args": [
+                        {
+                          "op": "input",
+                          "name": "trigger"
+                        },
+                        {
+                          "op": "not",
+                          "args": [
+                            {
+                              "op": "reg",
+                              "name": "prev_trig"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "op": "mod",
+                      "args": [
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "reg",
+                              "name": "index"
+                            },
+                            {
+                              "op": "select",
+                              "args": [
+                                {
+                                  "op": "input",
+                                  "name": "is_forward"
+                                },
+                                {
+                                  "op": "input",
+                                  "name": "step"
+                                },
+                                {
+                                  "op": "sub",
+                                  "args": [
+                                    {
+                                      "op": "input",
+                                      "name": "seq_len"
+                                    },
+                                    {
+                                      "op": "input",
+                                      "name": "step"
+                                    }
+                                  ]
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "op": "input",
+                          "name": "seq_len"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "reg",
+                      "name": "index"
+                    }
+                  ]
+                }
+              }
+            ],
+            "value": null
+          },
+          "ports": {
+            "inputs": [
+              "trigger",
+              "is_forward",
+              "step",
+              "seq_len",
+              "sequence"
+            ],
+            "outputs": [
+              "value",
+              "index"
             ]
-          },
-          "index": {
-            "op": "reg",
-            "name": "index"
           }
-        },
-        "next_regs": {
-          "prev_trig": {
-            "op": "input",
-            "name": "trigger"
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock1",
+        "program": "Clock",
+        "inputs": {
+          "freq": 3
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock2",
+        "program": "Clock",
+        "inputs": {
+          "freq": 0.6
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Clock3",
+        "program": "Clock",
+        "inputs": {
+          "freq": 0.75
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Seq1",
+        "program": "IntSeq",
+        "inputs": {
+          "trigger": {
+            "op": "ref",
+            "instance": "Clock1",
+            "output": "output"
           },
-          "index": {
-            "op": "select",
+          "is_forward": true,
+          "step": 1,
+          "seq_len": 8,
+          "sequence": {
+            "op": "array",
+            "items": [
+              110,
+              137.56,
+              164.48,
+              192.38,
+              220,
+              192.38,
+              164.48,
+              137.56
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Seq2",
+        "program": "IntSeq",
+        "inputs": {
+          "trigger": {
+            "op": "ref",
+            "instance": "Clock1",
+            "output": "output"
+          },
+          "is_forward": true,
+          "step": 1,
+          "seq_len": 8,
+          "sequence": {
+            "op": "array",
+            "items": [
+              137.56,
+              172.01,
+              205.66,
+              240.53,
+              275.12,
+              240.53,
+              205.66,
+              172.01
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Seq3",
+        "program": "IntSeq",
+        "inputs": {
+          "trigger": {
+            "op": "ref",
+            "instance": "Clock1",
+            "output": "output"
+          },
+          "is_forward": true,
+          "step": 1,
+          "seq_len": 8,
+          "sequence": {
+            "op": "array",
+            "items": [
+              164.48,
+              205.73,
+              245.93,
+              287.67,
+              328.97,
+              287.67,
+              245.93,
+              205.73
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Seq4",
+        "program": "IntSeq",
+        "inputs": {
+          "trigger": {
+            "op": "ref",
+            "instance": "Clock1",
+            "output": "output"
+          },
+          "is_forward": true,
+          "step": 1,
+          "seq_len": 8,
+          "sequence": {
+            "op": "array",
+            "items": [
+              192.38,
+              240.53,
+              287.67,
+              336.44,
+              384.75,
+              336.44,
+              287.67,
+              240.53
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Seq5",
+        "program": "IntSeq",
+        "inputs": {
+          "trigger": {
+            "op": "ref",
+            "instance": "Clock2",
+            "output": "output"
+          },
+          "is_forward": true,
+          "step": 1,
+          "seq_len": 8,
+          "sequence": {
+            "op": "array",
+            "items": [
+              1,
+              1.02267,
+              1.04581,
+              1.06952,
+              1.09381,
+              1.1187,
+              1.1442,
+              1.17032
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Seq6",
+        "program": "IntSeq",
+        "inputs": {
+          "trigger": {
+            "op": "ref",
+            "instance": "Clock3",
+            "output": "output"
+          },
+          "is_forward": true,
+          "step": 1,
+          "seq_len": 4,
+          "sequence": {
+            "op": "array",
+            "items": [
+              30,
+              40,
+              50,
+              60
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO1",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
             "args": [
               {
-                "op": "bit_and",
-                "args": [
-                  {
-                    "op": "input",
-                    "name": "trigger"
-                  },
-                  {
-                    "op": "not",
-                    "args": [
-                      {
-                        "op": "reg",
-                        "name": "prev_trig"
-                      }
-                    ]
-                  }
-                ]
+                "op": "ref",
+                "instance": "Seq1",
+                "output": "value"
               },
               {
-                "op": "mod",
-                "args": [
-                  {
-                    "op": "add",
-                    "args": [
-                      {
-                        "op": "reg",
-                        "name": "index"
-                      },
-                      {
-                        "op": "select",
-                        "args": [
-                          {
-                            "op": "input",
-                            "name": "is_forward"
-                          },
-                          {
-                            "op": "input",
-                            "name": "step"
-                          },
-                          {
-                            "op": "sub",
-                            "args": [
-                              {
-                                "op": "input",
-                                "name": "seq_len"
-                              },
-                              {
-                                "op": "input",
-                                "name": "step"
-                              }
-                            ]
-                          }
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "op": "input",
-                    "name": "seq_len"
-                  }
-                ]
-              },
-              {
-                "op": "reg",
-                "name": "index"
+                "op": "ref",
+                "instance": "Seq5",
+                "output": "value"
               }
             ]
           }
         }
       },
-      "regs": {
-        "index": 0,
-        "prev_trig": 0
-      }
-    }
-  },
-  "instances": {
-    "Clock1": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 3
-      }
-    },
-    "Clock2": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 0.6
-      }
-    },
-    "Clock3": {
-      "program": "Clock",
-      "inputs": {
-        "freq": 0.75
-      }
-    },
-    "Seq1": {
-      "program": "IntSeq",
-      "inputs": {
-        "trigger": {
-          "op": "ref",
-          "instance": "Clock1",
-          "output": "output"
-        },
-        "is_forward": true,
-        "step": 1,
-        "seq_len": 8,
-        "sequence": {
-          "op": "array",
-          "items": [
-            110,
-            137.56,
-            164.48,
-            192.38,
-            220,
-            192.38,
-            164.48,
-            137.56
-          ]
+      {
+        "op": "instance_decl",
+        "name": "VCO2",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "Seq2",
+                "output": "value"
+              },
+              {
+                "op": "ref",
+                "instance": "Seq5",
+                "output": "value"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO3",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "Seq3",
+                "output": "value"
+              },
+              {
+                "op": "ref",
+                "instance": "Seq5",
+                "output": "value"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO4",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "Seq4",
+                "output": "value"
+              },
+              {
+                "op": "ref",
+                "instance": "Seq5",
+                "output": "value"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCO5",
+        "program": "VCO",
+        "inputs": {
+          "freq": {
+            "op": "ref",
+            "instance": "Seq6",
+            "output": "value"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Env1",
+        "program": "ADEnvelope",
+        "inputs": {
+          "gate": {
+            "op": "ref",
+            "instance": "Clock1",
+            "output": "output"
+          },
+          "attack": 0.012,
+          "decay": 0.58
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Env2",
+        "program": "ADEnvelope",
+        "inputs": {
+          "gate": {
+            "op": "ref",
+            "instance": "Clock3",
+            "output": "output"
+          },
+          "attack": 0.008,
+          "decay": 0.25
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCA1",
+        "program": "VCA",
+        "inputs": {
+          "audio": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO1",
+                "output": "sin"
+              },
+              0.48
+            ]
+          },
+          "cv": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "Env1",
+                "output": "env"
+              },
+              {
+                "op": "sub",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "ref",
+                        "instance": "Env2",
+                        "output": "env"
+                      },
+                      0.7
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCA2",
+        "program": "VCA",
+        "inputs": {
+          "audio": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO2",
+                "output": "sin"
+              },
+              0.48
+            ]
+          },
+          "cv": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "Env1",
+                "output": "env"
+              },
+              {
+                "op": "sub",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "ref",
+                        "instance": "Env2",
+                        "output": "env"
+                      },
+                      0.7
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCA3",
+        "program": "VCA",
+        "inputs": {
+          "audio": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO3",
+                "output": "sin"
+              },
+              0.48
+            ]
+          },
+          "cv": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "Env1",
+                "output": "env"
+              },
+              {
+                "op": "sub",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "ref",
+                        "instance": "Env2",
+                        "output": "env"
+                      },
+                      0.7
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCA4",
+        "program": "VCA",
+        "inputs": {
+          "audio": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO4",
+                "output": "sin"
+              },
+              0.48
+            ]
+          },
+          "cv": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "Env1",
+                "output": "env"
+              },
+              {
+                "op": "sub",
+                "args": [
+                  1,
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "ref",
+                        "instance": "Env2",
+                        "output": "env"
+                      },
+                      0.7
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "VCA5",
+        "program": "VCA",
+        "inputs": {
+          "audio": {
+            "op": "mul",
+            "args": [
+              {
+                "op": "ref",
+                "instance": "VCO5",
+                "output": "sin"
+              },
+              1.6
+            ]
+          },
+          "cv": {
+            "op": "ref",
+            "instance": "Env2",
+            "output": "env"
+          }
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Ph1",
+        "program": "Phaser16",
+        "inputs": {
+          "input": {
+            "op": "add",
+            "args": [
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "ref",
+                            "instance": "VCA1",
+                            "output": "out"
+                          },
+                          {
+                            "op": "ref",
+                            "instance": "VCA2",
+                            "output": "out"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "ref",
+                        "instance": "VCA3",
+                        "output": "out"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "ref",
+                    "instance": "VCA4",
+                    "output": "out"
+                  }
+                ]
+              },
+              {
+                "op": "ref",
+                "instance": "VCA5",
+                "output": "out"
+              }
+            ]
+          },
+          "feedback": 0.5,
+          "lfo_speed": 0.03
+        }
+      },
+      {
+        "op": "instance_decl",
+        "name": "Rev1",
+        "program": "Reverb",
+        "inputs": {
+          "input": {
+            "op": "ref",
+            "instance": "Ph1",
+            "output": "output"
+          },
+          "mix": 0.45,
+          "decay": 0.88,
+          "damp": 0.3
         }
       }
-    },
-    "Seq2": {
-      "program": "IntSeq",
-      "inputs": {
-        "trigger": {
-          "op": "ref",
-          "instance": "Clock1",
-          "output": "output"
-        },
-        "is_forward": true,
-        "step": 1,
-        "seq_len": 8,
-        "sequence": {
-          "op": "array",
-          "items": [
-            137.56,
-            172.01,
-            205.66,
-            240.53,
-            275.12,
-            240.53,
-            205.66,
-            172.01
-          ]
-        }
-      }
-    },
-    "Seq3": {
-      "program": "IntSeq",
-      "inputs": {
-        "trigger": {
-          "op": "ref",
-          "instance": "Clock1",
-          "output": "output"
-        },
-        "is_forward": true,
-        "step": 1,
-        "seq_len": 8,
-        "sequence": {
-          "op": "array",
-          "items": [
-            164.48,
-            205.73,
-            245.93,
-            287.67,
-            328.97,
-            287.67,
-            245.93,
-            205.73
-          ]
-        }
-      }
-    },
-    "Seq4": {
-      "program": "IntSeq",
-      "inputs": {
-        "trigger": {
-          "op": "ref",
-          "instance": "Clock1",
-          "output": "output"
-        },
-        "is_forward": true,
-        "step": 1,
-        "seq_len": 8,
-        "sequence": {
-          "op": "array",
-          "items": [
-            192.38,
-            240.53,
-            287.67,
-            336.44,
-            384.75,
-            336.44,
-            287.67,
-            240.53
-          ]
-        }
-      }
-    },
-    "Seq5": {
-      "program": "IntSeq",
-      "inputs": {
-        "trigger": {
-          "op": "ref",
-          "instance": "Clock2",
-          "output": "output"
-        },
-        "is_forward": true,
-        "step": 1,
-        "seq_len": 8,
-        "sequence": {
-          "op": "array",
-          "items": [
-            1,
-            1.02267,
-            1.04581,
-            1.06952,
-            1.09381,
-            1.1187,
-            1.1442,
-            1.17032
-          ]
-        }
-      }
-    },
-    "Seq6": {
-      "program": "IntSeq",
-      "inputs": {
-        "trigger": {
-          "op": "ref",
-          "instance": "Clock3",
-          "output": "output"
-        },
-        "is_forward": true,
-        "step": 1,
-        "seq_len": 4,
-        "sequence": {
-          "op": "array",
-          "items": [
-            30,
-            40,
-            50,
-            60
-          ]
-        }
-      }
-    },
-    "VCO1": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "Seq1",
-              "output": "value"
-            },
-            {
-              "op": "ref",
-              "instance": "Seq5",
-              "output": "value"
-            }
-          ]
-        }
-      }
-    },
-    "VCO2": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "Seq2",
-              "output": "value"
-            },
-            {
-              "op": "ref",
-              "instance": "Seq5",
-              "output": "value"
-            }
-          ]
-        }
-      }
-    },
-    "VCO3": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "Seq3",
-              "output": "value"
-            },
-            {
-              "op": "ref",
-              "instance": "Seq5",
-              "output": "value"
-            }
-          ]
-        }
-      }
-    },
-    "VCO4": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "Seq4",
-              "output": "value"
-            },
-            {
-              "op": "ref",
-              "instance": "Seq5",
-              "output": "value"
-            }
-          ]
-        }
-      }
-    },
-    "VCO5": {
-      "program": "VCO",
-      "inputs": {
-        "freq": {
-          "op": "ref",
-          "instance": "Seq6",
-          "output": "value"
-        }
-      }
-    },
-    "Env1": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "gate": {
-          "op": "ref",
-          "instance": "Clock1",
-          "output": "output"
-        },
-        "attack": 0.012,
-        "decay": 0.58
-      }
-    },
-    "Env2": {
-      "program": "ADEnvelope",
-      "inputs": {
-        "gate": {
-          "op": "ref",
-          "instance": "Clock3",
-          "output": "output"
-        },
-        "attack": 0.008,
-        "decay": 0.25
-      }
-    },
-    "VCA1": {
-      "program": "VCA",
-      "inputs": {
-        "audio": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO1",
-              "output": "sin"
-            },
-            0.48
-          ]
-        },
-        "cv": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "Env1",
-              "output": "env"
-            },
-            {
-              "op": "sub",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "ref",
-                      "instance": "Env2",
-                      "output": "env"
-                    },
-                    0.7
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCA2": {
-      "program": "VCA",
-      "inputs": {
-        "audio": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO2",
-              "output": "sin"
-            },
-            0.48
-          ]
-        },
-        "cv": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "Env1",
-              "output": "env"
-            },
-            {
-              "op": "sub",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "ref",
-                      "instance": "Env2",
-                      "output": "env"
-                    },
-                    0.7
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCA3": {
-      "program": "VCA",
-      "inputs": {
-        "audio": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO3",
-              "output": "sin"
-            },
-            0.48
-          ]
-        },
-        "cv": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "Env1",
-              "output": "env"
-            },
-            {
-              "op": "sub",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "ref",
-                      "instance": "Env2",
-                      "output": "env"
-                    },
-                    0.7
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCA4": {
-      "program": "VCA",
-      "inputs": {
-        "audio": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO4",
-              "output": "sin"
-            },
-            0.48
-          ]
-        },
-        "cv": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "Env1",
-              "output": "env"
-            },
-            {
-              "op": "sub",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "ref",
-                      "instance": "Env2",
-                      "output": "env"
-                    },
-                    0.7
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    },
-    "VCA5": {
-      "program": "VCA",
-      "inputs": {
-        "audio": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "ref",
-              "instance": "VCO5",
-              "output": "sin"
-            },
-            1.6
-          ]
-        },
-        "cv": {
-          "op": "ref",
-          "instance": "Env2",
-          "output": "env"
-        }
-      }
-    },
-    "Ph1": {
-      "program": "Phaser16",
-      "inputs": {
-        "input": {
-          "op": "add",
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "add",
-                  "args": [
-                    {
-                      "op": "add",
-                      "args": [
-                        {
-                          "op": "ref",
-                          "instance": "VCA1",
-                          "output": "out"
-                        },
-                        {
-                          "op": "ref",
-                          "instance": "VCA2",
-                          "output": "out"
-                        }
-                      ]
-                    },
-                    {
-                      "op": "ref",
-                      "instance": "VCA3",
-                      "output": "out"
-                    }
-                  ]
-                },
-                {
-                  "op": "ref",
-                  "instance": "VCA4",
-                  "output": "out"
-                }
-              ]
-            },
-            {
-              "op": "ref",
-              "instance": "VCA5",
-              "output": "out"
-            }
-          ]
-        },
-        "feedback": 0.5,
-        "lfo_speed": 0.03
-      }
-    },
-    "Rev1": {
-      "program": "Reverb",
-      "inputs": {
-        "input": {
-          "op": "ref",
-          "instance": "Ph1",
-          "output": "output"
-        },
-        "mix": 0.45,
-        "decay": 0.88,
-        "damp": 0.3
-      }
-    }
+    ],
+    "assigns": [],
+    "value": null
   },
   "audio_outputs": [
     {
