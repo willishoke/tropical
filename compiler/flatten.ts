@@ -19,7 +19,7 @@ import {
 import { lowerArrayOps } from './lower_arrays.js'
 import { type PortType, Float, Bool, ArrayType } from './term.js'
 import { checkArrayConnection } from './array_wiring.js'
-import { emitNumericProgram, type NInstr, type ScalarType } from './emit_numeric.js'
+import { emitNumericProgram, type NInstr, type ScalarType, type GroupInfo } from './emit_numeric.js'
 
 // ─────────────────────────────────────────────────────────────
 // Wiring type validation
@@ -150,6 +150,8 @@ export interface FlatPlan {
   array_slot_sizes: number[]
   output_targets:  number[]
   register_targets: number[]
+  /** Gateable-subgraph metadata, if any source_tag wrappers were emitted. */
+  groups?:         GroupInfo[]
 }
 
 /** Pre-emission representation: flattened ExprNode trees before instruction emission. */
@@ -1109,6 +1111,23 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     }
   }
 
+  // ── Gateable instances: collect gate inputs, reject unsupported combinations ──
+  // A gateable instance's gate expression may reference other instances; include
+  // those refs in the dependency graph so the topo order respects them. Cycle-breaking
+  // and gateable are mutually exclusive for now — support can follow later.
+  const gateInputExprs = new Map<string, ExprNode>()
+  for (const [name, inst] of instances) {
+    if (!inst.gateable) continue
+    if (inst.gateInput === undefined) {
+      throw new FlattenError(`Instance '${name}' is gateable but has no gate_input.`)
+    }
+    if (cycleBreakers.has(name)) {
+      throw new FlattenError(`Instance '${name}' is both cycle-breaking and gateable; this combination is not yet supported.`)
+    }
+    // Extract session-level delay() nodes from the gate expression, same as wiring.
+    gateInputExprs.set(name, extractSessionDelays(inst.gateInput, sessionDelays))
+  }
+
   // ── Auto-feedback: detect self-references and inter-instance cycles ──
   // Any ref from an instance to itself, or a cycle among instances with no
   // breaks_cycles delay in the loop, gets a synthetic one-sample delay register
@@ -1134,7 +1153,14 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
   // Pass 2: Detect inter-instance cycles via topological sort + Tarjan's SCC.
   // For each cycle found, pick one back-edge and insert a synthetic delay register,
   // then add the target to cycleBreakers so the topo sort excludes it.
-  let deps = buildDependencyGraph(instanceInfos.keys(), inputExprNodes, cycleBreakers)
+  const depsInputExprs = (): Map<string, ExprNode> => {
+    // Combine wiring inputs with gate inputs so the dep graph respects gate refs.
+    if (gateInputExprs.size === 0) return inputExprNodes
+    const combined = new Map(inputExprNodes)
+    for (const [name, expr] of gateInputExprs) combined.set(`${name}:__gate__`, expr)
+    return combined
+  }
+  let deps = buildDependencyGraph(instanceInfos.keys(), depsInputExprs(), cycleBreakers)
   let { order, complete } = topologicalSort(deps)
 
   if (!complete) {
@@ -1179,7 +1205,7 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     }
 
     // Rebuild and retry
-    deps = buildDependencyGraph(instanceInfos.keys(), inputExprNodes, cycleBreakers)
+    deps = buildDependencyGraph(instanceInfos.keys(), depsInputExprs(), cycleBreakers)
     const retry = topologicalSort(deps)
     order = retry.order
     complete = retry.complete
@@ -1342,6 +1368,31 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
       return expr
     }
 
+    // If this instance is gateable, resolve its gate_expr once against the
+    // already-resolved outputs so downstream wrapping has a concrete ExprNode.
+    // The gate lives *outside* the tagged group — no input substitution, since
+    // gate_input is an external signal, not wired to any port of this instance.
+    let gateExpr: ExprNode | null = null
+    if (inst.gateable) {
+      const raw = gateInputExprs.get(name)!
+      const refsMemo = new WeakMap<object, ExprNode>()
+      let g = resolveRefs(raw, resolvedOutputs, resolvedOutputNames, refsMemo)
+      const lowerMemo = new WeakMap<object, ExprNode>()
+      g = lowerArrayOps(g, lowerMemo)
+      gateExpr = g
+    }
+
+    const wrapOutput = (expr: ExprNode): ExprNode =>
+      gateExpr === null ? expr : { op: 'source_tag', source_instance: name, gate_expr: gateExpr, expr }
+    const wrapRegUpdate = (expr: ExprNode, flatRegId: number): ExprNode =>
+      gateExpr === null ? expr : {
+        op: 'source_tag',
+        source_instance: name,
+        gate_expr: gateExpr,
+        expr,
+        on_skip: { op: 'reg', id: flatRegId },
+      }
+
     // Process each output expression
     // Order matters: offset registers BEFORE substituting inputs/resolving refs,
     // because wiring expressions already have globally-correct register IDs.
@@ -1350,6 +1401,7 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
       let expr = processExpr(def.outputExprNodes[i])
       const bounds = def.outputBounds[i]
       if (bounds) expr = applyBounds(expr, bounds)
+      expr = wrapOutput(expr)
       flatOutputExprs.push(expr)
       instOutputExprs.push(expr)
     }
@@ -1359,12 +1411,17 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     // Process each named register expression
     for (let i = 0; i < def.registerExprNodes.length; i++) {
       const regNode = def.registerExprNodes[i]
+      const flatRegId = registerBase + i
+      let expr: ExprNode
       if (regNode !== null) {
-        flatRegisterExprs.push(processExpr(regNode))
+        expr = processExpr(regNode)
+        expr = wrapRegUpdate(expr, flatRegId)
       } else {
-        // No update — register holds its value (identity: reg(registerBase + i))
-        flatRegisterExprs.push({ op: 'reg', id: registerBase + i })
+        // No update — register holds its value (identity: reg(flatRegId)).
+        // No wrap needed: gate ? reg : reg = reg.
+        expr = { op: 'reg', id: flatRegId }
       }
+      flatRegisterExprs.push(expr)
 
       // Register name, init value, and type
       flatRegisterNames.push(`${name}_${def.registerNames[i]}`)
@@ -1382,12 +1439,16 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     // Process delay state registers (delay_value(N) reads from delayBase + N)
     for (let i = 0; i < def.delayUpdateNodes.length; i++) {
       const updateNode = def.delayUpdateNodes[i]
+      const flatDelayRegId = delayBase + i
+      let expr: ExprNode
       if (updateNode !== null && updateNode !== undefined) {
-        flatRegisterExprs.push(processExpr(updateNode as ExprNode))
+        expr = processExpr(updateNode as ExprNode)
+        expr = wrapRegUpdate(expr, flatDelayRegId)
       } else {
-        // No update — hold current value
-        flatRegisterExprs.push({ op: 'reg', id: delayBase + i })
+        // No update — hold current value. No wrap needed.
+        expr = { op: 'reg', id: flatDelayRegId }
       }
+      flatRegisterExprs.push(expr)
       flatRegisterNames.push(`${name}_delay_${i}`)
       flatRegisterTypes.push('float')
       flatStateInit.push(def.delayInitValues[i] ?? 0)
@@ -1447,6 +1508,11 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
         expr = resolveRefs(expr, resolvedOutputs, resolvedOutputNames, nestedRefsMemo)
         const nestedLowerMemo = new WeakMap<object, ExprNode>()
         expr = lowerArrayOps(expr, nestedLowerMemo)
+        // Nested register is part of the owning instance's group; its flat id
+        // is the current length of flatRegisterExprs *before* push, which
+        // equals flatRegisterExprs.length right now.
+        const flatNestedRegId = flatRegisterExprs.length
+        expr = wrapRegUpdate(expr, flatNestedRegId)
         flatRegisterExprs.push(expr)
         flatRegisterNames.push(nested.names[i])
         flatRegisterTypes.push('float')
@@ -1664,7 +1730,7 @@ export function flattenSession(session: SessionState): FlatPlan {
     }
   }
 
-  return {
+  const plan: FlatPlan = {
     schema: 'tropical_plan_4',
     config: { sample_rate: flat.sampleRate },
     state_init: flat.stateInit as (number | boolean)[],
@@ -1679,5 +1745,7 @@ export function flattenSession(session: SessionState): FlatPlan {
     output_targets:   program.output_targets,
     register_targets: program.register_targets,
   }
+  if (program.groups) plan.groups = program.groups
+  return plan
 }
 

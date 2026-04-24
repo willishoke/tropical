@@ -355,13 +355,15 @@ const TOOLS = [
   },
   {
     name: 'add_instance',
-    description: 'Create a named instance of a registered program type. For generic programs (those declaring type_params — see list_programs), supply type_args with concrete integer values (e.g. {"N": 44100}).',
+    description: 'Create a named instance of a registered program type. For generic programs (those declaring type_params — see list_programs), supply type_args with concrete integer values (e.g. {"N": 44100}). Pass gateable=true with a Bool-typed gate_input expression to wrap this instance in a JIT-level conditional block: when the gate is false, outputs appear as zero and state registers hold — useful for idle voices in ensembles.',
     inputSchema: {
       type: 'object',
       properties: {
         program:       { type: 'string', description: 'Registered program/type name (builtin or user-defined)' },
         instance_name: { type: 'string', description: 'Unique name for this instance' },
         type_args:     { type: 'object', description: 'Compile-time type args for generic programs, e.g. {"N": 44100}. Omit for non-generic programs.' },
+        gateable:      { type: 'boolean', description: 'When true, wrap this instance in a conditional block. Requires gate_input.' },
+        gate_input:    { description: 'ExprNode producing a Bool-typed scalar signal. Required when gateable=true.' },
       },
       required: ['program', 'instance_name'],
     },
@@ -716,6 +718,8 @@ function handleAddInstance(
   programName: string,
   instanceName: string,
   typeArgs?: Record<string, number>,
+  gateable?: boolean,
+  gateInput?: ExprNode,
 ) {
   return wrap(() => {
     if (session.instanceRegistry.has(instanceName))
@@ -727,6 +731,16 @@ function handleAddInstance(
       })
     const { type, typeArgs: resolved } = resolveProgramTypeOrFail(programName, typeArgs, 'program')
     const inst = type.instantiateAs(instanceName, { baseTypeName: programName, typeArgs: resolved })
+    if (gateable) {
+      if (gateInput === undefined)
+        failBare({
+          code:    'missing_argument',
+          message: 'gateable=true requires gate_input expression.',
+          param:   'gate_input',
+        })
+      inst.gateable = true
+      inst.gateInput = gateInput
+    }
     session.instanceRegistry.set(instanceName, inst)
     return instanceSummary(instanceName)
   })
@@ -1221,6 +1235,8 @@ function handleTool(name: string, args: Record<string, unknown>) {
         args.program as string,
         args.instance_name as string,
         args.type_args as Record<string, number> | undefined,
+        args.gateable as boolean | undefined,
+        args.gate_input as ExprNode | undefined,
       )
 
     case 'remove_instance':

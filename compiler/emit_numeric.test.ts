@@ -406,4 +406,57 @@ describe('emitNumericProgram', () => {
       expect(cast.result_type).toBe('bool')
     })
   })
+
+  describe('source_tag group_id tagging (Phase 6)', () => {
+    test('tagged inner ops carry group_id; outer Select is ungated', () => {
+      const tagged: ExprNode = {
+        op: 'source_tag',
+        source_instance: 'voice_0',
+        gate_expr: true,
+        expr: { op: 'add', args: [{ op: 'input', id: 0 }, 1] },
+      }
+      const prog = emitNumericProgram([tagged], [])
+      const add = findInstr(prog, 'Add')!
+      expect(add).toBeTruthy()
+      expect(add.group_id).toMatch(/^voice_0#/)
+      // The merge Select that sits outside the group must NOT carry group_id.
+      const selects = findAll(prog, 'Select')
+      expect(selects.length).toBe(1)
+      expect(selects[0].group_id).toBeUndefined()
+    })
+
+    test('groups table records one entry per source_tag with a gate operand', () => {
+      const tagged: ExprNode = {
+        op: 'source_tag',
+        source_instance: 'voice_0',
+        gate_expr: true,
+        expr: { op: 'add', args: [{ op: 'input', id: 0 }, 1] },
+      }
+      const prog = emitNumericProgram([tagged], [])
+      expect(prog.groups).toBeTruthy()
+      expect(prog.groups!.length).toBe(1)
+      expect(prog.groups![0].id).toMatch(/^voice_0#/)
+      expect(prog.groups![0].gate_operand).toBeTruthy()
+    })
+
+    test('on_skip: reg(N) compiles as a state_reg read on the merge path', () => {
+      // Register-update wrapping: hold-on-skip semantic via on_skip = reg(0).
+      const tagged: ExprNode = {
+        op: 'source_tag',
+        source_instance: 'voice_0',
+        gate_expr: false,
+        expr: 0,
+        on_skip: { op: 'reg', id: 0 },
+      }
+      const prog = emitNumericProgram([tagged], [], [0], ['float'])
+      const sel = findInstr(prog, 'Select')!
+      // Third Select arg should be a state_reg read of slot 0.
+      expect(sel.args[2]).toMatchObject({ kind: 'state_reg', slot: 0 })
+    })
+
+    test('absent groups field when no source_tag appears', () => {
+      const prog = emitNumericProgram([{ op: 'add', args: [1, 2] }], [])
+      expect(prog.groups).toBeUndefined()
+    })
+  })
 })

@@ -6,9 +6,9 @@ import { describe, test, expect } from 'bun:test'
 import { parseProgramV2 } from './schema'
 import { makeSession, loadJSON, v2NodeToFile, type ExprNode } from './session'
 import {
-  loadStdlib as loadBuiltins, loadProgramAsType,
+  loadStdlib as loadBuiltins, loadProgramAsType, loadProgramAsSession,
   saveProgramFromSession, exportSessionAsProgram, instanceDecls,
-  type ProgramNode, type ProgramPortSpec,
+  type ProgramNode, type ProgramPortSpec, type ProgramTopLevel,
 } from './program'
 import { resolveProgramType } from './session'
 
@@ -239,6 +239,78 @@ describe('generic programs round-trip', () => {
     const p1 = [...instanceDecls(saved)].find(d => d.name === 'p1')!
     expect(p1.program).toBe('Passthrough')
     expect(p1.type_args).toBeUndefined()
+  })
+
+  test('gateable round-trips through schema, loader, and saver (Phase 3)', () => {
+    const session = makeSession()
+    const passthrough: ProgramNode = {
+      op: 'program',
+      name: 'Passthrough',
+      ports: { inputs: ['x'], outputs: ['y'] },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+      },
+    }
+    loadProgramAsType(passthrough, session)
+
+    const raw = {
+      schema: 'tropical_program_2',
+      name: 'Patch',
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'voice_0', program: 'Passthrough',
+          inputs: { x: 1.0 }, gateable: true, gate_input: true },
+      ]},
+      audio_outputs: [{ instance: 'voice_0', output: 'y' }],
+    }
+
+    // Pass through v2 schema validation (pass-through Zod + validateExpr on body).
+    const prog = parseProgramV2(raw)
+    const decl = (prog.body as { decls?: Array<Record<string, unknown>> }).decls!
+      .find(d => d.op === 'instance_decl' && d.name === 'voice_0')!
+    expect(decl.gateable).toBe(true)
+
+    // Load into a session, verify the ProgramInstance carries the flag.
+    loadProgramAsSession(prog as unknown as ProgramNode, {
+      audio_outputs: (raw as { audio_outputs: ProgramTopLevel['audio_outputs'] }).audio_outputs,
+    }, session)
+    const inst = session.instanceRegistry.get('voice_0')!
+    expect(inst.gateable).toBe(true)
+    expect(inst.gateInput).toBe(true)
+
+    // Save back — gateable and gate_input should survive on the instance_decl.
+    const { node: savedNode } = saveProgramFromSession(session)
+    const savedDecl = [...instanceDecls(savedNode)].find(d => d.name === 'voice_0')!
+    expect(savedDecl.gateable).toBe(true)
+    expect(savedDecl.gate_input).toBe(true)
+
+    session.graph.dispose()
+  })
+
+  test('gateable=true without gate_input is rejected at load (Phase 3)', () => {
+    const session = makeSession()
+    const passthrough: ProgramNode = {
+      op: 'program',
+      name: 'Passthrough',
+      ports: { inputs: ['x'], outputs: ['y'] },
+      body: { op: 'block',
+        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+      },
+    }
+    loadProgramAsType(passthrough, session)
+
+    const bad: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: { op: 'block', decls: [
+        // gate_input intentionally missing
+        { op: 'instance_decl', name: 'voice_0', program: 'Passthrough',
+          inputs: { x: 1.0 }, gateable: true } as unknown as ExprNode,
+      ]},
+    }
+    expect(() => loadProgramAsSession(bad, {
+      audio_outputs: [{ instance: 'voice_0', output: 'y' }],
+    }, session)).toThrow(/gate_input/)
+    session.graph.dispose()
   })
 })
 

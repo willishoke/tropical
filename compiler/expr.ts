@@ -664,6 +664,10 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
       for (const [k, v] of Object.entries(obj.inputs as Record<string, unknown>))
         validateExpr(v as ExprNode, `${path}.inputs.${k}`)
     }
+    if (obj.gateable !== undefined && typeof obj.gateable !== 'boolean')
+      throw new Error(`${path}: 'instance_decl' gateable must be boolean`)
+    if (obj.gate_input !== undefined)
+      validateExpr(obj.gate_input as ExprNode, `${path}.gate_input`)
     return
   }
 

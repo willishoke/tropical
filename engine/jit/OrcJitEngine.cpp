@@ -349,6 +349,12 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       append(&ns, sizeof(uint32_t));
       if (!instr.strides.empty())
         append(instr.strides.data(), instr.strides.size());
+      // group_id drives conditional-block emission; two plans that differ
+      // only in grouping must produce distinct kernels.
+      uint32_t gl = static_cast<uint32_t>(instr.group_id.size());
+      append(&gl, sizeof(uint32_t));
+      if (!instr.group_id.empty())
+        append(instr.group_id.data(), instr.group_id.size());
     }
     // Include mix_output_temps in cache key (different mixes → different kernels)
     uint32_t nm = static_cast<uint32_t>(program.mix_output_temps.size());
@@ -365,6 +371,26 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     append(&nrty, sizeof(uint32_t));
     for (JitScalarType t : program.register_types)
       append(&t, sizeof(JitScalarType));
+    // groups[] (id + gate_operand) also feed IR generation.
+    uint32_t ng = static_cast<uint32_t>(program.groups.size());
+    append(&ng, sizeof(uint32_t));
+    for (const auto & g : program.groups)
+    {
+      uint32_t il = static_cast<uint32_t>(g.id.size());
+      append(&il, sizeof(uint32_t));
+      if (!g.id.empty()) append(g.id.data(), g.id.size());
+      append(&g.gate_operand.kind,      sizeof(OperandKind));
+      append(&g.gate_operand.scalar_type, sizeof(JitScalarType));
+      append(&g.gate_operand.const_val, sizeof(double));
+      append(&g.gate_operand.slot,      sizeof(uint32_t));
+      uint64_t canonical_ptr = 0;
+      if (g.gate_operand.kind == OperandKind::Param && g.gate_operand.ptr != 0)
+      {
+        auto it = param_index.find(g.gate_operand.ptr);
+        if (it != param_index.end()) canonical_ptr = it->second;
+      }
+      append(&canonical_ptr, sizeof(uint64_t));
+    }
   }
 
   auto cache_it = kernel_cache_.find(cache_key);
@@ -745,9 +771,62 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   // Loop body: all instructions + writeback + output mixing
   builder.SetInsertPoint(loop_body_bb);
 
+  // ── Gateable-subgraph setup ──
+  // Gate operands are resolved LAZILY at the group-open point, not up front:
+  // the gate's value often comes from a temp (e.g. a ToBool instruction)
+  // that's only stored once we reach the right point in the instruction
+  // stream. Resolving eagerly at the top of loop_body would read a stale
+  // previous-sample value.
+  std::unordered_map<std::string, Operand> group_operand_by_id;
+  for (const auto & g : program.groups)
+    group_operand_by_id.emplace(g.id, g.gate_operand);
+
+  // Current group state. Tagged instructions from the same group flow into
+  // the same exec block; when group_id changes, we br into the merge block
+  // and open a new group (or stay ungated).
+  std::string current_group_id;
+  llvm::BasicBlock * current_merge_bb = nullptr;
+
+  auto close_current_group = [&]() {
+    if (current_merge_bb == nullptr) return;
+    builder.CreateBr(current_merge_bb);
+    builder.SetInsertPoint(current_merge_bb);
+    current_group_id.clear();
+    current_merge_bb = nullptr;
+  };
+
+  auto open_group = [&](const std::string & gid) -> llvm::Error {
+    auto it = group_operand_by_id.find(gid);
+    if (it == group_operand_by_id.end())
+      return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "compile_flat_program: instruction references unknown group '" + gid + "'");
+    auto [gv, gt] = resolve_typed(it->second);
+    if (gv == nullptr)
+      return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "compile_flat_program: unresolvable gate operand for group '" + gid + "'");
+    llvm::Value * gate_cond = coerce(gv, gt, ST::Bool);
+    llvm::BasicBlock * exec_bb  = llvm::BasicBlock::Create(*context, "gate_" + gid + "_exec",  fn);
+    llvm::BasicBlock * merge_bb = llvm::BasicBlock::Create(*context, "gate_" + gid + "_merge", fn);
+    builder.CreateCondBr(gate_cond, exec_bb, merge_bb);
+    builder.SetInsertPoint(exec_bb);
+    current_group_id = gid;
+    current_merge_bb = merge_bb;
+    return llvm::Error::success();
+  };
+
   // ── Main instruction loop ──
   for (const auto & instr : program.instructions)
   {
+    if (instr.group_id != current_group_id)
+    {
+      close_current_group();
+      if (!instr.group_id.empty())
+      {
+        if (auto err = open_group(instr.group_id)) return std::move(err);
+      }
+    }
     // ── SmoothParam ──
     if (instr.tag == OpTag::SmoothParam)
     {
@@ -931,6 +1010,10 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     temp_types[instr.dst] = instr.result_type;
   }
 
+  // Close any trailing group so subsequent writeback / mixing continues
+  // in a merged block.
+  close_current_group();
+
   // ── Register writeback: temps[register_targets[i]] → registers[i] ──
   // Emitted as fixed stores after all computation, so all reads of old
   // state (via StateReg operands) have already completed.
@@ -989,6 +1072,11 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   // Loop end
   builder.SetInsertPoint(loop_end_bb);
   builder.CreateRetVoid();
+
+  if (std::getenv("TROPICAL_DUMP_IR"))
+  {
+    module->print(llvm::errs(), nullptr);
+  }
 
   if (llvm::verifyFunction(*fn, &llvm::errs()) || llvm::verifyModule(*module, &llvm::errs()))
   {

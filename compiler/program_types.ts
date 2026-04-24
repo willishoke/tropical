@@ -83,6 +83,10 @@ export class ProgramInstance {
   readonly baseTypeName: string
   /** Resolved compile-time args if this instance was specialized. */
   readonly typeArgs?: Record<string, number>
+  /** Per-usage gating (see ProgramJSON.instances.gateable). Phase 2 plumbing;
+   *  flatten.ts will emit source_tag wrappers in a later phase. */
+  gateable: boolean = false
+  gateInput: ExprNode | undefined = undefined
 
   constructor(def: ProgramDef, name: string, baseTypeName?: string, typeArgs?: Record<string, number>) {
     this._def = def
