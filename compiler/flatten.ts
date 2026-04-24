@@ -1150,6 +1150,21 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     inputExprNodes = transformed
   }
 
+  // Same self-ref rewrite for gate inputs. A gateable instance whose gate
+  // references its own output is a legitimate hysteresis pattern ("live
+  // only when my own previous output exceeded threshold"); without this
+  // pass the flattener throws a misleading 'unresolved ref to unknown
+  // instance' from resolveRefs. Fix: treat the self-ref the same way as
+  // wiring self-refs (insert a synthetic one-sample delay register).
+  if (gateInputExprs.size > 0) {
+    const transformed = new Map<string, ExprNode>()
+    for (const [name, expr] of gateInputExprs) {
+      transformed.set(name, rewriteSelfRefs(expr, name, sessionDelays, syntheticDelays))
+    }
+    gateInputExprs.clear()
+    for (const [name, expr] of transformed) gateInputExprs.set(name, expr)
+  }
+
   // Pass 2: Detect inter-instance cycles via topological sort + Tarjan's SCC.
   // For each cycle found, pick one back-edge and insert a synthetic delay register,
   // then add the target to cycleBreakers so the topo sort excludes it.
@@ -1303,10 +1318,24 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
       flatStateInit.push(def.delayInitValues[i] ?? 0)
     }
 
-    deferredCbUpdates.push({ name, registerBase: myRegBase, delayBase, nestedRegStart, regStartIdx })
-
+    // Push placeholders for nested-call registers too. Without this, registerBase
+    // advances by (registers + delays + totalNestedRegs) while flatRegisterExprs
+    // only grows by (registers + delays) — so any non-cycle-breaking instance
+    // processed later in Phase 2 would have its register id and its position in
+    // flatRegisterExprs diverge by totalNestedRegs. Phase 3 overwrites these
+    // placeholders in place once the nested call updates are resolved.
     let totalNestedRegs = 0
     for (const nc of def.nestedCalls) totalNestedRegs += nestedCallRegCount(nc)
+    const ncFlatStart = myRegBase + def.registerNames.length + def.delayUpdateNodes.length
+    for (let i = 0; i < totalNestedRegs; i++) {
+      flatRegisterExprs.push({ op: 'reg', id: ncFlatStart + i })
+      flatRegisterNames.push(`${name}_nested_${i}`)
+      flatRegisterTypes.push('float')
+      flatStateInit.push(0)
+    }
+
+    deferredCbUpdates.push({ name, registerBase: myRegBase, delayBase, nestedRegStart, regStartIdx })
+
     registerBase += def.registerNames.length + def.delayUpdateNodes.length + totalNestedRegs
   }
 

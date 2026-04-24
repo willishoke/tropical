@@ -369,3 +369,198 @@ describe('gateable instances wrap outputs in source_tag', () => {
     expect(out.op).not.toBe('source_tag')
   })
 })
+
+// ─────────────────────────────────────────────────────────────
+// #98: gate_input self-reference auto-inserts synthetic delay
+// ─────────────────────────────────────────────────────────────
+
+describe('gate_input self-reference (#98)', () => {
+  function mockSession() {
+    return {
+      typeRegistry: new Map<string, ProgramType>(),
+      typeAliasRegistry: new Map<string, { base: string; bounds: Bounds }>(),
+      instanceRegistry: new Map<string, ProgramInstance>(),
+      paramRegistry: new Map<string, Param>(),
+      triggerRegistry: new Map<string, Trigger>(),
+    }
+  }
+
+  function passthroughWithReg(): ProgramNode {
+    return {
+      op: 'program',
+      name: 'Pass',
+      ports: { inputs: [{ name: 'in', default: 0 }], outputs: ['out'] },
+      body: { op: 'block',
+        decls: [{ op: 'reg_decl', name: 'last', init: 0 }],
+        assigns: [
+          { op: 'output_assign', name: 'out', expr: { op: 'input', name: 'in' } },
+          { op: 'next_update', target: { kind: 'reg', name: 'last' },
+            expr: { op: 'input', name: 'in' } },
+        ],
+      },
+    }
+  }
+
+  test('gate_input self-ref (hysteresis pattern) flattens via synthetic delay', () => {
+    // Before the fix: flatten threw "unresolved ref to unknown instance 'voice_0'"
+    // from resolveRefs — misleading, since the instance is obviously known.
+    // Fix: treat self-refs in gate_input the same way as self-refs in wiring,
+    // inserting a one-sample synthetic delay register. Semantically this gives
+    // users a hysteresis pattern: "stay live only while my own previous output
+    // exceeded threshold."
+    const session = mockSession()
+    const type = loadProgramDef(passthroughWithReg(), session)
+    session.typeRegistry.set('Pass', type)
+
+    const voice = type.instantiateAs('voice_0')
+    voice.gateable = true
+    voice.gateInput = {
+      op: 'gt',
+      args: [{ op: 'ref', instance: 'voice_0', output: 'out' }, 0.5],
+    }
+    session.instanceRegistry.set('voice_0', voice)
+
+    const fullSession = {
+      ...session,
+      bufferLength: 1,
+      dac: null,
+      inputExprNodes: new Map<string, ExprNode>([
+        ['voice_0:in', 1.0 as ExprNode],
+      ]),
+      graphOutputs: [{ instance: 'voice_0', output: 'out' }],
+      runtime: null as unknown as import('./runtime/runtime').Runtime,
+      graph: null as unknown as ReturnType<typeof import('./session').makeSession>['graph'],
+      _nameCounters: new Map<string, number>(),
+    }
+
+    // Should NOT throw.
+    const flat = flattenExpressions(fullSession)
+    // A synthetic delay register should have been inserted for voice_0's
+    // feedback edge; register names include the _feedback_ prefix.
+    const hasFeedbackReg = flat.registerNames.some(n => n.startsWith('_feedback_voice_0_'))
+    expect(hasFeedbackReg).toBe(true)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
+// #99: cycle-breaker + nested calls register accounting
+// ─────────────────────────────────────────────────────────────
+
+describe('cycle-breaker with nested calls (#99)', () => {
+  function mockSession() {
+    return {
+      typeRegistry: new Map<string, ProgramType>(),
+      typeAliasRegistry: new Map<string, { base: string; bounds: Bounds }>(),
+      instanceRegistry: new Map<string, ProgramInstance>(),
+      paramRegistry: new Map<string, Param>(),
+      triggerRegistry: new Map<string, Trigger>(),
+      specializationCache: new Map<string, ProgramType>(),
+      genericTemplates: new Map<string, ProgramNode>(),
+    }
+  }
+
+  function passthrough(): ProgramNode {
+    return {
+      op: 'program',
+      name: 'Inner',
+      ports: { inputs: [{ name: 'x', default: 0 }], outputs: ['y'] },
+      body: { op: 'block', assigns: [
+        { op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } },
+      ]},
+    }
+  }
+
+  // A breaks_cycles program that *also* has a nested instance — the combination
+  // that triggered the latent register-id drift bug.
+  function cycleBreakerWithNested(): ProgramNode {
+    return {
+      op: 'program',
+      name: 'CBNested',
+      breaks_cycles: true,
+      ports: { inputs: [{ name: 'in', default: 0 }], outputs: ['out'] },
+      body: { op: 'block',
+        decls: [
+          { op: 'reg_decl', name: 'state', init: 0 },
+          // One nested instance — produces a nested-call register
+          { op: 'instance_decl', name: 's', program: 'Inner',
+            inputs: { x: { op: 'reg', name: 'state' } } },
+        ],
+        assigns: [
+          // Output reads from the nested call (cycle-breaking: doesn't read
+          // current inputs, only register-derived values)
+          { op: 'output_assign', name: 'out',
+            expr: { op: 'nested_out', ref: 's', output: 'y' } },
+          { op: 'next_update', target: { kind: 'reg', name: 'state' },
+            expr: { op: 'add', args: [{ op: 'reg', name: 'state' }, 0.1] } },
+        ],
+      },
+    }
+  }
+
+  test('register array length matches registerBase after Phase 1', () => {
+    // Before the fix: Phase 1 pushed placeholders for named regs + delay regs
+    // only, while registerBase advanced by registers + delays + totalNestedRegs.
+    // Any Phase 2 non-cycle-breaking instance processed after would have its
+    // register ids drift past its position in flatRegisterExprs.
+    const session = mockSession()
+    const innerType = loadProgramDef(passthrough(), session)
+    session.typeRegistry.set('Inner', innerType)
+    const cbType = loadProgramDef(cycleBreakerWithNested(), session)
+    session.typeRegistry.set('CBNested', cbType)
+
+    // Instantiate both a cycle-breaker-with-nested AND a regular instance
+    // downstream that reads the cycle-breaker's output. The regular instance
+    // would have had its register id drift before the fix.
+    const cb = cbType.instantiateAs('cb')
+    const downstream = innerType.instantiateAs('ds')
+    session.instanceRegistry.set('cb', cb)
+    session.instanceRegistry.set('ds', downstream)
+
+    const fullSession = {
+      ...session,
+      bufferLength: 1,
+      dac: null,
+      inputExprNodes: new Map<string, ExprNode>([
+        ['ds:x', { op: 'ref', instance: 'cb', output: 'out' } as ExprNode],
+      ]),
+      graphOutputs: [{ instance: 'ds', output: 'y' }],
+      runtime: null as unknown as import('./runtime/runtime').Runtime,
+      graph: null as unknown as ReturnType<typeof import('./session').makeSession>['graph'],
+      _nameCounters: new Map<string, number>(),
+    }
+
+    const flat = flattenExpressions(fullSession)
+
+    // Core invariant: the flat register arrays stay parallel — one name, one
+    // init, one type, one expression per register slot.
+    expect(flat.registerExprs.length).toBe(flat.registerNames.length)
+    expect(flat.registerExprs.length).toBe(flat.stateInit.length)
+    expect(flat.registerExprs.length).toBe(flat.registerTypes.length)
+
+    // Every reg() reference inside registerExprs must point to a valid index.
+    // If registerBase drifted past flatRegisterExprs.length, the downstream
+    // instance's register references would be out of bounds or alias a
+    // cycle-breaker's nested register.
+    const maxRegId = flat.registerExprs.length - 1
+    for (const expr of flat.registerExprs) {
+      const refs = collectRegIds(expr)
+      for (const id of refs) {
+        expect(id).toBeGreaterThanOrEqual(0)
+        expect(id).toBeLessThanOrEqual(maxRegId)
+      }
+    }
+  })
+})
+
+/** Walk an ExprNode and collect all {op:'reg', id} references. */
+function collectRegIds(node: ExprNode, out: number[] = []): number[] {
+  if (typeof node !== 'object' || node === null) return out
+  if (Array.isArray(node)) {
+    for (const n of node) collectRegIds(n, out)
+    return out
+  }
+  const obj = node as Record<string, unknown>
+  if (obj.op === 'reg' && typeof obj.id === 'number') out.push(obj.id)
+  for (const v of Object.values(obj)) collectRegIds(v as ExprNode, out)
+  return out
+}
