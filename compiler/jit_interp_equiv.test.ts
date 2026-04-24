@@ -152,4 +152,142 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
 
     session.graph.dispose()
   })
+
+  // ─── Bob-recommended coverage: delay register, nested calls, gate dependencies ───
+
+  // Like ACCUM but with a delay register alongside the named reg, so both
+  // register-update paths (reg_decl and delay_decl) get wrapped with on_skip.
+  const ACCUM_WITH_DELAY: ProgramNode = {
+    op: 'program',
+    name: 'AccumDelay',
+    ports: { inputs: [{ name: 'x', default: 0 }], outputs: ['out'] },
+    body: { op: 'block',
+      decls: [
+        { op: 'reg_decl', name: 'acc', init: 0 },
+        { op: 'delay_decl', name: 'prev_x', update: { op: 'input', name: 'x' }, init: 0 },
+      ],
+      assigns: [
+        // Output is current register value.
+        { op: 'output_assign', name: 'out', expr: { op: 'reg', name: 'acc' } },
+        // Accumulator adds the PREVIOUS sample's x (via the delay reg).
+        { op: 'next_update', target: { kind: 'reg', name: 'acc' },
+          expr: { op: 'add', args: [{ op: 'reg', name: 'acc' }, { op: 'delay_ref', id: 'prev_x' }] } },
+      ],
+    },
+  }
+
+  test('gateable instance with both reg and delay registers: JIT matches interpreter', () => {
+    const session = makeSession(32)
+    loadBuiltins(session)
+    loadProgramAsType(ACCUM_WITH_DELAY, session)
+
+    // Dynamic gate: (sample_index % 4) < 2 — alternates live / skip.
+    const gate: ExprNode = {
+      op: 'lt',
+      args: [{ op: 'mod', args: [{ op: 'sample_index' }, 4] }, 2],
+    }
+    loadJSON({
+      schema: 'tropical_program_2',
+      name: 'patch',
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'a1', program: 'AccumDelay',
+          inputs: { x: 1.0 }, gateable: true, gate_input: gate },
+      ]},
+      audio_outputs: [{ instance: 'a1', output: 'out' }],
+    }, session)
+
+    applySessionWiring(session)
+    session.graph.primeJit()
+    session.graph.process()
+    const jit = new Float64Array(session.graph.outputBuffer)
+    const flat = flattenExpressions(session)
+    const interp = interpretSamples(flat, jit.length)
+
+    for (let i = 0; i < jit.length; i++) {
+      expect(jit[i]).toBeCloseTo(interp[i], 10)
+    }
+    session.graph.dispose()
+  })
+
+  test('gateable LadderFilter (4 nested OnePoles): JIT matches interpreter', () => {
+    // LadderFilter from stdlib has 4 internal OnePole instances — this
+    // exercises the nested-call register wrapping path that simple Accum
+    // doesn't hit.
+    const session = makeSession(64)
+    loadBuiltins(session)
+
+    // Gate alternates every 8 samples so the filter's state is meaningfully
+    // held through skip windows and resumes cleanly on live windows.
+    const gate: ExprNode = {
+      op: 'lt',
+      args: [{ op: 'mod', args: [{ op: 'sample_index' }, 16] }, 8],
+    }
+    loadJSON({
+      schema: 'tropical_program_2',
+      name: 'patch',
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'ladder', program: 'LadderFilter',
+          inputs: { input: 0.5, freq: 1000, res: 0.5 },
+          gateable: true, gate_input: gate },
+      ]},
+      audio_outputs: [{ instance: 'ladder', output: 'out' }],
+    }, session)
+
+    applySessionWiring(session)
+    session.graph.primeJit()
+    session.graph.process()
+    const jit = new Float64Array(session.graph.outputBuffer)
+    const flat = flattenExpressions(session)
+    const interp = interpretSamples(flat, jit.length)
+
+    for (let i = 0; i < jit.length; i++) {
+      expect(jit[i]).toBeCloseTo(interp[i], 8)
+    }
+    session.graph.dispose()
+  })
+
+  test('gate chain (a2 gated on a1 output): JIT matches interpreter', () => {
+    // Two gateable instances where the second's gate is derived from the
+    // first's output. Verifies gate-dependency tracking in the topo graph
+    // and correct hot-swap behaviour when one gate toggles the other.
+    const session = makeSession(32)
+    loadBuiltins(session)
+    loadProgramAsType(ACCUM, session)
+
+    // a1 gates on (sample_index % 6) < 3 — alternates live/skip in 3-sample runs.
+    const a1Gate: ExprNode = {
+      op: 'lt',
+      args: [{ op: 'mod', args: [{ op: 'sample_index' }, 6] }, 3],
+    }
+    // a2's gate depends on a1's output: live only when a1 has accumulated
+    // past some threshold.
+    const a2Gate: ExprNode = {
+      op: 'gt',
+      args: [{ op: 'ref', instance: 'a1', output: 'out' }, 1.5],
+    }
+
+    loadJSON({
+      schema: 'tropical_program_2',
+      name: 'patch',
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'a1', program: 'Accum',
+          inputs: { x: 1.0 }, gateable: true, gate_input: a1Gate },
+        { op: 'instance_decl', name: 'a2', program: 'Accum',
+          inputs: { x: 1.0 }, gateable: true, gate_input: a2Gate },
+      ]},
+      audio_outputs: [{ instance: 'a2', output: 'out' }],
+    }, session)
+
+    applySessionWiring(session)
+    session.graph.primeJit()
+    session.graph.process()
+    const jit = new Float64Array(session.graph.outputBuffer)
+    const flat = flattenExpressions(session)
+    const interp = interpretSamples(flat, jit.length)
+
+    for (let i = 0; i < jit.length; i++) {
+      expect(jit[i]).toBeCloseTo(interp[i], 10)
+    }
+    session.graph.dispose()
+  })
 })
