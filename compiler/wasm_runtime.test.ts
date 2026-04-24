@@ -9,15 +9,29 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { readFileSync } from 'fs'
-import { resolve, dirname, join } from 'path'
-import { fileURLToPath } from 'url'
 import type { FlatPlan } from './flatten'
+import { flattenSession } from './flatten'
 import { emitWasm } from './emit_wasm'
 import { WasmRuntime, type LoadedPlan } from '../web/worklet/runtime'
+import { makeSession, loadJSON } from './session'
+import { loadStdlib } from './program'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const distDir = resolve(__dirname, '../web/dist/patches')
+/** Build the pure-sine-440 plan inline rather than depending on the
+ *  web/dist/patches/ artifact (which would require running `bun web/build_patches.ts`
+ *  before tests). Mirrors the patch definition in web/build_patches.ts. */
+function buildPureSine440Plan(): FlatPlan {
+  const session = makeSession(128)
+  loadStdlib(session)
+  loadJSON({
+    schema: 'tropical_program_2',
+    name: 'pure_sine_440',
+    body: { op: 'block', decls: [
+      { op: 'instance_decl', name: 'osc', program: 'SinOsc', inputs: { freq: 440 } },
+    ]},
+    audio_outputs: [{ instance: 'osc', output: 'sine' }],
+  }, session)
+  return flattenSession(session)
+}
 
 async function compile(plan: FlatPlan, maxBlockSize: number): Promise<LoadedPlan> {
   const { bytes, layout, paramPtrs } = emitWasm(plan, { maxBlockSize })
@@ -34,7 +48,7 @@ async function compile(plan: FlatPlan, maxBlockSize: number): Promise<LoadedPlan
 
 describe('WasmRuntime — block-driven render', () => {
   test('pure-sine-440: sustained non-silent output across blocks', async () => {
-    const plan = JSON.parse(readFileSync(join(distDir, 'pure-sine-440.plan.json'), 'utf-8')) as FlatPlan
+    const plan = buildPureSine440Plan()
     const loaded = await compile(plan, 128)
 
     // Fake shared param buffer (unused by this plan).
@@ -69,7 +83,7 @@ describe('WasmRuntime — block-driven render', () => {
   })
 
   test('loadPlan auto-fades from zero to avoid click; first block is quiet', async () => {
-    const plan = JSON.parse(readFileSync(join(distDir, 'pure-sine-440.plan.json'), 'utf-8')) as FlatPlan
+    const plan = buildPureSine440Plan()
     const loaded = await compile(plan, 128)
 
     const fakeShared = new ArrayBuffer(16 * 2 * 8)
@@ -88,7 +102,7 @@ describe('WasmRuntime — block-driven render', () => {
   })
 
   test('explicit fade-in produces smooth ramp from 0', async () => {
-    const plan = JSON.parse(readFileSync(join(distDir, 'pure-sine-440.plan.json'), 'utf-8')) as FlatPlan
+    const plan = buildPureSine440Plan()
     const loaded = await compile(plan, 128)
 
     const fakeShared = new ArrayBuffer(16 * 2 * 8)
