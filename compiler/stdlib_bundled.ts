@@ -2285,11 +2285,6 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
-          "name": "env",
-          "init": 0
-        },
-        {
           "op": "delay_decl",
           "name": "prev_trigger",
           "update": {
@@ -2297,6 +2292,132 @@ export const STDLIB: Record<string, unknown> = {
             "name": "trigger"
           },
           "init": 0
+        },
+        {
+          "op": "delay_decl",
+          "name": "state",
+          "type": "Env",
+          "init": {
+            "op": "tag",
+            "type": "Env",
+            "variant": "Idle"
+          },
+          "update": {
+            "op": "match",
+            "type": "Env",
+            "scrutinee": {
+              "op": "delay_ref",
+              "id": "state"
+            },
+            "arms": {
+              "Idle": {
+                "body": {
+                  "op": "select",
+                  "args": [
+                    {
+                      "op": "and",
+                      "args": [
+                        {
+                          "op": "gt",
+                          "args": [
+                            {
+                              "op": "input",
+                              "name": "trigger"
+                            },
+                            0.5
+                          ]
+                        },
+                        {
+                          "op": "lte",
+                          "args": [
+                            {
+                              "op": "delay_ref",
+                              "id": "prev_trigger"
+                            },
+                            0.5
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "op": "tag",
+                      "type": "Env",
+                      "variant": "Decaying",
+                      "payload": {
+                        "level": 1
+                      }
+                    },
+                    {
+                      "op": "tag",
+                      "type": "Env",
+                      "variant": "Idle"
+                    }
+                  ]
+                }
+              },
+              "Decaying": {
+                "bind": "level",
+                "body": {
+                  "op": "select",
+                  "args": [
+                    {
+                      "op": "and",
+                      "args": [
+                        {
+                          "op": "gt",
+                          "args": [
+                            {
+                              "op": "input",
+                              "name": "trigger"
+                            },
+                            0.5
+                          ]
+                        },
+                        {
+                          "op": "lte",
+                          "args": [
+                            {
+                              "op": "delay_ref",
+                              "id": "prev_trigger"
+                            },
+                            0.5
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "op": "tag",
+                      "type": "Env",
+                      "variant": "Decaying",
+                      "payload": {
+                        "level": 1
+                      }
+                    },
+                    {
+                      "op": "tag",
+                      "type": "Env",
+                      "variant": "Decaying",
+                      "payload": {
+                        "level": {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "level"
+                            },
+                            {
+                              "op": "input",
+                              "name": "decay"
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
         }
       ],
       "assigns": [
@@ -2304,67 +2425,23 @@ export const STDLIB: Record<string, unknown> = {
           "op": "output_assign",
           "name": "env",
           "expr": {
-            "op": "reg",
-            "name": "env"
-          }
-        },
-        {
-          "op": "next_update",
-          "target": {
-            "kind": "reg",
-            "name": "env"
-          },
-          "expr": {
-            "op": "let",
-            "bind": {
-              "tick": {
-                "op": "mul",
-                "args": [
-                  {
-                    "op": "gt",
-                    "args": [
-                      {
-                        "op": "input",
-                        "name": "trigger"
-                      },
-                      0.5
-                    ]
-                  },
-                  {
-                    "op": "lte",
-                    "args": [
-                      {
-                        "op": "delay_ref",
-                        "id": "prev_trigger"
-                      },
-                      0.5
-                    ]
-                  }
-                ]
-              }
+            "op": "match",
+            "type": "Env",
+            "scrutinee": {
+              "op": "delay_ref",
+              "id": "state"
             },
-            "in": {
-              "op": "select",
-              "args": [
-                {
+            "arms": {
+              "Idle": {
+                "body": 0
+              },
+              "Decaying": {
+                "bind": "level",
+                "body": {
                   "op": "binding",
-                  "name": "tick"
-                },
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "reg",
-                      "name": "env"
-                    },
-                    {
-                      "op": "input",
-                      "name": "decay"
-                    }
-                  ]
+                  "name": "level"
                 }
-              ]
+              }
             }
           }
         }
@@ -2388,6 +2465,27 @@ export const STDLIB: Record<string, unknown> = {
         {
           "name": "env",
           "type": "signal"
+        }
+      ],
+      "type_defs": [
+        {
+          "kind": "sum",
+          "name": "Env",
+          "variants": [
+            {
+              "name": "Idle",
+              "payload": []
+            },
+            {
+              "name": "Decaying",
+              "payload": [
+                {
+                  "name": "level",
+                  "scalar_type": "float"
+                }
+              ]
+            }
+          ]
         }
       ]
     }
@@ -6809,12 +6907,6 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
-          "name": "t",
-          "init": 0,
-          "type": "int"
-        },
-        {
           "op": "delay_decl",
           "name": "prev_trigger",
           "update": {
@@ -6822,6 +6914,129 @@ export const STDLIB: Record<string, unknown> = {
             "name": "trigger"
           },
           "init": 0
+        },
+        {
+          "op": "delay_decl",
+          "name": "state",
+          "type": "RampState",
+          "init": {
+            "op": "tag",
+            "type": "RampState",
+            "variant": "Quiescent"
+          },
+          "update": {
+            "op": "match",
+            "type": "RampState",
+            "scrutinee": {
+              "op": "delay_ref",
+              "id": "state"
+            },
+            "arms": {
+              "Quiescent": {
+                "body": {
+                  "op": "select",
+                  "args": [
+                    {
+                      "op": "and",
+                      "args": [
+                        {
+                          "op": "gt",
+                          "args": [
+                            {
+                              "op": "input",
+                              "name": "trigger"
+                            },
+                            0.5
+                          ]
+                        },
+                        {
+                          "op": "lte",
+                          "args": [
+                            {
+                              "op": "delay_ref",
+                              "id": "prev_trigger"
+                            },
+                            0.5
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "op": "tag",
+                      "type": "RampState",
+                      "variant": "Counting",
+                      "payload": {
+                        "n": 0
+                      }
+                    },
+                    {
+                      "op": "tag",
+                      "type": "RampState",
+                      "variant": "Quiescent"
+                    }
+                  ]
+                }
+              },
+              "Counting": {
+                "bind": "n",
+                "body": {
+                  "op": "select",
+                  "args": [
+                    {
+                      "op": "and",
+                      "args": [
+                        {
+                          "op": "gt",
+                          "args": [
+                            {
+                              "op": "input",
+                              "name": "trigger"
+                            },
+                            0.5
+                          ]
+                        },
+                        {
+                          "op": "lte",
+                          "args": [
+                            {
+                              "op": "delay_ref",
+                              "id": "prev_trigger"
+                            },
+                            0.5
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "op": "tag",
+                      "type": "RampState",
+                      "variant": "Counting",
+                      "payload": {
+                        "n": 0
+                      }
+                    },
+                    {
+                      "op": "tag",
+                      "type": "RampState",
+                      "variant": "Counting",
+                      "payload": {
+                        "n": {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "n"
+                            },
+                            1
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
         }
       ],
       "assigns": [
@@ -6829,8 +7044,24 @@ export const STDLIB: Record<string, unknown> = {
           "op": "output_assign",
           "name": "frames",
           "expr": {
-            "op": "reg",
-            "name": "t"
+            "op": "match",
+            "type": "RampState",
+            "scrutinee": {
+              "op": "delay_ref",
+              "id": "state"
+            },
+            "arms": {
+              "Quiescent": {
+                "body": 0
+              },
+              "Counting": {
+                "bind": "n",
+                "body": {
+                  "op": "binding",
+                  "name": "n"
+                }
+              }
+            }
           }
         },
         {
@@ -6861,63 +7092,6 @@ export const STDLIB: Record<string, unknown> = {
               }
             ]
           }
-        },
-        {
-          "op": "next_update",
-          "target": {
-            "kind": "reg",
-            "name": "t"
-          },
-          "expr": {
-            "op": "let",
-            "bind": {
-              "tick": {
-                "op": "mul",
-                "args": [
-                  {
-                    "op": "gt",
-                    "args": [
-                      {
-                        "op": "input",
-                        "name": "trigger"
-                      },
-                      0.5
-                    ]
-                  },
-                  {
-                    "op": "lte",
-                    "args": [
-                      {
-                        "op": "delay_ref",
-                        "id": "prev_trigger"
-                      },
-                      0.5
-                    ]
-                  }
-                ]
-              }
-            },
-            "in": {
-              "op": "select",
-              "args": [
-                {
-                  "op": "binding",
-                  "name": "tick"
-                },
-                0,
-                {
-                  "op": "add",
-                  "args": [
-                    {
-                      "op": "reg",
-                      "name": "t"
-                    },
-                    1
-                  ]
-                }
-              ]
-            }
-          }
         }
       ],
       "value": null
@@ -6938,6 +7112,27 @@ export const STDLIB: Record<string, unknown> = {
         {
           "name": "edge",
           "type": "float"
+        }
+      ],
+      "type_defs": [
+        {
+          "kind": "sum",
+          "name": "RampState",
+          "variants": [
+            {
+              "name": "Quiescent",
+              "payload": []
+            },
+            {
+              "name": "Counting",
+              "payload": [
+                {
+                  "name": "n",
+                  "scalar_type": "int"
+                }
+              ]
+            }
+          ]
         }
       ]
     }

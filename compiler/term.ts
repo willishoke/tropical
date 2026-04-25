@@ -180,3 +180,98 @@ export function shapesCompatible(a: PortType, b: PortType): number[] | null {
   if (a.tag === 'scalar' && b.tag === 'scalar') return []      // both scalar
   return null
 }
+
+// ─────────────────────────────────────────────────────────────
+// Sum type metadata and bundle decomposition
+//
+// A sum type T = V_1 | V_2{f_a: A, f_b: B} | V_3{...} decomposes at flatten
+// time into a bundle of scalar wires:
+//   <wire>#tag                  (int) — variant index, 0-based
+//   <wire>#V_2__f_a             (A)
+//   <wire>#V_2__f_b             (B)
+//   <wire>#V_3__...             (...)
+// The bundle has one slot per (variant, field) pair plus the discriminator.
+// Inactive variants' field slots carry zeros (written by tag/match lowering).
+// ─────────────────────────────────────────────────────────────
+
+/** A field in a variant's payload. */
+export interface SumVariantField {
+  name: string
+  scalar: ScalarKind
+}
+
+/** A variant of a sum type: a name plus a (possibly empty) payload of named fields. */
+export interface SumVariantMeta {
+  name: string
+  payload: SumVariantField[]
+}
+
+/** Structural metadata for a sum type — what term.ts needs to compute bundle layout. */
+export interface SumTypeMeta {
+  name: string
+  variants: SumVariantMeta[]
+}
+
+/** A single slot in a sum-typed bundle. */
+export interface SumBundleSlot {
+  /** Suffix appended to the bundle's logical name to form the slot's mangled name. */
+  suffix: string
+  /** Scalar type of this slot. The discriminator is `int`; payload slots take their field type. */
+  scalar: ScalarKind
+  /** For payload slots: the variant they belong to. Undefined for the discriminator. */
+  variant?: string
+  /** For payload slots: the field name within the variant. Undefined for the discriminator. */
+  field?: string
+}
+
+/**
+ * Look up a variant's index (0-based, in declaration order) within a sum type.
+ * Returns -1 if the variant is not declared.
+ */
+export function sumVariantIndex(meta: SumTypeMeta, variant: string): number {
+  return meta.variants.findIndex(v => v.name === variant)
+}
+
+/**
+ * Compute the full bundle decomposition for a sum-typed wire.
+ * Returns an ordered list: [discriminator, then payload slots in (variant, field) order].
+ */
+export function sumBundleSlots(meta: SumTypeMeta): SumBundleSlot[] {
+  const slots: SumBundleSlot[] = [{ suffix: 'tag', scalar: 'int' }]
+  for (const variant of meta.variants) {
+    for (const field of variant.payload) {
+      slots.push({
+        suffix: `${variant.name}__${field.name}`,
+        scalar: field.scalar,
+        variant: variant.name,
+        field: field.name,
+      })
+    }
+  }
+  return slots
+}
+
+/**
+ * Look up a specific (variant, field) pair in a sum type, returning its scalar
+ * type and the slot suffix used in the bundle. Returns undefined if the variant
+ * or field is not declared.
+ */
+export function sumVariantField(
+  meta: SumTypeMeta,
+  variant: string,
+  field: string,
+): { scalar: ScalarKind; suffix: string } | undefined {
+  const v = meta.variants.find(x => x.name === variant)
+  if (v === undefined) return undefined
+  const f = v.payload.find(x => x.name === field)
+  if (f === undefined) return undefined
+  return { scalar: f.scalar, suffix: `${variant}__${field}` }
+}
+
+/**
+ * Mangle a logical wire name with a slot suffix using the bundle separator.
+ * E.g. mangleSumSlot('state', 'Decaying__level') === 'state#Decaying__level'.
+ */
+export function mangleSumSlot(name: string, suffix: string): string {
+  return `${name}#${suffix}`
+}

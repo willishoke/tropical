@@ -18,7 +18,11 @@ import {
   specializeProgramNode, specializationCacheKey, resolveTypeArgs,
   type RawTypeArgs, type ResolvedTypeArgs,
 } from './specialize.js'
-import { type PortType, Float, Int, Bool, Unit, ArrayType, StructType } from './term.js'
+import {
+  type PortType, type ScalarKind, type SumTypeMeta,
+  Float, Int, Bool, Unit, ArrayType, StructType, SumType,
+} from './term.js'
+import { expandSumTypes } from './sum_lowering.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -31,7 +35,8 @@ export type { ExprNode } from './expr.js'
 
 export interface TypeDefFieldJSON {
   name: string
-  scalar_type: number
+  /** Scalar kind: 'float', 'int', or 'bool'. */
+  scalar_type: ScalarKind
 }
 
 export interface StructTypeDefJSON {
@@ -70,6 +75,13 @@ export interface SessionState {
   dac: import('./runtime/audio.js').DAC | null  // lazy type import to avoid circular dep
   typeRegistry: Map<string, ProgramType>
   typeAliasRegistry: Map<string, { base: string; bounds: Bounds }>
+  /** Registered sum types from `ports.type_defs` entries with kind === 'sum'.
+   *  Keyed by name; values carry the variant + payload metadata used for bundle decomposition. */
+  sumTypeRegistry: Map<string, SumTypeMeta>
+  /** Registered struct types from `ports.type_defs` entries with kind === 'struct'.
+   *  Keyed by name; values carry the field metadata. Currently retained for type-system
+   *  completeness; struct values themselves have no expression-level operations. */
+  structTypeRegistry: Map<string, { fields: Array<{ name: string; scalar: ScalarKind }> }>
   instanceRegistry: Map<string, ProgramInstance>
   graphOutputs: Array<{ instance: string; output: string }>
   paramRegistry: Map<string, Param>
@@ -98,6 +110,8 @@ export function makeSession(bufferLength = 512): SessionState {
     dac: null,
     typeRegistry: new Map(),
     typeAliasRegistry: new Map(),
+    sumTypeRegistry: new Map(),
+    structTypeRegistry: new Map(),
     instanceRegistry: new Map(),
     graphOutputs: [],
     paramRegistry: new Map(),
@@ -238,18 +252,25 @@ function slottifyExpr(
     return { ...obj, a: recurse(obj.a as ExprNode), b: recurse(obj.b as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
   }
 
-  // ADT ops
-  if (op === 'construct_struct') {
-    return { ...obj, fields: (obj.fields as ExprNode[]).map(recurse) } as unknown as ExprNode
+  // Sum-type wiring expressions. Recurse into payload fields (tag) and
+  // scrutinee + per-arm body (match). Per-arm bind names are leaf strings —
+  // not ExprNodes — so they pass through unchanged.
+  if (op === 'tag') {
+    const payload = obj.payload as Record<string, ExprNode> | undefined
+    if (payload === undefined) return node
+    const converted: Record<string, ExprNode> = {}
+    for (const [k, v] of Object.entries(payload)) converted[k] = recurse(v)
+    return { ...obj, payload: converted } as unknown as ExprNode
   }
-  if (op === 'field_access') {
-    return { ...obj, struct_expr: recurse(obj.struct_expr as ExprNode) } as unknown as ExprNode
-  }
-  if (op === 'construct_variant') {
-    return { ...obj, payload: (obj.payload as ExprNode[]).map(recurse) } as unknown as ExprNode
-  }
-  if (op === 'match_variant') {
-    return { ...obj, scrutinee: recurse(obj.scrutinee as ExprNode), branches: (obj.branches as ExprNode[]).map(recurse) } as unknown as ExprNode
+  if (op === 'match') {
+    const arms = obj.arms as Record<string, { bind?: string | string[]; body: ExprNode }>
+    const newArms: Record<string, { bind?: string | string[]; body: ExprNode }> = {}
+    for (const [variant, arm] of Object.entries(arms)) {
+      newArms[variant] = arm.bind === undefined
+        ? { body: recurse(arm.body) }
+        : { bind: arm.bind, body: recurse(arm.body) }
+    }
+    return { ...obj, scrutinee: recurse(obj.scrutinee as ExprNode), arms: newArms } as unknown as ExprNode
   }
 
   // Leaf ops (sample_rate, sample_index, binding, float, int, bool, matrix, etc.)
@@ -280,30 +301,49 @@ export function resolveBaseType(typeStr: string | undefined, userAliases?: Alias
   return typeStr
 }
 
-/** Convert a scalar or alias name to a PortType. Unknown names become struct refs. */
-function scalarNameToPortType(name: string): PortType {
+/**
+ * Convert a scalar or alias name to a PortType.
+ *
+ * Resolution order:
+ *   1. Built-in scalar names ('float', 'int', 'bool', 'unit')
+ *   2. Registered sum types (when `sumTypes` is provided)
+ *   3. Fallback to `StructType(name)` for unknown names
+ *
+ * Sum types are preferred over the struct fallback because they describe wire
+ * types that flatten to bundles of scalar wires; struct refs are an opaque
+ * fallback for any other named type.
+ */
+function scalarNameToPortType(name: string, sumTypes?: ReadonlySet<string>): PortType {
   switch (name) {
     case 'float': return Float
     case 'int':   return Int
     case 'bool':  return Bool
     case 'unit':  return Unit
-    default:      return StructType(name)
+    default:
+      if (sumTypes?.has(name)) return SumType(name)
+      return StructType(name)
   }
 }
 
 /** Decode a structured port type declaration to a PortType, resolving aliases.
  *  Throws if the shape still contains an unresolved type_param ref — callers that
- *  use type_params must run `specializeProgramNode` first. */
+ *  use type_params must run `specializeProgramNode` first.
+ *
+ *  @param sumTypes Optional set of registered sum-type names. When provided, an
+ *                  unknown type name that matches a registered sum resolves to
+ *                  `SumType(name)` rather than the `StructType(name)` fallback.
+ */
 export function decodePortTypeDecl(
   t: PortTypeDecl,
   aliases: AliasMap | undefined,
   contextName: string,
+  sumTypes?: ReadonlySet<string>,
 ): PortType {
   if (typeof t === 'string') {
-    return scalarNameToPortType(resolveBaseType(t, aliases) ?? t)
+    return scalarNameToPortType(resolveBaseType(t, aliases) ?? t, sumTypes)
   }
   const elemName = resolveBaseType(t.element, aliases) ?? t.element
-  const elem = scalarNameToPortType(elemName)
+  const elem = scalarNameToPortType(elemName, sumTypes)
   const shape = t.shape.map(dim => {
     if (typeof dim === 'number') return dim
     throw new Error(
@@ -406,8 +446,30 @@ export function loadProgramDef(
   const inputBounds     = inputSpecs.map(s => resolveBounds(s, aliases))
   const outputBounds    = outputSpecs.map(s => resolveBounds(s, aliases))
 
+  // ── Sum-decomposition pre-pass ──
+  // Build a local sum-type registry from this program's type_defs, then
+  // rewrite the body so sum-typed delay_decls expand into N+1 scalar
+  // delay_decls (one per bundle slot) and tag/match expressions over
+  // sum-typed values lower to scalar selects. After this pass, the body
+  // contains only scalar delays and standard arithmetic. The pre-pass
+  // also handles the empty-registry case as a no-op.
+  const localSumRegistry = new Map<string, SumTypeMeta>()
+  for (const td of (def.ports?.type_defs ?? [])) {
+    if (td.kind === 'sum') {
+      localSumRegistry.set(td.name, {
+        name: td.name,
+        variants: td.variants.map(v => ({
+          name: v.name,
+          payload: v.payload.map(f => ({ name: f.name, scalar: f.scalar_type })),
+        })),
+      })
+    }
+  }
+  const sumLoweredBody = expandSumTypes(def.body, localSumRegistry)
+  const defWithLoweredBody: ProgramNode = { ...def, body: sumLoweredBody }
+
   // ── First pass over decls: assign IDs in source order ──
-  const body = expandDeclGenerators(def.body)
+  const body = expandDeclGenerators(defWithLoweredBody.body)
   const regNames: string[] = []
   const regInitValues: ValueCoercible[] = []
   const regPortTypes: (PortType | undefined)[] = []
@@ -500,7 +562,7 @@ export function loadProgramDef(
   const outputExprByName = new Map<string, ExprNode>()
   const registerExprByName = new Map<string, ExprNode>()
 
-  for (const rawAssign of def.body?.assigns ?? []) {
+  for (const rawAssign of body.assigns ?? []) {
     if (typeof rawAssign !== 'object' || rawAssign === null || Array.isArray(rawAssign))
       throw new Error(`${def.name}: block.assigns entries must be objects`)
     const a = rawAssign as Record<string, unknown>
@@ -665,6 +727,7 @@ export function prettyExpr(
   if (op === 'input')     return `input(${n.name})`
   if (op === 'param')     return `param(${n.name})`
   if (op === 'trigger')   return `trigger(${n.name})`
+  if (op === 'binding')   return `$${n.name}`
   if (op === 'sample_rate')  return 'sample_rate'
   if (op === 'sample_index') return 'sample_index'
   if (op === 'float' || op === 'int')  return String(n.value)
@@ -691,22 +754,23 @@ export function prettyExpr(
   if (op === 'delay') return `delay(${prettyExpr(args[0], instanceRegistry)}, ${n.init ?? 0})`
   if (op === 'delay_ref') return `delay_ref(${n.id})`
   if (op === 'nested_out') return `${n.ref}.${n.output}`
-  if (op === 'construct_struct') {
-    const fields = (n.fields as ExprNode[]).map(f => prettyExpr(f, instanceRegistry))
-    return `${n.type_name}{${fields.join(', ')}}`
+  if (op === 'tag') {
+    const payload = n.payload as Record<string, ExprNode> | undefined
+    const fields = payload === undefined
+      ? ''
+      : `{${Object.entries(payload).map(([k, v]) => `${k}: ${prettyExpr(v, instanceRegistry)}`).join(', ')}}`
+    return `${n.type}::${n.variant}${fields}`
   }
-  if (op === 'field_access') {
-    return `${prettyExpr(n.struct_expr as ExprNode, instanceRegistry)}.field[${n.field_index}]`
+  if (op === 'match') {
+    const arms = n.arms as Record<string, { bind?: string | string[]; body: ExprNode }>
+    const armStrs = Object.entries(arms).map(([variant, arm]) => {
+      const bindStr = arm.bind === undefined
+        ? ''
+        : ` bind ${typeof arm.bind === 'string' ? arm.bind : `(${arm.bind.join(', ')})`}`
+      return `${variant}${bindStr}: ${prettyExpr(arm.body, instanceRegistry)}`
+    })
+    return `match(${prettyExpr(n.scrutinee as ExprNode, instanceRegistry)}, type=${n.type}){${armStrs.join(', ')}}`
   }
-  if (op === 'construct_variant') {
-    const payload = (n.payload as ExprNode[]).map(p => prettyExpr(p, instanceRegistry))
-    return `${n.type_name}::${n.variant_tag}(${payload.join(', ')})`
-  }
-  if (op === 'match_variant') {
-    const branches = (n.branches as ExprNode[]).map(b => prettyExpr(b, instanceRegistry))
-    return `match(${prettyExpr(n.scrutinee as ExprNode, instanceRegistry)}){${branches.join(', ')}}`
-  }
-
   // Should never reach here given the finite op set, but keep a safe fallback
   throw new Error(`prettyExpr: unhandled op '${op}'`)
 }

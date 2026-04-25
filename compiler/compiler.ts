@@ -86,16 +86,21 @@ function walkExprRefs(node: ExprNode, deps: Set<string>): void {
   }
   // Walk standard args
   for (const arg of ((n.args as ExprNode[]) ?? [])) walkExprRefs(arg, deps)
-  // Walk special nested expression forms
-  if (n.op === 'construct_struct')
-    for (const f of ((n.fields as ExprNode[]) ?? [])) walkExprRefs(f, deps)
-  if (n.op === 'field_access')
-    walkExprRefs(n.struct_expr as ExprNode, deps)
-  if (n.op === 'construct_variant')
-    for (const p of ((n.payload as ExprNode[]) ?? [])) walkExprRefs(p, deps)
-  if (n.op === 'match_variant') {
-    walkExprRefs(n.scrutinee as ExprNode, deps)
-    for (const b of ((n.branches as ExprNode[]) ?? [])) walkExprRefs(b, deps)
+  // Sum-type wiring expressions: refs can hide inside payloads, scrutinees,
+  // and per-arm bodies, all of which live in non-`op` sub-objects that the
+  // generic `args` walk doesn't reach.
+  if (n.op === 'tag') {
+    const payload = n.payload as Record<string, ExprNode> | undefined
+    if (payload !== undefined) {
+      for (const v of Object.values(payload)) walkExprRefs(v, deps)
+    }
+  }
+  if (n.op === 'match') {
+    if (n.scrutinee !== undefined) walkExprRefs(n.scrutinee as ExprNode, deps)
+    const arms = n.arms as Record<string, { body: ExprNode }> | undefined
+    if (arms !== undefined) {
+      for (const arm of Object.values(arms)) walkExprRefs(arm.body, deps)
+    }
   }
 }
 

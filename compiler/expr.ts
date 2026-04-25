@@ -283,27 +283,58 @@ export function exprCall(fn: SignalExpr, args: ExprCoercible[]): SignalExpr {
   return SignalExpr.fromNode({ op: 'call', callee: fn._node, args: coerced.map(e => e._node) })
 }
 
-// ---------- ADT expression builders ----------
+// ---------- Sum-type wiring expression builders ----------
 
-export function constructStruct(typeName: string, fieldExprs: ExprCoercible[]): SignalExpr {
-  const items = fieldExprs.map(coerce)
-  return SignalExpr.fromNode({ op: 'construct_struct', type_name: typeName, fields: items.map(e => e._node) })
+/**
+ * Construct a variant value of a sum type (coproduct injection).
+ * `payload` maps payload-field names to their ExprNode values; pass undefined
+ * for nullary variants.
+ */
+export function tag(
+  typeName: string,
+  variant: string,
+  payload?: Record<string, ExprCoercible>,
+): SignalExpr {
+  const node: { op: string; type: string; variant: string; payload?: Record<string, ExprNode> } = {
+    op: 'tag', type: typeName, variant,
+  }
+  if (payload !== undefined) {
+    const coerced: Record<string, ExprNode> = {}
+    for (const [k, v] of Object.entries(payload)) coerced[k] = coerce(v)._node
+    node.payload = coerced
+  }
+  return SignalExpr.fromNode(node)
 }
 
-export function fieldAccess(typeName: string, structExpr: ExprCoercible, fieldIndex: number): SignalExpr {
-  const s = coerce(structExpr)
-  return SignalExpr.fromNode({ op: 'field_access', type_name: typeName, struct_expr: s._node, field_index: fieldIndex })
+/**
+ * Match on a sum-typed scrutinee, dispatching to per-variant arms (coproduct
+ * elimination via the universal property). Each arm specifies an optional
+ * `bind` (string or string[]) naming the locally-available payload values,
+ * plus a `body` expression that produces the arm's result. All arm bodies
+ * must produce the same type.
+ */
+export interface MatchArm {
+  bind?: string | string[]
+  body: ExprCoercible
 }
 
-export function constructVariant(typeName: string, variantTag: number, payloadExprs: ExprCoercible[]): SignalExpr {
-  const items = payloadExprs.map(coerce)
-  return SignalExpr.fromNode({ op: 'construct_variant', type_name: typeName, variant_tag: variantTag, payload: items.map(e => e._node) })
-}
-
-export function matchVariant(typeName: string, scrutinee: ExprCoercible, branchExprs: ExprCoercible[]): SignalExpr {
-  const s = coerce(scrutinee)
-  const items = branchExprs.map(coerce)
-  return SignalExpr.fromNode({ op: 'match_variant', type_name: typeName, scrutinee: s._node, branches: items.map(e => e._node) })
+export function match(
+  typeName: string,
+  scrutinee: ExprCoercible,
+  arms: Record<string, MatchArm>,
+): SignalExpr {
+  const armsNode: Record<string, { bind?: string | string[]; body: ExprNode }> = {}
+  for (const [variant, arm] of Object.entries(arms)) {
+    const armNode: { bind?: string | string[]; body: ExprNode } = { body: coerce(arm.body)._node }
+    if (arm.bind !== undefined) armNode.bind = arm.bind
+    armsNode[variant] = armNode
+  }
+  return SignalExpr.fromNode({
+    op: 'match',
+    type: typeName,
+    scrutinee: coerce(scrutinee)._node,
+    arms: armsNode,
+  })
 }
 
 // ---------- Leaf node constructors ----------
@@ -534,6 +565,54 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
     return
   }
 
+  // ── Sum-type wiring expressions ───────────────────────────────────────────
+  // tag (coproduct injection): {op, type, variant, payload?: Record<field, ExprNode>}
+  if (op === 'tag') {
+    if (typeof obj.type !== 'string')
+      throw new Error(`${path}: 'tag' requires type: string (sum type name)`)
+    if (typeof obj.variant !== 'string')
+      throw new Error(`${path}: 'tag' requires variant: string`)
+    if (obj.payload !== undefined) {
+      if (typeof obj.payload !== 'object' || obj.payload === null || Array.isArray(obj.payload))
+        throw new Error(`${path}: 'tag' payload must be an object {fieldName: ExprNode}`)
+      for (const [k, v] of Object.entries(obj.payload as Record<string, unknown>))
+        validateExpr(v as ExprNode, `${path}.payload.${k}`)
+    }
+    return
+  }
+
+  // match (coproduct elimination): {op, type, scrutinee, arms: Record<variantName, MatchArm>}
+  // MatchArm = {bind?: string | string[], body: ExprNode}
+  if (op === 'match') {
+    if (typeof obj.type !== 'string')
+      throw new Error(`${path}: 'match' requires type: string (sum type name)`)
+    if (obj.scrutinee === undefined)
+      throw new Error(`${path}: 'match' requires scrutinee: ExprNode`)
+    validateExpr(obj.scrutinee as ExprNode, `${path}.scrutinee`)
+    if (typeof obj.arms !== 'object' || obj.arms === null || Array.isArray(obj.arms))
+      throw new Error(`${path}: 'match' arms must be an object {variantName: {bind?, body}}`)
+    const arms = obj.arms as Record<string, unknown>
+    if (Object.keys(arms).length === 0)
+      throw new Error(`${path}: 'match' requires at least one arm`)
+    for (const [variantName, arm] of Object.entries(arms)) {
+      if (typeof arm !== 'object' || arm === null || Array.isArray(arm))
+        throw new Error(`${path}.arms.${variantName}: arm must be an object {bind?, body}`)
+      const a = arm as Record<string, unknown>
+      if (a.bind !== undefined) {
+        if (typeof a.bind !== 'string' && !Array.isArray(a.bind))
+          throw new Error(`${path}.arms.${variantName}.bind: must be string or string[], got ${typeof a.bind}`)
+        if (Array.isArray(a.bind))
+          for (let i = 0; i < a.bind.length; i++)
+            if (typeof a.bind[i] !== 'string')
+              throw new Error(`${path}.arms.${variantName}.bind[${i}]: must be a string`)
+      }
+      if (a.body === undefined)
+        throw new Error(`${path}.arms.${variantName}: missing required 'body' field`)
+      validateExpr(a.body as ExprNode, `${path}.arms.${variantName}.body`)
+    }
+    return
+  }
+
   // delay: args[0] is the expression to delay; init is a number; id is an optional string name
   if (op === 'delay') {
     if (!Array.isArray(obj.args) || (obj.args as unknown[]).length !== 1)
@@ -652,6 +731,13 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
       throw new Error(`${path}: 'delay_decl' requires name: string`)
     if (obj.update !== undefined) validateExpr(obj.update as ExprNode, `${path}.update`)
     if (obj.init !== undefined) validateExpr(obj.init as ExprNode, `${path}.init`)
+    // Optional `type` field — when present and naming a registered sum type,
+    // the delay holds a bundle of scalar slots (one per (variant, field) pair
+    // plus a discriminator). Init must then be a constant `tag` expression.
+    // The structural check here only verifies the field's shape; sum-name
+    // resolution and constant-fold validation happen at loadProgramDef time.
+    if (obj.type !== undefined && typeof obj.type !== 'string')
+      throw new Error(`${path}: 'delay_decl' type must be a string (registered sum/struct/scalar name)`)
     return
   }
 

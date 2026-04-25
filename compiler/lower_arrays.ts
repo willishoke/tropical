@@ -129,6 +129,22 @@ export function lowerArrayOps(node: ExprNode, memo?: WeakMap<object, ExprNode>):
       result = lowerChain(obj, memo)
       break
 
+    // ── Sum-type wiring expressions ──
+    // `tag` and `match` carry their sub-expressions inside non-op objects
+    // (payload as Record<field, ExprNode>; arms as Record<variant, {bind, body}>),
+    // which lowerChildren's generic walk doesn't traverse. Recurse explicitly
+    // so any array ops or combinators nested inside them are lowered. The
+    // tag/match node itself stays in place — actual lowering to scalar
+    // bundle ops happens later, in flatten.ts where slot allocation lives.
+
+    case 'tag':
+      result = lowerTag(obj, memo)
+      break
+
+    case 'match':
+      result = lowerMatch(obj, memo)
+      break
+
     default:
       result = lowerChildren(obj, memo)
       break
@@ -476,6 +492,34 @@ function substituteBindings(
     return node
   }
 
+  // ── match: per-arm bindings ──────────────────────────────────────────────
+  // Each arm of a match introduces its own (possibly empty) set of bindings
+  // visible only inside that arm's body. The scrutinee is evaluated in the
+  // outer scope. Per-arm bind shape: undefined | string | string[].
+  if (obj.op === 'match') {
+    const armsObj = obj.arms as Record<string, { bind?: string | string[]; body: ExprNode }>
+    let changed = false
+    const newScrutinee = substituteBindings(obj.scrutinee as ExprNode, bindings, memo)
+    if (newScrutinee !== obj.scrutinee) changed = true
+    const newArms: Record<string, { bind?: string | string[]; body: ExprNode }> = {}
+    for (const [variantName, arm] of Object.entries(armsObj)) {
+      const armBindNames = arm.bind === undefined
+        ? []
+        : (typeof arm.bind === 'string' ? [arm.bind] : arm.bind)
+      const shielded = shieldBindings(bindings, armBindNames)
+      const newBody = substituteBindings(arm.body, shielded, memo)
+      if (newBody !== arm.body) changed = true
+      newArms[variantName] = arm.bind === undefined
+        ? { body: newBody }
+        : { bind: arm.bind, body: newBody }
+    }
+    const out: ExprNode = changed
+      ? { ...obj, scrutinee: newScrutinee, arms: newArms } as ExprNode
+      : node
+    if (memo) memo.set(node as object, out)
+    return out
+  }
+
   // Determine per-field substitution maps for binder nodes.
   const binder = BINDER_OPS[obj.op]
   const letBindNames: string[] = obj.op === 'let' && obj.bind && typeof obj.bind === 'object' && !Array.isArray(obj.bind)
@@ -666,6 +710,53 @@ function lowerChain(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNod
     current = lowerArrayOps(substituteBindings(body, bindings, new WeakMap()), memo)
   }
   return current
+}
+
+/**
+ * tag — recurse into payload-field expressions so any array ops or combinators
+ * nested inside them are lowered. The tag node itself stays in place; lowering
+ * to scalar bundle writes happens in flatten.ts (Phase 3).
+ */
+function lowerTag(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const payload = obj.payload as Record<string, ExprNode> | undefined
+  if (payload === undefined) return obj as ExprNode
+  let changed = false
+  const newPayload: Record<string, ExprNode> = {}
+  for (const [k, v] of Object.entries(payload)) {
+    const newV = lowerArrayOps(v, memo)
+    if (newV !== v) changed = true
+    newPayload[k] = newV
+  }
+  return changed ? ({ ...obj, payload: newPayload } as unknown as ExprNode) : (obj as unknown as ExprNode)
+}
+
+/**
+ * match — recurse into the scrutinee and each arm body so any array ops or
+ * combinators nested inside them are lowered. The match node itself stays in
+ * place; lowering to scalar bundle dispatch happens in flatten.ts (Phase 3).
+ *
+ * Arms with a `bind` field introduce a local payload binding. Lowering the
+ * arm's body must happen with that binding in scope, but at this stage the
+ * binding's value (a bundle slot read) doesn't exist yet — we just recurse
+ * structurally. The `binding` node is left intact for substituteBindings to
+ * resolve later.
+ */
+function lowerMatch(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
+  const arms = obj.arms as Record<string, { bind?: string | string[]; body: ExprNode }>
+  let changed = false
+  const newScrutinee = lowerArrayOps(obj.scrutinee as ExprNode, memo)
+  if (newScrutinee !== obj.scrutinee) changed = true
+  const newArms: Record<string, { bind?: string | string[]; body: ExprNode }> = {}
+  for (const [variant, arm] of Object.entries(arms)) {
+    const newBody = lowerArrayOps(arm.body, memo)
+    if (newBody !== arm.body) changed = true
+    newArms[variant] = arm.bind === undefined
+      ? { body: newBody }
+      : { bind: arm.bind, body: newBody }
+  }
+  return changed
+    ? ({ ...obj, scrutinee: newScrutinee, arms: newArms } as unknown as ExprNode)
+    : (obj as unknown as ExprNode)
 }
 
 // ─────────────────────────────────────────────────────────────
