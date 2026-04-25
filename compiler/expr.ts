@@ -731,6 +731,13 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
       throw new Error(`${path}: 'delay_decl' requires name: string`)
     if (obj.update !== undefined) validateExpr(obj.update as ExprNode, `${path}.update`)
     if (obj.init !== undefined) validateExpr(obj.init as ExprNode, `${path}.init`)
+    // Optional `type` field — when present and naming a registered sum type,
+    // the delay holds a bundle of scalar slots (one per (variant, field) pair
+    // plus a discriminator). Init must then be a constant `tag` expression.
+    // The structural check here only verifies the field's shape; sum-name
+    // resolution and constant-fold validation happen at loadProgramDef time.
+    if (obj.type !== undefined && typeof obj.type !== 'string')
+      throw new Error(`${path}: 'delay_decl' type must be a string (registered sum/struct/scalar name)`)
     return
   }
 
