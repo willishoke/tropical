@@ -556,10 +556,26 @@ function extractSlotFromSumExpr(
     return chain
   }
 
-  // Anything else (a delay_ref to a sum-typed delay used as an update?)
-  // — for slot, just read the corresponding slot of the source.
+  // delay_ref to a sum-typed delay used as a sum-valued update —
+  // for slot, just read the corresponding slot of the source.
   if (obj.op === 'delay_ref' && typeof obj.id === 'string' && sumDelays.has(obj.id as string)) {
     return { op: 'delay_ref', id: mangleSumSlot(obj.id as string, slot.suffix) }
+  }
+
+  // select(cond, then, else) where both then and else are sum-valued —
+  // distribute slot extraction over the branches:
+  //   extract(select(c, a, b), slot) = select(c, extract(a, slot), extract(b, slot))
+  // The condition is rewritten as a scalar expression (not a sum).
+  if (obj.op === 'select' && Array.isArray(obj.args) && (obj.args as ExprNode[]).length === 3) {
+    const args = obj.args as ExprNode[]
+    return {
+      op: 'select',
+      args: [
+        rewriteExpr(args[0], sumDelays, sumRegistry),
+        extractSlotFromSumExpr(args[1], slot, meta, sumDelays, sumRegistry),
+        extractSlotFromSumExpr(args[2], slot, meta, sumDelays, sumRegistry),
+      ],
+    }
   }
 
   // Unrecognized — return zero. Future iterations may want to error here.

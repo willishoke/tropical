@@ -5,62 +5,80 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
-        "name": "env",
-        "init": 0
-      },
-      {
         "op": "delay_decl",
         "name": "prev_trigger",
         "update": { "op": "input", "name": "trigger" },
         "init": 0
+      },
+      {
+        "op": "delay_decl",
+        "name": "state",
+        "type": "Env",
+        "init": { "op": "tag", "type": "Env", "variant": "Idle" },
+        "update": {
+          "op": "match",
+          "type": "Env",
+          "scrutinee": { "op": "delay_ref", "id": "state" },
+          "arms": {
+            "Idle": {
+              "body": {
+                "op": "select",
+                "args": [
+                  {
+                    "op": "and",
+                    "args": [
+                      { "op": "gt", "args": [{ "op": "input", "name": "trigger" }, 0.5] },
+                      { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_trigger" }, 0.5] }
+                    ]
+                  },
+                  { "op": "tag", "type": "Env", "variant": "Decaying", "payload": { "level": 1 } },
+                  { "op": "tag", "type": "Env", "variant": "Idle" }
+                ]
+              }
+            },
+            "Decaying": {
+              "bind": "level",
+              "body": {
+                "op": "select",
+                "args": [
+                  {
+                    "op": "and",
+                    "args": [
+                      { "op": "gt", "args": [{ "op": "input", "name": "trigger" }, 0.5] },
+                      { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_trigger" }, 0.5] }
+                    ]
+                  },
+                  { "op": "tag", "type": "Env", "variant": "Decaying", "payload": { "level": 1 } },
+                  {
+                    "op": "tag", "type": "Env", "variant": "Decaying",
+                    "payload": {
+                      "level": {
+                        "op": "mul",
+                        "args": [
+                          { "op": "binding", "name": "level" },
+                          { "op": "input", "name": "decay" }
+                        ]
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
       }
     ],
     "assigns": [
       {
         "op": "output_assign",
         "name": "env",
-        "expr": { "op": "reg", "name": "env" }
-      },
-      {
-        "op": "next_update",
-        "target": { "kind": "reg", "name": "env" },
         "expr": {
-          "op": "let",
-          "bind": {
-            "tick": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "gt",
-                  "args": [
-                    { "op": "input", "name": "trigger" },
-                    0.5
-                  ]
-                },
-                {
-                  "op": "lte",
-                  "args": [
-                    { "op": "delay_ref", "id": "prev_trigger" },
-                    0.5
-                  ]
-                }
-              ]
-            }
-          },
-          "in": {
-            "op": "select",
-            "args": [
-              { "op": "binding", "name": "tick" },
-              1,
-              {
-                "op": "mul",
-                "args": [
-                  { "op": "reg", "name": "env" },
-                  { "op": "input", "name": "decay" }
-                ]
-              }
-            ]
+          "op": "match",
+          "type": "Env",
+          "scrutinee": { "op": "delay_ref", "id": "state" },
+          "arms": {
+            "Idle":     { "body": 0 },
+            "Decaying": { "bind": "level", "body": { "op": "binding", "name": "level" } }
           }
         }
       }
@@ -74,6 +92,16 @@
     ],
     "outputs": [
       { "name": "env", "type": "signal" }
+    ],
+    "type_defs": [
+      {
+        "kind": "sum",
+        "name": "Env",
+        "variants": [
+          { "name": "Idle", "payload": [] },
+          { "name": "Decaying", "payload": [{ "name": "level", "scalar_type": "float" }] }
+        ]
+      }
     ]
   }
 }
