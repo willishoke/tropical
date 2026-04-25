@@ -283,29 +283,6 @@ export function exprCall(fn: SignalExpr, args: ExprCoercible[]): SignalExpr {
   return SignalExpr.fromNode({ op: 'call', callee: fn._node, args: coerced.map(e => e._node) })
 }
 
-// ---------- ADT expression builders ----------
-
-export function constructStruct(typeName: string, fieldExprs: ExprCoercible[]): SignalExpr {
-  const items = fieldExprs.map(coerce)
-  return SignalExpr.fromNode({ op: 'construct_struct', type_name: typeName, fields: items.map(e => e._node) })
-}
-
-export function fieldAccess(typeName: string, structExpr: ExprCoercible, fieldIndex: number): SignalExpr {
-  const s = coerce(structExpr)
-  return SignalExpr.fromNode({ op: 'field_access', type_name: typeName, struct_expr: s._node, field_index: fieldIndex })
-}
-
-export function constructVariant(typeName: string, variantTag: number, payloadExprs: ExprCoercible[]): SignalExpr {
-  const items = payloadExprs.map(coerce)
-  return SignalExpr.fromNode({ op: 'construct_variant', type_name: typeName, variant_tag: variantTag, payload: items.map(e => e._node) })
-}
-
-export function matchVariant(typeName: string, scrutinee: ExprCoercible, branchExprs: ExprCoercible[]): SignalExpr {
-  const s = coerce(scrutinee)
-  const items = branchExprs.map(coerce)
-  return SignalExpr.fromNode({ op: 'match_variant', type_name: typeName, scrutinee: s._node, branches: items.map(e => e._node) })
-}
-
 // ---------- Leaf node constructors ----------
 
 export function sampleRate(): SignalExpr {

@@ -86,17 +86,6 @@ function walkExprRefs(node: ExprNode, deps: Set<string>): void {
   }
   // Walk standard args
   for (const arg of ((n.args as ExprNode[]) ?? [])) walkExprRefs(arg, deps)
-  // Walk special nested expression forms
-  if (n.op === 'construct_struct')
-    for (const f of ((n.fields as ExprNode[]) ?? [])) walkExprRefs(f, deps)
-  if (n.op === 'field_access')
-    walkExprRefs(n.struct_expr as ExprNode, deps)
-  if (n.op === 'construct_variant')
-    for (const p of ((n.payload as ExprNode[]) ?? [])) walkExprRefs(p, deps)
-  if (n.op === 'match_variant') {
-    walkExprRefs(n.scrutinee as ExprNode, deps)
-    for (const b of ((n.branches as ExprNode[]) ?? [])) walkExprRefs(b, deps)
-  }
 }
 
 // ─────────────────────────────────────────────────────────────

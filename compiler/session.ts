@@ -238,20 +238,6 @@ function slottifyExpr(
     return { ...obj, a: recurse(obj.a as ExprNode), b: recurse(obj.b as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
   }
 
-  // ADT ops
-  if (op === 'construct_struct') {
-    return { ...obj, fields: (obj.fields as ExprNode[]).map(recurse) } as unknown as ExprNode
-  }
-  if (op === 'field_access') {
-    return { ...obj, struct_expr: recurse(obj.struct_expr as ExprNode) } as unknown as ExprNode
-  }
-  if (op === 'construct_variant') {
-    return { ...obj, payload: (obj.payload as ExprNode[]).map(recurse) } as unknown as ExprNode
-  }
-  if (op === 'match_variant') {
-    return { ...obj, scrutinee: recurse(obj.scrutinee as ExprNode), branches: (obj.branches as ExprNode[]).map(recurse) } as unknown as ExprNode
-  }
-
   // Leaf ops (sample_rate, sample_index, binding, float, int, bool, matrix, etc.)
   return node
 }
@@ -691,22 +677,6 @@ export function prettyExpr(
   if (op === 'delay') return `delay(${prettyExpr(args[0], instanceRegistry)}, ${n.init ?? 0})`
   if (op === 'delay_ref') return `delay_ref(${n.id})`
   if (op === 'nested_out') return `${n.ref}.${n.output}`
-  if (op === 'construct_struct') {
-    const fields = (n.fields as ExprNode[]).map(f => prettyExpr(f, instanceRegistry))
-    return `${n.type_name}{${fields.join(', ')}}`
-  }
-  if (op === 'field_access') {
-    return `${prettyExpr(n.struct_expr as ExprNode, instanceRegistry)}.field[${n.field_index}]`
-  }
-  if (op === 'construct_variant') {
-    const payload = (n.payload as ExprNode[]).map(p => prettyExpr(p, instanceRegistry))
-    return `${n.type_name}::${n.variant_tag}(${payload.join(', ')})`
-  }
-  if (op === 'match_variant') {
-    const branches = (n.branches as ExprNode[]).map(b => prettyExpr(b, instanceRegistry))
-    return `match(${prettyExpr(n.scrutinee as ExprNode, instanceRegistry)}){${branches.join(', ')}}`
-  }
-
   // Should never reach here given the finite op set, but keep a safe fallback
   throw new Error(`prettyExpr: unhandled op '${op}'`)
 }
