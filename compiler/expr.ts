@@ -283,6 +283,60 @@ export function exprCall(fn: SignalExpr, args: ExprCoercible[]): SignalExpr {
   return SignalExpr.fromNode({ op: 'call', callee: fn._node, args: coerced.map(e => e._node) })
 }
 
+// ---------- Sum-type wiring expression builders ----------
+
+/**
+ * Construct a variant value of a sum type (coproduct injection).
+ * `payload` maps payload-field names to their ExprNode values; pass undefined
+ * for nullary variants.
+ */
+export function tag(
+  typeName: string,
+  variant: string,
+  payload?: Record<string, ExprCoercible>,
+): SignalExpr {
+  const node: { op: string; type: string; variant: string; payload?: Record<string, ExprNode> } = {
+    op: 'tag', type: typeName, variant,
+  }
+  if (payload !== undefined) {
+    const coerced: Record<string, ExprNode> = {}
+    for (const [k, v] of Object.entries(payload)) coerced[k] = coerce(v)._node
+    node.payload = coerced
+  }
+  return SignalExpr.fromNode(node)
+}
+
+/**
+ * Match on a sum-typed scrutinee, dispatching to per-variant arms (coproduct
+ * elimination via the universal property). Each arm specifies an optional
+ * `bind` (string or string[]) naming the locally-available payload values,
+ * plus a `body` expression that produces the arm's result. All arm bodies
+ * must produce the same type.
+ */
+export interface MatchArm {
+  bind?: string | string[]
+  body: ExprCoercible
+}
+
+export function match(
+  typeName: string,
+  scrutinee: ExprCoercible,
+  arms: Record<string, MatchArm>,
+): SignalExpr {
+  const armsNode: Record<string, { bind?: string | string[]; body: ExprNode }> = {}
+  for (const [variant, arm] of Object.entries(arms)) {
+    const armNode: { bind?: string | string[]; body: ExprNode } = { body: coerce(arm.body)._node }
+    if (arm.bind !== undefined) armNode.bind = arm.bind
+    armsNode[variant] = armNode
+  }
+  return SignalExpr.fromNode({
+    op: 'match',
+    type: typeName,
+    scrutinee: coerce(scrutinee)._node,
+    arms: armsNode,
+  })
+}
+
 // ---------- Leaf node constructors ----------
 
 export function sampleRate(): SignalExpr {
@@ -508,6 +562,54 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
     if (obj.a !== undefined) validateExpr(obj.a as ExprNode, `${path}.a`)
     if (obj.b !== undefined) validateExpr(obj.b as ExprNode, `${path}.b`)
     if (obj.body !== undefined) validateExpr(obj.body as ExprNode, `${path}.body`)
+    return
+  }
+
+  // ── Sum-type wiring expressions ───────────────────────────────────────────
+  // tag (coproduct injection): {op, type, variant, payload?: Record<field, ExprNode>}
+  if (op === 'tag') {
+    if (typeof obj.type !== 'string')
+      throw new Error(`${path}: 'tag' requires type: string (sum type name)`)
+    if (typeof obj.variant !== 'string')
+      throw new Error(`${path}: 'tag' requires variant: string`)
+    if (obj.payload !== undefined) {
+      if (typeof obj.payload !== 'object' || obj.payload === null || Array.isArray(obj.payload))
+        throw new Error(`${path}: 'tag' payload must be an object {fieldName: ExprNode}`)
+      for (const [k, v] of Object.entries(obj.payload as Record<string, unknown>))
+        validateExpr(v as ExprNode, `${path}.payload.${k}`)
+    }
+    return
+  }
+
+  // match (coproduct elimination): {op, type, scrutinee, arms: Record<variantName, MatchArm>}
+  // MatchArm = {bind?: string | string[], body: ExprNode}
+  if (op === 'match') {
+    if (typeof obj.type !== 'string')
+      throw new Error(`${path}: 'match' requires type: string (sum type name)`)
+    if (obj.scrutinee === undefined)
+      throw new Error(`${path}: 'match' requires scrutinee: ExprNode`)
+    validateExpr(obj.scrutinee as ExprNode, `${path}.scrutinee`)
+    if (typeof obj.arms !== 'object' || obj.arms === null || Array.isArray(obj.arms))
+      throw new Error(`${path}: 'match' arms must be an object {variantName: {bind?, body}}`)
+    const arms = obj.arms as Record<string, unknown>
+    if (Object.keys(arms).length === 0)
+      throw new Error(`${path}: 'match' requires at least one arm`)
+    for (const [variantName, arm] of Object.entries(arms)) {
+      if (typeof arm !== 'object' || arm === null || Array.isArray(arm))
+        throw new Error(`${path}.arms.${variantName}: arm must be an object {bind?, body}`)
+      const a = arm as Record<string, unknown>
+      if (a.bind !== undefined) {
+        if (typeof a.bind !== 'string' && !Array.isArray(a.bind))
+          throw new Error(`${path}.arms.${variantName}.bind: must be string or string[], got ${typeof a.bind}`)
+        if (Array.isArray(a.bind))
+          for (let i = 0; i < a.bind.length; i++)
+            if (typeof a.bind[i] !== 'string')
+              throw new Error(`${path}.arms.${variantName}.bind[${i}]: must be a string`)
+      }
+      if (a.body === undefined)
+        throw new Error(`${path}.arms.${variantName}: missing required 'body' field`)
+      validateExpr(a.body as ExprNode, `${path}.arms.${variantName}.body`)
+    }
     return
   }
 

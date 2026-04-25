@@ -251,6 +251,27 @@ function slottifyExpr(
     return { ...obj, a: recurse(obj.a as ExprNode), b: recurse(obj.b as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
   }
 
+  // Sum-type wiring expressions. Recurse into payload fields (tag) and
+  // scrutinee + per-arm body (match). Per-arm bind names are leaf strings —
+  // not ExprNodes — so they pass through unchanged.
+  if (op === 'tag') {
+    const payload = obj.payload as Record<string, ExprNode> | undefined
+    if (payload === undefined) return node
+    const converted: Record<string, ExprNode> = {}
+    for (const [k, v] of Object.entries(payload)) converted[k] = recurse(v)
+    return { ...obj, payload: converted } as unknown as ExprNode
+  }
+  if (op === 'match') {
+    const arms = obj.arms as Record<string, { bind?: string | string[]; body: ExprNode }>
+    const newArms: Record<string, { bind?: string | string[]; body: ExprNode }> = {}
+    for (const [variant, arm] of Object.entries(arms)) {
+      newArms[variant] = arm.bind === undefined
+        ? { body: recurse(arm.body) }
+        : { bind: arm.bind, body: recurse(arm.body) }
+    }
+    return { ...obj, scrutinee: recurse(obj.scrutinee as ExprNode), arms: newArms } as unknown as ExprNode
+  }
+
   // Leaf ops (sample_rate, sample_index, binding, float, int, bool, matrix, etc.)
   return node
 }
@@ -683,6 +704,7 @@ export function prettyExpr(
   if (op === 'input')     return `input(${n.name})`
   if (op === 'param')     return `param(${n.name})`
   if (op === 'trigger')   return `trigger(${n.name})`
+  if (op === 'binding')   return `$${n.name}`
   if (op === 'sample_rate')  return 'sample_rate'
   if (op === 'sample_index') return 'sample_index'
   if (op === 'float' || op === 'int')  return String(n.value)
@@ -709,6 +731,23 @@ export function prettyExpr(
   if (op === 'delay') return `delay(${prettyExpr(args[0], instanceRegistry)}, ${n.init ?? 0})`
   if (op === 'delay_ref') return `delay_ref(${n.id})`
   if (op === 'nested_out') return `${n.ref}.${n.output}`
+  if (op === 'tag') {
+    const payload = n.payload as Record<string, ExprNode> | undefined
+    const fields = payload === undefined
+      ? ''
+      : `{${Object.entries(payload).map(([k, v]) => `${k}: ${prettyExpr(v, instanceRegistry)}`).join(', ')}}`
+    return `${n.type}::${n.variant}${fields}`
+  }
+  if (op === 'match') {
+    const arms = n.arms as Record<string, { bind?: string | string[]; body: ExprNode }>
+    const armStrs = Object.entries(arms).map(([variant, arm]) => {
+      const bindStr = arm.bind === undefined
+        ? ''
+        : ` bind ${typeof arm.bind === 'string' ? arm.bind : `(${arm.bind.join(', ')})`}`
+      return `${variant}${bindStr}: ${prettyExpr(arm.body, instanceRegistry)}`
+    })
+    return `match(${prettyExpr(n.scrutinee as ExprNode, instanceRegistry)}, type=${n.type}){${armStrs.join(', ')}}`
+  }
   // Should never reach here given the finite op set, but keep a safe fallback
   throw new Error(`prettyExpr: unhandled op '${op}'`)
 }
