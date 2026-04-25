@@ -273,15 +273,16 @@ function resolveSumTypeOfExpr(
 /**
  * Lower a match expression to a scalar select-chain.
  *
- * For nullary-arm-only matches, the chain is over the tag slot directly:
+ * For each arm:
+ *   - Nullary arms: the body is rewritten directly.
+ *   - Payload-bearing arms with `bind`: the bound names are replaced
+ *     with reads of the scrutinee's variant-specific field slots, then
+ *     the body is rewritten in the resulting context.
+ *
+ * The select chain dispatches over the scrutinee's tag slot:
  *   select(eq(tag, k_0), arms[V_0],
  *    select(eq(tag, k_1), arms[V_1],
  *           default))
- *
- * Arms with bindings (payload) are handled in a follow-up commit; this
- * implementation supports only nullary arms (the Toggle case). A bind
- * field on any arm is rejected with a clear error — the caller knows
- * to expand its scope when payload support lands.
  */
 function lowerMatchToSelectChain(
   matchObj: Record<string, unknown>,
@@ -292,27 +293,28 @@ function lowerMatchToSelectChain(
   const scrutinee = matchObj.scrutinee as ExprNode
   const arms = matchObj.arms as Record<string, { bind?: string | string[]; body: ExprNode }>
 
-  // Reject payload bindings for now (Phase 3a scope).
-  for (const [variant, arm] of Object.entries(arms)) {
-    if (arm.bind !== undefined) {
-      throw new Error(
-        `match arm '${variant}': payload bindings are not yet supported in sum-lowering. ` +
-        `(Phase 3a handles only nullary variants; payload bindings land in Phase 3b.)`,
-      )
-    }
-  }
-
   // Rewrite the scrutinee into its tag-slot read.
   const tagRead = rewriteExpr(scrutinee, sumDelays, sumRegistry)
+
+  // Per-arm body rewriter: handles bindings if the arm declares them.
+  const lowerArmBody = (variantName: string, arm: { bind?: string | string[]; body: ExprNode }): ExprNode => {
+    if (arm.bind === undefined) {
+      return rewriteExpr(arm.body, sumDelays, sumRegistry)
+    }
+    const bindings = bindingsForArm(scrutinee, meta, variantName, arm.bind, sumDelays)
+    const bound = substituteBindingsLocal(arm.body, bindings)
+    return rewriteExpr(bound, sumDelays, sumRegistry)
+  }
 
   // Build select chain. Iterate variants in declaration order; the last
   // arm becomes the chain's tail (its `else` branch is the variant body
   // itself, since exhaustiveness guarantees one arm matches).
   const variants = meta.variants
-  let chain: ExprNode = rewriteExpr(arms[variants[variants.length - 1].name].body, sumDelays, sumRegistry)
+  const lastVariant = variants[variants.length - 1]
+  let chain: ExprNode = lowerArmBody(lastVariant.name, arms[lastVariant.name])
   for (let i = variants.length - 2; i >= 0; i--) {
     const v = variants[i]
-    const armBody = rewriteExpr(arms[v.name].body, sumDelays, sumRegistry)
+    const armBody = lowerArmBody(v.name, arms[v.name])
     chain = {
       op: 'select',
       args: [
@@ -323,6 +325,117 @@ function lowerMatchToSelectChain(
     }
   }
   return chain
+}
+
+/**
+ * Given a match arm's scrutinee and bind shape, build a bindings map
+ * from each bound name to an ExprNode that reads the corresponding
+ * variant-specific field slot of the scrutinee's bundle.
+ *
+ * Currently supports scrutinees that are delay_refs to sum-typed delays;
+ * in that case, the bundle's slot reads are delay_ref(<name>#<variant>__<field>).
+ * Future support for tag-valued scrutinees and nested matches will extend
+ * this helper.
+ */
+function bindingsForArm(
+  scrutinee: ExprNode,
+  meta: SumTypeMeta,
+  variantName: string,
+  bind: string | string[],
+  sumDelays: SumDelayMap,
+): Map<string, ExprNode> {
+  const bindings = new Map<string, ExprNode>()
+  const variant = meta.variants.find(v => v.name === variantName)
+  if (variant === undefined) {
+    throw new Error(`match: variant '${variantName}' not in sum '${meta.name}'.`)
+  }
+  const bindNames = typeof bind === 'string' ? [bind] : bind
+  if (bindNames.length !== variant.payload.length) {
+    throw new Error(
+      `match arm '${variantName}': bind has ${bindNames.length} name(s) but ` +
+      `variant has ${variant.payload.length} payload field(s).`,
+    )
+  }
+
+  // Resolve scrutinee's bundle to slot-read nodes. Only delay_ref to a
+  // sum-typed delay is supported in this version.
+  if (typeof scrutinee !== 'object' || scrutinee === null || Array.isArray(scrutinee)) {
+    throw new Error(
+      `match: cannot bind payload of arm '${variantName}' from a non-bundle scrutinee.`,
+    )
+  }
+  const sObj = scrutinee as Record<string, unknown>
+  if (sObj.op !== 'delay_ref' || typeof sObj.id !== 'string' || !sumDelays.has(sObj.id as string)) {
+    throw new Error(
+      `match: arm '${variantName}' has a payload binding but the scrutinee is not a ` +
+      `sum-typed delay_ref. (Only delay_ref scrutinees are supported in V1; future work ` +
+      `extends this to tag-valued and nested-match scrutinees.)`,
+    )
+  }
+  const stateName = sObj.id as string
+
+  for (let i = 0; i < bindNames.length; i++) {
+    const fieldName = variant.payload[i].name
+    const slotName = mangleSumSlot(stateName, `${variantName}__${fieldName}`)
+    bindings.set(bindNames[i], { op: 'delay_ref', id: slotName })
+  }
+  return bindings
+}
+
+/**
+ * Substitute `{op:'binding', name}` nodes in a tree using a bindings map.
+ * Local to sum_lowering — handles only the simple case (no shielding for
+ * inner binders) since match arms are leaves of the sum-decomposition pass.
+ * Bindings introduced inside an arm body don't propagate outside the body;
+ * this helper resolves them in-place before further lowering.
+ */
+function substituteBindingsLocal(node: ExprNode, bindings: Map<string, ExprNode>): ExprNode {
+  if (typeof node !== 'object' || node === null) return node
+  if (Array.isArray(node)) return node.map(n => substituteBindingsLocal(n, bindings))
+  const obj = node as Record<string, unknown>
+  if (obj.op === 'binding' && typeof obj.name === 'string') {
+    const v = bindings.get(obj.name as string)
+    if (v !== undefined) return v
+    return node
+  }
+  // Generic recursion through children (args, payload, scrutinee, arms).
+  let changed = false
+  const result: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(obj)) {
+    if (Array.isArray(v)) {
+      const newArr = (v as ExprNode[]).map(n => substituteBindingsLocal(n, bindings))
+      if (newArr.some((n, i) => n !== (v as ExprNode[])[i])) changed = true
+      result[k] = newArr
+    } else if (typeof v === 'object' && v !== null && 'op' in v) {
+      const newV = substituteBindingsLocal(v as ExprNode, bindings)
+      if (newV !== v) changed = true
+      result[k] = newV
+    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+      // Record fields (payload, arms): recurse into each entry's body when present.
+      const rec = v as Record<string, unknown>
+      const newRec: Record<string, unknown> = {}
+      let recChanged = false
+      for (const [rk, rv] of Object.entries(rec)) {
+        if (typeof rv === 'object' && rv !== null && !Array.isArray(rv) && 'op' in rv) {
+          const nrv = substituteBindingsLocal(rv as ExprNode, bindings)
+          if (nrv !== rv) recChanged = true
+          newRec[rk] = nrv
+        } else if (typeof rv === 'object' && rv !== null && !Array.isArray(rv) && 'body' in rv) {
+          const arm = rv as { bind?: string | string[]; body: ExprNode }
+          const nb = substituteBindingsLocal(arm.body, bindings)
+          if (nb !== arm.body) recChanged = true
+          newRec[rk] = arm.bind === undefined ? { body: nb } : { bind: arm.bind, body: nb }
+        } else {
+          newRec[rk] = rv
+        }
+      }
+      if (recChanged) changed = true
+      result[k] = recChanged ? newRec : rec
+    } else {
+      result[k] = v
+    }
+  }
+  return changed ? (result as ExprNode) : node
 }
 
 /**
@@ -407,29 +520,34 @@ function extractSlotFromSumExpr(
 
   // Match returning a sum value — for each arm, recursively extract this
   // slot's value, then build a select chain over the scrutinee's tag.
+  // Arms with payload bindings: substitute the bound names with reads of
+  // the scrutinee's variant-specific field slots before extracting.
   if (obj.op === 'match' && typeof obj.type === 'string') {
     const arms = obj.arms as Record<string, { bind?: string | string[]; body: ExprNode }>
-    for (const [variant, arm] of Object.entries(arms)) {
-      if (arm.bind !== undefined) {
-        throw new Error(
-          `match arm '${variant}' in delay update: payload bindings not yet supported (Phase 3a).`,
-        )
-      }
-    }
+    const scrutinee = obj.scrutinee as ExprNode
     const scrutineeMeta = resolveSumTypeOfExpr(
-      obj.scrutinee as ExprNode, obj.type as string, sumDelays, sumRegistry,
+      scrutinee, obj.type as string, sumDelays, sumRegistry,
     )
     if (scrutineeMeta === undefined) {
       throw new Error(`match: cannot resolve scrutinee's sum type for slot extraction.`)
     }
-    const tagRead = rewriteExpr(obj.scrutinee as ExprNode, sumDelays, sumRegistry)
+    const tagRead = rewriteExpr(scrutinee, sumDelays, sumRegistry)
+
+    const armBodyForSlot = (variantName: string, arm: { bind?: string | string[]; body: ExprNode }): ExprNode => {
+      if (arm.bind === undefined) {
+        return extractSlotFromSumExpr(arm.body, slot, meta, sumDelays, sumRegistry)
+      }
+      const bindings = bindingsForArm(scrutinee, scrutineeMeta, variantName, arm.bind, sumDelays)
+      const bound = substituteBindingsLocal(arm.body, bindings)
+      return extractSlotFromSumExpr(bound, slot, meta, sumDelays, sumRegistry)
+    }
+
     const variants = scrutineeMeta.variants
-    let chain: ExprNode = extractSlotFromSumExpr(
-      arms[variants[variants.length - 1].name].body, slot, meta, sumDelays, sumRegistry,
-    )
+    const lastVariant = variants[variants.length - 1]
+    let chain: ExprNode = armBodyForSlot(lastVariant.name, arms[lastVariant.name])
     for (let i = variants.length - 2; i >= 0; i--) {
       const v = variants[i]
-      const armSlot = extractSlotFromSumExpr(arms[v.name].body, slot, meta, sumDelays, sumRegistry)
+      const armSlot = armBodyForSlot(v.name, arms[v.name])
       chain = {
         op: 'select',
         args: [{ op: 'eq', args: [tagRead, i] }, armSlot, chain],

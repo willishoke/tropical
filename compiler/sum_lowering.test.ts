@@ -150,6 +150,159 @@ describe('Toggle — Sum{Off, On} loaded into a ProgramDef', () => {
 type ExprNode = import('./expr.js').ExprNode
 
 // ─────────────────────────────────────────────────────────────
+// Fixture: Counter — Sum{Idle, Counting{n: int}}.
+//
+// On a trigger (here, an internal trigger that fires every sample once
+// after entering Counting via the cycle-breaker pattern), advances n.
+// We use a simpler shape for the test: starts in Idle, then unconditionally
+// transitions to Counting{n: 0} on first sample, then increments n each
+// subsequent sample.
+//
+// This exercises:
+//   - delay_decl with a sum type that has a payload field (n: int).
+//   - tag with payload (Tag<Counting>{n: 0}, Tag<Counting>{n: n+1}).
+//   - match arm with `bind: 'n'` reading the payload.
+//   - tag-slot init for non-init variants populating field slots with 0.
+// ─────────────────────────────────────────────────────────────
+
+function counterProgram(): ProgramNode {
+  return {
+    op: 'program',
+    name: 'Counter',
+    ports: {
+      outputs: [{ name: 'count', type: 'float' }],
+      type_defs: [{
+        kind: 'sum',
+        name: 'CounterState',
+        variants: [
+          { name: 'Idle', payload: [] },
+          { name: 'Counting', payload: [{ name: 'n', scalar_type: 'int' }] },
+        ],
+      }],
+    },
+    body: {
+      op: 'block',
+      decls: [
+        {
+          op: 'delay_decl',
+          name: 'state',
+          type: 'CounterState',
+          init: { op: 'tag', type: 'CounterState', variant: 'Idle' },
+          // Update: in Idle, transition to Counting{n: 0}; in Counting{n},
+          // become Counting{n+1}.
+          update: {
+            op: 'match',
+            type: 'CounterState',
+            scrutinee: { op: 'delay_ref', id: 'state' },
+            arms: {
+              Idle: {
+                body: { op: 'tag', type: 'CounterState', variant: 'Counting',
+                        payload: { n: 0 } },
+              },
+              Counting: {
+                bind: 'n',
+                body: {
+                  op: 'tag', type: 'CounterState', variant: 'Counting',
+                  payload: {
+                    n: { op: 'add', args: [{ op: 'binding', name: 'n' }, 1] },
+                  },
+                },
+              },
+            },
+          },
+        },
+      ],
+      assigns: [
+        {
+          op: 'output_assign',
+          name: 'count',
+          expr: {
+            op: 'match',
+            type: 'CounterState',
+            scrutinee: { op: 'delay_ref', id: 'state' },
+            arms: {
+              Idle:     { body: 0 },
+              Counting: { bind: 'n', body: { op: 'binding', name: 'n' } },
+            },
+          },
+        },
+      ],
+    },
+  }
+}
+
+describe('Counter — Sum{Idle, Counting{n: int}} payload support', () => {
+  test('the program loads without error', () => {
+    const session = makeSession()
+    expect(() => loadProgramAsType(counterProgram(), session)).not.toThrow()
+  })
+
+  test('the resulting ProgramDef has 2 delay slots (tag + Counting.n)', () => {
+    const session = makeSession()
+    const type = loadProgramAsType(counterProgram(), session)!
+    const def = type._def
+    expect(def.delayUpdateNodes).toHaveLength(2)
+    expect(def.delayInitValues).toHaveLength(2)
+    // Init: Idle has variant index 0; Counting.n slot is 0 (non-init variant).
+    expect(def.delayInitValues[0]).toBe(0) // tag = Idle = 0
+    expect(def.delayInitValues[1]).toBe(0) // Counting.n = 0 (init variant is not Counting)
+  })
+
+  test('end-to-end interpreter run produces correct values before audio clamp kicks in', () => {
+    // Output of n exceeds the audio-output [-1, 1] clamp once n > 1, so
+    // we only verify the first 3 samples (n stays at 0, 0, 1). The full
+    // payload-passing semantics is covered by JIT-vs-interp equivalence
+    // below, which doesn't depend on the clamp.
+    const session = makeSession(16)
+    loadStdlib(session)
+    loadProgramAsType(counterProgram(), session)
+    loadJSON({
+      schema: 'tropical_program_2',
+      name: 'patch',
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'c1', program: 'Counter' },
+      ]},
+      audio_outputs: [{ instance: 'c1', output: 'count' }],
+    } as never, session)
+    applySessionWiring(session)
+
+    const flat = flattenExpressions(session)
+    const interp = interpretSamples(flat, 3)
+    // Sample 0: state=Idle → output 0. next_state=Counting{n:0}
+    // Sample 1: state=Counting{0} → output 0/20. next_state=Counting{n:1}
+    // Sample 2: state=Counting{1} → output 1/20. next_state=Counting{n:2}
+    expect(interp[0]).toBeCloseTo(0, 10)
+    expect(interp[1]).toBeCloseTo(0, 10)
+    expect(interp[2]).toBeCloseTo(1 / 20, 10)
+  })
+
+  test('JIT and interpreter agree sample-for-sample on Counter', () => {
+    const session = makeSession(16)
+    loadStdlib(session)
+    loadProgramAsType(counterProgram(), session)
+    loadJSON({
+      schema: 'tropical_program_2',
+      name: 'patch',
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 'c1', program: 'Counter' },
+      ]},
+      audio_outputs: [{ instance: 'c1', output: 'count' }],
+    } as never, session)
+    applySessionWiring(session)
+    session.graph.primeJit()
+    session.graph.process()
+    const jit = new Float64Array(session.graph.outputBuffer)
+
+    const flat = flattenExpressions(session)
+    const interp = interpretSamples(flat, jit.length)
+
+    for (let i = 0; i < jit.length; i++) {
+      expect(interp[i]).toBeCloseTo(jit[i], 10)
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────
 // End-to-end execution: JIT and interpreter produce the same alternating
 // 0,1,0,1,... output stream for the Toggle program.
 // ─────────────────────────────────────────────────────────────
