@@ -727,7 +727,7 @@ function lowerTag(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>
     if (newV !== v) changed = true
     newPayload[k] = newV
   }
-  return changed ? ({ ...obj, payload: newPayload } as ExprNode) : (obj as ExprNode)
+  return changed ? ({ ...obj, payload: newPayload } as unknown as ExprNode) : (obj as unknown as ExprNode)
 }
 
 /**
@@ -754,7 +754,9 @@ function lowerMatch(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNod
       ? { body: newBody }
       : { bind: arm.bind, body: newBody }
   }
-  return changed ? ({ ...obj, scrutinee: newScrutinee, arms: newArms } as ExprNode) : (obj as ExprNode)
+  return changed
+    ? ({ ...obj, scrutinee: newScrutinee, arms: newArms } as unknown as ExprNode)
+    : (obj as unknown as ExprNode)
 }
 
 // ─────────────────────────────────────────────────────────────
