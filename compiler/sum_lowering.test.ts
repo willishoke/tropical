@@ -6,9 +6,12 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { makeSession } from './session.js'
-import { loadProgramAsType } from './program.js'
+import { makeSession, loadJSON } from './session.js'
+import { loadProgramAsType, loadStdlib } from './program.js'
 import type { ProgramNode } from './program.js'
+import { applySessionWiring } from './apply_plan.js'
+import { flattenExpressions } from './flatten.js'
+import { interpretSamples } from './interpret.js'
 
 // ─────────────────────────────────────────────────────────────
 // Fixture: Toggle — Sum{Off, On}, alternates each sample.
@@ -145,3 +148,63 @@ describe('Toggle — Sum{Off, On} loaded into a ProgramDef', () => {
 // Type alias for ExprNode — used in the assertions above.
 // ─────────────────────────────────────────────────────────────
 type ExprNode = import('./expr.js').ExprNode
+
+// ─────────────────────────────────────────────────────────────
+// End-to-end execution: JIT and interpreter produce the same alternating
+// 0,1,0,1,... output stream for the Toggle program.
+// ─────────────────────────────────────────────────────────────
+
+describe('Toggle — end-to-end execution', () => {
+  test('interpreter produces alternating 0,1,0,1,... values', () => {
+    const session = makeSession(16)
+    loadStdlib(session)
+    loadProgramAsType(toggleProgram(), session)
+    loadJSON({
+      schema: 'tropical_program_2',
+      name: 'patch',
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 't1', program: 'Toggle' },
+      ]},
+      audio_outputs: [{ instance: 't1', output: 'value' }],
+    } as never, session)
+    applySessionWiring(session)
+
+    const flat = flattenExpressions(session)
+    const N = 8
+    const interp = interpretSamples(flat, N)
+    // Output goes through mixed / 20.0 scaling.
+    // Sample 0: state=Off → output 0.   next_state=On
+    // Sample 1: state=On  → output 1.   next_state=Off
+    // Sample 2: state=Off → output 0.   ...
+    // Expected stream after scaling: 0, 0.05, 0, 0.05, 0, 0.05, 0, 0.05
+    for (let i = 0; i < N; i++) {
+      const expected = (i % 2 === 0) ? 0 : 0.05
+      expect(interp[i]).toBeCloseTo(expected, 10)
+    }
+  })
+
+  test('JIT and interpreter agree sample-for-sample', () => {
+    const session = makeSession(16)
+    loadStdlib(session)
+    loadProgramAsType(toggleProgram(), session)
+    loadJSON({
+      schema: 'tropical_program_2',
+      name: 'patch',
+      body: { op: 'block', decls: [
+        { op: 'instance_decl', name: 't1', program: 'Toggle' },
+      ]},
+      audio_outputs: [{ instance: 't1', output: 'value' }],
+    } as never, session)
+    applySessionWiring(session)
+    session.graph.primeJit()
+    session.graph.process()
+    const jit = new Float64Array(session.graph.outputBuffer)
+
+    const flat = flattenExpressions(session)
+    const interp = interpretSamples(flat, jit.length)
+
+    for (let i = 0; i < jit.length; i++) {
+      expect(interp[i]).toBeCloseTo(jit[i], 10)
+    }
+  })
+})
