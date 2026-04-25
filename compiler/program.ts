@@ -153,11 +153,25 @@ export function loadProgramAsSession(
   session.inputExprNodes.clear()
   session._nameCounters.clear()
   session.typeAliasRegistry.clear()
+  session.sumTypeRegistry.clear()
+  session.structTypeRegistry.clear()
 
-  // Register type aliases from type_defs before anything else
+  // Register type defs (aliases, sums, structs) from ports.type_defs before anything else
   for (const td of prog.ports?.type_defs ?? []) {
     if (td.kind === 'alias') {
       session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
+    } else if (td.kind === 'sum') {
+      session.sumTypeRegistry.set(td.name, {
+        name: td.name,
+        variants: td.variants.map(v => ({
+          name: v.name,
+          payload: v.payload.map(f => ({ name: f.name, scalar: f.scalar_type })),
+        })),
+      })
+    } else if (td.kind === 'struct') {
+      session.structTypeRegistry.set(td.name, {
+        fields: td.fields.map(f => ({ name: f.name, scalar: f.scalar_type })),
+      })
     }
   }
 
@@ -233,14 +247,24 @@ export function loadProgramAsSession(
  */
 export function loadProgramAsType(
   prog: ProgramNode,
-  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>,
+  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'sumTypeRegistry' | 'structTypeRegistry'>>,
 ): ProgramType | undefined {
-  // Register type aliases from type_defs before processing subprograms
-  if (session.typeAliasRegistry) {
-    for (const td of prog.ports?.type_defs ?? []) {
-      if (td.kind === 'alias') {
-        session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
-      }
+  // Register type defs (aliases, sums, structs) from type_defs before processing subprograms
+  for (const td of prog.ports?.type_defs ?? []) {
+    if (td.kind === 'alias' && session.typeAliasRegistry) {
+      session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
+    } else if (td.kind === 'sum' && session.sumTypeRegistry) {
+      session.sumTypeRegistry.set(td.name, {
+        name: td.name,
+        variants: td.variants.map(v => ({
+          name: v.name,
+          payload: v.payload.map(f => ({ name: f.name, scalar: f.scalar_type })),
+        })),
+      })
+    } else if (td.kind === 'struct' && session.structTypeRegistry) {
+      session.structTypeRegistry.set(td.name, {
+        fields: td.fields.map(f => ({ name: f.name, scalar: f.scalar_type })),
+      })
     }
   }
 
@@ -278,10 +302,22 @@ export function mergeProgramIntoSession(
       throw new Error(`merge collision: param/trigger '${p.name}' already exists.`)
   }
 
-  // Register type aliases from type_defs (additive)
+  // Register type defs (aliases, sums, structs) from type_defs (additive)
   for (const td of prog.ports?.type_defs ?? []) {
     if (td.kind === 'alias') {
       session.typeAliasRegistry.set(td.name, { base: td.base, bounds: td.bounds })
+    } else if (td.kind === 'sum') {
+      session.sumTypeRegistry.set(td.name, {
+        name: td.name,
+        variants: td.variants.map(v => ({
+          name: v.name,
+          payload: v.payload.map(f => ({ name: f.name, scalar: f.scalar_type })),
+        })),
+      })
+    } else if (td.kind === 'struct') {
+      session.structTypeRegistry.set(td.name, {
+        fields: td.fields.map(f => ({ name: f.name, scalar: f.scalar_type })),
+      })
     }
   }
 

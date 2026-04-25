@@ -18,7 +18,10 @@ import {
   specializeProgramNode, specializationCacheKey, resolveTypeArgs,
   type RawTypeArgs, type ResolvedTypeArgs,
 } from './specialize.js'
-import { type PortType, Float, Int, Bool, Unit, ArrayType, StructType } from './term.js'
+import {
+  type PortType, type ScalarKind, type SumTypeMeta,
+  Float, Int, Bool, Unit, ArrayType, StructType, SumType,
+} from './term.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -31,7 +34,8 @@ export type { ExprNode } from './expr.js'
 
 export interface TypeDefFieldJSON {
   name: string
-  scalar_type: number
+  /** Scalar kind: 'float', 'int', or 'bool'. */
+  scalar_type: ScalarKind
 }
 
 export interface StructTypeDefJSON {
@@ -70,6 +74,13 @@ export interface SessionState {
   dac: import('./runtime/audio.js').DAC | null  // lazy type import to avoid circular dep
   typeRegistry: Map<string, ProgramType>
   typeAliasRegistry: Map<string, { base: string; bounds: Bounds }>
+  /** Registered sum types from `ports.type_defs` entries with kind === 'sum'.
+   *  Keyed by name; values carry the variant + payload metadata used for bundle decomposition. */
+  sumTypeRegistry: Map<string, SumTypeMeta>
+  /** Registered struct types from `ports.type_defs` entries with kind === 'struct'.
+   *  Keyed by name; values carry the field metadata. Currently retained for type-system
+   *  completeness; struct values themselves have no expression-level operations. */
+  structTypeRegistry: Map<string, { fields: Array<{ name: string; scalar: ScalarKind }> }>
   instanceRegistry: Map<string, ProgramInstance>
   graphOutputs: Array<{ instance: string; output: string }>
   paramRegistry: Map<string, Param>
@@ -98,6 +109,8 @@ export function makeSession(bufferLength = 512): SessionState {
     dac: null,
     typeRegistry: new Map(),
     typeAliasRegistry: new Map(),
+    sumTypeRegistry: new Map(),
+    structTypeRegistry: new Map(),
     instanceRegistry: new Map(),
     graphOutputs: [],
     paramRegistry: new Map(),
@@ -266,30 +279,49 @@ export function resolveBaseType(typeStr: string | undefined, userAliases?: Alias
   return typeStr
 }
 
-/** Convert a scalar or alias name to a PortType. Unknown names become struct refs. */
-function scalarNameToPortType(name: string): PortType {
+/**
+ * Convert a scalar or alias name to a PortType.
+ *
+ * Resolution order:
+ *   1. Built-in scalar names ('float', 'int', 'bool', 'unit')
+ *   2. Registered sum types (when `sumTypes` is provided)
+ *   3. Fallback to `StructType(name)` for unknown names
+ *
+ * Sum types are preferred over the struct fallback because they describe wire
+ * types that flatten to bundles of scalar wires; struct refs are an opaque
+ * fallback for any other named type.
+ */
+function scalarNameToPortType(name: string, sumTypes?: ReadonlySet<string>): PortType {
   switch (name) {
     case 'float': return Float
     case 'int':   return Int
     case 'bool':  return Bool
     case 'unit':  return Unit
-    default:      return StructType(name)
+    default:
+      if (sumTypes?.has(name)) return SumType(name)
+      return StructType(name)
   }
 }
 
 /** Decode a structured port type declaration to a PortType, resolving aliases.
  *  Throws if the shape still contains an unresolved type_param ref — callers that
- *  use type_params must run `specializeProgramNode` first. */
+ *  use type_params must run `specializeProgramNode` first.
+ *
+ *  @param sumTypes Optional set of registered sum-type names. When provided, an
+ *                  unknown type name that matches a registered sum resolves to
+ *                  `SumType(name)` rather than the `StructType(name)` fallback.
+ */
 export function decodePortTypeDecl(
   t: PortTypeDecl,
   aliases: AliasMap | undefined,
   contextName: string,
+  sumTypes?: ReadonlySet<string>,
 ): PortType {
   if (typeof t === 'string') {
-    return scalarNameToPortType(resolveBaseType(t, aliases) ?? t)
+    return scalarNameToPortType(resolveBaseType(t, aliases) ?? t, sumTypes)
   }
   const elemName = resolveBaseType(t.element, aliases) ?? t.element
-  const elem = scalarNameToPortType(elemName)
+  const elem = scalarNameToPortType(elemName, sumTypes)
   const shape = t.shape.map(dim => {
     if (typeof dim === 'number') return dim
     throw new Error(

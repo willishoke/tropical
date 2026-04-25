@@ -54,7 +54,7 @@ const PortTypeDeclSchema = z.union([
 
 const StructFieldSchema = z.object({
   name: z.string(),
-  scalar_type: z.number().int(),
+  scalar_type: z.union([z.literal('float'), z.literal('int'), z.literal('bool')]),
 })
 
 const StructTypeDefSchema = z.object({
@@ -65,7 +65,7 @@ const StructTypeDefSchema = z.object({
 
 const VariantPayloadFieldSchema = z.object({
   name: z.string(),
-  scalar_type: z.number().int(),
+  scalar_type: z.union([z.literal('float'), z.literal('int'), z.literal('bool')]),
 })
 
 const SumVariantSchema = z.object({
