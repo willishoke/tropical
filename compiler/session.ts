@@ -22,6 +22,7 @@ import {
   type PortType, type ScalarKind, type SumTypeMeta,
   Float, Int, Bool, Unit, ArrayType, StructType, SumType,
 } from './term.js'
+import { expandSumTypes } from './sum_lowering.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -445,8 +446,30 @@ export function loadProgramDef(
   const inputBounds     = inputSpecs.map(s => resolveBounds(s, aliases))
   const outputBounds    = outputSpecs.map(s => resolveBounds(s, aliases))
 
+  // ── Sum-decomposition pre-pass ──
+  // Build a local sum-type registry from this program's type_defs, then
+  // rewrite the body so sum-typed delay_decls expand into N+1 scalar
+  // delay_decls (one per bundle slot) and tag/match expressions over
+  // sum-typed values lower to scalar selects. After this pass, the body
+  // contains only scalar delays and standard arithmetic. The pre-pass
+  // also handles the empty-registry case as a no-op.
+  const localSumRegistry = new Map<string, SumTypeMeta>()
+  for (const td of (def.ports?.type_defs ?? [])) {
+    if (td.kind === 'sum') {
+      localSumRegistry.set(td.name, {
+        name: td.name,
+        variants: td.variants.map(v => ({
+          name: v.name,
+          payload: v.payload.map(f => ({ name: f.name, scalar: f.scalar_type })),
+        })),
+      })
+    }
+  }
+  const sumLoweredBody = expandSumTypes(def.body, localSumRegistry)
+  const defWithLoweredBody: ProgramNode = { ...def, body: sumLoweredBody }
+
   // ── First pass over decls: assign IDs in source order ──
-  const body = expandDeclGenerators(def.body)
+  const body = expandDeclGenerators(defWithLoweredBody.body)
   const regNames: string[] = []
   const regInitValues: ValueCoercible[] = []
   const regPortTypes: (PortType | undefined)[] = []
@@ -539,7 +562,7 @@ export function loadProgramDef(
   const outputExprByName = new Map<string, ExprNode>()
   const registerExprByName = new Map<string, ExprNode>()
 
-  for (const rawAssign of def.body?.assigns ?? []) {
+  for (const rawAssign of body.assigns ?? []) {
     if (typeof rawAssign !== 'object' || rawAssign === null || Array.isArray(rawAssign))
       throw new Error(`${def.name}: block.assigns entries must be objects`)
     const a = rawAssign as Record<string, unknown>
