@@ -12,12 +12,384 @@ import { broadcastShapes, type ScalarKind } from './term.js'
 
 // ---------- ExprNode (JSON-serializable expression tree) ----------
 
-/** An expression node — bare scalar, inline array, or a named op object. */
+/** An expression node — bare scalar, inline array, or a named op object.
+ *  The op variant is currently a bag of fields; see ExprOpNodeStrict below
+ *  for the closed parametric-arity discriminated union being phased in.
+ *  Once walkers are migrated to use ExprOpNodeStrict, this type will be
+ *  replaced by `number | boolean | ExprNode[] | ExprOpNodeStrict`. */
 export type ExprNode =
   | number
   | boolean
   | ExprNode[]
   | { op: string; [key: string]: unknown }
+
+// ─────────────────────────────────────────────────────────────
+// Closed parametric-arity discriminated union (Phase 1)
+//
+// `Op<N, Tag>` is a tagged structure parameterized by arity N and a union
+// of allowed op tags. ~45 fixed-arity-args ops factor into instantiations
+// of this single family. Named-children ops (tag, match, let, ...) get
+// bespoke interfaces because their structure is genuinely irreducible.
+// Leaf ops form a small union. Decl ops are top-level only.
+//
+// The discriminated union enables:
+//   - Type-narrowed field access (no `args as ExprNode[]` casts).
+//   - Exhaustive switch checks via `assertNever` (compile error on missing
+//     cases when a new op is added).
+//   - One shared `mapChildren` utility that knows the per-op child shape.
+//
+// Currently exported alongside the bag-of-fields ExprNode so existing code
+// continues to compile. Walkers migrate to use ExprOpNodeStrict
+// incrementally; the broad ExprNode is replaced once migration completes.
+// ─────────────────────────────────────────────────────────────
+
+/** Build a tuple type of length N filled with T. Used for Op<N, Tag> args. */
+export type Tuple<T, N extends number, R extends T[] = []> =
+  R['length'] extends N ? R : Tuple<T, N, [...R, T]>
+
+/** A tagged op with N positional ExprNode children at `args`. When N is a
+ *  literal number (1, 2, 3, ...), `args` is a fixed-length tuple. When N is
+ *  the type `number`, `args` is a variadic ExprNode[]. */
+export interface Op<N extends number, Tag extends string> {
+  op: Tag
+  args: Tuple<ExprNode, N>
+}
+
+// ── Per-arity tag unions ─────────────────────────────────────────────────
+
+/** Binary arithmetic ops. */
+export type ArithBinTag = 'add' | 'sub' | 'mul' | 'div' | 'mod' | 'floor_div' | 'ldexp'
+
+/** Binary comparison ops. */
+export type CompareBinTag = 'lt' | 'lte' | 'gt' | 'gte' | 'eq' | 'neq'
+
+/** Binary bitwise ops. */
+export type BitBinTag = 'bit_and' | 'bit_or' | 'bit_xor' | 'lshift' | 'rshift'
+
+/** Binary logical ops. */
+export type LogicalBinTag = 'and' | 'or'
+
+/** All binary (arity-2) op tags. */
+export type BinaryTag = ArithBinTag | CompareBinTag | BitBinTag | LogicalBinTag
+
+/** A binary op node — args is exactly two ExprNode children. */
+export type BinaryNode = Op<2, BinaryTag>
+
+/** Unary op tags (arity 1). */
+export type UnaryTag =
+  | 'neg' | 'abs' | 'sqrt' | 'floor' | 'ceil' | 'round'
+  | 'float_exponent' | 'not' | 'bit_not'
+  | 'to_int' | 'to_bool' | 'to_float'
+
+/** A unary op node — args is exactly one ExprNode child. */
+export type UnaryNode = Op<1, UnaryTag>
+
+/** Ternary op tags (arity 3). */
+export type TernaryTag = 'select' | 'clamp' | 'array_set'
+
+/** A ternary op node — args is exactly three ExprNode children. */
+export type TernaryNode = Op<3, TernaryTag>
+
+/** Variadic op tags (arity unconstrained). */
+export type VariadicTag = 'array'
+
+/** A variadic op node — args is an ExprNode[] of any length. */
+export type VariadicNode = Op<number, VariadicTag>
+
+// ── Op<N> with extra non-child metadata fields ──────────────────────────
+
+/** Reshape: traversal is Op<1>; carries a static shape annotation. */
+export interface ReshapeNode extends Op<1, 'reshape'> { shape: number[] }
+
+/** Transpose: traversal is Op<1>; no extra fields. */
+export interface TransposeNode extends Op<1, 'transpose'> {}
+
+/** Slice: traversal is Op<1>; carries axis and range. */
+export interface SliceNode extends Op<1, 'slice'> {
+  axis: number
+  start: number
+  end: number
+}
+
+/** Reduce: traversal is Op<1>; carries axis and reduction op. */
+export interface ReduceNode extends Op<1, 'reduce'> {
+  axis: number
+  reduce_op: 'add' | 'mul' | 'min' | 'max'
+}
+
+/** broadcast_to: traversal is Op<1>; carries target shape. */
+export interface BroadcastToNode extends Op<1, 'broadcast_to'> { shape: number[] }
+
+/** index: traversal is Op<2> (array, index). */
+export interface IndexNode extends Op<2, 'index'> {}
+
+/** matmul: traversal is Op<2>; carries shape and element type. */
+export interface MatmulNode extends Op<2, 'matmul'> {
+  shape_a: [number, number]
+  shape_b: [number, number]
+  element_type?: ScalarKind
+}
+
+/** map: traversal is Op<1> args[0] PLUS callee child. Bespoke shape. */
+export interface MapNode extends Op<1, 'map'> { callee: ExprNode }
+
+// ── Construction ops (no positional args; data lives in shape/values) ───
+
+/** zeros({shape}): allocates a zero-filled array. No children. */
+export interface ZerosNode { op: 'zeros'; shape: number[] }
+
+/** ones({shape}): allocates a one-filled array. No children. */
+export interface OnesNode { op: 'ones'; shape: number[] }
+
+/** fill({shape, value}): broadcasts a single value to the target shape. */
+export interface FillNode { op: 'fill'; shape: number[]; value: ExprNode }
+
+/** array_literal({shape, values}): an inline array of ExprNode values. */
+export interface ArrayLiteralNode { op: 'array_literal'; shape: number[]; values: ExprNode[] }
+
+/** matrix({rows}): a static 2D number-only matrix. No ExprNode children. */
+export interface MatrixNode { op: 'matrix'; rows: number[][] }
+
+// ── Named-children ops (children at named fields, not positional args) ──
+
+/** Match arm at the strict-IR layer (body is an ExprNode, not ExprCoercible).
+ *  The user-facing builder counterpart is {@link MatchArm} below, which accepts
+ *  ExprCoercible bodies for ergonomics. */
+export interface MatchArmStrict {
+  bind?: string | string[]
+  body: ExprNode
+}
+
+/** Coproduct injection: `tag<T, V>{payload?}`. Children live in payload values. */
+export interface TagNode {
+  op: 'tag'
+  type: string
+  variant: string
+  payload?: Record<string, ExprNode>
+}
+
+/** Coproduct elimination: `match<T>(scrutinee) { variant: arm, ... }`. */
+export interface MatchNode {
+  op: 'match'
+  type: string
+  scrutinee: ExprNode
+  arms: Record<string, MatchArmStrict>
+}
+
+/** let { name = expr; ... } in body */
+export interface LetNode {
+  op: 'let'
+  bind: Record<string, ExprNode>
+  in: ExprNode
+}
+
+/** function literal — used as the callee of `call` and `map`. */
+export interface FunctionNode {
+  op: 'function'
+  param_count: number
+  body: ExprNode
+}
+
+/** Call a function with positional arguments. */
+export interface CallNode {
+  op: 'call'
+  callee: ExprNode
+  args: ExprNode[]
+}
+
+/** Session-level delay node — `args[0]` is the value to delay one sample. */
+export interface DelayNode {
+  op: 'delay'
+  args: [ExprNode]
+  init?: number
+  id?: string
+}
+
+/** Gateable subgraph wrapper emitted by the flattener. */
+export interface SourceTagNode {
+  op: 'source_tag'
+  source_instance: string
+  gate_expr: ExprNode
+  expr: ExprNode
+  on_skip?: ExprNode
+}
+
+// Compile-time combinators (lowered before flatten). All have a `body`
+// child; some have additional ExprNode children (init, over, a, b).
+
+export interface GenerateNode { op: 'generate'; count: number; var: string; body: ExprNode }
+export interface IterateNode  { op: 'iterate'; count: number; var: string; init: ExprNode; body: ExprNode }
+export interface FoldNode     { op: 'fold'; over: ExprNode; init: ExprNode; acc: string; elem: string; body: ExprNode }
+export interface ScanNode     { op: 'scan'; over: ExprNode; init: ExprNode; acc: string; elem: string; body: ExprNode }
+export interface Map2Node     { op: 'map2'; over: ExprNode; elem: string; body: ExprNode }
+export interface ZipWithNode  { op: 'zip_with'; a: ExprNode; b: ExprNode; x: string; y: string; body: ExprNode }
+export interface ChainNode    { op: 'chain'; count: number; var: string; init: ExprNode; body: ExprNode }
+export interface StrConcatNode { op: 'str_concat'; parts: ExprNode[] }
+export interface GenerateDeclsNode { op: 'generate_decls'; count: number; var: string; decls: ExprNode[] }
+
+/** All named-children ops in a single union for convenience. */
+export type NamedChildrenNode =
+  | TagNode | MatchNode | LetNode | FunctionNode | CallNode
+  | DelayNode | SourceTagNode
+  | GenerateNode | IterateNode | FoldNode | ScanNode
+  | Map2Node | ZipWithNode | ChainNode | StrConcatNode | GenerateDeclsNode
+
+// ── Leaf ops (no children) ──────────────────────────────────────────────
+
+/** Pre-slottify input ref: `{op:'input', name}`. Post-slottify: `{op:'input', id}`. */
+export interface InputNode { op: 'input'; id?: number; name?: string }
+
+/** Pre-slottify register ref: `{op:'reg', name}`. Post-slottify: `{op:'reg', id}`. */
+export interface RegRefNode { op: 'reg'; id?: number; name?: string }
+
+/** Pre-slottify delay reference: `{op:'delay_ref', id: 'name'}`. */
+export interface DelayRefNode { op: 'delay_ref'; id: string }
+
+/** Post-slottify delay value read: `{op:'delay_value', node_id: N}`. */
+export interface DelayValueNode { op: 'delay_value'; node_id: number }
+
+/** Pre-slottify nested-output ref: `{op:'nested_out', ref, output}`. */
+export interface NestedOutNode { op: 'nested_out'; ref: string; output: string | number }
+
+/** Post-slottify nested-output ref. */
+export interface NestedOutputNode { op: 'nested_output'; node_id: number; output_id: number }
+
+/** Combinator-introduced binding placeholder; resolved at lowering time. */
+export interface BindingNode { op: 'binding'; name: string }
+
+/** Generic-program type-parameter placeholder; resolved at specialization. */
+export interface TypeParamNode { op: 'type_param'; name: string }
+
+/** Sample-rate constant. */
+export interface SampleRateNode { op: 'sample_rate' }
+
+/** Current sample-index counter. */
+export interface SampleIndexNode { op: 'sample_index' }
+
+/** Smoothed control parameter handle (FFI). */
+export interface SmoothedParamNode { op: 'smoothed_param'; _ptr: true; _handle: unknown }
+
+/** One-shot trigger control parameter handle (FFI). */
+export interface TriggerParamNode { op: 'trigger_param'; _ptr: true; _handle: unknown }
+
+/** Typed scalar literal emitted by specialize.ts after type-arg substitution. */
+export interface ConstNode {
+  op: 'const'
+  val: number | boolean
+  type?: ScalarKind
+}
+
+/** All leaf ops in a single union. */
+export type LeafNode =
+  | InputNode | RegRefNode | DelayRefNode | DelayValueNode
+  | NestedOutNode | NestedOutputNode | BindingNode | TypeParamNode
+  | SampleRateNode | SampleIndexNode
+  | SmoothedParamNode | TriggerParamNode | ConstNode
+
+// ── Decl ops (top-level only — appear at decl/assign positions) ─────────
+
+/** Wiring ref to an instance output. May project a sum-type variant field. */
+export interface RefNode {
+  op: 'ref'
+  instance: string
+  output: string | number
+  project?: { variant: string; field: string }
+}
+
+/** Top-level instance declaration. */
+export interface InstanceDeclNode {
+  op: 'instance_decl'
+  name: string
+  program: string
+  inputs?: Record<string, ExprNode>
+  type_args?: Record<string, number | ExprNode>
+  gateable?: boolean
+  gate_input?: ExprNode
+}
+
+/** Register declaration with optional initializer and type annotation. */
+export interface RegDeclNode {
+  op: 'reg_decl'
+  name: string
+  init?: ExprNode
+  type?: string
+}
+
+/** Delay declaration — sum-typed delays decompose into multiple scalar slots. */
+export interface DelayDeclNode {
+  op: 'delay_decl'
+  name: string
+  init?: ExprNode | number
+  update?: ExprNode
+  type?: string
+}
+
+/** Inline subprogram declaration. */
+export interface ProgramDeclNode {
+  op: 'program_decl'
+  name: string
+  program?: ExprNode
+}
+
+/** Output port assignment in a program body's `assigns` list. */
+export interface OutputAssignNode {
+  op: 'output_assign'
+  name: string
+  expr?: ExprNode
+}
+
+/** Next-state assignment for a register or delay register. */
+export interface NextUpdateNode {
+  op: 'next_update'
+  target: { kind: 'reg' | 'delay'; name: string }
+  expr?: ExprNode
+}
+
+/** Block: a list of decls + assigns inside a program body. */
+export interface ProgramBlockNode {
+  op: 'block'
+  decls?: ExprNode[]
+  assigns?: ExprNode[]
+  value?: ExprNode | null
+}
+
+/** Top-level program node. The body is always a ProgramBlockNode. */
+export interface ProgramOpNode {
+  op: 'program'
+  name: string
+  type_params?: Record<string, { type: 'int'; default?: number }>
+  sample_rate?: number
+  breaks_cycles?: boolean
+  ports?: unknown  // ProgramPorts; defined in program.ts
+  body: ProgramBlockNode
+}
+
+/** All top-level decl/assign/structural ops. */
+export type DeclNode =
+  | RefNode
+  | InstanceDeclNode | RegDeclNode | DelayDeclNode | ProgramDeclNode
+  | OutputAssignNode | NextUpdateNode
+  | ProgramBlockNode | ProgramOpNode
+
+// ── The closed parametric-arity discriminated union ─────────────────────
+
+/** Closed discriminated union of every op kind. Replaces the bag-of-fields
+ *  `{op: string; [k]: unknown}` once walkers are migrated. Adding a new op
+ *  forces touching this union and every exhaustive `mapChildren` switch. */
+export type ExprOpNodeStrict =
+  // Op<N> family — most ops factor through here.
+  | UnaryNode | BinaryNode | TernaryNode | VariadicNode
+  // Op<N> + extras — same-shape traversal, extra metadata fields.
+  | ReshapeNode | TransposeNode | SliceNode | ReduceNode
+  | BroadcastToNode | IndexNode | MatmulNode | MapNode
+  // Construction ops with shape/values.
+  | ZerosNode | OnesNode | FillNode | ArrayLiteralNode | MatrixNode
+  // Named-children ops — bespoke per-op interfaces.
+  | NamedChildrenNode
+  // Leaves.
+  | LeafNode
+  // Top-level decls.
+  | DeclNode
 
 // ---------- SignalExpr ----------
 
