@@ -142,13 +142,13 @@ export function nextName(session: SessionState, prefix: string): string {
 // ─────────────────────────────────────────────────────────────
 
 const BINARY_OPS = new Set([
-  'add', 'sub', 'mul', 'div', 'floor_div', 'mod', 'pow',
+  'add', 'sub', 'mul', 'div', 'floorDiv', 'mod', 'pow',
   'lt', 'lte', 'gt', 'gte', 'eq', 'neq',
-  'bit_and', 'bit_or', 'bit_xor', 'lshift', 'rshift',
+  'bitAnd', 'bitOr', 'bitXor', 'lshift', 'rshift',
 ])
 
 const UNARY_OPS = new Set([
-  'neg', 'abs', 'sin', 'cos', 'exp', 'log', 'tanh', 'not', 'bit_not',
+  'neg', 'abs', 'sin', 'cos', 'exp', 'log', 'tanh', 'not', 'bitNot',
 ])
 
 // ─────────────────────────────────────────────────────────────
@@ -196,14 +196,14 @@ function slottifyExpr(
     return node
   }
 
-  if (op === 'delay_ref') {
+  if (op === 'delayRef') {
     const id = obj.id as string
     const nodeId = delayNameToId.get(id)
     if (nodeId === undefined) throw new Error(`delay_ref: no delay with id '${id}'.`)
-    return { op: 'delay_value', node_id: nodeId }
+    return { op: 'delayValue', node_id: nodeId }
   }
 
-  if (op === 'nested_out') {
+  if (op === 'nestedOut') {
     const ref = obj.ref as string
     const nodeId = nestedAliasToId.get(ref)
     if (nodeId === undefined) throw new Error(`nested_out: no nested program named '${ref}'.`)
@@ -211,7 +211,7 @@ function slottifyExpr(
     const output = obj.output as string | number
     const outputId = typeof output === 'number' ? output : nestedDef.outputNames.indexOf(output)
     if (outputId === -1) throw new Error(`nested_out: unknown output '${output}' on '${ref}'.`)
-    return { op: 'nested_output', node_id: nodeId, output_id: outputId }
+    return { op: 'nestedOutput', node_id: nodeId, output_id: outputId }
   }
 
   // Generic op with args — recurse
@@ -248,7 +248,7 @@ function slottifyExpr(
   if (op === 'map2') {
     return { ...obj, over: recurse(obj.over as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
   }
-  if (op === 'zip_with') {
+  if (op === 'zipWith') {
     return { ...obj, a: recurse(obj.a as ExprNode), b: recurse(obj.b as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
   }
 
@@ -489,7 +489,7 @@ export function loadProgramDef(
     const d = rawDecl as Record<string, unknown>
     const op = d.op as string
 
-    if (op === 'reg_decl') {
+    if (op === 'regDecl') {
       const name = d.name as string
       regNames.push(name)
       const init = d.init as unknown
@@ -505,12 +505,12 @@ export function loadProgramDef(
         regInitValues.push(init as ValueCoercible)
         regPortTypes.push(undefined)
       }
-    } else if (op === 'delay_decl') {
+    } else if (op === 'delayDecl') {
       const name = d.name as string
       delayNames.push(name)
       delayInitValues.push((d.init as number | undefined) ?? 0)
       if (d.update !== undefined) delayUpdateByName.set(name, d.update as ExprNode)
-    } else if (op === 'instance_decl') {
+    } else if (op === 'instanceDecl') {
       const alias = d.name as string
       nestedAliases.push(alias)
       nestedSpecByAlias.set(alias, {
@@ -518,7 +518,7 @@ export function loadProgramDef(
         inputs: d.inputs as Record<string, ExprNode> | undefined,
         type_args: d.type_args as Record<string, number | ExprNode> | undefined,
       })
-    } else if (op === 'program_decl') {
+    } else if (op === 'programDecl') {
       // Registered by loadProgramAsType; nothing to do here.
     } else {
       throw new Error(`${def.name}: unexpected decl op '${op}' in block.decls`)
@@ -568,9 +568,9 @@ export function loadProgramDef(
     const a = rawAssign as Record<string, unknown>
     const op = a.op as string
 
-    if (op === 'output_assign') {
+    if (op === 'outputAssign') {
       outputExprByName.set(a.name as string, a.expr as ExprNode)
-    } else if (op === 'next_update') {
+    } else if (op === 'nextUpdate') {
       const target = a.target as { kind: string; name: string }
       if (target.kind === 'reg') {
         registerExprByName.set(target.name, a.expr as ExprNode)
@@ -728,8 +728,8 @@ export function prettyExpr(
   if (op === 'param')     return `param(${n.name})`
   if (op === 'trigger')   return `trigger(${n.name})`
   if (op === 'binding')   return `$${n.name}`
-  if (op === 'sample_rate')  return 'sample_rate'
-  if (op === 'sample_index') return 'sample_index'
+  if (op === 'sampleRate')  return 'sampleRate'
+  if (op === 'sampleIndex') return 'sampleIndex'
   if (op === 'float' || op === 'int')  return String(n.value)
   if (op === 'bool')  return String(n.value)
 
@@ -748,12 +748,12 @@ export function prettyExpr(
   if (op === 'clamp')  return `clamp(${args.map(a => prettyExpr(a, instanceRegistry)).join(', ')})`
   if (op === 'select') return `select(${args.map(a => prettyExpr(a, instanceRegistry)).join(', ')})`
   if (op === 'index')  return `${prettyExpr(args[0], instanceRegistry)}[${prettyExpr(args[1], instanceRegistry)}]`
-  if (op === 'array_set') return `array_set(${args.map(a => prettyExpr(a, instanceRegistry)).join(', ')})`
+  if (op === 'arraySet') return `array_set(${args.map(a => prettyExpr(a, instanceRegistry)).join(', ')})`
   if (op === 'array') return `[${(n.items as ExprNode[]).map(i => prettyExpr(i, instanceRegistry)).join(', ')}]`
   if (op === 'matrix') return `matrix(${JSON.stringify(n.rows)})`
   if (op === 'delay') return `delay(${prettyExpr(args[0], instanceRegistry)}, ${n.init ?? 0})`
-  if (op === 'delay_ref') return `delay_ref(${n.id})`
-  if (op === 'nested_out') return `${n.ref}.${n.output}`
+  if (op === 'delayRef') return `delay_ref(${n.id})`
+  if (op === 'nestedOut') return `${n.ref}.${n.output}`
   if (op === 'tag') {
     const payload = n.payload as Record<string, ExprNode> | undefined
     const fields = payload === undefined

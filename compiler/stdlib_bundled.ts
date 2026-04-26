@@ -15,14 +15,14 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "s",
           "init": 0
         }
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "add",
@@ -48,7 +48,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "s"
@@ -134,19 +134,19 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "hold_sample",
           "init": 0
         },
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "hold_counter",
           "init": 0
         }
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "output",
           "expr": {
             "op": "let",
@@ -171,7 +171,7 @@ export const STDLIB: Record<string, unknown> = {
                   },
                   1,
                   {
-                    "op": "sample_rate"
+                    "op": "sampleRate"
                   }
                 ]
               }
@@ -202,7 +202,7 @@ export const STDLIB: Record<string, unknown> = {
                       "op": "floorDiv",
                       "args": [
                         {
-                          "op": "sample_rate"
+                          "op": "sampleRate"
                         },
                         {
                           "op": "binding",
@@ -298,7 +298,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "hold_sample"
@@ -326,7 +326,7 @@ export const STDLIB: Record<string, unknown> = {
                   },
                   1,
                   {
-                    "op": "sample_rate"
+                    "op": "sampleRate"
                   }
                 ]
               }
@@ -357,7 +357,7 @@ export const STDLIB: Record<string, unknown> = {
                       "op": "floorDiv",
                       "args": [
                         {
-                          "op": "sample_rate"
+                          "op": "sampleRate"
                         },
                         {
                           "op": "binding",
@@ -453,7 +453,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "hold_counter"
@@ -470,7 +470,7 @@ export const STDLIB: Record<string, unknown> = {
                   },
                   1,
                   {
-                    "op": "sample_rate"
+                    "op": "sampleRate"
                   }
                 ]
               }
@@ -485,7 +485,7 @@ export const STDLIB: Record<string, unknown> = {
                       "op": "floorDiv",
                       "args": [
                         {
-                          "op": "sample_rate"
+                          "op": "sampleRate"
                         },
                         {
                           "op": "binding",
@@ -573,14 +573,14 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "phase",
           "init": 0
         }
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "saw",
           "expr": {
             "op": "let",
@@ -593,7 +593,7 @@ export const STDLIB: Record<string, unknown> = {
                     "name": "freq"
                   },
                   {
-                    "op": "sample_rate"
+                    "op": "sampleRate"
                   }
                 ]
               },
@@ -787,7 +787,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "phase"
@@ -810,7 +810,7 @@ export const STDLIB: Record<string, unknown> = {
                         "name": "freq"
                       },
                       {
-                        "op": "sample_rate"
+                        "op": "sampleRate"
                       }
                     ]
                   }
@@ -850,12 +850,12 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "env_smooth",
           "init": 0
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "hold",
           "program": "SampleHold",
           "inputs": {
@@ -870,7 +870,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ramp",
           "program": "TriggerRamp",
           "inputs": {
@@ -881,7 +881,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "decay_calc",
           "program": "Exp",
           "inputs": {
@@ -893,7 +893,7 @@ export const STDLIB: Record<string, unknown> = {
                   "op": "mul",
                   "args": [
                     {
-                      "op": "sample_rate"
+                      "op": "sampleRate"
                     },
                     {
                       "op": "add",
@@ -906,7 +906,7 @@ export const STDLIB: Record<string, unknown> = {
                               "name": "decay_scale"
                             },
                             {
-                              "op": "nested_out",
+                              "op": "nestedOut",
                               "ref": "hold",
                               "output": "value"
                             }
@@ -922,7 +922,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "env_gen",
           "program": "EnvExpDecay",
           "inputs": {
@@ -931,19 +931,19 @@ export const STDLIB: Record<string, unknown> = {
               "name": "trigger"
             },
             "decay": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "decay_calc",
               "output": "out"
             }
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "svf",
           "program": "SVF",
           "inputs": {
             "input": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ramp",
               "output": "edge"
             },
@@ -951,12 +951,12 @@ export const STDLIB: Record<string, unknown> = {
               "op": "let",
               "bind": {
                 "r_held": {
-                  "op": "nested_out",
+                  "op": "nestedOut",
                   "ref": "hold",
                   "output": "value"
                 },
                 "t_eff": {
-                  "op": "nested_out",
+                  "op": "nestedOut",
                   "ref": "ramp",
                   "output": "frames"
                 }
@@ -1031,7 +1031,7 @@ export const STDLIB: Record<string, unknown> = {
                               "op": "mul",
                               "args": [
                                 {
-                                  "op": "sample_rate"
+                                  "op": "sampleRate"
                                 },
                                 {
                                   "op": "binding",
@@ -1056,7 +1056,7 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "mul",
@@ -1069,7 +1069,7 @@ export const STDLIB: Record<string, unknown> = {
                     "name": "env_smooth"
                   },
                   {
-                    "op": "nested_out",
+                    "op": "nestedOut",
                     "ref": "svf",
                     "output": "bp"
                   }
@@ -1082,7 +1082,7 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "mul",
                     "args": [
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "hold",
                         "output": "value"
                       },
@@ -1099,7 +1099,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "env_smooth"
@@ -1122,7 +1122,7 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "sub",
                     "args": [
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "env_gen",
                         "output": "env"
                       },
@@ -1193,13 +1193,13 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "voice_idx",
           "init": 0,
           "type": "int"
         },
         {
-          "op": "delay_decl",
+          "op": "delayDecl",
           "name": "prev_trigger",
           "update": {
             "op": "input",
@@ -1208,7 +1208,7 @@ export const STDLIB: Record<string, unknown> = {
           "init": 0
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "v0",
           "program": "Bubble",
           "inputs": {
@@ -1254,7 +1254,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "v1",
           "program": "Bubble",
           "inputs": {
@@ -1300,7 +1300,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "v2",
           "program": "Bubble",
           "inputs": {
@@ -1346,7 +1346,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "v3",
           "program": "Bubble",
           "inputs": {
@@ -1392,7 +1392,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "v4",
           "program": "Bubble",
           "inputs": {
@@ -1438,7 +1438,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "v5",
           "program": "Bubble",
           "inputs": {
@@ -1484,7 +1484,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "v6",
           "program": "Bubble",
           "inputs": {
@@ -1530,7 +1530,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "v7",
           "program": "Bubble",
           "inputs": {
@@ -1578,7 +1578,7 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "add",
@@ -1590,12 +1590,12 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "add",
                     "args": [
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "v0",
                         "output": "out"
                       },
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "v1",
                         "output": "out"
                       }
@@ -1605,12 +1605,12 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "add",
                     "args": [
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "v2",
                         "output": "out"
                       },
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "v3",
                         "output": "out"
                       }
@@ -1625,12 +1625,12 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "add",
                     "args": [
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "v4",
                         "output": "out"
                       },
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "v5",
                         "output": "out"
                       }
@@ -1640,12 +1640,12 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "add",
                     "args": [
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "v6",
                         "output": "out"
                       },
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "v7",
                         "output": "out"
                       }
@@ -1657,7 +1657,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "voice_idx"
@@ -1682,7 +1682,7 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "lte",
                     "args": [
                       {
-                        "op": "delay_ref",
+                        "op": "delayRef",
                         "id": "prev_trigger"
                       },
                       0.5
@@ -1763,7 +1763,7 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "program_decl",
+          "op": "programDecl",
           "name": "_wrap01",
           "program": {
             "op": "program",
@@ -1773,7 +1773,7 @@ export const STDLIB: Record<string, unknown> = {
               "decls": [],
               "assigns": [
                 {
-                  "op": "output_assign",
+                  "op": "outputAssign",
                   "name": "value",
                   "expr": {
                     "op": "mod",
@@ -1812,7 +1812,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "_wrap01_0",
           "program": "_wrap01",
           "inputs": {
@@ -1823,7 +1823,7 @@ export const STDLIB: Record<string, unknown> = {
                   "op": "mul",
                   "args": [
                     {
-                      "op": "sample_index"
+                      "op": "sampleIndex"
                     },
                     {
                       "op": "input",
@@ -1832,14 +1832,14 @@ export const STDLIB: Record<string, unknown> = {
                   ]
                 },
                 {
-                  "op": "sample_rate"
+                  "op": "sampleRate"
                 }
               ]
             }
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "_wrap01_1",
           "program": "_wrap01",
           "inputs": {
@@ -1853,7 +1853,7 @@ export const STDLIB: Record<string, unknown> = {
                       "op": "mul",
                       "args": [
                         {
-                          "op": "sample_index"
+                          "op": "sampleIndex"
                         },
                         {
                           "op": "input",
@@ -1868,7 +1868,7 @@ export const STDLIB: Record<string, unknown> = {
                   ]
                 },
                 {
-                  "op": "sample_rate"
+                  "op": "sampleRate"
                 }
               ]
             }
@@ -1877,7 +1877,7 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "output",
           "expr": {
             "op": "mul",
@@ -1886,7 +1886,7 @@ export const STDLIB: Record<string, unknown> = {
                 "op": "lt",
                 "args": [
                   {
-                    "op": "nested_out",
+                    "op": "nestedOut",
                     "ref": "_wrap01_0",
                     "output": "value"
                   },
@@ -1898,7 +1898,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "ratios_out",
           "expr": {
             "op": "mul",
@@ -1907,7 +1907,7 @@ export const STDLIB: Record<string, unknown> = {
                 "op": "lt",
                 "args": [
                   {
-                    "op": "nested_out",
+                    "op": "nestedOut",
                     "ref": "_wrap01_1",
                     "output": "value"
                   },
@@ -1967,14 +1967,14 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "s",
           "init": 0
         }
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "add",
@@ -2000,7 +2000,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "s"
@@ -2059,7 +2059,7 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "sin",
           "program": "Sin",
           "inputs": {
@@ -2078,10 +2078,10 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "sin",
             "output": "out"
           }
@@ -2113,7 +2113,7 @@ export const STDLIB: Record<string, unknown> = {
       "decls": [],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "add",
@@ -2189,18 +2189,18 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "buf",
           "init": {
             "zeros": {
-              "type_param": "N"
+              "typeParam": "N"
             }
           }
         }
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "y",
           "expr": {
             "op": "index",
@@ -2213,10 +2213,10 @@ export const STDLIB: Record<string, unknown> = {
                 "op": "mod",
                 "args": [
                   {
-                    "op": "sample_index"
+                    "op": "sampleIndex"
                   },
                   {
-                    "op": "type_param",
+                    "op": "typeParam",
                     "name": "N"
                   }
                 ]
@@ -2225,13 +2225,13 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "buf"
           },
           "expr": {
-            "op": "array_set",
+            "op": "arraySet",
             "args": [
               {
                 "op": "reg",
@@ -2241,10 +2241,10 @@ export const STDLIB: Record<string, unknown> = {
                 "op": "mod",
                 "args": [
                   {
-                    "op": "sample_index"
+                    "op": "sampleIndex"
                   },
                   {
-                    "op": "type_param",
+                    "op": "typeParam",
                     "name": "N"
                   }
                 ]
@@ -2285,7 +2285,7 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "delay_decl",
+          "op": "delayDecl",
           "name": "prev_trigger",
           "update": {
             "op": "input",
@@ -2294,7 +2294,7 @@ export const STDLIB: Record<string, unknown> = {
           "init": 0
         },
         {
-          "op": "delay_decl",
+          "op": "delayDecl",
           "name": "state",
           "type": "Env",
           "init": {
@@ -2306,7 +2306,7 @@ export const STDLIB: Record<string, unknown> = {
             "op": "match",
             "type": "Env",
             "scrutinee": {
-              "op": "delay_ref",
+              "op": "delayRef",
               "id": "state"
             },
             "arms": {
@@ -2331,7 +2331,7 @@ export const STDLIB: Record<string, unknown> = {
                           "op": "lte",
                           "args": [
                             {
-                              "op": "delay_ref",
+                              "op": "delayRef",
                               "id": "prev_trigger"
                             },
                             0.5
@@ -2377,7 +2377,7 @@ export const STDLIB: Record<string, unknown> = {
                           "op": "lte",
                           "args": [
                             {
-                              "op": "delay_ref",
+                              "op": "delayRef",
                               "id": "prev_trigger"
                             },
                             0.5
@@ -2422,13 +2422,13 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "env",
           "expr": {
             "op": "match",
             "type": "Env",
             "scrutinee": {
-              "op": "delay_ref",
+              "op": "delayRef",
               "id": "state"
             },
             "arms": {
@@ -2498,7 +2498,7 @@ export const STDLIB: Record<string, unknown> = {
       "decls": [],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "let",
@@ -2675,17 +2675,17 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "delay_decl",
+          "op": "delayDecl",
           "name": "prev_lp",
           "update": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "pole4",
             "output": "out"
           },
           "init": 0
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "tanh_in",
           "program": "Tanh",
           "inputs": {
@@ -2705,7 +2705,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "sin_g",
           "program": "Sin",
           "inputs": {
@@ -2729,14 +2729,14 @@ export const STDLIB: Record<string, unknown> = {
                           "args": [
                             0.49,
                             {
-                              "op": "sample_rate"
+                              "op": "sampleRate"
                             }
                           ]
                         }
                       ]
                     },
                     {
-                      "op": "sample_rate"
+                      "op": "sampleRate"
                     }
                   ]
                 }
@@ -2745,7 +2745,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "pole1",
           "program": "OnePole",
           "inputs": {
@@ -2753,7 +2753,7 @@ export const STDLIB: Record<string, unknown> = {
               "op": "sub",
               "args": [
                 {
-                  "op": "nested_out",
+                  "op": "nestedOut",
                   "ref": "tanh_in",
                   "output": "out"
                 },
@@ -2771,7 +2771,7 @@ export const STDLIB: Record<string, unknown> = {
                       ]
                     },
                     {
-                      "op": "delay_ref",
+                      "op": "delayRef",
                       "id": "prev_lp"
                     }
                   ]
@@ -2783,7 +2783,7 @@ export const STDLIB: Record<string, unknown> = {
               "args": [
                 2,
                 {
-                  "op": "nested_out",
+                  "op": "nestedOut",
                   "ref": "sin_g",
                   "output": "out"
                 }
@@ -2792,12 +2792,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "pole2",
           "program": "OnePole",
           "inputs": {
             "input": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "pole1",
               "output": "out"
             },
@@ -2806,7 +2806,7 @@ export const STDLIB: Record<string, unknown> = {
               "args": [
                 2,
                 {
-                  "op": "nested_out",
+                  "op": "nestedOut",
                   "ref": "sin_g",
                   "output": "out"
                 }
@@ -2815,12 +2815,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "pole3",
           "program": "OnePole",
           "inputs": {
             "input": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "pole2",
               "output": "out"
             },
@@ -2829,7 +2829,7 @@ export const STDLIB: Record<string, unknown> = {
               "args": [
                 2,
                 {
-                  "op": "nested_out",
+                  "op": "nestedOut",
                   "ref": "sin_g",
                   "output": "out"
                 }
@@ -2838,12 +2838,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "pole4",
           "program": "OnePole",
           "inputs": {
             "input": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "pole3",
               "output": "out"
             },
@@ -2852,7 +2852,7 @@ export const STDLIB: Record<string, unknown> = {
               "args": [
                 2,
                 {
-                  "op": "nested_out",
+                  "op": "nestedOut",
                   "ref": "sin_g",
                   "output": "out"
                 }
@@ -2863,27 +2863,27 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "lp",
           "expr": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "pole4",
             "output": "out"
           }
         },
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "bp",
           "expr": {
             "op": "sub",
             "args": [
               {
-                "op": "nested_out",
+                "op": "nestedOut",
                 "ref": "pole2",
                 "output": "out"
               },
               {
-                "op": "nested_out",
+                "op": "nestedOut",
                 "ref": "pole4",
                 "output": "out"
               }
@@ -2891,7 +2891,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "hp",
           "expr": {
             "op": "sub",
@@ -2901,7 +2901,7 @@ export const STDLIB: Record<string, unknown> = {
                 "name": "input"
               },
               {
-                "op": "nested_out",
+                "op": "nestedOut",
                 "ref": "pole4",
                 "output": "out"
               }
@@ -2909,7 +2909,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "notch",
           "expr": {
             "op": "add",
@@ -2922,14 +2922,14 @@ export const STDLIB: Record<string, unknown> = {
                     "name": "input"
                   },
                   {
-                    "op": "nested_out",
+                    "op": "nestedOut",
                     "ref": "pole4",
                     "output": "out"
                   }
                 ]
               },
               {
-                "op": "nested_out",
+                "op": "nestedOut",
                 "ref": "pole4",
                 "output": "out"
               }
@@ -2976,7 +2976,7 @@ export const STDLIB: Record<string, unknown> = {
       "decls": [],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "let",
@@ -3002,7 +3002,7 @@ export const STDLIB: Record<string, unknown> = {
                 ]
               },
               "e0": {
-                "op": "float_exponent",
+                "op": "floatExponent",
                 "args": [
                   {
                     "op": "binding",
@@ -3193,18 +3193,18 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "state",
           "init": 44257,
           "type": "int"
         },
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "value",
           "init": 0
         },
         {
-          "op": "delay_decl",
+          "op": "delayDecl",
           "name": "prev_clock",
           "update": {
             "op": "input",
@@ -3215,7 +3215,7 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "let",
@@ -3237,7 +3237,7 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "lte",
                     "args": [
                       {
-                        "op": "delay_ref",
+                        "op": "delayRef",
                         "id": "prev_clock"
                       },
                       0.5
@@ -3355,7 +3355,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "state"
@@ -3380,7 +3380,7 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "lte",
                     "args": [
                       {
-                        "op": "delay_ref",
+                        "op": "delayRef",
                         "id": "prev_clock"
                       },
                       0.5
@@ -3457,7 +3457,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "value"
@@ -3482,7 +3482,7 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "lte",
                     "args": [
                       {
-                        "op": "delay_ref",
+                        "op": "delayRef",
                         "id": "prev_clock"
                       },
                       0.5
@@ -3624,12 +3624,12 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "s",
           "init": 0
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "tanh_in",
           "program": "Tanh",
           "inputs": {
@@ -3640,7 +3640,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "tanh_s",
           "program": "Tanh",
           "inputs": {
@@ -3653,7 +3653,7 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "add",
@@ -3673,12 +3673,12 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "sub",
                     "args": [
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "tanh_in",
                         "output": "out"
                       },
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "tanh_s",
                         "output": "out"
                       }
@@ -3690,7 +3690,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "s"
@@ -3713,12 +3713,12 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "sub",
                     "args": [
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "tanh_in",
                         "output": "out"
                       },
                       {
-                        "op": "nested_out",
+                        "op": "nestedOut",
                         "ref": "tanh_s",
                         "output": "out"
                       }
@@ -3760,12 +3760,12 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "fb",
           "init": 0
         },
         {
-          "op": "program_decl",
+          "op": "programDecl",
           "name": "_allpassStage",
           "program": {
             "op": "program",
@@ -3774,19 +3774,19 @@ export const STDLIB: Record<string, unknown> = {
               "op": "block",
               "decls": [
                 {
-                  "op": "reg_decl",
+                  "op": "regDecl",
                   "name": "x_prev",
                   "init": 0
                 },
                 {
-                  "op": "reg_decl",
+                  "op": "regDecl",
                   "name": "y_prev",
                   "init": 0
                 }
               ],
               "assigns": [
                 {
-                  "op": "output_assign",
+                  "op": "outputAssign",
                   "name": "y",
                   "expr": {
                     "op": "add",
@@ -3835,7 +3835,7 @@ export const STDLIB: Record<string, unknown> = {
                   }
                 },
                 {
-                  "op": "next_update",
+                  "op": "nextUpdate",
                   "target": {
                     "kind": "reg",
                     "name": "x_prev"
@@ -3846,7 +3846,7 @@ export const STDLIB: Record<string, unknown> = {
                   }
                 },
                 {
-                  "op": "next_update",
+                  "op": "nextUpdate",
                   "target": {
                     "kind": "reg",
                     "name": "y_prev"
@@ -3912,7 +3912,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "lfo_sin",
           "program": "Sin",
           "inputs": {
@@ -3927,7 +3927,7 @@ export const STDLIB: Record<string, unknown> = {
                       "op": "mul",
                       "args": [
                         {
-                          "op": "sample_index"
+                          "op": "sampleIndex"
                         },
                         {
                           "op": "input",
@@ -3936,7 +3936,7 @@ export const STDLIB: Record<string, unknown> = {
                       ]
                     },
                     {
-                      "op": "sample_rate"
+                      "op": "sampleRate"
                     }
                   ]
                 }
@@ -3945,7 +3945,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_0",
           "program": "_allpassStage",
           "inputs": {
@@ -3980,7 +3980,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -3991,12 +3991,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_1",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_0",
               "output": "y"
             },
@@ -4009,7 +4009,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4020,12 +4020,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_2",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_1",
               "output": "y"
             },
@@ -4038,7 +4038,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4049,12 +4049,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_3",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_2",
               "output": "y"
             },
@@ -4067,7 +4067,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4080,7 +4080,7 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "output",
           "expr": {
             "op": "add",
@@ -4100,7 +4100,7 @@ export const STDLIB: Record<string, unknown> = {
                 "args": [
                   0.5,
                   {
-                    "op": "nested_out",
+                    "op": "nestedOut",
                     "ref": "ap_3",
                     "output": "y"
                   }
@@ -4110,22 +4110,22 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "lfo",
           "expr": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "lfo_sin",
             "output": "out"
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "fb"
           },
           "expr": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "ap_3",
             "output": "y"
           }
@@ -4161,12 +4161,12 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "fb",
           "init": 0
         },
         {
-          "op": "program_decl",
+          "op": "programDecl",
           "name": "_allpassStage",
           "program": {
             "op": "program",
@@ -4175,19 +4175,19 @@ export const STDLIB: Record<string, unknown> = {
               "op": "block",
               "decls": [
                 {
-                  "op": "reg_decl",
+                  "op": "regDecl",
                   "name": "x_prev",
                   "init": 0
                 },
                 {
-                  "op": "reg_decl",
+                  "op": "regDecl",
                   "name": "y_prev",
                   "init": 0
                 }
               ],
               "assigns": [
                 {
-                  "op": "output_assign",
+                  "op": "outputAssign",
                   "name": "y",
                   "expr": {
                     "op": "add",
@@ -4236,7 +4236,7 @@ export const STDLIB: Record<string, unknown> = {
                   }
                 },
                 {
-                  "op": "next_update",
+                  "op": "nextUpdate",
                   "target": {
                     "kind": "reg",
                     "name": "x_prev"
@@ -4247,7 +4247,7 @@ export const STDLIB: Record<string, unknown> = {
                   }
                 },
                 {
-                  "op": "next_update",
+                  "op": "nextUpdate",
                   "target": {
                     "kind": "reg",
                     "name": "y_prev"
@@ -4313,7 +4313,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "lfo_sin",
           "program": "Sin",
           "inputs": {
@@ -4328,7 +4328,7 @@ export const STDLIB: Record<string, unknown> = {
                       "op": "mul",
                       "args": [
                         {
-                          "op": "sample_index"
+                          "op": "sampleIndex"
                         },
                         {
                           "op": "input",
@@ -4337,7 +4337,7 @@ export const STDLIB: Record<string, unknown> = {
                       ]
                     },
                     {
-                      "op": "sample_rate"
+                      "op": "sampleRate"
                     }
                   ]
                 }
@@ -4346,7 +4346,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_0",
           "program": "_allpassStage",
           "inputs": {
@@ -4381,7 +4381,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4392,12 +4392,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_1",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_0",
               "output": "y"
             },
@@ -4410,7 +4410,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4421,12 +4421,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_2",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_1",
               "output": "y"
             },
@@ -4439,7 +4439,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4450,12 +4450,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_3",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_2",
               "output": "y"
             },
@@ -4468,7 +4468,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4479,12 +4479,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_4",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_3",
               "output": "y"
             },
@@ -4497,7 +4497,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4508,12 +4508,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_5",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_4",
               "output": "y"
             },
@@ -4526,7 +4526,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4537,12 +4537,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_6",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_5",
               "output": "y"
             },
@@ -4555,7 +4555,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4566,12 +4566,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_7",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_6",
               "output": "y"
             },
@@ -4584,7 +4584,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4595,12 +4595,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_8",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_7",
               "output": "y"
             },
@@ -4613,7 +4613,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4624,12 +4624,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_9",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_8",
               "output": "y"
             },
@@ -4642,7 +4642,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4653,12 +4653,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_10",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_9",
               "output": "y"
             },
@@ -4671,7 +4671,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4682,12 +4682,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_11",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_10",
               "output": "y"
             },
@@ -4700,7 +4700,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4711,12 +4711,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_12",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_11",
               "output": "y"
             },
@@ -4729,7 +4729,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4740,12 +4740,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_13",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_12",
               "output": "y"
             },
@@ -4758,7 +4758,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4769,12 +4769,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_14",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_13",
               "output": "y"
             },
@@ -4787,7 +4787,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4798,12 +4798,12 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "ap_15",
           "program": "_allpassStage",
           "inputs": {
             "x": {
-              "op": "nested_out",
+              "op": "nestedOut",
               "ref": "ap_14",
               "output": "y"
             },
@@ -4816,7 +4816,7 @@ export const STDLIB: Record<string, unknown> = {
                   "args": [
                     0.35,
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "lfo_sin",
                       "output": "out"
                     }
@@ -4829,7 +4829,7 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "output",
           "expr": {
             "op": "add",
@@ -4849,7 +4849,7 @@ export const STDLIB: Record<string, unknown> = {
                 "args": [
                   0.5,
                   {
-                    "op": "nested_out",
+                    "op": "nestedOut",
                     "ref": "ap_15",
                     "output": "y"
                   }
@@ -4859,22 +4859,22 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "lfo",
           "expr": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "lfo_sin",
             "output": "out"
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "fb"
           },
           "expr": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "ap_15",
             "output": "y"
           }
@@ -4910,7 +4910,7 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "state",
           "init": 2685821657736339000,
           "type": "int"
@@ -4918,7 +4918,7 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "trigger",
           "expr": {
             "op": "let",
@@ -5038,7 +5038,7 @@ export const STDLIB: Record<string, unknown> = {
                               ]
                             },
                             {
-                              "op": "sample_rate"
+                              "op": "sampleRate"
                             }
                           ]
                         }
@@ -5070,7 +5070,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "state"
@@ -5169,7 +5169,7 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "log_x",
           "program": "Log",
           "inputs": {
@@ -5180,7 +5180,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "exp",
           "program": "Exp",
           "inputs": {
@@ -5192,7 +5192,7 @@ export const STDLIB: Record<string, unknown> = {
                   "name": "y"
                 },
                 {
-                  "op": "nested_out",
+                  "op": "nestedOut",
                   "ref": "log_x",
                   "output": "out"
                 }
@@ -5203,10 +5203,10 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "exp",
             "output": "out"
           }
@@ -5242,19 +5242,19 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "ic1eq",
           "init": 0
         },
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "ic2eq",
           "init": 0
         }
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "lp",
           "expr": {
             "op": "let",
@@ -5273,7 +5273,7 @@ export const STDLIB: Record<string, unknown> = {
                     ]
                   },
                   {
-                    "op": "sample_rate"
+                    "op": "sampleRate"
                   }
                 ]
               },
@@ -5455,7 +5455,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "bp",
           "expr": {
             "op": "let",
@@ -5474,7 +5474,7 @@ export const STDLIB: Record<string, unknown> = {
                     ]
                   },
                   {
-                    "op": "sample_rate"
+                    "op": "sampleRate"
                   }
                 ]
               },
@@ -5593,7 +5593,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "hp",
           "expr": {
             "op": "let",
@@ -5612,7 +5612,7 @@ export const STDLIB: Record<string, unknown> = {
                     ]
                   },
                   {
-                    "op": "sample_rate"
+                    "op": "sampleRate"
                   }
                 ]
               },
@@ -5829,7 +5829,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "ic1eq"
@@ -5851,7 +5851,7 @@ export const STDLIB: Record<string, unknown> = {
                     ]
                   },
                   {
-                    "op": "sample_rate"
+                    "op": "sampleRate"
                   }
                 ]
               },
@@ -5994,7 +5994,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "ic2eq"
@@ -6016,7 +6016,7 @@ export const STDLIB: Record<string, unknown> = {
                     ]
                   },
                   {
-                    "op": "sample_rate"
+                    "op": "sampleRate"
                   }
                 ]
               },
@@ -6233,12 +6233,12 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "held",
           "init": 0
         },
         {
-          "op": "delay_decl",
+          "op": "delayDecl",
           "name": "prev_trigger",
           "update": {
             "op": "input",
@@ -6249,7 +6249,7 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "value",
           "expr": {
             "op": "let",
@@ -6271,7 +6271,7 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "lte",
                     "args": [
                       {
-                        "op": "delay_ref",
+                        "op": "delayRef",
                         "id": "prev_trigger"
                       },
                       0.5
@@ -6300,7 +6300,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "held"
@@ -6325,7 +6325,7 @@ export const STDLIB: Record<string, unknown> = {
                     "op": "lte",
                     "args": [
                       {
-                        "op": "delay_ref",
+                        "op": "delayRef",
                         "id": "prev_trigger"
                       },
                       0.5
@@ -6384,13 +6384,13 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "step",
           "init": 0,
           "type": "int"
         },
         {
-          "op": "delay_decl",
+          "op": "delayDecl",
           "name": "prev_clock",
           "update": {
             "op": "input",
@@ -6401,7 +6401,7 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "value",
           "expr": {
             "op": "index",
@@ -6418,7 +6418,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "step"
@@ -6450,7 +6450,7 @@ export const STDLIB: Record<string, unknown> = {
                         "op": "lte",
                         "args": [
                           {
-                            "op": "delay_ref",
+                            "op": "delayRef",
                             "id": "prev_clock"
                           },
                           0.5
@@ -6461,7 +6461,7 @@ export const STDLIB: Record<string, unknown> = {
                 ]
               },
               {
-                "op": "type_param",
+                "op": "typeParam",
                 "name": "N"
               }
             ]
@@ -6484,7 +6484,7 @@ export const STDLIB: Record<string, unknown> = {
             "element": "float",
             "shape": [
               {
-                "op": "type_param",
+                "op": "typeParam",
                 "name": "N"
               }
             ]
@@ -6513,7 +6513,7 @@ export const STDLIB: Record<string, unknown> = {
       "decls": [],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "let",
@@ -6553,7 +6553,7 @@ export const STDLIB: Record<string, unknown> = {
                 ]
               },
               "odd_n": {
-                "op": "bit_and",
+                "op": "bitAnd",
                 "args": [
                   {
                     "op": "binding",
@@ -6678,7 +6678,7 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "sin",
           "program": "Sin",
           "inputs": {
@@ -6693,7 +6693,7 @@ export const STDLIB: Record<string, unknown> = {
                       "op": "mul",
                       "args": [
                         {
-                          "op": "sample_index"
+                          "op": "sampleIndex"
                         },
                         {
                           "op": "input",
@@ -6702,7 +6702,7 @@ export const STDLIB: Record<string, unknown> = {
                       ]
                     },
                     {
-                      "op": "sample_rate"
+                      "op": "sampleRate"
                     }
                   ]
                 }
@@ -6713,10 +6713,10 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "sine",
           "expr": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "sin",
             "output": "out"
           }
@@ -6747,7 +6747,7 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "tanh",
           "program": "Tanh",
           "inputs": {
@@ -6769,10 +6769,10 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "tanh",
             "output": "out"
           }
@@ -6809,7 +6809,7 @@ export const STDLIB: Record<string, unknown> = {
       "decls": [],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "let",
@@ -6907,7 +6907,7 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "delay_decl",
+          "op": "delayDecl",
           "name": "prev_trigger",
           "update": {
             "op": "input",
@@ -6916,7 +6916,7 @@ export const STDLIB: Record<string, unknown> = {
           "init": 0
         },
         {
-          "op": "delay_decl",
+          "op": "delayDecl",
           "name": "state",
           "type": "RampState",
           "init": {
@@ -6928,7 +6928,7 @@ export const STDLIB: Record<string, unknown> = {
             "op": "match",
             "type": "RampState",
             "scrutinee": {
-              "op": "delay_ref",
+              "op": "delayRef",
               "id": "state"
             },
             "arms": {
@@ -6953,7 +6953,7 @@ export const STDLIB: Record<string, unknown> = {
                           "op": "lte",
                           "args": [
                             {
-                              "op": "delay_ref",
+                              "op": "delayRef",
                               "id": "prev_trigger"
                             },
                             0.5
@@ -6999,7 +6999,7 @@ export const STDLIB: Record<string, unknown> = {
                           "op": "lte",
                           "args": [
                             {
-                              "op": "delay_ref",
+                              "op": "delayRef",
                               "id": "prev_trigger"
                             },
                             0.5
@@ -7041,13 +7041,13 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "frames",
           "expr": {
             "op": "match",
             "type": "RampState",
             "scrutinee": {
-              "op": "delay_ref",
+              "op": "delayRef",
               "id": "state"
             },
             "arms": {
@@ -7065,7 +7065,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "edge",
           "expr": {
             "op": "mul",
@@ -7084,7 +7084,7 @@ export const STDLIB: Record<string, unknown> = {
                 "op": "lte",
                 "args": [
                   {
-                    "op": "delay_ref",
+                    "op": "delayRef",
                     "id": "prev_trigger"
                   },
                   0.5
@@ -7145,7 +7145,7 @@ export const STDLIB: Record<string, unknown> = {
       "decls": [],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "mul",
@@ -7192,7 +7192,7 @@ export const STDLIB: Record<string, unknown> = {
       "op": "block",
       "decls": [
         {
-          "op": "reg_decl",
+          "op": "regDecl",
           "name": "state",
           "init": 88172645463325250,
           "type": "int"
@@ -7200,7 +7200,7 @@ export const STDLIB: Record<string, unknown> = {
       ],
       "assigns": [
         {
-          "op": "output_assign",
+          "op": "outputAssign",
           "name": "out",
           "expr": {
             "op": "let",
@@ -7304,7 +7304,7 @@ export const STDLIB: Record<string, unknown> = {
           }
         },
         {
-          "op": "next_update",
+          "op": "nextUpdate",
           "target": {
             "kind": "reg",
             "name": "state"

@@ -5,12 +5,12 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "fb",
         "init": 0
       },
       {
-        "op": "program_decl",
+        "op": "programDecl",
         "name": "_allpassStage",
         "program": {
           "op": "program",
@@ -19,19 +19,19 @@
             "op": "block",
             "decls": [
               {
-                "op": "reg_decl",
+                "op": "regDecl",
                 "name": "x_prev",
                 "init": 0
               },
               {
-                "op": "reg_decl",
+                "op": "regDecl",
                 "name": "y_prev",
                 "init": 0
               }
             ],
             "assigns": [
               {
-                "op": "output_assign",
+                "op": "outputAssign",
                 "name": "y",
                 "expr": {
                   "op": "add",
@@ -80,7 +80,7 @@
                 }
               },
               {
-                "op": "next_update",
+                "op": "nextUpdate",
                 "target": {
                   "kind": "reg",
                   "name": "x_prev"
@@ -91,7 +91,7 @@
                 }
               },
               {
-                "op": "next_update",
+                "op": "nextUpdate",
                 "target": {
                   "kind": "reg",
                   "name": "y_prev"
@@ -157,7 +157,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "lfo_sin",
         "program": "Sin",
         "inputs": {
@@ -172,7 +172,7 @@
                     "op": "mul",
                     "args": [
                       {
-                        "op": "sample_index"
+                        "op": "sampleIndex"
                       },
                       {
                         "op": "input",
@@ -181,7 +181,7 @@
                     ]
                   },
                   {
-                    "op": "sample_rate"
+                    "op": "sampleRate"
                   }
                 ]
               }
@@ -190,7 +190,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "ap_0",
         "program": "_allpassStage",
         "inputs": {
@@ -225,7 +225,7 @@
                 "args": [
                   0.35,
                   {
-                    "op": "nested_out",
+                    "op": "nestedOut",
                     "ref": "lfo_sin",
                     "output": "out"
                   }
@@ -236,12 +236,12 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "ap_1",
         "program": "_allpassStage",
         "inputs": {
           "x": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "ap_0",
             "output": "y"
           },
@@ -254,7 +254,7 @@
                 "args": [
                   0.35,
                   {
-                    "op": "nested_out",
+                    "op": "nestedOut",
                     "ref": "lfo_sin",
                     "output": "out"
                   }
@@ -265,12 +265,12 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "ap_2",
         "program": "_allpassStage",
         "inputs": {
           "x": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "ap_1",
             "output": "y"
           },
@@ -283,7 +283,7 @@
                 "args": [
                   0.35,
                   {
-                    "op": "nested_out",
+                    "op": "nestedOut",
                     "ref": "lfo_sin",
                     "output": "out"
                   }
@@ -294,12 +294,12 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "ap_3",
         "program": "_allpassStage",
         "inputs": {
           "x": {
-            "op": "nested_out",
+            "op": "nestedOut",
             "ref": "ap_2",
             "output": "y"
           },
@@ -312,7 +312,7 @@
                 "args": [
                   0.35,
                   {
-                    "op": "nested_out",
+                    "op": "nestedOut",
                     "ref": "lfo_sin",
                     "output": "out"
                   }
@@ -325,7 +325,7 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "output",
         "expr": {
           "op": "add",
@@ -345,7 +345,7 @@
               "args": [
                 0.5,
                 {
-                  "op": "nested_out",
+                  "op": "nestedOut",
                   "ref": "ap_3",
                   "output": "y"
                 }
@@ -355,22 +355,22 @@
         }
       },
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "lfo",
         "expr": {
-          "op": "nested_out",
+          "op": "nestedOut",
           "ref": "lfo_sin",
           "output": "out"
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": {
           "kind": "reg",
           "name": "fb"
         },
         "expr": {
-          "op": "nested_out",
+          "op": "nestedOut",
           "ref": "ap_3",
           "output": "y"
         }

@@ -32,7 +32,7 @@ export class Param {
 
   /** Return a SmoothedParam SignalExpr node for use in wiring expressions. */
   asExpr(): SignalExpr {
-    return SignalExpr.fromNode({ op: 'smoothed_param', name: '(unnamed)', _ptr: true, _handle: this._h })
+    return SignalExpr.fromNode({ op: 'smoothedParam', name: '(unnamed)', _ptr: true, _handle: this._h })
   }
 
   dispose(): void {
@@ -60,7 +60,7 @@ export class Trigger {
 
   /** Return a TriggerParam SignalExpr node for use in wiring expressions. */
   asExpr(): SignalExpr {
-    return SignalExpr.fromNode({ op: 'trigger_param', name: '(unnamed)', _ptr: true, _handle: this._h })
+    return SignalExpr.fromNode({ op: 'triggerParam', name: '(unnamed)', _ptr: true, _handle: this._h })
   }
 
   dispose(): void {

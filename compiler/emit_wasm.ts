@@ -286,7 +286,7 @@ export type EmitWasmOptions = {
 export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmResult {
   const inputCount = opts.inputCount ?? 0
   const maxBlockSize = opts.maxBlockSize ?? 2048
-  const sampleRate = opts.sampleRate ?? plan.config.sample_rate
+  const sampleRate = opts.sampleRate ?? plan.config.sampleRate
 
   const flatProgram = {
     register_count: plan.register_count,

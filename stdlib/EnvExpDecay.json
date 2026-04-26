@@ -5,20 +5,20 @@
     "op": "block",
     "decls": [
       {
-        "op": "delay_decl",
+        "op": "delayDecl",
         "name": "prev_trigger",
         "update": { "op": "input", "name": "trigger" },
         "init": 0
       },
       {
-        "op": "delay_decl",
+        "op": "delayDecl",
         "name": "state",
         "type": "Env",
         "init": { "op": "tag", "type": "Env", "variant": "Idle" },
         "update": {
           "op": "match",
           "type": "Env",
-          "scrutinee": { "op": "delay_ref", "id": "state" },
+          "scrutinee": { "op": "delayRef", "id": "state" },
           "arms": {
             "Idle": {
               "body": {
@@ -28,7 +28,7 @@
                     "op": "and",
                     "args": [
                       { "op": "gt", "args": [{ "op": "input", "name": "trigger" }, 0.5] },
-                      { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_trigger" }, 0.5] }
+                      { "op": "lte", "args": [{ "op": "delayRef", "id": "prev_trigger" }, 0.5] }
                     ]
                   },
                   { "op": "tag", "type": "Env", "variant": "Decaying", "payload": { "level": 1 } },
@@ -45,7 +45,7 @@
                     "op": "and",
                     "args": [
                       { "op": "gt", "args": [{ "op": "input", "name": "trigger" }, 0.5] },
-                      { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_trigger" }, 0.5] }
+                      { "op": "lte", "args": [{ "op": "delayRef", "id": "prev_trigger" }, 0.5] }
                     ]
                   },
                   { "op": "tag", "type": "Env", "variant": "Decaying", "payload": { "level": 1 } },
@@ -70,12 +70,12 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "env",
         "expr": {
           "op": "match",
           "type": "Env",
-          "scrutinee": { "op": "delay_ref", "id": "state" },
+          "scrutinee": { "op": "delayRef", "id": "state" },
           "arms": {
             "Idle":     { "body": 0 },
             "Decaying": { "bind": "level", "body": { "op": "binding", "name": "level" } }

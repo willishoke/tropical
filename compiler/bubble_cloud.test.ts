@@ -13,11 +13,11 @@ describe('stdlib BubbleCloud', () => {
       schema: 'tropical_program_2',
       name: 'test',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'c', program: 'BubbleCloud', inputs: {
+        { op: 'instanceDecl', name: 'c', program: 'BubbleCloud', inputs: {
           trigger: {
             op: 'select',
             args: [
-              { op: 'eq', args: [{ op: 'mod', args: [{ op: 'sample_index' }, 1000] }, 0] },
+              { op: 'eq', args: [{ op: 'mod', args: [{ op: 'sampleIndex' }, 1000] }, 0] },
               1,
               0,
             ],
@@ -63,8 +63,8 @@ describe('stdlib BubbleCloud', () => {
         schema: 'tropical_program_2',
         name: 'test',
         body: { op: 'block', decls: [
-          { op: 'instance_decl', name: 'clk', program: 'Clock', inputs: { freq: 8, ratios_in: [1] }},
-          { op: 'instance_decl', name: 'c', program: 'BubbleCloud', inputs: {
+          { op: 'instanceDecl', name: 'clk', program: 'Clock', inputs: { freq: 8, ratios_in: [1] }},
+          { op: 'instanceDecl', name: 'c', program: 'BubbleCloud', inputs: {
             trigger: { op: 'ref', instance: 'clk', output: 'output' },
             radius: 0.003,
             amp_scale: 0.1,

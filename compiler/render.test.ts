@@ -45,18 +45,18 @@ const TEST_OSC: ProgramNode = {
   },
   body: { op: 'block',
     decls: [
-      { op: 'reg_decl', name: 'phase', init: 0 },
-      { op: 'instance_decl', name: 'sin1', program: 'Sin', inputs: {
+      { op: 'regDecl', name: 'phase', init: 0 },
+      { op: 'instanceDecl', name: 'sin1', program: 'Sin', inputs: {
         x: { op: 'mul', args: [6.283185307179586, { op: 'reg', name: 'phase' }] },
       }},
     ],
     assigns: [
-      { op: 'output_assign', name: 'saw', expr: { op: 'sub', args: [{ op: 'mul', args: [2, { op: 'reg', name: 'phase' }] }, 1] } },
-      { op: 'output_assign', name: 'sin', expr: { op: 'nested_out', ref: 'sin1', output: 'out' } },
-      { op: 'next_update', target: { kind: 'reg', name: 'phase' }, expr: { op: 'mod', args: [
+      { op: 'outputAssign', name: 'saw', expr: { op: 'sub', args: [{ op: 'mul', args: [2, { op: 'reg', name: 'phase' }] }, 1] } },
+      { op: 'outputAssign', name: 'sin', expr: { op: 'nestedOut', ref: 'sin1', output: 'out' } },
+      { op: 'nextUpdate', target: { kind: 'reg', name: 'phase' }, expr: { op: 'mod', args: [
         { op: 'add', args: [
           { op: 'reg', name: 'phase' },
-          { op: 'div', args: [{ op: 'input', name: 'freq' }, { op: 'sample_rate' }] },
+          { op: 'div', args: [{ op: 'input', name: 'freq' }, { op: 'sampleRate' }] },
         ]},
         1,
       ]}},
@@ -73,7 +73,7 @@ function oscSession(freq: number, output: 'saw' | 'sin', bufferLength = 256) {
     schema: 'tropical_program_2',
     name: 'test',
     body: { op: 'block', decls: [
-      { op: 'instance_decl', name: 'osc', program: 'TestOsc', inputs: { freq } },
+      { op: 'instanceDecl', name: 'osc', program: 'TestOsc', inputs: { freq } },
     ]},
     audio_outputs: [{ instance: 'osc', output }],
   } as ProgramFile, session)
@@ -114,7 +114,7 @@ describe('renderFrames / buffer backend', () => {
       schema: 'tropical_program_2',
       name: 'test',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'osc', program: 'TestOsc', inputs: { freq: 220 } },
+        { op: 'instanceDecl', name: 'osc', program: 'TestOsc', inputs: { freq: 220 } },
       ]},
       audio_outputs: [{ instance: 'osc', output: 'sin' }],
     } as ProgramFile, session)
@@ -152,7 +152,7 @@ describe('renderFrames / buffer backend', () => {
       schema: 'tropical_program_2',
       name: 'test',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'osc', program: 'TestOsc', inputs: { freq: 440 } },
+        { op: 'instanceDecl', name: 'osc', program: 'TestOsc', inputs: { freq: 440 } },
       ]},
       audio_outputs: [{ instance: 'osc', output: 'sin' }],
     }

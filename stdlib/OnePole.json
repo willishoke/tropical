@@ -5,12 +5,12 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "s",
         "init": 0
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "tanh_in",
         "program": "Tanh",
         "inputs": {
@@ -21,7 +21,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "tanh_s",
         "program": "Tanh",
         "inputs": {
@@ -34,7 +34,7 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "out",
         "expr": {
           "op": "add",
@@ -54,12 +54,12 @@
                   "op": "sub",
                   "args": [
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "tanh_in",
                       "output": "out"
                     },
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "tanh_s",
                       "output": "out"
                     }
@@ -71,7 +71,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": {
           "kind": "reg",
           "name": "s"
@@ -94,12 +94,12 @@
                   "op": "sub",
                   "args": [
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "tanh_in",
                       "output": "out"
                     },
                     {
-                      "op": "nested_out",
+                      "op": "nestedOut",
                       "ref": "tanh_s",
                       "output": "out"
                     }

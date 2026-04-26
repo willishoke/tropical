@@ -94,12 +94,12 @@ export function evalExpr(node: ExprNode, env: InterpretEnv): Value {
       return env.inputs[(obj.id ?? obj.slot) as number] ?? 0
     case 'reg':
       return env.registers[(obj.id ?? obj.slot) as number] ?? 0
-    case 'sample_rate':
+    case 'sampleRate':
       return env.sampleRate
-    case 'sample_index':
+    case 'sampleIndex':
       return env.sampleIndex
-    case 'smoothed_param':
-    case 'trigger_param': {
+    case 'smoothedParam':
+    case 'triggerParam': {
       const handle = (obj._handle ?? obj.ptr) as number
       return env.params.get(handle) ?? 0
     }
@@ -111,7 +111,7 @@ export function evalExpr(node: ExprNode, env: InterpretEnv): Value {
     case 'div':       return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => b !== 0 ? a / b : 0)
     case 'mod':       return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => b !== 0 ? a % b : 0)
     case 'ldexp':     return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => a * Math.pow(2, Math.trunc(b)))
-    case 'floor_div':
+    case 'floorDiv':
     case 'floorDiv':  return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => b !== 0 ? Math.floor(a / b) : 0)
 
     // ── Binary comparison ─────────────────────────────────
@@ -123,11 +123,11 @@ export function evalExpr(node: ExprNode, env: InterpretEnv): Value {
     case 'neq': return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => a !== b)
 
     // ── Binary bitwise ────────────────────────────────────
-    case 'bit_and':
+    case 'bitAnd':
     case 'bitAnd':  return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => toInt(a) & toInt(b))
-    case 'bit_or':
+    case 'bitOr':
     case 'bitOr':   return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => toInt(a) | toInt(b))
-    case 'bit_xor':
+    case 'bitXor':
     case 'bitXor':  return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => toInt(a) ^ toInt(b))
     case 'lshift':  return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => toInt(a) << toInt(b))
     case 'rshift':  return binOp(evalExpr(args![0], env), evalExpr(args![1], env), (a, b) => toInt(a) >> toInt(b))
@@ -143,14 +143,14 @@ export function evalExpr(node: ExprNode, env: InterpretEnv): Value {
     case 'floor': return unOp(evalExpr(args![0], env), x => Math.floor(x))
     case 'ceil':  return unOp(evalExpr(args![0], env), x => Math.ceil(x))
     case 'round': return unOp(evalExpr(args![0], env), x => Math.round(x))
-    case 'float_exponent': return unOp(evalExpr(args![0], env), x => {
+    case 'floatExponent': return unOp(evalExpr(args![0], env), x => {
       if (x === 0 || !isFinite(x)) return 0
       return Math.floor(Math.log2(Math.abs(x)))
     })
 
     // ── Unary logical/bitwise ─────────────────────────────
     case 'not':     return unOp(evalExpr(args![0], env), x => !toBool(x))
-    case 'bit_not': return unOp(evalExpr(args![0], env), x => ~toInt(x))
+    case 'bitNot': return unOp(evalExpr(args![0], env), x => ~toInt(x))
 
     // ── Ternary ───────────────────────────────────────────
     case 'select': {
@@ -190,7 +190,7 @@ export function evalExpr(node: ExprNode, env: InterpretEnv): Value {
       if (Array.isArray(arr)) return (arr as number[])[idx] ?? 0
       return arr // scalar indexing returns the scalar
     }
-    case 'array_set': {
+    case 'arraySet': {
       const arr = evalExpr(args![0], env)
       const idx = toInt(evalExpr(args![1], env) as number | boolean)
       const val = toNum(evalExpr(args![2], env) as number | boolean)
@@ -201,7 +201,7 @@ export function evalExpr(node: ExprNode, env: InterpretEnv): Value {
       }
       return val // scalar case
     }
-    case 'broadcast_to': {
+    case 'broadcastTo': {
       const src = evalExpr(args![0], env)
       const shape = obj.shape as number[]
       const len = shape.reduce((a, b) => a * b, 1)
@@ -225,7 +225,7 @@ export function evalExpr(node: ExprNode, env: InterpretEnv): Value {
     // Instance-lineage marker for gateable instances: evaluate `expr` if the
     // gate is true, otherwise evaluate `on_skip` (default 0). This is the
     // reference semantics the JIT optimizes into a real br-i1-guarded block.
-    case 'source_tag': {
+    case 'sourceTag': {
       const gate = toBool(evalExpr(obj.gate_expr as ExprNode, env) as number | boolean)
       if (gate) return evalExpr(obj.expr as ExprNode, env)
       const onSkip = obj.on_skip as ExprNode | undefined

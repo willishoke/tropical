@@ -5,18 +5,18 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "buf",
         "init": {
           "zeros": {
-            "type_param": "N"
+            "typeParam": "N"
           }
         }
       }
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "y",
         "expr": {
           "op": "index",
@@ -29,10 +29,10 @@
               "op": "mod",
               "args": [
                 {
-                  "op": "sample_index"
+                  "op": "sampleIndex"
                 },
                 {
-                  "op": "type_param",
+                  "op": "typeParam",
                   "name": "N"
                 }
               ]
@@ -41,13 +41,13 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": {
           "kind": "reg",
           "name": "buf"
         },
         "expr": {
-          "op": "array_set",
+          "op": "arraySet",
           "args": [
             {
               "op": "reg",
@@ -57,10 +57,10 @@
               "op": "mod",
               "args": [
                 {
-                  "op": "sample_index"
+                  "op": "sampleIndex"
                 },
                 {
-                  "op": "type_param",
+                  "op": "typeParam",
                   "name": "N"
                 }
               ]

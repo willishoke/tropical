@@ -72,10 +72,9 @@ export type FlatProgram = {
 
 const BINARY_TAG: Record<string, string> = {
   add: 'Add', sub: 'Sub', mul: 'Mul', div: 'Div', mod: 'Mod',
-  floor_div: 'FloorDiv', floorDiv: 'FloorDiv',
+  floorDiv: 'FloorDiv',
   lt: 'Less', lte: 'LessEq', gt: 'Greater', gte: 'GreaterEq',
   eq: 'Equal', neq: 'NotEqual',
-  bit_and: 'BitAnd', bit_or: 'BitOr', bit_xor: 'BitXor',
   bitAnd: 'BitAnd', bitOr: 'BitOr', bitXor: 'BitXor',
   lshift: 'LShift', rshift: 'RShift',
   and: 'And', or: 'Or',
@@ -85,9 +84,9 @@ const BINARY_TAG: Record<string, string> = {
 const UNARY_TAG: Record<string, string> = {
   neg: 'Neg', abs: 'Abs', sqrt: 'Sqrt',
   floor: 'Floor', ceil: 'Ceil', round: 'Round',
-  not: 'Not', bit_not: 'BitNot',
-  float_exponent: 'FloatExponent',
-  to_int: 'ToInt', to_bool: 'ToBool', to_float: 'ToFloat',
+  not: 'Not', bitNot: 'BitNot',
+  floatExponent: 'FloatExponent',
+  toInt: 'ToInt', toBool: 'ToBool', toFloat: 'ToFloat',
 }
 
 // Cast ops force their result type regardless of arg type. They bypass
@@ -246,10 +245,10 @@ class Emitter {
         const regType = this.stateRegTypes[obj.id as number] ?? 'float'
         return { op: { kind: 'state_reg', slot: obj.id as number, scalar_type: regType }, scalarType: regType }
       }
-      case 'sample_rate':  return { op: { kind: 'rate', scalar_type: 'float' }, scalarType: 'float' }
-      case 'sample_index': return { op: { kind: 'tick', scalar_type: 'int' }, scalarType: 'int' }
-      case 'smoothed_param':
-      case 'trigger_param':
+      case 'sampleRate':  return { op: { kind: 'rate', scalar_type: 'float' }, scalarType: 'float' }
+      case 'sampleIndex': return { op: { kind: 'tick', scalar_type: 'int' }, scalarType: 'int' }
+      case 'smoothedParam':
+      case 'triggerParam':
         // Params embed their C++ pointer. Serialize as decimal string (JSON-safe).
         if (obj._ptr && obj._handle != null) {
           return { op: { kind: 'param', ptr: String(obj._handle), scalar_type: 'float' }, scalarType: 'float' }
@@ -336,7 +335,7 @@ class Emitter {
 
     // Array ops
     if (obj.op === 'index')     return this.compileIndex(obj.args as ExprNode[], expected)
-    if (obj.op === 'array_set') return this.compileSetElement(obj.args as ExprNode[])
+    if (obj.op === 'arraySet') return this.compileSetElement(obj.args as ExprNode[])
 
     // Matrix literal → flatten rows → Pack
     if (obj.op === 'matrix') {
@@ -346,7 +345,7 @@ class Emitter {
     }
 
     // broadcast_to surviving lower_arrays (dynamic, non-literal src)
-    if (obj.op === 'broadcast_to') return this.compileBroadcastTo(obj)
+    if (obj.op === 'broadcastTo') return this.compileBroadcastTo(obj)
 
     // Instance-lineage marker emitted by flatten.ts for gateable instances.
     // Emit gate_expr and on_skip UNGATED (they live outside the group);
@@ -356,7 +355,7 @@ class Emitter {
     // For Phase 6 JIT correctness, emit an ungated Select(gate, expr, on_skip)
     // after the tagged block — this matches the interpreter's source_tag
     // semantics even before the JIT optimization recognizes groups.
-    if (obj.op === 'source_tag') return this.compileSourceTag(obj, expected)
+    if (obj.op === 'sourceTag') return this.compileSourceTag(obj, expected)
 
     // Fallthrough: emit a zero constant (unknown op — safe stub)
     console.warn(`emit_numeric: unhandled op '${obj.op}', substituting 0`)

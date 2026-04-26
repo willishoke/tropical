@@ -29,7 +29,7 @@ const BoundsSchema = z.tuple([z.number().nullable(), z.number().nullable()])
 
 const ShapeDimSchema = z.union([
   z.number().int().nonnegative(),
-  z.object({ op: z.literal('type_param'), name: z.string() }),
+  z.object({ op: z.literal('typeParam'), name: z.string() }),
 ])
 
 const ArrayTypeDeclSchema = z.object({

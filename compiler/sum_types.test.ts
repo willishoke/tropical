@@ -146,7 +146,7 @@ describe('SumTypeDef registration through program loading', () => {
         }],
       },
       body: { op: 'block' as const, decls: [], assigns: [
-        { op: 'output_assign' as const, name: 'out', expr: 0 },
+        { op: 'outputAssign' as const, name: 'out', expr: 0 },
       ] },
     }
     const session = makeSession()

@@ -5,19 +5,19 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "hold_sample",
         "init": 0
       },
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "hold_counter",
         "init": 0
       }
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "output",
         "expr": {
           "op": "let",
@@ -42,7 +42,7 @@
                 },
                 1,
                 {
-                  "op": "sample_rate"
+                  "op": "sampleRate"
                 }
               ]
             }
@@ -73,7 +73,7 @@
                     "op": "floorDiv",
                     "args": [
                       {
-                        "op": "sample_rate"
+                        "op": "sampleRate"
                       },
                       {
                         "op": "binding",
@@ -169,7 +169,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": {
           "kind": "reg",
           "name": "hold_sample"
@@ -197,7 +197,7 @@
                 },
                 1,
                 {
-                  "op": "sample_rate"
+                  "op": "sampleRate"
                 }
               ]
             }
@@ -228,7 +228,7 @@
                     "op": "floorDiv",
                     "args": [
                       {
-                        "op": "sample_rate"
+                        "op": "sampleRate"
                       },
                       {
                         "op": "binding",
@@ -324,7 +324,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": {
           "kind": "reg",
           "name": "hold_counter"
@@ -341,7 +341,7 @@
                 },
                 1,
                 {
-                  "op": "sample_rate"
+                  "op": "sampleRate"
                 }
               ]
             }
@@ -356,7 +356,7 @@
                     "op": "floorDiv",
                     "args": [
                       {
-                        "op": "sample_rate"
+                        "op": "sampleRate"
                       },
                       {
                         "op": "binding",

@@ -69,7 +69,7 @@ public:
    * Plan schema (tropical_plan_4):
    * {
    *   "schema": "tropical_plan_4",
-   *   "config": { "sample_rate": 44100 },
+   *   "config": { "sampleRate": 44100 },
    *   "state_init": [0.0, ...],
    *   "register_names": ["VCO1_phase", ...],
    *   "outputs": [0, 2, ...],

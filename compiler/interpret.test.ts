@@ -61,27 +61,27 @@ describe('evalExpr terminals', () => {
     expect(evalExpr({ op: 'reg', id: 1 }, env({ registers: [0, [1, 2, 3]] }))).toEqual([1, 2, 3])
   })
 
-  test('sample_rate', () => {
-    expect(evalExpr({ op: 'sample_rate' }, env())).toBe(44100)
-    expect(evalExpr({ op: 'sample_rate' }, env({ sampleRate: 48000 }))).toBe(48000)
+  test('sampleRate', () => {
+    expect(evalExpr({ op: 'sampleRate' }, env())).toBe(44100)
+    expect(evalExpr({ op: 'sampleRate' }, env({ sampleRate: 48000 }))).toBe(48000)
   })
 
-  test('sample_index', () => {
-    expect(evalExpr({ op: 'sample_index' }, env({ sampleIndex: 100 }))).toBe(100)
+  test('sampleIndex', () => {
+    expect(evalExpr({ op: 'sampleIndex' }, env({ sampleIndex: 100 }))).toBe(100)
   })
 
-  test('smoothed_param', () => {
+  test('smoothedParam', () => {
     const params = new Map([[12345, 0.75]])
-    expect(evalExpr({ op: 'smoothed_param', _ptr: true, _handle: 12345 }, env({ params }))).toBe(0.75)
+    expect(evalExpr({ op: 'smoothedParam', _ptr: true, _handle: 12345 }, env({ params }))).toBe(0.75)
   })
 
-  test('trigger_param', () => {
+  test('triggerParam', () => {
     const params = new Map([[99, 1]])
-    expect(evalExpr({ op: 'trigger_param', _ptr: true, _handle: 99 }, env({ params }))).toBe(1)
+    expect(evalExpr({ op: 'triggerParam', _ptr: true, _handle: 99 }, env({ params }))).toBe(1)
   })
 
   test('missing param returns 0', () => {
-    expect(evalExpr({ op: 'smoothed_param', _ptr: true, _handle: 999 }, env())).toBe(0)
+    expect(evalExpr({ op: 'smoothedParam', _ptr: true, _handle: 999 }, env())).toBe(0)
   })
 })
 
@@ -110,8 +110,8 @@ describe('evalExpr binary arithmetic', () => {
     expect(evalExpr({ op: 'mod', args: [1, 0] }, env())).toBe(0) // mod by zero
   })
 
-  test('floor_div', () => {
-    expect(evalExpr({ op: 'floor_div', args: [7, 2] }, env())).toBe(3)
+  test('floorDiv', () => {
+    expect(evalExpr({ op: 'floorDiv', args: [7, 2] }, env())).toBe(3)
     expect(evalExpr({ op: 'floorDiv', args: [7, 2] }, env())).toBe(3)
   })
 })
@@ -138,9 +138,9 @@ describe('evalExpr comparison', () => {
 
 describe('evalExpr bitwise', () => {
   test('bit_and / bit_or / bit_xor', () => {
-    expect(evalExpr({ op: 'bit_and', args: [0xFF, 0x0F] }, env())).toBe(0x0F)
-    expect(evalExpr({ op: 'bit_or', args: [0xF0, 0x0F] }, env())).toBe(0xFF)
-    expect(evalExpr({ op: 'bit_xor', args: [0xFF, 0x0F] }, env())).toBe(0xF0)
+    expect(evalExpr({ op: 'bitAnd', args: [0xFF, 0x0F] }, env())).toBe(0x0F)
+    expect(evalExpr({ op: 'bitOr', args: [0xF0, 0x0F] }, env())).toBe(0xFF)
+    expect(evalExpr({ op: 'bitXor', args: [0xFF, 0x0F] }, env())).toBe(0xF0)
   })
 
   test('lshift / rshift', () => {
@@ -192,7 +192,7 @@ describe('evalExpr unary', () => {
   test('not / bit_not', () => {
     expect(evalExpr({ op: 'not', args: [true] }, env())).toBe(false)
     expect(evalExpr({ op: 'not', args: [0] }, env())).toBe(true)
-    expect(evalExpr({ op: 'bit_not', args: [0] }, env())).toBe(-1) // ~0 === -1
+    expect(evalExpr({ op: 'bitNot', args: [0] }, env())).toBe(-1) // ~0 === -1
   })
 })
 
@@ -238,16 +238,16 @@ describe('evalExpr array ops', () => {
     expect(evalExpr({ op: 'index', args: [[10, 20], 5] }, env())).toBe(0)
   })
 
-  test('array_set', () => {
-    expect(evalExpr({ op: 'array_set', args: [[10, 20, 30], 1, 99] }, env())).toEqual([10, 99, 30])
+  test('arraySet', () => {
+    expect(evalExpr({ op: 'arraySet', args: [[10, 20, 30], 1, 99] }, env())).toEqual([10, 99, 30])
   })
 
   test('broadcast_to scalar', () => {
-    expect(evalExpr({ op: 'broadcast_to', args: [5], shape: [3] }, env())).toEqual([5, 5, 5])
+    expect(evalExpr({ op: 'broadcastTo', args: [5], shape: [3] }, env())).toEqual([5, 5, 5])
   })
 
   test('broadcast_to array', () => {
-    expect(evalExpr({ op: 'broadcast_to', args: [[1, 2]], shape: [4] }, env())).toEqual([1, 2, 1, 2])
+    expect(evalExpr({ op: 'broadcastTo', args: [[1, 2]], shape: [4] }, env())).toEqual([1, 2, 1, 2])
   })
 
   test('matrix', () => {
@@ -340,7 +340,7 @@ describe('interpretSamples', () => {
         { op: 'mod', args: [
           { op: 'add', args: [
             { op: 'reg', id: 0 },
-            { op: 'div', args: [440, { op: 'sample_rate' }] },
+            { op: 'div', args: [440, { op: 'sampleRate' }] },
           ]},
           1.0,
         ]},
@@ -421,7 +421,7 @@ describe('interpretSamples', () => {
 
   test('sample_index increments', () => {
     const flat: FlatExpressions = {
-      outputExprs: [{ op: 'sample_index' }],
+      outputExprs: [{ op: 'sampleIndex' }],
       registerExprs: [],
       stateInit: [],
       registerTypes: [],
@@ -439,7 +439,7 @@ describe('interpretSamples', () => {
 
   test('source_tag evaluates inner expr when gate is true (Phase 5)', () => {
     const tagged: ExprNode = {
-      op: 'source_tag',
+      op: 'sourceTag',
       source_instance: 'voice_0',
       gate_expr: true,
       expr: { op: 'add', args: [{ op: 'input', id: 0 }, 10] },
@@ -451,7 +451,7 @@ describe('interpretSamples', () => {
   test('source_tag returns 0 when gate is false and no on_skip (Phase 5)', () => {
     // This is the output-position semantic: silent on skip.
     const tagged: ExprNode = {
-      op: 'source_tag',
+      op: 'sourceTag',
       source_instance: 'voice_0',
       gate_expr: false,
       expr: { op: 'add', args: [{ op: 'input', id: 0 }, 10] },
@@ -462,7 +462,7 @@ describe('interpretSamples', () => {
   test('source_tag returns on_skip expr when gate is false (Phase 5)', () => {
     // This is the register-update semantic: hold previous value on skip.
     const tagged: ExprNode = {
-      op: 'source_tag',
+      op: 'sourceTag',
       source_instance: 'voice_0',
       gate_expr: false,
       expr: { op: 'add', args: [{ op: 'reg', id: 0 }, 1] },  // would increment
@@ -474,7 +474,7 @@ describe('interpretSamples', () => {
   test('source_tag with dynamic gate flips behavior across samples (Phase 5)', () => {
     // gate_expr can be any expression; here it reads input(1).
     const tagged: ExprNode = {
-      op: 'source_tag',
+      op: 'sourceTag',
       source_instance: 'voice_0',
       gate_expr: { op: 'input', id: 1 },
       expr: { op: 'input', id: 0 },

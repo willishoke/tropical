@@ -31,7 +31,7 @@ describe('stdlib Delay<N>', () => {
       schema: 'tropical_program_2',
       name: 'test',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'd', program: 'Delay', type_args: { N: 8 }, inputs: { x: 0.5 } },
+        { op: 'instanceDecl', name: 'd', program: 'Delay', type_args: { N: 8 }, inputs: { x: 0.5 } },
       ]},
       audio_outputs: [{ instance: 'd', output: 'y' }],
     }, session)

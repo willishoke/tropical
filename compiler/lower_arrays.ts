@@ -51,7 +51,7 @@ export function lowerArrayOps(node: ExprNode, memo?: WeakMap<object, ExprNode>):
   let result: ExprNode
 
   switch (obj.op) {
-    case 'array_literal':
+    case 'arrayLiteral':
       result = lowerArrayLiteral(obj, memo)
       break
 
@@ -83,7 +83,7 @@ export function lowerArrayOps(node: ExprNode, memo?: WeakMap<object, ExprNode>):
       result = lowerReduce(obj, memo)
       break
 
-    case 'broadcast_to':
+    case 'broadcastTo':
       result = lowerBroadcastTo(obj, memo)
       break
 
@@ -121,7 +121,7 @@ export function lowerArrayOps(node: ExprNode, memo?: WeakMap<object, ExprNode>):
       result = lowerMap2(obj, memo)
       break
 
-    case 'zip_with':
+    case 'zipWith':
       result = lowerZipWith(obj, memo)
       break
 
@@ -384,7 +384,7 @@ function lowerBroadcastTo(obj: Record<string, unknown>, memo?: WeakMap<object, E
   }
 
   // General case: pass through for runtime
-  return { op: 'broadcast_to', args: [arr], shape: targetShape }
+  return { op: 'broadcastTo', args: [arr], shape: targetShape }
 }
 
 /**
@@ -777,7 +777,7 @@ function evaluateStrExpr(node: ExprNode): string {
 
   const obj = node as Record<string, unknown>
 
-  if (obj.op === 'str_concat') {
+  if (obj.op === 'strConcat') {
     const parts = obj.parts as ExprNode[]
     return parts.map(evaluateStrExpr).join('')
   }
@@ -809,7 +809,7 @@ function resolveStrConcats(node: unknown): unknown {
   if (typeof node !== 'object' || node === null) return node
   if (Array.isArray(node)) return (node as unknown[]).map(resolveStrConcats)
   const obj = node as Record<string, unknown>
-  if (obj.op === 'str_concat') return evaluateStrExpr(node as ExprNode)
+  if (obj.op === 'strConcat') return evaluateStrExpr(node as ExprNode)
   const result: Record<string, unknown> = {}
   for (const [k, v] of Object.entries(obj)) {
     result[k] = resolveStrConcats(v)
@@ -818,7 +818,7 @@ function resolveStrConcats(node: unknown): unknown {
 }
 
 /** Decls that carry a unique `name` field — used for collision detection. */
-const NAMED_DECL_OPS = new Set(['instance_decl', 'reg_decl', 'delay_decl', 'program_decl'])
+const NAMED_DECL_OPS = new Set(['instanceDecl', 'regDecl', 'delayDecl', 'programDecl'])
 
 /**
  * Walk a tree and throw if any `{op:'binding'}` node's name is NOT bound by
@@ -885,13 +885,13 @@ function assertNoResidualBindings(
  * generate_decls schema:
  * ```json
  * {
- *   "op": "generate_decls",
+ *   "op": "generateDecls",
  *   "count": 10,
  *   "var": "i",
  *   "decls": [
  *     {
- *       "op": "instance_decl",
- *       "name": { "op": "str_concat", "parts": ["VCO", { "op": "binding", "name": "i" }] },
+ *       "op": "instanceDecl",
+ *       "name": { "op": "strConcat", "parts": ["VCO", { "op": "binding", "name": "i" }] },
  *       "program": "SinOsc",
  *       "inputs": { "freq": { "op": "mul", "args": [{ "op": "binding", "name": "i" }, 80] } }
  *     }
@@ -943,7 +943,7 @@ export function expandDeclGenerators(block: BlockNode): BlockNode {
       continue
     }
     const d = rawDecl as Record<string, unknown>
-    if (d.op !== 'generate_decls') {
+    if (d.op !== 'generateDecls') {
       pushChecked(rawDecl, 'explicit decl')
       continue
     }
@@ -965,7 +965,7 @@ export function expandDeclGenerators(block: BlockNode): BlockNode {
         // bindings and str_concats; running them at this level would
         // misinterpret inner-scoped `{binding innerVar}` nodes.
         if (typeof substituted === 'object' && substituted !== null && !Array.isArray(substituted)
-            && (substituted as Record<string, unknown>).op === 'generate_decls') {
+            && (substituted as Record<string, unknown>).op === 'generateDecls') {
           const inner = expandDeclGenerators({ op: 'block', decls: [substituted as ExprNode] })
           for (const innerDecl of inner.decls ?? []) pushChecked(innerDecl, hint)
           continue

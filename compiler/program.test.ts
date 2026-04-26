@@ -22,7 +22,7 @@ describe('parseProgramV2', () => {
       schema: 'tropical_program_2',
       name: 'Test',
       ports: { outputs: ['out'] },
-      body: { op: 'block', assigns: [{ op: 'output_assign', name: 'out', expr: 42 }] },
+      body: { op: 'block', assigns: [{ op: 'outputAssign', name: 'out', expr: 42 }] },
     }
     const prog = parseProgramV2(raw)
     expect(prog.name).toBe('Test')
@@ -33,7 +33,7 @@ describe('parseProgramV2', () => {
       schema: 'tropical_program_2',
       name: 'TestPatch',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'VCO1', program: 'VCO', inputs: { freq: 440 } },
+        { op: 'instanceDecl', name: 'VCO1', program: 'VCO', inputs: { freq: 440 } },
       ]},
       audio_outputs: [{ instance: 'VCO1', output: 'sin' }],
     }
@@ -47,15 +47,15 @@ describe('parseProgramV2', () => {
       schema: 'tropical_program_2',
       name: 'Composite',
       body: { op: 'block', decls: [
-        { op: 'program_decl', name: 'MyOsc', program: {
+        { op: 'programDecl', name: 'MyOsc', program: {
           op: 'program',
           name: 'MyOsc',
           ports: { inputs: ['freq'], outputs: ['out'] },
           body: { op: 'block',
-            assigns: [{ op: 'output_assign', name: 'out', expr: { op: 'input', name: 'freq' } }],
+            assigns: [{ op: 'outputAssign', name: 'out', expr: { op: 'input', name: 'freq' } }],
           },
         }},
-        { op: 'instance_decl', name: 'o1', program: 'MyOsc', inputs: { freq: 440 } },
+        { op: 'instanceDecl', name: 'o1', program: 'MyOsc', inputs: { freq: 440 } },
       ]},
       audio_outputs: [{ instance: 'o1', output: 'out' }],
     }
@@ -93,7 +93,7 @@ describe('exportSessionAsProgram — port type round-trip', () => {
         outputs: [{ name: 'out', type: { kind: 'array', element: 'float', shape: [4] } }],
       },
       body: { op: 'block',
-        assigns: [{ op: 'output_assign', name: 'out', expr: { op: 'input', name: 'a' } }],
+        assigns: [{ op: 'outputAssign', name: 'out', expr: { op: 'input', name: 'a' } }],
       },
     }
     loadProgramAsType(typedLeaf, session)
@@ -131,7 +131,7 @@ describe('exportSessionAsProgram — port type round-trip', () => {
       name: 'Plain',
       ports: { inputs: ['x'], outputs: ['y'] },
       body: { op: 'block',
-        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+        assigns: [{ op: 'outputAssign', name: 'y', expr: { op: 'input', name: 'x' } }],
       },
     }
     loadProgramAsType(plain, session)
@@ -185,21 +185,21 @@ describe('generic programs round-trip', () => {
       },
       body: { op: 'block',
         decls: [
-          { op: 'reg_decl', name: 'buf', init: { zeros: { type_param: 'N' } } as any },
+          { op: 'regDecl', name: 'buf', init: { zeros: { typeParam: 'N' } } as any },
         ],
         assigns: [
-          { op: 'output_assign', name: 'y', expr: {
+          { op: 'outputAssign', name: 'y', expr: {
             op: 'index',
             args: [
               { op: 'reg', name: 'buf' },
-              { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
+              { op: 'mod', args: [{ op: 'sampleIndex' }, { op: 'typeParam', name: 'N' }] },
             ],
           }},
-          { op: 'next_update', target: { kind: 'reg', name: 'buf' }, expr: {
-            op: 'array_set',
+          { op: 'nextUpdate', target: { kind: 'reg', name: 'buf' }, expr: {
+            op: 'arraySet',
             args: [
               { op: 'reg', name: 'buf' },
-              { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
+              { op: 'mod', args: [{ op: 'sampleIndex' }, { op: 'typeParam', name: 'N' }] },
               { op: 'input', name: 'x' },
             ],
           }},
@@ -228,7 +228,7 @@ describe('generic programs round-trip', () => {
       name: 'Passthrough',
       ports: { inputs: ['x'], outputs: ['y'] },
       body: { op: 'block',
-        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+        assigns: [{ op: 'outputAssign', name: 'y', expr: { op: 'input', name: 'x' } }],
       },
     }
     loadProgramAsType(p, session)
@@ -248,7 +248,7 @@ describe('generic programs round-trip', () => {
       name: 'Passthrough',
       ports: { inputs: ['x'], outputs: ['y'] },
       body: { op: 'block',
-        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+        assigns: [{ op: 'outputAssign', name: 'y', expr: { op: 'input', name: 'x' } }],
       },
     }
     loadProgramAsType(passthrough, session)
@@ -257,7 +257,7 @@ describe('generic programs round-trip', () => {
       schema: 'tropical_program_2',
       name: 'Patch',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'voice_0', program: 'Passthrough',
+        { op: 'instanceDecl', name: 'voice_0', program: 'Passthrough',
           inputs: { x: 1.0 }, gateable: true, gate_input: true },
       ]},
       audio_outputs: [{ instance: 'voice_0', output: 'y' }],
@@ -266,7 +266,7 @@ describe('generic programs round-trip', () => {
     // Pass through v2 schema validation (pass-through Zod + validateExpr on body).
     const prog = parseProgramV2(raw)
     const decl = (prog.body as { decls?: Array<Record<string, unknown>> }).decls!
-      .find(d => d.op === 'instance_decl' && d.name === 'voice_0')!
+      .find(d => d.op === 'instanceDecl' && d.name === 'voice_0')!
     expect(decl.gateable).toBe(true)
 
     // Load into a session, verify the ProgramInstance carries the flag.
@@ -293,7 +293,7 @@ describe('generic programs round-trip', () => {
       name: 'Passthrough',
       ports: { inputs: ['x'], outputs: ['y'] },
       body: { op: 'block',
-        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+        assigns: [{ op: 'outputAssign', name: 'y', expr: { op: 'input', name: 'x' } }],
       },
     }
     loadProgramAsType(passthrough, session)
@@ -303,7 +303,7 @@ describe('generic programs round-trip', () => {
       name: 'Patch',
       body: { op: 'block', decls: [
         // gate_input intentionally missing
-        { op: 'instance_decl', name: 'voice_0', program: 'Passthrough',
+        { op: 'instanceDecl', name: 'voice_0', program: 'Passthrough',
           inputs: { x: 1.0 }, gateable: true } as unknown as ExprNode,
       ]},
     }
@@ -323,15 +323,15 @@ describe('typeResolver', () => {
         op: 'program', name: 'CycleA',
         ports: { inputs: [], outputs: ['out'] },
         body: { op: 'block', decls: [
-          { op: 'instance_decl', name: 'b', program: 'CycleB' },
-        ], assigns: [{ op: 'output_assign', name: 'out', expr: 0 }] },
+          { op: 'instanceDecl', name: 'b', program: 'CycleB' },
+        ], assigns: [{ op: 'outputAssign', name: 'out', expr: 0 }] },
       }],
       ['CycleB', {
         op: 'program', name: 'CycleB',
         ports: { inputs: [], outputs: ['out'] },
         body: { op: 'block', decls: [
-          { op: 'instance_decl', name: 'a', program: 'CycleA' },
-        ], assigns: [{ op: 'output_assign', name: 'out', expr: 0 }] },
+          { op: 'instanceDecl', name: 'a', program: 'CycleA' },
+        ], assigns: [{ op: 'outputAssign', name: 'out', expr: 0 }] },
       }],
     ])
 

@@ -12,12 +12,385 @@ import { broadcastShapes, type ScalarKind } from './term.js'
 
 // ---------- ExprNode (JSON-serializable expression tree) ----------
 
-/** An expression node — bare scalar, inline array, or a named op object. */
+/** An expression node — bare scalar, inline array, or a named op object.
+ *  The op variant is currently a bag of fields; see ExprOpNodeStrict below
+ *  for the closed parametric-arity discriminated union being phased in.
+ *  Once walkers are migrated to use ExprOpNodeStrict, this type will be
+ *  replaced by `number | boolean | ExprNode[] | ExprOpNodeStrict`. */
 export type ExprNode =
   | number
   | boolean
   | ExprNode[]
   | { op: string; [key: string]: unknown }
+
+// ─────────────────────────────────────────────────────────────
+// Closed parametric-arity discriminated union (Phase 1)
+//
+// `Op<N, Tag>` is a tagged structure parameterized by arity N and a union
+// of allowed op tags. ~45 fixed-arity-args ops factor into instantiations
+// of this single family. Named-children ops (tag, match, let, ...) get
+// bespoke interfaces because their structure is genuinely irreducible.
+// Leaf ops form a small union. Decl ops are top-level only.
+//
+// The discriminated union enables:
+//   - Type-narrowed field access (no `args as ExprNode[]` casts).
+//   - Exhaustive switch checks via `assertNever` (compile error on missing
+//     cases when a new op is added).
+//   - One shared `mapChildren` utility that knows the per-op child shape.
+//
+// Currently exported alongside the bag-of-fields ExprNode so existing code
+// continues to compile. Walkers migrate to use ExprOpNodeStrict
+// incrementally; the broad ExprNode is replaced once migration completes.
+// ─────────────────────────────────────────────────────────────
+
+/** Build a tuple type of length N filled with T. Used for Op<N, Tag> args. */
+export type Tuple<T, N extends number, R extends T[] = []> =
+  R['length'] extends N ? R : Tuple<T, N, [...R, T]>
+
+/** A tagged op with N positional ExprNode children at `args`. When N is a
+ *  literal number (1, 2, 3, ...), `args` is a fixed-length tuple. When N is
+ *  the type `number`, `args` is a variadic ExprNode[]. */
+export interface Op<N extends number, Tag extends string> {
+  op: Tag
+  args: Tuple<ExprNode, N>
+}
+
+// ── Per-arity tag unions ─────────────────────────────────────────────────
+
+/** Binary arithmetic ops. */
+export type ArithBinTag = 'add' | 'sub' | 'mul' | 'div' | 'mod' | 'floorDiv' | 'ldexp' | 'pow'
+
+/** Binary comparison ops. */
+export type CompareBinTag = 'lt' | 'lte' | 'gt' | 'gte' | 'eq' | 'neq'
+
+/** Binary bitwise ops. */
+export type BitBinTag = 'bitAnd' | 'bitOr' | 'bitXor' | 'lshift' | 'rshift'
+
+/** Binary logical ops. */
+export type LogicalBinTag = 'and' | 'or'
+
+/** All binary (arity-2) op tags. */
+export type BinaryTag = ArithBinTag | CompareBinTag | BitBinTag | LogicalBinTag
+
+/** A binary op node — args is exactly two ExprNode children. */
+export type BinaryNode = Op<2, BinaryTag>
+
+/** Unary op tags (arity 1). */
+export type UnaryTag =
+  | 'neg' | 'abs' | 'sqrt' | 'floor' | 'ceil' | 'round'
+  | 'floatExponent' | 'not' | 'bitNot'
+  | 'toInt' | 'toBool' | 'toFloat'
+
+/** A unary op node — args is exactly one ExprNode child. */
+export type UnaryNode = Op<1, UnaryTag>
+
+/** Ternary op tags (arity 3). */
+export type TernaryTag = 'select' | 'clamp' | 'arraySet'
+
+/** A ternary op node — args is exactly three ExprNode children. */
+export type TernaryNode = Op<3, TernaryTag>
+
+/** Inline array-pack op: `{op: 'array', items: ExprNode[]}`. Variadic but
+ *  uses an `items` field, not `args` — bespoke shape, lives in named-children
+ *  category. */
+export interface ArrayNode { op: 'array'; items: ExprNode[] }
+
+// ── Op<N> with extra non-child metadata fields ──────────────────────────
+
+/** Reshape: traversal is Op<1>; carries a static shape annotation. */
+export interface ReshapeNode extends Op<1, 'reshape'> { shape: number[] }
+
+/** Transpose: traversal is Op<1>; no extra fields. */
+export interface TransposeNode extends Op<1, 'transpose'> {}
+
+/** Slice: traversal is Op<1>; carries axis and range. */
+export interface SliceNode extends Op<1, 'slice'> {
+  axis: number
+  start: number
+  end: number
+}
+
+/** Reduce: traversal is Op<1>; carries axis and reduction op. */
+export interface ReduceNode extends Op<1, 'reduce'> {
+  axis: number
+  reduce_op: 'add' | 'mul' | 'min' | 'max'
+}
+
+/** broadcast_to: traversal is Op<1>; carries target shape. */
+export interface BroadcastToNode extends Op<1, 'broadcastTo'> { shape: number[] }
+
+/** index: traversal is Op<2> (array, index). */
+export interface IndexNode extends Op<2, 'index'> {}
+
+/** matmul: traversal is Op<2>; carries shape and element type. */
+export interface MatmulNode extends Op<2, 'matmul'> {
+  shape_a: [number, number]
+  shape_b: [number, number]
+  element_type?: ScalarKind
+}
+
+/** map: traversal is Op<1> args[0] PLUS callee child. Bespoke shape. */
+export interface MapNode extends Op<1, 'map'> { callee: ExprNode }
+
+// ── Construction ops (no positional args; data lives in shape/values) ───
+
+/** zeros({shape}): allocates a zero-filled array. No children. */
+export interface ZerosNode { op: 'zeros'; shape: number[] }
+
+/** ones({shape}): allocates a one-filled array. No children. */
+export interface OnesNode { op: 'ones'; shape: number[] }
+
+/** fill({shape, value}): broadcasts a single value to the target shape. */
+export interface FillNode { op: 'fill'; shape: number[]; value: ExprNode }
+
+/** array_literal({shape, values}): an inline array of ExprNode values. */
+export interface ArrayLiteralNode { op: 'arrayLiteral'; shape: number[]; values: ExprNode[] }
+
+/** matrix({rows}): a static 2D number-only matrix. No ExprNode children. */
+export interface MatrixNode { op: 'matrix'; rows: number[][] }
+
+// ── Named-children ops (children at named fields, not positional args) ──
+
+/** Match arm at the strict-IR layer (body is an ExprNode, not ExprCoercible).
+ *  The user-facing builder counterpart is {@link MatchArm} below, which accepts
+ *  ExprCoercible bodies for ergonomics. */
+export interface MatchArmStrict {
+  bind?: string | string[]
+  body: ExprNode
+}
+
+/** Coproduct injection: `tag<T, V>{payload?}`. Children live in payload values. */
+export interface TagNode {
+  op: 'tag'
+  type: string
+  variant: string
+  payload?: Record<string, ExprNode>
+}
+
+/** Coproduct elimination: `match<T>(scrutinee) { variant: arm, ... }`. */
+export interface MatchNode {
+  op: 'match'
+  type: string
+  scrutinee: ExprNode
+  arms: Record<string, MatchArmStrict>
+}
+
+/** let { name = expr; ... } in body */
+export interface LetNode {
+  op: 'let'
+  bind: Record<string, ExprNode>
+  in: ExprNode
+}
+
+/** function literal — used as the callee of `call` and `map`. */
+export interface FunctionNode {
+  op: 'function'
+  param_count: number
+  body: ExprNode
+}
+
+/** Call a function with positional arguments. */
+export interface CallNode {
+  op: 'call'
+  callee: ExprNode
+  args: ExprNode[]
+}
+
+/** Session-level delay node — `args[0]` is the value to delay one sample. */
+export interface DelayNode {
+  op: 'delay'
+  args: [ExprNode]
+  init?: number
+  id?: string
+}
+
+/** Gateable subgraph wrapper emitted by the flattener. */
+export interface SourceTagNode {
+  op: 'sourceTag'
+  source_instance: string
+  gate_expr: ExprNode
+  expr: ExprNode
+  on_skip?: ExprNode
+}
+
+// Compile-time combinators (lowered before flatten). All have a `body`
+// child; some have additional ExprNode children (init, over, a, b).
+
+export interface GenerateNode { op: 'generate'; count: number; var: string; body: ExprNode }
+export interface IterateNode  { op: 'iterate'; count: number; var: string; init: ExprNode; body: ExprNode }
+export interface FoldNode     { op: 'fold'; over: ExprNode; init: ExprNode; acc: string; elem: string; body: ExprNode }
+export interface ScanNode     { op: 'scan'; over: ExprNode; init: ExprNode; acc: string; elem: string; body: ExprNode }
+export interface Map2Node     { op: 'map2'; over: ExprNode; elem: string; body: ExprNode }
+export interface ZipWithNode  { op: 'zipWith'; a: ExprNode; b: ExprNode; x: string; y: string; body: ExprNode }
+export interface ChainNode    { op: 'chain'; count: number; var: string; init: ExprNode; body: ExprNode }
+export interface StrConcatNode { op: 'strConcat'; parts: ExprNode[] }
+export interface GenerateDeclsNode { op: 'generateDecls'; count: number; var: string; decls: ExprNode[] }
+
+/** All named-children ops in a single union for convenience. */
+export type NamedChildrenNode =
+  | TagNode | MatchNode | LetNode | FunctionNode | CallNode
+  | DelayNode | SourceTagNode
+  | GenerateNode | IterateNode | FoldNode | ScanNode
+  | Map2Node | ZipWithNode | ChainNode | StrConcatNode | GenerateDeclsNode
+
+// ── Leaf ops (no children) ──────────────────────────────────────────────
+
+/** Pre-slottify input ref: `{op:'input', name}`. Post-slottify: `{op:'input', id}`. */
+export interface InputNode { op: 'input'; id?: number; name?: string }
+
+/** Pre-slottify register ref: `{op:'reg', name}`. Post-slottify: `{op:'reg', id}`. */
+export interface RegRefNode { op: 'reg'; id?: number; name?: string }
+
+/** Pre-slottify delay reference: `{op:'delayRef', id: 'name'}`. */
+export interface DelayRefNode { op: 'delayRef'; id: string }
+
+/** Post-slottify delay value read: `{op:'delayValue', node_id: N}`. */
+export interface DelayValueNode { op: 'delayValue'; node_id: number }
+
+/** Pre-slottify nested-output ref: `{op:'nestedOut', ref, output}`. */
+export interface NestedOutNode { op: 'nestedOut'; ref: string; output: string | number }
+
+/** Post-slottify nested-output ref. */
+export interface NestedOutputNode { op: 'nestedOutput'; node_id: number; output_id: number }
+
+/** Combinator-introduced binding placeholder; resolved at lowering time. */
+export interface BindingNode { op: 'binding'; name: string }
+
+/** Generic-program type-parameter placeholder; resolved at specialization. */
+export interface TypeParamNode { op: 'typeParam'; name: string }
+
+/** Sample-rate constant. */
+export interface SampleRateNode { op: 'sampleRate' }
+
+/** Current sample-index counter. */
+export interface SampleIndexNode { op: 'sampleIndex' }
+
+/** Smoothed control parameter handle (FFI). */
+export interface SmoothedParamNode { op: 'smoothedParam'; _ptr: true; _handle: unknown }
+
+/** One-shot trigger control parameter handle (FFI). */
+export interface TriggerParamNode { op: 'triggerParam'; _ptr: true; _handle: unknown }
+
+/** Typed scalar literal emitted by specialize.ts after type-arg substitution. */
+export interface ConstNode {
+  op: 'const'
+  val: number | boolean
+  type?: ScalarKind
+}
+
+/** All leaf ops in a single union. */
+export type LeafNode =
+  | InputNode | RegRefNode | DelayRefNode | DelayValueNode
+  | NestedOutNode | NestedOutputNode | BindingNode | TypeParamNode
+  | SampleRateNode | SampleIndexNode
+  | SmoothedParamNode | TriggerParamNode | ConstNode
+
+// ── Decl ops (top-level only — appear at decl/assign positions) ─────────
+
+/** Wiring ref to an instance output. May project a sum-type variant field. */
+export interface RefNode {
+  op: 'ref'
+  instance: string
+  output: string | number
+  project?: { variant: string; field: string }
+}
+
+/** Top-level instance declaration. */
+export interface InstanceDeclNode {
+  op: 'instanceDecl'
+  name: string
+  program: string
+  inputs?: Record<string, ExprNode>
+  type_args?: Record<string, number | ExprNode>
+  gateable?: boolean
+  gate_input?: ExprNode
+}
+
+/** Register declaration with optional initializer and type annotation. */
+export interface RegDeclNode {
+  op: 'regDecl'
+  name: string
+  init?: ExprNode
+  type?: string
+}
+
+/** Delay declaration — sum-typed delays decompose into multiple scalar slots. */
+export interface DelayDeclNode {
+  op: 'delayDecl'
+  name: string
+  init?: ExprNode | number
+  update?: ExprNode
+  type?: string
+}
+
+/** Inline subprogram declaration. */
+export interface ProgramDeclNode {
+  op: 'programDecl'
+  name: string
+  program?: ExprNode
+}
+
+/** Output port assignment in a program body's `assigns` list. */
+export interface OutputAssignNode {
+  op: 'outputAssign'
+  name: string
+  expr?: ExprNode
+}
+
+/** Next-state assignment for a register or delay register. */
+export interface NextUpdateNode {
+  op: 'nextUpdate'
+  target: { kind: 'reg' | 'delay'; name: string }
+  expr?: ExprNode
+}
+
+/** Block: a list of decls + assigns inside a program body. */
+export interface ProgramBlockNode {
+  op: 'block'
+  decls?: ExprNode[]
+  assigns?: ExprNode[]
+  value?: ExprNode | null
+}
+
+/** Top-level program node. The body is always a ProgramBlockNode. */
+export interface ProgramOpNode {
+  op: 'program'
+  name: string
+  type_params?: Record<string, { type: 'int'; default?: number }>
+  sample_rate?: number
+  breaks_cycles?: boolean
+  ports?: unknown  // ProgramPorts; defined in program.ts
+  body: ProgramBlockNode
+}
+
+/** All top-level decl/assign/structural ops. */
+export type DeclNode =
+  | RefNode
+  | InstanceDeclNode | RegDeclNode | DelayDeclNode | ProgramDeclNode
+  | OutputAssignNode | NextUpdateNode
+  | ProgramBlockNode | ProgramOpNode
+
+// ── The closed parametric-arity discriminated union ─────────────────────
+
+/** Closed discriminated union of every op kind. Replaces the bag-of-fields
+ *  `{op: string; [k]: unknown}` once walkers are migrated. Adding a new op
+ *  forces touching this union and every exhaustive `mapChildren` switch. */
+export type ExprOpNodeStrict =
+  // Op<N> family — most ops factor through here.
+  | UnaryNode | BinaryNode | TernaryNode
+  // Inline array (variadic but uses `items`).
+  | ArrayNode
+  // Op<N> + extras — same-shape traversal, extra metadata fields.
+  | ReshapeNode | TransposeNode | SliceNode | ReduceNode
+  | BroadcastToNode | IndexNode | MatmulNode | MapNode
+  // Construction ops with shape/values.
+  | ZerosNode | OnesNode | FillNode | ArrayLiteralNode | MatrixNode
+  // Named-children ops — bespoke per-op interfaces.
+  | NamedChildrenNode
+  // Leaves.
+  | LeafNode
+  // Top-level decls.
+  | DeclNode
 
 // ---------- SignalExpr ----------
 
@@ -114,7 +487,7 @@ export const add      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('add'
 export const sub      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('sub',       lhs, rhs)
 export const mul      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('mul',       lhs, rhs)
 export const div      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('div',       lhs, rhs)
-export const floorDiv = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('floor_div', lhs, rhs)
+export const floorDiv = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('floorDiv', lhs, rhs)
 export const mod      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('mod',       lhs, rhs)
 export const matmul = (
   lhs: ExprCoercible,
@@ -146,25 +519,25 @@ export const neq = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('neq', lhs
 
 // ---------- Bitwise ----------
 
-export const bitAnd  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('bit_and', lhs, rhs)
-export const bitOr   = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('bit_or',  lhs, rhs)
-export const bitXor  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('bit_xor', lhs, rhs)
+export const bitAnd  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('bitAnd', lhs, rhs)
+export const bitOr   = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('bitOr',  lhs, rhs)
+export const bitXor  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('bitXor', lhs, rhs)
 export const lshift  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('lshift',  lhs, rhs)
 export const rshift  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('rshift',  lhs, rhs)
-export const bitNot  = (operand: ExprCoercible) => unary('bit_not', operand)
+export const bitNot  = (operand: ExprCoercible) => unary('bitNot', operand)
 
 // ---------- Unary / math ----------
 
 export const neg        = (operand: ExprCoercible) => unary('neg', operand)
 export const abs_       = (operand: ExprCoercible) => unary('abs', operand)
-export const floatExponent = (operand: ExprCoercible) => unary('float_exponent', operand)
+export const floatExponent = (operand: ExprCoercible) => unary('floatExponent', operand)
 export const ldexp      = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('ldexp', lhs, rhs)
 export const logicalNot = (operand: ExprCoercible) => unary('not', operand)
 
 // Scalar-type cast ops. Truncate-toward-zero (FPToSI) for to_int — not floor.
-export const toInt   = (operand: ExprCoercible) => unary('to_int',   operand)
-export const toBool  = (operand: ExprCoercible) => unary('to_bool',  operand)
-export const toFloat = (operand: ExprCoercible) => unary('to_float', operand)
+export const toInt   = (operand: ExprCoercible) => unary('toInt',   operand)
+export const toBool  = (operand: ExprCoercible) => unary('toBool',  operand)
+export const toFloat = (operand: ExprCoercible) => unary('toFloat', operand)
 export const logicalAnd = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('and', lhs, rhs)
 export const logicalOr  = (lhs: ExprCoercible, rhs: ExprCoercible) => binary('or',  lhs, rhs)
 
@@ -195,7 +568,7 @@ export function arraySet(arrExpr: ExprCoercible, idx: ExprCoercible, val: ExprCo
   const a = coerce(arrExpr)
   const i = coerce(idx)
   const v = coerce(val)
-  return SignalExpr.fromNode({ op: 'array_set', args: [a._node, i._node, v._node] }, a.shape)
+  return SignalExpr.fromNode({ op: 'arraySet', args: [a._node, i._node, v._node] }, a.shape)
 }
 
 /** Build a matrix literal expression from a row-major 2D array of numbers. */
@@ -211,7 +584,7 @@ export function matrix(rows: number[][]): SignalExpr {
  */
 export function arrayLiteral(shape: number[], values: ExprCoercible[]): SignalExpr {
   const items = values.map(v => coerce(v)._node)
-  return SignalExpr.fromNode({ op: 'array_literal', shape, values: items }, shape)
+  return SignalExpr.fromNode({ op: 'arrayLiteral', shape, values: items }, shape)
 }
 
 /** Create an array filled with zeros. */
@@ -257,7 +630,7 @@ export function reduce(arr: ExprCoercible, axis: number, reduceOp: string): Sign
 
 /** Explicitly broadcast an array to a target shape. */
 export function broadcastTo(arr: ExprCoercible, shape: number[]): SignalExpr {
-  return SignalExpr.fromNode({ op: 'broadcast_to', args: [coerce(arr)._node], shape }, shape)
+  return SignalExpr.fromNode({ op: 'broadcastTo', args: [coerce(arr)._node], shape }, shape)
 }
 
 /** Map a function over array elements: map(fn, arr) applies fn to each element. */
@@ -340,11 +713,11 @@ export function match(
 // ---------- Leaf node constructors ----------
 
 export function sampleRate(): SignalExpr {
-  return SignalExpr.fromNode({ op: 'sample_rate' })
+  return SignalExpr.fromNode({ op: 'sampleRate' })
 }
 
 export function sampleIndex(): SignalExpr {
-  return SignalExpr.fromNode({ op: 'sample_index' })
+  return SignalExpr.fromNode({ op: 'sampleIndex' })
 }
 
 export function inputExpr(inputId: number): SignalExpr {
@@ -360,21 +733,21 @@ export function refExpr(instanceName: string, outputId: number): SignalExpr {
 }
 
 export function nestedOutputExpr(nodeId: number, outputId: number): SignalExpr {
-  return SignalExpr.fromNode({ op: 'nested_output', node_id: nodeId, output_id: outputId })
+  return SignalExpr.fromNode({ op: 'nestedOutput', node_id: nodeId, output_id: outputId })
 }
 
 export function delayValueExpr(nodeId: number): SignalExpr {
-  return SignalExpr.fromNode({ op: 'delay_value', node_id: nodeId })
+  return SignalExpr.fromNode({ op: 'delayValue', node_id: nodeId })
 }
 
 /** Create a smoothed-param expression node for use in wiring expressions. */
 export function paramExpr(paramHandle: unknown): SignalExpr {
-  return SignalExpr.fromNode({ op: 'smoothed_param', _ptr: true, _handle: paramHandle })
+  return SignalExpr.fromNode({ op: 'smoothedParam', _ptr: true, _handle: paramHandle })
 }
 
 /** Create a trigger-param expression node for use in wiring expressions. */
 export function triggerParamExpr(paramHandle: unknown): SignalExpr {
-  return SignalExpr.fromNode({ op: 'trigger_param', _ptr: true, _handle: paramHandle })
+  return SignalExpr.fromNode({ op: 'triggerParam', _ptr: true, _handle: paramHandle })
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -382,27 +755,27 @@ export function triggerParamExpr(paramHandle: unknown): SignalExpr {
 // ─────────────────────────────────────────────────────────────
 
 const BINARY_OPS = new Set([
-  'add', 'sub', 'mul', 'div', 'floor_div', 'mod',
+  'add', 'sub', 'mul', 'div', 'floorDiv', 'mod',
   'lt', 'lte', 'gt', 'gte', 'eq', 'neq',
-  'bit_and', 'bit_or', 'bit_xor', 'lshift', 'rshift',
+  'bitAnd', 'bitOr', 'bitXor', 'lshift', 'rshift',
   'and', 'or',
   'ldexp',
 ])
 
 const UNARY_OPS = new Set([
-  'neg', 'abs', 'not', 'bit_not',
+  'neg', 'abs', 'not', 'bitNot',
   'sqrt', 'floor', 'ceil', 'round',
-  'float_exponent',
-  'to_int', 'to_bool', 'to_float',
+  'floatExponent',
+  'toInt', 'toBool', 'toFloat',
 ])
 
 const TERNARY_OPS = new Set(['clamp', 'select'])
 
 const LEAF_OPS = new Set([
-  'input', 'reg', 'sample_rate', 'sample_index',
-  'smoothed_param', 'trigger_param',
-  'delay_value', 'delay_ref',
-  'nested_output', 'nested_out',
+  'input', 'reg', 'sampleRate', 'sampleIndex',
+  'smoothedParam', 'triggerParam',
+  'delayValue', 'delayRef',
+  'nestedOutput', 'nestedOut',
   'binding',
 ])
 
@@ -475,9 +848,9 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
     validateExpr((obj.args as ExprNode[])[1], `${path}.args[1]`)
     return
   }
-  if (op === 'array_set') {
+  if (op === 'arraySet') {
     if (!Array.isArray(obj.args) || (obj.args as unknown[]).length !== 3) {
-      throw new Error(`${path}: 'array_set' requires args: [array, index, value]`)
+      throw new Error(`${path}: 'arraySet' requires args: [array, index, value]`)
     }
     for (let i = 0; i < 3; i++) validateExpr((obj.args as ExprNode[])[i], `${path}.args[${i}]`)
     return
@@ -501,7 +874,7 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
     }
     return
   }
-  if (op === 'array_pack' && Array.isArray(obj.args)) {
+  if (op === 'arrayPack' && Array.isArray(obj.args)) {
     for (let i = 0; i < (obj.args as unknown[]).length; i++) {
       validateExpr((obj.args as ExprNode[])[i], `${path}.args[${i}]`)
     }
@@ -558,7 +931,7 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
     if (obj.body !== undefined) validateExpr(obj.body as ExprNode, `${path}.body`)
     return
   }
-  if (op === 'zip_with') {
+  if (op === 'zipWith') {
     if (obj.a !== undefined) validateExpr(obj.a as ExprNode, `${path}.a`)
     if (obj.b !== undefined) validateExpr(obj.b as ExprNode, `${path}.b`)
     if (obj.body !== undefined) validateExpr(obj.body as ExprNode, `${path}.body`)
@@ -640,9 +1013,9 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
     validateExpr(obj.value as ExprNode, `${path}.value`)
     return
   }
-  if (op === 'array_literal') {
+  if (op === 'arrayLiteral') {
     if (!Array.isArray(obj.values))
-      throw new Error(`${path}: 'array_literal' requires values: ExprNode[]`)
+      throw new Error(`${path}: 'arrayLiteral' requires values: ExprNode[]`)
     for (let i = 0; i < (obj.values as unknown[]).length; i++)
       validateExpr((obj.values as ExprNode[])[i], `${path}.values[${i}]`)
     return
@@ -672,9 +1045,9 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
       throw new Error(`${path}: 'reduce' requires reduce_op: string`)
     return
   }
-  if (op === 'broadcast_to') {
+  if (op === 'broadcastTo') {
     if (!Array.isArray(obj.args) || (obj.args as unknown[]).length < 1)
-      throw new Error(`${path}: 'broadcast_to' requires args: [arr]`)
+      throw new Error(`${path}: 'broadcastTo' requires args: [arr]`)
     validateExpr((obj.args as ExprNode[])[0], `${path}.args[0]`)
     return
   }
@@ -719,16 +1092,16 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
     return
   }
 
-  if (op === 'reg_decl') {
+  if (op === 'regDecl') {
     if (typeof obj.name !== 'string')
-      throw new Error(`${path}: 'reg_decl' requires name: string`)
+      throw new Error(`${path}: 'regDecl' requires name: string`)
     if (obj.init !== undefined) validateExpr(obj.init as ExprNode, `${path}.init`)
     return
   }
 
-  if (op === 'delay_decl') {
+  if (op === 'delayDecl') {
     if (typeof obj.name !== 'string')
-      throw new Error(`${path}: 'delay_decl' requires name: string`)
+      throw new Error(`${path}: 'delayDecl' requires name: string`)
     if (obj.update !== undefined) validateExpr(obj.update as ExprNode, `${path}.update`)
     if (obj.init !== undefined) validateExpr(obj.init as ExprNode, `${path}.init`)
     // Optional `type` field — when present and naming a registered sum type,
@@ -737,48 +1110,48 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
     // The structural check here only verifies the field's shape; sum-name
     // resolution and constant-fold validation happen at loadProgramDef time.
     if (obj.type !== undefined && typeof obj.type !== 'string')
-      throw new Error(`${path}: 'delay_decl' type must be a string (registered sum/struct/scalar name)`)
+      throw new Error(`${path}: 'delayDecl' type must be a string (registered sum/struct/scalar name)`)
     return
   }
 
-  if (op === 'instance_decl') {
+  if (op === 'instanceDecl') {
     if (typeof obj.name !== 'string')
-      throw new Error(`${path}: 'instance_decl' requires name: string`)
+      throw new Error(`${path}: 'instanceDecl' requires name: string`)
     if (typeof obj.program !== 'string')
-      throw new Error(`${path}: 'instance_decl' requires program: string`)
+      throw new Error(`${path}: 'instanceDecl' requires program: string`)
     if (obj.inputs !== undefined && typeof obj.inputs === 'object' && obj.inputs !== null) {
       for (const [k, v] of Object.entries(obj.inputs as Record<string, unknown>))
         validateExpr(v as ExprNode, `${path}.inputs.${k}`)
     }
     if (obj.gateable !== undefined && typeof obj.gateable !== 'boolean')
-      throw new Error(`${path}: 'instance_decl' gateable must be boolean`)
+      throw new Error(`${path}: 'instanceDecl' gateable must be boolean`)
     if (obj.gate_input !== undefined)
       validateExpr(obj.gate_input as ExprNode, `${path}.gate_input`)
     return
   }
 
-  if (op === 'program_decl') {
+  if (op === 'programDecl') {
     if (typeof obj.name !== 'string')
-      throw new Error(`${path}: 'program_decl' requires name: string`)
+      throw new Error(`${path}: 'programDecl' requires name: string`)
     if (obj.program !== undefined) validateExpr(obj.program as ExprNode, `${path}.program`)
     return
   }
 
-  if (op === 'output_assign') {
+  if (op === 'outputAssign') {
     if (typeof obj.name !== 'string')
-      throw new Error(`${path}: 'output_assign' requires name: string`)
+      throw new Error(`${path}: 'outputAssign' requires name: string`)
     if (obj.expr !== undefined) validateExpr(obj.expr as ExprNode, `${path}.expr`)
     return
   }
 
-  if (op === 'next_update') {
+  if (op === 'nextUpdate') {
     if (typeof obj.target !== 'object' || obj.target === null)
-      throw new Error(`${path}: 'next_update' requires target: {kind, name}`)
+      throw new Error(`${path}: 'nextUpdate' requires target: {kind, name}`)
     const tgt = obj.target as Record<string, unknown>
     if (tgt.kind !== 'reg' && tgt.kind !== 'delay')
-      throw new Error(`${path}: 'next_update' target.kind must be 'reg' or 'delay', got ${String(tgt.kind)}`)
+      throw new Error(`${path}: 'nextUpdate' target.kind must be 'reg' or 'delay', got ${String(tgt.kind)}`)
     if (typeof tgt.name !== 'string')
-      throw new Error(`${path}: 'next_update' target.name must be a string`)
+      throw new Error(`${path}: 'nextUpdate' target.name must be a string`)
     if (obj.expr !== undefined) validateExpr(obj.expr as ExprNode, `${path}.expr`)
     return
   }

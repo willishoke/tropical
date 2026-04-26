@@ -218,10 +218,10 @@ describe('map2', () => {
   })
 })
 
-describe('zip_with', () => {
+describe('zipWith', () => {
   test('zip_with combines two arrays', () => {
     const node: ExprNode = {
-      op: 'zip_with',
+      op: 'zipWith',
       a: [1, 2, 3],
       b: [10, 20, 30],
       x_var: 'x', y_var: 'y',
@@ -236,7 +236,7 @@ describe('zip_with', () => {
 
   test('zip_with truncates to shorter array', () => {
     const node: ExprNode = {
-      op: 'zip_with',
+      op: 'zipWith',
       a: [1, 2],
       b: [10, 20, 30],
       x_var: 'x', y_var: 'y',

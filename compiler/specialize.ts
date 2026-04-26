@@ -3,11 +3,11 @@
  *
  * A program declares `type_params` (e.g. { N: { type: 'int', default: 44100 } }).
  * An instance supplies `type_args` (e.g. { N: 8 } or, in nested contexts,
- * { N: { op: 'type_param', name: 'N' } } to forward from the outer frame).
+ * { N: { op: 'typeParam', name: 'N' } } to forward from the outer frame).
  *
  * `specializeProgramNode` clones the template and substitutes every
- * `{ op: 'type_param', name }` ExprNode with the integer literal, and every
- * `{ zeros: { type_param: name } }` reg init with the resolved integer count.
+ * `{ op: 'typeParam', name }` ExprNode with the integer literal, and every
+ * `{ zeros: { typeParam: name } }` reg init with the resolved integer count.
  * The result is a ProgramNode that `loadProgramDef` can consume without any
  * awareness of type parameters.
  */
@@ -24,7 +24,7 @@ export type ResolvedTypeArgs = Record<string, number>
 
 /**
  * Resolve raw type_args against the surrounding (outer) program's resolved args.
- * Numeric literals pass through. `{ op: 'type_param', name }` looks up in outerArgs.
+ * Numeric literals pass through. `{ op: 'typeParam', name }` looks up in outerArgs.
  * Throws on unresolved refs, non-integer values, or unknown param names.
  */
 export function resolveTypeArgs(
@@ -66,14 +66,14 @@ function resolveValue(
   context: string,
 ): number {
   if (typeof v === 'number') return v
-  if (v && typeof v === 'object' && !Array.isArray(v) && (v as { op?: string }).op === 'type_param') {
+  if (v && typeof v === 'object' && !Array.isArray(v) && (v as { op?: string }).op === 'typeParam') {
     const name = (v as unknown as { name: string }).name
     if (!outerArgs || !(name in outerArgs)) {
       throw new Error(`${context}: unresolved type_param '${name}' (no outer frame provides it)`)
     }
     return outerArgs[name]
   }
-  throw new Error(`${context}: type_arg value must be a number or { op: 'type_param', name }, got ${JSON.stringify(v)}`)
+  throw new Error(`${context}: type_arg value must be a number or { op: 'typeParam', name }, got ${JSON.stringify(v)}`)
 }
 
 /** Build a stable cache key for a specialization. */
@@ -137,12 +137,12 @@ function specializeDecl(
   const op = d.op as string
   const out: Record<string, unknown> = { ...d }
 
-  if (op === 'reg_decl') {
+  if (op === 'regDecl') {
     const init = d.init
     if (init && typeof init === 'object' && !Array.isArray(init) && 'zeros' in (init as Record<string, unknown>)) {
       const zeros = (init as { zeros: unknown }).zeros
-      if (zeros && typeof zeros === 'object' && !Array.isArray(zeros) && 'type_param' in (zeros as Record<string, unknown>)) {
-        const paramName = (zeros as { type_param: string }).type_param
+      if (zeros && typeof zeros === 'object' && !Array.isArray(zeros) && 'typeParam' in (zeros as Record<string, unknown>)) {
+        const paramName = (zeros as { typeParam: string }).typeParam
         if (!(paramName in args)) {
           throw new Error(`${progName}: reg '${String(d.name)}' references undeclared type_param '${paramName}'`)
         }
@@ -158,13 +158,13 @@ function specializeDecl(
     return out as ExprNode
   }
 
-  if (op === 'delay_decl') {
+  if (op === 'delayDecl') {
     if (d.update !== undefined) out.update = substNode(d.update as ExprNode)
     // init is a numeric literal — nothing to substitute
     return out as ExprNode
   }
 
-  if (op === 'instance_decl') {
+  if (op === 'instanceDecl') {
     if (d.inputs && typeof d.inputs === 'object' && !Array.isArray(d.inputs)) {
       const newInputs: Record<string, ExprNode> = {}
       for (const [k, v] of Object.entries(d.inputs as Record<string, ExprNode>)) {
@@ -179,7 +179,7 @@ function specializeDecl(
       for (const [k, v] of Object.entries(d.type_args as RawTypeArgs)) {
         if (typeof v === 'number') {
           resolved[k] = v
-        } else if (v && typeof v === 'object' && !Array.isArray(v) && (v as { op?: string }).op === 'type_param') {
+        } else if (v && typeof v === 'object' && !Array.isArray(v) && (v as { op?: string }).op === 'typeParam') {
           const pn = (v as unknown as { name: string }).name
           if (!(pn in args)) {
             throw new Error(`${progName}: instance '${String(d.name)}' forwards unknown type_param '${pn}'`)
@@ -203,13 +203,13 @@ function specializeAssign(rawAssign: ExprNode, substNode: (n: ExprNode) => ExprN
   if (typeof rawAssign !== 'object' || rawAssign === null || Array.isArray(rawAssign)) return rawAssign
   const a = rawAssign as Record<string, unknown>
   const op = a.op as string
-  if (op === 'output_assign' || op === 'next_update') {
+  if (op === 'outputAssign' || op === 'nextUpdate') {
     return { ...a, expr: substNode(a.expr as ExprNode) } as unknown as ExprNode
   }
   return rawAssign
 }
 
-/** Substitute {op:'type_param',name} refs inside a port-type declaration's
+/** Substitute {op:'typeParam',name} refs inside a port-type declaration's
  *  shape array with their resolved integer values. Scalars pass through. */
 function substituteTypeInDecl(
   t: unknown,
@@ -223,7 +223,7 @@ function substituteTypeInDecl(
     if (o.kind === 'array' && Array.isArray(o.shape)) {
       const newShape = o.shape.map((dim, i) => {
         if (typeof dim === 'number') return dim
-        if (dim && typeof dim === 'object' && (dim as { op?: string }).op === 'type_param') {
+        if (dim && typeof dim === 'object' && (dim as { op?: string }).op === 'typeParam') {
           const name = (dim as { name: string }).name
           if (!(name in args)) {
             throw new Error(
@@ -287,7 +287,7 @@ function substituteTypeParams(
   if (Array.isArray(node)) return node.map(n => substituteTypeParams(n, args, progName, typeParams))
 
   const obj = node as Record<string, unknown>
-  if (obj.op === 'type_param') {
+  if (obj.op === 'typeParam') {
     const name = obj.name as string
     if (!(name in args)) {
       throw new Error(`${progName}: ExprNode references undeclared type_param '${name}'`)

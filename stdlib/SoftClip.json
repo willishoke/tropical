@@ -5,7 +5,7 @@
     "op": "block",
     "decls": [
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "tanh",
         "program": "Tanh",
         "inputs": {
@@ -27,10 +27,10 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "out",
         "expr": {
-          "op": "nested_out",
+          "op": "nestedOut",
           "ref": "tanh",
           "output": "out"
         }

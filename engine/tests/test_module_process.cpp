@@ -82,7 +82,7 @@ static void test_sawtooth()
 
   std::string plan = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
     "outputs": [0],
@@ -143,7 +143,7 @@ static void test_two_outputs_mix()
 
   std::string plan = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [],
     "register_names": [],
     "outputs": [0, 1],
@@ -187,7 +187,7 @@ static void test_hot_swap_preserves_state()
   // Plan A: output = reg(0), register update = mod(reg(0) + 440/sr, 1)
   std::string plan_a = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
     "outputs": [0],
@@ -221,7 +221,7 @@ static void test_hot_swap_preserves_state()
   // Plan B: output = reg(0) * 5.0, same register name "phase"
   std::string plan_b = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
     "outputs": [0],
@@ -274,7 +274,7 @@ static void test_array_literal()
 
   std::string plan = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [0.0, 1.0],
     "register_names": ["idx", "idx2"],
     "outputs": [0],
@@ -330,7 +330,7 @@ static void test_counter_wrap()
 
   std::string plan = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["counter"],
     "outputs": [0],
@@ -381,7 +381,7 @@ static void test_select_conditional()
 
   std::string plan = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["phase"],
     "outputs": [0],
@@ -431,7 +431,7 @@ static void test_multi_register_clock()
 
   std::string plan = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [0.0, 0.0],
     "register_names": ["phase", "gate"],
     "outputs": [0],
@@ -487,7 +487,7 @@ static void test_multiple_outputs_summed()
 
   std::string plan = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [],
     "register_names": [],
     "outputs": [0, 1],
@@ -542,7 +542,7 @@ static void test_typed_int_bitwise()
   // reg6 = SIToFP equivalent via Mul(reg0, 1.0)        [float] — for output
   std::string plan = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [1.0],
     "register_names": ["lfsr_state"],
     "register_types": ["int"],
@@ -628,7 +628,7 @@ static void test_typed_bool_select()
 
   std::string plan = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [],
     "register_names": [],
     "outputs": [0],
@@ -706,7 +706,7 @@ static void test_float_to_int_register_writeback()
 
   std::string plan = R"({
     "schema": "tropical_plan_4",
-    "config": { "sample_rate": 44100.0 },
+    "config": { "sampleRate": 44100.0 },
     "state_init": [0.0],
     "register_names": ["counter"],
     "register_types": ["int"],
@@ -777,7 +777,7 @@ static void test_cast_ops()
     char plan_buf[2048];
     snprintf(plan_buf, sizeof(plan_buf), R"({
       "schema": "tropical_plan_4",
-      "config": { "sample_rate": 44100.0 },
+      "config": { "sampleRate": 44100.0 },
       "state_init": [],
       "register_names": [],
       "register_types": [],
@@ -815,7 +815,7 @@ static void test_cast_ops()
     char plan_buf[2048];
     snprintf(plan_buf, sizeof(plan_buf), R"({
       "schema": "tropical_plan_4",
-      "config": { "sample_rate": 44100.0 },
+      "config": { "sampleRate": 44100.0 },
       "state_init": [],
       "register_names": [],
       "register_types": [],

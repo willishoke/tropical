@@ -5,14 +5,14 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "phase",
         "init": 0
       }
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "saw",
         "expr": {
           "op": "let",
@@ -25,7 +25,7 @@
                   "name": "freq"
                 },
                 {
-                  "op": "sample_rate"
+                  "op": "sampleRate"
                 }
               ]
             },
@@ -219,7 +219,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": {
           "kind": "reg",
           "name": "phase"
@@ -242,7 +242,7 @@
                       "name": "freq"
                     },
                     {
-                      "op": "sample_rate"
+                      "op": "sampleRate"
                     }
                   ]
                 }

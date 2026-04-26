@@ -5,7 +5,7 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "state",
         "init": 2685821657736338717,
         "type": "int"
@@ -13,7 +13,7 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "trigger",
         "expr": {
           "op": "let",
@@ -81,7 +81,7 @@
                             "op": "mul",
                             "args": [2, { "op": "input", "name": "rate" }]
                           },
-                          { "op": "sample_rate" }
+                          { "op": "sampleRate" }
                         ]
                       }
                     ]
@@ -106,7 +106,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": { "kind": "reg", "name": "state" },
         "expr": {
           "op": "let",

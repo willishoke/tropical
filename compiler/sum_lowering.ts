@@ -47,7 +47,7 @@ export function expandSumTypes(
   for (const decl of body.decls ?? []) {
     if (typeof decl !== 'object' || decl === null || Array.isArray(decl)) continue
     const d = decl as Record<string, unknown>
-    if (d.op !== 'delay_decl' || typeof d.type !== 'string') continue
+    if (d.op !== 'delayDecl' || typeof d.type !== 'string') continue
     const meta = sumRegistry.get(d.type as string)
     if (meta === undefined) continue  // not a sum type — leave alone
     sumDelays.set(d.name as string, {
@@ -70,7 +70,7 @@ export function expandSumTypes(
       continue
     }
     const d = decl as Record<string, unknown>
-    if (d.op === 'delay_decl' && typeof d.type === 'string' && sumDelays.has(d.name as string)) {
+    if (d.op === 'delayDecl' && typeof d.type === 'string' && sumDelays.has(d.name as string)) {
       const info = sumDelays.get(d.name as string)!
       // Validate init is a constant tag expression of matching type.
       const init = d.init
@@ -102,7 +102,7 @@ export function expandSumTypes(
           ? extractSlotFromSumExpr(d.update as ExprNode, slot, info.meta, sumDelays, sumRegistry)
           : undefined
         const slotDecl: Record<string, unknown> = {
-          op: 'delay_decl',
+          op: 'delayDecl',
           name: slotName,
           init: slotInit,
         }
@@ -157,9 +157,9 @@ function rewriteExpr(
   // correct lowering when the delay_ref is a match scrutinee. (Match
   // rewriting below also reads the tag for dispatch and rewrites payload
   // bindings to read the right field slots.)
-  if (op === 'delay_ref' && typeof obj.id === 'string' && sumDelays.has(obj.id as string)) {
+  if (op === 'delayRef' && typeof obj.id === 'string' && sumDelays.has(obj.id as string)) {
     const info = sumDelays.get(obj.id as string)!
-    return { op: 'delay_ref', id: mangleSumSlot(obj.id as string, 'tag') }
+    return { op: 'delayRef', id: mangleSumSlot(obj.id as string, 'tag') }
   }
 
   // match — when scrutinee resolves to a sum-typed bundle, lower to a
@@ -260,7 +260,7 @@ function resolveSumTypeOfExpr(
 ): SumTypeMeta | undefined {
   if (typeof expr !== 'object' || expr === null || Array.isArray(expr)) return undefined
   const obj = expr as Record<string, unknown>
-  if (obj.op === 'delay_ref' && typeof obj.id === 'string') {
+  if (obj.op === 'delayRef' && typeof obj.id === 'string') {
     const info = sumDelays.get(obj.id as string)
     if (info !== undefined) return info.meta
   }
@@ -365,7 +365,7 @@ function bindingsForArm(
     )
   }
   const sObj = scrutinee as Record<string, unknown>
-  if (sObj.op !== 'delay_ref' || typeof sObj.id !== 'string' || !sumDelays.has(sObj.id as string)) {
+  if (sObj.op !== 'delayRef' || typeof sObj.id !== 'string' || !sumDelays.has(sObj.id as string)) {
     throw new Error(
       `match: arm '${variantName}' has a payload binding but the scrutinee is not a ` +
       `sum-typed delay_ref. (Only delay_ref scrutinees are supported in V1; future work ` +
@@ -377,7 +377,7 @@ function bindingsForArm(
   for (let i = 0; i < bindNames.length; i++) {
     const fieldName = variant.payload[i].name
     const slotName = mangleSumSlot(stateName, `${variantName}__${fieldName}`)
-    bindings.set(bindNames[i], { op: 'delay_ref', id: slotName })
+    bindings.set(bindNames[i], { op: 'delayRef', id: slotName })
   }
   return bindings
 }
@@ -558,8 +558,8 @@ function extractSlotFromSumExpr(
 
   // delay_ref to a sum-typed delay used as a sum-valued update —
   // for slot, just read the corresponding slot of the source.
-  if (obj.op === 'delay_ref' && typeof obj.id === 'string' && sumDelays.has(obj.id as string)) {
-    return { op: 'delay_ref', id: mangleSumSlot(obj.id as string, slot.suffix) }
+  if (obj.op === 'delayRef' && typeof obj.id === 'string' && sumDelays.has(obj.id as string)) {
+    return { op: 'delayRef', id: mangleSumSlot(obj.id as string, slot.suffix) }
   }
 
   // select(cond, then, else) where both then and else are sum-valued —
@@ -608,7 +608,7 @@ function rewriteAssign(
   // multiple per-slot next_updates. V1 path: users put updates on the
   // delay_decl itself (the `update` field), so this case is uncommon.
   // If we see one, expand it.
-  if (obj.op === 'next_update') {
+  if (obj.op === 'nextUpdate') {
     const target = obj.target as { kind: string; name: string }
     if (target.kind === 'delay' && sumDelays.has(target.name)) {
       // Phase 3b should handle this. For Phase 3a, error out so the

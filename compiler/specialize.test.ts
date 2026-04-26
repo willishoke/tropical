@@ -7,10 +7,10 @@ import {
 import type { ExprNode } from './expr.js'
 import type { ProgramNode } from './program.js'
 
-type RegDecl = { op: 'reg_decl'; name: string; init: unknown; type?: unknown }
-type InstanceDecl = { op: 'instance_decl'; name: string; program: string; inputs?: Record<string, ExprNode>; type_args?: Record<string, number | ExprNode> }
-type OutputAssign = { op: 'output_assign'; name: string; expr: ExprNode }
-type NextUpdate = { op: 'next_update'; target: { kind: 'reg' | 'delay'; name: string }; expr: ExprNode }
+type RegDecl = { op: 'regDecl'; name: string; init: unknown; type?: unknown }
+type InstanceDecl = { op: 'instanceDecl'; name: string; program: string; inputs?: Record<string, ExprNode>; type_args?: Record<string, number | ExprNode> }
+type OutputAssign = { op: 'outputAssign'; name: string; expr: ExprNode }
+type NextUpdate = { op: 'nextUpdate'; target: { kind: 'reg' | 'delay'; name: string }; expr: ExprNode }
 
 function findDecl<T extends { op: string; name: string }>(prog: ProgramNode, op: T['op'], name: string): T {
   const decl = (prog.body.decls ?? []).find(d =>
@@ -43,28 +43,28 @@ function makeGenericDelay(): ProgramNode {
     body: {
       op: 'block',
       decls: [
-        { op: 'reg_decl', name: 'buf', init: { zeros: { type_param: 'N' } } } as unknown as ExprNode,
+        { op: 'regDecl', name: 'buf', init: { zeros: { typeParam: 'N' } } } as unknown as ExprNode,
       ],
       assigns: [
         {
-          op: 'output_assign',
+          op: 'outputAssign',
           name: 'y',
           expr: {
             op: 'index',
             args: [
               { op: 'reg', name: 'buf' },
-              { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
+              { op: 'mod', args: [{ op: 'sampleIndex' }, { op: 'typeParam', name: 'N' }] },
             ],
           },
         } as unknown as ExprNode,
         {
-          op: 'next_update',
+          op: 'nextUpdate',
           target: { kind: 'reg', name: 'buf' },
           expr: {
-            op: 'array_set',
+            op: 'arraySet',
             args: [
               { op: 'reg', name: 'buf' },
-              { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
+              { op: 'mod', args: [{ op: 'sampleIndex' }, { op: 'typeParam', name: 'N' }] },
               { op: 'input', name: 'x' },
             ],
           },
@@ -87,7 +87,7 @@ describe('resolveTypeArgs', () => {
   })
 
   test('resolves type_param refs against outer frame', () => {
-    const arg = { op: 'type_param' as const, name: 'M' }
+    const arg = { op: 'typeParam' as const, name: 'M' }
     expect(resolveTypeArgs({ N: arg }, { M: 16 }, params, 'test')).toEqual({ N: 16 })
   })
 
@@ -105,7 +105,7 @@ describe('resolveTypeArgs', () => {
   })
 
   test('throws on unresolved type_param ref', () => {
-    const arg = { op: 'type_param' as const, name: 'M' }
+    const arg = { op: 'typeParam' as const, name: 'M' }
     expect(() => resolveTypeArgs({ N: arg }, undefined, params, 'test')).toThrow(/unresolved type_param 'M'/)
     expect(() => resolveTypeArgs({ N: arg }, { K: 5 }, params, 'test')).toThrow(/unresolved type_param 'M'/)
   })
@@ -131,11 +131,11 @@ describe('specializeProgramNode', () => {
     const spec = specializeProgramNode(prog, { N: 8 })
 
     // N is declared `type: 'int'`, so substitutions emit typed-const nodes.
-    const yAssign = findAssign<OutputAssign>(spec, 'output_assign', a => a.name === 'y')
+    const yAssign = findAssign<OutputAssign>(spec, 'outputAssign', a => a.name === 'y')
     const yExpr = yAssign.expr as { args: [unknown, { args: [unknown, unknown] }] }
     expect(yExpr.args[1].args[1]).toEqual({ op: 'const', val: 8, type: 'int' } as ExprNode)
 
-    const bufUpdate = findAssign<NextUpdate>(spec, 'next_update', a => a.target.name === 'buf')
+    const bufUpdate = findAssign<NextUpdate>(spec, 'nextUpdate', a => a.target.name === 'buf')
     const bufExpr = bufUpdate.expr as { args: [unknown, { args: [unknown, unknown] }, unknown] }
     expect(bufExpr.args[1].args[1]).toEqual({ op: 'const', val: 8, type: 'int' } as ExprNode)
   })
@@ -143,7 +143,7 @@ describe('specializeProgramNode', () => {
   test('substitutes { zeros: { type_param } } to { zeros: N }', () => {
     const prog = makeGenericDelay()
     const spec = specializeProgramNode(prog, { N: 512 })
-    const buf = findDecl<RegDecl>(spec, 'reg_decl', 'buf')
+    const buf = findDecl<RegDecl>(spec, 'regDecl', 'buf')
     expect(buf.init).toEqual({ zeros: 512 })
   })
 
@@ -154,21 +154,21 @@ describe('specializeProgramNode', () => {
       ports: { outputs: ['y'] },
       body: {
         op: 'block',
-        decls: [{ op: 'reg_decl', name: 'buf', init: { zeros: 100 } } as unknown as ExprNode],
-        assigns: [{ op: 'output_assign', name: 'y', expr: 0 } as unknown as ExprNode],
+        decls: [{ op: 'regDecl', name: 'buf', init: { zeros: 100 } } as unknown as ExprNode],
+        assigns: [{ op: 'outputAssign', name: 'y', expr: 0 } as unknown as ExprNode],
       },
     }
     const spec = specializeProgramNode(prog, {})
-    const buf = findDecl<RegDecl>(spec, 'reg_decl', 'buf')
+    const buf = findDecl<RegDecl>(spec, 'regDecl', 'buf')
     expect(buf.init).toEqual({ zeros: 100 })
   })
 
   test('is a deep clone — mutating output does not affect input', () => {
     const prog = makeGenericDelay()
     const spec = specializeProgramNode(prog, { N: 8 })
-    const yAssign = findAssign<OutputAssign>(spec, 'output_assign', a => a.name === 'y')
+    const yAssign = findAssign<OutputAssign>(spec, 'outputAssign', a => a.name === 'y')
     ;(yAssign.expr as { op: string }).op = 'mutated'
-    const origAssign = findAssign<OutputAssign>(prog, 'output_assign', a => a.name === 'y')
+    const origAssign = findAssign<OutputAssign>(prog, 'outputAssign', a => a.name === 'y')
     expect((origAssign.expr as { op: string }).op).toBe('index')
   })
 
@@ -178,12 +178,12 @@ describe('specializeProgramNode', () => {
       name: 'X',
       type_params: { N: { type: 'int' } },
       ports: {
-        inputs: [{ name: 'x', default: { op: 'type_param', name: 'N' } }],
+        inputs: [{ name: 'x', default: { op: 'typeParam', name: 'N' } }],
         outputs: ['y'],
       },
       body: {
         op: 'block',
-        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } } as unknown as ExprNode],
+        assigns: [{ op: 'outputAssign', name: 'y', expr: { op: 'input', name: 'x' } } as unknown as ExprNode],
       },
     }
     const spec = specializeProgramNode(prog, { N: 42 })
@@ -201,20 +201,20 @@ describe('specializeProgramNode', () => {
         op: 'block',
         decls: [
           {
-            op: 'instance_decl',
+            op: 'instanceDecl',
             name: 'd',
             program: 'Delay',
-            inputs: { x: { op: 'type_param', name: 'N' } },
-            type_args: { N: { op: 'type_param', name: 'N' } },
+            inputs: { x: { op: 'typeParam', name: 'N' } },
+            type_args: { N: { op: 'typeParam', name: 'N' } },
           } as unknown as ExprNode,
         ],
         assigns: [
-          { op: 'output_assign', name: 'y', expr: { op: 'nested_out', ref: 'd', output: 'y' } } as unknown as ExprNode,
+          { op: 'outputAssign', name: 'y', expr: { op: 'nestedOut', ref: 'd', output: 'y' } } as unknown as ExprNode,
         ],
       },
     }
     const spec = specializeProgramNode(prog, { N: 256 })
-    const d = findDecl<InstanceDecl>(spec, 'instance_decl', 'd')
+    const d = findDecl<InstanceDecl>(spec, 'instanceDecl', 'd')
     expect(d.inputs!.x).toEqual({ op: 'const', val: 256, type: 'int' } as ExprNode)
     expect(d.type_args).toEqual({ N: 256 })
   })
@@ -227,7 +227,7 @@ describe('specializeProgramNode', () => {
       ports: { outputs: ['y'] },
       body: {
         op: 'block',
-        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'type_param', name: 'Z' } } as unknown as ExprNode],
+        assigns: [{ op: 'outputAssign', name: 'y', expr: { op: 'typeParam', name: 'Z' } } as unknown as ExprNode],
       },
     }
     expect(() => specializeProgramNode(prog, { N: 8 })).toThrow(/undeclared type_param 'Z'/)
@@ -243,11 +243,11 @@ describe('specializeProgramNode', () => {
         op: 'block',
         assigns: [
           {
-            op: 'output_assign',
+            op: 'outputAssign',
             name: 'y',
             expr: {
               op: 'generate',
-              n: { op: 'type_param', name: 'N' },
+              n: { op: 'typeParam', name: 'N' },
               i: 'i',
               body: { op: 'binding', name: 'i' },
             },
@@ -256,7 +256,7 @@ describe('specializeProgramNode', () => {
       },
     }
     const spec = specializeProgramNode(prog, { N: 4 })
-    const yAssign = findAssign<OutputAssign>(spec, 'output_assign', a => a.name === 'y')
+    const yAssign = findAssign<OutputAssign>(spec, 'outputAssign', a => a.name === 'y')
     const y = yAssign.expr as { n: ExprNode }
     expect(y.n).toEqual({ op: 'const', val: 4, type: 'int' } as ExprNode)
   })
@@ -268,13 +268,13 @@ describe('specializeProgramNode', () => {
       type_params: { N: { type: 'int' } },
       ports: {
         inputs: [
-          { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
+          { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'typeParam', name: 'N' }] } },
         ],
         outputs: ['y'],
       },
       body: {
         op: 'block',
-        assigns: [{ op: 'output_assign', name: 'y', expr: 0 } as unknown as ExprNode],
+        assigns: [{ op: 'outputAssign', name: 'y', expr: 0 } as unknown as ExprNode],
       },
     }
     const spec = specializeProgramNode(prog, { N: 8 })
@@ -289,12 +289,12 @@ describe('specializeProgramNode', () => {
       type_params: { N: { type: 'int' } },
       ports: {
         outputs: [
-          { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }, 2] } },
+          { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'typeParam', name: 'N' }, 2] } },
         ],
       },
       body: {
         op: 'block',
-        assigns: [{ op: 'output_assign', name: 'out', expr: 0 } as unknown as ExprNode],
+        assigns: [{ op: 'outputAssign', name: 'out', expr: 0 } as unknown as ExprNode],
       },
     }
     const spec = specializeProgramNode(prog, { N: 3 })
@@ -309,13 +309,13 @@ describe('specializeProgramNode', () => {
       type_params: { N: { type: 'int' } },
       ports: {
         inputs: [
-          { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'M' }] } },
+          { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'typeParam', name: 'M' }] } },
         ],
         outputs: ['y'],
       },
       body: {
         op: 'block',
-        assigns: [{ op: 'output_assign', name: 'y', expr: 0 } as unknown as ExprNode],
+        assigns: [{ op: 'outputAssign', name: 'y', expr: 0 } as unknown as ExprNode],
       },
     }
     expect(() => specializeProgramNode(prog, { N: 4 })).toThrow(/undeclared type_param 'M'/)
@@ -335,17 +335,17 @@ describe('specializeProgramNode', () => {
       ports: { outputs: ['y'] },
       body: {
         op: 'block',
-        decls: [{ op: 'reg_decl', name: 'step', init: 0, type: 'int' } as unknown as ExprNode],
+        decls: [{ op: 'regDecl', name: 'step', init: 0, type: 'int' } as unknown as ExprNode],
         assigns: [
-          { op: 'output_assign', name: 'y', expr: { op: 'reg', name: 'step' } } as unknown as ExprNode,
+          { op: 'outputAssign', name: 'y', expr: { op: 'reg', name: 'step' } } as unknown as ExprNode,
           {
-            op: 'next_update',
+            op: 'nextUpdate',
             target: { kind: 'reg', name: 'step' },
             expr: {
               op: 'mod',
               args: [
                 { op: 'add', args: [{ op: 'reg', name: 'step' }, 1] },
-                { op: 'type_param', name: 'N' },
+                { op: 'typeParam', name: 'N' },
               ],
             },
           } as unknown as ExprNode,
@@ -353,7 +353,7 @@ describe('specializeProgramNode', () => {
       },
     }
     const spec = specializeProgramNode(prog, { N: 4 })
-    const stepUpdate = findAssign<NextUpdate>(spec, 'next_update', a => a.target.name === 'step')
+    const stepUpdate = findAssign<NextUpdate>(spec, 'nextUpdate', a => a.target.name === 'step')
     const stepExpr = stepUpdate.expr as { args: [unknown, unknown] }
     expect(stepExpr.args[1]).toEqual({ op: 'const', val: 4, type: 'int' } as ExprNode)
   })

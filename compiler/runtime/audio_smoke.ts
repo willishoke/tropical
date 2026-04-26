@@ -16,8 +16,8 @@ loadJSON({
   schema: 'tropical_program_2',
   name: 'smoke_test',
   body: { op: 'block', decls: [
-    { op: 'instance_decl', name: 'VCO1', program: 'VCO', inputs: { freq: 440 } },
-    { op: 'instance_decl', name: 'VCA1', program: 'VCA', inputs: {
+    { op: 'instanceDecl', name: 'VCO1', program: 'VCO', inputs: { freq: 440 } },
+    { op: 'instanceDecl', name: 'VCA1', program: 'VCA', inputs: {
       audio: { op: 'ref', instance: 'VCO1', output: 'saw' },
       cv: 0.3,
     }},

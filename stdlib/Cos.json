@@ -5,7 +5,7 @@
     "op": "block",
     "decls": [
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "sin",
         "program": "Sin",
         "inputs": {
@@ -24,10 +24,10 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "out",
         "expr": {
-          "op": "nested_out",
+          "op": "nestedOut",
           "ref": "sin",
           "output": "out"
         }

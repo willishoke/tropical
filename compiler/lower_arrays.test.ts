@@ -33,7 +33,7 @@ describe('lowerArrayOps', () => {
   })
 
   test('lowers array_literal to inline array', () => {
-    const node: ExprNode = { op: 'array_literal', shape: [2, 2], values: [1, 2, 3, 4] }
+    const node: ExprNode = { op: 'arrayLiteral', shape: [2, 2], values: [1, 2, 3, 4] }
     expect(lowerArrayOps(node)).toEqual([1, 2, 3, 4])
   })
 
@@ -69,12 +69,12 @@ describe('lowerArrayOps', () => {
   })
 
   test('lowers broadcast_to scalar', () => {
-    const node: ExprNode = { op: 'broadcast_to', args: [5], shape: [4] }
+    const node: ExprNode = { op: 'broadcastTo', args: [5], shape: [4] }
     expect(lowerArrayOps(node)).toEqual([5, 5, 5, 5])
   })
 
   test('lowers broadcast_to [1] to [N]', () => {
-    const node: ExprNode = { op: 'broadcast_to', args: [[7]], shape: [3] }
+    const node: ExprNode = { op: 'broadcastTo', args: [[7]], shape: [3] }
     expect(lowerArrayOps(node)).toEqual([7, 7, 7])
   })
 
@@ -217,7 +217,7 @@ describe('expandDeclGenerators', () => {
   test('passes through block with no generate_decls', () => {
     const block = {
       op: 'block' as const,
-      decls: [{ op: 'instance_decl', name: 'Osc', program: 'SinOsc', inputs: { freq: 440 } } as ExprNode],
+      decls: [{ op: 'instanceDecl', name: 'Osc', program: 'SinOsc', inputs: { freq: 440 } } as ExprNode],
       assigns: [],
     }
     expect(expandDeclGenerators(block)).toBe(block)
@@ -227,12 +227,12 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 3,
         var: 'i',
         decls: [{
-          op: 'instance_decl',
-          name: { op: 'str_concat', parts: ['Osc', { op: 'binding', name: 'i' }] },
+          op: 'instanceDecl',
+          name: { op: 'strConcat', parts: ['Osc', { op: 'binding', name: 'i' }] },
           program: 'SinOsc',
           inputs: { freq: { op: 'mul', args: [{ op: 'binding', name: 'i' }, 100] } },
         }],
@@ -254,12 +254,12 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 3,
         var: 'i',
         decls: [{
-          op: 'instance_decl',
-          name: { op: 'str_concat', parts: ['VCO', { op: 'add', args: [{ op: 'binding', name: 'i' }, 1] }] },
+          op: 'instanceDecl',
+          name: { op: 'strConcat', parts: ['VCO', { op: 'add', args: [{ op: 'binding', name: 'i' }, 1] }] },
           program: 'SinOsc',
           inputs: {},
         }],
@@ -275,10 +275,10 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 0,
         var: 'i',
-        decls: [{ op: 'instance_decl', name: 'X', program: 'SinOsc', inputs: {} }],
+        decls: [{ op: 'instanceDecl', name: 'X', program: 'SinOsc', inputs: {} }],
       } as ExprNode],
       assigns: [],
     }
@@ -290,19 +290,19 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 2,
         var: 'i',
         decls: [
           {
-            op: 'instance_decl',
-            name: { op: 'str_concat', parts: ['Osc', { op: 'binding', name: 'i' }] },
+            op: 'instanceDecl',
+            name: { op: 'strConcat', parts: ['Osc', { op: 'binding', name: 'i' }] },
             program: 'SinOsc',
             inputs: {},
           },
           {
-            op: 'instance_decl',
-            name: { op: 'str_concat', parts: ['Env', { op: 'binding', name: 'i' }] },
+            op: 'instanceDecl',
+            name: { op: 'strConcat', parts: ['Env', { op: 'binding', name: 'i' }] },
             program: 'EnvExpDecay',
             inputs: {},
           },
@@ -316,16 +316,16 @@ describe('expandDeclGenerators', () => {
   })
 
   test('preserves non-generate_decls entries alongside expanded ones', () => {
-    const existing = { op: 'instance_decl', name: 'Static', program: 'Clock', inputs: {} } as ExprNode
+    const existing = { op: 'instanceDecl', name: 'Static', program: 'Clock', inputs: {} } as ExprNode
     const block = {
       op: 'block' as const,
       decls: [
         existing,
         {
-          op: 'generate_decls',
+          op: 'generateDecls',
           count: 2,
           var: 'i',
-          decls: [{ op: 'instance_decl', name: { op: 'str_concat', parts: ['G', { op: 'binding', name: 'i' }] }, program: 'SinOsc', inputs: {} }],
+          decls: [{ op: 'instanceDecl', name: { op: 'strConcat', parts: ['G', { op: 'binding', name: 'i' }] }, program: 'SinOsc', inputs: {} }],
         } as ExprNode,
       ],
       assigns: [],
@@ -341,11 +341,11 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 1,
         var: 'i',
         decls: [{
-          op: 'instance_decl',
+          op: 'instanceDecl',
           name: { op: 'sin', args: [{ op: 'binding', name: 'i' }] },
           program: 'SinOsc',
           inputs: {},
@@ -364,14 +364,14 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [
-        { op: 'instance_decl', name: 'Osc0', program: 'SinOsc', inputs: { x: 440 } } as ExprNode,
+        { op: 'instanceDecl', name: 'Osc0', program: 'SinOsc', inputs: { x: 440 } } as ExprNode,
         {
-          op: 'generate_decls',
+          op: 'generateDecls',
           count: 3,
           var: 'i',
           decls: [{
-            op: 'instance_decl',
-            name: { op: 'str_concat', parts: ['Osc', { op: 'binding', name: 'i' }] },
+            op: 'instanceDecl',
+            name: { op: 'strConcat', parts: ['Osc', { op: 'binding', name: 'i' }] },
             program: 'SinOsc',
             inputs: { x: { op: 'mul', args: [{ op: 'binding', name: 'i' }, 100] } },
           }],
@@ -388,19 +388,19 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 2,
         var: 'i',
         decls: [
           {
-            op: 'instance_decl',
-            name: { op: 'str_concat', parts: ['X', { op: 'binding', name: 'i' }] },
+            op: 'instanceDecl',
+            name: { op: 'strConcat', parts: ['X', { op: 'binding', name: 'i' }] },
             program: 'SinOsc',
             inputs: {},
           },
           {
-            op: 'instance_decl',
-            name: { op: 'str_concat', parts: ['X', { op: 'binding', name: 'i' }] },
+            op: 'instanceDecl',
+            name: { op: 'strConcat', parts: ['X', { op: 'binding', name: 'i' }] },
             program: 'Clock',
             inputs: {},
           },
@@ -421,11 +421,11 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 1,
         var: 'i',
         decls: [{
-          op: 'instance_decl',
+          op: 'instanceDecl',
           name: 'v0',
           program: 'SinOsc',
           inputs: {
@@ -460,11 +460,11 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 1,
         var: 'i',
         decls: [{
-          op: 'instance_decl',
+          op: 'instanceDecl',
           name: 'v0',
           program: 'SinOsc',
           inputs: {
@@ -497,11 +497,11 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 1,
         var: 'i',
         decls: [{
-          op: 'instance_decl',
+          op: 'instanceDecl',
           name: 'v0',
           program: 'SinOsc',
           inputs: {
@@ -520,16 +520,16 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 2,
         var: 't',
         decls: [{
-          op: 'generate_decls',
+          op: 'generateDecls',
           count: 3,
           var: 'c',
           decls: [{
-            op: 'instance_decl',
-            name: { op: 'str_concat', parts: [
+            op: 'instanceDecl',
+            name: { op: 'strConcat', parts: [
               'tree', { op: 'binding', name: 't' },
               '_coco', { op: 'binding', name: 'c' },
             ]},
@@ -554,16 +554,16 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 2,
         var: 'i',
         decls: [{
-          op: 'generate_decls',
+          op: 'generateDecls',
           count: 3,
           var: 'i',  // deliberately shadows outer
           decls: [{
-            op: 'instance_decl',
-            name: { op: 'str_concat', parts: [
+            op: 'instanceDecl',
+            name: { op: 'strConcat', parts: [
               'v', { op: 'binding', name: 'i' },
             ]},
             program: 'SinOsc',
@@ -588,19 +588,19 @@ describe('expandDeclGenerators', () => {
     const block = {
       op: 'block' as const,
       decls: [{
-        op: 'generate_decls',
+        op: 'generateDecls',
         count: 2,
         var: 'i',
         decls: [
           {
-            op: 'instance_decl',
-            name: { op: 'str_concat', parts: ['g', { op: 'binding', name: 'i' }] },
+            op: 'instanceDecl',
+            name: { op: 'strConcat', parts: ['g', { op: 'binding', name: 'i' }] },
             program: 'SinOsc',
             inputs: {},
           },
           {
-            op: 'instance_decl',
-            name: { op: 'str_concat', parts: ['v', { op: 'binding', name: 'i' }] },
+            op: 'instanceDecl',
+            name: { op: 'strConcat', parts: ['v', { op: 'binding', name: 'i' }] },
             program: 'Coconut',
             inputs: {},
             gateable: true,
@@ -608,7 +608,7 @@ describe('expandDeclGenerators', () => {
               op: 'gt',
               args: [
                 { op: 'ref',
-                  instance: { op: 'str_concat', parts: ['g', { op: 'binding', name: 'i' }] },
+                  instance: { op: 'strConcat', parts: ['g', { op: 'binding', name: 'i' }] },
                   output: 'out' },
                 0.5,
               ],

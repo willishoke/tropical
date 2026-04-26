@@ -26,7 +26,7 @@ function buildPureSine440Plan(): FlatPlan {
     schema: 'tropical_program_2',
     name: 'pure_sine_440',
     body: { op: 'block', decls: [
-      { op: 'instance_decl', name: 'osc', program: 'SinOsc', inputs: { freq: 440 } },
+      { op: 'instanceDecl', name: 'osc', program: 'SinOsc', inputs: { freq: 440 } },
     ]},
     audio_outputs: [{ instance: 'osc', output: 'sine' }],
   }, session)

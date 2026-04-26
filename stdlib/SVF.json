@@ -5,19 +5,19 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "ic1eq",
         "init": 0
       },
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "ic2eq",
         "init": 0
       }
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "lp",
         "expr": {
           "op": "let",
@@ -32,7 +32,7 @@
                     { "op": "input", "name": "cutoff" }
                   ]
                 },
-                { "op": "sample_rate" }
+                { "op": "sampleRate" }
               ]
             },
             "k": {
@@ -156,7 +156,7 @@
         }
       },
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "bp",
         "expr": {
           "op": "let",
@@ -171,7 +171,7 @@
                     { "op": "input", "name": "cutoff" }
                   ]
                 },
-                { "op": "sample_rate" }
+                { "op": "sampleRate" }
               ]
             },
             "k": {
@@ -253,7 +253,7 @@
         }
       },
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "hp",
         "expr": {
           "op": "let",
@@ -268,7 +268,7 @@
                     { "op": "input", "name": "cutoff" }
                   ]
                 },
-                { "op": "sample_rate" }
+                { "op": "sampleRate" }
               ]
             },
             "k": {
@@ -412,7 +412,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": { "kind": "reg", "name": "ic1eq" },
         "expr": {
           "op": "let",
@@ -427,7 +427,7 @@
                     { "op": "input", "name": "cutoff" }
                   ]
                 },
-                { "op": "sample_rate" }
+                { "op": "sampleRate" }
               ]
             },
             "k": {
@@ -527,7 +527,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": { "kind": "reg", "name": "ic2eq" },
         "expr": {
           "op": "let",
@@ -542,7 +542,7 @@
                     { "op": "input", "name": "cutoff" }
                   ]
                 },
-                { "op": "sample_rate" }
+                { "op": "sampleRate" }
               ]
             },
             "k": {

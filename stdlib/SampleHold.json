@@ -5,12 +5,12 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "held",
         "init": 0
       },
       {
-        "op": "delay_decl",
+        "op": "delayDecl",
         "name": "prev_trigger",
         "update": { "op": "input", "name": "trigger" },
         "init": 0
@@ -18,7 +18,7 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "value",
         "expr": {
           "op": "let",
@@ -36,7 +36,7 @@
                 {
                   "op": "lte",
                   "args": [
-                    { "op": "delay_ref", "id": "prev_trigger" },
+                    { "op": "delayRef", "id": "prev_trigger" },
                     0.5
                   ]
                 }
@@ -54,7 +54,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": { "kind": "reg", "name": "held" },
         "expr": {
           "op": "let",
@@ -72,7 +72,7 @@
                 {
                   "op": "lte",
                   "args": [
-                    { "op": "delay_ref", "id": "prev_trigger" },
+                    { "op": "delayRef", "id": "prev_trigger" },
                     0.5
                   ]
                 }

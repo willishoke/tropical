@@ -12,11 +12,11 @@ describe('stdlib EnvExpDecay', () => {
       schema: 'tropical_program_2',
       name: 'test',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'env', program: 'EnvExpDecay', inputs: {
+        { op: 'instanceDecl', name: 'env', program: 'EnvExpDecay', inputs: {
           trigger: {
             op: 'select',
             args: [
-              { op: 'eq', args: [{ op: 'sample_index' }, 10] },
+              { op: 'eq', args: [{ op: 'sampleIndex' }, 10] },
               1,
               0,
             ],

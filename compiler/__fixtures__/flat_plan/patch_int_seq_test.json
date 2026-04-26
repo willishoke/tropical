@@ -6,7 +6,7 @@
       "op": "block",
       "decls": [
         {
-          "op": "program_decl",
+          "op": "programDecl",
           "name": "IntSeq",
           "program": {
             "op": "program",
@@ -28,14 +28,14 @@
               "op": "block",
               "decls": [
                 {
-                  "op": "reg_decl",
+                  "op": "regDecl",
                   "name": "index",
                   "init": 0
                 }
               ],
               "assigns": [
                 {
-                  "op": "output_assign",
+                  "op": "outputAssign",
                   "name": "value",
                   "expr": {
                     "op": "index",
@@ -52,7 +52,7 @@
                   }
                 },
                 {
-                  "op": "output_assign",
+                  "op": "outputAssign",
                   "name": "index",
                   "expr": {
                     "op": "reg",
@@ -60,7 +60,7 @@
                   }
                 },
                 {
-                  "op": "next_update",
+                  "op": "nextUpdate",
                   "target": {
                     "kind": "reg",
                     "name": "index"
@@ -129,7 +129,7 @@
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "Seq1",
           "program": "IntSeq",
           "inputs": {
@@ -170,7 +170,7 @@
   "expected_plan": {
     "schema": "tropical_plan_4",
     "config": {
-      "sample_rate": 44100
+      "sampleRate": 44100
     },
     "state_init": [
       0

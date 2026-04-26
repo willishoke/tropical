@@ -6,7 +6,7 @@
     "decls": [],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "out",
         "expr": {
           "op": "let",

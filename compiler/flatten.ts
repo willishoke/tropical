@@ -8,7 +8,8 @@
  * flat instruction stream (tropical_plan_4).
  */
 
-import type { ExprNode } from './expr.js'
+import type { ExprNode, ExprOpNodeStrict, CallNode, FunctionNode } from './expr.js'
+import { mapChildren } from './walk.js'
 import type { SessionState } from './session.js'
 import type { ProgramInstance, NestedCall, Bounds } from './program_types.js'
 import {
@@ -54,12 +55,12 @@ function inferExprOutputType(
       if (outIdx === -1 || outIdx >= modInfo.outputTypes.length) return undefined
       return modInfo.outputTypes[outIdx]
     }
-    case 'broadcast_to':
+    case 'broadcastTo':
       return ArrayType(Float, obj.shape as number[])
     case 'zeros':
     case 'ones':
     case 'fill':
-    case 'array_literal':
+    case 'arrayLiteral':
       return ArrayType(Float, obj.shape as number[])
     default:
       return undefined
@@ -137,7 +138,7 @@ export function applyBounds(expr: ExprNode, bounds: Bounds): ExprNode {
 
 export interface FlatPlan {
   schema: 'tropical_plan_4'
-  config: { sample_rate: number }
+  config: { sampleRate: number }
   state_init: (number | boolean)[]
   register_names: string[]
   register_types: ScalarType[]
@@ -201,70 +202,32 @@ function cloneExpr(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode {
  * This eliminates function/call nodes that the C++ plan_loader doesn't support.
  */
 function inlineCalls(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode {
-  if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => inlineCalls(n, memo))
   if (typeof node !== 'object' || node === null) return node
+  if (Array.isArray(node)) return node.map(n => inlineCalls(n, memo))
 
   if (memo) {
-    const cached = memo.get(node as object)
+    const cached = memo.get(node)
     if (cached !== undefined) return cached
   }
 
-  const obj = node as Record<string, unknown>
+  // Recurse into children bottom-up; nested calls are inlined first.
+  const inner = mapChildren(node as ExprOpNodeStrict, n => inlineCalls(n, memo)) as unknown as ExprNode
 
-  // First, recursively inline in children
-  let changed = false
-  const result: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(obj)) {
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => inlineCalls(n, memo))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = inlineCalls(v as ExprNode, memo)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      // Record<string, ExprNode> fields (e.g. 'bind' in let nodes)
-      const rec = v as Record<string, ExprNode>
-      const newRec: Record<string, ExprNode> = {}
-      let recChanged = false
-      for (const [rk, rv] of Object.entries(rec)) {
-        const newRv = inlineCalls(rv, memo)
-        if (newRv !== rv) recChanged = true
-        newRec[rk] = newRv
-      }
-      if (recChanged) changed = true
-      result[k] = recChanged ? newRec : rec
-    } else {
-      result[k] = v
-    }
-  }
-
-  let out: ExprNode
-  // Now check if this is a call(function(...), args) that can be inlined
-  if ((changed ? result.op : obj.op) === 'call') {
-    const src = changed ? result : obj
-    const callee = src.callee as ExprNode
-    if (typeof callee === 'object' && !Array.isArray(callee) && (callee as Record<string, unknown>).op === 'function') {
-      const fnNode = callee as Record<string, unknown>
-      const body = fnNode.body as ExprNode
-      const args = src.args as ExprNode[]
-      // Substitute input(N) → args[N] in the function body
+  // If this is a call(function(...), args), substitute input(N) → args[N] in the function body.
+  let out: ExprNode = inner
+  if (typeof inner === 'object' && !Array.isArray(inner) && (inner as { op?: string }).op === 'call') {
+    const callNode = inner as unknown as CallNode
+    const callee = callNode.callee
+    if (typeof callee === 'object' && !Array.isArray(callee) && callee !== null
+        && (callee as { op?: string }).op === 'function') {
+      const fnNode = callee as unknown as FunctionNode
       const argMap = new Map<number, ExprNode>()
-      for (let i = 0; i < args.length; i++) {
-        argMap.set(i, args[i])
-      }
-      out = substituteInputs(body, argMap)
-    } else {
-      out = changed ? result as ExprNode : node
+      for (let i = 0; i < callNode.args.length; i++) argMap.set(i, callNode.args[i])
+      out = substituteInputs(fnNode.body, argMap)
     }
-  } else {
-    out = changed ? result as ExprNode : node
   }
 
-  if (memo) memo.set(node as object, out)
+  if (memo) memo.set(node, out)
   return out
 }
 
@@ -278,58 +241,24 @@ function inlineCalls(node: ExprNode, memo?: WeakMap<object, ExprNode>): ExprNode
  * Replacements are returned directly (not cloned) so call-site sharing is preserved.
  */
 function substituteInputs(node: ExprNode, inputMap: Map<number, ExprNode>, memo?: WeakMap<object, ExprNode>): ExprNode {
-  if (typeof node === 'number' || typeof node === 'boolean') return node
+  if (typeof node !== 'object' || node === null) return node
   if (Array.isArray(node)) return node.map(n => substituteInputs(n, inputMap, memo))
 
   if (memo) {
-    const cached = memo.get(node as object)
+    const cached = memo.get(node)
     if (cached !== undefined) return cached
   }
 
-  const obj = node as { op: string; [k: string]: unknown }
-
-  if (obj.op === 'input') {
-    const replacement = inputMap.get(obj.id as number)
-    // Return directly — all occurrences of input(N) share the same replacement object,
-    // keeping the expression a compact DAG rather than duplicating the arg subtree.
+  // Per-op intercept: input(id) → corresponding replacement.
+  // All occurrences share the same replacement object (compact DAG; no duplication).
+  if ((node as { op?: string }).op === 'input') {
+    const replacement = inputMap.get((node as unknown as { id: number }).id)
     if (replacement !== undefined) return replacement
     return node
   }
 
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => substituteInputs(n, inputMap, memo))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = substituteInputs(v as ExprNode, inputMap, memo)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      const rec = v as Record<string, ExprNode>
-      const newRec: Record<string, ExprNode> = {}
-      let recChanged = false
-      for (const [rk, rv] of Object.entries(rec)) {
-        const newRv = substituteInputs(rv, inputMap, memo)
-        if (newRv !== rv) recChanged = true
-        newRec[rk] = newRv
-      }
-      if (recChanged) changed = true
-      result[k] = recChanged ? newRec : rec
-    } else {
-      result[k] = v
-    }
-  }
-  if (!changed) {
-    if (memo) memo.set(node as object, node)
-    return node
-  }
-  const out = result as ExprNode
-  if (memo) memo.set(node as object, out)
+  const out = mapChildren(node as ExprOpNodeStrict, n => substituteInputs(n, inputMap, memo)) as unknown as ExprNode
+  if (memo) memo.set(node, out)
   return out
 }
 
@@ -349,7 +278,7 @@ function resolveDelayValues(node: ExprNode, delayBase: number, memo?: WeakMap<ob
 
   const obj = node as { op: string; [k: string]: unknown }
 
-  if (obj.op === 'delay_value') {
+  if (obj.op === 'delayValue') {
     const out = { op: 'reg', id: delayBase + (obj.node_id as number) }
     if (memo) memo.set(node as object, out)
     return out
@@ -498,61 +427,26 @@ function substituteNestedOutputRefs(
   resolved: Map<number, ExprNode[]>,
   memo?: WeakMap<object, ExprNode>,
 ): ExprNode {
-  if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => substituteNestedOutputRefs(n, resolved, memo))
   if (typeof node !== 'object' || node === null) return node
+  if (Array.isArray(node)) return node.map(n => substituteNestedOutputRefs(n, resolved, memo))
 
   if (memo) {
-    const cached = memo.get(node as object)
+    const cached = memo.get(node)
     if (cached !== undefined) return cached
   }
 
-  const obj = node as { op: string; [k: string]: unknown }
-
-  if (obj.op === 'nested_output') {
-    const nodeId = obj.node_id as number
-    const outputId = obj.output_id as number
-    const outputs = resolved.get(nodeId)
-    if (!outputs) throw new Error(`flatten: unresolved nested_output node_id=${nodeId}`)
-    if (outputId >= outputs.length) throw new Error(`flatten: nested_output output_id=${outputId} out of range`)
-    // Return directly — no clone. All references to this call-site share one object.
-    return outputs[outputId]
+  // Per-op intercept: nestedOutput → resolved expression, no clone (DAG sharing).
+  if ((node as { op?: string }).op === 'nestedOutput') {
+    const n = node as unknown as { node_id: number; output_id: number }
+    const outputs = resolved.get(n.node_id)
+    if (!outputs) throw new Error(`flatten: unresolved nested_output node_id=${n.node_id}`)
+    if (n.output_id >= outputs.length)
+      throw new Error(`flatten: nested_output output_id=${n.output_id} out of range`)
+    return outputs[n.output_id]
   }
 
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => substituteNestedOutputRefs(n, resolved, memo))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = substituteNestedOutputRefs(v as ExprNode, resolved, memo)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      const rec = v as Record<string, ExprNode>
-      const newRec: Record<string, ExprNode> = {}
-      let recChanged = false
-      for (const [rk, rv] of Object.entries(rec)) {
-        const newRv = substituteNestedOutputRefs(rv, resolved, memo)
-        if (newRv !== rv) recChanged = true
-        newRec[rk] = newRv
-      }
-      if (recChanged) changed = true
-      result[k] = recChanged ? newRec : rec
-    } else {
-      result[k] = v
-    }
-  }
-  if (!changed) {
-    if (memo) memo.set(node as object, node)
-    return node
-  }
-  const out = result as ExprNode
-  if (memo) memo.set(node as object, out)
+  const out = mapChildren(node as ExprOpNodeStrict, n => substituteNestedOutputRefs(n, resolved, memo)) as unknown as ExprNode
+  if (memo) memo.set(node, out)
   return out
 }
 
@@ -728,56 +622,23 @@ function collectNestedRegisterExprs(
  */
 function offsetRegisters(node: ExprNode, offset: number, memo?: WeakMap<object, ExprNode>): ExprNode {
   if (offset === 0) return node
-  if (typeof node === 'number' || typeof node === 'boolean') return node
+  if (typeof node !== 'object' || node === null) return node
   if (Array.isArray(node)) return node.map(n => offsetRegisters(n, offset, memo))
 
   if (memo) {
-    const cached = memo.get(node as object)
+    const cached = memo.get(node)
     if (cached !== undefined) return cached
   }
 
-  const obj = node as { op: string; [k: string]: unknown }
-
-  if (obj.op === 'reg') {
-    const out = { op: 'reg', id: (obj.id as number) + offset }
-    if (memo) memo.set(node as object, out)
+  // Per-op intercept: reg(id) → reg(id + offset).
+  if ((node as { op?: string }).op === 'reg') {
+    const out: ExprNode = { op: 'reg', id: (node as unknown as { id: number }).id + offset }
+    if (memo) memo.set(node, out)
     return out
   }
 
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => offsetRegisters(n, offset, memo))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = offsetRegisters(v as ExprNode, offset, memo)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      const rec = v as Record<string, ExprNode>
-      const newRec: Record<string, ExprNode> = {}
-      let recChanged = false
-      for (const [rk, rv] of Object.entries(rec)) {
-        const newRv = offsetRegisters(rv, offset, memo)
-        if (newRv !== rv) recChanged = true
-        newRec[rk] = newRv
-      }
-      if (recChanged) changed = true
-      result[k] = recChanged ? newRec : rec
-    } else {
-      result[k] = v
-    }
-  }
-  if (!changed) {
-    if (memo) memo.set(node as object, node)
-    return node
-  }
-  const out = result as ExprNode
-  if (memo) memo.set(node as object, out)
+  const out = mapChildren(node as ExprOpNodeStrict, n => offsetRegisters(n, offset, memo)) as unknown as ExprNode
+  if (memo) memo.set(node, out)
   return out
 }
 
@@ -792,73 +653,40 @@ function resolveRefs(
   outputNames: Map<string, string[]>,
   memo?: WeakMap<object, ExprNode>,
 ): ExprNode {
-  if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => resolveRefs(n, outputExprs, outputNames, memo))
   if (typeof node !== 'object' || node === null) return node
+  if (Array.isArray(node)) return node.map(n => resolveRefs(n, outputExprs, outputNames, memo))
 
   if (memo) {
-    const cached = memo.get(node as object)
+    const cached = memo.get(node)
     if (cached !== undefined) return cached
   }
 
-  const obj = node as { op: string; [k: string]: unknown }
-
-  if (obj.op === 'ref') {
-    const instanceName = obj.instance as string
-    const instanceOutputs = outputExprs.get(instanceName)
-    if (!instanceOutputs) throw new Error(`flatten: unresolved ref to unknown instance '${instanceName}'`)
+  // Per-op intercept: ref(instance, output) → resolved output expression.
+  if ((node as { op?: string }).op === 'ref') {
+    const refNode = node as unknown as { instance: string; output: string | number }
+    const instanceOutputs = outputExprs.get(refNode.instance)
+    if (!instanceOutputs)
+      throw new Error(`flatten: unresolved ref to unknown instance '${refNode.instance}'`)
 
     let outputId: number
-    if (typeof obj.output === 'number') {
-      outputId = obj.output
+    if (typeof refNode.output === 'number') {
+      outputId = refNode.output
     } else {
-      // String output name — resolve to index
-      const names = outputNames.get(instanceName)
-      if (!names) throw new Error(`flatten: no output names for instance '${instanceName}'`)
-      outputId = names.indexOf(obj.output as string)
-      if (outputId === -1) throw new Error(`flatten: unknown output '${obj.output}' on instance '${instanceName}'`)
+      const names = outputNames.get(refNode.instance)
+      if (!names) throw new Error(`flatten: no output names for instance '${refNode.instance}'`)
+      outputId = names.indexOf(refNode.output)
+      if (outputId === -1) throw new Error(`flatten: unknown output '${refNode.output}' on instance '${refNode.instance}'`)
     }
 
-    if (outputId >= instanceOutputs.length) throw new Error(`flatten: ref output ${outputId} out of range for '${instanceName}'`)
+    if (outputId >= instanceOutputs.length)
+      throw new Error(`flatten: ref output ${outputId} out of range for '${refNode.instance}'`)
     // Return directly — the resolved output is already fully processed and immutable.
     // Sharing is safe; the emitter's identity-based CSE compiles each unique node once.
     return instanceOutputs[outputId]
   }
 
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => resolveRefs(n, outputExprs, outputNames, memo))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = resolveRefs(v as ExprNode, outputExprs, outputNames, memo)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      const rec = v as Record<string, ExprNode>
-      const newRec: Record<string, ExprNode> = {}
-      let recChanged = false
-      for (const [rk, rv] of Object.entries(rec)) {
-        const newRv = resolveRefs(rv, outputExprs, outputNames, memo)
-        if (newRv !== rv) recChanged = true
-        newRec[rk] = newRv
-      }
-      if (recChanged) changed = true
-      result[k] = recChanged ? newRec : rec
-    } else {
-      result[k] = v
-    }
-  }
-  if (!changed) {
-    if (memo) memo.set(node as object, node)
-    return node
-  }
-  const out = result as ExprNode
-  if (memo) memo.set(node as object, out)
+  const out = mapChildren(node as ExprOpNodeStrict, n => resolveRefs(n, outputExprs, outputNames, memo)) as unknown as ExprNode
+  if (memo) memo.set(node, out)
   return out
 }
 
@@ -901,54 +729,21 @@ interface SessionDelayRecord {
  * are extracted depth-first so inner delays get lower indices than outer ones.
  */
 function extractSessionDelays(node: ExprNode, out: SessionDelayRecord[]): ExprNode {
-  if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return (node as ExprNode[]).map(n => extractSessionDelays(n, out))
   if (typeof node !== 'object' || node === null) return node
+  if (Array.isArray(node)) return node.map(n => extractSessionDelays(n, out))
 
-  const obj = node as Record<string, unknown>
-  if (typeof obj.op !== 'string') return node
-
-  if (obj.op === 'delay') {
+  // Per-op intercept: delay(expr, init?, id?) → reg(N), recording the update
+  // expression in `out`. Recurse into the update expression first so inner
+  // delays get lower indices.
+  if ((node as { op?: string }).op === 'delay') {
+    const d = node as unknown as { args: [ExprNode]; init?: number; id?: string }
     const regIdx = out.length
-    const init   = (obj.init as number | undefined) ?? 0
-    const id     = obj.id   as string | undefined
-    // Recurse into the update expression first so inner delays get lower indices
-    const rawUpdate = extractSessionDelays((obj.args as ExprNode[])[0], out)
-    out.push({ regIdx, rawUpdateExpr: rawUpdate, init, regName: id ?? `wiring_delay_${regIdx}` })
+    const rawUpdate = extractSessionDelays(d.args[0], out)
+    out.push({ regIdx, rawUpdateExpr: rawUpdate, init: d.init ?? 0, regName: d.id ?? `wiring_delay_${regIdx}` })
     return { op: 'reg' as const, id: regIdx }
   }
 
-  // Generic recursion — mirrors the pattern used by resolveRefs / inlineCalls
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => extractSessionDelays(n, out))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = extractSessionDelays(v as ExprNode, out)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      // Record<string, ExprNode> fields (e.g. 'bind' in let nodes)
-      const rec = v as Record<string, ExprNode>
-      const newRec: Record<string, ExprNode> = {}
-      let recChanged = false
-      for (const [rk, rv] of Object.entries(rec)) {
-        const newRv = extractSessionDelays(rv, out)
-        if (newRv !== rv) recChanged = true
-        newRec[rk] = newRv
-      }
-      if (recChanged) changed = true
-      result[k] = recChanged ? newRec : rec
-    } else {
-      result[k] = v
-    }
-  }
-  return changed ? result as ExprNode : node
+  return mapChildren(node as ExprOpNodeStrict, n => extractSessionDelays(n, out)) as unknown as ExprNode
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -973,15 +768,14 @@ function rewriteSelfRefs(
   sessionDelays: SessionDelayRecord[],
   syntheticDelays: SyntheticFeedbackDelay[],
 ): ExprNode {
-  if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => rewriteSelfRefs(n, instanceName, sessionDelays, syntheticDelays))
   if (typeof node !== 'object' || node === null) return node
+  if (Array.isArray(node)) return node.map(n => rewriteSelfRefs(n, instanceName, sessionDelays, syntheticDelays))
 
-  const obj = node as { op: string; [k: string]: unknown }
-
-  if (obj.op === 'ref' && obj.instance === instanceName) {
-    const outputRef = String(obj.output)
-    // Reuse existing delay if this instance+output pair was already encountered
+  // Per-op intercept: ref to self → synthetic delay register read.
+  if ((node as { op?: string }).op === 'ref'
+      && (node as unknown as { instance: string }).instance === instanceName) {
+    const refNode = node as unknown as { instance: string; output: string | number }
+    const outputRef = String(refNode.output)
     let existing = syntheticDelays.find(
       sd => sd.instanceName === instanceName && sd.outputRef === outputRef,
     )
@@ -999,25 +793,7 @@ function rewriteSelfRefs(
     return { op: 'reg', id: existing.regIdx }
   }
 
-  // Generic recursion
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => rewriteSelfRefs(n, instanceName, sessionDelays, syntheticDelays))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = rewriteSelfRefs(v as ExprNode, instanceName, sessionDelays, syntheticDelays)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else {
-      result[k] = v
-    }
-  }
-  return changed ? result as ExprNode : node
+  return mapChildren(node as ExprOpNodeStrict, n => rewriteSelfRefs(n, instanceName, sessionDelays, syntheticDelays)) as unknown as ExprNode
 }
 
 /**
@@ -1032,14 +808,14 @@ function rewriteRefsToDelays(
   sessionDelays: SessionDelayRecord[],
   syntheticDelays: SyntheticFeedbackDelay[],
 ): ExprNode {
-  if (typeof node === 'number' || typeof node === 'boolean') return node
-  if (Array.isArray(node)) return node.map(n => rewriteRefsToDelays(n, targetInstance, _outputNames, sessionDelays, syntheticDelays))
   if (typeof node !== 'object' || node === null) return node
+  if (Array.isArray(node)) return node.map(n => rewriteRefsToDelays(n, targetInstance, _outputNames, sessionDelays, syntheticDelays))
 
-  const obj = node as { op: string; [k: string]: unknown }
-
-  if (obj.op === 'ref' && obj.instance === targetInstance) {
-    const outputRef = String(obj.output)
+  // Per-op intercept: ref to target → existing synthetic delay register read.
+  if ((node as { op?: string }).op === 'ref'
+      && (node as unknown as { instance: string }).instance === targetInstance) {
+    const refNode = node as unknown as { instance: string; output: string | number }
+    const outputRef = String(refNode.output)
     const existing = syntheticDelays.find(
       sd => sd.instanceName === targetInstance && sd.outputRef === outputRef,
     )
@@ -1047,24 +823,7 @@ function rewriteRefsToDelays(
     return { op: 'reg', id: existing.regIdx }
   }
 
-  let changed = false
-  const result: Record<string, unknown> = { op: obj.op }
-  for (const [k, v] of Object.entries(obj)) {
-    if (k === 'op') continue
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => rewriteRefsToDelays(n, targetInstance, _outputNames, sessionDelays, syntheticDelays))
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = rewriteRefsToDelays(v as ExprNode, targetInstance, _outputNames, sessionDelays, syntheticDelays)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else {
-      result[k] = v
-    }
-  }
-  return changed ? result as ExprNode : node
+  return mapChildren(node as ExprOpNodeStrict, n => rewriteRefsToDelays(n, targetInstance, _outputNames, sessionDelays, syntheticDelays)) as unknown as ExprNode
 }
 
 /**
@@ -1412,10 +1171,10 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     }
 
     const wrapOutput = (expr: ExprNode): ExprNode =>
-      gateExpr === null ? expr : { op: 'source_tag', source_instance: name, gate_expr: gateExpr, expr }
+      gateExpr === null ? expr : { op: 'sourceTag', source_instance: name, gate_expr: gateExpr, expr }
     const wrapRegUpdate = (expr: ExprNode, flatRegId: number): ExprNode =>
       gateExpr === null ? expr : {
-        op: 'source_tag',
+        op: 'sourceTag',
         source_instance: name,
         gate_expr: gateExpr,
         expr,
@@ -1761,7 +1520,7 @@ export function flattenSession(session: SessionState): FlatPlan {
 
   const plan: FlatPlan = {
     schema: 'tropical_plan_4',
-    config: { sample_rate: flat.sampleRate },
+    config: { sampleRate: flat.sampleRate },
     state_init: flat.stateInit as (number | boolean)[],
     register_names: flat.registerNames,
     register_types: flat.registerTypes,

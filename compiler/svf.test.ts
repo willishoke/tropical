@@ -12,11 +12,11 @@ describe('stdlib SVF', () => {
       schema: 'tropical_program_2',
       name: 'test',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'svf', program: 'SVF', inputs: {
+        { op: 'instanceDecl', name: 'svf', program: 'SVF', inputs: {
           input: {
             op: 'select',
             args: [
-              { op: 'eq', args: [{ op: 'sample_index' }, 0] },
+              { op: 'eq', args: [{ op: 'sampleIndex' }, 0] },
               1,
               0,
             ],
