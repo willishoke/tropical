@@ -477,3 +477,175 @@ describe('paramDecl in body decls (Phase A3)', () => {
     session.graph.dispose()
   })
 })
+
+// ─────────────────────────────────────────────────────────────
+// dac.out body wires — outputAssign(name='dac.out') (Phase A4)
+// ─────────────────────────────────────────────────────────────
+
+describe('dac.out body wires (Phase A4)', () => {
+  test('loadProgramAsSession reads body outputAssign(name="dac.out")', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: {
+        op: 'block',
+        decls: [
+          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 220.0 } } as unknown as ExprNode,
+        ],
+        assigns: [
+          { op: 'outputAssign', name: 'dac.out',
+            expr: { op: 'ref', instance: 'osc', output: 0 } } as unknown as ExprNode,
+        ],
+      },
+    }
+    loadProgramAsSession(prog, {}, session)
+    expect(session.graphOutputs).toEqual([{ instance: 'osc', output: 'saw' }])
+    session.graph.dispose()
+  })
+
+  test('saveProgramFromSession emits dac.out outputAssigns in body, no topLevel.audio_outputs', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: {
+        op: 'block',
+        decls: [
+          { op: 'instanceDecl', name: 'a', program: 'BlepSaw', inputs: { freq: 110.0 } } as unknown as ExprNode,
+          { op: 'instanceDecl', name: 'b', program: 'BlepSaw', inputs: { freq: 220.0 } } as unknown as ExprNode,
+        ],
+        assigns: [
+          { op: 'outputAssign', name: 'dac.out',
+            expr: { op: 'ref', instance: 'a', output: 0 } } as unknown as ExprNode,
+          { op: 'outputAssign', name: 'dac.out',
+            expr: { op: 'ref', instance: 'b', output: 0 } } as unknown as ExprNode,
+        ],
+      },
+    }
+    loadProgramAsSession(prog, {}, session)
+
+    const { node, topLevel } = saveProgramFromSession(session)
+    expect(topLevel.audio_outputs).toBeUndefined()
+
+    const assigns = (node.body.assigns ?? []) as Array<Record<string, unknown>>
+    const dacAssigns = assigns.filter(a => a.op === 'outputAssign' && a.name === 'dac.out')
+    expect(dacAssigns).toHaveLength(2)
+    const refs = dacAssigns.map(a => a.expr as { op: string; instance: string; output: number })
+    expect(refs.some(r => r.op === 'ref' && r.instance === 'a')).toBe(true)
+    expect(refs.some(r => r.op === 'ref' && r.instance === 'b')).toBe(true)
+
+    session.graph.dispose()
+  })
+
+  test('round-trip: save then load preserves dac wires', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: {
+        op: 'block',
+        decls: [
+          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 440.0 } } as unknown as ExprNode,
+        ],
+        assigns: [
+          { op: 'outputAssign', name: 'dac.out',
+            expr: { op: 'ref', instance: 'osc', output: 0 } } as unknown as ExprNode,
+        ],
+      },
+    }
+    loadProgramAsSession(prog, {}, session)
+    const { node, topLevel } = saveProgramFromSession(session)
+
+    const session2 = makeTestSession()
+    loadProgramAsSession(node, topLevel, session2)
+    expect(session2.graphOutputs).toEqual([{ instance: 'osc', output: 'saw' }])
+
+    session.graph.dispose()
+    session2.graph.dispose()
+  })
+
+  test('legacy topLevel.audio_outputs still loads (deprecated fallback)', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: {
+        op: 'block',
+        decls: [
+          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 100.0 } } as unknown as ExprNode,
+        ],
+      },
+    }
+    const topLevel: ProgramTopLevel = {
+      audio_outputs: [{ instance: 'osc', output: 'saw' }],
+    }
+    loadProgramAsSession(prog, topLevel, session)
+    expect(session.graphOutputs).toEqual([{ instance: 'osc', output: 'saw' }])
+    session.graph.dispose()
+  })
+
+  test('body wires + legacy topLevel both contribute (body first, fallback after)', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: {
+        op: 'block',
+        decls: [
+          { op: 'instanceDecl', name: 'a', program: 'BlepSaw', inputs: { freq: 110.0 } } as unknown as ExprNode,
+          { op: 'instanceDecl', name: 'b', program: 'BlepSaw', inputs: { freq: 220.0 } } as unknown as ExprNode,
+        ],
+        assigns: [
+          { op: 'outputAssign', name: 'dac.out',
+            expr: { op: 'ref', instance: 'a', output: 0 } } as unknown as ExprNode,
+        ],
+      },
+    }
+    const topLevel: ProgramTopLevel = {
+      audio_outputs: [{ instance: 'b', output: 'saw' }],
+    }
+    loadProgramAsSession(prog, topLevel, session)
+    expect(session.graphOutputs).toEqual([
+      { instance: 'a', output: 'saw' },
+      { instance: 'b', output: 'saw' },
+    ])
+    session.graph.dispose()
+  })
+
+  test('non-ref expression in dac.out outputAssign throws', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: {
+        op: 'block',
+        decls: [
+          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 100.0 } } as unknown as ExprNode,
+        ],
+        assigns: [
+          { op: 'outputAssign', name: 'dac.out', expr: 0.5 as unknown as ExprNode } as unknown as ExprNode,
+        ],
+      },
+    }
+    expect(() => loadProgramAsSession(prog, {}, session)).toThrow(/ref-shaped/)
+    session.graph.dispose()
+  })
+
+  test('dac.out with unknown instance throws', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: {
+        op: 'block',
+        assigns: [
+          { op: 'outputAssign', name: 'dac.out',
+            expr: { op: 'ref', instance: 'nope', output: 0 } } as unknown as ExprNode,
+        ],
+      },
+    }
+    expect(() => loadProgramAsSession(prog, {}, session)).toThrow(/unknown instance/)
+    session.graph.dispose()
+  })
+})
