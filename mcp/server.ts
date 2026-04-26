@@ -42,6 +42,13 @@ const portTypeOrNull = (t: PortType | undefined): string | null =>
 const session: SessionState = makeSession()
 loadBuiltins(session.typeRegistry)
 
+// Reserved instance name for the audio output boundary leaf. Wires whose
+// destination has `instance === DAC_INSTANCE_NAME` route to session.graphOutputs
+// instead of session.inputExprNodes. Multiple wires accumulate (mix-bus sum
+// semantics, matching the C++ kernel's output_targets summing).
+const DAC_INSTANCE_NAME = 'dac'
+const DAC_OUT_PORT = 'out'
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 /**
@@ -379,7 +386,7 @@ const TOOLS = [
   },
   {
     name: 'replicate',
-    description: 'Create N instances of a program type in one call. Returns the list of created instance names and their ports. Does NOT trigger recompilation — follow up with wire and/or set_output.',
+    description: 'Create N instances of a program type in one call. Returns the list of created instance names and their ports. Does NOT trigger recompilation — follow up with wire (use `instance: "dac", input: "out"` to wire to audio output).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -560,7 +567,7 @@ const TOOLS = [
   },
   {
     name: 'wire',
-    description: 'Set and/or remove input wiring in a single recompile. Use `set` to wire inputs (each is {instance, input, expr}), `remove` to disconnect (each is {instance, input}).',
+    description: 'Set and/or remove input wiring in a single recompile. Use `set` to wire inputs (each is {instance, input, expr}), `remove` to disconnect (each is {instance, input}). Audio output: use `instance: "dac", input: "out"` to wire to the DAC boundary leaf — `expr` must be a ref-shaped node (e.g. {op:"ref",instance,output}). Multiple wires to dac.out sum into the mono output bus. Removing a dac wire (`remove: [{instance:"dac",input:"out"}]`) clears all dac wires at once.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -598,27 +605,6 @@ const TOOLS = [
       properties: {
         instance: { type: 'string', description: 'If provided, filter to inputs of this instance.' },
       },
-    },
-  },
-  {
-    name: 'set_output',
-    description: 'Set the audio output mix. Provide a complete list of outputs — replaces all current outputs.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        outputs: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              instance:    { type: 'string' },
-              output: { description: 'Output port name or index' },
-            },
-            required: ['instance', 'output'],
-          },
-        },
-      },
-      required: ['outputs'],
     },
   },
   {
@@ -722,6 +708,13 @@ function handleAddInstance(
   gateInput?: ExprNode,
 ) {
   return wrap(() => {
+    if (instanceName === DAC_INSTANCE_NAME)
+      failBare({
+        code:    'invalid_value',
+        message: `'${DAC_INSTANCE_NAME}' is a reserved instance name (audio output boundary). Choose a different name.`,
+        param:   'instance_name',
+        value:   instanceName,
+      })
     if (session.instanceRegistry.has(instanceName))
       failBare({
         code:    'instance_exists',
@@ -763,6 +756,13 @@ function handleReplicate(
       })
 
     const prefix = namePrefix ?? programName.toLowerCase()
+    if (prefix === DAC_INSTANCE_NAME)
+      failBare({
+        code:    'invalid_value',
+        message: `'${DAC_INSTANCE_NAME}' is a reserved instance name (audio output boundary). Choose a different name_prefix.`,
+        param:   'name_prefix',
+        value:   prefix,
+      })
     const created = []
     for (let i = 0; i < count; i++) {
       const name = nextName(session, prefix)
@@ -1115,13 +1115,91 @@ function handleGetInfo(instanceName: string) {
   })
 }
 
+/** Resolve a wire-to-dac.out source expression to an {instance, output} pair.
+ *  Today's session.graphOutputs stores only named instance outputs (matching the
+ *  C++ kernel's output_targets). The `expr` must be a `ref`-shaped node;
+ *  arbitrary expression outputs land in a later phase (A4). */
+function resolveDacSource(expr: ExprNode): { instance: string; output: string } {
+  if (typeof expr !== 'object' || expr === null || Array.isArray(expr)) {
+    failBare({
+      code:    'invalid_value',
+      message: `dac.${DAC_OUT_PORT} requires a ref-shaped expression (use refExpr or {op:'ref',instance,output}). Got literal/array.`,
+      param:   'expr',
+      value:   expr,
+    })
+  }
+  const e = expr as { op?: string; instance?: unknown; output?: unknown }
+  if (e.op !== 'ref') {
+    failBare({
+      code:    'invalid_value',
+      message: `dac.${DAC_OUT_PORT} requires expr.op === 'ref'. Got op='${String(e.op)}'.`,
+      param:   'expr',
+      value:   expr,
+    })
+  }
+  if (typeof e.instance !== 'string') {
+    failBare({
+      code:    'invalid_value',
+      message: `dac.${DAC_OUT_PORT}: ref.instance must be a string`,
+      param:   'instance',
+      value:   e.instance,
+    })
+  }
+  const inst = requireInstance(e.instance, 'instance')
+  let outputName: string
+  if (typeof e.output === 'number') {
+    if (e.output < 0 || e.output >= inst.outputNames.length) {
+      failEnum({
+        code:    'unknown_output',
+        param:   'output',
+        value:   e.output,
+        options: inst.outputNames,
+      })
+    }
+    outputName = inst.outputNames[e.output]
+  } else if (typeof e.output === 'string') {
+    if (!inst.outputNames.includes(e.output)) {
+      failEnum({
+        code:    'unknown_output',
+        param:   'output',
+        value:   e.output,
+        options: inst.outputNames,
+      })
+    }
+    outputName = e.output
+  } else {
+    failBare({
+      code:    'invalid_value',
+      message: `dac.${DAC_OUT_PORT}: ref.output must be a number or string`,
+      param:   'output',
+      value:   e.output,
+    })
+  }
+  return { instance: e.instance, output: outputName }
+}
+
 function handleWire(args: Record<string, unknown>) {
   return wrap(() => {
     const setOps = (args.set ?? []) as Array<{ instance: string; input: string | number; expr: ExprNode }>
     const removeOps = (args.remove ?? []) as Array<{ instance: string; input: string | number }>
 
     // Process removes first
+    let dacRemoved = 0
     for (const r of removeOps) {
+      if (r.instance === DAC_INSTANCE_NAME) {
+        if (r.input !== DAC_OUT_PORT) {
+          failBare({
+            code:    'unknown_output',
+            message: `dac has only one output port: '${DAC_OUT_PORT}'. Got '${r.input}'.`,
+            param:   'remove[].input',
+            value:   r.input,
+          })
+        }
+        // Mass-clear all dac wires; per-wire identity is not encoded.
+        dacRemoved += session.graphOutputs.length
+        session.graphOutputs.length = 0
+        continue
+      }
       const inst = requireInstance(r.instance, 'remove[].instance')
       const inputId = resolveInputIdx(inst, r.input)
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
@@ -1130,7 +1208,23 @@ function handleWire(args: Record<string, unknown>) {
 
     // Process sets
     const results = []
+    const dacWires = []
     for (const s of setOps) {
+      if (s.instance === DAC_INSTANCE_NAME) {
+        if (s.input !== DAC_OUT_PORT) {
+          failBare({
+            code:    'unknown_output',
+            message: `dac has only one output port: '${DAC_OUT_PORT}'. Got '${s.input}'.`,
+            param:   'set[].input',
+            value:   s.input,
+          })
+        }
+        validateExpr(s.expr, `${DAC_INSTANCE_NAME}.${DAC_OUT_PORT}`)
+        const resolved = resolveDacSource(s.expr)
+        session.graphOutputs.push(resolved)
+        dacWires.push({ instance: s.instance, input: s.input, expr: s.expr })
+        continue
+      }
       const inst = requireInstance(s.instance, 'set[].instance')
       const inputId = resolveInputIdx(inst, s.input)
       const resolvedName = inst.inputNames[inputId] ?? String(inputId)
@@ -1140,7 +1234,13 @@ function handleWire(args: Record<string, unknown>) {
       results.push({ instance: s.instance, input: resolvedName, expr })
     }
 
-    return { set: results, removed: removeOps.length, ...wire() }
+    return {
+      set: results,
+      ...(dacWires.length ? { dac: dacWires } : {}),
+      removed: removeOps.length,
+      ...(dacRemoved ? { dacRemoved } : {}),
+      ...wire(),
+    }
   })
 }
 
@@ -1155,19 +1255,6 @@ function handleListWiring(filterInstance?: string) {
       results.push({ instance: inst, input, expr: prettyExpr(node, session.instanceRegistry) })
     }
     return results
-  })
-}
-
-function handleSetOutput(args: Record<string, unknown>) {
-  return wrap(() => {
-    const outputs = args.outputs as Array<{ instance: string; output: string | number }>
-    session.graphOutputs.length = 0
-    for (const o of outputs) {
-      const inst = requireInstance(o.instance, 'outputs[].instance')
-      const outId = resolveOutputIdx(inst, o.output)
-      session.graphOutputs.push({ instance: o.instance, output: inst.outputNames[outId] })
-    }
-    return { outputs: session.graphOutputs, ...wire() }
   })
 }
 
@@ -1282,9 +1369,6 @@ function handleTool(name: string, args: Record<string, unknown>) {
 
     case 'list_wiring':
       return handleListWiring(args.instance as string | undefined)
-
-    case 'set_output':
-      return handleSetOutput(args)
 
     case 'load':
       return handleLoad(args)

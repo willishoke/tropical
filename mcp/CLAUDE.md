@@ -37,11 +37,8 @@ Every mutation that affects the signal graph calls `wire()`, which runs the full
 - `export_program` — crystallize session instances into a reusable program type. Specify input/output mappings; current wiring becomes defaults. Optionally removes exported instances from the session.
 
 ### Wiring
-- `wire` — set and/or remove input wiring in a single recompile. Replaces connect_modules, disconnect_modules, set_module_input, set_inputs_batch.
+- `wire` — set and/or remove input wiring in a single recompile. Audio output uses the same tool: wire to `instance: "dac", input: "out"` with a ref-shaped expression. Multiple wires to dac.out sum into the mono output bus; remove with `{instance: "dac", input: "out"}` clears all dac wires.
 - `list_wiring` — show current input expressions, optionally filtered by instance
-
-### Audio output
-- `set_output` — declaratively set the full audio output list (replaces add/remove_graph_output)
 
 ### Control parameters
 - `set_param` — set a named smoothed or trigger parameter value
