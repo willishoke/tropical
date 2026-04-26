@@ -8,7 +8,8 @@
  * All shapes are static (known at compile time), so every expansion is fully unrolled.
  */
 
-import type { ExprNode } from './expr.js'
+import type { ExprNode, ExprOpNodeStrict } from './expr.js'
+import { mapChildren } from './walk.js'
 import { shapeSize, shapeStrides } from './term.js'
 
 // Minimal local BlockNode — mirrors program.ts's BlockNode without creating a circular import.
@@ -163,26 +164,10 @@ export function lowerArrayOps(node: ExprNode, memo?: WeakMap<object, ExprNode>):
 // ─────────────────────────────────────────────────────────────
 
 function lowerChildren(obj: Record<string, unknown>, memo?: WeakMap<object, ExprNode>): ExprNode {
-  // Return the original node if no children actually change — this preserves DAG
-  // identity so shared subexpressions remain shared through the lowering pass.
-  const result: Record<string, unknown> = {}
-  let changed = false
-  for (const [k, v] of Object.entries(obj)) {
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(n => lowerArrayOps(n, memo))
-      const anyChanged = newArr.some((n, i) => n !== arr[i])
-      result[k] = anyChanged ? newArr : arr
-      if (anyChanged) changed = true
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = lowerArrayOps(v as ExprNode, memo)
-      result[k] = newV
-      if (newV !== v) changed = true
-    } else {
-      result[k] = v
-    }
-  }
-  return changed ? result as ExprNode : obj as ExprNode
+  // Identity-preserving recursion via mapChildren — same semantics as the
+  // legacy Object.entries iteration that lived here, but the per-op child
+  // structure lives in one place (compiler/walk.ts).
+  return mapChildren(obj as unknown as ExprOpNodeStrict, n => lowerArrayOps(n, memo)) as unknown as ExprNode
 }
 
 // ─────────────────────────────────────────────────────────────

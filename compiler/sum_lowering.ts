@@ -15,7 +15,8 @@
  * in the result depends on coproduct structure.
  */
 
-import type { ExprNode } from './expr.js'
+import type { ExprNode, ExprOpNodeStrict } from './expr.js'
+import { mapChildren } from './walk.js'
 import type { BlockNode } from './program.js'
 import {
   type SumTypeMeta, type SumBundleSlot,
@@ -172,7 +173,7 @@ function rewriteExpr(
     }
     // Fallback: not a recognized sum-typed scrutinee — recurse children
     // generically so a future refinement can still see the structure.
-    return mapChildren(obj, e => rewriteExpr(e, sumDelays, sumRegistry))
+    return mapChildren(obj as unknown as ExprOpNodeStrict, e => rewriteExpr(e, sumDelays, sumRegistry)) as unknown as ExprNode
   }
 
   // tag in expression position (no payload) → variant index as scalar.
@@ -192,60 +193,10 @@ function rewriteExpr(
   }
 
   // Generic recursion through args and standard fields.
-  return mapChildren(obj, e => rewriteExpr(e, sumDelays, sumRegistry))
+  return mapChildren(obj as unknown as ExprOpNodeStrict, e => rewriteExpr(e, sumDelays, sumRegistry)) as unknown as ExprNode
 }
 
-/**
- * Recurse into an expression's children, applying `f` to each child ExprNode.
- * Handles `args` arrays and standard nested-expr fields the way lowerChildren
- * does, with extensions for the sum-op shape (payload, scrutinee, arms).
- */
-function mapChildren(
-  obj: Record<string, unknown>,
-  f: (e: ExprNode) => ExprNode,
-): ExprNode {
-  let changed = false
-  const result: Record<string, unknown> = {}
-  for (const [k, v] of Object.entries(obj)) {
-    if (Array.isArray(v)) {
-      const arr = v as ExprNode[]
-      const newArr = arr.map(f)
-      if (newArr.some((n, i) => n !== arr[i])) changed = true
-      result[k] = newArr
-    } else if (typeof v === 'object' && v !== null && 'op' in v) {
-      const newV = f(v as ExprNode)
-      if (newV !== v) changed = true
-      result[k] = newV
-    } else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
-      // Record<string, ExprNode> fields — payload, arms.bind/body, etc.
-      const rec = v as Record<string, unknown>
-      const newRec: Record<string, unknown> = {}
-      let recChanged = false
-      for (const [rk, rv] of Object.entries(rec)) {
-        if (typeof rv === 'object' && rv !== null && !Array.isArray(rv) && 'op' in rv) {
-          const nrv = f(rv as ExprNode)
-          if (nrv !== rv) recChanged = true
-          newRec[rk] = nrv
-        } else if (typeof rv === 'object' && rv !== null && !Array.isArray(rv) && 'body' in rv) {
-          // Match arm: { bind?, body }
-          const arm = rv as { bind?: string | string[]; body: ExprNode }
-          const newBody = f(arm.body)
-          if (newBody !== arm.body) recChanged = true
-          newRec[rk] = arm.bind === undefined
-            ? { body: newBody }
-            : { bind: arm.bind, body: newBody }
-        } else {
-          newRec[rk] = rv
-        }
-      }
-      if (recChanged) changed = true
-      result[k] = recChanged ? newRec : rec
-    } else {
-      result[k] = v
-    }
-  }
-  return changed ? (result as ExprNode) : (obj as ExprNode)
-}
+// (Local mapChildren deleted; use the shared one from compiler/walk.ts.)
 
 /**
  * Determine the SumTypeMeta of an expression, if it's a sum-typed value.
@@ -592,7 +543,7 @@ function rewriteDecl(
   sumRegistry: ReadonlyMap<string, SumTypeMeta>,
 ): ExprNode {
   if (typeof decl !== 'object' || decl === null || Array.isArray(decl)) return decl
-  return mapChildren(decl as Record<string, unknown>, e => rewriteExpr(e, sumDelays, sumRegistry))
+  return mapChildren(decl as unknown as ExprOpNodeStrict, e => rewriteExpr(e, sumDelays, sumRegistry)) as unknown as ExprNode
 }
 
 /** Rewrite an assign (output_assign / next_update). */
@@ -620,5 +571,5 @@ function rewriteAssign(
     }
   }
 
-  return mapChildren(obj, e => rewriteExpr(e, sumDelays, sumRegistry))
+  return mapChildren(obj as unknown as ExprOpNodeStrict, e => rewriteExpr(e, sumDelays, sumRegistry)) as unknown as ExprNode
 }

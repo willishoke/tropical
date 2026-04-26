@@ -265,6 +265,13 @@ export interface SampleRateNode { op: 'sampleRate' }
 /** Current sample-index counter. */
 export interface SampleIndexNode { op: 'sampleIndex' }
 
+/** Pre-resolution parameter reference by name (used in user-authored code
+ *  before parameter handles are resolved to FFI pointers). */
+export interface ParamRefNode { op: 'param'; name: string }
+
+/** Pre-resolution trigger reference by name (mirrors ParamRefNode). */
+export interface TriggerRefNode { op: 'trigger'; name: string }
+
 /** Smoothed control parameter handle (FFI). */
 export interface SmoothedParamNode { op: 'smoothedParam'; _ptr: true; _handle: unknown }
 
@@ -283,6 +290,7 @@ export type LeafNode =
   | InputNode | RegRefNode | DelayRefNode | DelayValueNode
   | NestedOutNode | NestedOutputNode | BindingNode | TypeParamNode
   | SampleRateNode | SampleIndexNode
+  | ParamRefNode | TriggerRefNode
   | SmoothedParamNode | TriggerParamNode | ConstNode
 
 // ── Decl ops (top-level only — appear at decl/assign positions) ─────────

@@ -7,6 +7,8 @@
  */
 
 import type { ExprNode } from './session'
+import type { ExprOpNodeStrict } from './expr.js'
+import { mapChildren } from './walk.js'
 import { type PortType, Float } from './term'
 
 // ─────────────────────────────────────────────────────────────
@@ -74,7 +76,7 @@ export function exprDependencies(node: ExprNode): Set<string> {
 }
 
 function walkExprRefs(node: ExprNode, deps: Set<string>): void {
-  if (typeof node === 'number' || typeof node === 'boolean') return
+  if (typeof node !== 'object' || node === null) return
   if (Array.isArray(node)) {
     for (const item of node) walkExprRefs(item, deps)
     return
@@ -84,24 +86,16 @@ function walkExprRefs(node: ExprNode, deps: Set<string>): void {
     deps.add(n.instance as string)
     return
   }
-  // Walk standard args
-  for (const arg of ((n.args as ExprNode[]) ?? [])) walkExprRefs(arg, deps)
-  // Sum-type wiring expressions: refs can hide inside payloads, scrutinees,
-  // and per-arm bodies, all of which live in non-`op` sub-objects that the
-  // generic `args` walk doesn't reach.
-  if (n.op === 'tag') {
-    const payload = n.payload as Record<string, ExprNode> | undefined
-    if (payload !== undefined) {
-      for (const v of Object.values(payload)) walkExprRefs(v, deps)
-    }
-  }
-  if (n.op === 'match') {
-    if (n.scrutinee !== undefined) walkExprRefs(n.scrutinee as ExprNode, deps)
-    const arms = n.arms as Record<string, { body: ExprNode }> | undefined
-    if (arms !== undefined) {
-      for (const arm of Object.values(arms)) walkExprRefs(arm.body, deps)
-    }
-  }
+  // Use mapChildren as a side-effect-only traversal: the callback walks
+  // each child, accumulating ref dependencies into `deps`. Returns the
+  // child unchanged (we only care about side effects). mapChildren handles
+  // the per-op child structure (args, payload values, match arm bodies,
+  // combinator bodies, etc.) so we walk EVERY ExprNode child, not just
+  // a hand-picked subset.
+  mapChildren(n as unknown as ExprOpNodeStrict, child => {
+    walkExprRefs(child, deps)
+    return child
+  })
 }
 
 // ─────────────────────────────────────────────────────────────

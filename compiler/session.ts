@@ -3,8 +3,9 @@
  */
 
 import {
-  type SignalExpr, type ExprCoercible, coerce, type ExprNode, validateExpr,
+  type SignalExpr, type ExprCoercible, coerce, type ExprNode, type ExprOpNodeStrict, validateExpr,
 } from './expr.js'
+import { mapChildren } from './walk.js'
 import {
   ProgramType, ProgramInstance,
   type ProgramDef, type NestedCall, type ValueCoercible, type Bounds,
@@ -214,64 +215,11 @@ function slottifyExpr(
     return { op: 'nestedOutput', node_id: nodeId, output_id: outputId }
   }
 
-  // Generic op with args — recurse
-  if ('args' in obj) {
-    const args = (obj.args as ExprNode[]).map(recurse)
-    const result: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(obj)) {
-      if (k === 'args') continue
-      result[k] = v
-    }
-    result.args = args
-    return result as ExprNode
-  }
-
-  // Handle array-like containers that aren't in 'args'
-  if (op === 'array') {
-    const items = (obj.items as ExprNode[]).map(recurse)
-    return { ...obj, items } as unknown as ExprNode
-  }
-
-  // Combinator forms with nested expr fields
-  if (op === 'let') {
-    const bind = obj.bind as Record<string, ExprNode>
-    const converted: Record<string, ExprNode> = {}
-    for (const [k, v] of Object.entries(bind)) converted[k] = recurse(v)
-    return { ...obj, bind: converted, in: recurse(obj.in as ExprNode) } as unknown as ExprNode
-  }
-  if (op === 'generate' || op === 'chain' || op === 'iterate') {
-    return { ...obj, ...(obj.init !== undefined ? { init: recurse(obj.init as ExprNode) } : {}), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
-  }
-  if (op === 'fold' || op === 'scan') {
-    return { ...obj, over: recurse(obj.over as ExprNode), init: recurse(obj.init as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
-  }
-  if (op === 'map2') {
-    return { ...obj, over: recurse(obj.over as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
-  }
-  if (op === 'zipWith') {
-    return { ...obj, a: recurse(obj.a as ExprNode), b: recurse(obj.b as ExprNode), body: recurse(obj.body as ExprNode) } as unknown as ExprNode
-  }
-
-  // Sum-type wiring expressions. Recurse into payload fields (tag) and
-  // scrutinee + per-arm body (match). Per-arm bind names are leaf strings —
-  // not ExprNodes — so they pass through unchanged.
-  if (op === 'tag') {
-    const payload = obj.payload as Record<string, ExprNode> | undefined
-    if (payload === undefined) return node
-    const converted: Record<string, ExprNode> = {}
-    for (const [k, v] of Object.entries(payload)) converted[k] = recurse(v)
-    return { ...obj, payload: converted } as unknown as ExprNode
-  }
-  if (op === 'match') {
-    const arms = obj.arms as Record<string, { bind?: string | string[]; body: ExprNode }>
-    const newArms: Record<string, { bind?: string | string[]; body: ExprNode }> = {}
-    for (const [variant, arm] of Object.entries(arms)) {
-      newArms[variant] = arm.bind === undefined
-        ? { body: recurse(arm.body) }
-        : { bind: arm.bind, body: recurse(arm.body) }
-    }
-    return { ...obj, scrutinee: recurse(obj.scrutinee as ExprNode), arms: newArms } as unknown as ExprNode
-  }
+  // Everything else — generic recursion via shared mapChildren.
+  // The per-op intercepts above handle the leaf-name → slot-id rewrites;
+  // mapChildren takes care of the structural traversal for every op kind
+  // (args, named children, payload values, match arms, etc.).
+  return mapChildren(obj as unknown as ExprOpNodeStrict, recurse) as unknown as ExprNode
 
   // Leaf ops (sample_rate, sample_index, binding, float, int, bool, matrix, etc.)
   return node
