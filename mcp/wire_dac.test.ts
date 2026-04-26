@@ -165,13 +165,15 @@ describe('wire to dac.out — basic flow', () => {
       ],
     })
 
-    // graphOutputs surfaces via save → program.audio_outputs
+    // graphOutputs surfaces via save → body assigns of op outputAssign with name 'dac.out'
     const saved = await client.callOk('save')
-    expect(Array.isArray(saved.program?.audio_outputs)).toBe(true)
-    const outs = saved.program.audio_outputs
-    expect(outs.length).toBe(2)
-    expect(outs.some((o: any) => o.instance === a)).toBe(true)
-    expect(outs.some((o: any) => o.instance === b)).toBe(true)
+    const assigns = (saved.program?.body?.assigns ?? []) as Array<Record<string, unknown>>
+    const dacAssigns = assigns.filter(a => a.op === 'outputAssign' && a.name === 'dac.out')
+    expect(dacAssigns.length).toBe(2)
+    expect(dacAssigns.some(a => (a.expr as any)?.instance === a)).toBe(false) // sanity
+    const dacInstances = dacAssigns.map(a => (a.expr as any)?.instance as string)
+    expect(dacInstances).toContain(a)
+    expect(dacInstances).toContain(b)
   })
 
   test('remove clears all dac wires at once', async () => {
@@ -188,7 +190,9 @@ describe('wire to dac.out — basic flow', () => {
     expect(data.dacRemoved).toBeGreaterThanOrEqual(1)
 
     const saved = await client.callOk('save')
-    expect(saved.program?.audio_outputs ?? []).toEqual([])
+    const assigns = (saved.program?.body?.assigns ?? []) as Array<Record<string, unknown>>
+    const dacAssigns = assigns.filter(a => a.op === 'outputAssign' && a.name === 'dac.out')
+    expect(dacAssigns).toEqual([])
   })
 })
 

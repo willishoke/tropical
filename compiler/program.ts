@@ -156,6 +156,19 @@ export function* paramDecls(prog: ProgramNode): Iterable<{
   }
 }
 
+/** Iterate `outputAssign` entries whose `name` is "dac.out" — the audio output
+ *  boundary leaf. These are body-resident wires to the DAC; multiple entries
+ *  accumulate (mix-bus). The expression must be a ref-shaped node; arbitrary
+ *  expressions defer to a later phase. */
+export function* dacWires(prog: ProgramNode): Iterable<{ expr: ExprNode }> {
+  for (const a of prog.body?.assigns ?? []) {
+    if (typeof a !== 'object' || a === null || Array.isArray(a)) continue
+    const obj = a as Record<string, unknown>
+    if (obj.op !== 'outputAssign' || obj.name !== 'dac.out') continue
+    yield { expr: obj.expr as ExprNode }
+  }
+}
+
 type ParamSpec = { name: string; value?: number; time_const?: number; type: 'param' | 'trigger' }
 
 /** Merge param sources: body paramDecls canonical, topLevel.params is a
@@ -206,6 +219,81 @@ function applyParamSpecs(session: SessionState, specs: ParamSpec[]): void {
     }
   }
 }
+
+type GraphOutput = { instance: string; output: string }
+
+/** Resolve a body dac-wire expression to {instance, output}. Today's
+ *  session.graphOutputs stores only named instance outputs; the expression
+ *  must be a ref-shaped node. */
+function resolveDacWireExprToGraphOutput(
+  expr: ExprNode,
+  session: SessionState,
+  context: string,
+): GraphOutput {
+  if (typeof expr !== 'object' || expr === null || Array.isArray(expr)) {
+    throw new Error(`${context}: dac.out wire requires a ref-shaped expression (use {op:'ref',instance,output}); got literal/array.`)
+  }
+  const e = expr as { op?: string; instance?: unknown; output?: unknown }
+  if (e.op !== 'ref') {
+    throw new Error(`${context}: dac.out wire requires expr.op === 'ref'; got '${String(e.op)}'.`)
+  }
+  if (typeof e.instance !== 'string') {
+    throw new Error(`${context}: dac.out wire ref.instance must be a string`)
+  }
+  const inst = session.instanceRegistry.get(e.instance)
+  if (!inst) {
+    throw new Error(`${context}: dac.out wire references unknown instance '${e.instance}'.`)
+  }
+  let outputName: string
+  if (typeof e.output === 'number') {
+    if (e.output < 0 || e.output >= inst.outputNames.length) {
+      throw new Error(`${context}: dac.out wire output index ${e.output} out of range for '${e.instance}' (${inst.outputNames.length} outputs).`)
+    }
+    outputName = inst.outputNames[e.output]
+  } else if (typeof e.output === 'string') {
+    if (!inst.outputNames.includes(e.output)) {
+      throw new Error(`${context}: dac.out wire references unknown output '${e.output}' on '${e.instance}'. Valid: ${inst.outputNames.join(', ')}`)
+    }
+    outputName = e.output
+  } else {
+    throw new Error(`${context}: dac.out wire ref.output must be a number or string`)
+  }
+  return { instance: e.instance, output: outputName }
+}
+
+/** Collect graph outputs from canonical body wires (outputAssign with name="dac.out")
+ *  and from the deprecated topLevel.audio_outputs fallback. Body wires take precedence
+ *  in source order; legacy entries are appended after. Emits a one-time deprecation
+ *  warning when topLevel.audio_outputs is non-empty. */
+function collectGraphOutputs(
+  prog: ProgramNode,
+  topLevel: ProgramTopLevel,
+  session: SessionState,
+  context: string,
+): GraphOutput[] {
+  const out: GraphOutput[] = []
+  for (const w of dacWires(prog)) {
+    out.push(resolveDacWireExprToGraphOutput(w.expr, session, context))
+  }
+  if (topLevel.audio_outputs && topLevel.audio_outputs.length > 0) {
+    if (!_topLevelAudioOutputsWarned) {
+      console.warn(
+        'tropical: file-root `audio_outputs` is deprecated; wire to the DAC via outputAssign with name="dac.out" in the program body.',
+      )
+      _topLevelAudioOutputsWarned = true
+    }
+    for (const o of topLevel.audio_outputs) {
+      if ('expr' in o) {
+        throw new Error(`${context}: file-root audio_outputs[].expr form not supported. Use {instance, output} or migrate to body dac.out wires.`)
+      }
+      const inst = session.instanceRegistry.get(o.instance)
+      if (!inst) throw new Error(`${context}: audio_outputs references unknown instance '${o.instance}'.`)
+      out.push({ instance: o.instance, output: String(o.output) })
+    }
+  }
+  return out
+}
+let _topLevelAudioOutputsWarned = false
 
 /**
  * Load a ProgramNode into a session, replacing all existing state.
@@ -294,13 +382,9 @@ export function loadProgramAsSession(
   }
 
   // Set audio outputs
-  for (const out of topLevel.audio_outputs ?? []) {
-    if ('expr' in out) {
-      throw new Error('Output expressions not supported in plan-based path. Use instance output refs instead.')
-    }
-    const inst = session.instanceRegistry.get(out.instance)
-    if (!inst) throw new Error(`Output instance '${out.instance}' not found.`)
-    session.graphOutputs.push({ instance: out.instance, output: String(out.output) })
+  // Set audio outputs — body dac.out wires canonical, topLevel.audio_outputs deprecated fallback
+  for (const o of collectGraphOutputs(prog, topLevel, session, 'loadProgramAsSession')) {
+    session.graphOutputs.push(o)
   }
 
   // Compile and load
@@ -433,14 +517,9 @@ export function mergeProgramIntoSession(
     }
   }
 
-  // Append audio outputs
-  for (const out of topLevel.audio_outputs ?? []) {
-    if ('expr' in out) {
-      throw new Error('Output expressions not supported in plan-based path. Use instance output refs instead.')
-    }
-    const inst = session.instanceRegistry.get(out.instance)
-    if (!inst) throw new Error(`Output instance '${out.instance}' not found.`)
-    session.graphOutputs.push({ instance: out.instance, output: String(out.output) })
+  // Append audio outputs — body dac.out wires canonical, topLevel.audio_outputs deprecated fallback
+  for (const o of collectGraphOutputs(prog, topLevel, session, 'mergeProgramIntoSession')) {
+    session.graphOutputs.push(o)
   }
 
   // Recompile
@@ -522,19 +601,27 @@ export function saveProgramFromSession(
     decls.push(entry as ExprNode)
   }
 
+  // dac.out wires emitted as body assigns (canonical post-A4)
+  const assigns: ExprNode[] = []
+  for (const o of session.graphOutputs) {
+    const inst = session.instanceRegistry.get(o.instance)
+    if (!inst) continue // session has a stale entry; skip silently rather than crash on save
+    const outputIdx = inst.outputNames.indexOf(o.output)
+    if (outputIdx < 0) continue
+    assigns.push({
+      op: 'outputAssign',
+      name: 'dac.out',
+      expr: { op: 'ref', instance: o.instance, output: outputIdx },
+    } as unknown as ExprNode)
+  }
+
   const node: ProgramNode = {
     op: 'program',
     name: 'patch',
-    body: { op: 'block', decls },
+    body: { op: 'block', decls, assigns: assigns.length ? assigns : undefined },
   }
 
   const topLevel: ProgramTopLevel = {}
-  if (session.graphOutputs.length) {
-    topLevel.audio_outputs = session.graphOutputs.map(o => ({
-      instance: o.instance, output: o.output,
-    }))
-  }
-
   return { node, topLevel }
 }
 
