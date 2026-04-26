@@ -306,3 +306,19 @@ describe('start_audio override validation (Phase A5)', () => {
     expect(env.param).toBe('channels')
   })
 })
+
+describe('generic stdlib types reachable from MCP session', () => {
+  // Regression test for the loadBuiltins(session.typeRegistry) bug: passing
+  // a bare Map made stdlib_loader synthesize a throwaway session, so generic
+  // templates and typeResolver landed there instead of on the real session.
+  // After the fix, generic stdlib types instantiate by name with type_args.
+  test('add_instance with type_args resolves a generic stdlib type', async () => {
+    const data = await client.callOk('add_instance', {
+      program: 'Delay',
+      instance_name: unique('d'),
+      type_args: { N: 4 },
+    })
+    expect(data).toBeDefined()
+    expect((data as { type_args?: Record<string, number> }).type_args?.N).toBe(4)
+  })
+})

@@ -47,7 +47,7 @@ const DEFAULT_SAMPLE_RATE = 44100
 const DEFAULT_DAC_CHANNELS = 2
 
 const session: SessionState = makeSession()
-loadBuiltins(session.typeRegistry)
+loadBuiltins(session)
 
 // Reserved instance name for the audio output boundary leaf. Wires whose
 // destination has `instance === DAC_INSTANCE_NAME` route to session.graphOutputs
