@@ -286,3 +286,23 @@ describe('set_output is removed', () => {
     }
   })
 })
+
+describe('start_audio override validation (Phase A5)', () => {
+  test('rejects non-positive sample_rate', async () => {
+    const env = await client.callError('start_audio', { sample_rate: 0 })
+    expect(env.code).toBe('invalid_value')
+    expect(env.param).toBe('sample_rate')
+  })
+
+  test('rejects non-integer channels', async () => {
+    const env = await client.callError('start_audio', { channels: 1.5 })
+    expect(env.code).toBe('invalid_value')
+    expect(env.param).toBe('channels')
+  })
+
+  test('rejects negative channels', async () => {
+    const env = await client.callError('start_audio', { channels: -2 })
+    expect(env.code).toBe('invalid_value')
+    expect(env.param).toBe('channels')
+  })
+})

@@ -39,6 +39,13 @@ const portTypeOrNull = (t: PortType | undefined): string | null =>
 
 // ─── Session ──────────────────────────────────────────────────────────────────
 
+// Defaults for DAC configuration. Host config — describes the audio device,
+// not anything semantic about the program. Overridable per-call on
+// `start_audio`; once the DAC is created the values are fixed for the
+// runtime's lifetime.
+const DEFAULT_SAMPLE_RATE = 44100
+const DEFAULT_DAC_CHANNELS = 2
+
 const session: SessionState = makeSession()
 loadBuiltins(session.typeRegistry)
 
@@ -297,6 +304,21 @@ function requireInstance(name: string, param: string) {
       options: [...session.instanceRegistry.keys()],
     })
   return inst
+}
+
+/** Validate an optional positive integer arg; fall back to `defaultValue` when
+ *  the arg is undefined. Throws an `invalid_value` envelope on bad input. */
+function validatePositiveInt(value: unknown, param: string, defaultValue: number): number {
+  if (value === undefined || value === null) return defaultValue
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    failBare({
+      code:    'invalid_value',
+      message: `${param} must be a positive integer; got ${JSON.stringify(value)}`,
+      param,
+      value,
+    })
+  }
+  return value as number
 }
 
 function resolveOutputIdx(inst: { outputNames: string[] }, nameOrIdx: string | number): number {
@@ -659,11 +681,13 @@ const TOOLS = [
 
   {
     name: 'start_audio',
-    description: 'Start audio output. Optionally specify a device by name substring.',
+    description: 'Start audio output. Optional: device by name substring; sample_rate (default 44100); channels (default 2). Sample rate and channel count apply only the first time the DAC is created and are fixed thereafter; subsequent calls ignore those overrides.',
     inputSchema: {
       type: 'object',
       properties: {
         device_name: { type: 'string', description: 'Optional partial device name match' },
+        sample_rate: { type: 'integer', minimum: 1, description: 'DAC sample rate in Hz (default 44100). Used only on first DAC creation.' },
+        channels:    { type: 'integer', minimum: 1, description: 'DAC output channel count (default 2). Used only on first DAC creation.' },
       },
     },
   },
@@ -1382,7 +1406,11 @@ function handleTool(name: string, args: Record<string, unknown>) {
     // ── Audio / params (unchanged) ────────────────────────────────────────
 
     case 'start_audio': return wrap(() => {
-      if (!session.dac) session.dac = DAC.fromRuntime(session.runtime._h)
+      if (!session.dac) {
+        const sampleRate = validatePositiveInt(args.sample_rate, 'sample_rate', DEFAULT_SAMPLE_RATE)
+        const channels   = validatePositiveInt(args.channels,    'channels',    DEFAULT_DAC_CHANNELS)
+        session.dac = DAC.fromRuntime(session.runtime._h, sampleRate, channels)
+      }
 
       const deviceName = args.device_name as string | undefined
       if (deviceName) {
