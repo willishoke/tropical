@@ -58,7 +58,7 @@ export interface Op<N extends number, Tag extends string> {
 // ── Per-arity tag unions ─────────────────────────────────────────────────
 
 /** Binary arithmetic ops. */
-export type ArithBinTag = 'add' | 'sub' | 'mul' | 'div' | 'mod' | 'floorDiv' | 'ldexp'
+export type ArithBinTag = 'add' | 'sub' | 'mul' | 'div' | 'mod' | 'floorDiv' | 'ldexp' | 'pow'
 
 /** Binary comparison ops. */
 export type CompareBinTag = 'lt' | 'lte' | 'gt' | 'gte' | 'eq' | 'neq'
@@ -90,11 +90,10 @@ export type TernaryTag = 'select' | 'clamp' | 'arraySet'
 /** A ternary op node — args is exactly three ExprNode children. */
 export type TernaryNode = Op<3, TernaryTag>
 
-/** Variadic op tags (arity unconstrained). */
-export type VariadicTag = 'array'
-
-/** A variadic op node — args is an ExprNode[] of any length. */
-export type VariadicNode = Op<number, VariadicTag>
+/** Inline array-pack op: `{op: 'array', items: ExprNode[]}`. Variadic but
+ *  uses an `items` field, not `args` — bespoke shape, lives in named-children
+ *  category. */
+export interface ArrayNode { op: 'array'; items: ExprNode[] }
 
 // ── Op<N> with extra non-child metadata fields ──────────────────────────
 
@@ -378,7 +377,9 @@ export type DeclNode =
  *  forces touching this union and every exhaustive `mapChildren` switch. */
 export type ExprOpNodeStrict =
   // Op<N> family — most ops factor through here.
-  | UnaryNode | BinaryNode | TernaryNode | VariadicNode
+  | UnaryNode | BinaryNode | TernaryNode
+  // Inline array (variadic but uses `items`).
+  | ArrayNode
   // Op<N> + extras — same-shape traversal, extra metadata fields.
   | ReshapeNode | TransposeNode | SliceNode | ReduceNode
   | BroadcastToNode | IndexNode | MatmulNode | MapNode

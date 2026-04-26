@@ -12,7 +12,7 @@ import { mapChildren, mapValues, mapArms } from './walk.js'
 import type {
   ExprNode,
   ExprOpNodeStrict,
-  AddNode, UnaryNode, TernaryNode, VariadicNode,
+  AddNode, UnaryNode, TernaryNode, ArrayNode,
   ReshapeNode, MatmulNode, MapNode,
   FillNode, ArrayLiteralNode, MatrixNode,
   TagNode, MatchNode, MatchArmStrict, LetNode, FunctionNode, CallNode,
@@ -51,10 +51,10 @@ describe('mapChildren — Op<N> family', () => {
     expect(result.args).toEqual([2, 3, 4])
   })
 
-  test('variadic op handles arbitrary length', () => {
-    const n: VariadicNode = { op: 'array', args: [1, 2, 3, 4, 5] }
-    const result = mapChildren(n, inc) as VariadicNode
-    expect(result.args).toEqual([2, 3, 4, 5, 6])
+  test('array op handles arbitrary length items', () => {
+    const n: ArrayNode = { op: 'array', items: [1, 2, 3, 4, 5] }
+    const result = mapChildren(n, inc) as ArrayNode
+    expect(result.items).toEqual([2, 3, 4, 5, 6])
   })
 
   test('reference identity preserved when no children change', () => {

@@ -19,10 +19,10 @@ import type {
   ExprNode,
   ExprOpNodeStrict,
   Op,
-  BinaryNode, UnaryNode, TernaryNode, VariadicNode,
+  BinaryNode, UnaryNode, TernaryNode,
   ReshapeNode, TransposeNode, SliceNode, ReduceNode,
   BroadcastToNode, IndexNode, MatmulNode, MapNode,
-  ZerosNode, OnesNode, FillNode, ArrayLiteralNode, MatrixNode,
+  ZerosNode, OnesNode, FillNode, ArrayLiteralNode, MatrixNode, ArrayNode,
   TagNode, MatchNode, MatchArmStrict, LetNode, FunctionNode, CallNode,
   DelayNode, SourceTagNode,
   GenerateNode, IterateNode, FoldNode, ScanNode,
@@ -37,7 +37,7 @@ import type {
 // ─────────────────────────────────────────────────────────────
 
 const BINARY_TAGS: ReadonlySet<string> = new Set([
-  'add', 'sub', 'mul', 'div', 'mod', 'floorDiv', 'ldexp',
+  'add', 'sub', 'mul', 'div', 'mod', 'floorDiv', 'ldexp', 'pow',
   'lt', 'lte', 'gt', 'gte', 'eq', 'neq',
   'bitAnd', 'bitOr', 'bitXor', 'lshift', 'rshift',
   'and', 'or',
@@ -51,13 +51,10 @@ const UNARY_TAGS: ReadonlySet<string> = new Set([
 
 const TERNARY_TAGS: ReadonlySet<string> = new Set(['select', 'clamp', 'arraySet'])
 
-const VARIADIC_TAGS: ReadonlySet<string> = new Set(['array'])
-
 /** True when the op is a member of the Op<N> family — args is a flat
- *  ExprNode tuple/array and traversal is purely positional. */
-function isOpNFamily(node: ExprOpNodeStrict): node is BinaryNode | UnaryNode | TernaryNode | VariadicNode {
-  return BINARY_TAGS.has(node.op) || UNARY_TAGS.has(node.op)
-      || TERNARY_TAGS.has(node.op) || VARIADIC_TAGS.has(node.op)
+ *  ExprNode tuple and traversal is purely positional. */
+function isOpNFamily(node: ExprOpNodeStrict): node is BinaryNode | UnaryNode | TernaryNode {
+  return BINARY_TAGS.has(node.op) || UNARY_TAGS.has(node.op) || TERNARY_TAGS.has(node.op)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -146,6 +143,14 @@ export function mapChildren<T extends ExprOpNodeStrict>(
       const newArg = f(n.args[0])
       if (newCallee === n.callee && newArg === n.args[0]) return node
       return { ...n, callee: newCallee, args: [newArg] } as unknown as T
+    }
+
+    // ── Inline array (variadic, but uses `items` not `args`) ──
+    case 'array': {
+      const n = node as ArrayNode
+      const newItems = n.items.map(f)
+      const same = newItems.every((c, i) => c === n.items[i])
+      return same ? node : ({ ...n, items: newItems } as unknown as T)
     }
 
     // ── Construction ops ───────────────────────────────────────

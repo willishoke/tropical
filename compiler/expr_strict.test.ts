@@ -153,7 +153,7 @@ describe('ExprOpNodeStrict union assignability', () => {
       { op: 'add', args: [1, 2] },
       { op: 'neg', args: [3] },
       { op: 'select', args: [true, 1, 0] },
-      { op: 'array', args: [1, 2, 3] },
+      { op: 'array', items: [1, 2, 3] },
       { op: 'reshape', args: [0], shape: [2, 2] },
       { op: 'zeros', shape: [4] },
       { op: 'tag', type: 'T', variant: 'V' },
