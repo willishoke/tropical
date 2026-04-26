@@ -271,7 +271,7 @@ function parsePostfix(ctx: Ctx): ExprNode {
       // node shapes (e.g., array.length — not supported), emit the same
       // nestedOut form and let the elaborator decide.
       if (isNameRef(node)) {
-        node = { op: 'nestedOut', ref: (node as { name: string }).name, output: field.value as string }
+        node = { op: 'nestedOut', ref: node.name, output: field.value as string }
       } else {
         node = { op: 'fieldAccess', expr: node, field: field.value as string }
       }
@@ -286,8 +286,7 @@ function parsePostfix(ctx: Ctx): ExprNode {
       // its structured op directly; otherwise emit a generic call for the
       // elaborator to resolve into a builtin op or user function call.
       if (isNameRef(node)) {
-        const name = (node as { name: string }).name
-        const combinator = parseCombinatorCall(ctx, name)
+        const combinator = parseCombinatorCall(ctx, node.name)
         if (combinator !== null) {
           node = combinator
         } else {
@@ -316,7 +315,7 @@ function parseCallArgs(ctx: Ctx): ExprNode[] {
   return args
 }
 
-function isNameRef(node: ExprNode): boolean {
+function isNameRef(node: ExprNode): node is { op: 'nameRef'; name: string } {
   return typeof node === 'object' && node !== null && !Array.isArray(node)
     && (node as { op?: string }).op === 'nameRef'
 }
