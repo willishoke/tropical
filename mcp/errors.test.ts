@@ -368,9 +368,12 @@ describe('unknown_instance — helper-routed across all wiring tools', () => {
     assertEnvelope(env, 'instance')
   })
 
-  test('set_output outputs[].instance', async () => {
-    const env = await client.callError('set_output', {
-      outputs: [{ instance: 'nope', output: 'out' }],
+  test('wire to dac.out — unknown source instance in ref expression', async () => {
+    const env = await client.callError('wire', {
+      set: [{
+        instance: 'dac', input: 'out',
+        expr: { op: 'ref', instance: 'nope', output: 0 },
+      }],
     })
     assertEnvelope(env, 'instance')
   })
@@ -413,8 +416,11 @@ describe('unknown_input / unknown_output — scoped enum', () => {
   })
 
   test('unknown_output — valid.options is exactly this instance\'s outputs', async () => {
-    const env = await client.callError('set_output', {
-      outputs: [{ instance: inst, output: 'ouput' }],
+    const env = await client.callError('wire', {
+      set: [{
+        instance: 'dac', input: 'out',
+        expr: { op: 'ref', instance: inst, output: 'ouput' },
+      }],
     })
     expect(env.code).toBe('unknown_output')
     expect(env.param).toBe('output')
