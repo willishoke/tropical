@@ -649,3 +649,34 @@ describe('dac.out body wires (Phase A4)', () => {
     session.graph.dispose()
   })
 })
+
+// ─────────────────────────────────────────────────────────────
+// Source-level config field removed (Phase A5)
+// ─────────────────────────────────────────────────────────────
+
+describe('source-level `config` removed (Phase A5)', () => {
+  test('files with legacy `config` field still parse — Zod strips it silently', () => {
+    const raw = {
+      schema: 'tropical_program_2',
+      name: 'OldPatch',
+      body: { op: 'block', decls: [], assigns: [] },
+      config: { sample_rate: 96000, buffer_length: 1024 },
+    }
+    const parsed = parseProgramV2(raw) as Record<string, unknown>
+    expect(parsed.config).toBeUndefined()
+    expect(parsed.name).toBe('OldPatch')
+  })
+
+  test('saveProgramFromSession does not emit a config field', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: { op: 'block' },
+    }
+    loadProgramAsSession(prog, {}, session)
+    const { topLevel } = saveProgramFromSession(session)
+    expect((topLevel as Record<string, unknown>).config).toBeUndefined()
+    session.graph.dispose()
+  })
+})

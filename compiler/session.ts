@@ -617,15 +617,13 @@ export function normalizeProgramFile(
     schema: 'tropical_program_2'
     params?: ProgramTopLevel['params']
     audio_outputs?: ProgramTopLevel['audio_outputs']
-    config?: ProgramTopLevel['config']
   }
-  const { schema: _schema, params, audio_outputs, config, ...progFields } = v2
+  const { schema: _schema, params, audio_outputs, ...progFields } = v2
   void _schema
   const node: ProgramNode = { op: 'program', ...progFields } as unknown as ProgramNode
   const topLevel: ProgramTopLevel = {}
   if (params !== undefined)        topLevel.params        = params
   if (audio_outputs !== undefined) topLevel.audio_outputs = audio_outputs
-  if (config !== undefined)        topLevel.config        = config
   return { node, topLevel }
 }
 
@@ -642,7 +640,6 @@ export function v2NodeToFile(
   const file: Record<string, unknown> = { schema: 'tropical_program_2', ...fields }
   if (topLevel.params !== undefined)        file.params        = topLevel.params
   if (topLevel.audio_outputs !== undefined) file.audio_outputs = topLevel.audio_outputs
-  if (topLevel.config !== undefined)        file.config        = topLevel.config
   return file as { schema: 'tropical_program_2'; [k: string]: unknown }
 }
 

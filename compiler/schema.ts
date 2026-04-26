@@ -159,10 +159,6 @@ export const ProgramFileSchemaV2: z.ZodType = z.lazy(() => z.object({
     z.object({ instance: z.string(), output: z.union([z.string(), z.number()]) }),
     z.object({ expr: ExprNodeSchema }),
   ])).optional(),
-  config: z.object({
-    buffer_length: z.number().int().positive().optional(),
-    sample_rate: z.number().positive().optional(),
-  }).optional(),
 }))
 
 // ─────────────────────────────────────────────────────────────

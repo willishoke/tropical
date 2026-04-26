@@ -73,14 +73,18 @@ export interface ProgramNode {
   body: BlockNode
 }
 
-/** Top-level session metadata carried alongside a root program in a v2 file. */
+/** Top-level session metadata carried alongside a root program in a v2 file.
+ *  Both fields are deprecated: post-A3 saves emit params via paramDecl body
+ *  decls, post-A4 saves emit audio_outputs via outputAssign(name='dac.out')
+ *  body assigns. The fields remain in the type for the deprecated read path
+ *  used by pre-A4 patches. (Source-level `config` was removed in A5: sample
+ *  rate and buffer length are runtime/host concerns, not source concerns.) */
 export interface ProgramTopLevel {
   params?: Array<{ name: string; value?: number; time_const?: number; type?: 'param' | 'trigger' }>
   audio_outputs?: Array<
     | { instance: string; output: string | number }
     | { expr: ExprNode }
   >
-  config?: { buffer_length?: number; sample_rate?: number }
 }
 
 /** On-disk `tropical_program_2` file shape: a program plus session metadata. */
