@@ -803,7 +803,7 @@ function resolveStrConcats(node: unknown): unknown {
 }
 
 /** Decls that carry a unique `name` field — used for collision detection. */
-const NAMED_DECL_OPS = new Set(['instanceDecl', 'regDecl', 'delayDecl', 'programDecl'])
+const NAMED_DECL_OPS = new Set(['instanceDecl', 'regDecl', 'delayDecl', 'programDecl', 'paramDecl'])
 
 /**
  * Walk a tree and throw if any `{op:'binding'}` node's name is NOT bound by
