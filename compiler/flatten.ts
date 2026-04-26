@@ -54,12 +54,12 @@ function inferExprOutputType(
       if (outIdx === -1 || outIdx >= modInfo.outputTypes.length) return undefined
       return modInfo.outputTypes[outIdx]
     }
-    case 'broadcast_to':
+    case 'broadcastTo':
       return ArrayType(Float, obj.shape as number[])
     case 'zeros':
     case 'ones':
     case 'fill':
-    case 'array_literal':
+    case 'arrayLiteral':
       return ArrayType(Float, obj.shape as number[])
     default:
       return undefined
@@ -137,7 +137,7 @@ export function applyBounds(expr: ExprNode, bounds: Bounds): ExprNode {
 
 export interface FlatPlan {
   schema: 'tropical_plan_4'
-  config: { sample_rate: number }
+  config: { sampleRate: number }
   state_init: (number | boolean)[]
   register_names: string[]
   register_types: ScalarType[]
@@ -349,7 +349,7 @@ function resolveDelayValues(node: ExprNode, delayBase: number, memo?: WeakMap<ob
 
   const obj = node as { op: string; [k: string]: unknown }
 
-  if (obj.op === 'delay_value') {
+  if (obj.op === 'delayValue') {
     const out = { op: 'reg', id: delayBase + (obj.node_id as number) }
     if (memo) memo.set(node as object, out)
     return out
@@ -509,7 +509,7 @@ function substituteNestedOutputRefs(
 
   const obj = node as { op: string; [k: string]: unknown }
 
-  if (obj.op === 'nested_output') {
+  if (obj.op === 'nestedOutput') {
     const nodeId = obj.node_id as number
     const outputId = obj.output_id as number
     const outputs = resolved.get(nodeId)
@@ -1412,10 +1412,10 @@ export function flattenExpressions(session: SessionState): FlatExpressions {
     }
 
     const wrapOutput = (expr: ExprNode): ExprNode =>
-      gateExpr === null ? expr : { op: 'source_tag', source_instance: name, gate_expr: gateExpr, expr }
+      gateExpr === null ? expr : { op: 'sourceTag', source_instance: name, gate_expr: gateExpr, expr }
     const wrapRegUpdate = (expr: ExprNode, flatRegId: number): ExprNode =>
       gateExpr === null ? expr : {
-        op: 'source_tag',
+        op: 'sourceTag',
         source_instance: name,
         gate_expr: gateExpr,
         expr,
@@ -1761,7 +1761,7 @@ export function flattenSession(session: SessionState): FlatPlan {
 
   const plan: FlatPlan = {
     schema: 'tropical_plan_4',
-    config: { sample_rate: flat.sampleRate },
+    config: { sampleRate: flat.sampleRate },
     state_init: flat.stateInit as (number | boolean)[],
     register_names: flat.registerNames,
     register_types: flat.registerTypes,

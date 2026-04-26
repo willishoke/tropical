@@ -124,7 +124,7 @@ inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
   ParsedPlan4 result;
 
   result.sample_rate = plan.value("config", nlohmann::json::object())
-                           .value("sample_rate", 44100.0);
+                           .value("sampleRate", 44100.0);
 
   // state_init — scalars only; arrays (not used by current modules) are zeroed
   if (plan.contains("state_init"))

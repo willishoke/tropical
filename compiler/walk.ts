@@ -37,19 +37,19 @@ import type {
 // ─────────────────────────────────────────────────────────────
 
 const BINARY_TAGS: ReadonlySet<string> = new Set([
-  'add', 'sub', 'mul', 'div', 'mod', 'floor_div', 'ldexp',
+  'add', 'sub', 'mul', 'div', 'mod', 'floorDiv', 'ldexp',
   'lt', 'lte', 'gt', 'gte', 'eq', 'neq',
-  'bit_and', 'bit_or', 'bit_xor', 'lshift', 'rshift',
+  'bitAnd', 'bitOr', 'bitXor', 'lshift', 'rshift',
   'and', 'or',
 ])
 
 const UNARY_TAGS: ReadonlySet<string> = new Set([
   'neg', 'abs', 'sqrt', 'floor', 'ceil', 'round',
-  'float_exponent', 'not', 'bit_not',
-  'to_int', 'to_bool', 'to_float',
+  'floatExponent', 'not', 'bitNot',
+  'toInt', 'toBool', 'toFloat',
 ])
 
-const TERNARY_TAGS: ReadonlySet<string> = new Set(['select', 'clamp', 'array_set'])
+const TERNARY_TAGS: ReadonlySet<string> = new Set(['select', 'clamp', 'arraySet'])
 
 const VARIADIC_TAGS: ReadonlySet<string> = new Set(['array'])
 
@@ -130,7 +130,7 @@ export function mapChildren<T extends ExprOpNodeStrict>(
     case 'transpose':
     case 'slice':
     case 'reduce':
-    case 'broadcast_to':
+    case 'broadcastTo':
     case 'index':
     case 'matmul': {
       const n = node as ReshapeNode | TransposeNode | SliceNode | ReduceNode
@@ -158,7 +158,7 @@ export function mapChildren<T extends ExprOpNodeStrict>(
       const newValue = f(n.value)
       return newValue === n.value ? node : ({ ...n, value: newValue } as unknown as T)
     }
-    case 'array_literal': {
+    case 'arrayLiteral': {
       const n = node as ArrayLiteralNode
       const newValues = n.values.map(f)
       const same = newValues.every((c, i) => c === n.values[i])
@@ -204,7 +204,7 @@ export function mapChildren<T extends ExprOpNodeStrict>(
       const newArg = f(n.args[0])
       return newArg === n.args[0] ? node : ({ ...n, args: [newArg] } as unknown as T)
     }
-    case 'source_tag': {
+    case 'sourceTag': {
       const n = node as SourceTagNode
       const newGate = f(n.gate_expr)
       const newExpr = f(n.expr)
@@ -255,7 +255,7 @@ export function mapChildren<T extends ExprOpNodeStrict>(
       if (newOver === n.over && newBody === n.body) return node
       return { ...n, over: newOver, body: newBody } as unknown as T
     }
-    case 'zip_with': {
+    case 'zipWith': {
       const n = node as ZipWithNode
       const newA = f(n.a)
       const newB = f(n.b)
@@ -263,13 +263,13 @@ export function mapChildren<T extends ExprOpNodeStrict>(
       if (newA === n.a && newB === n.b && newBody === n.body) return node
       return { ...n, a: newA, b: newB, body: newBody } as unknown as T
     }
-    case 'str_concat': {
+    case 'strConcat': {
       const n = node as StrConcatNode
       const newParts = n.parts.map(f)
       const same = newParts.every((c, i) => c === n.parts[i])
       return same ? node : ({ ...n, parts: newParts } as unknown as T)
     }
-    case 'generate_decls': {
+    case 'generateDecls': {
       const n = node as GenerateDeclsNode
       const newDecls = n.decls.map(f)
       const same = newDecls.every((c, i) => c === n.decls[i])
@@ -279,7 +279,7 @@ export function mapChildren<T extends ExprOpNodeStrict>(
     // ── Decl ops ───────────────────────────────────────────────
     case 'ref':
       return node  // wiring ref carries no ExprNode children
-    case 'instance_decl': {
+    case 'instanceDecl': {
       const n = node as InstanceDeclNode
       const newInputs = n.inputs === undefined ? undefined : mapValues(n.inputs, f)
       const newGate = n.gate_input === undefined ? undefined : f(n.gate_input)
@@ -291,13 +291,13 @@ export function mapChildren<T extends ExprOpNodeStrict>(
         ...(n.gate_input === undefined ? {} : { gate_input: newGate }),
       } as unknown as T
     }
-    case 'reg_decl': {
+    case 'regDecl': {
       const n = node as RegDeclNode
       if (n.init === undefined) return node
       const newInit = f(n.init)
       return newInit === n.init ? node : ({ ...n, init: newInit } as unknown as T)
     }
-    case 'delay_decl': {
+    case 'delayDecl': {
       const n = node as DelayDeclNode
       const initIsExpr = n.init !== undefined && typeof n.init === 'object'
       const newInit = initIsExpr ? f(n.init as ExprNode) : n.init
@@ -311,19 +311,19 @@ export function mapChildren<T extends ExprOpNodeStrict>(
         ...(n.update === undefined ? {} : { update: newUpdate }),
       } as unknown as T
     }
-    case 'program_decl': {
+    case 'programDecl': {
       const n = node as ProgramDeclNode
       if (n.program === undefined) return node
       const newProgram = f(n.program)
       return newProgram === n.program ? node : ({ ...n, program: newProgram } as unknown as T)
     }
-    case 'output_assign': {
+    case 'outputAssign': {
       const n = node as OutputAssignNode
       if (n.expr === undefined) return node
       const newExpr = f(n.expr)
       return newExpr === n.expr ? node : ({ ...n, expr: newExpr } as unknown as T)
     }
-    case 'next_update': {
+    case 'nextUpdate': {
       const n = node as NextUpdateNode
       if (n.expr === undefined) return node
       const newExpr = f(n.expr)
@@ -355,16 +355,16 @@ export function mapChildren<T extends ExprOpNodeStrict>(
     // ── Leaves: no children. Catches every LeafNode variant. ──
     case 'input':
     case 'reg':
-    case 'delay_ref':
-    case 'delay_value':
-    case 'nested_out':
-    case 'nested_output':
+    case 'delayRef':
+    case 'delayValue':
+    case 'nestedOut':
+    case 'nestedOutput':
     case 'binding':
-    case 'type_param':
-    case 'sample_rate':
-    case 'sample_index':
-    case 'smoothed_param':
-    case 'trigger_param':
+    case 'typeParam':
+    case 'sampleRate':
+    case 'sampleIndex':
+    case 'smoothedParam':
+    case 'triggerParam':
     case 'const':
       return node
 

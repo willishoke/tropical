@@ -63,7 +63,7 @@ describe('mapChildren — Op<N> family', () => {
   })
 
   test('all binary tag variants traverse identically', () => {
-    const variants = ['add', 'sub', 'mul', 'lt', 'eq', 'and', 'bit_and', 'lshift'] as const
+    const variants = ['add', 'sub', 'mul', 'lt', 'eq', 'and', 'bitAnd', 'lshift'] as const
     for (const op of variants) {
       const n = { op, args: [1, 2] } as AddNode
       const result = mapChildren(n, inc) as AddNode
@@ -130,7 +130,7 @@ describe('mapChildren — construction ops', () => {
   })
 
   test('array_literal recurses into all values', () => {
-    const n: ArrayLiteralNode = { op: 'array_literal', shape: [3], values: [1, 2, 3] }
+    const n: ArrayLiteralNode = { op: 'arrayLiteral', shape: [3], values: [1, 2, 3] }
     const result = mapChildren(n, inc) as ArrayLiteralNode
     expect(result.values).toEqual([2, 3, 4])
   })
@@ -203,7 +203,7 @@ describe('mapChildren — named-children ops', () => {
 
   test('source_tag recurses into gate/expr/on_skip', () => {
     const n: SourceTagNode = {
-      op: 'source_tag', source_instance: 'a',
+      op: 'sourceTag', source_instance: 'a',
       gate_expr: 1, expr: 2, on_skip: 3,
     }
     const result = mapChildren(n, inc) as SourceTagNode
@@ -257,7 +257,7 @@ describe('mapChildren — combinators', () => {
     expect(m2r.over).toBe(2)
     expect(m2r.body).toBe(3)
 
-    const zw: ZipWithNode = { op: 'zip_with', a: 1, b: 2, x: 'x', y: 'y', body: 3 }
+    const zw: ZipWithNode = { op: 'zipWith', a: 1, b: 2, x: 'x', y: 'y', body: 3 }
     const zwr = mapChildren(zw, inc) as ZipWithNode
     expect(zwr.a).toBe(2)
     expect(zwr.b).toBe(3)
@@ -272,14 +272,14 @@ describe('mapChildren — combinators', () => {
   })
 
   test('str_concat recurses into all parts', () => {
-    const n: StrConcatNode = { op: 'str_concat', parts: [1, 2, 3] }
+    const n: StrConcatNode = { op: 'strConcat', parts: [1, 2, 3] }
     const result = mapChildren(n, inc) as StrConcatNode
     expect(result.parts).toEqual([2, 3, 4])
   })
 
   test('generate_decls recurses into all decls', () => {
     const n: GenerateDeclsNode = {
-      op: 'generate_decls', count: 2, var: 'i', decls: [1, 2],
+      op: 'generateDecls', count: 2, var: 'i', decls: [1, 2],
     }
     const result = mapChildren(n, inc) as GenerateDeclsNode
     expect(result.decls).toEqual([2, 3])
@@ -298,7 +298,7 @@ describe('mapChildren — decl ops', () => {
 
   test('instance_decl recurses into inputs and gate_input', () => {
     const n: InstanceDeclNode = {
-      op: 'instance_decl', name: 'a', program: 'X',
+      op: 'instanceDecl', name: 'a', program: 'X',
       inputs: { freq: 100, gain: 0.5 },
       gate_input: 1,
     }
@@ -308,24 +308,24 @@ describe('mapChildren — decl ops', () => {
   })
 
   test('reg_decl recurses into init when present', () => {
-    const n: RegDeclNode = { op: 'reg_decl', name: 'r', init: 5 }
+    const n: RegDeclNode = { op: 'regDecl', name: 'r', init: 5 }
     const result = mapChildren(n, inc) as RegDeclNode
     expect(result.init).toBe(6)
 
-    const empty: RegDeclNode = { op: 'reg_decl', name: 'r' }
+    const empty: RegDeclNode = { op: 'regDecl', name: 'r' }
     expect(mapChildren(empty, inc)).toBe(empty)
   })
 
   test('delay_decl recurses into update; init is recursed only when ExprNode', () => {
     // numeric init — no recursion
-    const numInit: DelayDeclNode = { op: 'delay_decl', name: 'd', init: 0, update: 5 }
+    const numInit: DelayDeclNode = { op: 'delayDecl', name: 'd', init: 0, update: 5 }
     const r1 = mapChildren(numInit, inc) as DelayDeclNode
     expect(r1.init).toBe(0)
     expect(r1.update).toBe(6)
 
     // tag-init (ExprNode) — recursed
     const tagInit: DelayDeclNode = {
-      op: 'delay_decl', name: 'd',
+      op: 'delayDecl', name: 'd',
       init: { op: 'tag', type: 'T', variant: 'V' },
       update: 5,
     }
@@ -336,12 +336,12 @@ describe('mapChildren — decl ops', () => {
   })
 
   test('output_assign / next_update recurse into expr', () => {
-    const oa: OutputAssignNode = { op: 'output_assign', name: 'out', expr: 5 }
+    const oa: OutputAssignNode = { op: 'outputAssign', name: 'out', expr: 5 }
     const oar = mapChildren(oa, inc) as OutputAssignNode
     expect(oar.expr).toBe(6)
 
     const nu: NextUpdateNode = {
-      op: 'next_update', target: { kind: 'reg', name: 'r' }, expr: 10,
+      op: 'nextUpdate', target: { kind: 'reg', name: 'r' }, expr: 10,
     }
     const nur = mapChildren(nu, inc) as NextUpdateNode
     expect(nur.expr).toBe(11)
@@ -357,7 +357,7 @@ describe('mapChildren — decl ops', () => {
   })
 
   test('program_decl recurses into program when present', () => {
-    const n: ProgramDeclNode = { op: 'program_decl', name: 'P', program: 5 }
+    const n: ProgramDeclNode = { op: 'programDecl', name: 'P', program: 5 }
     const result = mapChildren(n, inc) as ProgramDeclNode
     expect(result.program).toBe(6)
   })
@@ -372,16 +372,16 @@ describe('mapChildren — leaves', () => {
     const leaves: ExprOpNodeStrict[] = [
       { op: 'input', id: 0 },
       { op: 'reg', id: 0 },
-      { op: 'delay_ref', id: 'state' },
-      { op: 'delay_value', node_id: 0 },
-      { op: 'nested_out', ref: 'a', output: 0 },
-      { op: 'nested_output', node_id: 0, output_id: 0 },
+      { op: 'delayRef', id: 'state' },
+      { op: 'delayValue', node_id: 0 },
+      { op: 'nestedOut', ref: 'a', output: 0 },
+      { op: 'nestedOutput', node_id: 0, output_id: 0 },
       { op: 'binding', name: 'x' },
-      { op: 'type_param', name: 'N' },
-      { op: 'sample_rate' },
-      { op: 'sample_index' },
-      { op: 'smoothed_param', _ptr: true, _handle: 'h' },
-      { op: 'trigger_param', _ptr: true, _handle: 'h' },
+      { op: 'typeParam', name: 'N' },
+      { op: 'sampleRate' },
+      { op: 'sampleIndex' },
+      { op: 'smoothedParam', _ptr: true, _handle: 'h' },
+      { op: 'triggerParam', _ptr: true, _handle: 'h' },
       { op: 'const', val: 5 },
     ]
     for (const leaf of leaves) {

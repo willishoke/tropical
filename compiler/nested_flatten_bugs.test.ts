@@ -22,7 +22,7 @@ import type { ProgramFile } from './program'
 function countDelayValueLeaks(node: unknown): number {
   if (!node || typeof node !== 'object') return 0
   const obj = node as Record<string, unknown>
-  if (obj.op === 'delay_value') return 1
+  if (obj.op === 'delayValue') return 1
   let n = 0
   for (const v of Object.values(obj)) {
     if (Array.isArray(v)) for (const el of v) n += countDelayValueLeaks(el)
@@ -39,33 +39,33 @@ describe('flatten bug 1 — outer delay_ref inside nested input wiring', () => {
       schema: 'tropical_program_2',
       name: 't',
       body: { op: 'block', decls: [
-        { op: 'program_decl', name: 'Wrap', program: {
+        { op: 'programDecl', name: 'Wrap', program: {
           op: 'program', name: 'Wrap',
           ports: {
             inputs: [{ name: 'x', type: 'signal', default: 0 }],
             outputs: [{ name: 'out', type: 'float' }],
           },
           body: { op: 'block', decls: [
-            { op: 'delay_decl', name: 'prev_x',
+            { op: 'delayDecl', name: 'prev_x',
               update: { op: 'input', name: 'x' }, init: 0 },
-            { op: 'instance_decl', name: 'op', program: 'OnePole', inputs: {
+            { op: 'instanceDecl', name: 'op', program: 'OnePole', inputs: {
               // Inner instance's input wiring references Wrap's own delay_ref.
               // This is the exact pattern that was tripping flatten.ts.
               input: {
                 op: 'add',
                 args: [
                   { op: 'input', name: 'x' },
-                  { op: 'delay_ref', id: 'prev_x' },
+                  { op: 'delayRef', id: 'prev_x' },
                 ],
               },
               g: 0.1,
             }},
           ], assigns: [
-            { op: 'output_assign', name: 'out', expr: { op: 'nested_out', ref: 'op', output: 'out' } },
+            { op: 'outputAssign', name: 'out', expr: { op: 'nestedOut', ref: 'op', output: 'out' } },
           ]},
         }},
-        { op: 'instance_decl', name: 'w', program: 'Wrap', inputs: {
-          x: { op: 'select', args: [{ op: 'eq', args: [{ op: 'sample_index' }, 10] }, 1, 0] },
+        { op: 'instanceDecl', name: 'w', program: 'Wrap', inputs: {
+          x: { op: 'select', args: [{ op: 'eq', args: [{ op: 'sampleIndex' }, 10] }, 1, 0] },
         }},
       ]},
       audio_outputs: [{ instance: 'w', output: 'out' }],
@@ -80,7 +80,7 @@ describe('flatten bug 1 — outer delay_ref inside nested input wiring', () => {
 
 describe('flatten bug 2 — wrapping stateful stdlib programs in program_decl', () => {
   test('Wrap(OnePole) matches unwrapped OnePole', () => {
-    const impulse = { op: 'select', args: [{ op: 'eq', args: [{ op: 'sample_index' }, 10] }, 1, 0] }
+    const impulse = { op: 'select', args: [{ op: 'eq', args: [{ op: 'sampleIndex' }, 10] }, 1, 0] }
 
     const wrapped = (() => {
       const session = makeSession(44100)
@@ -89,21 +89,21 @@ describe('flatten bug 2 — wrapping stateful stdlib programs in program_decl', 
         schema: 'tropical_program_2',
         name: 't',
         body: { op: 'block', decls: [
-          { op: 'program_decl', name: 'Wrap', program: {
+          { op: 'programDecl', name: 'Wrap', program: {
             op: 'program', name: 'Wrap',
             ports: {
               inputs: [{ name: 'x', type: 'signal', default: 0 }],
               outputs: [{ name: 'out', type: 'float' }],
             },
             body: { op: 'block', decls: [
-              { op: 'instance_decl', name: 'op', program: 'OnePole', inputs: {
+              { op: 'instanceDecl', name: 'op', program: 'OnePole', inputs: {
                 input: { op: 'input', name: 'x' }, g: 0.1,
               }},
             ], assigns: [
-              { op: 'output_assign', name: 'out', expr: { op: 'nested_out', ref: 'op', output: 'out' } },
+              { op: 'outputAssign', name: 'out', expr: { op: 'nestedOut', ref: 'op', output: 'out' } },
             ]},
           }},
-          { op: 'instance_decl', name: 'w', program: 'Wrap', inputs: { x: impulse } },
+          { op: 'instanceDecl', name: 'w', program: 'Wrap', inputs: { x: impulse } },
         ]},
         audio_outputs: [{ instance: 'w', output: 'out' }],
       } as ProgramFile, session)
@@ -117,7 +117,7 @@ describe('flatten bug 2 — wrapping stateful stdlib programs in program_decl', 
         schema: 'tropical_program_2',
         name: 't',
         body: { op: 'block', decls: [
-          { op: 'instance_decl', name: 'op', program: 'OnePole', inputs: {
+          { op: 'instanceDecl', name: 'op', program: 'OnePole', inputs: {
             input: impulse, g: 0.1,
           }},
         ]},
@@ -133,27 +133,27 @@ describe('flatten bug 2 — wrapping stateful stdlib programs in program_decl', 
 
   test('Wrap(LadderFilter) matches unwrapped LadderFilter (no delay_value leaks)', () => {
     const makeImpulsePatch = (useWrap: boolean): ProgramFile => {
-      const impulse = { op: 'select', args: [{ op: 'eq', args: [{ op: 'sample_index' }, 10] }, 1, 0] }
+      const impulse = { op: 'select', args: [{ op: 'eq', args: [{ op: 'sampleIndex' }, 10] }, 1, 0] }
       if (useWrap) {
         return {
           schema: 'tropical_program_2',
           name: 't',
           body: { op: 'block', decls: [
-            { op: 'program_decl', name: 'Wrap', program: {
+            { op: 'programDecl', name: 'Wrap', program: {
               op: 'program', name: 'Wrap',
               ports: {
                 inputs: [{ name: 'x', type: 'signal', default: 0 }],
                 outputs: [{ name: 'out', type: 'float' }],
               },
               body: { op: 'block', decls: [
-                { op: 'instance_decl', name: 'lf', program: 'LadderFilter', inputs: {
+                { op: 'instanceDecl', name: 'lf', program: 'LadderFilter', inputs: {
                   input: { op: 'input', name: 'x' }, cutoff: 800, resonance: 0.5, drive: 1,
                 }},
               ], assigns: [
-                { op: 'output_assign', name: 'out', expr: { op: 'nested_out', ref: 'lf', output: 'lp' } },
+                { op: 'outputAssign', name: 'out', expr: { op: 'nestedOut', ref: 'lf', output: 'lp' } },
               ]},
             }},
-            { op: 'instance_decl', name: 'w', program: 'Wrap', inputs: { x: impulse } },
+            { op: 'instanceDecl', name: 'w', program: 'Wrap', inputs: { x: impulse } },
           ]},
           audio_outputs: [{ instance: 'w', output: 'out' }],
         } as ProgramFile
@@ -162,7 +162,7 @@ describe('flatten bug 2 — wrapping stateful stdlib programs in program_decl', 
         schema: 'tropical_program_2',
         name: 't',
         body: { op: 'block', decls: [
-          { op: 'instance_decl', name: 'lf', program: 'LadderFilter', inputs: {
+          { op: 'instanceDecl', name: 'lf', program: 'LadderFilter', inputs: {
             input: impulse, cutoff: 800, resonance: 0.5, drive: 1,
           }},
         ]},
@@ -188,7 +188,7 @@ describe('flatten bug 2 — wrapping stateful stdlib programs in program_decl', 
   })
 
   test('Wrap(Bubble) matches unwrapped Bubble', () => {
-    const impulse = { op: 'select', args: [{ op: 'eq', args: [{ op: 'sample_index' }, 100] }, 1, 0] }
+    const impulse = { op: 'select', args: [{ op: 'eq', args: [{ op: 'sampleIndex' }, 100] }, 1, 0] }
 
     const wrapped = (() => {
       const session = makeSession(44100)
@@ -197,22 +197,22 @@ describe('flatten bug 2 — wrapping stateful stdlib programs in program_decl', 
         schema: 'tropical_program_2',
         name: 't',
         body: { op: 'block', decls: [
-          { op: 'program_decl', name: 'Wrap', program: {
+          { op: 'programDecl', name: 'Wrap', program: {
             op: 'program', name: 'Wrap',
             ports: {
               inputs: [{ name: 'trigger', type: 'signal', default: 0 }],
               outputs: [{ name: 'out', type: 'float' }],
             },
             body: { op: 'block', decls: [
-              { op: 'instance_decl', name: 'b', program: 'Bubble', inputs: {
+              { op: 'instanceDecl', name: 'b', program: 'Bubble', inputs: {
                 trigger: { op: 'input', name: 'trigger' },
                 radius: 0.003, decay_scale: 12, amp_scale: 0.3,
               }},
             ], assigns: [
-              { op: 'output_assign', name: 'out', expr: { op: 'nested_out', ref: 'b', output: 'out' } },
+              { op: 'outputAssign', name: 'out', expr: { op: 'nestedOut', ref: 'b', output: 'out' } },
             ]},
           }},
-          { op: 'instance_decl', name: 'w', program: 'Wrap', inputs: { trigger: impulse } },
+          { op: 'instanceDecl', name: 'w', program: 'Wrap', inputs: { trigger: impulse } },
         ]},
         audio_outputs: [{ instance: 'w', output: 'out' }],
       } as ProgramFile, session)
@@ -226,7 +226,7 @@ describe('flatten bug 2 — wrapping stateful stdlib programs in program_decl', 
         schema: 'tropical_program_2',
         name: 't',
         body: { op: 'block', decls: [
-          { op: 'instance_decl', name: 'b', program: 'Bubble', inputs: {
+          { op: 'instanceDecl', name: 'b', program: 'Bubble', inputs: {
             trigger: impulse, radius: 0.003, decay_scale: 12, amp_scale: 0.3,
           }},
         ]},

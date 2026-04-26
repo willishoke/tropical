@@ -12,11 +12,11 @@ describe('stdlib Bubble', () => {
       schema: 'tropical_program_2',
       name: 'test',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'b', program: 'Bubble', inputs: {
+        { op: 'instanceDecl', name: 'b', program: 'Bubble', inputs: {
           trigger: {
             op: 'select',
             args: [
-              { op: 'eq', args: [{ op: 'sample_index' }, 100] },
+              { op: 'eq', args: [{ op: 'sampleIndex' }, 100] },
               1,
               0,
             ],
@@ -62,11 +62,11 @@ describe('stdlib Bubble', () => {
         schema: 'tropical_program_2',
         name: 'test',
         body: { op: 'block', decls: [
-          { op: 'instance_decl', name: 'b', program: 'Bubble', inputs: {
+          { op: 'instanceDecl', name: 'b', program: 'Bubble', inputs: {
             trigger: {
               op: 'select',
               args: [
-                { op: 'eq', args: [{ op: 'sample_index' }, 100] },
+                { op: 'eq', args: [{ op: 'sampleIndex' }, 100] },
                 1,
                 0,
               ],

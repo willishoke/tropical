@@ -425,7 +425,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   llvm::Value * arrays_arg      = &*arg_it++;  arrays_arg->setName("arrays");
   llvm::Value * array_sizes_arg = &*arg_it++;  array_sizes_arg->setName("array_sizes");
   llvm::Value * temps_arg       = &*arg_it++;  temps_arg->setName("temps");
-  llvm::Value * sample_rate_arg      = &*arg_it++;  sample_rate_arg->setName("sample_rate");
+  llvm::Value * sample_rate_arg      = &*arg_it++;  sample_rate_arg->setName("sampleRate");
   llvm::Value * start_sample_idx_arg = &*arg_it++;  start_sample_idx_arg->setName("start_sample_index");
   llvm::Value * param_ptrs_arg       = &*arg_it++;  param_ptrs_arg->setName("param_ptrs");
   llvm::Value * output_buffer_arg    = &*arg_it++;  output_buffer_arg->setName("output_buffer");

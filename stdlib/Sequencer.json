@@ -5,13 +5,13 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "step",
         "init": 0,
         "type": "int"
       },
       {
-        "op": "delay_decl",
+        "op": "delayDecl",
         "name": "prev_clock",
         "update": {
           "op": "input",
@@ -22,7 +22,7 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "value",
         "expr": {
           "op": "index",
@@ -39,7 +39,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": {
           "kind": "reg",
           "name": "step"
@@ -71,7 +71,7 @@
                       "op": "lte",
                       "args": [
                         {
-                          "op": "delay_ref",
+                          "op": "delayRef",
                           "id": "prev_clock"
                         },
                         0.5
@@ -82,7 +82,7 @@
               ]
             },
             {
-              "op": "type_param",
+              "op": "typeParam",
               "name": "N"
             }
           ]
@@ -105,7 +105,7 @@
           "element": "float",
           "shape": [
             {
-              "op": "type_param",
+              "op": "typeParam",
               "name": "N"
             }
           ]

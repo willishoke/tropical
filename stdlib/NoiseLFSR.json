@@ -5,18 +5,18 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "state",
         "init": 44257,
         "type": "int"
       },
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "value",
         "init": 0
       },
       {
-        "op": "delay_decl",
+        "op": "delayDecl",
         "name": "prev_clock",
         "update": {
           "op": "input",
@@ -27,7 +27,7 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "out",
         "expr": {
           "op": "let",
@@ -49,7 +49,7 @@
                   "op": "lte",
                   "args": [
                     {
-                      "op": "delay_ref",
+                      "op": "delayRef",
                       "id": "prev_clock"
                     },
                     0.5
@@ -167,7 +167,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": {
           "kind": "reg",
           "name": "state"
@@ -192,7 +192,7 @@
                   "op": "lte",
                   "args": [
                     {
-                      "op": "delay_ref",
+                      "op": "delayRef",
                       "id": "prev_clock"
                     },
                     0.5
@@ -269,7 +269,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": {
           "kind": "reg",
           "name": "value"
@@ -294,7 +294,7 @@
                   "op": "lte",
                   "args": [
                     {
-                      "op": "delay_ref",
+                      "op": "delayRef",
                       "id": "prev_clock"
                     },
                     0.5

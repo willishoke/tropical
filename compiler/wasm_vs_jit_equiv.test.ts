@@ -68,7 +68,7 @@ function makeSinOscPlan(freqHz: number): FlatPlan {
       schema: 'tropical_program_2',
       name: 'eq_sinosc',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'osc', program: 'SinOsc', inputs: { freq: freqHz } },
+        { op: 'instanceDecl', name: 'osc', program: 'SinOsc', inputs: { freq: freqHz } },
       ]},
       audio_outputs: [{ instance: 'osc', output: 'sine' }],
     }
@@ -87,8 +87,8 @@ function makeOnePolePlan(cutoff: number): FlatPlan {
       schema: 'tropical_program_2',
       name: 'eq_onepole',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'osc', program: 'SinOsc', inputs: { freq: 220 } },
-        { op: 'instance_decl', name: 'lp', program: 'OnePole', inputs: {
+        { op: 'instanceDecl', name: 'osc', program: 'SinOsc', inputs: { freq: 220 } },
+        { op: 'instanceDecl', name: 'lp', program: 'OnePole', inputs: {
           signal: { op: 'ref', instance: 'osc', output: 'sine' },
           cutoff,
         }},

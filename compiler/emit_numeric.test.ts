@@ -45,9 +45,9 @@ describe('emitNumericProgram', () => {
     const cases: [ExprNode, Partial<NOperand>][] = [
       [{ op: 'input', id: 0 },                              { kind: 'input', slot: 0, scalar_type: 'float' }],
       [{ op: 'reg', id: 0 },                                { kind: 'state_reg', slot: 0, scalar_type: 'float' }],
-      [{ op: 'sample_rate' },                                { kind: 'rate', scalar_type: 'float' }],
-      [{ op: 'sample_index' },                               { kind: 'tick', scalar_type: 'int' }],
-      [{ op: 'smoothed_param', _ptr: true, _handle: 12345 }, { kind: 'param', ptr: '12345', scalar_type: 'float' }],
+      [{ op: 'sampleRate' },                                { kind: 'rate', scalar_type: 'float' }],
+      [{ op: 'sampleIndex' },                               { kind: 'tick', scalar_type: 'int' }],
+      [{ op: 'smoothedParam', _ptr: true, _handle: 12345 }, { kind: 'param', ptr: '12345', scalar_type: 'float' }],
     ]
     for (const [expr, expected] of cases) {
       const prog = emitNumericProgram([expr], [])
@@ -99,7 +99,7 @@ describe('emitNumericProgram', () => {
   // ── Type inference ─────────────────────────────────────────
 
   test('type categories: bitwise→int, comparison→bool, sqrt→float', () => {
-    const bitProg = emitNumericProgram([{ op: 'bit_and', args: [1, 2] }], [])
+    const bitProg = emitNumericProgram([{ op: 'bitAnd', args: [1, 2] }], [])
     expect(findInstr(bitProg, 'BitAnd')!.result_type).toBe('int')
 
     const cmpProg = emitNumericProgram([{ op: 'lt', args: [1, 2] }], [])
@@ -112,7 +112,7 @@ describe('emitNumericProgram', () => {
   test('type promotion in arithmetic', () => {
     // float (input) + int (sample_index) → float
     const prog1 = emitNumericProgram(
-      [{ op: 'add', args: [{ op: 'input', id: 0 }, { op: 'sample_index' }] }],
+      [{ op: 'add', args: [{ op: 'input', id: 0 }, { op: 'sampleIndex' }] }],
       [],
     )
     const add1 = findInstr(prog1, 'Add')!
@@ -201,7 +201,7 @@ describe('emitNumericProgram', () => {
     expect(idx.loop_count).toBe(1)  // result is scalar
 
     // array_set([10, 20, 30], 1, 99)
-    const setProg = emitNumericProgram([{ op: 'array_set', args: [[10, 20, 30], 1, 99] }], [])
+    const setProg = emitNumericProgram([{ op: 'arraySet', args: [[10, 20, 30], 1, 99] }], [])
     const setEl = findInstr(setProg, 'SetElement')!
     expect(setEl).toBeDefined()
     expect(setEl.loop_count).toBe(1)
@@ -379,7 +379,7 @@ describe('emitNumericProgram', () => {
 
     test('to_int on a float expression yields int result_type', () => {
       const prog = emitNumericProgram(
-        [{ op: 'to_int', args: [{ op: 'add', args: [1.5, 2.5] }] }],
+        [{ op: 'toInt', args: [{ op: 'add', args: [1.5, 2.5] }] }],
         [],
       )
       const cast = findInstr(prog, 'ToInt')!
@@ -388,7 +388,7 @@ describe('emitNumericProgram', () => {
 
     test('to_float on an int register yields float result_type', () => {
       const prog = emitNumericProgram(
-        [{ op: 'to_float', args: [{ op: 'reg', id: 0 }] }],
+        [{ op: 'toFloat', args: [{ op: 'reg', id: 0 }] }],
         [],
         [0],
         ['int'],
@@ -399,7 +399,7 @@ describe('emitNumericProgram', () => {
 
     test('to_bool on an int constant yields bool result_type', () => {
       const prog = emitNumericProgram(
-        [{ op: 'to_bool', args: [{ op: 'const', val: 3, type: 'int' } as ExprNode] }],
+        [{ op: 'toBool', args: [{ op: 'const', val: 3, type: 'int' } as ExprNode] }],
         [],
       )
       const cast = findInstr(prog, 'ToBool')!
@@ -410,7 +410,7 @@ describe('emitNumericProgram', () => {
   describe('source_tag group_id tagging (Phase 6)', () => {
     test('tagged inner ops carry group_id; outer Select is ungated', () => {
       const tagged: ExprNode = {
-        op: 'source_tag',
+        op: 'sourceTag',
         source_instance: 'voice_0',
         gate_expr: true,
         expr: { op: 'add', args: [{ op: 'input', id: 0 }, 1] },
@@ -427,7 +427,7 @@ describe('emitNumericProgram', () => {
 
     test('groups table records one entry per source_tag with a gate operand', () => {
       const tagged: ExprNode = {
-        op: 'source_tag',
+        op: 'sourceTag',
         source_instance: 'voice_0',
         gate_expr: true,
         expr: { op: 'add', args: [{ op: 'input', id: 0 }, 1] },
@@ -442,7 +442,7 @@ describe('emitNumericProgram', () => {
     test('on_skip: reg(N) compiles as a state_reg read on the merge path', () => {
       // Register-update wrapping: hold-on-skip semantic via on_skip = reg(0).
       const tagged: ExprNode = {
-        op: 'source_tag',
+        op: 'sourceTag',
         source_instance: 'voice_0',
         gate_expr: false,
         expr: 0,

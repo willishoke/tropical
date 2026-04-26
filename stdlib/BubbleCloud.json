@@ -4,15 +4,15 @@
   "body": {
     "op": "block",
     "decls": [
-      { "op": "reg_decl", "name": "voice_idx", "init": 0, "type": "int" },
+      { "op": "regDecl", "name": "voice_idx", "init": 0, "type": "int" },
       {
-        "op": "delay_decl",
+        "op": "delayDecl",
         "name": "prev_trigger",
         "update": { "op": "input", "name": "trigger" },
         "init": 0
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "v0",
         "program": "Bubble",
         "inputs": {
@@ -28,7 +28,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "v1",
         "program": "Bubble",
         "inputs": {
@@ -44,7 +44,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "v2",
         "program": "Bubble",
         "inputs": {
@@ -60,7 +60,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "v3",
         "program": "Bubble",
         "inputs": {
@@ -76,7 +76,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "v4",
         "program": "Bubble",
         "inputs": {
@@ -92,7 +92,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "v5",
         "program": "Bubble",
         "inputs": {
@@ -108,7 +108,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "v6",
         "program": "Bubble",
         "inputs": {
@@ -124,7 +124,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "v7",
         "program": "Bubble",
         "inputs": {
@@ -142,36 +142,36 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "out",
         "expr": {
           "op": "add",
           "args": [
             { "op": "add", "args": [
               { "op": "add", "args": [
-                { "op": "nested_out", "ref": "v0", "output": "out" },
-                { "op": "nested_out", "ref": "v1", "output": "out" }
+                { "op": "nestedOut", "ref": "v0", "output": "out" },
+                { "op": "nestedOut", "ref": "v1", "output": "out" }
               ]},
               { "op": "add", "args": [
-                { "op": "nested_out", "ref": "v2", "output": "out" },
-                { "op": "nested_out", "ref": "v3", "output": "out" }
+                { "op": "nestedOut", "ref": "v2", "output": "out" },
+                { "op": "nestedOut", "ref": "v3", "output": "out" }
               ]}
             ]},
             { "op": "add", "args": [
               { "op": "add", "args": [
-                { "op": "nested_out", "ref": "v4", "output": "out" },
-                { "op": "nested_out", "ref": "v5", "output": "out" }
+                { "op": "nestedOut", "ref": "v4", "output": "out" },
+                { "op": "nestedOut", "ref": "v5", "output": "out" }
               ]},
               { "op": "add", "args": [
-                { "op": "nested_out", "ref": "v6", "output": "out" },
-                { "op": "nested_out", "ref": "v7", "output": "out" }
+                { "op": "nestedOut", "ref": "v6", "output": "out" },
+                { "op": "nestedOut", "ref": "v7", "output": "out" }
               ]}
             ]}
           ]
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": { "kind": "reg", "name": "voice_idx" },
         "expr": {
           "op": "let",
@@ -180,7 +180,7 @@
               "op": "mul",
               "args": [
                 { "op": "gt", "args": [{ "op": "input", "name": "trigger" }, 0.5] },
-                { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_trigger" }, 0.5] }
+                { "op": "lte", "args": [{ "op": "delayRef", "id": "prev_trigger" }, 0.5] }
               ]
             }
           },

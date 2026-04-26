@@ -1423,21 +1423,21 @@ and breaks_cycles sit alongside the body. Session metadata — \`params\`,
 { "schema": "tropical_program_2", "name": "MyPatch",
   "body": { "op": "block",
     "decls": [
-      { "op": "program_decl", "name": "Sine", "program": { "op": "program", "name": "Sine",
+      { "op": "programDecl", "name": "Sine", "program": { "op": "program", "name": "Sine",
         "ports": { "inputs": ["freq"], "outputs": ["out"] },
         "body": { "op": "block",
-          "decls": [{ "op": "reg_decl", "name": "phase", "init": 0 }],
+          "decls": [{ "op": "regDecl", "name": "phase", "init": 0 }],
           "assigns": [
-            { "op": "output_assign", "name": "out",
+            { "op": "outputAssign", "name": "out",
               "expr": { "op": "sin", "args": [{ "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }] } },
-            { "op": "next_update", "target": { "kind": "reg", "name": "phase" },
-              "expr": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sample_rate" }] }] }, 1] } }
+            { "op": "nextUpdate", "target": { "kind": "reg", "name": "phase" },
+              "expr": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sampleRate" }] }] }, 1] } }
           ],
           "value": null
         }
       }},
-      { "op": "instance_decl", "name": "osc", "program": "Sine", "inputs": { "freq": 440 } },
-      { "op": "instance_decl", "name": "filt", "program": "LadderFilter",
+      { "op": "instanceDecl", "name": "osc", "program": "Sine", "inputs": { "freq": 440 } },
+      { "op": "instanceDecl", "name": "filt", "program": "LadderFilter",
         "inputs": { "input": { "op": "ref", "instance": "osc", "output": "out" }, "cutoff": 2000 } }
     ],
     "assigns": [],
@@ -1467,7 +1467,7 @@ Assign node shapes:
 - fold: { "op": "fold", "over": <array>, "init": <expr>, "acc_var": "acc", "elem_var": "x", "body": <expr> }
 - scan: like fold but keeps intermediates as array
 - map2: { "op": "map2", "over": <array>, "elem_var": "x", "body": <expr> }
-- zip_with: { "op": "zip_with", "a": <arr>, "b": <arr>, "x_var": "x", "y_var": "y", "body": <expr> }
+- zip_with: { "op": "zipWith", "a": <arr>, "b": <arr>, "x_var": "x", "y_var": "y", "body": <expr> }
 - chain: { "op": "chain", "count": 3, "init": <expr>, "var": "x", "body": <expr> }
 - let: { "op": "let", "bind": { "x": <expr> }, "in": <expr> }
 - binding: { "op": "binding", "name": "x" } — variable reference in combinator bodies
@@ -1491,7 +1491,7 @@ Used in instance input wiring and inline program process definitions.
 - **Array**: \`{ "op": "array", "items": [<expr>, ...] }\`
 - **Index**: \`{ "op": "index", "args": [<array_expr>, <index_expr>] }\`
 - **Delay**: \`{ "op": "delay", "args": [<expr>], "init": 0.0, "id": "optional_name" }\`
-- **Builtins**: \`{ "op": "sample_rate" }\`, \`{ "op": "sample_index" }\`
+- **Builtins**: \`{ "op": "sampleRate" }\`, \`{ "op": "sampleIndex" }\`
 `
 
 // ─── Prompts ──────────────────────────────────────────────────────────────────

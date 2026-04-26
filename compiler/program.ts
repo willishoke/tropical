@@ -25,7 +25,7 @@ import type { Bounds } from './program_types.js'
 
 /** Compile-time shape dimension: a concrete int or a reference to an
  *  outer type parameter to be substituted during specialization. */
-export type ShapeDim = number | { op: 'type_param'; name: string }
+export type ShapeDim = number | { op: 'typeParam'; name: string }
 
 /** Structured port/reg type declaration. Scalars and aliases are bare strings;
  *  arrays use the structured form so type_param refs can appear in shapes. */
@@ -110,7 +110,7 @@ export function* instanceDecls(prog: ProgramNode): Iterable<{
   for (const d of prog.body?.decls ?? []) {
     if (typeof d !== 'object' || d === null || Array.isArray(d)) continue
     const obj = d as Record<string, unknown>
-    if (obj.op !== 'instance_decl') continue
+    if (obj.op !== 'instanceDecl') continue
     yield {
       name: obj.name as string,
       program: obj.program as string,
@@ -127,7 +127,7 @@ function* programDecls(prog: ProgramNode): Iterable<{ name: string; program: Pro
   for (const d of prog.body?.decls ?? []) {
     if (typeof d !== 'object' || d === null || Array.isArray(d)) continue
     const obj = d as Record<string, unknown>
-    if (obj.op !== 'program_decl') continue
+    if (obj.op !== 'programDecl') continue
     yield { name: obj.name as string, program: obj.program as ProgramNode }
   }
 }
@@ -429,7 +429,7 @@ export function saveProgramFromSession(
 ): { node: ProgramNode; topLevel: ProgramTopLevel } {
   const decls: ExprNode[] = []
   for (const [name, inst] of session.instanceRegistry) {
-    const entry: Record<string, unknown> = { op: 'instance_decl', name, program: inst.typeName }
+    const entry: Record<string, unknown> = { op: 'instanceDecl', name, program: inst.typeName }
     if (inst.typeArgs) entry.type_args = inst.typeArgs
     if (inst.gateable) {
       entry.gateable = true
@@ -576,7 +576,7 @@ export function exportSessionAsProgram(
     if (Array.isArray(node)) return node.map(rewriteRefs)
     const obj = node as Record<string, unknown>
     if (obj.op === 'ref' && reachable.has(obj.instance as string)) {
-      return { op: 'nested_out', ref: obj.instance, output: obj.output } as unknown as ExprNode
+      return { op: 'nestedOut', ref: obj.instance, output: obj.output } as unknown as ExprNode
     }
     // Recurse into args
     if ('args' in obj) {
@@ -665,7 +665,7 @@ export function exportSessionAsProgram(
   for (const instName of order) {
     const inst = session.instanceRegistry.get(instName)!
     const entry: Record<string, unknown> = {
-      op: 'instance_decl',
+      op: 'instanceDecl',
       name: instName,
       program: inst.typeName,
     }
@@ -697,9 +697,9 @@ export function exportSessionAsProgram(
   const assigns: ExprNode[] = []
   for (const [outName, ref] of Object.entries(outputs)) {
     assigns.push({
-      op: 'output_assign',
+      op: 'outputAssign',
       name: outName,
-      expr: { op: 'nested_out', ref: ref.instance, output: ref.output },
+      expr: { op: 'nestedOut', ref: ref.instance, output: ref.output },
     } as ExprNode)
   }
 

@@ -5,7 +5,7 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "state",
         "init": 88172645463325252,
         "type": "int"
@@ -13,7 +13,7 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "out",
         "expr": {
           "op": "let",
@@ -72,7 +72,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": { "kind": "reg", "name": "state" },
         "expr": {
           "op": "let",

@@ -26,10 +26,10 @@ const ACCUM: ProgramNode = {
   name: 'Accum',
   ports: { inputs: [{ name: 'x', default: 0 }], outputs: ['out'] },
   body: { op: 'block',
-    decls: [{ op: 'reg_decl', name: 'acc', init: 0 }],
+    decls: [{ op: 'regDecl', name: 'acc', init: 0 }],
     assigns: [
-      { op: 'output_assign', name: 'out', expr: { op: 'reg', name: 'acc' } },
-      { op: 'next_update', target: { kind: 'reg', name: 'acc' },
+      { op: 'outputAssign', name: 'out', expr: { op: 'reg', name: 'acc' } },
+      { op: 'nextUpdate', target: { kind: 'reg', name: 'acc' },
         expr: { op: 'add', args: [{ op: 'reg', name: 'acc' }, { op: 'input', name: 'x' }] } },
     ],
   },
@@ -46,7 +46,7 @@ function setupGated(gateInput: ExprNode, bufferLength = 32) {
     schema: 'tropical_program_2',
     name: 'patch',
     body: { op: 'block', decls: [
-      { op: 'instance_decl', name: 'a1', program: 'Accum',
+      { op: 'instanceDecl', name: 'a1', program: 'Accum',
         inputs: { x: 1.0 }, gateable: true, gate_input: gateInput },
     ]},
     audio_outputs: [{ instance: 'a1', output: 'out' }],
@@ -85,7 +85,7 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
       schema: 'tropical_program_2',
       name: 'patch',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'a1', program: 'Accum', inputs: { x: 1.0 } },
+        { op: 'instanceDecl', name: 'a1', program: 'Accum', inputs: { x: 1.0 } },
       ]},
       audio_outputs: [{ instance: 'a1', output: 'out' }],
     }, session)
@@ -137,7 +137,7 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
     const gate: ExprNode = {
       op: 'lt',
       args: [
-        { op: 'mod', args: [{ op: 'sample_index' }, 4] },
+        { op: 'mod', args: [{ op: 'sampleIndex' }, 4] },
         2,
       ],
     }
@@ -163,15 +163,15 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
     ports: { inputs: [{ name: 'x', default: 0 }], outputs: ['out'] },
     body: { op: 'block',
       decls: [
-        { op: 'reg_decl', name: 'acc', init: 0 },
-        { op: 'delay_decl', name: 'prev_x', update: { op: 'input', name: 'x' }, init: 0 },
+        { op: 'regDecl', name: 'acc', init: 0 },
+        { op: 'delayDecl', name: 'prev_x', update: { op: 'input', name: 'x' }, init: 0 },
       ],
       assigns: [
         // Output is current register value.
-        { op: 'output_assign', name: 'out', expr: { op: 'reg', name: 'acc' } },
+        { op: 'outputAssign', name: 'out', expr: { op: 'reg', name: 'acc' } },
         // Accumulator adds the PREVIOUS sample's x (via the delay reg).
-        { op: 'next_update', target: { kind: 'reg', name: 'acc' },
-          expr: { op: 'add', args: [{ op: 'reg', name: 'acc' }, { op: 'delay_ref', id: 'prev_x' }] } },
+        { op: 'nextUpdate', target: { kind: 'reg', name: 'acc' },
+          expr: { op: 'add', args: [{ op: 'reg', name: 'acc' }, { op: 'delayRef', id: 'prev_x' }] } },
       ],
     },
   }
@@ -184,13 +184,13 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
     // Dynamic gate: (sample_index % 4) < 2 — alternates live / skip.
     const gate: ExprNode = {
       op: 'lt',
-      args: [{ op: 'mod', args: [{ op: 'sample_index' }, 4] }, 2],
+      args: [{ op: 'mod', args: [{ op: 'sampleIndex' }, 4] }, 2],
     }
     loadJSON({
       schema: 'tropical_program_2',
       name: 'patch',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'a1', program: 'AccumDelay',
+        { op: 'instanceDecl', name: 'a1', program: 'AccumDelay',
           inputs: { x: 1.0 }, gateable: true, gate_input: gate },
       ]},
       audio_outputs: [{ instance: 'a1', output: 'out' }],
@@ -220,13 +220,13 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
     // held through skip windows and resumes cleanly on live windows.
     const gate: ExprNode = {
       op: 'lt',
-      args: [{ op: 'mod', args: [{ op: 'sample_index' }, 16] }, 8],
+      args: [{ op: 'mod', args: [{ op: 'sampleIndex' }, 16] }, 8],
     }
     loadJSON({
       schema: 'tropical_program_2',
       name: 'patch',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'ladder', program: 'LadderFilter',
+        { op: 'instanceDecl', name: 'ladder', program: 'LadderFilter',
           inputs: { input: 0.5, freq: 1000, res: 0.5 },
           gateable: true, gate_input: gate },
       ]},
@@ -257,7 +257,7 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
     // a1 gates on (sample_index % 6) < 3 — alternates live/skip in 3-sample runs.
     const a1Gate: ExprNode = {
       op: 'lt',
-      args: [{ op: 'mod', args: [{ op: 'sample_index' }, 6] }, 3],
+      args: [{ op: 'mod', args: [{ op: 'sampleIndex' }, 6] }, 3],
     }
     // a2's gate depends on a1's output: live only when a1 has accumulated
     // past some threshold.
@@ -270,9 +270,9 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
       schema: 'tropical_program_2',
       name: 'patch',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'a1', program: 'Accum',
+        { op: 'instanceDecl', name: 'a1', program: 'Accum',
           inputs: { x: 1.0 }, gateable: true, gate_input: a1Gate },
-        { op: 'instance_decl', name: 'a2', program: 'Accum',
+        { op: 'instanceDecl', name: 'a2', program: 'Accum',
           inputs: { x: 1.0 }, gateable: true, gate_input: a2Gate },
       ]},
       audio_outputs: [{ instance: 'a2', output: 'out' }],

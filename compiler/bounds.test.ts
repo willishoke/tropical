@@ -43,7 +43,7 @@ function leafProgram(overrides: LeafOverrides = {}): ProgramNode {
     out: { op: 'mul', args: [{ op: 'input', name: 'x' }, 2] },
   }
   const assigns: ExprNode[] = Object.entries(outputExprs).map(([name, expr]) =>
-    ({ op: 'output_assign', name, expr } as ExprNode))
+    ({ op: 'outputAssign', name, expr } as ExprNode))
   const ports: ProgramNode['ports'] = { inputs, outputs }
   if (overrides.type_defs !== undefined) ports.type_defs = overrides.type_defs
   return {
@@ -533,7 +533,7 @@ describe('user-definable type aliases', () => {
         inputs: [{ name: 'x', type: 'cv' }],
         outputs: [{ name: 'out', type: 'cv' }],
       },
-      body: { op: 'block', assigns: [{ op: 'output_assign', name: 'out', expr: 0 }] },
+      body: { op: 'block', assigns: [{ op: 'outputAssign', name: 'out', expr: 0 }] },
     })
     expect(prog.ports?.type_defs).toHaveLength(1)
     expect(prog.ports.type_defs[0].kind).toBe('alias')

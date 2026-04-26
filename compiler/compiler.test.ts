@@ -67,7 +67,7 @@ describe('exprDependencies', () => {
   })
 
   test('non-ref ops with no args', () => {
-    expect(exprDependencies({ op: 'sample_rate' }).size).toBe(0)
+    expect(exprDependencies({ op: 'sampleRate' }).size).toBe(0)
     expect(exprDependencies({ op: 'param', name: 'freq' }).size).toBe(0)
   })
 })

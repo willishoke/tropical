@@ -5,20 +5,20 @@
     "op": "block",
     "decls": [
       {
-        "op": "delay_decl",
+        "op": "delayDecl",
         "name": "prev_trigger",
         "update": { "op": "input", "name": "trigger" },
         "init": 0
       },
       {
-        "op": "delay_decl",
+        "op": "delayDecl",
         "name": "state",
         "type": "RampState",
         "init": { "op": "tag", "type": "RampState", "variant": "Quiescent" },
         "update": {
           "op": "match",
           "type": "RampState",
-          "scrutinee": { "op": "delay_ref", "id": "state" },
+          "scrutinee": { "op": "delayRef", "id": "state" },
           "arms": {
             "Quiescent": {
               "body": {
@@ -28,7 +28,7 @@
                     "op": "and",
                     "args": [
                       { "op": "gt", "args": [{ "op": "input", "name": "trigger" }, 0.5] },
-                      { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_trigger" }, 0.5] }
+                      { "op": "lte", "args": [{ "op": "delayRef", "id": "prev_trigger" }, 0.5] }
                     ]
                   },
                   { "op": "tag", "type": "RampState", "variant": "Counting", "payload": { "n": 0 } },
@@ -45,7 +45,7 @@
                     "op": "and",
                     "args": [
                       { "op": "gt", "args": [{ "op": "input", "name": "trigger" }, 0.5] },
-                      { "op": "lte", "args": [{ "op": "delay_ref", "id": "prev_trigger" }, 0.5] }
+                      { "op": "lte", "args": [{ "op": "delayRef", "id": "prev_trigger" }, 0.5] }
                     ]
                   },
                   { "op": "tag", "type": "RampState", "variant": "Counting", "payload": { "n": 0 } },
@@ -64,12 +64,12 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "frames",
         "expr": {
           "op": "match",
           "type": "RampState",
-          "scrutinee": { "op": "delay_ref", "id": "state" },
+          "scrutinee": { "op": "delayRef", "id": "state" },
           "arms": {
             "Quiescent": { "body": 0 },
             "Counting":  { "bind": "n", "body": { "op": "binding", "name": "n" } }
@@ -77,7 +77,7 @@
         }
       },
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "edge",
         "expr": {
           "op": "mul",
@@ -92,7 +92,7 @@
             {
               "op": "lte",
               "args": [
-                { "op": "delay_ref", "id": "prev_trigger" },
+                { "op": "delayRef", "id": "prev_trigger" },
                 0.5
               ]
             }

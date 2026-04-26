@@ -5,12 +5,12 @@
     "op": "block",
     "decls": [
       {
-        "op": "reg_decl",
+        "op": "regDecl",
         "name": "env_smooth",
         "init": 0
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "hold",
         "program": "SampleHold",
         "inputs": {
@@ -19,7 +19,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "ramp",
         "program": "TriggerRamp",
         "inputs": {
@@ -27,7 +27,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "decay_calc",
         "program": "Exp",
         "inputs": {
@@ -38,7 +38,7 @@
               {
                 "op": "mul",
                 "args": [
-                  { "op": "sample_rate" },
+                  { "op": "sampleRate" },
                   {
                     "op": "add",
                     "args": [
@@ -46,7 +46,7 @@
                         "op": "mul",
                         "args": [
                           { "op": "input", "name": "decay_scale" },
-                          { "op": "nested_out", "ref": "hold", "output": "value" }
+                          { "op": "nestedOut", "ref": "hold", "output": "value" }
                         ]
                       },
                       1e-6
@@ -59,25 +59,25 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "env_gen",
         "program": "EnvExpDecay",
         "inputs": {
           "trigger": { "op": "input", "name": "trigger" },
-          "decay": { "op": "nested_out", "ref": "decay_calc", "output": "out" }
+          "decay": { "op": "nestedOut", "ref": "decay_calc", "output": "out" }
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "svf",
         "program": "SVF",
         "inputs": {
-          "input": { "op": "nested_out", "ref": "ramp", "output": "edge" },
+          "input": { "op": "nestedOut", "ref": "ramp", "output": "edge" },
           "cutoff": {
             "op": "let",
             "bind": {
-              "r_held": { "op": "nested_out", "ref": "hold", "output": "value" },
-              "t_eff": { "op": "nested_out", "ref": "ramp", "output": "frames" }
+              "r_held": { "op": "nestedOut", "ref": "hold", "output": "value" },
+              "t_eff": { "op": "nestedOut", "ref": "ramp", "output": "frames" }
             },
             "in": {
               "op": "let",
@@ -124,7 +124,7 @@
                           {
                             "op": "mul",
                             "args": [
-                              { "op": "sample_rate" },
+                              { "op": "sampleRate" },
                               { "op": "binding", "name": "tau" }
                             ]
                           }
@@ -142,7 +142,7 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "out",
         "expr": {
           "op": "mul",
@@ -151,7 +151,7 @@
               "op": "mul",
               "args": [
                 { "op": "reg", "name": "env_smooth" },
-                { "op": "nested_out", "ref": "svf", "output": "bp" }
+                { "op": "nestedOut", "ref": "svf", "output": "bp" }
               ]
             },
             {
@@ -160,7 +160,7 @@
                 {
                   "op": "mul",
                   "args": [
-                    { "op": "nested_out", "ref": "hold", "output": "value" },
+                    { "op": "nestedOut", "ref": "hold", "output": "value" },
                     1000
                   ]
                 },
@@ -171,7 +171,7 @@
         }
       },
       {
-        "op": "next_update",
+        "op": "nextUpdate",
         "target": { "kind": "reg", "name": "env_smooth" },
         "expr": {
           "op": "add",
@@ -184,7 +184,7 @@
                 {
                   "op": "sub",
                   "args": [
-                    { "op": "nested_out", "ref": "env_gen", "output": "env" },
+                    { "op": "nestedOut", "ref": "env_gen", "output": "env" },
                     { "op": "reg", "name": "env_smooth" }
                   ]
                 }

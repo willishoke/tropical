@@ -6,7 +6,7 @@
       "op": "block",
       "decls": [
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "osc",
           "program": "BlepSaw",
           "inputs": {
@@ -14,7 +14,7 @@
           }
         },
         {
-          "op": "instance_decl",
+          "op": "instanceDecl",
           "name": "filt",
           "program": "LadderFilter",
           "inputs": {
@@ -42,7 +42,7 @@
   "expected_plan": {
     "schema": "tropical_plan_4",
     "config": {
-      "sample_rate": 44100
+      "sampleRate": 44100
     },
     "state_init": [
       0,

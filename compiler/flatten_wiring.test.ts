@@ -65,7 +65,7 @@ describe('normalizeWiringTypes', () => {
     const exprs = new Map([['dst:in', ref('src', 'out')]])
     const result = normalizeWiringTypes(infos, exprs)
     const node = result.get('dst:in') as Record<string, unknown>
-    expect(node.op).toBe('broadcast_to')
+    expect(node.op).toBe('broadcastTo')
     expect(node.shape).toEqual([4])
   })
 
@@ -76,7 +76,7 @@ describe('normalizeWiringTypes', () => {
     const exprs = new Map<string, ExprNode>([['dst:gain', 0.5]])
     const result = normalizeWiringTypes(infos, exprs)
     const node = result.get('dst:gain') as Record<string, unknown>
-    expect(node.op).toBe('broadcast_to')
+    expect(node.op).toBe('broadcastTo')
     expect(node.shape).toEqual([3])
   })
 
@@ -88,7 +88,7 @@ describe('normalizeWiringTypes', () => {
     const exprs = new Map([['dst:in', ref('src', 'out')]])
     const result = normalizeWiringTypes(infos, exprs)
     const node = result.get('dst:in') as Record<string, unknown>
-    expect(node.op).toBe('broadcast_to')
+    expect(node.op).toBe('broadcastTo')
     expect(node.shape).toEqual([4])
   })
 
@@ -146,7 +146,7 @@ describe('normalizeWiringTypes', () => {
     const exprs = new Map([['dst:in', ref('src', 'out')]])
     const result = normalizeWiringTypes(infos, exprs)
     const node = result.get('dst:in') as Record<string, unknown>
-    expect(node.op).toBe('broadcast_to')
+    expect(node.op).toBe('broadcastTo')
     expect(node.shape).toEqual([3, 4])
   })
 })
@@ -174,7 +174,7 @@ describe('feedback cycle auto-delay', () => {
       name: 'Pass',
       ports: { inputs: [{ name: 'in', default: 0 }], outputs: ['out'] },
       body: { op: 'block',
-        assigns: [{ op: 'output_assign', name: 'out', expr: { op: 'input', name: 'in' } }],
+        assigns: [{ op: 'outputAssign', name: 'out', expr: { op: 'input', name: 'in' } }],
       },
     }
   }
@@ -261,10 +261,10 @@ describe('gateable instances wrap outputs in source_tag', () => {
       name: 'Pass',
       ports: { inputs: [{ name: 'in', default: 0 }], outputs: ['out'] },
       body: { op: 'block',
-        decls: [{ op: 'reg_decl', name: 'last', init: 0 }],
+        decls: [{ op: 'regDecl', name: 'last', init: 0 }],
         assigns: [
-          { op: 'output_assign', name: 'out', expr: { op: 'input', name: 'in' } },
-          { op: 'next_update', target: { kind: 'reg', name: 'last' },
+          { op: 'outputAssign', name: 'out', expr: { op: 'input', name: 'in' } },
+          { op: 'nextUpdate', target: { kind: 'reg', name: 'last' },
             expr: { op: 'input', name: 'in' } },
         ],
       },
@@ -303,7 +303,7 @@ describe('gateable instances wrap outputs in source_tag', () => {
     const outer = flat.outputExprs[0] as { op: string; args: unknown[] }
     expect(outer.op).toBe('clamp')  // safety clamp
     const tag = outer.args[0] as { op: string; source_instance: string; gate_expr: unknown }
-    expect(tag.op).toBe('source_tag')
+    expect(tag.op).toBe('sourceTag')
     expect(tag.source_instance).toBe('voice_0')
     expect(tag.gate_expr).toBe(true)
 
@@ -311,7 +311,7 @@ describe('gateable instances wrap outputs in source_tag', () => {
     // clamp on the register path.
     expect(flat.registerExprs.length).toBe(1)
     const reg = flat.registerExprs[0] as { op: string; on_skip: { op: string; id: number } }
-    expect(reg.op).toBe('source_tag')
+    expect(reg.op).toBe('sourceTag')
     expect(reg.on_skip.op).toBe('reg')
     expect(reg.on_skip.id).toBe(0)  // the only register's flat id
   })
@@ -366,7 +366,7 @@ describe('gateable instances wrap outputs in source_tag', () => {
 
     const flat = flattenExpressions(fullSession)
     const out = flat.outputExprs[0] as { op: string }
-    expect(out.op).not.toBe('source_tag')
+    expect(out.op).not.toBe('sourceTag')
   })
 })
 
@@ -391,10 +391,10 @@ describe('gate_input self-reference (#98)', () => {
       name: 'Pass',
       ports: { inputs: [{ name: 'in', default: 0 }], outputs: ['out'] },
       body: { op: 'block',
-        decls: [{ op: 'reg_decl', name: 'last', init: 0 }],
+        decls: [{ op: 'regDecl', name: 'last', init: 0 }],
         assigns: [
-          { op: 'output_assign', name: 'out', expr: { op: 'input', name: 'in' } },
-          { op: 'next_update', target: { kind: 'reg', name: 'last' },
+          { op: 'outputAssign', name: 'out', expr: { op: 'input', name: 'in' } },
+          { op: 'nextUpdate', target: { kind: 'reg', name: 'last' },
             expr: { op: 'input', name: 'in' } },
         ],
       },
@@ -465,7 +465,7 @@ describe('cycle-breaker with nested calls (#99)', () => {
       name: 'Inner',
       ports: { inputs: [{ name: 'x', default: 0 }], outputs: ['y'] },
       body: { op: 'block', assigns: [
-        { op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } },
+        { op: 'outputAssign', name: 'y', expr: { op: 'input', name: 'x' } },
       ]},
     }
   }
@@ -480,17 +480,17 @@ describe('cycle-breaker with nested calls (#99)', () => {
       ports: { inputs: [{ name: 'in', default: 0 }], outputs: ['out'] },
       body: { op: 'block',
         decls: [
-          { op: 'reg_decl', name: 'state', init: 0 },
+          { op: 'regDecl', name: 'state', init: 0 },
           // One nested instance — produces a nested-call register
-          { op: 'instance_decl', name: 's', program: 'Inner',
+          { op: 'instanceDecl', name: 's', program: 'Inner',
             inputs: { x: { op: 'reg', name: 'state' } } },
         ],
         assigns: [
           // Output reads from the nested call (cycle-breaking: doesn't read
           // current inputs, only register-derived values)
-          { op: 'output_assign', name: 'out',
-            expr: { op: 'nested_out', ref: 's', output: 'y' } },
-          { op: 'next_update', target: { kind: 'reg', name: 'state' },
+          { op: 'outputAssign', name: 'out',
+            expr: { op: 'nestedOut', ref: 's', output: 'y' } },
+          { op: 'nextUpdate', target: { kind: 'reg', name: 'state' },
             expr: { op: 'add', args: [{ op: 'reg', name: 'state' }, 0.1] } },
         ],
       },

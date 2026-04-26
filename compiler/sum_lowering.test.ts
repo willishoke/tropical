@@ -38,14 +38,14 @@ function toggleProgram(): ProgramNode {
       op: 'block',
       decls: [
         {
-          op: 'delay_decl',
+          op: 'delayDecl',
           name: 'state',
           type: 'TogState',
           init: { op: 'tag', type: 'TogState', variant: 'Off' },
           update: {
             op: 'match',
             type: 'TogState',
-            scrutinee: { op: 'delay_ref', id: 'state' },
+            scrutinee: { op: 'delayRef', id: 'state' },
             arms: {
               Off: { body: { op: 'tag', type: 'TogState', variant: 'On' } },
               On:  { body: { op: 'tag', type: 'TogState', variant: 'Off' } },
@@ -55,12 +55,12 @@ function toggleProgram(): ProgramNode {
       ],
       assigns: [
         {
-          op: 'output_assign',
+          op: 'outputAssign',
           name: 'value',
           expr: {
             op: 'match',
             type: 'TogState',
-            scrutinee: { op: 'delay_ref', id: 'state' },
+            scrutinee: { op: 'delayRef', id: 'state' },
             arms: {
               Off: { body: 0 },
               On:  { body: 1 },
@@ -184,7 +184,7 @@ function counterProgram(): ProgramNode {
       op: 'block',
       decls: [
         {
-          op: 'delay_decl',
+          op: 'delayDecl',
           name: 'state',
           type: 'CounterState',
           init: { op: 'tag', type: 'CounterState', variant: 'Idle' },
@@ -193,7 +193,7 @@ function counterProgram(): ProgramNode {
           update: {
             op: 'match',
             type: 'CounterState',
-            scrutinee: { op: 'delay_ref', id: 'state' },
+            scrutinee: { op: 'delayRef', id: 'state' },
             arms: {
               Idle: {
                 body: { op: 'tag', type: 'CounterState', variant: 'Counting',
@@ -214,12 +214,12 @@ function counterProgram(): ProgramNode {
       ],
       assigns: [
         {
-          op: 'output_assign',
+          op: 'outputAssign',
           name: 'count',
           expr: {
             op: 'match',
             type: 'CounterState',
-            scrutinee: { op: 'delay_ref', id: 'state' },
+            scrutinee: { op: 'delayRef', id: 'state' },
             arms: {
               Idle:     { body: 0 },
               Counting: { bind: 'n', body: { op: 'binding', name: 'n' } },
@@ -260,7 +260,7 @@ describe('Counter — Sum{Idle, Counting{n: int}} payload support', () => {
       schema: 'tropical_program_2',
       name: 'patch',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'c1', program: 'Counter' },
+        { op: 'instanceDecl', name: 'c1', program: 'Counter' },
       ]},
       audio_outputs: [{ instance: 'c1', output: 'count' }],
     } as never, session)
@@ -284,7 +284,7 @@ describe('Counter — Sum{Idle, Counting{n: int}} payload support', () => {
       schema: 'tropical_program_2',
       name: 'patch',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'c1', program: 'Counter' },
+        { op: 'instanceDecl', name: 'c1', program: 'Counter' },
       ]},
       audio_outputs: [{ instance: 'c1', output: 'count' }],
     } as never, session)
@@ -316,7 +316,7 @@ describe('Toggle — end-to-end execution', () => {
       schema: 'tropical_program_2',
       name: 'patch',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 't1', program: 'Toggle' },
+        { op: 'instanceDecl', name: 't1', program: 'Toggle' },
       ]},
       audio_outputs: [{ instance: 't1', output: 'value' }],
     } as never, session)
@@ -344,7 +344,7 @@ describe('Toggle — end-to-end execution', () => {
       schema: 'tropical_program_2',
       name: 'patch',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 't1', program: 'Toggle' },
+        { op: 'instanceDecl', name: 't1', program: 'Toggle' },
       ]},
       audio_outputs: [{ instance: 't1', output: 'value' }],
     } as never, session)

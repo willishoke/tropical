@@ -12,18 +12,18 @@ describe('stdlib SampleHold', () => {
       schema: 'tropical_program_2',
       name: 'test',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'sh', program: 'SampleHold', inputs: {
+        { op: 'instanceDecl', name: 'sh', program: 'SampleHold', inputs: {
           trigger: {
             op: 'select',
             args: [
-              { op: 'eq', args: [{ op: 'sample_index' }, 100] },
+              { op: 'eq', args: [{ op: 'sampleIndex' }, 100] },
               1,
               0,
             ],
           },
           input: {
             op: 'mul',
-            args: [{ op: 'sample_index' }, 0.01],
+            args: [{ op: 'sampleIndex' }, 0.01],
           },
         }},
       ]},

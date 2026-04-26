@@ -38,7 +38,7 @@ describe('checkArrayConnection', () => {
     expect(check.compatible).toBe(true)
     expect(check.broadcastExpr).toBeDefined()
     const node = check.broadcastExpr as Record<string, unknown>
-    expect(node.op).toBe('broadcast_to')
+    expect(node.op).toBe('broadcastTo')
     expect(node.shape).toEqual([4])
     expect(check.resultShape).toEqual([4])
   })
@@ -66,7 +66,7 @@ describe('checkArrayConnection', () => {
     expect(check.compatible).toBe(true)
     expect(check.broadcastExpr).toBeDefined()
     const node = check.broadcastExpr as Record<string, unknown>
-    expect(node.op).toBe('broadcast_to')
+    expect(node.op).toBe('broadcastTo')
     expect(node.shape).toEqual([4])
   })
 

@@ -6,7 +6,7 @@
     "decls": [],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "out",
         "expr": {
           "op": "let",
@@ -46,7 +46,7 @@
               ]
             },
             "odd_n": {
-              "op": "bit_and",
+              "op": "bitAnd",
               "args": [
                 {
                   "op": "binding",

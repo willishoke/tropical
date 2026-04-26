@@ -16,7 +16,7 @@ describe('array construction', () => {
   test('arrayLiteral produces correct node', () => {
     const expr = arrayLiteral([2, 2], [1, 2, 3, 4])
     const node = expr._node as Record<string, unknown>
-    expect(node.op).toBe('array_literal')
+    expect(node.op).toBe('arrayLiteral')
     expect(node.shape).toEqual([2, 2])
     expect(node.values).toEqual([1, 2, 3, 4])
   })
@@ -83,7 +83,7 @@ describe('array manipulation', () => {
     const arr = arrayLiteral([1, 4], [1, 2, 3, 4])
     const b = broadcastTo(arr, [3, 4])
     const node = b._node as Record<string, unknown>
-    expect(node.op).toBe('broadcast_to')
+    expect(node.op).toBe('broadcastTo')
     expect(node.shape).toEqual([3, 4])
   })
 
@@ -148,8 +148,8 @@ describe('shape-polymorphic arithmetic', () => {
     expect(node.op).toBe('add')
     // args should be the two array_literal nodes
     const args = node.args as unknown[]
-    expect((args[0] as Record<string, unknown>).op).toBe('array_literal')
-    expect((args[1] as Record<string, unknown>).op).toBe('array_literal')
+    expect((args[0] as Record<string, unknown>).op).toBe('arrayLiteral')
+    expect((args[1] as Record<string, unknown>).op).toBe('arrayLiteral')
   })
 
   test('mul scalar by array produces mul node', () => {

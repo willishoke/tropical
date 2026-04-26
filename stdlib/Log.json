@@ -6,7 +6,7 @@
     "decls": [],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "out",
         "expr": {
           "op": "let",
@@ -32,7 +32,7 @@
               ]
             },
             "e0": {
-              "op": "float_exponent",
+              "op": "floatExponent",
               "args": [
                 {
                   "op": "binding",

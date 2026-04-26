@@ -31,8 +31,8 @@ describe('stdlib Sequencer<N>', () => {
       schema: 'tropical_program_2',
       name: 'test',
       body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'clk', program: 'Clock', inputs: { freq: 4, ratios_in: [1] } },
-        { op: 'instance_decl', name: 'seq', program: 'Sequencer', type_args: { N: 4 }, inputs: {
+        { op: 'instanceDecl', name: 'clk', program: 'Clock', inputs: { freq: 4, ratios_in: [1] } },
+        { op: 'instanceDecl', name: 'seq', program: 'Sequencer', type_args: { N: 4 }, inputs: {
           clock: { op: 'ref', instance: 'clk', output: 'output' },
           values: [110, 220, 330, 440],
         }},

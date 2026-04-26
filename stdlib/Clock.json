@@ -5,7 +5,7 @@
     "op": "block",
     "decls": [
       {
-        "op": "program_decl",
+        "op": "programDecl",
         "name": "_wrap01",
         "program": {
           "op": "program",
@@ -15,7 +15,7 @@
             "decls": [],
             "assigns": [
               {
-                "op": "output_assign",
+                "op": "outputAssign",
                 "name": "value",
                 "expr": {
                   "op": "mod",
@@ -54,7 +54,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "_wrap01_0",
         "program": "_wrap01",
         "inputs": {
@@ -65,7 +65,7 @@
                 "op": "mul",
                 "args": [
                   {
-                    "op": "sample_index"
+                    "op": "sampleIndex"
                   },
                   {
                     "op": "input",
@@ -74,14 +74,14 @@
                 ]
               },
               {
-                "op": "sample_rate"
+                "op": "sampleRate"
               }
             ]
           }
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "_wrap01_1",
         "program": "_wrap01",
         "inputs": {
@@ -95,7 +95,7 @@
                     "op": "mul",
                     "args": [
                       {
-                        "op": "sample_index"
+                        "op": "sampleIndex"
                       },
                       {
                         "op": "input",
@@ -110,7 +110,7 @@
                 ]
               },
               {
-                "op": "sample_rate"
+                "op": "sampleRate"
               }
             ]
           }
@@ -119,7 +119,7 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "output",
         "expr": {
           "op": "mul",
@@ -128,7 +128,7 @@
               "op": "lt",
               "args": [
                 {
-                  "op": "nested_out",
+                  "op": "nestedOut",
                   "ref": "_wrap01_0",
                   "output": "value"
                 },
@@ -140,7 +140,7 @@
         }
       },
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "ratios_out",
         "expr": {
           "op": "mul",
@@ -149,7 +149,7 @@
               "op": "lt",
               "args": [
                 {
-                  "op": "nested_out",
+                  "op": "nestedOut",
                   "ref": "_wrap01_1",
                   "output": "value"
                 },

@@ -74,7 +74,7 @@ export function checkArrayConnection(
   if (srcType.tag === 'scalar' && dstType.tag === 'array') {
     return {
       compatible: true,
-      broadcastExpr: { op: 'broadcast_to', args: [refExpr], shape: dstType.shape },
+      broadcastExpr: { op: 'broadcastTo', args: [refExpr], shape: dstType.shape },
       resultShape: dstType.shape,
     }
   }
@@ -122,7 +122,7 @@ export function checkArrayConnection(
     // Source needs broadcasting to match destination
     return {
       compatible: true,
-      broadcastExpr: { op: 'broadcast_to', args: [refExpr], shape: dstType.shape },
+      broadcastExpr: { op: 'broadcastTo', args: [refExpr], shape: dstType.shape },
       resultShape,
     }
   }

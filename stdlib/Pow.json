@@ -5,7 +5,7 @@
     "op": "block",
     "decls": [
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "log_x",
         "program": "Log",
         "inputs": {
@@ -16,7 +16,7 @@
         }
       },
       {
-        "op": "instance_decl",
+        "op": "instanceDecl",
         "name": "exp",
         "program": "Exp",
         "inputs": {
@@ -28,7 +28,7 @@
                 "name": "y"
               },
               {
-                "op": "nested_out",
+                "op": "nestedOut",
                 "ref": "log_x",
                 "output": "out"
               }
@@ -39,10 +39,10 @@
     ],
     "assigns": [
       {
-        "op": "output_assign",
+        "op": "outputAssign",
         "name": "out",
         "expr": {
-          "op": "nested_out",
+          "op": "nestedOut",
           "ref": "exp",
           "output": "out"
         }

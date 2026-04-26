@@ -16,21 +16,21 @@ function genericDelay(): ProgramNode {
     },
     body: { op: 'block',
       decls: [
-        { op: 'reg_decl', name: 'buf', init: { zeros: { type_param: 'N' } } as any },
+        { op: 'regDecl', name: 'buf', init: { zeros: { typeParam: 'N' } } as any },
       ],
       assigns: [
-        { op: 'output_assign', name: 'y', expr: {
+        { op: 'outputAssign', name: 'y', expr: {
           op: 'index',
           args: [
             { op: 'reg', name: 'buf' },
-            { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
+            { op: 'mod', args: [{ op: 'sampleIndex' }, { op: 'typeParam', name: 'N' }] },
           ],
         }},
-        { op: 'next_update', target: { kind: 'reg', name: 'buf' }, expr: {
-          op: 'array_set',
+        { op: 'nextUpdate', target: { kind: 'reg', name: 'buf' }, expr: {
+          op: 'arraySet',
           args: [
             { op: 'reg', name: 'buf' },
-            { op: 'mod', args: [{ op: 'sample_index' }, { op: 'type_param', name: 'N' }] },
+            { op: 'mod', args: [{ op: 'sampleIndex' }, { op: 'typeParam', name: 'N' }] },
             { op: 'input', name: 'x' },
           ],
         }},
@@ -77,7 +77,7 @@ describe('resolveProgramType — generic instantiation', () => {
       name: 'Identity',
       ports: { inputs: ['x'], outputs: ['y'] },
       body: { op: 'block',
-        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+        assigns: [{ op: 'outputAssign', name: 'y', expr: { op: 'input', name: 'x' } }],
       },
     }
     loadProgramAsType(identity, session)
@@ -96,7 +96,7 @@ describe('resolveProgramType — generic instantiation', () => {
       name: 'Passthrough',
       ports: { inputs: ['x'], outputs: ['y'] },
       body: { op: 'block',
-        assigns: [{ op: 'output_assign', name: 'y', expr: { op: 'input', name: 'x' } }],
+        assigns: [{ op: 'outputAssign', name: 'y', expr: { op: 'input', name: 'x' } }],
       },
     }
     loadProgramAsType(p, session)
@@ -112,14 +112,14 @@ describe('resolveProgramType — generic instantiation', () => {
       type_params: { N: { type: 'int', default: 4 } },
       ports: {
         inputs: [
-          { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
+          { name: 'values', type: { kind: 'array', element: 'float', shape: [{ op: 'typeParam', name: 'N' }] } },
         ],
         outputs: [
-          { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'type_param', name: 'N' }] } },
+          { name: 'out', type: { kind: 'array', element: 'float', shape: [{ op: 'typeParam', name: 'N' }] } },
         ],
       },
       body: { op: 'block',
-        assigns: [{ op: 'output_assign', name: 'out', expr: { op: 'input', name: 'values' } }],
+        assigns: [{ op: 'outputAssign', name: 'out', expr: { op: 'input', name: 'values' } }],
       },
     }
     const session = makeSession()

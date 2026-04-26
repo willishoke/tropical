@@ -59,9 +59,9 @@ describe('Op<N, Tag> tuple shape', () => {
   test('BinaryTag union covers all binary op kinds', () => {
     // Every binary tag is assignable to BinaryTag.
     const tags: BinaryTag[] = [
-      'add', 'sub', 'mul', 'div', 'mod', 'floor_div', 'ldexp',
+      'add', 'sub', 'mul', 'div', 'mod', 'floorDiv', 'ldexp',
       'lt', 'lte', 'gt', 'gte', 'eq', 'neq',
-      'bit_and', 'bit_or', 'bit_xor', 'lshift', 'rshift',
+      'bitAnd', 'bitOr', 'bitXor', 'lshift', 'rshift',
       'and', 'or',
     ]
     expect(tags).toHaveLength(20)
@@ -80,10 +80,10 @@ describe('Op<N, Tag> tuple shape', () => {
 
 describe('Op<N> with extras narrows correctly', () => {
   test('ReshapeNode has args + shape', () => {
-    const n: ReshapeNode = { op: 'reshape', args: [{ op: 'sample_rate' }], shape: [2, 3] }
+    const n: ReshapeNode = { op: 'reshape', args: [{ op: 'sampleRate' }], shape: [2, 3] }
     if (n.op === 'reshape') {
       // Both fields are statically typed.
-      expect(n.args[0]).toEqual({ op: 'sample_rate' })
+      expect(n.args[0]).toEqual({ op: 'sampleRate' })
       expect(n.shape).toEqual([2, 3])
     }
   })
@@ -111,7 +111,7 @@ describe('Named-children ops narrow correctly', () => {
     const arm: MatchArmStrict = { bind: 'level', body: { op: 'binding', name: 'level' } }
     const n: MatchNode = {
       op: 'match', type: 'Env',
-      scrutinee: { op: 'sample_rate' },
+      scrutinee: { op: 'sampleRate' },
       arms: { Idle: { body: 0 }, Decaying: arm },
     }
     if (n.op === 'match') {
@@ -133,12 +133,12 @@ describe('Leaf nodes narrow correctly', () => {
 describe('Decl nodes narrow correctly', () => {
   test('DelayDeclNode has init/update/type fields', () => {
     const n: DelayDeclNode = {
-      op: 'delay_decl',
+      op: 'delayDecl',
       name: 'state',
       type: 'Env',
       init: { op: 'tag', type: 'Env', variant: 'Idle' },
     }
-    if (n.op === 'delay_decl') {
+    if (n.op === 'delayDecl') {
       expect(n.name).toBe('state')
       expect(n.type).toBe('Env')
     }
@@ -158,9 +158,9 @@ describe('ExprOpNodeStrict union assignability', () => {
       { op: 'zeros', shape: [4] },
       { op: 'tag', type: 'T', variant: 'V' },
       { op: 'match', type: 'T', scrutinee: 0, arms: { V: { body: 0 } } },
-      { op: 'sample_rate' },
+      { op: 'sampleRate' },
       { op: 'input', id: 0 },
-      { op: 'delay_decl', name: 's' },
+      { op: 'delayDecl', name: 's' },
     ]
     expect(nodes).toHaveLength(11)
   })
