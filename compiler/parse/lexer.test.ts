@@ -81,7 +81,7 @@ describe('lexer — identifiers and keywords', () => {
   })
 
   test('all declaration keywords', () => {
-    const kws = ['program', 'reg', 'delay', 'param', 'next', 'out',
+    const kws = ['program', 'reg', 'delay', 'param', 'next',
                  'let', 'in', 'if', 'else', 'match',
                  'struct', 'enum', 'type']
     for (const kw of kws) {

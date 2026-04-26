@@ -23,7 +23,7 @@ export type TokKind =
   // Binders + control flow
   | 'let' | 'in' | 'if' | 'else' | 'match'
   // Declarations
-  | 'program' | 'reg' | 'delay' | 'param' | 'next' | 'out'
+  | 'program' | 'reg' | 'delay' | 'param' | 'next'
   // ADTs
   | 'struct' | 'enum' | 'type'
   // Punctuation: parens, brackets, braces
@@ -59,7 +59,7 @@ const KEYWORDS: Record<string, TokKind> = {
   if: 'if', else: 'else', match: 'match',
   program: 'program',
   reg: 'reg', delay: 'delay', param: 'param',
-  next: 'next', out: 'out',
+  next: 'next',
   struct: 'struct', enum: 'enum', type: 'type',
 }
 
