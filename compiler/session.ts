@@ -335,8 +335,7 @@ export function resolveProgramType(
   rawTypeArgs: RawTypeArgs | undefined,
   outerArgs: ResolvedTypeArgs | undefined,
 ): { type: ProgramType; typeArgs?: ResolvedTypeArgs } {
-  const template = session.genericTemplates.get(baseName)
-  if (template) {
+  const specializeFromTemplate = (template: import('./program.js').ProgramNode) => {
     const resolved = resolveTypeArgs(rawTypeArgs, outerArgs, template.type_params, `instance of '${baseName}'`)
     const key = specializationCacheKey(baseName, resolved)
     const cached = session.specializationCache.get(key)
@@ -348,8 +347,18 @@ export function resolveProgramType(
     return { type, typeArgs: resolved }
   }
 
-  const type = session.typeRegistry.get(baseName) ?? session.typeResolver?.(baseName)
-  if (!type) {
+  const template = session.genericTemplates.get(baseName)
+  if (template) return specializeFromTemplate(template)
+
+  // typeResolver may register baseName as a generic template (returning
+  // undefined for the concrete-type case — see stdlib_loader.ts). Re-check
+  // genericTemplates after the resolver fires so the lazy-load path works.
+  const concrete = session.typeRegistry.get(baseName) ?? session.typeResolver?.(baseName)
+  if (concrete === undefined) {
+    const lateTemplate = session.genericTemplates.get(baseName)
+    if (lateTemplate) return specializeFromTemplate(lateTemplate)
+  }
+  if (!concrete) {
     const known = [
       ...session.typeRegistry.keys(),
       ...session.genericTemplates.keys(),
@@ -359,7 +368,7 @@ export function resolveProgramType(
   if (rawTypeArgs && Object.keys(rawTypeArgs).length > 0) {
     throw new Error(`Program '${baseName}' does not declare type_params; got type_args: ${Object.keys(rawTypeArgs).join(', ')}`)
   }
-  return { type }
+  return { type: concrete }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -468,6 +477,9 @@ export function loadProgramDef(
       })
     } else if (op === 'programDecl') {
       // Registered by loadProgramAsType; nothing to do here.
+    } else if (op === 'paramDecl') {
+      // Session-scoped: handled by loadProgramAsSession / mergeProgramIntoSession.
+      // Not part of ProgramDef construction.
     } else {
       throw new Error(`${def.name}: unexpected decl op '${op}' in block.decls`)
     }

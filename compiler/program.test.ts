@@ -355,3 +355,125 @@ describe('typeResolver', () => {
     session.graph.dispose()
   })
 })
+
+// ─────────────────────────────────────────────────────────────
+// paramDecl — body-decl form for params/triggers (Phase A3)
+// ─────────────────────────────────────────────────────────────
+
+describe('paramDecl in body decls (Phase A3)', () => {
+  test('loadProgramAsSession populates Param/Trigger registry from body paramDecls', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: {
+        op: 'block',
+        decls: [
+          { op: 'paramDecl', name: 'cutoff', value: 1234.0, time_const: 0.01 } as unknown as ExprNode,
+          { op: 'paramDecl', name: 'gate', type: 'trigger' } as unknown as ExprNode,
+        ],
+      },
+    }
+    loadProgramAsSession(prog, {}, session)
+
+    expect(session.paramRegistry.has('cutoff')).toBe(true)
+    expect(session.triggerRegistry.has('gate')).toBe(true)
+    const p = session.paramRegistry.get('cutoff')!
+    expect(p.value).toBeCloseTo(1234.0)
+
+    session.graph.dispose()
+  })
+
+  test('saveProgramFromSession emits paramDecls in body, no topLevel.params', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: {
+        op: 'block',
+        decls: [
+          { op: 'paramDecl', name: 'freq', value: 440.0, time_const: 0.005 } as unknown as ExprNode,
+          { op: 'paramDecl', name: 'fire', type: 'trigger' } as unknown as ExprNode,
+        ],
+      },
+    }
+    loadProgramAsSession(prog, {}, session)
+
+    const { node, topLevel } = saveProgramFromSession(session)
+    expect(topLevel.params).toBeUndefined()
+
+    const decls = (node.body.decls ?? []) as Array<Record<string, unknown>>
+    const paramDeclEntries = decls.filter(d => d.op === 'paramDecl')
+    expect(paramDeclEntries).toHaveLength(2)
+    const byName = new Map(paramDeclEntries.map(d => [d.name as string, d]))
+    expect(byName.get('freq')?.value).toBeCloseTo(440.0)
+    expect(byName.get('fire')?.type).toBe('trigger')
+
+    session.graph.dispose()
+  })
+
+  test('round-trip: save then load preserves param values and trigger names', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: {
+        op: 'block',
+        decls: [
+          { op: 'paramDecl', name: 'q', value: 0.7 } as unknown as ExprNode,
+          { op: 'paramDecl', name: 'reset', type: 'trigger' } as unknown as ExprNode,
+        ],
+      },
+    }
+    loadProgramAsSession(prog, {}, session)
+    // Mutate to verify round-trip preserves the live value.
+    session.paramRegistry.get('q')!.value = 0.42
+
+    const { node, topLevel } = saveProgramFromSession(session)
+
+    const session2 = makeTestSession()
+    loadProgramAsSession(node, topLevel, session2)
+    expect(session2.paramRegistry.get('q')?.value).toBeCloseTo(0.42)
+    expect(session2.triggerRegistry.has('reset')).toBe(true)
+
+    session.graph.dispose()
+    session2.graph.dispose()
+  })
+
+  test('legacy topLevel.params still loads (deprecated fallback)', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: { op: 'block', decls: [] },
+    }
+    const topLevel: ProgramTopLevel = {
+      params: [
+        { name: 'legacy', value: 7.5, time_const: 0.02 },
+        { name: 'tap', type: 'trigger' },
+      ],
+    }
+    loadProgramAsSession(prog, topLevel, session)
+    expect(session.paramRegistry.get('legacy')?.value).toBeCloseTo(7.5)
+    expect(session.triggerRegistry.has('tap')).toBe(true)
+    session.graph.dispose()
+  })
+
+  test('body paramDecl wins over duplicate topLevel.params entry', () => {
+    const session = makeTestSession()
+    const prog: ProgramNode = {
+      op: 'program',
+      name: 'Patch',
+      body: {
+        op: 'block',
+        decls: [{ op: 'paramDecl', name: 'shared', value: 100.0 } as unknown as ExprNode],
+      },
+    }
+    const topLevel: ProgramTopLevel = {
+      params: [{ name: 'shared', value: 999.0 }],
+    }
+    loadProgramAsSession(prog, topLevel, session)
+    expect(session.paramRegistry.get('shared')?.value).toBeCloseTo(100.0)
+    session.graph.dispose()
+  })
+})

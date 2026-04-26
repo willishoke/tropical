@@ -132,6 +132,81 @@ function* programDecls(prog: ProgramNode): Iterable<{ name: string; program: Pro
   }
 }
 
+/** Iterate paramDecl entries in a ProgramNode's body. Each entry declares a
+ *  smoothed param or fire-once trigger that the program reads via paramExpr /
+ *  triggerParamExpr. Only the top-level program's paramDecls populate
+ *  session.paramRegistry / session.triggerRegistry; nested-program paramDecls
+ *  (inside `programDecl` entries) are not auto-hoisted. */
+export function* paramDecls(prog: ProgramNode): Iterable<{
+  name: string
+  value?: number
+  time_const?: number
+  type: 'param' | 'trigger'
+}> {
+  for (const d of prog.body?.decls ?? []) {
+    if (typeof d !== 'object' || d === null || Array.isArray(d)) continue
+    const obj = d as Record<string, unknown>
+    if (obj.op !== 'paramDecl') continue
+    yield {
+      name: obj.name as string,
+      value: typeof obj.value === 'number' ? obj.value : undefined,
+      time_const: typeof obj.time_const === 'number' ? obj.time_const : undefined,
+      type: obj.type === 'trigger' ? 'trigger' : 'param',
+    }
+  }
+}
+
+type ParamSpec = { name: string; value?: number; time_const?: number; type: 'param' | 'trigger' }
+
+/** Merge param sources: body paramDecls canonical, topLevel.params is a
+ *  deprecated fallback for pre-A3 patches. Body wins on name collisions; a
+ *  one-time deprecation warning fires if topLevel.params is non-empty. */
+function mergeParamSources(prog: ProgramNode, topLevel: ProgramTopLevel): ParamSpec[] {
+  const out: ParamSpec[] = []
+  const seen = new Set<string>()
+  for (const p of paramDecls(prog)) {
+    out.push(p)
+    seen.add(p.name)
+  }
+  if (topLevel.params && topLevel.params.length > 0) {
+    if (!_topLevelParamsWarned) {
+      console.warn(
+        'tropical: file-root `params` is deprecated; declare params via paramDecl entries in the program body. Pre-A3 patches load with a fallback.',
+      )
+      _topLevelParamsWarned = true
+    }
+    for (const p of topLevel.params) {
+      if (seen.has(p.name)) continue
+      out.push({
+        name: p.name,
+        value: p.value,
+        time_const: p.time_const,
+        type: p.type === 'trigger' ? 'trigger' : 'param',
+      })
+      seen.add(p.name)
+    }
+  }
+  return out
+}
+let _topLevelParamsWarned = false
+
+/** Populate session.paramRegistry / session.triggerRegistry from a ParamSpec list.
+ *  Idempotent within a single load: skip names already present (prevents
+ *  duplicate registration during merge with body+topLevel both supplying same name). */
+function applyParamSpecs(session: SessionState, specs: ParamSpec[]): void {
+  for (const p of specs) {
+    if (p.type === 'trigger') {
+      if (!session.triggerRegistry.has(p.name)) {
+        session.triggerRegistry.set(p.name, new Trigger())
+      }
+    } else {
+      if (!session.paramRegistry.has(p.name)) {
+        session.paramRegistry.set(p.name, new Param(p.value ?? 0.0, p.time_const ?? 0.005))
+      }
+    }
+  }
+}
+
 /**
  * Load a ProgramNode into a session, replacing all existing state.
  * `topLevel` carries session-scoped metadata (params, audio_outputs, config).
@@ -180,14 +255,10 @@ export function loadProgramAsSession(
     loadProgramAsType({ ...sub.program, name: sub.name }, session)
   }
 
-  // Create params and triggers before instances (instances may reference them)
-  for (const p of topLevel.params ?? []) {
-    if (p.type === 'trigger') {
-      session.triggerRegistry.set(p.name, new Trigger())
-    } else {
-      session.paramRegistry.set(p.name, new Param(p.value ?? 0.0, p.time_const ?? 0.005))
-    }
-  }
+  // Create params and triggers before instances (instances may reference them).
+  // Body paramDecls are canonical; topLevel.params is a deprecated fallback for
+  // pre-A3 patches. When both are present, body wins (dedup by name).
+  applyParamSpecs(session, mergeParamSources(prog, topLevel))
 
   // Instantiate programs
   for (const inst of instanceDecls(prog)) {
@@ -297,7 +368,7 @@ export function mergeProgramIntoSession(
     if (session.instanceRegistry.has(inst.name))
       throw new Error(`merge collision: instance '${inst.name}' already exists.`)
   }
-  for (const p of topLevel.params ?? []) {
+  for (const p of mergeParamSources(prog, topLevel)) {
     if (session.paramRegistry.has(p.name) || session.triggerRegistry.has(p.name))
       throw new Error(`merge collision: param/trigger '${p.name}' already exists.`)
   }
@@ -326,14 +397,8 @@ export function mergeProgramIntoSession(
     loadProgramAsType({ ...sub.program, name: sub.name }, session)
   }
 
-  // Create params and triggers
-  for (const p of topLevel.params ?? []) {
-    if (p.type === 'trigger') {
-      session.triggerRegistry.set(p.name, new Trigger())
-    } else {
-      session.paramRegistry.set(p.name, new Param(p.value ?? 0.0, p.time_const ?? 0.005))
-    }
-  }
+  // Create params and triggers — body paramDecls canonical, topLevel fallback
+  applyParamSpecs(session, mergeParamSources(prog, topLevel))
 
   // Instantiate programs
   for (const inst of instanceDecls(prog)) {
@@ -428,6 +493,16 @@ export function saveProgramFromSession(
   session: SessionState,
 ): { node: ProgramNode; topLevel: ProgramTopLevel } {
   const decls: ExprNode[] = []
+
+  // paramDecls go first so they're declared before the instances that may
+  // reference them via paramExpr / triggerParamExpr.
+  for (const [name, p] of session.paramRegistry) {
+    decls.push({ op: 'paramDecl', name, value: p.value, time_const: 0.005 } as ExprNode)
+  }
+  for (const [name] of session.triggerRegistry) {
+    decls.push({ op: 'paramDecl', name, type: 'trigger' } as ExprNode)
+  }
+
   for (const [name, inst] of session.instanceRegistry) {
     const entry: Record<string, unknown> = { op: 'instanceDecl', name, program: inst.typeName }
     if (inst.typeArgs) entry.type_args = inst.typeArgs
@@ -459,15 +534,6 @@ export function saveProgramFromSession(
       instance: o.instance, output: o.output,
     }))
   }
-
-  const params: NonNullable<ProgramTopLevel['params']> = []
-  for (const [name, p] of session.paramRegistry) {
-    params.push({ name, value: p.value, time_const: 0.005 })
-  }
-  for (const [name] of session.triggerRegistry) {
-    params.push({ name, type: 'trigger' })
-  }
-  if (params.length) topLevel.params = params
 
   return { node, topLevel }
 }
