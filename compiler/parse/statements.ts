@@ -38,12 +38,30 @@ export interface BlockNode {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Body-parser options
+// ─────────────────────────────────────────────────────────────
+
+/** Optional dependency-injection slot for nested-program parsing.
+ *  declarations.ts (Phase B4) passes its program-decl parser via this
+ *  callback so that bodies can contain `programDecl` entries. Without
+ *  this hook a `program` keyword inside a body raises a parse error. */
+export interface BodyOptions {
+  /** Called when the body parser encounters a `program` keyword as the
+   *  leading token of a new body item. Receives the shared token stream
+   *  plus the current index; must consume tokens through the program's
+   *  closing `}` and return a `programDecl`-shaped ExprNode plus the
+   *  next-token index. */
+  programDeclParser?: (toks: Tok[], i: number) => { node: ExprNode; nextIdx: number }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Parser context
 // ─────────────────────────────────────────────────────────────
 
 interface Ctx {
   toks: Tok[]
   i: number
+  opts: BodyOptions
 }
 
 function peek(ctx: Ctx, offset = 0): Tok {
@@ -81,10 +99,11 @@ function isCapitalized(name: string): boolean {
 // ─────────────────────────────────────────────────────────────
 
 /** Parse a brace-delimited body block from source text, e.g.
- *  `{ reg s = 0; out = s; next s = s + 1 }`. Returns a BlockNode. */
-export function parseBody(src: string): BlockNode {
+ *  `{ reg s = 0; out = s; next s = s + 1 }`. Returns a BlockNode.
+ *  Pass `opts.programDeclParser` to enable nested `program` decls. */
+export function parseBody(src: string, opts: BodyOptions = {}): BlockNode {
   const toks = tokenize(src)
-  const ctx: Ctx = { toks, i: 0 }
+  const ctx: Ctx = { toks, i: 0, opts }
   consume(ctx, '{', 'opening `{` of body')
   const block = parseBodyItems(ctx)
   consume(ctx, '}', 'closing `}` of body')
@@ -99,8 +118,10 @@ export function parseBody(src: string): BlockNode {
  *  position immediately after the opening `{`. Stops at the matching `}`
  *  (left for the caller to consume). Used by upper-layer parsers (B4
  *  declarations) that share a token stream. */
-export function parseBodyFromTokens(toks: Tok[], startIdx: number): { block: BlockNode; nextIdx: number } {
-  const ctx: Ctx = { toks, i: startIdx }
+export function parseBodyFromTokens(
+  toks: Tok[], startIdx: number, opts: BodyOptions = {},
+): { block: BlockNode; nextIdx: number } {
+  const ctx: Ctx = { toks, i: startIdx, opts }
   const block = parseBodyItems(ctx)
   return { block, nextIdx: ctx.i }
 }
@@ -133,6 +154,17 @@ function parseBodyItem(ctx: Ctx): BodyItem {
   if (t.kind === 'delay') return { kind: 'decl',   node: parseDelayDecl(ctx) }
   if (t.kind === 'param') return { kind: 'decl',   node: parseParamDecl(ctx) }
   if (t.kind === 'next')  return { kind: 'assign', node: parseNextUpdate(ctx) }
+
+  if (t.kind === 'program') {
+    if (!ctx.opts.programDeclParser) {
+      throw new ParseError(
+        `nested 'program' decl is not supported in this parser context`, t,
+      )
+    }
+    const { node, nextIdx } = ctx.opts.programDeclParser(ctx.toks, ctx.i)
+    ctx.i = nextIdx
+    return { kind: 'decl', node }
+  }
 
   if (t.kind === 'ident') {
     const name = t.value as string
