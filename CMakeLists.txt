@@ -45,8 +45,8 @@ set(TROPICAL_CORE_SOURCES
 add_library(tropical_core SHARED ${TROPICAL_CORE_SOURCES})
 
 find_package(LLVM CONFIG REQUIRED)
-if(LLVM_PACKAGE_VERSION VERSION_LESS 15)
-    message(FATAL_ERROR "LLVM >= 15 required; found ${LLVM_PACKAGE_VERSION}")
+if(LLVM_PACKAGE_VERSION VERSION_LESS 19)
+    message(FATAL_ERROR "LLVM >= 19 required (getOrInsertDeclaration); found ${LLVM_PACKAGE_VERSION}")
 endif()
 message(STATUS "Using LLVM ${LLVM_PACKAGE_VERSION}")
 

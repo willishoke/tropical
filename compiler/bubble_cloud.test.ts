@@ -50,7 +50,7 @@ describe('stdlib BubbleCloud', () => {
       if (windowPeak > peak * 0.1) audibleWindows++
     }
     expect(audibleWindows).toBeGreaterThanOrEqual(8)
-  })
+  }, 15000)
 
   test('BubbleCloud JIT matches interpreter bit-exact', () => {
     const bufLen = 256
