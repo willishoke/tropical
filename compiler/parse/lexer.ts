@@ -10,9 +10,12 @@
  * Output is a flat token stream; the parser layers above (expressions,
  * statements, declarations) consume it via lookahead.
  *
- * Position info: every token carries `pos` (byte offset into the source)
- * and `line`/`col` (1-indexed). Suitable for error reporting once mapped
- * back through the markdown extractor's line offsets.
+ * Design: an unfold over `(src, ctx)`. Each step picks the first matching
+ * rule from a static table, advances the context immutably, and (sometimes)
+ * yields a token. `tokenize` is just `[...lex(src)]` — collection comes from
+ * spread, not push. Position tracking (line/col, 1-indexed) is recovered
+ * from the consumed span by counting newlines; only whitespace and block
+ * comments can ever cross lines.
  */
 
 export type TokKind =
@@ -44,7 +47,7 @@ export type TokKind =
   | 'eof'
 
 /** A lexed token. `value` is set for `num` (number), `ident` (name string),
- *  and `string` (the unquoted contents). All other kinds carry their kind only. */
+ *  and `string` (the unquoted, escape-processed contents). */
 export interface Tok {
   kind: TokKind
   value?: string | number
@@ -63,134 +66,150 @@ const KEYWORDS: Record<string, TokKind> = {
   struct: 'struct', enum: 'enum', type: 'type',
 }
 
+const ESCAPES: Record<string, string> = {
+  n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"',
+}
+
 export class LexError extends Error {
   constructor(message: string, public pos: number, public line: number, public col: number) {
     super(`${line}:${col}: ${message}`)
   }
 }
 
-export function tokenize(src: string): Tok[] {
-  const toks: Tok[] = []
-  let i = 0
-  let line = 1
-  let lineStart = 0  // byte offset of the start of the current line
+interface LexCtx { i: number; line: number; lineStart: number }
+type Emit = Pick<Tok, 'kind' | 'value'>
+type Match = { length: number; tok?: Emit }
+type Rule = (src: string, ctx: LexCtx) => Match | null
 
-  const colAt = (offset: number) => offset - lineStart + 1
-  const push = (kind: TokKind, pos: number, value?: string | number) =>
-    toks.push({ kind, pos, line, col: colAt(pos), ...(value !== undefined ? { value } : {}) })
-
-  while (i < src.length) {
-    const c = src[i]
-
-    // Whitespace
-    if (c === ' ' || c === '\t' || c === '\r') { i++; continue }
-    if (c === '\n') { i++; line++; lineStart = i; continue }
-
-    // Line comment
-    if (c === '/' && src[i + 1] === '/') {
-      while (i < src.length && src[i] !== '\n') i++
-      continue
-    }
-
-    // Block comment /* ... */ (non-nesting)
-    if (c === '/' && src[i + 1] === '*') {
-      i += 2
-      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) {
-        if (src[i] === '\n') { line++; lineStart = i + 1 }
-        i++
-      }
-      if (i >= src.length) throw new LexError('unterminated block comment', i, line, colAt(i))
-      i += 2
-      continue
-    }
-
-    const start = i
-
-    // Number: optional leading dot, digits, optional fractional, optional exponent.
-    if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(src[i + 1] ?? ''))) {
-      let j = i
-      while (j < src.length && /[0-9]/.test(src[j])) j++
-      if (src[j] === '.' && /[0-9]/.test(src[j + 1] ?? '')) {
-        j++
-        while (j < src.length && /[0-9]/.test(src[j])) j++
-      }
-      if (src[j] === 'e' || src[j] === 'E') {
-        j++
-        if (src[j] === '+' || src[j] === '-') j++
-        if (!/[0-9]/.test(src[j] ?? '')) {
-          throw new LexError(`malformed number (exponent missing digits): ${src.slice(start, j)}`, start, line, colAt(start))
-        }
-        while (j < src.length && /[0-9]/.test(src[j])) j++
-      }
-      const text = src.slice(i, j)
-      const n = Number(text)
-      if (!Number.isFinite(n)) throw new LexError(`invalid number: ${text}`, start, line, colAt(start))
-      push('num', start, n)
-      i = j
-      continue
-    }
-
-    // Identifier or keyword
-    if (/[A-Za-z_]/.test(c)) {
-      let j = i
-      while (j < src.length && /[A-Za-z0-9_]/.test(src[j])) j++
-      const text = src.slice(i, j)
-      const kw = KEYWORDS[text]
-      if (kw) push(kw, start)
-      else push('ident', start, text)
-      i = j
-      continue
-    }
-
-    // String literal (single or double quoted; same semantics)
-    if (c === '"' || c === "'") {
-      const quote = c
-      let j = i + 1
-      let buf = ''
-      while (j < src.length && src[j] !== quote) {
-        if (src[j] === '\n') throw new LexError('unterminated string literal', start, line, colAt(start))
-        if (src[j] === '\\') {
-          const next = src[j + 1]
-          if (next === undefined) throw new LexError('unterminated escape', j, line, colAt(j))
-          const esc: Record<string, string> = { n: '\n', t: '\t', r: '\r', '\\': '\\', "'": "'", '"': '"' }
-          if (!(next in esc)) throw new LexError(`unknown escape: \\${next}`, j, line, colAt(j))
-          buf += esc[next]
-          j += 2
-          continue
-        }
-        buf += src[j]
-        j++
-      }
-      if (j >= src.length) throw new LexError('unterminated string literal', start, line, colAt(start))
-      push('string', start, buf)
-      i = j + 1
-      continue
-    }
-
-    // Three-char punctuation (none currently — reserved for future "..." or "==>")
-    // Two-char punctuation (longest-match wins)
-    const two = src.slice(i, i + 2)
-    if (two === '<=' || two === '>=' || two === '==' || two === '!=' ||
-        two === '<<' || two === '>>' || two === '&&' || two === '||' ||
-        two === '=>' || two === '->') {
-      push(two as TokKind, start)
-      i += 2
-      continue
-    }
-
-    // Single-char punctuation
-    if ('()[]{},.;:=+-*/%<>&|^~!'.includes(c)) {
-      push(c as TokKind, start)
-      i++
-      continue
-    }
-
-    throw new LexError(`unexpected character: ${JSON.stringify(c)}`, start, line, colAt(start))
-  }
-
-  toks.push({ kind: 'eof', pos: i, line, col: colAt(i) })
-  return toks
+function errAt(msg: string, ctx: LexCtx, offset = ctx.i): never {
+  throw new LexError(msg, offset, ctx.line, offset - ctx.lineStart + 1)
 }
+
+/** Wraps a sticky regex into a Rule. If `emit` is omitted the match is skipped. */
+const re = (pattern: RegExp, emit?: (m: string) => Emit): Rule => {
+  if (!pattern.sticky) throw new Error(`lexer rule regex must be sticky: ${pattern}`)
+  return (src, ctx) => {
+    pattern.lastIndex = ctx.i
+    const m = pattern.exec(src)
+    if (!m || m.index !== ctx.i) return null
+    return emit ? { length: m[0].length, tok: emit(m[0]) } : { length: m[0].length }
+  }
+}
+
+// --- skip rules (whitespace / comments emit no token) ---------------------
+
+const skipSpace = re(/[ \t\r\n]+/y)
+const skipLineComment = re(/\/\/[^\n]*/y)
+
+const skipBlockComment: Rule = (src, ctx) => {
+  if (src[ctx.i] !== '/' || src[ctx.i + 1] !== '*') return null
+  const end = src.indexOf('*/', ctx.i + 2)
+  if (end < 0) errAt('unterminated block comment', ctx)
+  return { length: end - ctx.i + 2 }
+}
+
+// --- value-bearing rules --------------------------------------------------
+
+// Greedy: matches `1e` (with empty exponent digits) so we can report a
+// targeted error instead of letting the trailing `e` re-tokenize as an ident.
+const NUM_RE = /(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]*)?/y
+
+const number: Rule = (src, ctx) => {
+  NUM_RE.lastIndex = ctx.i
+  const m = NUM_RE.exec(src)
+  if (!m || m.index !== ctx.i) return null
+  const text = m[0]
+  const eAt = text.search(/[eE]/)
+  if (eAt >= 0 && !/[0-9]$/.test(text)) {
+    errAt(`malformed number (exponent missing digits): ${text}`, ctx)
+  }
+  return { length: text.length, tok: { kind: 'num', value: Number(text) } }
+}
+
+const identOrKeyword = re(/[A-Za-z_][A-Za-z0-9_]*/y, m =>
+  KEYWORDS[m] ? { kind: KEYWORDS[m] } : { kind: 'ident', value: m },
+)
+
+// Body: any backslash + char (escape), or any non-quote/backslash/newline char.
+const STRING_RE = /"((?:\\[^]|[^"\\\n])*)"|'((?:\\[^]|[^'\\\n])*)'/y
+
+const stringLit: Rule = (src, ctx) => {
+  const c = src[ctx.i]
+  if (c !== '"' && c !== "'") return null
+  STRING_RE.lastIndex = ctx.i
+  const m = STRING_RE.exec(src)
+  if (!m || m.index !== ctx.i) errAt('unterminated string literal', ctx)
+  const body = (m[1] ?? m[2])!
+  // Body offset = ctx.i + 1 (skip opening quote); used to point escape errors precisely.
+  const value = body.replace(/\\(.)/g, (_, ch: string, idx: number) => {
+    const replacement = ESCAPES[ch]
+    if (replacement === undefined) errAt(`unknown escape: \\${ch}`, ctx, ctx.i + 1 + idx)
+    return replacement
+  })
+  return { length: m[0].length, tok: { kind: 'string', value } }
+}
+
+const punct2 = re(/<=|>=|==|!=|<<|>>|&&|\|\||=>|->/y, m => ({ kind: m as TokKind }))
+const punct1 = re(/[()\[\]{},.;:=+\-*/%<>&|^~!]/y, m => ({ kind: m as TokKind }))
+
+// Order: skips first, then literals, then ident/keyword, then strings, then
+// longest-match punctuation before single-char.
+const RULES: ReadonlyArray<Rule> = [
+  skipSpace,
+  skipLineComment,
+  skipBlockComment,
+  number,
+  identOrKeyword,
+  stringLit,
+  punct2,
+  punct1,
+]
+
+/** First-non-null map: applies `f` and returns the first defined result. */
+function firstMatch(src: string, ctx: LexCtx): Match | null {
+  for (const rule of RULES) {
+    const m = rule(src, ctx)
+    if (m) return m
+  }
+  return null
+}
+
+/** Advance the context by `length` chars, immutably. Recomputes line/lineStart
+ *  from the consumed span — cheap because newlines only occur in skip rules. */
+function advance(src: string, ctx: LexCtx, length: number): LexCtx {
+  const span = src.slice(ctx.i, ctx.i + length)
+  const last = span.lastIndexOf('\n')
+  if (last < 0) return { i: ctx.i + length, line: ctx.line, lineStart: ctx.lineStart }
+  const newlines = (span.match(/\n/g) as string[]).length
+  return {
+    i: ctx.i + length,
+    line: ctx.line + newlines,
+    lineStart: ctx.i + last + 1,
+  }
+}
+
+const at = (ctx: LexCtx, tok: Emit): Tok => ({
+  ...tok,
+  pos: ctx.i,
+  line: ctx.line,
+  col: ctx.i - ctx.lineStart + 1,
+})
+
+const eof = (ctx: LexCtx): Tok => ({ kind: 'eof', pos: ctx.i, line: ctx.line, col: ctx.i - ctx.lineStart + 1 })
+
+/** The unfold: `(src, ctx) → Maybe (Tok, nextCtx)`, repeated until EOF. */
+function* lex(src: string): Generator<Tok> {
+  let ctx: LexCtx = { i: 0, line: 1, lineStart: 0 }
+  while (ctx.i < src.length) {
+    const match = firstMatch(src, ctx)
+    if (!match) errAt(`unexpected character: ${JSON.stringify(src[ctx.i])}`, ctx)
+    if (match.tok) yield at(ctx, match.tok)
+    ctx = advance(src, ctx, match.length)
+  }
+  yield eof(ctx)
+}
+
+export const tokenize = (src: string): Tok[] => [...lex(src)]
 
 /** Pretty-format a token for diagnostic messages. */
 export function formatTok(t: Tok): string {
