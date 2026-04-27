@@ -336,9 +336,27 @@ function parsePrimary(ctx: Ctx): ExprNode {
     return parseLet(ctx)
   }
 
+  if (t.kind === 'match') {
+    ctx.i++
+    return parseMatch(ctx)
+  }
+
   if (t.kind === 'ident') {
     ctx.i++
     const name = t.value as string
+    // Capitalized ident followed by `{` is a tag construction:
+    //   Variant { field: expr, ... } → {op:'tag', type:'', variant, payload}
+    // The empty `type` field is filled in by the elaborator (B6) from the
+    // sum-type registry — variant names uniquely identify a sum type.
+    if (isCapitalizedName(name) && peek(ctx).kind === '{') {
+      ctx.i++  // consume `{`
+      const payload = parseTagPayload(ctx, name)
+      consume(ctx, '}', `closing \`}\` of tag '${name}' payload`)
+      const node: { op: 'tag'; type: string; variant: string; payload?: Record<string, ExprNode> } =
+        { op: 'tag', type: '', variant: name }
+      if (Object.keys(payload).length > 0) node.payload = payload
+      return node as unknown as ExprNode
+    }
     if (ctx.binders.has(name)) {
       return { op: 'binding', name }
     }
@@ -350,6 +368,67 @@ function parsePrimary(ctx: Ctx): ExprNode {
   // the ident branch above. Same for sample_index.
 
   throw new ParseError(`unexpected token in expression: ${formatTok(t)}`, t)
+}
+
+const isCapitalizedName = (s: string): boolean => /^[A-Z]/.test(s)
+
+/** Parse the keyword-arg payload of a tag construction:
+ *    `field: expr, field: expr` (within already-consumed braces). */
+function parseTagPayload(ctx: Ctx, variant: string): Record<string, ExprNode> {
+  const out: Record<string, ExprNode> = {}
+  if (peek(ctx).kind === '}') return out
+  for (;;) {
+    const fnameTok = consume(ctx, 'ident', `tag '${variant}' payload field name`)
+    const fname = fnameTok.value as string
+    if (fname in out) {
+      throw new ParseError(`tag '${variant}': duplicate payload field '${fname}'`, fnameTok)
+    }
+    consume(ctx, ':', `tag '${variant}' \`:\` after field name`)
+    out[fname] = parseTopExpr(ctx)
+    if (peek(ctx).kind === '}') return out
+    consume(ctx, ',', `tag '${variant}' \`,\` between payload fields`)
+  }
+}
+
+/** Parse `match scrutinee { Variant => body, Variant { f: name, ... } => body, ... }`.
+ *  The opening `match` has already been consumed.
+ *  Emits `{op:'match', type:'', scrutinee, arms: { variant: {bind?, body}, ... }}`.
+ *  The `type` field is filled in by the elaborator (B6) from variant
+ *  membership in the sum-type registry. */
+function parseMatch(ctx: Ctx): ExprNode {
+  const scrutinee = parseTopExpr(ctx)
+  consume(ctx, '{', '`{` after match scrutinee')
+  const arms: Record<string, { bind?: string | string[]; body: ExprNode }> = {}
+  while (peek(ctx).kind !== '}') {
+    const variantTok = consume(ctx, 'ident', 'match arm variant name')
+    const variant = variantTok.value as string
+    if (variant in arms) {
+      throw new ParseError(`match: duplicate arm for variant '${variant}'`, variantTok)
+    }
+    let bindNames: string[] = []
+    if (eat(ctx, '{')) {
+      // Pattern: `Variant { field: name, field: name }` — bind payload
+      // fields to local names.
+      const pairs = commaList(ctx, '}', () => {
+        const fname = consume(ctx, 'ident', `arm '${variant}' field name`).value as string
+        consume(ctx, ':', `arm '${variant}' \`:\` after field name`)
+        const localName = consume(ctx, 'ident', `arm '${variant}' bind name`).value as string
+        return localName
+      })
+      consume(ctx, '}', `arm '${variant}' closing \`}\` of pattern`)
+      bindNames = pairs
+    }
+    consume(ctx, '=>', `arm '${variant}' \`=>\` after pattern`)
+    const body = withScope(ctx.binders, bindNames, () => parseTopExpr(ctx))
+    const arm: { bind?: string | string[]; body: ExprNode } = { body }
+    if (bindNames.length === 1) arm.bind = bindNames[0]
+    else if (bindNames.length > 1) arm.bind = bindNames
+    arms[variant] = arm
+    if (peek(ctx).kind === '}') break
+    consume(ctx, ',', 'match: `,` between arms')
+  }
+  consume(ctx, '}', 'match: closing `}`')
+  return { op: 'match', type: '', scrutinee, arms } as unknown as ExprNode
 }
 
 function parseArrayLiteral(ctx: Ctx): ExprNode {
