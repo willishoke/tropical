@@ -3,7 +3,8 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { tokenize, formatTok, LexError, type Tok, type TokKind } from './lexer.js'
+import { tokenize, LexError, type Tok, type TokKind } from './lexer.js'
+import { formatTok } from './shared.js'
 
 function kinds(toks: Tok[]): TokKind[] {
   return toks.map(t => t.kind)
@@ -37,6 +38,28 @@ describe('lexer — literals', () => {
 
   test('malformed exponent (missing digits) errors', () => {
     expect(() => tokenize('1e')).toThrow(LexError)
+    expect(() => tokenize('1e+')).toThrow(LexError)
+    expect(() => tokenize('1.5E-')).toThrow(LexError)
+  })
+
+  test('trailing dot lexes as num then dot punct', () => {
+    // `1.` is ambiguous: could be `1.0` or `1` followed by member access.
+    // The lexer chooses the latter so `inst.port` parses cleanly when
+    // `inst` happens to be numeric — currently irrelevant but pins
+    // behavior for the future.
+    const toks = tokenize('1.')
+    expect(toks.map(t => t.kind)).toEqual(['num', '.', 'eof'])
+    expect(toks[0].value).toBe(1)
+  })
+
+  test('1.2.3 lexes as 1.2 then 0.3', () => {
+    // Documented quirk of the leading-dot fractional rule. The parser
+    // sees this as a syntax error (two adjacent num tokens are not a
+    // legal expression).
+    const toks = tokenize('1.2.3')
+    expect(toks.map(t => t.kind)).toEqual(['num', 'num', 'eof'])
+    expect(toks[0].value).toBeCloseTo(1.2)
+    expect(toks[1].value).toBeCloseTo(0.3)
   })
 
   test('boolean literals tokenize as their own kinds', () => {
@@ -238,8 +261,13 @@ describe('lexer — formatTok', () => {
     expect(formatTok(tokenize('"hi"')[0])).toBe('string("hi")')
   })
 
-  test('keyword tokens format as their kind', () => {
-    expect(formatTok(tokenize('let')[0])).toBe('let')
-    expect(formatTok(tokenize('=>')[0])).toBe('=>')
+  test('keyword and operator tokens format as quoted kind', () => {
+    expect(formatTok(tokenize('let')[0])).toBe("'let'")
+    expect(formatTok(tokenize('=>')[0])).toBe("'=>'")
+  })
+
+  test('eof formats as a human-readable phrase', () => {
+    const toks = tokenize('foo')
+    expect(formatTok(toks[toks.length - 1])).toBe('end of input')
   })
 })

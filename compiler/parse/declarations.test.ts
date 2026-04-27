@@ -161,6 +161,17 @@ describe('declarations — array port types', () => {
       program X(buf: float[]) -> (out: signal) { out = 0 }
     `)).toThrow(/at least one shape dim/)
   })
+
+  test('chained `[N][M]` (array-of-array) is NOT supported', () => {
+    // The grammar's port-type parser stops after the first `]`. Chained
+    // brackets become a syntax error at the second `[` (unexpected
+    // character in port type position). Pin this behaviour: if/when
+    // multi-dim shapes need surface support, prefer `float[N, M]` (one
+    // bracket pair, comma-separated dims) which already works.
+    expect(() => parseProgram(`
+      program X(buf: float[4][8]) -> (out: signal) { out = 0 }
+    `)).toThrow()
+  })
 })
 
 describe('declarations — type params', () => {

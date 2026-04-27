@@ -25,18 +25,15 @@
  */
 
 import { tokenize, type Tok } from './lexer.js'
-import { parseExprFromTokens, type ExprNode } from './expressions.js'
+import { parseExprFromTokens } from './expressions.js'
 import { commaList, consume, eat, formatTok, isContextualKw, peek, ParseError, type Cursor } from './shared.js'
+import type {
+  ExprNode, BlockNode, BodyDecl, BodyAssign, TypeDef,
+  RegDeclNode, DelayDeclNode, ParamDeclNode, InstanceDeclNode, ProgramDeclNode,
+  OutputAssignNode, NextUpdateNode,
+} from './nodes.js'
 
-// ─────────────────────────────────────────────────────────────
-// BlockNode shape — kept loose to avoid a hard dependency on compiler/expr.ts
-// ─────────────────────────────────────────────────────────────
-
-export interface BlockNode {
-  op: 'block'
-  decls: ExprNode[]
-  assigns: ExprNode[]
-}
+export type { BlockNode } from './nodes.js'
 
 // ─────────────────────────────────────────────────────────────
 // Body-parser options
@@ -56,16 +53,16 @@ export interface BodyOptions {
   /** Called when the body parser encounters a `program` keyword as the
    *  leading token of a new body item. Receives the shared token stream
    *  plus the current index; must consume tokens through the program's
-   *  closing `}` and return a `programDecl`-shaped ExprNode plus the
-   *  next-token index. */
-  programDeclParser?: (toks: Tok[], i: number) => { node: ExprNode; nextIdx: number }
+   *  closing `}` and return a `programDecl` body-decl plus the next-token
+   *  index. */
+  programDeclParser?: (toks: Tok[], i: number) => { node: ProgramDeclNode; nextIdx: number }
 
   /** Called when the body parser encounters a `struct`, `enum`, or `type`
    *  keyword as the leading token of a new body item. The handler must
    *  consume tokens through the type def's closing brace (or end-of-decl
-   *  for aliases) and return a `tropical_program_2` type-def JSON value
-   *  plus the next-token index. */
-  typeDefHandler?: (toks: Tok[], i: number) => { typeDef: unknown; nextIdx: number }
+   *  for aliases) and return a strict `TypeDef` value plus the next-token
+   *  index. */
+  typeDefHandler?: (toks: Tok[], i: number) => { typeDef: TypeDef; nextIdx: number }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -110,16 +107,16 @@ export function parseBody(src: string, opts: BodyOptions = {}): BlockNode {
  *  empty when the callback isn't provided or no ADT decls appear). */
 export function parseBodyFromTokens(
   toks: Tok[], startIdx: number, opts: BodyOptions = {},
-): { block: BlockNode; typeDefs: unknown[]; nextIdx: number } {
+): { block: BlockNode; typeDefs: TypeDef[]; nextIdx: number } {
   const ctx: Ctx = { toks, i: startIdx, opts }
   const { block, typeDefs } = parseBodyItems(ctx)
   return { block, typeDefs, nextIdx: ctx.i }
 }
 
-function parseBodyItems(ctx: Ctx): { block: BlockNode; typeDefs: unknown[] } {
-  const decls: ExprNode[] = []
-  const assigns: ExprNode[] = []
-  const typeDefs: unknown[] = []
+function parseBodyItems(ctx: Ctx): { block: BlockNode; typeDefs: TypeDef[] } {
+  const decls: BodyDecl[] = []
+  const assigns: BodyAssign[] = []
+  const typeDefs: TypeDef[] = []
   while (peek(ctx).kind !== '}' && peek(ctx).kind !== 'eof') {
     const item = parseBodyItem(ctx)
     if (item.kind === 'decl')         decls.push(item.node)
@@ -136,9 +133,9 @@ function parseBodyItems(ctx: Ctx): { block: BlockNode; typeDefs: unknown[] } {
 // ─────────────────────────────────────────────────────────────
 
 type BodyItem =
-  | { kind: 'decl';    node: ExprNode }
-  | { kind: 'assign';  node: ExprNode }
-  | { kind: 'typeDef'; typeDef: unknown }
+  | { kind: 'decl';    node: BodyDecl }
+  | { kind: 'assign';  node: BodyAssign }
+  | { kind: 'typeDef'; typeDef: TypeDef }
 
 function parseBodyItem(ctx: Ctx): BodyItem {
   const t = peek(ctx)
@@ -185,7 +182,7 @@ function parseBodyItem(ctx: Ctx): BodyItem {
 // ─────────────────────────────────────────────────────────────
 
 /** `reg name [: type] = init` */
-function parseRegDecl(ctx: Ctx): ExprNode {
+function parseRegDecl(ctx: Ctx): RegDeclNode {
   consume(ctx, 'reg', 'reg keyword')
   const name = consume(ctx, 'ident', 'reg name').value as string
   let type: string | undefined
@@ -194,14 +191,14 @@ function parseRegDecl(ctx: Ctx): ExprNode {
   }
   consume(ctx, '=', 'reg `=` before init')
   const init = parseExpr(ctx)
-  const out: Record<string, unknown> = { op: 'regDecl', name, init }
+  const out: RegDeclNode = { op: 'regDecl', name, init }
   if (type !== undefined) out.type = type
-  return out as ExprNode
+  return out
 }
 
 /** `delay name = update_expr init init_value` —
  *  `init` is a contextual keyword (parsed as an ident token). */
-function parseDelayDecl(ctx: Ctx): ExprNode {
+function parseDelayDecl(ctx: Ctx): DelayDeclNode {
   consume(ctx, 'delay', 'delay keyword')
   const name = consume(ctx, 'ident', 'delay name').value as string
   consume(ctx, '=', 'delay `=` before update expression')
@@ -215,14 +212,14 @@ function parseDelayDecl(ctx: Ctx): ExprNode {
   }
   ctx.i++
   const init = parseExpr(ctx)
-  return { op: 'delayDecl', name, update, init } as unknown as ExprNode
+  return { op: 'delayDecl', name, update, init }
 }
 
 /** `param name: smoothed|trigger [= default]`.
  *  Surface kind `smoothed` maps to IR `type: 'param'`; `trigger` is identity.
  *  ('smoothed' is the surface word because 'param' is reserved as the
  *  declaration keyword.) */
-function parseParamDecl(ctx: Ctx): ExprNode {
+function parseParamDecl(ctx: Ctx): ParamDeclNode {
   consume(ctx, 'param', 'param keyword')
   const name = consume(ctx, 'ident', 'param name').value as string
   consume(ctx, ':', 'param `:` before kind')
@@ -232,7 +229,7 @@ function parseParamDecl(ctx: Ctx): ExprNode {
   if (kindRaw === 'smoothed') irKind = 'param'
   else if (kindRaw === 'trigger') irKind = 'trigger'
   else throw new ParseError(`param kind must be 'smoothed' or 'trigger', got '${kindRaw}'`, kindTok)
-  const out: Record<string, unknown> = { op: 'paramDecl', name, type: irKind }
+  const out: ParamDeclNode = { op: 'paramDecl', name, type: irKind }
   if (eat(ctx, '=')) {
     if (irKind === 'trigger') {
       throw new ParseError(`trigger params cannot have a default value`, peek(ctx))
@@ -243,7 +240,7 @@ function parseParamDecl(ctx: Ctx): ExprNode {
     }
     out.value = valueExpr
   }
-  return out as ExprNode
+  return out
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -253,7 +250,7 @@ function parseParamDecl(ctx: Ctx): ExprNode {
 /** `next name = expr` — register update.
  *  Delays carry their update inside delayDecl, so target.kind is always
  *  'reg' here. */
-function parseNextUpdate(ctx: Ctx): ExprNode {
+function parseNextUpdate(ctx: Ctx): NextUpdateNode {
   consume(ctx, 'next', 'next keyword')
   const name = consume(ctx, 'ident', 'next target name').value as string
   consume(ctx, '=', 'next `=` before expression')
@@ -262,11 +259,11 @@ function parseNextUpdate(ctx: Ctx): ExprNode {
     op: 'nextUpdate',
     target: { kind: 'reg', name },
     expr,
-  } as unknown as ExprNode
+  }
 }
 
 /** `dac.out = expr` — boundary-leaf wire (per A4). */
-function parseDacOutAssign(ctx: Ctx): ExprNode {
+function parseDacOutAssign(ctx: Ctx): OutputAssignNode {
   // The leading 'dac' ident is at peek; consume and verify the dotted form.
   const dacTok = consume(ctx, 'ident', 'dac')
   if (dacTok.value !== 'dac') {
@@ -279,7 +276,7 @@ function parseDacOutAssign(ctx: Ctx): ExprNode {
   }
   consume(ctx, '=', 'dac.out `=` before expression')
   const expr = parseExpr(ctx)
-  return { op: 'outputAssign', name: 'dac.out', expr } as unknown as ExprNode
+  return { op: 'outputAssign', name: 'dac.out', expr }
 }
 
 /** `name = ...` — either an instanceDecl (RHS is `Capitalized(...)`) or an
@@ -299,12 +296,13 @@ function parseAssignOrInstance(ctx: Ctx): BodyItem {
   }
 
   const expr = parseExpr(ctx)
-  return { kind: 'assign', node: { op: 'outputAssign', name, expr } as unknown as ExprNode }
+  const node: OutputAssignNode = { op: 'outputAssign', name, expr }
+  return { kind: 'assign', node }
 }
 
 /** Parse `ProgType[<typeArgs>](port: expr, ...)` — the RHS of an instance
  *  declaration. `name` is the instance binding's name. */
-function parseInstanceRhs(ctx: Ctx, name: string): ExprNode {
+function parseInstanceRhs(ctx: Ctx, name: string): InstanceDeclNode {
   const typeTok = consume(ctx, 'ident', 'program type name')
   const programName = typeTok.value as string
 
@@ -317,10 +315,10 @@ function parseInstanceRhs(ctx: Ctx, name: string): ExprNode {
   const inputs = parseInstanceInputs(ctx)
   consume(ctx, ')', `closing \`)\` of '${programName}' inputs`)
 
-  const out: Record<string, unknown> = { op: 'instanceDecl', name, program: programName }
+  const out: InstanceDeclNode = { op: 'instanceDecl', name, program: programName }
   if (typeArgs !== undefined && Object.keys(typeArgs).length > 0) out.type_args = typeArgs
   if (Object.keys(inputs).length > 0) out.inputs = inputs
-  return out as ExprNode
+  return out
 }
 
 /** Parse `<key=value, key=value>`. The opening `<` is already consumed;

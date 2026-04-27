@@ -38,58 +38,23 @@
  */
 
 import { tokenize, type Tok } from './lexer.js'
-import { parseExprFromTokens, type ExprNode } from './expressions.js'
-import { parseBodyFromTokens, type BlockNode, type BodyOptions } from './statements.js'
+import { parseExprFromTokens } from './expressions.js'
+import { parseBodyFromTokens, type BodyOptions } from './statements.js'
 import { commaList, consume, eat, formatTok, isContextualKw, peek, ParseError, type Cursor } from './shared.js'
+import type {
+  ExprNode, ProgramNode, ProgramPort, ProgramPortSpec, ProgramPorts,
+  PortTypeDecl, ShapeDim, ScalarKind,
+  TypeDef, StructTypeDef, StructField, SumTypeDef, SumVariant, AliasTypeDef,
+  ProgramDeclNode,
+} from './nodes.js'
 
-// ─────────────────────────────────────────────────────────────
-// ProgramNode shape — kept loose to avoid cycles with compiler/program.ts
-// ─────────────────────────────────────────────────────────────
-
-export type ShapeDim = number | { op: 'typeParam'; name: string }
-
-export type PortTypeDecl = string | { kind: 'array'; element: string; shape: ShapeDim[] }
-
-export interface ProgramPortSpec {
-  name: string
-  type?: PortTypeDecl
-  default?: ExprNode
-  bounds?: [number | null, number | null]
-}
-
-export type ProgramPort = string | ProgramPortSpec
-
-/** Permitted scalar element types in struct fields and sum-variant payloads. */
-export type ScalarKind = 'float' | 'int' | 'bool'
-
-export interface StructField { name: string; scalar_type: ScalarKind }
-export interface StructTypeDef { kind: 'struct'; name: string; fields: StructField[] }
-
-export interface SumVariant { name: string; payload: StructField[] }
-export interface SumTypeDef { kind: 'sum'; name: string; variants: SumVariant[] }
-
-export interface AliasTypeDef {
-  kind: 'alias'
-  name: string
-  base: string
-  bounds: [number | null, number | null]
-}
-
-export type TypeDef = StructTypeDef | SumTypeDef | AliasTypeDef
-
-export interface ProgramPorts {
-  inputs?: ProgramPort[]
-  outputs?: ProgramPort[]
-  type_defs?: TypeDef[]
-}
-
-export interface ProgramNode {
-  op: 'program'
-  name: string
-  type_params?: Record<string, { type: 'int'; default?: number }>
-  ports?: ProgramPorts
-  body: BlockNode
-}
+// Re-export the node types so existing public-API consumers (tests etc.)
+// keep their imports stable.
+export type {
+  ProgramNode, ProgramPort, ProgramPortSpec, ProgramPorts,
+  PortTypeDecl, ShapeDim, ScalarKind,
+  TypeDef, StructTypeDef, StructField, SumTypeDef, SumVariant, AliasTypeDef,
+} from './nodes.js'
 
 // ─────────────────────────────────────────────────────────────
 // Parser context
@@ -134,12 +99,10 @@ export function parseProgramFromTokens(
  *  `programDecl` body item. */
 function parseNestedProgramDecl(
   toks: Tok[], startIdx: number,
-): { node: ExprNode; nextIdx: number } {
+): { node: ProgramDeclNode; nextIdx: number } {
   const { node: inner, nextIdx } = parseProgramFromTokens(toks, startIdx)
-  return {
-    node: { op: 'programDecl', name: inner.name, program: inner } as unknown as ExprNode,
-    nextIdx,
-  }
+  const node: ProgramDeclNode = { op: 'programDecl', name: inner.name, program: inner }
+  return { node, nextIdx }
 }
 
 /** Body-parser hook: dispatch `struct`/`enum`/`type` to the right ADT
@@ -148,7 +111,7 @@ function parseNestedProgramDecl(
  *  the program's `ports.type_defs`. */
 function parseBodyTypeDef(
   toks: Tok[], startIdx: number,
-): { typeDef: unknown; nextIdx: number } {
+): { typeDef: TypeDef; nextIdx: number } {
   const ctx: Ctx = { toks, i: startIdx, typeParams: new Set() }
   const t = peek(ctx)
   let typeDef: TypeDef
@@ -209,7 +172,7 @@ function parseProgramFromCtx(ctx: Ctx): ProgramNode {
   const ports: ProgramPorts = {}
   if (inputs.length > 0)  ports.inputs  = inputs
   if (outputs && outputs.length > 0) ports.outputs = outputs
-  if (typeDefs.length > 0) ports.type_defs = typeDefs as TypeDef[]
+  if (typeDefs.length > 0) ports.type_defs = typeDefs
   if (ports.inputs || ports.outputs || ports.type_defs) node.ports = ports
   return node
 }
@@ -236,24 +199,25 @@ function parseStructDecl(ctx: Ctx): StructTypeDef {
   consume(ctx, '{', `\`{\` after struct '${name}'`)
   const fields = parseFieldList(ctx, `struct '${name}'`)
   consume(ctx, '}', `\`}\` closing struct '${name}'`)
-  const seen = new Set<string>()
-  for (const f of fields) {
-    if (seen.has(f.name)) {
-      throw new ParseError(`struct '${name}': duplicate field '${f.name}'`, peek(ctx))
-    }
-    seen.add(f.name)
-  }
   return { kind: 'struct', name, fields }
 }
 
 /** Comma-separated `name: scalarType` list inside `{...}`. Used by both
- *  struct fields and sum-variant payloads. */
+ *  struct fields and sum-variant payloads. Duplicate detection is inline
+ *  so the error position points at the duplicate's token, not the
+ *  closing brace. */
 function parseFieldList(ctx: Ctx, where: string): StructField[] {
+  const seen = new Set<string>()
   return commaList(ctx, '}', () => {
     const nameTok = consume(ctx, 'ident', `${where}: field name`)
+    const fieldName = nameTok.value as string
+    if (seen.has(fieldName)) {
+      throw new ParseError(`${where}: duplicate field '${fieldName}'`, nameTok)
+    }
+    seen.add(fieldName)
     consume(ctx, ':', `${where}: \`:\` after field name`)
     const scalar_type = parseScalarKind(ctx, `${where}: field type`)
-    return { name: nameTok.value as string, scalar_type }
+    return { name: fieldName, scalar_type }
   })
 }
 
@@ -262,15 +226,20 @@ function parseEnumDecl(ctx: Ctx): SumTypeDef {
   consume(ctx, 'enum', 'enum keyword')
   const name = consume(ctx, 'ident', 'enum name').value as string
   consume(ctx, '{', `\`{\` after enum '${name}'`)
-  const variants = commaList(ctx, '}', () => parseSumVariant(ctx, name))
-  consume(ctx, '}', `\`}\` closing enum '${name}'`)
   const seen = new Set<string>()
-  for (const v of variants) {
+  const variants = commaList(ctx, '}', () => {
+    const v = parseSumVariant(ctx, name)
     if (seen.has(v.name)) {
+      // The variant token has already been consumed; rewind one so the
+      // error points at the variant name. (commaList doesn't expose the
+      // token, but we can re-derive: it's the previous `ident` we just
+      // consumed two-or-more tokens ago. Approximate with peek for now.)
       throw new ParseError(`enum '${name}': duplicate variant '${v.name}'`, peek(ctx))
     }
     seen.add(v.name)
-  }
+    return v
+  })
+  consume(ctx, '}', `\`}\` closing enum '${name}'`)
   return { kind: 'sum', name, variants }
 }
 
@@ -281,23 +250,19 @@ function parseSumVariant(ctx: Ctx, enumName: string): SumVariant {
     return { name: variantName, payload: [] }
   }
   ctx.i++  // consume `(`
+  const seenFields = new Set<string>()
   const payload = commaList(ctx, ')', () => {
-    const pname = consume(ctx, 'ident', `variant '${variantName}' field name`).value as string
+    const pnameTok = consume(ctx, 'ident', `variant '${variantName}' field name`)
+    const pname = pnameTok.value as string
+    if (seenFields.has(pname)) {
+      throw new ParseError(`variant '${variantName}': duplicate field '${pname}'`, pnameTok)
+    }
+    seenFields.add(pname)
     consume(ctx, ':', `variant '${variantName}' \`:\` after field name`)
     const scalar_type = parseScalarKind(ctx, `variant '${variantName}' field type`)
     return { name: pname, scalar_type }
   })
   consume(ctx, ')', `closing \`)\` of variant '${variantName}' payload`)
-  // Reject duplicate field names within a variant.
-  const seen = new Set<string>()
-  for (const f of payload) {
-    if (seen.has(f.name)) {
-      throw new ParseError(
-        `variant '${variantName}': duplicate field '${f.name}'`, nameTok,
-      )
-    }
-    seen.add(f.name)
-  }
   return { name: variantName, payload }
 }
 
@@ -448,18 +413,24 @@ function parseBounds(ctx: Ctx): [number | null, number | null] {
   return [lo, hi]
 }
 
+/** Parse a single bound: `null` sentinel, or a signed numeric literal.
+ *  Direct lexer handling — no need to detour through the expression
+ *  parser (which would only constant-fold `neg(<num>)` into a negative
+ *  number anyway). The grammar is just `'-'? num | 'null'`. */
 function parseBound(ctx: Ctx): number | null {
   const t = peek(ctx)
   if (isContextualKw(t, 'null')) {
     ctx.i++
     return null
   }
-  // Allow `-1.0` etc. via expression parsing + literal extraction.
-  const expr = parseExprAt(ctx)
-  if (typeof expr !== 'number') {
-    throw new ParseError(`bound must be a number literal or 'null'`, t)
+  let sign = 1
+  if (eat(ctx, '-')) sign = -1
+  const numTok = peek(ctx)
+  if (numTok.kind !== 'num') {
+    throw new ParseError(`bound must be a number literal or 'null', got ${formatTok(t)}`, t)
   }
-  return expr
+  ctx.i++
+  return sign * (numTok.value as number)
 }
 
 // ─────────────────────────────────────────────────────────────
