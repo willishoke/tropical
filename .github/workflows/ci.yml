@@ -1,19 +1,47 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 
 jobs:
-  ts-typecheck:
+  typecheck:
     name: TypeScript type-check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v1
-      - name: Install dependencies
-        run: bun install
-      - name: Type-check
-        run: bun run tsc --noEmit
+      - run: bun install
+      - run: bun run tsc --noEmit
+
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install LLVM 18 and ALSA headers
+        run: |
+          wget -qO llvm.sh https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y libasound2-dev
+
+      - name: Build libtropical
+        run: |
+          cmake -S . -B build \
+            -DLLVM_DIR=/usr/lib/llvm-18/lib/cmake/llvm \
+            -DTROPICAL_BUILD_PYTHON=OFF \
+            -DTROPICAL_PROFILE=OFF
+          cmake --build build -j$(nproc)
+
+      - uses: oven-sh/setup-bun@v1
+      - run: bun install
+
+      - name: TypeScript tests
+        run: bun test
+
+      - name: C++ tests
+        run: ctest --test-dir build --output-on-failure
