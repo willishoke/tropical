@@ -59,9 +59,28 @@ export interface ProgramPortSpec {
 
 export type ProgramPort = string | ProgramPortSpec
 
+/** Permitted scalar element types in struct fields and sum-variant payloads. */
+export type ScalarKind = 'float' | 'int' | 'bool'
+
+export interface StructField { name: string; scalar_type: ScalarKind }
+export interface StructTypeDef { kind: 'struct'; name: string; fields: StructField[] }
+
+export interface SumVariant { name: string; payload: StructField[] }
+export interface SumTypeDef { kind: 'sum'; name: string; variants: SumVariant[] }
+
+export interface AliasTypeDef {
+  kind: 'alias'
+  name: string
+  base: string
+  bounds: [number | null, number | null]
+}
+
+export type TypeDef = StructTypeDef | SumTypeDef | AliasTypeDef
+
 export interface ProgramPorts {
   inputs?: ProgramPort[]
   outputs?: ProgramPort[]
+  type_defs?: TypeDef[]
 }
 
 export interface ProgramNode {
@@ -123,7 +142,27 @@ function parseNestedProgramDecl(
   }
 }
 
-const NESTED_PROGRAM_OPTS: BodyOptions = { programDeclParser: parseNestedProgramDecl }
+/** Body-parser hook: dispatch `struct`/`enum`/`type` to the right ADT
+ *  parser. The body parser collects the result into a separate `typeDefs`
+ *  array (returned alongside the BlockNode), which we then route into
+ *  the program's `ports.type_defs`. */
+function parseBodyTypeDef(
+  toks: Tok[], startIdx: number,
+): { typeDef: unknown; nextIdx: number } {
+  const ctx: Ctx = { toks, i: startIdx, typeParams: new Set() }
+  const t = peek(ctx)
+  let typeDef: TypeDef
+  if (t.kind === 'struct') typeDef = parseStructDecl(ctx)
+  else if (t.kind === 'enum') typeDef = parseEnumDecl(ctx)
+  else if (t.kind === 'type') typeDef = parseAliasDecl(ctx)
+  else throw new ParseError(`expected struct/enum/type, got ${formatTok(t)}`, t)
+  return { typeDef, nextIdx: ctx.i }
+}
+
+const BODY_OPTS: BodyOptions = {
+  programDeclParser: parseNestedProgramDecl,
+  typeDefHandler: parseBodyTypeDef,
+}
 
 // ─────────────────────────────────────────────────────────────
 // Program-declaration parser
@@ -156,7 +195,7 @@ function parseProgramFromCtx(ctx: Ctx): ProgramNode {
 
   // Body
   consume(ctx, '{', `\`{\` opening body of '${name}'`)
-  const { block, nextIdx } = parseBodyFromTokens(ctx.toks, ctx.i, NESTED_PROGRAM_OPTS)
+  const { block, typeDefs, nextIdx } = parseBodyFromTokens(ctx.toks, ctx.i, BODY_OPTS)
   ctx.i = nextIdx
   consume(ctx, '}', `\`}\` closing body of '${name}'`)
 
@@ -170,8 +209,108 @@ function parseProgramFromCtx(ctx: Ctx): ProgramNode {
   const ports: ProgramPorts = {}
   if (inputs.length > 0)  ports.inputs  = inputs
   if (outputs && outputs.length > 0) ports.outputs = outputs
-  if (ports.inputs || ports.outputs) node.ports = ports
+  if (typeDefs.length > 0) ports.type_defs = typeDefs as TypeDef[]
+  if (ports.inputs || ports.outputs || ports.type_defs) node.ports = ports
   return node
+}
+
+// ─────────────────────────────────────────────────────────────
+// ADT decls — struct / enum / type alias (Phase B5)
+// ─────────────────────────────────────────────────────────────
+
+const SCALAR_KINDS: ReadonlySet<string> = new Set(['float', 'int', 'bool'])
+
+function parseScalarKind(ctx: Ctx, what: string): ScalarKind {
+  const t = consume(ctx, 'ident', what)
+  const k = t.value as string
+  if (!SCALAR_KINDS.has(k)) {
+    throw new ParseError(`${what}: expected float/int/bool, got '${k}'`, t)
+  }
+  return k as ScalarKind
+}
+
+/** struct Name { field: scalarType, ... } */
+function parseStructDecl(ctx: Ctx): StructTypeDef {
+  consume(ctx, 'struct', 'struct keyword')
+  const name = consume(ctx, 'ident', 'struct name').value as string
+  consume(ctx, '{', `\`{\` after struct '${name}'`)
+  const fields = parseFieldList(ctx, `struct '${name}'`)
+  consume(ctx, '}', `\`}\` closing struct '${name}'`)
+  const seen = new Set<string>()
+  for (const f of fields) {
+    if (seen.has(f.name)) {
+      throw new ParseError(`struct '${name}': duplicate field '${f.name}'`, peek(ctx))
+    }
+    seen.add(f.name)
+  }
+  return { kind: 'struct', name, fields }
+}
+
+/** Comma-separated `name: scalarType` list inside `{...}`. Used by both
+ *  struct fields and sum-variant payloads. */
+function parseFieldList(ctx: Ctx, where: string): StructField[] {
+  return commaList(ctx, '}', () => {
+    const nameTok = consume(ctx, 'ident', `${where}: field name`)
+    consume(ctx, ':', `${where}: \`:\` after field name`)
+    const scalar_type = parseScalarKind(ctx, `${where}: field type`)
+    return { name: nameTok.value as string, scalar_type }
+  })
+}
+
+/** enum Name { Variant, Variant(field: type, ...), ... } */
+function parseEnumDecl(ctx: Ctx): SumTypeDef {
+  consume(ctx, 'enum', 'enum keyword')
+  const name = consume(ctx, 'ident', 'enum name').value as string
+  consume(ctx, '{', `\`{\` after enum '${name}'`)
+  const variants = commaList(ctx, '}', () => parseSumVariant(ctx, name))
+  consume(ctx, '}', `\`}\` closing enum '${name}'`)
+  const seen = new Set<string>()
+  for (const v of variants) {
+    if (seen.has(v.name)) {
+      throw new ParseError(`enum '${name}': duplicate variant '${v.name}'`, peek(ctx))
+    }
+    seen.add(v.name)
+  }
+  return { kind: 'sum', name, variants }
+}
+
+function parseSumVariant(ctx: Ctx, enumName: string): SumVariant {
+  const nameTok = consume(ctx, 'ident', `enum '${enumName}': variant name`)
+  const variantName = nameTok.value as string
+  if (peek(ctx).kind !== '(') {
+    return { name: variantName, payload: [] }
+  }
+  ctx.i++  // consume `(`
+  const payload = commaList(ctx, ')', () => {
+    const pname = consume(ctx, 'ident', `variant '${variantName}' field name`).value as string
+    consume(ctx, ':', `variant '${variantName}' \`:\` after field name`)
+    const scalar_type = parseScalarKind(ctx, `variant '${variantName}' field type`)
+    return { name: pname, scalar_type }
+  })
+  consume(ctx, ')', `closing \`)\` of variant '${variantName}' payload`)
+  // Reject duplicate field names within a variant.
+  const seen = new Set<string>()
+  for (const f of payload) {
+    if (seen.has(f.name)) {
+      throw new ParseError(
+        `variant '${variantName}': duplicate field '${f.name}'`, nameTok,
+      )
+    }
+    seen.add(f.name)
+  }
+  return { name: variantName, payload }
+}
+
+/** type AliasName = baseScalar in [lo, hi] */
+function parseAliasDecl(ctx: Ctx): AliasTypeDef {
+  consume(ctx, 'type', 'type keyword')
+  const name = consume(ctx, 'ident', 'alias name').value as string
+  consume(ctx, '=', `\`=\` after alias '${name}'`)
+  const baseTok = consume(ctx, 'ident', `base type for alias '${name}'`)
+  const base = baseTok.value as string
+  consume(ctx, 'in', `\`in\` after base type for alias '${name}'`)
+  const bounds = parseBounds(ctx)
+  return { kind: 'alias', name, base, bounds }
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -45,7 +45,13 @@ export interface BlockNode {
 /** Optional dependency-injection slot for nested-program parsing.
  *  declarations.ts (Phase B4) passes its program-decl parser via this
  *  callback so that bodies can contain `programDecl` entries. Without
- *  this hook a `program` keyword inside a body raises a parse error. */
+ *  this hook a `program` keyword inside a body raises a parse error.
+ *
+ *  The same dependency-injection shape is used for ADT type defs
+ *  (struct/enum/type — Phase B5). When the body parser sees one of those
+ *  keywords, it calls the typeDefHandler if provided; the parsed type def
+ *  is collected in the body parser's typeDefs array (returned alongside
+ *  the BlockNode), not mixed into body.decls. */
 export interface BodyOptions {
   /** Called when the body parser encounters a `program` keyword as the
    *  leading token of a new body item. Receives the shared token stream
@@ -53,6 +59,13 @@ export interface BodyOptions {
    *  closing `}` and return a `programDecl`-shaped ExprNode plus the
    *  next-token index. */
   programDeclParser?: (toks: Tok[], i: number) => { node: ExprNode; nextIdx: number }
+
+  /** Called when the body parser encounters a `struct`, `enum`, or `type`
+   *  keyword as the leading token of a new body item. The handler must
+   *  consume tokens through the type def's closing brace (or end-of-decl
+   *  for aliases) and return a `tropical_program_2` type-def JSON value
+   *  plus the next-token index. */
+  typeDefHandler?: (toks: Tok[], i: number) => { typeDef: unknown; nextIdx: number }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -78,7 +91,7 @@ export function parseBody(src: string, opts: BodyOptions = {}): BlockNode {
   const toks = tokenize(src)
   const ctx: Ctx = { toks, i: 0, opts }
   consume(ctx, '{', 'opening `{` of body')
-  const block = parseBodyItems(ctx)
+  const { block } = parseBodyItems(ctx)
   consume(ctx, '}', 'closing `}` of body')
   const trailing = ctx.toks[ctx.i]
   if (trailing.kind !== 'eof') {
@@ -90,26 +103,32 @@ export function parseBody(src: string, opts: BodyOptions = {}): BlockNode {
 /** Parse the contents of a body block from a token stream, starting at the
  *  position immediately after the opening `{`. Stops at the matching `}`
  *  (left for the caller to consume). Used by upper-layer parsers (B4
- *  declarations) that share a token stream. */
+ *  declarations) that share a token stream.
+ *
+ *  Returns the BlockNode plus a separate `typeDefs` array (collected from
+ *  any struct/enum/type body items via the typeDefHandler callback —
+ *  empty when the callback isn't provided or no ADT decls appear). */
 export function parseBodyFromTokens(
   toks: Tok[], startIdx: number, opts: BodyOptions = {},
-): { block: BlockNode; nextIdx: number } {
+): { block: BlockNode; typeDefs: unknown[]; nextIdx: number } {
   const ctx: Ctx = { toks, i: startIdx, opts }
-  const block = parseBodyItems(ctx)
-  return { block, nextIdx: ctx.i }
+  const { block, typeDefs } = parseBodyItems(ctx)
+  return { block, typeDefs, nextIdx: ctx.i }
 }
 
-function parseBodyItems(ctx: Ctx): BlockNode {
+function parseBodyItems(ctx: Ctx): { block: BlockNode; typeDefs: unknown[] } {
   const decls: ExprNode[] = []
   const assigns: ExprNode[] = []
+  const typeDefs: unknown[] = []
   while (peek(ctx).kind !== '}' && peek(ctx).kind !== 'eof') {
     const item = parseBodyItem(ctx)
-    if (item.kind === 'decl') decls.push(item.node)
-    else assigns.push(item.node)
+    if (item.kind === 'decl')         decls.push(item.node)
+    else if (item.kind === 'assign')  assigns.push(item.node)
+    else                              typeDefs.push(item.typeDef)
     // Optional `;` separator
     eat(ctx, ';')
   }
-  return { op: 'block', decls, assigns }
+  return { block: { op: 'block', decls, assigns }, typeDefs }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -117,8 +136,9 @@ function parseBodyItems(ctx: Ctx): BlockNode {
 // ─────────────────────────────────────────────────────────────
 
 type BodyItem =
-  | { kind: 'decl';   node: ExprNode }
-  | { kind: 'assign'; node: ExprNode }
+  | { kind: 'decl';    node: ExprNode }
+  | { kind: 'assign';  node: ExprNode }
+  | { kind: 'typeDef'; typeDef: unknown }
 
 function parseBodyItem(ctx: Ctx): BodyItem {
   const t = peek(ctx)
@@ -137,6 +157,17 @@ function parseBodyItem(ctx: Ctx): BodyItem {
     const { node, nextIdx } = ctx.opts.programDeclParser(ctx.toks, ctx.i)
     ctx.i = nextIdx
     return { kind: 'decl', node }
+  }
+
+  if (t.kind === 'struct' || t.kind === 'enum' || t.kind === 'type') {
+    if (!ctx.opts.typeDefHandler) {
+      throw new ParseError(
+        `'${t.kind}' decl is not supported in this parser context`, t,
+      )
+    }
+    const { typeDef, nextIdx } = ctx.opts.typeDefHandler(ctx.toks, ctx.i)
+    ctx.i = nextIdx
+    return { kind: 'typeDef', typeDef }
   }
 
   if (t.kind === 'ident') {
