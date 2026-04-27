@@ -5,6 +5,7 @@
 import { describe, test, expect } from 'bun:test'
 import { parseProgram, type ProgramNode, type ProgramPortSpec } from './declarations.js'
 import { ParseError } from './expressions.js'
+import { nameRef } from './nodes.js'
 
 describe('declarations — minimal program', () => {
   test('empty body, no ports', () => {
@@ -18,7 +19,7 @@ describe('declarations — minimal program', () => {
   test('with single output, no body', () => {
     const p = parseProgram('program Const() -> (out: signal) { out = 0 }')
     expect(p.name).toBe('Const')
-    expect(p.ports?.outputs).toEqual([{ name: 'out', type: 'signal' }])
+    expect(p.ports?.outputs).toEqual([{ name: 'out', type: nameRef('signal') }])
     expect(p.body.assigns).toHaveLength(1)
   })
 
@@ -28,8 +29,8 @@ describe('declarations — minimal program', () => {
         y = x
       }
     `)
-    expect(p.ports?.inputs).toEqual([{ name: 'x', type: 'signal' }])
-    expect(p.ports?.outputs).toEqual([{ name: 'y', type: 'signal' }])
+    expect(p.ports?.inputs).toEqual([{ name: 'x', type: nameRef('signal') }])
+    expect(p.ports?.outputs).toEqual([{ name: 'y', type: nameRef('signal') }])
   })
 
   test('trailing input rejected', () => {
@@ -48,7 +49,7 @@ describe('declarations — port specs', () => {
     const p = parseProgram(`
       program X(freq: freq = 220) -> (out: signal) { out = 0 }
     `)
-    expect(p.ports?.inputs).toEqual([{ name: 'freq', type: 'freq', default: 220 }])
+    expect(p.ports?.inputs).toEqual([{ name: 'freq', type: nameRef('freq'), default: 220 }])
   })
 
   test('input with bounds', () => {
@@ -56,7 +57,7 @@ describe('declarations — port specs', () => {
       program X(g: float in [0, 1]) -> (out: signal) { out = 0 }
     `)
     expect(p.ports?.inputs).toEqual([
-      { name: 'g', type: 'float', bounds: [0, 1] },
+      { name: 'g', type: nameRef('float'), bounds: [0, 1] },
     ])
   })
 
@@ -65,7 +66,7 @@ describe('declarations — port specs', () => {
       program X(g: float = 0.5 in [0, 1]) -> (out: signal) { out = 0 }
     `)
     expect(p.ports?.inputs).toEqual([
-      { name: 'g', type: 'float', default: 0.5, bounds: [0, 1] },
+      { name: 'g', type: nameRef('float'), default: 0.5, bounds: [0, 1] },
     ])
   })
 
@@ -94,8 +95,8 @@ describe('declarations — port specs', () => {
     `)
     expect(p.ports?.inputs).toEqual([
       'a',
-      { name: 'b', type: 'signal' },
-      { name: 'c', type: 'float', default: 1 },
+      { name: 'b', type: nameRef('signal') },
+      { name: 'c', type: nameRef('float'), default: 1 },
     ])
   })
 
@@ -108,9 +109,9 @@ describe('declarations — port specs', () => {
       }
     `)
     expect(p.ports?.outputs).toEqual([
-      { name: 'lp', type: 'signal' },
-      { name: 'bp', type: 'signal' },
-      { name: 'hp', type: 'signal' },
+      { name: 'lp', type: nameRef('signal') },
+      { name: 'bp', type: nameRef('signal') },
+      { name: 'hp', type: nameRef('signal') },
     ])
   })
 })
@@ -121,7 +122,7 @@ describe('declarations — array port types', () => {
       program X(buf: float[4]) -> (out: signal) { out = 0 }
     `)
     expect((p.ports!.inputs![0] as ProgramPortSpec).type).toEqual({
-      kind: 'array', element: 'float', shape: [4],
+      kind: 'array', element: nameRef('float'), shape: [4],
     })
   })
 
@@ -130,7 +131,7 @@ describe('declarations — array port types', () => {
       program X<N: int = 8>(buf: float[N]) -> (out: signal) { out = 0 }
     `)
     expect((p.ports!.inputs![0] as ProgramPortSpec).type).toEqual({
-      kind: 'array', element: 'float', shape: [{ op: 'typeParam', name: 'N' }],
+      kind: 'array', element: nameRef('float'), shape: [nameRef('N')],
     })
   })
 
@@ -139,15 +140,22 @@ describe('declarations — array port types', () => {
       program X<N: int = 4, M: int = 8>(buf: float[N, M]) -> (out: signal) { out = 0 }
     `)
     expect((p.ports!.inputs![0] as ProgramPortSpec).type).toEqual({
-      kind: 'array', element: 'float',
-      shape: [{ op: 'typeParam', name: 'N' }, { op: 'typeParam', name: 'M' }],
+      kind: 'array', element: nameRef('float'),
+      shape: [nameRef('N'), nameRef('M')],
     })
   })
 
-  test('array shape with undeclared name rejected', () => {
-    expect(() => parseProgram(`
+  test('array shape identifier emits a NameRef without parser-side validation', () => {
+    // The parser performs no scope analysis. Whether `K` is actually a
+    // declared type-param is determined by the elaborator (B6) when it
+    // resolves the NameRefNode against the enclosing program's type-params.
+    // The parser simply records the reference here.
+    const p = parseProgram(`
       program X(buf: float[K]) -> (out: signal) { out = 0 }
-    `)).toThrow(/not a declared type-param/)
+    `)
+    expect((p.ports!.inputs![0] as ProgramPortSpec).type).toEqual({
+      kind: 'array', element: nameRef('float'), shape: [nameRef('K')],
+    })
   })
 
   test('non-integer literal shape dim rejected', () => {
@@ -273,7 +281,7 @@ describe('declarations — nested programs', () => {
     const buf = inner.ports!.inputs![0] as ProgramPortSpec
     // Should reference N (resolved against inner scope, not outer)
     expect(buf.type).toEqual({
-      kind: 'array', element: 'float', shape: [{ op: 'typeParam', name: 'N' }],
+      kind: 'array', element: nameRef('float'), shape: [nameRef('N')],
     })
   })
 

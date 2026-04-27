@@ -35,8 +35,9 @@ import type {
   BinaryOpTag, BinaryOpNode, UnaryOpTag, UnaryOpNode,
   CallNode, NameRefNode, BindingNode, NestedOutNode, IndexNode,
   LetNode, FoldNode, ScanNode, GenerateNode, IterateNode, ChainNode,
-  Map2Node, ZipWithNode, TagNode, MatchNode, MatchArm,
+  Map2Node, ZipWithNode, TagNode, TagPayloadEntry, MatchNode, MatchArmEntry,
 } from './nodes.js'
+import { nameRef } from './nodes.js'
 
 export { ParseError }
 export type { ExprNode } from './nodes.js'
@@ -160,7 +161,11 @@ function parsePostfix(ctx: Ctx): ExprNode {
           t,
         )
       }
-      const next: NestedOutNode = { op: 'nestedOut', ref: node.name, output: field.value as string }
+      const next: NestedOutNode = {
+        op: 'nestedOut',
+        ref: nameRef(node.name),
+        output: nameRef(field.value as string),
+      }
       node = next
     } else if (t.kind === '[') {
       ctx.i++
@@ -368,16 +373,15 @@ function parsePrimary(ctx: Ctx): ExprNode {
       ctx.i++  // consume `{`
       const payload = parseTagPayload(ctx, name)
       consume(ctx, '}', `closing \`}\` of tag '${name}' payload`)
-      const node: TagNode = { op: 'tag', variant: name }
-      if (Object.keys(payload).length > 0) node.payload = payload
+      const node: TagNode = { op: 'tag', variant: nameRef(name) }
+      if (payload.length > 0) node.payload = payload
       return node
     }
     if (ctx.binders.has(name)) {
       const binding: BindingNode = { op: 'binding', name }
       return binding
     }
-    const ref: NameRefNode = { op: 'nameRef', name }
-    return ref
+    return nameRef(name)
   }
 
   // Sentinels are reserved tokens but appear in postfix-call form. The
@@ -390,18 +394,23 @@ function parsePrimary(ctx: Ctx): ExprNode {
 const isCapitalizedName = (s: string): boolean => /^[A-Z]/.test(s)
 
 /** Parse the keyword-arg payload of a tag construction:
- *    `field: expr, field: expr` (within already-consumed braces). */
-function parseTagPayload(ctx: Ctx, variant: string): Record<string, ExprNode> {
-  const out: Record<string, ExprNode> = {}
+ *    `field: expr, field: expr` (within already-consumed braces).
+ *  Each payload field name becomes a NameRefNode. Duplicate detection
+ *  is by string name; the elaborator further validates against the
+ *  variant's declared payload fields. */
+function parseTagPayload(ctx: Ctx, variant: string): TagPayloadEntry[] {
+  const out: TagPayloadEntry[] = []
+  const seen = new Set<string>()
   if (peek(ctx).kind === '}') return out
   for (;;) {
     const fnameTok = consume(ctx, 'ident', `tag '${variant}' payload field name`)
     const fname = fnameTok.value as string
-    if (fname in out) {
+    if (seen.has(fname)) {
       throw new ParseError(`tag '${variant}': duplicate payload field '${fname}'`, fnameTok)
     }
+    seen.add(fname)
     consume(ctx, ':', `tag '${variant}' \`:\` after field name`)
-    out[fname] = parseTopExpr(ctx)
+    out.push({ field: nameRef(fname), value: parseTopExpr(ctx) })
     if (peek(ctx).kind === '}') return out
     consume(ctx, ',', `tag '${variant}' \`,\` between payload fields`)
   }
@@ -409,19 +418,22 @@ function parseTagPayload(ctx: Ctx, variant: string): Record<string, ExprNode> {
 
 /** Parse `match scrutinee { Variant => body, Variant { f: name, ... } => body, ... }`.
  *  The opening `match` has already been consumed.
- *  Emits `{op:'match', type:'', scrutinee, arms: { variant: {bind?, body}, ... }}`.
- *  The `type` field is filled in by the elaborator (B6) from variant
- *  membership in the sum-type registry. */
+ *  Emits `{op:'match', scrutinee, arms: MatchArmEntry[]}`. Arm order is
+ *  preserved (it's meaningful — first match wins after the elaborator's
+ *  exhaustiveness check). The `type` field is filled in by the elaborator
+ *  (B6) from variant membership in the sum-type registry. */
 function parseMatch(ctx: Ctx): MatchNode {
   const scrutinee = parseTopExpr(ctx)
   consume(ctx, '{', '`{` after match scrutinee')
-  const arms: Record<string, MatchArm> = {}
+  const arms: MatchArmEntry[] = []
+  const seen = new Set<string>()
   while (peek(ctx).kind !== '}') {
     const variantTok = consume(ctx, 'ident', 'match arm variant name')
     const variant = variantTok.value as string
-    if (variant in arms) {
+    if (seen.has(variant)) {
       throw new ParseError(`match: duplicate arm for variant '${variant}'`, variantTok)
     }
+    seen.add(variant)
     let bindNames: string[] = []
     if (eat(ctx, '{')) {
       // Pattern: `Variant { field: name, field: name }` — bind payload
@@ -437,10 +449,10 @@ function parseMatch(ctx: Ctx): MatchNode {
     }
     consume(ctx, '=>', `arm '${variant}' \`=>\` after pattern`)
     const body = withScope(ctx.binders, bindNames, () => parseTopExpr(ctx))
-    const arm: MatchArm = { body }
+    const arm: MatchArmEntry = { variant: nameRef(variant), body }
     if (bindNames.length === 1) arm.bind = bindNames[0]
     else if (bindNames.length > 1) arm.bind = bindNames
-    arms[variant] = arm
+    arms.push(arm)
     if (peek(ctx).kind === '}') break
     consume(ctx, ',', 'match: `,` between arms')
   }

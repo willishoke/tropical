@@ -5,6 +5,7 @@
 import { describe, test, expect } from 'bun:test'
 import { parseBody, type BlockNode } from './statements.js'
 import { ParseError } from './expressions.js'
+import { nameRef } from './nodes.js'
 
 describe('body — empty and minimal', () => {
   test('empty body', () => {
@@ -29,16 +30,16 @@ describe('body — regDecl', () => {
 
   test('reg with type', () => {
     const b = parseBody('{ reg s: float = 0 }')
-    expect(b.decls).toEqual([{ op: 'regDecl', name: 's', init: 0, type: 'float' }])
+    expect(b.decls).toEqual([{ op: 'regDecl', name: 's', init: 0, type: nameRef('float') }])
   })
 
   test('reg with expression init', () => {
     const b = parseBody('{ reg state: float = 1 + 2 }')
     expect(b.decls).toHaveLength(1)
-    const d = b.decls[0] as { op: string; name: string; type: string; init: { op: string } }
+    const d = b.decls[0] as { op: string; name: string; type: { name: string }; init: { op: string } }
     expect(d.op).toBe('regDecl')
     expect(d.name).toBe('state')
-    expect(d.type).toBe('float')
+    expect(d.type.name).toBe('float')
     expect(d.init.op).toBe('add')
   })
 
@@ -162,7 +163,7 @@ describe('body — outputAssign', () => {
     expect(b.assigns).toEqual([{
       op: 'outputAssign',
       name: 'dac.out',
-      expr: { op: 'nestedOut', ref: 'osc', output: 'sin' },
+      expr: { op: 'nestedOut', ref: nameRef('osc'), output: nameRef('sin') },
     }])
   })
 
@@ -177,20 +178,26 @@ describe('body — instanceDecl', () => {
     expect(b.decls).toEqual([{
       op: 'instanceDecl',
       name: 'osc',
-      program: 'SinOsc',
-      inputs: { freq: 440 },
+      program: nameRef('SinOsc'),
+      inputs: [{ port: nameRef('freq'), value: 440 }],
     }])
   })
 
   test('instance with multiple inputs', () => {
     const b = parseBody('{ filt = OnePole(cutoff: 1000, x: osc.sin) }')
-    const d = b.decls[0] as { op: string; name: string; program: string; inputs: Record<string, unknown> }
+    const d = b.decls[0] as {
+      op: string; name: string; program: { name: string };
+      inputs: Array<{ port: { name: string }; value: unknown }>
+    }
     expect(d.op).toBe('instanceDecl')
     expect(d.name).toBe('filt')
-    expect(d.program).toBe('OnePole')
-    expect(Object.keys(d.inputs).sort()).toEqual(['cutoff', 'x'])
-    expect(d.inputs.cutoff).toBe(1000)
-    expect(d.inputs.x).toEqual({ op: 'nestedOut', ref: 'osc', output: 'sin' })
+    expect(d.program).toEqual(nameRef('OnePole'))
+    const ports = d.inputs.map(i => i.port.name).sort()
+    expect(ports).toEqual(['cutoff', 'x'])
+    const cutoff = d.inputs.find(i => i.port.name === 'cutoff')!
+    const x = d.inputs.find(i => i.port.name === 'x')!
+    expect(cutoff.value).toBe(1000)
+    expect(x.value).toEqual({ op: 'nestedOut', ref: nameRef('osc'), output: nameRef('sin') })
   })
 
   test('instance with type args', () => {
@@ -198,16 +205,17 @@ describe('body — instanceDecl', () => {
     expect(b.decls).toEqual([{
       op: 'instanceDecl',
       name: 'seq',
-      program: 'Sequencer',
-      type_args: { N: 4 },
-      inputs: { clock: { op: 'nameRef', name: 'trig' } },
+      program: nameRef('Sequencer'),
+      type_args: [{ param: nameRef('N'), value: 4 }],
+      inputs: [{ port: nameRef('clock'), value: { op: 'nameRef', name: 'trig' } }],
     }])
   })
 
   test('instance with multiple type args', () => {
     const b = parseBody('{ d = Delay<N=4, M=8>()  }')
-    const d = b.decls[0] as { type_args: Record<string, number> }
-    expect(d.type_args).toEqual({ N: 4, M: 8 })
+    const d = b.decls[0] as { type_args: Array<{ param: { name: string }; value: number }> }
+    const byName = Object.fromEntries(d.type_args.map(a => [a.param.name, a.value]))
+    expect(byName).toEqual({ N: 4, M: 8 })
   })
 
   test('instance with no inputs', () => {
