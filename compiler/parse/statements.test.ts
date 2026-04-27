@@ -125,6 +125,19 @@ describe('body — nextUpdate', () => {
   test('next without `=` rejected', () => {
     expect(() => parseBody('{ next x x }')).toThrow(ParseError)
   })
+
+  test('next on undeclared name parses cleanly (semantic check is elaborator-level)', () => {
+    // The parser does not check that `next foo = ...` references a
+    // previously-declared `reg foo`; that's a scope-resolution concern
+    // for the elaborator. Pin the current behaviour so future scope
+    // tightening is intentional.
+    const b = parseBody('{ next undeclared = 0 }')
+    expect(b.assigns).toEqual([{
+      op: 'nextUpdate',
+      target: { kind: 'reg', name: 'undeclared' },
+      expr: 0,
+    }])
+  })
 })
 
 describe('body — outputAssign', () => {

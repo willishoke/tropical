@@ -31,9 +31,9 @@
 import { tokenize, type Tok, type TokKind } from './lexer.js'
 import { commaList, consume, eat, formatTok, peek, withScope, ParseError, type Cursor } from './shared.js'
 import type {
-  ExprNode, ExprOpNode,
+  ExprNode,
   BinaryOpTag, BinaryOpNode, UnaryOpTag, UnaryOpNode,
-  CallNode, NameRefNode, NestedOutNode, FieldAccessNode, IndexNode,
+  CallNode, NameRefNode, BindingNode, NestedOutNode, IndexNode,
   LetNode, FoldNode, ScanNode, GenerateNode, IterateNode, ChainNode,
   Map2Node, ZipWithNode, TagNode, MatchNode, MatchArm,
 } from './nodes.js'
@@ -150,17 +150,18 @@ function parsePostfix(ctx: Ctx): ExprNode {
     if (t.kind === '.') {
       ctx.i++
       const field = consume(ctx, 'ident', 'field name after `.`')
-      // For node = nameRef(name), this is `instance.port`. The elaborator
-      // converts to `nestedOut(ref: instance, output: port)`. For other
-      // node shapes (e.g., array.length — not supported), emit the same
-      // nestedOut form and let the elaborator decide.
-      if (isNameRef(node)) {
-        const next: NestedOutNode = { op: 'nestedOut', ref: node.name, output: field.value as string }
-        node = next
-      } else {
-        const next: FieldAccessNode = { op: 'fieldAccess', expr: node, field: field.value as string }
-        node = next
+      // Dotted access is only meaningful as `instance.port` today — i.e.
+      // when the LHS is a bare identifier (parsed as nameRef). Reject
+      // `(expr).field` and other non-identifier LHS forms at parse time
+      // rather than emit a downstream-unconsumed node shape.
+      if (!isNameRef(node)) {
+        throw new ParseError(
+          `dot access requires an identifier on the left (got a complex expression)`,
+          t,
+        )
       }
+      const next: NestedOutNode = { op: 'nestedOut', ref: node.name, output: field.value as string }
+      node = next
     } else if (t.kind === '[') {
       ctx.i++
       const idx = parseTopExpr(ctx)
@@ -367,12 +368,12 @@ function parsePrimary(ctx: Ctx): ExprNode {
       ctx.i++  // consume `{`
       const payload = parseTagPayload(ctx, name)
       consume(ctx, '}', `closing \`}\` of tag '${name}' payload`)
-      const node: TagNode = { op: 'tag', type: '', variant: name }
+      const node: TagNode = { op: 'tag', variant: name }
       if (Object.keys(payload).length > 0) node.payload = payload
       return node
     }
     if (ctx.binders.has(name)) {
-      const binding: ExprOpNode = { op: 'binding', name }
+      const binding: BindingNode = { op: 'binding', name }
       return binding
     }
     const ref: NameRefNode = { op: 'nameRef', name }
@@ -444,7 +445,7 @@ function parseMatch(ctx: Ctx): MatchNode {
     consume(ctx, ',', 'match: `,` between arms')
   }
   consume(ctx, '}', 'match: closing `}`')
-  return { op: 'match', type: '', scrutinee, arms }
+  return { op: 'match', scrutinee, arms }
 }
 
 function parseArrayLiteral(ctx: Ctx): ExprNode {

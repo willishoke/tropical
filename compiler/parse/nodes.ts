@@ -1,37 +1,67 @@
 /**
  * nodes.ts — strict discriminated-union node types for the .trop parser.
  *
+ * Phase tagging
+ * -------------
+ * The exported types are *parsed-phase only*: they describe what the
+ * parser emits before the elaborator runs. Distinguishing characteristics:
+ *
+ *   - Bare identifiers become `NameRefNode` placeholders (the elaborator
+ *     resolves to input/reg/typeParam/instance refs).
+ *   - `TagNode` and `MatchNode` carry NO `type` field — the sum-type
+ *     name is filled in by the elaborator from the registry.
+ *
+ * The forthcoming elaborator (B6) defines a separate `ResolvedExprNode`
+ * union that lacks `NameRefNode` and adds the `type` field on tag/match.
+ * The elaborator's signature is `ParsedExprNode -> ResolvedExprNode`,
+ * making the phase distinction visible to type-checked downstream code.
+ *
+ * `ExprNode` is exported as an alias for `ParsedExprNode` so callers
+ * within this directory can use the short name; cross-phase callers
+ * should prefer the phase-explicit names.
+ *
  * Three universes, kept categorically distinct:
  *
- *   ExprNode    — value-producing computations (literals, infix/unary,
- *                 calls, dotted refs, indexing, let, combinator bodies,
- *                 match, tag, parser-internal placeholders).
- *   BodyDecl    — declarations that introduce names into program scope
- *                 (regDecl, delayDecl, paramDecl, instanceDecl,
- *                 programDecl).
- *   BodyAssign  — wires that pin a value to a port (outputAssign,
- *                 nextUpdate).
+ *   ParsedExprNode  — value-producing computations (literals, infix/unary,
+ *                     calls, dotted refs, indexing, let, combinator bodies,
+ *                     match, tag, parser-internal placeholders).
+ *   BodyDecl        — declarations that introduce names into program
+ *                     scope (regDecl, delayDecl, paramDecl, instanceDecl,
+ *                     programDecl).
+ *   BodyAssign      — wires that pin a value to a port (outputAssign,
+ *                     nextUpdate).
  *
- *   TypeDef     — type-level declarations (struct/sum/alias). Lives in
- *                 `ports.type_defs`, not in body.decls/assigns.
+ *   TypeDef         — type-level declarations (struct/sum/alias). Lives
+ *                     in `ports.type_defs`, not in body.decls/assigns.
  *
- * BlockNode therefore carries homogeneously-typed arrays: a body's decls
- * are all `BodyDecl`, its assigns all `BodyAssign`. A `regDecl` is not a
- * legal `ExprNode` — the type system enforces that a declaration cannot
- * appear in expression position, and vice versa.
+ * `BlockNode` carries homogeneously-typed arrays: a body's decls are all
+ * `BodyDecl`, its assigns all `BodyAssign`. A `regDecl` is not a legal
+ * `ExprNode` — the type system enforces position invariants.
  *
  * Pre-slottification only: the parser emits name-bearing variants
  * (`{op:'reg', name}`, `{op:'input', name}`, `{op:'nestedOut', ref}`).
  * The id-bearing variants used post-slottification (in
  * `compiler/session.ts:slottifyExpr`) live in `compiler/expr.ts`.
+ *
+ * Note on shadowing: the parser does not preserve let/combinator/match
+ * binder shadowing — `let { x: 1 } in let { x: 2 } in x` produces two
+ * `BindingNode { name: 'x' }` references that both refer to "any binder
+ * named x" in the surrounding scope. The elaborator must disambiguate
+ * if shadowing semantics matter for downstream stages. Renaming binders
+ * to `name#depth` or de-Bruijn indices at parse time is a future option.
  */
 
 // ─────────────────────────────────────────────────────────────
-// ExprNode — value-producing universe
+// ExprNode — value-producing universe (parsed phase)
 // ─────────────────────────────────────────────────────────────
 
-/** Top-level expression union: literals, arrays, and op-tagged objects. */
-export type ExprNode = number | boolean | ExprNode[] | ExprOpNode
+/** Top-level parser-phase expression union: literals, arrays, and op-tagged
+ *  objects emitted by the surface parser. */
+export type ParsedExprNode = number | boolean | ParsedExprNode[] | ExprOpNode
+
+/** Convenience alias for use inside the parser, where there's only one
+ *  phase. Cross-phase code should prefer the phase-explicit name. */
+export type ExprNode = ParsedExprNode
 
 /** All op-tagged expression nodes the parser can emit. The `op` tag is the
  *  discriminator; downstream switch statements narrow exhaustively. */
@@ -42,7 +72,6 @@ export type ExprOpNode =
   | NameRefNode
   | BindingNode
   | NestedOutNode
-  | FieldAccessNode
   | IndexNode
   | LetNode
   | FoldNode | ScanNode
@@ -104,15 +133,6 @@ export interface NestedOutNode {
   op: 'nestedOut'
   ref: string
   output: string | number
-}
-
-/** Field access on a non-instance expression. Emitted as a fallback for
- *  forms the parser doesn't recognize as instance refs (`expr.field`).
- *  Currently has no consumer; reserved for future struct-field access. */
-export interface FieldAccessNode {
-  op: 'fieldAccess'
-  expr: ExprNode
-  field: string
 }
 
 /** Indexing: `arr[i]`. Args are [array, index]. */
@@ -199,14 +219,14 @@ export interface ZipWithNode {
   body: ExprNode
 }
 
-// ── ADT expressions ───────────────────────────────────────────
+// ── ADT expressions (parsed phase — no `type` field) ──────────
 
-/** `Variant { field: expr, ... }` — sum-type constructor.
- *  `type` is the sum-type name; the parser emits `''` and the elaborator
- *  fills it from variant-name lookup. */
+/** `Variant { field: expr, ... }` — sum-type constructor as emitted by
+ *  the parser. The sum-type name is determined by the elaborator from
+ *  variant-name lookup, so the parser does NOT emit a `type` field.
+ *  The elaborator's `ResolvedTagNode` will add it. */
 export interface TagNode {
   op: 'tag'
-  type: string
   variant: string
   payload?: Record<string, ExprNode>
 }
@@ -220,10 +240,10 @@ export interface MatchArm {
 }
 
 /** `match scrutinee { Variant => body, V { f: x } => body, ... }`.
- *  `type` is empty when emitted by the parser; elaborator fills. */
+ *  No `type` field at the parsed phase; the elaborator infers from
+ *  arm variant names against the sum-type registry. */
 export interface MatchNode {
   op: 'match'
-  type: string
   scrutinee: ExprNode
   arms: Record<string, MatchArm>
 }

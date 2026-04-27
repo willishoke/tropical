@@ -234,6 +234,14 @@ describe('expressions — postfix: dot, index, call', () => {
       args: [{ op: 'nestedOut', ref: 'osc', output: 'out' }, 0],
     })
   })
+
+  test('dot access on a non-identifier LHS is rejected', () => {
+    // `(a + b).field` — the dotted form is reserved for `instance.port`.
+    // Allowing it on arbitrary expressions would emit an IR shape no
+    // downstream stage consumes; the parser refuses at parse time.
+    expect(() => parseExpr('(a + b).field')).toThrow(/dot access requires an identifier/)
+    expect(() => parseExpr('arr[0].field')).toThrow(/dot access requires an identifier/)
+  })
 })
 
 describe('expressions — let binding', () => {
@@ -390,6 +398,46 @@ describe('expressions — combinators', () => {
       in: { args: ExprNode[] }
     }
     expect(parsed.in.args[1]).toEqual({ op: 'nameRef', name: 'acc' })
+  })
+
+  test('shadowing is structurally invisible at parser level', () => {
+    // `let { x: 1 } in let { x: 2 } in x` — the parser does not
+    // disambiguate the two `x` binders. Both inner and outer x produce
+    // {op:'binding', name:'x'} indistinguishably; the elaborator (or
+    // any consumer that cares) is responsible for resolving by depth.
+    // This test pins the documented behavior so a future change that
+    // introduces de-Bruijn indices is intentional, not silent.
+    const parsed = parseExpr('let { x: 1 } in let { x: 2 } in x') as {
+      in: { in: ExprNode }
+    }
+    expect(parsed.in.in).toEqual({ op: 'binding', name: 'x' })
+  })
+
+  test('combinator binder reusing outer name', () => {
+    // `let { e: 9 } in fold(arr, 0, (e, x) => e + x)` — fold's `e`
+    // binder reuses the outer let's name. Inside the body, `e` refers
+    // to the fold binder, not the let. Outside the fold, `e` is the
+    // let binder. (Same shadowing-invisibility caveat as above.)
+    const parsed = parseExpr(
+      'let { e: 9 } in fold(arr, 0, (e, x) => e + x)',
+    ) as { in: { body: { args: ExprNode[] } } }
+    // Inside the fold body, `e` is a binding (refers to whichever
+    // enclosing binder is named e — which is the fold's, in nesting
+    // order, but the parser doesn't encode that).
+    expect(parsed.in.body.args[0]).toEqual({ op: 'binding', name: 'e' })
+  })
+
+  test('match arm binder shadowing a let', () => {
+    const parsed = parseExpr(`
+      let { x: 1 } in
+      match v {
+        Some { value: x } => x,
+        None => x
+      }
+    `) as { in: { arms: Record<string, { body: ExprNode }> } }
+    expect(parsed.in.arms.Some.body).toEqual({ op: 'binding', name: 'x' })
+    // Outer x is still in scope inside the None arm, so it's a binding too.
+    expect(parsed.in.arms.None.body).toEqual({ op: 'binding', name: 'x' })
   })
 
   test('lambda arity mismatch rejected', () => {

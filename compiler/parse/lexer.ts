@@ -210,11 +210,3 @@ function* lex(src: string): Generator<Tok> {
 }
 
 export const tokenize = (src: string): Tok[] => [...lex(src)]
-
-/** Pretty-format a token for diagnostic messages. */
-export function formatTok(t: Tok): string {
-  if (t.kind === 'num' || t.kind === 'ident' || t.kind === 'string') {
-    return `${t.kind}(${JSON.stringify(t.value)})`
-  }
-  return t.kind
-}

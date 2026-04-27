@@ -198,7 +198,6 @@ describe('expressions — tag construction', () => {
   test('tag with single-field payload', () => {
     expect(parseExpr('Some { value: 42 }')).toEqual({
       op: 'tag',
-      type: '',
       variant: 'Some',
       payload: { value: 42 },
     })
@@ -207,7 +206,6 @@ describe('expressions — tag construction', () => {
   test('tag with multi-field payload', () => {
     expect(parseExpr('Hz { freq: 440, gain: 0.5 }')).toEqual({
       op: 'tag',
-      type: '',
       variant: 'Hz',
       payload: { freq: 440, gain: 0.5 },
     })
@@ -216,7 +214,6 @@ describe('expressions — tag construction', () => {
   test('empty-payload tag via `Variant { }`', () => {
     expect(parseExpr('Empty { }')).toEqual({
       op: 'tag',
-      type: '',
       variant: 'Empty',
     })
   })
@@ -224,7 +221,6 @@ describe('expressions — tag construction', () => {
   test('payload field can be a complex expression', () => {
     expect(parseExpr('Vec { x: a + b, y: c * 2 }')).toEqual({
       op: 'tag',
-      type: '',
       variant: 'Vec',
       payload: {
         x: { op: 'add', args: [{ op: 'nameRef', name: 'a' }, { op: 'nameRef', name: 'b' }] },
@@ -259,7 +255,6 @@ describe('expressions — match', () => {
       }
     `)).toEqual({
       op: 'match',
-      type: '',
       scrutinee: { op: 'nameRef', name: 'v' },
       arms: {
         Red:   { body: 1 },
@@ -277,7 +272,6 @@ describe('expressions — match', () => {
       }
     `)).toEqual({
       op: 'match',
-      type: '',
       scrutinee: { op: 'nameRef', name: 'v' },
       arms: {
         Some: {
@@ -296,7 +290,6 @@ describe('expressions — match', () => {
       }
     `)).toEqual({
       op: 'match',
-      type: '',
       scrutinee: { op: 'nameRef', name: 'v' },
       arms: {
         Hz: {

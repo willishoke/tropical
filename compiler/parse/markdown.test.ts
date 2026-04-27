@@ -170,6 +170,26 @@ describe('markdown extractor — preserves structure', () => {
     const ext = extractMarkdown(src)
     expect(ext.blocks).toEqual([])
   })
+
+  test('mermaid block containing backticks is left intact', () => {
+    // A non-tropical fenced block that itself contains backtick chars
+    // (e.g. inline code in a label) must not confuse the closing-fence
+    // matcher. The closing fence regex only matches lines starting with
+    // backticks AND nothing-but-whitespace after them.
+    const src = [
+      '```mermaid',
+      'graph LR',
+      'a["uses `foo` syntax"] --> b',
+      '```',
+      '',
+      '```tropical',
+      'X',
+      '```',
+    ].join('\n')
+    const ext = extractMarkdown(src)
+    expect(ext.blocks).toHaveLength(1)
+    expect(ext.blocks[0].source).toBe('X')
+  })
 })
 
 describe('markdown extractor — joinBlocks', () => {
