@@ -1,0 +1,7 @@
+```tropical
+program WhiteNoise() -> (out: float) {
+  reg state: int = 88172645463325250
+  out = let { s1: state ^ state << 13 } in let { s2: s1 ^ s1 >> 7 } in let { s3: s2 ^ s2 << 17 } in (s3 & 65535) * 2 / 65535 - 1
+  next state = let { s1: state ^ state << 13 } in let { s2: s1 ^ s1 >> 7 } in s2 ^ s2 << 17
+}
+```

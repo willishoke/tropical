@@ -1,0 +1,5 @@
+```tropical
+program Exp(x: float = 0) -> (out: float) {
+  out = let { clamped: clamp(x, -87, 88); n: round(clamped * 1.4426950408889634); r: clamped - n * 0.693145751953125 - n * 0.0000014286068203094173; p: fold([0.000198756915, 0.0013981999507, 0.0083334519073, 0.041665795894, 0.16666665459, 0.50000001201], 0, (a, c) => c + a * r); exp_r: 1 + r * (1 + r * p) } in ldexp(exp_r, n)
+}
+```

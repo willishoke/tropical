@@ -1,0 +1,9 @@
+```tropical
+program TriggerRamp(trigger: signal = 0) -> (frames: float, edge: float) {
+  enum RampState { Quiescent, Counting(n: int) }
+  delay prev_trigger = trigger init 0
+  delay state: RampState = match state { Quiescent => select(trigger > 0.5 && prev_trigger <= 0.5, Counting { n: 0 }, Quiescent { }), Counting { f0: n } => select(trigger > 0.5 && prev_trigger <= 0.5, Counting { n: 0 }, Counting { n: n + 1 }) } init Quiescent { }
+  frames = match state { Quiescent => 0, Counting { f0: n } => n }
+  edge = (trigger > 0.5) * (prev_trigger <= 0.5)
+}
+```

@@ -1,0 +1,32 @@
+```tropical
+program Phaser16(input = 0, feedback = 0.4, lfo_speed = 0.2) -> (output, lfo) {
+  reg fb = 0
+  program _allpassStage(x, a) -> (y) {
+    reg x_prev = 0
+    reg y_prev = 0
+    y = -a * x + x_prev + a * y_prev
+    next x_prev = x
+    next y_prev = -a * x + x_prev + a * y_prev
+  }
+  lfo_sin = Sin(x: 6.283185307179586 * (sampleIndex() * lfo_speed / sampleRate()))
+  ap_0 = _allpassStage(x: input + feedback * fb, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_1 = _allpassStage(x: ap_0.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_2 = _allpassStage(x: ap_1.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_3 = _allpassStage(x: ap_2.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_4 = _allpassStage(x: ap_3.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_5 = _allpassStage(x: ap_4.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_6 = _allpassStage(x: ap_5.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_7 = _allpassStage(x: ap_6.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_8 = _allpassStage(x: ap_7.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_9 = _allpassStage(x: ap_8.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_10 = _allpassStage(x: ap_9.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_11 = _allpassStage(x: ap_10.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_12 = _allpassStage(x: ap_11.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_13 = _allpassStage(x: ap_12.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_14 = _allpassStage(x: ap_13.y, a: 0.6 + 0.35 * lfo_sin.out)
+  ap_15 = _allpassStage(x: ap_14.y, a: 0.6 + 0.35 * lfo_sin.out)
+  output = 0.5 * input + 0.5 * ap_15.y
+  lfo = lfo_sin.out
+  next fb = ap_15.y
+}
+```

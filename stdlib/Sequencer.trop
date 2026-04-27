@@ -1,0 +1,8 @@
+```tropical
+program Sequencer<N: int = 8>(clock: unipolar = 0, values: float[N]) -> (value: float) {
+  reg step: int = 0
+  delay prev_clock = clock init 0
+  value = values[step]
+  next step = (step + (clock > 0.5) * (prev_clock <= 0.5)) % N
+}
+```

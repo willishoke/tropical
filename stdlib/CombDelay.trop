@@ -1,0 +1,7 @@
+```tropical
+program CombDelay(input: signal = 0, feedback: float = 0.7) -> (out: signal) {
+  reg s = 0
+  out = input + feedback * s
+  next s = input + feedback * s
+}
+```

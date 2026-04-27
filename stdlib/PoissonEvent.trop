@@ -1,0 +1,7 @@
+```tropical
+program PoissonEvent(rate: float = 4) -> (trigger: signal) {
+  reg state: int = 2685821657736339000
+  trigger = let { s1: state ^ state << 13 } in let { s2: s1 ^ s1 >> 7 } in let { s3: s2 ^ s2 << 17 } in let { noise: (s3 & 65535) * 2 / 65535 - 1; threshold: 1 - 2 * rate / sampleRate() } in (noise > threshold) * 1
+  next state = let { s1: state ^ state << 13 } in let { s2: s1 ^ s1 >> 7 } in s2 ^ s2 << 17
+}
+```

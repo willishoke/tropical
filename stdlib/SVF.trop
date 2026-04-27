@@ -1,0 +1,11 @@
+```tropical
+program SVF(input: signal = 0, cutoff: freq = 1000, q: float = 0.707) -> (lp: signal, bp: signal, hp: signal) {
+  reg ic1eq = 0
+  reg ic2eq = 0
+  lp = let { g: 3.141592653589793 * cutoff / sampleRate(); k: 1 / q } in let { a1: 1 / (1 + g * (g + k)) } in let { a2: g * a1 } in let { a3: g * a2; v3: input - ic2eq } in let { v1: a1 * ic1eq + a2 * v3 } in ic2eq + (a2 * ic1eq + a3 * v3)
+  bp = let { g: 3.141592653589793 * cutoff / sampleRate(); k: 1 / q } in let { a1: 1 / (1 + g * (g + k)) } in let { a2: g * a1; v3: input - ic2eq } in a1 * ic1eq + a2 * v3
+  hp = let { g: 3.141592653589793 * cutoff / sampleRate(); k: 1 / q } in let { a1: 1 / (1 + g * (g + k)) } in let { a2: g * a1; a3: g * (g * a1); v3: input - ic2eq } in let { v1: a1 * ic1eq + a2 * v3; v2: ic2eq + (a2 * ic1eq + a3 * v3) } in input - k * v1 - v2
+  next ic1eq = let { g: 3.141592653589793 * cutoff / sampleRate(); k: 1 / q } in let { a1: 1 / (1 + g * (g + k)) } in let { a2: g * a1; v3: input - ic2eq } in let { v1: a1 * ic1eq + a2 * v3 } in 2 * v1 - ic1eq
+  next ic2eq = let { g: 3.141592653589793 * cutoff / sampleRate(); k: 1 / q } in let { a1: 1 / (1 + g * (g + k)) } in let { a2: g * a1; a3: g * (g * a1); v3: input - ic2eq } in let { v2: ic2eq + (a2 * ic1eq + a3 * v3) } in 2 * v2 - ic2eq
+}
+```

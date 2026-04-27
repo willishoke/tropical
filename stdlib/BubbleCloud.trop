@@ -1,0 +1,16 @@
+```tropical
+program BubbleCloud(trigger: signal = 0, radius: float = 0.001, q: float = 30, sigma: float = 0.3, decay_scale: float = 10, amp_scale: float = 0.05) -> (out: float) {
+  reg voice_idx: int = 0
+  delay prev_trigger = trigger init 0
+  v0 = Bubble(trigger: trigger * (voice_idx == 0), radius: radius, q: q, sigma: sigma, decay_scale: decay_scale, amp_scale: amp_scale)
+  v1 = Bubble(trigger: trigger * (voice_idx == 1), radius: radius, q: q, sigma: sigma, decay_scale: decay_scale, amp_scale: amp_scale)
+  v2 = Bubble(trigger: trigger * (voice_idx == 2), radius: radius, q: q, sigma: sigma, decay_scale: decay_scale, amp_scale: amp_scale)
+  v3 = Bubble(trigger: trigger * (voice_idx == 3), radius: radius, q: q, sigma: sigma, decay_scale: decay_scale, amp_scale: amp_scale)
+  v4 = Bubble(trigger: trigger * (voice_idx == 4), radius: radius, q: q, sigma: sigma, decay_scale: decay_scale, amp_scale: amp_scale)
+  v5 = Bubble(trigger: trigger * (voice_idx == 5), radius: radius, q: q, sigma: sigma, decay_scale: decay_scale, amp_scale: amp_scale)
+  v6 = Bubble(trigger: trigger * (voice_idx == 6), radius: radius, q: q, sigma: sigma, decay_scale: decay_scale, amp_scale: amp_scale)
+  v7 = Bubble(trigger: trigger * (voice_idx == 7), radius: radius, q: q, sigma: sigma, decay_scale: decay_scale, amp_scale: amp_scale)
+  out = v0.out + v1.out + (v2.out + v3.out) + (v4.out + v5.out + (v6.out + v7.out))
+  next voice_idx = let { tick: (trigger > 0.5) * (prev_trigger <= 0.5) } in (voice_idx + tick) % 8
+}
+```

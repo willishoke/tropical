@@ -1,0 +1,6 @@
+```tropical
+program Seq4MinorTranspose(trigger: unipolar = 0) -> (freq: freq) {
+  seq = Sequencer<N=4>(clock: trigger, values: [110, 130.81, 164.81, 196])
+  freq = seq.value
+}
+```

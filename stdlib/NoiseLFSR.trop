@@ -1,0 +1,10 @@
+```tropical
+program NoiseLFSR(clock = 0) -> (out: signal) {
+  reg state: int = 44257
+  reg value = 0
+  delay prev_clock = clock init 0
+  out = let { tick: (clock > 0.5) * (prev_clock <= 0.5); lsb: state & 1; shifted: state >> 1 } in let { newState: select(lsb, shifted ^ 46080, shifted); normalized: select(lsb, shifted ^ 46080, shifted) * 2 / 65535 - 1 } in select(tick, normalized, value)
+  next state = let { tick: (clock > 0.5) * (prev_clock <= 0.5); lsb: state & 1; shifted: state >> 1 } in let { newState: select(lsb, shifted ^ 46080, shifted) } in select(tick, newState, state)
+  next value = let { tick: (clock > 0.5) * (prev_clock <= 0.5); lsb: state & 1; shifted: state >> 1 } in let { newState: select(lsb, shifted ^ 46080, shifted); normalized: select(lsb, shifted ^ 46080, shifted) * 2 / 65535 - 1 } in select(tick, normalized, value)
+}
+```

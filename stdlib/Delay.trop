@@ -1,0 +1,7 @@
+```tropical
+program Delay<N: int = 44100>(x = 0) -> (y) breaks_cycles {
+  reg buf = zeros(N)
+  y = buf[sampleIndex() % N]
+  next buf = arraySet(buf, sampleIndex() % N, x)
+}
+```

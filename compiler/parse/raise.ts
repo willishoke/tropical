@@ -138,6 +138,7 @@ export function raiseProgram(legacy: LegacyProgramNode): ParsedProgramNode {
     const ports = raisePorts(legacy.ports)
     if (ports !== undefined) out.ports = ports
   }
+  if (legacy.breaks_cycles === true) out.breaks_cycles = true
   return out
 }
 
@@ -273,12 +274,14 @@ function raiseZerosArg(arg: LegacyExprNode): ParsedExprNode {
 }
 
 function raiseDelayDecl(d: Record<string, unknown>): ParsedDelayDeclNode {
-  return {
+  const out: ParsedDelayDeclNode = {
     op: 'delayDecl',
     name: d.name as string,
     update: raiseExpr(d.update as LegacyExprNode),
     init: raiseExpr(d.init as LegacyExprNode),
   }
+  if (typeof d.type === 'string') out.type = nameRef(d.type)
+  return out
 }
 
 function raiseParamDecl(d: Record<string, unknown>): ParsedParamDeclNode {

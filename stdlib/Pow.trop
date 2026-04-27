@@ -1,0 +1,7 @@
+```tropical
+program Pow(x: float = 1, y: float = 1) -> (out: float) {
+  log_x = Log(x: x)
+  exp = Exp(x: y * log_x.out)
+  out = exp.out
+}
+```

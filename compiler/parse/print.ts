@@ -134,6 +134,7 @@ function printProgramHeader(prog: ProgramNode): string {
   if (outputs.length > 0) {
     out += ` -> (${outputs.map(p => printPortSpec(p, /*allowDefault=*/ false)).join(', ')})`
   }
+  if (prog.breaks_cycles === true) out += ' breaks_cycles'
   return out
 }
 
@@ -187,7 +188,8 @@ function printRegDecl(d: RegDeclNode): string {
 }
 
 function printDelayDecl(d: DelayDeclNode): string {
-  return `delay ${d.name} = ${printExprAt(d.update, PREC_LOWEST)} init ${printExprAt(d.init, PREC_LOWEST)}`
+  const typeAnn = d.type !== undefined ? `: ${d.type.name}` : ''
+  return `delay ${d.name}${typeAnn} = ${printExprAt(d.update, PREC_LOWEST)} init ${printExprAt(d.init, PREC_LOWEST)}`
 }
 
 function printParamDecl(d: ParamDeclNode): string {

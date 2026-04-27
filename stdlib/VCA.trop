@@ -1,0 +1,5 @@
+```tropical
+program VCA(audio: float = 0, cv: float = 0) -> (out: float) {
+  out = audio * cv
+}
+```

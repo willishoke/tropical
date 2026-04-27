@@ -1,0 +1,9 @@
+```tropical
+program BitCrusher(audio = 0, bit_depth = 24, sample_rate_hz = 44100) -> (output) {
+  reg hold_sample = 0
+  reg hold_counter = 0
+  output = let { bd: clamp(bit_depth, 1, 24); targetSr: clamp(sample_rate_hz, 1, sampleRate()) } in let { levels: pow(2, bd - 1); samplesPerHold: clamp(floorDiv(sampleRate(), targetSr), 1, 44100); incremented: hold_counter + 1 } in let { quantized: floorDiv(audio * levels + 0.5, 1) / levels; shouldCapture: incremented >= samplesPerHold } in select(shouldCapture, quantized, hold_sample)
+  next hold_sample = let { bd: clamp(bit_depth, 1, 24); targetSr: clamp(sample_rate_hz, 1, sampleRate()) } in let { levels: pow(2, bd - 1); samplesPerHold: clamp(floorDiv(sampleRate(), targetSr), 1, 44100); incremented: hold_counter + 1 } in let { quantized: floorDiv(audio * levels + 0.5, 1) / levels; shouldCapture: incremented >= samplesPerHold } in select(shouldCapture, quantized, hold_sample)
+  next hold_counter = let { targetSr: clamp(sample_rate_hz, 1, sampleRate()) } in let { samplesPerHold: clamp(floorDiv(sampleRate(), targetSr), 1, 44100); incremented: hold_counter + 1 } in let { shouldCapture: incremented >= samplesPerHold } in select(shouldCapture, 0, incremented)
+}
+```

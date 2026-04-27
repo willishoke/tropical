@@ -1,0 +1,9 @@
+```tropical
+program OnePole(input: signal = 0, g: float = 0.1) -> (out: signal) {
+  reg s = 0
+  tanh_in = Tanh(x: input)
+  tanh_s = Tanh(x: s)
+  out = s + g * (tanh_in.out - tanh_s.out)
+  next s = s + g * (tanh_in.out - tanh_s.out)
+}
+```
