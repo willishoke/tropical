@@ -37,9 +37,10 @@
  * Out of scope (deferred to B5): ADTs and `match` (`type_defs` field).
  */
 
-import { tokenize, type Tok, type TokKind } from './lexer.js'
-import { parseExprFromTokens, type ExprNode, ParseError } from './expressions.js'
+import { tokenize, type Tok } from './lexer.js'
+import { parseExprFromTokens, type ExprNode } from './expressions.js'
 import { parseBodyFromTokens, type BlockNode, type BodyOptions } from './statements.js'
+import { commaList, consume, eat, formatTok, isContextualKw, peek, ParseError, type Cursor } from './shared.js'
 
 // ─────────────────────────────────────────────────────────────
 // ProgramNode shape — kept loose to avoid cycles with compiler/program.ts
@@ -75,40 +76,12 @@ export interface ProgramNode {
 // Parser context
 // ─────────────────────────────────────────────────────────────
 
-interface Ctx {
-  toks: Tok[]
-  i: number
+interface Ctx extends Cursor {
   /** Type-param names in scope at the current point. Populated when a
    *  program header declares `<N: int, ...>`. Used by the port-type
    *  parser to recognize array shapes like `float[N]` as
    *  `{op:'typeParam',name:'N'}` rather than a bare name. */
   typeParams: Set<string>
-}
-
-function peek(ctx: Ctx, offset = 0): Tok {
-  return ctx.toks[Math.min(ctx.i + offset, ctx.toks.length - 1)]
-}
-
-function consume(ctx: Ctx, kind: TokKind, what?: string): Tok {
-  const t = ctx.toks[ctx.i]
-  if (t.kind !== kind) {
-    throw new ParseError(`expected ${what ?? kind}, got ${formatTok(t)}`, t)
-  }
-  ctx.i++
-  return t
-}
-
-function eat(ctx: Ctx, kind: TokKind): Tok | null {
-  const t = ctx.toks[ctx.i]
-  if (t.kind !== kind) return null
-  ctx.i++
-  return t
-}
-
-function formatTok(t: Tok): string {
-  if (t.kind === 'eof') return 'end of input'
-  if (t.value !== undefined) return `${t.kind}(${JSON.stringify(t.value)})`
-  return `'${t.kind}'`
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -208,8 +181,7 @@ function parseProgramFromCtx(ctx: Ctx): ProgramNode {
 function parseTypeParams(ctx: Ctx): Record<string, { type: 'int'; default?: number }> {
   consume(ctx, '<', 'opening `<` of type params')
   const out: Record<string, { type: 'int'; default?: number }> = {}
-  if (eat(ctx, '>')) return out
-  for (;;) {
+  commaList(ctx, '>', () => {
     const nameTok = consume(ctx, 'ident', 'type-param name')
     const name = nameTok.value as string
     if (name in out) {
@@ -230,9 +202,9 @@ function parseTypeParams(ctx: Ctx): Record<string, { type: 'int'; default?: numb
       entry.default = defTok.value as number
     }
     out[name] = entry
-    if (eat(ctx, '>')) return out
-    consume(ctx, ',', '`,` between type params')
-  }
+  })
+  consume(ctx, '>', 'closing `>` of type params')
+  return out
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -240,13 +212,7 @@ function parseTypeParams(ctx: Ctx): Record<string, { type: 'int'; default?: numb
 // ─────────────────────────────────────────────────────────────
 
 function parsePortList(ctx: Ctx, allowDefault: boolean): ProgramPort[] {
-  const out: ProgramPort[] = []
-  if (peek(ctx).kind === ')') return out
-  for (;;) {
-    out.push(parsePortSpec(ctx, allowDefault))
-    if (peek(ctx).kind === ')') return out
-    consume(ctx, ',', '`,` between port specs')
-  }
+  return commaList(ctx, ')', () => parsePortSpec(ctx, allowDefault))
 }
 
 /** Parse one port spec. Forms (input):
@@ -302,13 +268,7 @@ function parsePortType(ctx: Ctx): PortTypeDecl {
   if (peek(ctx).kind !== '[') return element
 
   ctx.i++  // consume `[`
-  const shape: ShapeDim[] = []
-  if (peek(ctx).kind !== ']') {
-    shape.push(parseShapeDim(ctx))
-    while (eat(ctx, ',')) {
-      shape.push(parseShapeDim(ctx))
-    }
-  }
+  const shape = commaList(ctx, ']', () => parseShapeDim(ctx))
   consume(ctx, ']', `closing \`]\` of array type`)
   if (shape.length === 0) {
     throw new ParseError(`array type must have at least one shape dim`, elemTok)
@@ -351,7 +311,7 @@ function parseBounds(ctx: Ctx): [number | null, number | null] {
 
 function parseBound(ctx: Ctx): number | null {
   const t = peek(ctx)
-  if (t.kind === 'ident' && t.value === 'null') {
+  if (isContextualKw(t, 'null')) {
     ctx.i++
     return null
   }
