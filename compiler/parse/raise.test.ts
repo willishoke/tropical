@@ -4,7 +4,7 @@
  * The strongest assertion is round-trip identity through `lower`:
  * `lower(raise(legacy))` should deep-equal the original `legacy` for any
  * legacy ProgramNode whose construction the lowerer can re-produce. Where
- * the lowerer cannot (e.g. the `{zeros: <N>}` sugar in Delay.json's reg
+ * the lowerer cannot (e.g. the `{zeros: <N>}` sugar in Delay.trop's reg
  * init, which has no parser-shape inverse), we assert structurally on the
  * raise output.
  */
@@ -15,36 +15,26 @@ import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { raiseProgram } from './raise.js'
 import { lowerProgram } from './lower.js'
+import { extractMarkdown } from './markdown.js'
+import { parseProgram } from './declarations.js'
 import { nameRef, type ProgramNode as ParsedProgramNode } from './nodes.js'
 import type { ProgramNode as LegacyProgramNode } from '../program.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-/** Walk a JSON tree and strip `body.value === null` placeholders wherever
- *  they appear (top-level body, nested programDecl bodies). Pre-A4 stdlib
- *  files keep this legacy carry-over; the lowerer does not emit it. */
-function stripBodyValueNulls(node: unknown): void {
-  if (Array.isArray(node)) {
-    for (const x of node) stripBodyValueNulls(x)
-    return
+/** Load a stdlib program from its .trop source as a legacy ProgramNode
+ *  (i.e., the same shape `loadProgramAsType` consumes). The legacy node
+ *  is produced by the production parse+lower pipeline; that's the only
+ *  source-of-truth for stdlib programs after Phase B8e removed JSON.
+ *  The round-trip assertion `lower(raise(legacy)) === legacy` still
+ *  verifies that raise is the categorical inverse of lower. */
+function loadLegacy(filename: string): LegacyProgramNode {
+  const text = readFileSync(join(__dirname, '../../stdlib', filename), 'utf-8')
+  const ext = extractMarkdown(text)
+  if (ext.blocks.length !== 1) {
+    throw new Error(`${filename}: expected exactly 1 tropical block, got ${ext.blocks.length}`)
   }
-  if (node === null || typeof node !== 'object') return
-  const obj = node as Record<string, unknown>
-  if (obj.op === 'block' && obj.value === null) delete obj.value
-  for (const v of Object.values(obj)) stripBodyValueNulls(v)
-}
-
-/** Load a stdlib program file from disk and convert to the legacy
- *  ProgramNode shape consumed by `raiseProgram`. The on-disk file is a
- *  ProgramFile (carries `schema`, no top-level `op`); the runtime
- *  ProgramNode adds `op:'program'` and drops the deprecated `body.value`
- *  placeholder. */
-function loadLegacy(name: string): LegacyProgramNode {
-  const raw = JSON.parse(readFileSync(join(__dirname, '../../stdlib', name), 'utf-8')) as Record<string, unknown>
-  delete raw.schema
-  const node = { op: 'program' as const, ...raw } as unknown as LegacyProgramNode
-  stripBodyValueNulls(node)
-  return node
+  return lowerProgram(parseProgram(ext.blocks[0].source))
 }
 
 /** Round-trip assertion: lower(raise(legacy)) deep-equals legacy. */
@@ -74,18 +64,18 @@ describe('raise — empty program', () => {
 // ─────────────────────────────────────────────────────────────
 
 describe('raise — stdlib round-trips', () => {
-  test('OnePole.json', () => {
-    assertRoundTrip(loadLegacy('OnePole.json'))
+  test('OnePole.trop', () => {
+    assertRoundTrip(loadLegacy('OnePole.trop'))
   })
 
-  test('AllpassDelay.json (let-binding)', () => {
-    assertRoundTrip(loadLegacy('AllpassDelay.json'))
+  test('AllpassDelay.trop (let-binding)', () => {
+    assertRoundTrip(loadLegacy('AllpassDelay.trop'))
   })
 
-  test('EnvExpDecay.json (sum types, tag, match, payload, bind)', () => {
+  test('EnvExpDecay.trop (sum types, tag, match, payload, bind)', () => {
     // The on-disk file decorates `delayDecl` with a `type: "Env"` annotation
     // that the parser AST does not carry, so we strip it before round-trip.
-    const legacy = loadLegacy('EnvExpDecay.json')
+    const legacy = loadLegacy('EnvExpDecay.trop')
     for (const decl of legacy.body?.decls ?? []) {
       const obj = decl as { op?: string; type?: unknown }
       if (obj.op === 'delayDecl' && obj.type !== undefined) delete obj.type
@@ -93,20 +83,20 @@ describe('raise — stdlib round-trips', () => {
     assertRoundTrip(legacy)
   })
 
-  test('Sin.json (fold over array of literals)', () => {
-    assertRoundTrip(loadLegacy('Sin.json'))
+  test('Sin.trop (fold over array of literals)', () => {
+    assertRoundTrip(loadLegacy('Sin.trop'))
   })
 
-  test('Exp.json (fold + clamp + ldexp)', () => {
-    assertRoundTrip(loadLegacy('Exp.json'))
+  test('Exp.trop (fold + clamp + ldexp)', () => {
+    assertRoundTrip(loadLegacy('Exp.trop'))
   })
 
-  test('LadderFilter.json (deeply-nested nestedOut chain)', () => {
-    assertRoundTrip(loadLegacy('LadderFilter.json'))
+  test('LadderFilter.trop (deeply-nested nestedOut chain)', () => {
+    assertRoundTrip(loadLegacy('LadderFilter.trop'))
   })
 
-  test('Phaser.json (nested programDecl)', () => {
-    assertRoundTrip(loadLegacy('Phaser.json'))
+  test('Phaser.trop (nested programDecl)', () => {
+    assertRoundTrip(loadLegacy('Phaser.trop'))
   })
 })
 
@@ -117,7 +107,7 @@ describe('raise — stdlib round-trips', () => {
 
 describe('raise — Delay (zeros sugar)', () => {
   test('regDecl.init {zeros: {typeParam: N}} raises to call(zeros, [nameRef(N)])', () => {
-    const legacy = loadLegacy('Delay.json')
+    const legacy = loadLegacy('Delay.trop')
     const raised = raiseProgram(legacy)
     const reg = raised.body.decls[0]
     if (reg.op !== 'regDecl') throw new Error('expected regDecl')
@@ -129,13 +119,13 @@ describe('raise — Delay (zeros sugar)', () => {
   })
 
   test('bare-name output port "y" preserved as a string', () => {
-    const legacy = loadLegacy('Delay.json')
+    const legacy = loadLegacy('Delay.trop')
     const raised = raiseProgram(legacy)
     expect(raised.ports?.outputs).toEqual(['y'])
   })
 
   test('typeParam ref in expression position raises to nameRef', () => {
-    const legacy = loadLegacy('Delay.json')
+    const legacy = loadLegacy('Delay.trop')
     const raised = raiseProgram(legacy)
     // outputAssign('y') = index(nameRef('buf'), mod(call(sampleIndex), nameRef('N')))
     const outAssign = raised.body.assigns[0]
@@ -232,7 +222,7 @@ describe('raise — error cases', () => {
 
 describe('raise — parser-shape sanity', () => {
   test('raise(OnePole legacy) produces NameRefs at every reference site', () => {
-    const raised = raiseProgram(loadLegacy('OnePole.json'))
+    const raised = raiseProgram(loadLegacy('OnePole.trop'))
     // The same hand-authored shape from lower.test.ts; if raise produces it,
     // raise and the lowerer agree on the parsed shape.
     const expected: ParsedProgramNode = {

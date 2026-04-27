@@ -5,7 +5,7 @@
  * input, interprets the resulting ExprNode tree, and compares against
  * JavaScript Math.*. Pure TS, no FFI — runs without libtropical.dylib.
  *
- * These tests pin the polynomial approximations shipped in stdlib/*.json
+ * These tests pin the polynomial approximations shipped in stdlib/*.trop
  * to documented accuracy thresholds. Changing a coefficient without
  * updating the corresponding program should trip a threshold here.
  */
