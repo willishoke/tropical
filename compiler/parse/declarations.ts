@@ -152,6 +152,15 @@ function parseProgramFromCtx(ctx: Ctx): ProgramNode {
     consume(ctx, ')', `closing \`)\` of outputs for '${name}'`)
   }
 
+  // Optional contextual `breaks_cycles` flag — informs the legacy
+  // flattener's cycle detector. Recognized as an ident token because the
+  // lexer doesn't promote it to a reserved word.
+  let breaksCycles = false
+  if (isContextualKw(peek(ctx), 'breaks_cycles')) {
+    ctx.i++
+    breaksCycles = true
+  }
+
   // Body
   consume(ctx, '{', `\`{\` opening body of '${name}'`)
   const { block, typeDefs, nextIdx } = parseBodyFromTokens(ctx.toks, ctx.i, BODY_OPTS)
@@ -165,6 +174,7 @@ function parseProgramFromCtx(ctx: Ctx): ProgramNode {
   if (outputs && outputs.length > 0) ports.outputs = outputs
   if (typeDefs.length > 0) ports.type_defs = typeDefs
   if (ports.inputs || ports.outputs || ports.type_defs) node.ports = ports
+  if (breaksCycles) node.breaks_cycles = true
   return node
 }
 
@@ -311,25 +321,30 @@ function parsePortList(ctx: Ctx, allowDefault: boolean): ProgramPort[] {
 
 /** Parse one port spec. Forms (input):
  *    name
+ *    name = default                   (no explicit type)
  *    name: type
  *    name: type = default
  *    name: type in [lo, hi]
  *    name: type = default in [lo, hi]
  *  Outputs accept the same forms minus `= default`.
  *  When the spec has only a name (no type, default, or bounds), emits the
- *  bare-string form to match stdlib JSON convention. */
+ *  bare-string form to match stdlib JSON convention. The untyped-with-
+ *  default form preserves legacy stdlib programs (e.g. BitCrusher,
+ *  LadderFilter) whose port specs declare a default but no type. */
 function parsePortSpec(ctx: Ctx, allowDefault: boolean): ProgramPort {
   const nameTok = consume(ctx, 'ident', 'port name')
   const name = nameTok.value as string
 
-  if (peek(ctx).kind !== ':') {
-    return name  // bare-string form
-  }
-  ctx.i++  // consume `:`
-
-  const type = parsePortType(ctx)
+  let type: PortTypeDecl | undefined
   let defaultExpr: ExprNode | undefined
   let bounds: [number | null, number | null] | undefined
+
+  if (peek(ctx).kind === ':') {
+    ctx.i++  // consume `:`
+    type = parsePortType(ctx)
+  } else if (peek(ctx).kind !== '=') {
+    return name  // bare-string form
+  }
 
   // Optional `= default` (inputs only)
   if (peek(ctx).kind === '=') {
@@ -346,7 +361,8 @@ function parsePortSpec(ctx: Ctx, allowDefault: boolean): ProgramPort {
     bounds = parseBounds(ctx)
   }
 
-  const spec: ProgramPortSpec = { name, type }
+  const spec: ProgramPortSpec = { name }
+  if (type !== undefined) spec.type = type
   if (defaultExpr !== undefined) spec.default = defaultExpr
   if (bounds !== undefined) spec.bounds = bounds
   return spec

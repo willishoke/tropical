@@ -199,11 +199,20 @@ function parseRegDecl(ctx: Ctx): RegDeclNode {
   return out
 }
 
-/** `delay name = update_expr init init_value` —
- *  `init` is a contextual keyword (parsed as an ident token). */
+/** `delay name[: SumType] = update_expr init init_value` —
+ *  `init` is a contextual keyword (parsed as an ident token). The
+ *  optional `: SumType` annotation names a sum-type the delay carries;
+ *  the legacy session loader's sum-decomposition pre-pass requires it
+ *  to expand bundle delays. */
 function parseDelayDecl(ctx: Ctx): DelayDeclNode {
   consume(ctx, 'delay', 'delay keyword')
   const name = consume(ctx, 'ident', 'delay name').value as string
+  let typeAnn: import('./nodes.js').NameRefNode | undefined
+  if (peek(ctx).kind === ':') {
+    ctx.i++
+    const tTok = consume(ctx, 'ident', 'delay type name')
+    typeAnn = nameRef(tTok.value as string)
+  }
   consume(ctx, '=', 'delay `=` before update expression')
   const update = parseExpr(ctx)
   // Contextual `init` terminator. The expression parser leaves `init` on
@@ -215,7 +224,9 @@ function parseDelayDecl(ctx: Ctx): DelayDeclNode {
   }
   ctx.i++
   const init = parseExpr(ctx)
-  return { op: 'delayDecl', name, update, init }
+  const out: DelayDeclNode = { op: 'delayDecl', name, update, init }
+  if (typeAnn !== undefined) out.type = typeAnn
+  return out
 }
 
 /** `param name: smoothed|trigger [= default]`.
@@ -282,20 +293,39 @@ function parseDacOutAssign(ctx: Ctx): OutputAssignNode {
   return { op: 'outputAssign', name: 'dac.out', expr }
 }
 
-/** `name = ...` — either an instanceDecl (RHS is `Capitalized(...)`) or an
- *  outputAssign (RHS is anything else). */
+/** `name = ...` — either an instanceDecl (RHS is `Type(...)` or `Type<...>(...)`
+ *  with `Type` either capitalized or recognized syntactically by the keyword-
+ *  arg shape) or an outputAssign (RHS is anything else). */
 function parseAssignOrInstance(ctx: Ctx): BodyItem {
   const nameTok = consume(ctx, 'ident', 'statement target name')
   const name = nameTok.value as string
   consume(ctx, '=', `\`=\` after '${name}'`)
 
-  // Lookahead: is the RHS a capitalized identifier followed by `(` or `<`?
-  // If so, parse as instanceDecl. Otherwise parse as outputAssign expr.
+  // Lookahead: is the RHS an identifier followed by `(` or `<` whose first
+  // argument is a keyword (`port:`)? Function calls in expression position
+  // never use `port:` named args — only instance decls do — so the
+  // `ident ( ident :` shape unambiguously indicates an instance decl.
+  // Capitalized identifiers always parse as instance decls (legacy
+  // convention; matches stdlib type-name casing).
   const t = peek(ctx)
   const t2 = peek(ctx, 1)
-  if (t.kind === 'ident' && typeof t.value === 'string' && isCapitalized(t.value)
-      && (t2.kind === '(' || t2.kind === '<')) {
+  if (t.kind === 'ident' && typeof t.value === 'string' && t2.kind === '<') {
     return { kind: 'decl', node: parseInstanceRhs(ctx, name) }
+  }
+  if (t.kind === 'ident' && typeof t.value === 'string' && t2.kind === '(') {
+    if (isCapitalized(t.value)) {
+      return { kind: 'decl', node: parseInstanceRhs(ctx, name) }
+    }
+    // Lowercase/underscore-led type name (e.g. `_allpassStage`): peek
+    // past `(` for a keyword-arg shape `ident :`. Treat the empty
+    // argument list `()` as a regular call (instance decls always have
+    // explicit inputs in stdlib usage; an instance with zero inputs is
+    // indistinguishable here and falls into outputAssign).
+    const t3 = peek(ctx, 2)
+    const t4 = peek(ctx, 3)
+    if (t3.kind === 'ident' && t4.kind === ':') {
+      return { kind: 'decl', node: parseInstanceRhs(ctx, name) }
+    }
   }
 
   const expr = parseExpr(ctx)

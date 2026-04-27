@@ -234,6 +234,7 @@ function lowerProgramWith(
   if (prog.type_params !== undefined) out.type_params = prog.type_params
   const ports = lowerPorts(prog.ports, scope)
   if (ports !== undefined) out.ports = ports
+  if (prog.breaks_cycles === true) out.breaks_cycles = true
   return out
 }
 
@@ -339,19 +340,54 @@ function lowerRegDecl(d: ParsedRegDeclNode, scope: Scope): LegacyExprNode {
   const out: { op: 'regDecl'; name: string; init: LegacyExprNode; type?: string } = {
     op: 'regDecl',
     name: d.name,
-    init: lowerExpr(d.init, scope),
+    init: lowerRegInit(d.init, scope),
   }
   if (d.type !== undefined) out.type = d.type.name
   return out as LegacyExprNode
 }
 
+/** Reg init has one legacy-only form the parser/printer don't speak as a
+ *  general expression: `{zeros: <N>}` (or `{zeros: {typeParam: <name>}}`)
+ *  for array-typed registers. The printer raises this to the surface
+ *  `zeros(N)`; round-tripping requires the lowerer to detect the special
+ *  shape `call(nameRef('zeros'), [...])` in reg-init position and emit the
+ *  sugar form, since the legacy session loader expects it as a literal
+ *  property bag. Plain scalar inits pass straight through. */
+function lowerRegInit(init: ParsedExprNode, scope: Scope): LegacyExprNode {
+  if (typeof init === 'object' && init !== null && !Array.isArray(init)
+      && init.op === 'call'
+      && typeof init.callee === 'object' && init.callee !== null && !Array.isArray(init.callee)
+      && init.callee.op === 'nameRef'
+      && (init.callee as NameRefNode).name === 'zeros') {
+    if (init.args.length !== 1) {
+      throw new Error(`lower: zeros(...) reg init must take exactly 1 argument, got ${init.args.length}`)
+    }
+    const arg = init.args[0]
+    // Type-param dimension: emit `{typeParam: <name>}` — the legacy nested sugar.
+    if (typeof arg === 'object' && arg !== null && !Array.isArray(arg) && arg.op === 'nameRef') {
+      const name = (arg as NameRefNode).name
+      if (scope.typeParams.has(name)) {
+        return { zeros: { typeParam: name } } as unknown as LegacyExprNode
+      }
+    }
+    // Numeric literal dimension.
+    if (typeof arg === 'number') {
+      return { zeros: arg } as unknown as LegacyExprNode
+    }
+    throw new Error(`lower: zeros(...) reg init dimension must be a numeric literal or a type-param identifier`)
+  }
+  return lowerExpr(init, scope)
+}
+
 function lowerDelayDecl(d: ParsedDelayDeclNode, scope: Scope): LegacyExprNode {
-  return {
+  const out: { op: 'delayDecl'; name: string; update: LegacyExprNode; init: LegacyExprNode; type?: string } = {
     op: 'delayDecl',
     name: d.name,
     update: lowerExpr(d.update, scope),
     init: lowerExpr(d.init, scope),
-  } as LegacyExprNode
+  }
+  if (d.type !== undefined) out.type = d.type.name
+  return out as LegacyExprNode
 }
 
 function lowerParamDecl(d: ParsedParamDeclNode): LegacyExprNode {
@@ -609,14 +645,15 @@ function lowerMatch(node: ParsedMatchNode, scope: Scope): LegacyExprNode {
 }
 
 function lowerLet(node: ParsedLetNode, scope: Scope): LegacyExprNode {
-  // `bind` values see the outer scope; only `in` sees the let-bound names.
+  // Sequential let*: each binding's value sees the binders introduced by
+  // earlier entries. Push each binder before lowering the next entry's
+  // value, then lower the body with all binders in scope. Match the
+  // semantics of `lower_arrays.ts:lowerLet`, which the legacy combinator
+  // pass eventually applies to this node.
   const bind: Record<string, LegacyExprNode> = {}
+  const pushed: string[] = []
   for (const [k, v] of Object.entries(node.bind)) {
     bind[k] = lowerExpr(v, scope)
-  }
-
-  const pushed: string[] = []
-  for (const k of Object.keys(node.bind)) {
     if (!scope.binders.has(k)) {
       scope.binders.add(k)
       pushed.push(k)

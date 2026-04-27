@@ -1,0 +1,11 @@
+```tropical
+program Clock(freq: freq = 1, ratios_in: float[1] = [1]) -> (output: unipolar, ratios_out: float[1]) {
+  program _wrap01(x) -> (value) {
+    value = (x % 1 + 1) % 1
+  }
+  _wrap01_0 = _wrap01(x: sampleIndex() * freq / sampleRate())
+  _wrap01_1 = _wrap01(x: sampleIndex() * freq * ratios_in / sampleRate())
+  output = (_wrap01_0.value < 0.5) * 1
+  ratios_out = (_wrap01_1.value < 0.5) * 1
+}
+```

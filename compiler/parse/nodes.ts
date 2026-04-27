@@ -298,14 +298,17 @@ export interface RegDeclNode {
   type?: NameRefNode
 }
 
-/** `delay name = update_expr init init_value` — synthetic one-sample
- *  delay register. `update` is the next-tick value; `init` is the
- *  starting value. */
+/** `delay name[: type] = update_expr init init_value` — synthetic one-
+ *  sample delay register. `update` is the next-tick value; `init` is the
+ *  starting value. `type`, when present, is a sum-type name; the sum-
+ *  decomposition pre-pass (in `compiler/session.ts`) consults it to
+ *  expand sum-typed delays into N+1 scalar delay slots. */
 export interface DelayDeclNode {
   op: 'delayDecl'
   name: string
   update: ExprNode
   init: ExprNode
+  type?: NameRefNode
 }
 
 /** `param name: smoothed = default` or `param name: trigger`.
@@ -457,11 +460,16 @@ export interface ProgramPorts {
 }
 
 /** A program declaration: header + body. The unit produced by parsing
- *  a top-level `program ...` declaration in `.trop`. */
+ *  a top-level `program ...` declaration in `.trop`. The optional
+ *  `breaks_cycles` flag is a hint to the legacy flattener's cycle
+ *  detector; in `.trop` source it appears as a contextual keyword
+ *  between the output list and the body brace (`program X(...) -> (...)
+ *  breaks_cycles { ... }`). */
 export interface ProgramNode {
   op: 'program'
   name: string
   type_params?: Record<string, { type: 'int'; default?: number }>
   ports?: ProgramPorts
   body: BlockNode
+  breaks_cycles?: boolean
 }

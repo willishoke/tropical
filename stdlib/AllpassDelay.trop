@@ -1,0 +1,7 @@
+```tropical
+program AllpassDelay(input: signal = 0, coeff: float = 0.5) -> (out: signal) {
+  reg s = 0
+  out = coeff * input + s
+  next s = let { y: coeff * input + s } in input - coeff * y
+}
+```

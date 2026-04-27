@@ -1,0 +1,6 @@
+```tropical
+program Cos(x: float = 0) -> (out: float) {
+  sin = Sin(x: x + 1.5707963267948966)
+  out = sin.out
+}
+```

@@ -1,0 +1,12 @@
+```tropical
+program Bubble(trigger: signal = 0, radius: float = 0.001, q: float = 30, sigma: float = 0.3, decay_scale: float = 10, amp_scale: float = 1, attack_g: float = 0.05) -> (out: float) {
+  reg env_smooth = 0
+  hold = SampleHold(trigger: trigger, input: radius)
+  ramp = TriggerRamp(trigger: trigger)
+  decay_calc = Exp(x: -1 / (sampleRate() * (decay_scale * hold.value + 0.000001)))
+  env_gen = EnvExpDecay(trigger: trigger, decay: decay_calc.out)
+  svf = SVF(input: ramp.edge, cutoff: let { r_held: hold.value; t_eff: ramp.frames } in let { tau: decay_scale * r_held + 0.000001; f0: 3.26 / (r_held + 0.000001) } in f0 * (1 + sigma * t_eff / (sampleRate() * tau)), q: q)
+  out = env_smooth * svf.bp * (hold.value * 1000 * amp_scale)
+  next env_smooth = env_smooth + attack_g * (env_gen.env - env_smooth)
+}
+```
