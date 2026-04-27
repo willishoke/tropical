@@ -9,13 +9,8 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { readFileSync } from 'fs'
-import { join, dirname } from 'path'
-import { fileURLToPath } from 'url'
 import { lowerProgram } from './lower.js'
 import { nameRef, type ProgramNode as ParsedProgramNode } from './nodes.js'
-
-const __dirname = dirname(fileURLToPath(import.meta.url))
 
 // ─────────────────────────────────────────────────────────────
 // 1. Empty program
@@ -38,14 +33,14 @@ describe('lower — empty program', () => {
 })
 
 // ─────────────────────────────────────────────────────────────
-// 2. OnePole — full structural deep-equal against stdlib JSON
+// 2. OnePole — full structural deep-equal against the legacy shape
 // ─────────────────────────────────────────────────────────────
 
-describe('lower — OnePole matches stdlib JSON', () => {
-  test('OnePole.json round-trip', () => {
-    // Hand-author the parsed-shape equivalent of stdlib/OnePole.json. Every
-    // reference site uses NameRef; the lowerer must produce the same legacy
-    // shape on the disk.
+describe('lower — OnePole legacy shape', () => {
+  test('OnePole', () => {
+    // Hand-author the parsed-shape equivalent of the legacy OnePole program.
+    // Every reference site uses NameRef; the lowerer must produce the
+    // exact legacy ProgramNode shape inlined below.
     const parsed: ParsedProgramNode = {
       op: 'program',
       name: 'OnePole',
@@ -125,19 +120,83 @@ describe('lower — OnePole matches stdlib JSON', () => {
     }
 
     const lowered = lowerProgram(parsed)
-    const onDisk = JSON.parse(readFileSync(join(__dirname, '../../stdlib/OnePole.json'), 'utf-8'))
-
-    // The on-disk JSON is a ProgramFile (no top-level `op`, has `schema`);
-    // the lowerer emits a ProgramNode. Convert the file shape to the
-    // ProgramNode shape: drop `schema`, add `op: 'program'`, drop the
-    // `value: null` placeholder in the body block (legacy carry-over).
-    const { schema: _schema, ...rest } = onDisk
-    const expected = { op: 'program' as const, ...rest }
-    if (expected.body && expected.body.value === null) {
-      delete expected.body.value
-    }
-
-    expect(lowered).toEqual(expected)
+    expect(lowered).toEqual({
+      op: 'program',
+      name: 'OnePole',
+      ports: {
+        inputs: [
+          { name: 'input', type: 'signal', default: 0 },
+          { name: 'g',     type: 'float',  default: 0.1 },
+        ],
+        outputs: [{ name: 'out', type: 'signal' }],
+      },
+      body: {
+        op: 'block',
+        decls: [
+          { op: 'regDecl', name: 's', init: 0 },
+          {
+            op: 'instanceDecl',
+            name: 'tanh_in',
+            program: 'Tanh',
+            inputs: { x: { op: 'input', name: 'input' } },
+          },
+          {
+            op: 'instanceDecl',
+            name: 'tanh_s',
+            program: 'Tanh',
+            inputs: { x: { op: 'reg', name: 's' } },
+          },
+        ],
+        assigns: [
+          {
+            op: 'outputAssign',
+            name: 'out',
+            expr: {
+              op: 'add',
+              args: [
+                { op: 'reg', name: 's' },
+                {
+                  op: 'mul',
+                  args: [
+                    { op: 'input', name: 'g' },
+                    {
+                      op: 'sub',
+                      args: [
+                        { op: 'nestedOut', ref: 'tanh_in', output: 'out' },
+                        { op: 'nestedOut', ref: 'tanh_s',  output: 'out' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          {
+            op: 'nextUpdate',
+            target: { kind: 'reg', name: 's' },
+            expr: {
+              op: 'add',
+              args: [
+                { op: 'reg', name: 's' },
+                {
+                  op: 'mul',
+                  args: [
+                    { op: 'input', name: 'g' },
+                    {
+                      op: 'sub',
+                      args: [
+                        { op: 'nestedOut', ref: 'tanh_in', output: 'out' },
+                        { op: 'nestedOut', ref: 'tanh_s',  output: 'out' },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    })
   })
 })
 

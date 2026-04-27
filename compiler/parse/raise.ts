@@ -1,13 +1,12 @@
 /**
  * raise.ts — bridge from the legacy ExprNode-shaped `ProgramNode`
- * (`compiler/program.ts`, schema `tropical_program_2`, used on disk in every
- * `stdlib/*.json`) to the strict-typed parser AST `ParsedProgram`
- * (`compiler/parse/nodes.ts`).
+ * (`compiler/program.ts`, schema `tropical_program_2`) to the strict-typed
+ * parser AST `ParsedProgram` (`compiler/parse/nodes.ts`).
  *
  * This is the categorical inverse of `lower.ts`: every transformation that
  * lower performs is undone here, and `lower(raise(legacy))` recovers the
- * input. Used only by the one-shot stdlib migration script (B8c) and the
- * round-trip golden tests — never on the production runtime path.
+ * input. Used by the round-trip golden tests in `raise.test.ts` — never on
+ * the production runtime path.
  *
  * Mapping summary (op tag → parser shape):
  *   {op:'input',name}          → nameRef(name)
