@@ -38,58 +38,23 @@
  */
 
 import { tokenize, type Tok } from './lexer.js'
-import { parseExprFromTokens, type ExprNode } from './expressions.js'
-import { parseBodyFromTokens, type BlockNode, type BodyOptions } from './statements.js'
+import { parseExprFromTokens } from './expressions.js'
+import { parseBodyFromTokens, type BodyOptions } from './statements.js'
 import { commaList, consume, eat, formatTok, isContextualKw, peek, ParseError, type Cursor } from './shared.js'
+import type {
+  ExprNode, ProgramNode, ProgramPort, ProgramPortSpec, ProgramPorts,
+  PortTypeDecl, ShapeDim, ScalarKind,
+  TypeDef, StructTypeDef, StructField, SumTypeDef, SumVariant, AliasTypeDef,
+  ProgramDeclNode,
+} from './nodes.js'
 
-// ─────────────────────────────────────────────────────────────
-// ProgramNode shape — kept loose to avoid cycles with compiler/program.ts
-// ─────────────────────────────────────────────────────────────
-
-export type ShapeDim = number | { op: 'typeParam'; name: string }
-
-export type PortTypeDecl = string | { kind: 'array'; element: string; shape: ShapeDim[] }
-
-export interface ProgramPortSpec {
-  name: string
-  type?: PortTypeDecl
-  default?: ExprNode
-  bounds?: [number | null, number | null]
-}
-
-export type ProgramPort = string | ProgramPortSpec
-
-/** Permitted scalar element types in struct fields and sum-variant payloads. */
-export type ScalarKind = 'float' | 'int' | 'bool'
-
-export interface StructField { name: string; scalar_type: ScalarKind }
-export interface StructTypeDef { kind: 'struct'; name: string; fields: StructField[] }
-
-export interface SumVariant { name: string; payload: StructField[] }
-export interface SumTypeDef { kind: 'sum'; name: string; variants: SumVariant[] }
-
-export interface AliasTypeDef {
-  kind: 'alias'
-  name: string
-  base: string
-  bounds: [number | null, number | null]
-}
-
-export type TypeDef = StructTypeDef | SumTypeDef | AliasTypeDef
-
-export interface ProgramPorts {
-  inputs?: ProgramPort[]
-  outputs?: ProgramPort[]
-  type_defs?: TypeDef[]
-}
-
-export interface ProgramNode {
-  op: 'program'
-  name: string
-  type_params?: Record<string, { type: 'int'; default?: number }>
-  ports?: ProgramPorts
-  body: BlockNode
-}
+// Re-export the node types so existing public-API consumers (tests etc.)
+// keep their imports stable.
+export type {
+  ProgramNode, ProgramPort, ProgramPortSpec, ProgramPorts,
+  PortTypeDecl, ShapeDim, ScalarKind,
+  TypeDef, StructTypeDef, StructField, SumTypeDef, SumVariant, AliasTypeDef,
+} from './nodes.js'
 
 // ─────────────────────────────────────────────────────────────
 // Parser context
@@ -134,12 +99,10 @@ export function parseProgramFromTokens(
  *  `programDecl` body item. */
 function parseNestedProgramDecl(
   toks: Tok[], startIdx: number,
-): { node: ExprNode; nextIdx: number } {
+): { node: ProgramDeclNode; nextIdx: number } {
   const { node: inner, nextIdx } = parseProgramFromTokens(toks, startIdx)
-  return {
-    node: { op: 'programDecl', name: inner.name, program: inner } as unknown as ExprNode,
-    nextIdx,
-  }
+  const node: ProgramDeclNode = { op: 'programDecl', name: inner.name, program: inner }
+  return { node, nextIdx }
 }
 
 /** Body-parser hook: dispatch `struct`/`enum`/`type` to the right ADT
@@ -148,7 +111,7 @@ function parseNestedProgramDecl(
  *  the program's `ports.type_defs`. */
 function parseBodyTypeDef(
   toks: Tok[], startIdx: number,
-): { typeDef: unknown; nextIdx: number } {
+): { typeDef: TypeDef; nextIdx: number } {
   const ctx: Ctx = { toks, i: startIdx, typeParams: new Set() }
   const t = peek(ctx)
   let typeDef: TypeDef
@@ -209,7 +172,7 @@ function parseProgramFromCtx(ctx: Ctx): ProgramNode {
   const ports: ProgramPorts = {}
   if (inputs.length > 0)  ports.inputs  = inputs
   if (outputs && outputs.length > 0) ports.outputs = outputs
-  if (typeDefs.length > 0) ports.type_defs = typeDefs as TypeDef[]
+  if (typeDefs.length > 0) ports.type_defs = typeDefs
   if (ports.inputs || ports.outputs || ports.type_defs) node.ports = ports
   return node
 }

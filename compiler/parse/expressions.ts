@@ -30,18 +30,16 @@
 
 import { tokenize, type Tok, type TokKind } from './lexer.js'
 import { commaList, consume, eat, formatTok, peek, withScope, ParseError, type Cursor } from './shared.js'
+import type {
+  ExprNode, ExprOpNode,
+  BinaryOpTag, BinaryOpNode, UnaryOpTag, UnaryOpNode,
+  CallNode, NameRefNode, NestedOutNode, FieldAccessNode, IndexNode,
+  LetNode, FoldNode, ScanNode, GenerateNode, IterateNode, ChainNode,
+  Map2Node, ZipWithNode, TagNode, MatchNode, MatchArm,
+} from './nodes.js'
 
 export { ParseError }
-
-// ─────────────────────────────────────────────────────────────
-// ExprNode local type — kept loose so we don't import from compiler/expr.ts
-// ─────────────────────────────────────────────────────────────
-
-export type ExprNode =
-  | number
-  | boolean
-  | ExprNode[]
-  | { op: string; [k: string]: unknown }
+export type { ExprNode } from './nodes.js'
 
 // ─────────────────────────────────────────────────────────────
 // Parser context
@@ -87,7 +85,8 @@ export function parseExprFromTokens(toks: Tok[], startIdx: number, binders?: Set
 // stronger level for the lhs, then loop on any matching infix operator at
 // this level. A single helper drives all 8 levels.
 
-type InfixTable = Partial<Record<TokKind, string>>
+type InfixTable = Partial<Record<TokKind, BinaryOpTag>>
+type UnaryTable = Partial<Record<TokKind, UnaryOpTag>>
 
 // Listed in precedence order (lowest binding power first). The recursive
 // descent is implicit: level N delegates to level N+1 for both sides.
@@ -104,10 +103,12 @@ const INFIX_LEVELS: ReadonlyArray<InfixTable> = [
   { '*':  'mul', '/':  'div', '%': 'mod' },
 ]
 
-const UNARY_OPS: InfixTable = { '-': 'neg', '!': 'not', '~': 'bitNot' }
+const UNARY_OPS: UnaryTable = { '-': 'neg', '!': 'not', '~': 'bitNot' }
 
-const binary = (op: string, lhs: ExprNode, rhs: ExprNode): ExprNode => ({ op, args: [lhs, rhs] })
-const unary = (op: string, operand: ExprNode): ExprNode => ({ op, args: [operand] })
+const binary = (op: BinaryOpTag, lhs: ExprNode, rhs: ExprNode): BinaryOpNode =>
+  ({ op, args: [lhs, rhs] })
+const unary = (op: UnaryOpTag, operand: ExprNode): UnaryOpNode =>
+  ({ op, args: [operand] })
 
 function parseTopExpr(ctx: Ctx): ExprNode {
   return parseInfix(ctx, 0)
@@ -143,7 +144,7 @@ function parseUnary(ctx: Ctx): ExprNode {
 // ─────────────────────────────────────────────────────────────
 
 function parsePostfix(ctx: Ctx): ExprNode {
-  let node = parsePrimary(ctx)
+  let node: ExprNode = parsePrimary(ctx)
   for (;;) {
     const t = peek(ctx)
     if (t.kind === '.') {
@@ -154,15 +155,18 @@ function parsePostfix(ctx: Ctx): ExprNode {
       // node shapes (e.g., array.length — not supported), emit the same
       // nestedOut form and let the elaborator decide.
       if (isNameRef(node)) {
-        node = { op: 'nestedOut', ref: node.name, output: field.value as string }
+        const next: NestedOutNode = { op: 'nestedOut', ref: node.name, output: field.value as string }
+        node = next
       } else {
-        node = { op: 'fieldAccess', expr: node, field: field.value as string }
+        const next: FieldAccessNode = { op: 'fieldAccess', expr: node, field: field.value as string }
+        node = next
       }
     } else if (t.kind === '[') {
       ctx.i++
       const idx = parseTopExpr(ctx)
       consume(ctx, ']', 'closing `]`')
-      node = { op: 'index', args: [node, idx] }
+      const next: IndexNode = { op: 'index', args: [node, idx] }
+      node = next
     } else if (t.kind === '(') {
       ctx.i++
       // Function-call form. If the callee is a known combinator name, emit
@@ -175,12 +179,14 @@ function parsePostfix(ctx: Ctx): ExprNode {
         } else {
           const args = parseCallArgs(ctx)
           consume(ctx, ')', 'closing `)`')
-          node = { op: 'call', callee: node, args }
+          const next: CallNode = { op: 'call', callee: node, args }
+          node = next
         }
       } else {
         const args = parseCallArgs(ctx)
         consume(ctx, ')', 'closing `)`')
-        node = { op: 'call', callee: node, args }
+        const next: CallNode = { op: 'call', callee: node, args }
+        node = next
       }
     } else {
       return node
@@ -206,7 +212,10 @@ function isNameRef(node: ExprNode): node is { op: 'nameRef'; name: string } {
  *  `)` and returns the structured node. On no-match (unknown name or shape),
  *  rewinds zero tokens and returns null — the caller falls back to generic
  *  call parsing. */
-function parseCombinatorCall(ctx: Ctx, name: string): ExprNode | null {
+type CombinatorNode =
+  | FoldNode | ScanNode | GenerateNode | IterateNode | ChainNode | Map2Node | ZipWithNode
+
+function parseCombinatorCall(ctx: Ctx, name: string): CombinatorNode | null {
   switch (name) {
     case 'fold':    return parseFoldOrScan(ctx, 'fold')
     case 'scan':    return parseFoldOrScan(ctx, 'scan')
@@ -220,7 +229,9 @@ function parseCombinatorCall(ctx: Ctx, name: string): ExprNode | null {
 }
 
 /** fold(over, init, (acc, elem) => body) */
-function parseFoldOrScan(ctx: Ctx, op: 'fold' | 'scan'): ExprNode {
+function parseFoldOrScan<Op extends 'fold' | 'scan'>(
+  ctx: Ctx, op: Op,
+): Op extends 'fold' ? FoldNode : ScanNode {
   const over = parseTopExpr(ctx)
   consume(ctx, ',', `${op}: comma after over`)
   const init = parseTopExpr(ctx)
@@ -229,11 +240,12 @@ function parseFoldOrScan(ctx: Ctx, op: 'fold' | 'scan'): ExprNode {
   const [accVar, elemVar] = lambda.binders
   const body = parseLambdaBody(ctx, lambda.binders)
   consume(ctx, ')', `${op}: closing \`)\``)
-  return { op, over, init, acc_var: accVar, elem_var: elemVar, body }
+  return { op, over, init, acc_var: accVar, elem_var: elemVar, body } as
+    Op extends 'fold' ? FoldNode : ScanNode
 }
 
 /** generate(count, (i) => body) */
-function parseGenerate(ctx: Ctx): ExprNode {
+function parseGenerate(ctx: Ctx): GenerateNode {
   const count = parseTopExpr(ctx)
   consume(ctx, ',', 'generate: comma after count')
   const lambda = parseLambdaArgs(ctx, 1, 'generate')
@@ -244,7 +256,9 @@ function parseGenerate(ctx: Ctx): ExprNode {
 }
 
 /** iterate(count, init, (x) => body) — and chain with the same shape. */
-function parseIterateOrChain(ctx: Ctx, op: 'iterate' | 'chain'): ExprNode {
+function parseIterateOrChain<Op extends 'iterate' | 'chain'>(
+  ctx: Ctx, op: Op,
+): Op extends 'iterate' ? IterateNode : ChainNode {
   const count = parseTopExpr(ctx)
   consume(ctx, ',', `${op}: comma after count`)
   const init = parseTopExpr(ctx)
@@ -253,11 +267,12 @@ function parseIterateOrChain(ctx: Ctx, op: 'iterate' | 'chain'): ExprNode {
   const [varName] = lambda.binders
   const body = parseLambdaBody(ctx, lambda.binders)
   consume(ctx, ')', `${op}: closing \`)\``)
-  return { op, count, var: varName, init, body }
+  return { op, count, var: varName, init, body } as
+    Op extends 'iterate' ? IterateNode : ChainNode
 }
 
 /** map2(over, (e) => body) */
-function parseMap2(ctx: Ctx): ExprNode {
+function parseMap2(ctx: Ctx): Map2Node {
   const over = parseTopExpr(ctx)
   consume(ctx, ',', 'map2: comma after over')
   const lambda = parseLambdaArgs(ctx, 1, 'map2')
@@ -268,7 +283,7 @@ function parseMap2(ctx: Ctx): ExprNode {
 }
 
 /** zipWith(a, b, (x, y) => body) */
-function parseZipWith(ctx: Ctx): ExprNode {
+function parseZipWith(ctx: Ctx): ZipWithNode {
   const a = parseTopExpr(ctx)
   consume(ctx, ',', 'zipWith: comma after a')
   const b = parseTopExpr(ctx)
@@ -352,15 +367,16 @@ function parsePrimary(ctx: Ctx): ExprNode {
       ctx.i++  // consume `{`
       const payload = parseTagPayload(ctx, name)
       consume(ctx, '}', `closing \`}\` of tag '${name}' payload`)
-      const node: { op: 'tag'; type: string; variant: string; payload?: Record<string, ExprNode> } =
-        { op: 'tag', type: '', variant: name }
+      const node: TagNode = { op: 'tag', type: '', variant: name }
       if (Object.keys(payload).length > 0) node.payload = payload
-      return node as unknown as ExprNode
+      return node
     }
     if (ctx.binders.has(name)) {
-      return { op: 'binding', name }
+      const binding: ExprOpNode = { op: 'binding', name }
+      return binding
     }
-    return { op: 'nameRef', name }
+    const ref: NameRefNode = { op: 'nameRef', name }
+    return ref
   }
 
   // Sentinels are reserved tokens but appear in postfix-call form. The
@@ -395,10 +411,10 @@ function parseTagPayload(ctx: Ctx, variant: string): Record<string, ExprNode> {
  *  Emits `{op:'match', type:'', scrutinee, arms: { variant: {bind?, body}, ... }}`.
  *  The `type` field is filled in by the elaborator (B6) from variant
  *  membership in the sum-type registry. */
-function parseMatch(ctx: Ctx): ExprNode {
+function parseMatch(ctx: Ctx): MatchNode {
   const scrutinee = parseTopExpr(ctx)
   consume(ctx, '{', '`{` after match scrutinee')
-  const arms: Record<string, { bind?: string | string[]; body: ExprNode }> = {}
+  const arms: Record<string, MatchArm> = {}
   while (peek(ctx).kind !== '}') {
     const variantTok = consume(ctx, 'ident', 'match arm variant name')
     const variant = variantTok.value as string
@@ -420,7 +436,7 @@ function parseMatch(ctx: Ctx): ExprNode {
     }
     consume(ctx, '=>', `arm '${variant}' \`=>\` after pattern`)
     const body = withScope(ctx.binders, bindNames, () => parseTopExpr(ctx))
-    const arm: { bind?: string | string[]; body: ExprNode } = { body }
+    const arm: MatchArm = { body }
     if (bindNames.length === 1) arm.bind = bindNames[0]
     else if (bindNames.length > 1) arm.bind = bindNames
     arms[variant] = arm
@@ -428,7 +444,7 @@ function parseMatch(ctx: Ctx): ExprNode {
     consume(ctx, ',', 'match: `,` between arms')
   }
   consume(ctx, '}', 'match: closing `}`')
-  return { op: 'match', type: '', scrutinee, arms } as unknown as ExprNode
+  return { op: 'match', type: '', scrutinee, arms }
 }
 
 function parseArrayLiteral(ctx: Ctx): ExprNode {
@@ -442,7 +458,7 @@ function parseArrayLiteral(ctx: Ctx): ExprNode {
  *  using `:` to bind and `;` or `,` as separator) and emit
  *  `{op:'let', bind: {x: e1, y: e2}, in: body}`. The let-bindings are
  *  visible inside `body` as `{op:'binding', name}` placeholders. */
-function parseLet(ctx: Ctx): ExprNode {
+function parseLet(ctx: Ctx): LetNode {
   consume(ctx, '{', 'let: opening `{`')
   const bind: Record<string, ExprNode> = {}
   const order: string[] = []
@@ -464,6 +480,6 @@ function parseLet(ctx: Ctx): ExprNode {
   consume(ctx, '}', 'let: closing `}`')
   consume(ctx, 'in', 'let: `in`')
   return withScope(ctx.binders, order, () => ({
-    op: 'let', bind, in: parseTopExpr(ctx),
+    op: 'let' as const, bind, in: parseTopExpr(ctx),
   }))
 }
