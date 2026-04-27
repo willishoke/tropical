@@ -538,27 +538,57 @@ import { readFileSync, readdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { loadStdlibFromMap } from './stdlib_loader.js'
+import { extractMarkdown } from './parse/markdown.js'
+import { parseProgram as parseTropicalProgram } from './parse/declarations.js'
+import { lowerProgram } from './parse/lower.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 /**
  * Load all stdlib program files (tropical_program_2) into a type registry.
- * Reads `../stdlib/*.json` from disk, then delegates to `loadStdlibFromMap`
- * for registration. Browser builds use `loadStdlibFromMap` directly with a
- * bundled JSON map (see compiler/stdlib_bundled.ts).
+ * Reads `../stdlib/*.{trop,json}` from disk; `.trop` is preferred when both
+ * extensions exist for the same program name. The `.trop` path is:
+ *
+ *   read → extractMarkdown → parseProgram → lowerProgram → wrap as v2 file
+ *
+ * The `.json` path passes the parsed JSON straight to `loadStdlibFromMap`,
+ * which delegates schema normalization to `normalizeProgramFile`.
+ *
+ * Browser builds use `loadStdlibFromMap` directly with a bundled JSON map
+ * (see compiler/stdlib_bundled.ts).
  */
 export function loadStdlib(
   target: Map<string, ProgramType> | Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplates'>,
 ): void {
   const stdlibDir = join(__dirname, '../stdlib')
-  const files = readdirSync(stdlibDir).filter(f => f.endsWith('.json')).sort()
+  const entries = readdirSync(stdlibDir)
+  const tropFiles = entries.filter(f => f.endsWith('.trop')).sort()
+  const jsonFiles = entries.filter(f => f.endsWith('.json')).sort()
 
   const rawByName = new Map<string, unknown>()
-  for (const file of files) {
+
+  for (const file of tropFiles) {
+    const path = join(stdlibDir, file)
+    const text = readFileSync(path, 'utf-8')
+    const ext = extractMarkdown(text)
+    if (ext.blocks.length !== 1) {
+      throw new Error(`${path}: expected exactly 1 tropical code block, got ${ext.blocks.length}`)
+    }
+    const parsed = parseTropicalProgram(ext.blocks[0].source)
+    const lowered = lowerProgram(parsed)
+    const { op: _op, ...fields } = lowered as unknown as Record<string, unknown>
+    void _op
+    const v2 = { schema: 'tropical_program_2', ...fields } as { schema: string; name?: unknown }
+    if (typeof v2.name !== 'string') throw new Error(`${path}: lowered program missing name`)
+    rawByName.set(v2.name, v2)
+  }
+
+  for (const file of jsonFiles) {
     const path = join(stdlibDir, file)
     const raw = JSON.parse(readFileSync(path, 'utf-8')) as { schema?: string; name?: string }
     if (typeof raw.name !== 'string') throw new Error(`${path}: missing 'name' field`)
+    if (rawByName.has(raw.name)) continue // .trop took precedence
     rawByName.set(raw.name, raw)
   }
 
