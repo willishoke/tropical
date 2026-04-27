@@ -47,6 +47,7 @@ import type {
   TypeDef, StructTypeDef, StructField, SumTypeDef, SumVariant, AliasTypeDef,
   ProgramDeclNode,
 } from './nodes.js'
+import { nameRef } from './nodes.js'
 
 // Re-export the node types so existing public-API consumers (tests etc.)
 // keep their imports stable.
@@ -60,13 +61,9 @@ export type {
 // Parser context
 // ─────────────────────────────────────────────────────────────
 
-interface Ctx extends Cursor {
-  /** Type-param names in scope at the current point. Populated when a
-   *  program header declares `<N: int, ...>`. Used by the port-type
-   *  parser to recognize array shapes like `float[N]` as
-   *  `{op:'typeParam',name:'N'}` rather than a bare name. */
-  typeParams: Set<string>
-}
+/** Parser context. The parser does NO scope analysis: every reference is
+ *  emitted as a NameRefNode and the elaborator resolves them. */
+interface Ctx extends Cursor {}
 
 // ─────────────────────────────────────────────────────────────
 // Public entry points
@@ -75,7 +72,7 @@ interface Ctx extends Cursor {
 /** Parse a top-level program declaration from source text. */
 export function parseProgram(src: string): ProgramNode {
   const toks = tokenize(src)
-  const ctx: Ctx = { toks, i: 0, typeParams: new Set() }
+  const ctx: Ctx = { toks, i: 0 }
   const node = parseProgramFromCtx(ctx)
   const trailing = ctx.toks[ctx.i]
   if (trailing.kind !== 'eof') {
@@ -90,7 +87,7 @@ export function parseProgram(src: string): ProgramNode {
 export function parseProgramFromTokens(
   toks: Tok[], startIdx: number,
 ): { node: ProgramNode; nextIdx: number } {
-  const ctx: Ctx = { toks, i: startIdx, typeParams: new Set() }
+  const ctx: Ctx = { toks, i: startIdx }
   const node = parseProgramFromCtx(ctx)
   return { node, nextIdx: ctx.i }
 }
@@ -112,7 +109,7 @@ function parseNestedProgramDecl(
 function parseBodyTypeDef(
   toks: Tok[], startIdx: number,
 ): { typeDef: TypeDef; nextIdx: number } {
-  const ctx: Ctx = { toks, i: startIdx, typeParams: new Set() }
+  const ctx: Ctx = { toks, i: startIdx }
   const t = peek(ctx)
   let typeDef: TypeDef
   if (t.kind === 'struct') typeDef = parseStructDecl(ctx)
@@ -140,7 +137,6 @@ function parseProgramFromCtx(ctx: Ctx): ProgramNode {
   let typeParams: Record<string, { type: 'int'; default?: number }> | undefined
   if (peek(ctx).kind === '<') {
     typeParams = parseTypeParams(ctx)
-    for (const tp of Object.keys(typeParams)) ctx.typeParams.add(tp)
   }
 
   // Input ports
@@ -161,11 +157,6 @@ function parseProgramFromCtx(ctx: Ctx): ProgramNode {
   const { block, typeDefs, nextIdx } = parseBodyFromTokens(ctx.toks, ctx.i, BODY_OPTS)
   ctx.i = nextIdx
   consume(ctx, '}', `\`}\` closing body of '${name}'`)
-
-  // Pop type params from scope (each program declaration introduces its own)
-  if (typeParams) {
-    for (const tp of Object.keys(typeParams)) ctx.typeParams.delete(tp)
-  }
 
   const node: ProgramNode = { op: 'program', name, body: block }
   if (typeParams && Object.keys(typeParams).length > 0) node.type_params = typeParams
@@ -272,10 +263,9 @@ function parseAliasDecl(ctx: Ctx): AliasTypeDef {
   const name = consume(ctx, 'ident', 'alias name').value as string
   consume(ctx, '=', `\`=\` after alias '${name}'`)
   const baseTok = consume(ctx, 'ident', `base type for alias '${name}'`)
-  const base = baseTok.value as string
   consume(ctx, 'in', `\`in\` after base type for alias '${name}'`)
   const bounds = parseBounds(ctx)
-  return { kind: 'alias', name, base, bounds }
+  return { kind: 'alias', name, base: nameRef(baseTok.value as string), bounds }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -364,11 +354,13 @@ function parsePortSpec(ctx: Ctx, allowDefault: boolean): ProgramPort {
 
 /** Parse a port type:
  *    Identifier                — bare scalar (e.g. `signal`, `float`, `freq`)
- *    Identifier[Dim, ...]      — array with shape dims (numeric or typeParam)
- *  The opening identifier is the element-type name. Anything else throws. */
+ *    Identifier[Dim, ...]      — array with shape dims (numeric or NameRefNode)
+ *  Both the element and shape-dim identifiers become NameRefNodes; the
+ *  elaborator resolves them against scalar kinds + program type-params
+ *  + type aliases. */
 function parsePortType(ctx: Ctx): PortTypeDecl {
   const elemTok = consume(ctx, 'ident', 'port type name')
-  const element = elemTok.value as string
+  const element = nameRef(elemTok.value as string)
   if (peek(ctx).kind !== '[') return element
 
   ctx.i++  // consume `[`
@@ -380,6 +372,10 @@ function parsePortType(ctx: Ctx): PortTypeDecl {
   return { kind: 'array', element, shape }
 }
 
+/** Parse a single array-shape dim. Numeric literal or identifier — the
+ *  identifier becomes a NameRefNode the elaborator resolves against the
+ *  enclosing program's type-params. The parser does NO scope analysis;
+ *  every name is a NameRef awaiting elaboration. */
 function parseShapeDim(ctx: Ctx): ShapeDim {
   const t = peek(ctx)
   if (t.kind === 'num') {
@@ -391,15 +387,9 @@ function parseShapeDim(ctx: Ctx): ShapeDim {
   }
   if (t.kind === 'ident') {
     ctx.i++
-    const name = t.value as string
-    if (!ctx.typeParams.has(name)) {
-      throw new ParseError(
-        `array shape dim '${name}' is not a declared type-param of the enclosing program`, t,
-      )
-    }
-    return { op: 'typeParam', name }
+    return nameRef(t.value as string)
   }
-  throw new ParseError(`expected number or type-param name in array shape, got ${formatTok(t)}`, t)
+  throw new ParseError(`expected number or identifier in array shape, got ${formatTok(t)}`, t)
 }
 
 /** Parse `[lo, hi]` after `in`. Each side may be `null` (sentinel) to

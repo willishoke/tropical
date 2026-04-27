@@ -4,6 +4,7 @@
 
 import { describe, test, expect } from 'bun:test'
 import { parseExpr, ParseError, type ExprNode } from './expressions.js'
+import { nameRef } from './nodes.js'
 
 describe('expressions — literals', () => {
   test('integer literal is a bare number', () => {
@@ -194,7 +195,7 @@ describe('expressions — unary', () => {
 
 describe('expressions — postfix: dot, index, call', () => {
   test('dotted port reference emits nestedOut', () => {
-    expect(parseExpr('osc.sin')).toEqual({ op: 'nestedOut', ref: 'osc', output: 'sin' })
+    expect(parseExpr('osc.sin')).toEqual({ op: 'nestedOut', ref: nameRef('osc'), output: nameRef('sin') })
   })
 
   test('indexing emits index op', () => {
@@ -231,7 +232,7 @@ describe('expressions — postfix: dot, index, call', () => {
     // osc.out[0]
     expect(parseExpr('osc.out[0]')).toEqual({
       op: 'index',
-      args: [{ op: 'nestedOut', ref: 'osc', output: 'out' }, 0],
+      args: [{ op: 'nestedOut', ref: nameRef('osc'), output: nameRef('out') }, 0],
     })
   })
 
@@ -434,10 +435,12 @@ describe('expressions — combinators', () => {
         Some { value: x } => x,
         None => x
       }
-    `) as { in: { arms: Record<string, { body: ExprNode }> } }
-    expect(parsed.in.arms.Some.body).toEqual({ op: 'binding', name: 'x' })
+    `) as { in: { arms: Array<{ variant: { name: string }; body: ExprNode }> } }
+    const some = parsed.in.arms.find(a => a.variant.name === 'Some')!
+    const none = parsed.in.arms.find(a => a.variant.name === 'None')!
+    expect(some.body).toEqual({ op: 'binding', name: 'x' })
     // Outer x is still in scope inside the None arm, so it's a binding too.
-    expect(parsed.in.arms.None.body).toEqual({ op: 'binding', name: 'x' })
+    expect(none.body).toEqual({ op: 'binding', name: 'x' })
   })
 
   test('lambda arity mismatch rejected', () => {
@@ -482,7 +485,7 @@ describe('expressions — realistic samples', () => {
       args: [
         {
           op: 'mul',
-          args: [3, { op: 'nestedOut', ref: 'y', output: 'out' }],
+          args: [3, { op: 'nestedOut', ref: nameRef('y'), output: nameRef('out') }],
         },
         1,
       ],

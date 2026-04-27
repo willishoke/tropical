@@ -6,6 +6,7 @@
 import { describe, test, expect } from 'bun:test'
 import { parseProgram, type ProgramNode, type StructTypeDef, type SumTypeDef, type AliasTypeDef } from './declarations.js'
 import { parseExpr, ParseError } from './expressions.js'
+import { nameRef } from './nodes.js'
 
 // ─────────────────────────────────────────────────────────────
 // Struct decls
@@ -124,7 +125,7 @@ describe('adts — type aliases', () => {
       }
     `)
     expect(p.ports?.type_defs).toEqual([
-      { kind: 'alias', name: 'Freq', base: 'float', bounds: [0, 20000] },
+      { kind: 'alias', name: 'Freq', base: nameRef('float'), bounds: [0, 20000] },
     ])
   })
 
@@ -198,34 +199,39 @@ describe('expressions — tag construction', () => {
   test('tag with single-field payload', () => {
     expect(parseExpr('Some { value: 42 }')).toEqual({
       op: 'tag',
-      variant: 'Some',
-      payload: { value: 42 },
+      variant: nameRef('Some'),
+      payload: [{ field: nameRef('value'), value: 42 }],
     })
   })
 
   test('tag with multi-field payload', () => {
     expect(parseExpr('Hz { freq: 440, gain: 0.5 }')).toEqual({
       op: 'tag',
-      variant: 'Hz',
-      payload: { freq: 440, gain: 0.5 },
+      variant: nameRef('Hz'),
+      payload: [
+        { field: nameRef('freq'), value: 440 },
+        { field: nameRef('gain'), value: 0.5 },
+      ],
     })
   })
 
   test('empty-payload tag via `Variant { }`', () => {
     expect(parseExpr('Empty { }')).toEqual({
       op: 'tag',
-      variant: 'Empty',
+      variant: nameRef('Empty'),
     })
   })
 
   test('payload field can be a complex expression', () => {
     expect(parseExpr('Vec { x: a + b, y: c * 2 }')).toEqual({
       op: 'tag',
-      variant: 'Vec',
-      payload: {
-        x: { op: 'add', args: [{ op: 'nameRef', name: 'a' }, { op: 'nameRef', name: 'b' }] },
-        y: { op: 'mul', args: [{ op: 'nameRef', name: 'c' }, 2] },
-      },
+      variant: nameRef('Vec'),
+      payload: [
+        { field: nameRef('x'),
+          value: { op: 'add', args: [{ op: 'nameRef', name: 'a' }, { op: 'nameRef', name: 'b' }] } },
+        { field: nameRef('y'),
+          value: { op: 'mul', args: [{ op: 'nameRef', name: 'c' }, 2] } },
+      ],
     })
   })
 
@@ -256,11 +262,11 @@ describe('expressions — match', () => {
     `)).toEqual({
       op: 'match',
       scrutinee: { op: 'nameRef', name: 'v' },
-      arms: {
-        Red:   { body: 1 },
-        Green: { body: 2 },
-        Blue:  { body: 3 },
-      },
+      arms: [
+        { variant: nameRef('Red'),   body: 1 },
+        { variant: nameRef('Green'), body: 2 },
+        { variant: nameRef('Blue'),  body: 3 },
+      ],
     })
   })
 
@@ -273,13 +279,14 @@ describe('expressions — match', () => {
     `)).toEqual({
       op: 'match',
       scrutinee: { op: 'nameRef', name: 'v' },
-      arms: {
-        Some: {
+      arms: [
+        {
+          variant: nameRef('Some'),
           bind: 'x',
           body: { op: 'add', args: [{ op: 'binding', name: 'x' }, 1] },
         },
-        None: { body: 0 },
-      },
+        { variant: nameRef('None'), body: 0 },
+      ],
     })
   })
 
@@ -291,15 +298,16 @@ describe('expressions — match', () => {
     `)).toEqual({
       op: 'match',
       scrutinee: { op: 'nameRef', name: 'v' },
-      arms: {
-        Hz: {
+      arms: [
+        {
+          variant: nameRef('Hz'),
           bind: ['f', 'g'],
           body: {
             op: 'mul',
             args: [{ op: 'binding', name: 'f' }, { op: 'binding', name: 'g' }],
           },
         },
-      },
+      ],
     })
   })
 
@@ -313,17 +321,16 @@ describe('expressions — match', () => {
       }
     ` ) as {
       in: {
-        arms: {
-          Some: { body: ExprNode }
-          None: { body: ExprNode }
-        }
+        arms: Array<{ variant: { name: string }; body: ExprNode }>
       }
     }
+    const some = parsed.in.arms.find(a => a.variant.name === 'Some')!
+    const none = parsed.in.arms.find(a => a.variant.name === 'None')!
     // Inner arm's `x` refers to the bound payload (shadowing the outer let).
-    expect(parsed.in.arms.Some.body).toEqual({ op: 'binding', name: 'x' })
+    expect(some.body).toEqual({ op: 'binding', name: 'x' })
     // Outer arm's `x` refers to the outer let binding (still bound, since
     // `withScope` doesn't double-add an existing name).
-    expect(parsed.in.arms.None.body).toEqual({ op: 'binding', name: 'x' })
+    expect(none.body).toEqual({ op: 'binding', name: 'x' })
   })
 
   test('duplicate arm rejected', () => {

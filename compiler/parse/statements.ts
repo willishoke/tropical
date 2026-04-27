@@ -31,7 +31,9 @@ import type {
   ExprNode, BlockNode, BodyDecl, BodyAssign, TypeDef,
   RegDeclNode, DelayDeclNode, ParamDeclNode, InstanceDeclNode, ProgramDeclNode,
   OutputAssignNode, NextUpdateNode,
+  TypeArgEntry, InstanceInputEntry,
 } from './nodes.js'
+import { nameRef } from './nodes.js'
 
 export type { BlockNode } from './nodes.js'
 
@@ -185,14 +187,15 @@ function parseBodyItem(ctx: Ctx): BodyItem {
 function parseRegDecl(ctx: Ctx): RegDeclNode {
   consume(ctx, 'reg', 'reg keyword')
   const name = consume(ctx, 'ident', 'reg name').value as string
-  let type: string | undefined
+  let typeRef: RegDeclNode['type']
   if (eat(ctx, ':')) {
-    type = consume(ctx, 'ident', 'reg type name').value as string
+    const typeNameTok = consume(ctx, 'ident', 'reg type name')
+    typeRef = nameRef(typeNameTok.value as string)
   }
   consume(ctx, '=', 'reg `=` before init')
   const init = parseExpr(ctx)
   const out: RegDeclNode = { op: 'regDecl', name, init }
-  if (type !== undefined) out.type = type
+  if (typeRef !== undefined) out.type = typeRef
   return out
 }
 
@@ -306,7 +309,7 @@ function parseInstanceRhs(ctx: Ctx, name: string): InstanceDeclNode {
   const typeTok = consume(ctx, 'ident', 'program type name')
   const programName = typeTok.value as string
 
-  let typeArgs: Record<string, number> | undefined
+  let typeArgs: TypeArgEntry[] = []
   if (eat(ctx, '<')) {
     typeArgs = parseTypeArgs(ctx, programName)
   }
@@ -315,16 +318,21 @@ function parseInstanceRhs(ctx: Ctx, name: string): InstanceDeclNode {
   const inputs = parseInstanceInputs(ctx)
   consume(ctx, ')', `closing \`)\` of '${programName}' inputs`)
 
-  const out: InstanceDeclNode = { op: 'instanceDecl', name, program: programName }
-  if (typeArgs !== undefined && Object.keys(typeArgs).length > 0) out.type_args = typeArgs
-  if (Object.keys(inputs).length > 0) out.inputs = inputs
+  const out: InstanceDeclNode = {
+    op: 'instanceDecl',
+    name,
+    program: nameRef(programName),
+  }
+  if (typeArgs.length > 0) out.type_args = typeArgs
+  if (inputs.length > 0) out.inputs = inputs
   return out
 }
 
 /** Parse `<key=value, key=value>`. The opening `<` is already consumed;
  *  this consumes through the closing `>`. */
-function parseTypeArgs(ctx: Ctx, owner: string): Record<string, number> {
-  const args: Record<string, number> = {}
+function parseTypeArgs(ctx: Ctx, owner: string): TypeArgEntry[] {
+  const out: TypeArgEntry[] = []
+  const seen = new Set<string>()
   commaList(ctx, '>', () => {
     const kTok = consume(ctx, 'ident', `${owner}: type-arg name`)
     const k = kTok.value as string
@@ -333,29 +341,32 @@ function parseTypeArgs(ctx: Ctx, owner: string): Record<string, number> {
     if (!Number.isInteger(vTok.value)) {
       throw new ParseError(`${owner}: type-arg '${k}' must be an integer`, vTok)
     }
-    if (k in args) {
+    if (seen.has(k)) {
       throw new ParseError(`${owner}: duplicate type-arg '${k}'`, kTok)
     }
-    args[k] = vTok.value as number
+    seen.add(k)
+    out.push({ param: nameRef(k), value: vTok.value as number })
   })
   consume(ctx, '>', `${owner}: closing \`>\` of type-args`)
-  return args
+  return out
 }
 
 /** Parse `(port: expr, port: expr)` — keyword arg form. The `(` is already
  *  consumed; this stops at the matching `)` (left for the caller). */
-function parseInstanceInputs(ctx: Ctx): Record<string, ExprNode> {
-  const inputs: Record<string, ExprNode> = {}
+function parseInstanceInputs(ctx: Ctx): InstanceInputEntry[] {
+  const out: InstanceInputEntry[] = []
+  const seen = new Set<string>()
   commaList(ctx, ')', () => {
     const portTok = consume(ctx, 'ident', 'instance input port name')
     const port = portTok.value as string
-    if (port in inputs) {
+    if (seen.has(port)) {
       throw new ParseError(`duplicate instance input '${port}'`, portTok)
     }
+    seen.add(port)
     consume(ctx, ':', `\`:\` after input port '${port}'`)
-    inputs[port] = parseExpr(ctx)
+    out.push({ port: nameRef(port), value: parseExpr(ctx) })
   })
-  return inputs
+  return out
 }
 
 // ─────────────────────────────────────────────────────────────

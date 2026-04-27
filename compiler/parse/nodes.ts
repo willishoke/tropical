@@ -1,54 +1,56 @@
 /**
  * nodes.ts — strict discriminated-union node types for the .trop parser.
  *
- * Phase tagging
- * -------------
- * The exported types are *parsed-phase only*: they describe what the
- * parser emits before the elaborator runs. Distinguishing characteristics:
+ * Two kinds of strings live in the parsed tree:
  *
- *   - Bare identifiers become `NameRefNode` placeholders (the elaborator
- *     resolves to input/reg/typeParam/instance refs).
- *   - `TagNode` and `MatchNode` carry NO `type` field — the sum-type
- *     name is filled in by the elaborator from the registry.
+ *  1. Identity strings — names the user gave to declarations (RegDecl.name,
+ *     InstanceDecl.name, ProgramNode.name, OutputAssign.name, paramDecl.name,
+ *     etc.) and anonymous binder labels (BindingNode.name, LetNode.bind keys,
+ *     MatchArm.bind). These are the user's chosen labels for things that have
+ *     no other name; they never resolve to a different entity.
  *
- * The forthcoming elaborator (B6) defines a separate `ResolvedExprNode`
- * union that lacks `NameRefNode` and adds the `type` field on tag/match.
- * The elaborator's signature is `ParsedExprNode -> ResolvedExprNode`,
- * making the phase distinction visible to type-checked downstream code.
+ *  2. Reference strings — none. Every place where the user's source mentions
+ *     something declared elsewhere is wrapped in NameRefNode. The elaborator
+ *     resolves NameRefNodes to graph edges (direct references to decl objects)
+ *     in a uniform pass. The parser does no scope analysis; it simply records
+ *     "this is a name awaiting resolution at this position."
  *
- * `ExprNode` is exported as an alias for `ParsedExprNode` so callers
- * within this directory can use the short name; cross-phase callers
- * should prefer the phase-explicit names.
+ * Concretely: instance refs (`osc.out`), program-type names in instance
+ * declarations (`SinOsc(...)`), variant names in tag/match, scalar-kind names
+ * in port-type declarations and reg type annotations, type-param refs in
+ * array shapes, alias base types — all become `NameRefNode`. The position
+ * the NameRefNode appears in tells the elaborator which scope to resolve
+ * against.
  *
- * Three universes, kept categorically distinct:
+ * Three categorically-distinct value universes:
  *
  *   ParsedExprNode  — value-producing computations (literals, infix/unary,
  *                     calls, dotted refs, indexing, let, combinator bodies,
  *                     match, tag, parser-internal placeholders).
- *   BodyDecl        — declarations that introduce names into program
- *                     scope (regDecl, delayDecl, paramDecl, instanceDecl,
+ *   BodyDecl        — declarations introducing names into program scope
+ *                     (regDecl, delayDecl, paramDecl, instanceDecl,
  *                     programDecl).
- *   BodyAssign      — wires that pin a value to a port (outputAssign,
+ *   BodyAssign      — wires pinning a value to a port (outputAssign,
  *                     nextUpdate).
  *
- *   TypeDef         — type-level declarations (struct/sum/alias). Lives
- *                     in `ports.type_defs`, not in body.decls/assigns.
+ *   TypeDef         — type-level declarations (struct/sum/alias). Lives in
+ *                     `ports.type_defs`, not in body.decls/assigns.
  *
- * `BlockNode` carries homogeneously-typed arrays: a body's decls are all
- * `BodyDecl`, its assigns all `BodyAssign`. A `regDecl` is not a legal
- * `ExprNode` — the type system enforces position invariants.
+ * `BlockNode` carries homogeneously-typed arrays. `TagNode` and `MatchNode`
+ * carry no `type` field; the elaborator fills that in from the sum-type
+ * registry. The forthcoming elaborator (B6) defines a separate
+ * `ResolvedExprNode` union (in compiler/ir/) that replaces every NameRefNode
+ * with a direct decl reference. The elaborator's signature is
+ * `ParsedExprNode -> ResolvedExprNode`.
  *
- * Pre-slottification only: the parser emits name-bearing variants
- * (`{op:'reg', name}`, `{op:'input', name}`, `{op:'nestedOut', ref}`).
- * The id-bearing variants used post-slottification (in
- * `compiler/session.ts:slottifyExpr`) live in `compiler/expr.ts`.
+ * `ExprNode` is exported as an alias for `ParsedExprNode` so callers within
+ * this directory can use the short name.
  *
  * Note on shadowing: the parser does not preserve let/combinator/match
  * binder shadowing — `let { x: 1 } in let { x: 2 } in x` produces two
  * `BindingNode { name: 'x' }` references that both refer to "any binder
  * named x" in the surrounding scope. The elaborator must disambiguate
- * if shadowing semantics matter for downstream stages. Renaming binders
- * to `name#depth` or de-Bruijn indices at parse time is a future option.
+ * if shadowing semantics matter for downstream stages.
  */
 
 // ─────────────────────────────────────────────────────────────
@@ -112,13 +114,22 @@ export interface CallNode {
   args: ExprNode[]
 }
 
-/** Parser-internal placeholder for unresolved bare identifiers. The
- *  elaborator (B6) converts to `input`/`reg`/`typeParam`/etc. based on
- *  the surrounding declaration's scope. Emitted only by the parser. */
+/** Unresolved name-reference placeholder. Every place where a parsed-tree
+ *  node mentions another node by name (instance refs, program-type names
+ *  in instance decls, variant names, scalar-kind names in port types,
+ *  type-param refs in array shapes, ...) wraps that name in a NameRefNode.
+ *  The elaborator resolves NameRefNodes to direct decl references.
+ *  Position determines scope. */
 export interface NameRefNode {
   op: 'nameRef'
   name: string
 }
+
+/** Convenience constructor — exists to give NameRefNode introduction a
+ *  vocabulary, not to enforce anything (TypeScript object literals would
+ *  work too). Use at every site that emits a NameRef so a future
+ *  refactor (e.g. carrying source position) only needs to change here. */
+export const nameRef = (name: string): NameRefNode => ({ op: 'nameRef', name })
 
 /** Lexically-bound name: introduced by a `let`, combinator binder, or
  *  match-arm pattern. Body parsers track binders in scope and emit this
@@ -128,11 +139,15 @@ export interface BindingNode {
   name: string
 }
 
-/** Pre-slottification dotted port reference: `inst.port`. */
+/** Dotted port reference: `inst.port`. Both `ref` (the instance) and
+ *  `output` (the port name on the referenced program type) are unresolved
+ *  at parse time and wrapped in NameRefNode. The elaborator resolves
+ *  `ref` against in-scope instances and `output` against the resolved
+ *  program type's declared output ports. */
 export interface NestedOutNode {
   op: 'nestedOut'
-  ref: string
-  output: string | number
+  ref: NameRefNode
+  output: NameRefNode
 }
 
 /** Indexing: `arr[i]`. Args are [array, index]. */
@@ -221,31 +236,45 @@ export interface ZipWithNode {
 
 // ── ADT expressions (parsed phase — no `type` field) ──────────
 
-/** `Variant { field: expr, ... }` — sum-type constructor as emitted by
- *  the parser. The sum-type name is determined by the elaborator from
- *  variant-name lookup, so the parser does NOT emit a `type` field.
- *  The elaborator's `ResolvedTagNode` will add it. */
-export interface TagNode {
-  op: 'tag'
-  variant: string
-  payload?: Record<string, ExprNode>
+/** A single payload-field assignment in tag construction:
+ *  `{ field: expr, field: expr }`. The field name is a NameRefNode
+ *  awaiting resolution against the variant's declared payload fields. */
+export interface TagPayloadEntry {
+  field: NameRefNode
+  value: ExprNode
 }
 
-/** A single arm of a `match`. `bind` is the local name(s) for payload
- *  fields (string for one binder, string[] for multiple); omitted when
- *  the variant has no payload. */
-export interface MatchArm {
+/** `Variant { field: expr, ... }` — sum-type constructor.
+ *  `variant` is unresolved at parse time and wrapped in NameRefNode;
+ *  the elaborator resolves it against the sum-type registry (variant
+ *  names uniquely identify a sum type). The sum-type name is filled in
+ *  there too — the parsed TagNode has no `type` field. */
+export interface TagNode {
+  op: 'tag'
+  variant: NameRefNode
+  payload?: TagPayloadEntry[]
+}
+
+/** A single arm of a `match`: `Variant [{ field: name, ... }] => body`.
+ *  `variant` is a NameRefNode resolved against the sum type's variants.
+ *  `bind` is the local name(s) for payload fields (string for one
+ *  binder, string[] for multiple); omitted when the variant has no
+ *  payload. (`bind` is anonymous — no decl exists, so it stays a
+ *  string.) */
+export interface MatchArmEntry {
+  variant: NameRefNode
   bind?: string | string[]
   body: ExprNode
 }
 
 /** `match scrutinee { Variant => body, V { f: x } => body, ... }`.
- *  No `type` field at the parsed phase; the elaborator infers from
- *  arm variant names against the sum-type registry. */
+ *  Arms are an ordered array (arm order is meaningful); the parser
+ *  rejects duplicate variants at parse time. No `type` field at the
+ *  parsed phase. */
 export interface MatchNode {
   op: 'match'
   scrutinee: ExprNode
-  arms: Record<string, MatchArm>
+  arms: MatchArmEntry[]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -259,12 +288,14 @@ export type BodyDecl =
   | InstanceDeclNode
   | ProgramDeclNode
 
-/** `reg name [: type] = init` — persistent state register. */
+/** `reg name [: type] = init` — persistent state register.
+ *  `type` is a NameRefNode (e.g., `float`, `signal`, or a user alias) the
+ *  elaborator resolves against scalar kinds + the program's type aliases. */
 export interface RegDeclNode {
   op: 'regDecl'
   name: string
   init: ExprNode
-  type?: string
+  type?: NameRefNode
 }
 
 /** `delay name = update_expr init init_value` — synthetic one-sample
@@ -287,14 +318,31 @@ export interface ParamDeclNode {
   value?: number
 }
 
+/** `<param=value, ...>` entry in an instance's type-args list. The param
+ *  is a NameRefNode the elaborator resolves against the target program
+ *  type's declared `type_params`. */
+export interface TypeArgEntry {
+  param: NameRefNode
+  value: number
+}
+
+/** `(port: expr, ...)` entry in an instance's input keyword args. The
+ *  port is a NameRefNode resolved against the target program type's
+ *  declared input ports. */
+export interface InstanceInputEntry {
+  port: NameRefNode
+  value: ExprNode
+}
+
 /** `name = ProgType<typeArgs>(port: expr, port: expr)` — instance of a
- *  registered program type. */
+ *  registered program type. `program` is a NameRefNode resolved against
+ *  the program type registry. */
 export interface InstanceDeclNode {
   op: 'instanceDecl'
   name: string
-  program: string
-  type_args?: Record<string, number>
-  inputs?: Record<string, ExprNode>
+  program: NameRefNode
+  type_args?: TypeArgEntry[]
+  inputs?: InstanceInputEntry[]
 }
 
 /** `program SubName(...) -> (...) { ... }` inside an outer body —
@@ -343,11 +391,17 @@ export interface BlockNode {
   assigns: BodyAssign[]
 }
 
-/** Compile-time array-shape dimension: integer literal or type-param ref. */
-export type ShapeDim = number | { op: 'typeParam'; name: string }
+/** Compile-time array-shape dimension: integer literal or NameRefNode.
+ *  The NameRefNode is resolved by the elaborator against the enclosing
+ *  program's declared type-params. */
+export type ShapeDim = number | NameRefNode
 
-/** Port type: bare scalar name, or array with element + shape. */
-export type PortTypeDecl = string | { kind: 'array'; element: string; shape: ShapeDim[] }
+/** Port type: bare scalar name, or array with element + shape. The
+ *  element name is a NameRefNode (`float`/`int`/`bool` or a user alias)
+ *  resolved against scalar kinds + program type aliases. */
+export type PortTypeDecl =
+  | NameRefNode
+  | { kind: 'array'; element: NameRefNode; shape: ShapeDim[] }
 
 export interface ProgramPortSpec {
   name: string
@@ -388,7 +442,7 @@ export interface SumTypeDef {
 export interface AliasTypeDef {
   kind: 'alias'
   name: string
-  base: string
+  base: NameRefNode
   bounds: [number | null, number | null]
 }
 
