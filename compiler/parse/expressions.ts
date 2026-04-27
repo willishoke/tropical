@@ -29,6 +29,9 @@
  */
 
 import { tokenize, type Tok, type TokKind } from './lexer.js'
+import { commaList, consume, eat, formatTok, peek, withScope, ParseError, type Cursor } from './shared.js'
+
+export { ParseError }
 
 // ─────────────────────────────────────────────────────────────
 // ExprNode local type — kept loose so we don't import from compiler/expr.ts
@@ -41,52 +44,14 @@ export type ExprNode =
   | { op: string; [k: string]: unknown }
 
 // ─────────────────────────────────────────────────────────────
-// Parse error
-// ─────────────────────────────────────────────────────────────
-
-export class ParseError extends Error {
-  constructor(message: string, public tok: Tok) {
-    super(`${tok.line}:${tok.col}: ${message}`)
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
 // Parser context
 // ─────────────────────────────────────────────────────────────
 
-interface Ctx {
-  toks: Tok[]
-  i: number
+interface Ctx extends Cursor {
   /** Names that are lexically bound by an enclosing let or combinator
    *  binder. A bare identifier matching any frame in this stack emits
    *  `binding(name)`; everything else emits `nameRef(name)`. */
   binders: Set<string>
-}
-
-function peek(ctx: Ctx, offset = 0): Tok {
-  return ctx.toks[Math.min(ctx.i + offset, ctx.toks.length - 1)]
-}
-
-function consume(ctx: Ctx, kind: TokKind, what?: string): Tok {
-  const t = ctx.toks[ctx.i]
-  if (t.kind !== kind) {
-    throw new ParseError(`expected ${what ?? kind}, got ${formatTokForError(t)}`, t)
-  }
-  ctx.i++
-  return t
-}
-
-function eat(ctx: Ctx, kind: TokKind): Tok | null {
-  const t = ctx.toks[ctx.i]
-  if (t.kind !== kind) return null
-  ctx.i++
-  return t
-}
-
-function formatTokForError(t: Tok): string {
-  if (t.kind === 'eof') return 'end of input'
-  if (t.value !== undefined) return `${t.kind}(${JSON.stringify(t.value)})`
-  return `'${t.kind}'`
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -101,7 +66,7 @@ export function parseExpr(src: string): ExprNode {
   const node = parseTopExpr(ctx)
   const trailing = ctx.toks[ctx.i]
   if (trailing.kind !== 'eof') {
-    throw new ParseError(`unexpected trailing input: ${formatTokForError(trailing)}`, trailing)
+    throw new ParseError(`unexpected trailing input: ${formatTok(trailing)}`, trailing)
   }
   return node
 }
@@ -115,144 +80,62 @@ export function parseExprFromTokens(toks: Tok[], startIdx: number, binders?: Set
 }
 
 // ─────────────────────────────────────────────────────────────
-// Precedence climbing — top-level expression
+// Precedence climbing — table-driven left-associative infix
 // ─────────────────────────────────────────────────────────────
+//
+// Levels are listed weakest → strongest. At each level we parse the next
+// stronger level for the lhs, then loop on any matching infix operator at
+// this level. A single helper drives all 8 levels.
+
+type InfixTable = Partial<Record<TokKind, string>>
+
+// Listed in precedence order (lowest binding power first). The recursive
+// descent is implicit: level N delegates to level N+1 for both sides.
+const INFIX_LEVELS: ReadonlyArray<InfixTable> = [
+  { '||': 'or' },
+  { '&&': 'and' },
+  { '|':  'bitOr' },
+  { '^':  'bitXor' },
+  { '&':  'bitAnd' },
+  { '==': 'eq', '!=': 'neq' },
+  { '<':  'lt', '<=': 'lte', '>': 'gt', '>=': 'gte' },
+  { '<<': 'lshift', '>>': 'rshift' },
+  { '+':  'add', '-':  'sub' },
+  { '*':  'mul', '/':  'div', '%': 'mod' },
+]
+
+const UNARY_OPS: InfixTable = { '-': 'neg', '!': 'not', '~': 'bitNot' }
+
+const binary = (op: string, lhs: ExprNode, rhs: ExprNode): ExprNode => ({ op, args: [lhs, rhs] })
+const unary = (op: string, operand: ExprNode): ExprNode => ({ op, args: [operand] })
 
 function parseTopExpr(ctx: Ctx): ExprNode {
-  return parseLogicalOr(ctx)
+  return parseInfix(ctx, 0)
 }
 
-function binary(op: string, lhs: ExprNode, rhs: ExprNode): ExprNode {
-  return { op, args: [lhs, rhs] }
-}
-
-function unary(op: string, operand: ExprNode): ExprNode {
-  return { op, args: [operand] }
-}
-
-function parseLogicalOr(ctx: Ctx): ExprNode {
-  let lhs = parseLogicalAnd(ctx)
-  while (peek(ctx).kind === '||') {
-    ctx.i++
-    const rhs = parseLogicalAnd(ctx)
-    lhs = binary('or', lhs, rhs)
-  }
-  return lhs
-}
-
-function parseLogicalAnd(ctx: Ctx): ExprNode {
-  let lhs = parseBitwiseOr(ctx)
-  while (peek(ctx).kind === '&&') {
-    ctx.i++
-    const rhs = parseBitwiseOr(ctx)
-    lhs = binary('and', lhs, rhs)
-  }
-  return lhs
-}
-
-function parseBitwiseOr(ctx: Ctx): ExprNode {
-  let lhs = parseBitwiseXor(ctx)
-  while (peek(ctx).kind === '|') {
-    ctx.i++
-    const rhs = parseBitwiseXor(ctx)
-    lhs = binary('bitOr', lhs, rhs)
-  }
-  return lhs
-}
-
-function parseBitwiseXor(ctx: Ctx): ExprNode {
-  let lhs = parseBitwiseAnd(ctx)
-  while (peek(ctx).kind === '^') {
-    ctx.i++
-    const rhs = parseBitwiseAnd(ctx)
-    lhs = binary('bitXor', lhs, rhs)
-  }
-  return lhs
-}
-
-function parseBitwiseAnd(ctx: Ctx): ExprNode {
-  let lhs = parseEquality(ctx)
-  while (peek(ctx).kind === '&') {
-    ctx.i++
-    const rhs = parseEquality(ctx)
-    lhs = binary('bitAnd', lhs, rhs)
-  }
-  return lhs
-}
-
-const EQUALITY_OPS: Partial<Record<TokKind, string>> = { '==': 'eq', '!=': 'neq' }
-function parseEquality(ctx: Ctx): ExprNode {
-  let lhs = parseRelational(ctx)
+function parseInfix(ctx: Ctx, level: number): ExprNode {
+  if (level >= INFIX_LEVELS.length) return parseUnary(ctx)
+  const ops = INFIX_LEVELS[level]
+  let lhs = parseInfix(ctx, level + 1)
   for (;;) {
-    const op = EQUALITY_OPS[peek(ctx).kind]
+    const op = ops[peek(ctx).kind]
     if (!op) return lhs
     ctx.i++
-    const rhs = parseRelational(ctx)
+    const rhs = parseInfix(ctx, level + 1)
     lhs = binary(op, lhs, rhs)
   }
 }
 
-const RELATIONAL_OPS: Partial<Record<TokKind, string>> = { '<': 'lt', '<=': 'lte', '>': 'gt', '>=': 'gte' }
-function parseRelational(ctx: Ctx): ExprNode {
-  let lhs = parseShift(ctx)
-  for (;;) {
-    const op = RELATIONAL_OPS[peek(ctx).kind]
-    if (!op) return lhs
-    ctx.i++
-    const rhs = parseShift(ctx)
-    lhs = binary(op, lhs, rhs)
-  }
-}
-
-const SHIFT_OPS: Partial<Record<TokKind, string>> = { '<<': 'lshift', '>>': 'rshift' }
-function parseShift(ctx: Ctx): ExprNode {
-  let lhs = parseAdditive(ctx)
-  for (;;) {
-    const op = SHIFT_OPS[peek(ctx).kind]
-    if (!op) return lhs
-    ctx.i++
-    const rhs = parseAdditive(ctx)
-    lhs = binary(op, lhs, rhs)
-  }
-}
-
-const ADDITIVE_OPS: Partial<Record<TokKind, string>> = { '+': 'add', '-': 'sub' }
-function parseAdditive(ctx: Ctx): ExprNode {
-  let lhs = parseMultiplicative(ctx)
-  for (;;) {
-    const op = ADDITIVE_OPS[peek(ctx).kind]
-    if (!op) return lhs
-    ctx.i++
-    const rhs = parseMultiplicative(ctx)
-    lhs = binary(op, lhs, rhs)
-  }
-}
-
-const MULTIPLICATIVE_OPS: Partial<Record<TokKind, string>> = { '*': 'mul', '/': 'div', '%': 'mod' }
-function parseMultiplicative(ctx: Ctx): ExprNode {
-  let lhs = parseUnary(ctx)
-  for (;;) {
-    const op = MULTIPLICATIVE_OPS[peek(ctx).kind]
-    if (!op) return lhs
-    ctx.i++
-    const rhs = parseUnary(ctx)
-    lhs = binary(op, lhs, rhs)
-  }
-}
-
-const UNARY_OPS: Partial<Record<TokKind, string>> = { '-': 'neg', '!': 'not', '~': 'bitNot' }
 function parseUnary(ctx: Ctx): ExprNode {
   const op = UNARY_OPS[peek(ctx).kind]
-  if (op) {
-    ctx.i++
-    const operand = parseUnary(ctx)
-    // Constant-fold `-<number-literal>` into a negative number. Matches the
-    // canonical JSON form (`-0.5`, not `{op:'neg', args:[0.5]}`) and makes
-    // array literals like `[1, -0.5, 0.25]` agree with stdlib JSON.
-    if (op === 'neg' && typeof operand === 'number') return -operand
-    return unary(op, operand)
-  }
-  return parsePostfix(ctx)
+  if (!op) return parsePostfix(ctx)
+  ctx.i++
+  const operand = parseUnary(ctx)
+  // Constant-fold `-<number-literal>` into a negative number. Matches the
+  // canonical JSON form (`-0.5`, not `{op:'neg', args:[0.5]}`) and makes
+  // array literals like `[1, -0.5, 0.25]` agree with stdlib JSON.
+  if (op === 'neg' && typeof operand === 'number') return -operand
+  return unary(op, operand)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -306,13 +189,7 @@ function parsePostfix(ctx: Ctx): ExprNode {
 }
 
 function parseCallArgs(ctx: Ctx): ExprNode[] {
-  const args: ExprNode[] = []
-  if (peek(ctx).kind === ')') return args
-  args.push(parseTopExpr(ctx))
-  while (eat(ctx, ',')) {
-    args.push(parseTopExpr(ctx))
-  }
-  return args
+  return commaList(ctx, ')', () => parseTopExpr(ctx))
 }
 
 function isNameRef(node: ExprNode): node is { op: 'nameRef'; name: string } {
@@ -407,13 +284,9 @@ function parseZipWith(ctx: Ctx): ExprNode {
  *  Validates the expected arity (0+ allows any). */
 function parseLambdaArgs(ctx: Ctx, expectedArity: number, ownerOp: string): { binders: string[] } {
   const open = consume(ctx, '(', `${ownerOp}: opening \`(\` for lambda`)
-  const binders: string[] = []
-  if (peek(ctx).kind !== ')') {
-    binders.push(consume(ctx, 'ident', `${ownerOp}: binder name`).value as string)
-    while (eat(ctx, ',')) {
-      binders.push(consume(ctx, 'ident', `${ownerOp}: binder name`).value as string)
-    }
-  }
+  const binders = commaList(ctx, ')', () =>
+    consume(ctx, 'ident', `${ownerOp}: binder name`).value as string,
+  )
   consume(ctx, ')', `${ownerOp}: closing \`)\` of lambda args`)
   if (binders.length !== expectedArity) {
     throw new ParseError(
@@ -428,18 +301,7 @@ function parseLambdaArgs(ctx: Ctx, expectedArity: number, ownerOp: string): { bi
 /** Parse a lambda body with the given binders pushed onto the parser's
  *  scope. Restores scope on return. */
 function parseLambdaBody(ctx: Ctx, binders: string[]): ExprNode {
-  const added: string[] = []
-  for (const b of binders) {
-    if (!ctx.binders.has(b)) {
-      ctx.binders.add(b)
-      added.push(b)
-    }
-  }
-  try {
-    return parseTopExpr(ctx)
-  } finally {
-    for (const b of added) ctx.binders.delete(b)
-  }
+  return withScope(ctx.binders, binders, () => parseTopExpr(ctx))
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -487,20 +349,12 @@ function parsePrimary(ctx: Ctx): ExprNode {
   // parser currently lexes 'sample_rate' as an ident, so it's covered by
   // the ident branch above. Same for sample_index.
 
-  throw new ParseError(`unexpected token in expression: ${formatTokForError(t)}`, t)
+  throw new ParseError(`unexpected token in expression: ${formatTok(t)}`, t)
 }
 
 function parseArrayLiteral(ctx: Ctx): ExprNode {
   // The opening `[` has already been consumed.
-  const items: ExprNode[] = []
-  if (peek(ctx).kind !== ']') {
-    items.push(parseTopExpr(ctx))
-    while (eat(ctx, ',')) {
-      // Tolerate trailing comma: `[1, 2, 3,]`
-      if (peek(ctx).kind === ']') break
-      items.push(parseTopExpr(ctx))
-    }
-  }
+  const items = commaList(ctx, ']', () => parseTopExpr(ctx))
   consume(ctx, ']', 'closing `]` of array literal')
   return items
 }
@@ -530,17 +384,7 @@ function parseLet(ctx: Ctx): ExprNode {
   }
   consume(ctx, '}', 'let: closing `}`')
   consume(ctx, 'in', 'let: `in`')
-  const added: string[] = []
-  for (const n of order) {
-    if (!ctx.binders.has(n)) {
-      ctx.binders.add(n)
-      added.push(n)
-    }
-  }
-  try {
-    const body = parseTopExpr(ctx)
-    return { op: 'let', bind, in: body }
-  } finally {
-    for (const b of added) ctx.binders.delete(b)
-  }
+  return withScope(ctx.binders, order, () => ({
+    op: 'let', bind, in: parseTopExpr(ctx),
+  }))
 }

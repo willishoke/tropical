@@ -24,8 +24,9 @@
  *  - ADTs / match (B5)
  */
 
-import { tokenize, type Tok, type TokKind } from './lexer.js'
-import { parseExprFromTokens, type ExprNode, ParseError } from './expressions.js'
+import { tokenize, type Tok } from './lexer.js'
+import { parseExprFromTokens, type ExprNode } from './expressions.js'
+import { commaList, consume, eat, formatTok, isContextualKw, peek, ParseError, type Cursor } from './shared.js'
 
 // ─────────────────────────────────────────────────────────────
 // BlockNode shape — kept loose to avoid a hard dependency on compiler/expr.ts
@@ -58,36 +59,8 @@ export interface BodyOptions {
 // Parser context
 // ─────────────────────────────────────────────────────────────
 
-interface Ctx {
-  toks: Tok[]
-  i: number
+interface Ctx extends Cursor {
   opts: BodyOptions
-}
-
-function peek(ctx: Ctx, offset = 0): Tok {
-  return ctx.toks[Math.min(ctx.i + offset, ctx.toks.length - 1)]
-}
-
-function consume(ctx: Ctx, kind: TokKind, what?: string): Tok {
-  const t = ctx.toks[ctx.i]
-  if (t.kind !== kind) {
-    throw new ParseError(`expected ${what ?? kind}, got ${formatTok(t)}`, t)
-  }
-  ctx.i++
-  return t
-}
-
-function eat(ctx: Ctx, kind: TokKind): Tok | null {
-  const t = ctx.toks[ctx.i]
-  if (t.kind !== kind) return null
-  ctx.i++
-  return t
-}
-
-function formatTok(t: Tok): string {
-  if (t.kind === 'eof') return 'end of input'
-  if (t.value !== undefined) return `${t.kind}(${JSON.stringify(t.value)})`
-  return `'${t.kind}'`
 }
 
 function isCapitalized(name: string): boolean {
@@ -206,7 +179,7 @@ function parseDelayDecl(ctx: Ctx): ExprNode {
   // the token stream because identifiers don't extend an expression past
   // a complete operand.
   const initTok = peek(ctx)
-  if (initTok.kind !== 'ident' || initTok.value !== 'init') {
+  if (!isContextualKw(initTok, 'init')) {
     throw new ParseError(`delay decl: expected 'init' after update expression, got ${formatTok(initTok)}`, initTok)
   }
   ctx.i++
@@ -319,35 +292,32 @@ function parseInstanceRhs(ctx: Ctx, name: string): ExprNode {
   return out as ExprNode
 }
 
-/** Parse `<key=value, key=value>`. The opening `<` is already consumed. */
+/** Parse `<key=value, key=value>`. The opening `<` is already consumed;
+ *  this consumes through the closing `>`. */
 function parseTypeArgs(ctx: Ctx, owner: string): Record<string, number> {
   const args: Record<string, number> = {}
-  if (peek(ctx).kind === '>') {
-    ctx.i++
-    return args
-  }
-  for (;;) {
-    const k = consume(ctx, 'ident', `${owner}: type-arg name`).value as string
+  commaList(ctx, '>', () => {
+    const kTok = consume(ctx, 'ident', `${owner}: type-arg name`)
+    const k = kTok.value as string
     consume(ctx, '=', `${owner}: \`=\` after type-arg name '${k}'`)
     const vTok = consume(ctx, 'num', `${owner}: type-arg value (number literal)`)
     if (!Number.isInteger(vTok.value)) {
       throw new ParseError(`${owner}: type-arg '${k}' must be an integer`, vTok)
     }
     if (k in args) {
-      throw new ParseError(`${owner}: duplicate type-arg '${k}'`, vTok)
+      throw new ParseError(`${owner}: duplicate type-arg '${k}'`, kTok)
     }
     args[k] = vTok.value as number
-    if (eat(ctx, '>')) return args
-    consume(ctx, ',', `${owner}: \`,\` between type-args`)
-  }
+  })
+  consume(ctx, '>', `${owner}: closing \`>\` of type-args`)
+  return args
 }
 
 /** Parse `(port: expr, port: expr)` — keyword arg form. The `(` is already
  *  consumed; this stops at the matching `)` (left for the caller). */
 function parseInstanceInputs(ctx: Ctx): Record<string, ExprNode> {
   const inputs: Record<string, ExprNode> = {}
-  if (peek(ctx).kind === ')') return inputs
-  for (;;) {
+  commaList(ctx, ')', () => {
     const portTok = consume(ctx, 'ident', 'instance input port name')
     const port = portTok.value as string
     if (port in inputs) {
@@ -355,9 +325,8 @@ function parseInstanceInputs(ctx: Ctx): Record<string, ExprNode> {
     }
     consume(ctx, ':', `\`:\` after input port '${port}'`)
     inputs[port] = parseExpr(ctx)
-    if (peek(ctx).kind === ')') return inputs
-    consume(ctx, ',', `\`,\` between instance inputs`)
-  }
+  })
+  return inputs
 }
 
 // ─────────────────────────────────────────────────────────────
