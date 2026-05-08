@@ -826,6 +826,12 @@ const LEAF_OPS = new Set([
   'delayValue', 'delayRef',
   'nestedOutput', 'nestedOut',
   'binding',
+  // Pre-resolution param/trigger refs (`{op:'param',name}` /
+  // `{op:'trigger',name}`). The materializer resolves the name to an
+  // FFI handle (or SAB slot for WASM) at compile time. Both spellings
+  // are accepted on the wire — the snake_case `paramExpr`/
+  // `triggerParamExpr` mirror the elaborator's NULLARY map.
+  'param', 'trigger', 'paramExpr', 'triggerParamExpr',
 ])
 
 /**

@@ -184,6 +184,93 @@ describe('JIT ↔ interpreter equivalence — edge cases (Phase D P0.1)', () => 
   }
 })
 
+describe('Phase B — wholesale-array writeback absolute-value pin', () => {
+  // The `array_reg_select_writeback` fixture exercises
+  // `next arr = select(cond, arr1, arr2)` with cond = sampleIndex < 4,
+  // arr1 = [1,2,3,4], arr2 = [10,20,30,40], and reads index 2 of the
+  // reg. The runEquivalence harness only checks JIT == interp; this
+  // additional pin guards against coordinated drift by asserting
+  // specific output values.
+  //
+  // With the wholesale writeback (one-sample delay between the
+  // selected-array expression and the reg read):
+  //   sample 0: reg = init [0,0,0,0] → out = 0
+  //   sample 1: reg holds prev write (cond=true at s=0) = [1,2,3,4] → out = 3
+  //   sample 5: reg holds prev write (cond=false at s=4) = [10,20,30,40] → out = 30
+  // After the engine's /20 mix scaling: 0, 0.15, 1.5.
+  test('select(cond, arr1, arr2) writeback pins {sample 0,1,5} = {0, 3, 30} pre-mix', () => {
+    const session = makeSession(BUFFER_LENGTH)
+    loadStdlib(session)
+    const fixture = EDGE_FIXTURES.find(f => f.name === 'array_reg_select_writeback')!
+    const type = loadProgramAsType(fixture.program, session)!
+    session.typeRegistry.set(fixture.program.name, type)
+    const inst = type.instantiateAs('inst')
+    session.instanceRegistry.set('inst', inst)
+    session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+
+    applyFlatPlan(session, session.runtime)
+    session.graph.primeJit()
+    session.graph.process()
+    const buf = session.graph.outputBuffer
+
+    // The runtime divides the audio mix by 20 (matches interpretSession).
+    // Pin pre-mix values via *20 for readability.
+    expect(buf[0] * 20).toBeCloseTo(0,  10)
+    expect(buf[1] * 20).toBeCloseTo(3,  10)
+    expect(buf[5] * 20).toBeCloseTo(30, 10)
+    session.graph.dispose()
+  })
+})
+
+describe('Phase D — mutual register update absolute-value pin', () => {
+  // Read-before-write isolation: at every sample, both regs see the
+  // *previous-sample* value of the other, never an intermediate
+  // post-update value. The recurrence simplifies to a = b = sample
+  // index, so output is 2 * sample_index (scalar fixture) or
+  // sample_index (array fixture, reads only arr1[0]). Pin the first
+  // 4 samples exactly — failure mode is off-by-one-sample, not a
+  // numeric drift, so toBe (not toBeCloseTo) is the right assertion.
+  test('scalar mutual reg: out[t] = 2*t (first 4 samples)', () => {
+    const session = makeSession(BUFFER_LENGTH)
+    loadStdlib(session)
+    const fixture = EDGE_FIXTURES.find(f => f.name === 'scalar_mutual_reg')!
+    const type = loadProgramAsType(fixture.program, session)!
+    session.typeRegistry.set(fixture.program.name, type)
+    const inst = type.instantiateAs('inst')
+    session.instanceRegistry.set('inst', inst)
+    session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+    applyFlatPlan(session, session.runtime)
+    session.graph.primeJit()
+    session.graph.process()
+    const buf = session.graph.outputBuffer
+    // After /20 mix scaling: out[t] = 2*t / 20.
+    for (let t = 0; t < 4; t++) {
+      expect(buf[t] * 20).toBeCloseTo(2 * t, 10)
+    }
+    session.graph.dispose()
+  })
+
+  test('array mutual reg: arr1[0][t] = t (first 4 samples)', () => {
+    const session = makeSession(BUFFER_LENGTH)
+    loadStdlib(session)
+    const fixture = EDGE_FIXTURES.find(f => f.name === 'array_mutual_reg')!
+    const type = loadProgramAsType(fixture.program, session)!
+    session.typeRegistry.set(fixture.program.name, type)
+    const inst = type.instantiateAs('inst')
+    session.instanceRegistry.set('inst', inst)
+    session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+    applyFlatPlan(session, session.runtime)
+    session.graph.primeJit()
+    session.graph.process()
+    const buf = session.graph.outputBuffer
+    // After /20 mix scaling: out[t] = t / 20.
+    for (let t = 0; t < 4; t++) {
+      expect(buf[t] * 20).toBeCloseTo(t, 10)
+    }
+    session.graph.dispose()
+  })
+})
+
 describe('JIT state transfer across loadPlan (Phase D P0.1)', () => {
   test('state preserved when wiring changes between two loadPlan calls', () => {
     // Build plan A: SinOsc → output. Run a buffer; SinOsc accumulates phase.

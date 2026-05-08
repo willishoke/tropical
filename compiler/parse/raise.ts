@@ -110,10 +110,15 @@ const BUILTIN_NULLARY_OPS: ReadonlySet<string> = new Set([
 ])
 
 /** Legacy n-ary builtins that raise to `call(nameRef(<op>), [...args])`.
- *  Mirrors `lower.ts`'s BUILTIN_CALL_OPS. */
+ *  Mirrors `lower.ts`'s BUILTIN_CALL_OPS. Includes both camelCase
+ *  (canonical) and snake_case (older fixtures + patches/CLAUDE.md docs)
+ *  spellings; the elaborator's UNARY_CALLS / BINARY_CALLS maps accept
+ *  both. */
 const BUILTIN_CALL_OPS: ReadonlySet<string> = new Set([
   'select', 'clamp', 'round', 'ldexp', 'floorDiv',
   'sqrt', 'abs', 'floatExponent', 'arraySet',
+  'floor', 'ceil', 'toInt', 'toBool', 'toFloat',
+  'floor_div', 'float_exponent', 'to_int', 'to_bool', 'to_float',
 ])
 
 /** Legacy binary ops that pass through unchanged (parser-shape identical). */
