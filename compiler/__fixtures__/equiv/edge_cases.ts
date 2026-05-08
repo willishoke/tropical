@@ -585,12 +585,24 @@ const arrayMutualReg: EdgeFixture = {
 // The plan calls for a variant whose payload is `float[N]` (e.g. a Box4
 // holding a 4-element payload), with the wholesale writeback covered by
 // the same fix as `arrayRegWholesaleWriteback`. Today this isn't
-// expressible in the IR: `StructField` is `{name, type: ScalarKind}`
-// with no shape field, so array-typed payload fields are silently
-// dropped at elaboration. Implementing the full path requires extending
-// StructField + parse + elaborator + sum_lower (multi-slot allocation
-// per payload field) and bindings/extract paths. Tracked as a
-// follow-up; not in this PR's scope.
+// expressible in the IR: `StructField` (compiler/ir/nodes.ts:54) is
+// `{name, type: ScalarKind}` with no shape field, so array-typed payload
+// fields can't even be represented. Both surface paths reject them
+// before they reach the elaborator: the Zod schema (compiler/schema.ts:
+// StructFieldSchema / VariantPayloadFieldSchema) declares only
+// `name + scalar_type` and Zod's default strip mode silently drops
+// extras; the .trop grammar (compiler/parse/declarations.ts) only
+// accepts a scalar kind. Implementing the full path touches:
+//   - nodes.ts (extend StructField + BinderDecl with optional shape)
+//   - schema.ts + parse/declarations.ts (accept shape on the wire)
+//   - elaborator.ts (resolveStructField passes shape through)
+//   - sum_lower.ts (multi-slot allocation per (variant, field, idx);
+//     extractSlotFromSumExpr returns scalar per index;
+//     bindingsForArm substitutes an inline-array of slot DelayRefs)
+//   - array_lower.ts (resolve `index` over the synthetic array binding
+//     post-sumLower, since the binder's `body` may use the payload via
+//     `index(binder, i)`)
+// Tracked as a follow-up; not in this PR's scope.
 
 export const EDGE_FIXTURES: EdgeFixture[] = [
   divByZero,

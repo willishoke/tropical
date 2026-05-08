@@ -245,12 +245,32 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
   // ─────────────────────────────────────────────────────────────
   // Phase H — Param / Trigger handle stitching (TDD plan §Phase H)
   //
-  // Both tests are deferred: the live-JIT param-handle stitching path
-  // (compile_session.ts:31) emits `String(napi_external)` which is
-  // "[object Object]" and the C++ side throws "stoull: no conversion".
-  // Fixing it requires either a `tropical_param_address(handle)` C
-  // export or changing the FFI binding return type to uint64; either
-  // way is a focused PR on its own. Tracked outside this PR.
+  // Both tests are deferred. The live-JIT path for params/triggers has
+  // never been end-to-end exercised, and surfacing it requires THREE
+  // coordinated changes (it isn't a single focused PR):
+  //
+  //  1. TS FFI: compile_session.ts:31 emits `String(napi_external)` =
+  //     "[object Object]"; the C++ side throws stoull("no conversion").
+  //     `koffi.address(_h)` returns the WRAPPER's address, not the
+  //     inner ControlParam* the kernel expects (tropical_c.cpp's
+  //     TropicalParam wraps a ControlParam* member). The fix needs a
+  //     dedicated `tropical_param_address(handle)` C export that
+  //     returns `static_cast<TropicalParam*>(p)->param`, OR a layout
+  //     change to TropicalParam.
+  //
+  //  2. TS emit: emit_resolved.ts emits a bare `param` operand; the
+  //     C++ JIT (OrcJitEngine.cpp:624) returns null for it because
+  //     params must be wrapped in a SmoothParam / TriggerParam
+  //     instruction before they can flow into arithmetic. emit_wasm.ts
+  //     does this; emit_resolved.ts doesn't yet.
+  //
+  //  3. C++ runtime state: FlatRuntime::load_plan never populates
+  //     KernelState::param_ptrs or trigger_params from the parsed
+  //     plan. The kernel's param_ptrs GEP indexes into a zero-length
+  //     vector → segfault. The per-buffer trigger snapshot loop also
+  //     iterates an empty vector.
+  //
+  // All three need to land together for these tests to pass.
   // ─────────────────────────────────────────────────────────────
 
   test.skip('(D) param fan-out + non-aliasing: shared cutoff updates lockstep, drive unchanged', () => {
@@ -326,12 +346,16 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
     session.graph.dispose()
   })
 
-  test.skip('(D) trigger as gate_input: trigger-driven gate matches literal bool gate on same samples', () => {
+  test.skip('(D) trigger as gate_input: trigger-driven gate matches always-true gate on the buffer it fired in', () => {
     // Gateable instance whose gate_input is `{op:'trigger', name:'go'}`.
-    // Fire the trigger once; the audio thread reads it on the next
-    // process() call (one sample) then auto-clears. Compare to a
-    // reference instance whose gate_input is a literal expression
-    // that's true on sample 0 only.
+    // Fire the trigger before process(); the runtime snapshots the
+    // trigger value once per buffer (FlatRuntime.hpp:105-111 does
+    // value.exchange(0.0)) and the kernel reads `frame_value` every
+    // sample with no per-sample reset. So a fired trigger reads as
+    // 1.0 for ALL samples of that buffer (not just sample 0). The
+    // reference is therefore a literal-true gate, not a sample-0-only
+    // gate — both should produce identical Accum behavior across the
+    // whole buffer in which the trigger fires.
     const triggerSession = makeSession(8)
     loadBuiltins(triggerSession)
     loadProgramAsType(ACCUM, triggerSession)
@@ -348,8 +372,8 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
     }, triggerSession)
     applySessionWiring(triggerSession)
     triggerSession.graph.primeJit()
-    // Fire the trigger before the buffer runs. The runtime reads it
-    // on the next process call (one sample) then auto-clears.
+    // Fire the trigger before the buffer runs. The runtime snapshots
+    // the value once per buffer; gate stays true for all 8 samples.
     triggerSession.triggerRegistry.get('go')!.fire()
     triggerSession.graph.process()
     const triggerOut = new Float64Array(triggerSession.graph.outputBuffer)
@@ -357,15 +381,15 @@ describe('JIT ↔ interpreter equivalence for gateable subgraphs', () => {
     const literalSession = makeSession(8)
     loadBuiltins(literalSession)
     loadProgramAsType(ACCUM, literalSession)
-    // Reference: gate_input = (sampleIndex == 0). True only on sample 0,
-    // matching the trigger's one-sample-on then auto-clear behavior.
+    // Reference: gate_input = literal true (whole buffer on), matching
+    // the trigger's per-buffer snapshot semantics described above.
     loadJSON({
       schema: 'tropical_program_2',
       name: 'patch',
       body: { op: 'block', decls: [
         { op: 'instanceDecl', name: 'a1', program: 'Accum',
           inputs: { x: 1.0 }, gateable: true,
-          gate_input: { op: 'eq', args: [{ op: 'sampleIndex' }, 0] } },
+          gate_input: true },
       ]},
       audio_outputs: [{ instance: 'a1', output: 'out' }],
     }, literalSession)
