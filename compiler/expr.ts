@@ -293,11 +293,27 @@ export type NamedChildrenNode =
 
 // ── Leaf ops (no children) ──────────────────────────────────────────────
 
-/** Pre-slottify input ref: `{op:'input', name}`. Post-slottify: `{op:'input', id}`. */
-export interface InputNode { op: 'input'; id?: number; name?: string }
+// Input and register references arrive at two distinct phases. Pre-slottify
+// (parser, raise, MCP wiring surface) the user-given name identifies the
+// port/register; post-slottify (after slot maps are built) the integer
+// slot id does. Encoding both phases as a coproduct rather than a product-
+// of-optionals rules out the illegal states { id and name }, { neither }.
 
-/** Pre-slottify register ref: `{op:'reg', name}`. Post-slottify: `{op:'reg', id}`. */
-export interface RegRefNode { op: 'reg'; id?: number; name?: string }
+/** Pre-slottify input ref: input port identified by name. */
+export interface PreSlotInputRef  { op: 'input'; name: string }
+
+/** Post-slottify input ref: input port identified by slot id. */
+export interface PostSlotInputRef { op: 'input'; id: number }
+
+export type InputNode = PreSlotInputRef | PostSlotInputRef
+
+/** Pre-slottify register ref: register identified by name. */
+export interface PreSlotRegRef  { op: 'reg'; name: string }
+
+/** Post-slottify register ref: register identified by slot id. */
+export interface PostSlotRegRef { op: 'reg'; id: number }
+
+export type RegRefNode = PreSlotRegRef | PostSlotRegRef
 
 /** Pre-slottify delay reference: `{op:'delayRef', id: 'name'}`. */
 export interface DelayRefNode { op: 'delayRef'; id: string }
