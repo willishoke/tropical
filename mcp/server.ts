@@ -21,6 +21,12 @@ import {
   makeSession, nextName, loadJSON,
   prettyExpr, resolveProgramType, SessionState, ExprNode,
   normalizeProgramFile, v2NodeToFile,
+  type Instance,
+  instantiate,
+  inputNames, outputNames, registerNames,
+  inputPortTypes, outputPortTypes, registerPortTypes,
+  inputPortType, outputPortType, registerPortType,
+  rawInputDefaults,
 } from '../compiler/session.js'
 import {
   saveProgramFromSession, loadProgramAsType, mergeProgramIntoSession,
@@ -84,8 +90,8 @@ function adaptInputExpr(
       const srcInst = session.instanceRegistry.get(obj.instance as string)
       if (srcInst) {
         const outName = obj.output as string | number
-        const outIdx = typeof outName === 'number' ? outName : srcInst.outputNames.indexOf(String(outName))
-        if (outIdx !== -1) srcType = srcInst.outputPortType(outIdx)
+        const outIdx = typeof outName === 'number' ? outName : outputNames(srcInst).indexOf(String(outName))
+        if (outIdx !== -1) srcType = outputPortType(srcInst, outIdx)
       }
     }
   }
@@ -321,30 +327,30 @@ function validatePositiveInt(value: unknown, param: string, defaultValue: number
   return value as number
 }
 
-function resolveOutputIdx(inst: { outputNames: string[] }, nameOrIdx: string | number): number {
+function resolveOutputIdx(inst: Instance, nameOrIdx: string | number): number {
   if (typeof nameOrIdx === 'number') return nameOrIdx
   if (typeof nameOrIdx === 'string' && /^\d+$/.test(nameOrIdx)) return parseInt(nameOrIdx, 10)
-  const idx = inst.outputNames.indexOf(nameOrIdx)
+  const idx = outputNames(inst).indexOf(nameOrIdx)
   if (idx === -1)
     failEnum({
       code:    'unknown_output',
       param:   'output',
       value:   nameOrIdx,
-      options: inst.outputNames,
+      options: outputNames(inst),
     })
   return idx
 }
 
-function resolveInputIdx(inst: { inputNames: string[] }, nameOrIdx: string | number): number {
+function resolveInputIdx(inst: Instance, nameOrIdx: string | number): number {
   if (typeof nameOrIdx === 'number') return nameOrIdx
   if (typeof nameOrIdx === 'string' && /^\d+$/.test(nameOrIdx)) return parseInt(nameOrIdx, 10)
-  const idx = inst.inputNames.indexOf(nameOrIdx)
+  const idx = inputNames(inst).indexOf(nameOrIdx)
   if (idx === -1)
     failEnum({
       code:    'unknown_input',
       param:   'input',
       value:   nameOrIdx,
-      options: inst.inputNames,
+      options: inputNames(inst),
     })
   return idx
 }
@@ -353,10 +359,10 @@ function instanceSummary(name: string) {
   const inst = session.instanceRegistry.get(name)!
   return {
     name,
-    type_name: inst.typeName,
+    type_name: inst.baseTypeName,
     type_args: inst.typeArgs ?? null,
-    inputs: inst.inputNames,
-    outputs: inst.outputNames,
+    inputs: inputNames(inst),
+    outputs: outputNames(inst),
   }
 }
 
@@ -712,7 +718,7 @@ function handleDefineProgram(args: Record<string, unknown>) {
     const { node } = normalizeProgramFile(args.def as { schema?: string; [k: string]: unknown })
     const type = loadProgramAsType(node, session)
     if (type) {
-      return { program_name: type.name, inputs: type.inputNames, outputs: type.outputNames }
+      return { program_name: type.displayName, inputs: inputNames(type), outputs: outputNames(type) }
     }
     // Generic — template only, no concrete ports until instantiation.
     return {
@@ -747,7 +753,7 @@ function handleAddInstance(
         value:   instanceName,
       })
     const { type, typeArgs: resolved } = resolveProgramTypeOrFail(programName, typeArgs, 'program')
-    const inst = type.instantiateAs(instanceName, { baseTypeName: programName, typeArgs: resolved })
+    const inst = instantiate(type, instanceName, { baseTypeName: programName, typeArgs: resolved })
     if (gateable) {
       if (gateInput === undefined)
         failBare({
@@ -798,7 +804,7 @@ function handleReplicate(
           value:   namePrefix,
         })
       const { type, typeArgs: resolved } = resolveProgramTypeOrFail(programName, typeArgs, 'program')
-      const inst = type.instantiateAs(name, { baseTypeName: programName, typeArgs: resolved })
+      const inst = instantiate(type, name, { baseTypeName: programName, typeArgs: resolved })
       session.instanceRegistry.set(name, inst)
       created.push(instanceSummary(name))
     }
@@ -807,15 +813,15 @@ function handleReplicate(
 }
 
 /** Resolve an output name/index on an instance and return the canonical name string. */
-function resolveOutputName(inst: { outputNames: string[] }, nameOrIdx: string | number): string {
+function resolveOutputName(inst: Instance, nameOrIdx: string | number): string {
   const idx = resolveOutputIdx(inst, nameOrIdx)
-  return inst.outputNames[idx]
+  return outputNames(inst)[idx]
 }
 
 /** Resolve an input name/index on an instance and return the canonical name string. */
-function resolveInputName(inst: { inputNames: string[] }, nameOrIdx: string | number): string {
+function resolveInputName(inst: Instance, nameOrIdx: string | number): string {
   const idx = resolveInputIdx(inst, nameOrIdx)
-  return inst.inputNames[idx]
+  return inputNames(inst)[idx]
 }
 
 function handleWireChain(args: Record<string, unknown>) {
@@ -841,7 +847,7 @@ function handleWireChain(args: Record<string, unknown>) {
       const firstName  = instanceNames[0]
       const firstInst  = insts[0]
       const inputName  = resolveInputName(firstInst, inputPort)
-      const { expr }   = adaptInputExpr(initialExpr, firstInst.inputPortType(firstInst.inputNames.indexOf(inputName)), firstName, inputName)
+      const { expr }   = adaptInputExpr(initialExpr, inputPortType(firstInst, inputNames(firstInst).indexOf(inputName)), firstName, inputName)
       session.inputExprNodes.set(`${firstName}:${inputName}`, expr)
     }
 
@@ -855,7 +861,7 @@ function handleWireChain(args: Record<string, unknown>) {
       const outName  = resolveOutputName(srcInst, outputPort)
       const inName   = resolveInputName(dstInst, inputPort)
       const refExpr  = { op: 'ref' as const, instance: srcName, output: outName }
-      const { expr } = adaptInputExpr(refExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), dstName, inName)
+      const { expr } = adaptInputExpr(refExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), dstName, inName)
       session.inputExprNodes.set(`${dstName}:${inName}`, expr)
       linked.push(`${srcName}.${outName} → ${dstName}.${inName}`)
     }
@@ -887,7 +893,7 @@ function handleWireZip(args: Record<string, unknown>) {
       const outName  = resolveOutputName(srcInst, src.output)
       const inName   = resolveInputName(dstInst, dst.input)
       const refExpr  = { op: 'ref' as const, instance: src.instance, output: outName }
-      const { expr } = adaptInputExpr(refExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), dst.instance, inName)
+      const { expr } = adaptInputExpr(refExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), dst.instance, inName)
       session.inputExprNodes.set(`${dst.instance}:${inName}`, expr)
       linked.push(`${src.instance}.${outName} → ${dst.instance}.${inName}`)
     }
@@ -925,7 +931,7 @@ function handleFanOut(args: Record<string, unknown>) {
     for (const dst of targets) {
       const dstInst = requireInstance(dst.instance, 'targets[].instance')
       const inName   = resolveInputName(dstInst, dst.input)
-      const { expr } = adaptInputExpr(sourceExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), dst.instance, inName)
+      const { expr } = adaptInputExpr(sourceExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), dst.instance, inName)
       session.inputExprNodes.set(`${dst.instance}:${inName}`, expr)
       linked.push(`${sourceLabel} → ${dst.instance}.${inName}`)
     }
@@ -961,7 +967,7 @@ function handleFanIn(args: Record<string, unknown>) {
     )
 
     const inName   = resolveInputName(dstInst, target.input)
-    const { expr } = adaptInputExpr(sumExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), target.instance, inName)
+    const { expr } = adaptInputExpr(sumExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), target.instance, inName)
     session.inputExprNodes.set(`${target.instance}:${inName}`, expr)
 
     return { mixed: sources.length, target: `${target.instance}.${inName}`, ...wire() }
@@ -987,7 +993,7 @@ function handleFeedback(args: Record<string, unknown>) {
       : { op: 'delay' as const, args: [refExpr], init }
 
     validateExpr(delayExpr, `${to.instance}.${inName}`)
-    const { expr } = adaptInputExpr(delayExpr, dstInst.inputPortType(dstInst.inputNames.indexOf(inName)), to.instance, inName)
+    const { expr } = adaptInputExpr(delayExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), to.instance, inName)
     session.inputExprNodes.set(`${to.instance}:${inName}`, expr)
 
     return {
@@ -1043,8 +1049,8 @@ function handleExportProgram(args: Record<string, unknown>) {
 
     return {
       program_name: name,
-      inputs: type.inputNames,
-      outputs: type.outputNames,
+      inputs: inputNames(type),
+      outputs: outputNames(type),
       instances_included: exportedInstanceNames,
       program: v2NodeToFile(exportedNode as unknown as ExprNode),
     }
@@ -1069,22 +1075,22 @@ function handleRemoveInstance(instanceName: string) {
 function handleListPrograms() {
   return wrap(() => {
     const concrete = [...session.typeRegistry.entries()].map(([typeName, type]) => {
-      const defaultsMap = type.rawInputDefaults as Record<string, unknown>
-      const inputPortTypes  = type.inputPortTypes
-      const outputPortTypes = type.outputPortTypes
-      const registerPortTypes = type.registerPortTypes
+      const defaultsMap = rawInputDefaults(type) as Record<string, unknown>
+      const ipt = inputPortTypes(type)
+      const opt = outputPortTypes(type)
+      const rpt = registerPortTypes(type)
       return {
         program_name: typeName,
-        inputs:    type.inputNames.map((n, i) => ({
+        inputs:    inputNames(type).map((n, i) => ({
           name: n,
-          type: portTypeOrNull(inputPortTypes[i]),
+          type: portTypeOrNull(ipt[i]),
           default: defaultsMap[n] ?? null,
         })),
-        outputs: type.outputNames.map((n, i) => ({
+        outputs: outputNames(type).map((n, i) => ({
           name: n,
-          type: portTypeOrNull(outputPortTypes[i]),
+          type: portTypeOrNull(opt[i]),
         })),
-        registers: type.registerNames.map((n, i) => ({ name: n, type: portTypeOrNull(registerPortTypes[i]) })),
+        registers: registerNames(type).map((n, i) => ({ name: n, type: portTypeOrNull(rpt[i]) })),
         type_params: null as Record<string, { type: 'int'; default?: number }> | null,
       }
     })
@@ -1125,22 +1131,22 @@ function handleGetInfo(instanceName: string) {
     const inst = requireInstance(instanceName, 'instance_name')
     return {
       name: instanceName,
-      program: inst.typeName,
+      program: inst.baseTypeName,
       type_args: inst.typeArgs ?? null,
-      inputs:  inst.inputNames.map((n, i) => ({
+      inputs:  inputNames(inst).map((n, i) => ({
         name: n, index: i,
-        type: inst.inputPortType(i) ?? null,
+        type: inputPortType(inst, i) ?? null,
         expr: session.inputExprNodes.get(`${instanceName}:${n}`) ?? null,
         pretty: session.inputExprNodes.has(`${instanceName}:${n}`)
           ? prettyExpr(session.inputExprNodes.get(`${instanceName}:${n}`)!, session.instanceRegistry)
           : null,
       })),
-      outputs: inst.outputNames.map((n, i) => ({
+      outputs: outputNames(inst).map((n, i) => ({
         name: n, index: i,
-        type: inst.outputPortType(i) ?? null,
+        type: outputPortType(inst, i) ?? null,
       })),
-      registers: inst.registerNames.map((n, i) => ({
-        name: n, index: i, type: inst.registerPortType(i) ?? null,
+      registers: registerNames(inst).map((n, i) => ({
+        name: n, index: i, type: registerPortType(inst, i) ?? null,
       })),
     }
   })
@@ -1179,22 +1185,22 @@ function resolveDacSource(expr: ExprNode): { instance: string; output: string } 
   const inst = requireInstance(e.instance, 'instance')
   let outputName: string
   if (typeof e.output === 'number') {
-    if (e.output < 0 || e.output >= inst.outputNames.length) {
+    if (e.output < 0 || e.output >= outputNames(inst).length) {
       failEnum({
         code:    'unknown_output',
         param:   'output',
         value:   e.output,
-        options: inst.outputNames,
+        options: outputNames(inst),
       })
     }
-    outputName = inst.outputNames[e.output]
+    outputName = outputNames(inst)[e.output]
   } else if (typeof e.output === 'string') {
-    if (!inst.outputNames.includes(e.output)) {
+    if (!outputNames(inst).includes(e.output)) {
       failEnum({
         code:    'unknown_output',
         param:   'output',
         value:   e.output,
-        options: inst.outputNames,
+        options: outputNames(inst),
       })
     }
     outputName = e.output
@@ -1233,7 +1239,7 @@ function handleWire(args: Record<string, unknown>) {
       }
       const inst = requireInstance(r.instance, 'remove[].instance')
       const inputId = resolveInputIdx(inst, r.input)
-      const resolvedName = inst.inputNames[inputId] ?? String(inputId)
+      const resolvedName = inputNames(inst)[inputId] ?? String(inputId)
       session.inputExprNodes.delete(`${r.instance}:${resolvedName}`)
     }
 
@@ -1258,9 +1264,9 @@ function handleWire(args: Record<string, unknown>) {
       }
       const inst = requireInstance(s.instance, 'set[].instance')
       const inputId = resolveInputIdx(inst, s.input)
-      const resolvedName = inst.inputNames[inputId] ?? String(inputId)
+      const resolvedName = inputNames(inst)[inputId] ?? String(inputId)
       validateExpr(s.expr, `${s.instance}.${resolvedName}`)
-      const { expr } = adaptInputExpr(s.expr, inst.inputPortType(inputId), s.instance, resolvedName)
+      const { expr } = adaptInputExpr(s.expr, inputPortType(inst, inputId), s.instance, resolvedName)
       session.inputExprNodes.set(`${s.instance}:${resolvedName}`, expr)
       results.push({ instance: s.instance, input: resolvedName, expr })
     }
@@ -1513,13 +1519,13 @@ function renderProgramCatalog(): string {
   const lines: string[] = ['# tropical program catalog\n']
   for (const [typeName, type] of session.typeRegistry) {
     lines.push(`## ${typeName}`)
-    const defaultsMap = type.rawInputDefaults as Record<string, unknown>
-    const inputParts = type.inputNames.map(n => {
+    const defaultsMap = rawInputDefaults(type) as Record<string, unknown>
+    const inputParts = inputNames(type).map(n => {
       const val = defaultsMap[n]
       return val !== undefined ? `${n}=${JSON.stringify(val)}` : n
     })
     lines.push(`Inputs:  ${inputParts.join(', ')}`)
-    lines.push(`Outputs: ${type.outputNames.join(', ')}`)
+    lines.push(`Outputs: ${outputNames(type).join(', ')}`)
     lines.push('')
   }
   return lines.join('\n')

@@ -34,4 +34,4 @@ export function compileSession(session: SessionState): FlatPlan {
   return compileResolved(lowered, { paramHandles })
 }
 
-export type { ProgramInstance } from '../program_types.js'
+export type { Instance } from '../program_types.js'

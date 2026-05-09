@@ -12,7 +12,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, resolveProgramType } from './session'
+import { makeSession, resolveProgramType, instantiate } from './session'
 import { loadStdlib } from './program'
 import { interpretSession } from './interpret_resolved'
 
@@ -40,7 +40,7 @@ function evalProgram(
   sharedSession.graphOutputs.length = 0
 
   const { type } = resolveProgramType(sharedSession, programName, undefined, undefined)
-  const inst = type.instantiateAs('it', { baseTypeName: programName })
+  const inst = instantiate(type, 'it', { baseTypeName: programName })
   sharedSession.instanceRegistry.set('it', inst)
   for (const [k, v] of Object.entries(inputs)) sharedSession.inputExprNodes.set(`it:${k}`, v)
   sharedSession.graphOutputs.push({ instance: 'it', output: outputName })

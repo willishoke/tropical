@@ -8,7 +8,10 @@
 
 import { type ExprNode } from './expr.js'
 import {
-  ProgramType, ProgramInstance,
+  type Compiled, type Instance,
+  outputNames,
+  // Note: re-exports below pick up Compiled/Instance + helpers for
+  // callers that already import from session.js.
 } from './program_types.js'
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type PortTypeDecl, type ProgramNode, type ProgramTopLevel } from './program.js'
@@ -31,6 +34,18 @@ import type { TypeParamDecl } from './ir/nodes.js'
 
 // ExprNode is defined in expr.ts and re-exported here for backward compatibility.
 export type { ExprNode } from './expr.js'
+
+// Re-export Compiled/Instance + free-function helpers for callers that
+// already import from session.js.
+export {
+  type Compiled, type Instance,
+  makeCompiled, instantiate,
+  inputNames, outputNames, registerNames,
+  inputPortTypes, outputPortTypes, registerPortTypes,
+  inputPortType, outputPortType, registerPortType,
+  inputIndex, outputIndex,
+  rawInputDefaults,
+} from './program_types.js'
 
 export interface TypeDefFieldJSON {
   name: string
@@ -71,7 +86,7 @@ export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON | AliasTypeDefJSON
 export interface SessionState {
   bufferLength: number
   dac: import('./runtime/audio.js').DAC | null  // lazy type import to avoid circular dep
-  typeRegistry: Map<string, ProgramType>
+  typeRegistry: Map<string, Compiled>
   typeAliasRegistry: Map<string, { base: string }>
   /** Registered sum types from `ports.type_defs` entries with kind === 'sum'.
    *  Keyed by name; values carry the variant + payload metadata used for bundle decomposition. */
@@ -80,7 +95,7 @@ export interface SessionState {
    *  Keyed by name; values carry the field metadata. Currently retained for type-system
    *  completeness; struct values themselves have no expression-level operations. */
   structTypeRegistry: Map<string, { fields: Array<{ name: string; scalar: ScalarKind }> }>
-  instanceRegistry: Map<string, ProgramInstance>
+  instanceRegistry: Map<string, Instance>
   graphOutputs: Array<{ instance: string; output: string }>
   paramRegistry: Map<string, Param>
   triggerRegistry: Map<string, Trigger>
@@ -91,13 +106,13 @@ export interface SessionState {
   /** Thin proxy over runtime that matches the old Graph interface for tests and legacy callers. */
   graph: { primeJit(): void; process(): void; readonly outputBuffer: Float64Array; dispose(): void }
   /** On-demand type resolver (set by loadStdlib for lazy loading). */
-  typeResolver?: (name: string) => ProgramType | undefined
+  typeResolver?: (name: string) => Compiled | undefined
   /** Monomorphized specializations of generic programs, keyed by `Type<k1=v1,k2=v2>`. */
-  specializationCache: Map<string, ProgramType>
+  specializationCache: Map<string, Compiled>
   /** ResolvedProgram templates for generic programs. Keyed by type name.
    *  Only populated for programs declaring type_params. The strata pipeline's
    *  `specializeProgram` consumes these at instantiation time, producing a
-   *  fresh `ProgramType` per (template, type-args) pair via the
+   *  fresh `Compiled` per (template, type-args) pair via the
    *  specialization cache. */
   genericTemplatesResolved: Map<string, import('./ir/nodes.js').ResolvedProgram>
   /** Pre-strata `ResolvedProgram` for every non-generic registered type,
@@ -246,20 +261,20 @@ type ResolveSession = Pick<SessionState, 'typeRegistry' | 'specializationCache' 
   Partial<Pick<SessionState, 'typeResolver' | 'typeAliasRegistry'>>
 
 /**
- * Resolve a (baseName, type_args) pair to a concrete ProgramType.
+ * Resolve a (baseName, type_args) pair to a concrete Compiled.
  * Generic types monomorphize on demand, keyed by fully-resolved integer args.
  * Non-generic types reject non-empty type_args.
  *
  * The strata pipeline is the only path: generic templates live in
  * `genericTemplatesResolved` as `ResolvedProgram`s; instantiation routes
- * through `programTypeFromResolved` to produce a fresh `ProgramType`.
+ * through `programTypeFromResolved` to produce a fresh `Compiled`.
  */
 export function resolveProgramType(
   session: ResolveSession,
   baseName: string,
   rawTypeArgs: RawTypeArgs | undefined,
   outerArgs: ResolvedTypeArgs | undefined,
-): { type: ProgramType; typeArgs?: ResolvedTypeArgs } {
+): { type: Compiled; typeArgs?: ResolvedTypeArgs } {
   const specializeFromResolvedTemplate = (template: import('./ir/nodes.js').ResolvedProgram) => {
     // Mirror the legacy `type_params` shape that resolveTypeArgs expects.
     const typeParamsByName: Record<string, { type: 'int'; default?: number }> = {}
@@ -281,8 +296,7 @@ export function resolveProgramType(
       }
       subst.set(decl, value)
     }
-    const type = programTypeFromResolved(template, subst)
-    type.rename(key)
+    const type = programTypeFromResolved(template, subst, { displayName: key })
     session.specializationCache.set(key, type)
     return { type, typeArgs: resolved }
   }
@@ -374,7 +388,7 @@ const UNARY_PREFIX: Record<string, string> = { neg: '-' }
  */
 export function prettyExpr(
   node: ExprNode,
-  instanceRegistry: Map<string, ProgramInstance>,
+  instanceRegistry: Map<string, Instance>,
 ): string {
   if (typeof node === 'number') return String(node)
   if (typeof node === 'boolean') return String(node)
@@ -388,7 +402,7 @@ export function prettyExpr(
     const mod = n.instance as string
     const out = n.output
     const inst = instanceRegistry.get(mod)
-    const outName = inst && typeof out === 'number' ? (inst.outputNames[out] ?? String(out)) : String(out)
+    const outName = inst && typeof out === 'number' ? (outputNames(inst)[out] ?? String(out)) : String(out)
     return `${mod}.${outName}`
   }
   if (op === 'input')     return `input(${n.name})`

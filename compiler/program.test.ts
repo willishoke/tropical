@@ -4,7 +4,7 @@
 
 import { describe, test, expect } from 'bun:test'
 import { parseProgramV2 } from './schema'
-import { makeSession, loadJSON, v2NodeToFile, type Expr } from './session'
+import { makeSession, loadJSON, v2NodeToFile, type Expr, instantiate, inputPortType, outputPortType } from './session'
 import {
   loadStdlib as loadBuiltins, loadProgramAsType, loadProgramAsSession,
   saveProgramFromSession, exportSessionAsProgram, instanceDecls,
@@ -98,7 +98,7 @@ describe('exportSessionAsProgram — port type round-trip', () => {
     }
     loadProgramAsType(typedLeaf, session)
     const { type } = resolveProgramType(session, 'TypedLeaf', undefined, undefined)
-    session.instanceRegistry.set('t1', type.instantiateAs('t1', { baseTypeName: 'TypedLeaf' }))
+    session.instanceRegistry.set('t1', instantiate(type, 't1', { baseTypeName: 'TypedLeaf' }))
 
     const exported = exportSessionAsProgram(session, {
       name: 'Exported',
@@ -116,8 +116,8 @@ describe('exportSessionAsProgram — port type round-trip', () => {
     loadProgramAsType(typedLeaf, session2)
     loadProgramAsType(exported, session2)
     const { type: exportedType } = resolveProgramType(session2, 'Exported', undefined, undefined)
-    const srcPt = exportedType.inputPortType(0)
-    const dstPt = exportedType.outputPortType(0)
+    const srcPt = inputPortType(exportedType, 0)
+    const dstPt = outputPortType(exportedType, 0)
     expect(srcPt?.tag).toBe('array')
     expect(dstPt?.tag).toBe('array')
     if (srcPt?.tag === 'array') expect(srcPt.shape).toEqual([4])
@@ -136,7 +136,7 @@ describe('exportSessionAsProgram — port type round-trip', () => {
     }
     loadProgramAsType(plain, session)
     const { type } = resolveProgramType(session, 'Plain', undefined, undefined)
-    session.instanceRegistry.set('p1', type.instantiateAs('p1', { baseTypeName: 'Plain' }))
+    session.instanceRegistry.set('p1', instantiate(type, 'p1', { baseTypeName: 'Plain' }))
 
     const exported = exportSessionAsProgram(session, {
       name: 'Exported',
@@ -212,7 +212,7 @@ describe('generic programs round-trip', () => {
     const session = makeSession()
     loadProgramAsType(genericDelay(), session)
     const { type, typeArgs } = resolveProgramType(session, 'Delay', { N: 8 }, undefined)
-    const inst = type.instantiateAs('d1', { baseTypeName: 'Delay', typeArgs })
+    const inst = instantiate(type, 'd1', { baseTypeName: 'Delay', typeArgs })
     session.instanceRegistry.set('d1', inst)
 
     const { node: saved } = saveProgramFromSession(session)
@@ -233,7 +233,7 @@ describe('generic programs round-trip', () => {
     }
     loadProgramAsType(p, session)
     const { type } = resolveProgramType(session, 'Passthrough', undefined, undefined)
-    session.instanceRegistry.set('p1', type.instantiateAs('p1', { baseTypeName: 'Passthrough' }))
+    session.instanceRegistry.set('p1', instantiate(type, 'p1', { baseTypeName: 'Passthrough' }))
 
     const { node: saved } = saveProgramFromSession(session)
     const p1 = [...instanceDecls(saved)].find(d => d.name === 'p1')!
@@ -269,7 +269,7 @@ describe('generic programs round-trip', () => {
       .find(d => d.op === 'instanceDecl' && d.name === 'voice_0')!
     expect(decl.gateable).toBe(true)
 
-    // Load into a session, verify the ProgramInstance carries the flag.
+    // Load into a session, verify the Instance carries the flag.
     loadProgramAsSession(prog as unknown as Program, {
       audio_outputs: (raw as { audio_outputs: ProgramTopLevel['audio_outputs'] }).audio_outputs,
     }, session)

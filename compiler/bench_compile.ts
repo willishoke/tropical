@@ -1,7 +1,7 @@
 /**
  * Quick benchmark: reproduce the 13-module patch compilation to find bottleneck.
  */
-import { makeSession, SessionState } from './session.js'
+import { makeSession, SessionState, instantiate, outputNames } from './session.js'
 import { loadStdlib as loadBuiltins } from './program.js'
 import { compileSession } from './ir/compile_session'
 
@@ -27,7 +27,7 @@ const modules: [string, string][] = [
 
 for (const [typeName, instanceName] of modules) {
   const type = session.typeRegistry.get(typeName)!
-  const inst = type.instantiateAs(instanceName)
+  const inst = instantiate(type, instanceName)
   session.instanceRegistry.set(instanceName, inst)
 }
 
@@ -39,8 +39,8 @@ for (const [typeName, instanceName] of modules) {
   const solo = makeSession()
   loadBuiltins(solo)
   const type = solo.typeRegistry.get(typeName)!
-  solo.instanceRegistry.set(instanceName, type.instantiateAs(instanceName))
-  solo.graphOutputs.push({ instance: instanceName, output: type.outputNames[0] })
+  solo.instanceRegistry.set(instanceName, instantiate(type, instanceName))
+  solo.graphOutputs.push({ instance: instanceName, output: outputNames(type)[0] })
   const t = performance.now()
   try {
     compileSession(solo)

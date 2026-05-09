@@ -11,7 +11,7 @@
  */
 
 import type { ResolvedProgram, TypeParamDecl } from './nodes.js'
-import { ProgramType } from '../program_types.js'
+import { type Compiled, makeCompiled } from '../program_types.js'
 import { specializeProgram } from './specialize.js'
 import { sumLower } from './sum_lower.js'
 import { traceCycles } from './trace_cycles.js'
@@ -30,12 +30,15 @@ export function strataPipeline(
 }
 
 /** Run the full strata pipeline + wrap the post-strata `ResolvedProgram`
- *  in a `ProgramType`. The wrapper exposes port/register/default metadata
- *  via thin getters over the resolved IR — no slot-indexed flattening
- *  upfront. */
+ *  in a `Compiled` record. Helpers in `program_types.ts` expose
+ *  port/register/default metadata via free functions over the resolved
+ *  IR — no slot-indexed flattening upfront. The optional `displayName`
+ *  rebrands the wrapped name for the specialization cache (e.g.
+ *  `Type<N=8>`) without mutating `prog.name`. */
 export function programTypeFromResolved(
   prog: ResolvedProgram,
   typeArgs: ReadonlyMap<TypeParamDecl, number>,
-): ProgramType {
-  return new ProgramType(strataPipeline(prog, typeArgs))
+  opts?: { displayName?: string },
+): Compiled {
+  return makeCompiled(strataPipeline(prog, typeArgs), opts)
 }
