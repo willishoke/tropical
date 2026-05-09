@@ -323,7 +323,7 @@ export function loadProgramAsSession(
   session.paramRegistry.clear()
   session.triggerRegistry.clear()
   session.inputExprNodes.clear()
-  session._nameCounters.clear()
+  session.nameCounters.clear()
   session.typeAliasRegistry.clear()
   session.sumTypeRegistry.clear()
   session.structTypeRegistry.clear()

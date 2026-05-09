@@ -122,7 +122,7 @@ export interface SessionState {
    *  references. Generic templates live in `genericTemplatesResolved`. */
   resolvedRegistry: Map<string, import('./ir/nodes.js').ResolvedProgram>
   /** Name counter for auto-generated instance names. */
-  _nameCounters: Map<string, number>
+  nameCounters: Map<string, number>
 }
 
 export function makeSession(bufferLength = 512): SessionState {
@@ -149,14 +149,14 @@ export function makeSession(bufferLength = 512): SessionState {
       get outputBuffer() { return runtime.outputBuffer },
       dispose: () => runtime.dispose(),
     },
-    _nameCounters: new Map(),
+    nameCounters: new Map(),
   }
 }
 
 /** Generate a unique instance name from a type prefix. */
 export function nextName(session: SessionState, prefix: string): string {
-  const count = (session._nameCounters.get(prefix) ?? 0) + 1
-  session._nameCounters.set(prefix, count)
+  const count = (session.nameCounters.get(prefix) ?? 0) + 1
+  session.nameCounters.set(prefix, count)
   return `${prefix}${count}`
 }
 
