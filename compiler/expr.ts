@@ -453,57 +453,21 @@ export type ExprOpNodeStrict =
 
 // ---------- SignalExpr ----------
 
-export class SignalExpr {
-  /** JSON-serializable expression tree. */
-  _node: ExprNode
-  /** Static shape, if known at module-definition time. undefined = scalar or unknown. */
+/** A symbolic expression: a JSON-serializable expression tree plus an
+ *  optional static shape. Pure record; helpers below are free functions. */
+export type SignalExpr = {
+  readonly _node: ExprNode
   readonly shape: number[] | undefined
-
-  private constructor(node: ExprNode, shape?: number[]) {
-    this._node = node
-    this.shape = shape
-  }
-
-  static fromNode(node: ExprNode, shape?: number[]): SignalExpr {
-    return new SignalExpr(node, shape)
-  }
-
-  /** @deprecated Alias for fromNode — old code used fromHandle(handle, node). */
-  static fromHandle(_handle: unknown, node: ExprNode): SignalExpr {
-    return new SignalExpr(node)
-  }
-
-  /** Index into an array expression: expr[idx] */
-  at(idx: ExprCoercible): SignalExpr {
-    const i = coerce(idx)
-    return new SignalExpr({ op: 'index', args: [this._node, i._node] })
-  }
-
-  /** Reshape this array to a new shape. */
-  reshape(newShape: number[]): SignalExpr {
-    return new SignalExpr({ op: 'reshape', args: [this._node], shape: newShape })
-  }
-
-  /** Transpose a 2D array. */
-  transpose(): SignalExpr {
-    return new SignalExpr({ op: 'transpose', args: [this._node] })
-  }
-
-  /** Slice along an axis: [start, end). */
-  slice(axis: number, start: number, end: number): SignalExpr {
-    return new SignalExpr({ op: 'slice', args: [this._node], axis, start, end })
-  }
-
-  /** Reduce along an axis with an associative op ('add', 'mul', 'min', 'max'). */
-  reduce(axis: number, reduceOp: string): SignalExpr {
-    return new SignalExpr({ op: 'reduce', args: [this._node], axis, reduce_op: reduceOp })
-  }
-
-  /** Sum all elements (reduce over axis 0 with 'add'). */
-  sum(axis = 0): SignalExpr {
-    return this.reduce(axis, 'add')
-  }
 }
+
+/** Construct a SignalExpr from a node + optional shape. */
+export const signalExpr = (node: ExprNode, shape?: number[]): SignalExpr =>
+  ({ _node: node, shape })
+
+/** Discriminator for the coerce() runtime check. Plain primitives, arrays,
+ *  and other objects don't have `_node`; SignalExpr records do. */
+const isSignalExpr = (v: unknown): v is SignalExpr =>
+  typeof v === 'object' && v !== null && !Array.isArray(v) && '_node' in v
 
 // ---------- Coercion ----------
 
@@ -511,9 +475,9 @@ export type ExprCoercible = SignalExpr | number | boolean | ExprCoercible[]
 
 /** Convert a scalar, boolean, array, or SignalExpr to a SignalExpr. */
 export function coerce(value: ExprCoercible): SignalExpr {
-  if (value instanceof SignalExpr) return value
-  if (typeof value === 'boolean') return SignalExpr.fromNode(value)
-  if (typeof value === 'number') return SignalExpr.fromNode(value)
+  if (isSignalExpr(value)) return value
+  if (typeof value === 'boolean') return signalExpr(value)
+  if (typeof value === 'number') return signalExpr(value)
   if (Array.isArray(value)) return arrayPack(value)
   throw new TypeError(`Cannot coerce ${typeof value} to SignalExpr`)
 }
@@ -532,12 +496,12 @@ function propagateBinaryShape(l: SignalExpr, r: SignalExpr): number[] | undefine
 function binary(opName: BinaryTag, lhs: ExprCoercible, rhs: ExprCoercible): SignalExpr {
   const l = coerce(lhs)
   const r = coerce(rhs)
-  return SignalExpr.fromNode({ op: opName, args: [l._node, r._node] }, propagateBinaryShape(l, r))
+  return signalExpr({ op: opName, args: [l._node, r._node] }, propagateBinaryShape(l, r))
 }
 
 function unary(opName: UnaryTag, operand: ExprCoercible): SignalExpr {
   const o = coerce(operand)
-  return SignalExpr.fromNode({ op: opName, args: [o._node] }, o.shape)
+  return signalExpr({ op: opName, args: [o._node] }, o.shape)
 }
 
 // ---------- Arithmetic ----------
@@ -561,7 +525,7 @@ export const matmul = (
   const r = coerce(rhs)
   const [M] = shape_a
   const [, N] = shape_b
-  return SignalExpr.fromNode(
+  return signalExpr(
     { op: 'matmul', args: [l._node, r._node], shape_a, shape_b, element_type },
     [M, N],
   )
@@ -605,7 +569,7 @@ export function clamp(value: ExprCoercible, lo: ExprCoercible, hi: ExprCoercible
   const l = coerce(lo)
   const h = coerce(hi)
   const shape = propagateBinaryShape(v, l) ?? v.shape ?? l.shape ?? h.shape
-  return SignalExpr.fromNode({ op: 'clamp', args: [v._node, l._node, h._node] }, shape)
+  return signalExpr({ op: 'clamp', args: [v._node, l._node, h._node] }, shape)
 }
 
 export function select(cond: ExprCoercible, thenVal: ExprCoercible, elseVal: ExprCoercible): SignalExpr {
@@ -613,26 +577,26 @@ export function select(cond: ExprCoercible, thenVal: ExprCoercible, elseVal: Exp
   const t = coerce(thenVal)
   const e = coerce(elseVal)
   const shape = propagateBinaryShape(t, e) ?? t.shape ?? e.shape ?? c.shape
-  return SignalExpr.fromNode({ op: 'select', args: [c._node, t._node, e._node] }, shape)
+  return signalExpr({ op: 'select', args: [c._node, t._node, e._node] }, shape)
 }
 
 // ---------- Array operations ----------
 
 export function arrayPack(values: ExprCoercible[]): SignalExpr {
   const items = values.map(coerce)
-  return SignalExpr.fromNode(items.map(e => e._node), [items.length])
+  return signalExpr(items.map(e => e._node), [items.length])
 }
 
 export function arraySet(arrExpr: ExprCoercible, idx: ExprCoercible, val: ExprCoercible): SignalExpr {
   const a = coerce(arrExpr)
   const i = coerce(idx)
   const v = coerce(val)
-  return SignalExpr.fromNode({ op: 'arraySet', args: [a._node, i._node, v._node] }, a.shape)
+  return signalExpr({ op: 'arraySet', args: [a._node, i._node, v._node] }, a.shape)
 }
 
 /** Build a matrix literal expression from a row-major 2D array of numbers. */
 export function matrix(rows: number[][]): SignalExpr {
-  return SignalExpr.fromNode({ op: 'matrix', rows })
+  return signalExpr({ op: 'matrix', rows })
 }
 
 // ---------- First-class array operations (static shapes) ----------
@@ -643,33 +607,33 @@ export function matrix(rows: number[][]): SignalExpr {
  */
 export function arrayLiteral(shape: number[], values: ExprCoercible[]): SignalExpr {
   const items = values.map(v => coerce(v)._node)
-  return SignalExpr.fromNode({ op: 'arrayLiteral', shape, values: items }, shape)
+  return signalExpr({ op: 'arrayLiteral', shape, values: items }, shape)
 }
 
 /** Create an array filled with zeros. */
 export function zeros(shape: number[]): SignalExpr {
-  return SignalExpr.fromNode({ op: 'zeros', shape }, shape)
+  return signalExpr({ op: 'zeros', shape }, shape)
 }
 
 /** Create an array filled with ones. */
 export function ones(shape: number[]): SignalExpr {
-  return SignalExpr.fromNode({ op: 'ones', shape }, shape)
+  return signalExpr({ op: 'ones', shape }, shape)
 }
 
 /** Create an array filled with a constant value. */
 export function fill(shape: number[], value: ExprCoercible): SignalExpr {
-  return SignalExpr.fromNode({ op: 'fill', shape, value: coerce(value)._node }, shape)
+  return signalExpr({ op: 'fill', shape, value: coerce(value)._node }, shape)
 }
 
 /** Reshape an array to a new shape (total elements must match). */
 export function reshape(arr: ExprCoercible, newShape: number[]): SignalExpr {
-  return SignalExpr.fromNode({ op: 'reshape', args: [coerce(arr)._node], shape: newShape })
+  return signalExpr({ op: 'reshape', args: [coerce(arr)._node], shape: newShape })
 }
 
 /** Transpose a 2D array (swap axes). */
 export function transpose(arr: ExprCoercible): SignalExpr {
   const a = coerce(arr)
-  return SignalExpr.fromNode({ op: 'transpose', args: [a._node] }, a.shape)
+  return signalExpr({ op: 'transpose', args: [a._node] }, a.shape)
 }
 
 /**
@@ -677,7 +641,7 @@ export function transpose(arr: ExprCoercible): SignalExpr {
  * Returns elements [start, end) along the given axis.
  */
 export function slice(arr: ExprCoercible, axis: number, start: number, end: number): SignalExpr {
-  return SignalExpr.fromNode({ op: 'slice', args: [coerce(arr)._node], axis, start, end })
+  return signalExpr({ op: 'slice', args: [coerce(arr)._node], axis, start, end })
 }
 
 /**
@@ -685,12 +649,24 @@ export function slice(arr: ExprCoercible, axis: number, start: number, end: numb
  * reduceOp is one of: 'add', 'mul', 'min', 'max'.
  */
 export function reduce(arr: ExprCoercible, axis: number, reduceOp: string): SignalExpr {
-  return SignalExpr.fromNode({ op: 'reduce', args: [coerce(arr)._node], axis, reduce_op: reduceOp })
+  return signalExpr({ op: 'reduce', args: [coerce(arr)._node], axis, reduce_op: reduceOp })
+}
+
+/** Index into an array: arr[idx]. */
+export function at(arr: ExprCoercible, idx: ExprCoercible): SignalExpr {
+  const a = coerce(arr)
+  const i = coerce(idx)
+  return signalExpr({ op: 'index', args: [a._node, i._node] })
+}
+
+/** Sum all elements (reduce over the given axis with 'add'). */
+export function sum(arr: ExprCoercible, axis = 0): SignalExpr {
+  return reduce(arr, axis, 'add')
 }
 
 /** Explicitly broadcast an array to a target shape. */
 export function broadcastTo(arr: ExprCoercible, shape: number[]): SignalExpr {
-  return SignalExpr.fromNode({ op: 'broadcastTo', args: [coerce(arr)._node], shape }, shape)
+  return signalExpr({ op: 'broadcastTo', args: [coerce(arr)._node], shape }, shape)
 }
 
 /** Map a function over array elements: map(fn, arr) applies fn to each element. */
@@ -698,7 +674,7 @@ export function mapArray(fn: (elem: SignalExpr) => SignalExpr, arr: ExprCoercibl
   // Build as: map(function(1, body), arr) — function takes 1 param (the element)
   const param = inputExpr(0)
   const body = fn(param)
-  return SignalExpr.fromNode({
+  return signalExpr({
     op: 'map',
     callee: { op: 'function', param_count: 1, body: body._node },
     args: [coerce(arr)._node],
@@ -708,12 +684,12 @@ export function mapArray(fn: (elem: SignalExpr) => SignalExpr, arr: ExprCoercibl
 // ---------- Function expressions ----------
 
 export function exprFunction(paramCount: number, body: SignalExpr): SignalExpr {
-  return SignalExpr.fromNode({ op: 'function', param_count: paramCount, body: body._node })
+  return signalExpr({ op: 'function', param_count: paramCount, body: body._node })
 }
 
 export function exprCall(fn: SignalExpr, args: ExprCoercible[]): SignalExpr {
   const coerced = args.map(coerce)
-  return SignalExpr.fromNode({ op: 'call', callee: fn._node, args: coerced.map(e => e._node) })
+  return signalExpr({ op: 'call', callee: fn._node, args: coerced.map(e => e._node) })
 }
 
 // ---------- Sum-type wiring expression builders ----------
@@ -736,7 +712,7 @@ export function tag(
     for (const [k, v] of Object.entries(payload)) coerced[k] = coerce(v)._node
     node.payload = coerced
   }
-  return SignalExpr.fromNode(node)
+  return signalExpr(node)
 }
 
 /**
@@ -762,7 +738,7 @@ export function match(
     if (arm.bind !== undefined) armNode.bind = arm.bind
     armsNode[variant] = armNode
   }
-  return SignalExpr.fromNode({
+  return signalExpr({
     op: 'match',
     type: typeName,
     scrutinee: coerce(scrutinee)._node,
@@ -773,31 +749,31 @@ export function match(
 // ---------- Leaf node constructors ----------
 
 export function sampleRate(): SignalExpr {
-  return SignalExpr.fromNode({ op: 'sampleRate' })
+  return signalExpr({ op: 'sampleRate' })
 }
 
 export function sampleIndex(): SignalExpr {
-  return SignalExpr.fromNode({ op: 'sampleIndex' })
+  return signalExpr({ op: 'sampleIndex' })
 }
 
 export function inputExpr(inputId: number): SignalExpr {
-  return SignalExpr.fromNode({ op: 'input', id: inputId })
+  return signalExpr({ op: 'input', id: inputId })
 }
 
 export function registerExpr(regId: number): SignalExpr {
-  return SignalExpr.fromNode({ op: 'reg', id: regId })
+  return signalExpr({ op: 'reg', id: regId })
 }
 
 export function refExpr(instanceName: string, outputId: number): SignalExpr {
-  return SignalExpr.fromNode({ op: 'ref', instance: instanceName, output: outputId })
+  return signalExpr({ op: 'ref', instance: instanceName, output: outputId })
 }
 
 export function nestedOutputExpr(nodeId: number, outputId: number): SignalExpr {
-  return SignalExpr.fromNode({ op: 'nestedOutput', node_id: nodeId, output_id: outputId })
+  return signalExpr({ op: 'nestedOutput', node_id: nodeId, output_id: outputId })
 }
 
 export function delayValueExpr(nodeId: number): SignalExpr {
-  return SignalExpr.fromNode({ op: 'delayValue', node_id: nodeId })
+  return signalExpr({ op: 'delayValue', node_id: nodeId })
 }
 
 // ─────────────────────────────────────────────────────────────

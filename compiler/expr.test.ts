@@ -4,12 +4,12 @@
 
 import { describe, test, expect } from 'bun:test'
 import {
-  SignalExpr,
+  type SignalExpr,
   coerce,
   add, mul, sub, matmul,
   arrayPack, arraySet, arrayLiteral,
   zeros, ones, fill, reshape, transpose,
-  slice, reduce, broadcastTo, mapArray,
+  slice, reduce, sum, broadcastTo, mapArray,
 } from './expr'
 
 describe('array construction', () => {
@@ -96,25 +96,25 @@ describe('array manipulation', () => {
   })
 })
 
-describe('SignalExpr array methods', () => {
-  test('reshape method', () => {
+describe('array helpers', () => {
+  test('reshape', () => {
     const arr = coerce([1, 2, 3, 4, 5, 6])
-    const r = arr.reshape([2, 3])
+    const r = reshape(arr, [2, 3])
     const node = r._node as Record<string, unknown>
     expect(node.op).toBe('reshape')
     expect(node.shape).toEqual([2, 3])
   })
 
-  test('transpose method', () => {
+  test('transpose', () => {
     const arr = coerce([1, 2, 3, 4])
-    const t = arr.transpose()
+    const t = transpose(arr)
     const node = t._node as Record<string, unknown>
     expect(node.op).toBe('transpose')
   })
 
-  test('slice method', () => {
+  test('slice', () => {
     const arr = coerce([1, 2, 3, 4, 5])
-    const s = arr.slice(0, 1, 3)
+    const s = slice(arr, 0, 1, 3)
     const node = s._node as Record<string, unknown>
     expect(node.op).toBe('slice')
     expect(node.axis).toBe(0)
@@ -122,16 +122,16 @@ describe('SignalExpr array methods', () => {
     expect(node.end).toBe(3)
   })
 
-  test('reduce method', () => {
+  test('reduce', () => {
     const arr = coerce([1, 2, 3, 4])
-    const s = arr.reduce(0, 'add')
+    const s = reduce(arr, 0, 'add')
     const node = s._node as Record<string, unknown>
     expect(node.op).toBe('reduce')
   })
 
-  test('sum method', () => {
+  test('sum', () => {
     const arr = coerce([1, 2, 3, 4])
-    const s = arr.sum()
+    const s = sum(arr)
     const node = s._node as Record<string, unknown>
     expect(node.op).toBe('reduce')
     expect(node.reduce_op).toBe('add')
