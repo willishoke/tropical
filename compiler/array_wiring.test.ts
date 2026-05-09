@@ -4,7 +4,7 @@
 
 import { describe, test, expect } from 'bun:test'
 import { checkArrayConnection } from './array_wiring'
-import { Float, Int, Bool, ArrayType, StructType } from './term'
+import { Float, Int, Bool, ArrayType } from './ir/port_type'
 import type { ExprNode } from './expr'
 
 const ref: ExprNode = { op: 'ref', instance: 'VCO1', output: 'saw' }
@@ -80,16 +80,6 @@ describe('checkArrayConnection', () => {
     const check = checkArrayConnection(ArrayType(Float, [1, 4]), ArrayType(Float, [3, 4]), ref)
     expect(check.compatible).toBe(true)
     expect(check.broadcastExpr).toBeDefined()
-  })
-
-  test('struct type mismatch', () => {
-    const check = checkArrayConnection(StructType('MyStruct'), StructType('OtherStruct'), ref)
-    expect(check.compatible).toBe(false)
-  })
-
-  test('same struct types are compatible', () => {
-    const check = checkArrayConnection(StructType('MyStruct'), StructType('MyStruct'), ref)
-    expect(check.compatible).toBe(true)
   })
 
   // ── Scalar-kind widening lattice (Phase 4) ───────────────────

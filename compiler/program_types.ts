@@ -13,12 +13,11 @@
  */
 
 import type { ExprNode } from './expr.js'
-import type { PortType as LegacyPortType } from './term.js'
-import { Float, Int, Bool, ArrayType } from './term.js'
 import type {
-  ResolvedProgram, ResolvedExpr, RegDecl, AliasTypeDef, ScalarKind,
-  PortType as ResolvedPortType,
+  ResolvedProgram, ResolvedExpr, RegDecl,
+  PortType,
 } from './ir/nodes.js'
+import { ArrayType } from './ir/port_type.js'
 import { buildSlotMaps } from './ir/slots.js'
 
 // ---------- Value helpers ----------
@@ -32,7 +31,7 @@ export type RegInit = ValueCoercible | { init: ValueCoercible; type: string }
 
 interface SlotsCache {
   names: string[]
-  types: (LegacyPortType | undefined)[]
+  types: (PortType | undefined)[]
 }
 
 /** A post-strata ResolvedProgram with display metadata. */
@@ -61,41 +60,47 @@ export const inputNames      = (x: CompiledOrInstance): string[] =>
   _c(x).prog.ports.inputs.map(d => d.name)
 export const outputNames     = (x: CompiledOrInstance): string[] =>
   _c(x).prog.ports.outputs.map(d => d.name)
-export const inputPortTypes  = (x: CompiledOrInstance): (LegacyPortType | undefined)[] =>
-  _c(x).prog.ports.inputs.map(d => convertPortType(d.type))
-export const outputPortTypes = (x: CompiledOrInstance): (LegacyPortType | undefined)[] =>
-  _c(x).prog.ports.outputs.map(d => convertPortType(d.type))
+export const inputPortTypes  = (x: CompiledOrInstance): (PortType | undefined)[] =>
+  _c(x).prog.ports.inputs.map(d => d.type)
+export const outputPortTypes = (x: CompiledOrInstance): (PortType | undefined)[] =>
+  _c(x).prog.ports.outputs.map(d => d.type)
 
-export const inputPortType   = (x: CompiledOrInstance, idx: number): LegacyPortType | undefined =>
+export const inputPortType   = (x: CompiledOrInstance, idx: number): PortType | undefined =>
   inputPortTypes(x)[idx]
-export const outputPortType  = (x: CompiledOrInstance, idx: number): LegacyPortType | undefined =>
+export const outputPortType  = (x: CompiledOrInstance, idx: number): PortType | undefined =>
   outputPortTypes(x)[idx]
 
 function ensureSlots(c: Compiled): SlotsCache {
   if (c.slotsCache) return c.slotsCache
   const { regDecls } = buildSlotMaps(c.prog)
   const names = regDecls.map(d => d.name)
-  const types: (LegacyPortType | undefined)[] = regDecls.map(d => regPortType(d))
+  const types: (PortType | undefined)[] = regDecls.map(d => regPortType(d))
   // Override register port types for array-init regs — lift the shape
   // from the resolved init's array literal / `zeros{count}` form.
   for (let i = 0; i < regDecls.length; i++) {
     const init = regDecls[i].init
     if (Array.isArray(init)) {
-      types[i] = ArrayType(Float, [init.length])
+      types[i] = ArrayType('float', [init.length])
     } else if (typeof init === 'object' && init !== null && (init as { op?: string }).op === 'zeros') {
       const count = (init as { count: unknown }).count
-      if (typeof count === 'number') types[i] = ArrayType(Float, [count])
+      if (typeof count === 'number') types[i] = ArrayType('float', [count])
     }
   }
   c.slotsCache = { names, types }
   return c.slotsCache
 }
 
+function regPortType(d: RegDecl): PortType | undefined {
+  if (d.type === undefined) return undefined
+  if (typeof d.type === 'string') return { kind: 'scalar', scalar: d.type }
+  return { kind: 'alias', alias: d.type }
+}
+
 export const registerNames     = (x: CompiledOrInstance): string[] =>
   ensureSlots(_c(x)).names
-export const registerPortTypes = (x: CompiledOrInstance): (LegacyPortType | undefined)[] =>
+export const registerPortTypes = (x: CompiledOrInstance): (PortType | undefined)[] =>
   ensureSlots(_c(x)).types
-export const registerPortType  = (x: CompiledOrInstance, idx: number): LegacyPortType | undefined =>
+export const registerPortType  = (x: CompiledOrInstance, idx: number): PortType | undefined =>
   ensureSlots(_c(x)).types[idx]
 
 /** Default expressions per input port name; seeded into
@@ -155,42 +160,7 @@ export function outputIndex(i: Instance, name: string): number {
   return idx
 }
 
-// ─── helpers (resolved → legacy port type, default-expr lowering) ───────────
-
-function convertPortType(pt: ResolvedPortType | undefined): LegacyPortType | undefined {
-  if (pt === undefined) return undefined
-  switch (pt.kind) {
-    case 'scalar': return scalarToLegacy(pt.scalar)
-    case 'alias':  return scalarToLegacy(pt.alias.base)
-    case 'array': {
-      const elem = typeof pt.element === 'string' ? scalarToLegacy(pt.element) : scalarToLegacy(pt.element.base)
-      const shape = pt.shape.map(d => {
-        if (typeof d !== 'number') {
-          throw new Error(
-            `Compiled: array shape contains unresolved type-param '${d.name}'. ` +
-            `Run specializeProgram first.`,
-          )
-        }
-        return d
-      })
-      return ArrayType(elem, shape)
-    }
-  }
-}
-
-function scalarToLegacy(s: ScalarKind): LegacyPortType {
-  switch (s) {
-    case 'float': return Float
-    case 'int':   return Int
-    case 'bool':  return Bool
-  }
-}
-
-function regPortType(d: RegDecl): LegacyPortType | undefined {
-  if (d.type === undefined) return undefined
-  if (typeof d.type === 'string') return scalarToLegacy(d.type)
-  return scalarToLegacy((d.type as AliasTypeDef).base)
-}
+// ─── helpers (default-expr lowering) ────────────────────────────────────
 
 /** Lower a `ResolvedExpr` input-default to the MCP wire-format `ExprNode`
  *  shape that gets spliced into `session.inputExprNodes`. Defaults are

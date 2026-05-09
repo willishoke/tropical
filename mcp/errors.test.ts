@@ -551,10 +551,10 @@ describe('type_mismatch', () => {
     expect(env.valid?.kind).toBe('predicate')
     if (env.valid?.kind === 'predicate') {
       expect(env.valid.predicate).toBe('type_compatible')
-      expect(env.valid.expected).toEqual({ tag: 'scalar', scalar: 'float' })
+      expect(env.valid.expected).toEqual({ kind: 'scalar', scalar: 'float' })
       expect(env.valid.got).toEqual({
-        tag: 'array',
-        element: { tag: 'scalar', scalar: 'float' },
+        kind: 'array',
+        element: 'float',
         shape: [4],
       })
     }

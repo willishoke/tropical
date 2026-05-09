@@ -118,10 +118,10 @@ describe('exportSessionAsProgram — port type round-trip', () => {
     const { type: exportedType } = resolveProgramType(session2, 'Exported', undefined, undefined)
     const srcPt = inputPortType(exportedType, 0)
     const dstPt = outputPortType(exportedType, 0)
-    expect(srcPt?.tag).toBe('array')
-    expect(dstPt?.tag).toBe('array')
-    if (srcPt?.tag === 'array') expect(srcPt.shape).toEqual([4])
-    if (dstPt?.tag === 'array') expect(dstPt.shape).toEqual([4])
+    expect(srcPt?.kind).toBe('array')
+    expect(dstPt?.kind).toBe('array')
+    if (srcPt?.kind === 'array') expect(srcPt.shape).toEqual([4])
+    if (dstPt?.kind === 'array') expect(dstPt.shape).toEqual([4])
   })
 
   test('emits bare string names when no type is declared', () => {

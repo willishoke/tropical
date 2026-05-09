@@ -2,7 +2,7 @@ import { describe, test, expect } from 'bun:test'
 import { makeSession, resolveProgramType, inputPortType, outputPortType, registerPortType } from './session.js'
 import { loadProgramAsType } from './program.js'
 import type { ProgramNode } from './program.js'
-import { Float, ArrayType } from './term.js'
+import { Float, ArrayType } from './ir/port_type.js'
 
 function genericDelay(): ProgramNode {
   return {

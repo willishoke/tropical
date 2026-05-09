@@ -2,7 +2,7 @@ import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON, resolveProgramType, registerPortType } from './session'
 import { loadStdlib } from './program'
 import { compileSession } from './ir/compile_session'
-import { Float, ArrayType } from './term'
+import { Float, ArrayType } from './ir/port_type'
 
 describe('stdlib Delay<N>', () => {
   test('Delay with N=8 resolves to a distinct type from Delay with N=44100', () => {

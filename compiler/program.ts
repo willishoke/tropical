@@ -22,11 +22,11 @@ import {
 } from './program_types.js'
 import { exprDependencies, reachableInstances, buildDependencyGraph, topologicalSort } from './compiler.js'
 import type { RawTypeArgs } from './specialize.js'
-import { Float, portTypeEqual, type PortType } from './term.js'
+import { Float, portTypeEqual } from './ir/port_type.js'
 import { raiseProgram } from './parse/raise.js'
 import { elaborate, type ExternalProgramResolver } from './ir/elaborator.js'
 import { programTypeFromResolved } from './ir/strata.js'
-import type { ResolvedProgram } from './ir/nodes.js'
+import type { ResolvedProgram, PortType } from './ir/nodes.js'
 
 // ─────────────────────────────────────────────────────────────
 // Program schema
@@ -881,19 +881,20 @@ export function exportSessionAsProgram(
     t === undefined || portTypeEqual(t, Float)
 
   const portTypeToDecl = (t: PortType): PortTypeDecl => {
-    switch (t.tag) {
+    switch (t.kind) {
       case 'scalar': return t.scalar
+      case 'alias':  return t.alias.name
       case 'array': {
-        if (t.element.tag !== 'scalar') {
-          throw new Error(`export: cannot serialize nested array element type (${t.element.tag})`)
-        }
-        return { kind: 'array', element: t.element.scalar, shape: t.shape }
+        const elem = typeof t.element === 'string' ? t.element : t.element.name
+        // Post-strata shapes are concrete integers (specialize has run).
+        const shape = t.shape.map(d => {
+          if (typeof d !== 'number') {
+            throw new Error(`export: array shape carries unresolved type-param '${d.name}'`)
+          }
+          return d
+        })
+        return { kind: 'array', element: elem, shape }
       }
-      case 'struct': return t.name
-      case 'sum': return t.name
-      case 'unit': return 'unit'
-      case 'product':
-        throw new Error(`export: product port types cannot be serialized`)
     }
   }
 

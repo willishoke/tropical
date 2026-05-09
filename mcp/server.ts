@@ -38,7 +38,8 @@ import { applyFlatPlan }  from '../compiler/apply_plan.js'
 import { checkArrayConnection } from '../compiler/array_wiring.js'
 import { validateExpr }         from '../compiler/expr.js'
 import { exprDependencies }     from '../compiler/compiler.js'
-import { portTypeToString, type PortType } from '../compiler/term.js'
+import { portTypeToString } from '../compiler/ir/port_type.js'
+import type { PortType } from '../compiler/ir/nodes.js'
 
 const portTypeOrNull = (t: PortType | undefined): string | null =>
   t === undefined ? null : portTypeToString(t)
@@ -79,11 +80,11 @@ function adaptInputExpr(
   let srcType: PortType | undefined
 
   if (typeof node === 'number') {
-    srcType = { tag: 'scalar', scalar: 'float' }
+    srcType = { kind: 'scalar', scalar: 'float' }
   } else if (typeof node === 'boolean') {
-    srcType = { tag: 'scalar', scalar: 'bool' }
+    srcType = { kind: 'scalar', scalar: 'bool' }
   } else if (Array.isArray(node)) {
-    srcType = { tag: 'array', element: { tag: 'scalar', scalar: 'float' }, shape: [(node as unknown[]).length] }
+    srcType = { kind: 'array', element: 'float', shape: [(node as unknown[]).length] }
   } else if (typeof node === 'object' && node !== null) {
     const obj = node as Record<string, unknown>
     if (obj.op === 'ref') {

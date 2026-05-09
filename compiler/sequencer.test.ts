@@ -2,7 +2,7 @@ import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON, resolveProgramType, inputPortType } from './session'
 import { loadStdlib } from './program'
 import { compileSession } from './ir/compile_session'
-import { Float, Int, ArrayType, portTypeEqual } from './term'
+import { Float, Int, ArrayType, portTypeEqual } from './ir/port_type'
 
 describe('stdlib Sequencer<N>', () => {
   test('Sequencer<N> monomorphizes values input shape to [N]', () => {
