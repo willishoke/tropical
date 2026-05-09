@@ -11,10 +11,11 @@
 
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON, type ProgramFile } from './session'
-import { loadStdlib } from './program'
+import { loadStdlib, loadProgramAsType } from './program'
 import { compileSession } from './ir/compile_session'
 import type { FlatPlan } from './flat_plan'
 import { emitWasm } from './emit_wasm'
+import { EDGE_FIXTURES } from './__fixtures__/equiv/edge_cases'
 
 // Load state_init values into the WASM module's register region.
 function initWasmState(memory: WebAssembly.Memory, regOffset: number, stateInit: (number | boolean)[], regTypes: string[]): void {
@@ -129,6 +130,36 @@ describe('wasm vs native JIT', () => {
   test('SinOsc → OnePole(1000 Hz) — 256 samples', async () => {
     const plan = makeOnePolePlan(1000)
     const N = 256
+    const nat = runNative(plan, N)
+    const wasm = await runWasm(plan, N)
+    for (let i = 0; i < N; i++) {
+      expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+    }
+  })
+
+  // Phase B cross-check: bring a wholesale-array-writeback fixture into
+  // the WASM equivalence loop so all three backends agree on at least
+  // one Phase B shape. Uses `array_reg_zipwith_writeback` rather than
+  // `array_reg_select_writeback` because emit_wasm doesn't (yet)
+  // support elementwise `select` over arrays — that's a separate gap
+  // tracked outside this PR.
+  test('Phase B array-zipWith wholesale writeback — WASM matches JIT', async () => {
+    const fixture = EDGE_FIXTURES.find(f => f.name === 'array_reg_zipwith_writeback')!
+    const session = makeSession(64)
+    let plan: FlatPlan
+    try {
+      loadStdlib(session)
+      const type = loadProgramAsType(fixture.program, session)!
+      session.typeRegistry.set(fixture.program.name, type)
+      const inst = type.instantiateAs('inst')
+      session.instanceRegistry.set('inst', inst)
+      session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+      plan = compileSession(session)
+    } finally {
+      session.runtime.dispose()
+    }
+
+    const N = 64
     const nat = runNative(plan, N)
     const wasm = await runWasm(plan, N)
     for (let i = 0; i < N; i++) {

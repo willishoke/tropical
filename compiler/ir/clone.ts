@@ -253,10 +253,18 @@ function cloneBodyDeclShell(d: BodyDecl, t: CloneTable): BodyDecl {
       return fresh
     }
     case 'paramDecl': {
-      const fresh: ParamDecl = { op: 'paramDecl', name: d.name, kind: d.kind }
-      if (d.value !== undefined) fresh.value = d.value
-      t.params.set(d, fresh)
-      return fresh
+      // ParamDecls are session-scoped by name (the materializer holds
+      // the canonical decl in ctx.paramDecls and compile_session keys
+      // FFI handles by that decl's identity). Cloning would mint a
+      // fresh decl whose identity the materializer's table doesn't
+      // know — paramHandles.get(decl) then misses, emit_resolved emits
+      // const 0 instead of a `param` operand, and the parameter
+      // silently never reaches the JIT. Preserve identity here.
+      // inline_instances.ts already documents this invariant:
+      // "ParamDecls and ProgramDecls are lifted as-is (no rename:
+      // ParamDecls are session-scoped by name)."
+      t.params.set(d, d)
+      return d
     }
     case 'instanceDecl': {
       // Instance type-program is cloned via the nested-program memo

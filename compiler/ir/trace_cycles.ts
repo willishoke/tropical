@@ -42,7 +42,11 @@ import type {
 
 export function traceCycles(prog: ResolvedProgram): ResolvedProgram {
   const instances = collectInstances(prog.body.decls)
-  if (instances.length < 2) return prog
+  // A program with no instances has no inter-instance graph. A program with
+  // exactly one instance can still have a self-loop (instance 'a' wires its
+  // own input from its own output) — so don't skip the deps build for the
+  // 1-instance case; only the 0-instance case is a guaranteed identity.
+  if (instances.length === 0) return prog
 
   const deps = buildInstanceDeps(prog, instances)
   const sccs = tarjanSCC(instances, deps)
@@ -72,7 +76,12 @@ export function traceCycles(prog: ResolvedProgram): ResolvedProgram {
     const sortedScc = [...scc].sort((a, b) => orderIndex.get(a)! - orderIndex.get(b)!)
     const breakTarget = sortedScc[0]
     for (const member of sortedScc) {
-      if (member === breakTarget) continue
+      // Don't skip the breakTarget itself: in a single-member SCC with a
+      // self-edge, the only wire that closes the cycle is the breakTarget's
+      // own wire to itself. Including it in rewriteTargets ensures that
+      // wire becomes a delayRef on the synthetic delay. For multi-member
+      // SCCs, the breakTarget never references itself, so this is a no-op
+      // there.
       let s = rewriteTargets.get(member)
       if (!s) { s = new Set(); rewriteTargets.set(member, s) }
       s.add(breakTarget)

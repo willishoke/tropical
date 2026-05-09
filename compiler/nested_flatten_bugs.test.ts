@@ -124,6 +124,139 @@ describe('flatten regression — wrapping stateful stdlib programs in program_de
     }
   })
 
+  // ─────────────────────────────────────────────────────────────
+  // Phase G — wrap-nesting depth (TDD plan §Phase G)
+  // ─────────────────────────────────────────────────────────────
+
+  test('(D) Wrap(Wrap(Wrap(LadderFilter))) matches bare LadderFilter — 60 samples', () => {
+    // Three nested levels of program_decl wrapping. The post-strata
+    // `_liftedFrom` provenance chain becomes inst3.inst2.inst1.lf.
+    // Behavior, not provenance shape, is the gate.
+    const impulse = { op: 'select', args: [{ op: 'eq', args: [{ op: 'sampleIndex' }, 10] }, 1, 0] }
+
+    const wrapped = (() => {
+      const session = makeSession(44100)
+      loadStdlib(session)
+      loadJSON({
+        schema: 'tropical_program_2',
+        name: 't',
+        body: { op: 'block', decls: [
+          // Innermost: Wrap1 = LadderFilter passthrough
+          { op: 'programDecl', name: 'Wrap1', program: {
+            op: 'program', name: 'Wrap1',
+            ports: {
+              inputs: [{ name: 'x', type: 'signal', default: 0 }],
+              outputs: [{ name: 'out', type: 'float' }],
+            },
+            body: { op: 'block', decls: [
+              { op: 'instanceDecl', name: 'lf', program: 'LadderFilter', inputs: {
+                input: { op: 'input', name: 'x' }, cutoff: 800, resonance: 0.5, drive: 1,
+              }},
+            ], assigns: [
+              { op: 'outputAssign', name: 'out', expr: { op: 'nestedOut', ref: 'lf', output: 'lp' } },
+            ]},
+          }},
+          // Middle: Wrap2 = instance of Wrap1
+          { op: 'programDecl', name: 'Wrap2', program: {
+            op: 'program', name: 'Wrap2',
+            ports: {
+              inputs: [{ name: 'x', type: 'signal', default: 0 }],
+              outputs: [{ name: 'out', type: 'float' }],
+            },
+            body: { op: 'block', decls: [
+              { op: 'instanceDecl', name: 'inst1', program: 'Wrap1', inputs: {
+                x: { op: 'input', name: 'x' },
+              }},
+            ], assigns: [
+              { op: 'outputAssign', name: 'out', expr: { op: 'nestedOut', ref: 'inst1', output: 'out' } },
+            ]},
+          }},
+          // Outermost: Wrap3 = instance of Wrap2
+          { op: 'programDecl', name: 'Wrap3', program: {
+            op: 'program', name: 'Wrap3',
+            ports: {
+              inputs: [{ name: 'x', type: 'signal', default: 0 }],
+              outputs: [{ name: 'out', type: 'float' }],
+            },
+            body: { op: 'block', decls: [
+              { op: 'instanceDecl', name: 'inst2', program: 'Wrap2', inputs: {
+                x: { op: 'input', name: 'x' },
+              }},
+            ], assigns: [
+              { op: 'outputAssign', name: 'out', expr: { op: 'nestedOut', ref: 'inst2', output: 'out' } },
+            ]},
+          }},
+          { op: 'instanceDecl', name: 'inst3', program: 'Wrap3', inputs: { x: impulse } },
+        ]},
+        audio_outputs: [{ instance: 'inst3', output: 'out' }],
+      } as ProgramFile, session)
+      return interpretSession(session, 60)
+    })()
+
+    const bare = (() => {
+      const session = makeSession(44100)
+      loadStdlib(session)
+      loadJSON({
+        schema: 'tropical_program_2',
+        name: 't',
+        body: { op: 'block', decls: [
+          { op: 'instanceDecl', name: 'lf', program: 'LadderFilter', inputs: {
+            input: impulse, cutoff: 800, resonance: 0.5, drive: 1,
+          }},
+        ]},
+        audio_outputs: [{ instance: 'lf', output: 'lp' }],
+      } as ProgramFile, session)
+      return interpretSession(session, 60)
+    })()
+
+    for (let i = 0; i < 60; i++) {
+      expect(wrapped[i]).toBeCloseTo(bare[i], 10)
+    }
+  })
+
+  test('(S) generic Wrap<P>: instantiating Wrap<Sin> lowers without throwing', () => {
+    // Smoke test only — assert that a generic wrapper around a generic
+    // stdlib type can be instantiated. The denotational stretch goal
+    // (specialize ∘ inline_instances == inline_instances ∘ specialize)
+    // is deferred per the plan.
+    const session = makeSession(64)
+    loadStdlib(session)
+    expect(() => {
+      loadJSON({
+        schema: 'tropical_program_2',
+        name: 't',
+        body: { op: 'block', decls: [
+          // Generic Wrap<P>: Wrap<P>(x) = P(x).out where P is the
+          // type argument. Sin is a leaf with input `x` and output `out`.
+          { op: 'programDecl', name: 'WrapGen', program: {
+            op: 'program', name: 'WrapGen',
+            ports: {
+              inputs: [{ name: 'x', type: 'signal', default: 0 }],
+              outputs: [{ name: 'out', type: 'float' }],
+            },
+            body: { op: 'block', decls: [
+              // Concrete inner program (the smoke version doesn't use
+              // a true generic type parameter — `Sin` is referenced by
+              // name. The plan's stretch goal would parameterize this
+              // properly; for now this confirms the multi-level wrap
+              // around a stdlib type lowers cleanly).
+              { op: 'instanceDecl', name: 'p', program: 'Sin', inputs: {
+                x: { op: 'input', name: 'x' },
+              }},
+            ], assigns: [
+              { op: 'outputAssign', name: 'out', expr: { op: 'nestedOut', ref: 'p', output: 'out' } },
+            ]},
+          }},
+          { op: 'instanceDecl', name: 'w', program: 'WrapGen',
+            inputs: { x: { op: 'sampleIndex' } } },
+        ]},
+        audio_outputs: [{ instance: 'w', output: 'out' }],
+      } as ProgramFile, session)
+      // Run a single sample to confirm the lowered IR also evaluates.
+      interpretSession(session, 1)
+    }).not.toThrow()
+  })
+
   test('Wrap(Bubble) matches unwrapped Bubble', () => {
     const impulse = { op: 'select', args: [{ op: 'eq', args: [{ op: 'sampleIndex' }, 100] }, 1, 0] }
 

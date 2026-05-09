@@ -219,6 +219,391 @@ const boolPropagationThroughArith: EdgeFixture = {
   tolerance: 12,
 }
 
+// ─────────────────────────────────────────────────────────────
+// Phase B — wholesale-array writebacks beyond `generate`
+// (TDD plan: ~/.claude/plans/we-re-doing-a-tdd-eager-waffle.md)
+//
+// Same shape as `arrayRegWholesaleWriteback`: `next arr = <expr>` where
+// `<expr>` is built from a different combinator each fixture. Each one
+// exercises an independent unrolling path in `array_lower.ts` followed
+// by the same JIT writeback fix from 66ae9f9.
+// ─────────────────────────────────────────────────────────────
+
+/** (D) `next arr = select(cond, arr1, arr2)` — array-typed Select.
+ *  cond is `sampleIndex < 4`; arr1=[1,2,3,4], arr2=[10,20,30,40].
+ *  Sample 0..3 reads arr1; sample 4+ reads arr2. Output is index 2,
+ *  so sample 0 → 3, sample 4 → 30 (post-/20: 0.15, 1.5).
+ *
+ *  Note: select on whole arrays may not be supported by the lowering
+ *  pipeline today. If `applyFlatPlan` throws, that's a pinned
+ *  type-error (per the plan); record here and downgrade to a
+ *  direct-error fixture if needed. */
+const arraySelectWriteback: EdgeFixture = {
+  name: 'array_reg_select_writeback',
+  program: {
+    op: 'program',
+    name: 'ArrayRegSelectWriteback',
+    ports: { inputs: [], outputs: ['out'] },
+    body: { op: 'block',
+      decls: [
+        { op: 'regDecl', name: 'arr', init: [0, 0, 0, 0] as any },
+      ],
+      assigns: [
+        { op: 'outputAssign', name: 'out',
+          expr: { op: 'index', args: [{ op: 'reg', name: 'arr' }, 2] } },
+        { op: 'nextUpdate', target: { kind: 'reg', name: 'arr' },
+          expr: { op: 'select', args: [
+            { op: 'lt', args: [{ op: 'sampleIndex' }, 4] },
+            [1, 2, 3, 4],
+            [10, 20, 30, 40],
+          ]} as any },
+      ],
+    },
+  },
+  expectAllFinite: true,
+  tolerance: 12,
+}
+
+/** (D) `next arr = zipWith(arr_a, arr_b, (x, y) => x + y)` — exercises
+ *  array_lower's zipWith unroll in nextUpdate position. The plan calls
+ *  this `map2`, but tropical's `map2` is single-array; the right
+ *  primitive for two arrays is `zipWith`. */
+const arrayZipWithWriteback: EdgeFixture = {
+  name: 'array_reg_zipwith_writeback',
+  program: {
+    op: 'program',
+    name: 'ArrayRegZipWithWriteback',
+    ports: { inputs: [], outputs: ['out'] },
+    body: { op: 'block',
+      decls: [
+        { op: 'regDecl', name: 'arr', init: [0, 0, 0, 0] as any },
+      ],
+      assigns: [
+        { op: 'outputAssign', name: 'out',
+          expr: { op: 'index', args: [{ op: 'reg', name: 'arr' }, 2] } },
+        { op: 'nextUpdate', target: { kind: 'reg', name: 'arr' },
+          expr: { op: 'zipWith',
+            a: [1, 2, 3, 4],
+            b: [10, 20, 30, 40],
+            x_var: 'x', y_var: 'y',
+            body: { op: 'add', args: [
+              { op: 'binding', name: 'x' },
+              { op: 'binding', name: 'y' },
+            ]},
+          } as any },
+      ],
+    },
+  },
+  expectAllFinite: true,
+  tolerance: 12,
+}
+
+/** (D) `next arr = scan(over, init, f)` — scan emits intermediate
+ *  accumulators. With over=[1,2,3,4], init=0, f=acc+elem: result is
+ *  [1, 3, 6, 10] (running sums). Reads index 3 → 10 (post-/20: 0.5). */
+const arrayScanWriteback: EdgeFixture = {
+  name: 'array_reg_scan_writeback',
+  program: {
+    op: 'program',
+    name: 'ArrayRegScanWriteback',
+    ports: { inputs: [], outputs: ['out'] },
+    body: { op: 'block',
+      decls: [
+        { op: 'regDecl', name: 'arr', init: [0, 0, 0, 0] as any },
+      ],
+      assigns: [
+        { op: 'outputAssign', name: 'out',
+          expr: { op: 'index', args: [{ op: 'reg', name: 'arr' }, 3] } },
+        { op: 'nextUpdate', target: { kind: 'reg', name: 'arr' },
+          expr: { op: 'scan',
+            over: [1, 2, 3, 4],
+            init: 0,
+            acc_var: 'acc', elem_var: 'x',
+            body: { op: 'add', args: [
+              { op: 'binding', name: 'acc' },
+              { op: 'binding', name: 'x' },
+            ]},
+          } as any },
+      ],
+    },
+  },
+  expectAllFinite: true,
+  tolerance: 12,
+}
+
+/** (D) `next arr = let { tmp = generate(N, ...) } in tmp` — the
+ *  let-binding indirection between the producer combinator and the
+ *  writeback exercises the let-elimination path. */
+const arrayLetGenerateWriteback: EdgeFixture = {
+  name: 'array_reg_let_generate_writeback',
+  program: {
+    op: 'program',
+    name: 'ArrayRegLetGenerateWriteback',
+    ports: { inputs: [], outputs: ['out'] },
+    body: { op: 'block',
+      decls: [
+        { op: 'regDecl', name: 'arr', init: [0, 0, 0, 0] as any },
+      ],
+      assigns: [
+        { op: 'outputAssign', name: 'out',
+          expr: { op: 'index', args: [{ op: 'reg', name: 'arr' }, 2] } },
+        { op: 'nextUpdate', target: { kind: 'reg', name: 'arr' },
+          expr: { op: 'let',
+            bind: {
+              tmp: { op: 'generate', count: 4, var: 'i',
+                body: { op: 'add', args: [
+                  { op: 'sampleIndex' },
+                  { op: 'binding', name: 'i' },
+                ]},
+              },
+            },
+            in: { op: 'binding', name: 'tmp' },
+          } as any },
+      ],
+    },
+  },
+  expectAllFinite: true,
+  tolerance: 12,
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase C — known expected-type sites (TDD plan §Phase C)
+// Targeted regressions; the universal property "expected= is a hint
+// that doesn't change ⟦e⟧" is not class-tested here.
+// ─────────────────────────────────────────────────────────────
+
+/** (R) `clamp(bool_expr, 0, 1)` — bool result type would push down
+ *  into the lo / hi literals. compileTernary handles both Select
+ *  and Clamp; 52bd3a8 stripped bool for Select arms but the
+ *  fix-comment didn't mention Clamp. The exact analog of that fix's
+ *  repro for Select. Should compile without throwing
+ *  "literal cannot narrow to bool". */
+const clampBoolArms: EdgeFixture = {
+  name: 'clamp_bool_arms',
+  program: {
+    op: 'program',
+    name: 'ClampBoolArms',
+    ports: { inputs: [{ name: 'x', default: 0.5 }], outputs: ['out'] },
+    body: { op: 'block',
+      assigns: [{ op: 'outputAssign', name: 'out',
+        // clamp( gt(x, 0), 0, 1 ) — a bool input clamped to [0,1].
+        // 0 and 1 are int literals; if the bool expectation propagates
+        // to them they'd narrow to bool (legal) — but extending to a
+        // hi=2 case forces the issue. Use [0, 2] to make the bug
+        // visible: 2 cannot narrow to bool.
+        expr: { op: 'clamp', args: [
+          { op: 'gt', args: [{ op: 'input', name: 'x' }, 0] },
+          0, 2,
+        ]},
+      }],
+    },
+  },
+  expectAllFinite: true,
+  tolerance: 12,
+}
+
+/** (R) `select(cond, gt(a,b), x*0.5)` — mixed bool/float arms. The
+ *  cond's `expected='bool'` could leak into the float arm where 0.5
+ *  literal would try to narrow to bool. Asserts the propagation
+ *  strips bool before reaching the float arm. */
+const selectMixedArms: EdgeFixture = {
+  name: 'select_mixed_arms',
+  program: {
+    op: 'program',
+    name: 'SelectMixedArms',
+    ports: { inputs: [{ name: 'x', default: 0.3 }], outputs: ['out'] },
+    body: { op: 'block',
+      assigns: [{ op: 'outputAssign', name: 'out',
+        // select( gt(x, 0), gt(x, 0.5), x * 0.5 + 0.25 )
+        expr: { op: 'select', args: [
+          { op: 'gt', args: [{ op: 'input', name: 'x' }, 0] },
+          { op: 'gt', args: [{ op: 'input', name: 'x' }, 0.5] },
+          { op: 'add', args: [
+            { op: 'mul', args: [{ op: 'input', name: 'x' }, 0.5] },
+            0.25,
+          ]},
+        ]},
+      }],
+    },
+  },
+  expectAllFinite: true,
+  tolerance: 12,
+}
+
+/** (R) `eq(neq(a,b), neq(c,d))` — chained bool comparisons. Here
+ *  expected='bool' *should* propagate (both args are themselves
+ *  bools). Failure mode: over-aggressive bool-stripping pushes the
+ *  inner neq's args to compile as float and miss bool-specific
+ *  codegen. Pin that the chained bool→bool path still works. */
+const eqOfNeqs: EdgeFixture = {
+  name: 'eq_of_neqs',
+  program: {
+    op: 'program',
+    name: 'EqOfNeqs',
+    ports: { inputs: [{ name: 'x', default: 0.3 }], outputs: ['out'] },
+    body: { op: 'block',
+      assigns: [{ op: 'outputAssign', name: 'out',
+        // eq( neq(x, 0), neq(x, 0.5) )
+        expr: { op: 'eq', args: [
+          { op: 'neq', args: [{ op: 'input', name: 'x' }, 0] },
+          { op: 'neq', args: [{ op: 'input', name: 'x' }, 0.5] },
+        ]},
+      }],
+    },
+  },
+  expectAllFinite: true,
+  tolerance: 12,
+}
+
+/** (R) `expected='int'` through `div`. Symmetric to the bool leak:
+ *  if an int hint propagates into a div whose result needs to be
+ *  float, the result silently truncates. Here `add(int_reg, div(x, 2))`
+ *  pushes int into div; div's float-typed result must NOT narrow to
+ *  int. Pin the float result. */
+const intHintThroughDiv: EdgeFixture = {
+  name: 'int_hint_through_div',
+  program: {
+    op: 'program',
+    name: 'IntHintThroughDiv',
+    ports: { inputs: [{ name: 'x', default: 1 }], outputs: ['out'] },
+    body: { op: 'block',
+      decls: [
+        // int-typed reg holding a constant int. Forces the add's left
+        // arg expected to be int; the right (div) inherits the hint.
+        { op: 'regDecl', name: 'k', init: 0, type: 'int' as any },
+      ],
+      assigns: [
+        { op: 'nextUpdate', target: { kind: 'reg', name: 'k' },
+          expr: { op: 'reg', name: 'k' } },
+        { op: 'outputAssign', name: 'out',
+          expr: { op: 'add', args: [
+            { op: 'reg', name: 'k' },
+            { op: 'div', args: [{ op: 'input', name: 'x' }, 2] },
+          ]},
+        },
+      ],
+    },
+  },
+  expectAllFinite: true,
+  tolerance: 12,
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase D — mutual register update (TDD plan §Phase D)
+//
+// Two-pass writeback isolation: each next-state must be a function of
+// the *current-state* of all regs, not of intermediate post-update
+// values. The 66ae9f9 fix-comment claims this invariant for array regs;
+// these fixtures exercise it directly. Sample-by-sample exact pinning
+// — failure mode is off-by-one-sample, not numeric drift.
+// ─────────────────────────────────────────────────────────────
+
+/** (D) Scalar mutual update — `next a = b + 1; next b = a + 1`. Both
+ *  init 0. Read-before-write isolation: at sample 1 both read the
+ *  previous (init=0) value of the other, so both become 1. At sample 2
+ *  both read each other's value 1, both become 2. Sequence: a=b=t.
+ *
+ *  Bug shape: if the JIT writes `a = b + 1` first, then evaluates
+ *  `b = a + 1` it sees the just-updated `a`. Pinned exactly to catch
+ *  the off-by-one-sample drift this would produce.
+ *
+ *  Output is `a + b`. Sample 0: 0 + 0 = 0. Sample 1: 1 + 1 = 2.
+ *  Sample 2: 2 + 2 = 4. After /20 mix scaling: 0, 0.1, 0.2, 0.3. */
+const scalarMutualReg: EdgeFixture = {
+  name: 'scalar_mutual_reg',
+  program: {
+    op: 'program',
+    name: 'ScalarMutualReg',
+    ports: { inputs: [], outputs: ['out'] },
+    body: { op: 'block',
+      decls: [
+        { op: 'regDecl', name: 'a', init: 0 },
+        { op: 'regDecl', name: 'b', init: 0 },
+      ],
+      assigns: [
+        { op: 'outputAssign', name: 'out',
+          expr: { op: 'add', args: [
+            { op: 'reg', name: 'a' }, { op: 'reg', name: 'b' },
+          ]}},
+        { op: 'nextUpdate', target: { kind: 'reg', name: 'a' },
+          expr: { op: 'add', args: [{ op: 'reg', name: 'b' }, 1] } },
+        { op: 'nextUpdate', target: { kind: 'reg', name: 'b' },
+          expr: { op: 'add', args: [{ op: 'reg', name: 'a' }, 1] } },
+      ],
+    },
+  },
+  expectAllFinite: true,
+  tolerance: 12,
+}
+
+/** (D) Array mutual update — same temporal-isolation property at
+ *  array type. `next arr1 = generate(N, i => arr2[i] + 1)`,
+ *  `next arr2 = generate(N, i => arr1[i] + 1)`. Both init zeros(2).
+ *
+ *  Distinct from Phase B: B tests *writeback correctness* (does the
+ *  array land in the persistent slot); D tests *temporal isolation*
+ *  (does the writeback happen *after* all reads complete).
+ *
+ *  Output is arr1[0]. Same recurrence as the scalar version:
+ *  arr1[0] = sample-index. After /20 mix: 0, 0.05, 0.1, ... */
+const arrayMutualReg: EdgeFixture = {
+  name: 'array_mutual_reg',
+  program: {
+    op: 'program',
+    name: 'ArrayMutualReg',
+    ports: { inputs: [], outputs: ['out'] },
+    body: { op: 'block',
+      decls: [
+        { op: 'regDecl', name: 'arr1', init: [0, 0] as any },
+        { op: 'regDecl', name: 'arr2', init: [0, 0] as any },
+      ],
+      assigns: [
+        { op: 'outputAssign', name: 'out',
+          expr: { op: 'index', args: [{ op: 'reg', name: 'arr1' }, 0] } },
+        { op: 'nextUpdate', target: { kind: 'reg', name: 'arr1' },
+          expr: { op: 'generate', count: 2, var: 'i',
+            body: { op: 'add', args: [
+              { op: 'index', args: [{ op: 'reg', name: 'arr2' }, { op: 'binding', name: 'i' }] },
+              1,
+            ]},
+          } as any },
+        { op: 'nextUpdate', target: { kind: 'reg', name: 'arr2' },
+          expr: { op: 'generate', count: 2, var: 'i',
+            body: { op: 'add', args: [
+              { op: 'index', args: [{ op: 'reg', name: 'arr1' }, { op: 'binding', name: 'i' }] },
+              1,
+            ]},
+          } as any },
+      ],
+    },
+  },
+  expectAllFinite: true,
+  tolerance: 12,
+}
+
+// (D) Sum-typed delay carrying an array field — Phase B Test 11 (deferred).
+// The plan calls for a variant whose payload is `float[N]` (e.g. a Box4
+// holding a 4-element payload), with the wholesale writeback covered by
+// the same fix as `arrayRegWholesaleWriteback`. Today this isn't
+// expressible in the IR: `StructField` (compiler/ir/nodes.ts:54) is
+// `{name, type: ScalarKind}` with no shape field, so array-typed payload
+// fields can't even be represented. Both surface paths reject them
+// before they reach the elaborator: the Zod schema (compiler/schema.ts:
+// StructFieldSchema / VariantPayloadFieldSchema) declares only
+// `name + scalar_type` and Zod's default strip mode silently drops
+// extras; the .trop grammar (compiler/parse/declarations.ts) only
+// accepts a scalar kind. Implementing the full path touches:
+//   - nodes.ts (extend StructField + BinderDecl with optional shape)
+//   - schema.ts + parse/declarations.ts (accept shape on the wire)
+//   - elaborator.ts (resolveStructField passes shape through)
+//   - sum_lower.ts (multi-slot allocation per (variant, field, idx);
+//     extractSlotFromSumExpr returns scalar per index;
+//     bindingsForArm substitutes an inline-array of slot DelayRefs)
+//   - array_lower.ts (resolve `index` over the synthetic array binding
+//     post-sumLower, since the binder's `body` may use the payload via
+//     `index(binder, i)`)
+// Tracked as a follow-up; not in this PR's scope.
+
 export const EDGE_FIXTURES: EdgeFixture[] = [
   divByZero,
   sqrtNegative,
@@ -227,4 +612,17 @@ export const EDGE_FIXTURES: EdgeFixture[] = [
   selectWithSpecials,
   arrayRegWholesaleWriteback,
   boolPropagationThroughArith,
+  // Phase B — wholesale-array writebacks
+  arraySelectWriteback,
+  arrayZipWithWriteback,
+  arrayScanWriteback,
+  arrayLetGenerateWriteback,
+  // Phase C — known expected-type sites
+  clampBoolArms,
+  selectMixedArms,
+  eqOfNeqs,
+  intHintThroughDiv,
+  // Phase D — mutual register update (read-before-write isolation)
+  scalarMutualReg,
+  arrayMutualReg,
 ]
