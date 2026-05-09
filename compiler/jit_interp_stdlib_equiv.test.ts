@@ -204,9 +204,9 @@ describe('Phase B — wholesale-array writeback absolute-value pin', () => {
     const fixture = EDGE_FIXTURES.find(f => f.name === 'array_reg_select_writeback')!
     const type = loadProgramAsType(fixture.program, session)!
     session.typeRegistry.set(fixture.program.name, type)
-    const inst = type.instantiateAs('inst')
+    const inst = instantiate(type, 'inst')
     session.instanceRegistry.set('inst', inst)
-    session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+    session.graphOutputs.push({ instance: 'inst', output: outputNames(inst)[0] })
 
     applyFlatPlan(session, session.runtime)
     session.graph.primeJit()
@@ -236,9 +236,9 @@ describe('Phase D — mutual register update absolute-value pin', () => {
     const fixture = EDGE_FIXTURES.find(f => f.name === 'scalar_mutual_reg')!
     const type = loadProgramAsType(fixture.program, session)!
     session.typeRegistry.set(fixture.program.name, type)
-    const inst = type.instantiateAs('inst')
+    const inst = instantiate(type, 'inst')
     session.instanceRegistry.set('inst', inst)
-    session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+    session.graphOutputs.push({ instance: 'inst', output: outputNames(inst)[0] })
     applyFlatPlan(session, session.runtime)
     session.graph.primeJit()
     session.graph.process()
@@ -256,9 +256,9 @@ describe('Phase D — mutual register update absolute-value pin', () => {
     const fixture = EDGE_FIXTURES.find(f => f.name === 'array_mutual_reg')!
     const type = loadProgramAsType(fixture.program, session)!
     session.typeRegistry.set(fixture.program.name, type)
-    const inst = type.instantiateAs('inst')
+    const inst = instantiate(type, 'inst')
     session.instanceRegistry.set('inst', inst)
-    session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+    session.graphOutputs.push({ instance: 'inst', output: outputNames(inst)[0] })
     applyFlatPlan(session, session.runtime)
     session.graph.primeJit()
     session.graph.process()

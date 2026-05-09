@@ -10,7 +10,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, loadJSON, type ProgramFile } from './session'
+import { makeSession, loadJSON, type ProgramFile, instantiate, outputNames } from './session'
 import { loadStdlib, loadProgramAsType } from './program'
 import { compileSession } from './ir/compile_session'
 import type { FlatPlan } from './flat_plan'
@@ -151,9 +151,9 @@ describe('wasm vs native JIT', () => {
       loadStdlib(session)
       const type = loadProgramAsType(fixture.program, session)!
       session.typeRegistry.set(fixture.program.name, type)
-      const inst = type.instantiateAs('inst')
+      const inst = instantiate(type, 'inst')
       session.instanceRegistry.set('inst', inst)
-      session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+      session.graphOutputs.push({ instance: 'inst', output: outputNames(inst)[0] })
       plan = compileSession(session)
     } finally {
       session.runtime.dispose()
