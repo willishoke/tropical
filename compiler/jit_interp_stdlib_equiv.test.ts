@@ -34,7 +34,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, resolveProgramType } from './session.js'
+import { makeSession, resolveProgramType, instantiate, inputNames, outputNames } from './session.js'
 import type { ExprNode } from './expr.js'
 import { loadStdlib } from './program.js'
 import { applyFlatPlan } from './apply_plan.js'
@@ -88,14 +88,14 @@ function setupStdlibInstance(
   const session = makeSession(BUFFER_LENGTH)
   loadStdlib(session)
   const { type, typeArgs: resolved } = resolveProgramType(session, typeName, typeArgs, undefined)
-  const inst = type.instantiateAs('inst', { baseTypeName: typeName, typeArgs: resolved })
+  const inst = instantiate(type, 'inst', { baseTypeName: typeName, typeArgs: resolved })
   session.instanceRegistry.set('inst', inst)
-  for (const portName of inst.inputNames) {
+  for (const portName of inputNames(inst)) {
     if (portName in DEFAULT_INPUTS) {
       session.inputExprNodes.set(`inst:${portName}`, DEFAULT_INPUTS[portName])
     }
   }
-  session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+  session.graphOutputs.push({ instance: 'inst', output: outputNames(inst)[0] })
   return session
 }
 
@@ -164,14 +164,14 @@ describe('JIT ↔ interpreter equivalence — edge cases (Phase D P0.1)', () => 
       loadStdlib(session)
       const type = loadProgramAsType(fixture.program, session)!
       session.typeRegistry.set(fixture.program.name, type)
-      const inst = type.instantiateAs('inst')
+      const inst = instantiate(type, 'inst')
       session.instanceRegistry.set('inst', inst)
       if (fixture.inputs) {
         for (const [k, v] of Object.entries(fixture.inputs)) {
           session.inputExprNodes.set(`inst:${k}`, v)
         }
       }
-      const outName = fixture.output ?? inst.outputNames[0]
+      const outName = fixture.output ?? outputNames(inst)[0]
       session.graphOutputs.push({ instance: 'inst', output: outName })
 
       runEquivalence(session, {
@@ -204,9 +204,9 @@ describe('Phase B — wholesale-array writeback absolute-value pin', () => {
     const fixture = EDGE_FIXTURES.find(f => f.name === 'array_reg_select_writeback')!
     const type = loadProgramAsType(fixture.program, session)!
     session.typeRegistry.set(fixture.program.name, type)
-    const inst = type.instantiateAs('inst')
+    const inst = instantiate(type, 'inst')
     session.instanceRegistry.set('inst', inst)
-    session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+    session.graphOutputs.push({ instance: 'inst', output: outputNames(inst)[0] })
 
     applyFlatPlan(session, session.runtime)
     session.graph.primeJit()
@@ -236,9 +236,9 @@ describe('Phase D — mutual register update absolute-value pin', () => {
     const fixture = EDGE_FIXTURES.find(f => f.name === 'scalar_mutual_reg')!
     const type = loadProgramAsType(fixture.program, session)!
     session.typeRegistry.set(fixture.program.name, type)
-    const inst = type.instantiateAs('inst')
+    const inst = instantiate(type, 'inst')
     session.instanceRegistry.set('inst', inst)
-    session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+    session.graphOutputs.push({ instance: 'inst', output: outputNames(inst)[0] })
     applyFlatPlan(session, session.runtime)
     session.graph.primeJit()
     session.graph.process()
@@ -256,9 +256,9 @@ describe('Phase D — mutual register update absolute-value pin', () => {
     const fixture = EDGE_FIXTURES.find(f => f.name === 'array_mutual_reg')!
     const type = loadProgramAsType(fixture.program, session)!
     session.typeRegistry.set(fixture.program.name, type)
-    const inst = type.instantiateAs('inst')
+    const inst = instantiate(type, 'inst')
     session.instanceRegistry.set('inst', inst)
-    session.graphOutputs.push({ instance: 'inst', output: inst.outputNames[0] })
+    session.graphOutputs.push({ instance: 'inst', output: outputNames(inst)[0] })
     applyFlatPlan(session, session.runtime)
     session.graph.primeJit()
     session.graph.process()

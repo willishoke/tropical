@@ -4,7 +4,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { parseProgram, type ProgramNode, type StructTypeDef, type SumTypeDef, type AliasTypeDef } from './declarations.js'
+import { parseProgram, type Program, type StructTypeDef, type SumTypeDef, type AliasTypeDef } from './declarations.js'
 import { parseExpr, ParseError } from './expressions.js'
 import { nameRef } from './nodes.js'
 
@@ -307,7 +307,7 @@ describe('expressions — match', () => {
       }
     ` ) as {
       in: {
-        arms: Array<{ variant: { name: string }; body: ExprNode }>
+        arms: Array<{ variant: { name: string }; body: Expr }>
       }
     }
     const some = parsed.in.arms.find(a => a.variant.name === 'Some')!
@@ -377,9 +377,9 @@ describe('adts — program integration', () => {
   })
 })
 
-// Top-level type defs in tests need this import for ExprNode.
-type ExprNode =
+// Top-level type defs in tests need this import for Expr.
+type Expr =
   | number
   | boolean
-  | ExprNode[]
+  | Expr[]
   | { op: string; [k: string]: unknown }

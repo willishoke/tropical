@@ -19,7 +19,7 @@
  * - `SumTypeDef`, `SumVariant`, `AliasTypeDef`, `StructTypeDef`,
  *   `StructField` — SHARED (`===` preserved). They carry no
  *   per-specialization data; cloning them would break variant
- *   identity in `MatchExpr.arms[i].variant` and `TagExpr.variant`,
+ *   identity in `Match.arms[i].variant` and `Tag.variant`,
  *   which downstream passes (sum_lower) compare by `===`.
  * - All other decls (`InputDecl`, `OutputDecl`, `TypeParamDecl`,
  *   `RegDecl`, `DelayDecl`, `ParamDecl`, `InstanceDecl`,
@@ -37,15 +37,15 @@
 
 import type {
   ResolvedProgram, ResolvedBlock, ResolvedProgramPorts,
-  ResolvedExpr, ResolvedExprOpNode,
+  ResolvedExpr, ResolvedExprOp,
   InputDecl, OutputDecl, TypeParamDecl,
   RegDecl, DelayDecl, ParamDecl, InstanceDecl, ProgramDecl, BodyDecl,
   BodyAssign, OutputAssign, NextUpdate,
   PortType, ShapeDim,
   BinderDecl,
-  TagExpr, MatchExpr, MatchArm,
-  LetExpr,
-  FoldExpr, ScanExpr, GenerateExpr, IterateExpr, ChainExpr, Map2Expr, ZipWithExpr,
+  Tag, Match, MatchArm,
+  Let,
+  Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith,
 } from './nodes.js'
 
 // ─────────────────────────────────────────────────────────────
@@ -419,7 +419,7 @@ function cloneBinder(b: BinderDecl, t: CloneTable): BinderDecl {
   return fresh
 }
 
-function cloneOpNode(node: ResolvedExprOpNode, t: CloneTable): ResolvedExprOpNode {
+function cloneOpNode(node: ResolvedExprOp, t: CloneTable): ResolvedExprOp {
   switch (node.op) {
     // Refs — point at the cloned decl via the dedup table.
     case 'inputRef':  return { op: 'inputRef',  decl: cloneInputDecl(node.decl, t) }
@@ -444,7 +444,7 @@ function cloneOpNode(node: ResolvedExprOpNode, t: CloneTable): ResolvedExprOpNod
 
     // ADT — variant shared, payload/arms cloned.
     case 'tag': {
-      const fresh: TagExpr = {
+      const fresh: Tag = {
         op: 'tag',
         variant: node.variant,    // shared
         payload: node.payload.map(p => ({ field: p.field, value: cloneExpr(p.value, t) })),
@@ -457,7 +457,7 @@ function cloneOpNode(node: ResolvedExprOpNode, t: CloneTable): ResolvedExprOpNod
         binders: arm.binders.map(b => cloneBinder(b, t)),
         body: cloneExpr(arm.body, t),
       }))
-      const fresh: MatchExpr = {
+      const fresh: Match = {
         op: 'match',
         type: node.type,    // shared
         scrutinee: cloneExpr(node.scrutinee, t),
@@ -468,7 +468,7 @@ function cloneOpNode(node: ResolvedExprOpNode, t: CloneTable): ResolvedExprOpNod
 
     // Combinators — each carries its binder decls.
     case 'let': {
-      const fresh: LetExpr = {
+      const fresh: Let = {
         op: 'let',
         binders: node.binders.map(b => ({
           binder: cloneBinder(b.binder, t),
@@ -479,7 +479,7 @@ function cloneOpNode(node: ResolvedExprOpNode, t: CloneTable): ResolvedExprOpNod
       return fresh
     }
     case 'fold': {
-      const fresh: FoldExpr = {
+      const fresh: Fold = {
         op: 'fold',
         over: cloneExpr(node.over, t),
         init: cloneExpr(node.init, t),
@@ -490,7 +490,7 @@ function cloneOpNode(node: ResolvedExprOpNode, t: CloneTable): ResolvedExprOpNod
       return fresh
     }
     case 'scan': {
-      const fresh: ScanExpr = {
+      const fresh: Scan = {
         op: 'scan',
         over: cloneExpr(node.over, t),
         init: cloneExpr(node.init, t),
@@ -501,7 +501,7 @@ function cloneOpNode(node: ResolvedExprOpNode, t: CloneTable): ResolvedExprOpNod
       return fresh
     }
     case 'generate': {
-      const fresh: GenerateExpr = {
+      const fresh: Generate = {
         op: 'generate',
         count: cloneExpr(node.count, t),
         iter: cloneBinder(node.iter, t),
@@ -510,7 +510,7 @@ function cloneOpNode(node: ResolvedExprOpNode, t: CloneTable): ResolvedExprOpNod
       return fresh
     }
     case 'iterate': {
-      const fresh: IterateExpr = {
+      const fresh: Iterate = {
         op: 'iterate',
         count: cloneExpr(node.count, t),
         init: cloneExpr(node.init, t),
@@ -520,7 +520,7 @@ function cloneOpNode(node: ResolvedExprOpNode, t: CloneTable): ResolvedExprOpNod
       return fresh
     }
     case 'chain': {
-      const fresh: ChainExpr = {
+      const fresh: Chain = {
         op: 'chain',
         count: cloneExpr(node.count, t),
         init: cloneExpr(node.init, t),
@@ -530,7 +530,7 @@ function cloneOpNode(node: ResolvedExprOpNode, t: CloneTable): ResolvedExprOpNod
       return fresh
     }
     case 'map2': {
-      const fresh: Map2Expr = {
+      const fresh: Map2 = {
         op: 'map2',
         over: cloneExpr(node.over, t),
         elem: cloneBinder(node.elem, t),
@@ -539,7 +539,7 @@ function cloneOpNode(node: ResolvedExprOpNode, t: CloneTable): ResolvedExprOpNod
       return fresh
     }
     case 'zipWith': {
-      const fresh: ZipWithExpr = {
+      const fresh: ZipWith = {
         op: 'zipWith',
         a: cloneExpr(node.a, t),
         b: cloneExpr(node.b, t),

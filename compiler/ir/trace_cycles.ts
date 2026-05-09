@@ -29,7 +29,7 @@
  */
 
 import type {
-  ResolvedProgram, ResolvedExpr, ResolvedExprOpNode,
+  ResolvedProgram, ResolvedExpr, ResolvedExprOp,
   ResolvedBlock,
   BodyDecl, BodyAssign, OutputAssign, NextUpdate,
   InstanceDecl, OutputDecl, DelayDecl,
@@ -119,7 +119,7 @@ export function traceCycles(prog: ResolvedProgram): ResolvedProgram {
     if (Array.isArray(expr)) return expr.map(e => rewriteForOwner(e, breakSet))
     return rewriteOpForOwner(expr, breakSet)
   }
-  const rewriteOpForOwner = (node: ResolvedExprOpNode, breakSet: Set<InstanceDecl>): ResolvedExpr => {
+  const rewriteOpForOwner = (node: ResolvedExprOp, breakSet: Set<InstanceDecl>): ResolvedExpr => {
     switch (node.op) {
       case 'nestedOut': {
         if (breakSet.has(node.instance)) {

@@ -12,14 +12,21 @@ import type { TypeDefJSON, SessionState } from './session.js'
 import { resolveProgramType } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
-import { ProgramType } from './program_types.js'
+import {
+  type Compiled,
+  instantiate,
+  inputNames, outputNames,
+  inputPortType, outputPortType,
+  inputIndex, outputIndex,
+  rawInputDefaults,
+} from './program_types.js'
 import { exprDependencies, reachableInstances, buildDependencyGraph, topologicalSort } from './compiler.js'
 import type { RawTypeArgs } from './specialize.js'
-import { Float, portTypeEqual, type PortType } from './term.js'
+import { Float, portTypeEqual } from './ir/port_type.js'
 import { raiseProgram } from './parse/raise.js'
 import { elaborate, type ExternalProgramResolver } from './ir/elaborator.js'
 import { programTypeFromResolved } from './ir/strata.js'
-import type { ResolvedProgram } from './ir/nodes.js'
+import type { ResolvedProgram, PortType } from './ir/nodes.js'
 
 // ─────────────────────────────────────────────────────────────
 // Program schema
@@ -251,13 +258,13 @@ function resolveDacWireExprToGraphOutput(
   }
   let outputName: string
   if (typeof e.output === 'number') {
-    if (e.output < 0 || e.output >= inst.outputNames.length) {
-      throw new Error(`${context}: dac.out wire output index ${e.output} out of range for '${e.instance}' (${inst.outputNames.length} outputs).`)
+    if (e.output < 0 || e.output >= outputNames(inst).length) {
+      throw new Error(`${context}: dac.out wire output index ${e.output} out of range for '${e.instance}' (${outputNames(inst).length} outputs).`)
     }
-    outputName = inst.outputNames[e.output]
+    outputName = outputNames(inst)[e.output]
   } else if (typeof e.output === 'string') {
-    if (!inst.outputNames.includes(e.output)) {
-      throw new Error(`${context}: dac.out wire references unknown output '${e.output}' on '${e.instance}'. Valid: ${inst.outputNames.join(', ')}`)
+    if (!outputNames(inst).includes(e.output)) {
+      throw new Error(`${context}: dac.out wire references unknown output '${e.output}' on '${e.instance}'. Valid: ${outputNames(inst).join(', ')}`)
     }
     outputName = e.output
   } else {
@@ -316,7 +323,7 @@ export function loadProgramAsSession(
   session.paramRegistry.clear()
   session.triggerRegistry.clear()
   session.inputExprNodes.clear()
-  session._nameCounters.clear()
+  session.nameCounters.clear()
   session.typeAliasRegistry.clear()
   session.sumTypeRegistry.clear()
   session.structTypeRegistry.clear()
@@ -356,7 +363,7 @@ export function loadProgramAsSession(
   // Instantiate programs
   for (const inst of instanceDecls(prog)) {
     const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
-    const instance = type.instantiateAs(inst.name, { baseTypeName: inst.program, typeArgs })
+    const instance = instantiate(type, inst.name, { baseTypeName: inst.program, typeArgs })
     if (inst.gateable) {
       if (inst.gate_input === undefined)
         throw new Error(`Instance '${inst.name}' has gateable=true but no gate_input expression.`)
@@ -377,7 +384,7 @@ export function loadProgramAsSession(
 
   // Apply input defaults from each instance's program definition
   for (const [name, inst] of session.instanceRegistry) {
-    const defaults = inst.type.rawInputDefaults
+    const defaults = rawInputDefaults(inst)
     for (const [inputName, value] of Object.entries(defaults)) {
       const key = `${name}:${inputName}`
       if (!session.inputExprNodes.has(key)) {
@@ -397,7 +404,7 @@ export function loadProgramAsSession(
 }
 
 /**
- * Load a ProgramNode as a ProgramType (registerable in typeRegistry).
+ * Load a ProgramNode as a Compiled (registerable in typeRegistry).
  * Programs with inline `program_decl` entries get their subprograms registered first.
  *
  * The strata pipeline is the only path: ProgramNode JSON is raised to
@@ -410,7 +417,7 @@ export function loadProgramAsSession(
 export function loadProgramAsType(
   prog: ProgramNode,
   session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'sumTypeRegistry' | 'structTypeRegistry'>>,
-): ProgramType | undefined {
+): Compiled | undefined {
   // Register type defs (aliases, sums, structs) from type_defs before processing subprograms
   for (const td of prog.ports?.type_defs ?? []) {
     if (td.kind === 'alias' && session.typeAliasRegistry) {
@@ -516,7 +523,7 @@ export function mergeProgramIntoSession(
   // Instantiate programs
   for (const inst of instanceDecls(prog)) {
     const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
-    const instance = type.instantiateAs(inst.name, { baseTypeName: inst.program, typeArgs })
+    const instance = instantiate(type, inst.name, { baseTypeName: inst.program, typeArgs })
     if (inst.gateable) {
       if (inst.gate_input === undefined)
         throw new Error(`Instance '${inst.name}' has gateable=true but no gate_input expression.`)
@@ -537,7 +544,7 @@ export function mergeProgramIntoSession(
 
   // Apply input defaults
   for (const [name, inst] of session.instanceRegistry) {
-    const defaults = inst.type.rawInputDefaults
+    const defaults = rawInputDefaults(inst)
     for (const [inputName, value] of Object.entries(defaults)) {
       const key = `${name}:${inputName}`
       if (!session.inputExprNodes.has(key)) {
@@ -569,7 +576,7 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
 type StdlibTarget =
-  | Map<string, ProgramType>
+  | Map<string, Compiled>
   | (Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'>
     & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>)
 
@@ -685,7 +692,7 @@ function loadStdlibFromResolved(
   // that wasn't pre-registered concretely (e.g. a generic template name
   // that resolveProgramType then re-checks against genericTemplatesResolved).
   if (!session.typeResolver) {
-    session.typeResolver = (n: string): ProgramType | undefined => {
+    session.typeResolver = (n: string): Compiled | undefined => {
       return session.typeRegistry.get(n)
     }
   }
@@ -713,7 +720,7 @@ export function saveProgramFromSession(
   }
 
   for (const [name, inst] of session.instanceRegistry) {
-    const entry: Record<string, unknown> = { op: 'instanceDecl', name, program: inst.typeName }
+    const entry: Record<string, unknown> = { op: 'instanceDecl', name, program: inst.baseTypeName }
     if (inst.typeArgs) entry.type_args = inst.typeArgs
     if (inst.gateable) {
       entry.gateable = true
@@ -722,7 +729,7 @@ export function saveProgramFromSession(
 
     // Merge wiring for this instance
     const inputs: Record<string, ExprNode> = {}
-    for (const portName of inst.inputNames) {
+    for (const portName of inputNames(inst)) {
       const key = `${name}:${portName}`
       const expr = session.inputExprNodes.get(key)
       if (expr !== undefined) inputs[portName] = expr
@@ -736,7 +743,7 @@ export function saveProgramFromSession(
   for (const o of session.graphOutputs) {
     const inst = session.instanceRegistry.get(o.instance)
     if (!inst) continue // session has a stale entry; skip silently rather than crash on save
-    const outputIdx = inst.outputNames.indexOf(o.output)
+    const outputIdx = outputNames(inst).indexOf(o.output)
     if (outputIdx < 0) continue
     assigns.push({
       op: 'outputAssign',
@@ -790,29 +797,29 @@ export function exportSessionAsProgram(
   const { name, inputs, outputs } = opts
 
   // Validate output mappings and build output ref expressions
-  const outputNames = Object.keys(outputs)
+  const outputKeys = Object.keys(outputs)
   const outputExprs: Record<string, ExprNode> = {}
   const rootExprs: ExprNode[] = []
   for (const [outName, ref] of Object.entries(outputs)) {
     const inst = session.instanceRegistry.get(ref.instance)
     if (!inst) throw new Error(`export: output '${outName}' references unknown instance '${ref.instance}'.`)
-    if (!inst.outputNames.includes(ref.output))
-      throw new Error(`export: instance '${ref.instance}' has no output '${ref.output}'. Available: ${inst.outputNames.join(', ')}`)
+    if (!outputNames(inst).includes(ref.output))
+      throw new Error(`export: instance '${ref.instance}' has no output '${ref.output}'. Available: ${outputNames(inst).join(', ')}`)
     const refExpr: ExprNode = { op: 'ref', instance: ref.instance, output: ref.output }
     outputExprs[outName] = refExpr
     rootExprs.push(refExpr)
   }
 
   // Validate input mappings
-  const inputNames = Object.keys(inputs)
+  const inputKeys = Object.keys(inputs)
   const exposedKeys = new Set<string>()   // "instance:port" keys being exposed as inputs
   for (const [inputName, target] of Object.entries(inputs)) {
     const [instName, portName] = target.split(':')
     if (!portName) throw new Error(`export: input '${inputName}' target must be "instance:port", got '${target}'.`)
     const inst = session.instanceRegistry.get(instName)
     if (!inst) throw new Error(`export: input '${inputName}' references unknown instance '${instName}'.`)
-    if (!inst.inputNames.includes(portName))
-      throw new Error(`export: instance '${instName}' has no input '${portName}'. Available: ${inst.inputNames.join(', ')}`)
+    if (!inputNames(inst).includes(portName))
+      throw new Error(`export: instance '${instName}' has no input '${portName}'. Available: ${inputNames(inst).join(', ')}`)
     exposedKeys.add(target)
   }
 
@@ -874,19 +881,20 @@ export function exportSessionAsProgram(
     t === undefined || portTypeEqual(t, Float)
 
   const portTypeToDecl = (t: PortType): PortTypeDecl => {
-    switch (t.tag) {
+    switch (t.kind) {
       case 'scalar': return t.scalar
+      case 'alias':  return t.alias.name
       case 'array': {
-        if (t.element.tag !== 'scalar') {
-          throw new Error(`export: cannot serialize nested array element type (${t.element.tag})`)
-        }
-        return { kind: 'array', element: t.element.scalar, shape: t.shape }
+        const elem = typeof t.element === 'string' ? t.element : t.element.name
+        // Post-strata shapes are concrete integers (specialize has run).
+        const shape = t.shape.map(d => {
+          if (typeof d !== 'number') {
+            throw new Error(`export: array shape carries unresolved type-param '${d.name}'`)
+          }
+          return d
+        })
+        return { kind: 'array', element: elem, shape }
       }
-      case 'struct': return t.name
-      case 'sum': return t.name
-      case 'unit': return 'unit'
-      case 'product':
-        throw new Error(`export: product port types cannot be serialized`)
     }
   }
 
@@ -899,12 +907,12 @@ export function exportSessionAsProgram(
     }
   }
 
-  const inputEntries: Array<string | ProgramPortSpec> = inputNames.map(inputName => {
+  const inputEntries: Array<string | ProgramPortSpec> = inputKeys.map(inputName => {
     const target = inputs[inputName]
     const [instName, portName] = target.split(':')
     const inst = session.instanceRegistry.get(instName)!
-    const idx = inst.inputIndex(portName)
-    const pt = inst.inputPortType(idx)
+    const idx = inputIndex(inst, portName)
+    const pt = inputPortType(inst, idx)
     const dflt = inputDefaults[inputName]
     const entry: ProgramPortSpec = { name: inputName }
     if (!isDefaultPortType(pt)) entry.type = portTypeToDecl(pt!)
@@ -914,11 +922,11 @@ export function exportSessionAsProgram(
       : entry
   })
 
-  const outputEntries: Array<string | ProgramPortSpec> = outputNames.map(outName => {
+  const outputEntries: Array<string | ProgramPortSpec> = outputKeys.map(outName => {
     const ref = outputs[outName]
     const inst = session.instanceRegistry.get(ref.instance)!
-    const idx = inst.outputIndex(ref.output)
-    const pt = inst.outputPortType(idx)
+    const idx = outputIndex(inst, ref.output)
+    const pt = outputPortType(inst, idx)
     const entry: ProgramPortSpec = { name: outName }
     if (!isDefaultPortType(pt)) entry.type = portTypeToDecl(pt!)
     return entry.type === undefined ? outName : entry
@@ -944,7 +952,7 @@ export function exportSessionAsProgram(
     const entry: Record<string, unknown> = {
       op: 'instanceDecl',
       name: instName,
-      program: inst.typeName,
+      program: inst.baseTypeName,
     }
     if (inst.typeArgs) entry.type_args = inst.typeArgs
     if (inst.gateable) {
@@ -955,7 +963,7 @@ export function exportSessionAsProgram(
     // Copy wiring, rewriting exposed ports to {op:"input", name:...}
     // and ref→nested_out for sibling instances
     const instInputs: Record<string, ExprNode> = {}
-    for (const portName of inst.inputNames) {
+    for (const portName of inputNames(inst)) {
       const key = `${instName}:${portName}`
       if (exposedKeys.has(key)) {
         const inputName = Object.entries(inputs).find(([_, t]) => t === key)![0]

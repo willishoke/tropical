@@ -4,11 +4,11 @@
 
 import { describe, test, expect } from 'bun:test'
 import { parseProgramV2 } from './schema'
-import { makeSession, loadJSON, v2NodeToFile, type ExprNode } from './session'
+import { makeSession, loadJSON, v2NodeToFile, type Expr, instantiate, inputPortType, outputPortType } from './session'
 import {
   loadStdlib as loadBuiltins, loadProgramAsType, loadProgramAsSession,
   saveProgramFromSession, exportSessionAsProgram, instanceDecls,
-  type ProgramNode, type ProgramPortSpec, type ProgramTopLevel,
+  type Program, type ProgramPortSpec, type ProgramTopLevel,
 } from './program'
 import { resolveProgramType } from './session'
 
@@ -38,7 +38,7 @@ describe('parseProgramV2', () => {
       audio_outputs: [{ instance: 'VCO1', output: 'sin' }],
     }
     const prog = parseProgramV2(raw)
-    const vco1 = [...instanceDecls(prog as unknown as ProgramNode)].find(d => d.name === 'VCO1')!
+    const vco1 = [...instanceDecls(prog as unknown as Program)].find(d => d.name === 'VCO1')!
     expect(vco1.program).toBe('VCO')
   })
 
@@ -85,7 +85,7 @@ function makeTestSession() {
 describe('exportSessionAsProgram — port type round-trip', () => {
   test('emits typed inputs/outputs matching source instance port types', () => {
     const session = makeSession(256)
-    const typedLeaf: ProgramNode = {
+    const typedLeaf: Program = {
       op: 'program',
       name: 'TypedLeaf',
       ports: {
@@ -98,7 +98,7 @@ describe('exportSessionAsProgram — port type round-trip', () => {
     }
     loadProgramAsType(typedLeaf, session)
     const { type } = resolveProgramType(session, 'TypedLeaf', undefined, undefined)
-    session.instanceRegistry.set('t1', type.instantiateAs('t1', { baseTypeName: 'TypedLeaf' }))
+    session.instanceRegistry.set('t1', instantiate(type, 't1', { baseTypeName: 'TypedLeaf' }))
 
     const exported = exportSessionAsProgram(session, {
       name: 'Exported',
@@ -106,7 +106,7 @@ describe('exportSessionAsProgram — port type round-trip', () => {
       outputs: { out: { instance: 't1', output: 'out' } },
     })
 
-    const reparsed = parseProgramV2(v2NodeToFile(exported as unknown as ExprNode))
+    const reparsed = parseProgramV2(v2NodeToFile(exported as unknown as Expr))
     const inputEntry = (reparsed.ports?.inputs ?? [])[0] as ProgramPortSpec
     const outputEntry = (reparsed.ports?.outputs ?? [])[0] as ProgramPortSpec
     expect(typeof inputEntry === 'object' && inputEntry.type).toEqual({ kind: 'array', element: 'float', shape: [4] })
@@ -116,17 +116,17 @@ describe('exportSessionAsProgram — port type round-trip', () => {
     loadProgramAsType(typedLeaf, session2)
     loadProgramAsType(exported, session2)
     const { type: exportedType } = resolveProgramType(session2, 'Exported', undefined, undefined)
-    const srcPt = exportedType.inputPortType(0)
-    const dstPt = exportedType.outputPortType(0)
-    expect(srcPt?.tag).toBe('array')
-    expect(dstPt?.tag).toBe('array')
-    if (srcPt?.tag === 'array') expect(srcPt.shape).toEqual([4])
-    if (dstPt?.tag === 'array') expect(dstPt.shape).toEqual([4])
+    const srcPt = inputPortType(exportedType, 0)
+    const dstPt = outputPortType(exportedType, 0)
+    expect(srcPt?.kind).toBe('array')
+    expect(dstPt?.kind).toBe('array')
+    if (srcPt?.kind === 'array') expect(srcPt.shape).toEqual([4])
+    if (dstPt?.kind === 'array') expect(dstPt.shape).toEqual([4])
   })
 
   test('emits bare string names when no type is declared', () => {
     const session = makeSession(256)
-    const plain: ProgramNode = {
+    const plain: Program = {
       op: 'program',
       name: 'Plain',
       ports: { inputs: ['x'], outputs: ['y'] },
@@ -136,7 +136,7 @@ describe('exportSessionAsProgram — port type round-trip', () => {
     }
     loadProgramAsType(plain, session)
     const { type } = resolveProgramType(session, 'Plain', undefined, undefined)
-    session.instanceRegistry.set('p1', type.instantiateAs('p1', { baseTypeName: 'Plain' }))
+    session.instanceRegistry.set('p1', instantiate(type, 'p1', { baseTypeName: 'Plain' }))
 
     const exported = exportSessionAsProgram(session, {
       name: 'Exported',
@@ -173,7 +173,7 @@ describe('exportSessionAsProgram', () => {
 // ─────────────────────────────────────────────────────────────
 
 describe('generic programs round-trip', () => {
-  function genericDelay(): ProgramNode {
+  function genericDelay(): Program {
     return {
       op: 'program',
       name: 'Delay',
@@ -212,7 +212,7 @@ describe('generic programs round-trip', () => {
     const session = makeSession()
     loadProgramAsType(genericDelay(), session)
     const { type, typeArgs } = resolveProgramType(session, 'Delay', { N: 8 }, undefined)
-    const inst = type.instantiateAs('d1', { baseTypeName: 'Delay', typeArgs })
+    const inst = instantiate(type, 'd1', { baseTypeName: 'Delay', typeArgs })
     session.instanceRegistry.set('d1', inst)
 
     const { node: saved } = saveProgramFromSession(session)
@@ -223,7 +223,7 @@ describe('generic programs round-trip', () => {
 
   test('saveProgramFromSession omits type_args on non-generic instances', () => {
     const session = makeSession()
-    const p: ProgramNode = {
+    const p: Program = {
       op: 'program',
       name: 'Passthrough',
       ports: { inputs: ['x'], outputs: ['y'] },
@@ -233,7 +233,7 @@ describe('generic programs round-trip', () => {
     }
     loadProgramAsType(p, session)
     const { type } = resolveProgramType(session, 'Passthrough', undefined, undefined)
-    session.instanceRegistry.set('p1', type.instantiateAs('p1', { baseTypeName: 'Passthrough' }))
+    session.instanceRegistry.set('p1', instantiate(type, 'p1', { baseTypeName: 'Passthrough' }))
 
     const { node: saved } = saveProgramFromSession(session)
     const p1 = [...instanceDecls(saved)].find(d => d.name === 'p1')!
@@ -243,7 +243,7 @@ describe('generic programs round-trip', () => {
 
   test('gateable round-trips through schema, loader, and saver (Phase 3)', () => {
     const session = makeSession()
-    const passthrough: ProgramNode = {
+    const passthrough: Program = {
       op: 'program',
       name: 'Passthrough',
       ports: { inputs: ['x'], outputs: ['y'] },
@@ -269,8 +269,8 @@ describe('generic programs round-trip', () => {
       .find(d => d.op === 'instanceDecl' && d.name === 'voice_0')!
     expect(decl.gateable).toBe(true)
 
-    // Load into a session, verify the ProgramInstance carries the flag.
-    loadProgramAsSession(prog as unknown as ProgramNode, {
+    // Load into a session, verify the Instance carries the flag.
+    loadProgramAsSession(prog as unknown as Program, {
       audio_outputs: (raw as { audio_outputs: ProgramTopLevel['audio_outputs'] }).audio_outputs,
     }, session)
     const inst = session.instanceRegistry.get('voice_0')!
@@ -288,7 +288,7 @@ describe('generic programs round-trip', () => {
 
   test('gateable=true without gate_input is rejected at load (Phase 3)', () => {
     const session = makeSession()
-    const passthrough: ProgramNode = {
+    const passthrough: Program = {
       op: 'program',
       name: 'Passthrough',
       ports: { inputs: ['x'], outputs: ['y'] },
@@ -298,13 +298,13 @@ describe('generic programs round-trip', () => {
     }
     loadProgramAsType(passthrough, session)
 
-    const bad: ProgramNode = {
+    const bad: Program = {
       op: 'program',
       name: 'Patch',
       body: { op: 'block', decls: [
         // gate_input intentionally missing
         { op: 'instanceDecl', name: 'voice_0', program: 'Passthrough',
-          inputs: { x: 1.0 }, gateable: true } as unknown as ExprNode,
+          inputs: { x: 1.0 }, gateable: true } as unknown as Expr,
       ]},
     }
     expect(() => loadProgramAsSession(bad, {
@@ -318,7 +318,7 @@ describe('typeResolver', () => {
   test('circular stdlib dependency throws with cycle path', () => {
     const session = makeSession()
 
-    const fakeTypes = new Map<string, ProgramNode>([
+    const fakeTypes = new Map<string, Program>([
       ['CycleA', {
         op: 'program', name: 'CycleA',
         ports: { inputs: [], outputs: ['out'] },
@@ -363,14 +363,14 @@ describe('typeResolver', () => {
 describe('paramDecl in body decls (Phase A3)', () => {
   test('loadProgramAsSession populates Param/Trigger registry from body paramDecls', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: {
         op: 'block',
         decls: [
-          { op: 'paramDecl', name: 'cutoff', value: 1234.0, time_const: 0.01 } as unknown as ExprNode,
-          { op: 'paramDecl', name: 'gate', type: 'trigger' } as unknown as ExprNode,
+          { op: 'paramDecl', name: 'cutoff', value: 1234.0, time_const: 0.01 } as unknown as Expr,
+          { op: 'paramDecl', name: 'gate', type: 'trigger' } as unknown as Expr,
         ],
       },
     }
@@ -386,14 +386,14 @@ describe('paramDecl in body decls (Phase A3)', () => {
 
   test('saveProgramFromSession emits paramDecls in body, no topLevel.params', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: {
         op: 'block',
         decls: [
-          { op: 'paramDecl', name: 'freq', value: 440.0, time_const: 0.005 } as unknown as ExprNode,
-          { op: 'paramDecl', name: 'fire', type: 'trigger' } as unknown as ExprNode,
+          { op: 'paramDecl', name: 'freq', value: 440.0, time_const: 0.005 } as unknown as Expr,
+          { op: 'paramDecl', name: 'fire', type: 'trigger' } as unknown as Expr,
         ],
       },
     }
@@ -414,14 +414,14 @@ describe('paramDecl in body decls (Phase A3)', () => {
 
   test('round-trip: save then load preserves param values and trigger names', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: {
         op: 'block',
         decls: [
-          { op: 'paramDecl', name: 'q', value: 0.7 } as unknown as ExprNode,
-          { op: 'paramDecl', name: 'reset', type: 'trigger' } as unknown as ExprNode,
+          { op: 'paramDecl', name: 'q', value: 0.7 } as unknown as Expr,
+          { op: 'paramDecl', name: 'reset', type: 'trigger' } as unknown as Expr,
         ],
       },
     }
@@ -442,7 +442,7 @@ describe('paramDecl in body decls (Phase A3)', () => {
 
   test('legacy topLevel.params still loads (deprecated fallback)', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: { op: 'block', decls: [] },
@@ -461,12 +461,12 @@ describe('paramDecl in body decls (Phase A3)', () => {
 
   test('body paramDecl wins over duplicate topLevel.params entry', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: {
         op: 'block',
-        decls: [{ op: 'paramDecl', name: 'shared', value: 100.0 } as unknown as ExprNode],
+        decls: [{ op: 'paramDecl', name: 'shared', value: 100.0 } as unknown as Expr],
       },
     }
     const topLevel: ProgramTopLevel = {
@@ -485,17 +485,17 @@ describe('paramDecl in body decls (Phase A3)', () => {
 describe('dac.out body wires (Phase A4)', () => {
   test('loadProgramAsSession reads body outputAssign(name="dac.out")', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: {
         op: 'block',
         decls: [
-          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 220.0 } } as unknown as ExprNode,
+          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 220.0 } } as unknown as Expr,
         ],
         assigns: [
           { op: 'outputAssign', name: 'dac.out',
-            expr: { op: 'ref', instance: 'osc', output: 0 } } as unknown as ExprNode,
+            expr: { op: 'ref', instance: 'osc', output: 0 } } as unknown as Expr,
         ],
       },
     }
@@ -506,20 +506,20 @@ describe('dac.out body wires (Phase A4)', () => {
 
   test('saveProgramFromSession emits dac.out outputAssigns in body, no topLevel.audio_outputs', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: {
         op: 'block',
         decls: [
-          { op: 'instanceDecl', name: 'a', program: 'BlepSaw', inputs: { freq: 110.0 } } as unknown as ExprNode,
-          { op: 'instanceDecl', name: 'b', program: 'BlepSaw', inputs: { freq: 220.0 } } as unknown as ExprNode,
+          { op: 'instanceDecl', name: 'a', program: 'BlepSaw', inputs: { freq: 110.0 } } as unknown as Expr,
+          { op: 'instanceDecl', name: 'b', program: 'BlepSaw', inputs: { freq: 220.0 } } as unknown as Expr,
         ],
         assigns: [
           { op: 'outputAssign', name: 'dac.out',
-            expr: { op: 'ref', instance: 'a', output: 0 } } as unknown as ExprNode,
+            expr: { op: 'ref', instance: 'a', output: 0 } } as unknown as Expr,
           { op: 'outputAssign', name: 'dac.out',
-            expr: { op: 'ref', instance: 'b', output: 0 } } as unknown as ExprNode,
+            expr: { op: 'ref', instance: 'b', output: 0 } } as unknown as Expr,
         ],
       },
     }
@@ -540,17 +540,17 @@ describe('dac.out body wires (Phase A4)', () => {
 
   test('round-trip: save then load preserves dac wires', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: {
         op: 'block',
         decls: [
-          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 440.0 } } as unknown as ExprNode,
+          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 440.0 } } as unknown as Expr,
         ],
         assigns: [
           { op: 'outputAssign', name: 'dac.out',
-            expr: { op: 'ref', instance: 'osc', output: 0 } } as unknown as ExprNode,
+            expr: { op: 'ref', instance: 'osc', output: 0 } } as unknown as Expr,
         ],
       },
     }
@@ -567,13 +567,13 @@ describe('dac.out body wires (Phase A4)', () => {
 
   test('legacy topLevel.audio_outputs still loads (deprecated fallback)', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: {
         op: 'block',
         decls: [
-          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 100.0 } } as unknown as ExprNode,
+          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 100.0 } } as unknown as Expr,
         ],
       },
     }
@@ -587,18 +587,18 @@ describe('dac.out body wires (Phase A4)', () => {
 
   test('body wires + legacy topLevel both contribute (body first, fallback after)', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: {
         op: 'block',
         decls: [
-          { op: 'instanceDecl', name: 'a', program: 'BlepSaw', inputs: { freq: 110.0 } } as unknown as ExprNode,
-          { op: 'instanceDecl', name: 'b', program: 'BlepSaw', inputs: { freq: 220.0 } } as unknown as ExprNode,
+          { op: 'instanceDecl', name: 'a', program: 'BlepSaw', inputs: { freq: 110.0 } } as unknown as Expr,
+          { op: 'instanceDecl', name: 'b', program: 'BlepSaw', inputs: { freq: 220.0 } } as unknown as Expr,
         ],
         assigns: [
           { op: 'outputAssign', name: 'dac.out',
-            expr: { op: 'ref', instance: 'a', output: 0 } } as unknown as ExprNode,
+            expr: { op: 'ref', instance: 'a', output: 0 } } as unknown as Expr,
         ],
       },
     }
@@ -615,16 +615,16 @@ describe('dac.out body wires (Phase A4)', () => {
 
   test('non-ref expression in dac.out outputAssign throws', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: {
         op: 'block',
         decls: [
-          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 100.0 } } as unknown as ExprNode,
+          { op: 'instanceDecl', name: 'osc', program: 'BlepSaw', inputs: { freq: 100.0 } } as unknown as Expr,
         ],
         assigns: [
-          { op: 'outputAssign', name: 'dac.out', expr: 0.5 as unknown as ExprNode } as unknown as ExprNode,
+          { op: 'outputAssign', name: 'dac.out', expr: 0.5 as unknown as Expr } as unknown as Expr,
         ],
       },
     }
@@ -634,14 +634,14 @@ describe('dac.out body wires (Phase A4)', () => {
 
   test('dac.out with unknown instance throws', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: {
         op: 'block',
         assigns: [
           { op: 'outputAssign', name: 'dac.out',
-            expr: { op: 'ref', instance: 'nope', output: 0 } } as unknown as ExprNode,
+            expr: { op: 'ref', instance: 'nope', output: 0 } } as unknown as Expr,
         ],
       },
     }
@@ -669,7 +669,7 @@ describe('source-level `config` removed (Phase A5)', () => {
 
   test('saveProgramFromSession does not emit a config field', () => {
     const session = makeTestSession()
-    const prog: ProgramNode = {
+    const prog: Program = {
       op: 'program',
       name: 'Patch',
       body: { op: 'block' },

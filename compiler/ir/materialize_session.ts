@@ -2,7 +2,7 @@
  * compiler/ir/materialize_session.ts — Session → ResolvedProgram materialization.
  *
  * `materializeSessionToResolvedIR(session)` turns a session — a partially-typed
- * graph of `ProgramInstance`s plus session-keyed wiring `ExprNode`s plus
+ * graph of `Instance`s plus session-keyed wiring `ExprNode`s plus
  * `dac.out` graph outputs — into a synthetic top-level `ResolvedProgram`,
  * then runs the strata pipeline. The result feeds either the JIT
  * (`compileSession`) or the pure-TS interpreter (`interpret_resolved`).
@@ -26,7 +26,7 @@
  */
 
 import type {
-  ResolvedProgram, ResolvedExpr, ResolvedExprOpNode, ResolvedBlock,
+  ResolvedProgram, ResolvedExpr, ResolvedExprOp, ResolvedBlock,
   ResolvedProgramPorts,
   InputDecl, OutputDecl, RegDecl, ParamDecl, DelayDecl, InstanceDecl,
   BodyDecl, BodyAssign, OutputAssign,
@@ -34,7 +34,7 @@ import type {
 } from './nodes.js'
 import type { ExprNode } from '../expr.js'
 import type { SessionState } from '../session.js'
-import type { ProgramInstance } from '../program_types.js'
+import type { Instance } from '../program_types.js'
 import { strataPipeline } from './strata.js'
 import { specializeProgram } from './specialize.js'
 import { cloneResolvedProgram } from './clone.js'
@@ -283,7 +283,7 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     }
     if (outDecl.type !== undefined) sessionOutput.type = outDecl.type
     outputDecls.push(sessionOutput)
-    const ref: ResolvedExprOpNode = { op: 'nestedOut', instance: instDecl, output: outDecl }
+    const ref: ResolvedExprOp = { op: 'nestedOut', instance: instDecl, output: outDecl }
     outputAssigns.push({ op: 'outputAssign', target: sessionOutput, expr: ref })
   }
 
@@ -326,7 +326,7 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
 
 function buildInstanceDecl(
   name: string,
-  inst: ProgramInstance,
+  inst: Instance,
   ctx: MaterializeContext,
 ): InstanceDecl {
   const session = ctx.session

@@ -22,19 +22,19 @@
  */
 
 import type {
-  ParsedExprNode,
-  ExprOpNode,
-  ProgramNode,
-  BlockNode,
+  ParsedExpr,
+  ParsedExprOp,
+  Program,
+  Block,
   BodyDecl,
   BodyAssign,
-  RegDeclNode,
-  DelayDeclNode,
-  ParamDeclNode,
-  InstanceDeclNode,
-  ProgramDeclNode,
-  OutputAssignNode,
-  NextUpdateNode,
+  RegDecl,
+  DelayDecl,
+  ParamDecl,
+  InstanceDecl,
+  ProgramDecl,
+  OutputAssign,
+  NextUpdate,
   ProgramPort,
   ProgramPortSpec,
   PortTypeDecl,
@@ -45,24 +45,24 @@ import type {
   SumTypeDef,
   SumVariant,
   AliasTypeDef,
-  TagNode,
-  MatchNode,
+  Tag,
+  Match,
   MatchArmEntry,
-  LetNode,
-  FoldNode,
-  ScanNode,
-  GenerateNode,
-  IterateNode,
-  ChainNode,
-  Map2Node,
-  ZipWithNode,
-  IndexNode,
-  CallNode,
-  NestedOutNode,
-  BindingNode,
-  NameRefNode,
-  BinaryOpNode,
-  UnaryOpNode,
+  Let,
+  Fold,
+  Scan,
+  Generate,
+  Iterate,
+  Chain,
+  Map2,
+  ZipWith,
+  Index,
+  Call,
+  NestedOut,
+  Binding,
+  NameRef,
+  BinaryOp,
+  UnaryOp,
   BinaryOpTag,
   TypeArgEntry,
   InstanceInputEntry,
@@ -76,12 +76,12 @@ import type {
 /** Print a parsed program as a `.trop` document (markdown with a single
  *  fenced `tropical` block). Round-trip via the parser is structurally
  *  identity. */
-export function printProgram(prog: ProgramNode): string {
+export function printProgram(prog: Program): string {
   return ['```tropical', printProgramDecl(prog, 0), '```', ''].join('\n')
 }
 
 /** Print a single expression — useful for tests and debugging. */
-export function printExpr(expr: ParsedExprNode): string {
+export function printExpr(expr: ParsedExpr): string {
   return printExprAt(expr, PREC_LOWEST)
 }
 
@@ -91,7 +91,7 @@ export function printExpr(expr: ParsedExprNode): string {
  *  Output order inside the body: type defs (struct/enum/type aliases)
  *  first, then body decls in source order, then body assigns. This
  *  matches the parser's expectations and reads top-down. */
-export function printProgramDecl(prog: ProgramNode, indent: number): string {
+export function printProgramDecl(prog: Program, indent: number): string {
   const ind = '  '.repeat(indent)
   const header = printProgramHeader(prog)
   const lines: string[] = []
@@ -117,7 +117,7 @@ export function printProgramDecl(prog: ProgramNode, indent: number): string {
 // Program header
 // ─────────────────────────────────────────────────────────────
 
-function printProgramHeader(prog: ProgramNode): string {
+function printProgramHeader(prog: Program): string {
   let out = `program ${prog.name}`
   if (prog.type_params && Object.keys(prog.type_params).length > 0) {
     const parts: string[] = []
@@ -173,26 +173,26 @@ function printBodyDecl(decl: BodyDecl, indent: number): string {
   }
 }
 
-function printRegDecl(d: RegDeclNode): string {
+function printRegDecl(d: RegDecl): string {
   let out = `reg ${d.name}`
   if (d.type !== undefined) out += `: ${d.type.name}`
   out += ` = ${printExprAt(d.init, PREC_LOWEST)}`
   return out
 }
 
-function printDelayDecl(d: DelayDeclNode): string {
+function printDelayDecl(d: DelayDecl): string {
   const typeAnn = d.type !== undefined ? `: ${d.type.name}` : ''
   return `delay ${d.name}${typeAnn} = ${printExprAt(d.update, PREC_LOWEST)} init ${printExprAt(d.init, PREC_LOWEST)}`
 }
 
-function printParamDecl(d: ParamDeclNode): string {
+function printParamDecl(d: ParamDecl): string {
   const surface = d.type === 'param' ? 'smoothed' : 'trigger'
   let out = `param ${d.name}: ${surface}`
   if (d.value !== undefined) out += ` = ${d.value}`
   return out
 }
 
-function printInstanceDecl(d: InstanceDeclNode): string {
+function printInstanceDecl(d: InstanceDecl): string {
   let out = `${d.name} = ${d.program.name}`
   if (d.type_args && d.type_args.length > 0) {
     out += `<${d.type_args.map(printTypeArg).join(', ')}>`
@@ -209,7 +209,7 @@ function printInstanceInput(e: InstanceInputEntry): string {
   return `${e.port.name}: ${printExprAt(e.value, PREC_LOWEST)}`
 }
 
-function printProgramDeclItem(d: ProgramDeclNode, indent: number): string {
+function printProgramDeclItem(d: ProgramDecl, indent: number): string {
   return printProgramDecl(d.program, indent)
 }
 
@@ -265,7 +265,7 @@ const BINARY_SYM: Record<BinaryOpTag, string> = {
   mul: '*', div: '/', mod: '%',
 }
 
-function printExprAt(node: ParsedExprNode, contextPrec: number): string {
+function printExprAt(node: ParsedExpr, contextPrec: number): string {
   if (typeof node === 'number')  return formatNumber(node)
   if (typeof node === 'boolean') return node ? 'true' : 'false'
   if (Array.isArray(node)) {
@@ -280,27 +280,27 @@ function formatNumber(n: number): string {
   return Number.isFinite(n) ? String(n) : 'NaN'
 }
 
-function printOpNode(node: ExprOpNode, contextPrec: number): string {
+function printOpNode(node: ParsedExprOp, contextPrec: number): string {
   switch (node.op) {
-    case 'nameRef':   return (node as NameRefNode).name
-    case 'binding':   return (node as BindingNode).name
-    case 'nestedOut': return printNestedOut(node as NestedOutNode)
-    case 'index':     return printIndex(node as IndexNode)
-    case 'call':      return printCall(node as CallNode)
-    case 'tag':       return printTag(node as TagNode)
-    case 'match':     return printMatch(node as MatchNode)
-    case 'let':       return parens(printLet(node as LetNode), contextPrec, PREC_LOWEST)
-    case 'fold':      return printFold(node as FoldNode)
-    case 'scan':      return printScan(node as ScanNode)
-    case 'generate':  return printGenerate(node as GenerateNode)
-    case 'iterate':   return printIterate(node as IterateNode)
-    case 'chain':     return printChain(node as ChainNode)
-    case 'map2':      return printMap2(node as Map2Node)
-    case 'zipWith':   return printZipWith(node as ZipWithNode)
+    case 'nameRef':   return (node as NameRef).name
+    case 'binding':   return (node as Binding).name
+    case 'nestedOut': return printNestedOut(node as NestedOut)
+    case 'index':     return printIndex(node as Index)
+    case 'call':      return printCall(node as Call)
+    case 'tag':       return printTag(node as Tag)
+    case 'match':     return printMatch(node as Match)
+    case 'let':       return parens(printLet(node as Let), contextPrec, PREC_LOWEST)
+    case 'fold':      return printFold(node as Fold)
+    case 'scan':      return printScan(node as Scan)
+    case 'generate':  return printGenerate(node as Generate)
+    case 'iterate':   return printIterate(node as Iterate)
+    case 'chain':     return printChain(node as Chain)
+    case 'map2':      return printMap2(node as Map2)
+    case 'zipWith':   return printZipWith(node as ZipWith)
     default:
-      if (node.op in BINARY_PREC) return printBinary(node as BinaryOpNode, contextPrec)
+      if (node.op in BINARY_PREC) return printBinary(node as BinaryOp, contextPrec)
       // Unary
-      return printUnary(node as UnaryOpNode, contextPrec)
+      return printUnary(node as UnaryOp, contextPrec)
   }
 }
 
@@ -308,7 +308,7 @@ function parens(s: string, contextPrec: number, ownPrec: number): string {
   return ownPrec < contextPrec ? `(${s})` : s
 }
 
-function printBinary(node: BinaryOpNode, contextPrec: number): string {
+function printBinary(node: BinaryOp, contextPrec: number): string {
   const prec = BINARY_PREC[node.op]
   const sym = BINARY_SYM[node.op]
   // Left-associative: left side accepts equal-prec without parens; right
@@ -320,10 +320,10 @@ function printBinary(node: BinaryOpNode, contextPrec: number): string {
 
 const UNARY_SYM: Record<string, string> = { neg: '-', not: '!', bitNot: '~' }
 
-function printUnary(node: UnaryOpNode, contextPrec: number): string {
+function printUnary(node: UnaryOp, contextPrec: number): string {
   const sym = UNARY_SYM[node.op]
   if (sym === undefined) {
-    // Defensive — every parsed UnaryOpNode should be in UNARY_SYM.
+    // Defensive — every parsed UnaryOp should be in UNARY_SYM.
     throw new Error(`printer: unknown unary op '${node.op}'`)
   }
   // Unary binds tighter than any binary; emit without parens unless the
@@ -331,16 +331,16 @@ function printUnary(node: UnaryOpNode, contextPrec: number): string {
   return parens(`${sym}${printExprAt(node.args[0], PREC_UNARY)}`, contextPrec, PREC_UNARY)
 }
 
-function printNestedOut(node: NestedOutNode): string {
+function printNestedOut(node: NestedOut): string {
   const portName = isNameRef(node.output) ? node.output.name : String(node.output)
   return `${node.ref.name}.${portName}`
 }
 
-function printIndex(node: IndexNode): string {
+function printIndex(node: Index): string {
   return `${printExprAt(node.args[0], PREC_POSTFIX)}[${printExprAt(node.args[1], PREC_LOWEST)}]`
 }
 
-function printCall(node: CallNode): string {
+function printCall(node: Call): string {
   // The callee is always a NameRef from the parser (only ident-call form
   // is supported in expressions). Defensive cast for the unlikely future.
   const callee = isNameRef(node.callee) ? node.callee.name
@@ -349,7 +349,7 @@ function printCall(node: CallNode): string {
   return `${callee}(${args.join(', ')})`
 }
 
-function printTag(node: TagNode): string {
+function printTag(node: Tag): string {
   if (!node.payload || node.payload.length === 0) {
     return `${node.variant.name} { }`
   }
@@ -360,7 +360,7 @@ function printTagPayloadEntry(e: TagPayloadEntry): string {
   return `${e.field.name}: ${printExprAt(e.value, PREC_LOWEST)}`
 }
 
-function printMatch(node: MatchNode): string {
+function printMatch(node: Match): string {
   const arms = node.arms.map(printMatchArm).join(', ')
   return `match ${printExprAt(node.scrutinee, PREC_LOWEST)} { ${arms} }`
 }
@@ -375,38 +375,38 @@ function printMatchArm(arm: MatchArmEntry): string {
   return `${v} { ${pattern} } => ${body}`
 }
 
-function printLet(node: LetNode): string {
+function printLet(node: Let): string {
   const entries = Object.entries(node.bind).map(([k, v]) =>
     `${k}: ${printExprAt(v, PREC_LOWEST)}`
   )
   return `let { ${entries.join('; ')} } in ${printExprAt(node.in, PREC_LOWEST)}`
 }
 
-function printFold(node: FoldNode): string {
+function printFold(node: Fold): string {
   return `fold(${printExprAt(node.over, PREC_LOWEST)}, ${printExprAt(node.init, PREC_LOWEST)}, (${node.acc_var}, ${node.elem_var}) => ${printExprAt(node.body, PREC_LOWEST)})`
 }
 
-function printScan(node: ScanNode): string {
+function printScan(node: Scan): string {
   return `scan(${printExprAt(node.over, PREC_LOWEST)}, ${printExprAt(node.init, PREC_LOWEST)}, (${node.acc_var}, ${node.elem_var}) => ${printExprAt(node.body, PREC_LOWEST)})`
 }
 
-function printGenerate(node: GenerateNode): string {
+function printGenerate(node: Generate): string {
   return `generate(${printExprAt(node.count, PREC_LOWEST)}, (${node.var}) => ${printExprAt(node.body, PREC_LOWEST)})`
 }
 
-function printIterate(node: IterateNode): string {
+function printIterate(node: Iterate): string {
   return `iterate(${printExprAt(node.count, PREC_LOWEST)}, ${printExprAt(node.init, PREC_LOWEST)}, (${node.var}) => ${printExprAt(node.body, PREC_LOWEST)})`
 }
 
-function printChain(node: ChainNode): string {
+function printChain(node: Chain): string {
   return `chain(${printExprAt(node.count, PREC_LOWEST)}, ${printExprAt(node.init, PREC_LOWEST)}, (${node.var}) => ${printExprAt(node.body, PREC_LOWEST)})`
 }
 
-function printMap2(node: Map2Node): string {
+function printMap2(node: Map2): string {
   return `map2(${printExprAt(node.over, PREC_LOWEST)}, (${node.elem_var}) => ${printExprAt(node.body, PREC_LOWEST)})`
 }
 
-function printZipWith(node: ZipWithNode): string {
+function printZipWith(node: ZipWith): string {
   return `zipWith(${printExprAt(node.a, PREC_LOWEST)}, ${printExprAt(node.b, PREC_LOWEST)}, (${node.x_var}, ${node.y_var}) => ${printExprAt(node.body, PREC_LOWEST)})`
 }
 
@@ -447,7 +447,7 @@ function printAliasTypeDef(td: AliasTypeDef): string {
 // Helpers
 // ─────────────────────────────────────────────────────────────
 
-function isNameRef(v: unknown): v is NameRefNode {
+function isNameRef(v: unknown): v is NameRef {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
     && (v as { op?: unknown }).op === 'nameRef'
 }

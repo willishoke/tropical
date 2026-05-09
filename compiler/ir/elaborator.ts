@@ -19,20 +19,20 @@
  */
 
 import type {
-  ParsedExprNode,
-  ExprOpNode as ParsedExprOpNode,
-  NameRefNode as ParsedNameRefNode,
-  ProgramNode as ParsedProgramNode,
-  BlockNode as ParsedBlockNode,
+  ParsedExpr,
+  ParsedExprOp as ParsedExprOp,
+  NameRef as ParsedNameRef,
+  Program as ParsedProgram,
+  Block as ParsedBlock,
   BodyDecl as ParsedBodyDecl,
   BodyAssign as ParsedBodyAssign,
-  RegDeclNode as ParsedRegDecl,
-  DelayDeclNode as ParsedDelayDecl,
-  ParamDeclNode as ParsedParamDecl,
-  InstanceDeclNode as ParsedInstanceDecl,
-  ProgramDeclNode as ParsedProgramDecl,
-  OutputAssignNode as ParsedOutputAssign,
-  NextUpdateNode as ParsedNextUpdate,
+  RegDecl as ParsedRegDecl,
+  DelayDecl as ParsedDelayDecl,
+  ParamDecl as ParsedParamDecl,
+  InstanceDecl as ParsedInstanceDecl,
+  ProgramDecl as ParsedProgramDecl,
+  OutputAssign as ParsedOutputAssign,
+  NextUpdate as ParsedNextUpdate,
   ProgramPort as ParsedProgramPort,
   PortTypeDecl as ParsedPortType,
   ShapeDim as ParsedShapeDim,
@@ -41,26 +41,26 @@ import type {
   SumTypeDef as ParsedSumTypeDef,
   AliasTypeDef as ParsedAliasTypeDef,
   StructField as ParsedStructField,
-  CallNode as ParsedCallNode,
-  TagNode as ParsedTag,
-  MatchNode as ParsedMatch,
-  LetNode as ParsedLetNode,
-  FoldNode as ParsedFold,
-  ScanNode as ParsedScan,
-  GenerateNode as ParsedGenerate,
-  IterateNode as ParsedIterate,
-  ChainNode as ParsedChain,
-  Map2Node as ParsedMap2,
-  ZipWithNode as ParsedZipWith,
-  IndexNode as ParsedIndex,
-  NestedOutNode as ParsedNestedOut,
-  BindingNode as ParsedBindingNode,
-  BinaryOpNode as ParsedBinary,
-  UnaryOpNode as ParsedUnary,
+  Call as ParsedCall,
+  Tag as ParsedTag,
+  Match as ParsedMatch,
+  Let as ParsedLet,
+  Fold as ParsedFold,
+  Scan as ParsedScan,
+  Generate as ParsedGenerate,
+  Iterate as ParsedIterate,
+  Chain as ParsedChain,
+  Map2 as ParsedMap2,
+  ZipWith as ParsedZipWith,
+  Index as ParsedIndex,
+  NestedOut as ParsedNestedOut,
+  Binding as ParsedBinding,
+  BinaryOp as ParsedBinary,
+  UnaryOp as ParsedUnary,
 } from '../parse/nodes.js'
 import type {
   ResolvedProgram, ResolvedBlock, ResolvedProgramPorts,
-  ResolvedExpr, ResolvedExprOpNode,
+  ResolvedExpr, ResolvedExprOp,
   InputDecl, OutputDecl, TypeParamDecl,
   RegDecl, DelayDecl, ParamDecl, InstanceDecl, ProgramDecl, BodyDecl,
   BodyAssign, OutputAssign, NextUpdate,
@@ -69,13 +69,13 @@ import type {
   BinderDecl,
   InputRef, RegRef, DelayRef, ParamRef, TypeParamRef, BindingRef,
   NestedOut,
-  TagExpr, MatchExpr, MatchArm,
-  LetExpr,
-  FoldExpr, ScanExpr, GenerateExpr, IterateExpr, ChainExpr, Map2Expr, ZipWithExpr,
-  ClampNode, SelectNode, IndexNode,
-  ZerosNode, ArraySetNode,
-  BinaryOpNode, BinaryOpTag, UnaryOpNode, UnaryOpTag,
-  SampleRateNode, SampleIndexNode,
+  Tag, Match, MatchArm,
+  Let,
+  Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith,
+  Clamp, Select, Index,
+  Zeros, ArraySet,
+  BinaryOp, BinaryOpTag, UnaryOp, UnaryOpTag,
+  SampleRate, SampleIndex,
 } from './nodes.js'
 import { ElaborationError } from './nodes.js'
 
@@ -187,10 +187,10 @@ function emptyScope(parent?: Scope): Scope {
 }
 
 /** Look up a name across scope categories in a defined order. Used when
- *  resolving a NameRefNode in expression position — the position has a
+ *  resolving a NameRef in expression position — the position has a
  *  fixed semantic intent (a value-producing reference), and we try each
  *  applicable scope. */
-function lookupValueRef(scope: Scope, name: string): ResolvedExprOpNode | null {
+function lookupValueRef(scope: Scope, name: string): ResolvedExprOp | null {
   // Local binders (innermost-first via the Scope's own state)
   const binder = scope.binders.get(name)
   if (binder) {
@@ -237,7 +237,7 @@ function lookupProgram(scope: Scope, name: string): ResolvedProgram | null {
 }
 
 /** Resolve a port-type's element name (must be a scalar kind or alias). */
-function resolveElement(scope: Scope, ref: ParsedNameRefNode): ScalarKind | AliasTypeDef {
+function resolveElement(scope: Scope, ref: ParsedNameRef): ScalarKind | AliasTypeDef {
   const builtin = BUILTIN_TYPE_TO_SCALAR[ref.name]
   if (builtin) return builtin
   let s: Scope | undefined = scope
@@ -278,14 +278,14 @@ export type ExternalProgramResolver = (name: string) => ResolvedProgram | undefi
  *  consults the resolver. This is how stdlib elaboration works — sibling
  *  programs are elaborated first, then fed in via the resolver. */
 export function elaborate(
-  prog: ParsedProgramNode,
+  prog: ParsedProgram,
   resolveExternalProgram?: ExternalProgramResolver,
 ): ResolvedProgram {
   return elaborateProgram(prog, undefined, resolveExternalProgram)
 }
 
 function elaborateProgram(
-  prog: ParsedProgramNode,
+  prog: ParsedProgram,
   parent: Scope | undefined,
   resolveExternalProgram?: ExternalProgramResolver,
 ): ResolvedProgram {
@@ -478,7 +478,7 @@ function resolvePortType(pt: ParsedPortType, scope: Scope): PortType {
 
 function resolveShapeDim(d: ParsedShapeDim, scope: Scope): ShapeDim {
   if (typeof d === 'number') return d
-  // d is a NameRefNode in shape position — must resolve to a TypeParamDecl.
+  // d is a NameRef in shape position — must resolve to a TypeParamDecl.
   let s: Scope | undefined = scope
   while (s) {
     const tp = s.typeParams.get(d.name)
@@ -505,7 +505,7 @@ function lookupTypeDef(scope: Scope, name: string): TypeDef | null {
 // ─────────────────────────────────────────────────────────────
 
 function registerBodyDecls(
-  body: ParsedBlockNode,
+  body: ParsedBlock,
   scope: Scope,
   pairing: Map<ParsedBodyDecl, BodyDecl>,
 ): BodyDecl[] {
@@ -749,13 +749,13 @@ function resolveNextUpdate(a: ParsedNextUpdate, scope: Scope): NextUpdate {
 // Expressions
 // ─────────────────────────────────────────────────────────────
 
-function resolveExpr(node: ParsedExprNode, scope: Scope): ResolvedExpr {
+function resolveExpr(node: ParsedExpr, scope: Scope): ResolvedExpr {
   if (typeof node === 'number' || typeof node === 'boolean') return node
   if (Array.isArray(node)) return node.map(n => resolveExpr(n, scope))
   return resolveOpNode(node, scope)
 }
 
-function resolveOpNode(node: ParsedExprOpNode, scope: Scope): ResolvedExprOpNode {
+function resolveOpNode(node: ParsedExprOp, scope: Scope): ResolvedExprOp {
   // Discriminated-union switch on `op`. TypeScript narrows each branch
   // to its specific parsed-node type.
   switch (node.op) {
@@ -776,7 +776,7 @@ function resolveOpNode(node: ParsedExprOpNode, scope: Scope): ResolvedExprOpNode
     case 'zipWith':   return resolveZipWith(node, scope)
     default:
       // Remaining branches are binary or unary ops by the discriminator.
-      // BinaryOpNode and UnaryOpNode share the `args`-tuple shape; the
+      // BinaryOp and UnaryOp share the `args`-tuple shape; the
       // op tag selects between them.
       if (UNARY_OP_TAGS.has(node.op)) {
         return resolveUnary(node as ParsedUnary, scope)
@@ -787,27 +787,27 @@ function resolveOpNode(node: ParsedExprOpNode, scope: Scope): ResolvedExprOpNode
 
 const UNARY_OP_TAGS: ReadonlySet<string> = new Set(['neg', 'not', 'bitNot'])
 
-function resolveBinary(node: ParsedBinary, scope: Scope): BinaryOpNode {
+function resolveBinary(node: ParsedBinary, scope: Scope): BinaryOp {
   return {
     op: node.op,
     args: [resolveExpr(node.args[0], scope), resolveExpr(node.args[1], scope)],
   }
 }
 
-function resolveUnary(node: ParsedUnary, scope: Scope): UnaryOpNode {
+function resolveUnary(node: ParsedUnary, scope: Scope): UnaryOp {
   return {
     op: node.op as UnaryOpTag,
     args: [resolveExpr(node.args[0], scope)],
   }
 }
 
-function resolveNameRef(ref: ParsedNameRefNode, scope: Scope): ResolvedExprOpNode {
+function resolveNameRef(ref: ParsedNameRef, scope: Scope): ResolvedExprOp {
   const resolved = lookupValueRef(scope, ref.name)
   if (resolved) return resolved
   throw new ElaborationError(`unknown name '${ref.name}'`)
 }
 
-function resolveParsedBinding(node: ParsedBindingNode, scope: Scope): BindingRef {
+function resolveParsedBinding(node: ParsedBinding, scope: Scope): BindingRef {
   // The parser already determined this is bound; the elaborator confirms
   // the binder is in scope and links the ref to the decl.
   const binder = scope.binders.get(node.name)
@@ -826,7 +826,7 @@ function resolveNestedOut(node: ParsedNestedOut, scope: Scope): NestedOut {
       `instance '${node.ref.name}' is not declared in this scope`,
     )
   }
-  // node.output is NameRefNode | number; the parser preserves whichever form
+  // node.output is NameRef | number; the parser preserves whichever form
   // the user wrote.
   const targetProgram = inst.type
   let output: OutputDecl | undefined
@@ -845,14 +845,14 @@ function resolveNestedOut(node: ParsedNestedOut, scope: Scope): NestedOut {
   return { op: 'nestedOut', instance: inst, output }
 }
 
-function resolveIndex(node: ParsedIndex, scope: Scope): IndexNode {
+function resolveIndex(node: ParsedIndex, scope: Scope): Index {
   return {
     op: 'index',
     args: [resolveExpr(node.args[0], scope), resolveExpr(node.args[1], scope)],
   }
 }
 
-function resolveCall(node: ParsedCallNode, scope: Scope): ResolvedExprOpNode {
+function resolveCall(node: ParsedCall, scope: Scope): ResolvedExprOp {
   // Generic call always has a NameRef callee from the parser (it's the
   // `f(args)` form where f was an ident). The elaborator either rewrites
   // to a builtin op, or rejects.
@@ -869,10 +869,10 @@ function resolveCall(node: ParsedCallNode, scope: Scope): ResolvedExprOpNode {
       throw new ElaborationError(`'${fname}()' takes no arguments`)
     }
     if (fname === 'sample_rate' || fname === 'sampleRate') {
-      const n: SampleRateNode = { op: 'sampleRate' }
+      const n: SampleRate = { op: 'sampleRate' }
       return n
     }
-    const n: SampleIndexNode = { op: 'sampleIndex' }
+    const n: SampleIndex = { op: 'sampleIndex' }
     return n
   }
 
@@ -882,17 +882,17 @@ function resolveCall(node: ParsedCallNode, scope: Scope): ResolvedExprOpNode {
     if (node.args.length !== 1) {
       throw new ElaborationError(`'${fname}' takes 1 argument; got ${node.args.length}`)
     }
-    const u: UnaryOpNode = { op: unaryTag, args: [resolveExpr(node.args[0], scope)] }
+    const u: UnaryOp = { op: unaryTag, args: [resolveExpr(node.args[0], scope)] }
     return u
   }
 
-  // Binary builtins (call syntax, same shape as infix BinaryOpNode)
+  // Binary builtins (call syntax, same shape as infix BinaryOp)
   const binaryTag = BINARY_CALLS[fname]
   if (binaryTag) {
     if (node.args.length !== 2) {
       throw new ElaborationError(`'${fname}' takes 2 arguments; got ${node.args.length}`)
     }
-    const b: BinaryOpNode = {
+    const b: BinaryOp = {
       op: binaryTag,
       args: [resolveExpr(node.args[0], scope), resolveExpr(node.args[1], scope)],
     }
@@ -905,14 +905,14 @@ function resolveCall(node: ParsedCallNode, scope: Scope): ResolvedExprOpNode {
     if (node.args.length !== 1) {
       throw new ElaborationError(`'zeros' takes 1 argument (count); got ${node.args.length}`)
     }
-    const z: ZerosNode = { op: 'zeros', count: resolveExpr(node.args[0], scope) }
+    const z: Zeros = { op: 'zeros', count: resolveExpr(node.args[0], scope) }
     return z
   }
   if (fname === 'arraySet' || fname === 'array_set') {
     if (node.args.length !== 3) {
       throw new ElaborationError(`'${fname}' takes 3 arguments (arr, idx, value); got ${node.args.length}`)
     }
-    const a: ArraySetNode = {
+    const a: ArraySet = {
       op: 'arraySet',
       args: [
         resolveExpr(node.args[0], scope),
@@ -928,7 +928,7 @@ function resolveCall(node: ParsedCallNode, scope: Scope): ResolvedExprOpNode {
     if (node.args.length !== 3) {
       throw new ElaborationError(`'clamp' takes 3 arguments (value, lo, hi); got ${node.args.length}`)
     }
-    const c: ClampNode = {
+    const c: Clamp = {
       op: 'clamp',
       args: [
         resolveExpr(node.args[0], scope),
@@ -942,7 +942,7 @@ function resolveCall(node: ParsedCallNode, scope: Scope): ResolvedExprOpNode {
     if (node.args.length !== 3) {
       throw new ElaborationError(`'select' takes 3 arguments (cond, then, else); got ${node.args.length}`)
     }
-    const s: SelectNode = {
+    const s: Select = {
       op: 'select',
       args: [
         resolveExpr(node.args[0], scope),
@@ -959,7 +959,7 @@ function resolveCall(node: ParsedCallNode, scope: Scope): ResolvedExprOpNode {
   )
 }
 
-function resolveTag(node: ParsedTag, scope: Scope): TagExpr {
+function resolveTag(node: ParsedTag, scope: Scope): Tag {
   // Look up the variant in scope.variantOf (built when sum types were registered).
   const variantName = node.variant.name
   let variant: SumVariant | undefined
@@ -974,7 +974,7 @@ function resolveTag(node: ParsedTag, scope: Scope): TagExpr {
   }
   // Validate payload: every variant.payload field must be supplied;
   // no extras.
-  const payload: TagExpr['payload'] = []
+  const payload: Tag['payload'] = []
   const supplied = new Map<string, ResolvedExpr>()
   for (const entry of node.payload ?? []) {
     supplied.set(entry.field.name, resolveExpr(entry.value, scope))
@@ -998,7 +998,7 @@ function resolveTag(node: ParsedTag, scope: Scope): TagExpr {
   return { op: 'tag', variant, payload }
 }
 
-function resolveMatch(node: ParsedMatch, scope: Scope): MatchExpr {
+function resolveMatch(node: ParsedMatch, scope: Scope): Match {
   if (node.arms.length === 0) {
     throw new ElaborationError(`match expression has no arms`)
   }
@@ -1088,7 +1088,7 @@ function resolveMatch(node: ParsedMatch, scope: Scope): MatchExpr {
   }
 }
 
-function resolveLet(node: ParsedLetNode, scope: Scope): LetExpr {
+function resolveLet(node: ParsedLet, scope: Scope): Let {
   // Sequential `let*` semantics: each binder's value is resolved in a
   // scope that already contains the prior binders. Surface stdlib relies
   // on this — programs like Tanh write `let { c: clamp(...); c2: c * c }`
@@ -1099,7 +1099,7 @@ function resolveLet(node: ParsedLetNode, scope: Scope): LetExpr {
   // sees all of them. We snapshot prior bindings so we can restore them
   // (mirroring withBinders) — this matters when the parent scope already
   // has a binder with the same name (shadowing).
-  const binders: LetExpr['binders'] = []
+  const binders: Let['binders'] = []
   const prior: Array<{ name: string; was: BinderDecl | undefined }> = []
   try {
     for (const [name, valueExpr] of Object.entries(node.bind)) {
@@ -1121,7 +1121,7 @@ function resolveLet(node: ParsedLetNode, scope: Scope): LetExpr {
   }
 }
 
-function resolveFold(node: ParsedFold, scope: Scope): FoldExpr {
+function resolveFold(node: ParsedFold, scope: Scope): Fold {
   const acc: BinderDecl = { op: 'binderDecl', name: node.acc_var }
   const elem: BinderDecl = { op: 'binderDecl', name: node.elem_var }
   const body = withBinders(scope, [acc, elem], () => resolveExpr(node.body, scope))
@@ -1133,7 +1133,7 @@ function resolveFold(node: ParsedFold, scope: Scope): FoldExpr {
   }
 }
 
-function resolveScan(node: ParsedScan, scope: Scope): ScanExpr {
+function resolveScan(node: ParsedScan, scope: Scope): Scan {
   const acc: BinderDecl = { op: 'binderDecl', name: node.acc_var }
   const elem: BinderDecl = { op: 'binderDecl', name: node.elem_var }
   const body = withBinders(scope, [acc, elem], () => resolveExpr(node.body, scope))
@@ -1145,13 +1145,13 @@ function resolveScan(node: ParsedScan, scope: Scope): ScanExpr {
   }
 }
 
-function resolveGenerate(node: ParsedGenerate, scope: Scope): GenerateExpr {
+function resolveGenerate(node: ParsedGenerate, scope: Scope): Generate {
   const iter: BinderDecl = { op: 'binderDecl', name: node.var }
   const body = withBinders(scope, [iter], () => resolveExpr(node.body, scope))
   return { op: 'generate', count: resolveExpr(node.count, scope), iter, body }
 }
 
-function resolveIterate(node: ParsedIterate, scope: Scope): IterateExpr {
+function resolveIterate(node: ParsedIterate, scope: Scope): Iterate {
   const iter: BinderDecl = { op: 'binderDecl', name: node.var }
   const body = withBinders(scope, [iter], () => resolveExpr(node.body, scope))
   return {
@@ -1162,7 +1162,7 @@ function resolveIterate(node: ParsedIterate, scope: Scope): IterateExpr {
   }
 }
 
-function resolveChain(node: ParsedChain, scope: Scope): ChainExpr {
+function resolveChain(node: ParsedChain, scope: Scope): Chain {
   const iter: BinderDecl = { op: 'binderDecl', name: node.var }
   const body = withBinders(scope, [iter], () => resolveExpr(node.body, scope))
   return {
@@ -1173,13 +1173,13 @@ function resolveChain(node: ParsedChain, scope: Scope): ChainExpr {
   }
 }
 
-function resolveMap2(node: ParsedMap2, scope: Scope): Map2Expr {
+function resolveMap2(node: ParsedMap2, scope: Scope): Map2 {
   const elem: BinderDecl = { op: 'binderDecl', name: node.elem_var }
   const body = withBinders(scope, [elem], () => resolveExpr(node.body, scope))
   return { op: 'map2', over: resolveExpr(node.over, scope), elem, body }
 }
 
-function resolveZipWith(node: ParsedZipWith, scope: Scope): ZipWithExpr {
+function resolveZipWith(node: ParsedZipWith, scope: Scope): ZipWith {
   const x: BinderDecl = { op: 'binderDecl', name: node.x_var }
   const y: BinderDecl = { op: 'binderDecl', name: node.y_var }
   const body = withBinders(scope, [x, y], () => resolveExpr(node.body, scope))
@@ -1215,7 +1215,7 @@ function withBinders<T>(scope: Scope, binders: BinderDecl[], body: () => T): T {
 // Type predicates over parsed nodes
 // ─────────────────────────────────────────────────────────────
 
-function isParsedNameRef(v: unknown): v is ParsedNameRefNode {
+function isParsedNameRef(v: unknown): v is ParsedNameRef {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
     && (v as { op?: unknown }).op === 'nameRef'
 }

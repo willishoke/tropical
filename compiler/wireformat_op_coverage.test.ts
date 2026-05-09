@@ -22,7 +22,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, loadJSON, type ProgramFile } from './session.js'
+import { makeSession, loadJSON, type ProgramFile, instantiate, outputNames } from './session.js'
 import { loadStdlib, loadProgramAsType, type ProgramNode } from './program.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { interpretSession } from './interpret_resolved.js'
@@ -154,9 +154,9 @@ function setupSession(prog: ProgramNode, instanceName = 'inst'): ReturnType<type
   loadStdlib(session)
   const type = loadProgramAsType(prog, session)!
   session.typeRegistry.set(prog.name, type)
-  const inst = type.instantiateAs(instanceName)
+  const inst = instantiate(type, instanceName)
   session.instanceRegistry.set(instanceName, inst)
-  session.graphOutputs.push({ instance: instanceName, output: inst.outputNames[0] })
+  session.graphOutputs.push({ instance: instanceName, output: outputNames(inst)[0] })
   return session
 }
 

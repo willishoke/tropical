@@ -2,14 +2,14 @@
  * uniformity.test.ts — structural invariants on parsed trees (Phase B5c).
  *
  * The parser's contract is that every reference to another node is wrapped
- * in a NameRefNode, and that identity strings (decl names, binders) remain
+ * in a NameRef, and that identity strings (decl names, binders) remain
  * plain strings. This test walks parsed programs and verifies both
  * directions of the invariant.
  *
  * If a future change introduces a stringly-typed reference field (e.g.,
- * NestedOutNode regaining `ref: string`), or accidentally wraps an
- * identity field in a NameRefNode (e.g., RegDeclNode.name becoming a
- * NameRefNode), one of these tests catches it.
+ * NestedOut regaining `ref: string`), or accidentally wraps an
+ * identity field in a NameRef (e.g., RegDecl.name becoming a
+ * NameRef), one of these tests catches it.
  */
 
 import { describe, test, expect } from 'bun:test'
@@ -37,23 +37,23 @@ const isNameRef = (v: unknown): v is { op: 'nameRef'; name: string } =>
 
 /** Field paths whose value is a *reference string* — i.e., a name that
  *  refers to another declaration somewhere. After B5c, all of these
- *  should be NameRefNode. The path is matched as a substring (so
+ *  should be NameRef. The path is matched as a substring (so
  *  `program` matches both `instanceDecl.program` and the program list). */
 const REFERENCE_FIELDS_THAT_MUST_BE_NAMEREF = [
-  // NestedOutNode.ref + .output
+  // NestedOut.ref + .output
   '.ref',
-  // The output of nestedOut is a NameRefNode (or numeric index)
+  // The output of nestedOut is a NameRef (or numeric index)
   '.output',
-  // InstanceDeclNode.program
+  // InstanceDecl.program
   '.program',
-  // TagNode.variant, MatchArmEntry.variant
+  // Tag.variant, MatchArmEntry.variant
   '.variant',
   // TypeArgEntry.param
   '.param',
   // InstanceInputEntry.port, TagPayloadEntry.field
   '.port',
   '.field',
-  // RegDeclNode.type
+  // RegDecl.type
   '.type',  // careful: this also matches paramDecl.type ('param'|'trigger') — checked below
   // AliasTypeDef.base
   '.base',
@@ -64,10 +64,10 @@ const REFERENCE_FIELDS_THAT_MUST_BE_NAMEREF = [
 /** Identity strings that must NOT become NameRefNodes (decl names, binder
  *  labels, etc). */
 const IDENTITY_PATHS = [
-  '.name',  // RegDecl.name, InstanceDecl.name, ProgramNode.name, etc.
+  '.name',  // RegDecl.name, InstanceDecl.name, Program.name, etc.
 ]
 
-describe('parser uniformity — references are NameRefNode, identities are strings', () => {
+describe('parser uniformity — references are NameRef, identities are strings', () => {
   test('a representative program has no inlined reference strings', () => {
     const prog = parseProgram(`
       program Synth<N: int = 4>(freq: freq = 220, x: float[N]) -> (out: signal) {
@@ -93,14 +93,14 @@ describe('parser uniformity — references are NameRefNode, identities are strin
       }
     `)
 
-    // Every value at a reference field should either be a NameRefNode,
+    // Every value at a reference field should either be a NameRef,
     // a numeric index (for nestedOut.output), or undefined (optional
     // field).
     walk(prog, (obj, path) => {
       for (const fieldSuffix of REFERENCE_FIELDS_THAT_MUST_BE_NAMEREF) {
         if (!path.endsWith(fieldSuffix)) continue
         // Skip checks where the field doesn't exist on this object
-        // (e.g. RegDeclNode without a `type` annotation).
+        // (e.g. RegDecl without a `type` annotation).
         const segment = fieldSuffix.slice(1)  // drop leading dot
         if (!(segment in obj)) continue
         const v = obj[segment]
@@ -109,7 +109,7 @@ describe('parser uniformity — references are NameRefNode, identities are strin
         // Match: arm `bind` field is a binder name (string or string[])
         // — handled by being IN the IDENTITY_PATHS / not present here.
         if (typeof v === 'string') {
-          throw new Error(`expected NameRefNode at ${path}.${segment}, got string ${JSON.stringify(v)}`)
+          throw new Error(`expected NameRef at ${path}.${segment}, got string ${JSON.stringify(v)}`)
         }
         // numeric for output index is fine
         if (typeof v === 'number') continue
@@ -138,7 +138,7 @@ describe('parser uniformity — references are NameRefNode, identities are strin
         if (!(segment in obj)) continue
         const v = obj[segment]
         if (v === undefined || v === null) continue
-        // The `name` field on a NameRefNode itself is a string by design
+        // The `name` field on a NameRef itself is a string by design
         // — we want to skip over the inner of a NameRef. Detect by
         // checking the parent object's `op`.
         if ((obj as { op?: string }).op === 'nameRef') continue
@@ -158,7 +158,7 @@ describe('parser uniformity — references are NameRefNode, identities are strin
     expect(regDecl.name).toBe('s')
   })
 
-  test('NameRefNode is the only reachable shape with op:"nameRef"', () => {
+  test('NameRef is the only reachable shape with op:"nameRef"', () => {
     // Consistency: all NameRefNodes have shape {op:'nameRef', name:string}.
     const prog = parseProgram(`
       program X<N: int = 4>(buf: float[N]) -> (out: signal) {

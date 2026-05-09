@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, test, expect } from 'bun:test'
 import { loadStdlib } from '../program.js'
-import type { ProgramType } from '../program_types.js'
+import type { Compiled } from '../program_types.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const stdlibDir = join(__dirname, '../../stdlib')
@@ -22,7 +22,7 @@ const stdlibDir = join(__dirname, '../../stdlib')
 describe('stdlib loader — every .trop file loads cleanly', () => {
   test('typeRegistry + genericTemplatesResolved cover every top-level program in stdlib/', () => {
     const session = {
-      typeRegistry: new Map<string, ProgramType>(),
+      typeRegistry: new Map<string, Compiled>(),
       instanceRegistry: new Map(),
       paramRegistry: new Map(),
       triggerRegistry: new Map(),

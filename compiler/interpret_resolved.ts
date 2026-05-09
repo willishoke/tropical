@@ -9,13 +9,13 @@
  * end-to-end semantic agreement of the IR against the emitter.
  *
  * Phase D D3-b: replaces the retired `interpret.ts` (which walked
- * ExprNode produced by the legacy `flatten.ts:flattenExpressions`).
+ * Expr produced by the legacy `flatten.ts:flattenExpressions`).
  *
  * No FFI, no C++ dependency. Pure TS, fully deterministic.
  */
 
 import type {
-  ResolvedExpr, ResolvedExprOpNode, ResolvedProgram,
+  ResolvedExpr, ResolvedExprOp, ResolvedProgram,
   RegDecl, DelayDecl, InputDecl, ParamDecl,
 } from './ir/nodes.js'
 import type { SessionState } from './session.js'
@@ -97,10 +97,10 @@ function evalExpr(node: ResolvedExpr, env: InterpretEnv): Value {
   if (Array.isArray(node)) {
     return (node as ResolvedExpr[]).map(n => toNum(evalExpr(n, env)))
   }
-  return evalOpNode(node as ResolvedExprOpNode, env)
+  return evalOpNode(node as ResolvedExprOp, env)
 }
 
-function evalOpNode(node: ResolvedExprOpNode, env: InterpretEnv): Value {
+function evalOpNode(node: ResolvedExprOp, env: InterpretEnv): Value {
   const recur = (e: ResolvedExpr): Value => evalExpr(e, env)
 
   switch (node.op) {

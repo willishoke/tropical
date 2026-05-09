@@ -38,10 +38,10 @@
 
 import type {
   ResolvedProgram,
-  ResolvedExpr, ResolvedExprOpNode,
+  ResolvedExpr, ResolvedExprOp,
   BodyDecl, BodyAssign, OutputAssign, NextUpdate,
   BinderDecl,
-  TagExpr, MatchExpr, MatchArm,
+  Tag, Match, MatchArm,
 } from './nodes.js'
 import { cloneResolvedProgram } from './clone.js'
 
@@ -75,7 +75,7 @@ export function arrayLower(prog: ResolvedProgram): ResolvedProgram {
   if (!progNeedsLowering(prog)) return prog
 
   const cloned = cloneResolvedProgram(prog)
-  const memo = new WeakMap<ResolvedExprOpNode, ResolvedExpr>()
+  const memo = new WeakMap<ResolvedExprOp, ResolvedExpr>()
   const empty: SubstMap = EMPTY_SUBST
 
   // Lower input defaults in place on the cloned port decls. Defaults
@@ -131,7 +131,7 @@ function exprNeedsLowering(expr: ResolvedExpr): boolean {
   return opNeedsLowering(expr)
 }
 
-function opNeedsLowering(node: ResolvedExprOpNode): boolean {
+function opNeedsLowering(node: ResolvedExprOp): boolean {
   switch (node.op) {
     case 'let': case 'fold': case 'scan': case 'generate':
     case 'iterate': case 'chain': case 'map2': case 'zipWith':
@@ -190,7 +190,7 @@ function extendN(subst: SubstMap, pairs: Array<[BinderDecl, ResolvedExpr]>): Sub
 // Decl / assign rewriting
 // ─────────────────────────────────────────────────────────────
 
-type Memo = WeakMap<ResolvedExprOpNode, ResolvedExpr>
+type Memo = WeakMap<ResolvedExprOp, ResolvedExpr>
 
 /** Lower a body decl in place. Mutates the decl's expression-shaped
  *  fields when lowering produces a different expression; otherwise
@@ -270,7 +270,7 @@ function lowerExpr(expr: ResolvedExpr, subst: SubstMap, memo: Memo): ResolvedExp
   return lowerOp(expr, subst, memo)
 }
 
-function lowerOp(node: ResolvedExprOpNode, subst: SubstMap, memo: Memo): ResolvedExpr {
+function lowerOp(node: ResolvedExprOp, subst: SubstMap, memo: Memo): ResolvedExpr {
   switch (node.op) {
     // ── BindingRef: substitute when the binder is in the active map.
     //    Residuals (binder belongs to an outer combinator we haven't
@@ -321,7 +321,7 @@ function lowerOp(node: ResolvedExprOpNode, subst: SubstMap, memo: Memo): Resolve
         return changed ? { field: p.field, value } : p
       })
       if (!changed) return node
-      const fresh: TagExpr = { op: 'tag', variant: node.variant, payload }
+      const fresh: Tag = { op: 'tag', variant: node.variant, payload }
       return fresh
     }
 
@@ -329,7 +329,7 @@ function lowerOp(node: ResolvedExprOpNode, subst: SubstMap, memo: Memo): Resolve
     //    (payload bindings) stay — they're resolved by sum_lower
     //    when the scrutinee is a sum-typed DelayRef. arrayLower runs
     //    after sum_lower in the strata, so well-formed programs
-    //    have no MatchExpr surviving here; defensive recursion. ──
+    //    have no Match surviving here; defensive recursion. ──
     case 'match': {
       let changed = false
       const scrutinee = lowerExpr(node.scrutinee, subst, memo)
@@ -340,7 +340,7 @@ function lowerOp(node: ResolvedExprOpNode, subst: SubstMap, memo: Memo): Resolve
         return body === arm.body ? arm : { variant: arm.variant, binders: arm.binders, body }
       })
       if (!changed) return node
-      const fresh: MatchExpr = { op: 'match', type: node.type, scrutinee, arms }
+      const fresh: Match = { op: 'match', type: node.type, scrutinee, arms }
       return fresh
     }
 

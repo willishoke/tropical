@@ -122,11 +122,11 @@ describe('Named-children ops narrow correctly', () => {
 })
 
 describe('Leaf nodes narrow correctly', () => {
-  test('InputNode has optional id and name', () => {
+  test('InputNode is a coproduct of pre- and post-slottify forms', () => {
     const post: InputNode = { op: 'input', id: 0 }
     const pre:  InputNode = { op: 'input', name: 'freq' }
-    expect(post.id).toBe(0)
-    expect(pre.name).toBe('freq')
+    if ('id' in post)   expect(post.id).toBe(0)
+    if ('name' in pre)  expect(pre.name).toBe('freq')
   })
 })
 

@@ -9,7 +9,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, resolveProgramType } from '../session.js'
+import { makeSession, resolveProgramType, instantiate, outputNames } from '../session.js'
 import { loadStdlib } from '../program.js'
 import { compileSession } from './compile_session.js'
 
@@ -17,9 +17,9 @@ function singleInstanceSession(typeName: string) {
   const session = makeSession()
   loadStdlib(session)
   const { type } = resolveProgramType(session, typeName, undefined, undefined)
-  const inst = type.instantiateAs('inst', { baseTypeName: typeName, typeArgs: new Map() })
+  const inst = instantiate(type, 'inst', { baseTypeName: typeName, typeArgs: new Map() })
   session.instanceRegistry.set('inst', inst)
-  for (const outName of inst.outputNames) {
+  for (const outName of outputNames(inst)) {
     session.graphOutputs.push({ instance: 'inst', output: outName })
   }
   return session
@@ -54,8 +54,8 @@ describe('compileSession — two-instance refs', () => {
     const sin = resolveProgramType(session, 'Sin', undefined, undefined).type
     const vca = resolveProgramType(session, 'VCA', undefined, undefined).type
 
-    const sinInst = sin.instantiateAs('osc', { baseTypeName: 'Sin' })
-    const vcaInst = vca.instantiateAs('amp', { baseTypeName: 'VCA' })
+    const sinInst = instantiate(sin, 'osc', { baseTypeName: 'Sin' })
+    const vcaInst = instantiate(vca, 'amp', { baseTypeName: 'VCA' })
     session.instanceRegistry.set('osc', sinInst)
     session.instanceRegistry.set('amp', vcaInst)
 

@@ -5,7 +5,7 @@
  *
  *   program Name<TypeParams>(InputPorts) -> (OutputPorts) { body }
  *
- * Produces a `ProgramNode`-shaped value matching the existing
+ * Produces a `Program`-shaped value matching the existing
  * `tropical_program_2` schema:
  *
  *   {
@@ -16,11 +16,11 @@
  *       inputs?:  Array<string | { name, type?, default? }>,
  *       outputs?: Array<string | { name, type? }>,
  *     },
- *     body: BlockNode,
+ *     body: Block,
  *   }
  *
  * Nested program decls inside a body are wrapped as
- * `{ op: 'programDecl', name: <inner program name>, program: ProgramNode }`.
+ * `{ op: 'programDecl', name: <inner program name>, program: Program }`.
  *
  * Surface coverage:
  *  - Type params: `<N: int = 8, M: int>` (optional default)
@@ -41,17 +41,17 @@ import { parseBodyFromTokens, type BodyOptions } from './statements.js'
 import { commaList, consume, eat, formatTok, isContextualKw, peek, ParseError, type Cursor } from './shared.js'
 import { lowerBoundsToClamps } from './lower_bounds.js'
 import type {
-  ExprNode, ProgramNode, ProgramPort, ProgramPortSpec, ProgramPorts,
+  Expr, Program, ProgramPort, ProgramPortSpec, ProgramPorts,
   PortTypeDecl, ShapeDim, ScalarKind,
   TypeDef, StructTypeDef, StructField, SumTypeDef, SumVariant, AliasTypeDef,
-  ProgramDeclNode,
+  ProgramDecl,
 } from './nodes.js'
 import { nameRef } from './nodes.js'
 
 // Re-export the node types so existing public-API consumers (tests etc.)
 // keep their imports stable.
 export type {
-  ProgramNode, ProgramPort, ProgramPortSpec, ProgramPorts,
+  Program, ProgramPort, ProgramPortSpec, ProgramPorts,
   PortTypeDecl, ShapeDim, ScalarKind,
   TypeDef, StructTypeDef, StructField, SumTypeDef, SumVariant, AliasTypeDef,
 } from './nodes.js'
@@ -61,7 +61,7 @@ export type {
 // ─────────────────────────────────────────────────────────────
 
 /** Parser context. The parser does NO scope analysis: every reference is
- *  emitted as a NameRefNode and the elaborator resolves them. */
+ *  emitted as a NameRef and the elaborator resolves them. */
 interface Ctx extends Cursor {}
 
 // ─────────────────────────────────────────────────────────────
@@ -72,7 +72,7 @@ interface Ctx extends Cursor {}
  *  annotations (`in [lo, hi]`) are desugared to explicit `clamp`/`select`
  *  ops by `lowerBoundsToClamps` here, so callers never observe a `bounds`
  *  field on the returned AST. */
-export function parseProgram(src: string): ProgramNode {
+export function parseProgram(src: string): Program {
   const toks = tokenize(src)
   const ctx: Ctx = { toks, i: 0 }
   const node = parseProgramFromCtx(ctx)
@@ -90,7 +90,7 @@ export function parseProgram(src: string): ProgramNode {
  *  recurses into nested programs. */
 export function parseProgramFromTokens(
   toks: Tok[], startIdx: number,
-): { node: ProgramNode; nextIdx: number } {
+): { node: Program; nextIdx: number } {
   const ctx: Ctx = { toks, i: startIdx }
   const node = parseProgramFromCtx(ctx)
   return { node, nextIdx: ctx.i }
@@ -100,15 +100,15 @@ export function parseProgramFromTokens(
  *  `programDecl` body item. */
 function parseNestedProgramDecl(
   toks: Tok[], startIdx: number,
-): { node: ProgramDeclNode; nextIdx: number } {
+): { node: ProgramDecl; nextIdx: number } {
   const { node: inner, nextIdx } = parseProgramFromTokens(toks, startIdx)
-  const node: ProgramDeclNode = { op: 'programDecl', name: inner.name, program: inner }
+  const node: ProgramDecl = { op: 'programDecl', name: inner.name, program: inner }
   return { node, nextIdx }
 }
 
 /** Body-parser hook: dispatch `struct`/`enum`/`type` to the right ADT
  *  parser. The body parser collects the result into a separate `typeDefs`
- *  array (returned alongside the BlockNode), which we then route into
+ *  array (returned alongside the Block), which we then route into
  *  the program's `ports.type_defs`. */
 function parseBodyTypeDef(
   toks: Tok[], startIdx: number,
@@ -132,7 +132,7 @@ const BODY_OPTS: BodyOptions = {
 // Program-declaration parser
 // ─────────────────────────────────────────────────────────────
 
-function parseProgramFromCtx(ctx: Ctx): ProgramNode {
+function parseProgramFromCtx(ctx: Ctx): Program {
   consume(ctx, 'program', 'program keyword')
   const nameTok = consume(ctx, 'ident', 'program name')
   const name = nameTok.value as string
@@ -171,7 +171,7 @@ function parseProgramFromCtx(ctx: Ctx): ProgramNode {
   ctx.i = nextIdx
   consume(ctx, '}', `\`}\` closing body of '${name}'`)
 
-  const node: ProgramNode = { op: 'program', name, body: block }
+  const node: Program = { op: 'program', name, body: block }
   if (typeParams && Object.keys(typeParams).length > 0) node.type_params = typeParams
   const ports: ProgramPorts = {}
   if (inputs.length > 0)  ports.inputs  = inputs
@@ -344,7 +344,7 @@ function parsePortSpec(ctx: Ctx, allowDefault: boolean): ProgramPort {
   const name = nameTok.value as string
 
   let type: PortTypeDecl | undefined
-  let defaultExpr: ExprNode | undefined
+  let defaultExpr: Expr | undefined
   let bounds: [number | null, number | null] | undefined
 
   if (peek(ctx).kind === ':') {
@@ -409,7 +409,7 @@ function parseBound(ctx: Ctx): number | null {
 
 /** Parse a port type:
  *    Identifier                — bare scalar (e.g. `signal`, `float`, `freq`)
- *    Identifier[Dim, ...]      — array with shape dims (numeric or NameRefNode)
+ *    Identifier[Dim, ...]      — array with shape dims (numeric or NameRef)
  *  Both the element and shape-dim identifiers become NameRefNodes; the
  *  elaborator resolves them against scalar kinds + program type-params
  *  + type aliases. */
@@ -428,7 +428,7 @@ function parsePortType(ctx: Ctx): PortTypeDecl {
 }
 
 /** Parse a single array-shape dim. Numeric literal or identifier — the
- *  identifier becomes a NameRefNode the elaborator resolves against the
+ *  identifier becomes a NameRef the elaborator resolves against the
  *  enclosing program's type-params. The parser does NO scope analysis;
  *  every name is a NameRef awaiting elaboration. */
 function parseShapeDim(ctx: Ctx): ShapeDim {
@@ -451,7 +451,7 @@ function parseShapeDim(ctx: Ctx): ShapeDim {
 // Expression delegation
 // ─────────────────────────────────────────────────────────────
 
-function parseExprAt(ctx: Ctx): ExprNode {
+function parseExprAt(ctx: Ctx): Expr {
   const { node, nextIdx } = parseExprFromTokens(ctx.toks, ctx.i)
   ctx.i = nextIdx
   return node

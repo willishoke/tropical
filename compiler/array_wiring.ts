@@ -5,14 +5,9 @@
  * compatible and inserts broadcast_to nodes when needed.
  */
 
-import {
-  type PortType,
-  type ScalarKind,
-  Float,
-  portTypeEqual,
-  portTypeToString,
-  broadcastShapes,
-} from './term.js'
+import { broadcastShapes } from './term.js'
+import type { PortType, ScalarKind } from './ir/nodes.js'
+import { Float, portTypeEqual, portTypeToString } from './ir/port_type.js'
 import type { ExprNode } from './expr.js'
 
 // Widening lattice: bool → int → float. A source kind widens to a dest kind
@@ -61,7 +56,7 @@ export function checkArrayConnection(
   }
 
   // Scalar → scalar: widening (bool→int→float) is implicit, narrowing is explicit.
-  if (srcType.tag === 'scalar' && dstType.tag === 'scalar') {
+  if (srcType.kind === 'scalar' && dstType.kind === 'scalar') {
     if (srcType.scalar === dstType.scalar) return { compatible: true }
     if (widens(srcType.scalar, dstType.scalar)) return { compatible: true }
     return {
@@ -70,17 +65,28 @@ export function checkArrayConnection(
     }
   }
 
+  // Post-strata shapes are concrete integers; type-params are gone after specialize.
+  const concreteShape = (s: PortType extends infer P ? P extends { kind: 'array'; shape: infer S } ? S : never : never): number[] => {
+    return (s as Array<number | { name: string }>).map(d => {
+      if (typeof d !== 'number') throw new Error(`array shape carries unresolved type-param '${d.name}'`)
+      return d
+    })
+  }
+  const elemScalar = (e: ScalarKind | { base: ScalarKind }): ScalarKind =>
+    typeof e === 'string' ? e : e.base
+
   // Scalar → array: broadcast scalar to array shape
-  if (srcType.tag === 'scalar' && dstType.tag === 'array') {
+  if (srcType.kind === 'scalar' && dstType.kind === 'array') {
+    const dstShape = concreteShape(dstType.shape)
     return {
       compatible: true,
-      broadcastExpr: { op: 'broadcastTo', args: [refExpr], shape: dstType.shape },
-      resultShape: dstType.shape,
+      broadcastExpr: { op: 'broadcastTo', args: [refExpr], shape: dstShape },
+      resultShape: dstShape,
     }
   }
 
   // Array → scalar: not auto-compatible (user must reduce explicitly)
-  if (srcType.tag === 'array' && dstType.tag === 'scalar') {
+  if (srcType.kind === 'array' && dstType.kind === 'scalar') {
     return {
       compatible: false,
       error: `Cannot connect ${portTypeToString(srcType)} to ${portTypeToString(dstType)} — reduce or index the array first`,
@@ -88,25 +94,19 @@ export function checkArrayConnection(
   }
 
   // Array → array: check element-kind and shape compatibility.
-  if (srcType.tag === 'array' && dstType.tag === 'array') {
-    // Element kind must widen (bool→int→float). We only track scalar element kinds.
-    if (srcType.element.tag === 'scalar' && dstType.element.tag === 'scalar') {
-      const sk = srcType.element.scalar
-      const dk = dstType.element.scalar
-      if (sk !== dk && !widens(sk, dk)) {
-        return {
-          compatible: false,
-          error: `Lossy conversion: cannot narrow ${portTypeToString(srcType)} to ${portTypeToString(dstType)} — wrap source in ${narrowingHint(dk)} to narrow explicitly`,
-        }
-      }
-    } else if (!portTypeEqual(srcType.element, dstType.element)) {
+  if (srcType.kind === 'array' && dstType.kind === 'array') {
+    const sk = elemScalar(srcType.element)
+    const dk = elemScalar(dstType.element)
+    if (sk !== dk && !widens(sk, dk)) {
       return {
         compatible: false,
-        error: `Element type mismatch: source is ${portTypeToString(srcType)} but destination expects ${portTypeToString(dstType)}`,
+        error: `Lossy conversion: cannot narrow ${portTypeToString(srcType)} to ${portTypeToString(dstType)} — wrap source in ${narrowingHint(dk)} to narrow explicitly`,
       }
     }
 
-    const resultShape = broadcastShapes(srcType.shape, dstType.shape)
+    const srcShape = concreteShape(srcType.shape)
+    const dstShape = concreteShape(dstType.shape)
+    const resultShape = broadcastShapes(srcShape, dstShape)
     if (resultShape === null) {
       return {
         compatible: false,
@@ -115,19 +115,19 @@ export function checkArrayConnection(
     }
 
     // If source shape already matches destination, no broadcast needed
-    if (arraysEqual(srcType.shape, dstType.shape)) {
+    if (arraysEqual(srcShape, dstShape)) {
       return { compatible: true, resultShape }
     }
 
     // Source needs broadcasting to match destination
     return {
       compatible: true,
-      broadcastExpr: { op: 'broadcastTo', args: [refExpr], shape: dstType.shape },
+      broadcastExpr: { op: 'broadcastTo', args: [refExpr], shape: dstShape },
       resultShape,
     }
   }
 
-  // Non-array, non-scalar types: fall back to structural equality
+  // Alias / mixed cases: fall back to structural equality
   if (!portTypeEqual(srcType, dstType)) {
     return {
       compatible: false,

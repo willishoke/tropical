@@ -1,8 +1,8 @@
 import { describe, test, expect } from 'bun:test'
-import { makeSession, loadJSON, resolveProgramType } from './session'
+import { makeSession, loadJSON, resolveProgramType, registerPortType } from './session'
 import { loadStdlib } from './program'
 import { compileSession } from './ir/compile_session'
-import { Float, ArrayType } from './term'
+import { Float, ArrayType } from './ir/port_type'
 
 describe('stdlib Delay<N>', () => {
   test('Delay with N=8 resolves to a distinct type from Delay with N=44100', () => {
@@ -11,8 +11,8 @@ describe('stdlib Delay<N>', () => {
     const a = resolveProgramType(session, 'Delay', { N: 8 }, undefined)
     const b = resolveProgramType(session, 'Delay', { N: 44100 }, undefined)
     expect(a.type).not.toBe(b.type)
-    expect(a.type.registerPortType(0)).toEqual(ArrayType(Float, [8]))
-    expect(b.type.registerPortType(0)).toEqual(ArrayType(Float, [44100]))
+    expect(registerPortType(a.type, 0)).toEqual(ArrayType(Float, [8]))
+    expect(registerPortType(b.type, 0)).toEqual(ArrayType(Float, [44100]))
   })
 
   test('Delay with default N=44100 matches explicit N=44100', () => {
@@ -38,7 +38,7 @@ describe('stdlib Delay<N>', () => {
     const plan = compileSession(session)
     expect(plan).toBeDefined()
     const inst = session.instanceRegistry.get('d')!
-    expect(inst.typeName).toBe('Delay')
+    expect(inst.baseTypeName).toBe('Delay')
     expect(inst.typeArgs).toEqual({ N: 8 })
   })
 })

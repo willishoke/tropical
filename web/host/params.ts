@@ -10,7 +10,7 @@
  * runtime reads that string back as the SAB index when snapshotting.
  */
 
-import { SignalExpr } from '../../compiler/expr.js'
+import { type SignalExpr, signalExpr } from '../../compiler/expr.js'
 
 export class ParamBank {
   /** SAB view, f64. Each param owns `[value, frame_value]`. */
@@ -53,7 +53,7 @@ export class WebParam {
   set value(v: number) { this.bank.view[this._h * 2] = v }
 
   asExpr(): SignalExpr {
-    return SignalExpr.fromNode({ op: 'smoothed_param', name: '(unnamed)', _ptr: true, _handle: this._h })
+    return signalExpr({ op: 'smoothed_param', name: '(unnamed)', _ptr: true, _handle: this._h })
   }
 }
 
@@ -71,6 +71,6 @@ export class WebTrigger {
   get value(): number { return this.bank.view[this._h * 2 + 1]! }
 
   asExpr(): SignalExpr {
-    return SignalExpr.fromNode({ op: 'trigger_param', name: '(unnamed)', _ptr: true, _handle: this._h })
+    return signalExpr({ op: 'trigger_param', name: '(unnamed)', _ptr: true, _handle: this._h })
   }
 }

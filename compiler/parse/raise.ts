@@ -1,6 +1,6 @@
 /**
  * raise.ts — bridge from the legacy `tropical_program_2` JSON shape
- * (`compiler/program.ts:ProgramNode`) to the strict-typed parser AST
+ * (`compiler/program.ts:Program`) to the strict-typed parser AST
  * `ParsedProgram` (`compiler/parse/nodes.ts`).
  *
  * **Production runtime path** (Phase D D6 doc correction): this module
@@ -13,11 +13,11 @@
  *
  * **Invariant — zero scope analysis** (per category-theorist review):
  * `raise.ts` does no name resolution. Every reference position emits a
- * `NameRefNode`; the elaborator (`compiler/ir/elaborator.ts`) is the
+ * `NameRef`; the elaborator (`compiler/ir/elaborator.ts`) is the
  * unique site at which names resolve to decl identity. If you find
  * yourself reaching for "just resolve the obvious case here," stop —
  * that work belongs in elaborate, not raise. The type system enforces
- * this today (raise output is `ParsedProgramNode`, which has no
+ * this today (raise output is `ParsedProgram`, which has no
  * resolved-IR ref ops); `raise.test.ts` adds a runtime assertion as
  * future-proofing.
  *
@@ -36,13 +36,13 @@
  *   {op:'trigger',name}        → nameRef(name)
  *   {op:'paramExpr',name}      → nameRef(name)
  *   {op:'triggerParamExpr',n}  → nameRef(name)
- *   {op:'binding',name}        → BindingNode {op:'binding',name}    [pass-through]
+ *   {op:'binding',name}        → Binding {op:'binding',name}    [pass-through]
  *   {op:'sampleRate'}          → call(nameRef('sampleRate'), [])
  *   {op:'sampleIndex'}         → call(nameRef('sampleIndex'), [])
  *   {op:'select'|'clamp'|...}  → call(nameRef(opname), [...args raised])
- *   {op:'tag',type,variant,..} → TagNode (drop `type`, lift variant + payload entries)
- *   {op:'match',type,arms,..}  → MatchNode (drop `type`, lift arms array)
- *   {op:'nestedOut',ref,output}→ NestedOutNode {ref:nameRef, output:nameRef}
+ *   {op:'tag',type,variant,..} → Tag (drop `type`, lift variant + payload entries)
+ *   {op:'match',type,arms,..}  → Match (drop `type`, lift arms array)
+ *   {op:'nestedOut',ref,output}→ NestedOut {ref:nameRef, output:nameRef}
  *   regDecl.type:string        → regDecl.type:NameRef
  *   regDecl.init:{zeros:<N>}   → call(nameRef('zeros'), [N raised])
  *   instanceDecl.inputs:Record → InstanceInputEntry[] (Object.entries order)
@@ -57,18 +57,18 @@
  */
 
 import type {
-  ProgramNode as ParsedProgramNode,
-  BlockNode as ParsedBlockNode,
+  Program as ParsedProgram,
+  Block as ParsedBlock,
   BodyDecl as ParsedBodyDecl,
   BodyAssign as ParsedBodyAssign,
-  RegDeclNode as ParsedRegDeclNode,
-  DelayDeclNode as ParsedDelayDeclNode,
-  ParamDeclNode as ParsedParamDeclNode,
-  InstanceDeclNode as ParsedInstanceDeclNode,
-  ProgramDeclNode as ParsedProgramDeclNode,
-  OutputAssignNode as ParsedOutputAssignNode,
-  NextUpdateNode as ParsedNextUpdateNode,
-  ParsedExprNode,
+  RegDecl as ParsedRegDecl,
+  DelayDecl as ParsedDelayDecl,
+  ParamDecl as ParsedParamDecl,
+  InstanceDecl as ParsedInstanceDecl,
+  ProgramDecl as ParsedProgramDecl,
+  OutputAssign as ParsedOutputAssign,
+  NextUpdate as ParsedNextUpdate,
+  ParsedExpr,
   TagPayloadEntry,
   MatchArmEntry,
   ProgramPort as ParsedProgramPort,
@@ -138,10 +138,10 @@ const UNARY_OPS: ReadonlySet<string> = new Set([
 // Entry point
 // ─────────────────────────────────────────────────────────────
 
-/** Raise a legacy ProgramNode (on-disk `tropical_program_2` shape) to a
- *  strict-typed parser ProgramNode. Pure; throws on shapes the function
+/** Raise a legacy Program (on-disk `tropical_program_2` shape) to a
+ *  strict-typed parser Program. Pure; throws on shapes the function
  *  doesn't recognize. */
-export function raiseProgram(legacy: LegacyProgramNode): ParsedProgramNode {
+export function raiseProgram(legacy: LegacyProgramNode): ParsedProgram {
   const decls: ParsedBodyDecl[] = []
   for (const d of legacy.body?.decls ?? []) {
     decls.push(raiseBodyDecl(d))
@@ -150,9 +150,9 @@ export function raiseProgram(legacy: LegacyProgramNode): ParsedProgramNode {
   for (const a of legacy.body?.assigns ?? []) {
     assigns.push(raiseBodyAssign(a))
   }
-  const body: ParsedBlockNode = { op: 'block', decls, assigns }
+  const body: ParsedBlock = { op: 'block', decls, assigns }
 
-  const out: ParsedProgramNode = {
+  const out: ParsedProgram = {
     op: 'program',
     name: legacy.name,
     body,
@@ -253,12 +253,12 @@ function raiseBodyDecl(decl: LegacyExprNode): ParsedBodyDecl {
   }
 }
 
-function raiseRegDecl(d: Record<string, unknown>): ParsedRegDeclNode {
+function raiseRegDecl(d: Record<string, unknown>): ParsedRegDecl {
   const init = d.init as LegacyExprNode | undefined
   if (init === undefined) {
     throw new Error(`raise: regDecl '${String(d.name)}' missing init`)
   }
-  const out: ParsedRegDeclNode = {
+  const out: ParsedRegDecl = {
     op: 'regDecl',
     name: d.name as string,
     init: raiseRegInit(init),
@@ -267,11 +267,11 @@ function raiseRegDecl(d: Record<string, unknown>): ParsedRegDeclNode {
   return out
 }
 
-/** Reg init is normally an ExprNode, but `Delay.json` uses the legacy
+/** Reg init is normally an Expr, but `Delay.json` uses the legacy
  *  sugar `{zeros: <N>}` (no `op` field) — sometimes paired with the
  *  inner sugar `{typeParam: <name>}` for the dimension. Recognize both
  *  here and raise to a `zeros(N)` builtin call. */
-function raiseRegInit(init: LegacyExprNode): ParsedExprNode {
+function raiseRegInit(init: LegacyExprNode): ParsedExpr {
   if (typeof init === 'object' && init !== null && !Array.isArray(init)) {
     const obj = init as unknown as Record<string, unknown>
     if (!('op' in obj) && 'zeros' in obj) {
@@ -289,7 +289,7 @@ function raiseRegInit(init: LegacyExprNode): ParsedExprNode {
 /** Raise the dimension argument of the `{zeros: <N>}` sugar. The on-disk
  *  form is either a number literal or `{typeParam: <name>}` (no `op`
  *  field — yet another legacy sugar shape used only here). */
-function raiseZerosArg(arg: LegacyExprNode): ParsedExprNode {
+function raiseZerosArg(arg: LegacyExprNode): ParsedExpr {
   if (typeof arg === 'object' && arg !== null && !Array.isArray(arg)) {
     const obj = arg as unknown as Record<string, unknown>
     if (!('op' in obj) && 'typeParam' in obj && typeof obj.typeParam === 'string') {
@@ -299,8 +299,8 @@ function raiseZerosArg(arg: LegacyExprNode): ParsedExprNode {
   return raiseExpr(arg)
 }
 
-function raiseDelayDecl(d: Record<string, unknown>): ParsedDelayDeclNode {
-  const out: ParsedDelayDeclNode = {
+function raiseDelayDecl(d: Record<string, unknown>): ParsedDelayDecl {
+  const out: ParsedDelayDecl = {
     op: 'delayDecl',
     name: d.name as string,
     update: raiseExpr(d.update as LegacyExprNode),
@@ -310,8 +310,8 @@ function raiseDelayDecl(d: Record<string, unknown>): ParsedDelayDeclNode {
   return out
 }
 
-function raiseParamDecl(d: Record<string, unknown>): ParsedParamDeclNode {
-  const out: ParsedParamDeclNode = {
+function raiseParamDecl(d: Record<string, unknown>): ParsedParamDecl {
+  const out: ParsedParamDecl = {
     op: 'paramDecl',
     name: d.name as string,
     type: d.type === 'trigger' ? 'trigger' : 'param',
@@ -320,8 +320,8 @@ function raiseParamDecl(d: Record<string, unknown>): ParsedParamDeclNode {
   return out
 }
 
-function raiseInstanceDecl(d: Record<string, unknown>): ParsedInstanceDeclNode {
-  const out: ParsedInstanceDeclNode = {
+function raiseInstanceDecl(d: Record<string, unknown>): ParsedInstanceDecl {
+  const out: ParsedInstanceDecl = {
     op: 'instanceDecl',
     name: d.name as string,
     program: nameRef(d.program as string),
@@ -345,7 +345,7 @@ function raiseInstanceDecl(d: Record<string, unknown>): ParsedInstanceDeclNode {
   return out
 }
 
-function raiseProgramDecl(d: Record<string, unknown>): ParsedProgramDeclNode {
+function raiseProgramDecl(d: Record<string, unknown>): ParsedProgramDecl {
   return {
     op: 'programDecl',
     name: d.name as string,
@@ -367,7 +367,7 @@ function raiseBodyAssign(a: LegacyExprNode): ParsedBodyAssign {
   }
 }
 
-function raiseOutputAssign(a: Record<string, unknown>): ParsedOutputAssignNode {
+function raiseOutputAssign(a: Record<string, unknown>): ParsedOutputAssign {
   return {
     op: 'outputAssign',
     name: a.name as string,
@@ -375,7 +375,7 @@ function raiseOutputAssign(a: Record<string, unknown>): ParsedOutputAssignNode {
   }
 }
 
-function raiseNextUpdate(a: Record<string, unknown>): ParsedNextUpdateNode {
+function raiseNextUpdate(a: Record<string, unknown>): ParsedNextUpdate {
   const target = a.target as { kind: 'reg' | 'delay'; name: string }
   return {
     op: 'nextUpdate',
@@ -388,7 +388,7 @@ function raiseNextUpdate(a: Record<string, unknown>): ParsedNextUpdateNode {
 // Expressions
 // ─────────────────────────────────────────────────────────────
 
-function raiseExpr(e: LegacyExprNode): ParsedExprNode {
+function raiseExpr(e: LegacyExprNode): ParsedExpr {
   if (typeof e === 'number')  return e
   if (typeof e === 'boolean') return e
   if (Array.isArray(e))       return e.map(raiseExpr)
@@ -398,7 +398,7 @@ function raiseExpr(e: LegacyExprNode): ParsedExprNode {
   return raiseOpNode(e as Record<string, unknown>)
 }
 
-function raiseOpNode(node: Record<string, unknown>): ParsedExprNode {
+function raiseOpNode(node: Record<string, unknown>): ParsedExpr {
   const op = node.op
   if (typeof op !== 'string') {
     throw new Error(`raise: expression object missing 'op' field: ${JSON.stringify(node)}`)
@@ -453,7 +453,7 @@ function raiseOpNode(node: Record<string, unknown>): ParsedExprNode {
   }
 }
 
-function raiseNestedOut(node: Record<string, unknown>): ParsedExprNode {
+function raiseNestedOut(node: Record<string, unknown>): ParsedExpr {
   return {
     op: 'nestedOut',
     ref: nameRef(node.ref as string),
@@ -461,12 +461,12 @@ function raiseNestedOut(node: Record<string, unknown>): ParsedExprNode {
   }
 }
 
-function raiseIndex(node: Record<string, unknown>): ParsedExprNode {
+function raiseIndex(node: Record<string, unknown>): ParsedExpr {
   const args = node.args as [LegacyExprNode, LegacyExprNode]
   return { op: 'index', args: [raiseExpr(args[0]), raiseExpr(args[1])] }
 }
 
-function raiseTag(node: Record<string, unknown>): ParsedExprNode {
+function raiseTag(node: Record<string, unknown>): ParsedExpr {
   const out: { op: 'tag'; variant: ReturnType<typeof nameRef>; payload?: TagPayloadEntry[] } = {
     op: 'tag',
     variant: nameRef(node.variant as string),
@@ -482,7 +482,7 @@ function raiseTag(node: Record<string, unknown>): ParsedExprNode {
   return out
 }
 
-function raiseMatch(node: Record<string, unknown>): ParsedExprNode {
+function raiseMatch(node: Record<string, unknown>): ParsedExpr {
   const arms = node.arms as Record<string, { bind?: string | string[]; body: LegacyExprNode }>
   const armEntries: MatchArmEntry[] = []
   for (const [variant, arm] of Object.entries(arms)) {
@@ -510,8 +510,8 @@ function raiseMatch(node: Record<string, unknown>): ParsedExprNode {
   }
 }
 
-function raiseLet(node: Record<string, unknown>): ParsedExprNode {
-  const bind: Record<string, ParsedExprNode> = {}
+function raiseLet(node: Record<string, unknown>): ParsedExpr {
+  const bind: Record<string, ParsedExpr> = {}
   for (const [k, v] of Object.entries(node.bind as Record<string, LegacyExprNode>)) {
     bind[k] = raiseExpr(v)
   }
@@ -522,7 +522,7 @@ function raiseLet(node: Record<string, unknown>): ParsedExprNode {
   }
 }
 
-function raiseFold(node: Record<string, unknown>): ParsedExprNode {
+function raiseFold(node: Record<string, unknown>): ParsedExpr {
   return {
     op: 'fold',
     over: raiseExpr(node.over as LegacyExprNode),
@@ -533,7 +533,7 @@ function raiseFold(node: Record<string, unknown>): ParsedExprNode {
   }
 }
 
-function raiseScan(node: Record<string, unknown>): ParsedExprNode {
+function raiseScan(node: Record<string, unknown>): ParsedExpr {
   return {
     op: 'scan',
     over: raiseExpr(node.over as LegacyExprNode),
@@ -544,7 +544,7 @@ function raiseScan(node: Record<string, unknown>): ParsedExprNode {
   }
 }
 
-function raiseGenerate(node: Record<string, unknown>): ParsedExprNode {
+function raiseGenerate(node: Record<string, unknown>): ParsedExpr {
   return {
     op: 'generate',
     count: raiseExpr(node.count as LegacyExprNode),
@@ -553,7 +553,7 @@ function raiseGenerate(node: Record<string, unknown>): ParsedExprNode {
   }
 }
 
-function raiseIterate(node: Record<string, unknown>): ParsedExprNode {
+function raiseIterate(node: Record<string, unknown>): ParsedExpr {
   return {
     op: 'iterate',
     count: raiseExpr(node.count as LegacyExprNode),
@@ -563,7 +563,7 @@ function raiseIterate(node: Record<string, unknown>): ParsedExprNode {
   }
 }
 
-function raiseChain(node: Record<string, unknown>): ParsedExprNode {
+function raiseChain(node: Record<string, unknown>): ParsedExpr {
   return {
     op: 'chain',
     count: raiseExpr(node.count as LegacyExprNode),
@@ -573,7 +573,7 @@ function raiseChain(node: Record<string, unknown>): ParsedExprNode {
   }
 }
 
-function raiseMap2(node: Record<string, unknown>): ParsedExprNode {
+function raiseMap2(node: Record<string, unknown>): ParsedExpr {
   return {
     op: 'map2',
     over: raiseExpr(node.over as LegacyExprNode),
@@ -582,7 +582,7 @@ function raiseMap2(node: Record<string, unknown>): ParsedExprNode {
   }
 }
 
-function raiseZipWith(node: Record<string, unknown>): ParsedExprNode {
+function raiseZipWith(node: Record<string, unknown>): ParsedExpr {
   return {
     op: 'zipWith',
     a: raiseExpr(node.a as LegacyExprNode),

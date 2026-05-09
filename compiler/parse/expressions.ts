@@ -1,7 +1,7 @@
 /**
  * expressions.ts — surface-syntax expression parser (Phase B2, Stage 1).
  *
- * Consumes tokens produced by `lexer.ts`, produces `ExprNode` JSON identical
+ * Consumes tokens produced by `lexer.ts`, produces `Expr` JSON identical
  * to what hand-written stdlib files contain. Bare identifiers that aren't
  * lexically bound by an enclosing combinator/let become a placeholder
  * `{op:'nameRef', name}` op for the elaborator (B6) to resolve to inputs,
@@ -31,16 +31,16 @@
 import { tokenize, type Tok, type TokKind } from './lexer.js'
 import { commaList, consume, eat, formatTok, peek, withScope, ParseError, type Cursor } from './shared.js'
 import type {
-  ExprNode,
-  BinaryOpTag, BinaryOpNode, UnaryOpTag, UnaryOpNode,
-  CallNode, NameRefNode, BindingNode, NestedOutNode, IndexNode,
-  LetNode, FoldNode, ScanNode, GenerateNode, IterateNode, ChainNode,
-  Map2Node, ZipWithNode, TagNode, TagPayloadEntry, MatchNode, MatchArmEntry,
+  Expr,
+  BinaryOpTag, BinaryOp, UnaryOpTag, UnaryOp,
+  Call, NameRef, Binding, NestedOut, Index,
+  Let, Fold, Scan, Generate, Iterate, Chain,
+  Map2, ZipWith, Tag, TagPayloadEntry, Match, MatchArmEntry,
 } from './nodes.js'
 import { nameRef } from './nodes.js'
 
 export { ParseError }
-export type { ExprNode } from './nodes.js'
+export type { Expr } from './nodes.js'
 
 // ─────────────────────────────────────────────────────────────
 // Parser context
@@ -59,7 +59,7 @@ interface Ctx extends Cursor {
 
 /** Parse a complete expression from source text. Throws ParseError if the
  *  input is malformed or has trailing tokens past the expression. */
-export function parseExpr(src: string): ExprNode {
+export function parseExpr(src: string): Expr {
   const toks = tokenize(src)
   const ctx: Ctx = { toks, i: 0, binders: new Set() }
   const node = parseTopExpr(ctx)
@@ -72,7 +72,7 @@ export function parseExpr(src: string): ExprNode {
 
 /** Parse one expression from a token stream starting at `ctx.i`. Used by
  *  upper-layer parsers (statements, declarations) that share a token stream. */
-export function parseExprFromTokens(toks: Tok[], startIdx: number, binders?: Set<string>): { node: ExprNode; nextIdx: number } {
+export function parseExprFromTokens(toks: Tok[], startIdx: number, binders?: Set<string>): { node: Expr; nextIdx: number } {
   const ctx: Ctx = { toks, i: startIdx, binders: binders ? new Set(binders) : new Set() }
   const node = parseTopExpr(ctx)
   return { node, nextIdx: ctx.i }
@@ -106,16 +106,16 @@ const INFIX_LEVELS: ReadonlyArray<InfixTable> = [
 
 const UNARY_OPS: UnaryTable = { '-': 'neg', '!': 'not', '~': 'bitNot' }
 
-const binary = (op: BinaryOpTag, lhs: ExprNode, rhs: ExprNode): BinaryOpNode =>
+const binary = (op: BinaryOpTag, lhs: Expr, rhs: Expr): BinaryOp =>
   ({ op, args: [lhs, rhs] })
-const unary = (op: UnaryOpTag, operand: ExprNode): UnaryOpNode =>
+const unary = (op: UnaryOpTag, operand: Expr): UnaryOp =>
   ({ op, args: [operand] })
 
-function parseTopExpr(ctx: Ctx): ExprNode {
+function parseTopExpr(ctx: Ctx): Expr {
   return parseInfix(ctx, 0)
 }
 
-function parseInfix(ctx: Ctx, level: number): ExprNode {
+function parseInfix(ctx: Ctx, level: number): Expr {
   if (level >= INFIX_LEVELS.length) return parseUnary(ctx)
   const ops = INFIX_LEVELS[level]
   let lhs = parseInfix(ctx, level + 1)
@@ -128,7 +128,7 @@ function parseInfix(ctx: Ctx, level: number): ExprNode {
   }
 }
 
-function parseUnary(ctx: Ctx): ExprNode {
+function parseUnary(ctx: Ctx): Expr {
   const op = UNARY_OPS[peek(ctx).kind]
   if (!op) return parsePostfix(ctx)
   ctx.i++
@@ -144,8 +144,8 @@ function parseUnary(ctx: Ctx): ExprNode {
 // Postfix: dot-access, index, call
 // ─────────────────────────────────────────────────────────────
 
-function parsePostfix(ctx: Ctx): ExprNode {
-  let node: ExprNode = parsePrimary(ctx)
+function parsePostfix(ctx: Ctx): Expr {
+  let node: Expr = parsePrimary(ctx)
   for (;;) {
     const t = peek(ctx)
     if (t.kind === '.') {
@@ -161,7 +161,7 @@ function parsePostfix(ctx: Ctx): ExprNode {
           t,
         )
       }
-      const next: NestedOutNode = {
+      const next: NestedOut = {
         op: 'nestedOut',
         ref: nameRef(node.name),
         output: nameRef(field.value as string),
@@ -171,7 +171,7 @@ function parsePostfix(ctx: Ctx): ExprNode {
       ctx.i++
       const idx = parseTopExpr(ctx)
       consume(ctx, ']', 'closing `]`')
-      const next: IndexNode = { op: 'index', args: [node, idx] }
+      const next: Index = { op: 'index', args: [node, idx] }
       node = next
     } else if (t.kind === '(') {
       ctx.i++
@@ -185,13 +185,13 @@ function parsePostfix(ctx: Ctx): ExprNode {
         } else {
           const args = parseCallArgs(ctx)
           consume(ctx, ')', 'closing `)`')
-          const next: CallNode = { op: 'call', callee: node, args }
+          const next: Call = { op: 'call', callee: node, args }
           node = next
         }
       } else {
         const args = parseCallArgs(ctx)
         consume(ctx, ')', 'closing `)`')
-        const next: CallNode = { op: 'call', callee: node, args }
+        const next: Call = { op: 'call', callee: node, args }
         node = next
       }
     } else {
@@ -200,11 +200,11 @@ function parsePostfix(ctx: Ctx): ExprNode {
   }
 }
 
-function parseCallArgs(ctx: Ctx): ExprNode[] {
+function parseCallArgs(ctx: Ctx): Expr[] {
   return commaList(ctx, ')', () => parseTopExpr(ctx))
 }
 
-function isNameRef(node: ExprNode): node is { op: 'nameRef'; name: string } {
+function isNameRef(node: Expr): node is { op: 'nameRef'; name: string } {
   return typeof node === 'object' && node !== null && !Array.isArray(node)
     && (node as { op?: string }).op === 'nameRef'
 }
@@ -219,7 +219,7 @@ function isNameRef(node: ExprNode): node is { op: 'nameRef'; name: string } {
  *  rewinds zero tokens and returns null — the caller falls back to generic
  *  call parsing. */
 type CombinatorNode =
-  | FoldNode | ScanNode | GenerateNode | IterateNode | ChainNode | Map2Node | ZipWithNode
+  | Fold | Scan | Generate | Iterate | Chain | Map2 | ZipWith
 
 function parseCombinatorCall(ctx: Ctx, name: string): CombinatorNode | null {
   switch (name) {
@@ -237,7 +237,7 @@ function parseCombinatorCall(ctx: Ctx, name: string): CombinatorNode | null {
 /** fold(over, init, (acc, elem) => body) */
 function parseFoldOrScan<Op extends 'fold' | 'scan'>(
   ctx: Ctx, op: Op,
-): Op extends 'fold' ? FoldNode : ScanNode {
+): Op extends 'fold' ? Fold : Scan {
   const over = parseTopExpr(ctx)
   consume(ctx, ',', `${op}: comma after over`)
   const init = parseTopExpr(ctx)
@@ -247,11 +247,11 @@ function parseFoldOrScan<Op extends 'fold' | 'scan'>(
   const body = parseLambdaBody(ctx, lambda.binders)
   consume(ctx, ')', `${op}: closing \`)\``)
   return { op, over, init, acc_var: accVar, elem_var: elemVar, body } as
-    Op extends 'fold' ? FoldNode : ScanNode
+    Op extends 'fold' ? Fold : Scan
 }
 
 /** generate(count, (i) => body) */
-function parseGenerate(ctx: Ctx): GenerateNode {
+function parseGenerate(ctx: Ctx): Generate {
   const count = parseTopExpr(ctx)
   consume(ctx, ',', 'generate: comma after count')
   const lambda = parseLambdaArgs(ctx, 1, 'generate')
@@ -264,7 +264,7 @@ function parseGenerate(ctx: Ctx): GenerateNode {
 /** iterate(count, init, (x) => body) — and chain with the same shape. */
 function parseIterateOrChain<Op extends 'iterate' | 'chain'>(
   ctx: Ctx, op: Op,
-): Op extends 'iterate' ? IterateNode : ChainNode {
+): Op extends 'iterate' ? Iterate : Chain {
   const count = parseTopExpr(ctx)
   consume(ctx, ',', `${op}: comma after count`)
   const init = parseTopExpr(ctx)
@@ -274,11 +274,11 @@ function parseIterateOrChain<Op extends 'iterate' | 'chain'>(
   const body = parseLambdaBody(ctx, lambda.binders)
   consume(ctx, ')', `${op}: closing \`)\``)
   return { op, count, var: varName, init, body } as
-    Op extends 'iterate' ? IterateNode : ChainNode
+    Op extends 'iterate' ? Iterate : Chain
 }
 
 /** map2(over, (e) => body) */
-function parseMap2(ctx: Ctx): Map2Node {
+function parseMap2(ctx: Ctx): Map2 {
   const over = parseTopExpr(ctx)
   consume(ctx, ',', 'map2: comma after over')
   const lambda = parseLambdaArgs(ctx, 1, 'map2')
@@ -289,7 +289,7 @@ function parseMap2(ctx: Ctx): Map2Node {
 }
 
 /** zipWith(a, b, (x, y) => body) */
-function parseZipWith(ctx: Ctx): ZipWithNode {
+function parseZipWith(ctx: Ctx): ZipWith {
   const a = parseTopExpr(ctx)
   consume(ctx, ',', 'zipWith: comma after a')
   const b = parseTopExpr(ctx)
@@ -321,7 +321,7 @@ function parseLambdaArgs(ctx: Ctx, expectedArity: number, ownerOp: string): { bi
 
 /** Parse a lambda body with the given binders pushed onto the parser's
  *  scope. Restores scope on return. */
-function parseLambdaBody(ctx: Ctx, binders: string[]): ExprNode {
+function parseLambdaBody(ctx: Ctx, binders: string[]): Expr {
   return withScope(ctx.binders, binders, () => parseTopExpr(ctx))
 }
 
@@ -329,7 +329,7 @@ function parseLambdaBody(ctx: Ctx, binders: string[]): ExprNode {
 // Primary expressions
 // ─────────────────────────────────────────────────────────────
 
-function parsePrimary(ctx: Ctx): ExprNode {
+function parsePrimary(ctx: Ctx): Expr {
   const t = peek(ctx)
 
   if (t.kind === 'num') {
@@ -373,12 +373,12 @@ function parsePrimary(ctx: Ctx): ExprNode {
       ctx.i++  // consume `{`
       const payload = parseTagPayload(ctx, name)
       consume(ctx, '}', `closing \`}\` of tag '${name}' payload`)
-      const node: TagNode = { op: 'tag', variant: nameRef(name) }
+      const node: Tag = { op: 'tag', variant: nameRef(name) }
       if (payload.length > 0) node.payload = payload
       return node
     }
     if (ctx.binders.has(name)) {
-      const binding: BindingNode = { op: 'binding', name }
+      const binding: Binding = { op: 'binding', name }
       return binding
     }
     return nameRef(name)
@@ -395,7 +395,7 @@ const isCapitalizedName = (s: string): boolean => /^[A-Z]/.test(s)
 
 /** Parse the keyword-arg payload of a tag construction:
  *    `field: expr, field: expr` (within already-consumed braces).
- *  Each payload field name becomes a NameRefNode. Duplicate detection
+ *  Each payload field name becomes a NameRef. Duplicate detection
  *  is by string name; the elaborator further validates against the
  *  variant's declared payload fields. */
 function parseTagPayload(ctx: Ctx, variant: string): TagPayloadEntry[] {
@@ -422,7 +422,7 @@ function parseTagPayload(ctx: Ctx, variant: string): TagPayloadEntry[] {
  *  preserved (it's meaningful — first match wins after the elaborator's
  *  exhaustiveness check). The `type` field is filled in by the elaborator
  *  (B6) from variant membership in the sum-type registry. */
-function parseMatch(ctx: Ctx): MatchNode {
+function parseMatch(ctx: Ctx): Match {
   const scrutinee = parseTopExpr(ctx)
   consume(ctx, '{', '`{` after match scrutinee')
   const arms: MatchArmEntry[] = []
@@ -434,7 +434,7 @@ function parseMatch(ctx: Ctx): MatchNode {
       throw new ParseError(`match: duplicate arm for variant '${variant}'`, variantTok)
     }
     seen.add(variant)
-    const binds: Array<{ field: NameRefNode; bind: string }> = []
+    const binds: Array<{ field: NameRef; bind: string }> = []
     if (eat(ctx, '{')) {
       // Pattern: `Variant { field: name, field: name }` — bind payload
       // fields to local names. Field name and bind name are both required.
@@ -463,7 +463,7 @@ function parseMatch(ctx: Ctx): MatchNode {
   return { op: 'match', scrutinee, arms }
 }
 
-function parseArrayLiteral(ctx: Ctx): ExprNode {
+function parseArrayLiteral(ctx: Ctx): Expr {
   // The opening `[` has already been consumed.
   const items = commaList(ctx, ']', () => parseTopExpr(ctx))
   consume(ctx, ']', 'closing `]` of array literal')
@@ -474,9 +474,9 @@ function parseArrayLiteral(ctx: Ctx): ExprNode {
  *  using `:` to bind and `;` or `,` as separator) and emit
  *  `{op:'let', bind: {x: e1, y: e2}, in: body}`. The let-bindings are
  *  visible inside `body` as `{op:'binding', name}` placeholders. */
-function parseLet(ctx: Ctx): LetNode {
+function parseLet(ctx: Ctx): Let {
   consume(ctx, '{', 'let: opening `{`')
-  const bind: Record<string, ExprNode> = {}
+  const bind: Record<string, Expr> = {}
   const order: string[] = []
   while (peek(ctx).kind !== '}') {
     const nameTok = consume(ctx, 'ident', 'let binding name')
