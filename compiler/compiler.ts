@@ -9,7 +9,6 @@
 import type { ExprNode } from './session'
 import type { ExprOpNodeStrict } from './expr.js'
 import { mapChildren } from './walk.js'
-import { type PortType, Float } from './term'
 
 // ─────────────────────────────────────────────────────────────
 // Errors
@@ -19,48 +18,6 @@ export class CompilerError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'CompilerError'
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// Instance info
-// ─────────────────────────────────────────────────────────────
-
-/** Structural type information for a program instance — pure data, no C handles. */
-export interface InstanceInfo {
-  name: string
-  typeName: string
-  inputNames: string[]
-  outputNames: string[]
-  registerNames: string[]
-  inputTypes: PortType[]
-  outputTypes: PortType[]
-  registerTypes: PortType[]
-}
-
-/** The subset of ProgramDef the compiler reads. */
-interface ProgramDefLike {
-  typeName: string
-  inputNames: string[]
-  outputNames: string[]
-  registerNames: string[]
-  inputPortTypes: (PortType | undefined)[]
-  outputPortTypes: (PortType | undefined)[]
-  registerPortTypes: (PortType | undefined)[]
-}
-
-/** Extract InstanceInfo from a program definition. Undeclared ports default to Float. */
-export function extractInstanceInfo(name: string, def: ProgramDefLike): InstanceInfo {
-  const fillFloat = (t: PortType | undefined): PortType => t ?? Float
-  return {
-    name,
-    typeName: def.typeName,
-    inputNames: [...def.inputNames],
-    outputNames: [...def.outputNames],
-    registerNames: [...def.registerNames],
-    inputTypes: def.inputPortTypes.map(fillFloat),
-    outputTypes: def.outputPortTypes.map(fillFloat),
-    registerTypes: def.registerPortTypes.map(fillFloat),
   }
 }
 

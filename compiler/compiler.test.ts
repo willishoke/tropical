@@ -8,9 +8,7 @@ import {
   buildDependencyGraph,
   topologicalSort,
   tarjanSCC,
-  extractInstanceInfo,
 } from './compiler'
-import { Float, Int, Bool, portTypeEqual } from './term'
 import type { ExprNode } from './session'
 
 // ─────────────────────────────────────────────────────────────
@@ -238,26 +236,3 @@ describe('tarjanSCC', () => {
   })
 })
 
-// ─────────────────────────────────────────────────────────────
-// extractInstanceInfo
-// ─────────────────────────────────────────────────────────────
-
-describe('extractInstanceInfo', () => {
-  test('forwards PortTypes, defaulting undefined to Float', () => {
-    const def = {
-      typeName: 'Test',
-      inputNames: ['a', 'b'],
-      outputNames: ['out'],
-      registerNames: ['state'],
-      inputPortTypes: [Float, Bool],
-      outputPortTypes: [Int],
-      registerPortTypes: [undefined],
-    }
-    const info = extractInstanceInfo('Test1', def)
-    expect(info.name).toBe('Test1')
-    expect(portTypeEqual(info.inputTypes[0], Float)).toBe(true)
-    expect(portTypeEqual(info.inputTypes[1], Bool)).toBe(true)
-    expect(portTypeEqual(info.outputTypes[0], Int)).toBe(true)
-    expect(portTypeEqual(info.registerTypes[0], Float)).toBe(true) // undefined → Float
-  })
-})
