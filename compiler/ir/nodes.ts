@@ -3,7 +3,7 @@
  *
  * The elaborator (`compiler/ir/elaborator.ts`) consumes a parsed tree
  * (`compiler/parse/nodes.ts`) and produces values of the types defined
- * here. Where the parsed tree had NameRefNode placeholders, the resolved
+ * here. Where the parsed tree had NameRef placeholders, the resolved
  * tree has direct decl references — every reference is a graph edge.
  *
  * Categorical shape
@@ -41,7 +41,7 @@
 // ─────────────────────────────────────────────────────────────
 
 /** Permitted scalar element types. The resolved IR uses an enum literal,
- *  not a `NameRefNode` — these are language primitives, not decls. */
+ *  not a `NameRef` — these are language primitives, not decls. */
 export type ScalarKind = 'float' | 'int' | 'bool'
 
 // ─────────────────────────────────────────────────────────────
@@ -219,7 +219,7 @@ export type BodyAssign = OutputAssign | NextUpdate
 // Binders — anonymous names introduced by let / combinators / match arms
 // ─────────────────────────────────────────────────────────────
 
-/** A single anonymous binder. The parent node (LetExpr, FoldExpr, etc.,
+/** A single anonymous binder. The parent node (Let, Fold, etc.,
  *  or MatchArm) determines the binder's role. The `name` is an identity
  *  string — the user's chosen label, not a reference. */
 export interface BinderDecl {
@@ -250,8 +250,8 @@ export interface NestedOut {
 // Sentinel leaves — semantic primitives, no decl
 // ─────────────────────────────────────────────────────────────
 
-export interface SampleRateNode  { op: 'sampleRate' }
-export interface SampleIndexNode { op: 'sampleIndex' }
+export interface SampleRate  { op: 'sampleRate' }
+export interface SampleIndex { op: 'sampleIndex' }
 
 // ─────────────────────────────────────────────────────────────
 // Builtin op shapes — same as parsed but with resolved children
@@ -263,11 +263,11 @@ export type BinaryOpTag =
   | 'and' | 'or'
   | 'bitAnd' | 'bitOr' | 'bitXor' | 'lshift' | 'rshift'
   // Numeric builtins surfaced as `f(a, b)` in source; same arity/shape as
-  // the infix ops above, so they share BinaryOpNode rather than earning
+  // the infix ops above, so they share BinaryOp rather than earning
   // their own resolved-IR node types.
   | 'floorDiv' | 'ldexp'
 
-export interface BinaryOpNode {
+export interface BinaryOp {
   op: BinaryOpTag
   args: [ResolvedExpr, ResolvedExpr]
 }
@@ -277,39 +277,39 @@ export type UnaryOpTag =
   | 'sqrt' | 'abs' | 'floor' | 'ceil' | 'round'
   | 'floatExponent' | 'toInt' | 'toBool' | 'toFloat'
 
-export interface UnaryOpNode {
+export interface UnaryOp {
   op: UnaryOpTag
   args: [ResolvedExpr]
 }
 
 /** `clamp(value, lo, hi)` — explicit user-written bound enforcement. */
-export interface ClampNode {
+export interface Clamp {
   op: 'clamp'
   args: [ResolvedExpr, ResolvedExpr, ResolvedExpr]
 }
 
 /** `select(cond, then, else)` — value-level if. */
-export interface SelectNode {
+export interface Select {
   op: 'select'
   args: [ResolvedExpr, ResolvedExpr, ResolvedExpr]
 }
 
 /** `index(arr, i)` — array element access. */
-export interface IndexNode {
+export interface Index {
   op: 'index'
   args: [ResolvedExpr, ResolvedExpr]
 }
 
 /** `zeros(count)` — array constructor producing `count` zero elements.
  *  An array op: array_lower (C6) lowers it to scalar primitives. */
-export interface ZerosNode {
+export interface Zeros {
   op: 'zeros'
   count: ResolvedExpr
 }
 
 /** `arraySet(arr, idx, value)` — non-mutating "set the i-th element".
  *  An array op: array_lower (C6) lowers it. */
-export interface ArraySetNode {
+export interface ArraySet {
   op: 'arraySet'
   args: [ResolvedExpr, ResolvedExpr, ResolvedExpr]
 }
@@ -318,7 +318,7 @@ export interface ArraySetNode {
 // Combinators — each one carries its binder declarations directly
 // ─────────────────────────────────────────────────────────────
 
-export interface FoldExpr {
+export interface Fold {
   op: 'fold'
   over: ResolvedExpr
   init: ResolvedExpr
@@ -327,7 +327,7 @@ export interface FoldExpr {
   body: ResolvedExpr
 }
 
-export interface ScanExpr {
+export interface Scan {
   op: 'scan'
   over: ResolvedExpr
   init: ResolvedExpr
@@ -336,14 +336,14 @@ export interface ScanExpr {
   body: ResolvedExpr
 }
 
-export interface GenerateExpr {
+export interface Generate {
   op: 'generate'
   count: ResolvedExpr
   iter: BinderDecl
   body: ResolvedExpr
 }
 
-export interface IterateExpr {
+export interface Iterate {
   op: 'iterate'
   count: ResolvedExpr
   init: ResolvedExpr
@@ -351,7 +351,7 @@ export interface IterateExpr {
   body: ResolvedExpr
 }
 
-export interface ChainExpr {
+export interface Chain {
   op: 'chain'
   count: ResolvedExpr
   init: ResolvedExpr
@@ -359,14 +359,14 @@ export interface ChainExpr {
   body: ResolvedExpr
 }
 
-export interface Map2Expr {
+export interface Map2 {
   op: 'map2'
   over: ResolvedExpr
   elem: BinderDecl
   body: ResolvedExpr
 }
 
-export interface ZipWithExpr {
+export interface ZipWith {
   op: 'zipWith'
   a: ResolvedExpr
   b: ResolvedExpr
@@ -379,7 +379,7 @@ export interface ZipWithExpr {
 // Let — multiple binder/value pairs, body sees them all
 // ─────────────────────────────────────────────────────────────
 
-export interface LetExpr {
+export interface Let {
   op: 'let'
   /** Each entry introduces one binder. The `value` is evaluated in the
    *  enclosing scope (no let* semantics inside this single Let — bindings
@@ -395,7 +395,7 @@ export interface LetExpr {
 /** A sum-type variant constructor. `variant` carries a back-pointer to
  *  its `parent` SumTypeDef, so the type name is derivable without a
  *  registry lookup. */
-export interface TagExpr {
+export interface Tag {
   op: 'tag'
   variant: SumVariant
   /** Each entry is a payload field (StructField from variant.payload)
@@ -416,7 +416,7 @@ export interface MatchArm {
 /** Match expression: `type` is the sum type the elaborator inferred
  *  from the arms; `arms` is the ordered list. The elaborator validates
  *  exhaustiveness (every variant has an arm) and absence of duplicates. */
-export interface MatchExpr {
+export interface Match {
   op: 'match'
   type: SumTypeDef
   scrutinee: ResolvedExpr
@@ -430,27 +430,27 @@ export interface MatchExpr {
 /** Value-producing expressions in the resolved phase. */
 export type ResolvedExpr =
   | number | boolean | ResolvedExpr[]
-  | ResolvedExprOpNode
+  | ResolvedExprOp
 
-export type ResolvedExprOpNode =
+export type ResolvedExprOp =
   // Operators
-  | BinaryOpNode | UnaryOpNode
-  | ClampNode | SelectNode | IndexNode
+  | BinaryOp | UnaryOp
+  | Clamp | Select | Index
   // Array ops (lowered by array_lower in C6)
-  | ZerosNode | ArraySetNode
+  | Zeros | ArraySet
   // References (graph edges)
   | InputRef | RegRef | DelayRef | ParamRef | TypeParamRef | BindingRef
   | NestedOut
   // Sentinels
-  | SampleRateNode | SampleIndexNode
+  | SampleRate | SampleIndex
   // Combinators
-  | FoldExpr | ScanExpr
-  | GenerateExpr | IterateExpr | ChainExpr
-  | Map2Expr | ZipWithExpr
+  | Fold | Scan
+  | Generate | Iterate | Chain
+  | Map2 | ZipWith
   // Let
-  | LetExpr
+  | Let
   // ADT expressions
-  | TagExpr | MatchExpr
+  | Tag | Match
 
 // ─────────────────────────────────────────────────────────────
 // Block + Program

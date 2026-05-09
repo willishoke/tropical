@@ -1,7 +1,7 @@
 /**
  * elaborator.test.ts — coverage for the parser → resolved-IR elaborator.
  *
- * The elaborator's job is to turn the parsed tree (with NameRefNode
+ * The elaborator's job is to turn the parsed tree (with NameRef
  * placeholders) into a graph where every reference is a direct decl
  * reference. These tests verify both:
  *   - resolution: each reference resolves to the correct decl
@@ -14,14 +14,14 @@ import { parseProgram } from '../parse/declarations.js'
 import { elaborate, type ExternalProgramResolver } from './elaborator.js'
 import { ElaborationError } from './nodes.js'
 import type {
-  ResolvedProgram, ResolvedExpr, ResolvedExprOpNode,
+  ResolvedProgram, ResolvedExpr, ResolvedExprOp,
   RegRef, InputRef, DelayRef, ParamRef, TypeParamRef, BindingRef,
-  NestedOut, BinaryOpNode, ClampNode, SelectNode,
-  TagExpr, MatchExpr, LetExpr, FoldExpr, GenerateExpr,
+  NestedOut, BinaryOp, Clamp, Select,
+  Tag, Match, Let, Fold, Generate,
   RegDecl, DelayDecl, ParamDecl, InputDecl, TypeParamDecl,
   InstanceDecl, ProgramDecl, OutputAssign, NextUpdate,
   SumTypeDef, AliasTypeDef,
-  ZerosNode, ArraySetNode,
+  Zeros, ArraySet,
 } from './nodes.js'
 
 function elabSrc(src: string): ResolvedProgram {
@@ -117,7 +117,7 @@ describe('elaborator — sentinel calls', () => {
       program X() -> (out: float) { out = sample_rate() }
     `)
     const out = p.body.assigns[0] as OutputAssign
-    expect((out.expr as ResolvedExprOpNode).op).toBe('sampleRate')
+    expect((out.expr as ResolvedExprOp).op).toBe('sampleRate')
   })
 
   test('sample_index() resolves to SampleIndex node', () => {
@@ -125,7 +125,7 @@ describe('elaborator — sentinel calls', () => {
       program X() -> (out: float) { out = sample_index() }
     `)
     const out = p.body.assigns[0] as OutputAssign
-    expect((out.expr as ResolvedExprOpNode).op).toBe('sampleIndex')
+    expect((out.expr as ResolvedExprOp).op).toBe('sampleIndex')
   })
 
   test('sample_rate(arg) errors — nullary only', () => {
@@ -136,26 +136,26 @@ describe('elaborator — sentinel calls', () => {
 })
 
 describe('elaborator — builtin calls', () => {
-  test('clamp(v, lo, hi) resolves to ClampNode', () => {
+  test('clamp(v, lo, hi) resolves to Clamp', () => {
     const p = elabSrc(`
       program X(v: float) -> (out: float) { out = clamp(v, -1, 1) }
     `)
     const out = p.body.assigns[0] as OutputAssign
-    const c = out.expr as ClampNode
+    const c = out.expr as Clamp
     expect(c.op).toBe('clamp')
     expect(c.args.length).toBe(3)
   })
 
-  test('select(c, t, e) resolves to SelectNode', () => {
+  test('select(c, t, e) resolves to Select', () => {
     const p = elabSrc(`
       program X(g: bool) -> (out: float) { out = select(g, 1, 0) }
     `)
     const out = p.body.assigns[0] as OutputAssign
-    const s = out.expr as SelectNode
+    const s = out.expr as Select
     expect(s.op).toBe('select')
   })
 
-  test('sqrt(x) resolves to UnaryOpNode with sqrt op', () => {
+  test('sqrt(x) resolves to UnaryOp with sqrt op', () => {
     const p = elabSrc(`
       program X(x: float) -> (out: float) { out = sqrt(x) }
     `)
@@ -189,11 +189,11 @@ describe('elaborator — binders are decl objects with refs', () => {
       }
     `)
     const out = p.body.assigns[0] as OutputAssign
-    const letExpr = out.expr as LetExpr
+    const letExpr = out.expr as Let
     expect(letExpr.op).toBe('let')
     expect(letExpr.binders.length).toBe(1)
     const xBinder = letExpr.binders[0].binder
-    const body = letExpr.in as BinaryOpNode
+    const body = letExpr.in as BinaryOp
     expect(body.op).toBe('add')
     const left = body.args[0] as BindingRef
     const right = body.args[1] as BindingRef
@@ -211,8 +211,8 @@ describe('elaborator — binders are decl objects with refs', () => {
       }
     `)
     const out = p.body.assigns[0] as OutputAssign
-    const outer = out.expr as LetExpr
-    const inner = outer.in as LetExpr
+    const outer = out.expr as Let
+    const inner = outer.in as Let
     const outerX = outer.binders[0].binder
     const innerX = inner.binders[0].binder
     expect(outerX).not.toBe(innerX)  // distinct decl objects
@@ -227,13 +227,13 @@ describe('elaborator — binders are decl objects with refs', () => {
       }
     `)
     const out = p.body.assigns[0] as OutputAssign
-    const fold = out.expr as FoldExpr
+    const fold = out.expr as Fold
     expect(fold.op).toBe('fold')
     const accBinder = fold.acc
     const elemBinder = fold.elem
     expect(accBinder.name).toBe('acc')
     expect(elemBinder.name).toBe('e')
-    const body = fold.body as BinaryOpNode
+    const body = fold.body as BinaryOp
     const lhs = body.args[0] as BindingRef
     const rhs = body.args[1] as BindingRef
     expect(lhs.decl).toBe(accBinder)
@@ -247,9 +247,9 @@ describe('elaborator — binders are decl objects with refs', () => {
       }
     `)
     const out = p.body.assigns[0] as OutputAssign
-    const gen = out.expr as GenerateExpr
+    const gen = out.expr as Generate
     const iterBinder = gen.iter
-    const body = gen.body as BinaryOpNode
+    const body = gen.body as BinaryOp
     const lhs = body.args[0] as BindingRef
     const rhs = body.args[1] as BindingRef
     expect(lhs.decl).toBe(iterBinder)
@@ -280,8 +280,8 @@ describe('elaborator — tags', () => {
         }
       }
     `)
-    const matchExpr = (p.body.assigns[0] as OutputAssign).expr as MatchExpr
-    const tag = matchExpr.scrutinee as TagExpr
+    const matchExpr = (p.body.assigns[0] as OutputAssign).expr as Match
+    const tag = matchExpr.scrutinee as Tag
     expect(tag.op).toBe('tag')
     expect(tag.variant.name).toBe('Some')
     // Variant carries a back-pointer to its parent SumTypeDef
@@ -335,7 +335,7 @@ describe('elaborator — match', () => {
         }
       }
     `)
-    const matchExpr = (p.body.assigns[0] as OutputAssign).expr as MatchExpr
+    const matchExpr = (p.body.assigns[0] as OutputAssign).expr as Match
     expect(matchExpr.op).toBe('match')
     expect(matchExpr.type.name).toBe('Color')
     expect(matchExpr.arms.length).toBe(3)
@@ -354,12 +354,12 @@ describe('elaborator — match', () => {
         }
       }
     `)
-    const matchExpr = (p.body.assigns[0] as OutputAssign).expr as MatchExpr
+    const matchExpr = (p.body.assigns[0] as OutputAssign).expr as Match
     const hzArm = matchExpr.arms.find(a => a.variant.name === 'Hz')!
     expect(hzArm.binders.length).toBe(2)
     expect(hzArm.binders[0].name).toBe('f')
     expect(hzArm.binders[1].name).toBe('g')
-    const body = hzArm.body as BinaryOpNode
+    const body = hzArm.body as BinaryOp
     const lhs = body.args[0] as BindingRef
     const rhs = body.args[1] as BindingRef
     expect(lhs.decl).toBe(hzArm.binders[0])
@@ -663,7 +663,7 @@ describe('elaborator — graph integrity', () => {
     // p.body.decls[0]. The expr graph contains a regRef that also points
     // at it. This is a cycle in the graph (decl ↔ ref ↔ decl).
     expect(next.target).toBe(regDecl)
-    const expr = next.expr as BinaryOpNode
+    const expr = next.expr as BinaryOp
     expect((expr.args[0] as RegRef).decl).toBe(regDecl)
   })
 })
@@ -750,9 +750,9 @@ describe('elaborator — sequential let* binding', () => {
         out = let { c: x + 1; c2: c * c } in c2
       }
     `)
-    const letExpr = (p.body.assigns[0] as OutputAssign).expr as LetExpr
+    const letExpr = (p.body.assigns[0] as OutputAssign).expr as Let
     const cBinder = letExpr.binders[0].binder
-    const c2Value = letExpr.binders[1].value as BinaryOpNode
+    const c2Value = letExpr.binders[1].value as BinaryOp
     // c2's value is `c * c` — both operands reference the c binder.
     expect(c2Value.op).toBe('mul')
     const lhs = c2Value.args[0] as BindingRef
@@ -767,7 +767,7 @@ describe('elaborator — sequential let* binding', () => {
         out = let { a: x; b: a + 1; c: b + 1 } in a + b + c
       }
     `)
-    const letExpr = (p.body.assigns[0] as OutputAssign).expr as LetExpr
+    const letExpr = (p.body.assigns[0] as OutputAssign).expr as Let
     expect(letExpr.binders.length).toBe(3)
     // No throw on `a`, `b`, `c` in the body — that's the assertion.
     expect(letExpr.in).toBeDefined()
@@ -781,13 +781,13 @@ describe('elaborator — sequential let* binding', () => {
         out = let { a: x } in let { a: a + 1 } in a
       }
     `)
-    const outer = (p.body.assigns[0] as OutputAssign).expr as LetExpr
+    const outer = (p.body.assigns[0] as OutputAssign).expr as Let
     const outerA = outer.binders[0].binder
-    const inner = outer.in as LetExpr
+    const inner = outer.in as Let
     const innerA = inner.binders[0].binder
     // The inner let's value reads `a` — the outer binder, since the
     // inner binder isn't in scope until after its value is resolved.
-    const innerValue = inner.binders[0].value as BinaryOpNode
+    const innerValue = inner.binders[0].value as BinaryOp
     const ref = innerValue.args[0] as BindingRef
     expect(ref.decl).toBe(outerA)
     // The body of the inner let sees the inner binder.
@@ -805,13 +805,13 @@ describe('elaborator — new builtin calls', () => {
     const p = elabSrc(`
       program X() -> (out: float) { out = sampleRate() + sampleIndex() }
     `)
-    const expr = (p.body.assigns[0] as OutputAssign).expr as BinaryOpNode
+    const expr = (p.body.assigns[0] as OutputAssign).expr as BinaryOp
     expect(expr.op).toBe('add')
-    const argOps = expr.args.map(a => (a as ResolvedExprOpNode).op).sort()
+    const argOps = expr.args.map(a => (a as ResolvedExprOp).op).sort()
     expect(argOps).toEqual(['sampleIndex', 'sampleRate'])
   })
 
-  test('floatExponent (camelCase) resolves to UnaryOpNode', () => {
+  test('floatExponent (camelCase) resolves to UnaryOp', () => {
     const p = elabSrc(`
       program X(x: float) -> (out: float) { out = floatExponent(x) }
     `)
@@ -834,7 +834,7 @@ describe('elaborator — new builtin calls', () => {
     expect(tags.sort()).toEqual(['floorDiv', 'ldexp'])
   })
 
-  test('zeros(n) resolves to ZerosNode with the count expr', () => {
+  test('zeros(n) resolves to Zeros with the count expr', () => {
     const p = elabSrc(`
       program X<N: int = 4>() -> (out: float[N]) {
         reg buf: float = 0
@@ -843,14 +843,14 @@ describe('elaborator — new builtin calls', () => {
       }
     `)
     const next = p.body.assigns[1] as NextUpdate
-    const z = next.expr as ZerosNode
+    const z = next.expr as Zeros
     expect(z.op).toBe('zeros')
     const ref = z.count as TypeParamRef
     expect(ref.op).toBe('typeParamRef')
     expect(ref.decl).toBe(p.typeParams[0])
   })
 
-  test('arraySet(arr, idx, val) resolves to ArraySetNode with three args', () => {
+  test('arraySet(arr, idx, val) resolves to ArraySet with three args', () => {
     const p = elabSrc(`
       program X<N: int = 4>(x = 0) -> (y) {
         reg buf: float = 0
@@ -859,7 +859,7 @@ describe('elaborator — new builtin calls', () => {
       }
     `)
     const next = p.body.assigns[1] as NextUpdate
-    const a = next.expr as ArraySetNode
+    const a = next.expr as ArraySet
     expect(a.op).toBe('arraySet')
     expect(a.args.length).toBe(3)
   })

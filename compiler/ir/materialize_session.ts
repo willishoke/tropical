@@ -26,7 +26,7 @@
  */
 
 import type {
-  ResolvedProgram, ResolvedExpr, ResolvedExprOpNode, ResolvedBlock,
+  ResolvedProgram, ResolvedExpr, ResolvedExprOp, ResolvedBlock,
   ResolvedProgramPorts,
   InputDecl, OutputDecl, RegDecl, ParamDecl, DelayDecl, InstanceDecl,
   BodyDecl, BodyAssign, OutputAssign,
@@ -283,7 +283,7 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     }
     if (outDecl.type !== undefined) sessionOutput.type = outDecl.type
     outputDecls.push(sessionOutput)
-    const ref: ResolvedExprOpNode = { op: 'nestedOut', instance: instDecl, output: outDecl }
+    const ref: ResolvedExprOp = { op: 'nestedOut', instance: instDecl, output: outDecl }
     outputAssigns.push({ op: 'outputAssign', target: sessionOutput, expr: ref })
   }
 

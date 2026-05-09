@@ -50,13 +50,13 @@
 
 import type {
   ResolvedProgram, ResolvedBlock,
-  ResolvedExpr, ResolvedExprOpNode,
+  ResolvedExpr, ResolvedExprOp,
   BodyDecl, BodyAssign, OutputAssign, NextUpdate,
   InputDecl, OutputDecl, InstanceDecl,
   TypeParamDecl,
-  TagExpr, MatchExpr, MatchArm,
-  LetExpr,
-  FoldExpr, ScanExpr, GenerateExpr, IterateExpr, ChainExpr, Map2Expr, ZipWithExpr,
+  Tag, Match, MatchArm,
+  Let,
+  Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith,
 } from './nodes.js'
 import { specializeProgram } from './specialize.js'
 import { sumLower } from './sum_lower.js'
@@ -477,7 +477,7 @@ function substExpr(
 }
 
 function substOpNode(
-  node: ResolvedExprOpNode,
+  node: ResolvedExprOp,
   subst: Map<InstanceDecl, Map<OutputDecl, ResolvedExpr>>,
   memo: WeakMap<object, ResolvedExpr>,
 ): ResolvedExpr {
@@ -546,7 +546,7 @@ function substOpNode(
     // Combinators — preserve binders by reference (substitution doesn't
     // touch BinderDecls), recurse into expression-shaped fields.
     case 'fold': {
-      const fresh: FoldExpr = {
+      const fresh: Fold = {
         op: 'fold',
         over: recur(node.over),
         init: recur(node.init),
@@ -557,7 +557,7 @@ function substOpNode(
       return fresh
     }
     case 'scan': {
-      const fresh: ScanExpr = {
+      const fresh: Scan = {
         op: 'scan',
         over: recur(node.over),
         init: recur(node.init),
@@ -568,7 +568,7 @@ function substOpNode(
       return fresh
     }
     case 'generate': {
-      const fresh: GenerateExpr = {
+      const fresh: Generate = {
         op: 'generate',
         count: recur(node.count),
         iter: node.iter,
@@ -577,7 +577,7 @@ function substOpNode(
       return fresh
     }
     case 'iterate': {
-      const fresh: IterateExpr = {
+      const fresh: Iterate = {
         op: 'iterate',
         count: recur(node.count),
         init:  recur(node.init),
@@ -587,7 +587,7 @@ function substOpNode(
       return fresh
     }
     case 'chain': {
-      const fresh: ChainExpr = {
+      const fresh: Chain = {
         op: 'chain',
         count: recur(node.count),
         init:  recur(node.init),
@@ -597,7 +597,7 @@ function substOpNode(
       return fresh
     }
     case 'map2': {
-      const fresh: Map2Expr = {
+      const fresh: Map2 = {
         op: 'map2',
         over: recur(node.over),
         elem: node.elem,
@@ -606,7 +606,7 @@ function substOpNode(
       return fresh
     }
     case 'zipWith': {
-      const fresh: ZipWithExpr = {
+      const fresh: ZipWith = {
         op: 'zipWith',
         a: recur(node.a),
         b: recur(node.b),
@@ -617,7 +617,7 @@ function substOpNode(
       return fresh
     }
     case 'let': {
-      const fresh: LetExpr = {
+      const fresh: Let = {
         op: 'let',
         binders: node.binders.map(b => ({ binder: b.binder, value: recur(b.value) })),
         in: recur(node.in),
@@ -625,7 +625,7 @@ function substOpNode(
       return fresh
     }
     case 'tag': {
-      const fresh: TagExpr = {
+      const fresh: Tag = {
         op: 'tag',
         variant: node.variant,
         payload: node.payload.map(p => ({ field: p.field, value: recur(p.value) })),
@@ -638,7 +638,7 @@ function substOpNode(
         binders: arm.binders,
         body:    recur(arm.body),
       }))
-      const fresh: MatchExpr = {
+      const fresh: Match = {
         op: 'match',
         type: node.type,
         scrutinee: recur(node.scrutinee),

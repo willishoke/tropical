@@ -17,7 +17,7 @@ import { cloneResolvedProgram } from './clone.js'
 import type {
   ResolvedProgram, RegDecl, DelayDecl, InputDecl, OutputDecl,
   RegRef, DelayRef, InputRef,
-  SumTypeDef, MatchExpr, OutputAssign, NextUpdate,
+  SumTypeDef, Match, OutputAssign, NextUpdate,
 } from './nodes.js'
 
 function clab(src: string): { orig: ResolvedProgram; copy: ResolvedProgram } {
@@ -145,7 +145,7 @@ describe('clone — sum-type sharing', () => {
 
     // The MatchArm.variant must still === the original variants.
     const out = copy.body.assigns[0] as OutputAssign
-    const m = out.expr as MatchExpr
+    const m = out.expr as Match
     expect(m.op).toBe('match')
     expect(m.type).toBe(origSum)
     expect(m.arms[0].variant).toBe(origSum.variants[0])

@@ -3,7 +3,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { parseProgram, type ProgramNode, type ProgramPortSpec } from './declarations.js'
+import { parseProgram, type Program, type ProgramPortSpec } from './declarations.js'
 import { ParseError } from './expressions.js'
 import { nameRef } from './nodes.js'
 
@@ -150,7 +150,7 @@ describe('declarations — array port types', () => {
   test('array shape identifier emits a NameRef without parser-side validation', () => {
     // The parser performs no scope analysis. Whether `K` is actually a
     // declared type-param is determined by the elaborator (B6) when it
-    // resolves the NameRefNode against the enclosing program's type-params.
+    // resolves the NameRef against the enclosing program's type-params.
     // The parser simply records the reference here.
     const p = parseProgram(`
       program X(buf: float[K]) -> (out: signal) { out = 0 }
@@ -264,7 +264,7 @@ describe('declarations — nested programs', () => {
       }
     `)
     expect(p.body.decls).toHaveLength(2)  // programDecl + instanceDecl
-    const programDecl = p.body.decls[0] as { op: string; name: string; program: ProgramNode }
+    const programDecl = p.body.decls[0] as { op: string; name: string; program: Program }
     expect(programDecl.op).toBe('programDecl')
     expect(programDecl.name).toBe('Inner')
     expect(programDecl.program.name).toBe('Inner')
@@ -278,7 +278,7 @@ describe('declarations — nested programs', () => {
         program Inner<N: int = 4>(buf: float[N]) -> (out) { out = 0 }
       }
     `)
-    const inner = (p.body.decls[0] as { program: ProgramNode }).program
+    const inner = (p.body.decls[0] as { program: Program }).program
     expect(inner.type_params).toEqual({ N: { type: 'int', default: 4 } })
     const buf = inner.ports!.inputs![0] as ProgramPortSpec
     // Should reference N (resolved against inner scope, not outer)

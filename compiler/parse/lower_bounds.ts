@@ -28,15 +28,15 @@
  */
 
 import type {
-  ExprNode, ProgramNode, ProgramPort, ProgramPortSpec, PortTypeDecl, NameRefNode,
-  CallNode, BinaryOpNode,
+  Expr, Program, ProgramPort, ProgramPortSpec, PortTypeDecl, NameRef,
+  Call, BinaryOp,
 } from './nodes.js'
 import { nameRef } from './nodes.js'
 
 /** Local copy of the elaborator's nameRef predicate — `parse/nodes.ts`
  *  doesn't export one and we don't want a layering dep on the elaborator
  *  from inside the parser. */
-function isNameRef(v: unknown): v is NameRefNode {
+function isNameRef(v: unknown): v is NameRef {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
     && (v as { op?: unknown }).op === 'nameRef'
 }
@@ -75,21 +75,21 @@ function aliasBounds(t: PortTypeDecl | undefined): Bounds | null {
  *
  *  Idempotent: if `expr` is already a wrapper matching `bounds` exactly,
  *  returns it unchanged. */
-function wrapWithBound(expr: ExprNode, bounds: Bounds): ExprNode {
+function wrapWithBound(expr: Expr, bounds: Bounds): Expr {
   const [lo, hi] = bounds
   if (alreadyWrapped(expr, bounds)) return expr
   if (lo !== null && hi !== null) {
-    const node: CallNode = { op: 'call', callee: nameRef('clamp'), args: [expr, lo, hi] }
+    const node: Call = { op: 'call', callee: nameRef('clamp'), args: [expr, lo, hi] }
     return node
   }
   if (lo !== null) {
-    const cond: BinaryOpNode = { op: 'gt', args: [expr, lo] }
-    const node: CallNode = { op: 'call', callee: nameRef('select'), args: [cond, expr, lo] }
+    const cond: BinaryOp = { op: 'gt', args: [expr, lo] }
+    const node: Call = { op: 'call', callee: nameRef('select'), args: [cond, expr, lo] }
     return node
   }
   if (hi !== null) {
-    const cond: BinaryOpNode = { op: 'lt', args: [expr, hi] }
-    const node: CallNode = { op: 'call', callee: nameRef('select'), args: [cond, expr, hi] }
+    const cond: BinaryOp = { op: 'lt', args: [expr, hi] }
+    const node: Call = { op: 'call', callee: nameRef('select'), args: [cond, expr, hi] }
     return node
   }
   return expr  // [null, null] — no enforcement to insert
@@ -100,7 +100,7 @@ function wrapWithBound(expr: ExprNode, bounds: Bounds): ExprNode {
  *  produces and the parser's call shape (`call(nameRef('clamp'), ...)`).
  *  Used to make `lowerBoundsToClamps` idempotent so parse → print →
  *  parse round-trips converge. */
-function alreadyWrapped(expr: ExprNode, bounds: Bounds): boolean {
+function alreadyWrapped(expr: Expr, bounds: Bounds): boolean {
   if (typeof expr !== 'object' || expr === null || Array.isArray(expr)) return false
   const e = expr as unknown as Record<string, unknown>
   const args = e.args as unknown[] | undefined
@@ -133,9 +133,9 @@ function alreadyWrapped(expr: ExprNode, bounds: Bounds): boolean {
 /** Run lowering on every program in the tree (recurse into nested
  *  `programDecl` body decls). Mutates the input — port specs lose their
  *  `bounds` field and matching body assigns get clamp wrappers. */
-export function lowerBoundsToClamps(prog: ProgramNode): ProgramNode {
+export function lowerBoundsToClamps(prog: Program): Program {
   // Recurse into nested programs first. Body decls of op `programDecl`
-  // carry an inner `program: ProgramNode`. The outer pass operates on
+  // carry an inner `program: Program`. The outer pass operates on
   // `prog` afterward so its body sees lowered nested forms.
   for (const decl of prog.body.decls ?? []) {
     if (decl.op === 'programDecl' && decl.program) {

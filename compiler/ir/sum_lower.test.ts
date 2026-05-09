@@ -16,7 +16,7 @@ import { parseProgram } from '../parse/declarations.js'
 import { elaborate } from './elaborator.js'
 import { sumLower } from './sum_lower.js'
 import type {
-  ResolvedProgram, ResolvedExpr, ResolvedExprOpNode,
+  ResolvedProgram, ResolvedExpr, ResolvedExprOp,
   DelayDecl, OutputAssign,
 } from './nodes.js'
 
@@ -159,7 +159,7 @@ function collectDelayRefNames(expr: ResolvedExpr): string[] {
   return out
 }
 
-function walkChildren(node: ResolvedExprOpNode, k: (e: ResolvedExpr) => void): void {
+function walkChildren(node: ResolvedExprOp, k: (e: ResolvedExpr) => void): void {
   switch (node.op) {
     case 'add': case 'sub': case 'mul': case 'div': case 'mod':
     case 'lt': case 'lte': case 'gt': case 'gte': case 'eq': case 'neq':

@@ -3,7 +3,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { parseBody, type BlockNode } from './statements.js'
+import { parseBody, type Block } from './statements.js'
 import { ParseError } from './expressions.js'
 import { nameRef } from './nodes.js'
 

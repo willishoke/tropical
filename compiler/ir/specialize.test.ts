@@ -23,7 +23,7 @@ import { specializeProgram } from './specialize.js'
 import type {
   ResolvedProgram, TypeParamDecl,
   RegDecl, InstanceDecl,
-  SumTypeDef, MatchExpr, OutputAssign,
+  SumTypeDef, Match, OutputAssign,
 } from './nodes.js'
 
 // ─────────────────────────────────────────────────────────────
@@ -209,10 +209,10 @@ describe('specialize — sum-type variant identity preserved', () => {
     expect(copySum.variants[0]).toBe(origSum.variants[0])
     expect(copySum.variants[1]).toBe(origSum.variants[1])
 
-    // The MatchExpr in the assign points at the same SumTypeDef and
+    // The Match in the assign points at the same SumTypeDef and
     // its arms still reference the original variants by `===`.
     const out = copy.body.assigns[0] as OutputAssign
-    const m = out.expr as MatchExpr
+    const m = out.expr as Match
     expect(m.op).toBe('match')
     expect(m.type).toBe(origSum)
     expect(m.arms[0].variant).toBe(origSum.variants[0])

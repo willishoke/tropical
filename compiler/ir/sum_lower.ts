@@ -2,9 +2,9 @@
  * sum_lower.ts — Phase C4: sum-type decomposition on the resolved IR.
  *
  * Decomposes every sum-typed `DelayDecl` (one whose `init` is a
- * `TagExpr`) into N+1 scalar `DelayDecl`s — a discriminator slot
+ * `Tag`) into N+1 scalar `DelayDecl`s — a discriminator slot
  * (int) plus one slot per (variant, field) pair across all variants —
- * and lowers every `MatchExpr`/`TagExpr` to scalar select-chains and
+ * and lowers every `Match`/`Tag` to scalar select-chains and
  * variant-index literals.
  *
  * After this pass the program contains no `tag` or `match` expressions
@@ -18,7 +18,7 @@
  * matches the legacy pipeline byte-for-byte.
  *
  * Constraints (matching legacy):
- *   - A sum-typed delay's `init` MUST be a `TagExpr` (constant
+ *   - A sum-typed delay's `init` MUST be a `Tag` (constant
  *     variant constructor). Anything else is a structural error.
  *   - Match-arm payload bindings are only supported when the
  *     scrutinee is a `DelayRef` to a sum-typed delay. Other
@@ -26,12 +26,12 @@
  */
 
 import type {
-  ResolvedProgram, ResolvedExpr, ResolvedExprOpNode,
+  ResolvedProgram, ResolvedExpr, ResolvedExprOp,
   ResolvedBlock,
   BodyDecl, BodyAssign, OutputAssign, NextUpdate,
   DelayDecl, BinderDecl,
   SumTypeDef, SumVariant, StructField,
-  TagExpr, MatchExpr, MatchArm,
+  Tag, Match, MatchArm,
   DelayRef,
 } from './nodes.js'
 
@@ -111,7 +111,7 @@ export function sumLower(prog: ResolvedProgram): ResolvedProgram {
       const info = sumDelays.get(decl)!
       // The slots' decl objects were already created during collection.
       // Now fill in their init/update, which depend on the rewritten
-      // versions of the original's init (a TagExpr) and update (a
+      // versions of the original's init (a Tag) and update (a
       // sum-valued expression).
       fillSlotsForSumDelay(info, decl, ctx)
       for (const slot of info.slots) newDecls.push(slot.decl)
@@ -209,7 +209,7 @@ function mangle(base: string, suffix: string): string {
 
 /**
  * After collection has pre-allocated slot decls, populate their
- * `init` (from the original's `TagExpr`) and `update` (per-slot
+ * `init` (from the original's `Tag`) and `update` (per-slot
  * extraction of the sum-valued update expression).
  */
 function fillSlotsForSumDelay(
@@ -223,7 +223,7 @@ function fillSlotsForSumDelay(
       `sumLower: delay '${orig.name}': init must be a constant tag expression`,
     )
   }
-  const initTag = init as TagExpr
+  const initTag = init as Tag
   const initVariantIdx = info.sumType.variants.indexOf(initTag.variant)
   if (initVariantIdx < 0) {
     throw new Error(
@@ -334,7 +334,7 @@ function rewriteExpr(expr: ResolvedExpr, ctx: Ctx): ResolvedExpr {
   return rewriteOp(expr, ctx)
 }
 
-function rewriteOp(node: ResolvedExprOpNode, ctx: Ctx): ResolvedExpr {
+function rewriteOp(node: ResolvedExprOp, ctx: Ctx): ResolvedExpr {
   switch (node.op) {
     // ── Bindings: substitute when the binder is in the active map. ──
     case 'bindingRef': {
@@ -442,7 +442,7 @@ function rewriteOp(node: ResolvedExprOpNode, ctx: Ctx): ResolvedExpr {
 // Match → select chain (scalar-valued match)
 // ─────────────────────────────────────────────────────────────
 
-function lowerMatchToSelectChain(m: MatchExpr, ctx: Ctx): ResolvedExpr {
+function lowerMatchToSelectChain(m: Match, ctx: Ctx): ResolvedExpr {
   // The scrutinee must reduce to a sum-typed value. We need access to
   // the per-variant payload slots to rewrite payload bindings.
   // V1 (mirrors legacy): only DelayRef-to-sum-typed-delay scrutinees
@@ -498,7 +498,7 @@ function lowerMatchToSelectChain(m: MatchExpr, ctx: Ctx): ResolvedExpr {
  * sufficient for nullary-only matches whose scrutinee is itself a
  * `match` returning a tag.
  */
-function scrutineeTagRead(m: MatchExpr, ctx: Ctx): ResolvedExpr {
+function scrutineeTagRead(m: Match, ctx: Ctx): ResolvedExpr {
   return rewriteExpr(m.scrutinee, ctx)
 }
 
@@ -556,10 +556,10 @@ function bindingsForArm(
  * `compiler/sum_lowering.ts`.
  *
  * Recognized shapes for `expr`:
- *   - `TagExpr` — constant constructor; tag-slot gets the variant
+ *   - `Tag` — constant constructor; tag-slot gets the variant
  *     index, payload-slot gets either the literal value or 0
  *     depending on whether the slot's variant matches the tag.
- *   - `MatchExpr` returning a sum value — distribute slot extraction
+ *   - `Match` returning a sum value — distribute slot extraction
  *     over each arm; build a select-chain over the scrutinee's tag
  *     read.
  *   - `DelayRef` to a sum-typed delay — read the matching slot of

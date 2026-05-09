@@ -3,9 +3,9 @@
  *
  * The §2.1 from-scratch port that closes Phase D's structural goal:
  * the runtime path is `ResolvedProgram → strata → emit_resolved → JIT`,
- * with no intermediate ExprNode tree. Refs become operand kinds via
+ * with no intermediate Expr tree. Refs become operand kinds via
  * decl-identity slot lookups; the dispatch is exhaustive over the
- * closed `ResolvedExprOpNode` union.
+ * closed `ResolvedExprOp` union.
  *
  * Replaces:
  *   - compiler/ir/lower_to_exprnode.ts:resolvedToSlotted (deleted)
@@ -25,14 +25,14 @@
  *     `sampleIndex`) using slot maps + decl identity. No string
  *     lookups, no `obj._ptr` reflection.
  *   - `compileNodeUncached` switches over the closed
- *     `ResolvedExprOpNode` union; TypeScript's exhaustiveness check
+ *     `ResolvedExprOp` union; TypeScript's exhaustiveness check
  *     gates missing cases at compile time.
  *   - param handles thread through `paramHandles: Map<ParamDecl, ...>`
  *     populated by compileSession from the session's paramRegistry.
  */
 
 import type {
-  ResolvedExpr, ResolvedExprOpNode,
+  ResolvedExpr, ResolvedExprOp,
   RegDecl, DelayDecl, InputDecl, InstanceDecl, ParamDecl,
 } from './nodes.js'
 
@@ -217,7 +217,7 @@ class Emitter {
     if (typeof node === 'boolean') return { op: { kind: 'const', val: node ? 1 : 0, scalar_type: 'bool' }, scalarType: 'bool' }
     if (Array.isArray(node)) return null
     if (typeof node !== 'object' || node === null) return { op: { kind: 'const', val: 0, scalar_type: 'float' }, scalarType: 'float' }
-    const obj = node as ResolvedExprOpNode
+    const obj = node as ResolvedExprOp
     switch (obj.op) {
       case 'inputRef': {
         const slot = this.slots.inputs.get(obj.decl)
@@ -351,7 +351,7 @@ class Emitter {
   private compileNodeUncached(node: ResolvedExpr, expected?: ScalarType): CompileResult {
     if (Array.isArray(node)) return this.compilePack(node, expected)
 
-    const obj = node as ResolvedExprOpNode
+    const obj = node as ResolvedExprOp
 
     // Array-typed regRef (filtered out by tryTerminal).
     if (obj.op === 'regRef') {
@@ -365,14 +365,14 @@ class Emitter {
     // Binary arithmetic / comparison / bitwise / logical ops.
     const binTag = BINARY_TAG[obj.op]
     if (binTag) {
-      const opNode = obj as Extract<ResolvedExprOpNode, { args: [ResolvedExpr, ResolvedExpr] }>
+      const opNode = obj as Extract<ResolvedExprOp, { args: [ResolvedExpr, ResolvedExpr] }>
       return this.compileBinary(binTag, opNode.args, expected)
     }
 
     // Unary ops (`pow` is binary in the resolved IR — handled above).
     const uniTag = UNARY_TAG[obj.op]
     if (uniTag) {
-      const opNode = obj as Extract<ResolvedExprOpNode, { args: [ResolvedExpr] }>
+      const opNode = obj as Extract<ResolvedExprOp, { args: [ResolvedExpr] }>
       return this.compileUnary(uniTag, opNode.args[0], expected)
     }
 
@@ -410,7 +410,7 @@ class Emitter {
     }
 
     // Unreachable — TypeScript will catch missing cases at compile time
-    // when the ResolvedExprOpNode union grows.
+    // when the ResolvedExprOp union grows.
     const _exhaustive: never = obj as never
     void _exhaustive
     throw new Error(`emit_resolved: unhandled op (TypeScript exhaustiveness escape)`)
