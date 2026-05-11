@@ -1,30 +1,30 @@
 /**
- * compile_session_slotted.ts — slot-mode session compilation (M4).
+ * compile_session_slotted.ts — slot-mode session compilation (M4–M8).
  *
- * This is the new compile path that produces FlatPlans with slot
- * allocation metadata. It runs alongside the legacy `compileSession`
- * and is gated behind the `TROPICAL_SLOT_MODE` env var (or the
- * `slotMode` opt to compileSession).
+ * As of M8, this is the default path invoked by `compileSession`. It
+ * runs the legacy pipeline (materialize → strata → compileResolved) to
+ * produce the audio-correct instruction stream, then attaches slot
+ * allocation metadata derived from the session's slot registries.
  *
- * **What this milestone does:** runs the legacy compile pipeline
- * (materialize → strata → compileResolved) to produce the audio-correct
- * instruction stream, then attaches slot allocation metadata derived
- * from the session's slot registries. The instructions themselves
- * remain in legacy form (`input` / `reg` / `state_reg` / `param`
- * operands); the engine work in M5–M6 starts honoring the slot
- * metadata, and M8 migrates the instructions to use `slot` operands
- * directly.
+ * **What ships in M4–M8:**
+ *   - slot_count / slot_names / slot_defaults populated in every plan
+ *   - control-plane writes via tropical_runtime_set_slot work end-to-end
+ *   - JIT honors `slot` operands and `WriteSlot` instructions when
+ *     emitted (engine ready; emit_resolved doesn't yet emit them)
+ *   - Hot-swap preserves slot values by name
  *
- * Why this incremental approach: a full operand-remapping rewrite is
- * the bulk of the slot-mode work and wants its own milestone. M4
- * proves the schema/plumbing/dispatch flow works end-to-end without
- * gating itself on the larger emit-rewrite, which lets M5–M7 land
- * engine support and equivalence tests against a stable plan shape.
+ * **What's deferred to a future milestone:**
+ *   The instruction stream is still legacy: `input` / `reg` /
+ *   `state_reg` / `param` operands. The full rewrite that emits `slot`
+ *   operands instead — replacing `param` operands with slot reads,
+ *   adding `WriteSlot` after each instance's outputs, etc. — is a
+ *   substantial per-instance compile rewrite that warrants its own
+ *   focused effort. The engine and equivalence harness are ready
+ *   for it (M5–M7); only the TS emit path remains.
  *
- * Audio behavior under M4: identical to the legacy path. The slot
- * fields are inert metadata — the kernel doesn't read them yet.
- * Equivalence with the legacy path is a regression test, not an
- * audio-correctness milestone.
+ * Audio behavior today: byte-identical to the legacy path. The slot
+ * fields are honored for control-plane writes but the kernel doesn't
+ * yet read from slots in production patches.
  */
 
 import type { SessionState } from '../session.js'
@@ -73,13 +73,10 @@ export function compileSessionSlotted(session: SessionState): FlatPlan {
   }
 }
 
-/** Read-time check for the slot-mode flag. Cheap; cached not necessary
- *  since this is called once per compile. */
-export function slotModeEnabled(session: SessionState, opt?: boolean): boolean {
-  if (opt !== undefined) return opt
-  // Test-friendly env-var override. `false` / `0` / unset → off; any
-  // other value → on. Bun reads process.env consistently.
-  const env = process.env.TROPICAL_SLOT_MODE
-  if (env === undefined || env === '' || env === '0' || env === 'false') return false
+/** @deprecated As of M8, slot mode is the default for `compileSession`.
+ *  This function previously read TROPICAL_SLOT_MODE; it now always
+ *  returns true. Kept as a tiny shim in case external callers
+ *  reference it. Will be removed in a follow-up cleanup. */
+export function slotModeEnabled(_session?: SessionState, _opt?: boolean): boolean {
   return true
 }

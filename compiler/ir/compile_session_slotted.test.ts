@@ -104,37 +104,26 @@ describe('M4: compileSessionSlotted', () => {
   })
 })
 
-describe('M4: slotModeEnabled flag', () => {
-  test('opt argument overrides env var', () => {
+describe('M8: slot mode is default; slotModeEnabled is deprecated stub', () => {
+  test('always returns true (env var dispatch removed in M8)', () => {
+    // Slot mode is unconditionally enabled as of M8; the env var is no
+    // longer consulted. Existing callers get a stable `true` so they
+    // can unblock without changing behavior.
+    expect(slotModeEnabled()).toBe(true)
+    expect(slotModeEnabled(makeSession())).toBe(true)
+    expect(slotModeEnabled(makeSession(), false)).toBe(true)
     expect(slotModeEnabled(makeSession(), true)).toBe(true)
-    expect(slotModeEnabled(makeSession(), false)).toBe(false)
   })
 
-  test('env var "0" / "false" / unset → off', () => {
-    const old = process.env.TROPICAL_SLOT_MODE
-    try {
-      process.env.TROPICAL_SLOT_MODE = '0'
-      expect(slotModeEnabled(makeSession())).toBe(false)
-      process.env.TROPICAL_SLOT_MODE = 'false'
-      expect(slotModeEnabled(makeSession())).toBe(false)
-      delete process.env.TROPICAL_SLOT_MODE
-      expect(slotModeEnabled(makeSession())).toBe(false)
-    } finally {
-      if (old === undefined) delete process.env.TROPICAL_SLOT_MODE
-      else process.env.TROPICAL_SLOT_MODE = old
-    }
-  })
-
-  test('env var "1" / "true" / any other value → on', () => {
-    const old = process.env.TROPICAL_SLOT_MODE
-    try {
-      process.env.TROPICAL_SLOT_MODE = '1'
-      expect(slotModeEnabled(makeSession())).toBe(true)
-      process.env.TROPICAL_SLOT_MODE = 'true'
-      expect(slotModeEnabled(makeSession())).toBe(true)
-    } finally {
-      if (old === undefined) delete process.env.TROPICAL_SLOT_MODE
-      else process.env.TROPICAL_SLOT_MODE = old
-    }
+  test('compileSession defaults to slot-mode plan', () => {
+    // Verifies the M8 dispatch flip: the public compileSession entry
+    // point now produces a plan with slot fields populated, without
+    // any env-var setup.
+    const { compileSession } = require('./compile_session.ts')
+    const s = makeSession()
+    const plan = compileSession(s)
+    expect(plan.slot_count).toBe(0)        // empty session, no slots
+    expect(plan.slot_names).toEqual([])
+    expect(plan.slot_defaults).toEqual([])
   })
 })
