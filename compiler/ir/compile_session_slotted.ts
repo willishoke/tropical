@@ -40,15 +40,67 @@ import {
 
 /** Compile the current session in slot mode. Dispatches between the
  *  legacy-wrap and the per-instance paths based on
- *  `TROPICAL_SLOT_OPS`. Both paths produce a FlatPlan with slot
- *  allocation metadata; the per-instance path additionally emits
- *  `slot` operands and `WriteSlot` instructions in the instruction
- *  stream. */
+ *  `TROPICAL_SLOT_OPS` and on whether the session uses any shapes the
+ *  per-instance path doesn't yet handle (arrays, sums, nested
+ *  instance calls in input expressions).
+ *
+ *  When `TROPICAL_SLOT_OPS` is unset:
+ *    - default path: metadata-only (legacy plan + slot fields)
+ *    - audio behavior: byte-identical to legacy
+ *
+ *  When `TROPICAL_SLOT_OPS=1`:
+ *    - tries per-instance compile first
+ *    - falls back to metadata-only if the per-instance path throws
+ *      an "unsupported shape" error (with a console hint)
+ *    - other errors propagate */
 export function compileSessionSlotted(session: SessionState): FlatPlan {
-  const useOps = useSlotOps()
-  return useOps
-    ? compileSessionSlottedPerInstance(session)
-    : compileSessionSlottedMetadataOnly(session)
+  if (!useSlotOps()) return compileSessionSlottedMetadataOnly(session)
+  try {
+    return compileSessionSlottedPerInstance(session)
+  } catch (e) {
+    if (isUnsupportedShapeError(e)) {
+      // Auto-fallback to the metadata-only path. The audio still
+      // works; the per-instance optimization just doesn't apply for
+      // this session's shape. Log once per session for visibility.
+      logFallbackOnce((e as Error).message)
+      return compileSessionSlottedMetadataOnly(session)
+    }
+    throw e
+  }
+}
+
+/** Recognize errors the per-instance path can't handle yet. Falls into
+ *  three buckets:
+ *   1. Shape-level: arrays, sums, nested instance calls (M9d+)
+ *   2. Allocation-level: instance created outside the normal flow that
+ *      didn't run allocateOutputSlots
+ *   3. Cycle-detection: ref graph wasn't broken by traceCycles delays
+ *      (legacy path handles these via different cycle-breaking)
+ *  In all three cases the legacy path works and the slot-mode plan
+ *  would either fail or produce different audio. */
+function isUnsupportedShapeError(e: unknown): boolean {
+  if (!(e instanceof Error)) return false
+  const msg = e.message
+  return (
+    msg.includes('not yet supported') ||
+    msg.includes('Arrays land in') ||
+    msg.includes('M9d') ||
+    msg.includes('nested instance') ||
+    msg.includes('not allocated') ||
+    msg.includes('cycle detected')
+  )
+}
+
+const _fallbackLoggedFor = new Set<string>()
+function logFallbackOnce(reason: string): void {
+  // Console.warn is fine; this is a development-mode hint.
+  // Bun's test runner suppresses it by default during quiet runs.
+  if (_fallbackLoggedFor.has(reason)) return
+  _fallbackLoggedFor.add(reason)
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[slot-model] per-instance path fell back to legacy for this session: ${reason}`,
+  )
 }
 
 /** M4–M8 path: wrap the legacy plan with slot metadata. Untouched

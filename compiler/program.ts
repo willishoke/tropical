@@ -9,7 +9,7 @@
 import type { ExprNode } from './expr.js'
 import { validateExpr } from './expr.js'
 import type { TypeDefJSON, SessionState } from './session.js'
-import { resolveProgramType, allocateParamSlot } from './session.js'
+import { resolveProgramType, allocateParamSlot, allocateOutputSlots } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
 import {
@@ -383,6 +383,10 @@ export function loadProgramAsSession(
       instance.gateInput = inst.gate_input
     }
     session.instanceRegistry.set(instance.name, instance)
+    // Slot model: allocate output slots for the instance, parallel to
+    // what MCP add_instance does. Required for the per-instance
+    // compile path (M9a+) to find each output's slot index.
+    allocateOutputSlots(session, instance.name, type)
 
     // Populate wiring from instance inputs
     if (inst.inputs) {
@@ -543,6 +547,10 @@ export function mergeProgramIntoSession(
       instance.gateInput = inst.gate_input
     }
     session.instanceRegistry.set(instance.name, instance)
+    // Slot model: allocate output slots for the instance, parallel to
+    // what MCP add_instance does. Required for the per-instance
+    // compile path (M9a+) to find each output's slot index.
+    allocateOutputSlots(session, instance.name, type)
 
     // Populate wiring from instance inputs
     if (inst.inputs) {

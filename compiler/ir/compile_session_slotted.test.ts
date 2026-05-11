@@ -77,30 +77,39 @@ describe('M4: compileSessionSlotted', () => {
     expect(plan.slot_defaults![fireIdx]).toBe(0)  // trigger
   })
 
-  test('slot-mode plan has identical instruction stream to legacy plan', () => {
-    // M4 invariant: until M8 rewrites instructions to use slot operands,
-    // the slot-mode and legacy plans must be byte-equal except for the
-    // additional slot_count/slot_names/slot_defaults fields.
-    const s = makeSession()
-    loadStdlib(s)
-    const onePole = s.typeRegistry.get('OnePole')!
-    s.instanceRegistry.set('lp1', instantiate(onePole, 'lp1'))
-    allocateOutputSlots(s, 'lp1', onePole)
-    s.graphOutputs.push({ instance: 'lp1', output: 'out' })
+  test('default-mode slot plan has identical instruction stream to legacy plan', () => {
+    // M4 invariant under DEFAULT mode (no TROPICAL_SLOT_OPS): the
+    // slot-mode plan is byte-equal to legacy plus the slot metadata
+    // fields. When TROPICAL_SLOT_OPS=1, the per-instance path
+    // produces a different (slot-operand) instruction stream by
+    // design — that's the M9 work; tested separately under M9 tests.
+    const prevEnv = process.env.TROPICAL_SLOT_OPS
+    delete process.env.TROPICAL_SLOT_OPS
+    try {
+      const s = makeSession()
+      loadStdlib(s)
+      const onePole = s.typeRegistry.get('OnePole')!
+      s.instanceRegistry.set('lp1', instantiate(onePole, 'lp1'))
+      allocateOutputSlots(s, 'lp1', onePole)
+      s.graphOutputs.push({ instance: 'lp1', output: 'out' })
 
-    const legacy   = compileSessionLegacy(s)
-    const slotted  = compileSessionSlotted(s)
+      const legacy  = compileSessionLegacy(s)
+      const slotted = compileSessionSlotted(s)
 
-    // Same instruction count and same instruction stream
-    expect(slotted.instructions.length).toBe(legacy.instructions.length)
-    expect(JSON.stringify(slotted.instructions)).toBe(JSON.stringify(legacy.instructions))
-    expect(slotted.register_count).toBe(legacy.register_count)
-    expect(slotted.output_targets).toEqual(legacy.output_targets)
+      // Same instruction count and same instruction stream
+      expect(slotted.instructions.length).toBe(legacy.instructions.length)
+      expect(JSON.stringify(slotted.instructions)).toBe(JSON.stringify(legacy.instructions))
+      expect(slotted.register_count).toBe(legacy.register_count)
+      expect(slotted.output_targets).toEqual(legacy.output_targets)
 
-    // Slotted-only fields: present and populated
-    expect(slotted.slot_count).toBe(1)
-    expect(slotted.slot_names).toEqual(['lp1.out'])
-    expect(legacy.slot_count).toBeUndefined()
+      // Slotted-only fields: present and populated
+      expect(slotted.slot_count).toBe(1)
+      expect(slotted.slot_names).toEqual(['lp1.out'])
+      expect(legacy.slot_count).toBeUndefined()
+    } finally {
+      if (prevEnv === undefined) delete process.env.TROPICAL_SLOT_OPS
+      else process.env.TROPICAL_SLOT_OPS = prevEnv
+    }
   })
 })
 
