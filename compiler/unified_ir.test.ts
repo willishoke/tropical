@@ -17,7 +17,12 @@ import { fileURLToPath } from 'node:url'
 
 import { makeSession, loadJSON } from './session.js'
 import { loadStdlib } from './program.js'
-import { compileSession } from './ir/compile_session'
+// Use compileSessionLegacy directly so the env-var dispatch in
+// `compileSession` (which routes to slot-mode under TROPICAL_SLOT_MODE)
+// can't perturb the snapshot. These goldens are explicitly pinned to
+// the legacy plan shape; slot-mode plans get their own equivalence
+// tests in M7.
+import { compileSessionLegacy as compileSession } from './ir/compile_session'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const FIXTURE_DIR = join(__dirname, '__fixtures__/flat_plan')

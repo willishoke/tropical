@@ -67,4 +67,23 @@ export class Runtime {
   createDAC(sampleRate = 44100, channels = 2): DAC {
     return DAC.fromRuntime(this._h, sampleRate, channels)
   }
+
+  // ── Slot model (M5+) ─────────────────────────────────────────────────────
+  // Resolve a slot name → integer index. Returns -1 when the active plan
+  // has no slot of that name (mapping the C UINT32_MAX sentinel to a JS
+  // signed-int sentinel that's friendlier to test).
+  slotIndex(name: string): number {
+    const idx = b.tropical_runtime_slot_index(this._h, name) as number
+    return idx === 0xffffffff ? -1 : idx
+  }
+
+  /** Write to a slot by integer index. Out-of-range indices are no-ops. */
+  setSlot(slotIndex: number, value: number): void {
+    b.tropical_runtime_set_slot(this._h, slotIndex, value)
+  }
+
+  /** Read a slot by integer index. Returns 0 for out-of-range indices. */
+  getSlot(slotIndex: number): number {
+    return b.tropical_runtime_get_slot(this._h, slotIndex) as number
+  }
 }

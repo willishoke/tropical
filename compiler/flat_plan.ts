@@ -29,4 +29,18 @@ export interface FlatPlan {
   register_targets: number[]
   /** Gateable-subgraph metadata, if any source_tag wrappers were emitted. */
   groups?:         GroupInfo[]
+
+  // ─── Slot model (additive) ─────────────────────────────────────────────
+  // Inter-module shared slot array. Module outputs and control-plane
+  // params land here; downstream module input expressions read from
+  // `slot` operands referencing these indices. All three fields are
+  // optional so legacy plans (no slot model) continue to validate.
+  /** Total slots in the shared inter-module array. */
+  slot_count?:    number
+  /** "${instance}.${port}" for output slots; "${name}" for param slots.
+   *  Length === slot_count. */
+  slot_names?:    string[]
+  /** Initial value per slot (params start at declared default; output
+   *  slots typically start at 0). Length === slot_count. */
+  slot_defaults?: number[]
 }

@@ -481,9 +481,15 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   llvm::Type * i1_ty    = builder.getInt1Ty();
   llvm::Type * ptr_ty   = llvm::PointerType::get(*context, 0);
 
+  // Kernel signature (M6+): adds `slots` (double *) as the trailing arg.
+  // The IRTransformLayer's nocapture-inference handles aliasing
+  // analysis on the existing pointer args; we additionally tag
+  // `slots` explicitly with `nocapture` and `noalias` below so GVN /
+  // store-to-load forwarding engages on slot reads (per spike #3 —
+  // verified that the JIT's IRTransformLayer pipeline includes GVN).
   llvm::FunctionType * fn_ty = llvm::FunctionType::get(
     void_ty,
-    {ptr_ty, ptr_ty, ptr_ty, ptr_ty, ptr_ty, f64_ty, i64_ty, ptr_ty, ptr_ty, i64_ty},
+    {ptr_ty, ptr_ty, ptr_ty, ptr_ty, ptr_ty, f64_ty, i64_ty, ptr_ty, ptr_ty, i64_ty, ptr_ty},
     false);
 
   llvm::Function * fn = llvm::Function::Create(
@@ -500,6 +506,13 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   llvm::Value * param_ptrs_arg       = &*arg_it++;  param_ptrs_arg->setName("param_ptrs");
   llvm::Value * output_buffer_arg    = &*arg_it++;  output_buffer_arg->setName("output_buffer");
   llvm::Value * buffer_length_arg    = &*arg_it++;  buffer_length_arg->setName("buffer_length");
+  llvm::Argument * slots_arg_a       = &*arg_it++;  slots_arg_a->setName("slots");
+  llvm::Value * slots_arg            = slots_arg_a;
+  // M6: tag slots explicitly so GVN can prove no-alias and forward
+  // store-to-load. Without these, even with IRTransformLayer running
+  // GVN, slot loads may not be eliminated (spike #3 finding).
+  slots_arg_a->addAttr(llvm::Attribute::NoCapture);
+  slots_arg_a->addAttr(llvm::Attribute::NoAlias);
 
   llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
   builder.SetInsertPoint(entry);
@@ -529,6 +542,20 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   auto load_array_size_f = [&](uint32_t slot) -> llvm::Value * {
     llvm::Value * sp = builder.CreateInBoundsGEP(i64_ty, array_sizes_arg, builder.getInt64(slot));
     return builder.CreateLoad(i64_ty, sp);
+  };
+
+  // M6: slot helpers. Slots are stored as double[] (not int64 like
+  // temps/registers/inputs) — direct f64 load/store, no bit-cast
+  // round-trip. Spike #1 confirmed GVN eliminates redundant slot
+  // loads when the slots arg has nocapture+noalias attributes (set
+  // above).
+  auto load_slot_f64 = [&](uint32_t idx) -> llvm::Value * {
+    llvm::Value * ptr = builder.CreateInBoundsGEP(f64_ty, slots_arg, builder.getInt64(idx));
+    return builder.CreateLoad(f64_ty, ptr);
+  };
+  auto store_slot_f64 = [&](uint32_t idx, llvm::Value * v) {
+    llvm::Value * ptr = builder.CreateInBoundsGEP(f64_ty, slots_arg, builder.getInt64(idx));
+    builder.CreateStore(v, ptr);
   };
 
   // ── Typed load/store helpers ──
@@ -620,6 +647,18 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       case OperandKind::StateReg: return {load_reg_typed(op.slot, op.scalar_type), op.scalar_type};
       case OperandKind::Rate:     return {sample_rate_arg, ST::Float};
       case OperandKind::Tick:     return {current_sample_idx, ST::Int};
+      // M6: slot operand. Stored as f64; coerce to declared scalar_type
+      // for int/bool slots (matches the temp/reg coercion convention).
+      case OperandKind::Slot: {
+        llvm::Value * v = load_slot_f64(op.slot);
+        switch (op.scalar_type)
+        {
+          case ST::Float: return {v, ST::Float};
+          case ST::Int:   return {builder.CreateFPToSI(v, i64_ty), ST::Int};
+          case ST::Bool:  return {builder.CreateFCmpONE(v, llvm::ConstantFP::get(f64_ty, 0.0)), ST::Bool};
+        }
+        return {v, ST::Float};
+      }
       case OperandKind::ArrayReg:
       case OperandKind::Param:    return {nullptr, ST::Float};
     }
@@ -943,6 +982,19 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       fv_ld->setAtomic(llvm::AtomicOrdering::Monotonic);
       store_temp_f64(instr.dst, fv_ld);
       temp_types[instr.dst] = ST::Float;
+      continue;
+    }
+
+    // ── WriteSlot: write a computed value to slots[dst] (M6+) ──
+    // Used by slot-mode plans to commit each module instance's outputs
+    // to the shared inter-module slot array. `dst` is the slot index;
+    // `args[0]` is the value to write. No temp is consumed, no result
+    // is produced — pure side effect.
+    if (instr.tag == OpTag::WriteSlot)
+    {
+      auto [v, t] = resolve_typed(instr.args[0]);
+      llvm::Value * v_f64 = coerce(v, t, ST::Float);
+      store_slot_f64(instr.dst, v_f64);
       continue;
     }
 

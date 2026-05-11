@@ -432,6 +432,17 @@ function pushOperand(c: Code, op: NOperand, ctx: EmitCtx): ScalarType {
     case 'tick': {
       c.localGet(L_SIDX); return 'int'
     }
+    case 'slot': {
+      // Slot model — not yet wired through emit_wasm. M5/M8 will add the
+      // shared slot region to wasm_memory_layout and emit a load against
+      // it here. Until then, the WASM backend should never see a 'slot'
+      // operand (the new compile path is gated behind M4 and only the
+      // JIT consumes it initially).
+      throw new Error(
+        `emit_wasm: 'slot' operand (index=${op.index}) not yet supported. ` +
+        `Slot-model plans currently target the JIT path only.`,
+      )
+    }
   }
 }
 

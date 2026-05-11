@@ -9,7 +9,7 @@
 import { type ExprNode } from './expr.js'
 import {
   type Compiled, type Instance,
-  outputNames,
+  outputNames, outputPortType,
   // Note: re-exports below pick up Compiled/Instance + helpers for
   // callers that already import from session.js.
 } from './program_types.js'
@@ -25,6 +25,7 @@ import {
   type PortType, type ScalarKind, type SumTypeMeta,
   Float, Int, Bool, Unit, ArrayType, StructType, SumType,
 } from './term.js'
+import type { PortType as IRPortType, ScalarKind as IRScalarKind } from './ir/nodes.js'
 import { programTypeFromResolved } from './ir/strata.js'
 import type { TypeParamDecl } from './ir/nodes.js'
 
@@ -83,6 +84,31 @@ export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON | AliasTypeDefJSON
 // Session state (shared by patch load/save and MCP server)
 // ─────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────
+// Slot model — additive state for the inter-module slot array.
+// All five fields below start empty and stay empty until the slot-mode
+// compile path (M4+) starts populating them. Until then, the existing
+// inputExprNodes / paramRegistry path remains the source of truth.
+// ─────────────────────────────────────────────────────────────
+
+/** Metadata for one declared output port, derived from its post-strata
+ *  PortType. Captured at allocate time so wire() can typecheck combine
+ *  arguments and look up scalar slot indices without re-walking the
+ *  PortType tree.
+ *
+ *  Uses the post-strata `IRPortType` (from `ir/nodes.ts`) because it is
+ *  derived from a `Compiled`'s already-stratified port declarations.
+ *  After strata, sums/structs/products/units are gone — only scalar,
+ *  alias, and array remain. */
+export interface WirePortMeta {
+  /** "${instance}.${port}[0]" / etc. — one entry per scalar slot. */
+  scalarSlotNames: string[]
+  /** One ScalarKind per slot; length === scalarSlotNames.length. */
+  scalarTypes:     IRScalarKind[]
+  /** The original IR PortType, retained for combine typecheck. */
+  portType:        IRPortType
+}
+
 export interface SessionState {
   bufferLength: number
   dac: import('./runtime/audio.js').DAC | null  // lazy type import to avoid circular dep
@@ -101,6 +127,19 @@ export interface SessionState {
   triggerRegistry: Map<string, Trigger>
   /** Canonical input wiring: key is `${instance}:${input}`, value is the ExprNode for round-trip save. */
   inputExprNodes: Map<string, ExprNode>  // key: `${instance}:${input}`
+
+  // ── Slot model state (populated by M3+; empty in legacy path) ───────────
+  /** "${instance}.${scalarSlotName}" → slot index in the shared slot[] array. */
+  outputSlotRegistry: Map<string, number>
+  /** Param/trigger name → slot index. Same flat slot[] as outputs. */
+  paramSlotRegistry:  Map<string, number>
+  /** Per-output-port metadata captured at allocate time. */
+  outputPortMeta:     Map<string, WirePortMeta>  // key: "${instance}.${port}"
+  /** Next slot index to allocate. Always equals outputSlotRegistry.size + paramSlotRegistry.size. */
+  slotCount:          number
+  /** Input expressions keyed by scalar-slot name "${instance}:${scalarSlotName}".
+   *  Coexists with inputExprNodes during the migration; M8 unifies them. */
+  inputExprs:         Map<string, ExprNode>
   /** FlatRuntime — all audio goes through this. */
   runtime: Runtime
   /** Thin proxy over runtime that matches the old Graph interface for tests and legacy callers. */
@@ -139,6 +178,11 @@ export function makeSession(bufferLength = 512): SessionState {
     paramRegistry: new Map(),
     triggerRegistry: new Map(),
     inputExprNodes: new Map(),
+    outputSlotRegistry: new Map(),
+    paramSlotRegistry:  new Map(),
+    outputPortMeta:     new Map(),
+    slotCount:          0,
+    inputExprs:         new Map(),
     specializationCache: new Map(),
     genericTemplatesResolved: new Map(),
     resolvedRegistry: new Map(),
@@ -158,6 +202,114 @@ export function nextName(session: SessionState, prefix: string): string {
   const count = (session.nameCounters.get(prefix) ?? 0) + 1
   session.nameCounters.set(prefix, count)
   return `${prefix}${count}`
+}
+
+// ─────────────────────────────────────────────────────────────
+// Slot allocation (M2 — additive helpers, no callers yet)
+// ─────────────────────────────────────────────────────────────
+
+/** Expand a post-strata port type to its scalar-slot names + types.
+ *
+ *    scalar  → 1 slot, suffix ""
+ *    alias   → treated as 1 opaque scalar (the wrapped scalar kind comes
+ *              from the alias's underlying type — defaults to 'float')
+ *    array   → product(shape) slots, suffix "[i]" for each linear index;
+ *              element must be scalar (post-strata guarantees this for
+ *              array-of-scalar ports)
+ *
+ *  Uses the IR (post-strata) PortType. Sum/struct/product/unit don't
+ *  appear here because strata lowered them all. */
+export function expandPortToSlots(
+  baseName: string,
+  type: IRPortType,
+): { names: string[]; types: IRScalarKind[] } {
+  switch (type.kind) {
+    case 'scalar':
+      return { names: [baseName], types: [type.scalar] }
+    case 'alias':
+      // Aliases wrap a scalar (e.g. an opaque sum-bundle handle). For
+      // slot allocation purposes, treat as a single float slot. The
+      // alias's actual underlying scalar layout is computed elsewhere
+      // when the slot is read/written; here we only need shape and count.
+      return { names: [baseName], types: ['float'] }
+    case 'array': {
+      // Element is ScalarKind | AliasTypeDef per ir/port_type.ts.
+      const elemKind: IRScalarKind = typeof type.element === 'string'
+        ? type.element
+        : 'float'  // alias element treated as opaque scalar
+      // Shape dims should be concrete numbers post-specialize. If any
+      // dim is still a TypeParamDecl, specialize wasn't run on the
+      // owning program — that's a bug in the caller, not something to
+      // silently accept.
+      let total = 1
+      for (const dim of type.shape) {
+        if (typeof dim !== 'number') {
+          throw new Error(
+            `expandPortToSlots: array port '${baseName}' has unresolved ` +
+            `type-param dimension; ensure specialize ran on the owning program`,
+          )
+        }
+        total *= dim
+      }
+      const names: string[] = []
+      const types: IRScalarKind[] = []
+      for (let i = 0; i < total; i++) {
+        names.push(`${baseName}[${i}]`)
+        types.push(elemKind)
+      }
+      return { names, types }
+    }
+  }
+}
+
+/** Default port type used when a Compiled doesn't carry an explicit
+ *  PortType for an output — happens for unannotated stdlib outputs
+ *  (e.g. `Delay`'s `y`). The pipeline already treats these as scalar
+ *  float at codegen, so do the same here. */
+const DEFAULT_OUTPUT_PORT_TYPE: IRPortType = { kind: 'scalar', scalar: 'float' }
+
+/** Allocate slot indices for every output port of an instance. Records
+ *  slot indices in `outputSlotRegistry` and full PortMeta in
+ *  `outputPortMeta`. Idempotent: returns silently if already allocated.
+ *  When a port lacks an explicit PortType in the post-strata IR, the
+ *  fallback is a single scalar-float slot (matches existing codegen). */
+export function allocateOutputSlots(
+  session: SessionState,
+  instanceName: string,
+  type: Compiled,
+): void {
+  const portNames = outputNames(type)
+  for (let idx = 0; idx < portNames.length; idx++) {
+    const portName = portNames[idx]
+    const portKey = `${instanceName}.${portName}`
+    if (session.outputPortMeta.has(portKey)) continue  // idempotent
+    const portType = outputPortType(type, idx) ?? DEFAULT_OUTPUT_PORT_TYPE
+    const { names, types } = expandPortToSlots(portKey, portType)
+    for (let i = 0; i < names.length; i++) {
+      session.outputSlotRegistry.set(names[i], session.slotCount + i)
+    }
+    session.outputPortMeta.set(portKey, {
+      scalarSlotNames: names,
+      scalarTypes:     types,
+      portType,
+    })
+    session.slotCount += names.length
+  }
+}
+
+/** Allocate a single param/trigger slot owned by the control plane.
+ *  Returns the assigned slot index. Idempotent for a given name (returns
+ *  the existing index if already allocated). */
+export function allocateParamSlot(
+  session: SessionState,
+  name: string,
+): number {
+  const existing = session.paramSlotRegistry.get(name)
+  if (existing !== undefined) return existing
+  const idx = session.slotCount
+  session.paramSlotRegistry.set(name, idx)
+  session.slotCount += 1
+  return idx
 }
 
 // ─────────────────────────────────────────────────────────────

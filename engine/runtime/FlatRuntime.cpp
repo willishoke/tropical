@@ -37,6 +37,18 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
     new_state.register_names = parsed.register_names;
     new_state.array_names    = parsed.array_slot_names;
 
+    // ── Slot model state (M5) ────────────────────────────────────────────
+    // Allocate the slot array sized by the plan's slot_count and seed
+    // from slot_defaults. Empty slot_count → no allocation (legacy plan).
+    new_state.slots.assign(parsed.slot_count, 0.0);
+    new_state.slot_names = parsed.slot_names;
+    for (std::size_t i = 0;
+         i < parsed.slot_defaults.size() && i < new_state.slots.size();
+         ++i)
+    {
+      new_state.slots[i] = parsed.slot_defaults[i];
+    }
+
     // Scalar state registers (type-aware initialization)
     new_state.registers.resize(parsed.state_init.size(), 0);
     for (std::size_t i = 0; i < parsed.state_init.size(); ++i)
@@ -83,6 +95,7 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
     {
       const auto mapping       = compute_register_mapping(old_state, new_state);
       const auto array_mapping = compute_array_mapping(old_state, new_state);
+      const auto slot_mapping  = compute_slot_mapping(old_state, new_state);
       for (const auto & [si, di] : mapping)
         if (si < old_state.registers.size() && di < new_state.registers.size())
           new_state.registers[di] = old_state.registers[si];
@@ -90,6 +103,9 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
         if (si < old_state.array_storage.size() && di < new_state.array_storage.size() &&
             old_state.array_storage[si].size() == new_state.array_storage[di].size())
           new_state.array_storage[di] = old_state.array_storage[si];
+      for (const auto & [si, di] : slot_mapping)
+        if (si < old_state.slots.size() && di < new_state.slots.size())
+          new_state.slots[di] = old_state.slots[si];
     }
 
     states_[inactive] = std::move(new_state);

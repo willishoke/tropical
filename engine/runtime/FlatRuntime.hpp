@@ -47,6 +47,15 @@ struct KernelState
   // Trigger params (need per-frame snapshot)
   std::vector<tropical_expr::ControlParam *> trigger_params;
 
+  // ── Slot model state (M5) ────────────────────────────────────────────────
+  // Inter-module slot array. M5 uses it for control-plane writes only
+  // (via tropical_runtime_set_slot); M6 introduces JIT codegen that
+  // reads from it via 'slot' operands. Slots survive hot-swap by name
+  // so control values set from outside persist; this transfer becomes
+  // unnecessary in M8 once the kernel rewrites slots every sample.
+  std::vector<double>      slots;
+  std::vector<std::string> slot_names;
+
   double sample_rate = 44100.0;
   uint64_t sample_index = 0;
 };
@@ -121,7 +130,8 @@ public:
       state.sample_index,
       state.param_ptrs.data(),
       outputBuffer.data(),
-      buffer_length_);
+      buffer_length_,
+      state.slots.data());          // M6: shared inter-module slot array
 
     state.sample_index += buffer_length_;
 
@@ -181,6 +191,40 @@ public:
     return fade_out_remaining_.load(std::memory_order_acquire) == 0;
   }
 
+  // ── Slot model accessors (M5) ──────────────────────────────────────────────
+  // Lookup a slot index by name — returns the index or UINT32_MAX if no
+  // slot with that name exists in the active plan. Wired by the C API
+  // helper so external controllers can resolve a name once and write
+  // by integer index thereafter.
+  uint32_t slot_index(const std::string & name) const
+  {
+    const uint32_t idx = active_state_.load(std::memory_order_acquire);
+    const KernelState & state = states_[idx];
+    for (uint32_t i = 0; i < state.slot_names.size(); ++i)
+      if (state.slot_names[i] == name) return i;
+    return UINT32_MAX;
+  }
+
+  // Write a slot value. Safe to call from any thread; the audio thread
+  // reads slots via the kernel (M6+) and tolerates one-buffer races on
+  // double writes. Out-of-range indices are no-ops.
+  void set_slot(uint32_t idx, double value)
+  {
+    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+    KernelState & state = states_[state_idx];
+    if (idx < state.slots.size()) state.slots[idx] = value;
+  }
+
+  // Read a slot value. Useful for tests and introspection. Returns 0.0
+  // if the index is out of range.
+  double get_slot(uint32_t idx) const
+  {
+    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+    const KernelState & state = states_[state_idx];
+    if (idx >= state.slots.size()) return 0.0;
+    return state.slots[idx];
+  }
+
 private:
   void wait_for_state_available(uint32_t state_index) const
   {
@@ -230,6 +274,31 @@ private:
             oi < old_state.array_storage.size() &&
             ni < new_state.array_storage.size() &&
             old_state.array_storage[oi].size() == new_state.array_storage[ni].size())
+        {
+          mapping.push_back({oi, ni});
+          break;
+        }
+      }
+    }
+    return mapping;
+  }
+
+  // M5: name-based slot transfer on hot-swap. Control-plane writes via
+  // tropical_runtime_set_slot must persist across recompiles even though
+  // the slot's integer index may change in the new plan. Drops in M8
+  // once the kernel rewrites slots every sample.
+  static std::vector<std::pair<uint32_t, uint32_t>> compute_slot_mapping(
+    const KernelState & old_state,
+    const KernelState & new_state)
+  {
+    std::vector<std::pair<uint32_t, uint32_t>> mapping;
+    for (uint32_t ni = 0; ni < new_state.slot_names.size(); ++ni)
+    {
+      const auto & name = new_state.slot_names[ni];
+      if (name.empty()) continue;
+      for (uint32_t oi = 0; oi < old_state.slot_names.size(); ++oi)
+      {
+        if (old_state.slot_names[oi] == name)
         {
           mapping.push_back({oi, ni});
           break;

@@ -52,6 +52,9 @@ enum class OpTag : uint8_t
   // Stateful param ops (special handling)
   SmoothParam,   // args[0]=Param(ptr), args[1]=StateReg(slot), args[2]=Const(coeff)
   TriggerParam,  // args[0]=Param(ptr)
+  // M6+: write a computed value to slots[dst]. `dst` is the slot index;
+  // `args[0]` is the value to write (scalar). No temp slot consumed.
+  WriteSlot,
 };
 
 enum class OperandKind : uint8_t
@@ -64,6 +67,7 @@ enum class OperandKind : uint8_t
   Param,    // ControlParam pointer (ptr field)
   Rate,     // sample rate (runtime constant)
   Tick,     // sample index (runtime counter)
+  Slot,     // shared inter-module slot (slot field, indexes slots[]) — M6+
 };
 
 struct Operand
@@ -90,6 +94,10 @@ struct Operand
   { Operand o; o.kind = OperandKind::Rate; o.scalar_type = JitScalarType::Float; return o; }
   static Operand make_tick()
   { Operand o; o.kind = OperandKind::Tick; o.scalar_type = JitScalarType::Float; return o; }
+  // M6: slot operand reads from the shared slots[] arg passed to the
+  // kernel. Stored as double, coerced at use site to match scalar_type.
+  static Operand make_slot(uint32_t s, JitScalarType t = JitScalarType::Float)
+  { Operand o; o.kind = OperandKind::Slot; o.scalar_type = t; o.slot = s; return o; }
 };
 
 struct FlatInstr
@@ -131,6 +139,12 @@ struct FlatProgram
   std::vector<GroupInfo>     groups;
 };
 
+// Kernel signature. `slots` (M6+) is the shared inter-module slot array
+// passed by reference for both reads (slot operands) and writes
+// (WriteSlot instructions). Always passed; legacy plans pass an empty
+// vector's data ptr (the kernel just doesn't reference it). The
+// argument is annotated `nocapture noalias` in the IR so GVN /
+// store-to-load forwarding can engage on slot reads (per spike #3).
 using NumericKernelFn = void (*)(
   const int64_t * inputs,
   int64_t * registers,
@@ -141,7 +155,8 @@ using NumericKernelFn = void (*)(
   uint64_t start_sample_index,
   const uint64_t * param_ptrs,
   double * output_buffer,
-  uint64_t buffer_length);
+  uint64_t buffer_length,
+  double * slots);
 
 class KernelObjectCache;
 
