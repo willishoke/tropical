@@ -103,7 +103,7 @@ export interface EmitSlots {
 // Op-tag mappings (verbatim from emit_numeric.ts)
 // ─────────────────────────────────────────────────────────────
 
-const BINARY_TAG: Record<string, string> = {
+export const BINARY_TAG: Record<string, string> = {
   add: 'Add', sub: 'Sub', mul: 'Mul', div: 'Div', mod: 'Mod',
   floorDiv: 'FloorDiv',
   lt: 'Less', lte: 'LessEq', gt: 'Greater', gte: 'GreaterEq',
@@ -114,12 +114,16 @@ const BINARY_TAG: Record<string, string> = {
   ldexp: 'Ldexp',
 }
 
-const UNARY_TAG: Record<string, string> = {
+export const UNARY_TAG: Record<string, string> = {
   neg: 'Neg', abs: 'Abs', sqrt: 'Sqrt',
   floor: 'Floor', ceil: 'Ceil', round: 'Round',
   not: 'Not', bitNot: 'BitNot',
   floatExponent: 'FloatExponent',
   toInt: 'ToInt', toBool: 'ToBool', toFloat: 'ToFloat',
+}
+
+export const TERNARY_TAG: Record<string, string> = {
+  select: 'Select', clamp: 'Clamp',
 }
 
 const CAST_RESULT: Record<string, ScalarType> = {

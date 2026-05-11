@@ -1225,7 +1225,7 @@ function resolveDacSource(expr: ExprNode): { instance: string; output: string } 
 
 function handleWire(args: Record<string, unknown>) {
   return wrap(() => {
-    const setOps = (args.set ?? []) as Array<{ instance: string; input: string | number; expr: ExprNode }>
+    const setOps = (args.set ?? []) as Array<{ instance: string; input: string | number; expr: ExprNode; combine?: string }>
     const removeOps = (args.remove ?? []) as Array<{ instance: string; input: string | number }>
 
     // Process removes first
@@ -1275,8 +1275,20 @@ function handleWire(args: Record<string, unknown>) {
       const resolvedName = inputNames(inst)[inputId] ?? String(inputId)
       validateExpr(s.expr, `${s.instance}.${resolvedName}`)
       const { expr } = adaptInputExpr(s.expr, inputPortType(inst, inputId), s.instance, resolvedName)
-      session.inputExprNodes.set(`${s.instance}:${resolvedName}`, expr)
-      results.push({ instance: s.instance, input: resolvedName, expr })
+      // M9d: fan-in support. If the input already has a wired
+      // expression and the caller provided `combine`, wrap both in
+      // {op:combine, args:[existing, new]}. Without `combine`, behave
+      // as before (replace) for backward compat with single-wire
+      // MCP callers. Future tightening (require combine on duplicate
+      // writes) deferred to M9d-strict.
+      const key = `${s.instance}:${resolvedName}`
+      const existing = session.inputExprNodes.get(key)
+      let toStore: ExprNode = expr
+      if (existing !== undefined && s.combine !== undefined) {
+        toStore = { op: s.combine, args: [existing, expr] } as ExprNode
+      }
+      session.inputExprNodes.set(key, toStore)
+      results.push({ instance: s.instance, input: resolvedName, expr: toStore })
     }
 
     return {

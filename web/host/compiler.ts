@@ -33,6 +33,8 @@ export async function compilePlan(plan: FlatPlan, maxBlockSize = 2048): Promise<
     registerTypes: plan.register_types,
     registerNames: plan.register_names,
     arraySlotNames: plan.array_slot_names,
+    slotNames:    plan.slot_names,
+    slotDefaults: plan.slot_defaults,
   }
 }
 

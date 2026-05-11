@@ -26,6 +26,9 @@ export type LoadedPlan = {
   registerTypes: ('float' | 'int' | 'bool')[]
   registerNames: string[]
   arraySlotNames: string[]
+  /** Slot-model names and seeded defaults. Empty for legacy plans. (M10) */
+  slotNames?:    string[]
+  slotDefaults?: number[]
 }
 
 type Slot = {
@@ -37,6 +40,7 @@ type Slot = {
   registerNames: string[]
   arraySlotNames: string[]
   registerTypes: ('float' | 'int' | 'bool')[]
+  slotNames: string[]
 }
 
 const FADE_SAMPLES = 2048
@@ -64,6 +68,9 @@ export class WasmRuntime {
     // Initialize state_init into registers. Array slots are zeroed (matching
     // the native parser at engine/runtime/NumericProgramParser.hpp:130-139).
     initRegisters(memory, plan.layout.registersOffset, plan.stateInit, plan.registerTypes)
+    // M10: seed inter-module slots from slot_defaults. Mirrors the
+    // native FlatRuntime::load_plan path (FlatRuntime.cpp:43-49).
+    initSlots(memory, plan.layout.slotsOffset, plan.layout.slotCount, plan.slotDefaults)
 
     const newSlot: Slot = {
       instance, memory, processFn,
@@ -72,6 +79,7 @@ export class WasmRuntime {
       registerNames: plan.registerNames,
       arraySlotNames: plan.arraySlotNames,
       registerTypes: plan.registerTypes,
+      slotNames: plan.slotNames ?? [],
     }
 
     // If there's an outgoing slot, transfer matching state.
@@ -79,6 +87,7 @@ export class WasmRuntime {
     if (outgoing) {
       transferRegisters(outgoing, newSlot)
       transferArrays(outgoing, newSlot)
+      transferSlots(outgoing, newSlot)
     }
 
     const inactive = 1 - this.activeIdx
@@ -179,6 +188,34 @@ function transferRegisters(from: Slot, to: Slot): void {
     if (from.registerTypes[fromIdx] !== to.registerTypes[toIdx]) continue
     const val = dvFrom.getBigInt64(from.layout.registersOffset + fromIdx * 8, true)
     dvTo.setBigInt64(to.layout.registersOffset + toIdx * 8, val, true)
+  }
+}
+
+function initSlots(
+  memory: WebAssembly.Memory,
+  slotsOffset: number,
+  slotCount: number,
+  slotDefaults: number[] | undefined,
+): void {
+  if (slotCount === 0) return
+  const view = new Float64Array(memory.buffer, slotsOffset, slotCount)
+  if (slotDefaults === undefined) return
+  for (let i = 0; i < Math.min(slotDefaults.length, slotCount); i++) {
+    view[i] = slotDefaults[i]!
+  }
+}
+
+function transferSlots(from: Slot, to: Slot): void {
+  // Copy slot values by name match. Mirrors FlatRuntime.hpp:295-305.
+  if (to.slotNames.length === 0 || from.slotNames.length === 0) return
+  const dvFrom = new Float64Array(from.memory.buffer)
+  const dvTo = new Float64Array(to.memory.buffer)
+  for (let toIdx = 0; toIdx < to.slotNames.length; toIdx++) {
+    const name = to.slotNames[toIdx]
+    const fromIdx = from.slotNames.indexOf(name!)
+    if (fromIdx < 0) continue
+    dvTo[to.layout.slotsOffset / 8 + toIdx] =
+      dvFrom[from.layout.slotsOffset / 8 + fromIdx]!
   }
 }
 
