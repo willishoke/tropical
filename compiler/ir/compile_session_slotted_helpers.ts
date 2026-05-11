@@ -35,6 +35,22 @@ import { BINARY_TAG, UNARY_TAG, TERNARY_TAG } from './emit_resolved.js'
 import { compileResolved } from './compile_resolved.js'
 import { topologicalSort } from '../compiler.js'
 
+/** Marker error thrown by the per-instance compile path when the
+ *  session's current shape isn't yet supported (arrays, sum types,
+ *  nested instance calls in input expressions) or when an instance
+ *  was created outside the normal allocate-slots flow. The dispatcher
+ *  in `compile_session_slotted.ts` catches this and falls back to
+ *  the metadata-only legacy path — audio is preserved either way.
+ *
+ *  Using a marker class instead of message-text matching keeps the
+ *  fallback robust to error-message refactors. */
+export class SlotShapeUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'SlotShapeUnsupportedError'
+  }
+}
+
 /** Per-instance preamble emitter. Allocates fresh temps in the unified
  *  register space and collects NInstrs that need to run before the
  *  consuming instance's body. Used by inputExprToOperand to compile
@@ -66,7 +82,7 @@ function translateNode(
     return { kind: 'const', val: expr ? 1 : 0, scalar_type: scalarType }
   }
   if (Array.isArray(expr)) {
-    throw new Error(
+    throw new SlotShapeUnsupportedError(
       `compileSessionSlotted: array-shaped input expression at '${context}' ` +
       `not yet supported. Arrays land in M9d.`,
     )
@@ -85,7 +101,7 @@ function translateNode(
     const key = `${obj.instance}.${obj.output}`
     const slotIdx = session.outputSlotRegistry.get(key)
     if (slotIdx === undefined) {
-      throw new Error(
+      throw new SlotShapeUnsupportedError(
         `compileSessionSlotted: wire src '${key}' at '${context}' has no allocated output slot.`,
       )
     }
@@ -94,7 +110,7 @@ function translateNode(
   if ((op === 'param' || op === 'paramExpr') && typeof obj.name === 'string') {
     const slotIdx = session.paramSlotRegistry.get(obj.name)
     if (slotIdx === undefined) {
-      throw new Error(
+      throw new SlotShapeUnsupportedError(
         `compileSessionSlotted: param '${obj.name}' at '${context}' has no allocated slot.`,
       )
     }
@@ -103,7 +119,7 @@ function translateNode(
   if ((op === 'trigger' || op === 'triggerParamExpr') && typeof obj.name === 'string') {
     const slotIdx = session.paramSlotRegistry.get(obj.name)
     if (slotIdx === undefined) {
-      throw new Error(
+      throw new SlotShapeUnsupportedError(
         `compileSessionSlotted: trigger '${obj.name}' at '${context}' has no allocated slot.`,
       )
     }
@@ -180,7 +196,7 @@ function translateNode(
   }
 
   // ── unknown ──
-  throw new Error(
+  throw new SlotShapeUnsupportedError(
     `compileSessionSlotted: input expression at '${context}' uses op '${op}' which is not ` +
     `yet supported. Nested instance calls (e.g. Sin(x: ...)), array ops, and fan-in (combine) ` +
     `land in M9d.`,
@@ -249,7 +265,7 @@ export function computeInstanceTopoOrder(session: SessionState): string[] {
   }
   const result = topologicalSort(deps)
   if (!result.complete) {
-    throw new Error(
+    throw new SlotShapeUnsupportedError(
       `compileSessionSlotted: cycle detected in session dependency graph. ` +
       `(Expected: strata's traceCycles should have inserted delay nodes. ` +
       `Inspect inputExprNodes for unwanted self-refs.)`,
@@ -332,7 +348,7 @@ function inputExprToOperand(
       const key = `${obj.instance}.${obj.output}`
       const slotIdx = session.outputSlotRegistry.get(key)
       if (slotIdx === undefined) {
-        throw new Error(
+        throw new SlotShapeUnsupportedError(
           `compileSessionSlotted: wire src '${key}' for '${instanceName}.${portName}' ` +
           `has no allocated output slot. (Did add_instance populate outputSlotRegistry?)`,
         )
@@ -347,7 +363,7 @@ function inputExprToOperand(
     if ((obj.op === 'param' || obj.op === 'paramExpr') && typeof obj.name === 'string') {
       const slotIdx = session.paramSlotRegistry.get(obj.name)
       if (slotIdx === undefined) {
-        throw new Error(
+        throw new SlotShapeUnsupportedError(
           `compileSessionSlotted: param '${obj.name}' wired to '${instanceName}.${portName}' ` +
           `has no allocated slot. (Did applyParamSpecs register it?)`,
         )
@@ -357,7 +373,7 @@ function inputExprToOperand(
     if ((obj.op === 'trigger' || obj.op === 'triggerParamExpr') && typeof obj.name === 'string') {
       const slotIdx = session.paramSlotRegistry.get(obj.name)
       if (slotIdx === undefined) {
-        throw new Error(
+        throw new SlotShapeUnsupportedError(
           `compileSessionSlotted: trigger '${obj.name}' wired to '${instanceName}.${portName}' ` +
           `has no allocated slot. (Did applyParamSpecs register it?)`,
         )
@@ -431,13 +447,14 @@ export function remapInstancePlan(
         // operand surviving means the per-instance plan's body
         // referenced a paramDecl at the type level (e.g., a stdlib
         // type that uses an inline {op:'param'} ExprNode internally).
-        // We don't yet support this — most stdlib types don't do it.
-        throw new Error(
+        // Auto-fall-back to the legacy path — type-level params are
+        // a follow-up scope item.
+        throw new SlotShapeUnsupportedError(
           `compileSessionSlotted: legacy 'param' operand encountered ` +
           `in '${ctx.instanceName}'. Session-level params should resolve ` +
           `to slot operands before this point. This usually means the ` +
           `program type's body has an internal {op:'param'} ExprNode ` +
-          `— this case is not yet handled in M9b.`,
+          `— this case is not yet handled.`,
         )
     }
   }
@@ -518,7 +535,7 @@ export function emitDacStitch(
     const key = `${go.instance}.${go.output}`
     const slotIdx = session.outputSlotRegistry.get(key)
     if (slotIdx === undefined) {
-      throw new Error(
+      throw new SlotShapeUnsupportedError(
         `compileSessionSlotted: dac wire '${key}' has no allocated output slot. ` +
         `(Did add_instance populate outputSlotRegistry for the source instance?)`,
       )
