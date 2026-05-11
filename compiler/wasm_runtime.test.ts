@@ -43,6 +43,8 @@ async function compile(plan: FlatPlan, maxBlockSize: number): Promise<LoadedPlan
     registerTypes: plan.register_types,
     registerNames: plan.register_names,
     arraySlotNames: plan.array_slot_names,
+    slotNames:    plan.slot_names,
+    slotDefaults: plan.slot_defaults,
   }
 }
 

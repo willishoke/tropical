@@ -300,7 +300,10 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   const paramIndex = new Map<string, number>()
   paramPtrs.forEach((p, i) => paramIndex.set(p, i))
 
-  const layout = computeLayout({ plan: flatProgram, inputCount, paramPtrs, maxBlockSize })
+  const layout = computeLayout({
+    plan: flatProgram, inputCount, paramPtrs, maxBlockSize,
+    slotCount: plan.slot_count ?? 0,
+  })
   const ctx: EmitCtx = { layout, paramIndex, sampleRate }
 
   const c = new Code()
@@ -384,11 +387,23 @@ type EmitCtx = {
 function emitInstruction(c: Code, instr: NInstr, ctx: EmitCtx): void {
   if (instr.tag === 'SmoothParam') return emitSmoothParam(c, instr, ctx)
   if (instr.tag === 'TriggerParam') return emitTriggerParam(c, instr, ctx)
+  if (instr.tag === 'WriteSlot') return emitWriteSlot(c, instr, ctx)
   if (instr.tag === 'Pack') return emitPack(c, instr, ctx)
   if (instr.tag === 'Index') return emitIndex(c, instr, ctx)
   if (instr.tag === 'SetElement') return emitSetElement(c, instr, ctx)
   if (instr.loop_count > 1) return emitElementwise(c, instr, ctx)
   return emitScalar(c, instr, ctx)
+}
+
+// ── WriteSlot: publish a temp value to slots[dst] (M10) ──
+// `dst` is the slot index (not a temp); `args[0]` is the value. The
+// instruction produces no temp result — pure side effect. Coerces to
+// float since slots are stored as f64 (matching the JIT).
+function emitWriteSlot(c: Code, instr: NInstr, ctx: EmitCtx): void {
+  const off = ctx.layout.slotsOffset + instr.dst * 8
+  c.i32c(0)                                // memory base for store
+  pushAs(c, instr.args[0]!, 'float', ctx)  // value
+  c.f64Store(off)
 }
 
 // ── Operand emitter: pushes a value in its native WASM type, returns the ScalarType ──
@@ -433,15 +448,12 @@ function pushOperand(c: Code, op: NOperand, ctx: EmitCtx): ScalarType {
       c.localGet(L_SIDX); return 'int'
     }
     case 'slot': {
-      // Slot model — not yet wired through emit_wasm. M5/M8 will add the
-      // shared slot region to wasm_memory_layout and emit a load against
-      // it here. Until then, the WASM backend should never see a 'slot'
-      // operand (the new compile path is gated behind M4 and only the
-      // JIT consumes it initially).
-      throw new Error(
-        `emit_wasm: 'slot' operand (index=${op.index}) not yet supported. ` +
-        `Slot-model plans currently target the JIT path only.`,
-      )
+      // M10: inter-module slot read. Slots are stored as f64 in the
+      // dedicated `slotsOffset` region (mirrors the native engine —
+      // see store_slot_f64 in OrcJitEngine.cpp). Result is always
+      // float; callers `coerce` to int/bool as needed.
+      c.i32c(0); c.f64Load(ctx.layout.slotsOffset + op.index * 8)
+      return 'float'
     }
   }
 }
