@@ -27,6 +27,7 @@ import {
   inputPortTypes, outputPortTypes, registerPortTypes,
   inputPortType, outputPortType, registerPortType,
   rawInputDefaults,
+  allocateOutputSlots,
 } from '../compiler/session.js'
 import {
   saveProgramFromSession, loadProgramAsType, mergeProgramIntoSession,
@@ -596,7 +597,7 @@ const TOOLS = [
   },
   {
     name: 'wire',
-    description: 'Set and/or remove input wiring in a single recompile. Use `set` to wire inputs (each is {instance, input, expr}), `remove` to disconnect (each is {instance, input}). Audio output: use `instance: "dac", input: "out"` to wire to the DAC boundary leaf — `expr` must be a ref-shaped node (e.g. {op:"ref",instance,output}). Multiple wires to dac.out sum into the mono output bus. Removing a dac wire (`remove: [{instance:"dac",input:"out"}]`) clears all dac wires at once.',
+    description: 'Set and/or remove input wiring in a single recompile. Use `set` to wire inputs (each is {instance, input, expr, [combine]}), `remove` to disconnect (each is {instance, input}). Audio output: use `instance: "dac", input: "out"` to wire to the DAC boundary leaf — `expr` must be a ref-shaped node (e.g. {op:"ref",instance,output}). Multiple wires to dac.out sum into the mono output bus. Removing a dac wire (`remove: [{instance:"dac",input:"out"}]`) clears all dac wires at once. The optional per-set `combine` field declares how a second wire to the same input combines with the first (slot model, M3+): named built-in like "add", "or", "max", or a program name. Currently stored but not yet enforced — wire(set:[...]) still replaces a prior expression.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -608,6 +609,7 @@ const TOOLS = [
               instance: { type: 'string' },
               input:    { description: 'Input port name or index' },
               expr:     { description: 'ExprNode: number, bool, array, or {op, ...} object' },
+              combine:  { type: 'string', description: 'Optional combine op for fan-in (e.g. "add", "or", "max", or a program name). Required when wiring a second source to the same input. Currently stored but not enforced; M4 wires it into the slot-mode compile path.' },
             },
             required: ['instance', 'input', 'expr'],
           },
@@ -766,6 +768,10 @@ function handleAddInstance(
       inst.gateInput = gateInput
     }
     session.instanceRegistry.set(instanceName, inst)
+    // Slot model (M3, additive): populate the output slot registry
+    // alongside the legacy instanceRegistry. Nothing consumes these
+    // yet; M4 wires them into the new compile path.
+    allocateOutputSlots(session, instanceName, type)
     return instanceSummary(instanceName)
   })
 }
@@ -807,6 +813,7 @@ function handleReplicate(
       const { type, typeArgs: resolved } = resolveProgramTypeOrFail(programName, typeArgs, 'program')
       const inst = instantiate(type, name, { baseTypeName: programName, typeArgs: resolved })
       session.instanceRegistry.set(name, inst)
+      allocateOutputSlots(session, name, type)
       created.push(instanceSummary(name))
     }
     return { created }

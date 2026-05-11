@@ -9,7 +9,7 @@
 import type { ExprNode } from './expr.js'
 import { validateExpr } from './expr.js'
 import type { TypeDefJSON, SessionState } from './session.js'
-import { resolveProgramType } from './session.js'
+import { resolveProgramType, allocateParamSlot } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param, Trigger } from './runtime/param.js'
 import {
@@ -229,6 +229,10 @@ function applyParamSpecs(session: SessionState, specs: ParamSpec[]): void {
         session.paramRegistry.set(p.name, new Param(p.value ?? 0.0, p.time_const ?? 0.005))
       }
     }
+    // Slot model (M3, additive): allocate a slot for every param/trigger
+    // alongside the legacy registries. Idempotent — safe to call on
+    // every param spec, even if already registered.
+    allocateParamSlot(session, p.name)
   }
 }
 
@@ -327,6 +331,13 @@ export function loadProgramAsSession(
   session.typeAliasRegistry.clear()
   session.sumTypeRegistry.clear()
   session.structTypeRegistry.clear()
+  // Slot model (M3): clear slot registries on session load too, otherwise
+  // slot indices accumulate across loads and collide with the new instances.
+  session.outputSlotRegistry.clear()
+  session.paramSlotRegistry.clear()
+  session.outputPortMeta.clear()
+  session.inputExprs.clear()
+  session.slotCount = 0
   // Note: typeRegistry, genericTemplatesResolved, resolvedRegistry, and
   // specializationCache are NOT cleared — they hold the stdlib + any
   // session-defined types that the loaded program may instantiate.

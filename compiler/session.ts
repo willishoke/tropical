@@ -262,10 +262,17 @@ export function expandPortToSlots(
   }
 }
 
+/** Default port type used when a Compiled doesn't carry an explicit
+ *  PortType for an output — happens for unannotated stdlib outputs
+ *  (e.g. `Delay`'s `y`). The pipeline already treats these as scalar
+ *  float at codegen, so do the same here. */
+const DEFAULT_OUTPUT_PORT_TYPE: IRPortType = { kind: 'scalar', scalar: 'float' }
+
 /** Allocate slot indices for every output port of an instance. Records
  *  slot indices in `outputSlotRegistry` and full PortMeta in
  *  `outputPortMeta`. Idempotent: returns silently if already allocated.
- *  Not yet wired into add_instance — M3 will call this. */
+ *  When a port lacks an explicit PortType in the post-strata IR, the
+ *  fallback is a single scalar-float slot (matches existing codegen). */
 export function allocateOutputSlots(
   session: SessionState,
   instanceName: string,
@@ -276,13 +283,7 @@ export function allocateOutputSlots(
     const portName = portNames[idx]
     const portKey = `${instanceName}.${portName}`
     if (session.outputPortMeta.has(portKey)) continue  // idempotent
-    const portType = outputPortType(type, idx)
-    if (portType === undefined) {
-      throw new Error(
-        `allocateOutputSlots: type '${type.prog.name}' has no recorded ` +
-        `PortType for output '${portName}' (index ${idx})`,
-      )
-    }
+    const portType = outputPortType(type, idx) ?? DEFAULT_OUTPUT_PORT_TYPE
     const { names, types } = expandPortToSlots(portKey, portType)
     for (let i = 0; i < names.length; i++) {
       session.outputSlotRegistry.set(names[i], session.slotCount + i)

@@ -10,7 +10,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   makeSession, allocateOutputSlots, allocateParamSlot, expandPortToSlots,
 } from './session.ts'
-import { loadStdlib } from './program.ts'
+import { loadStdlib, loadProgramAsSession } from './program.ts'
 import { Float, Int, Bool } from './ir/port_type.ts'
 import { ArrayType } from './ir/port_type.ts'
 
@@ -116,5 +116,86 @@ describe('session slot allocation', () => {
     expect(s.inputExprNodes.size).toBe(0)
     expect(s.paramRegistry.size).toBe(0)
     expect(s.triggerRegistry.size).toBe(0)
+  })
+
+  test('output ports without explicit PortType fall back to one scalar slot', () => {
+    // Some stdlib outputs have no explicit PortType in the post-strata IR
+    // (e.g. unannotated outputs from Delay's specialized form).
+    // allocateOutputSlots must fall back to a single scalar-float slot
+    // rather than throwing. The wire_dac.test.ts "generic stdlib types"
+    // case exercises this path end-to-end via the MCP add_instance handler;
+    // this test directly synthesizes a Compiled with one undefined output
+    // PortType to pin the fallback behavior here.
+    const s = makeSession()
+    loadStdlib(s)
+    // Construct a Compiled-shaped object with a single output whose port
+    // type is undefined. We borrow the fields off OnePole and overwrite
+    // the output decl's `type` to undefined.
+    const onePole = s.typeRegistry.get('OnePole')!
+    const fakePortless = {
+      ...onePole,
+      prog: {
+        ...onePole.prog,
+        ports: {
+          ...onePole.prog.ports,
+          outputs: [{ ...onePole.prog.ports.outputs[0], type: undefined }],
+        },
+      },
+      slotsCache: undefined,
+    }
+    allocateOutputSlots(s, 'fp1', fakePortless as any)
+    expect(s.outputSlotRegistry.get(`fp1.${onePole.prog.ports.outputs[0].name}`)).toBe(0)
+    expect(s.slotCount).toBe(1)
+  })
+})
+
+describe('M3: applyParamSpecs allocates param slots transitively', () => {
+  test('loadProgramAsSession with declared params populates paramSlotRegistry', () => {
+    const s = makeSession()
+    loadStdlib(s)
+    // Minimal program declaring two top-level control params: one smoothed,
+    // one trigger. The body is a paramDecl form — applyParamSpecs sees the
+    // params via mergeParamSources(prog, topLevel) and registers them.
+    const prog = {
+      name: 'TestPatch',
+      ports: { inputs: [], outputs: [] },
+      body: {
+        op: 'block',
+        decls: [
+          { op: 'paramDecl', name: 'cutoff', type: 'param',   value: 1000, time_const: 0.005 },
+          { op: 'paramDecl', name: 'fire',   type: 'trigger' },
+        ],
+        assigns: [],
+      },
+    }
+    const topLevel = {}
+    loadProgramAsSession(prog as any, topLevel as any, s)
+    // Both legacy registries populated
+    expect(s.paramRegistry.has('cutoff')).toBe(true)
+    expect(s.triggerRegistry.has('fire')).toBe(true)
+    // ALSO populated by the slot model (M3 wire-up via allocateParamSlot)
+    expect(s.paramSlotRegistry.get('cutoff')).toBeDefined()
+    expect(s.paramSlotRegistry.get('fire')).toBeDefined()
+    expect(s.paramSlotRegistry.get('cutoff')).not.toBe(s.paramSlotRegistry.get('fire'))
+  })
+
+  test('loadProgramAsSession resets slot registries between loads', () => {
+    const s = makeSession()
+    loadStdlib(s)
+    const onePole = s.typeRegistry.get('OnePole')!
+    allocateOutputSlots(s, 'lp1', onePole)            // slotCount = 1
+    allocateParamSlot(s, 'cutoff')                     // slotCount = 2
+    expect(s.slotCount).toBe(2)
+    // Loading any program should reset the slot state cleanly.
+    loadProgramAsSession(
+      { name: 'Empty', ports: { inputs: [], outputs: [] }, body: { op: 'block', decls: [], assigns: [] } } as any,
+      {} as any,
+      s,
+    )
+    expect(s.slotCount).toBe(0)
+    expect(s.outputSlotRegistry.size).toBe(0)
+    expect(s.paramSlotRegistry.size).toBe(0)
+    expect(s.outputPortMeta.size).toBe(0)
+    expect(s.inputExprs.size).toBe(0)
   })
 })
