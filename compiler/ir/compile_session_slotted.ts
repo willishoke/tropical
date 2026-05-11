@@ -130,8 +130,9 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
       outputScalarTypes: outPortTypes,
     }
 
-    const { body, writeSlots } = remapInstancePlan(plan, ctx, session)
-    allInstructions.push(...body, ...writeSlots)
+    const { preamble, body, writeSlots, tempsConsumed } = remapInstancePlan(plan, ctx, session)
+    // Order: preamble (compute input expressions) → body → writeSlots (publish outputs)
+    allInstructions.push(...preamble, ...body, ...writeSlots)
 
     // Accumulate the per-instance state contributions into the unified plan
     for (const n of plan.register_names) allRegisterNames.push(`${instName}.${n}`)
@@ -145,7 +146,7 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
       allRegisterTargets.push(t + regOffset)
     }
 
-    regOffset += plan.register_count
+    regOffset += plan.register_count + tempsConsumed
     stateRegOffset += plan.state_init.length
     arraySlotOffset += plan.array_slot_count
   }

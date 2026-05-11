@@ -110,21 +110,22 @@ describe('M9a: per-instance slot-mode equivalence', () => {
   })
 })
 
-describe('M9a: unsupported shapes throw clear errors', () => {
-  test('arbitrary input expression (sin of a ref) is deferred to M9c', () => {
+describe('M9a: roadmap sanity', () => {
+  test('nested instance call in input expression (Sin(x: ...)) still throws (M9d)', () => {
+    // Sin is a stdlib type — wiring `Sin(x: ref)` into an input is a
+    // nested instance call that M9d would handle. M9c covers arithmetic
+    // / comparison / unary / ternary; nested instance calls are a
+    // separate, harder case.
     const s = makeSession()
     loadStdlib(s)
-    const sinOsc  = s.typeRegistry.get('SinOsc')!
     const onePole = s.typeRegistry.get('OnePole')!
-    s.instanceRegistry.set('osc', instantiate(sinOsc, 'osc'))
-    s.instanceRegistry.set('lp',  instantiate(onePole, 'lp'))
-    allocateOutputSlots(s, 'osc', sinOsc)
-    allocateOutputSlots(s, 'lp',  onePole)
-    s.inputExprNodes.set('osc:freq', 220)
-    s.inputExprNodes.set('lp:input', { op: 'mul', args: [{ op: 'ref', instance: 'osc', output: 'sine' }, 0.5] })
+    s.instanceRegistry.set('lp', instantiate(onePole, 'lp'))
+    allocateOutputSlots(s, 'lp', onePole)
+    // {op:'call', callee:..., args:...} is the nested-call shape;
+    // not in BINARY/UNARY/TERNARY tag tables.
+    s.inputExprNodes.set('lp:input', { op: 'call', callee: 'Sin', args: { x: 1.0 } })
     s.inputExprNodes.set('lp:g', 0.1)
     s.graphOutputs.push({ instance: 'lp', output: 'out' })
-
-    expect(() => compileSessionSlotted(s)).toThrow(/M9c|arbitrary input expression/i)
+    expect(() => compileSessionSlotted(s)).toThrow(/M9d|nested instance|not.*supported/i)
   })
 })

@@ -31,8 +31,173 @@ import type { FlatPlan } from '../flat_plan.js'
 import type {
   NOperand, NInstr, ScalarType,
 } from './emit_resolved.js'
+import { BINARY_TAG, UNARY_TAG, TERNARY_TAG } from './emit_resolved.js'
 import { compileResolved } from './compile_resolved.js'
 import { topologicalSort } from '../compiler.js'
+
+/** Per-instance preamble emitter. Allocates fresh temps in the unified
+ *  register space and collects NInstrs that need to run before the
+ *  consuming instance's body. Used by inputExprToOperand to compile
+ *  arbitrary input expressions (sin, mul, etc.) into preamble
+ *  instructions whose final temp value flows into the instance via a
+ *  `reg` operand. (M9c) */
+export interface PreambleEmitter {
+  instrs: NInstr[]
+  allocTemp(): number
+}
+
+/** Translate an arbitrary ExprNode into NInstrs emitted to the
+ *  preamble, returning the operand that holds the result. M9c-supported
+ *  ops: refs, params/triggers, literals, all entries in BINARY_TAG /
+ *  UNARY_TAG / TERNARY_TAG. Anything else throws with a pointer to the
+ *  appropriate follow-on milestone. */
+function translateNode(
+  expr: ExprNode,
+  scalarType: ScalarType,
+  session: SessionState,
+  emitter: PreambleEmitter,
+  context: string,  // for error messages: "${instance}.${port}"
+): NOperand {
+  // ── leaves ──
+  if (typeof expr === 'number') {
+    return { kind: 'const', val: expr, scalar_type: scalarType }
+  }
+  if (typeof expr === 'boolean') {
+    return { kind: 'const', val: expr ? 1 : 0, scalar_type: scalarType }
+  }
+  if (Array.isArray(expr)) {
+    throw new Error(
+      `compileSessionSlotted: array-shaped input expression at '${context}' ` +
+      `not yet supported. Arrays land in M9d.`,
+    )
+  }
+  if (typeof expr !== 'object' || expr === null) {
+    throw new Error(
+      `compileSessionSlotted: unrecognized input expression at '${context}': ${typeof expr}`,
+    )
+  }
+
+  const obj = expr as Record<string, unknown>
+  const op = obj.op
+
+  // ── refs and params (leaves) ──
+  if (op === 'ref' && typeof obj.instance === 'string' && typeof obj.output === 'string') {
+    const key = `${obj.instance}.${obj.output}`
+    const slotIdx = session.outputSlotRegistry.get(key)
+    if (slotIdx === undefined) {
+      throw new Error(
+        `compileSessionSlotted: wire src '${key}' at '${context}' has no allocated output slot.`,
+      )
+    }
+    return { kind: 'slot', index: slotIdx, scalar_type: scalarType }
+  }
+  if ((op === 'param' || op === 'paramExpr') && typeof obj.name === 'string') {
+    const slotIdx = session.paramSlotRegistry.get(obj.name)
+    if (slotIdx === undefined) {
+      throw new Error(
+        `compileSessionSlotted: param '${obj.name}' at '${context}' has no allocated slot.`,
+      )
+    }
+    return { kind: 'slot', index: slotIdx, scalar_type: scalarType }
+  }
+  if ((op === 'trigger' || op === 'triggerParamExpr') && typeof obj.name === 'string') {
+    const slotIdx = session.paramSlotRegistry.get(obj.name)
+    if (slotIdx === undefined) {
+      throw new Error(
+        `compileSessionSlotted: trigger '${obj.name}' at '${context}' has no allocated slot.`,
+      )
+    }
+    return { kind: 'slot', index: slotIdx, scalar_type: scalarType }
+  }
+
+  // ── builtins ──
+  if (op === 'sampleRate')  return { kind: 'rate',  scalar_type: scalarType }
+  if (op === 'sampleIndex') return { kind: 'tick',  scalar_type: scalarType }
+
+  // ── arithmetic / logical / comparison ──
+  if (typeof op === 'string' && BINARY_TAG[op]) {
+    const args = (obj.args as ExprNode[])
+    if (args.length !== 2) {
+      throw new Error(
+        `compileSessionSlotted: binary op '${op}' at '${context}' needs 2 args, got ${args.length}.`,
+      )
+    }
+    // Result type for comparisons is bool; for arithmetic, promote inputs.
+    const tag = BINARY_TAG[op]
+    const resultType: ScalarType = isComparisonTag(tag) ? 'bool'
+      : isBitwiseTag(tag) ? 'int'
+      : scalarType
+    const argType: ScalarType = isComparisonTag(tag) ? 'float'
+      : isBitwiseTag(tag) ? 'int'
+      : isLogicalTag(tag) ? 'bool'
+      : resultType
+    const a = translateNode(args[0], argType, session, emitter, context)
+    const b = translateNode(args[1], argType, session, emitter, context)
+    const dst = emitter.allocTemp()
+    emitter.instrs.push({
+      tag, dst, args: [a, b], loop_count: 1, strides: [], result_type: resultType,
+    })
+    return { kind: 'reg', slot: dst, scalar_type: resultType }
+  }
+  if (typeof op === 'string' && UNARY_TAG[op]) {
+    const args = (obj.args as ExprNode[])
+    if (args.length !== 1) {
+      throw new Error(
+        `compileSessionSlotted: unary op '${op}' at '${context}' needs 1 arg, got ${args.length}.`,
+      )
+    }
+    const tag = UNARY_TAG[op]
+    const resultType: ScalarType =
+      tag === 'ToInt' ? 'int' : tag === 'ToBool' ? 'bool' : tag === 'ToFloat' ? 'float'
+      : tag === 'Not' ? 'bool'
+      : tag === 'BitNot' ? 'int'
+      : scalarType
+    const a = translateNode(args[0], resultType, session, emitter, context)
+    const dst = emitter.allocTemp()
+    emitter.instrs.push({
+      tag, dst, args: [a], loop_count: 1, strides: [], result_type: resultType,
+    })
+    return { kind: 'reg', slot: dst, scalar_type: resultType }
+  }
+  if (typeof op === 'string' && TERNARY_TAG[op]) {
+    const args = (obj.args as ExprNode[])
+    if (args.length !== 3) {
+      throw new Error(
+        `compileSessionSlotted: ternary op '${op}' at '${context}' needs 3 args, got ${args.length}.`,
+      )
+    }
+    const tag = TERNARY_TAG[op]
+    // select: args = [cond:bool, then:T, else:T]; clamp: args = [val, lo, hi] all same type
+    const condType: ScalarType = tag === 'Select' ? 'bool' : scalarType
+    const a = translateNode(args[0], condType, session, emitter, context)
+    const b = translateNode(args[1], scalarType, session, emitter, context)
+    const c = translateNode(args[2], scalarType, session, emitter, context)
+    const dst = emitter.allocTemp()
+    emitter.instrs.push({
+      tag, dst, args: [a, b, c], loop_count: 1, strides: [], result_type: scalarType,
+    })
+    return { kind: 'reg', slot: dst, scalar_type: scalarType }
+  }
+
+  // ── unknown ──
+  throw new Error(
+    `compileSessionSlotted: input expression at '${context}' uses op '${op}' which is not ` +
+    `yet supported. Nested instance calls (e.g. Sin(x: ...)), array ops, and fan-in (combine) ` +
+    `land in M9d.`,
+  )
+}
+
+function isComparisonTag(tag: string): boolean {
+  return tag === 'Less' || tag === 'LessEq' || tag === 'Greater' || tag === 'GreaterEq'
+    || tag === 'Equal' || tag === 'NotEqual'
+}
+function isBitwiseTag(tag: string): boolean {
+  return tag === 'BitAnd' || tag === 'BitOr' || tag === 'BitXor'
+    || tag === 'LShift' || tag === 'RShift'
+}
+function isLogicalTag(tag: string): boolean {
+  return tag === 'And' || tag === 'Or'
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Topological order from session.inputExprNodes
@@ -133,8 +298,10 @@ export interface RemapContext {
 }
 
 /** Translate a single ExprNode-wired input into a concrete operand for
- *  the slot-mode plan. M9a scope: only literal constants and pure ref
- *  nodes. Anything else throws with a clear roadmap pointer. */
+ *  the slot-mode plan. Handles the simple leaf cases (constants, refs,
+ *  params/triggers) inline; delegates arbitrary expressions to
+ *  `translateNode`, which emits preamble instructions and returns a
+ *  `reg` operand pointing at the result temp. */
 function inputExprToOperand(
   expr: ExprNode | undefined,
   defaultVal: number | boolean | undefined,
@@ -142,6 +309,7 @@ function inputExprToOperand(
   session: SessionState,
   instanceName: string,
   portName: string,
+  emitter: PreambleEmitter,
 ): NOperand {
   // Unwired → default value as a const
   if (expr === undefined) {
@@ -200,27 +368,41 @@ function inputExprToOperand(
       return { kind: 'slot', index: slotIdx, scalar_type: scalarType }
     }
   }
-  // Everything else: out of current scope
-  throw new Error(
-    `compileSessionSlotted: input expression for '${instanceName}.${portName}' ` +
-    `is not a constant, ref, or param/trigger ref. Arbitrary input expressions ` +
-    `ship in M9c; fan-in (combine ops) in M9d. ` +
-    `Got expr op: '${(expr as { op?: unknown })?.op ?? typeof expr}'.`,
-  )
+  // M9c: arbitrary expressions — emit preamble instructions, return a
+  // reg operand pointing at the result temp. The caller is responsible
+  // for stitching `emitter.instrs` before the consuming instance's body.
+  return translateNode(expr, scalarType, session, emitter, `${instanceName}.${portName}`)
 }
 
 /** Apply per-instance operand and slot-index remapping. Returns a fresh
  *  set of instructions ready to merge into the unified instruction
- *  stream. Also returns the per-output Write Slot instructions to
- *  append after the body. */
+ *  stream:
+ *  - `preamble`: instructions emitted to compute arbitrary input
+ *    expressions (M9c). These go BEFORE the instance's body in the
+ *    unified stream.
+ *  - `body`: the instance's body with operands remapped.
+ *  - `writeSlots`: WriteSlot instructions per output port, AFTER the body.
+ *  Also returns `tempsConsumed` — the number of temps allocated for
+ *  preamble computations, which the caller adds to its running offset. */
 export function remapInstancePlan(
   plan: FlatPlan,
   ctx: RemapContext,
   session: SessionState,
 ): {
-  body: NInstr[]
-  writeSlots: NInstr[]
+  preamble:      NInstr[]
+  body:          NInstr[]
+  writeSlots:    NInstr[]
+  tempsConsumed: number
 } {
+  // Preamble emitter: allocates fresh temps in the unified register space.
+  // Temps after the instance's own register_count get used here.
+  let preambleNextTemp = ctx.regOffset + plan.register_count
+  const preamble: NInstr[] = []
+  const emitter: PreambleEmitter = {
+    instrs: preamble,
+    allocTemp: () => preambleNextTemp++,
+  }
+
   const remapOperand = (op: NOperand): NOperand => {
     switch (op.kind) {
       case 'const': return op
@@ -237,7 +419,7 @@ export function remapInstancePlan(
         }
         const expr = ctx.inputExprFor(portName)
         const dflt = ctx.inputDefaults[op.slot]
-        return inputExprToOperand(expr, dflt, op.scalar_type, session, ctx.instanceName, portName)
+        return inputExprToOperand(expr, dflt, op.scalar_type, session, ctx.instanceName, portName, emitter)
       }
       case 'reg':       return { ...op, slot: op.slot + ctx.regOffset }
       case 'state_reg': return { ...op, slot: op.slot + ctx.stateRegOffset }
@@ -292,7 +474,12 @@ export function remapInstancePlan(
     })
   }
 
-  return { body, writeSlots }
+  return {
+    preamble,
+    body,
+    writeSlots,
+    tempsConsumed: preambleNextTemp - (ctx.regOffset + plan.register_count),
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
