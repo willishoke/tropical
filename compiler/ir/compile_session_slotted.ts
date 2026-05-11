@@ -119,6 +119,20 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
       )
     }
 
+    // Gateable instances rely on materializeSession's two-phase wrap
+    // (pre-strata select() on own outputs, post-strata wrap on lifted
+    // sub-instance regs/delays). The per-instance path skips
+    // materializeSession entirely, so the wrap doesn't happen and gate
+    // semantics are lost. Fall back to legacy for now; preserving
+    // gateable in the per-instance path is its own milestone.
+    if (inst.gateable) {
+      throw new SlotShapeUnsupportedError(
+        `compileSessionSlotted: instance '${instName}' is gateable. ` +
+        `Gate wrapping is performed by materializeSession (pre+post-strata) ` +
+        `which the per-instance path bypasses.`,
+      )
+    }
+
     // Compile this instance standalone. M9a doesn't yet support param
     // handles in input expressions, so paramHandles stays empty — any
     // {op:'param'} ExprNode would surface as a 'param' operand and the
