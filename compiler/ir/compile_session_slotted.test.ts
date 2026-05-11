@@ -1,0 +1,140 @@
+/**
+ * compile_session_slotted.test.ts — tests for the M4 slot-mode compile path.
+ *
+ * Verifies the slot-mode FlatPlan carries correct slot allocation
+ * metadata and is otherwise equivalent to the legacy plan. Audio
+ * behavior IS the legacy path under M4 — the engine doesn't yet
+ * consume the slot fields. M5–M7 add real engine handling.
+ */
+import { describe, expect, test } from 'bun:test'
+import { makeSession, allocateOutputSlots, allocateParamSlot } from '../session.ts'
+import { loadStdlib, loadProgramAsSession } from '../program.ts'
+import { instantiate } from '../program_types.ts'
+import { compileSessionLegacy } from './compile_session.ts'
+import { compileSessionSlotted, slotModeEnabled } from './compile_session_slotted.ts'
+
+describe('M4: compileSessionSlotted', () => {
+  test('empty session → empty slot fields', () => {
+    const s = makeSession()
+    const plan = compileSessionSlotted(s)
+    expect(plan.slot_count).toBe(0)
+    expect(plan.slot_names).toEqual([])
+    expect(plan.slot_defaults).toEqual([])
+  })
+
+  test('session with one OnePole instance → one output slot', () => {
+    const s = makeSession()
+    loadStdlib(s)
+    const onePole = s.typeRegistry.get('OnePole')!
+    const inst = instantiate(onePole, 'lp1')
+    s.instanceRegistry.set('lp1', inst)
+    allocateOutputSlots(s, 'lp1', onePole)
+
+    const plan = compileSessionSlotted(s)
+    expect(plan.slot_count).toBe(1)
+    expect(plan.slot_names).toEqual(['lp1.out'])
+    expect(plan.slot_defaults).toEqual([0])
+  })
+
+  test('output slot names match outputSlotRegistry indices', () => {
+    const s = makeSession()
+    loadStdlib(s)
+    const onePole = s.typeRegistry.get('OnePole')!
+    s.instanceRegistry.set('a', instantiate(onePole, 'a'))
+    s.instanceRegistry.set('b', instantiate(onePole, 'b'))
+    allocateOutputSlots(s, 'a', onePole)
+    allocateOutputSlots(s, 'b', onePole)
+
+    const plan = compileSessionSlotted(s)
+    expect(plan.slot_count).toBe(2)
+    expect(plan.slot_names![s.outputSlotRegistry.get('a.out')!]).toBe('a.out')
+    expect(plan.slot_names![s.outputSlotRegistry.get('b.out')!]).toBe('b.out')
+  })
+
+  test('param slots populate with prefix and default value', () => {
+    const s = makeSession()
+    loadProgramAsSession(
+      {
+        name: 'P', ports: { inputs: [], outputs: [] },
+        body: {
+          op: 'block',
+          decls: [
+            { op: 'paramDecl', name: 'cutoff', type: 'param', value: 1500, time_const: 0.005 },
+            { op: 'paramDecl', name: 'fire',   type: 'trigger' },
+          ],
+          assigns: [],
+        },
+      } as any,
+      {} as any,
+      s,
+    )
+    const plan = compileSessionSlotted(s)
+    const cutoffIdx = s.paramSlotRegistry.get('cutoff')!
+    const fireIdx   = s.paramSlotRegistry.get('fire')!
+    expect(plan.slot_names![cutoffIdx]).toBe('param:cutoff')
+    expect(plan.slot_names![fireIdx]).toBe('param:fire')
+    expect(plan.slot_defaults![cutoffIdx]).toBe(1500)
+    expect(plan.slot_defaults![fireIdx]).toBe(0)  // trigger
+  })
+
+  test('slot-mode plan has identical instruction stream to legacy plan', () => {
+    // M4 invariant: until M8 rewrites instructions to use slot operands,
+    // the slot-mode and legacy plans must be byte-equal except for the
+    // additional slot_count/slot_names/slot_defaults fields.
+    const s = makeSession()
+    loadStdlib(s)
+    const onePole = s.typeRegistry.get('OnePole')!
+    s.instanceRegistry.set('lp1', instantiate(onePole, 'lp1'))
+    allocateOutputSlots(s, 'lp1', onePole)
+    s.graphOutputs.push({ instance: 'lp1', output: 'out' })
+
+    const legacy   = compileSessionLegacy(s)
+    const slotted  = compileSessionSlotted(s)
+
+    // Same instruction count and same instruction stream
+    expect(slotted.instructions.length).toBe(legacy.instructions.length)
+    expect(JSON.stringify(slotted.instructions)).toBe(JSON.stringify(legacy.instructions))
+    expect(slotted.register_count).toBe(legacy.register_count)
+    expect(slotted.output_targets).toEqual(legacy.output_targets)
+
+    // Slotted-only fields: present and populated
+    expect(slotted.slot_count).toBe(1)
+    expect(slotted.slot_names).toEqual(['lp1.out'])
+    expect(legacy.slot_count).toBeUndefined()
+  })
+})
+
+describe('M4: slotModeEnabled flag', () => {
+  test('opt argument overrides env var', () => {
+    expect(slotModeEnabled(makeSession(), true)).toBe(true)
+    expect(slotModeEnabled(makeSession(), false)).toBe(false)
+  })
+
+  test('env var "0" / "false" / unset → off', () => {
+    const old = process.env.TROPICAL_SLOT_MODE
+    try {
+      process.env.TROPICAL_SLOT_MODE = '0'
+      expect(slotModeEnabled(makeSession())).toBe(false)
+      process.env.TROPICAL_SLOT_MODE = 'false'
+      expect(slotModeEnabled(makeSession())).toBe(false)
+      delete process.env.TROPICAL_SLOT_MODE
+      expect(slotModeEnabled(makeSession())).toBe(false)
+    } finally {
+      if (old === undefined) delete process.env.TROPICAL_SLOT_MODE
+      else process.env.TROPICAL_SLOT_MODE = old
+    }
+  })
+
+  test('env var "1" / "true" / any other value → on', () => {
+    const old = process.env.TROPICAL_SLOT_MODE
+    try {
+      process.env.TROPICAL_SLOT_MODE = '1'
+      expect(slotModeEnabled(makeSession())).toBe(true)
+      process.env.TROPICAL_SLOT_MODE = 'true'
+      expect(slotModeEnabled(makeSession())).toBe(true)
+    } finally {
+      if (old === undefined) delete process.env.TROPICAL_SLOT_MODE
+      else process.env.TROPICAL_SLOT_MODE = old
+    }
+  })
+})

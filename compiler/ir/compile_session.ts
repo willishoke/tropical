@@ -18,6 +18,25 @@ import { compileResolved } from './compile_resolved.js'
 import { materializeSessionForEmit } from './materialize_session.js'
 
 export function compileSession(session: SessionState): FlatPlan {
+  // Slot-mode dispatch (M4). When TROPICAL_SLOT_MODE is set, route
+  // through the slot-aware compile path — same instructions, plus
+  // slot allocation metadata. The env-var flag avoids dragging slot
+  // mode into every test until equivalence (M7) is verified.
+  // Lazy import to avoid a circular import (compile_session_slotted
+  // imports this file for the legacy fallback).
+  const env = process.env.TROPICAL_SLOT_MODE
+  if (env !== undefined && env !== '' && env !== '0' && env !== 'false') {
+    // Dynamic require keeps this branch out of the legacy-only callgraph.
+    const { compileSessionSlotted } = require('./compile_session_slotted.js') as
+      typeof import('./compile_session_slotted.js')
+    return compileSessionSlotted(session)
+  }
+  return compileSessionLegacy(session)
+}
+
+/** Legacy compile path — single-kernel, instances inlined, no slot metadata.
+ *  Exported so the slot-mode path can call it as a base. */
+export function compileSessionLegacy(session: SessionState): FlatPlan {
   const { lowered, paramDecls } = materializeSessionForEmit(session)
   // Build paramHandles from the materializer's ParamDecls. Each ParamDecl
   // is keyed by name; the session's paramRegistry / triggerRegistry give
