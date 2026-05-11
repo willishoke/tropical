@@ -251,4 +251,24 @@ bool tropical_runtime_is_fade_out_complete(tropical_runtime_t r)
   return static_cast<tropical_runtime::FlatRuntime*>(r)->is_fade_out_complete();
 }
 
+// ── Slot model (M5+) ────────────────────────────────────────────────────────
+
+unsigned int tropical_runtime_slot_index(tropical_runtime_t r, const char* name)
+{
+  if (!r || !name) return UINT32_MAX;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)->slot_index(std::string(name));
+}
+
+void tropical_runtime_set_slot(tropical_runtime_t r, unsigned int slot_index, double value)
+{
+  if (!r) return;
+  static_cast<tropical_runtime::FlatRuntime*>(r)->set_slot(slot_index, value);
+}
+
+double tropical_runtime_get_slot(tropical_runtime_t r, unsigned int slot_index)
+{
+  if (!r) return 0.0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)->get_slot(slot_index);
+}
+
 } // extern "C"

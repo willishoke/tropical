@@ -89,6 +89,21 @@ void             tropical_runtime_begin_fade_in(tropical_runtime_t);
 void             tropical_runtime_begin_fade_out(tropical_runtime_t);
 bool             tropical_runtime_is_fade_out_complete(tropical_runtime_t);
 
+/* ---------- Slot model (M5+) ----------
+ *
+ * Slots are an inter-module shared array introduced by the slot model.
+ * Each output port of every instance + each control-plane param has a
+ * dedicated slot index. Until M6 plumbs slot reads into the JIT IR,
+ * only control-plane writes (set_slot) take effect; the kernel doesn't
+ * yet read from slots.
+ *
+ * `slot_index` returns UINT32_MAX when no slot with that name exists
+ * in the active plan — typical lookup pattern is to resolve the name
+ * once at session start and write by integer index thereafter. */
+unsigned int     tropical_runtime_slot_index(tropical_runtime_t, const char* name);
+void             tropical_runtime_set_slot(tropical_runtime_t, unsigned int slot_index, double value);
+double           tropical_runtime_get_slot(tropical_runtime_t, unsigned int slot_index);
+
 #ifdef __cplusplus
 }
 #endif

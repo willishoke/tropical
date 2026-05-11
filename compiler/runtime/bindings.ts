@@ -105,6 +105,14 @@ export const tropical_runtime_begin_fade_in          = lib.func('tropical_runtim
 export const tropical_runtime_begin_fade_out         = lib.func('tropical_runtime_begin_fade_out',         'void',   ['void *'])
 export const tropical_runtime_is_fade_out_complete   = lib.func('tropical_runtime_is_fade_out_complete',   'bool',   ['void *'])
 
+// ── Slot model (M5+) ───────────────────────────────────────────────────────
+// slot_index returns UINT32_MAX (= 4294967295) when no slot of that name
+// exists in the active plan; callers should test for that sentinel before
+// using the result.
+export const tropical_runtime_slot_index             = lib.func('tropical_runtime_slot_index',             'uint32', ['void *', 'str'])
+export const tropical_runtime_set_slot               = lib.func('tropical_runtime_set_slot',               'void',   ['void *', 'uint32', 'double'])
+export const tropical_runtime_get_slot               = lib.func('tropical_runtime_get_slot',               'double', ['void *', 'uint32'])
+
 // ---------- Device enumeration ----------
 
 export const tropical_audio_device_count          = lib.func('tropical_audio_device_count',          'uint32', [])

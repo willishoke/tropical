@@ -117,6 +117,15 @@ struct ParsedPlan4
   std::vector<std::string> array_slot_names;
   std::vector<uint32_t>    mix_indices;
   double                   sample_rate = 44100.0;
+
+  // ── Slot model (M5+) ──────────────────────────────────────────────────────
+  // Inter-module slot array. Module outputs and control-plane params land
+  // here; downstream module input expressions read from slot operands
+  // referencing these indices. Empty when the plan has no slot metadata
+  // (legacy plans / TROPICAL_SLOT_MODE off).
+  uint32_t                 slot_count = 0;
+  std::vector<std::string> slot_names;
+  std::vector<double>      slot_defaults;
 };
 
 inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
@@ -220,6 +229,20 @@ inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
       prog.groups.push_back(std::move(g));
     }
   }
+
+  // ── Slot model fields (M5) ──
+  // Optional in tropical_plan_4. Legacy plans omit them; FlatRuntime
+  // sees slot_count == 0 and skips slot allocation.
+  if (plan.contains("slot_count") && plan["slot_count"].is_number())
+    result.slot_count = plan["slot_count"].get<uint32_t>();
+
+  if (plan.contains("slot_names"))
+    for (const auto & n : plan["slot_names"])
+      result.slot_names.push_back(n.get<std::string>());
+
+  if (plan.contains("slot_defaults"))
+    for (const auto & v : plan["slot_defaults"])
+      result.slot_defaults.push_back(v.get<double>());
 
   return result;
 }
