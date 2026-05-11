@@ -130,7 +130,8 @@ public:
       state.sample_index,
       state.param_ptrs.data(),
       outputBuffer.data(),
-      buffer_length_);
+      buffer_length_,
+      state.slots.data());          // M6: shared inter-module slot array
 
     state.sample_index += buffer_length_;
 

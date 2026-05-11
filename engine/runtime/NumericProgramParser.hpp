@@ -66,6 +66,7 @@ inline tropical_jit::OpTag parse_op_tag(const std::string & s)
     {"ToFloat",     T::ToFloat},
     {"SmoothParam", T::SmoothParam},
     {"TriggerParam",T::TriggerParam},
+    {"WriteSlot",   T::WriteSlot},
   };
   const auto it = MAP.find(s);
   if (it == MAP.end())
@@ -101,6 +102,8 @@ inline tropical_jit::Operand parse_operand(const nlohmann::json & j)
   }
   if (kind == "rate") return tropical_jit::Operand::make_rate();
   if (kind == "tick") return tropical_jit::Operand::make_tick();
+  if (kind == "slot")
+    return tropical_jit::Operand::make_slot(j.at("index").get<uint32_t>(), st);
   throw std::runtime_error("NumericProgramParser: unknown operand kind '" + kind + "'");
 }
 
