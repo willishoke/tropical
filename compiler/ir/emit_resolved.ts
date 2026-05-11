@@ -51,6 +51,12 @@ export type NOperand =
   | { kind: 'param';     ptr: string;  scalar_type: ScalarType }
   | { kind: 'rate';      scalar_type: ScalarType }
   | { kind: 'tick';      scalar_type: ScalarType }
+  // Slot model — read from the shared inter-module slot array. Unlike
+  // 'input' / 'reg' (which index into per-kind state arrays), 'slot'
+  // reads from a single flat slot[] populated by upstream module
+  // outputs and the control plane. Distinct field name (`index`) from
+  // existing `slot: number` operands so the two never get confused.
+  | { kind: 'slot';      index: number; scalar_type: ScalarType }
 
 export type NInstr = {
   tag:         string
