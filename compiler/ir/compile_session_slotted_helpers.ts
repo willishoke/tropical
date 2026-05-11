@@ -165,18 +165,46 @@ function inputExprToOperand(
       const slotIdx = session.outputSlotRegistry.get(key)
       if (slotIdx === undefined) {
         throw new Error(
-          `compileSessionSlotted (M9a): wire src '${key}' for '${instanceName}.${portName}' ` +
+          `compileSessionSlotted: wire src '${key}' for '${instanceName}.${portName}' ` +
           `has no allocated output slot. (Did add_instance populate outputSlotRegistry?)`,
         )
       }
       return { kind: 'slot', index: slotIdx, scalar_type: scalarType }
     }
+    // M9b: param / trigger refs compile to slot operands. The slot is
+    // allocated at applyParamSpecs time (M3) and shared between
+    // params and triggers via paramSlotRegistry. Trigger fire-once
+    // semantics are now a control-plane / stdlib concern, not a
+    // kernel primitive — see M9b notes in the plan.
+    if ((obj.op === 'param' || obj.op === 'paramExpr') && typeof obj.name === 'string') {
+      const slotIdx = session.paramSlotRegistry.get(obj.name)
+      if (slotIdx === undefined) {
+        throw new Error(
+          `compileSessionSlotted: param '${obj.name}' wired to '${instanceName}.${portName}' ` +
+          `has no allocated slot. (Did applyParamSpecs register it?)`,
+        )
+      }
+      return { kind: 'slot', index: slotIdx, scalar_type: scalarType }
+    }
+    if ((obj.op === 'trigger' || obj.op === 'triggerParamExpr') && typeof obj.name === 'string') {
+      const slotIdx = session.paramSlotRegistry.get(obj.name)
+      if (slotIdx === undefined) {
+        throw new Error(
+          `compileSessionSlotted: trigger '${obj.name}' wired to '${instanceName}.${portName}' ` +
+          `has no allocated slot. (Did applyParamSpecs register it?)`,
+        )
+      }
+      // Triggers are bool-valued conceptually but live in the same
+      // double slot array; use the destination port's scalar type to
+      // preserve coercion semantics at the read site.
+      return { kind: 'slot', index: slotIdx, scalar_type: scalarType }
+    }
   }
-  // Everything else: out of M9a scope
+  // Everything else: out of current scope
   throw new Error(
-    `compileSessionSlotted (M9a): input expression for '${instanceName}.${portName}' ` +
-    `is not a constant or simple ref node. Arbitrary input expressions ship in M9c; ` +
-    `fan-in (combine ops) in M9d; param/trigger refs in M9b. ` +
+    `compileSessionSlotted: input expression for '${instanceName}.${portName}' ` +
+    `is not a constant, ref, or param/trigger ref. Arbitrary input expressions ` +
+    `ship in M9c; fan-in (combine ops) in M9d. ` +
     `Got expr op: '${(expr as { op?: unknown })?.op ?? typeof expr}'.`,
   )
 }
@@ -215,10 +243,19 @@ export function remapInstancePlan(
       case 'state_reg': return { ...op, slot: op.slot + ctx.stateRegOffset }
       case 'array_reg': return { ...op, slot: op.slot + ctx.arraySlotOffset }
       case 'param':
+        // M9b: under slot mode, session-level param/trigger refs in
+        // input expressions are resolved by inputExprToOperand to
+        // `slot` operands before reaching here. A legacy `param`
+        // operand surviving means the per-instance plan's body
+        // referenced a paramDecl at the type level (e.g., a stdlib
+        // type that uses an inline {op:'param'} ExprNode internally).
+        // We don't yet support this — most stdlib types don't do it.
         throw new Error(
-          `compileSessionSlotted (M9a): legacy 'param' operand encountered. ` +
-          `Param/trigger handling lands in M9b — for now, patches that use ` +
-          `paramRef/triggerParamExpr in input expressions are unsupported.`,
+          `compileSessionSlotted: legacy 'param' operand encountered ` +
+          `in '${ctx.instanceName}'. Session-level params should resolve ` +
+          `to slot operands before this point. This usually means the ` +
+          `program type's body has an internal {op:'param'} ExprNode ` +
+          `— this case is not yet handled in M9b.`,
         )
     }
   }
