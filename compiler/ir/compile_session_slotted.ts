@@ -35,7 +35,7 @@ import {
   type RemapContext,
 } from './compile_session_slotted_helpers.js'
 import {
-  inputNames, outputNames, inputPortTypes, outputPortTypes,
+  inputNames, outputNames, outputPortTypes,
   rawInputDefaults,
 } from '../program_types.js'
 
@@ -128,22 +128,25 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
     // Build remap context for this instance
     const inPortNames  = inputNames(compiled)
     const outPortNames = outputNames(compiled)
-    const inPortTypes  = inputPortTypes(compiled).map(scalarOf)
     const outPortTypes = outputPortTypes(compiled).map(scalarOf)
     const defaults     = rawInputDefaults(compiled)
-    const inputDefaults: Array<number | boolean | undefined> = inPortNames.map(name => {
-      const d = defaults[name]
-      if (typeof d === 'number' || typeof d === 'boolean') return d
-      return undefined
-    })
 
     const ctx: RemapContext = {
       instanceName: instName,
       regOffset,
       stateRegOffset,
       arraySlotOffset,
-      inputExprFor: (portName) =>
-        session.inputExprNodes.get(`${instName}:${portName}`),
+      inputBindingFor: (portName) => {
+        const expr = session.inputExprNodes.get(`${instName}:${portName}`)
+        if (expr !== undefined) return { kind: 'wired', expr }
+        // No wiring: resolve to the port's declared default, or 0 if
+        // the default isn't a plain scalar literal. (Non-scalar defaults
+        // would need preamble emission — those shapes fall back to the
+        // metadata-only path via SlotShapeUnsupportedError elsewhere.)
+        const d = defaults[portName]
+        const value = (typeof d === 'number' || typeof d === 'boolean') ? d : 0
+        return { kind: 'literal', value }
+      },
       outputSlotFor: (portName) => {
         const key = `${instName}.${portName}`
         const idx = session.outputSlotRegistry.get(key)
@@ -156,7 +159,6 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
         return idx
       },
       inputPortNames: inPortNames,
-      inputDefaults,
       outputPortNames: outPortNames,
       outputScalarTypes: outPortTypes,
     }

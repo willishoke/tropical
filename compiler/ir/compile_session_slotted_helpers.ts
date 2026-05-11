@@ -51,6 +51,22 @@ export class SlotShapeUnsupportedError extends Error {
   }
 }
 
+/** Resolved binding for a module input port. Replaces the previously
+ *  coupled `(expr | undefined, defaultVal | undefined)` parameter pair
+ *  with a single discriminated union — the consumer doesn't have to
+ *  reconstruct "is this wired or unwired" from two correlated fields.
+ *
+ *  - `wired`: the input has an ExprNode wired to it. Could be a literal,
+ *    a ref, a param, or an arbitrary expression — `translateNode`
+ *    handles all of these.
+ *  - `literal`: the input has no wiring. Carries the resolved fallback
+ *    value (port declared default, or 0 if no default exists). The
+ *    resolver owns the "default → 0" fallback so consumers don't
+ *    re-implement it. */
+export type InputBinding =
+  | { kind: 'wired';   expr:  ExprNode }
+  | { kind: 'literal'; value: number | boolean }
+
 /** Per-instance preamble emitter. Allocates fresh temps in the unified
  *  register space and collects NInstrs that need to run before the
  *  consuming instance's body. Used by inputExprToOperand to compile
@@ -292,20 +308,18 @@ export interface RemapContext {
   /** Cumulative array-slot offset. All `array_reg` operand `slot` fields
    *  shift by this. */
   arraySlotOffset: number
-  /** Resolve an input port (by name) to its session-level expression.
-   *  Returns the wired ExprNode (which M9a interprets narrowly) or
-   *  undefined if the port is unwired (use default). */
-  inputExprFor: (portName: string) => ExprNode | undefined
+  /** Resolve an input port (by name) to its binding — either a wired
+   *  ExprNode or a literal fallback. The resolver owns the
+   *  "unwired → default → 0" fallback chain so the consumer just sees
+   *  one of two cases. */
+  inputBindingFor: (portName: string) => InputBinding
   /** Resolve an output port (by name) to its allocated output-slot
    *  index in the session's unified slot array. */
   outputSlotFor: (portName: string) => number
   /** Names of the instance's input ports, in port-declaration order.
    *  `input` operands index into this; we look up the port name then
-   *  consult `inputExprFor`. */
+   *  consult `inputBindingFor`. */
   inputPortNames: string[]
-  /** Per-input-port default value, indexed parallel to `inputPortNames`.
-   *  Used when the port has no wiring entry. */
-  inputDefaults: Array<number | boolean | undefined>
   /** Per-output-port name + scalar type, indexed parallel to the
    *  instance's program output port declarations. Used for emitting
    *  WriteSlot instructions at the end of the instance's body. */
@@ -313,81 +327,24 @@ export interface RemapContext {
   outputScalarTypes: ScalarType[]
 }
 
-/** Translate a single ExprNode-wired input into a concrete operand for
- *  the slot-mode plan. Handles the simple leaf cases (constants, refs,
- *  params/triggers) inline; delegates arbitrary expressions to
- *  `translateNode`, which emits preamble instructions and returns a
- *  `reg` operand pointing at the result temp. */
-function inputExprToOperand(
-  expr: ExprNode | undefined,
-  defaultVal: number | boolean | undefined,
+/** Resolve an input port's binding to a concrete NOperand.
+ *  - Literal binding → const operand
+ *  - Wired binding → delegate to translateNode, which handles every
+ *    ExprNode shape (refs, params, triggers, arithmetic, etc.)
+ *    uniformly. Preamble emission happens transparently via the
+ *    emitter when the wired expression is non-leaf. */
+function inputBindingToOperand(
+  binding: InputBinding,
   scalarType: ScalarType,
   session: SessionState,
-  instanceName: string,
-  portName: string,
+  context: string,
   emitter: PreambleEmitter,
 ): NOperand {
-  // Unwired → default value as a const
-  if (expr === undefined) {
-    const v = typeof defaultVal === 'number' ? defaultVal
-      : typeof defaultVal === 'boolean' ? (defaultVal ? 1 : 0)
-      : 0
+  if (binding.kind === 'literal') {
+    const v = typeof binding.value === 'boolean' ? (binding.value ? 1 : 0) : binding.value
     return { kind: 'const', val: v, scalar_type: scalarType }
   }
-  // Literal constants
-  if (typeof expr === 'number') {
-    return { kind: 'const', val: expr, scalar_type: scalarType }
-  }
-  if (typeof expr === 'boolean') {
-    return { kind: 'const', val: expr ? 1 : 0, scalar_type: scalarType }
-  }
-  // Ref node: look up the source's allocated slot
-  if (typeof expr === 'object' && expr !== null && !Array.isArray(expr)) {
-    const obj = expr as Record<string, unknown>
-    if (obj.op === 'ref' && typeof obj.instance === 'string' && typeof obj.output === 'string') {
-      const key = `${obj.instance}.${obj.output}`
-      const slotIdx = session.outputSlotRegistry.get(key)
-      if (slotIdx === undefined) {
-        throw new SlotShapeUnsupportedError(
-          `compileSessionSlotted: wire src '${key}' for '${instanceName}.${portName}' ` +
-          `has no allocated output slot. (Did add_instance populate outputSlotRegistry?)`,
-        )
-      }
-      return { kind: 'slot', index: slotIdx, scalar_type: scalarType }
-    }
-    // M9b: param / trigger refs compile to slot operands. The slot is
-    // allocated at applyParamSpecs time (M3) and shared between
-    // params and triggers via paramSlotRegistry. Trigger fire-once
-    // semantics are now a control-plane / stdlib concern, not a
-    // kernel primitive — see M9b notes in the plan.
-    if ((obj.op === 'param' || obj.op === 'paramExpr') && typeof obj.name === 'string') {
-      const slotIdx = session.paramSlotRegistry.get(obj.name)
-      if (slotIdx === undefined) {
-        throw new SlotShapeUnsupportedError(
-          `compileSessionSlotted: param '${obj.name}' wired to '${instanceName}.${portName}' ` +
-          `has no allocated slot. (Did applyParamSpecs register it?)`,
-        )
-      }
-      return { kind: 'slot', index: slotIdx, scalar_type: scalarType }
-    }
-    if ((obj.op === 'trigger' || obj.op === 'triggerParamExpr') && typeof obj.name === 'string') {
-      const slotIdx = session.paramSlotRegistry.get(obj.name)
-      if (slotIdx === undefined) {
-        throw new SlotShapeUnsupportedError(
-          `compileSessionSlotted: trigger '${obj.name}' wired to '${instanceName}.${portName}' ` +
-          `has no allocated slot. (Did applyParamSpecs register it?)`,
-        )
-      }
-      // Triggers are bool-valued conceptually but live in the same
-      // double slot array; use the destination port's scalar type to
-      // preserve coercion semantics at the read site.
-      return { kind: 'slot', index: slotIdx, scalar_type: scalarType }
-    }
-  }
-  // M9c: arbitrary expressions — emit preamble instructions, return a
-  // reg operand pointing at the result temp. The caller is responsible
-  // for stitching `emitter.instrs` before the consuming instance's body.
-  return translateNode(expr, scalarType, session, emitter, `${instanceName}.${portName}`)
+  return translateNode(binding.expr, scalarType, session, emitter, context)
 }
 
 /** Apply per-instance operand and slot-index remapping. Returns a fresh
@@ -433,9 +390,13 @@ export function remapInstancePlan(
             `out of range (only ${ctx.inputPortNames.length} input ports).`,
           )
         }
-        const expr = ctx.inputExprFor(portName)
-        const dflt = ctx.inputDefaults[op.slot]
-        return inputExprToOperand(expr, dflt, op.scalar_type, session, ctx.instanceName, portName, emitter)
+        return inputBindingToOperand(
+          ctx.inputBindingFor(portName),
+          op.scalar_type,
+          session,
+          `${ctx.instanceName}.${portName}`,
+          emitter,
+        )
       }
       case 'reg':       return { ...op, slot: op.slot + ctx.regOffset }
       case 'state_reg': return { ...op, slot: op.slot + ctx.stateRegOffset }
