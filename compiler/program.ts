@@ -116,8 +116,7 @@ export function* instanceDecls(prog: ProgramNode): Iterable<{
   program: string
   inputs?: Record<string, ExprNode>
   type_args?: Record<string, number | ExprNode>
-  gateable?: boolean
-  gate_input?: ExprNode
+  alive_input?: ExprNode
 }> {
   for (const d of prog.body?.decls ?? []) {
     if (typeof d !== 'object' || d === null || Array.isArray(d)) continue
@@ -128,8 +127,7 @@ export function* instanceDecls(prog: ProgramNode): Iterable<{
       program: obj.program as string,
       inputs: obj.inputs as Record<string, ExprNode> | undefined,
       type_args: obj.type_args as Record<string, number | ExprNode> | undefined,
-      gateable: obj.gateable as boolean | undefined,
-      gate_input: obj.gate_input as ExprNode | undefined,
+      alive_input: obj.alive_input as ExprNode | undefined,
     }
   }
 }
@@ -375,12 +373,9 @@ export function loadProgramAsSession(
   for (const inst of instanceDecls(prog)) {
     const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
     const instance = instantiate(type, inst.name, { baseTypeName: inst.program, typeArgs })
-    if (inst.gateable) {
-      if (inst.gate_input === undefined)
-        throw new Error(`Instance '${inst.name}' has gateable=true but no gate_input expression.`)
-      validateExpr(inst.gate_input, `${inst.name}.__gate__`)
-      instance.gateable = true
-      instance.gateInput = inst.gate_input
+    if (inst.alive_input !== undefined) {
+      validateExpr(inst.alive_input, `${inst.name}.__alive__`)
+      instance.aliveInput = inst.alive_input
     }
     session.instanceRegistry.set(instance.name, instance)
     // Slot model: allocate output slots for the instance, parallel to
@@ -539,12 +534,9 @@ export function mergeProgramIntoSession(
   for (const inst of instanceDecls(prog)) {
     const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args as RawTypeArgs | undefined, undefined)
     const instance = instantiate(type, inst.name, { baseTypeName: inst.program, typeArgs })
-    if (inst.gateable) {
-      if (inst.gate_input === undefined)
-        throw new Error(`Instance '${inst.name}' has gateable=true but no gate_input expression.`)
-      validateExpr(inst.gate_input, `${inst.name}.__gate__`)
-      instance.gateable = true
-      instance.gateInput = inst.gate_input
+    if (inst.alive_input !== undefined) {
+      validateExpr(inst.alive_input, `${inst.name}.__alive__`)
+      instance.aliveInput = inst.alive_input
     }
     session.instanceRegistry.set(instance.name, instance)
     // Slot model: allocate output slots for the instance, parallel to
@@ -741,10 +733,7 @@ export function saveProgramFromSession(
   for (const [name, inst] of session.instanceRegistry) {
     const entry: Record<string, unknown> = { op: 'instanceDecl', name, program: inst.baseTypeName }
     if (inst.typeArgs) entry.type_args = inst.typeArgs
-    if (inst.gateable) {
-      entry.gateable = true
-      if (inst.gateInput !== undefined) entry.gate_input = inst.gateInput
-    }
+    if (inst.aliveInput !== undefined) entry.alive_input = inst.aliveInput
 
     // Merge wiring for this instance
     const inputs: Record<string, ExprNode> = {}
@@ -974,10 +963,7 @@ export function exportSessionAsProgram(
       program: inst.baseTypeName,
     }
     if (inst.typeArgs) entry.type_args = inst.typeArgs
-    if (inst.gateable) {
-      entry.gateable = true
-      if (inst.gateInput !== undefined) entry.gate_input = rewriteRefs(inst.gateInput)
-    }
+    if (inst.aliveInput !== undefined) entry.alive_input = rewriteRefs(inst.aliveInput)
 
     // Copy wiring, rewriting exposed ports to {op:"input", name:...}
     // and ref→nested_out for sibling instances

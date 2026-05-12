@@ -377,8 +377,7 @@ export interface InstanceDeclNode {
   program: string
   inputs?: Record<string, ExprNode>
   type_args?: Record<string, number | ExprNode>
-  gateable?: boolean
-  gate_input?: ExprNode
+  alive_input?: ExprNode
 }
 
 /** Register declaration with optional initializer and type annotation. */
@@ -1098,10 +1097,8 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
       for (const [k, v] of Object.entries(obj.inputs as Record<string, unknown>))
         validateExpr(v as ExprNode, `${path}.inputs.${k}`)
     }
-    if (obj.gateable !== undefined && typeof obj.gateable !== 'boolean')
-      throw new Error(`${path}: 'instanceDecl' gateable must be boolean`)
-    if (obj.gate_input !== undefined)
-      validateExpr(obj.gate_input as ExprNode, `${path}.gate_input`)
+    if (obj.alive_input !== undefined)
+      validateExpr(obj.alive_input as ExprNode, `${path}.alive_input`)
     return
   }
 
