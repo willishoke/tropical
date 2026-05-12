@@ -1,33 +1,36 @@
 /**
- * compiler/ir/compile_resolved.ts — single-program tropical_plan_4 emit boundary.
+ * compile_resolved.ts — per-program emit boundary.
  *
- * Phase D D1 entry point. Takes a `ResolvedProgram` (post-strata: no
- * instances, no combinators, no instance refs) and produces a
- * `tropical_plan_4` JSON consumed by the C++ JIT.
+ * Takes a post-strata `ResolvedProgram` (no instances, no
+ * combinators, no instance refs) and produces a `PerInstancePlan` —
+ * the per-instance slice of a `tropical_plan_5` `FlatPlan`. The
+ * session-level compiler in `compile_session_slotted.ts` packs one
+ * `PerInstancePlan` per session instance into `instance_functions[]`.
  *
- * Post-§2.1: walks `ResolvedExpr` directly via `emit_resolved.ts`. The
- * legacy `resolvedToSlotted → emit_numeric` bridge is gone.
+ * This function does not produce a runnable plan on its own. The
+ * shape it returns is intentionally smaller than `FlatPlan`: no
+ * schema, no slot maps, no scheduler. The session compiler owns the
+ * runnable-plan boundary.
  */
 
 import type { ResolvedProgram, ResolvedExpr, OutputDecl, RegDecl, DelayDecl, ParamDecl } from './nodes.js'
-import type { FlatPlan } from '../flat_plan'
+import type { PerInstancePlan } from '../flat_plan.js'
 import { buildSlotMaps, type SlotMaps } from './slots.js'
 import { emitResolvedProgram, type EmitSlots, type ScalarType } from './emit_resolved.js'
 
-/** Optional per-emit context: param-handle bindings for FFI param/trigger
- *  decls. compileSession populates this from the session's
- *  paramRegistry; the per-program path (loadProgramAsType for stdlib
- *  types, with no live session params) leaves it empty. */
+/** Param-handle bindings for FFI param/trigger decls embedded in a
+ *  program type's body. Empty on the per-instance path (session-level
+ *  params resolve through `slot` operands during input remapping;
+ *  type-level params survive into emission and surface here). */
 export interface CompileResolvedContext {
   paramHandles?: Map<ParamDecl, { ptr: string }>
 }
 
-/** Compile a post-strata `ResolvedProgram` to `tropical_plan_4`. */
-export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedContext = {}): FlatPlan {
+/** Compile a post-strata `ResolvedProgram` to a `PerInstancePlan`. */
+export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedContext = {}): PerInstancePlan {
   const slots = buildSlotMaps(prog)
 
-  // Reject anything the strata pipeline should have removed. A surviving
-  // instanceDecl means inlineInstances didn't run.
+  // Any surviving `instanceDecl` means `inlineInstances` didn't run.
   if (slots.instanceDecls.length > 0) {
     throw new Error(
       `compileResolved: program '${prog.name}' has ${slots.instanceDecls.length} surviving instanceDecl entries; ` +
@@ -65,8 +68,6 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
   const registerNames: string[] = []
   const registerTypes: ScalarType[] = []
 
-  // Reg decls — each contributes one state-reg slot. The update expression
-  // (if any) drives the per-tick writeback.
   for (const d of slots.regDecls) {
     registerNames.push(d.name)
     registerTypes.push(regScalarType(d))
@@ -75,9 +76,6 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     registerExprs.push(u === undefined ? null : u)
   }
 
-  // Delay decls — same state-reg layout (slots come AFTER regs in the
-  // unified state register sequence; emit_resolved threads `regCount`
-  // through `EmitSlots` so delayRefs resolve to `state_reg slot=regCount+delayIdx`).
   for (const d of slots.delayDecls) {
     registerNames.push(d.name)
     registerTypes.push(delayScalarType(d))
@@ -86,7 +84,6 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     registerExprs.push(u)
   }
 
-  // Input port types — typed input operands so int/bool inputs don't get floated.
   const inputPortTypes: ScalarType[] = slots.inputDecls.map(d => {
     if (d.type === undefined) return 'float'
     if (d.type.kind === 'scalar') return d.type.scalar
@@ -112,32 +109,23 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     slots: emitSlots,
   })
 
-  // Compute array_slot_names — registers whose stateInit is a literal array.
   const arraySlotNames: string[] = []
   for (let i = 0; i < stateInit.length; i++) {
     if (Array.isArray(stateInit[i])) arraySlotNames.push(registerNames[i])
   }
 
-  // Output indices: each outputExpr maps to its position in outputs.
-  const outputIndices: number[] = outputExprs.map((_, i) => i)
-
-  const plan: FlatPlan = {
-    schema: 'tropical_plan_4',
-    config: { sampleRate: 44100 },
-    state_init: stateInit as (number | boolean)[],
-    register_names: registerNames,
-    register_types: registerTypes,
-    array_slot_names: arraySlotNames,
-    outputs:          outputIndices,
-    instructions:     program.instructions,
+  return {
     register_count:   program.register_count,
     array_slot_count: program.array_slot_count,
     array_slot_sizes: program.array_slot_sizes,
+    instructions:     program.instructions,
     output_targets:   program.output_targets,
     register_targets: program.register_targets,
+    state_init:       stateInit as (number | boolean)[],
+    register_names:   registerNames,
+    register_types:   registerTypes,
+    array_slot_names: arraySlotNames,
   }
-  if (program.groups) plan.groups = program.groups
-  return plan
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -164,8 +152,6 @@ function regInit(d: RegDecl): number | boolean | number[] {
 }
 
 function delayScalarType(_d: DelayDecl): ScalarType {
-  // Delay decls today carry no scalar-type annotation in the resolved IR;
-  // the C++ DAC contract treats delays as continuous float buffers.
   return 'float'
 }
 

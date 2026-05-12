@@ -27,23 +27,21 @@
  */
 
 import type { SessionState, ExprNode } from '../session.js'
-import type { FlatPlan } from '../flat_plan.js'
+import type { PerInstancePlan } from '../flat_plan.js'
 import type {
   NOperand, NInstr, ScalarType,
 } from './emit_resolved.js'
 import { BINARY_TAG, UNARY_TAG, TERNARY_TAG } from './emit_resolved.js'
-import { compileResolved } from './compile_resolved.js'
 import { topologicalSort } from '../compiler.js'
 
-/** Marker error thrown by the per-instance compile path when the
- *  session's current shape isn't yet supported (arrays, sum types,
- *  nested instance calls in input expressions) or when an instance
- *  was created outside the normal allocate-slots flow. The dispatcher
- *  in `compile_session_slotted.ts` catches this and falls back to
- *  the metadata-only legacy path — audio is preserved either way.
+/** Raised when a session uses a shape the per-instance compile path
+ *  doesn't yet support: nested instance calls in input expressions,
+ *  sums survived to the session layer, type-level paramDecls embedded
+ *  in a program type's body, etc. After PR-C there is no auto-
+ *  fallback; this surfaces directly to the caller.
  *
- *  Using a marker class instead of message-text matching keeps the
- *  fallback robust to error-message refactors. */
+ *  Kept as a marker class so we can distinguish "shape we know we
+ *  don't handle yet" from genuine compiler bugs. */
 export class SlotShapeUnsupportedError extends Error {
   constructor(message: string) {
     super(message)
@@ -67,12 +65,12 @@ export type InputBinding =
   | { kind: 'wired';   expr:  ExprNode }
   | { kind: 'literal'; value: number | boolean }
 
-/** Per-instance preamble emitter. Allocates fresh temps in the unified
- *  register space and collects NInstrs that need to run before the
- *  consuming instance's body. Used by inputExprToOperand to compile
- *  arbitrary input expressions (sin, mul, etc.) into preamble
- *  instructions whose final temp value flows into the instance via a
- *  `reg` operand. (M9c) */
+/** Allocates fresh temps in the unified register space and collects
+ *  NInstrs that need to run somewhere in the kernel — either before
+ *  the consuming instance's body (for input expressions) or in the
+ *  scheduler's pre/postamble (for alive expressions and DAC stitch).
+ *  Decoupling the emitter from where the instructions land lets the
+ *  same `translateNode` machinery serve all three callers. */
 export interface PreambleEmitter {
   instrs: NInstr[]
   allocTemp(): number
@@ -231,6 +229,26 @@ function isLogicalTag(tag: string): boolean {
   return tag === 'And' || tag === 'Or'
 }
 
+/** Compile a session's aliveInput ExprNode into NInstrs emitted to the
+ *  scheduler preamble, returning the operand that feeds the WriteSlot
+ *  into the instance's `__alive__` slot.
+ *
+ *  Inter-instance refs inside an alive expression are implicitly
+ *  one-sample-delayed: at preamble time, no WriteSlot has fired this
+ *  sample yet, so any `ref` operand reads the slot's previous-sample
+ *  value. This is the documented `Topological ordering with alive
+ *  dependencies` semantic from the runtime plan — it lets alive be
+ *  driven by its own instance's output (envelope-driven self-sleep)
+ *  without introducing a graph cycle. */
+export function translateAliveExpr(
+  expr: ExprNode,
+  session: SessionState,
+  emitter: PreambleEmitter,
+  context: string,
+): NOperand {
+  return translateNode(expr, 'bool', session, emitter, context)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Topological order from session.inputExprNodes
 // ─────────────────────────────────────────────────────────────────────────────
@@ -258,10 +276,18 @@ function collectInstanceRefs(expr: ExprNode | undefined, out: Set<string>): void
   }
 }
 
-/** Build a topological order over session instances using inputExprNodes
- *  references. Instances with no wiring come first (no dependencies).
- *  Throws on cycles (would mean a feedback loop without a breaking delay
- *  — strata would have rejected the program earlier, but we double-check). */
+/** Build a topological order over session instances using
+ *  inputExprNodes references. Instances with no wiring come first.
+ *
+ *  Cycles do not throw. The slot architecture handles them
+ *  implicitly: every inter-instance ref reads from a slot, and the
+ *  slot's value is either the current-sample WriteSlot (when the
+ *  producer ran earlier this iteration) or the previous-sample
+ *  WriteSlot (when the producer hasn't run yet, including back-edges
+ *  in a cycle). This is the structural equivalent of `traceCycles`
+ *  inserting a synthetic unit-delay on a back-edge — the slot itself
+ *  IS the unit delay. We just pick a consistent order across cyclic
+ *  instances so the topology is fully sequenced. */
 export function computeInstanceTopoOrder(session: SessionState): string[] {
   const deps = new Map<string, Set<string>>()
   for (const name of session.instanceRegistry.keys()) {
@@ -272,22 +298,27 @@ export function computeInstanceTopoOrder(session: SessionState): string[] {
     if (colon < 0) continue
     const consumer = key.slice(0, colon)
     const producers = deps.get(consumer)
-    if (producers === undefined) continue  // stale wiring entry
+    if (producers === undefined) continue
     collectInstanceRefs(expr, producers)
-    // Self-references can occur for feedback delays; drop them — the
-    // strata pipeline introduces synthetic delays to break cycles, and
-    // they wouldn't be a session-level dep anyway.
+    // Self-references resolve through the slot's previous-sample
+    // value naturally; drop them from the dep graph so Kahn's makes
+    // progress.
     producers.delete(consumer)
   }
   const result = topologicalSort(deps)
-  if (!result.complete) {
-    throw new SlotShapeUnsupportedError(
-      `compileSessionSlotted: cycle detected in session dependency graph. ` +
-      `(Expected: strata's traceCycles should have inserted delay nodes. ` +
-      `Inspect inputExprNodes for unwanted self-refs.)`,
-    )
+  if (result.complete) return result.order
+
+  // Cycle present: emit the topologically-sorted prefix, then append
+  // remaining (cyclic) instances in insertion order. Within an SCC,
+  // back-edge reads see the previous sample's slot value — the
+  // category-theoretic unit-delay endomorphism realized through the
+  // slot array.
+  const seen = new Set(result.order)
+  const tail: string[] = []
+  for (const name of session.instanceRegistry.keys()) {
+    if (!seen.has(name)) tail.push(name)
   }
-  return result.order
+  return [...result.order, ...tail]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -358,7 +389,7 @@ function inputBindingToOperand(
  *  Also returns `tempsConsumed` — the number of temps allocated for
  *  preamble computations, which the caller adds to its running offset. */
 export function remapInstancePlan(
-  plan: FlatPlan,
+  plan: PerInstancePlan,
   ctx: RemapContext,
   session: SessionState,
 ): {

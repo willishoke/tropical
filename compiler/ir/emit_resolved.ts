@@ -65,12 +65,6 @@ export type NInstr = {
   loop_count:  number
   strides:     number[]
   result_type: ScalarType
-  group_id?:   string
-}
-
-export type GroupInfo = {
-  id:           string
-  gate_operand: NOperand
 }
 
 export type FlatProgram = {
@@ -80,7 +74,6 @@ export type FlatProgram = {
   instructions:     NInstr[]
   output_targets:   number[]
   register_targets: number[]
-  groups?:          GroupInfo[]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -168,9 +161,6 @@ class Emitter {
   private nextArraySlot = 0
   private arraySizes:   number[] = []
   private instrs:       NInstr[] = []
-  private groupStack:   string[] = []
-  private groupCounter  = 0
-  private groups:       GroupInfo[] = []
 
   // Structural CSE — same shape as emit_numeric (issue #131).
   private hashTable = new Map<string, number>()
@@ -214,7 +204,6 @@ class Emitter {
   }
 
   private emit(instr: NInstr): void {
-    if (this.groupStack.length > 0) instr.group_id = this.groupStack[this.groupStack.length - 1]
     this.instrs.push(instr)
   }
 
@@ -665,7 +654,6 @@ class Emitter {
       output_targets,
       register_targets,
     }
-    if (this.groups.length > 0) out.groups = this.groups
     return out
   }
 }
