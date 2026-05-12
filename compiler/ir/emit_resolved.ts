@@ -1,49 +1,179 @@
 /**
  * compiler/ir/emit_resolved.ts — `ResolvedExpr → FlatProgram` emitter.
  *
- * The §2.1 from-scratch port that closes Phase D's structural goal:
- * the runtime path is `ResolvedProgram → strata → emit_resolved → JIT`,
- * with no intermediate Expr tree. Refs become operand kinds via
- * decl-identity slot lookups; the dispatch is exhaustive over the
- * closed `ResolvedExprOp` union.
+ * Walks a `ResolvedExpr` directly via a single emitter pass. Refs
+ * become operand kinds via decl-identity slot lookups; the dispatch
+ * is exhaustive over the closed `ResolvedExprOp` union.
  *
- * Replaces:
- *   - compiler/ir/lower_to_exprnode.ts:resolvedToSlotted (deleted)
- *   - compiler/emit_numeric.ts (deleted)
- *   - the EmitExprNode bag-of-fields type (deleted; see compiler/ir/emit_node.ts)
+ * ## Branded internal IR (active-set rigor refactor)
  *
- * Borrowed wholesale from emit_numeric.ts:
- *   - the FlatProgram / NInstr / NOperand / GroupInfo data types
- *   - the BINARY_TAG / UNARY_TAG / CAST_RESULT / *_TAGS sets
- *   - the type-inference rules (promoteTypes, inferResultType)
- *   - the structural-CSE intern table (issue #131)
- *   - the array-loop emission patterns (loop_count > 1, strides[])
+ * The emitter produces a `FlatProgram` whose every integer namespace
+ * carries a brand (`TempIdx`, `StateRegIdx`, `ArraySlotIdx`,
+ * `InputPortIdx`). `NInstr.dst` is a tagged `DstSlot` union rather
+ * than a bare `number`, so the namespace (temp / array / module
+ * slot) is explicit at construction time. The two production bugs
+ * that prompted this refactor — `-1` sentinel arithmetic and
+ * dst-namespace confusion — are unrepresentable in this shape.
  *
- * What's actually new:
- *   - `tryTerminal` dispatches on the ResolvedExpr ref ops
- *     (`inputRef`, `regRef`, `delayRef`, `paramRef`, `sampleRate`,
- *     `sampleIndex`) using slot maps + decl identity. No string
- *     lookups, no `obj._ptr` reflection.
- *   - `compileNodeUncached` switches over the closed
- *     `ResolvedExprOp` union; TypeScript's exhaustiveness check
- *     gates missing cases at compile time.
- *   - param handles thread through `paramHandles: Map<ParamDecl, ...>`
- *     populated by compileSession from the session's paramRegistry.
+ * All instruction emission goes through typed constructors
+ * (`instrScalar`, `instrArray`, `instrPack`, `instrSetElement`,
+ * `instrIndex`, `instrWriteSlot`, `instrSmoothParam`,
+ * `instrTriggerParam`) — direct object-literal construction of
+ * `NInstr` is avoided. Constructors enforce the dst's namespace
+ * matches the tag's writeback class.
+ *
+ * ## Wire format
+ *
+ * `WireNInstr` and `WireNOperand` are plain JSON-shaped types with
+ * raw `number` indices and a flat `dst: number`. `toWireInstr(i)`
+ * collapses the discriminated dst back to a number for the JSON
+ * serialization boundary; the engine parses that shape.
  */
 
 import type {
   ResolvedExpr, ResolvedExprOp,
   RegDecl, DelayDecl, InputDecl, InstanceDecl, ParamDecl,
 } from './nodes.js'
+import {
+  type TempIdx, type StateRegIdx, type ArraySlotIdx, type ModuleSlotIdx,
+  type InputPortIdx,
+  tempIdx, arraySlotIdx, stateRegIdx, inputPortIdx,
+  rawIdx,
+} from './slot_indices.js'
+import type { RegTarget } from '../flat_plan.js'
+import { TempTarget, ArrayManagedTarget } from '../flat_plan.js'
 
 // ─────────────────────────────────────────────────────────────
-// Public types — mirror the C++ engine's FlatProgram contract
+// Public types — operand variants with branded slot indices
 // ─────────────────────────────────────────────────────────────
 
 export type ScalarType = 'float' | 'int' | 'bool'
 
 export type NOperand =
-  | { kind: 'const';     val: number;  scalar_type: ScalarType }
+  | { kind: 'const';     val: number;          scalar_type: ScalarType }
+  | { kind: 'input';     slot: InputPortIdx;   scalar_type: ScalarType }
+  | { kind: 'reg';       slot: TempIdx;        scalar_type: ScalarType }
+  | { kind: 'array_reg'; slot: ArraySlotIdx }
+  | { kind: 'state_reg'; slot: StateRegIdx;    scalar_type: ScalarType }
+  | { kind: 'param';     ptr:  string;         scalar_type: ScalarType }
+  | { kind: 'rate';                            scalar_type: ScalarType }
+  | { kind: 'tick';                            scalar_type: ScalarType }
+  | { kind: 'slot';      index: ModuleSlotIdx; scalar_type: ScalarType }
+
+/** Discriminated dst — the namespace of an instruction's writeback. */
+export type DstSlot =
+  | { kind: 'temp';       slot: TempIdx }
+  | { kind: 'array';      slot: ArraySlotIdx }
+  | { kind: 'moduleSlot'; index: ModuleSlotIdx }
+
+export type NInstr = {
+  tag:         string
+  dst:         DstSlot
+  args:        NOperand[]
+  loop_count:  number
+  strides:     number[]
+  result_type: ScalarType
+}
+
+export interface FlatProgram {
+  register_count:   number
+  array_slot_count: number
+  array_slot_sizes: number[]
+  instructions:     NInstr[]
+  /** Per-output-port temp index (local; the session compiler shifts). */
+  output_targets:   TempIdx[]
+  register_targets: RegTarget[]
+}
+
+// ─── Instruction constructors ───────────────────────────────────────────────
+// Each constructor brands its dst with the right namespace. The type
+// system enforces the brand at the call site.
+
+export const instrScalar = (
+  tag: string, dst: TempIdx, args: NOperand[], result_type: ScalarType,
+): NInstr => ({
+  tag, dst: { kind: 'temp', slot: dst }, args,
+  loop_count: 1, strides: [], result_type,
+})
+
+export const instrArray = (
+  tag: string, dst: ArraySlotIdx, args: NOperand[],
+  loop_count: number, strides: number[], result_type: ScalarType,
+): NInstr => ({
+  tag, dst: { kind: 'array', slot: dst }, args,
+  loop_count, strides, result_type,
+})
+
+export const instrPack = (dst: ArraySlotIdx, args: NOperand[]): NInstr => ({
+  tag: 'Pack', dst: { kind: 'array', slot: dst }, args,
+  loop_count: 1, strides: [], result_type: 'float',
+})
+
+export const instrSetElement = (
+  dst: ArraySlotIdx, args: [NOperand, NOperand, NOperand],
+): NInstr => ({
+  tag: 'SetElement', dst: { kind: 'array', slot: dst }, args,
+  loop_count: 1, strides: [], result_type: 'float',
+})
+
+export const instrIndex = (
+  dst: TempIdx, args: [NOperand, NOperand], result_type: ScalarType,
+): NInstr => ({
+  tag: 'Index', dst: { kind: 'temp', slot: dst }, args,
+  loop_count: 1, strides: [], result_type,
+})
+
+export const instrWriteSlot = (
+  dst: ModuleSlotIdx, value: NOperand, scalar_type: ScalarType = 'float',
+): NInstr => ({
+  tag: 'WriteSlot', dst: { kind: 'moduleSlot', index: dst }, args: [value],
+  loop_count: 1, strides: [], result_type: scalar_type,
+})
+
+export const instrSmoothParam = (
+  dst: TempIdx, paramPtr: string, stateRegSlot: StateRegIdx, coeff: number,
+): NInstr => ({
+  tag: 'SmoothParam', dst: { kind: 'temp', slot: dst },
+  args: [
+    { kind: 'param', ptr: paramPtr, scalar_type: 'float' },
+    { kind: 'state_reg', slot: stateRegSlot, scalar_type: 'float' },
+    { kind: 'const', val: coeff, scalar_type: 'float' },
+  ],
+  loop_count: 1, strides: [], result_type: 'float',
+})
+
+export const instrTriggerParam = (dst: TempIdx, paramPtr: string): NInstr => ({
+  tag: 'TriggerParam', dst: { kind: 'temp', slot: dst },
+  args: [{ kind: 'param', ptr: paramPtr, scalar_type: 'float' }],
+  loop_count: 1, strides: [], result_type: 'float',
+})
+
+// ─── Operand constructors (typed) ───────────────────────────────────────────
+
+export const opConst    = (val: number, scalar_type: ScalarType = 'float'): NOperand =>
+  ({ kind: 'const', val, scalar_type })
+export const opTemp     = (slot: TempIdx, scalar_type: ScalarType): NOperand =>
+  ({ kind: 'reg', slot, scalar_type })
+export const opArray    = (slot: ArraySlotIdx): NOperand =>
+  ({ kind: 'array_reg', slot })
+export const opStateReg = (slot: StateRegIdx, scalar_type: ScalarType): NOperand =>
+  ({ kind: 'state_reg', slot, scalar_type })
+export const opInput    = (slot: InputPortIdx, scalar_type: ScalarType): NOperand =>
+  ({ kind: 'input', slot, scalar_type })
+export const opSlot     = (index: ModuleSlotIdx, scalar_type: ScalarType): NOperand =>
+  ({ kind: 'slot', index, scalar_type })
+export const opParam    = (ptr: string, scalar_type: ScalarType = 'float'): NOperand =>
+  ({ kind: 'param', ptr, scalar_type })
+export const opRate: NOperand = { kind: 'rate', scalar_type: 'float' }
+export const opTick: NOperand = { kind: 'tick', scalar_type: 'int' }
+
+// ─── Wire format ────────────────────────────────────────────────────────────
+// The C++ engine parses this shape from JSON. Brands erase at runtime
+// so operand fields auto-flatten; only `dst` (the DstSlot
+// discriminated union) needs structural conversion to a plain number.
+
+export type WireNOperand =
+  | { kind: 'const';     val: number; scalar_type: ScalarType }
   | { kind: 'input';     slot: number; scalar_type: ScalarType }
   | { kind: 'reg';       slot: number; scalar_type: ScalarType }
   | { kind: 'array_reg'; slot: number }
@@ -51,30 +181,61 @@ export type NOperand =
   | { kind: 'param';     ptr: string;  scalar_type: ScalarType }
   | { kind: 'rate';      scalar_type: ScalarType }
   | { kind: 'tick';      scalar_type: ScalarType }
-  // Slot model — read from the shared inter-module slot array. Unlike
-  // 'input' / 'reg' (which index into per-kind state arrays), 'slot'
-  // reads from a single flat slot[] populated by upstream module
-  // outputs and the control plane. Distinct field name (`index`) from
-  // existing `slot: number` operands so the two never get confused.
   | { kind: 'slot';      index: number; scalar_type: ScalarType }
 
-export type NInstr = {
-  tag:         string
-  dst:         number
-  args:        NOperand[]
-  loop_count:  number
-  strides:     number[]
+export interface WireNInstr {
+  tag: string
+  dst: number
+  args: WireNOperand[]
+  loop_count: number
+  strides: number[]
   result_type: ScalarType
 }
 
-export type FlatProgram = {
-  register_count:   number
-  array_slot_count: number
-  array_slot_sizes: number[]
-  instructions:     NInstr[]
-  output_targets:   number[]
-  register_targets: number[]
+export const dstSlotToWire = (d: DstSlot): number => {
+  switch (d.kind) {
+    case 'temp':       return rawIdx(d.slot)
+    case 'array':      return rawIdx(d.slot)
+    case 'moduleSlot': return rawIdx(d.index)
+  }
 }
+
+// ─── DstSlot accessors that assert namespace at the call site ──────────────
+// Used by consumers (emit_wasm, etc.) that know which namespace an
+// instruction's dst belongs to from the tag. Wrong namespace → throw,
+// catching IR-construction bugs in the call site that built the instr.
+
+export const dstAsTemp = (i: NInstr): TempIdx => {
+  if (i.dst.kind !== 'temp') {
+    throw new Error(`emit: expected temp dst for tag='${i.tag}', got ${i.dst.kind}`)
+  }
+  return i.dst.slot
+}
+
+export const dstAsArray = (i: NInstr): ArraySlotIdx => {
+  if (i.dst.kind !== 'array') {
+    throw new Error(`emit: expected array dst for tag='${i.tag}', got ${i.dst.kind}`)
+  }
+  return i.dst.slot
+}
+
+export const dstAsModuleSlot = (i: NInstr): ModuleSlotIdx => {
+  if (i.dst.kind !== 'moduleSlot') {
+    throw new Error(`emit: expected moduleSlot dst for tag='${i.tag}', got ${i.dst.kind}`)
+  }
+  return i.dst.index
+}
+
+export const toWireInstr = (i: NInstr): WireNInstr => ({
+  tag:         i.tag,
+  dst:         dstSlotToWire(i.dst),
+  // Branded primitives erase at runtime; the cast tells TS to drop
+  // the brand without producing a value-level conversion.
+  args:        i.args as unknown as WireNOperand[],
+  loop_count:  i.loop_count,
+  strides:     i.strides,
+  result_type: i.result_type,
+})
 
 // ─────────────────────────────────────────────────────────────
 // Slot tables — passed in by compile_resolved.ts / compile_session.ts
@@ -84,16 +245,15 @@ export interface EmitSlots {
   inputs: Map<InputDecl, number>
   regs:   Map<RegDecl, number>
   delays: Map<DelayDecl, number>
-  /** Total scalar-register count (regs.size). Delays land at `regCount + delaySlot`
+  /** Total scalar-register count. Delays land at `regCount + delaySlot`
    *  in the unified state-register layout. */
   regCount: number
-  /** FFI handle metadata per param/trigger decl, populated by compile_session
-   *  from the session's paramRegistry/triggerRegistry. */
+  /** FFI handle metadata per param/trigger decl. */
   paramHandles: Map<ParamDecl, { ptr: string }>
 }
 
 // ─────────────────────────────────────────────────────────────
-// Op-tag mappings (verbatim from emit_numeric.ts)
+// Op-tag mappings
 // ─────────────────────────────────────────────────────────────
 
 export const BINARY_TAG: Record<string, string> = {
@@ -167,10 +327,10 @@ class Emitter {
   private hashCache = new WeakMap<object, number>()
   private memo      = new Map<string, CompileResult>()
 
-  // ResolvedExpr-array regs surface as `regRef` to a regDecl whose init
-  // is an array. Tracked here so `compileNodeUncached`'s regRef branch
-  // returns an `array_reg` operand rather than a scalar `state_reg`.
-  private arrayRegMap = new Map<number, { slot: number; size: number }>()
+  // ResolvedExpr-array regs surface as `regRef` to a regDecl whose
+  // init is an array. The map keys the regDecl's slot to its
+  // backing array-slot and length.
+  private arrayRegMap = new Map<number, { slot: ArraySlotIdx; size: number }>()
 
   private regTypes = new Map<number, ScalarType>()
   private stateRegTypes: ScalarType[]
@@ -195,10 +355,15 @@ class Emitter {
     }
   }
 
-  private allocReg(): number { return this.nextReg++ }
+  private allocReg(): TempIdx {
+    const slot = tempIdx(this.nextReg)
+    this.nextReg += 1
+    return slot
+  }
 
-  private allocArraySlot(size: number): number {
-    const slot = this.nextArraySlot++
+  private allocArraySlot(size: number): ArraySlotIdx {
+    const slot = arraySlotIdx(this.nextArraySlot)
+    this.nextArraySlot += 1
     this.arraySizes.push(size)
     return slot
   }
@@ -211,47 +376,43 @@ class Emitter {
   private tryTerminal(node: ResolvedExpr, expected?: ScalarType): { op: NOperand; scalarType: ScalarType } | null {
     if (typeof node === 'number') {
       const t = this.resolveNumericLiteralType(node, expected)
-      return { op: { kind: 'const', val: node, scalar_type: t }, scalarType: t }
+      return { op: opConst(node, t), scalarType: t }
     }
-    if (typeof node === 'boolean') return { op: { kind: 'const', val: node ? 1 : 0, scalar_type: 'bool' }, scalarType: 'bool' }
+    if (typeof node === 'boolean') return { op: opConst(node ? 1 : 0, 'bool'), scalarType: 'bool' }
     if (Array.isArray(node)) return null
-    if (typeof node !== 'object' || node === null) return { op: { kind: 'const', val: 0, scalar_type: 'float' }, scalarType: 'float' }
+    if (typeof node !== 'object' || node === null) return { op: opConst(0, 'float'), scalarType: 'float' }
     const obj = node as ResolvedExprOp
     switch (obj.op) {
       case 'inputRef': {
         const slot = this.slots.inputs.get(obj.decl)
         if (slot === undefined) throw new Error(`emit_resolved: input '${obj.decl.name}' missing from slot table`)
         const portT = this.inputPortTypes[slot] ?? 'float'
-        return { op: { kind: 'input', slot, scalar_type: portT }, scalarType: portT }
+        return { op: opInput(inputPortIdx(slot), portT), scalarType: portT }
       }
       case 'regRef': {
         const slot = this.slots.regs.get(obj.decl)
         if (slot === undefined) throw new Error(`emit_resolved: reg '${obj.decl.name}' missing from slot table`)
-        // Array-typed regs return null so compileNodeUncached emits an
-        // array_reg operand (matching emit_numeric's behavior).
         if (this.arrayRegMap.has(slot)) return null
         const regType = this.stateRegTypes[slot] ?? 'float'
-        return { op: { kind: 'state_reg', slot, scalar_type: regType }, scalarType: regType }
+        return { op: opStateReg(stateRegIdx(slot), regType), scalarType: regType }
       }
       case 'delayRef': {
         const slot = this.slots.delays.get(obj.decl)
         if (slot === undefined) throw new Error(`emit_resolved: delay '${obj.decl.name}' missing from slot table`)
         const combined = this.slots.regCount + slot
         const regType = this.stateRegTypes[combined] ?? 'float'
-        return { op: { kind: 'state_reg', slot: combined, scalar_type: regType }, scalarType: regType }
+        return { op: opStateReg(stateRegIdx(combined), regType), scalarType: regType }
       }
       case 'paramRef': {
         const handle = this.slots.paramHandles.get(obj.decl)
         if (handle === undefined) {
-          // No live FFI handle (e.g. running under interpret-style fixtures
-          // that don't bind params) — emit zero, matching the legacy
-          // emit_numeric fallback.
-          return { op: { kind: 'const', val: 0, scalar_type: 'float' }, scalarType: 'float' }
+          // No live FFI handle — emit zero, matching the legacy fallback.
+          return { op: opConst(0, 'float'), scalarType: 'float' }
         }
-        return { op: { kind: 'param', ptr: handle.ptr, scalar_type: 'float' }, scalarType: 'float' }
+        return { op: opParam(handle.ptr, 'float'), scalarType: 'float' }
       }
-      case 'sampleRate':  return { op: { kind: 'rate', scalar_type: 'float' }, scalarType: 'float' }
-      case 'sampleIndex': return { op: { kind: 'tick', scalar_type: 'int' }, scalarType: 'int' }
+      case 'sampleRate':  return { op: opRate, scalarType: 'float' }
+      case 'sampleIndex': return { op: opTick, scalarType: 'int' }
     }
     return null
   }
@@ -273,15 +434,8 @@ class Emitter {
   }
 
   // ── Structural CSE id ───────────────────────────────────────
-  //
-  // Ref-bearing nodes (regRef/delayRef/paramRef/inputRef/etc.) are keyed
-  // by op + decl IDENTITY, not by recursing through `decl`'s fields. The
-  // resolved IR has cycles via decl init/update fields (a self-
-  // referential delay reads its own previous value), so naive deep
-  // hashing infinite-recurses.
-  //
-  // For other ops the recursive hash is what makes CSE collapse
-  // structurally-identical subtrees produced by clone-then-substitute.
+  // Ref-bearing nodes are keyed by op + decl IDENTITY (resolved IR
+  // has cycles via init/update fields). Other ops hash recursively.
   private declIds = new WeakMap<object, number>()
   private nextDeclId = 0
   private declIdOf(decl: object): number {
@@ -302,7 +456,6 @@ class Emitter {
     } else {
       const obj = node as Record<string, unknown>
       const op = String(obj.op)
-      // Ref-bearing nodes: hash op + decl identity, skip recursion.
       if (op === 'regRef' || op === 'delayRef' || op === 'paramRef'
           || op === 'inputRef' || op === 'typeParamRef' || op === 'bindingRef') {
         key = `op:${op}|decl=${this.declIdOf(obj.decl as object)}`
@@ -357,48 +510,36 @@ class Emitter {
       const slot = this.slots.regs.get(obj.decl)
       if (slot === undefined) throw new Error(`emit_resolved: reg '${obj.decl.name}' missing from slot table`)
       const arr = this.arrayRegMap.get(slot)
-      if (arr) return { isArray: true, op: { kind: 'array_reg', slot: arr.slot }, size: arr.size, scalarType: 'float' }
+      if (arr) return { isArray: true, op: opArray(arr.slot), size: arr.size, scalarType: 'float' }
       throw new Error(`emit_resolved: regRef to non-array slot ${slot} reached compileNodeUncached unexpectedly`)
     }
 
-    // Binary arithmetic / comparison / bitwise / logical ops.
     const binTag = BINARY_TAG[obj.op]
     if (binTag) {
       const opNode = obj as Extract<ResolvedExprOp, { args: [ResolvedExpr, ResolvedExpr] }>
       return this.compileBinary(binTag, opNode.args, expected)
     }
 
-    // Unary ops (`pow` is binary in the resolved IR — handled above).
     const uniTag = UNARY_TAG[obj.op]
     if (uniTag) {
       const opNode = obj as Extract<ResolvedExprOp, { args: [ResolvedExpr] }>
       return this.compileUnary(uniTag, opNode.args[0], expected)
     }
 
-    // Ternary ops.
     if (obj.op === 'clamp')  return this.compileTernary('Clamp',  [obj.args[0], obj.args[1], obj.args[2]], expected)
     if (obj.op === 'select') return this.compileTernary('Select', [obj.args[0], obj.args[1], obj.args[2]], expected)
     if (obj.op === 'arraySet') return this.compileSetElement([obj.args[0], obj.args[1], obj.args[2]])
 
-    // Index.
     if (obj.op === 'index') return this.compileIndex([obj.args[0], obj.args[1]])
 
-    // zeros literal — should be statically unrolled by arrayLower, but if
-    // it survives (e.g. as a regDecl init), emit a zero array.
     if (obj.op === 'zeros') {
       const c = this.compileNode(obj.count, 'int')
       const n = c.op.kind === 'const' && typeof c.op.val === 'number' ? c.op.val : 0
       const slot = this.allocArraySlot(n)
-      this.emit({
-        tag: 'Pack', dst: slot,
-        args: new Array(n).fill({ kind: 'const', val: 0, scalar_type: 'float' as ScalarType }),
-        loop_count: 1, strides: [], result_type: 'float',
-      })
-      return { isArray: true, op: { kind: 'array_reg', slot }, size: n, scalarType: 'float' }
+      this.emit(instrPack(slot, new Array(n).fill(opConst(0, 'float'))))
+      return { isArray: true, op: opArray(slot), size: n, scalarType: 'float' }
     }
 
-    // Combinators / let / ADTs should have been lowered out by arrayLower
-    // / sumLower. Reaching one is a strata bug.
     switch (obj.op) {
       case 'fold': case 'scan': case 'generate': case 'iterate':
       case 'chain': case 'map2': case 'zipWith':
@@ -408,8 +549,6 @@ class Emitter {
         throw new Error(`emit_resolved: '${obj.op}' should have been lowered before emit`)
     }
 
-    // Unreachable — TypeScript will catch missing cases at compile time
-    // when the ResolvedExprOp union grows.
     const _exhaustive: never = obj as never
     void _exhaustive
     throw new Error(`emit_resolved: unhandled op (TypeScript exhaustiveness escape)`)
@@ -420,8 +559,8 @@ class Emitter {
     const dst = this.allocReg()
     const rt = arr.scalarType
     this.regTypes.set(dst, rt)
-    this.emit({ tag: 'Index', dst, args: [arr.op, { kind: 'const', val: 0, scalar_type: 'int' }], loop_count: 1, strides: [], result_type: rt })
-    return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
+    this.emit(instrIndex(dst, [arr.op, opConst(0, 'int')], rt))
+    return { isArray: false, op: opTemp(dst, rt), scalarType: rt }
   }
 
   // ── Compile an inline JS array to a Pack instruction. ──
@@ -430,27 +569,14 @@ class Emitter {
     const slot = this.allocArraySlot(size)
     const args: NOperand[] = elements.map(e => {
       const r = this.compileNode(e, expected)
-      return r.isArray ? { kind: 'const' as const, val: 0, scalar_type: 'float' as ScalarType } : r.op
+      return r.isArray ? opConst(0, 'float') : r.op
     })
-    this.emit({ tag: 'Pack', dst: slot, args, loop_count: 1, strides: [], result_type: 'float' })
-    return { isArray: true, op: { kind: 'array_reg', slot }, size, scalarType: 'float' }
+    this.emit(instrPack(slot, args))
+    return { isArray: true, op: opArray(slot), size, scalarType: 'float' }
   }
 
   // ── Compile a binary op. ──
   private compileBinary(tag: string, argNodes: [ResolvedExpr, ResolvedExpr], expected?: ScalarType): CompileResult {
-    // `expected` is a hint used to narrow leaf literals (e.g. `add(int_reg, 1)`
-    // wants the `1` to compile as int, not float). For arithmetic ops we can
-    // propagate it down — but never `'bool'`. Arithmetic on float/int args
-    // can't produce bool, so pushing `expected='bool'` into the args (which
-    // happens when this op's result is the cond of a Select, or the left arg
-    // of a comparison whose other side is bool) would wrongly try to narrow
-    // any float literal in the subtree to bool.
-    //
-    // Comparison ops are already exempt (argExpected=undefined) because they
-    // fully redefine their arg types via the comparison itself; we additionally
-    // strip 'bool' from non-bitwise non-comparison ops here. The `secondExpected`
-    // path below also strips 'bool' from the comparison's right-arg expected,
-    // since `secondExpected = l.scalarType` may be 'bool' (e.g. `gt(bool, expr)`).
     const propagated = expected === 'bool' ? undefined : expected
     const argExpected = BITWISE_TAGS.has(tag) ? 'int' as ScalarType
       : COMPARISON_TAGS.has(tag) ? undefined
@@ -468,15 +594,15 @@ class Emitter {
     if (!l.isArray && !r.isArray) {
       const dst = this.allocReg()
       this.regTypes.set(dst, rt)
-      this.emit({ tag, dst, args: [l.op, r.op], loop_count: 1, strides: [], result_type: rt })
-      return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
+      this.emit(instrScalar(tag, dst, [l.op, r.op], rt))
+      return { isArray: false, op: opTemp(dst, rt), scalarType: rt }
     }
 
     const size = l.isArray ? l.size : (r as ArrayResult).size
     const slot = this.allocArraySlot(size)
     const strides = [l.isArray ? 1 : 0, r.isArray ? 1 : 0]
-    this.emit({ tag, dst: slot, args: [l.op, r.op], loop_count: size, strides, result_type: rt })
-    return { isArray: true, op: { kind: 'array_reg', slot }, size, scalarType: rt }
+    this.emit(instrArray(tag, slot, [l.op, r.op], size, strides, rt))
+    return { isArray: true, op: opArray(slot), size, scalarType: rt }
   }
 
   // ── Compile a unary op. ──
@@ -493,19 +619,17 @@ class Emitter {
     if (!a.isArray) {
       const dst = this.allocReg()
       this.regTypes.set(dst, rt)
-      this.emit({ tag, dst, args: [a.op], loop_count: 1, strides: [], result_type: rt })
-      return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
+      this.emit(instrScalar(tag, dst, [a.op], rt))
+      return { isArray: false, op: opTemp(dst, rt), scalarType: rt }
     }
 
     const slot = this.allocArraySlot(a.size)
-    this.emit({ tag, dst: slot, args: [a.op], loop_count: a.size, strides: [1], result_type: rt })
-    return { isArray: true, op: { kind: 'array_reg', slot }, size: a.size, scalarType: rt }
+    this.emit(instrArray(tag, slot, [a.op], a.size, [1], rt))
+    return { isArray: true, op: opArray(slot), size: a.size, scalarType: rt }
   }
 
   // ── Compile a ternary op. ──
   private compileTernary(tag: string, argNodes: [ResolvedExpr, ResolvedExpr, ResolvedExpr], expected?: ScalarType): CompileResult {
-    // For Select: cond must be bool, but arm exprs are arbitrary — don't
-    // push 'bool' into them (same reasoning as compileBinary above).
     const condExpected: ScalarType | undefined = tag === 'Select' ? 'bool' : expected
     const armExpected = expected === 'bool' ? undefined : expected
     let a = this.compileNode(argNodes[0], condExpected)
@@ -521,15 +645,15 @@ class Emitter {
     if (!anyArray) {
       const dst = this.allocReg()
       this.regTypes.set(dst, rt)
-      this.emit({ tag, dst, args: [a.op, b.op, c.op], loop_count: 1, strides: [], result_type: rt })
-      return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
+      this.emit(instrScalar(tag, dst, [a.op, b.op, c.op], rt))
+      return { isArray: false, op: opTemp(dst, rt), scalarType: rt }
     }
 
     const size = (a.isArray ? a.size : b.isArray ? b.size : (c as ArrayResult).size)
     const slot = this.allocArraySlot(size)
     const strides = [a.isArray ? 1 : 0, b.isArray ? 1 : 0, c.isArray ? 1 : 0]
-    this.emit({ tag, dst: slot, args: [a.op, b.op, c.op], loop_count: size, strides, result_type: rt })
-    return { isArray: true, op: { kind: 'array_reg', slot }, size, scalarType: rt }
+    this.emit(instrArray(tag, slot, [a.op, b.op, c.op], size, strides, rt))
+    return { isArray: true, op: opArray(slot), size, scalarType: rt }
   }
 
   // ── Index. ──
@@ -539,10 +663,10 @@ class Emitter {
     const dst = this.allocReg()
     const rt = arr.scalarType
     this.regTypes.set(dst, rt)
-    const arrOp: NOperand = arr.isArray ? arr.op : { kind: 'const', val: 0, scalar_type: 'float' }
-    const idxOp: NOperand = idx.isArray ? { kind: 'const', val: 0, scalar_type: 'int' } : idx.op
-    this.emit({ tag: 'Index', dst, args: [arrOp, idxOp], loop_count: 1, strides: [], result_type: rt })
-    return { isArray: false, op: { kind: 'reg', slot: dst, scalar_type: rt }, scalarType: rt }
+    const arrOp: NOperand = arr.isArray ? arr.op : opConst(0, 'float')
+    const idxOp: NOperand = idx.isArray ? opConst(0, 'int') : idx.op
+    this.emit(instrIndex(dst, [arrOp, idxOp], rt))
+    return { isArray: false, op: opTemp(dst, rt), scalarType: rt }
   }
 
   // ── ArraySet. ──
@@ -554,66 +678,63 @@ class Emitter {
     if (!arr.isArray) {
       const size = 1
       const slot = this.allocArraySlot(size)
-      return { isArray: true, op: { kind: 'array_reg', slot }, size, scalarType: 'float' }
+      return { isArray: true, op: opArray(slot), size, scalarType: 'float' }
     }
 
     const arrOp: NOperand = arr.op
-    const idxOp: NOperand = idx.isArray ? { kind: 'const', val: 0, scalar_type: 'float' } : idx.op
-    const valOp: NOperand = val.isArray ? { kind: 'const', val: 0, scalar_type: 'float' } : val.op
-    const slot = (arr.op as { slot: number }).slot
-    this.emit({ tag: 'SetElement', dst: slot, args: [arrOp, idxOp, valOp], loop_count: 1, strides: [], result_type: 'float' })
+    const idxOp: NOperand = idx.isArray ? opConst(0, 'float') : idx.op
+    const valOp: NOperand = val.isArray ? opConst(0, 'float') : val.op
+    // The target array slot is the one the array operand already
+    // points at — `arr.op.kind === 'array_reg'` with a branded slot.
+    if (arr.op.kind !== 'array_reg') {
+      throw new Error(`emit_resolved: compileSetElement expected array_reg operand, got ${arr.op.kind}`)
+    }
+    this.emit(instrSetElement(arr.op.slot, [arrOp, idxOp, valOp]))
     return { isArray: true, op: arr.op, size: arr.size, scalarType: 'float' }
   }
 
   // ── Top-level emit driver ──
   emitProgram(outputExprs: ResolvedExpr[], registerExprs: (ResolvedExpr | null)[]): FlatProgram {
-    const output_targets: number[] = []
-    const register_targets: number[] = []
+    const output_targets: TempIdx[] = []
+    const register_targets: RegTarget[] = []
 
     for (const expr of outputExprs) {
       const r = this.compileNode(expr, 'float')
       if (r.isArray) {
         const dst = this.allocReg()
         this.regTypes.set(dst, 'float')
-        this.emit({ tag: 'Index', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: 'int' }], loop_count: 1, strides: [], result_type: 'float' })
+        this.emit(instrIndex(dst, [r.op, opConst(0, 'int')], 'float'))
         output_targets.push(dst)
       } else {
         const dst = this.allocReg()
         this.regTypes.set(dst, r.scalarType)
-        this.emit({ tag: 'Add', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: r.scalarType }], loop_count: 1, strides: [], result_type: r.scalarType })
+        this.emit(instrScalar('Add', dst, [r.op, opConst(0, r.scalarType)], r.scalarType))
         output_targets.push(dst)
       }
     }
 
-    // Two-pass register update to preserve per-sample read-before-
-    // write isolation for array regs.
+    // Two-pass register update — see history-rich block below for the
+    // read-before-write isolation reasoning.
     //
-    // Scalar regs: the writeback is just `register_targets[i] = dst`
-    // and the engine writes after the sample loop body, so
-    // intra-sample reads of older state still see pre-update values.
+    // Scalar regs: a temp target is recorded; the engine emits the
+    // store after the sample body.
     //
-    // Array regs: there's no analogous deferred-writeback mechanism
-    // in the kernel. We need to emit an explicit copy instruction
-    // from the expression's result slot into the reg's persistent
-    // storage slot. If we emit those copies inline as we compile
-    // each reg expression, a later reg expression reading the same
-    // array reg would see post-update values. So pass 1 compiles
-    // every reg expression, collecting (source slot, persistent
-    // slot, size) triples; pass 2 emits the copies, which all sit
-    // at the tail of the per-sample body. Subsequent samples then
-    // read the freshly-copied persistent slot.
+    // Array regs: register_targets[i] = ArrayManagedTarget signals
+    // "no scalar writeback needed". The pass 2 below emits an
+    // explicit elementwise copy from the source slot to the
+    // persistent array slot — that copy is what makes future
+    // samples see the new value. The in-place case (arraySet on the
+    // reg's own slot) skips the copy.
     //
-    // The copy itself is a strided elementwise no-op (`Add x, 0`)
-    // reusing the existing OrcJitEngine elementwise-loop machinery —
-    // no engine changes needed. The in-place case (arraySet on the
-    // reg's own array_reg, used by Delay) is free: srcSlot already
-    // equals the persistent slot, so we skip the copy.
-    type ArrayCopy = { src: NOperand; dst: number; size: number }
+    // The copy itself is `Add x, 0` with loop_count = size, stride
+    // [1, 0]. The OrcJitEngine's elementwise-loop machinery handles
+    // it; no engine changes needed.
+    type ArrayCopy = { src: NOperand; dst: ArraySlotIdx; size: number }
     const arrayCopies: ArrayCopy[] = []
     for (let ri = 0; ri < registerExprs.length; ri++) {
       const expr = registerExprs[ri]
       if (expr === null) {
-        register_targets.push(-1)
+        register_targets.push(ArrayManagedTarget)
         continue
       }
       const regExpected = this.stateRegTypes[ri]
@@ -623,30 +744,25 @@ class Emitter {
         if (!arrInfo) {
           throw new Error(`emitProgram: array-result update on non-array reg ${ri}`)
         }
-        const srcSlot = (r.op as { slot: number }).slot
-        if (srcSlot !== arrInfo.slot) {
+        if (r.op.kind !== 'array_reg') {
+          throw new Error(`emitProgram: array result has non-array operand kind ${r.op.kind}`)
+        }
+        if (rawIdx(r.op.slot) !== rawIdx(arrInfo.slot)) {
           arrayCopies.push({ src: r.op, dst: arrInfo.slot, size: arrInfo.size })
         }
-        register_targets.push(-1)
+        register_targets.push(ArrayManagedTarget)
       } else {
         const dst = this.allocReg()
         this.regTypes.set(dst, r.scalarType)
-        this.emit({ tag: 'Add', dst, args: [r.op, { kind: 'const', val: 0, scalar_type: r.scalarType }], loop_count: 1, strides: [], result_type: r.scalarType })
-        register_targets.push(dst)
+        this.emit(instrScalar('Add', dst, [r.op, opConst(0, r.scalarType)], r.scalarType))
+        register_targets.push(TempTarget(dst))
       }
     }
     for (const c of arrayCopies) {
-      this.emit({
-        tag: 'Add',
-        dst: c.dst,
-        args: [c.src, { kind: 'const', val: 0, scalar_type: 'float' }],
-        loop_count: c.size,
-        strides: [1, 0],
-        result_type: 'float',
-      })
+      this.emit(instrArray('Add', c.dst, [c.src, opConst(0, 'float')], c.size, [1, 0], 'float'))
     }
 
-    const out: FlatProgram = {
+    return {
       register_count:   this.nextReg,
       array_slot_count: this.nextArraySlot,
       array_slot_sizes: this.arraySizes,
@@ -654,7 +770,6 @@ class Emitter {
       output_targets,
       register_targets,
     }
-    return out
   }
 }
 
