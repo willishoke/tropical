@@ -365,10 +365,20 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
 
   std::lock_guard<std::mutex> lock(jit_mutex_);
 
+  // Helper: visit every FlatInstr in the plan (preamble + each
+  // instance + postamble) in a fixed order. Used for param index
+  // collection and cache-key serialization so the canonical traversal
+  // matches between the two passes.
+  auto visit_all_instructions = [&](auto && fn) {
+    for (const auto & instr : program.scheduler.preamble) fn(instr);
+    for (const auto & inst : program.instance_functions)
+      for (const auto & instr : inst.instructions) fn(instr);
+    for (const auto & instr : program.scheduler.postamble) fn(instr);
+  };
+
   // Build canonical param_ptr → ordinal map (order of first appearance).
   std::unordered_map<uint64_t, uint64_t> param_index;
-  for (const auto & instr : program.instructions)
-  {
+  visit_all_instructions([&](const FlatInstr & instr) {
     for (const auto & arg : instr.args)
     {
       if (arg.kind == OperandKind::Param && arg.ptr != 0 &&
@@ -377,25 +387,19 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
         param_index.emplace(arg.ptr, static_cast<uint64_t>(param_index.size()));
       }
     }
-  }
+  });
 
-  // Serialize to a canonical cache key (param ptrs replaced by ordinal).
-  // The opt level is part of the key — different optimization levels
-  // produce different kernels; without this, a kernel JIT'd at one level
-  // would be served from cache when the user runs at another level.
+  // Serialize to a canonical cache key. Opt level is part of the key
+  // so plans cached at one level aren't served at another.
   std::string cache_key;
-  cache_key += "flat:";
+  cache_key += "flat5:";
   cache_key += opt_level_tag(opt_level_);
   cache_key += ":";
   {
     auto append = [&](const void * data, std::size_t size) {
       cache_key.append(static_cast<const char *>(data), size);
     };
-    append(&program.register_count, sizeof(uint32_t));
-    uint32_t n = static_cast<uint32_t>(program.instructions.size());
-    append(&n, sizeof(uint32_t));
-    for (const auto & instr : program.instructions)
-    {
+    auto serialize_instr = [&](const FlatInstr & instr) {
       append(&instr.tag,        sizeof(OpTag));
       append(&instr.result_type, sizeof(JitScalarType));
       append(&instr.dst,        sizeof(uint32_t));
@@ -419,20 +423,37 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       append(&ns, sizeof(uint32_t));
       if (!instr.strides.empty())
         append(instr.strides.data(), instr.strides.size());
-      // group_id drives conditional-block emission; two plans that differ
-      // only in grouping must produce distinct kernels.
-      uint32_t gl = static_cast<uint32_t>(instr.group_id.size());
-      append(&gl, sizeof(uint32_t));
-      if (!instr.group_id.empty())
-        append(instr.group_id.data(), instr.group_id.size());
+    };
+
+    append(&program.register_count, sizeof(uint32_t));
+    // Scheduler preamble + postamble
+    uint32_t npre = static_cast<uint32_t>(program.scheduler.preamble.size());
+    append(&npre, sizeof(uint32_t));
+    for (const auto & instr : program.scheduler.preamble) serialize_instr(instr);
+    uint32_t npost = static_cast<uint32_t>(program.scheduler.postamble.size());
+    append(&npost, sizeof(uint32_t));
+    for (const auto & instr : program.scheduler.postamble) serialize_instr(instr);
+    // Instance functions
+    uint32_t nfns = static_cast<uint32_t>(program.instance_functions.size());
+    append(&nfns, sizeof(uint32_t));
+    for (const auto & inst : program.instance_functions)
+    {
+      append(&inst.alive_slot_index, sizeof(uint32_t));
+      append(&inst.register_count, sizeof(uint32_t));
+      uint32_t nameLen = static_cast<uint32_t>(inst.instance_name.size());
+      append(&nameLen, sizeof(uint32_t));
+      if (!inst.instance_name.empty())
+        append(inst.instance_name.data(), inst.instance_name.size());
+      uint32_t ni = static_cast<uint32_t>(inst.instructions.size());
+      append(&ni, sizeof(uint32_t));
+      for (const auto & instr : inst.instructions) serialize_instr(instr);
     }
-    // Include mix_output_temps in cache key (different mixes → different kernels)
+    // Mix outputs
     uint32_t nm = static_cast<uint32_t>(program.mix_output_temps.size());
     append(&nm, sizeof(uint32_t));
     for (uint32_t mt : program.mix_output_temps)
       append(&mt, sizeof(uint32_t));
-    // register_targets + register_types also feed IR generation (writeback coerce),
-    // so differences there must produce distinct cached kernels.
+    // Register writebacks
     uint32_t nrt = static_cast<uint32_t>(program.register_targets.size());
     append(&nrt, sizeof(uint32_t));
     for (int32_t rt : program.register_targets)
@@ -441,26 +462,6 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     append(&nrty, sizeof(uint32_t));
     for (JitScalarType t : program.register_types)
       append(&t, sizeof(JitScalarType));
-    // groups[] (id + gate_operand) also feed IR generation.
-    uint32_t ng = static_cast<uint32_t>(program.groups.size());
-    append(&ng, sizeof(uint32_t));
-    for (const auto & g : program.groups)
-    {
-      uint32_t il = static_cast<uint32_t>(g.id.size());
-      append(&il, sizeof(uint32_t));
-      if (!g.id.empty()) append(g.id.data(), g.id.size());
-      append(&g.gate_operand.kind,      sizeof(OperandKind));
-      append(&g.gate_operand.scalar_type, sizeof(JitScalarType));
-      append(&g.gate_operand.const_val, sizeof(double));
-      append(&g.gate_operand.slot,      sizeof(uint32_t));
-      uint64_t canonical_ptr = 0;
-      if (g.gate_operand.kind == OperandKind::Param && g.gate_operand.ptr != 0)
-      {
-        auto it = param_index.find(g.gate_operand.ptr);
-        if (it != param_index.end()) canonical_ptr = it->second;
-      }
-      append(&canonical_ptr, sizeof(uint64_t));
-    }
   }
 
   auto cache_it = kernel_cache_.find(cache_key);
@@ -877,65 +878,17 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   llvm::Value * loop_cond_val = builder.CreateICmpULT(loop_counter, buffer_length_arg);
   builder.CreateCondBr(loop_cond_val, loop_body_bb, loop_end_bb);
 
-  // Loop body: all instructions + writeback + output mixing
+  // Loop body: scheduler.preamble + per-instance dispatch + scheduler.postamble
+  //            + writeback (per-instance, inside conditional) + output mixing
   builder.SetInsertPoint(loop_body_bb);
 
-  // ── Gateable-subgraph setup ──
-  // Gate operands are resolved LAZILY at the group-open point, not up front:
-  // the gate's value often comes from a temp (e.g. a ToBool instruction)
-  // that's only stored once we reach the right point in the instruction
-  // stream. Resolving eagerly at the top of loop_body would read a stale
-  // previous-sample value.
-  std::unordered_map<std::string, Operand> group_operand_by_id;
-  for (const auto & g : program.groups)
-    group_operand_by_id.emplace(g.id, g.gate_operand);
-
-  // Current group state. Tagged instructions from the same group flow into
-  // the same exec block; when group_id changes, we br into the merge block
-  // and open a new group (or stay ungated).
-  std::string current_group_id;
-  llvm::BasicBlock * current_merge_bb = nullptr;
-
-  auto close_current_group = [&]() {
-    if (current_merge_bb == nullptr) return;
-    builder.CreateBr(current_merge_bb);
-    builder.SetInsertPoint(current_merge_bb);
-    current_group_id.clear();
-    current_merge_bb = nullptr;
-  };
-
-  auto open_group = [&](const std::string & gid) -> llvm::Error {
-    auto it = group_operand_by_id.find(gid);
-    if (it == group_operand_by_id.end())
-      return llvm::createStringError(
-        llvm::inconvertibleErrorCode(),
-        "compile_flat_program: instruction references unknown group '" + gid + "'");
-    auto [gv, gt] = resolve_typed(it->second);
-    if (gv == nullptr)
-      return llvm::createStringError(
-        llvm::inconvertibleErrorCode(),
-        "compile_flat_program: unresolvable gate operand for group '" + gid + "'");
-    llvm::Value * gate_cond = coerce(gv, gt, ST::Bool);
-    llvm::BasicBlock * exec_bb  = llvm::BasicBlock::Create(*context, "gate_" + gid + "_exec",  fn);
-    llvm::BasicBlock * merge_bb = llvm::BasicBlock::Create(*context, "gate_" + gid + "_merge", fn);
-    builder.CreateCondBr(gate_cond, exec_bb, merge_bb);
-    builder.SetInsertPoint(exec_bb);
-    current_group_id = gid;
-    current_merge_bb = merge_bb;
-    return llvm::Error::success();
-  };
-
-  // ── Main instruction loop ──
-  for (const auto & instr : program.instructions)
+  // Instruction emitter for a single FlatInstr. Used by the scheduler's
+  // preamble/postamble and by each instance's body — all of which
+  // share the unified temp/state/array spaces, so the per-temp type
+  // tracking is a single vector accumulating across the entire
+  // per-sample sequence.
+  auto emit_instr = [&](const FlatInstr & instr) -> llvm::Error
   {
-    if (instr.group_id != current_group_id)
-    {
-      close_current_group();
-      if (!instr.group_id.empty())
-      {
-        if (auto err = open_group(instr.group_id)) return std::move(err);
-      }
-    }
     // ── SmoothParam ──
     if (instr.tag == OpTag::SmoothParam)
     {
@@ -960,7 +913,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       builder.CreateStore(builder.CreateBitCast(new_val, i64_ty), reg_gep);
       store_temp_f64(instr.dst, new_val);
       temp_types[instr.dst] = ST::Float;
-      continue;
+      return llvm::Error::success();
     }
 
     // ── TriggerParam ── (reads frame_value via ptr; no smoothing)
@@ -982,7 +935,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       fv_ld->setAtomic(llvm::AtomicOrdering::Monotonic);
       store_temp_f64(instr.dst, fv_ld);
       temp_types[instr.dst] = ST::Float;
-      continue;
+      return llvm::Error::success();
     }
 
     // ── WriteSlot: write a computed value to slots[dst] (M6+) ──
@@ -995,7 +948,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       auto [v, t] = resolve_typed(instr.args[0]);
       llvm::Value * v_f64 = coerce(v, t, ST::Float);
       store_slot_f64(instr.dst, v_f64);
-      continue;
+      return llvm::Error::success();
     }
 
     // ── Pack: N scalar args → arrays[dst] ──
@@ -1008,7 +961,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
         llvm::Value * ep  = builder.CreateInBoundsGEP(i64_ty, dst_ptr, builder.getInt64(static_cast<int64_t>(i)));
         builder.CreateStore(builder.CreateBitCast(val, i64_ty), ep);
       }
-      continue;
+      return llvm::Error::success();
     }
 
     // ── Index: arrays[args[0].slot][args[1]] → temps[dst] ──
@@ -1026,7 +979,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       llvm::Value * val = builder.CreateBitCast(builder.CreateLoad(i64_ty, ep), f64_ty);
       store_temp_f64(instr.dst, builder.CreateSelect(in_range, val, zero_f64));
       temp_types[instr.dst] = ST::Float;
-      continue;
+      return llvm::Error::success();
     }
 
     // ── SetElement: side-effect write to arrays[args[0].slot] ──
@@ -1048,7 +1001,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       builder.CreateStore(builder.CreateBitCast(resolve_as_f64(instr.args[2]), i64_ty), ep);
       builder.CreateBr(merge_bb);
       builder.SetInsertPoint(merge_bb);
-      continue;
+      return llvm::Error::success();
     }
 
     // ── Elementwise loop (loop_count > 1) ──
@@ -1148,7 +1101,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
         {
           builder.CreateAlignedStore(vres, dst_ptr_v,
                                      llvm::Align(sizeof(double)));
-          continue;  // skip scalar fallback below
+          return llvm::Error::success();  // skip scalar fallback below
         }
       }
       // ── End vectorized fast path ───────────────────────────────────────
@@ -1196,7 +1149,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       builder.CreateBr(cond_bb);
 
       builder.SetInsertPoint(end_bb);
-      continue;
+      return llvm::Error::success();
     }
 
     // ── Scalar instruction ──
@@ -1216,47 +1169,88 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     llvm::Value * coerced = coerce(result, actual_ty, instr.result_type);
     store_temp_typed(instr.dst, coerced, instr.result_type);
     temp_types[instr.dst] = instr.result_type;
-  }
+    return llvm::Error::success();
+  };  // end emit_instr lambda
 
-  // Close any trailing group so subsequent writeback / mixing continues
-  // in a merged block.
-  close_current_group();
-
-  // ── Register writeback: temps[register_targets[i]] → registers[i] ──
-  // Emitted as fixed stores after all computation, so all reads of old
-  // state (via StateReg operands) have already completed.
-  //
-  // Load the temp using its tracked IR type, coerce to the register's declared
-  // type (FPToSI / SIToFP / zext etc. via `coerce()`), then bit-cast the typed
-  // payload to i64 for the storage slot. This closes the silent float→int
-  // reinterpret miscompile that produced garbage when a float expression
-  // targeted an int register.
-  for (uint32_t ri = 0; ri < program.register_targets.size(); ++ri)
+  auto emit_instrs = [&](const std::vector<FlatInstr> & instrs) -> llvm::Error
   {
-    const int32_t ti = program.register_targets[ri];
-    if (ti < 0) continue;
+    for (const auto & instr : instrs)
+      if (auto err = emit_instr(instr)) return err;
+    return llvm::Error::success();
+  };
 
-    const ST src_ty = temp_types[static_cast<uint32_t>(ti)];
-    const ST dst_ty = (ri < program.register_types.size())
-      ? program.register_types[ri]
-      : ST::Float;
+  // ── Emit a single instance's writebacks (state register updates).
+  // Lives inside the instance's conditional dispatch so an asleep
+  // instance's registers don't update — matching the JIT skip-kernel
+  // semantic and the interpreter's `select(alive, raw_next, current)`
+  // wrap. ──
+  auto emit_writebacks = [&](const std::vector<InstanceProgram::Writeback> & wbs) {
+    for (const auto & wb : wbs)
+    {
+      if (wb.temp_slot < 0) continue;
+      const uint32_t ti = static_cast<uint32_t>(wb.temp_slot);
+      const ST src_ty = temp_types[ti];
+      const ST dst_ty = (wb.state_slot < program.register_types.size())
+        ? program.register_types[wb.state_slot] : ST::Float;
+      llvm::Value * typed_val = load_temp_typed(ti, src_ty);
+      llvm::Value * coerced   = coerce(typed_val, src_ty, dst_ty);
+      llvm::Value * as_i64 = nullptr;
+      if (dst_ty == ST::Float)
+        as_i64 = builder.CreateBitCast(coerced, i64_ty);
+      else if (dst_ty == ST::Int)
+        as_i64 = builder.CreateSExtOrBitCast(coerced, i64_ty);
+      else
+        as_i64 = builder.CreateZExt(coerced, i64_ty);
+      llvm::Value * reg_ptr = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(wb.state_slot));
+      builder.CreateStore(as_i64, reg_ptr);
+    }
+  };
 
-    llvm::Value * typed_val = load_temp_typed(static_cast<uint32_t>(ti), src_ty);
-    llvm::Value * coerced   = coerce(typed_val, src_ty, dst_ty);
+  // ── Scheduler preamble: alive expression writes + any other
+  //    per-sample setup. Runs BEFORE any instance dispatches, so
+  //    alive expressions reading other instances' slot values see
+  //    the previous-sample writes. ──
+  if (auto err = emit_instrs(program.scheduler.preamble)) return std::move(err);
 
-    // Encode the typed scalar into the i64 register slot matching FlatRuntime's
-    // initialization: int/bool → sext/zext to i64, float → bitcast to i64.
-    llvm::Value * as_i64 = nullptr;
-    if (dst_ty == ST::Float)
-      as_i64 = builder.CreateBitCast(coerced, i64_ty);
-    else if (dst_ty == ST::Int)
-      as_i64 = builder.CreateSExtOrBitCast(coerced, i64_ty);
-    else // Bool
-      as_i64 = builder.CreateZExt(coerced, i64_ty);
+  // ── Per-instance conditional dispatch ──
+  //
+  // For each instance:
+  //   alive_v = load slots[alive_slot_index]
+  //   if (alive_v > 0.5) {
+  //     <instance body instructions>
+  //     <instance writebacks>
+  //   }
+  //
+  // For default-alive instances the preamble wrote `1.0` to the
+  // alive slot; LLVM's GVN forwards the store-to-load, folds the
+  // compare to `true`, and jump-threading eliminates the branch —
+  // the body inlines unconditionally and matches a unified kernel
+  // byte-for-byte (per the active-set spike findings).
+  for (const auto & inst : program.instance_functions)
+  {
+    llvm::Value * alive_v = load_slot_f64(inst.alive_slot_index);
+    llvm::Value * alive_b = builder.CreateFCmpOGT(
+      alive_v, llvm::ConstantFP::get(f64_ty, 0.5), "alive_" + inst.instance_name);
 
-    llvm::Value * reg_ptr = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(ri));
-    builder.CreateStore(as_i64, reg_ptr);
+    llvm::BasicBlock * body_bb  = llvm::BasicBlock::Create(
+      *context, "inst_" + inst.instance_name + "_body", fn);
+    llvm::BasicBlock * merge_bb = llvm::BasicBlock::Create(
+      *context, "inst_" + inst.instance_name + "_after", fn);
+    builder.CreateCondBr(alive_b, body_bb, merge_bb);
+
+    builder.SetInsertPoint(body_bb);
+    if (auto err = emit_instrs(inst.instructions)) return std::move(err);
+    emit_writebacks(inst.writebacks);
+    builder.CreateBr(merge_bb);
+
+    builder.SetInsertPoint(merge_bb);
   }
+
+  // ── Scheduler postamble: DAC stitch reads. Runs AFTER all
+  //    instances dispatched, so slot reads observe the current
+  //    sample's WriteSlot values (asleep instances retain their
+  //    previous-sample slot value). ──
+  if (auto err = emit_instrs(program.scheduler.postamble)) return std::move(err);
 
   // ── Output mixing: accumulate mix_output_temps, scale, store to output_buffer[s] ──
   {
