@@ -4,6 +4,7 @@
 import { makeSession, SessionState, instantiate, outputNames } from './session.js'
 import { loadStdlib as loadBuiltins } from './program.js'
 import { compileSession } from './ir/compile_session'
+import { toWirePlan } from './flat_plan.js'
 
 const session: SessionState = makeSession()
 loadBuiltins(session)
@@ -68,6 +69,6 @@ console.log(`  array_slots: ${plan.array_slot_sizes.length} (sizes: ${plan.array
 console.log(`  outputs: ${plan.scheduler_function.output_targets.length}`)
 
 const t2 = performance.now()
-const json = JSON.stringify(plan)
+const json = JSON.stringify(toWirePlan(plan))
 const t3 = performance.now()
 console.log(`JSON.stringify: ${(t3 - t2).toFixed(1)}ms (${(json.length / 1024).toFixed(0)}KB)`)

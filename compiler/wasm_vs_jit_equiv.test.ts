@@ -14,6 +14,7 @@ import { makeSession, loadJSON, type ProgramFile, instantiate, outputNames } fro
 import { loadStdlib, loadProgramAsType } from './program'
 import { compileSession } from './ir/compile_session'
 import type { FlatPlan } from './flat_plan'
+import { toWirePlan } from './flat_plan'
 import { emitWasm } from './emit_wasm'
 import { EDGE_FIXTURES } from './__fixtures__/equiv/edge_cases'
 
@@ -54,7 +55,7 @@ async function runWasm(plan: FlatPlan, samples: number): Promise<Float64Array> {
 function runNative(plan: FlatPlan, samples: number): Float64Array {
   const session = makeSession(samples)
   try {
-    session.runtime.loadPlan(JSON.stringify(plan))
+    session.runtime.loadPlan(JSON.stringify(toWirePlan(plan)))
     session.runtime.process()
     return new Float64Array(session.runtime.outputBuffer)
   } finally {

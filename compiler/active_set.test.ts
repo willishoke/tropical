@@ -22,6 +22,7 @@ import { makeSession, allocateOutputSlots } from './session.js'
 import { loadStdlib } from './program.js'
 import { instantiate } from './program_types.js'
 import { compileSession } from './ir/compile_session.js'
+import { toWirePlan } from './flat_plan.js'
 import { Runtime } from './runtime/runtime.js'
 
 describe('active-set plan shape', () => {
@@ -64,10 +65,13 @@ describe('active-set plan shape', () => {
       s.graphOutputs.push({ instance: `v${i}`, output: 'sine' })
     }
     const plan = compileSession(s)
-    const aliveSlots = new Set(plan.instance_functions.map(i => i.alive_slot_index))
-    // Each instance writes to its own alive slot.
-    const aliveWrites = plan.scheduler_function.preamble.filter(i => i.tag === 'WriteSlot')
-      .filter(i => aliveSlots.has(i.dst))
+    const aliveSlots = new Set<number>(plan.instance_functions.map(i => i.alive_slot_index))
+    // Each instance writes to its own alive slot. `dst` is a tagged
+    // `DstSlot` post-refactor; pattern-match to extract the module-
+    // slot index.
+    const aliveWrites = plan.scheduler_function.preamble
+      .filter(i => i.tag === 'WriteSlot')
+      .filter(i => i.dst.kind === 'moduleSlot' && aliveSlots.has(i.dst.index))
     expect(aliveWrites.length).toBe(4)
     // Default-alive: each WriteSlot carries a constant 1.
     for (const w of aliveWrites) {
@@ -93,7 +97,7 @@ describe('active-set audio invariance', () => {
     }
     const run = (sess: ReturnType<typeof buildSinOsc>) => {
       const rt = new Runtime(64)
-      rt.loadPlan(JSON.stringify(compileSession(sess)))
+      rt.loadPlan(JSON.stringify(toWirePlan(compileSession(sess))))
       const samples: number[] = []
       for (let f = 0; f < 4; f++) {
         rt.process()
@@ -124,7 +128,7 @@ describe('active-set audio invariance', () => {
     s.graphOutputs.push({ instance: 'osc', output: 'sine' })
 
     const rt = new Runtime(64)
-    rt.loadPlan(JSON.stringify(compileSession(s)))
+    rt.loadPlan(JSON.stringify(toWirePlan(compileSession(s))))
     rt.process()
     // SinOsc's `sine` output slot was never written; the slot default
     // for non-alive output slots is 0.
@@ -166,7 +170,7 @@ describe('active-set audio invariance', () => {
     }
     const measure = (sess: ReturnType<typeof buildPatch>) => {
       const rt = new Runtime(256)
-      rt.loadPlan(JSON.stringify(compileSession(sess)))
+      rt.loadPlan(JSON.stringify(toWirePlan(compileSession(sess))))
       // Warm up
       for (let f = 0; f < 16; f++) rt.process()
       const t0 = performance.now()

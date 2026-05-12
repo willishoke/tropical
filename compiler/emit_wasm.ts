@@ -26,6 +26,8 @@
 
 import type { FlatPlan } from './flat_plan'
 import type { NInstr, NOperand, ScalarType } from './ir/emit_resolved'
+import { dstAsTemp, dstAsArray, dstAsModuleSlot } from './ir/emit_resolved'
+import { rawIdx, rawOffset } from './ir/slot_indices'
 import { type WasmLayout, computeLayout, collectParamPtrs } from './wasm_memory_layout.js'
 
 // ─────────────────────────────────────────────────────────────
@@ -288,14 +290,13 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   const maxBlockSize = opts.maxBlockSize ?? 2048
   const sampleRate = opts.sampleRate ?? plan.config.sampleRate
 
-  // WASM consumes plan_5 by flattening: preamble → for each instance:
-  // (alive ? body+writebacks) → postamble. The per-sample sequencing
-  // matches the C++ scheduler structure exactly; the only
-  // implementation difference is that WASM emits inline conditionals
-  // rather than `alwaysinline` LLVM calls. WASM lacks
-  // alwaysinline + cross-function GVN, so the active-set perf
-  // benefit is smaller on the web target until manual inlining lands
-  // — but correctness is identical.
+  // WASM consumes plan_5 by flattening per sample: scheduler.preamble
+  // (alive WriteSlots) → for each instance: (alive ? body +
+  // writebacks) → scheduler.postamble. Matches the C++ scheduler
+  // structure exactly; the only implementation difference is that
+  // WASM emits inline conditionals rather than `alwaysinline` LLVM
+  // calls (no alwaysinline + cross-function GVN on the web target,
+  // so active-set perf wins land in a follow-up).
   const allInstructions: NInstr[] = []
   for (const i of plan.scheduler_function.preamble) allInstructions.push(i)
   for (const inst of plan.instance_functions)
@@ -308,8 +309,8 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
     array_slot_sizes: plan.array_slot_sizes,
     instructions: allInstructions,
     output_targets: plan.scheduler_function.output_targets,
-    register_targets: [] as number[],  // unused; we iterate instance.register_targets below
-  }
+    register_targets: [],  // unused — per-instance writebacks live in instance_functions
+  } as unknown as Parameters<typeof collectParamPtrs>[0]
   const paramPtrs = collectParamPtrs(flatProgram)
   const paramIndex = new Map<string, number>()
   paramPtrs.forEach((p, i) => paramIndex.set(p, i))
@@ -337,31 +338,35 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   // Scheduler preamble (alive writes + any other per-sample setup)
   for (const instr of plan.scheduler_function.preamble) emitInstruction(c, instr, ctx)
 
-  // Per-instance conditional dispatch: if (slots[alive_slot] > 0.5) { body; writebacks }
+  // Per-instance conditional dispatch:
+  //   if (slots[alive_slot] > 0.5) { body; writebacks }
   for (const inst of plan.instance_functions) {
-    // Load slots[alive_slot_index] as f64; compare > 0.5
-    const aliveOffset = layout.slotsOffset + inst.alive_slot_index * 8
+    const aliveOffset = layout.slotsOffset + rawIdx(inst.alive_slot_index) * 8
     c.i32c(0); c.f64Load(aliveOffset)
     c.f64c(0.5); c.u8(OP.F64_GT)
     c.u8(OP.IF); c.u8(0x40)  // if-then block (no result)
 
     for (const instr of inst.instructions) emitInstruction(c, instr, ctx)
 
-    // Per-instance writebacks
+    // Per-instance writebacks. Pattern-match on the RegTarget sum
+    // type — the `arrayManaged` case carries no temp index because
+    // array regs persist via in-place SetElement / strided-Add
+    // instructions earlier in the body.
     for (let j = 0; j < inst.register_targets.length; j++) {
-      const ti = inst.register_targets[j]!
-      if (ti < 0) continue
-      const ri = j + inst.state_reg_offset
-      const regType = plan.register_types[ri] ?? 'float'
-      const tempOffset = layout.tempsOffset + ti * 8
-      const regOffset  = layout.registersOffset + ri * 8
+      const target = inst.register_targets[j]!
+      if (target.kind === 'arrayManaged') continue
+      const ti       = rawIdx(target.slot)
+      const ri       = j + rawOffset(inst.state_reg_offset)
+      const regType  = plan.register_types[ri] ?? 'float'
+      const tempOff  = layout.tempsOffset + ti * 8
+      const regOff   = layout.registersOffset + ri * 8
       if (regType === 'bool') {
-        c.i32c(0); c.i64Load(tempOffset); c.i64c(0); c.u8(OP.I64_NE); c.u8(OP.I64_EXTEND_I32_U)
+        c.i32c(0); c.i64Load(tempOff); c.i64c(0); c.u8(OP.I64_NE); c.u8(OP.I64_EXTEND_I32_U)
         c.localSet(L_AI)
-        c.i32c(0); c.localGet(L_AI); c.i64Store(regOffset)
+        c.i32c(0); c.localGet(L_AI); c.i64Store(regOff)
       } else {
-        c.i32c(0); c.i64Load(tempOffset); c.localSet(L_AI)
-        c.i32c(0); c.localGet(L_AI); c.i64Store(regOffset)
+        c.i32c(0); c.i64Load(tempOff); c.localSet(L_AI)
+        c.i32c(0); c.localGet(L_AI); c.i64Store(regOff)
       }
     }
 
@@ -375,7 +380,7 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   c.f64c(0); c.localSet(L_MIX)
   for (const outIdx of plan.scheduler_function.outputs) {
     if (outIdx >= plan.scheduler_function.output_targets.length) continue
-    const tempSlot = plan.scheduler_function.output_targets[outIdx]!
+    const tempSlot = rawIdx(plan.scheduler_function.output_targets[outIdx]!)
     c.localGet(L_MIX)
     c.i32c(0); c.f64Load(layout.tempsOffset + tempSlot * 8)
     c.u8(OP.F64_ADD)
@@ -429,7 +434,7 @@ function emitInstruction(c: Code, instr: NInstr, ctx: EmitCtx): void {
 // instruction produces no temp result — pure side effect. Coerces to
 // float since slots are stored as f64 (matching the JIT).
 function emitWriteSlot(c: Code, instr: NInstr, ctx: EmitCtx): void {
-  const off = ctx.layout.slotsOffset + instr.dst * 8
+  const off = ctx.layout.slotsOffset + rawIdx(dstAsModuleSlot(instr)) * 8
   c.i32c(0)                                // memory base for store
   pushAs(c, instr.args[0]!, 'float', ctx)  // value
   c.f64Store(off)
@@ -547,7 +552,7 @@ function emitSmoothParam(c: Code, instr: NInstr, ctx: EmitCtx): void {
   c.localSet(L_AF)
   c.i32c(0); c.localGet(L_AF); c.f64Store(regOff)
   // store → temps[dst]
-  c.i32c(0); c.localGet(L_BF); c.f64Store(ctx.layout.tempsOffset + instr.dst * 8)
+  c.i32c(0); c.localGet(L_BF); c.f64Store(ctx.layout.tempsOffset + rawIdx(dstAsTemp(instr)) * 8)
 }
 
 function emitTriggerParam(c: Code, instr: NInstr, ctx: EmitCtx): void {
@@ -556,11 +561,11 @@ function emitTriggerParam(c: Code, instr: NInstr, ctx: EmitCtx): void {
   const pIdx = ctx.paramIndex.get(pOp.ptr) ?? 0
   c.i32c(0); c.f64Load(ctx.layout.paramFrameOffset + pIdx * 8)
   c.localSet(L_AF)
-  c.i32c(0); c.localGet(L_AF); c.f64Store(ctx.layout.tempsOffset + instr.dst * 8)
+  c.i32c(0); c.localGet(L_AF); c.f64Store(ctx.layout.tempsOffset + rawIdx(dstAsTemp(instr)) * 8)
 }
 
 function emitPack(c: Code, instr: NInstr, ctx: EmitCtx): void {
-  const arrOff = ctx.layout.arrayOffsets[instr.dst]!
+  const arrOff = ctx.layout.arrayOffsets[rawIdx(dstAsArray(instr))]!
   for (let i = 0; i < instr.args.length; i++) {
     pushAs(c, instr.args[i]!, 'float', ctx)
     c.localSet(L_AF)
@@ -590,7 +595,7 @@ function emitIndex(c: Code, instr: NInstr, ctx: EmitCtx): void {
   c.else_()
   c.f64c(0); c.localSet(L_AF)
   c.end()
-  c.i32c(0); c.localGet(L_AF); c.f64Store(ctx.layout.tempsOffset + instr.dst * 8)
+  c.i32c(0); c.localGet(L_AF); c.f64Store(ctx.layout.tempsOffset + rawIdx(dstAsTemp(instr)) * 8)
 }
 
 function emitSetElement(c: Code, instr: NInstr, ctx: EmitCtx): void {
@@ -613,7 +618,7 @@ function emitSetElement(c: Code, instr: NInstr, ctx: EmitCtx): void {
 }
 
 function emitElementwise(c: Code, instr: NInstr, ctx: EmitCtx): void {
-  const dstOff = ctx.layout.arrayOffsets[instr.dst]!
+  const dstOff = ctx.layout.arrayOffsets[rawIdx(dstAsArray(instr))]!
   const n = instr.loop_count
   const nargs = instr.args.length
 
@@ -685,7 +690,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
     pushAs(c, instr.args[2]!, rt, ctx)
     c.localGet(L_TI32)
     c.select()
-    storeTempAt(c, instr.dst, rt, ctx)
+    storeTempAt(c, rawIdx(dstAsTemp(instr)),rt, ctx)
     return
   }
 
@@ -715,7 +720,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
       c.localGet(L_AF); c.localGet(L_CF); c.u8(OP.F64_LT)
       c.select()
     }
-    storeTempAt(c, instr.dst, rt, ctx)
+    storeTempAt(c, rawIdx(dstAsTemp(instr)),rt, ctx)
     return
   }
 
@@ -745,7 +750,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
         case 'NotEqual':  c.u8(OP.F64_NE); break
       }
     }
-    storeTempAt(c, instr.dst, 'bool', ctx)
+    storeTempAt(c, rawIdx(dstAsTemp(instr)),'bool', ctx)
     return
   }
 
@@ -754,7 +759,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
     pushAs(c, instr.args[0]!, 'bool', ctx)
     pushAs(c, instr.args[1]!, 'bool', ctx)
     c.u8(tag === 'And' ? OP.I32_AND : OP.I32_OR)
-    storeTempAt(c, instr.dst, 'bool', ctx)
+    storeTempAt(c, rawIdx(dstAsTemp(instr)),'bool', ctx)
     return
   }
 
@@ -762,7 +767,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
   if (tag === 'Not') {
     pushAs(c, instr.args[0]!, 'bool', ctx)
     c.u8(OP.I32_EQZ)
-    storeTempAt(c, instr.dst, 'bool', ctx)
+    storeTempAt(c, rawIdx(dstAsTemp(instr)),'bool', ctx)
     return
   }
 
@@ -782,7 +787,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
         case 'RShift': c.u8(OP.I64_SHR_S); break
       }
     }
-    storeTempAt(c, instr.dst, 'int', ctx)
+    storeTempAt(c, rawIdx(dstAsTemp(instr)),'int', ctx)
     return
   }
 
@@ -790,7 +795,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
   if (tag === 'ToInt' || tag === 'ToBool' || tag === 'ToFloat') {
     const target: ScalarType = tag === 'ToInt' ? 'int' : tag === 'ToBool' ? 'bool' : 'float'
     pushAs(c, instr.args[0]!, target, ctx)
-    storeTempAt(c, instr.dst, target, ctx)
+    storeTempAt(c, rawIdx(dstAsTemp(instr)),target, ctx)
     return
   }
 
@@ -819,7 +824,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
         case 'Round': c.u8(OP.F64_NEAREST); break
       }
     }
-    storeTempAt(c, instr.dst, 'float', ctx)
+    storeTempAt(c, rawIdx(dstAsTemp(instr)),'float', ctx)
     return
   }
 
@@ -834,7 +839,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
     if (opT === 'int') { c.i64c(-1); c.u8(OP.I64_MUL) }
     else               { c.u8(OP.F64_NEG) }
     coerce(c, opT, rt)
-    storeTempAt(c, instr.dst, rt, ctx)
+    storeTempAt(c, rawIdx(dstAsTemp(instr)),rt, ctx)
     return
   }
   if (tag === 'Abs') {
@@ -850,7 +855,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
       c.u8(OP.F64_ABS)
     }
     coerce(c, opT, rt)
-    storeTempAt(c, instr.dst, rt, ctx)
+    storeTempAt(c, rawIdx(dstAsTemp(instr)),rt, ctx)
     return
   }
   // Binary arithmetic: use locals to safely guard Div/Mod against zero.
@@ -941,7 +946,7 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
         throw new Error(`emit_wasm: scalar op ${tag} not supported`)
     }
     coerce(c, opT, rt)
-    storeTempAt(c, instr.dst, rt, ctx)
+    storeTempAt(c, rawIdx(dstAsTemp(instr)),rt, ctx)
   }
 }
 

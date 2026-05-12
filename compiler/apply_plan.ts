@@ -1,24 +1,29 @@
 /**
  * apply_plan.ts — Apply the compilation pipeline to a live session.
  *
- * Flow: SessionState → compileSession() → tropical_plan_4 JSON → runtime.loadPlan()
+ * Flow: SessionState → compileSession() → tropical_plan_5 JSON →
+ *       runtime.loadPlan()
  *
- * The resolved-IR pipeline (`compile_session.ts`) is the production
- * runtime path; the legacy `flatten.ts` was retired in Phase D D3.
+ * The branded internal `FlatPlan` collapses to a plain-JSON
+ * `WireFlatPlan` via `toWirePlan(plan)` at the serialization
+ * boundary. Brands erase at runtime; only `RegTarget` (sum type)
+ * and the `DstSlot` tag on each `NInstr.dst` get explicit
+ * structural conversion.
  */
 
 import type { SessionState } from './session'
 import { compileSession } from './ir/compile_session'
+import { toWirePlan } from './flat_plan'
 import type { Runtime } from './runtime/runtime'
 
 /**
- * Compile the session's program graph through the resolved-IR pipeline
- * and push to a FlatRuntime. Call this after any mutation to
- * `inputExprNodes` or `graphOutputs`.
+ * Compile the session's program graph through the resolved-IR
+ * pipeline and push to a FlatRuntime. Call this after any mutation
+ * to `inputExprNodes` or `graphOutputs`.
  */
 export function applyFlatPlan(session: SessionState, runtime: Runtime): void {
   const plan = compileSession(session)
-  const json = JSON.stringify(plan)
+  const json = JSON.stringify(toWirePlan(plan))
   runtime.loadPlan(json)
 }
 

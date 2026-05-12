@@ -24,6 +24,7 @@ import { homedir } from 'node:os'
 import { makeSession, loadJSON } from './session.js'
 import { loadStdlib as loadBuiltins } from './program.js'
 import { compileSession } from './ir/compile_session.js'
+import { toWirePlan } from './flat_plan.js'
 import * as b from './runtime/bindings.js'
 
 const args = process.argv.slice(2)
@@ -84,7 +85,7 @@ for (const p of patches) {
   const tsMs = performance.now() - t1
 
   const t2 = performance.now()
-  const planJson = JSON.stringify(plan)
+  const planJson = JSON.stringify(toWirePlan(plan))
   const stringifyMs = performance.now() - t2
 
   const jitMs = totalMs - tsMs - stringifyMs

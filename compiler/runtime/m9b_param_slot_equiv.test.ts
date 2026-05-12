@@ -22,6 +22,7 @@ import { makeSession, allocateOutputSlots, allocateParamSlot } from '../session.
 import { loadStdlib } from '../program.ts'
 import { instantiate } from '../program_types.ts'
 import { compileSessionSlotted } from '../ir/compile_session_slotted.ts'
+import { toWirePlan } from '../flat_plan.ts'
 import { Param, Trigger } from './param.ts'
 
 let prevEnv: string | undefined
@@ -89,14 +90,14 @@ describe('M9b: params as slot reads in per-instance path', () => {
     const planLit = compileSessionSlotted(sLit)
 
     const rtParam = new Runtime(64)
-    rtParam.loadPlan(JSON.stringify(planParam))
+    rtParam.loadPlan(JSON.stringify(toWirePlan(planParam)))
     // Defaults seeded the slot to FREQ already (via slot_defaults from
     // paramRegistry.value), so no set_slot needed for first buffer.
     rtParam.process()
     const paramAudio = Array.from(rtParam.outputBuffer)
 
     const rtLit = new Runtime(64)
-    rtLit.loadPlan(JSON.stringify(planLit))
+    rtLit.loadPlan(JSON.stringify(toWirePlan(planLit)))
     rtLit.process()
     const litAudio = Array.from(rtLit.outputBuffer)
 
@@ -121,7 +122,7 @@ describe('M9b: params as slot reads in per-instance path', () => {
 
     const plan = compileSessionSlotted(s)
     const rt = new Runtime(64)
-    rt.loadPlan(JSON.stringify(plan))
+    rt.loadPlan(JSON.stringify(toWirePlan(plan)))
 
     rt.process()
     const audio_110 = Array.from(rt.outputBuffer)
