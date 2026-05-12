@@ -288,13 +288,27 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   const maxBlockSize = opts.maxBlockSize ?? 2048
   const sampleRate = opts.sampleRate ?? plan.config.sampleRate
 
+  // WASM consumes plan_5 by flattening: preamble → for each instance:
+  // (alive ? body+writebacks) → postamble. The per-sample sequencing
+  // matches the C++ scheduler structure exactly; the only
+  // implementation difference is that WASM emits inline conditionals
+  // rather than `alwaysinline` LLVM calls. WASM lacks
+  // alwaysinline + cross-function GVN, so the active-set perf
+  // benefit is smaller on the web target until manual inlining lands
+  // — but correctness is identical.
+  const allInstructions: NInstr[] = []
+  for (const i of plan.scheduler_function.preamble) allInstructions.push(i)
+  for (const inst of plan.instance_functions)
+    for (const i of inst.instructions) allInstructions.push(i)
+  for (const i of plan.scheduler_function.postamble) allInstructions.push(i)
+
   const flatProgram = {
     register_count: plan.register_count,
     array_slot_count: plan.array_slot_count,
     array_slot_sizes: plan.array_slot_sizes,
-    instructions: plan.instructions,
-    output_targets: plan.output_targets,
-    register_targets: plan.register_targets,
+    instructions: allInstructions,
+    output_targets: plan.scheduler_function.output_targets,
+    register_targets: [] as number[],  // unused; we iterate instance.register_targets below
   }
   const paramPtrs = collectParamPtrs(flatProgram)
   const paramIndex = new Map<string, number>()
@@ -320,33 +334,48 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   c.u8(OP.I64_ADD)
   c.localSet(L_SIDX)
 
-  for (const instr of plan.instructions) emitInstruction(c, instr, ctx)
+  // Scheduler preamble (alive writes + any other per-sample setup)
+  for (const instr of plan.scheduler_function.preamble) emitInstruction(c, instr, ctx)
 
-  // Register writeback
-  for (let ri = 0; ri < plan.register_targets.length; ri++) {
-    const ti = plan.register_targets[ri]!
-    if (ti < 0) continue
-    const regType = plan.register_types[ri] ?? 'float'
-    const tempOffset = layout.tempsOffset + ti * 8
-    const regOffset  = layout.registersOffset + ri * 8
+  // Per-instance conditional dispatch: if (slots[alive_slot] > 0.5) { body; writebacks }
+  for (const inst of plan.instance_functions) {
+    // Load slots[alive_slot_index] as f64; compare > 0.5
+    const aliveOffset = layout.slotsOffset + inst.alive_slot_index * 8
+    c.i32c(0); c.f64Load(aliveOffset)
+    c.f64c(0.5); c.u8(OP.F64_GT)
+    c.u8(OP.IF); c.u8(0x40)  // if-then block (no result)
 
-    if (regType === 'bool') {
-      // Temp slot holds bool stored as i64 (0 or 1). Normalize and store.
-      c.i32c(0); c.i64Load(tempOffset); c.i64c(0); c.u8(OP.I64_NE); c.u8(OP.I64_EXTEND_I32_U)
-      c.localSet(L_AI)
-      c.i32c(0); c.localGet(L_AI); c.i64Store(regOffset)
-    } else {
-      // Float/int: temp slot is already in the right bitwise form.
-      c.i32c(0); c.i64Load(tempOffset); c.localSet(L_AI)
-      c.i32c(0); c.localGet(L_AI); c.i64Store(regOffset)
+    for (const instr of inst.instructions) emitInstruction(c, instr, ctx)
+
+    // Per-instance writebacks
+    for (let j = 0; j < inst.register_targets.length; j++) {
+      const ti = inst.register_targets[j]!
+      if (ti < 0) continue
+      const ri = j + inst.state_reg_offset
+      const regType = plan.register_types[ri] ?? 'float'
+      const tempOffset = layout.tempsOffset + ti * 8
+      const regOffset  = layout.registersOffset + ri * 8
+      if (regType === 'bool') {
+        c.i32c(0); c.i64Load(tempOffset); c.i64c(0); c.u8(OP.I64_NE); c.u8(OP.I64_EXTEND_I32_U)
+        c.localSet(L_AI)
+        c.i32c(0); c.localGet(L_AI); c.i64Store(regOffset)
+      } else {
+        c.i32c(0); c.i64Load(tempOffset); c.localSet(L_AI)
+        c.i32c(0); c.localGet(L_AI); c.i64Store(regOffset)
+      }
     }
+
+    c.u8(OP.END)  // close if-then
   }
+
+  // Scheduler postamble (DAC stitch reads)
+  for (const instr of plan.scheduler_function.postamble) emitInstruction(c, instr, ctx)
 
   // Output mix: output[s] = sum(temps[output_targets[outputs[i]]]) / 20
   c.f64c(0); c.localSet(L_MIX)
-  for (const outIdx of plan.outputs) {
-    if (outIdx >= plan.output_targets.length) continue
-    const tempSlot = plan.output_targets[outIdx]!
+  for (const outIdx of plan.scheduler_function.outputs) {
+    if (outIdx >= plan.scheduler_function.output_targets.length) continue
+    const tempSlot = plan.scheduler_function.output_targets[outIdx]!
     c.localGet(L_MIX)
     c.i32c(0); c.f64Load(layout.tempsOffset + tempSlot * 8)
     c.u8(OP.F64_ADD)

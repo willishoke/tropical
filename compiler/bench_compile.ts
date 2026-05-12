@@ -56,11 +56,16 @@ console.log('Starting full compileSession...')
 const t0 = performance.now()
 const plan = compileSession(session)
 const t1 = performance.now()
+const instrCount =
+    plan.scheduler_function.preamble.length
+  + plan.scheduler_function.postamble.length
+  + plan.instance_functions.reduce((n, i) => n + i.instructions.length, 0)
 console.log(`compileSession: ${(t1 - t0).toFixed(1)}ms`)
-console.log(`  instructions: ${plan.instructions.length}`)
-console.log(`  registers: ${plan.register_targets.length}`)
+console.log(`  instances: ${plan.instance_functions.length}`)
+console.log(`  instructions: ${instrCount} (${plan.scheduler_function.preamble.length} preamble + bodies + ${plan.scheduler_function.postamble.length} postamble)`)
+console.log(`  registers: ${plan.register_names.length}`)
 console.log(`  array_slots: ${plan.array_slot_sizes.length} (sizes: ${plan.array_slot_sizes.join(', ')})`)
-console.log(`  outputs: ${plan.output_targets.length}`)
+console.log(`  outputs: ${plan.scheduler_function.output_targets.length}`)
 
 const t2 = performance.now()
 const json = JSON.stringify(plan)

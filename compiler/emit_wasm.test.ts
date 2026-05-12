@@ -26,20 +26,46 @@ function plan(fields: {
   register_types?: ScalarType[]
   state_init?: (number | boolean)[]
 }): FlatPlan {
+  // Pack the hand-crafted single-program kernel into a plan_5 with one
+  // instance function. The instance's alive slot is synthesized at the
+  // end of the slot array, defaulting to 1.0 — the conditional folds
+  // to inline so the test exercises the same kernel a flat plan would.
+  const aliveSlot = 0  // we add the only slot
   return {
-    schema: 'tropical_plan_4',
+    schema: 'tropical_plan_5',
     config: { sample_rate: 44100 },
     state_init: fields.state_init ?? [],
     register_names: fields.register_names ?? [],
     register_types: fields.register_types ?? [],
     array_slot_names: [],
-    outputs: fields.outputs ?? fields.output_targets.map((_, i) => i),
-    instructions: fields.instructions,
-    register_count: fields.register_count,
     array_slot_count: fields.array_slot_count ?? 0,
     array_slot_sizes: fields.array_slot_sizes ?? [],
-    output_targets: fields.output_targets,
-    register_targets: fields.register_targets ?? [],
+    register_count: fields.register_count,
+    instance_functions: [{
+      name:              'unit_test',
+      instance_name:     'unit_test',
+      instructions:      fields.instructions,
+      register_offset:   0,
+      state_reg_offset:  0,
+      array_slot_offset: 0,
+      register_count:    fields.register_count,
+      register_targets:  fields.register_targets ?? [],
+      alive_slot_index:  aliveSlot,
+    }],
+    scheduler_function: {
+      // Write 1.0 to the alive slot so GVN folds the conditional.
+      preamble: [{
+        tag: 'WriteSlot', dst: aliveSlot,
+        args: [{ kind: 'const', val: 1, scalar_type: 'float' }],
+        loop_count: 1, strides: [], result_type: 'float',
+      }],
+      postamble:      [],
+      output_targets: fields.output_targets,
+      outputs:        fields.outputs ?? fields.output_targets.map((_, i) => i),
+    },
+    slot_count:    1,
+    slot_names:    ['__alive__'],
+    slot_defaults: [1.0],
   }
 }
 

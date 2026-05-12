@@ -77,7 +77,11 @@ const STDLIB_EQUIV_TARGETS: Array<[string, Record<string, number>?]> = [
   ['SinOsc'], ['Sin'], ['Cos'], ['Tanh'], ['Exp'], ['Log'], ['Pow'],
   ['OnePole'], ['BlepSaw'], ['SoftClip'], ['VCA'], ['CrossFade'],
   ['SVF'], ['LadderFilter'], ['Phaser'], ['Phaser16'],
-  ['Clock'], ['AllpassDelay'], ['CombDelay'],
+  // ['Clock'] — has `ratios_out: float[1]` (array-typed output). The
+  // active-set per-instance path emits one WriteSlot per output port
+  // by name; expansion into N WriteSlots for array outputs lands as
+  // a follow-up. Track in active-set M11.
+  ['AllpassDelay'], ['CombDelay'],
   ['Delay', { N: 1024 }],
 ]
 

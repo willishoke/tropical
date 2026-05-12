@@ -50,8 +50,14 @@ describe('M9b: params as slot reads in per-instance path', () => {
     const plan = compileSessionSlotted(s)
 
     // Find the SinOsc body's freq read and verify it's a slot operand
-    // pointing at the param's slot index.
-    const slotReadsAtParamIdx = plan.instructions.flatMap(instr => instr.args)
+    // pointing at the param's slot index. Search across all instance
+    // function bodies + scheduler preamble + postamble.
+    const allInstrs = [
+      ...plan.scheduler_function.preamble,
+      ...plan.scheduler_function.postamble,
+      ...plan.instance_functions.flatMap(i => i.instructions),
+    ]
+    const slotReadsAtParamIdx = allInstrs.flatMap(instr => instr.args)
       .filter(op => op.kind === 'slot' && op.index === paramSlotIdx)
     expect(slotReadsAtParamIdx.length).toBeGreaterThan(0)
   })
@@ -151,7 +157,12 @@ describe('M9b: triggers as slot reads', () => {
     s.graphOutputs.push({ instance: 'osc', output: 'sine' })
 
     const plan = compileSessionSlotted(s)
-    const slotReads = plan.instructions.flatMap(instr => instr.args)
+    const allInstrs = [
+      ...plan.scheduler_function.preamble,
+      ...plan.scheduler_function.postamble,
+      ...plan.instance_functions.flatMap(i => i.instructions),
+    ]
+    const slotReads = allInstrs.flatMap(instr => instr.args)
       .filter(op => op.kind === 'slot' && op.index === trigSlot)
     expect(slotReads.length).toBeGreaterThan(0)
   })

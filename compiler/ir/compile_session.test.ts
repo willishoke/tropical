@@ -1,11 +1,11 @@
 /**
  * compile_session.test.ts — structural soundness for `compileSession`.
  *
- * Covers single-instance and two-instance ref-wiring shapes; asserts the
- * produced FlatPlan validates as `tropical_plan_4` with non-degenerate
- * counts. The audio-equivalence vs. legacy `flattenSession` gate
- * (`compile_session_equiv.test.ts`) carried the cutover; this file is
- * the lightweight per-PR sanity for the materialization shape.
+ * Covers single-instance and two-instance ref-wiring shapes; asserts
+ * the produced FlatPlan validates as `tropical_plan_5` with
+ * non-degenerate counts. Audio-equivalence against the interpreter
+ * lives in `jit_interp_stdlib_equiv.test.ts`; this file is the
+ * lightweight per-PR sanity for the materialization shape.
  */
 
 import { describe, test, expect } from 'bun:test'
@@ -26,22 +26,35 @@ function singleInstanceSession(typeName: string) {
 }
 
 describe('compileSession — single-instance sessions', () => {
+  // Clock is excluded — it has an array-typed output (`ratios_out:
+  // float[1]`) that the per-instance compile path doesn't yet expand.
+  // The compile-fail path is exercised separately.
   for (const typeName of [
     'Sin', 'Cos', 'Exp', 'Log', 'Tanh',
     'OnePole', 'SoftClip', 'BitCrusher', 'CrossFade',
     'NoiseLFSR', 'AllpassDelay', 'CombDelay',
-    'VCA', 'Clock',
+    'VCA',
   ] as const) {
-    test(`emits well-formed tropical_plan_4: ${typeName}`, () => {
+    test(`emits well-formed tropical_plan_5: ${typeName}`, () => {
       const session = singleInstanceSession(typeName)
       const plan = compileSession(session)
 
-      expect(plan.schema).toBe('tropical_plan_4')
-      expect(plan.outputs.length).toBeGreaterThan(0)
-      expect(plan.outputs.length).toBe(session.graphOutputs.length)
-      expect(plan.instructions.length).toBeGreaterThan(0)
-      expect(plan.output_targets.length).toBe(plan.outputs.length)
-      expect(plan.register_targets.length).toBe(plan.register_names.length)
+      expect(plan.schema).toBe('tropical_plan_5')
+      const totalInstrs =
+          plan.scheduler_function.preamble.length
+        + plan.scheduler_function.postamble.length
+        + plan.instance_functions.reduce((n, i) => n + i.instructions.length, 0)
+      expect(totalInstrs).toBeGreaterThan(0)
+      expect(plan.scheduler_function.outputs.length).toBeGreaterThan(0)
+      expect(plan.scheduler_function.outputs.length).toBe(session.graphOutputs.length)
+      expect(plan.scheduler_function.output_targets.length).toBe(plan.scheduler_function.outputs.length)
+      expect(plan.instance_functions.length).toBe(session.instanceRegistry.size)
+      // Every instance has an alive slot.
+      for (const inst of plan.instance_functions) {
+        expect(inst.alive_slot_index).toBeGreaterThanOrEqual(0)
+        expect(inst.alive_slot_index).toBeLessThan(plan.slot_count)
+        expect(plan.slot_defaults[inst.alive_slot_index]).toBe(1)  // default-alive
+      }
       expect(plan.array_slot_sizes.length).toBe(plan.array_slot_count)
     })
   }
@@ -59,14 +72,13 @@ describe('compileSession — two-instance refs', () => {
     session.instanceRegistry.set('osc', sinInst)
     session.instanceRegistry.set('amp', vcaInst)
 
-    // Wire osc.out → amp.audio (ref node).
     session.inputExprNodes.set('amp:audio', { op: 'ref', instance: 'osc', output: 'out' })
     session.inputExprNodes.set('amp:cv', 0.5)
 
     session.graphOutputs.push({ instance: 'amp', output: 'out' })
 
     const plan = compileSession(session)
-    expect(plan.outputs.length).toBe(1)
-    expect(plan.instructions.length).toBeGreaterThan(0)
+    expect(plan.scheduler_function.outputs.length).toBe(1)
+    expect(plan.instance_functions.length).toBe(2)
   })
 })

@@ -111,7 +111,9 @@ for (const p of patches) {
       `${tsMs.toFixed(1)}+${stringifyMs.toFixed(1)}`,
       (planJson.length / 1024).toFixed(0),
       jitMs.toFixed(1),
-      plan.instructions.length,
+      plan.scheduler_function.preamble.length
+        + plan.scheduler_function.postamble.length
+        + plan.instance_functions.reduce((n, i) => n + i.instructions.length, 0),
       arrays,
       nsPerSample.toFixed(1),
       `${(rtRatio * 100).toFixed(1)}%`,
