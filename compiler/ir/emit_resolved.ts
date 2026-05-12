@@ -660,12 +660,29 @@ class Emitter {
   private compileIndex(argNodes: [ResolvedExpr, ResolvedExpr]): ScalarResult {
     const arr = this.compileNode(argNodes[0])
     const idx = this.compileNode(argNodes[1], 'int')
+    // The Index op requires its array operand to actually be an
+    // array (an `array_reg` operand). A scalar here means we're
+    // trying to index into something that won't behave like an
+    // array at runtime — typically an array-typed input port
+    // whose value can't be materialized as `array_reg` by the
+    // per-instance path. Silently substituting a `const 0`
+    // placeholder (the previous behavior) produced a kernel that
+    // segfaulted the moment the JIT dereferenced
+    // `arrays[args[0].slot]` with an uninitialized union field.
+    // Fail loudly instead.
+    if (!arr.isArray) {
+      throw new Error(
+        `emit_resolved: 'index' op has non-array operand. This usually means an ` +
+        `array-typed input port (e.g. \`sequence: int[N]\`) is being indexed inside ` +
+        `the program body — the per-instance compile path doesn't yet materialize ` +
+        `array input operands. Tracked as a follow-up to active-set M11.`,
+      )
+    }
     const dst = this.allocReg()
     const rt = arr.scalarType
     this.regTypes.set(dst, rt)
-    const arrOp: NOperand = arr.isArray ? arr.op : opConst(0, 'float')
     const idxOp: NOperand = idx.isArray ? opConst(0, 'int') : idx.op
-    this.emit(instrIndex(dst, [arrOp, idxOp], rt))
+    this.emit(instrIndex(dst, [arr.op, idxOp], rt))
     return { isArray: false, op: opTemp(dst, rt), scalarType: rt }
   }
 
