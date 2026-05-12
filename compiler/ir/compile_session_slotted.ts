@@ -2,34 +2,41 @@
  * compile_session_slotted.ts — session compilation for `tropical_plan_5`.
  *
  * Each session instance compiles standalone (via `compileResolved`) and
- * lands in its own `InstanceFunction` entry. The JIT emits one
- * `alwaysinline` LLVM function per instance plus a single scheduler
- * function that loops the audio buffer, evaluates each instance's
- * alive expression (in the scheduler preamble), and conditionally
- * dispatches to the instance functions:
+ * lands in its own `InstanceFunction` entry. The JIT emits a single
+ * LLVM kernel that loops the audio buffer; per sample it evaluates
+ * the alive expression of each instance (in the scheduler preamble),
+ * conditionally runs the instance's body + writebacks, then reads
+ * graphOutput slots in the postamble:
  *
  *     for each sample:
- *       <preamble: alive_i ← evaluate aliveInput_i; WriteSlot alive_slot_i>
- *       for i in 0..N: if (alive_i > 0.5) call instance_i(...)
- *       <DAC stitch: read graphOutput slots into mix temps>
+ *       <preamble: alive_i ← WriteSlot of evaluated expression>
+ *       for i in 0..N: if (slots[alive_slot_i] > 0.5) { body_i; writebacks_i }
+ *       <postamble: DAC stitch — read graphOutput slots into mix temps>
  *
- * For an instance with no aliveInput, the preamble writes the literal
- * `1.0` to its alive slot. LLVM's GVN forwards the store-to-load
- * through the same kernel pass, the conditional folds to `if (true)`,
- * and the inlined body runs unconditionally — byte-equal to a unified
- * kernel.
+ * Default-alive instances see a `WriteSlot const 1.0` in the
+ * preamble. LLVM's GVN forwards the store-to-load through the same
+ * kernel pass, folds the conditional to `if (true)`, and jump-
+ * threading eliminates the branch — the body inlines
+ * unconditionally, matching a unified kernel byte-for-byte.
  *
- * For an instance with an aliveInput ExprNode, the preamble compiles
- * that expression (via the shared `translateNode` machinery used for
- * input expressions) and writes the bool result. Asleep instances
- * skip their internal compute; their last-published output slot
- * persists. See `materialize_session.ts` for the matching interpreter
- * semantics.
+ * Asleep instances skip their internal compute; their last-published
+ * output slot persists. `materialize_session.ts` (interpreter oracle)
+ * realizes the same I/O semantics structurally via `select(alive,
+ * raw, fallback)` wraps.
+ *
+ * ## Branded discipline
+ *
+ * The unified accumulators carry branded counts/offsets per
+ * namespace (`TempIdx`, `StateRegIdx`, `ArraySlotIdx`,
+ * `ModuleSlotIdx`). Cross-namespace arithmetic is a compile error —
+ * the literal shape of the Phaser bug we hit during PR review.
  */
 
 import { allocateOutputSlots, type SessionState } from '../session.js'
-import type { FlatPlan, InstanceFunction, SchedulerFunction } from '../flat_plan.js'
-import type { NInstr, ScalarType } from './emit_resolved.js'
+import type { FlatPlan, InstanceFunction, SchedulerFunction, RegTarget } from '../flat_plan.js'
+import { TempTarget, ArrayManagedTarget } from '../flat_plan.js'
+import type { NInstr, ScalarType, NOperand } from './emit_resolved.js'
+import { instrWriteSlot, opConst } from './emit_resolved.js'
 import { compileResolved } from './compile_resolved.js'
 import {
   computeInstanceTopoOrder, remapInstancePlan, emitDacStitch,
@@ -37,25 +44,25 @@ import {
   translateAliveExpr,
 } from './compile_session_slotted_helpers.js'
 import {
+  type TempIdx, type ModuleSlotIdx,
+  tempIdx, moduleSlotIdx,
+  tempOffset, stateRegOffset, arraySlotOffset,
+  rawOffset,
+} from './slot_indices.js'
+import {
   inputNames, outputNames, outputPortTypes,
   rawInputDefaults,
 } from '../program_types.js'
 
-/** Compile the session into a `tropical_plan_5` `FlatPlan`. There is no
- *  fallback path — every shape supported by the per-instance compile
- *  must compile here. Shapes that don't yet work (e.g., type-level
- *  params, nested instance calls in input expressions) throw clear
- *  errors pointing at the relevant follow-up scope. */
+/** Compile the session into a `tropical_plan_5` `FlatPlan`. */
 export function compileSessionSlotted(session: SessionState): FlatPlan {
   return compileSessionSlottedPerInstance(session)
 }
 
 function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
-  // Auto-allocate output slots for any instance the caller hasn't
-  // pre-allocated. `add_instance` and `loadProgramAsSession` already
-  // do this eagerly, but tests sometimes poke `instanceRegistry`
-  // directly. Auto-allocation makes the boundary forgiving without
-  // weakening the rest of the invariants.
+  // Auto-allocate output slots for any instance whose owner hasn't
+  // pre-allocated. `add_instance` / `loadProgramAsSession` already do
+  // this eagerly; tests sometimes poke `instanceRegistry` directly.
   for (const [name, inst] of session.instanceRegistry) {
     if (inst.compiled !== undefined) allocateOutputSlots(session, name, inst.compiled)
   }
@@ -63,48 +70,34 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
   const order = computeInstanceTopoOrder(session)
 
   // ── Unified accumulators across all instance functions + scheduler ───
-  const allRegisterNames:  string[] = []
-  const allRegisterTypes:  ScalarType[] = []
-  const allStateInit:      (number | boolean)[] = []
-  const allArraySlotSizes: number[] = []
-  const allArraySlotNames: string[] = []
-  const allRegisterTargets: number[] = []
+  // Plain counts (number) for things that are just "how many in this
+  // namespace"; the offsets we hand to RemapContext are branded so
+  // cross-namespace arithmetic can't compile.
+  const allRegisterNames:   string[]            = []
+  const allRegisterTypes:   ScalarType[]        = []
+  const allStateInit:       (number | boolean)[] = []
+  const allArraySlotSizes:  number[]            = []
+  const allArraySlotNames:  string[]            = []
 
-  let regOffset       = 0  // unified temp count (NInstr.dst + reg-operand slot)
-  let stateRegOffset  = 0  // unified state-register count
-  let arraySlotOffset = 0  // unified array-slot count
+  let nextRegRaw    = 0
+  let nextStateRaw  = 0
+  let nextArrayRaw  = 0
 
   const instanceFunctions: InstanceFunction[] = []
-
-  // Scheduler preamble — emitted once per sample, before any instance
-  // fires. Holds:
-  //   1. Alive expression WriteSlots (one per instance; literal 1.0
-  //      for instances without aliveInput).
-  //   2. DAC stitching reads (each graphOutput slot → mix temp).
-  //
-  // For (1), we accumulate temps into the unified register space
-  // *after* every instance's body — preamble lives at the top of the
-  // sample loop but its temps come last in temp-index space, so they
-  // can't collide with instance regs.
   const schedulerPreamble: NInstr[] = []
 
-  // First pass: compile each instance, building the instance_functions
-  // entries and accumulating the unified state.
+  // First pass: compile each instance, building instance_functions
+  // entries and accumulating unified state.
   for (const instName of order) {
     const inst = session.instanceRegistry.get(instName)
     if (inst === undefined) continue
     const compiled = inst.compiled
     if (compiled === undefined) {
       throw new Error(
-        `compileSessionSlotted: instance '${instName}' has no Compiled type. ` +
-        `(Did add_instance fail silently?)`,
+        `compileSessionSlotted: instance '${instName}' has no Compiled type.`,
       )
     }
 
-    // Compile this instance standalone. Param handles stay empty here
-    // — session-level params resolve to slot operands at remap time;
-    // type-level inline params would surface as a `param` operand and
-    // remap throws.
     const plan = compileResolved(compiled.prog, { paramHandles: new Map() })
 
     const inPortNames  = inputNames(compiled)
@@ -114,9 +107,9 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
 
     const ctx: RemapContext = {
       instanceName: instName,
-      regOffset,
-      stateRegOffset,
-      arraySlotOffset,
+      regOffset:       tempOffset(nextRegRaw),
+      stateRegOffset:  stateRegOffset(nextStateRaw),
+      arraySlotOffset: arraySlotOffset(nextArrayRaw),
       inputBindingFor: (portName) => {
         const expr = session.inputExprNodes.get(`${instName}:${portName}`)
         if (expr !== undefined) return { kind: 'wired', expr }
@@ -124,122 +117,87 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
         const value = (typeof d === 'number' || typeof d === 'boolean') ? d : 0
         return { kind: 'literal', value }
       },
-      outputSlotFor: (portName) => {
-        const key = `${instName}.${portName}`
-        const idx = session.outputSlotRegistry.get(key)
-        if (idx === undefined) {
-          throw new Error(
-            `compileSessionSlotted: output slot for '${key}' not allocated. ` +
-            `(Did add_instance populate outputSlotRegistry?)`,
-          )
-        }
-        return idx
-      },
+      outputSlotFor: (portName) => moduleSlotIdx(requireOutputSlot(session, instName, portName)),
       inputPortNames:    inPortNames,
       outputPortNames:   outPortNames,
       outputScalarTypes: outPortTypes,
     }
 
     const { preamble, body, writeSlots, tempsConsumed } = remapInstancePlan(plan, ctx, session)
-
-    // Per-instance instructions: input-preamble (computes wired inputs
-    // into temps) → body → writeSlots. All three are skipped when the
-    // instance is asleep.
     const instanceInstructions: NInstr[] = [...preamble, ...body, ...writeSlots]
 
-    const aliveSlotIdx = session.outputSlotRegistry.get(`${instName}.__alive__`)
-    if (aliveSlotIdx === undefined) {
-      throw new Error(
-        `compileSessionSlotted: instance '${instName}' has no __alive__ slot. ` +
-        `(allocateOutputSlots should have allocated one.)`,
-      )
-    }
+    const aliveSlot = moduleSlotIdx(
+      requireOutputSlot(session, instName, '__alive__'),
+    )
 
-    // Per-instance register_targets entries that are negative
-    // (`-1`) mean "no scalar writeback for this slot" — used for
-    // array-typed state registers, which manage their persistence
-    // via in-place SetElement / strided Add writes elsewhere in the
-    // instruction stream. Leave the sentinel intact rather than
-    // shifting it into a (bogus, scalar) temp index.
-    const shiftTempIdx = (t: number): number => (t < 0 ? t : t + regOffset)
+    // Shift per-instance register_targets into the unified temp
+    // space. ArrayManagedTarget passes through structurally — no
+    // arithmetic can corrupt it, exactly the property the `-1`
+    // sentinel didn't provide.
+    const shiftedTargets: RegTarget[] = plan.register_targets.map(t => {
+      if (t.kind === 'arrayManaged') return ArrayManagedTarget
+      return TempTarget(tempIdx(t.slot + nextRegRaw))
+    })
 
     instanceFunctions.push({
       name:              `instance_${instName}`,
       instance_name:     instName,
       instructions:      instanceInstructions,
-      register_offset:   regOffset,
-      state_reg_offset:  stateRegOffset,
-      array_slot_offset: arraySlotOffset,
+      register_offset:   tempOffset(nextRegRaw),
+      state_reg_offset:  stateRegOffset(nextStateRaw),
+      array_slot_offset: arraySlotOffset(nextArrayRaw),
       register_count:    plan.register_count + tempsConsumed,
-      register_targets:  plan.register_targets.map(shiftTempIdx),
-      alive_slot_index:  aliveSlotIdx,
+      register_targets:  shiftedTargets,
+      alive_slot_index:  aliveSlot,
     })
 
-    // Accumulate state contributions into the unified plan-level arrays.
+    // Accumulate unified state. These arrays mirror per-instance
+    // contributions in instance order; their indices line up with
+    // (state_reg_offset + i), (array_slot_offset + i), etc.
     for (const n of plan.register_names) allRegisterNames.push(`${instName}.${n}`)
     allRegisterTypes.push(...plan.register_types)
     for (const v of plan.state_init) allStateInit.push(v as number | boolean)
     allArraySlotSizes.push(...plan.array_slot_sizes)
     for (const n of plan.array_slot_names) allArraySlotNames.push(`${instName}.${n}`)
-    for (const t of plan.register_targets) {
-      allRegisterTargets.push(shiftTempIdx(t))
-    }
 
-    regOffset       += plan.register_count + tempsConsumed
-    stateRegOffset  += plan.state_init.length
-    arraySlotOffset += plan.array_slot_count
+    nextRegRaw   += plan.register_count + tempsConsumed
+    nextStateRaw += plan.state_init.length
+    nextArrayRaw += plan.array_slot_count
   }
 
-  // Second pass: emit alive WriteSlot instructions into the scheduler
-  // preamble. Writing every sample (even for default-alive instances)
-  // lets LLVM's GVN forward the constant 1.0 through the same kernel
-  // pass — the load-then-cmp-then-br chain folds to a pure inline.
-  //
-  // For instances with aliveInput, translateAliveExpr compiles the
-  // expression into preamble temps and returns the final operand to
-  // WriteSlot.
-  let preambleNextTemp = regOffset
+  // Second pass: emit alive WriteSlots into the scheduler preamble.
+  // Writing every sample lets GVN forward the constant 1.0 in the
+  // default case so the dispatch conditional folds to inline.
+  let preambleNextTempRaw = nextRegRaw
   const aliveEmitter: PreambleEmitter = {
     instrs: schedulerPreamble,
-    allocTemp: () => preambleNextTemp++,
+    allocTemp: () => {
+      const slot = tempIdx(preambleNextTempRaw)
+      preambleNextTempRaw += 1
+      return slot
+    },
   }
 
   for (const instName of order) {
     const inst = session.instanceRegistry.get(instName)
     if (inst === undefined) continue
-    const aliveSlotIdx = session.outputSlotRegistry.get(`${instName}.__alive__`)
-    if (aliveSlotIdx === undefined) continue
+    const aliveSlotRaw = session.outputSlotRegistry.get(`${instName}.__alive__`)
+    if (aliveSlotRaw === undefined) continue
+    const aliveSlot = moduleSlotIdx(aliveSlotRaw)
 
-    let aliveOperand: import('./emit_resolved.js').NOperand
-    if (inst.aliveInput === undefined) {
-      // Default: always alive. Literal 1.0.
-      aliveOperand = { kind: 'const', val: 1, scalar_type: 'float' }
-    } else {
-      aliveOperand = translateAliveExpr(
-        inst.aliveInput,
-        session,
-        aliveEmitter,
-        `${instName}.__alive__`,
-      )
-    }
-    schedulerPreamble.push({
-      tag:        'WriteSlot',
-      dst:        aliveSlotIdx,
-      args:       [aliveOperand],
-      loop_count: 1,
-      strides:    [],
-      result_type: 'float',
-    })
+    const aliveOperand: NOperand = inst.aliveInput === undefined
+      ? opConst(1, 'float')
+      : translateAliveExpr(
+          inst.aliveInput, session, aliveEmitter,
+          `${instName}.__alive__`,
+        )
+    schedulerPreamble.push(instrWriteSlot(aliveSlot, aliveOperand, 'float'))
   }
 
-  regOffset = preambleNextTemp
-
   // DAC stitching reads each graphOutput slot AFTER all instances
-  // have dispatched, so the reads see the current sample's WriteSlot
-  // values (alive instances have written this sample; asleep
-  // instances retain the previous WriteSlot).
-  const dac = emitDacStitch(session, regOffset)
-  regOffset += dac.tempCount
+  // dispatch — observes the current sample's WriteSlots.
+  const dac = emitDacStitch(session, tempOffset(preambleNextTempRaw))
+  const dacEndRaw = preambleNextTempRaw + dac.tempCount
 
   const schedulerFunction: SchedulerFunction = {
     preamble:       schedulerPreamble,
@@ -255,13 +213,26 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
     register_names:    allRegisterNames,
     register_types:    allRegisterTypes,
     array_slot_names:  allArraySlotNames,
-    array_slot_count:  arraySlotOffset,
+    array_slot_count:  nextArrayRaw,
     array_slot_sizes:  allArraySlotSizes,
-    register_count:    regOffset,
+    register_count:    dacEndRaw,
     instance_functions: instanceFunctions,
     scheduler_function: schedulerFunction,
     ...buildSlotMetadata(session),
   }
+}
+
+/** Look up an instance's output slot, throwing with a clear message
+ *  if it's missing. Centralised so error wording stays consistent. */
+function requireOutputSlot(session: SessionState, instName: string, portName: string): number {
+  const key = `${instName}.${portName}`
+  const idx = session.outputSlotRegistry.get(key)
+  if (idx === undefined) {
+    throw new Error(
+      `compileSessionSlotted: output slot for '${key}' not allocated.`,
+    )
+  }
+  return idx
 }
 
 /** Compute slot allocation metadata from the session registries. */
@@ -274,7 +245,7 @@ function buildSlotMetadata(session: SessionState): {
   for (const [name, idx] of session.outputSlotRegistry) {
     slotNames[idx] = name
     // __alive__ slots default to 1.0 so an instance is alive until
-    // explicitly silenced. Other output slots start at 0.
+    // explicitly silenced.
     if (name.endsWith('.__alive__')) slotDefaults[idx] = 1
   }
   for (const [name, idx] of session.paramSlotRegistry) {
@@ -302,3 +273,6 @@ function scalarOf(
 export function slotModeEnabled(_session?: SessionState, _opt?: boolean): boolean {
   return true
 }
+
+// Silence unused-import warnings for re-export-style symbols.
+void rawOffset

@@ -19,9 +19,7 @@ import { buildSlotMaps, type SlotMaps } from './slots.js'
 import { emitResolvedProgram, type EmitSlots, type ScalarType } from './emit_resolved.js'
 
 /** Param-handle bindings for FFI param/trigger decls embedded in a
- *  program type's body. Empty on the per-instance path (session-level
- *  params resolve through `slot` operands during input remapping;
- *  type-level params survive into emission and surface here). */
+ *  program type's body. */
 export interface CompileResolvedContext {
   paramHandles?: Map<ParamDecl, { ptr: string }>
 }
@@ -30,7 +28,6 @@ export interface CompileResolvedContext {
 export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedContext = {}): PerInstancePlan {
   const slots = buildSlotMaps(prog)
 
-  // Any surviving `instanceDecl` means `inlineInstances` didn't run.
   if (slots.instanceDecls.length > 0) {
     throw new Error(
       `compileResolved: program '${prog.name}' has ${slots.instanceDecls.length} surviving instanceDecl entries; ` +
