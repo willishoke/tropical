@@ -451,9 +451,23 @@ export function remapInstancePlan(
     }
   }
 
+  // `dst` semantics depend on the instruction:
+  //   - `Pack`, `SetElement`, and any elementwise op (loop_count > 1)
+  //     write to an ARRAY slot (`arrays[dst]`). Shift by arraySlotOffset.
+  //   - Everything else (scalar ops, Index, casts, WriteSlot) writes
+  //     to a TEMP slot. Shift by regOffset.
+  // (WriteSlot is emitted by remapInstancePlan AFTER the body and uses
+  // an absolute slot index, so it doesn't go through this remap.)
+  const dstShiftFor = (instr: NInstr): number => {
+    if (instr.loop_count > 1) return ctx.arraySlotOffset
+    if (instr.tag === 'Pack')       return ctx.arraySlotOffset
+    if (instr.tag === 'SetElement') return ctx.arraySlotOffset
+    return ctx.regOffset
+  }
+
   const body: NInstr[] = plan.instructions.map(instr => ({
     ...instr,
-    dst: instr.dst + ctx.regOffset,
+    dst: instr.dst + dstShiftFor(instr),
     args: instr.args.map(remapOperand),
   }))
 

@@ -1,0 +1,835 @@
+{
+  "input": {
+    "schema": "tropical_program_2",
+    "name": "stdlib_noise_crush_scenario",
+    "body": {
+      "op": "block",
+      "decls": [
+        {
+          "op": "instanceDecl",
+          "name": "n",
+          "program": "NoiseLFSR",
+          "inputs": {}
+        },
+        {
+          "op": "instanceDecl",
+          "name": "bc",
+          "program": "BitCrusher",
+          "inputs": {
+            "audio": {
+              "op": "ref",
+              "instance": "n",
+              "output": "out"
+            },
+            "bit_depth": 6
+          }
+        }
+      ],
+      "assigns": [],
+      "value": null
+    },
+    "audio_outputs": [
+      {
+        "instance": "bc",
+        "output": "output"
+      }
+    ]
+  },
+  "expected_plan": {
+    "schema": "tropical_plan_4",
+    "config": {
+      "sampleRate": 44100
+    },
+    "state_init": [
+      44257,
+      0,
+      0,
+      0,
+      0
+    ],
+    "register_names": [
+      "n_state",
+      "n_value",
+      "bc_hold_sample",
+      "bc_hold_counter",
+      "n_prev_clock"
+    ],
+    "register_types": [
+      "int",
+      "float",
+      "float",
+      "float",
+      "float"
+    ],
+    "array_slot_names": [],
+    "outputs": [
+      0
+    ],
+    "instructions": [
+      {
+        "tag": "Add",
+        "dst": 0,
+        "args": [
+          {
+            "kind": "state_reg",
+            "slot": 3,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Clamp",
+        "dst": 1,
+        "args": [
+          {
+            "kind": "const",
+            "val": 44100,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "rate",
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "FloorDiv",
+        "dst": 2,
+        "args": [
+          {
+            "kind": "rate",
+            "scalar_type": "float"
+          },
+          {
+            "kind": "reg",
+            "slot": 1,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Clamp",
+        "dst": 3,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 2,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 44100,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "GreaterEq",
+        "dst": 4,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 0,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "reg",
+            "slot": 3,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "bool"
+      },
+      {
+        "tag": "Greater",
+        "dst": 5,
+        "args": [
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 0.5,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "bool"
+      },
+      {
+        "tag": "LessEq",
+        "dst": 6,
+        "args": [
+          {
+            "kind": "state_reg",
+            "slot": 4,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 0.5,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "bool"
+      },
+      {
+        "tag": "Mul",
+        "dst": 7,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 5,
+            "scalar_type": "bool"
+          },
+          {
+            "kind": "reg",
+            "slot": 6,
+            "scalar_type": "bool"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "bool"
+      },
+      {
+        "tag": "BitAnd",
+        "dst": 8,
+        "args": [
+          {
+            "kind": "state_reg",
+            "slot": 0,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "int"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "int"
+      },
+      {
+        "tag": "RShift",
+        "dst": 9,
+        "args": [
+          {
+            "kind": "state_reg",
+            "slot": 0,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "int"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "int"
+      },
+      {
+        "tag": "BitXor",
+        "dst": 10,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 9,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "const",
+            "val": 46080,
+            "scalar_type": "int"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "int"
+      },
+      {
+        "tag": "RShift",
+        "dst": 11,
+        "args": [
+          {
+            "kind": "state_reg",
+            "slot": 0,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "int"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "int"
+      },
+      {
+        "tag": "Select",
+        "dst": 12,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 8,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "reg",
+            "slot": 10,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "reg",
+            "slot": 11,
+            "scalar_type": "int"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "int"
+      },
+      {
+        "tag": "Mul",
+        "dst": 13,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 12,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "const",
+            "val": 2,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Div",
+        "dst": 14,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 13,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 65535,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Sub",
+        "dst": 15,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 14,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Select",
+        "dst": 16,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 7,
+            "scalar_type": "bool"
+          },
+          {
+            "kind": "reg",
+            "slot": 15,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "state_reg",
+            "slot": 1,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Clamp",
+        "dst": 17,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 16,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": -1,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Clamp",
+        "dst": 18,
+        "args": [
+          {
+            "kind": "const",
+            "val": 6,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 24,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Sub",
+        "dst": 19,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 18,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Ldexp",
+        "dst": 20,
+        "args": [
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "reg",
+            "slot": 19,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Mul",
+        "dst": 21,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 17,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "reg",
+            "slot": 20,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Add",
+        "dst": 22,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 21,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 0.5,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "FloorDiv",
+        "dst": 23,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 22,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Div",
+        "dst": 24,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 23,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "reg",
+            "slot": 20,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Select",
+        "dst": 25,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 4,
+            "scalar_type": "bool"
+          },
+          {
+            "kind": "reg",
+            "slot": 24,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "state_reg",
+            "slot": 2,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Add",
+        "dst": 26,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 25,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "BitXor",
+        "dst": 27,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 9,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "const",
+            "val": 46080,
+            "scalar_type": "int"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "int"
+      },
+      {
+        "tag": "Select",
+        "dst": 28,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 8,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "reg",
+            "slot": 27,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "reg",
+            "slot": 9,
+            "scalar_type": "int"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "int"
+      },
+      {
+        "tag": "Select",
+        "dst": 29,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 7,
+            "scalar_type": "bool"
+          },
+          {
+            "kind": "reg",
+            "slot": 28,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "state_reg",
+            "slot": 0,
+            "scalar_type": "int"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "int"
+      },
+      {
+        "tag": "Add",
+        "dst": 30,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 29,
+            "scalar_type": "int"
+          },
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "int"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "int"
+      },
+      {
+        "tag": "Add",
+        "dst": 31,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 16,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Add",
+        "dst": 32,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 25,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Add",
+        "dst": 33,
+        "args": [
+          {
+            "kind": "state_reg",
+            "slot": 3,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 1,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Select",
+        "dst": 34,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 4,
+            "scalar_type": "bool"
+          },
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "reg",
+            "slot": 33,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Add",
+        "dst": 35,
+        "args": [
+          {
+            "kind": "reg",
+            "slot": 34,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      },
+      {
+        "tag": "Add",
+        "dst": 36,
+        "args": [
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "float"
+          },
+          {
+            "kind": "const",
+            "val": 0,
+            "scalar_type": "float"
+          }
+        ],
+        "loop_count": 1,
+        "strides": [],
+        "result_type": "float"
+      }
+    ],
+    "register_count": 37,
+    "array_slot_count": 0,
+    "array_slot_sizes": [],
+    "output_targets": [
+      26
+    ],
+    "register_targets": [
+      30,
+      31,
+      32,
+      35,
+      36
+    ]
+  }
+}

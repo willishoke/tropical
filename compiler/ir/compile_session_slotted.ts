@@ -155,6 +155,14 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
       )
     }
 
+    // Per-instance register_targets entries that are negative
+    // (`-1`) mean "no scalar writeback for this slot" — used for
+    // array-typed state registers, which manage their persistence
+    // via in-place SetElement / strided Add writes elsewhere in the
+    // instruction stream. Leave the sentinel intact rather than
+    // shifting it into a (bogus, scalar) temp index.
+    const shiftTempIdx = (t: number): number => (t < 0 ? t : t + regOffset)
+
     instanceFunctions.push({
       name:              `instance_${instName}`,
       instance_name:     instName,
@@ -163,7 +171,7 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
       state_reg_offset:  stateRegOffset,
       array_slot_offset: arraySlotOffset,
       register_count:    plan.register_count + tempsConsumed,
-      register_targets:  plan.register_targets.map(t => t + regOffset),
+      register_targets:  plan.register_targets.map(shiftTempIdx),
       alive_slot_index:  aliveSlotIdx,
     })
 
@@ -174,7 +182,7 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
     allArraySlotSizes.push(...plan.array_slot_sizes)
     for (const n of plan.array_slot_names) allArraySlotNames.push(`${instName}.${n}`)
     for (const t of plan.register_targets) {
-      allRegisterTargets.push(t + regOffset)
+      allRegisterTargets.push(shiftTempIdx(t))
     }
 
     regOffset       += plan.register_count + tempsConsumed
