@@ -1,28 +1,55 @@
 /**
- * compiler/ir/materialize_session.ts — Session → ResolvedProgram materialization.
+ * materialize_session.ts — Session → ResolvedProgram materialization.
  *
- * `materializeSessionToResolvedIR(session)` turns a session — a partially-typed
- * graph of `Instance`s plus session-keyed wiring `ExprNode`s plus
- * `dac.out` graph outputs — into a synthetic top-level `ResolvedProgram`,
- * then runs the strata pipeline. The result feeds either the JIT
- * (`compileSession`) or the pure-TS interpreter (`interpret_resolved`).
+ * Lifts a session — a partially-typed graph of `Instance`s plus
+ * session-keyed wiring `ExprNode`s plus `dac.out` graph outputs — into
+ * a synthetic top-level `ResolvedProgram` and runs the strata
+ * pipeline.
  *
- * Per PHASE_D_PLAN §5e, this is the highest-risk single piece of code in
- * Phase D: the session represents a partially-typed graph; the resolved IR
- * represents a fully-typed graph; the materializer is the coproduct
- * injection between the two universes.
+ * The JIT path (`compile_session_slotted.ts`) DOES NOT use this
+ * materialization any more — it compiles each instance standalone and
+ * the scheduler drives per-instance dispatch. This file is retained
+ * as the **interpreter oracle**: `interpret_resolved.ts` walks the
+ * resolved IR produced here, and `tests/equiv/jit_vs_interp` cross-checks the
+ * two evaluators sample-for-sample.
  *
- * Invariants (per category-theorist review §5e):
+ * ## Alive semantics in the oracle
+ *
+ * The JIT realizes `aliveInput` by skipping the instance's kernel
+ * when alive evaluates to false; the instance's output slot retains
+ * its last write. The interpreter (single-program oracle) realizes
+ * the same I/O semantics structurally via `select(alive, raw,
+ * fallback)` wraps on the gated instance's outputs and own
+ * reg/delay updates:
+ *
+ *   - **Output wrap** (pre-strata): `out = select(alive, raw_out, 0)`
+ *     ensures consumers downstream see a held value, not the live
+ *     computation, when alive is false.
+ *   - **Reg/delay wrap** (pre-strata for own decls; post-strata for
+ *     decls lifted by `inlineInstances` from nested sub-instances):
+ *     `next_value = select(alive, raw_next, current_value)` ensures
+ *     state freezes while alive is false.
+ *
+ * Inter-instance refs inside the alive expression are translated as
+ * normal (current-sample reads). The JIT side reads slot values from
+ * the start of the sample loop (previous-sample writes), so there is
+ * a one-sample-delay discrepancy when an alive expression references
+ * another instance's current-sample output. For most patches —
+ * param-driven alive, self-referencing envelope alive — the
+ * discrepancy is structural (alive depends on register state, which
+ * is one-sample-delayed in both backends anyway). Tests that exercise
+ * cross-instance current-sample alive references should drive
+ * through the JIT path only.
+ *
+ * ## Invariants
+ *
  *  - Zero scope analysis. The translator does no name resolution other
  *    than `instanceRegistry.get(instanceName)` and
  *    `findOutput(instance, outputName)`. Every reference becomes a
  *    direct decl-identity ResolvedExpr ref.
- *  - Coproduct injection: instance types come pre-resolved (resolved
- *    registry / specialization cache); the materializer only stitches
- *    them into a top-level shell.
  *  - Decl creation is bounded: the materializer creates fresh
  *    `DelayDecl` objects for session-level `delay()` nodes and fresh
- *    `OutputDecl` objects for graph_outputs. Nothing else.
+ *    `OutputDecl` objects for graph_outputs.
  */
 
 import type {
@@ -39,63 +66,53 @@ import { strataPipeline } from './strata.js'
 import { specializeProgram } from './specialize.js'
 import { cloneResolvedProgram } from './clone.js'
 
-/**
- * Run the session-to-ResolvedProgram materialization pipeline end-to-end:
- * synthesize a top-level program, route gate expressions through strata
- * for nestedOut inlining, run the strata pipeline, post-strata wrap
- * gateable lifted decls. Returns the post-strata `ResolvedProgram` ready
- * for either `compileResolved` (→ tropical_plan_4 for the JIT) or the
- * pure-TS interpreter (D3 D3-b).
- *
- * Shared by `compileSession` and `interpretSession` so both backends see
- * the exact same IR — the property `jit_interp_equiv` rests on.
- */
+/** Run the session-to-ResolvedProgram materialization end-to-end. */
 export function materializeSessionToResolvedIR(session: SessionState): ResolvedProgram {
   return materializeSessionForEmit(session).lowered
 }
 
-/** Variant of `materializeSessionToResolvedIR` that also exposes the
- *  ParamDecl map so `compileSession` can look up FFI handles per decl. */
+/** Variant that also exposes the ParamDecl map (paramHandle stitching
+ *  is no longer needed on the JIT side post-PR-A, but the interpreter
+ *  threads param values through this map). */
 export function materializeSessionForEmit(session: SessionState): {
   lowered: ResolvedProgram
   paramDecls: Map<string, ParamDecl>
 } {
   const ctx = makeContext(session)
   const synthetic = materializeSessionInner(session, ctx)
-  const gateableInstances = ctx.gateableInstances
+  const aliveInstances = ctx.aliveInstances
 
-  // For each gateable instance, append a synthetic outputDecl + outputAssign
-  // carrying its gate expression. This routes the gate expressions through
-  // `strataPipeline` so any `nestedOut` refs to other instances get inlined
-  // alongside the rest. Post-strata, we read the inlined gate back off the
-  // synthetic output, then strip both the output decl and assign before
-  // passing to `compileResolved` so the gate doesn't appear in the plan's
-  // audio outputs.
-  const gateOutputDecls = new Map<string, OutputDecl>()
-  for (const [instName, gate] of gateableInstances) {
-    const gateOutDecl: OutputDecl = { op: 'outputDecl', name: `__gate__${instName}` }
-    synthetic.ports.outputs.push(gateOutDecl)
-    synthetic.body.assigns.push({ op: 'outputAssign', target: gateOutDecl, expr: gate })
-    gateOutputDecls.set(instName, gateOutDecl)
+  // For each instance with explicit alive wiring, append a synthetic
+  // outputDecl + outputAssign carrying its alive expression. This
+  // routes the alive expressions through `strataPipeline` so any
+  // `nestedOut` refs to other instances get inlined alongside the
+  // rest. Post-strata, we read the inlined alive back off the
+  // synthetic output, then strip both the output decl and assign
+  // before passing to `compileResolved` so the alive expression
+  // doesn't appear in the plan's audio outputs.
+  const aliveOutputDecls = new Map<string, OutputDecl>()
+  for (const [instName, alive] of aliveInstances) {
+    const decl: OutputDecl = { op: 'outputDecl', name: `__alive__${instName}` }
+    synthetic.ports.outputs.push(decl)
+    synthetic.body.assigns.push({ op: 'outputAssign', target: decl, expr: alive })
+    aliveOutputDecls.set(instName, decl)
   }
 
   const lowered = strataPipeline(synthetic)
 
-  // Read back the post-strata inlined gate expressions by name (strata
-  // doesn't rename OutputDecls but it may rebuild the program shell,
-  // breaking object identity — match on the `__gate__` prefix instead).
-  const inlinedGates = new Map<string, ResolvedExpr>()
+  // Read back the post-strata inlined alive expressions by name.
+  const inlinedAlives = new Map<string, ResolvedExpr>()
   const synthOutputNames = new Set<string>()
-  for (const instName of gateableInstances.keys()) synthOutputNames.add(`__gate__${instName}`)
+  for (const instName of aliveInstances.keys()) synthOutputNames.add(`__alive__${instName}`)
   for (const a of lowered.body.assigns) {
     if (a.op !== 'outputAssign') continue
     if (!('op' in a.target)) continue
     if (a.target.op !== 'outputDecl') continue
-    if (!a.target.name.startsWith('__gate__')) continue
-    const instName = a.target.name.slice('__gate__'.length)
-    inlinedGates.set(instName, a.expr)
+    if (!a.target.name.startsWith('__alive__')) continue
+    const instName = a.target.name.slice('__alive__'.length)
+    inlinedAlives.set(instName, a.expr)
   }
-  // Strip the synthetic outputs and assigns before lowering.
+  // Strip the synthetic outputs and assigns.
   if (synthOutputNames.size > 0) {
     lowered.ports.outputs = lowered.ports.outputs.filter(o => !synthOutputNames.has(o.name))
     lowered.body.assigns = lowered.body.assigns.filter(a => {
@@ -105,81 +122,71 @@ export function materializeSessionForEmit(session: SessionState): {
     })
   }
 
-  if (inlinedGates.size > 0) applyGateableWraps(lowered, inlinedGates)
+  if (inlinedAlives.size > 0) applyAliveWraps(lowered, inlinedAlives)
   return { lowered, paramDecls: ctx.paramDecls }
 }
 
 /** Wrap every lifted reg/delay update and output expression whose
- *  origin is a gateable session instance with `select(gate, expr,
- *  fallback)`. Identifies origin via the `_liftedFrom` provenance tag
- *  that `inlineInstances:liftClonedBody` stamps onto each lifted decl
- *  — replaces the §2.3 D7 name-prefix anti-pattern.
+ *  origin is an alive-eligible session instance with `select(alive,
+ *  raw, fallback)`. Identifies origin via the `_liftedFrom`
+ *  provenance tag stamped by `inlineInstances:liftClonedBody`.
  *
  *  Synthetic delays from `traceCycles` are tagged
- *  `_liftedFrom: 'synthetic'`; they don't belong to any gateable
- *  instance and are skipped. */
-function applyGateableWraps(
+ *  `_liftedFrom: 'synthetic'` and don't belong to any instance —
+ *  skipped here. */
+function applyAliveWraps(
   prog: ResolvedProgram,
-  gateableInstances: ReadonlyMap<string, ResolvedExpr>,
+  aliveInstances: ReadonlyMap<string, ResolvedExpr>,
 ): void {
-  /** Look up the gate for a decl based on its `_liftedFrom` tag. Returns
-   *  null when the decl isn't from a gateable instance (or not lifted at
-   *  all — outer-program decls untagged). */
-  const gateFor = (decl: { _liftedFrom?: string }): ResolvedExpr | null => {
+  const aliveFor = (decl: { _liftedFrom?: string }): ResolvedExpr | null => {
     if (decl._liftedFrom === undefined) return null
     if (decl._liftedFrom === 'synthetic') return null
-    const gate = gateableInstances.get(decl._liftedFrom)
-    return gate === undefined ? null : gate
+    const a = aliveInstances.get(decl._liftedFrom)
+    return a === undefined ? null : a
   }
 
   // Skip an expression that was already wrapped pre-strata (the
-  // gateable instance's OWN decls had `select(gate, raw, fallback)`
-  // applied by `wrapTypeOutputsPreStrata` and strata's input
-  // substitution embedded the same `gate` object identity).
-  const alreadyWrapped = (expr: ResolvedExpr, gate: ResolvedExpr): boolean => {
+  // alive instance's OWN decls had `select(alive, raw, fallback)`
+  // applied by `wrapTypeOutputsPreStrata`, and strata's input
+  // substitution embedded the same `alive` object identity).
+  const alreadyWrapped = (expr: ResolvedExpr, alive: ResolvedExpr): boolean => {
     return typeof expr === 'object' && expr !== null && !Array.isArray(expr)
-      && expr.op === 'select' && expr.args[0] === gate
+      && expr.op === 'select' && expr.args[0] === alive
   }
 
-  // Wrap nextUpdate assigns whose target reg/delay was lifted from a
-  // gateable instance and isn't already wrapped (sub-instance decls
-  // didn't exist pre-strata).
+  // Wrap nextUpdate assigns whose target reg/delay was lifted from an
+  // alive-eligible instance.
   for (const a of prog.body.assigns) {
     if (a.op !== 'nextUpdate') continue
-    const gate = gateFor(a.target)
-    if (gate === null) continue
-    if (alreadyWrapped(a.expr, gate)) continue
+    const alive = aliveFor(a.target)
+    if (alive === null) continue
+    if (alreadyWrapped(a.expr, alive)) continue
     const fallback: ResolvedExpr = a.target.op === 'regDecl'
       ? { op: 'regRef', decl: a.target as RegDecl }
       : { op: 'delayRef', decl: a.target as DelayDecl }
-    a.expr = { op: 'select', args: [gate, a.expr, fallback] }
+    a.expr = { op: 'select', args: [alive, a.expr, fallback] }
   }
 
   // Wrap delay decls' decl.update field for delays without a parallel
-  // nextUpdate. Same skip-if-already-wrapped logic.
+  // nextUpdate.
   for (const d of prog.body.decls) {
     if (d.op !== 'delayDecl') continue
-    const gate = gateFor(d)
-    if (gate === null) continue
+    const alive = aliveFor(d)
+    if (alive === null) continue
     const haveNextUpdate = prog.body.assigns.some(
       a => a.op === 'nextUpdate' && a.target === d,
     )
     if (haveNextUpdate) continue
-    if (alreadyWrapped(d.update, gate)) continue
+    if (alreadyWrapped(d.update, alive)) continue
     const fallback: ResolvedExpr = { op: 'delayRef', decl: d }
-    d.update = { op: 'select', args: [gate, d.update, fallback] }
+    d.update = { op: 'select', args: [alive, d.update, fallback] }
   }
 
-  // dac-target outputAssigns from gateable instances are ALREADY
-  // wrapped: pre-strata, the gateable type's outputAssigns got
-  // `select(__gate__, raw, 0)` applied. Strata's nestedOut substitution
-  // carried that wrapped form into wherever a1.out was referenced —
-  // including the synthetic dac.out outputAssign (which is just
-  // `nestedOut(a1, out)` syntactically, replaced inline). So no
-  // additional output wrapping is needed here. The wraps composed by
-  // strata also flow into other gateable instances' gate expressions
-  // (so `a2`'s gate `a1.out > 1.5` reads the wrapped a1.out, matching
-  // legacy `flatten.ts:wrapOutput` semantics).
+  // dac-target outputAssigns from alive-eligible instances are
+  // ALREADY wrapped: pre-strata, the instance's own outputAssigns got
+  // `select(__alive__, raw, 0)`. Strata's nestedOut substitution
+  // carried that wrapped form into wherever the output was
+  // referenced.
 }
 
 function makeContext(session: SessionState): MaterializeContext {
@@ -188,13 +195,12 @@ function makeContext(session: SessionState): MaterializeContext {
     paramDecls:          new Map(),
     syntheticDelayDecls: [],
     exprMemo:            new WeakMap(),
-    gateableInstances:   new Map(),
+    aliveInstances:      new Map(),
     session,
   }
 }
 
-/** Test-only export: expose the synthetic top-level builder so equiv
- *  diagnostics can inspect the IR before strata runs. */
+/** Test-only export. */
 export const _materializeSessionForTesting = materializeSession
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -202,28 +208,16 @@ export const _materializeSessionForTesting = materializeSession
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface MaterializeContext {
-  /** Fresh InstanceDecl per session instance name. Identity-keyed; shared
-   *  across the wiring translation so refs map to the same object. */
   instanceDecls: Map<string, InstanceDecl>
-  /** ParamDecl per param/trigger name. Created lazily as wiring expressions
-   *  reference them; same identity reused across all references. */
   paramDecls: Map<string, ParamDecl>
-  /** Synthetic DelayDecls for session-level `delay()` nodes extracted
-   *  from wiring expressions. The translator creates one DelayDecl per
-   *  `delay` node; subsequent translations of the same identity-shared
-   *  ExprNode reuse the same decl via exprMemo. */
   syntheticDelayDecls: DelayDecl[]
-  /** Identity memoization: shared session ExprNode objects produce shared
-   *  ResolvedExpr objects so downstream CSE memo (in resolvedToSlotted +
-   *  emit_numeric) treats them as identical. */
   exprMemo: WeakMap<object, ResolvedExpr>
-  /** For each gateable session instance, the resolved gate expression to
-   *  apply post-strata. Wrapping happens after `inlineInstances` has
-   *  lifted all sub-instance regs/delays into the synthetic top-level,
-   *  so every register in the gateable lineage gets wrapped. The legacy
-   *  `flatten.ts` wraps at the flat-register level for the same reason. */
-  gateableInstances: Map<string, ResolvedExpr>
-  /** Direct lookup into the session for type-resolution + port lookup. */
+  /** For each session instance with an explicit aliveInput, the
+   *  resolved alive expression to apply post-strata. Wrapping happens
+   *  after `inlineInstances` has lifted all sub-instance regs/delays
+   *  into the synthetic top-level so every register in the alive
+   *  lineage gets wrapped. */
+  aliveInstances: Map<string, ResolvedExpr>
   session: SessionState
 }
 
@@ -232,24 +226,18 @@ function materializeSession(session: SessionState): ResolvedProgram {
 }
 
 function materializeSessionInner(session: SessionState, ctx: MaterializeContext): ResolvedProgram {
-
-  // 1. Build InstanceDecl per session instance, in iteration order.
-  //    Each instance's `type` is resolved via the session's resolved
-  //    registry / generic templates; `inputs` is filled in step 2.
   for (const [name, inst] of session.instanceRegistry) {
     const decl = buildInstanceDecl(name, inst, ctx)
     ctx.instanceDecls.set(name, decl)
   }
 
-  // 2. Translate session.inputExprNodes → InstanceDecl.inputs entries.
-  //    Key shape is `${instance}:${input}`.
   for (const [key, expr] of session.inputExprNodes) {
     const colon = key.indexOf(':')
     if (colon < 0) continue
     const instName = key.slice(0, colon)
     const inputName = key.slice(colon + 1)
     const instDecl = ctx.instanceDecls.get(instName)
-    if (instDecl === undefined) continue  // stale wiring entry
+    if (instDecl === undefined) continue
     const port = instDecl.type.ports.inputs.find(p => p.name === inputName)
     if (port === undefined) {
       throw new Error(
@@ -260,10 +248,6 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     instDecl.inputs.push({ port, value })
   }
 
-  // 3. Build OutputDecls + OutputAssigns from session.graphOutputs (dac.out
-  //    wires). Each graph_output entry produces one OutputDecl in
-  //    ports.outputs (named after `${instance}.${output}`) and one
-  //    OutputAssign whose expr reads that instance's output.
   const outputDecls: OutputDecl[] = []
   const outputAssigns: OutputAssign[] = []
   for (const go of session.graphOutputs) {
@@ -287,10 +271,6 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     outputAssigns.push({ op: 'outputAssign', target: sessionOutput, expr: ref })
   }
 
-  // 4. Assemble body decls in source order: synthetic delays first
-  //    (so their slots claim low indices, matching legacy convention
-  //    where session delays come before instance regs), then instance
-  //    decls, then params.
   const bodyDecls: BodyDecl[] = []
   for (const decl of ctx.syntheticDelayDecls)   bodyDecls.push(decl)
   for (const decl of ctx.instanceDecls.values()) bodyDecls.push(decl)
@@ -310,14 +290,13 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     typeDefs: [],
   }
 
-  const prog: ResolvedProgram = {
+  return {
     op: 'program',
     name: '__session__',
     typeParams: [] as TypeParamDecl[],
     ports,
     body: block,
   }
-  return prog
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -333,7 +312,6 @@ function buildInstanceDecl(
   const baseTypeName = inst.baseTypeName
   const rawTypeArgs = inst.typeArgs ?? {}
 
-  // Try non-generic first (concrete type registered with this base name).
   const registered = session.resolvedRegistry.get(baseTypeName)
   let resolvedType: ResolvedProgram | undefined
   let typeArgsList: Array<{ param: TypeParamDecl; value: number }> = []
@@ -341,8 +319,6 @@ function buildInstanceDecl(
   if (registered !== undefined && registered.typeParams.length === 0) {
     resolvedType = registered
   } else {
-    // Generic case: pull the template, build TypeParamDecl-keyed subst,
-    // re-specialize. Mirrors session.ts:resolveProgramType.
     const template = session.genericTemplatesResolved.get(baseTypeName)
       ?? registered
     if (template === undefined) {
@@ -361,7 +337,6 @@ function buildInstanceDecl(
       subst.set(decl, value)
       typeArgsList.push({ param: decl, value })
     }
-    // Fill in defaults for any unspecified param.
     for (const decl of template.typeParams) {
       if (subst.has(decl)) continue
       if (decl.default === undefined) {
@@ -375,11 +350,6 @@ function buildInstanceDecl(
     resolvedType = specializeProgram(template, subst)
   }
 
-  // After buildInstanceDecl, `resolvedType` is fully specialized (empty
-  // typeParams). `inlineInstances` will then short-circuit on the
-  // empty-typeParams + empty-typeArgs path. Carrying typeArgsList through
-  // would re-trigger specializeProgram against an already-specialized
-  // template, which throws "type-arg X is not a declared type-param".
   const decl: InstanceDecl = {
     op: 'instanceDecl',
     name,
@@ -388,53 +358,44 @@ function buildInstanceDecl(
     inputs: [],
   }
 
-  // Gateable: two-phase wrap.
+  // Alive wrap: same two-phase mechanism as the legacy gateable wrap.
+  //   - PRE-STRATA: wrap the type's outputAssigns + own
+  //     regDecl/delayDecl updates with `select(alive, raw,
+  //     fallback)`. Necessary because strata's nestedOut substitution
+  //     captures the alive instance's output expression at inline
+  //     time — wrapping post-strata would miss it.
+  //   - POST-STRATA: wrap any decls lifted from sub-instances
+  //     (matched by `_liftedFrom`). These don't exist pre-strata.
   //
-  // PRE-STRATA: wrap the type's outputAssigns + own regDecl/delayDecl
-  // updates with `select(__gate__, raw, fallback)`. This is necessary
-  // for *outputs* because strata's nestedOut substitution captures the
-  // gateable instance's output expression at inline time — if we wrap
-  // post-strata, other instances' wiring/gates that reference this
-  // gateable's output have already captured the *un*wrapped form.
-  //
-  // POST-STRATA: wrap any decls lifted from sub-instances of this
-  // gateable instance (matched by name prefix `${name}_`). These
-  // didn't exist pre-strata.
-  //
-  // The gate is plumbed in as a synthetic `__gate__` input on the
-  // cloned type so cloning doesn't have to handle outer-scope refs in
-  // an embedded gate expression.
-  if (inst.gateable) {
-    if (inst.gateInput === undefined) {
-      throw new Error(
-        `compileSession: instance '${name}' is gateable but has no gateInput.`,
-      )
-    }
-    const gateExpr = translateExpr(inst.gateInput, ctx)
-    ctx.gateableInstances.set(name, gateExpr)
-    wrapTypeOutputsPreStrata(decl, gateExpr)
+  // The alive value is plumbed in as a synthetic `__alive__` input on
+  // the cloned type so cloning doesn't have to handle outer-scope
+  // refs in an embedded alive expression.
+  if (inst.aliveInput !== undefined) {
+    const aliveExpr = translateExpr(inst.aliveInput, ctx)
+    ctx.aliveInstances.set(name, aliveExpr)
+    wrapTypeOutputsForAlive(decl, aliveExpr)
   }
 
   return decl
 }
 
-/** Pre-strata wrap of a gateable instance's TYPE outputs and own
- *  reg/delay updates via a synthetic `__gate__` input. */
-function wrapTypeOutputsPreStrata(decl: InstanceDecl, gateExpr: ResolvedExpr): void {
+/** Pre-strata wrap of an alive-eligible instance's TYPE outputs and
+ *  own reg/delay updates via a synthetic `__alive__` input. */
+function wrapTypeOutputsForAlive(decl: InstanceDecl, aliveExpr: ResolvedExpr): void {
   const cloned = cloneResolvedProgram(decl.type)
-  const gateInputDecl: InputDecl = { op: 'inputDecl', name: '__gate__' }
-  cloned.ports.inputs.push(gateInputDecl)
+  const aliveInputDecl: InputDecl = { op: 'inputDecl', name: '__alive__' }
+  cloned.ports.inputs.push(aliveInputDecl)
 
-  const gateRef: ResolvedExpr = { op: 'inputRef', decl: gateInputDecl }
+  const aliveRef: ResolvedExpr = { op: 'inputRef', decl: aliveInputDecl }
 
   for (const a of cloned.body.assigns) {
     if (a.op === 'outputAssign') {
-      a.expr = { op: 'select', args: [gateRef, a.expr, 0] }
+      a.expr = { op: 'select', args: [aliveRef, a.expr, 0] }
     } else if (a.op === 'nextUpdate') {
       const fallback: ResolvedExpr = a.target.op === 'regDecl'
         ? { op: 'regRef', decl: a.target as RegDecl }
         : { op: 'delayRef', decl: a.target as DelayDecl }
-      a.expr = { op: 'select', args: [gateRef, a.expr, fallback] }
+      a.expr = { op: 'select', args: [aliveRef, a.expr, fallback] }
     }
   }
   for (const d of cloned.body.decls) {
@@ -444,11 +405,11 @@ function wrapTypeOutputsPreStrata(decl: InstanceDecl, gateExpr: ResolvedExpr): v
     )
     if (haveNextUpdate) continue
     const fallback: ResolvedExpr = { op: 'delayRef', decl: d }
-    d.update = { op: 'select', args: [gateRef, d.update, fallback] }
+    d.update = { op: 'select', args: [aliveRef, d.update, fallback] }
   }
 
   decl.type = cloned
-  decl.inputs.push({ port: gateInputDecl, value: gateExpr })
+  decl.inputs.push({ port: aliveInputDecl, value: aliveExpr })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -504,7 +465,6 @@ function translateOpNode(
   op: string,
   ctx: MaterializeContext,
 ): ResolvedExpr {
-  // ── Reference ops ─────────────────────────────────────────────────
   if (op === 'ref') {
     const instName = obj.instance as string
     const outputName = obj.output as string
@@ -532,7 +492,6 @@ function translateOpNode(
   if (op === 'sampleRate')  return { op: 'sampleRate' }
   if (op === 'sampleIndex') return { op: 'sampleIndex' }
 
-  // ── Pass-through binary / unary / ternary ─────────────────────────
   if (BINARY_OPS.has(op)) {
     const args = (obj.args as ExprNode[]).map(a => translateExpr(a, ctx))
     return { op, args: [args[0], args[1]] } as ResolvedExpr
@@ -553,20 +512,11 @@ function translateOpNode(
     return { op: 'index', args: [args[0], args[1]] }
   }
 
-  // Array literal: `{op:'array', items:[...]}` → bare array (ResolvedExpr[]).
-  // The resolved IR represents arrays as ResolvedExpr[]; the parser-level
-  // wrapper drops away.
   if (op === 'array') {
     const items = (obj.items as ExprNode[]).map(item => translateExpr(item, ctx))
     return items as ResolvedExpr
   }
 
-  // Session-level `delay()`: extract into a synthesized DelayDecl whose
-  // `update` is the inner expression; the original delay node becomes a
-  // delayRef. Init defaults to 0 (legacy convention). The decl is
-  // appended to ctx.syntheticDelayDecls so it lands in body.decls.
-  // exprMemo reuse means a shared `delay()` ExprNode produces a single
-  // DelayDecl, matching legacy CSE.
   if (op === 'delay') {
     const update = translateExpr((obj.args as ExprNode[])[0], ctx)
     const init = typeof obj.init === 'number' ? obj.init : 0
@@ -575,10 +525,7 @@ function translateOpNode(
     return { op: 'delayRef', decl }
   }
 
-  // TODO: gateable subgraph wiring (source_tag)
-  // TODO: broadcastTo / matmul (less common in patches; defer)
-
-  throw new Error(`compileSession: unhandled wiring op '${op}' (TODO: extend translator coverage).`)
+  throw new Error(`compileSession: unhandled wiring op '${op}'.`)
 }
 
 function paramRef(name: string, kind: 'param' | 'trigger', ctx: MaterializeContext): ResolvedExpr {

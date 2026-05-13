@@ -506,7 +506,7 @@ the strata passes that traverse it, and the other two backends
 no kernel compilation. Reaches every backend that rests on the same
 post-strata IR; a JIT bug shows up here as a cross-backend divergence.
 
-This is the independent oracle for `compiler/jit_interp_equiv.test.ts`.
+This is the independent oracle for `tests/equiv/jit_vs_interp.test.ts`.
 
 ### 5.4 emit_wasm — the WebAssembly backend
 
@@ -563,14 +563,16 @@ The pipeline is correct only if every pass and every backend agrees
 with the per-sample semantics on the input. Four test suites
 cross-check that:
 
-- `compiler/compile_session_equiv.test.ts` — fixture corpus through
-  the full session pipeline produces a stable `tropical_plan_4`.
-- `compiler/jit_interp_equiv.test.ts` — JIT and `interpret_resolved`
+- `tests/equiv/jit_vs_interp.test.ts` — JIT and `interpret_resolved`
   agree sample-for-sample on the same post-strata IR.
-- `compiler/wasm_vs_jit_equiv.test.ts` — WASM emit and JIT agree
+- `tests/equiv/jit_vs_interp_stdlib.test.ts` — same, expanded to
+  every viable stdlib program.
+- `tests/equiv/wasm_vs_jit.test.ts` — WASM emit and JIT agree
   sample-for-sample.
-- `compiler/web_plans_vs_jit.test.ts` — every precompiled plan in
+- `tests/equiv/web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches the JIT output.
+- `tests/equiv/migration_audio.test.ts` — new pipeline matches
+  pre-active-set goldens byte-for-byte.
 
 Any disagreement is a strata, materialize, or backend bug; the suite
 localises which.
@@ -901,16 +903,15 @@ typed int/bool ops.
 
 `cmake --build build -j4 && ctest --test-dir build`.
 
-### 14.2 TS tests (`compiler/*.test.ts`, `compiler/{ir,parse}/*.test.ts`)
+### 14.2 TS tests (`compiler/**/*.test.ts`, `tests/equiv/*.test.ts`)
 
 Run via `bun test`. The load-bearing suites:
 
-- `compile_session_equiv.test.ts` — fixture corpus through the full
-  session pipeline; pinned `tropical_plan_4` snapshots
-- `jit_interp_equiv.test.ts` — JIT vs. `interpret_resolved`
-- `wasm_vs_jit_equiv.test.ts`, `web_plans_vs_jit.test.ts` — WASM
-  emission equivalence
-- `unified_ir.test.ts` — `tropical_plan_4` snapshot tests
+- `tests/equiv/jit_vs_interp.test.ts` — JIT vs. `interpret_resolved`
+- `tests/equiv/wasm_vs_jit.test.ts`,
+  `tests/equiv/web_plans_vs_jit.test.ts` — WASM emission equivalence
+- `tests/equiv/migration_audio.test.ts` — new pipeline vs.
+  pre-active-set goldens
 - `ir/*.test.ts` — strata pipeline unit tests (specialize,
   sum_lower, trace_cycles, inline_instances, array_lower, slots,
   clone)

@@ -1,9 +1,10 @@
 /**
  * Quick benchmark: reproduce the 13-module patch compilation to find bottleneck.
  */
-import { makeSession, SessionState, instantiate, outputNames } from './session.js'
-import { loadStdlib as loadBuiltins } from './program.js'
-import { compileSession } from './ir/compile_session'
+import { makeSession, SessionState, instantiate, outputNames } from '../../compiler/session.js'
+import { loadStdlib as loadBuiltins } from '../../compiler/program.js'
+import { compileSession } from '../../compiler/ir/compile_session'
+import { toWirePlan } from '../../compiler/flat_plan.js'
 
 const session: SessionState = makeSession()
 loadBuiltins(session)
@@ -56,13 +57,18 @@ console.log('Starting full compileSession...')
 const t0 = performance.now()
 const plan = compileSession(session)
 const t1 = performance.now()
+const instrCount =
+    plan.scheduler_function.preamble.length
+  + plan.scheduler_function.postamble.length
+  + plan.instance_functions.reduce((n, i) => n + i.instructions.length, 0)
 console.log(`compileSession: ${(t1 - t0).toFixed(1)}ms`)
-console.log(`  instructions: ${plan.instructions.length}`)
-console.log(`  registers: ${plan.register_targets.length}`)
+console.log(`  instances: ${plan.instance_functions.length}`)
+console.log(`  instructions: ${instrCount} (${plan.scheduler_function.preamble.length} preamble + bodies + ${plan.scheduler_function.postamble.length} postamble)`)
+console.log(`  registers: ${plan.register_names.length}`)
 console.log(`  array_slots: ${plan.array_slot_sizes.length} (sizes: ${plan.array_slot_sizes.join(', ')})`)
-console.log(`  outputs: ${plan.output_targets.length}`)
+console.log(`  outputs: ${plan.scheduler_function.output_targets.length}`)
 
 const t2 = performance.now()
-const json = JSON.stringify(plan)
+const json = JSON.stringify(toWirePlan(plan))
 const t3 = performance.now()
 console.log(`JSON.stringify: ${(t3 - t2).toFixed(1)}ms (${(json.length / 1024).toFixed(0)}KB)`)

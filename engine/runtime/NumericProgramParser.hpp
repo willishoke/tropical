@@ -1,11 +1,15 @@
 #pragma once
 
 /**
- * NumericProgramParser.hpp — Parse tropical_plan_4 JSON → FlatProgram.
+ * NumericProgramParser.hpp — Parse `tropical_plan_5` JSON → FlatProgram.
  *
- * Thin deserialiser: no expression tree walking, no second compiler.
- * Reads the instruction stream emitted by compiler/emit_numeric.ts and
- * produces the tropical_jit::FlatProgram passed to compile_flat_program().
+ * Thin deserialiser. Reads the instruction stream emitted by
+ * compiler/ir/compile_session_slotted.ts and produces the
+ * tropical_jit::FlatProgram passed to compile_flat_program(). The
+ * plan's multi-function layout (instance_functions[] +
+ * scheduler_function) maps onto FlatProgram's parallel fields; the
+ * C++ JIT engine emits one LLVM function per instance plus one
+ * scheduler that drives them.
  */
 
 #include "jit/OrcJitEngine.hpp"
@@ -16,7 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace tropical_plan4
+namespace tropical_plan5
 {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -107,38 +111,54 @@ inline tropical_jit::Operand parse_operand(const nlohmann::json & j)
   throw std::runtime_error("NumericProgramParser: unknown operand kind '" + kind + "'");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Parsed plan_4 result
-// ─────────────────────────────────────────────────────────────────────────────
-
-struct ParsedPlan4
+inline tropical_jit::FlatInstr parse_instr(const nlohmann::json & ji)
 {
-  tropical_jit::FlatProgram  program;
-  std::vector<double>      state_init;
-  std::vector<std::string> register_names;
-  std::vector<tropical_jit::JitScalarType> register_types;
-  std::vector<std::string> array_slot_names;
-  std::vector<uint32_t>    mix_indices;
-  double                   sample_rate = 44100.0;
+  tropical_jit::FlatInstr instr;
+  instr.tag         = parse_op_tag(ji.at("tag").get<std::string>());
+  instr.result_type = parse_scalar_type(ji.value("result_type", "float"));
+  instr.dst         = ji.at("dst").get<uint32_t>();
+  instr.loop_count  = ji.value("loop_count", 1u);
+  if (ji.contains("args"))
+    for (const auto & a : ji["args"])
+      instr.args.push_back(parse_operand(a));
+  if (ji.contains("strides"))
+    for (const auto & s : ji["strides"])
+      instr.strides.push_back(s.get<uint8_t>());
+  return instr;
+}
 
-  // ── Slot model (M5+) ──────────────────────────────────────────────────────
-  // Inter-module slot array. Module outputs and control-plane params land
-  // here; downstream module input expressions read from slot operands
-  // referencing these indices. Empty when the plan has no slot metadata
-  // (legacy plans / TROPICAL_SLOT_MODE off).
+// ─────────────────────────────────────────────────────────────────────────────
+// Parsed plan_5 result
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct ParsedPlan5
+{
+  tropical_jit::FlatProgram                program;
+  std::vector<double>                      state_init;
+  std::vector<std::string>                 register_names;
+  std::vector<tropical_jit::JitScalarType> register_types;
+  std::vector<std::string>                 array_slot_names;
+  std::vector<uint32_t>                    mix_indices;
+  double                                   sample_rate = 44100.0;
+
+  // Inter-module slot array.
   uint32_t                 slot_count = 0;
   std::vector<std::string> slot_names;
   std::vector<double>      slot_defaults;
 };
 
-inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
+/** Parse a tropical_plan_5 JSON object. The C++ side only supports
+ *  schema "tropical_plan_5"; the TS compiler emits this shape
+ *  exclusively. Hand-crafted single-program plans should construct
+ *  the new shape (with one entry in `instance_functions[]` whose
+ *  `alive_slot_index` points at a slot defaulting to 1.0). */
+inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
 {
-  ParsedPlan4 result;
+  ParsedPlan5 result;
 
   result.sample_rate = plan.value("config", nlohmann::json::object())
                            .value("sampleRate", 44100.0);
 
-  // state_init — scalars only; arrays (not used by current modules) are zeroed
   if (plan.contains("state_init"))
   {
     for (const auto & v : plan["state_init"])
@@ -148,7 +168,7 @@ inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
       else if (v.is_boolean())
         result.state_init.push_back(v.get<bool>() ? 1.0 : 0.0);
       else
-        result.state_init.push_back(0.0);  // array or unknown — zeroed
+        result.state_init.push_back(0.0);
     }
   }
 
@@ -160,18 +180,12 @@ inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
     for (const auto & t : plan["register_types"])
       result.register_types.push_back(parse_scalar_type(t.get<std::string>()));
 
-  // Forward register_types onto FlatProgram so the JIT can coerce at writeback.
   result.program.register_types = result.register_types;
 
   if (plan.contains("array_slot_names"))
     for (const auto & n : plan["array_slot_names"])
       result.array_slot_names.push_back(n.get<std::string>());
 
-  if (plan.contains("outputs"))
-    for (const auto & o : plan["outputs"])
-      result.mix_indices.push_back(o.get<uint32_t>());
-
-  // FlatProgram fields
   auto & prog = result.program;
   prog.register_count = plan.value("register_count", 0u);
 
@@ -179,70 +193,74 @@ inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
     for (const auto & s : plan["array_slot_sizes"])
       prog.array_slot_sizes.push_back(s.get<uint32_t>());
 
-  if (plan.contains("output_targets"))
-    for (const auto & t : plan["output_targets"])
-      prog.output_targets.push_back(t.get<uint32_t>());
-
   if (plan.contains("register_targets"))
     for (const auto & t : plan["register_targets"])
       prog.register_targets.push_back(t.get<int32_t>());
 
-  // Compute mix_output_temps: map mix_indices through output_targets
+  // ── instance_functions[] ──
+  if (plan.contains("instance_functions"))
+  {
+    for (const auto & jf : plan["instance_functions"])
+    {
+      tropical_jit::InstanceProgram inst;
+      inst.instance_name = jf.value("instance_name", std::string{});
+      inst.register_count = jf.value("register_count", 0u);
+      inst.alive_slot_index = jf.at("alive_slot_index").get<uint32_t>();
+      if (jf.contains("instructions"))
+        for (const auto & ji : jf["instructions"])
+          inst.instructions.push_back(parse_instr(ji));
+      // Writebacks: each entry of register_targets[] is the
+      // (absolute, already shifted) temp slot whose value feeds the
+      // state register at position j among this instance's slots,
+      // which sits at `state_reg_offset + j` in the unified state
+      // array.
+      const uint32_t state_reg_offset = jf.value("state_reg_offset", 0u);
+      if (jf.contains("register_targets"))
+      {
+        const auto & rts = jf["register_targets"];
+        for (uint32_t j = 0; j < rts.size(); ++j)
+        {
+          inst.writebacks.push_back({
+            state_reg_offset + j,
+            rts[j].get<int32_t>()
+          });
+        }
+      }
+      prog.instance_functions.push_back(std::move(inst));
+    }
+  }
+
+  // ── scheduler_function ──
+  if (plan.contains("scheduler_function"))
+  {
+    const auto & jsched = plan["scheduler_function"];
+    if (jsched.contains("preamble"))
+      for (const auto & ji : jsched["preamble"])
+        prog.scheduler.preamble.push_back(parse_instr(ji));
+    if (jsched.contains("postamble"))
+      for (const auto & ji : jsched["postamble"])
+        prog.scheduler.postamble.push_back(parse_instr(ji));
+    if (jsched.contains("output_targets"))
+      for (const auto & t : jsched["output_targets"])
+        prog.output_targets.push_back(t.get<uint32_t>());
+    if (jsched.contains("outputs"))
+      for (const auto & o : jsched["outputs"])
+        result.mix_indices.push_back(o.get<uint32_t>());
+  }
+
+  // Compute mix_output_temps: map mix_indices through output_targets.
   for (uint32_t idx : result.mix_indices)
   {
     if (idx < prog.output_targets.size())
       prog.mix_output_temps.push_back(prog.output_targets[idx]);
   }
 
-  if (plan.contains("instructions"))
-  {
-    for (const auto & ji : plan["instructions"])
-    {
-      tropical_jit::FlatInstr instr;
-      instr.tag         = parse_op_tag(ji.at("tag").get<std::string>());
-      instr.result_type = parse_scalar_type(ji.value("result_type", "float"));
-      instr.dst         = ji.at("dst").get<uint32_t>();
-      instr.loop_count  = ji.value("loop_count", 1u);
-
-      if (ji.contains("args"))
-        for (const auto & a : ji["args"])
-          instr.args.push_back(parse_operand(a));
-
-      if (ji.contains("strides"))
-        for (const auto & s : ji["strides"])
-          instr.strides.push_back(s.get<uint8_t>());
-
-      if (ji.contains("group_id") && ji["group_id"].is_string())
-        instr.group_id = ji["group_id"].get<std::string>();
-
-      prog.instructions.push_back(std::move(instr));
-    }
-  }
-
-  // Gateable-subgraph groups table — present only when source_tag wrappers
-  // survived the pipeline. Phase 7 reads the field; Phase 8 consumes it at
-  // codegen time.
-  if (plan.contains("groups"))
-  {
-    for (const auto & jg : plan["groups"])
-    {
-      tropical_jit::GroupInfo g;
-      g.id = jg.at("id").get<std::string>();
-      g.gate_operand = parse_operand(jg.at("gate_operand"));
-      prog.groups.push_back(std::move(g));
-    }
-  }
-
-  // ── Slot model fields (M5) ──
-  // Optional in tropical_plan_4. Legacy plans omit them; FlatRuntime
-  // sees slot_count == 0 and skips slot allocation.
+  // ── Slot array ──
   if (plan.contains("slot_count") && plan["slot_count"].is_number())
     result.slot_count = plan["slot_count"].get<uint32_t>();
-
   if (plan.contains("slot_names"))
     for (const auto & n : plan["slot_names"])
       result.slot_names.push_back(n.get<std::string>());
-
   if (plan.contains("slot_defaults"))
     for (const auto & v : plan["slot_defaults"])
       result.slot_defaults.push_back(v.get<double>());
@@ -250,4 +268,129 @@ inline ParsedPlan4 parse_plan4(const nlohmann::json & plan)
   return result;
 }
 
-} // namespace tropical_plan4
+// ─────────────────────────────────────────────────────────────────────────────
+// Backward compat: tropical_plan_4 → tropical_plan_5
+// Lifts a single-program plan_4 into a one-instance-function plan_5
+// so hand-crafted plan_4 unit tests and any disk-saved plans continue
+// to load. The legacy plan's whole `instructions[]` becomes the body
+// of `instance_functions[0]`; DAC stitching moves to the scheduler
+// postamble; an `__alive__` slot is synthesized with default 1.0.
+// ─────────────────────────────────────────────────────────────────────────────
+
+inline ParsedPlan5 parse_plan4(const nlohmann::json & plan)
+{
+  ParsedPlan5 result;
+  result.sample_rate = plan.value("config", nlohmann::json::object())
+                           .value("sampleRate", 44100.0);
+
+  if (plan.contains("state_init"))
+  {
+    for (const auto & v : plan["state_init"])
+    {
+      if (v.is_number())
+        result.state_init.push_back(v.get<double>());
+      else if (v.is_boolean())
+        result.state_init.push_back(v.get<bool>() ? 1.0 : 0.0);
+      else
+        result.state_init.push_back(0.0);
+    }
+  }
+  if (plan.contains("register_names"))
+    for (const auto & n : plan["register_names"])
+      result.register_names.push_back(n.get<std::string>());
+  if (plan.contains("register_types"))
+    for (const auto & t : plan["register_types"])
+      result.register_types.push_back(parse_scalar_type(t.get<std::string>()));
+  if (plan.contains("array_slot_names"))
+    for (const auto & n : plan["array_slot_names"])
+      result.array_slot_names.push_back(n.get<std::string>());
+
+  auto & prog = result.program;
+  prog.register_types = result.register_types;
+  // plan_4 register_count covers ONLY instance-body temps; the lifted
+  // plan needs one extra temp for the synthetic alive slot's
+  // WriteSlot value. We allocate that as a new const-fed slot so no
+  // extra temp is needed — `WriteSlot dst=alive_slot, args=[const 1.0]`.
+  prog.register_count = plan.value("register_count", 0u);
+  if (plan.contains("array_slot_sizes"))
+    for (const auto & s : plan["array_slot_sizes"])
+      prog.array_slot_sizes.push_back(s.get<uint32_t>());
+  if (plan.contains("output_targets"))
+    for (const auto & t : plan["output_targets"])
+      prog.output_targets.push_back(t.get<uint32_t>());
+  if (plan.contains("register_targets"))
+    for (const auto & t : plan["register_targets"])
+      prog.register_targets.push_back(t.get<int32_t>());
+  if (plan.contains("outputs"))
+    for (const auto & o : plan["outputs"])
+      result.mix_indices.push_back(o.get<uint32_t>());
+  for (uint32_t idx : result.mix_indices)
+  {
+    if (idx < prog.output_targets.size())
+      prog.mix_output_temps.push_back(prog.output_targets[idx]);
+  }
+
+  // ── Synthesize one InstanceProgram for the entire body ──
+  tropical_jit::InstanceProgram inst;
+  inst.instance_name = "legacy_kernel";
+  inst.register_count = prog.register_count;
+
+  // The synthetic alive slot lives at the end of the slot array. We
+  // append it after parsing slot_count below.
+
+  if (plan.contains("instructions"))
+    for (const auto & ji : plan["instructions"])
+      inst.instructions.push_back(parse_instr(ji));
+
+  // Lift the top-level register_targets[i] into writebacks. State
+  // slots are 0..register_targets.size()-1 since the plan has only
+  // one instance worth of state.
+  for (uint32_t j = 0; j < prog.register_targets.size(); ++j)
+  {
+    inst.writebacks.push_back({j, prog.register_targets[j]});
+  }
+
+  // ── Slot array (with synthetic alive slot appended) ──
+  if (plan.contains("slot_count") && plan["slot_count"].is_number())
+    result.slot_count = plan["slot_count"].get<uint32_t>();
+  if (plan.contains("slot_names"))
+    for (const auto & n : plan["slot_names"])
+      result.slot_names.push_back(n.get<std::string>());
+  if (plan.contains("slot_defaults"))
+    for (const auto & v : plan["slot_defaults"])
+      result.slot_defaults.push_back(v.get<double>());
+
+  const uint32_t alive_slot = result.slot_count;
+  result.slot_count += 1;
+  result.slot_names.push_back("__legacy_kernel.__alive__");
+  result.slot_defaults.push_back(1.0);
+  inst.alive_slot_index = alive_slot;
+
+  prog.instance_functions.push_back(std::move(inst));
+
+  // Scheduler: preamble writes 1.0 to the alive slot so GVN folds the
+  // conditional to inline. No postamble (DAC stitch lives in the
+  // legacy instruction stream).
+  tropical_jit::FlatInstr alive_write;
+  alive_write.tag         = tropical_jit::OpTag::WriteSlot;
+  alive_write.result_type = tropical_jit::JitScalarType::Float;
+  alive_write.dst         = alive_slot;
+  alive_write.loop_count  = 1;
+  alive_write.args.push_back(tropical_jit::Operand::make_const(1.0));
+  prog.scheduler.preamble.push_back(std::move(alive_write));
+
+  return result;
+}
+
+} // namespace tropical_plan5
+
+// Backward-compat alias: the legacy namespace is still referenced by
+// some unit tests; keep the symbol resolving.
+namespace tropical_plan4
+{
+  using ParsedPlan4 = tropical_plan5::ParsedPlan5;
+  inline tropical_plan5::ParsedPlan5 parse_plan4(const nlohmann::json & plan)
+  {
+    return tropical_plan5::parse_plan4(plan);
+  }
+}

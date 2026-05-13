@@ -2,7 +2,7 @@
  * End-to-end compile + execution bench:
  *   TS pipeline → JSON.stringify → JIT loadPlan → runtime.process loop.
  *
- * Usage:  bun run compiler/bench_jit.ts <patch.json>... [--keep-cache] [--frames=N]
+ * Usage:  bun run tests/bench/jit_runtime.ts <patch.json>... [--keep-cache] [--frames=N]
  *
  * Wipes ~/.cache/tropical/kernels/ before running so every JIT load is a
  * true cold compile. Pass --keep-cache to leave the disk cache in place
@@ -16,15 +16,16 @@
  * and reports ns/sample. This is the realtime-cost number — it must
  * stay well below sample_period (~22.7μs @ 44.1k) to avoid xruns.
  *
- * Companion to bench_compile.ts (which times only the TS pipeline).
+ * Companion to compile.ts (which times only the TS pipeline).
  */
 import { readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { resolve, basename, join } from 'node:path'
 import { homedir } from 'node:os'
-import { makeSession, loadJSON } from './session.js'
-import { loadStdlib as loadBuiltins } from './program.js'
-import { compileSession } from './ir/compile_session.js'
-import * as b from './runtime/bindings.js'
+import { makeSession, loadJSON } from '../../compiler/session.js'
+import { loadStdlib as loadBuiltins } from '../../compiler/program.js'
+import { compileSession } from '../../compiler/ir/compile_session.js'
+import { toWirePlan } from '../../compiler/flat_plan.js'
+import * as b from '../../compiler/runtime/bindings.js'
 
 const args = process.argv.slice(2)
 const keepCache = args.includes('--keep-cache')
@@ -35,7 +36,7 @@ const FRAME_SIZE = 256
 const SAMPLE_RATE = 44100
 
 if (patches.length === 0) {
-  console.error('Usage: bun run compiler/bench_jit.ts <patch.json>... [--keep-cache]')
+  console.error('Usage: bun run tests/bench/jit_runtime.ts <patch.json>... [--keep-cache]')
   process.exit(1)
 }
 
@@ -84,7 +85,7 @@ for (const p of patches) {
   const tsMs = performance.now() - t1
 
   const t2 = performance.now()
-  const planJson = JSON.stringify(plan)
+  const planJson = JSON.stringify(toWirePlan(plan))
   const stringifyMs = performance.now() - t2
 
   const jitMs = totalMs - tsMs - stringifyMs
@@ -111,7 +112,9 @@ for (const p of patches) {
       `${tsMs.toFixed(1)}+${stringifyMs.toFixed(1)}`,
       (planJson.length / 1024).toFixed(0),
       jitMs.toFixed(1),
-      plan.instructions.length,
+      plan.scheduler_function.preamble.length
+        + plan.scheduler_function.postamble.length
+        + plan.instance_functions.reduce((n, i) => n + i.instructions.length, 0),
       arrays,
       nsPerSample.toFixed(1),
       `${(rtRatio * 100).toFixed(1)}%`,

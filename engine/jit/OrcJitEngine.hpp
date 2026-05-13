@@ -108,35 +108,51 @@ struct FlatInstr
   std::vector<Operand> args;
   uint32_t             loop_count  = 1;       // 1 = scalar; N > 1 = elementwise loop
   std::vector<uint8_t> strides;               // per-arg: 1 = iterate, 0 = broadcast
-  // Gateable-subgraph tag. Empty = ungated. Instructions with the same non-empty
-  // group_id belong to one conditional block (Phase 8). Phase 7 is serialization
-  // only — codegen ignores this field until Phase 8 lands.
-  std::string          group_id;
 };
 
-// Gateable-subgraph group: all instructions whose group_id == id are emitted
-// inside a single conditional basic block guarded by gate_operand. Paired
-// with FlatProgram::groups.
-struct GroupInfo
+// Per-instance kernel slice. Each session instance contributes one of
+// these to the multi-function plan. The compiler emits one `alwaysinline`
+// LLVM function per `InstanceProgram`, plus a scheduler that wraps each
+// call in `if (slots[alive_slot_index] > 0.5) call ...`.
+struct InstanceProgram
 {
-  std::string id;
-  Operand     gate_operand;
+  std::string                  instance_name;     // session instance name
+  std::vector<FlatInstr>       instructions;      // already shifted into unified offset space
+  uint32_t                     register_count = 0; // local temp count
+  uint32_t                     alive_slot_index = 0; // slot driving the dispatch conditional
+  /** State register writebacks for this instance. Each entry pairs a
+   *  state register slot index (absolute, into the unified register
+   *  array) with the temp index (also absolute) whose value feeds it.
+   *  Lives inside the instance function so the writeback skips
+   *  alongside the body when the instance is asleep. */
+  struct Writeback {
+    uint32_t state_slot;   // index into the unified state-register array
+    int32_t  temp_slot;    // index into the unified temp array (-1 = skip)
+  };
+  std::vector<Writeback>       writebacks;
+};
+
+// Top-level driver: runs once per sample. Preamble fires before any
+// instance dispatch; postamble fires after.
+struct SchedulerProgram
+{
+  std::vector<FlatInstr>       preamble;
+  std::vector<FlatInstr>       postamble;
 };
 
 struct FlatProgram
 {
-  std::vector<FlatInstr> instructions;
-  uint32_t               register_count   = 0;
-  std::vector<uint32_t>  array_slot_sizes; // element count per array slot
-  std::vector<uint32_t>  output_targets;
-  std::vector<int32_t>   register_targets;
-  std::vector<uint32_t>  mix_output_temps;  // temp indices whose values mix to audio
-  // Declared scalar type per state register, indexed parallel to register_targets.
-  // Drives FPToSI/SIToFP coercion at writeback so a float temp landing in an
-  // int register doesn't reinterpret-bitcast into garbage.
+  // ── Plan-wide unified state (shared across all instance functions) ──
+  uint32_t                   register_count   = 0;
+  std::vector<uint32_t>      array_slot_sizes; // element count per array slot
+  std::vector<uint32_t>      output_targets;
+  std::vector<int32_t>       register_targets;
+  std::vector<uint32_t>      mix_output_temps;  // temp indices summed to audio
   std::vector<JitScalarType> register_types;
-  // Gateable-subgraph metadata. Empty when the plan contains no source_tag wrappers.
-  std::vector<GroupInfo>     groups;
+
+  // ── Multi-function layout (tropical_plan_5) ──
+  std::vector<InstanceProgram> instance_functions;
+  SchedulerProgram             scheduler;
 };
 
 // Kernel signature. `slots` (M6+) is the shared inter-module slot array

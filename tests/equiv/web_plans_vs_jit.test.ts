@@ -10,12 +10,12 @@ import { describe, test, expect } from 'bun:test'
 import { readFileSync, readdirSync, existsSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { makeSession } from './session'
-import { type FlatPlan } from './flat_plan'
-import { emitWasm } from './emit_wasm'
+import { makeSession } from '../../compiler/session'
+import { type FlatPlan, type WireFlatPlan, toWirePlan, parseWirePlan } from '../../compiler/flat_plan'
+import { emitWasm } from '../../compiler/emit_wasm'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const distDir = resolve(__dirname, '../web/dist/patches')
+const distDir = resolve(__dirname, '../../web/dist/patches')
 
 function initWasmState(memory: WebAssembly.Memory, regOffset: number, stateInit: (number | boolean)[], regTypes: string[]): void {
   const dv = new DataView(memory.buffer)
@@ -45,7 +45,7 @@ async function runWasm(plan: FlatPlan, samples: number): Promise<Float64Array> {
 function runNative(plan: FlatPlan, samples: number): Float64Array {
   const session = makeSession(samples)
   try {
-    session.runtime.loadPlan(JSON.stringify(plan))
+    session.runtime.loadPlan(JSON.stringify(toWirePlan(plan)))
     session.runtime.process()
     return new Float64Array(session.runtime.outputBuffer)
   } finally {
@@ -80,7 +80,8 @@ describe('web/dist precompiled plans vs native JIT', () => {
 
   for (const file of planFiles) {
     test(`${file}`, async () => {
-      const plan = JSON.parse(readFileSync(join(distDir, file), 'utf-8')) as FlatPlan
+      const wire = JSON.parse(readFileSync(join(distDir, file), 'utf-8')) as WireFlatPlan
+      const plan: FlatPlan = parseWirePlan(wire)
 
       const nat = runNative(plan, N)
       const wasm = await runWasm(plan, N)

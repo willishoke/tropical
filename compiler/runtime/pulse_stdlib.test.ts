@@ -13,6 +13,7 @@ import { makeSession, allocateOutputSlots, allocateParamSlot } from '../session.
 import { loadStdlib } from '../program.ts'
 import { instantiate } from '../program_types.ts'
 import { compileSessionSlotted } from '../ir/compile_session_slotted.ts'
+import { toWirePlan } from '../flat_plan.ts'
 
 describe('M9b: Pulse stdlib emits rising-edge pulses', () => {
   test('Pulse fires exactly once per low-to-high transition', () => {
@@ -37,7 +38,7 @@ describe('M9b: Pulse stdlib emits rising-edge pulses', () => {
     try {
       const plan = compileSessionSlotted(s)
       const rt = new Runtime(8)
-      rt.loadPlan(JSON.stringify(plan))
+      rt.loadPlan(JSON.stringify(toWirePlan(plan)))
 
       // Buffer 1: fire is 0.0 (default). Pulse out should be 0.
       rt.process()

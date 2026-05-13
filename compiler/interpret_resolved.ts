@@ -1,7 +1,7 @@
 /**
  * interpret_resolved.ts — pure-TS interpreter that walks `ResolvedExpr`.
  *
- * The independent-oracle half of `jit_interp_equiv`: the JIT consumes
+ * The independent-oracle half of `tests/equiv/jit_vs_interp`: the JIT consumes
  * `tropical_plan_4` (an instruction stream emitted from the resolved
  * IR), this interpreter consumes the same `ResolvedProgram` directly.
  * Both run the same strata pipeline + materialization through

@@ -6,9 +6,19 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import type { FlatPlan } from './flat_plan'
-import type { NInstr, NOperand, ScalarType } from './ir/emit_resolved'
+import { type FlatPlan, type WireFlatPlan, parseWirePlan } from './flat_plan'
+import type { WireNInstr, WireNOperand, ScalarType } from './ir/emit_resolved'
 import { emitWasm } from './emit_wasm'
+
+// The tests construct plans in WIRE shape (plain numbers) for
+// convenience, then `parseWirePlan` lifts them into the branded
+// internal `FlatPlan` that the emitter consumes. This means tests
+// can keep writing `mkInstr('Add', 0, [...])` with a flat number
+// dst; the parser picks the right namespace from the tag and
+// loop_count, matching the rule the pipeline applies to its own
+// wire-format output.
+type NInstr   = WireNInstr
+type NOperand = WireNOperand
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -26,21 +36,50 @@ function plan(fields: {
   register_types?: ScalarType[]
   state_init?: (number | boolean)[]
 }): FlatPlan {
-  return {
-    schema: 'tropical_plan_4',
-    config: { sample_rate: 44100 },
+  // Pack the hand-crafted single-program kernel into a plan_5 with
+  // one instance function and a synthetic __alive__ slot defaulting
+  // to 1.0 (so the conditional folds to inline at JIT time).
+  //
+  // Construct in WIRE shape (flat numbers / -1 sentinels) for
+  // ergonomics, then `parseWirePlan` lifts into the branded internal
+  // FlatPlan the emitter consumes.
+  const aliveSlot = 0
+  const wire: WireFlatPlan = {
+    schema: 'tropical_plan_5',
+    config: { sampleRate: 44100 },
     state_init: fields.state_init ?? [],
     register_names: fields.register_names ?? [],
     register_types: fields.register_types ?? [],
     array_slot_names: [],
-    outputs: fields.outputs ?? fields.output_targets.map((_, i) => i),
-    instructions: fields.instructions,
-    register_count: fields.register_count,
     array_slot_count: fields.array_slot_count ?? 0,
     array_slot_sizes: fields.array_slot_sizes ?? [],
-    output_targets: fields.output_targets,
-    register_targets: fields.register_targets ?? [],
+    register_count: fields.register_count,
+    instance_functions: [{
+      name:              'unit_test',
+      instance_name:     'unit_test',
+      instructions:      fields.instructions,
+      register_offset:   0,
+      state_reg_offset:  0,
+      array_slot_offset: 0,
+      register_count:    fields.register_count,
+      register_targets:  fields.register_targets ?? [],
+      alive_slot_index:  aliveSlot,
+    }],
+    scheduler_function: {
+      preamble: [{
+        tag: 'WriteSlot', dst: aliveSlot,
+        args: [{ kind: 'const', val: 1, scalar_type: 'float' }],
+        loop_count: 1, strides: [], result_type: 'float',
+      }],
+      postamble:      [],
+      output_targets: fields.output_targets,
+      outputs:        fields.outputs ?? fields.output_targets.map((_, i) => i),
+    },
+    slot_count:    1,
+    slot_names:    ['__alive__'],
+    slot_defaults: [1.0],
   }
+  return parseWirePlan(wire)
 }
 
 const constF = (v: number): NOperand => ({ kind: 'const', val: v, scalar_type: 'float' })

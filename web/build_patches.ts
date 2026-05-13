@@ -14,6 +14,7 @@ import { fileURLToPath } from 'url'
 import { makeSession, loadJSON } from '../compiler/session.js'
 import { loadStdlib } from '../compiler/program.js'
 import { compileSession } from '../compiler/ir/compile_session.js'
+import { toWirePlan } from '../compiler/flat_plan.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const distDir = resolve(__dirname, 'dist/patches')
@@ -124,7 +125,7 @@ for (const patch of PATCHES) {
     loadStdlib(session)
     loadJSON(patch.program as { schema: string; [k: string]: unknown }, session)
     const plan = compileSession(session)
-    const out = JSON.stringify(plan)
+    const out = JSON.stringify(toWirePlan(plan))
     const outPath = join(distDir, `${patch.slug}.plan.json`)
     writeFileSync(outPath, out, 'utf-8')
     manifest.push({ slug: patch.slug, title: patch.title, description: patch.description, planPath: `patches/${patch.slug}.plan.json` })

@@ -296,15 +296,15 @@ describe('mapChildren — decl ops', () => {
     expect(mapChildren(n, inc)).toBe(n)
   })
 
-  test('instance_decl recurses into inputs and gate_input', () => {
+  test('instance_decl recurses into inputs and alive_input', () => {
     const n: InstanceDeclNode = {
       op: 'instanceDecl', name: 'a', program: 'X',
       inputs: { freq: 100, gain: 0.5 },
-      gate_input: 1,
+      alive_input: 1,
     }
     const result = mapChildren(n, inc) as InstanceDeclNode
     expect(result.inputs).toEqual({ freq: 101, gain: 1.5 })
-    expect(result.gate_input).toBe(2)
+    expect(result.alive_input).toBe(2)
   })
 
   test('reg_decl recurses into init when present', () => {

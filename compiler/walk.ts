@@ -287,13 +287,13 @@ export function mapChildren<T extends ExprOpNodeStrict>(
     case 'instanceDecl': {
       const n = node as InstanceDeclNode
       const newInputs = n.inputs === undefined ? undefined : mapValues(n.inputs, f)
-      const newGate = n.gate_input === undefined ? undefined : f(n.gate_input)
+      const newAlive = n.alive_input === undefined ? undefined : f(n.alive_input)
       if ((n.inputs === undefined || newInputs === n.inputs)
-          && (n.gate_input === undefined || newGate === n.gate_input)) return node
+          && (n.alive_input === undefined || newAlive === n.alive_input)) return node
       return {
         ...n,
         ...(n.inputs === undefined ? {} : { inputs: newInputs }),
-        ...(n.gate_input === undefined ? {} : { gate_input: newGate }),
+        ...(n.alive_input === undefined ? {} : { alive_input: newAlive }),
       } as unknown as T
     }
     case 'regDecl': {

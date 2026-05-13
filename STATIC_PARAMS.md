@@ -63,7 +63,7 @@ All six instance-resolution sites funnel through a new helper.
 - `compiler/session.ts:340,348` `loadProgramDef` nested instances — pass the parent program's resolved args as `outerArgs` to support forwarding
 - `mcp/server.ts:491` `handleAddInstance` — plumb `typeArgs`
 - `mcp/server.ts:502` `handleReplicate` — single `typeArgs` applied to all copies
-- `compiler/bench_compile.ts:29,41`, `compiler/transcendentals.test.ts:49` — audit; likely unchanged (they instantiate non-generic types)
+- `tests/bench/compile.ts:29,41`, `compiler/transcendentals.test.ts:49` — audit; likely unchanged (they instantiate non-generic types)
 
 `ProgramInstance` emits its resolved `typeArgs` at construction. Since the specialized ProgramDef carries the already-substituted expressions, flatten/emit/JIT see a concrete type and don't need to know static params exist.
 

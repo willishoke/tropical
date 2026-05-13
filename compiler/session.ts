@@ -270,9 +270,10 @@ const DEFAULT_OUTPUT_PORT_TYPE: IRPortType = { kind: 'scalar', scalar: 'float' }
 
 /** Allocate slot indices for every output port of an instance. Records
  *  slot indices in `outputSlotRegistry` and full PortMeta in
- *  `outputPortMeta`. Idempotent: returns silently if already allocated.
- *  When a port lacks an explicit PortType in the post-strata IR, the
- *  fallback is a single scalar-float slot (matches existing codegen). */
+ *  `outputPortMeta`. Also reserves an `__alive__` slot — every
+ *  session instance has one, defaulting to literal `1.0` so the
+ *  default behavior matches "always alive" with zero runtime cost
+ *  after LLVM folds the conditional. Idempotent. */
 export function allocateOutputSlots(
   session: SessionState,
   instanceName: string,
@@ -294,6 +295,12 @@ export function allocateOutputSlots(
       portType,
     })
     session.slotCount += names.length
+  }
+
+  const aliveKey = `${instanceName}.__alive__`
+  if (!session.outputSlotRegistry.has(aliveKey)) {
+    session.outputSlotRegistry.set(aliveKey, session.slotCount)
+    session.slotCount += 1
   }
 }
 
