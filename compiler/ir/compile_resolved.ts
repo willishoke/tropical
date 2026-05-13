@@ -13,7 +13,7 @@
  * runnable-plan boundary.
  */
 
-import type { ResolvedProgram, ResolvedExpr, OutputDecl, RegDecl, DelayDecl, ParamDecl } from './nodes.js'
+import type { ResolvedProgram, ResolvedExpr, OutputDecl, RegDecl, DelayDecl, ParamDecl, PortType } from './nodes.js'
 import type { PerInstancePlan } from '../flat_plan.js'
 import { buildSlotMaps, type SlotMaps } from './slots.js'
 import { emitResolvedProgram, type EmitSlots, type ScalarType } from './emit_resolved.js'
@@ -97,8 +97,14 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     paramHandles: ctx.paramHandles ?? new Map(),
   }
 
+  // Per-port scalar slot counts derived from declared output shapes.
+  // Scalar/alias = 1; array = product of shape dims. Drives the
+  // output_targets expansion in emit_resolved.
+  const outputPortScalarCounts = prog.ports.outputs.map(outputPortScalarCount)
+
   const program = emitResolvedProgram({
     outputExprs,
+    outputPortScalarCounts,
     registerExprs,
     stateInit,
     stateRegTypes: registerTypes,
@@ -150,6 +156,28 @@ function regInit(d: RegDecl): number | boolean | number[] {
 
 function delayScalarType(_d: DelayDecl): ScalarType {
   return 'float'
+}
+
+/** Total scalar slot count for an output port's declared shape. Scalar
+ *  and alias ports count as 1; array ports as the product of their
+ *  shape dimensions. Used to drive `output_targets` expansion. */
+function outputPortScalarCount(decl: OutputDecl): number {
+  const t: PortType | undefined = decl.type
+  if (t === undefined) return 1
+  if (t.kind === 'scalar') return 1
+  if (t.kind === 'alias')  return 1
+  // array
+  let total = 1
+  for (const dim of t.shape) {
+    if (typeof dim !== 'number') {
+      throw new Error(
+        `compileResolved: output port '${decl.name}' has unresolved ` +
+        `type-param dimension; ensure specialize ran first`,
+      )
+    }
+    total *= dim
+  }
+  return total
 }
 
 function delayInit(d: DelayDecl): number {

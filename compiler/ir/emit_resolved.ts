@@ -711,22 +711,67 @@ class Emitter {
   }
 
   // ── Top-level emit driver ──
-  emitProgram(outputExprs: ResolvedExpr[], registerExprs: (ResolvedExpr | null)[]): FlatProgram {
+  emitProgram(
+    outputExprs: ResolvedExpr[],
+    registerExprs: (ResolvedExpr | null)[],
+    outputPortScalarCounts: number[],
+  ): FlatProgram {
     const output_targets: TempIdx[] = []
     const register_targets: RegTarget[] = []
 
-    for (const expr of outputExprs) {
+    // Output-targets contract (M11 Phase 3): ONE entry per scalar slot
+    // of every declared output port. Scalar/alias ports contribute 1
+    // entry; array ports of total scalar count N contribute N entries
+    // in row-major order matching `expandPortToSlots`'s naming.
+    //
+    // The number of targets per port is determined by the DECLARED port
+    // shape (`outputPortScalarCounts`), not by the runtime shape of the
+    // computed expression. Backward-compat case: when a scalar-declared
+    // port receives an array-shaped expression, we project to element 0
+    // (the historical behavior for under-specified types).
+    if (outputPortScalarCounts.length !== outputExprs.length) {
+      throw new Error(
+        `emitProgram: outputPortScalarCounts.length (${outputPortScalarCounts.length}) ` +
+        `must match outputExprs.length (${outputExprs.length})`,
+      )
+    }
+    for (let portI = 0; portI < outputExprs.length; portI++) {
+      const expr = outputExprs[portI]
+      const declaredCount = outputPortScalarCounts[portI]
       const r = this.compileNode(expr, 'float')
-      if (r.isArray) {
+
+      if (declaredCount === 1) {
+        // Scalar port. If the expression is array-shaped, take [0]
+        // (backward-compat); otherwise emit a single scalar copy.
         const dst = this.allocReg()
-        this.regTypes.set(dst, 'float')
-        this.emit(instrIndex(dst, [r.op, opConst(0, 'int')], 'float'))
+        if (r.isArray) {
+          this.regTypes.set(dst, r.scalarType)
+          this.emit(instrIndex(dst, [r.op, opConst(0, 'int')], r.scalarType))
+        } else {
+          this.regTypes.set(dst, r.scalarType)
+          this.emit(instrScalar('Add', dst, [r.op, opConst(0, r.scalarType)], r.scalarType))
+        }
         output_targets.push(dst)
       } else {
-        const dst = this.allocReg()
-        this.regTypes.set(dst, r.scalarType)
-        this.emit(instrScalar('Add', dst, [r.op, opConst(0, r.scalarType)], r.scalarType))
-        output_targets.push(dst)
+        // Array port. Expression must be array-shaped of matching size.
+        if (!r.isArray) {
+          throw new Error(
+            `emitProgram: output port ${portI} declared as array of scalar count ` +
+            `${declaredCount}, but expression is scalar`,
+          )
+        }
+        if (r.size !== declaredCount) {
+          throw new Error(
+            `emitProgram: output port ${portI} declared as array of scalar count ` +
+            `${declaredCount}, but expression has size ${r.size}`,
+          )
+        }
+        for (let elemI = 0; elemI < declaredCount; elemI++) {
+          const dst = this.allocReg()
+          this.regTypes.set(dst, r.scalarType)
+          this.emit(instrIndex(dst, [r.op, opConst(elemI, 'int')], r.scalarType))
+          output_targets.push(dst)
+        }
       }
     }
 
@@ -796,6 +841,11 @@ class Emitter {
 
 export interface EmitResolvedInputs {
   outputExprs: ResolvedExpr[]
+  /** One entry per output port: total scalar slot count derived from
+   *  the port's declared shape (1 for scalar/alias; product of shape
+   *  dims for arrays). Determines how many `output_targets` the emit
+   *  produces per port. */
+  outputPortScalarCounts: number[]
   registerExprs: (ResolvedExpr | null)[]
   stateInit: (number | boolean | number[])[]
   stateRegTypes: ScalarType[]
@@ -805,5 +855,5 @@ export interface EmitResolvedInputs {
 
 export function emitResolvedProgram(input: EmitResolvedInputs): FlatProgram {
   const e = new Emitter(input.slots, input.stateInit, input.stateRegTypes, input.inputPortTypes)
-  return e.emitProgram(input.outputExprs, input.registerExprs)
+  return e.emitProgram(input.outputExprs, input.registerExprs, input.outputPortScalarCounts)
 }
