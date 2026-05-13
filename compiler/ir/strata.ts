@@ -3,9 +3,18 @@
  *
  * Composes the strata passes in order:
  *
- *   specialize → sumLower → traceCycles → inlineInstances → arrayLower
+ *   specialize → sumLower → traceCycles → inlineInstances
+ *              → arrayLower → identityElim
  *
- * After arrayLower, the result is a post-strata `ResolvedProgram`
+ * `identityElim` (M11 Phase 2) is the categorical identity-law rewrite:
+ * it eliminates `InstanceDecl`s whose program body is the identity
+ * morphism. Today (pre-Phase-4) it rarely fires at the per-program
+ * level — `inlineInstances` runs first and absorbs trivial sub-instances.
+ * Once Phase 4 retires `inlineInstances` from the session-level
+ * pipeline, `identityElim` catches the trivial wire-programs that would
+ * otherwise survive as no-op kernels.
+ *
+ * After identityElim, the result is a post-strata `ResolvedProgram`
  * consumed by either `compileResolved` (the JIT path) or
  * `interpret_resolved.ts` (the independent oracle).
  */
@@ -17,6 +26,7 @@ import { sumLower } from './sum_lower.js'
 import { traceCycles } from './trace_cycles.js'
 import { inlineInstances } from './inline_instances.js'
 import { arrayLower } from './array_lower.js'
+import { identityElim } from './identity_elim.js'
 
 export function strataPipeline(
   prog: ResolvedProgram,
@@ -26,7 +36,8 @@ export function strataPipeline(
   const summed = sumLower(specialized)
   const cyclic = traceCycles(summed)
   const inlined = inlineInstances(cyclic)
-  return arrayLower(inlined)
+  const arrayed = arrayLower(inlined)
+  return identityElim(arrayed)
 }
 
 /** Run the full strata pipeline + wrap the post-strata `ResolvedProgram`
