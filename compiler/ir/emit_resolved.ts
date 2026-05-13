@@ -32,12 +32,12 @@
 
 import type {
   ResolvedExpr, ResolvedExprOp,
-  RegDecl, DelayDecl, InputDecl, InstanceDecl, ParamDecl,
+  RegDecl, DelayDecl, InputDecl, InstanceDecl, OutputDecl, ParamDecl,
 } from './nodes.js'
 import {
   type TempIdx, type StateRegIdx, type ArraySlotIdx, type ModuleSlotIdx,
   type InputPortIdx,
-  tempIdx, arraySlotIdx, stateRegIdx, inputPortIdx,
+  tempIdx, arraySlotIdx, stateRegIdx, inputPortIdx, moduleSlotIdx,
   rawIdx,
 } from './slot_indices.js'
 import type { RegTarget } from '../flat_plan.js'
@@ -250,6 +250,14 @@ export interface EmitSlots {
   regCount: number
   /** FFI handle metadata per param/trigger decl. */
   paramHandles: Map<ParamDecl, { ptr: string }>
+  /** Module slot indices for sub-instance outputs that this kernel's
+   *  body references via `NestedOut`. Populated by `partition_recursive`
+   *  for fractal kernels — each child kernel's outputs occupy slots in
+   *  the shared module-slot array, and the parent reads them via slot
+   *  operands. Map shape: instanceDecl → outputDecl → moduleSlotIdx.
+   *  When undefined (legacy / per-program path), NestedOut throws as
+   *  before. */
+  nestedOutputSlots?: Map<InstanceDecl, Map<OutputDecl, number>>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -413,6 +421,44 @@ class Emitter {
       }
       case 'sampleRate':  return { op: opRate, scalarType: 'float' }
       case 'sampleIndex': return { op: opTick, scalarType: 'int' }
+      case 'nestedOut': {
+        // Fractal compile: a NestedOut references a sub-instance's
+        // output, which lives in a module slot allocated by
+        // partition_recursive. Read it as `slot[index]`. The scalar
+        // type comes from the output port's declared type.
+        if (this.slots.nestedOutputSlots === undefined) {
+          throw new Error(
+            `emit_resolved: NestedOut to '${obj.instance.name}.${obj.output.name}' ` +
+            `requires nestedOutputSlots — pass them via EmitSlots when invoking emit ` +
+            `on a fractal kernel.`,
+          )
+        }
+        const perInst = this.slots.nestedOutputSlots.get(obj.instance)
+        if (perInst === undefined) {
+          throw new Error(
+            `emit_resolved: NestedOut to instance '${obj.instance.name}' — ` +
+            `no slot map entry. partition_recursive should record every child ` +
+            `instance before emitting the parent kernel.`,
+          )
+        }
+        const slotRaw = perInst.get(obj.output)
+        if (slotRaw === undefined) {
+          throw new Error(
+            `emit_resolved: NestedOut to '${obj.instance.name}.${obj.output.name}' — ` +
+            `output port not in slot map.`,
+          )
+        }
+        // Determine the scalar type from the output port's declared type.
+        const outType = obj.output.type
+        const scalarType: ScalarType = outType === undefined
+          ? 'float'
+          : outType.kind === 'scalar'
+            ? outType.scalar
+            : outType.kind === 'alias'
+              ? (outType.alias.base as ScalarType)
+              : 'float'   // array — element 0; full array NestedOut not yet supported
+        return { op: opSlot(moduleSlotIdx(slotRaw), scalarType), scalarType }
+      }
     }
     return null
   }
@@ -545,8 +591,10 @@ class Emitter {
       case 'chain': case 'map2': case 'zipWith':
       case 'let':
       case 'tag': case 'match':
-      case 'typeParamRef': case 'bindingRef': case 'nestedOut':
+      case 'typeParamRef': case 'bindingRef':
         throw new Error(`emit_resolved: '${obj.op}' should have been lowered before emit`)
+      // 'nestedOut' is handled in tryTerminal (fractal compile slot read);
+      // it should never reach this exhaustiveness check.
     }
 
     const _exhaustive: never = obj as never
