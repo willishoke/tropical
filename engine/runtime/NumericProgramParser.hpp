@@ -147,11 +147,48 @@ struct ParsedPlan5
   std::vector<double>      slot_defaults;
 };
 
-/** Parse a tropical_plan_5 JSON object. The C++ side only supports
- *  schema "tropical_plan_5"; the TS compiler emits this shape
- *  exclusively. Hand-crafted single-program plans should construct
- *  the new shape (with one entry in `instance_functions[]` whose
- *  `alive_slot_index` points at a slot defaulting to 1.0). */
+/** Parse a single `InstanceProgram` from JSON, recursing into nested
+ *  `children`. Each child kernel's writebacks resolve against its own
+ *  `state_reg_offset` — nested kernels are independent in the unified
+ *  state-register space, just like top-level ones. */
+inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json & jf)
+{
+  tropical_jit::InstanceProgram inst;
+  inst.instance_name    = jf.value("instance_name", std::string{});
+  inst.register_count   = jf.value("register_count", 0u);
+  inst.alive_slot_index = jf.at("alive_slot_index").get<uint32_t>();
+  if (jf.contains("instructions"))
+    for (const auto & ji : jf["instructions"])
+      inst.instructions.push_back(parse_instr(ji));
+  // Writebacks: each entry of register_targets[] is the (absolute,
+  // already shifted) temp slot whose value feeds the state register at
+  // position j among this instance's slots, which sits at
+  // `state_reg_offset + j` in the unified state array.
+  const uint32_t state_reg_offset = jf.value("state_reg_offset", 0u);
+  if (jf.contains("register_targets"))
+  {
+    const auto & rts = jf["register_targets"];
+    for (uint32_t j = 0; j < rts.size(); ++j)
+    {
+      inst.writebacks.push_back({
+        state_reg_offset + j,
+        rts[j].get<int32_t>()
+      });
+    }
+  }
+  // Recurse into nested children (M11 fractal architecture). Absent or
+  // empty `children` array means a leaf kernel.
+  if (jf.contains("children"))
+    for (const auto & jc : jf["children"])
+      inst.children.push_back(parse_instance_program(jc));
+  return inst;
+}
+
+/** Parse a tropical_plan_5 JSON object. The C++ side supports nested
+ *  `instance_functions` (M11 fractal architecture): each function may
+ *  have `children: InstanceFunction[]` that emit recursively inside the
+ *  parent's alive-conditional. Legacy plans without nested children
+ *  parse as leaf-only kernels. */
 inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
 {
   ParsedPlan5 result;
@@ -201,33 +238,7 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
   if (plan.contains("instance_functions"))
   {
     for (const auto & jf : plan["instance_functions"])
-    {
-      tropical_jit::InstanceProgram inst;
-      inst.instance_name = jf.value("instance_name", std::string{});
-      inst.register_count = jf.value("register_count", 0u);
-      inst.alive_slot_index = jf.at("alive_slot_index").get<uint32_t>();
-      if (jf.contains("instructions"))
-        for (const auto & ji : jf["instructions"])
-          inst.instructions.push_back(parse_instr(ji));
-      // Writebacks: each entry of register_targets[] is the
-      // (absolute, already shifted) temp slot whose value feeds the
-      // state register at position j among this instance's slots,
-      // which sits at `state_reg_offset + j` in the unified state
-      // array.
-      const uint32_t state_reg_offset = jf.value("state_reg_offset", 0u);
-      if (jf.contains("register_targets"))
-      {
-        const auto & rts = jf["register_targets"];
-        for (uint32_t j = 0; j < rts.size(); ++j)
-        {
-          inst.writebacks.push_back({
-            state_reg_offset + j,
-            rts[j].get<int32_t>()
-          });
-        }
-      }
-      prog.instance_functions.push_back(std::move(inst));
-    }
+      prog.instance_functions.push_back(parse_instance_program(jf));
   }
 
   // ── scheduler_function ──

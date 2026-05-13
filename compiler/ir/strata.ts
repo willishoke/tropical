@@ -28,14 +28,25 @@ import { inlineInstances } from './inline_instances.js'
 import { arrayLower } from './array_lower.js'
 import { identityElim } from './identity_elim.js'
 
+export interface StrataOptions {
+  /** Whether to flatten nested `InstanceDecl`s via `inlineInstances`.
+   *  Default `true` (legacy / per-program-emit behavior). The fractal
+   *  session path passes `false` so sub-instances survive as kernel
+   *  boundaries — every `InstanceDecl` at every level becomes its own
+   *  kernel in `partition_recursive`. */
+  inlineNested?: boolean
+}
+
 export function strataPipeline(
   prog: ResolvedProgram,
   typeArgs: ReadonlyMap<TypeParamDecl, number> = new Map(),
+  options: StrataOptions = {},
 ): ResolvedProgram {
+  const { inlineNested = true } = options
   const specialized = specializeProgram(prog, typeArgs)
   const summed = sumLower(specialized)
   const cyclic = traceCycles(summed)
-  const inlined = inlineInstances(cyclic)
+  const inlined = inlineNested ? inlineInstances(cyclic) : cyclic
   const arrayed = arrayLower(inlined)
   return identityElim(arrayed)
 }

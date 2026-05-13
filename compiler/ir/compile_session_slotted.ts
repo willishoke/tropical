@@ -149,6 +149,7 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
       register_count:    plan.register_count + tempsConsumed,
       register_targets:  shiftedTargets,
       alive_slot_index:  aliveSlot,
+      children:          [],
     })
 
     // Accumulate unified state. These arrays mirror per-instance
