@@ -24,10 +24,14 @@ describe('stdlib Sequencer<N>', () => {
     expect(inputPortType(type, 1)).toEqual(ArrayType(Float, [8]))
   })
 
-  test.skip('Sequencer<4> flattens end-to-end with an arrayPack input', () => {
-    // Skipped under the active-set runtime: array-shaped input
-    // expressions (`values: [110, 220, ...]` and Clock's `ratios_in:
-    // [1]`) are not yet supported by the per-instance compile path's
-    // translateNode. Tracked as a follow-up.
+  test.skip('Sequencer<4> compiles end-to-end with an arrayPack input', () => {
+    // Phase 5 of M11 wire-lift handles the WIRE SIDE: the array literal
+    // [110, 220, ...] is lifted to a __wire_N program whose body is
+    // `out = arrayPack(...)`. But Sequencer's BODY does
+    // `index(InputRef(values), step)` — array-typed instance INPUTS
+    // still aren't materialized as array_reg operands by the per-
+    // instance compile path. emit_resolved throws "non-array operand"
+    // on the body-side index. Body-side array-input materialization
+    // is a separate follow-up to Phase 5.
   })
 })

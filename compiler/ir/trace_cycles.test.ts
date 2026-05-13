@@ -775,11 +775,18 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
   // Test 6 — (D) Session-level feedback via session-level delay
   // ──────────────────────────────────────────────────────────
   test.skip('(D) session-level delay() between two instances: denotation matches flattened reference', () => {
-    // Skipped under the active-set runtime: explicit session-level
-    // `delay()` in wiring is being superseded by the slot
-    // architecture's intrinsic unit-delay-on-back-edge. translateNode
-    // doesn't yet emit a synthetic state register for `op: 'delay'`;
-    // tracked as a follow-up.
+    // Phase 5 of M11 lifts `delay()` wire expressions to anonymous
+    // programs whose body contains the delay. But this hides the
+    // session-level delay from traceCycles: the lift turns a 1-sample
+    // delay into a 2-sample delay (one from the lifted body's delay,
+    // one from traceCycles inserting a synthetic delay for the cycle
+    // it now sees with no explicit delay at the session edge).
+    //
+    // Correct handling requires lifting that PRESERVES the delay at
+    // the session-edge level — either by leaving `delay()` at the
+    // session level and only lifting its arg, or by teaching
+    // traceCycles to detect existing delays inside lifted wire bodies.
+    // Tracked as a Phase 5 follow-up.
     // Two Inner instances feeding each other through an explicit
     // delay() expression. The session-level delay() short-circuits the
     // cycle so traceCycles sees no SCC.
