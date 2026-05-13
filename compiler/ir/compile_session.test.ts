@@ -4,7 +4,7 @@
  * Covers single-instance and two-instance ref-wiring shapes; asserts
  * the produced FlatPlan validates as `tropical_plan_5` with
  * non-degenerate counts. Audio-equivalence against the interpreter
- * lives in `jit_interp_stdlib_equiv.test.ts`; this file is the
+ * lives in `tests/equiv/jit_vs_interp_stdlib.test.ts`; this file is the
  * lightweight per-PR sanity for the materialization shape.
  */
 

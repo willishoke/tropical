@@ -1,5 +1,5 @@
 /**
- * jit_interp_equiv.test.ts — Differential test: TS interpreter vs. LLVM JIT.
+ * jit_vs_interp.test.ts — Differential test: TS interpreter vs. LLVM JIT.
  *
  * Runs alive-conditional patches through both the pure-TS interpreter
  * (interpret_resolved.ts / interpretSession) and the native LLVM JIT
@@ -28,10 +28,10 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, loadJSON, type ExprNode } from './session'
-import { loadStdlib as loadBuiltins, loadProgramAsType, type ProgramNode } from './program'
-import { applySessionWiring } from './apply_plan'
-import { interpretSession } from './interpret_resolved'
+import { makeSession, loadJSON, type ExprNode } from '../../compiler/session'
+import { loadStdlib as loadBuiltins, loadProgramAsType, type ProgramNode } from '../../compiler/program'
+import { applySessionWiring } from '../../compiler/apply_plan'
+import { interpretSession } from '../../compiler/interpret_resolved'
 
 const ACCUM: ProgramNode = {
   op: 'program',

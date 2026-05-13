@@ -52,11 +52,12 @@ bunx tsc --noEmit                                     # type-check the TS pipeli
 bun run scripts/validate_stdlib.ts                    # parse, elaborate, lower every stdlib/*.trop
 ```
 
-`bun test` exercises three equivalence gates that fix the meaning of
-the strata pipeline: `compile_session_equiv` (full pipeline → stable
-`tropical_plan_4`), `jit_interp_equiv` (JIT vs. pure-TS interpreter),
-and `wasm_vs_jit_equiv` (WASM emit vs. JIT). All three load
-`build/libtropical.dylib` via koffi, so `make build` must come first.
+`bun test` exercises the cross-backend equivalence gates that fix
+the meaning of the strata pipeline: `tests/equiv/jit_vs_interp` (JIT
+vs. pure-TS interpreter), `tests/equiv/wasm_vs_jit` (WASM emit vs.
+JIT), and `tests/equiv/web_plans_vs_jit` (precompiled web plans vs.
+JIT). All load `build/libtropical.dylib` via koffi, so `make build`
+must come first.
 
 `make validate` runs the C++ tests, the TS tests, and the stdlib
 audit in one go.

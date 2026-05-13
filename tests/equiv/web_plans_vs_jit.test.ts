@@ -10,12 +10,12 @@ import { describe, test, expect } from 'bun:test'
 import { readFileSync, readdirSync, existsSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { makeSession } from './session'
-import { type FlatPlan, type WireFlatPlan, toWirePlan, parseWirePlan } from './flat_plan'
-import { emitWasm } from './emit_wasm'
+import { makeSession } from '../../compiler/session'
+import { type FlatPlan, type WireFlatPlan, toWirePlan, parseWirePlan } from '../../compiler/flat_plan'
+import { emitWasm } from '../../compiler/emit_wasm'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const distDir = resolve(__dirname, '../web/dist/patches')
+const distDir = resolve(__dirname, '../../web/dist/patches')
 
 function initWasmState(memory: WebAssembly.Memory, regOffset: number, stateInit: (number | boolean)[], regTypes: string[]): void {
   const dv = new DataView(memory.buffer)

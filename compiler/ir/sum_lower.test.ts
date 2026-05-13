@@ -190,4 +190,4 @@ function walkChildren(node: ResolvedExprOp, k: (e: ResolvedExpr) => void): void 
 // (Removed in C9: stdlib EnvExpDecay/TriggerRamp byte-equal dual-run
 // gate. With the legacy `loadProgramDef` deleted, the comparison has
 // no dual to compare against; the strata pipeline alone is the source
-// of truth, exercised end-to-end by jit_interp_equiv and apply_plan.)
+// of truth, exercised end-to-end by tests/equiv/jit_vs_interp and apply_plan.)

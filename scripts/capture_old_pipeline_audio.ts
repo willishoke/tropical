@@ -1,6 +1,6 @@
 /**
  * capture_old_pipeline_audio.ts — capture the OLD pipeline's audio
- * output for every fixture in `compiler/__fixtures__/flat_plan/`.
+ * output for every fixture in `tests/fixtures/flat_plan/`.
  *
  * Run from a worktree checked out at `origin/main` (pre-active-set):
  *
@@ -12,7 +12,7 @@
  *     cp tests/golden/migration/*.json $REPO/tests/golden/migration/
  *
  * The goldens (sha256 + first-32-sample diagnostic) are then read by
- * `compiler/migration_old_vs_new_audio.test.ts` in the new branch,
+ * `tests/equiv/migration_audio.test.ts` in the new branch,
  * which compiles the same fixture inputs through the active-set
  * pipeline and asserts byte-equal audio.
  *
@@ -30,7 +30,7 @@ import { applySessionWiring } from '../compiler/apply_plan.js'
 
 const FRAMES = 16
 const BUFFER_LEN = 256
-const FIXTURE_DIR = resolve(__dirname, '..', 'compiler', '__fixtures__', 'flat_plan')
+const FIXTURE_DIR = resolve(__dirname, '..', 'tests', 'fixtures', 'flat_plan')
 const GOLDEN_DIR  = resolve(__dirname, '..', 'tests', 'golden', 'migration')
 
 if (!existsSync(GOLDEN_DIR)) mkdirSync(GOLDEN_DIR, { recursive: true })

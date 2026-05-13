@@ -10,7 +10,7 @@
  * materialization any more — it compiles each instance standalone and
  * the scheduler drives per-instance dispatch. This file is retained
  * as the **interpreter oracle**: `interpret_resolved.ts` walks the
- * resolved IR produced here, and `jit_interp_equiv` cross-checks the
+ * resolved IR produced here, and `tests/equiv/jit_vs_interp` cross-checks the
  * two evaluators sample-for-sample.
  *
  * ## Alive semantics in the oracle

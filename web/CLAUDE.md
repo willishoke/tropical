@@ -158,16 +158,15 @@ Three test suites lock the WASM backend to the JIT:
 - `compiler/wasm_runtime.test.ts` — `WasmRuntime` in isolation (no
   AudioWorklet): block-driven render, fade envelope, state-transfer
   invariants.
-- `compiler/wasm_vs_jit_equiv.test.ts` — same `tropical_plan_4`
-  through both backends; sample-for-sample agreement required.
-- `compiler/web_plans_vs_jit.test.ts` — every precompiled plan in
+- `tests/equiv/wasm_vs_jit.test.ts` — same `tropical_plan_4` through
+  both backends; sample-for-sample agreement required.
+- `tests/equiv/web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches the JIT output. Run after
   `bun web/build_patches.ts` and `make build`.
 
 Any divergence is a bug in either `emit_wasm.ts`, the WASM runtime,
-or the underlying strata pipeline (the latter shows up across all
-three of `jit_interp_equiv`, `wasm_vs_jit_equiv`, and
-`compile_session_equiv`).
+or the underlying strata pipeline (the latter shows up across both
+`tests/equiv/jit_vs_interp` and `tests/equiv/wasm_vs_jit`).
 
 ## Build / run
 

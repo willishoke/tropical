@@ -1,7 +1,7 @@
 /**
- * jit_interp_stdlib_equiv.test.ts — Phase D P0.1 corpus expansion.
+ * jit_vs_interp_stdlib.test.ts — Phase D P0.1 corpus expansion.
  *
- * Beyond the gateable-subgraph cases in `jit_interp_equiv.test.ts`, this
+ * Beyond the gateable-subgraph cases in `jit_vs_interp.test.ts`, this
  * suite drives every viable stdlib program plus 5 hand-built edge
  * fixtures through both the LLVM JIT and the pure-TS interpreter
  * (`interpret.ts`) and asserts agreement to within 1 ulp on a 4096-sample
@@ -28,19 +28,19 @@
  *    Sequencer — these fail at wire time on type narrowing
  *    ("literal 0.5 cannot narrow to bool") because their inputs require
  *    `to_bool`-shaped wiring this test doesn't synthesize. The gateable
- *    test in `jit_interp_equiv.test.ts` covers a subset of these.
+ *    test in `jit_vs_interp.test.ts` covers a subset of these.
  *
  * Requires libtropical.dylib (build with `make build` first).
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, resolveProgramType, instantiate, inputNames, outputNames } from './session.js'
-import type { ExprNode } from './expr.js'
-import { loadStdlib } from './program.js'
-import { applyFlatPlan } from './apply_plan.js'
-import { interpretSession } from './interpret_resolved'
-import { EDGE_FIXTURES } from './__fixtures__/equiv/edge_cases.js'
-import { loadProgramAsType } from './program.js'
+import { makeSession, resolveProgramType, instantiate, inputNames, outputNames } from '../../compiler/session.js'
+import type { ExprNode } from '../../compiler/expr.js'
+import { loadStdlib } from '../../compiler/program.js'
+import { applyFlatPlan } from '../../compiler/apply_plan.js'
+import { interpretSession } from '../../compiler/interpret_resolved'
+import { EDGE_FIXTURES } from '../fixtures/equiv/edge_cases.js'
+import { loadProgramAsType } from '../../compiler/program.js'
 
 // 256 * 4 = 1024 samples per fixture — large enough to expose
 // state-transfer drift and 4-buffer continuity, small enough to keep

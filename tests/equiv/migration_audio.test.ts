@@ -1,8 +1,7 @@
 /**
- * migration_old_vs_new_audio.test.ts — pre/post-active-set audio
- * equivalence gate.
+ * migration_audio.test.ts — pre/post-active-set audio equivalence gate.
  *
- * For every fixture in `compiler/__fixtures__/flat_plan/`, this test
+ * For every fixture in `tests/fixtures/flat_plan/`, this test
  * compiles the fixture's `input` (a `tropical_program_2`) through the
  * NEW pipeline (compileSession → tropical_plan_5 → native JIT), runs
  * the same 16 frames × 256 samples that the OLD pipeline ran, and
@@ -33,17 +32,17 @@ import { resolve, basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 
-import { makeSession, loadJSON } from './session.js'
-import { loadStdlib } from './program.js'
-import { applySessionWiring } from './apply_plan.js'
+import { makeSession, loadJSON } from '../../compiler/session.js'
+import { loadStdlib } from '../../compiler/program.js'
+import { applySessionWiring } from '../../compiler/apply_plan.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname  = dirname(__filename)
 
 const FRAMES      = 16
 const BUFFER_LEN  = 256
-const FIXTURE_DIR = resolve(__dirname, '__fixtures__', 'flat_plan')
-const GOLDEN_DIR  = resolve(__dirname, '..', 'tests', 'golden', 'migration')
+const FIXTURE_DIR = resolve(__dirname, '..', 'fixtures', 'flat_plan')
+const GOLDEN_DIR  = resolve(__dirname, '..', 'golden', 'migration')
 
 interface Golden {
   fixture:       string

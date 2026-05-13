@@ -165,13 +165,14 @@ The pipeline is correct only if every pass and every backend agrees
 with the per-sample semantics on the input. Four test suites pin that
 down by cross-checking outputs:
 
-- `active_set.test.ts` — IR-shape gate for the active-set runtime:
-  every instance gets a `__alive__` slot, the scheduler preamble
-  writes literal 1.0 by default, the conditional folds.
-- `jit_interp_equiv.test.ts` — JIT and `interpret_resolved` agree
-  sample-for-sample on the same post-strata IR.
-- `wasm_vs_jit_equiv.test.ts` — WASM and JIT agree sample-for-sample.
-- `web_plans_vs_jit.test.ts` — every precompiled plan in
+- `compiler/active_set.test.ts` — IR-shape gate for the active-set
+  runtime: every instance gets a `__alive__` slot, the scheduler
+  preamble writes literal 1.0 by default, the conditional folds.
+- `tests/equiv/jit_vs_interp.test.ts` — JIT and `interpret_resolved`
+  agree sample-for-sample on the same post-strata IR.
+- `tests/equiv/wasm_vs_jit.test.ts` — WASM and JIT agree
+  sample-for-sample.
+- `tests/equiv/web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches the JIT output.
 
 Any disagreement is a strata, materialize, or backend bug, and the
@@ -205,8 +206,16 @@ mcp/                  MCP server — primary agent interface over stdio
 web/                  WASM/browser backend — host (main thread), worklet (audio thread), build
 patches/              Example patches (tropical_program_2 JSON)
 stdlib/               31 .trop programs; see stdlib/README.md
+tests/                Cross-cutting test surface (see tests/ for layout)
+  equiv/              Cross-backend equivalence suites (the integration layer)
+  bench/              Compile-time and runtime benchmarks
+  fixtures/           Shared fixtures (flat_plan JSONs, equiv edge_cases)
+  golden/             Golden hashes / migration goldens
 design/               Architecture and design notes (architecture.md is authoritative)
 ```
+
+Unit tests live next to the code they test (`compiler/**/*.test.ts`).
+Tests that cross compilation/backend boundaries live under `tests/equiv/`.
 
 ## Conventions
 

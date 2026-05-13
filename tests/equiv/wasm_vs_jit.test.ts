@@ -1,5 +1,5 @@
 /**
- * wasm_vs_jit_equiv.test.ts — compare WASM output against the native JIT.
+ * wasm_vs_jit.test.ts — compare WASM output against the native JIT.
  *
  * Runs real stdlib-based patches through both backends and asserts the
  * output buffers match within a tight tolerance. This is the forcing
@@ -10,13 +10,13 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, loadJSON, type ProgramFile, instantiate, outputNames } from './session'
-import { loadStdlib, loadProgramAsType } from './program'
-import { compileSession } from './ir/compile_session'
-import type { FlatPlan } from './flat_plan'
-import { toWirePlan } from './flat_plan'
-import { emitWasm } from './emit_wasm'
-import { EDGE_FIXTURES } from './__fixtures__/equiv/edge_cases'
+import { makeSession, loadJSON, type ProgramFile, instantiate, outputNames } from '../../compiler/session'
+import { loadStdlib, loadProgramAsType } from '../../compiler/program'
+import { compileSession } from '../../compiler/ir/compile_session'
+import type { FlatPlan } from '../../compiler/flat_plan'
+import { toWirePlan } from '../../compiler/flat_plan'
+import { emitWasm } from '../../compiler/emit_wasm'
+import { EDGE_FIXTURES } from '../fixtures/equiv/edge_cases'
 
 // Load state_init values into the WASM module's register region.
 function initWasmState(memory: WebAssembly.Memory, regOffset: number, stateInit: (number | boolean)[], regTypes: string[]): void {

@@ -1,5 +1,5 @@
 /**
- * Edge-case fixtures for jit_interp_stdlib_equiv.test.ts (Phase D P0.1).
+ * Edge-case fixtures for tests/equiv/jit_vs_interp_stdlib.test.ts (Phase D P0.1).
  *
  * Each fixture is a hand-built program that stresses an axis the stdlib
  * corpus doesn't cover well: division by zero, sqrt of negatives, denormal

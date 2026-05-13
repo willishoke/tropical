@@ -1,10 +1,10 @@
 /**
  * Quick benchmark: reproduce the 13-module patch compilation to find bottleneck.
  */
-import { makeSession, SessionState, instantiate, outputNames } from './session.js'
-import { loadStdlib as loadBuiltins } from './program.js'
-import { compileSession } from './ir/compile_session'
-import { toWirePlan } from './flat_plan.js'
+import { makeSession, SessionState, instantiate, outputNames } from '../../compiler/session.js'
+import { loadStdlib as loadBuiltins } from '../../compiler/program.js'
+import { compileSession } from '../../compiler/ir/compile_session'
+import { toWirePlan } from '../../compiler/flat_plan.js'
 
 const session: SessionState = makeSession()
 loadBuiltins(session)
