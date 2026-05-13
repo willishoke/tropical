@@ -13,27 +13,39 @@
  * runnable-plan boundary.
  */
 
-import type { ResolvedProgram, ResolvedExpr, OutputDecl, RegDecl, DelayDecl, ParamDecl, PortType } from './nodes.js'
+import type { ResolvedProgram, ResolvedExpr, OutputDecl, RegDecl, DelayDecl, ParamDecl, PortType, InstanceDecl } from './nodes.js'
 import type { PerInstancePlan } from '../flat_plan.js'
 import { buildSlotMaps, type SlotMaps } from './slots.js'
 import { emitResolvedProgram, type EmitSlots, type ScalarType } from './emit_resolved.js'
 
 /** Param-handle bindings for FFI param/trigger decls embedded in a
- *  program type's body. */
+ *  program type's body, plus optional nested-output slot map for the
+ *  fractal compile path. When `nestedOutputSlots` is provided, this
+ *  kernel's body may reference sub-`InstanceDecl`s via `NestedOut`,
+ *  and `emit_resolved` reads each ref as a slot operand. */
 export interface CompileResolvedContext {
-  paramHandles?: Map<ParamDecl, { ptr: string }>
+  paramHandles?:      Map<ParamDecl, { ptr: string }>
+  /** Per-sub-instance, per-output-port module-slot map. Populated by
+   *  `partition_recursive` when compiling a parent kernel whose body
+   *  contains child kernels. */
+  nestedOutputSlots?: Map<InstanceDecl, Map<OutputDecl, number>>
 }
 
-/** Compile a post-strata `ResolvedProgram` to a `PerInstancePlan`. */
+/** Compile a `ResolvedProgram` to a `PerInstancePlan`.
+ *
+ *  Accepts both flat (no `InstanceDecl`s in body) and fractal (sub-
+ *  `InstanceDecl`s preserved) shapes. In the fractal case, the caller
+ *  must pass `nestedOutputSlots` so that `NestedOut` refs resolve to
+ *  slot reads; the sub-`InstanceDecl`s themselves are NOT compiled
+ *  here — they're sibling kernels emitted by the partitioner. */
 export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedContext = {}): PerInstancePlan {
   const slots = buildSlotMaps(prog)
 
-  if (slots.instanceDecls.length > 0) {
-    throw new Error(
-      `compileResolved: program '${prog.name}' has ${slots.instanceDecls.length} surviving instanceDecl entries; ` +
-      `compileResolved expects post-strata (post-inlineInstances) input.`,
-    )
-  }
+  // Fractal: surviving InstanceDecls are sibling kernels (handled by
+  // partition_recursive). The body's NestedOut refs resolve via
+  // `ctx.nestedOutputSlots`. If the caller didn't provide a slot map
+  // for a nested-bodied program, that's a contract error — let
+  // emit_resolved's terminal check throw a descriptive message.
 
   // ── Output expressions ──
   const outputExprByDecl = new Map<OutputDecl, ResolvedExpr>()
@@ -90,11 +102,12 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
   })
 
   const emitSlots: EmitSlots = {
-    inputs:       slots.inputs,
-    regs:         slots.regs,
-    delays:       slots.delays,
-    regCount:     slots.regDecls.length,
-    paramHandles: ctx.paramHandles ?? new Map(),
+    inputs:           slots.inputs,
+    regs:             slots.regs,
+    delays:           slots.delays,
+    regCount:         slots.regDecls.length,
+    paramHandles:     ctx.paramHandles     ?? new Map(),
+    nestedOutputSlots: ctx.nestedOutputSlots,
   }
 
   // Per-port scalar slot counts derived from declared output shapes.

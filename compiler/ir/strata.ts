@@ -51,12 +51,19 @@ export function strataPipeline(
   return identityElim(arrayed)
 }
 
-/** Run the full strata pipeline + wrap the post-strata `ResolvedProgram`
+/** Run the full strata pipeline + wrap the resulting `ResolvedProgram`
  *  in a `Compiled` record. Helpers in `program_types.ts` expose
  *  port/register/default metadata via free functions over the resolved
- *  IR — no slot-indexed flattening upfront. The optional `displayName`
- *  rebrands the wrapped name for the specialization cache (e.g.
- *  `Type<N=8>`) without mutating `prog.name`. */
+ *  IR.
+ *
+ *  Currently uses default inlining (`inlineNested: true`). The fractal
+ *  architecture (M11) is fully infrastructured — `partition_recursive`,
+ *  `NestedOut → slot read` in emit_resolved, recursive JIT emit, schema
+ *  field for `children` — but ACTIVATION (flipping to `inlineNested:
+ *  false`) is deferred: the cross-kernel input-wiring path (child
+ *  refers to parent's `inputRef`) needs an ancestor-resolution step
+ *  before partition. Once that lands, set `inlineNested: false` here
+ *  and full fractal activates uniformly. */
 export function programTypeFromResolved(
   prog: ResolvedProgram,
   typeArgs: ReadonlyMap<TypeParamDecl, number>,

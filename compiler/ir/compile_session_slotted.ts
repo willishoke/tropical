@@ -33,26 +33,20 @@
  */
 
 import { allocateOutputSlots, type SessionState } from '../session.js'
-import type { FlatPlan, InstanceFunction, SchedulerFunction, RegTarget } from '../flat_plan.js'
-import { TempTarget, ArrayManagedTarget } from '../flat_plan.js'
-import type { NInstr, ScalarType, NOperand } from './emit_resolved.js'
+import type { FlatPlan, InstanceFunction, SchedulerFunction } from '../flat_plan.js'
+import type { NInstr, NOperand } from './emit_resolved.js'
 import { instrWriteSlot, opConst } from './emit_resolved.js'
-import { compileResolved } from './compile_resolved.js'
 import {
-  computeInstanceTopoOrder, remapInstancePlan, emitDacStitch,
-  type RemapContext, type PreambleEmitter,
+  computeInstanceTopoOrder, emitDacStitch,
+  type PreambleEmitter,
   translateAliveExpr,
 } from './compile_session_slotted_helpers.js'
 import {
-  type TempIdx, type ModuleSlotIdx,
-  tempIdx, moduleSlotIdx,
-  tempOffset, stateRegOffset, arraySlotOffset,
+  type ModuleSlotIdx,
+  tempIdx, moduleSlotIdx, tempOffset,
   rawOffset,
 } from './slot_indices.js'
-import {
-  inputNames, outputNames, outputPortTypes,
-  rawInputDefaults,
-} from '../program_types.js'
+import { partitionKernel, makeAccumulators } from './partition_recursive.js'
 
 /** Compile the session into a `tropical_plan_5` `FlatPlan`. */
 export function compileSessionSlotted(session: SessionState): FlatPlan {
@@ -69,25 +63,13 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
 
   const order = computeInstanceTopoOrder(session)
 
-  // ── Unified accumulators across all instance functions + scheduler ───
-  // Plain counts (number) for things that are just "how many in this
-  // namespace"; the offsets we hand to RemapContext are branded so
-  // cross-namespace arithmetic can't compile.
-  const allRegisterNames:   string[]            = []
-  const allRegisterTypes:   ScalarType[]        = []
-  const allStateInit:       (number | boolean)[] = []
-  const allArraySlotSizes:  number[]            = []
-  const allArraySlotNames:  string[]            = []
-
-  let nextRegRaw    = 0
-  let nextStateRaw  = 0
-  let nextArrayRaw  = 0
-
+  // Recursive partition: for each top-level session instance, walk its
+  // ResolvedProgram tree and emit a kernel per InstanceDecl at every
+  // level. Slot allocations, register/state/array offsets, alive
+  // preamble operands are all threaded through `acc`.
+  const acc = makeAccumulators()
   const instanceFunctions: InstanceFunction[] = []
-  const schedulerPreamble: NInstr[] = []
 
-  // First pass: compile each instance, building instance_functions
-  // entries and accumulating unified state.
   for (const instName of order) {
     const inst = session.instanceRegistry.get(instName)
     if (inst === undefined) continue
@@ -98,78 +80,44 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
       )
     }
 
-    const plan = compileResolved(compiled.prog, { paramHandles: new Map() })
-
-    const inPortNames  = inputNames(compiled)
-    const outPortNames = outputNames(compiled)
-    const outPortTypes = outputPortTypes(compiled).map(scalarOf)
-    const defaults     = rawInputDefaults(compiled)
-
-    const ctx: RemapContext = {
-      instanceName: instName,
-      regOffset:       tempOffset(nextRegRaw),
-      stateRegOffset:  stateRegOffset(nextStateRaw),
-      arraySlotOffset: arraySlotOffset(nextArrayRaw),
-      inputBindingFor: (portName) => {
+    const { fn } = partitionKernel(
+      /* instancePath   */ instName,
+      /* prog           */ compiled.prog,
+      /* compiled       */ compiled,
+      /* aliveInput     */ inst.aliveInput,
+      /* inputBindingFor*/ (portName) => {
         const expr = session.inputExprNodes.get(`${instName}:${portName}`)
         if (expr !== undefined) return { kind: 'wired', expr }
-        const d = defaults[portName]
-        const value = (typeof d === 'number' || typeof d === 'boolean') ? d : 0
-        return { kind: 'literal', value }
+        return undefined
       },
-      outputSlotFor: (portName) => moduleSlotIdx(requireOutputSlot(session, instName, portName)),
-      inputPortNames:    inPortNames,
-      outputPortNames:   outPortNames,
-      outputScalarTypes: outPortTypes,
-    }
-
-    const { preamble, body, writeSlots, tempsConsumed } = remapInstancePlan(plan, ctx, session)
-    const instanceInstructions: NInstr[] = [...preamble, ...body, ...writeSlots]
-
-    const aliveSlot = moduleSlotIdx(
-      requireOutputSlot(session, instName, '__alive__'),
+      /* defaults       */ (() => {
+        // rawInputDefaults is imported from program_types.js — but we
+        // need the Compiled here. Use lazy access via property.
+        const out: Record<string, import('../session.js').ExprNode> = {}
+        for (const d of compiled.prog.ports.inputs) {
+          if (d.default !== undefined) {
+            const init = d.default
+            if (typeof init === 'number' || typeof init === 'boolean') {
+              out[d.name] = init
+            }
+          }
+        }
+        return out
+      })(),
+      /* paramHandles   */ new Map(),
+      session,
+      acc,
     )
-
-    // Shift per-instance register_targets into the unified temp
-    // space. ArrayManagedTarget passes through structurally — no
-    // arithmetic can corrupt it, exactly the property the `-1`
-    // sentinel didn't provide.
-    const shiftedTargets: RegTarget[] = plan.register_targets.map(t => {
-      if (t.kind === 'arrayManaged') return ArrayManagedTarget
-      return TempTarget(tempIdx(t.slot + nextRegRaw))
-    })
-
-    instanceFunctions.push({
-      name:              `instance_${instName}`,
-      instance_name:     instName,
-      instructions:      instanceInstructions,
-      register_offset:   tempOffset(nextRegRaw),
-      state_reg_offset:  stateRegOffset(nextStateRaw),
-      array_slot_offset: arraySlotOffset(nextArrayRaw),
-      register_count:    plan.register_count + tempsConsumed,
-      register_targets:  shiftedTargets,
-      alive_slot_index:  aliveSlot,
-      children:          [],
-    })
-
-    // Accumulate unified state. These arrays mirror per-instance
-    // contributions in instance order; their indices line up with
-    // (state_reg_offset + i), (array_slot_offset + i), etc.
-    for (const n of plan.register_names) allRegisterNames.push(`${instName}.${n}`)
-    allRegisterTypes.push(...plan.register_types)
-    for (const v of plan.state_init) allStateInit.push(v as number | boolean)
-    allArraySlotSizes.push(...plan.array_slot_sizes)
-    for (const n of plan.array_slot_names) allArraySlotNames.push(`${instName}.${n}`)
-
-    nextRegRaw   += plan.register_count + tempsConsumed
-    nextStateRaw += plan.state_init.length
-    nextArrayRaw += plan.array_slot_count
+    instanceFunctions.push(fn)
   }
 
-  // Second pass: emit alive WriteSlots into the scheduler preamble.
-  // Writing every sample lets GVN forward the constant 1.0 in the
-  // default case so the dispatch conditional folds to inline.
-  let preambleNextTempRaw = nextRegRaw
+  // ── Scheduler preamble: emit alive WriteSlots for every kernel in
+  //    the tree. Writing every sample lets GVN forward the constant 1.0
+  //    in the default case so the dispatch conditional folds to inline.
+  //    Done in a second pass so nested kernels' alive emissions are
+  //    included; acc.alivePreambleOps was populated during partition.
+  const schedulerPreamble: NInstr[] = []
+  let preambleNextTempRaw = acc.nextRegRaw
   const aliveEmitter: PreambleEmitter = {
     instrs: schedulerPreamble,
     allocTemp: () => {
@@ -179,20 +127,14 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
     },
   }
 
-  for (const instName of order) {
-    const inst = session.instanceRegistry.get(instName)
-    if (inst === undefined) continue
-    const aliveSlotRaw = session.outputSlotRegistry.get(`${instName}.__alive__`)
-    if (aliveSlotRaw === undefined) continue
-    const aliveSlot = moduleSlotIdx(aliveSlotRaw)
-
-    const aliveOperand: NOperand = inst.aliveInput === undefined
+  for (const op of acc.alivePreambleOps) {
+    const aliveOperand: NOperand = op.expr === undefined
       ? opConst(1, 'float')
       : translateAliveExpr(
-          inst.aliveInput, session, aliveEmitter,
-          `${instName}.__alive__`,
+          op.expr, session, aliveEmitter,
+          `__alive__@${rawOffset(op.aliveSlot)}`,
         )
-    schedulerPreamble.push(instrWriteSlot(aliveSlot, aliveOperand, 'float'))
+    schedulerPreamble.push(instrWriteSlot(op.aliveSlot, aliveOperand, 'float'))
   }
 
   // DAC stitching reads each graphOutput slot AFTER all instances
@@ -210,30 +152,17 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
   return {
     schema: 'tropical_plan_5',
     config: { sampleRate: 44100 },
-    state_init:        allStateInit,
-    register_names:    allRegisterNames,
-    register_types:    allRegisterTypes,
-    array_slot_names:  allArraySlotNames,
-    array_slot_count:  nextArrayRaw,
-    array_slot_sizes:  allArraySlotSizes,
+    state_init:        acc.stateInit,
+    register_names:    acc.registerNames,
+    register_types:    acc.registerTypes,
+    array_slot_names:  acc.arraySlotNames,
+    array_slot_count:  acc.nextArrayRaw,
+    array_slot_sizes:  acc.arraySlotSizes,
     register_count:    dacEndRaw,
     instance_functions: instanceFunctions,
     scheduler_function: schedulerFunction,
     ...buildSlotMetadata(session),
   }
-}
-
-/** Look up an instance's output slot, throwing with a clear message
- *  if it's missing. Centralised so error wording stays consistent. */
-function requireOutputSlot(session: SessionState, instName: string, portName: string): number {
-  const key = `${instName}.${portName}`
-  const idx = session.outputSlotRegistry.get(key)
-  if (idx === undefined) {
-    throw new Error(
-      `compileSessionSlotted: output slot for '${key}' not allocated.`,
-    )
-  }
-  return idx
 }
 
 /** Compute slot allocation metadata from the session registries. */
@@ -257,18 +186,6 @@ function buildSlotMetadata(session: SessionState): {
   return { slot_count: slotCount, slot_names: slotNames, slot_defaults: slotDefaults }
 }
 
-/** Reduce a PortType to a ScalarType for emission. */
-function scalarOf(
-  t: { kind?: string; scalar?: ScalarType; alias?: { base: ScalarType }; element?: ScalarType | { base: ScalarType } } | undefined,
-): ScalarType {
-  if (t === undefined) return 'float'
-  if (t.kind === 'scalar' && t.scalar !== undefined) return t.scalar
-  if (t.kind === 'alias' && t.alias !== undefined) return t.alias.base
-  if (t.kind === 'array' && t.element !== undefined) {
-    return typeof t.element === 'string' ? (t.element as ScalarType) : t.element.base
-  }
-  return 'float'
-}
 
 /** @deprecated Slot mode is the only mode. */
 export function slotModeEnabled(_session?: SessionState, _opt?: boolean): boolean {
