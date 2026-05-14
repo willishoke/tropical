@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <string>
+#include <functional>
 #include <unordered_map>
 
 #if defined(__APPLE__)
@@ -1217,16 +1218,19 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   // For each instance:
   //   alive_v = load slots[alive_slot_index]
   //   if (alive_v > 0.5) {
+  //     for each child: emit_kernel_block(child)   // recursive
   //     <instance body instructions>
   //     <instance writebacks>
   //   }
   //
-  // For default-alive instances the preamble wrote `1.0` to the
-  // alive slot; LLVM's GVN forwards the store-to-load, folds the
-  // compare to `true`, and jump-threading eliminates the branch —
-  // the body inlines unconditionally and matches a unified kernel
-  // byte-for-byte (per the active-set spike findings).
-  for (const auto & inst : program.instance_functions)
+  // Children run BEFORE the parent's own body so the parent can read
+  // its children's freshly-written slot values (M11 fractal). For
+  // default-alive instances the preamble wrote `1.0` to the alive slot;
+  // LLVM's GVN forwards the store-to-load, folds the compare to
+  // `true`, and jump-threading eliminates the branch — nested
+  // default-alive folds away the same way the flat case does.
+  std::function<llvm::Error(const tropical_jit::InstanceProgram &)> emit_kernel_block =
+    [&](const tropical_jit::InstanceProgram & inst) -> llvm::Error
   {
     llvm::Value * alive_v = load_slot_f64(inst.alive_slot_index);
     llvm::Value * alive_b = builder.CreateFCmpOGT(
@@ -1239,11 +1243,22 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     builder.CreateCondBr(alive_b, body_bb, merge_bb);
 
     builder.SetInsertPoint(body_bb);
-    if (auto err = emit_instrs(inst.instructions)) return std::move(err);
+    // Recursive: emit child kernels inside the parent's alive-body.
+    for (const auto & child : inst.children)
+    {
+      if (auto err = emit_kernel_block(child)) return err;
+    }
+    if (auto err = emit_instrs(inst.instructions)) return err;
     emit_writebacks(inst.writebacks);
     builder.CreateBr(merge_bb);
 
     builder.SetInsertPoint(merge_bb);
+    return llvm::Error::success();
+  };
+
+  for (const auto & inst : program.instance_functions)
+  {
+    if (auto err = emit_kernel_block(inst)) return std::move(err);
   }
 
   // ── Scheduler postamble: DAC stitch reads. Runs AFTER all

@@ -396,23 +396,57 @@ export function remapInstancePlan(
     args: instr.args.map(remapOperand),
   }))
 
-  // WriteSlot per output port to publish each computed value into
-  // the instance's allocated output slot. `plan.output_targets[i]`
-  // is a local temp index; shift into the unified space.
+  // WriteSlot per scalar slot of every output port. For scalar ports
+  // that's 1 WriteSlot. For array-typed ports of shape `[N]` (or any
+  // shape; `expandPortToSlots` flattens row-major) that's N WriteSlots,
+  // one per element. `plan.output_targets` is sized to match (one entry
+  // per scalar slot in port-major order — see emit_resolved.ts's
+  // emitProgram for the producer side).
+  //
+  // The session's `outputPortMeta` is the authoritative per-port shape
+  // record (scalar slot names + types, allocated once in
+  // `allocateOutputSlots`). We iterate it in port order and consume
+  // output_targets monotonically.
   const writeSlots: NInstr[] = []
-  for (let i = 0; i < ctx.outputPortNames.length; i++) {
-    const portName = ctx.outputPortNames[i]
-    const slotIdx  = ctx.outputSlotFor(portName)
-    const localTemp = plan.output_targets[i]
-    if (localTemp === undefined) {
+  let targetIdx = 0
+  for (let portI = 0; portI < ctx.outputPortNames.length; portI++) {
+    const portName = ctx.outputPortNames[portI]
+    const portKey  = `${ctx.instanceName}.${portName}`
+    const meta = session.outputPortMeta.get(portKey)
+    if (meta === undefined) {
       throw new Error(
-        `compileSessionSlotted: instance '${ctx.instanceName}' missing output_targets[${i}] ` +
-        `for port '${portName}'.`,
+        `compileSessionSlotted: instance '${ctx.instanceName}' port '${portName}' ` +
+        `missing outputPortMeta entry (allocateOutputSlots should have run).`,
       )
     }
-    const scalarType = ctx.outputScalarTypes[i]
-    const absTemp = shiftTemp(localTemp, ctx.regOffset)
-    writeSlots.push(instrWriteSlot(slotIdx, opTemp(absTemp, scalarType), scalarType))
+    for (let scalarI = 0; scalarI < meta.scalarSlotNames.length; scalarI++) {
+      const scalarSlotName = meta.scalarSlotNames[scalarI]
+      const slotIdxRaw = session.outputSlotRegistry.get(scalarSlotName)
+      if (slotIdxRaw === undefined) {
+        throw new Error(
+          `compileSessionSlotted: scalar slot '${scalarSlotName}' not in outputSlotRegistry.`,
+        )
+      }
+      const slotIdx = moduleSlotIdx(slotIdxRaw)
+      const localTemp = plan.output_targets[targetIdx]
+      if (localTemp === undefined) {
+        throw new Error(
+          `compileSessionSlotted: instance '${ctx.instanceName}' missing output_targets[${targetIdx}] ` +
+          `for scalar slot '${scalarSlotName}' (port '${portName}', element ${scalarI}).`,
+        )
+      }
+      const scalarType = meta.scalarTypes[scalarI]
+      const absTemp = shiftTemp(localTemp, ctx.regOffset)
+      writeSlots.push(instrWriteSlot(slotIdx, opTemp(absTemp, scalarType), scalarType))
+      targetIdx++
+    }
+  }
+  if (targetIdx !== plan.output_targets.length) {
+    throw new Error(
+      `compileSessionSlotted: instance '${ctx.instanceName}' has ${plan.output_targets.length} ` +
+      `output_targets but only ${targetIdx} were consumed by scalar slot expansion. ` +
+      `This indicates a port-shape / emit mismatch.`,
+    )
   }
 
   return {

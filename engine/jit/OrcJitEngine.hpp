@@ -111,12 +111,13 @@ struct FlatInstr
 };
 
 // Per-instance kernel slice. Each session instance contributes one of
-// these to the multi-function plan. The compiler emits one `alwaysinline`
-// LLVM function per `InstanceProgram`, plus a scheduler that wraps each
-// call in `if (slots[alive_slot_index] > 0.5) call ...`.
+// these to the multi-function plan. The compiler emits nested
+// alive-conditional basic blocks inside one LLVM function — `children`
+// are emitted recursively inside the parent's body block (M11 fractal
+// architecture).
 struct InstanceProgram
 {
-  std::string                  instance_name;     // session instance name
+  std::string                  instance_name;     // dotted path (e.g. voice1.env)
   std::vector<FlatInstr>       instructions;      // already shifted into unified offset space
   uint32_t                     register_count = 0; // local temp count
   uint32_t                     alive_slot_index = 0; // slot driving the dispatch conditional
@@ -130,6 +131,9 @@ struct InstanceProgram
     int32_t  temp_slot;    // index into the unified temp array (-1 = skip)
   };
   std::vector<Writeback>       writebacks;
+  /** Nested child kernels. Emitted recursively inside this kernel's
+   *  alive-conditional body block. Empty for leaf kernels. */
+  std::vector<InstanceProgram> children;
 };
 
 // Top-level driver: runs once per sample. Preamble fires before any

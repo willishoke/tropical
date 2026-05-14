@@ -120,7 +120,11 @@ function declNeedsLowering(decl: BodyDecl): boolean {
     case 'regDecl':      return exprNeedsLowering(decl.init)
     case 'delayDecl':    return exprNeedsLowering(decl.update) || exprNeedsLowering(decl.init)
     case 'paramDecl':    return false
-    case 'instanceDecl': return decl.inputs.some(i => exprNeedsLowering(i.value))
+    case 'instanceDecl':
+      // M11 fractal: also check sub-program for surviving combinators.
+      // Sub-program bodies are lowered recursively when arrayLower fires.
+      return decl.inputs.some(i => exprNeedsLowering(i.value))
+        || progNeedsLowering(decl.type)
     case 'programDecl':  return false
   }
 }
@@ -213,13 +217,25 @@ function lowerDeclInPlace(decl: BodyDecl, subst: SubstMap, memo: Memo): void {
     case 'programDecl':
       return
     case 'instanceDecl': {
-      // After inlineInstances, no `instanceDecl` should reach arrayLower.
-      // Defensive: if one does (e.g., arrayLower called outside the
-      // strata pipeline), lower its input expressions in place.
+      // M11 fractal: InstanceDecls survive through strata. Lower this
+      // instance's input expressions AND recursively lower the sub-
+      // program's body (its own `let`/`fold`/combinators must be
+      // lowered here — arrayLower only sees the top-level program of
+      // each call, and the per-type strata that constructed this
+      // sub-program lowered ITS top-level but not its grand-children).
       for (const i of decl.inputs) {
         const value = lowerExpr(i.value, subst, memo)
         if (value !== i.value) i.value = value
       }
+      // Recurse into the sub-program's body. The clone-then-lower
+      // discipline still holds because cloneResolvedProgram deep-clones
+      // through InstanceDecl.type, so `decl.type` is a fresh tree we
+      // can mutate.
+      const subEmpty: SubstMap = EMPTY_SUBST
+      for (const subDecl of decl.type.body.decls) {
+        lowerDeclInPlace(subDecl, subEmpty, memo)
+      }
+      decl.type.body.assigns = decl.type.body.assigns.map(a => lowerAssign(a, subEmpty, memo))
       return
     }
   }

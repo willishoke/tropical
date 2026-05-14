@@ -108,7 +108,8 @@ export interface PerInstancePlan {
 export interface InstanceFunction {
   /** Mangled symbol name (informational). */
   name:              string
-  /** Session instance name (e.g., `voice7`). */
+  /** Session instance name (e.g., `voice7`). May be a dotted path
+   *  (`voice7.env`) for nested kernels in the fractal architecture. */
   instance_name:     string
   /** Instructions with operands already shifted into unified space. */
   instructions:      NInstr[]
@@ -125,6 +126,11 @@ export interface InstanceFunction {
   register_targets:  RegTarget[]
   /** Slot driving the dispatch conditional. */
   alive_slot_index:  ModuleSlotIdx
+  /** Nested kernels (M11 fractal architecture). Sub-InstanceDecls
+   *  within this program's body become child kernels, emitted inside
+   *  this kernel's alive-conditional block. Empty for leaf kernels and
+   *  for legacy/non-fractal compiles. */
+  children:          InstanceFunction[]
 }
 
 // ─── SchedulerFunction: the top-level per-sample driver ─────────────────────
@@ -185,6 +191,8 @@ export interface WireInstanceFunction {
   register_count:    number
   register_targets:  number[]
   alive_slot_index:  number
+  /** Nested kernels. May be missing in legacy JSON (parsed as []). */
+  children?:         WireInstanceFunction[]
 }
 
 export interface WireSchedulerFunction {
@@ -258,6 +266,37 @@ const parseInstr = (i: WireNInstr): NInstr => ({
 const parseRegTargetFromWire = (n: number): RegTarget =>
   n < 0 ? ArrayManagedTarget : TempTarget(tempIdx(n))
 
+/** Recursive parse of an InstanceFunction wire structure. */
+const parseInstanceFn = (inst: WireInstanceFunction): InstanceFunction => ({
+  name:              inst.name,
+  instance_name:     inst.instance_name,
+  instructions:      inst.instructions.map(parseInstr),
+  register_offset:   tempOffset(inst.register_offset),
+  state_reg_offset:  stateRegOffset(inst.state_reg_offset),
+  array_slot_offset: arraySlotOffset(inst.array_slot_offset),
+  register_count:    inst.register_count,
+  register_targets:  inst.register_targets.map(parseRegTargetFromWire),
+  alive_slot_index:  moduleSlotIdx(inst.alive_slot_index),
+  children:          (inst.children ?? []).map(parseInstanceFn),
+})
+
+/** Recursive serialize of an InstanceFunction to wire structure. */
+const toWireInstanceFn = (inst: InstanceFunction): WireInstanceFunction => ({
+  name:              inst.name,
+  instance_name:     inst.instance_name,
+  instructions:      inst.instructions.map(toWireInstr),
+  register_offset:   rawOffset(inst.register_offset),
+  state_reg_offset:  rawOffset(inst.state_reg_offset),
+  array_slot_offset: rawOffset(inst.array_slot_offset),
+  register_count:    inst.register_count,
+  register_targets:  inst.register_targets.map(toWireRegTarget),
+  alive_slot_index:  rawIdx(inst.alive_slot_index),
+  // Omit `children` from the wire when empty so existing JSON consumers
+  // (golden fixtures, hand-crafted plan_5 tests) see exactly the bytes
+  // they expect today. Populated children are emitted normally.
+  ...(inst.children.length > 0 ? { children: inst.children.map(toWireInstanceFn) } : {}),
+})
+
 /** Parse a wire-format plan (as read from disk JSON or constructed
  *  by hand in legacy tests) into the branded internal `FlatPlan`.
  *  Inverse of `toWirePlan`. */
@@ -275,17 +314,7 @@ export function parseWirePlan(wire: WireFlatPlan): FlatPlan {
     slot_count:       wire.slot_count,
     slot_names:       wire.slot_names,
     slot_defaults:    wire.slot_defaults,
-    instance_functions: wire.instance_functions.map(inst => ({
-      name:              inst.name,
-      instance_name:     inst.instance_name,
-      instructions:      inst.instructions.map(parseInstr),
-      register_offset:   tempOffset(inst.register_offset),
-      state_reg_offset:  stateRegOffset(inst.state_reg_offset),
-      array_slot_offset: arraySlotOffset(inst.array_slot_offset),
-      register_count:    inst.register_count,
-      register_targets:  inst.register_targets.map(parseRegTargetFromWire),
-      alive_slot_index:  moduleSlotIdx(inst.alive_slot_index),
-    })),
+    instance_functions: wire.instance_functions.map(parseInstanceFn),
     scheduler_function: {
       preamble:       wire.scheduler_function.preamble.map(parseInstr),
       postamble:      wire.scheduler_function.postamble.map(parseInstr),
@@ -313,17 +342,7 @@ export function toWirePlan(plan: FlatPlan): WireFlatPlan {
     slot_count:       plan.slot_count,
     slot_names:       plan.slot_names,
     slot_defaults:    plan.slot_defaults,
-    instance_functions: plan.instance_functions.map(inst => ({
-      name:              inst.name,
-      instance_name:     inst.instance_name,
-      instructions:      inst.instructions.map(toWireInstr),
-      register_offset:   rawOffset(inst.register_offset),
-      state_reg_offset:  rawOffset(inst.state_reg_offset),
-      array_slot_offset: rawOffset(inst.array_slot_offset),
-      register_count:    inst.register_count,
-      register_targets:  inst.register_targets.map(toWireRegTarget),
-      alive_slot_index:  rawIdx(inst.alive_slot_index),
-    })),
+    instance_functions: plan.instance_functions.map(toWireInstanceFn),
     scheduler_function: {
       preamble:       plan.scheduler_function.preamble.map(toWireInstr),
       postamble:      plan.scheduler_function.postamble.map(toWireInstr),

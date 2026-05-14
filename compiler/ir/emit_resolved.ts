@@ -32,12 +32,12 @@
 
 import type {
   ResolvedExpr, ResolvedExprOp,
-  RegDecl, DelayDecl, InputDecl, InstanceDecl, ParamDecl,
+  RegDecl, DelayDecl, InputDecl, InstanceDecl, OutputDecl, ParamDecl,
 } from './nodes.js'
 import {
   type TempIdx, type StateRegIdx, type ArraySlotIdx, type ModuleSlotIdx,
   type InputPortIdx,
-  tempIdx, arraySlotIdx, stateRegIdx, inputPortIdx,
+  tempIdx, arraySlotIdx, stateRegIdx, inputPortIdx, moduleSlotIdx,
   rawIdx,
 } from './slot_indices.js'
 import type { RegTarget } from '../flat_plan.js'
@@ -250,6 +250,14 @@ export interface EmitSlots {
   regCount: number
   /** FFI handle metadata per param/trigger decl. */
   paramHandles: Map<ParamDecl, { ptr: string }>
+  /** Module slot indices for sub-instance outputs that this kernel's
+   *  body references via `NestedOut`. Populated by `partition_recursive`
+   *  for fractal kernels — each child kernel's outputs occupy slots in
+   *  the shared module-slot array, and the parent reads them via slot
+   *  operands. Map shape: instanceDecl → outputDecl → moduleSlotIdx.
+   *  When undefined (legacy / per-program path), NestedOut throws as
+   *  before. */
+  nestedOutputSlots?: Map<InstanceDecl, Map<OutputDecl, number>>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -413,6 +421,44 @@ class Emitter {
       }
       case 'sampleRate':  return { op: opRate, scalarType: 'float' }
       case 'sampleIndex': return { op: opTick, scalarType: 'int' }
+      case 'nestedOut': {
+        // Fractal compile: a NestedOut references a sub-instance's
+        // output, which lives in a module slot allocated by
+        // partition_recursive. Read it as `slot[index]`. The scalar
+        // type comes from the output port's declared type.
+        if (this.slots.nestedOutputSlots === undefined) {
+          throw new Error(
+            `emit_resolved: NestedOut to '${obj.instance.name}.${obj.output.name}' ` +
+            `requires nestedOutputSlots — pass them via EmitSlots when invoking emit ` +
+            `on a fractal kernel.`,
+          )
+        }
+        const perInst = this.slots.nestedOutputSlots.get(obj.instance)
+        if (perInst === undefined) {
+          throw new Error(
+            `emit_resolved: NestedOut to instance '${obj.instance.name}' — ` +
+            `no slot map entry. partition_recursive should record every child ` +
+            `instance before emitting the parent kernel.`,
+          )
+        }
+        const slotRaw = perInst.get(obj.output)
+        if (slotRaw === undefined) {
+          throw new Error(
+            `emit_resolved: NestedOut to '${obj.instance.name}.${obj.output.name}' — ` +
+            `output port not in slot map.`,
+          )
+        }
+        // Determine the scalar type from the output port's declared type.
+        const outType = obj.output.type
+        const scalarType: ScalarType = outType === undefined
+          ? 'float'
+          : outType.kind === 'scalar'
+            ? outType.scalar
+            : outType.kind === 'alias'
+              ? (outType.alias.base as ScalarType)
+              : 'float'   // array — element 0; full array NestedOut not yet supported
+        return { op: opSlot(moduleSlotIdx(slotRaw), scalarType), scalarType }
+      }
     }
     return null
   }
@@ -545,8 +591,10 @@ class Emitter {
       case 'chain': case 'map2': case 'zipWith':
       case 'let':
       case 'tag': case 'match':
-      case 'typeParamRef': case 'bindingRef': case 'nestedOut':
+      case 'typeParamRef': case 'bindingRef':
         throw new Error(`emit_resolved: '${obj.op}' should have been lowered before emit`)
+      // 'nestedOut' is handled in tryTerminal (fractal compile slot read);
+      // it should never reach this exhaustiveness check.
     }
 
     const _exhaustive: never = obj as never
@@ -711,22 +759,67 @@ class Emitter {
   }
 
   // ── Top-level emit driver ──
-  emitProgram(outputExprs: ResolvedExpr[], registerExprs: (ResolvedExpr | null)[]): FlatProgram {
+  emitProgram(
+    outputExprs: ResolvedExpr[],
+    registerExprs: (ResolvedExpr | null)[],
+    outputPortScalarCounts: number[],
+  ): FlatProgram {
     const output_targets: TempIdx[] = []
     const register_targets: RegTarget[] = []
 
-    for (const expr of outputExprs) {
+    // Output-targets contract (M11 Phase 3): ONE entry per scalar slot
+    // of every declared output port. Scalar/alias ports contribute 1
+    // entry; array ports of total scalar count N contribute N entries
+    // in row-major order matching `expandPortToSlots`'s naming.
+    //
+    // The number of targets per port is determined by the DECLARED port
+    // shape (`outputPortScalarCounts`), not by the runtime shape of the
+    // computed expression. Backward-compat case: when a scalar-declared
+    // port receives an array-shaped expression, we project to element 0
+    // (the historical behavior for under-specified types).
+    if (outputPortScalarCounts.length !== outputExprs.length) {
+      throw new Error(
+        `emitProgram: outputPortScalarCounts.length (${outputPortScalarCounts.length}) ` +
+        `must match outputExprs.length (${outputExprs.length})`,
+      )
+    }
+    for (let portI = 0; portI < outputExprs.length; portI++) {
+      const expr = outputExprs[portI]
+      const declaredCount = outputPortScalarCounts[portI]
       const r = this.compileNode(expr, 'float')
-      if (r.isArray) {
+
+      if (declaredCount === 1) {
+        // Scalar port. If the expression is array-shaped, take [0]
+        // (backward-compat); otherwise emit a single scalar copy.
         const dst = this.allocReg()
-        this.regTypes.set(dst, 'float')
-        this.emit(instrIndex(dst, [r.op, opConst(0, 'int')], 'float'))
+        if (r.isArray) {
+          this.regTypes.set(dst, r.scalarType)
+          this.emit(instrIndex(dst, [r.op, opConst(0, 'int')], r.scalarType))
+        } else {
+          this.regTypes.set(dst, r.scalarType)
+          this.emit(instrScalar('Add', dst, [r.op, opConst(0, r.scalarType)], r.scalarType))
+        }
         output_targets.push(dst)
       } else {
-        const dst = this.allocReg()
-        this.regTypes.set(dst, r.scalarType)
-        this.emit(instrScalar('Add', dst, [r.op, opConst(0, r.scalarType)], r.scalarType))
-        output_targets.push(dst)
+        // Array port. Expression must be array-shaped of matching size.
+        if (!r.isArray) {
+          throw new Error(
+            `emitProgram: output port ${portI} declared as array of scalar count ` +
+            `${declaredCount}, but expression is scalar`,
+          )
+        }
+        if (r.size !== declaredCount) {
+          throw new Error(
+            `emitProgram: output port ${portI} declared as array of scalar count ` +
+            `${declaredCount}, but expression has size ${r.size}`,
+          )
+        }
+        for (let elemI = 0; elemI < declaredCount; elemI++) {
+          const dst = this.allocReg()
+          this.regTypes.set(dst, r.scalarType)
+          this.emit(instrIndex(dst, [r.op, opConst(elemI, 'int')], r.scalarType))
+          output_targets.push(dst)
+        }
       }
     }
 
@@ -796,6 +889,11 @@ class Emitter {
 
 export interface EmitResolvedInputs {
   outputExprs: ResolvedExpr[]
+  /** One entry per output port: total scalar slot count derived from
+   *  the port's declared shape (1 for scalar/alias; product of shape
+   *  dims for arrays). Determines how many `output_targets` the emit
+   *  produces per port. */
+  outputPortScalarCounts: number[]
   registerExprs: (ResolvedExpr | null)[]
   stateInit: (number | boolean | number[])[]
   stateRegTypes: ScalarType[]
@@ -805,5 +903,5 @@ export interface EmitResolvedInputs {
 
 export function emitResolvedProgram(input: EmitResolvedInputs): FlatProgram {
   const e = new Emitter(input.slots, input.stateInit, input.stateRegTypes, input.inputPortTypes)
-  return e.emitProgram(input.outputExprs, input.registerExprs)
+  return e.emitProgram(input.outputExprs, input.registerExprs, input.outputPortScalarCounts)
 }
