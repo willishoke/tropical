@@ -88,6 +88,48 @@ $(BUILD)/v4_chain16_runner.o: $(SRC)/runner.c | $(BUILD)
 $(BUILD)/v4_chain16: $(BUILD)/v4_chain16_kernel.o $(BUILD)/v4_chain16_scheduler.o $(BUILD)/v4_chain16_runner.o
 	$(CC) $(CFLAGS) $(LTO_FLAGS) -o $@ $^
 
+# ─── Alive variants (chain4 only for now) ───────────────────────────────
+
+# v1 chain4 alive: kernel + scheduler same TU, alive check inlined,
+# default-alive write each sample, no LTO. Expect GVN to fold the
+# (alive > 0.5) checks since alive is constant-written 1.0 each sample.
+$(BUILD)/v1_chain4_alive: $(SRC)/v1_monolithic_alive.c $(SRC)/runner_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) -DBENCH_VARIANT_V1_ALIVE -o $@ $^
+
+# v1lto chain4 alive: same source, with LTO. Expect to match v1_alive
+# (LTO has nothing to do beyond what -O2 already did intra-TU).
+$(BUILD)/v1lto_chain4_alive_mono.o: $(SRC)/v1_monolithic_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) $(LTO_FLAGS) -c -o $@ $<
+$(BUILD)/v1lto_chain4_alive_runner.o: $(SRC)/runner_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) $(LTO_FLAGS) -DBENCH_VARIANT_V1LTO_ALIVE -c -o $@ $<
+$(BUILD)/v1lto_chain4_alive: $(BUILD)/v1lto_chain4_alive_mono.o $(BUILD)/v1lto_chain4_alive_runner.o
+	$(CC) $(CFLAGS) $(LTO_FLAGS) -o $@ $^
+
+# v3 chain4 alive: kernel as external function with alive check,
+# scheduler writes alive=1.0 each sample, no LTO. Expect the alive
+# check to STAY as a real runtime branch — the scheduler TU can't see
+# into the kernel function, so it can't propagate the constant.
+$(BUILD)/v3_chain4_alive_kernel.o: $(SRC)/v3_kernel_module_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
+$(BUILD)/v3_chain4_alive_scheduler.o: $(SRC)/v3_scheduler_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) -c -o $@ $<
+$(BUILD)/v3_chain4_alive_runner.o: $(SRC)/runner_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) -DBENCH_VARIANT_V3_ALIVE -c -o $@ $<
+$(BUILD)/v3_chain4_alive: $(BUILD)/v3_chain4_alive_kernel.o $(BUILD)/v3_chain4_alive_scheduler.o $(BUILD)/v3_chain4_alive_runner.o
+	$(CC) $(CFLAGS) -o $@ $^
+
+# v4 chain4 alive: same sources as v3_alive, with -flto. THE KEY
+# QUESTION: does LTO let GVN fold the alive check across the module
+# boundary?
+$(BUILD)/v4_chain4_alive_kernel.o: $(SRC)/v3_kernel_module_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) $(LTO_FLAGS) -c -o $@ $<
+$(BUILD)/v4_chain4_alive_scheduler.o: $(SRC)/v3_scheduler_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) $(LTO_FLAGS) -c -o $@ $<
+$(BUILD)/v4_chain4_alive_runner.o: $(SRC)/runner_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) $(LTO_FLAGS) -DBENCH_VARIANT_V4_ALIVE -c -o $@ $<
+$(BUILD)/v4_chain4_alive: $(BUILD)/v4_chain4_alive_kernel.o $(BUILD)/v4_chain4_alive_scheduler.o $(BUILD)/v4_chain4_alive_runner.o
+	$(CC) $(CFLAGS) $(LTO_FLAGS) -o $@ $^
+
 # ─── IR dumps ────────────────────────────────────────────────────────────
 
 $(BUILD)/v1_chain4.ll: $(SRC)/v1_monolithic.c | $(BUILD)
@@ -101,8 +143,16 @@ $(BUILD)/v3_chain4_scheduler.ll: $(SRC)/v3_scheduler.c | $(BUILD)
 $(BUILD)/v3_chain16_scheduler.ll: $(SRC)/v3_scheduler_16.c | $(BUILD)
 	$(CC) $(CFLAGS) -S -emit-llvm -o $@ $<
 
+$(BUILD)/v1_chain4_alive.ll: $(SRC)/v1_monolithic_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) -S -emit-llvm -DBENCH_VARIANT_V1_ALIVE -o $@ $<
+$(BUILD)/v3_alive_kernel.ll: $(SRC)/v3_kernel_module_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) -S -emit-llvm -o $@ $<
+$(BUILD)/v3_chain4_alive_scheduler.ll: $(SRC)/v3_scheduler_alive.c | $(BUILD)
+	$(CC) $(CFLAGS) -S -emit-llvm -o $@ $<
+
 ir: $(BUILD)/v1_chain4.ll $(BUILD)/v1_chain16.ll \
-    $(BUILD)/v3_kernel.ll $(BUILD)/v3_chain4_scheduler.ll $(BUILD)/v3_chain16_scheduler.ll
+    $(BUILD)/v3_kernel.ll $(BUILD)/v3_chain4_scheduler.ll $(BUILD)/v3_chain16_scheduler.ll \
+    $(BUILD)/v1_chain4_alive.ll $(BUILD)/v3_alive_kernel.ll $(BUILD)/v3_chain4_alive_scheduler.ll
 
 # ─── Aggregate targets ───────────────────────────────────────────────────
 
@@ -110,7 +160,9 @@ BINARIES = \
     $(BUILD)/v1_chain4    $(BUILD)/v1lto_chain4 \
     $(BUILD)/v3_chain4    $(BUILD)/v4_chain4 \
     $(BUILD)/v1_chain16   $(BUILD)/v1lto_chain16 \
-    $(BUILD)/v3_chain16   $(BUILD)/v4_chain16
+    $(BUILD)/v3_chain16   $(BUILD)/v4_chain16 \
+    $(BUILD)/v1_chain4_alive    $(BUILD)/v1lto_chain4_alive \
+    $(BUILD)/v3_chain4_alive    $(BUILD)/v4_chain4_alive
 
 all: $(BINARIES) ir
 
@@ -120,7 +172,7 @@ run: all
 	fi
 	@for b in $(BINARIES); do $$b >> data/results.csv; done
 	@echo "appended results to data/results.csv"
-	@tail -8 data/results.csv
+	@tail -12 data/results.csv
 
 $(BUILD):
 	@mkdir -p $(BUILD)

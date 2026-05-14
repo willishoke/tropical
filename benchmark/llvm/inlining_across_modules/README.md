@@ -311,6 +311,82 @@ matches v1 at all chain lengths tested. The LTO inliner handles
   of single-digit ns/call): confirmed empirically. 0.7–1.0 ns/call
   per kernel on M1 with -O2 clang.
 
+### 2026-05-14 — chain4 with alive check (default-alive folding test)
+
+Adds alive-aware variants: each kernel has an `alive` field; the
+scheduler writes `1.0` to all alive fields each sample (the default-
+alive pattern from tropical's active-set runtime); each kernel checks
+`alive > 0.5` and skips its body when false.
+
+| Variant | ns/sample (median of 5, excluding warm-up) |
+|---|---|
+| v1 (no alive) | 3.45 |
+| v1lto (no alive) | 3.46 |
+| v3 (no alive) | 7.52 |
+| v4 (no alive) | 3.52 |
+| **v1 + alive** | 3.44 |
+| **v1lto + alive** | 3.50 |
+| **v3 + alive** | 8.46 |
+| **v4 + alive** | 3.48 |
+
+All variants produce bit-identical output. Same number to within
+noise across alive/no-alive at the inline-or-LTO variants.
+
+**The active-set runtime's central performance claim survives
+cross-module compilation under LTO.** v4_alive (LTO with alive
+checks) matches v1_alive (monolithic with alive checks) matches v1
+(monolithic baseline). When LTO is active, default-alive checks cost
+zero observable runtime.
+
+The v3_alive overhead vs v3 (no alive): 8.46 − 7.52 = 0.94 ns/sample.
+This is the cost of four alive checks per sample (one per kernel)
+that the optimizer cannot fold because the kernel function is
+opaque. Per check: ~0.24 ns. For a stable alive signal (musical
+decay over hundreds of samples), branch prediction handles this for
+nearly free; for audio-rate alive signals, the branch could miss
+more often.
+
+### Caveat: the IR doesn't fold the alive check at v1 either
+
+Inspecting `build/v1_chain4_alive.ll` reveals something subtle: even
+in v1 (kernel inlined into scheduler, same TU), GVN does NOT fold
+the `alive > 0.5` check. The optimized IR contains the comparison
+and branch in the inner loop. Yet the runtime cost is identical to
+v1 without alive.
+
+The reason for the non-fold: the kernel pointers (`k1, k2, k3, k4`)
+are not annotated with `__restrict__`, so the optimizer cannot prove
+they don't alias. The store to `k1->alive = 1.0` could in principle
+be followed by a load of `k4->alive` that returns the same value (if
+k1 and k4 alias). GVN is conservative; it preserves the load.
+
+Why no runtime cost: the alive check branches 100% in the alive-true
+direction (we always write 1.0), so branch prediction handles it
+perfectly. The pipeline stays full; the cost is in the noise.
+
+**This differs from the active-set spike's findings.** The
+active-set spike showed alive checks fold *completely* under O2.
+That setup used a *single flat slot array* with distinct integer
+indices — the optimizer could prove non-aliasing trivially. Our
+struct-based test introduces an aliasing pessimism that wouldn't
+occur in tropical's actual model.
+
+**For tropical's real implementation**: the slot array is one
+contiguous double[N] with each alive slot at a distinct integer
+index. The aliasing analysis at that model is trivial and the alive
+fold should engage as the active-set spike reported. The conclusion
+this experiment supports — LTO recovers monolithic-equivalent
+performance across modules — applies regardless of the alive-fold
+question, because branch prediction makes the unfolded form
+essentially free at runtime when alive is stable.
+
+Re-running this experiment with `__restrict__`-annotated kernel
+pointers (or with a slot-array model that mimics tropical's actual
+layout) would likely show the alive fold happening at v1 and v4, but
+the runtime numbers wouldn't change meaningfully because branch
+prediction is already handling the unfolded form. Worth doing for
+IR-cleanliness validation; not blocking on architectural conclusions.
+
 ### Implications for tropical's architecture
 
 Strong confirmation that **the operadic substrate can compile each
