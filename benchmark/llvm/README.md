@@ -18,17 +18,25 @@ top-level `.md` file is a focused experiment or recorded result.
   `phaser_compare.c`) and their optimized IR dumps under
   `ir-dumps/`. See `active_set_spike/findings.md` for the writeup.
 
-### Planned
+### In progress
 
-- **`inlining_across_modules.md`** — investigates whether the
+- **`inlining_across_modules/`** — investigates whether the
   active-set findings extend to separately-compiled LLVM modules.
   The active-set spike verified intra-procedural GVN works across
   `alwaysinline` boundaries within one LLVM function. This experiment
   asks whether the same optimization survives when kernels live in
   *separate* modules linked together — relevant to the operadic
   substrate's hot-swap granularity and external-primitive realization
-  paths discussed in `design/operadic_ir.md`. Doc only at this point;
-  harness implementation pending.
+  paths discussed in `design/operadic_ir.md`.
+  
+  Initial results (2026-05-14): linear-chain tree, 4 variants;
+  **LTO dissolves the module boundary** (monolithic and separate-
+  modules variants run at identical speed with LTO). Without LTO,
+  separate modules pay a ~2.2× cost. See `inlining_across_modules/
+  README.md` for the writeup. Variants pending: separate static
+  functions (variant 2), external `.so` via dlopen (variant 5),
+  LadderFilter-pattern tree, Phaser16-scale tree, conditional-alive
+  testing.
 
 ## Conventions
 

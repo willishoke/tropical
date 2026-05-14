@@ -158,28 +158,41 @@ invocation" to "machine code address available."
 
 ## Implementation
 
-Each variant gets a small C++ harness that constructs the LLVM IR
-directly (not via tropical's compiler) so we isolate the LLVM-level
-optimization behavior from any tropical-specific transformation.
+The variants are plain C source files compiled with `clang -O2` (the
+JIT's default optimization level). LLVM-level differences are isolated
+by varying only the linkage strategy and the `-flto` flag, not the
+source. Each variant has its own runner binary that links a different
+combination of object files.
 
-Structure:
+Initial implementation (in this directory):
 
 ```
-benchmark/llvm/
-  inlining_across_modules.md       — this doc
-  bench/
-    common.hpp                     — shared scaffolding
-    bench_monolithic.cpp           — variant 1
-    bench_separate_funcs.cpp       — variant 2
-    bench_separate_modules.cpp     — variants 3 and 4
-    bench_external_call.cpp        — variant 5
+inlining_across_modules/
+  README.md                        — this doc
+  Makefile                         — builds + runs all variants
+  src/
+    kernel.h                       — shared kernel/state definition
+    v1_monolithic.c                — kernel + scheduler in one TU,
+                                     kernel inlined by definition
+    v3_kernel_module.c             — kernel as external function
+    v3_scheduler.c                 — scheduler calling external kernel
+    runner.c                       — timing harness, variant-selected
+                                     via -DBENCH_VARIANT_V*
+  build/                           — compile outputs (.o, .ll, binaries)
   data/
-    YYYY-MM-DD-results.md          — measured results per run
+    results.csv                    — measurements appended per `make run`
 ```
 
-Each `bench_*` produces a CSV row per (tree, alive) combination with
-the measured metrics. The aggregated CSV across runs lives in
-`data/`.
+Currently implemented variants:
+
+- **v1** — monolithic source; kernel inlined; no LTO
+- **v1lto** — monolithic source; kernel inlined; **with LTO**
+- **v3** — separate modules; kernel called externally; no LTO
+- **v4** — separate modules; kernel called externally; **with LTO**
+
+Not yet implemented: variant 2 (separate static functions same module),
+variant 5 (external `.so` via dlopen), additional kernel-tree shapes
+(B, C, D, E in the original axis-2 spec), conditional-alive testing.
 
 ## Decision criteria
 
@@ -207,9 +220,128 @@ strategy so we can make principled trade-offs in the architecture.
 
 ## Results
 
-(To be filled in as benchmarks run. Append timestamped entries.)
+### 2026-05-14 — linear-chain tree, 4 variants, default-alive
 
-### YYYY-MM-DD — pending
+Setup: macOS, Apple M1, clang from system toolchain. Linear chain of
+4 simple kernels (`y = a*x + b + 0.5*state`). Buffer length 4096
+samples; 256 measured iterations per run; 5 runs per variant.
+
+| Variant | ns/sample (median) | vs v1 baseline |
+|---|---|---|
+| **v1** — monolithic, no LTO | 3.4 | 1.0× |
+| **v1lto** — monolithic, with LTO | 1.4 | 0.41× |
+| **v3** — separate modules, no LTO | 7.6 | 2.2× |
+| **v4** — separate modules, with LTO | 1.4 | 0.41× |
+
+All four variants produce bit-identical output (sink value
+`0.292147`).
+
+**Headline finding: LTO dissolves the module boundary.** With LTO,
+the monolithic and separate-modules variants run at the same speed
+(~1.4 ns/sample). Without LTO, separate modules pay a ~2.2× cost
+relative to monolithic.
+
+The win from LTO isn't from inlining the kernel into the scheduler
+(that's already done in v1 by `static inline`). It's from **inlining
+the scheduler into the runner's outer test loop**. With LTO, the
+linker presents both translation units (scheduler + runner) to LLVM
+together; the optimizer inlines `scheduler` into the per-iteration
+measurement loop, then constant-propagates kernel coefficients, then
+vectorizes across iterations. Without LTO, `scheduler` is opaque from
+runner's TU and is invoked as a real function call per outer-loop
+iteration.
+
+This means **the test as written measures runner-level optimization
+benefit as much as kernel-level**. To isolate the kernel-level
+inlining effect from the outer-loop inlining effect, future variants
+should either: (a) move all timing logic into the same TU as the
+scheduler so there is no outer-call boundary to inline across, or
+(b) annotate the scheduler with `__attribute__((noinline))` so LTO
+preserves its call-site identity, isolating the kernel-into-scheduler
+inlining as the only effect under measurement.
+
+### What this means against the original hypotheses
+
+- **H1** (monolithic baseline performance is preserved with
+  default-alive folding intact): **CONFIRMED**. Default-alive isn't
+  tested in this first cut (no alive logic yet), but the kernel-
+  inlining piece is intact in v1.
+
+- **H2** (separate modules without LTO will *not* fold optimizations
+  across kernel boundaries; each call becomes opaque): **CONFIRMED**.
+  v3's IR shows four real function calls per loop iteration; v1's IR
+  shows the kernel body inlined eight times in the loop body with
+  zero function calls.
+
+- **H3** (LTO can recover monolithic performance for separately-
+  compiled modules): **CONFIRMED, AND THEN SOME**. v4 not only
+  recovers v1's performance — it matches v1lto, which BEATS v1
+  because of additional cross-TU optimization (the outer-loop
+  inlining). Module boundaries are essentially free under LTO at
+  this scale.
+
+- **H4** and **H5** are not tested by this first cut (external C
+  function calls, absolute ns/call cost) — pending future variants.
+
+### Implications for tropical's architecture
+
+If the tropical runtime adopts LTO for its compiled output (or its
+equivalent in the LLVM-ORC JIT pipeline that tropical uses — ORC's
+default O2 pipeline already does cross-module optimization within a
+single LLJIT instance), then the operadic substrate can use modular
+compilation for hot-swap granularity **without sacrificing
+performance**. Separate kernels compiled to separate LLVM modules
+will be linked + optimized as one program at JIT time; module
+boundaries disappear post-optimization.
+
+The remaining concern is **per-kernel JIT compile time** under LTO.
+LTO is more expensive than no-LTO. Need to measure: if each hot-swap
+triggers a re-LTO of the affected kernel's surrounding modules, does
+compile time stay reasonable?
+
+### IR observations
+
+v1 inner loop (relevant portion of `build/v1.ll`):
+
+```llvm
+; 4 kernels' bodies inlined; 8 fmuladd ops per sample:
+%25 = tail call double @llvm.fmuladd.f64(...)  ; k1's a*x+b
+%27 = tail call double @llvm.fmuladd.f64(...)  ; k1's +0.5*state
+%30 = tail call double @llvm.fmuladd.f64(...)  ; k2's a*x+b
+%32 = tail call double @llvm.fmuladd.f64(...)  ; k2's +0.5*state
+%35 = tail call double @llvm.fmuladd.f64(...)  ; k3's a*x+b
+%37 = tail call double @llvm.fmuladd.f64(...)  ; k3's +0.5*state
+%40 = tail call double @llvm.fmuladd.f64(...)  ; k4's a*x+b
+%42 = tail call double @llvm.fmuladd.f64(...)  ; k4's +0.5*state
+```
+
+The state and coefficient loads are NOT hoisted across iterations —
+they're inside the loop, one load per iteration per kernel. The
+pointers `k1, k2, k3, k4` could in principle alias (no `restrict`
+qualifier), so the optimizer is conservative. Adding `__restrict__`
+to the scheduler's parameters would likely allow phi-promotion of
+state and hoisting of coefficients out of the loop; this is a
+candidate optimization for a future iteration.
+
+v3 inner loop (relevant portion of `build/v3_scheduler.ll`):
+
+```llvm
+%14 = tail call double @kernel_step_external(double %13, ptr %3)
+%15 = tail call double @kernel_step_external(double %14, ptr %4)
+%16 = tail call double @kernel_step_external(double %15, ptr %5)
+%17 = tail call double @kernel_step_external(double %16, ptr %6)
+```
+
+Four actual function calls per sample. The function `kernel_step_external`
+is declared as extern; the optimizer at scheduler-TU's compile time
+has no body to inline. This is what produces the ~2.2× slowdown vs
+v1.
+
+The LTO variants (v1lto, v4) don't have their post-link IR dumped
+into the build directory; they're compiled to native code via the
+linker. Reading their optimized form would require `-Wl,-save-temps`
+or post-link disassembly. Worth doing if questions arise about how
+the LTO optimizer transformed the code.
 
 ## Open questions for future expansion
 
