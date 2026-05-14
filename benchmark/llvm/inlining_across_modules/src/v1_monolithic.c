@@ -15,6 +15,16 @@
 
 #include "kernel.h"
 
+// `noinline` on the scheduler prevents LTO from inlining it into the
+// timing loop in runner.c. Without this attribute, with -flto, the
+// optimizer would inline scheduler_v1 into main's measurement loop and
+// constant-propagate the kernel coefficients (which are stack-local in
+// main). That conflates "kernel inlining into scheduler" with
+// "scheduler inlining into runner," both of which give performance
+// wins. With this attribute, the only LTO effect under measurement is
+// the kernel-into-scheduler inlining (orthogonally to the scheduler's
+// call from runner).
+__attribute__((noinline))
 void scheduler_v1(
     const double *input,
     double *output,

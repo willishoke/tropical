@@ -15,49 +15,86 @@
 #include <string.h>
 #include <time.h>
 
-// Scheduler signature is uniform across variants — the differences
-// are in HOW each variant is compiled and linked, not in the API.
-typedef void (*scheduler_fn_t)(
-    const double *input,
-    double *output,
-    size_t n,
-    kernel_state_t *k1,
-    kernel_state_t *k2,
-    kernel_state_t *k3,
-    kernel_state_t *k4
-);
+// Chain length is selected at compile time via BENCH_CHAIN_LEN. The
+// runner has two parallel sets of scheduler signatures and timing
+// paths: 4-kernel (existing) and 16-kernel (Phaser16-scale).
+#ifndef BENCH_CHAIN_LEN
+#define BENCH_CHAIN_LEN 4
+#endif
+
+// ─── Variant + chain-length dispatch ───────────────────────────────────────
+//
+// Each chain-length has its own scheduler signature (fixed-arity in
+// the kernel pointers). The chain-length is selected at compile time
+// via BENCH_CHAIN_LEN; the variant is selected via BENCH_VARIANT_V*.
+// Combining them gives 4 variants × 2 chain lengths = 8 binaries.
 
 #ifdef BENCH_VARIANT_V1LTO
 #define BENCH_VARIANT_V1
-#define BENCH_NAME "v1lto_monolithic_lto"
+#define BENCH_LTO_SUFFIX "_lto"
+#else
+#define BENCH_LTO_SUFFIX ""
 #endif
+
+#if BENCH_CHAIN_LEN == 4
 
 #ifdef BENCH_VARIANT_V1
 extern void scheduler_v1(
     const double *, double *, size_t,
     kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *);
-#ifndef BENCH_NAME
-#define BENCH_NAME "v1_monolithic"
-#endif
+#define BENCH_NAME "v1_chain4" BENCH_LTO_SUFFIX
 #define BENCH_FN scheduler_v1
 #elif defined(BENCH_VARIANT_V3)
 extern void scheduler_v3(
     const double *, double *, size_t,
     kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *);
-#define BENCH_NAME "v3_separate_modules_nolto"
+#define BENCH_NAME "v3_chain4_nolto"
 #define BENCH_FN scheduler_v3
 #elif defined(BENCH_VARIANT_V4)
-// v4 uses the same source as v3; the difference is at the link layer
-// (with -flto vs without). The scheduler symbol is the same one
-// (scheduler_v3), but the runtime metric is reported as a distinct
-// variant so we can compare apples-to-apples.
 extern void scheduler_v3(
     const double *, double *, size_t,
     kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *);
-#define BENCH_NAME "v4_separate_modules_lto"
+#define BENCH_NAME "v4_chain4_lto"
 #define BENCH_FN scheduler_v3
 #else
-#error "Define BENCH_VARIANT_V1, BENCH_VARIANT_V3, or BENCH_VARIANT_V4"
+#error "Define BENCH_VARIANT_V1/V1LTO/V3/V4"
+#endif
+
+#elif BENCH_CHAIN_LEN == 16
+
+#ifdef BENCH_VARIANT_V1
+extern void scheduler_v1_16(
+    const double *, double *, size_t,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *);
+#define BENCH_NAME "v1_chain16" BENCH_LTO_SUFFIX
+#define BENCH_FN scheduler_v1_16
+#elif defined(BENCH_VARIANT_V3)
+extern void scheduler_v3_16(
+    const double *, double *, size_t,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *);
+#define BENCH_NAME "v3_chain16_nolto"
+#define BENCH_FN scheduler_v3_16
+#elif defined(BENCH_VARIANT_V4)
+extern void scheduler_v3_16(
+    const double *, double *, size_t,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *,
+    kernel_state_t *, kernel_state_t *, kernel_state_t *, kernel_state_t *);
+#define BENCH_NAME "v4_chain16_lto"
+#define BENCH_FN scheduler_v3_16
+#else
+#error "Define BENCH_VARIANT_V1/V1LTO/V3/V4"
+#endif
+
+#else
+#error "BENCH_CHAIN_LEN must be 4 or 16"
 #endif
 
 static double seconds_since(const struct timespec *t0) {
@@ -89,14 +126,27 @@ int main(int argc, char **argv) {
     // instability over the test duration. The state DC value matters
     // (cumulative drift would push us into infinity); a < 1 keeps it
     // bounded.
-    kernel_state_t k1 = { .a = 0.5,  .b = 0.01, .state = 0.0 };
-    kernel_state_t k2 = { .a = 0.4,  .b = 0.02, .state = 0.0 };
-    kernel_state_t k3 = { .a = 0.3,  .b = 0.03, .state = 0.0 };
-    kernel_state_t k4 = { .a = 0.2,  .b = 0.04, .state = 0.0 };
+    kernel_state_t ks[BENCH_CHAIN_LEN];
+    for (int i = 0; i < BENCH_CHAIN_LEN; i++) {
+        // Decay a coefficient with kernel index so the chain is stable
+        // (geometric decrease in gain through the chain).
+        ks[i].a = 0.5 / ((double)(i + 1));
+        ks[i].b = 0.01 * (double)(i + 1);
+        ks[i].state = 0.0;
+    }
+
+#if BENCH_CHAIN_LEN == 4
+#define CALL_BENCH() BENCH_FN(input, output, buf_len, \
+    &ks[0], &ks[1], &ks[2], &ks[3])
+#elif BENCH_CHAIN_LEN == 16
+#define CALL_BENCH() BENCH_FN(input, output, buf_len, \
+    &ks[0], &ks[1], &ks[2], &ks[3], &ks[4], &ks[5], &ks[6], &ks[7], \
+    &ks[8], &ks[9], &ks[10], &ks[11], &ks[12], &ks[13], &ks[14], &ks[15])
+#endif
 
     // Warm-up: prime caches; let CPU governor settle.
     for (int it = 0; it < warmup_iters; it++) {
-        BENCH_FN(input, output, buf_len, &k1, &k2, &k3, &k4);
+        CALL_BENCH();
     }
 
     // Measured: time M iterations, report ns/sample (total samples =
@@ -106,7 +156,7 @@ int main(int argc, char **argv) {
     clock_gettime(CLOCK_MONOTONIC, &t0);
 
     for (int it = 0; it < measured_iters; it++) {
-        BENCH_FN(input, output, buf_len, &k1, &k2, &k3, &k4);
+        CALL_BENCH();
     }
 
     double elapsed_s = seconds_since(&t0);

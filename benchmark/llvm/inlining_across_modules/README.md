@@ -220,45 +220,125 @@ strategy so we can make principled trade-offs in the architecture.
 
 ## Results
 
-### 2026-05-14 — linear-chain tree, 4 variants, default-alive
+### 2026-05-14 — initial pass (before methodology fix)
 
-Setup: macOS, Apple M1, clang from system toolchain. Linear chain of
-4 simple kernels (`y = a*x + b + 0.5*state`). Buffer length 4096
-samples; 256 measured iterations per run; 5 runs per variant.
+Original measurements without `noinline` on the scheduler. With LTO,
+the optimizer inlined the scheduler into the runner's measurement loop
+and constant-propagated kernel coefficients from the stack frame in
+`main`. This conflated kernel-level inlining with runner-level outer-
+loop inlining; the recorded LTO numbers were misleadingly fast (~1.4
+ns/sample for both v1lto and v4 vs 3.4 for v1). See git history for
+the original commit.
 
-| Variant | ns/sample (median) | vs v1 baseline |
+### 2026-05-14 — methodology fix + scaling test (chain4 and chain16)
+
+Setup: macOS, Apple M1, clang from system toolchain (Apple clang).
+Schedulers annotated with `__attribute__((noinline))` so LTO can't
+inline them into the runner's outer measurement loop. Buffer length
+4096 samples; 256 measured iterations per run; 5 runs per variant ×
+chain-length combination.
+
+**Chain length 4** (simple chain of 4 kernels, each `y = a*x + b + 0.5*state`):
+
+| Variant | ns/sample (median of 5) | vs v1 |
 |---|---|---|
-| **v1** — monolithic, no LTO | 3.4 | 1.0× |
-| **v1lto** — monolithic, with LTO | 1.4 | 0.41× |
-| **v3** — separate modules, no LTO | 7.6 | 2.2× |
-| **v4** — separate modules, with LTO | 1.4 | 0.41× |
+| **v1** — kernel inlined into scheduler, no LTO | 3.48 | 1.0× |
+| **v1lto** — same source, with LTO | 3.49 | 1.00× |
+| **v3** — kernel as external function, no LTO | 7.57 | 2.18× |
+| **v4** — kernel as external function, with LTO | 3.43 | 0.99× |
 
-All four variants produce bit-identical output (sink value
-`0.292147`).
+**Chain length 16** (Phaser16-scale):
 
-**Headline finding: LTO dissolves the module boundary.** With LTO,
-the monolithic and separate-modules variants run at the same speed
-(~1.4 ns/sample). Without LTO, separate modules pay a ~2.2× cost
-relative to monolithic.
+| Variant | ns/sample (median of 5) | vs v1 |
+|---|---|---|
+| **v1** — kernel inlined into scheduler, no LTO | 11.32 | 1.0× |
+| **v1lto** — same source, with LTO | 11.38 | 1.01× |
+| **v3** — kernel as external function, no LTO | 21.95 | 1.94× |
+| **v4** — kernel as external function, with LTO | 11.34 | 1.00× |
 
-The win from LTO isn't from inlining the kernel into the scheduler
-(that's already done in v1 by `static inline`). It's from **inlining
-the scheduler into the runner's outer test loop**. With LTO, the
-linker presents both translation units (scheduler + runner) to LLVM
-together; the optimizer inlines `scheduler` into the per-iteration
-measurement loop, then constant-propagates kernel coefficients, then
-vectorizes across iterations. Without LTO, `scheduler` is opaque from
-runner's TU and is invoked as a real function call per outer-loop
-iteration.
+All variants within each chain length produce bit-identical output
+(chain4 sink = `0.137081`; chain16 sink = `0.340000`).
 
-This means **the test as written measures runner-level optimization
-benefit as much as kernel-level**. To isolate the kernel-level
-inlining effect from the outer-loop inlining effect, future variants
-should either: (a) move all timing logic into the same TU as the
-scheduler so there is no outer-call boundary to inline across, or
-(b) annotate the scheduler with `__attribute__((noinline))` so LTO
-preserves its call-site identity, isolating the kernel-into-scheduler
-inlining as the only effect under measurement.
+### Reading the numbers
+
+**Kernel-level inlining is what LTO recovers, and it recovers it
+completely.** With the runner-loop confound removed:
+
+- `v1 ≈ v1lto` at both chain lengths — LTO has nothing useful to do
+  when the kernel is already inlined and the scheduler is noinline.
+- `v4 ≈ v1` at both chain lengths — LTO successfully inlines
+  `kernel_step_external` into the scheduler across the TU boundary,
+  recovering monolithic-equivalent performance.
+- `v3` is the only outlier — kernel calls survive as real function
+  calls in the inner loop, adding cost.
+
+**The cost of per-kernel function calls is linear in chain length.**
+v3's overhead vs v1:
+
+| | v1 | v3 | v3 − v1 | overhead / kernel |
+|---|---|---|---|---|
+| chain4 | 3.48 ns | 7.57 ns | 4.09 ns | ~1.0 ns/call |
+| chain16 | 11.32 ns | 21.95 ns | 10.63 ns | ~0.66 ns/call |
+
+The per-call overhead is slightly amortized at chain16 (likely
+because the function-call frame setup dominates less when there's
+more inter-call work). But it's bounded around 0.7–1.0 ns per kernel
+call on this hardware. For audio at 48 kHz (sample budget ≈ 81 ns
+for a 256-sample buffer on a single core), a 16-kernel chain with
+no LTO is roughly 27 % of the per-sample budget; a 4-kernel chain
+is roughly 9 %. Real but not catastrophic.
+
+**LTO numbers don't depend on chain length** in the sense that v4
+matches v1 at all chain lengths tested. The LTO inliner handles
+16-kernel chains as cleanly as 4-kernel chains.
+
+### What this means against the original hypotheses
+
+- **H1** (monolithic baseline preserved): confirmed.
+- **H2** (no-LTO separate modules don't fold cross-call optimizations):
+  confirmed — v3's IR shows raw function calls; runtime cost is
+  linear in chain length.
+- **H3** (LTO can recover monolithic performance for separately-
+  compiled modules): **confirmed**. v4 matches v1 at every chain
+  length tested. Module boundaries are essentially free under LTO.
+- **H4** (external C function calls can't be inlined without LTO,
+  even when present): not yet tested directly. The variant-5 case
+  (dlopen'd .so) remains pending. Reasonable inference from v3's
+  behavior: an external .so cannot be inlined by LTO unless the .so
+  was also compiled with -flto (and even then, only with `-fwhole-
+  program-vtables` or equivalent in modern toolchains).
+- **H5** (per-sample function-call overhead is bounded, on the order
+  of single-digit ns/call): confirmed empirically. 0.7–1.0 ns/call
+  per kernel on M1 with -O2 clang.
+
+### Implications for tropical's architecture
+
+Strong confirmation that **the operadic substrate can compile each
+operation into a separate LLVM module without sacrificing kernel-
+level performance, provided LTO (or its JIT-pipeline equivalent) is
+active at link time**. Modular compilation gives the substrate the
+ability to:
+
+- Hot-swap individual operations without recompiling the whole
+  session
+- Mix realizations (one operation as standard tropical compilation;
+  another as WDF; another as FFI) with predictable composition
+
+Open question for follow-up: at the LLVM ORC JIT level, does
+tropical's current `PassBuilder::buildPerModuleDefaultPipeline(O2)`
+include the cross-module inlining that LTO performs? If not, swapping
+the JIT to `buildLTOPreLinkDefaultPipeline` + the LTO post-link
+pipeline would be the natural next step. The active-set spike notes
+that O2 is already sufficient for default-alive folding within a
+single function — but the active-set spike's setup had everything in
+one function. The cross-module case here suggests JIT-side LTO
+configuration is worth investigating.
+
+Separate-modules **without** LTO costs ~2× at the chain lengths
+tested. If the JIT's LTO equivalent isn't easy to enable for some
+reason (compile-time concerns, ORC integration complexity, etc.),
+the substrate would need to fall back to monolithic-compile-per-
+hot-swap-unit. That's what we have today; it remains viable.
 
 ### What this means against the original hypotheses
 
@@ -301,47 +381,27 @@ compile time stay reasonable?
 
 ### IR observations
 
-v1 inner loop (relevant portion of `build/v1.ll`):
+v1 chain4 inner loop (from `build/v1_chain4.ll`): 4 kernels' bodies
+inlined into the scheduler, 8 fmuladd ops per sample iteration. No
+function calls in the loop body. State and coefficient loads happen
+inside the loop, one load per iteration per kernel — the optimizer
+is conservative because the kernel pointers could in principle alias
+(no `__restrict__` qualifier). Adding `__restrict__` would likely
+allow phi-promotion of state and hoisting of coefficients; candidate
+optimization for a future iteration.
 
-```llvm
-; 4 kernels' bodies inlined; 8 fmuladd ops per sample:
-%25 = tail call double @llvm.fmuladd.f64(...)  ; k1's a*x+b
-%27 = tail call double @llvm.fmuladd.f64(...)  ; k1's +0.5*state
-%30 = tail call double @llvm.fmuladd.f64(...)  ; k2's a*x+b
-%32 = tail call double @llvm.fmuladd.f64(...)  ; k2's +0.5*state
-%35 = tail call double @llvm.fmuladd.f64(...)  ; k3's a*x+b
-%37 = tail call double @llvm.fmuladd.f64(...)  ; k3's +0.5*state
-%40 = tail call double @llvm.fmuladd.f64(...)  ; k4's a*x+b
-%42 = tail call double @llvm.fmuladd.f64(...)  ; k4's +0.5*state
-```
-
-The state and coefficient loads are NOT hoisted across iterations —
-they're inside the loop, one load per iteration per kernel. The
-pointers `k1, k2, k3, k4` could in principle alias (no `restrict`
-qualifier), so the optimizer is conservative. Adding `__restrict__`
-to the scheduler's parameters would likely allow phi-promotion of
-state and hoisting of coefficients out of the loop; this is a
-candidate optimization for a future iteration.
-
-v3 inner loop (relevant portion of `build/v3_scheduler.ll`):
-
-```llvm
-%14 = tail call double @kernel_step_external(double %13, ptr %3)
-%15 = tail call double @kernel_step_external(double %14, ptr %4)
-%16 = tail call double @kernel_step_external(double %15, ptr %5)
-%17 = tail call double @kernel_step_external(double %16, ptr %6)
-```
-
-Four actual function calls per sample. The function `kernel_step_external`
-is declared as extern; the optimizer at scheduler-TU's compile time
-has no body to inline. This is what produces the ~2.2× slowdown vs
-v1.
+v3 chain4 inner loop (from `build/v3_chain4_scheduler.ll`): four
+actual `kernel_step_external` function calls per sample. The function
+is declared extern in this TU; the optimizer has no body to inline.
+This is the source of the ~2.2× slowdown vs v1.
 
 The LTO variants (v1lto, v4) don't have their post-link IR dumped
 into the build directory; they're compiled to native code via the
 linker. Reading their optimized form would require `-Wl,-save-temps`
 or post-link disassembly. Worth doing if questions arise about how
-the LTO optimizer transformed the code.
+the LTO optimizer transformed the code at the kernel level (specifically:
+does v4's LTO inline the kernel and then also vectorize / hoist /
+phi-promote, or just inline?).
 
 ## Open questions for future expansion
 

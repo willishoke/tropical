@@ -19,6 +19,11 @@
 // External declaration — body lives in v3_kernel_module.c.
 extern double kernel_step_external(double x, kernel_state_t *k);
 
+// `noinline` on the scheduler — same reasoning as in v1_monolithic.c.
+// Isolates the kernel-into-scheduler inlining (which LTO can affect)
+// from the scheduler-into-runner inlining (which we don't want to
+// measure here).
+__attribute__((noinline))
 void scheduler_v3(
     const double *input,
     double *output,
