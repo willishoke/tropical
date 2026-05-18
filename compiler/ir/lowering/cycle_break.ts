@@ -138,10 +138,15 @@ export function breakInstanceCycles(prog: ResolvedProgram): CycleBreakResult {
       name: `_feedback_${inst.name}_${output.name}`,
       // The synthetic reg's update reads the current sample of the
       // broken output; the reg holds that value to make it readable
-      // one sample later by the cycle members.
+      // one sample later by the cycle members. The `_feedback_` name
+      // prefix distinguishes these from user-written regs (consumed
+      // by trace_cycles.test.ts and any future analyses that want
+      // to identify cycle-break regs). Post-Phase 4b strict policy
+      // means production code paths never produce these (cycles in
+      // source throw at elaborate-time); the helper survives for
+      // direct invocation by tests and future realizations.
       update: { op: 'nestedOut', instance: inst, output },
       init: 0,
-      _liftedFrom: 'synthetic',
     }
     breakerReg.set(key, d)
     syntheticRegs.push(d)

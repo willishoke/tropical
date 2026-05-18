@@ -33,19 +33,21 @@ exclude form above.
 
 If you want a single sentence to hang the whole codebase off:
 
-> tropical is a cartesian category of typed signal-flow graphs with a
-> guarded trace, where the guard is the unit-delay endomorphism and
-> `traceCycles` is the trace operator's implementation.
+> tropical's IR is a DAG-shaped operad — programs are typed signal-flow
+> graphs with cycles broken explicitly by a single state primitive
+> (`RegDecl`), and the compiler is a functor between this operad and
+> the slot-operational operad consumed by the runtime.
 
 That's not load-bearing vocabulary you have to use day-to-day, but it
 *is* the shape of the system: programs are graphs, parallel composition
 is the cartesian product, sequential composition is graph wiring,
-feedback is a trace and the trace is causal because every cycle must
-go through a delay. The strata pipeline is what makes this concrete:
-each pass takes a graph, retires some structure that's already been
-consumed, and hands the next pass a smaller graph in the same category.
-Backends interpret the final, fully-reduced graph into different runtime
-targets.
+feedback is broken at the source-language layer (cycles in source code
+must pass through an explicit user `reg` or `delay`; the elaborator
+throws `CycleViolation` otherwise). The strata pipeline is what makes
+this concrete: each pass takes a graph, retires some structure that's
+already been consumed, and hands the next pass a smaller graph in the
+same category. Backends interpret the final, fully-reduced graph into
+different runtime targets.
 
 In practical terms, every pass in `compiler/parse/`, `compiler/`, and
 `compiler/ir/` is structure-preserving — it produces an IR that's
@@ -65,20 +67,28 @@ ParsedProgram (compiler/parse/nodes.ts)
   ▼
 ParsedProgram
   │
-  │  elaborate (compiler/ir/elaborator.ts) — drops names
+  │  elaborate (compiler/ir/elaborator.ts) — drops names, enforces
+  │              the acyclic-source invariant
   │              every NameRef is replaced by a direct decl-object pointer.
-  │              after this point, no string lookups, no scope walks.
+  │              inter-instance cycles in source code throw
+  │              CycleViolation here (Tier-2 port-detailed error
+  │              with a suggested explicit-delay fix).
   ▼
 ResolvedProgram (compiler/ir/nodes.ts)
-  graph IR with cycles allowed (delays + feedback)
+  DAG-shaped graph IR — cycles are not representable in a valid
+  resolved program (they're rejected upstream by the elaborator
+  or the session materializer). State lives in a single primitive
+  `RegDecl { name, init, update? }`; `delay name = u init v` is
+  surface sugar for `reg name { init: v, update: u }`.
   │
   │  strata pipeline (compiler/ir/strata.ts):
   │  ────────────────────────────────────────
+  │   assertAcyclic    — confirms the caller honored the contract
   │   specialize       — drops type parameters
   │   sumLower         — drops sum types (variants → tag + scalar bundles)
-  │   traceCycles      — implements the guarded trace (cycles → synthetic DelayDecls)
   │   inlineInstances  — drops nesting (inner bodies lifted, _liftedFrom kept as provenance)
   │   arrayLower       — drops shapes and combinators (fold/generate/let/etc. unroll)
+  │   identityElim     — categorical identity-law rewrite
   ▼
 ResolvedProgram (post-strata)
   scalar-only · monomorphic · acyclic · non-nested · combinator-free.

@@ -129,12 +129,11 @@ export interface TypeParamDecl {
 // ─────────────────────────────────────────────────────────────
 
 /** Provenance tag set by `inlineInstances:liftClonedBody` when a reg
- *  was lifted from a sub-instance. The outer instance's name is the
- *  originating session-level instance (or 'synthetic' for cycle-break
- *  regs inserted by `traceCycles`). Used by post-strata passes that
- *  need to identify decls by their lineage without parsing the renamed
+ *  was lifted from a sub-instance. The value is the originating
+ *  session-level instance name. Used by post-strata passes that need
+ *  to identify decls by their lineage without parsing the renamed
  *  `${instance}_${innerName}` prefix string. */
-export type LiftedFrom = string | 'synthetic'
+export type LiftedFrom = string
 
 /** The single state-bearing IR primitive. Carries an init expression
  *  (evaluated at sample 0) and an optional update expression (evaluated

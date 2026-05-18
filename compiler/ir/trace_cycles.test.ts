@@ -20,7 +20,7 @@ import { extractMarkdown } from '../parse/markdown.js'
 import { parseProgram } from '../parse/declarations.js'
 import { raiseProgram } from '../parse/raise.js'
 import { elaborate, _elaborateForCyclicTest, type ExternalProgramResolver } from './elaborator.js'
-import { traceCycles } from './trace_cycles.js'
+import { breakInstanceCycles } from './lowering/cycle_break.js'
 import { cloneResolvedProgram } from './clone.js'
 import { strataPipeline } from './strata.js'
 import { makeSession, loadJSON } from '../session.js'
@@ -52,14 +52,16 @@ function instanceDecls(prog: ResolvedProgram): InstanceDecl[] {
   return prog.body.decls.filter((d): d is InstanceDecl => d.op === 'instanceDecl')
 }
 
-/** Post-Phase-0a: former DelayDecls are now RegDecls with update set.
- *  Synthetic cycle-break decls are tagged `_liftedFrom: 'synthetic'`,
- *  but a helper that just returns "the update-bearing regs in the
- *  body" is the closest equivalent to the legacy `delayDecls` helper. */
+/** Post-Phase 0a: former DelayDecls are now RegDecls with update set.
+ *  Synthetic cycle-break decls are identifiable by the `_feedback_`
+ *  name prefix produced by `breakInstanceCycles`. (Earlier phases used
+ *  a `_liftedFrom: 'synthetic'` sentinel; Phase 5 retired it because
+ *  the synthetic tag was redundant with the distinctive name and the
+ *  strict policy means production code paths never see these regs.) */
 function syntheticBreakerRegs(prog: ResolvedProgram): RegDecl[] {
   return prog.body.decls.filter(
     (d): d is RegDecl =>
-      d.op === 'regDecl' && d._liftedFrom === 'synthetic',
+      d.op === 'regDecl' && d.name.startsWith('_feedback_'),
   )
 }
 
@@ -70,7 +72,7 @@ function syntheticBreakerRegs(prog: ResolvedProgram): RegDecl[] {
 describe('traceCycles — identity cases', () => {
   test('a program with no instances returns input by identity', () => {
     const p = elab('program X(a: float) -> (out: float) { out = a + 1 }')
-    expect(traceCycles(p)).toBe(p)
+    expect(breakInstanceCycles(p).lowered).toBe(p)
   })
 
   test('acyclic two-instance graph returns input by identity', () => {
@@ -83,7 +85,7 @@ describe('traceCycles — identity cases', () => {
         out = b.out_
       }
     `)
-    expect(traceCycles(p)).toBe(p)
+    expect(breakInstanceCycles(p).lowered).toBe(p)
   })
 })
 
@@ -103,7 +105,7 @@ describe('traceCycles — two-instance cycle', () => {
       }
     `)
     const beforeDelays = syntheticBreakerRegs(p).length
-    const out = traceCycles(p)
+    const out = breakInstanceCycles(p).lowered
     const afterDelays = syntheticBreakerRegs(out)
     expect(afterDelays.length).toBe(beforeDelays + 1)
 
@@ -150,7 +152,7 @@ describe('traceCycles — three-instance cycle', () => {
       }
     `)
     const beforeDelays = syntheticBreakerRegs(p).length
-    const out = traceCycles(p)
+    const out = breakInstanceCycles(p).lowered
     const afterDelays = syntheticBreakerRegs(out)
     // Exactly one synthetic delay added (one output port broken on
     // the chosen breaker).
@@ -182,7 +184,7 @@ describe('traceCycles — InstanceDecl identity is consistent for cloneResolvedP
         out = b.out_
       }
     `)
-    const traced = traceCycles(p)
+    const traced = breakInstanceCycles(p).lowered
     expect(() => cloneResolvedProgram(traced)).not.toThrow()
   })
 
@@ -205,7 +207,7 @@ describe('traceCycles — InstanceDecl identity is consistent for cloneResolvedP
     // Post-Phase 3: strataPipeline asserts acyclic input; the caller
     // (the standard realization, here our test driver) runs the cycle
     // break before invoking strata.
-    expect(() => strataPipeline(traceCycles(p))).not.toThrow()
+    expect(() => strataPipeline(breakInstanceCycles(p).lowered)).not.toThrow()
   })
 })
 
@@ -223,7 +225,7 @@ describe('traceCycles — stdlib corpus', () => {
       totalCount++
       // For pre-inlining stdlib programs with no inter-instance
       // cycles, traceCycles should be the identity by reference.
-      if (traceCycles(prog) === prog) identityCount++
+      if (breakInstanceCycles(prog).lowered === prog) identityCount++
     }
     expect(identityCount).toBe(totalCount)
     expect(totalCount).toBeGreaterThan(0)
@@ -393,11 +395,11 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     // fresh elaboration each time so subsequent passes see a consistent
     // program (decls and inputs both updated together).
     const beforeDelays = syntheticBreakerRegs(elabFromNode(TopSelf)).length
-    const traced = traceCycles(elabFromNode(TopSelf))
+    const traced = breakInstanceCycles(elabFromNode(TopSelf)).lowered
     const afterDelays = syntheticBreakerRegs(traced).length
     expect(afterDelays - beforeDelays).toBe(1)
     expect(() => cloneResolvedProgram(traced)).not.toThrow()
-    expect(() => strataPipeline(traceCycles(elabFromNode(TopSelf)))).not.toThrow()
+    expect(() => strataPipeline(breakInstanceCycles(elabFromNode(TopSelf)).lowered)).not.toThrow()
 
     // ── Denotation ── compare candidate vs. reference; pin first 8.
     // Candidate at session level: `a = IncInner(x: a.y)`.
@@ -473,7 +475,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
           expr: { op: 'nestedOut', ref: 'a', output: 'y' } },
       ]},
     } as unknown as ProgramNode
-    const traced = traceCycles(elabFromNode(TopTwoSCC))
+    const traced = breakInstanceCycles(elabFromNode(TopTwoSCC)).lowered
     const synthDelays = syntheticBreakerRegs(traced).filter(d => d.name.startsWith('_feedback_'))
     expect(synthDelays.length).toBe(2)
     const names = synthDelays.map(d => d.name)
@@ -551,8 +553,8 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
           expr: { op: 'nestedOut', ref: 'd', output: 'y' } },
       ]},
     } as unknown as ProgramNode
-    const traced = traceCycles(elabFromNode(TopDiamond))
-    expect(() => strataPipeline(traceCycles(elabFromNode(TopDiamond)))).not.toThrow()
+    const traced = breakInstanceCycles(elabFromNode(TopDiamond)).lowered
+    expect(() => strataPipeline(breakInstanceCycles(elabFromNode(TopDiamond)).lowered)).not.toThrow()
 
     // Topo-check: collect post-trace inter-instance edges; assert no cycle.
     const postInsts = traced.body.decls.filter((d): d is InstanceDecl => d.op === 'instanceDecl')
@@ -652,7 +654,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
           expr: { op: 'nestedOut', ref: 'a', output: 'y' } },
       ]},
     } as unknown as ProgramNode
-    const traced = traceCycles(elabFromNode(TopMultiOut))
+    const traced = breakInstanceCycles(elabFromNode(TopMultiOut)).lowered
     const synth = syntheticBreakerRegs(traced).filter(d => d.name.startsWith('_feedback_'))
     // Two distinct synthetic delays — one per (a, output) port that's
     // in a cycle.

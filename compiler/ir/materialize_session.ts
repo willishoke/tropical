@@ -158,19 +158,19 @@ export function materializeSessionForEmit(session: SessionState): {
  *  origin via the `_liftedFrom` provenance tag stamped by
  *  `inlineInstances:liftClonedBody`.
  *
- *  Synthetic regs from `traceCycles` are tagged
- *  `_liftedFrom: 'synthetic'` and don't belong to any instance —
- *  skipped here.
+ *  Post-Phase 0a: reg updates live on `decl.update`; NextUpdate
+ *  body-assigns are gone. The wrap is applied directly to the decl.
  *
- *  Post-Phase-0a: reg updates live on `decl.update`; NextUpdate
- *  body-assigns are gone. The wrap is applied directly to the decl. */
+ *  Post-Phase 4b: cycle-break is performed upstream (or throws at the
+ *  session boundary), so no synthetic cycle-break regs survive to this
+ *  pass — the legacy `_liftedFrom: 'synthetic'` skip is no longer
+ *  needed. */
 function applyAliveWraps(
   prog: ResolvedProgram,
   aliveInstances: ReadonlyMap<string, ResolvedExpr>,
 ): void {
   const aliveFor = (decl: { _liftedFrom?: string }): ResolvedExpr | null => {
     if (decl._liftedFrom === undefined) return null
-    if (decl._liftedFrom === 'synthetic') return null
     const a = aliveInstances.get(decl._liftedFrom)
     return a === undefined ? null : a
   }

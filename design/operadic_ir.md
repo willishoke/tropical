@@ -103,6 +103,19 @@ categorically-closed world.
 
 ## Pre- and post-trace operads
 
+> **Status (2026-05, post Phase 4b trace-lift refactor):** the
+> compiler has been refactored to live entirely in the post-trace
+> operad. The "trace functor" is no longer a compiler pass —
+> cycle-handling moves up to the realization layer (the standard
+> realization is the elaborator + session materializer). Cyclic
+> source code throws `CycleViolation` at elaborate-time; the
+> compiler asserts acyclic input at `strataPipeline` entry and
+> refuses to lower cyclic IR. Below is the original design framing
+> kept for context; see `compiler/CLAUDE.md` for the current
+> pipeline architecture.
+
+
+
 Tropical's IR has two distinct operadic shapes connected by a known
 transformation:
 
