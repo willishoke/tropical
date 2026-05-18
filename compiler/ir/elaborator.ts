@@ -78,6 +78,8 @@ import type {
   SampleRate, SampleIndex,
 } from './nodes.js'
 import { ElaborationError } from './nodes.js'
+import { findInstanceCycles } from './lowering/cycle_break.js'
+import { emitWarning } from './elaboration_diagnostics.js'
 
 const SCALAR_KINDS: ReadonlySet<string> = new Set(['float', 'int', 'bool'])
 const SCALAR_ALIASES: ReadonlySet<string> = new Set([
@@ -363,9 +365,47 @@ function elaborateProgram(
     body: block,
   }
 
+  // Phase 4a: detect cycles in this program's inter-instance graph and
+  // emit a warning per non-trivial SCC. The downstream caller
+  // (`programTypeFromResolved` / `materializeSession`) still auto-fixes
+  // via `breakInstanceCycles` before strata, so audio output is
+  // unchanged — this is an insurance pass before Phase 4b flips the
+  // policy to strict-error.
+  warnOnCycles(resolved)
+
   // Make this program visible to its containing scope (for sibling
   // nested programs) — caller registers the wrapping ProgramDecl.
   return resolved
+}
+
+function warnOnCycles(prog: ResolvedProgram): void {
+  const cycles = findInstanceCycles(prog)
+  if (cycles.length === 0) return
+  // The cycle-break helper mutates the input (rewrites InstanceDecl
+  // inputs in place to preserve decl identity), so we must not call
+  // it on the elaborator's live program. Build a generic suggestion
+  // instead. Phase 4b's strict path will run on a path that hasn't
+  // been auto-fixed yet (the elaborator throws BEFORE the realization
+  // layer calls breakInstanceCycles), so it can call the helper
+  // freely there.
+  for (const scc of cycles) {
+    // SCC members in source-encounter order: this is already what
+    // tarjanSCC returns. Pick first member as the suggested break
+    // target (matches the auto-fix's choice).
+    const sortedScc = [...scc]
+    const target = sortedScc[0]
+    const suggestedFix =
+      `Suggested fix: insert a 'delay' statement on one of '${target.name}'’s ` +
+      `output ports to break the cycle explicitly. ` +
+      `Example: 'delay ${target.name}_out_delayed = ${target.name}.<port> init 0' ` +
+      `and route cycle members from ${target.name}_out_delayed instead.`
+    emitWarning({
+      kind: 'cycle',
+      scc: sortedScc,
+      programName: prog.name,
+      suggestedFix,
+    })
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
