@@ -45,9 +45,12 @@ function findOps(prog: ResolvedProgram, targets: string[]): string[] {
     }
   }
   for (const d of prog.body.decls) {
-    if (d.op === 'regDecl') visit(d.init)
-    else if (d.op === 'delayDecl') { visit(d.init); visit(d.update) }
-    else if (d.op === 'instanceDecl') for (const i of d.inputs) visit(i.value)
+    if (d.op === 'regDecl') {
+      visit(d.init)
+      if (d.update !== undefined) visit(d.update)
+    } else if (d.op === 'instanceDecl') {
+      for (const i of d.inputs) visit(i.value)
+    }
   }
   for (const a of prog.body.assigns) visit(a.expr)
   return out

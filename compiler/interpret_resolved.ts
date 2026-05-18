@@ -16,7 +16,7 @@
 
 import type {
   ResolvedExpr, ResolvedExprOp, ResolvedProgram,
-  RegDecl, DelayDecl, InputDecl, ParamDecl,
+  RegDecl, InputDecl, ParamDecl,
 } from './ir/nodes.js'
 import type { SessionState } from './session.js'
 import { materializeSessionToResolvedIR } from './ir/materialize_session.js'
@@ -31,18 +31,18 @@ interface InterpretEnv {
   sampleRate: number
   sampleIndex: number
   /** Decl-identity-keyed state. Reads see the *current* sample's state;
-   *  next-sample state is computed into shadow maps and atomically
-   *  swapped at sample end. */
-  regs:    Map<RegDecl,    Value>
-  delays:  Map<DelayDecl,  Value>
+   *  next-sample state is computed into a shadow map and atomically
+   *  swapped at sample end. Post-Phase-0a: former DelayDecls live here
+   *  too — the env has one state map for all stateful decls. */
+  regs:    Map<RegDecl, Value>
   /** Top-level synthetic program has no inputs (audio inputs are a host
    *  concern, not in the model today), but lifted-from-instance inner
    *  inputRefs have already been substituted by `inlineInstances`, so
    *  this only fires on the rare case of a literal inputRef surviving
    *  to the top level — which would be a strata bug, not a runtime
    *  case. Keep the slot for completeness. */
-  inputs:  Map<InputDecl,  Value>
-  params:  Map<ParamDecl,  number>
+  inputs:  Map<InputDecl, Value>
+  params:  Map<ParamDecl, number>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -109,8 +109,6 @@ function evalOpNode(node: ResolvedExprOp, env: InterpretEnv): Value {
       return env.inputs.get(node.decl) ?? 0
     case 'regRef':
       return env.regs.get(node.decl) ?? regInitValue(node.decl)
-    case 'delayRef':
-      return env.delays.get(node.decl) ?? delayInitValue(node.decl)
     case 'paramRef':
       return env.params.get(node.decl) ?? node.decl.value ?? 0
     case 'typeParamRef':
@@ -261,13 +259,6 @@ function regInitValue(d: RegDecl): Value {
   return 0
 }
 
-function delayInitValue(d: DelayDecl): Value {
-  const init = d.init
-  if (typeof init === 'number')  return init
-  if (typeof init === 'boolean') return init
-  return 0
-}
-
 // ─────────────────────────────────────────────────────────────
 // Sample runner
 // ─────────────────────────────────────────────────────────────
@@ -296,13 +287,11 @@ export function interpretSession(
     sampleRate: 44100,
     sampleIndex: 0,
     regs:    new Map(),
-    delays:  new Map(),
     inputs:  new Map(),
     params:  new Map(),
   }
   for (const d of prog.body.decls) {
-    if (d.op === 'regDecl')   env.regs.set(d, regInitValue(d))
-    else if (d.op === 'delayDecl') env.delays.set(d, delayInitValue(d))
+    if (d.op === 'regDecl') env.regs.set(d, regInitValue(d))
     else if (d.op === 'paramDecl') {
       const v = params?.get(d.name) ?? d.value ?? 0
       env.params.set(d, v)
@@ -325,19 +314,15 @@ export function interpretSession(
     return expr
   })
 
-  // Reg/delay updates: map decl → update expression. Register updates
-  // come from nextUpdate assigns (or null for hold-current); delay updates
-  // come from either nextUpdate (override) or the decl's own `update` field.
-  const regUpdateByDecl   = new Map<RegDecl, ResolvedExpr | null>()
-  const delayUpdateByDecl = new Map<DelayDecl, ResolvedExpr>()
-  for (const a of prog.body.assigns) {
-    if (a.op !== 'nextUpdate') continue
-    if (a.target.op === 'regDecl')   regUpdateByDecl.set(a.target, a.expr)
-    if (a.target.op === 'delayDecl') delayUpdateByDecl.set(a.target, a.expr)
-  }
+  // Reg updates: post-Phase-0a every reg's update (if any) lives on
+  // `decl.update`. `undefined` means "hold current value" (former reg
+  // semantics); a defined expression means "compute next value each
+  // sample" (former delay or accumulator semantics). NextUpdate body-
+  // assigns are gone (folded into the decl by the elaborator).
+  const regUpdateByDecl = new Map<RegDecl, ResolvedExpr | null>()
   for (const d of prog.body.decls) {
-    if (d.op === 'regDecl' && !regUpdateByDecl.has(d)) regUpdateByDecl.set(d, null)
-    if (d.op === 'delayDecl' && !delayUpdateByDecl.has(d)) delayUpdateByDecl.set(d, d.update)
+    if (d.op !== 'regDecl') continue
+    regUpdateByDecl.set(d, d.update ?? null)
   }
 
   const output = new Float64Array(nSamples)
@@ -352,20 +337,15 @@ export function interpretSession(
       mixed += toNum(v)
     }
 
-    // 2. Evaluate register/delay updates against the current state.
-    const newRegs   = new Map<RegDecl, Value>()
-    const newDelays = new Map<DelayDecl, Value>()
+    // 2. Evaluate register updates against the current state.
+    const newRegs = new Map<RegDecl, Value>()
     for (const [d, update] of regUpdateByDecl) {
       if (update === null) newRegs.set(d, env.regs.get(d) ?? regInitValue(d))
       else newRegs.set(d, evalExpr(update, env))
     }
-    for (const [d, update] of delayUpdateByDecl) {
-      newDelays.set(d, evalExpr(update, env))
-    }
 
     // 3. Atomic writeback.
-    for (const [d, v] of newRegs)   env.regs.set(d, v)
-    for (const [d, v] of newDelays) env.delays.set(d, v)
+    for (const [d, v] of newRegs) env.regs.set(d, v)
 
     // 4. Mix + scale (matches the C++ runtime's /20 gain compensation).
     output[s] = mixed / 20.0

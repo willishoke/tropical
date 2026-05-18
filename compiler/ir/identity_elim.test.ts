@@ -254,12 +254,15 @@ describe('identityElim — elimination', () => {
   })
 
   test('substitution into RegDecl init / update fields', () => {
+    // Post-Phase-0a: update lives on the decl directly (no NextUpdate
+    // body-assign in the resolved IR).
     const idProg = identityProgram()
     const inst = makeInstance(idProg, 'i1', 100)
     const reg: RegDecl = {
       op: 'regDecl',
       name: 'r',
       init: { op: 'nestedOut', instance: inst, output: idProg.ports.outputs[0] },
+      update: { op: 'nestedOut', instance: inst, output: idProg.ports.outputs[0] },
     }
     const outerOut: OutputDecl = { op: 'outputDecl', name: 'out' }
     const prog: ResolvedProgram = {
@@ -274,11 +277,6 @@ describe('identityElim — elimination', () => {
             target: outerOut,
             expr: { op: 'regRef', decl: reg },
           },
-          {
-            op: 'nextUpdate',
-            target: reg,
-            expr: { op: 'nestedOut', instance: inst, output: idProg.ports.outputs[0] },
-          },
         ],
       },
     }
@@ -287,8 +285,7 @@ describe('identityElim — elimination', () => {
     expect(after.body.decls[0].op).toBe('regDecl')
     const newReg = after.body.decls[0] as RegDecl
     expect(newReg.init).toBe(100)              // substituted from nestedOut → 100
-    const nextAssign = after.body.assigns.find(a => a.op === 'nextUpdate')!
-    expect((nextAssign as { expr: ResolvedExpr }).expr).toBe(100)
+    expect(newReg.update).toBe(100)            // ditto for the update field
   })
 })
 

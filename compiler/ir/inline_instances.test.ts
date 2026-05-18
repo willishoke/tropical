@@ -19,7 +19,7 @@ import { describe, test, expect } from 'bun:test'
 import { parseProgram } from '../parse/declarations.js'
 import { elaborate } from './elaborator.js'
 import { inlineInstances } from './inline_instances.js'
-import type { ResolvedProgram, BodyDecl, RegDecl, DelayDecl } from './nodes.js'
+import type { ResolvedProgram, BodyDecl, RegDecl } from './nodes.js'
 
 function elab(src: string): ResolvedProgram {
   return elaborate(parseProgram(src))
@@ -57,8 +57,11 @@ function regDecls(p: ResolvedProgram): RegDecl[] {
   return p.body.decls.filter((d): d is RegDecl => d.op === 'regDecl')
 }
 
-function delayDecls(p: ResolvedProgram): DelayDecl[] {
-  return p.body.decls.filter((d): d is DelayDecl => d.op === 'delayDecl')
+/** Post-Phase-0a: former DelayDecls are RegDecls with update populated. */
+function delayLikeRegs(p: ResolvedProgram): RegDecl[] {
+  return p.body.decls.filter(
+    (d): d is RegDecl => d.op === 'regDecl' && d.update !== undefined,
+  )
 }
 
 function declNames(decls: BodyDecl[]): string[] {
@@ -136,11 +139,11 @@ describe('inlineInstances — basic shapes', () => {
     expect(findOps(out, ['instanceDecl'])).toEqual([])
     // The inner's `s` is now lifted with prefix `inst_`.
     const regs = regDecls(out)
-    expect(regs.map(r => r.name)).toContain('inst_s')
-    // The next-update for the lifted reg is also lifted into the
-    // outer's assigns.
-    const nextUpdates = out.body.assigns.filter(a => a.op === 'nextUpdate')
-    expect(nextUpdates).toHaveLength(1)
+    const liftedS = regs.find(r => r.name === 'inst_s')
+    expect(liftedS).toBeDefined()
+    // Post-Phase-0a: the next-update for the lifted reg travels on the
+    // decl's `update` field (no separate NextUpdate body-assign).
+    expect(liftedS!.update).toBeDefined()
   })
 
   test('multiple instances of the same inner program: names disambiguate', () => {
@@ -162,7 +165,8 @@ describe('inlineInstances — basic shapes', () => {
     expect(regs.map(r => r.name).sort()).toEqual(['i1_s', 'i2_s'])
   })
 
-  test('inner with delay: lifted delay renamed with instance prefix', () => {
+  test('inner with delay: lifted delay-form reg renamed with instance prefix', () => {
+    // Post-Phase-0a: `delay d = x init 0` is a RegDecl with update set.
     const p = elab(`
       program X(a: float) -> (out: float) {
         program Inner(x: float) -> (y: float) {
@@ -175,8 +179,8 @@ describe('inlineInstances — basic shapes', () => {
     `)
     const out = inlineInstances(p)
     expect(findOps(out, ['instanceDecl'])).toEqual([])
-    const delays = delayDecls(out)
-    expect(delays.map(d => d.name)).toContain('inst_d')
+    const liftedDelays = delayLikeRegs(out)
+    expect(liftedDelays.map(d => d.name)).toContain('inst_d')
   })
 
   test('nested instance: inner contains another instance', () => {

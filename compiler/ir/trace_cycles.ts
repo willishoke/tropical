@@ -31,9 +31,8 @@
 import type {
   ResolvedProgram, ResolvedExpr, ResolvedExprOp,
   ResolvedBlock,
-  BodyDecl, BodyAssign, OutputAssign, NextUpdate,
-  InstanceDecl, OutputDecl, DelayDecl,
-  NestedOut,
+  BodyDecl,
+  InstanceDecl, OutputDecl, RegDecl,
 } from './nodes.js'
 
 // ─────────────────────────────────────────────────────────────
@@ -63,11 +62,12 @@ export function traceCycles(prog: ResolvedProgram): ResolvedProgram {
   const orderIndex = new Map<InstanceDecl, number>()
   instances.forEach((inst, i) => orderIndex.set(inst, i))
 
-  // Accumulators for the rewritten body.
-  const syntheticDelays: DelayDecl[] = []
-  // Map (breakInstance, outputDecl) → synthetic delay holding its
+  // Accumulators for the rewritten body. Post-Phase-0a the synthetic
+  // breaker is a RegDecl with `update` populated (semantically a delay).
+  const syntheticRegs: RegDecl[] = []
+  // Map (breakInstance, outputDecl) → synthetic reg holding its
   // previous-sample value.
-  const breakerDelay = new Map<string, DelayDecl>()
+  const breakerReg = new Map<string, RegDecl>()
   // Set of (cycle-member, breakInstance) pairs; if a NestedOut belongs
   // to one of these, rewrite to a DelayRef on the breaker.
   const rewriteTargets = new Map<InstanceDecl, Set<InstanceDecl>>()
@@ -89,31 +89,31 @@ export function traceCycles(prog: ResolvedProgram): ResolvedProgram {
   }
 
   // Lookup helper: for a given (instance, output) pair, allocate the
-  // synthetic delay lazily on first use.
-  const breakerFor = (inst: InstanceDecl, output: OutputDecl): DelayDecl => {
+  // synthetic reg lazily on first use.
+  const breakerFor = (inst: InstanceDecl, output: OutputDecl): RegDecl => {
     const key = `${inst.name}::${output.name}`
-    let d = breakerDelay.get(key)
+    let d = breakerReg.get(key)
     if (d) return d
     d = {
-      op: 'delayDecl',
+      op: 'regDecl',
       name: `_feedback_${inst.name}_${output.name}`,
       // Update reads the current sample of the broken output. The
-      // synthetic delay's role is to hold the previous sample so that
+      // synthetic reg's role is to hold the previous sample so that
       // cycle members read a one-sample-delayed view of the cycle
       // breaker — same semantics as legacy flatten.ts.
       update: { op: 'nestedOut', instance: inst, output },
       init: 0,
       _liftedFrom: 'synthetic',
     }
-    breakerDelay.set(key, d)
-    syntheticDelays.push(d)
+    breakerReg.set(key, d)
+    syntheticRegs.push(d)
     return d
   }
 
   // Rewriter: in any expression that belongs to an instance in
   // `rewriteTargets`, replace `NestedOut` whose instance is one of
-  // the break-targets for that owner with a `DelayRef` to the
-  // appropriate synthetic delay.
+  // the break-targets for that owner with a `RegRef` to the
+  // appropriate synthetic reg.
   const rewriteForOwner = (expr: ResolvedExpr, breakSet: Set<InstanceDecl>): ResolvedExpr => {
     if (typeof expr === 'number' || typeof expr === 'boolean') return expr
     if (Array.isArray(expr)) return expr.map(e => rewriteForOwner(e, breakSet))
@@ -123,11 +123,11 @@ export function traceCycles(prog: ResolvedProgram): ResolvedProgram {
     switch (node.op) {
       case 'nestedOut': {
         if (breakSet.has(node.instance)) {
-          return { op: 'delayRef', decl: breakerFor(node.instance, node.output) }
+          return { op: 'regRef', decl: breakerFor(node.instance, node.output) }
         }
         return node
       }
-      case 'inputRef': case 'regRef': case 'delayRef': case 'paramRef':
+      case 'inputRef': case 'regRef': case 'paramRef':
       case 'typeParamRef': case 'bindingRef':
       case 'sampleRate': case 'sampleIndex':
       case 'tag':
@@ -212,11 +212,11 @@ export function traceCycles(prog: ResolvedProgram): ResolvedProgram {
     }
     newDecls.push(decl)
   }
-  // Append synthetic delays after instance decls so they appear at the
+  // Append synthetic regs after instance decls so they appear at the
   // tail of the body's decl list. (Legacy puts them in `sessionDelays`
   // which gets allocated in append order; positioning at the end keeps
   // existing slot indices stable.)
-  for (const d of syntheticDelays) newDecls.push(d)
+  for (const d of syntheticRegs) newDecls.push(d)
 
   const newBody: ResolvedBlock = {
     op: 'block',
@@ -317,7 +317,7 @@ function collectNestedOutInstances(
     case 'clamp': case 'select': case 'index': case 'arraySet':
       for (const a of expr.args) collectNestedOutInstances(a, out, allInstances)
       return
-    case 'inputRef': case 'regRef': case 'delayRef': case 'paramRef':
+    case 'inputRef': case 'regRef': case 'paramRef':
     case 'typeParamRef': case 'bindingRef':
     case 'sampleRate': case 'sampleIndex':
       return

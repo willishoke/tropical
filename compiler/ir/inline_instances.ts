@@ -15,13 +15,13 @@
  *      by the wired-in expression from `instanceDecl.inputs[port]`.
  *      The substituted expression passes through by reference,
  *      preserving DAG sharing.
- *   4. Cloned `RegDecl`s and `DelayDecl`s are lifted into the outer's
- *      `body.decls`, renamed `${instance.name}_${innerName}`. Their
- *      cloned `next_update` assigns are lifted into the outer's
- *      `body.assigns` with `target` rewritten to point at the lifted
- *      decl. `ProgramDecl`s and `ParamDecl`s are lifted as-is (no
- *      rename: ParamDecls are session-scoped by name, ProgramDecls
- *      are passive type bindings).
+ *   4. Cloned `RegDecl`s are lifted into the outer's `body.decls`,
+ *      renamed `${instance.name}_${innerName}`. Post-Phase-0a the
+ *      update expression travels on `decl.update` (no separate
+ *      NextUpdate assigns), so lifting the decl carries its update
+ *      with it — no per-assign rewrite needed. `ProgramDecl`s and
+ *      `ParamDecl`s are lifted as-is (no rename: ParamDecls are
+ *      session-scoped by name, ProgramDecls are passive type bindings).
  *   5. The cloned inner's `outputAssign` expressions are recorded in
  *      a substitution table keyed by the *template's* `OutputDecl`
  *      (matched by position to the cloned program's outputs). Every
@@ -31,16 +31,15 @@
  *
  * Decl ordering: instances are processed in the order they appear in
  * `body.decls`. Lifted decls are appended to `body.decls` in the order
- * (inner regs, inner delays, inner params, inner programDecls) per
- * instance — matching the legacy walker's depth-first traversal in
+ * (inner regs, inner params, inner programDecls) per instance —
+ * matching the legacy walker's depth-first traversal in
  * `flatten.ts:collectNestedRegisterExprs`.
  *
- * Naming convention: `${instance.name}_${decl.name}` for lifted regs
- * and delays. The legacy flat plan uses `${parentName}_nested${N}_...`
- * at flatten time; our convention is more readable and equivalent at
- * the level the runtime sees (the flatten step adds the parent
- * instance prefix). Slot identity, not slot name, is what the JIT
- * consumes.
+ * Naming convention: `${instance.name}_${decl.name}` for lifted regs.
+ * The legacy flat plan uses `${parentName}_nested${N}_...` at flatten
+ * time; our convention is more readable and equivalent at the level
+ * the runtime sees (the flatten step adds the parent instance prefix).
+ * Slot identity, not slot name, is what the JIT consumes.
  *
  * Pure: no global state, no input mutation. Returns a fresh
  * `ResolvedProgram` when any inlining occurred; the input is returned
@@ -51,7 +50,7 @@
 import type {
   ResolvedProgram, ResolvedBlock,
   ResolvedExpr, ResolvedExprOp,
-  BodyDecl, BodyAssign, OutputAssign, NextUpdate,
+  BodyDecl, BodyAssign, OutputAssign,
   InputDecl, OutputDecl, InstanceDecl,
   TypeParamDecl,
   Tag, Match, MatchArm,
@@ -78,8 +77,9 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   const outer = cloneResolvedProgram(prog)
 
   // Process every instance in declaration order. We build:
-  //   - liftedDecls: cloned reg/delay/param/programDecls to append
-  //   - liftedAssigns: cloned next_update assigns to append
+  //   - liftedDecls: cloned reg/param/programDecls to append (post-
+  //     Phase-0a regs carry their update expression on the decl, so
+  //     no separate lifted-assigns table is needed)
   //   - nestedOutSubst: Map<template OutputDecl, resolved expr> for
   //     replacing NestedOut refs in the outer's surviving expressions
   //
@@ -95,7 +95,6 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   // memoizes nested programs), so an OutputDecl alone can't
   // distinguish them. The InstanceDecl is the disambiguator.
   const liftedDecls: BodyDecl[] = []
-  const liftedAssigns: BodyAssign[] = []
   const nestedOutSubst = new Map<InstanceDecl, Map<OutputDecl, ResolvedExpr>>()
 
   const survivingDecls: BodyDecl[] = []
@@ -107,7 +106,6 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
     inlineOneInstance(
       decl,
       liftedDecls,
-      liftedAssigns,
       nestedOutSubst,
     )
   }
@@ -115,8 +113,8 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   // ── Substitute NestedOut refs in surviving outer expressions ──
   // Decl init/update fields and assigns may contain NestedOut refs
   // pointing at the (now-removed) instances. Walk them and replace.
-  // RegDecl/DelayDecl identity from the outer-clone is preserved
-  // (substDecl mutates init/update on the cloned decl in place).
+  // RegDecl identity from the outer-clone is preserved (substDecl
+  // mutates init/update on the cloned decl in place).
   //
   // The memo preserves DAG sharing across all expressions in the
   // program: a subexpression that appears on multiple paths is
@@ -124,25 +122,19 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   // explodes exponentially in programs where wired-in expressions
   // are referenced many times (e.g., a chain of allpass stages
   // all sharing an LFO input).
-  // Substitute on BOTH surviving and lifted decls/assigns. Lifted
+  // Substitute on BOTH surviving and lifted decls. Lifted
   // expressions came from `cloneWithInputSubst`, which only
-  // substitutes inputs — not NestedOuts. A lifted reg/delay's
+  // substitutes inputs — not NestedOuts. A lifted reg's
   // init/update may contain `nestedOut(otherInstance.out)` (when
   // the inner program wired one of its inputs from a sibling
   // instance's output). The single substExpr pass at the end
-  // resolves all of them in a topo-free walk: every NestedOut's
-  // target instance has been processed by now (the loop above
-  // ran to completion before we got here), so every key in
-  // `nestedOutSubst` resolves.
+  // resolves all of them in a topo-free walk.
   const memo = new WeakMap<object, ResolvedExpr>()
   const newDecls: BodyDecl[] = [
     ...survivingDecls.map(d => substDecl(d, nestedOutSubst, memo)),
     ...liftedDecls.map(d => substDecl(d, nestedOutSubst, memo)),
   ]
-  const newAssigns: BodyAssign[] = [
-    ...outer.body.assigns.map(a => substAssign(a, nestedOutSubst, memo)),
-    ...liftedAssigns.map(a => substAssign(a, nestedOutSubst, memo)),
-  ]
+  const newAssigns: BodyAssign[] = outer.body.assigns.map(a => substAssign(a, nestedOutSubst, memo))
 
   const block: ResolvedBlock = { op: 'block', decls: newDecls, assigns: newAssigns }
   return {
@@ -161,7 +153,6 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
 function inlineOneInstance(
   decl: InstanceDecl,
   liftedDecls: BodyDecl[],
-  liftedAssigns: BodyAssign[],
   nestedOutSubst: Map<InstanceDecl, Map<OutputDecl, ResolvedExpr>>,
 ): void {
   // 1. Specialize the inner program. For non-generic instances
@@ -198,10 +189,12 @@ function inlineOneInstance(
   //    InputRefs to substituted decls are replaced inline.
   const cloned = cloneWithInputSubst(flattened, inputSubst)
 
-  // 5. Lift the cloned inner's body decls and assigns into the outer.
-  //    Names are prefixed with the instance name to avoid collisions
-  //    when multiple instances of the same program are inlined.
-  liftClonedBody(decl.name, cloned, liftedDecls, liftedAssigns)
+  // 5. Lift the cloned inner's body decls into the outer. Names are
+  //    prefixed with the instance name to avoid collisions when
+  //    multiple instances of the same program are inlined. Post-Phase-0a
+  //    reg updates live on the decl, so lifting the decl carries its
+  //    update with it — no separate assign-lifting needed.
+  liftClonedBody(decl.name, cloned, liftedDecls)
 
   // 6. Record output expressions for NestedOut substitution.
   //    The outer's NestedOut refs still point at the *template's*
@@ -268,19 +261,17 @@ function buildInputSubst(
 }
 
 /**
- * Lift the cloned inner's body into the outer. RegDecls and DelayDecls
- * are renamed `${instance.name}_${innerName}`; ParamDecls and
- * ProgramDecls are lifted as-is. nextUpdate assigns are lifted with
- * their target unchanged (the target points at the cloned decl, which
- * is the same object we just lifted). outputAssign assigns are NOT
- * lifted — they're consumed by `recordOutputs` to build the NestedOut
- * substitution table.
+ * Lift the cloned inner's body decls into the outer. RegDecls are
+ * renamed `${instance.name}_${innerName}`; ParamDecls and ProgramDecls
+ * are lifted as-is. Post-Phase-0a reg updates live on the decl, so
+ * lifting the decl carries its update with it. outputAssign assigns
+ * are NOT lifted — they're consumed by `recordOutputs` to build the
+ * NestedOut substitution table.
  */
 function liftClonedBody(
   instanceName: string,
   cloned: ResolvedProgram,
   liftedDecls: BodyDecl[],
-  liftedAssigns: BodyAssign[],
 ): void {
   for (const d of cloned.body.decls) {
     switch (d.op) {
@@ -291,11 +282,6 @@ function liftClonedBody(
         // level) instance the decl ultimately came from. Consumers
         // (e.g. applyGateableWraps) match against gateable session
         // instances by name.
-        d._liftedFrom = instanceName
-        liftedDecls.push(d)
-        break
-      case 'delayDecl':
-        d.name = `${instanceName}_${d.name}`
         d._liftedFrom = instanceName
         liftedDecls.push(d)
         break
@@ -319,12 +305,10 @@ function liftClonedBody(
     }
   }
 
-  // Lift nextUpdate assigns. The target reg/delay decl was renamed
-  // above, but the reference is the same object — no rewrite needed.
-  for (const a of cloned.body.assigns) {
-    if (a.op === 'nextUpdate') liftedAssigns.push(a)
-    // outputAssigns are recorded separately by recordOutputs.
-  }
+  // Post-Phase-0a: NextUpdate body-assigns are gone. Reg updates live
+  // on the decl itself (set at elaboration), so lifting the decl
+  // carries the update with it — no per-assign lifting needed here.
+  // OutputAssigns are recorded separately by recordOutputs.
 }
 
 /**
@@ -423,10 +407,9 @@ function substDecl(
   switch (d.op) {
     case 'regDecl':
       d.init = substExpr(d.init, subst, memo)
-      return d
-    case 'delayDecl':
-      d.update = substExpr(d.update, subst, memo)
-      d.init = substExpr(d.init, subst, memo)
+      if (d.update !== undefined) {
+        d.update = substExpr(d.update, subst, memo)
+      }
       return d
     case 'paramDecl':
     case 'programDecl':
@@ -439,20 +422,16 @@ function substDecl(
 /**
  * Substitute NestedOut refs in an assign's expression. We allocate
  * a fresh assign object (assigns are leaves — nothing else points at
- * them) but preserve the `target` decl reference so RegDecl/DelayDecl
- * /OutputDecl identity matches the outer's body decls.
+ * them) but preserve the `target` decl/OutputDecl reference so identity
+ * matches the outer's body decls. Post-Phase-0a BodyAssign is
+ * OutputAssign-only.
  */
 function substAssign(
   a: BodyAssign,
   subst: Map<InstanceDecl, Map<OutputDecl, ResolvedExpr>>,
   memo: WeakMap<object, ResolvedExpr>,
 ): BodyAssign {
-  if (a.op === 'outputAssign') {
-    const fresh: OutputAssign = { op: 'outputAssign', target: a.target, expr: substExpr(a.expr, subst, memo) }
-    return fresh
-  }
-  // nextUpdate
-  const fresh: NextUpdate = { op: 'nextUpdate', target: a.target, expr: substExpr(a.expr, subst, memo) }
+  const fresh: OutputAssign = { op: 'outputAssign', target: a.target, expr: substExpr(a.expr, subst, memo) }
   return fresh
 }
 
@@ -508,7 +487,6 @@ function substOpNode(
     }
     case 'inputRef':
     case 'regRef':
-    case 'delayRef':
     case 'paramRef':
     case 'typeParamRef':
     case 'bindingRef':

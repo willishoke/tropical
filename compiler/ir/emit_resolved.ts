@@ -32,7 +32,7 @@
 
 import type {
   ResolvedExpr, ResolvedExprOp,
-  RegDecl, DelayDecl, InputDecl, InstanceDecl, OutputDecl, ParamDecl,
+  RegDecl, InputDecl, InstanceDecl, OutputDecl, ParamDecl,
 } from './nodes.js'
 import {
   type TempIdx, type StateRegIdx, type ArraySlotIdx, type ModuleSlotIdx,
@@ -244,9 +244,8 @@ export const toWireInstr = (i: NInstr): WireNInstr => ({
 export interface EmitSlots {
   inputs: Map<InputDecl, number>
   regs:   Map<RegDecl, number>
-  delays: Map<DelayDecl, number>
-  /** Total scalar-register count. Delays land at `regCount + delaySlot`
-   *  in the unified state-register layout. */
+  /** Total scalar-register count. Post-Phase-0a all stateful decls live
+   *  in `regs` (former delays included) so this is just `regs.size`. */
   regCount: number
   /** FFI handle metadata per param/trigger decl. */
   paramHandles: Map<ParamDecl, { ptr: string }>
@@ -404,13 +403,6 @@ class Emitter {
         const regType = this.stateRegTypes[slot] ?? 'float'
         return { op: opStateReg(stateRegIdx(slot), regType), scalarType: regType }
       }
-      case 'delayRef': {
-        const slot = this.slots.delays.get(obj.decl)
-        if (slot === undefined) throw new Error(`emit_resolved: delay '${obj.decl.name}' missing from slot table`)
-        const combined = this.slots.regCount + slot
-        const regType = this.stateRegTypes[combined] ?? 'float'
-        return { op: opStateReg(stateRegIdx(combined), regType), scalarType: regType }
-      }
       case 'paramRef': {
         const handle = this.slots.paramHandles.get(obj.decl)
         if (handle === undefined) {
@@ -502,7 +494,7 @@ class Emitter {
     } else {
       const obj = node as Record<string, unknown>
       const op = String(obj.op)
-      if (op === 'regRef' || op === 'delayRef' || op === 'paramRef'
+      if (op === 'regRef' || op === 'paramRef'
           || op === 'inputRef' || op === 'typeParamRef' || op === 'bindingRef') {
         key = `op:${op}|decl=${this.declIdOf(obj.decl as object)}`
       } else if (op === 'nestedOut') {

@@ -27,8 +27,8 @@ import { makeSession, loadJSON } from '../session.js'
 import { loadProgramAsType, type ProgramNode } from '../program.js'
 import { interpretSession } from '../interpret_resolved.js'
 import type {
-  ResolvedProgram, BodyDecl, InstanceDecl, DelayDecl,
-  ResolvedExpr, NestedOut, DelayRef,
+  ResolvedProgram, BodyDecl, InstanceDecl, RegDecl,
+  ResolvedExpr, NestedOut, RegRef,
 } from './nodes.js'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -43,8 +43,15 @@ function instanceDecls(prog: ResolvedProgram): InstanceDecl[] {
   return prog.body.decls.filter((d): d is InstanceDecl => d.op === 'instanceDecl')
 }
 
-function delayDecls(prog: ResolvedProgram): DelayDecl[] {
-  return prog.body.decls.filter((d): d is DelayDecl => d.op === 'delayDecl')
+/** Post-Phase-0a: former DelayDecls are now RegDecls with update set.
+ *  Synthetic cycle-break decls are tagged `_liftedFrom: 'synthetic'`,
+ *  but a helper that just returns "the update-bearing regs in the
+ *  body" is the closest equivalent to the legacy `delayDecls` helper. */
+function syntheticBreakerRegs(prog: ResolvedProgram): RegDecl[] {
+  return prog.body.decls.filter(
+    (d): d is RegDecl =>
+      d.op === 'regDecl' && d._liftedFrom === 'synthetic',
+  )
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -86,9 +93,9 @@ describe('traceCycles — two-instance cycle', () => {
         out = b.out_
       }
     `)
-    const beforeDelays = delayDecls(p).length
+    const beforeDelays = syntheticBreakerRegs(p).length
     const out = traceCycles(p)
-    const afterDelays = delayDecls(out)
+    const afterDelays = syntheticBreakerRegs(out)
     expect(afterDelays.length).toBe(beforeDelays + 1)
 
     // The break target is the first instance in source order = `a`.
@@ -100,11 +107,11 @@ describe('traceCycles — two-instance cycle', () => {
 
     // a's wire still references b via NestedOut (the surviving edge).
     expect(opsIn(a.inputs[0].value, 'nestedOut').length).toBeGreaterThan(0)
-    expect(opsIn(a.inputs[0].value, 'delayRef').length).toBe(0)
+    expect(opsIn(a.inputs[0].value, 'regRef').length).toBe(0)
     // b's wire was rewritten — no NestedOut, one DelayRef on the
     // synthetic delay.
     expect(opsIn(b.inputs[0].value, 'nestedOut').length).toBe(0)
-    expect(opsIn(b.inputs[0].value, 'delayRef').length).toBe(1)
+    expect(opsIn(b.inputs[0].value, 'regRef').length).toBe(1)
 
     // The synthetic delay is named `_feedback_a_out_` (instance "a",
     // output port "out_").
@@ -133,9 +140,9 @@ describe('traceCycles — three-instance cycle', () => {
         out = c.out_
       }
     `)
-    const beforeDelays = delayDecls(p).length
+    const beforeDelays = syntheticBreakerRegs(p).length
     const out = traceCycles(p)
-    const afterDelays = delayDecls(out)
+    const afterDelays = syntheticBreakerRegs(out)
     // Exactly one synthetic delay added (one output port broken on
     // the chosen breaker).
     expect(afterDelays.length).toBe(beforeDelays + 1)
@@ -231,7 +238,7 @@ function walkChildren(node: { op: string } & Record<string, unknown>, k: (e: Res
   // Recurse into structured children but NOT into back-pointers like
   // `delayRef.decl` (which would walk into its update expression).
   switch (node.op) {
-    case 'inputRef': case 'regRef': case 'delayRef': case 'paramRef':
+    case 'inputRef': case 'regRef': case 'paramRef':
     case 'typeParamRef': case 'bindingRef': case 'nestedOut':
     case 'sampleRate': case 'sampleIndex':
       return
@@ -370,9 +377,9 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     // ── IR shape ── traceCycles mutates `inputs` in place; run on a
     // fresh elaboration each time so subsequent passes see a consistent
     // program (decls and inputs both updated together).
-    const beforeDelays = delayDecls(elabFromNode(TopSelf)).length
+    const beforeDelays = syntheticBreakerRegs(elabFromNode(TopSelf)).length
     const traced = traceCycles(elabFromNode(TopSelf))
-    const afterDelays = delayDecls(traced).length
+    const afterDelays = syntheticBreakerRegs(traced).length
     expect(afterDelays - beforeDelays).toBe(1)
     expect(() => cloneResolvedProgram(traced)).not.toThrow()
     expect(() => strataPipeline(elabFromNode(TopSelf))).not.toThrow()
@@ -450,7 +457,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       ]},
     } as unknown as ProgramNode
     const traced = traceCycles(elabFromNode(TopTwoSCC))
-    const synthDelays = delayDecls(traced).filter(d => d.name.startsWith('_feedback_'))
+    const synthDelays = syntheticBreakerRegs(traced).filter(d => d.name.startsWith('_feedback_'))
     expect(synthDelays.length).toBe(2)
     const names = synthDelays.map(d => d.name)
     expect(new Set(names).size).toBe(2)  // distinct
@@ -628,7 +635,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       ]},
     } as unknown as ProgramNode
     const traced = traceCycles(elabFromNode(TopMultiOut))
-    const synth = delayDecls(traced).filter(d => d.name.startsWith('_feedback_'))
+    const synth = syntheticBreakerRegs(traced).filter(d => d.name.startsWith('_feedback_'))
     // Two distinct synthetic delays — one per (a, output) port that's
     // in a cycle.
     expect(synth.length).toBe(2)

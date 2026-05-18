@@ -39,7 +39,7 @@
 import type {
   ResolvedProgram,
   ResolvedExpr, ResolvedExprOp,
-  BodyDecl, BodyAssign, OutputAssign, NextUpdate,
+  BodyDecl, BodyAssign, OutputAssign,
   BinderDecl,
   Tag, Match, MatchArm,
 } from './nodes.js'
@@ -117,8 +117,9 @@ function progNeedsLowering(prog: ResolvedProgram): boolean {
 
 function declNeedsLowering(decl: BodyDecl): boolean {
   switch (decl.op) {
-    case 'regDecl':      return exprNeedsLowering(decl.init)
-    case 'delayDecl':    return exprNeedsLowering(decl.update) || exprNeedsLowering(decl.init)
+    case 'regDecl':
+      return exprNeedsLowering(decl.init)
+        || (decl.update !== undefined && exprNeedsLowering(decl.update))
     case 'paramDecl':    return false
     case 'instanceDecl':
       // M11 fractal: also check sub-program for surviving combinators.
@@ -147,7 +148,7 @@ function opNeedsLowering(node: ResolvedExprOp): boolean {
       return true
     case 'zeros':
       return true
-    case 'inputRef': case 'regRef': case 'delayRef': case 'paramRef':
+    case 'inputRef': case 'regRef': case 'paramRef':
     case 'typeParamRef': case 'nestedOut':
     case 'sampleRate': case 'sampleIndex':
       return false
@@ -204,13 +205,10 @@ function lowerDeclInPlace(decl: BodyDecl, subst: SubstMap, memo: Memo): void {
     case 'regDecl': {
       const init = lowerExpr(decl.init, subst, memo)
       if (init !== decl.init) decl.init = init
-      return
-    }
-    case 'delayDecl': {
-      const update = lowerExpr(decl.update, subst, memo)
-      const init   = lowerExpr(decl.init,   subst, memo)
-      if (update !== decl.update) decl.update = update
-      if (init !== decl.init)     decl.init   = init
+      if (decl.update !== undefined) {
+        const update = lowerExpr(decl.update, subst, memo)
+        if (update !== decl.update) decl.update = update
+      }
       return
     }
     case 'paramDecl':
@@ -242,15 +240,10 @@ function lowerDeclInPlace(decl: BodyDecl, subst: SubstMap, memo: Memo): void {
 }
 
 function lowerAssign(assign: BodyAssign, subst: SubstMap, memo: Memo): BodyAssign {
-  if (assign.op === 'outputAssign') {
-    const expr = lowerExpr(assign.expr, subst, memo)
-    if (expr === assign.expr) return assign
-    const out: OutputAssign = { op: 'outputAssign', target: assign.target, expr }
-    return out
-  }
+  // Post-Phase-0a: BodyAssign is OutputAssign-only.
   const expr = lowerExpr(assign.expr, subst, memo)
   if (expr === assign.expr) return assign
-  const out: NextUpdate = { op: 'nextUpdate', target: assign.target, expr }
+  const out: OutputAssign = { op: 'outputAssign', target: assign.target, expr }
   return out
 }
 
@@ -323,7 +316,7 @@ function lowerOp(node: ResolvedExprOp, subst: SubstMap, memo: Memo): ResolvedExp
     }
 
     // ── References / leaves: pass through. ──
-    case 'inputRef': case 'regRef': case 'delayRef': case 'paramRef':
+    case 'inputRef': case 'regRef': case 'paramRef':
     case 'typeParamRef': case 'nestedOut':
     case 'sampleRate': case 'sampleIndex':
       return node

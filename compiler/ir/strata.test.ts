@@ -114,8 +114,8 @@ describe('strata — throws on unsupported features', () => {
     // (no payload variants → just the discriminator).
     expect(out.body.decls.length).toBe(1)
     const d = out.body.decls[0]
-    expect(d.op).toBe('delayDecl')
-    if (d.op === 'delayDecl') expect(d.name).toBe('state#tag')
+    expect(d.op).toBe('regDecl')
+    if (d.op === 'regDecl') expect(d.name).toBe('state#tag')
   })
 
   test('arrayLower: program with let combinator returns a let-free program', () => {

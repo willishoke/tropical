@@ -15,9 +15,9 @@ import { parseProgram } from '../parse/declarations.js'
 import { elaborate } from './elaborator.js'
 import { cloneResolvedProgram } from './clone.js'
 import type {
-  ResolvedProgram, RegDecl, DelayDecl, InputDecl, OutputDecl,
-  RegRef, DelayRef, InputRef,
-  SumTypeDef, Match, OutputAssign, NextUpdate,
+  ResolvedProgram, RegDecl, InputDecl, OutputDecl,
+  RegRef, InputRef,
+  SumTypeDef, Match, OutputAssign,
 } from './nodes.js'
 
 function clab(src: string): { orig: ResolvedProgram; copy: ResolvedProgram } {
@@ -56,7 +56,8 @@ describe('clone — reference identity (within-clone)', () => {
     expect(ref.decl).toBe(inputDecl)
   })
 
-  test('self-referential RegDecl: nextUpdate.target === regDecl in the clone', () => {
+  test('self-referential RegDecl: update on decl points at the regDecl in the clone', () => {
+    // Post-Phase-0a: next-update folds into RegDecl.update at elaboration.
     const { copy } = clab(`
       program X() -> (out: float) {
         reg s: float = 0
@@ -66,11 +67,10 @@ describe('clone — reference identity (within-clone)', () => {
     `)
     const regDecl = copy.body.decls[0] as RegDecl
     const out  = copy.body.assigns[0] as OutputAssign
-    const next = copy.body.assigns[1] as NextUpdate
     expect(out.expr).toMatchObject({ op: 'regRef' })
     expect((out.expr as RegRef).decl).toBe(regDecl)
-    expect((next.expr as RegRef).decl).toBe(regDecl)
-    expect(next.target).toBe(regDecl)
+    expect(regDecl.update).toBeDefined()
+    expect((regDecl.update as RegRef).decl).toBe(regDecl)
   })
 
   test('multiple RegRefs to same RegDecl all point at the same cloned decl', () => {
@@ -97,18 +97,21 @@ describe('clone — reference identity (within-clone)', () => {
     for (const r of refs) expect(r).toBe(regDecl)
   })
 
-  test('DelayDecl clone preserves DelayRef identity', () => {
+  test('delay-form RegDecl clone preserves RegRef identity', () => {
+    // Post-Phase-0a: `delay z = u init v` desugars to a RegDecl with
+    // update populated. Reads of z are RegRefs.
     const { copy } = clab(`
       program X(x: float) -> (out: float) {
         delay z = x init 0
         out = z
       }
     `)
-    const delayDecl = copy.body.decls[0] as DelayDecl
+    const regDecl = copy.body.decls[0] as RegDecl
     const out = copy.body.assigns[0] as OutputAssign
-    const ref = out.expr as DelayRef
-    expect(ref.op).toBe('delayRef')
-    expect(ref.decl).toBe(delayDecl)
+    const ref = out.expr as RegRef
+    expect(ref.op).toBe('regRef')
+    expect(ref.decl).toBe(regDecl)
+    expect(regDecl.update).toBeDefined()
   })
 
   test('clone breaks decl identity vs original', () => {

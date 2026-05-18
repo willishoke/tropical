@@ -45,9 +45,12 @@ function findOps(prog: ResolvedProgram, targets: string[]): string[] {
     walkExprChildren(e, visitExpr)
   }
   for (const d of prog.body.decls) {
-    if (d.op === 'regDecl') visitExpr(d.init)
-    else if (d.op === 'delayDecl') { visitExpr(d.init); visitExpr(d.update) }
-    else if (d.op === 'instanceDecl') for (const i of d.inputs) visitExpr(i.value)
+    if (d.op === 'regDecl') {
+      visitExpr(d.init)
+      if (d.update !== undefined) visitExpr(d.update)
+    } else if (d.op === 'instanceDecl') {
+      for (const i of d.inputs) visitExpr(i.value)
+    }
   }
   for (const a of prog.body.assigns) visitExpr(a.expr)
   return out
@@ -58,7 +61,7 @@ function walkExprChildren(
   visit: (e: ResolvedExpr) => void,
 ): void {
   switch (node.op) {
-    case 'inputRef': case 'regRef': case 'delayRef': case 'paramRef':
+    case 'inputRef': case 'regRef': case 'paramRef':
     case 'typeParamRef': case 'bindingRef': case 'nestedOut':
     case 'sampleRate': case 'sampleIndex':
       return

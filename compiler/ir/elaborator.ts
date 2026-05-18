@@ -62,12 +62,12 @@ import type {
   ResolvedProgram, ResolvedBlock, ResolvedProgramPorts,
   ResolvedExpr, ResolvedExprOp,
   InputDecl, OutputDecl, TypeParamDecl,
-  RegDecl, DelayDecl, ParamDecl, InstanceDecl, ProgramDecl, BodyDecl,
-  BodyAssign, OutputAssign, NextUpdate,
+  RegDecl, ParamDecl, InstanceDecl, ProgramDecl, BodyDecl,
+  BodyAssign, OutputAssign,
   TypeDef, StructTypeDef, SumTypeDef, SumVariant, AliasTypeDef, StructField,
   PortType, ShapeDim, ScalarKind,
   BinderDecl,
-  InputRef, RegRef, DelayRef, ParamRef, TypeParamRef, BindingRef,
+  InputRef, RegRef, ParamRef, TypeParamRef, BindingRef,
   NestedOut,
   Tag, Match, MatchArm,
   Let,
@@ -140,8 +140,10 @@ interface Scope {
   inputs: Map<string, InputDecl>
   outputs: Map<string, OutputDecl>
   typeParams: Map<string, TypeParamDecl>
+  /** Unified state-bearing decls. After Phase 0a, regs and former-delays
+   *  share this single map; surface `delay` desugars at elaboration into
+   *  a RegDecl with `update` populated. */
   regs: Map<string, RegDecl>
-  delays: Map<string, DelayDecl>
   params: Map<string, ParamDecl>
   instances: Map<string, InstanceDecl>
   /** Sub-program decls visible in this scope (nested programDecl). */
@@ -170,7 +172,6 @@ function emptyScope(parent?: Scope): Scope {
     outputs: new Map(),
     typeParams: new Map(),
     regs: new Map(),
-    delays: new Map(),
     params: new Map(),
     instances: new Map(),
     programs: new Map(),
@@ -200,11 +201,6 @@ function lookupValueRef(scope: Scope, name: string): ResolvedExprOp | null {
   const reg = scope.regs.get(name)
   if (reg) {
     const ref: RegRef = { op: 'regRef', decl: reg }
-    return ref
-  }
-  const delay = scope.delays.get(name)
-  if (delay) {
-    const ref: DelayRef = { op: 'delayRef', decl: delay }
     return ref
   }
   const param = scope.params.get(name)
@@ -347,10 +343,14 @@ function elaborateProgram(
     resolveDeclExpressions(parsed, resolved, scope)
   }
 
-  // 6. Resolve body assigns.
+  // 6. Resolve body assigns. NextUpdate assigns fold into their target
+  //    reg's `update` field directly (A-canonical); resolveAssign
+  //    returns null for those, which we filter out so the assigns array
+  //    holds only structural assigns (OutputAssign today).
   const assigns: BodyAssign[] = []
   for (const a of prog.body.assigns ?? []) {
-    assigns.push(resolveAssign(a, scope))
+    const resolved = resolveAssign(a, scope)
+    if (resolved !== null) assigns.push(resolved)
   }
 
   const block: ResolvedBlock = { op: 'block', decls, assigns }
@@ -571,12 +571,22 @@ function registerRegDecl(d: ParsedRegDecl, scope: Scope): RegDecl {
   return decl
 }
 
-function registerDelayDecl(d: ParsedDelayDecl, scope: Scope): DelayDecl {
-  if (scope.delays.has(d.name)) {
-    throw new ElaborationError(`duplicate delay '${d.name}'`)
+/** Parsed `delay name = u init v` is surface sugar for a RegDecl with
+ *  `update: u` and `init: v`. Both reg-class names (parsed regDecl and
+ *  parsed delayDecl) land in the same unified scope.regs map. The
+ *  `init` and `update` fields are populated during the second-pass
+ *  expression resolution (resolveDeclExpressions). */
+function registerDelayDecl(d: ParsedDelayDecl, scope: Scope): RegDecl {
+  if (scope.regs.has(d.name)) {
+    throw new ElaborationError(`duplicate reg/delay '${d.name}'`)
   }
-  const decl: DelayDecl = { op: 'delayDecl', name: d.name, update: 0, init: 0 }
-  scope.delays.set(d.name, decl)
+  // init resolved later; update placeholder marks "expects update from
+  // resolveDeclExpressions" but the placeholder is overwritten before
+  // any consumer sees it. We avoid using `undefined` here so a stray
+  // next-update can still detect the conflict (delay-form already
+  // commits to having an update on the decl).
+  const decl: RegDecl = { op: 'regDecl', name: d.name, init: 0, update: 0 }
+  scope.regs.set(d.name, decl)
   return decl
 }
 
@@ -646,9 +656,11 @@ function resolveDeclExpressions(
 ): void {
   if (parsed.op === 'regDecl' && resolved.op === 'regDecl') {
     resolved.init = resolveExpr(parsed.init, scope)
+    // resolved.update intentionally not set here — a later NextUpdate
+    // assign (resolveNextUpdate) folds onto the decl if present.
     return
   }
-  if (parsed.op === 'delayDecl' && resolved.op === 'delayDecl') {
+  if (parsed.op === 'delayDecl' && resolved.op === 'regDecl') {
     resolved.update = resolveExpr(parsed.update, scope)
     resolved.init = resolveExpr(parsed.init, scope)
     return
@@ -709,9 +721,14 @@ function resolveInstanceArgs(
 // Body assigns
 // ─────────────────────────────────────────────────────────────
 
-function resolveAssign(a: ParsedBodyAssign, scope: Scope): BodyAssign {
+/** Returns either an OutputAssign body-assign, or null if the parsed
+ *  assign was a `next x = e` that's been folded into the target reg's
+ *  `update` field as an A-canonical side effect. The caller filters
+ *  nulls out of the assigns array. */
+function resolveAssign(a: ParsedBodyAssign, scope: Scope): BodyAssign | null {
   if (a.op === 'outputAssign') return resolveOutputAssign(a, scope)
-  return resolveNextUpdate(a, scope)
+  foldNextUpdateIntoDecl(a, scope)
+  return null
 }
 
 function resolveOutputAssign(a: ParsedOutputAssign, scope: Scope): OutputAssign {
@@ -730,19 +747,24 @@ function resolveOutputAssign(a: ParsedOutputAssign, scope: Scope): OutputAssign 
   return { op: 'outputAssign', target, expr: resolveExpr(a.expr, scope) }
 }
 
-function resolveNextUpdate(a: ParsedNextUpdate, scope: Scope): NextUpdate {
+/** A-canonical normalization: `next x = e` folds into the target reg's
+ *  `update` field directly. The resolved IR doesn't carry NextUpdate
+ *  as a body-assign — every reg's full specification lives on its decl. */
+function foldNextUpdateIntoDecl(a: ParsedNextUpdate, scope: Scope): void {
   const name = a.target.name
   const reg = scope.regs.get(name)
-  if (reg) {
-    return { op: 'nextUpdate', target: reg, expr: resolveExpr(a.expr, scope) }
+  if (!reg) {
+    throw new ElaborationError(
+      `next-update target '${name}' is not a declared reg or delay`,
+    )
   }
-  const delay = scope.delays.get(name)
-  if (delay) {
-    return { op: 'nextUpdate', target: delay, expr: resolveExpr(a.expr, scope) }
+  if (reg.update !== undefined) {
+    throw new ElaborationError(
+      `duplicate update for reg '${name}' (already set by ` +
+      `decl-side update or earlier next-update)`,
+    )
   }
-  throw new ElaborationError(
-    `nextUpdate target '${name}' is not a declared reg or delay`,
-  )
+  reg.update = resolveExpr(a.expr, scope)
 }
 
 // ─────────────────────────────────────────────────────────────
