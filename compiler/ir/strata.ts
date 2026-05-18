@@ -27,6 +27,7 @@ import { traceCycles } from './trace_cycles.js'
 import { inlineInstances } from './inline_instances.js'
 import { arrayLower } from './array_lower.js'
 import { identityElim } from './identity_elim.js'
+import { assertAcyclic } from './acyclic.js'
 
 export interface StrataOptions {
   /** Whether to flatten nested `InstanceDecl`s via `inlineInstances`.
@@ -46,6 +47,11 @@ export function strataPipeline(
   const specialized = specializeProgram(prog, typeArgs)
   const summed = sumLower(specialized)
   const cyclic = traceCycles(summed)
+  // Post-trace invariant: no surviving inter-instance cycles. Today
+  // this is a tautology (traceCycles just ran); after Phase 3 the
+  // trace pass moves out of the compiler and the assertion becomes
+  // load-bearing.
+  assertAcyclic(cyclic)
   const inlined = inlineNested ? inlineInstances(cyclic) : cyclic
   const arrayed = arrayLower(inlined)
   return identityElim(arrayed)
