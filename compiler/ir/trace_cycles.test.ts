@@ -193,7 +193,10 @@ describe('traceCycles — InstanceDecl identity is consistent for cloneResolvedP
         out = vco1.sine + vco2.sine
       }
     `)
-    expect(() => strataPipeline(p)).not.toThrow()
+    // Post-Phase 3: strataPipeline asserts acyclic input; the caller
+    // (the standard realization, here our test driver) runs the cycle
+    // break before invoking strata.
+    expect(() => strataPipeline(traceCycles(p))).not.toThrow()
   })
 })
 
@@ -382,7 +385,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     const afterDelays = syntheticBreakerRegs(traced).length
     expect(afterDelays - beforeDelays).toBe(1)
     expect(() => cloneResolvedProgram(traced)).not.toThrow()
-    expect(() => strataPipeline(elabFromNode(TopSelf))).not.toThrow()
+    expect(() => strataPipeline(traceCycles(elabFromNode(TopSelf)))).not.toThrow()
 
     // ── Denotation ── compare candidate vs. reference; pin first 8.
     // Candidate at session level: `a = IncInner(x: a.y)`.
@@ -534,7 +537,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       ]},
     } as unknown as ProgramNode
     const traced = traceCycles(elabFromNode(TopDiamond))
-    expect(() => strataPipeline(elabFromNode(TopDiamond))).not.toThrow()
+    expect(() => strataPipeline(traceCycles(elabFromNode(TopDiamond)))).not.toThrow()
 
     // Topo-check: collect post-trace inter-instance edges; assert no cycle.
     const postInsts = traced.body.decls.filter((d): d is InstanceDecl => d.op === 'instanceDecl')

@@ -63,6 +63,7 @@ import type { ExprNode } from '../expr.js'
 import type { SessionState } from '../session.js'
 import type { Instance } from '../program_types.js'
 import { strataPipeline } from './strata.js'
+import { breakInstanceCycles } from './lowering/cycle_break.js'
 import { specializeProgram } from './specialize.js'
 import { cloneResolvedProgram } from './clone.js'
 
@@ -98,7 +99,13 @@ export function materializeSessionForEmit(session: SessionState): {
     aliveOutputDecls.set(instName, decl)
   }
 
-  const lowered = strataPipeline(synthetic)
+  // Post-Phase 3: the materializer (a "standard realization" producer)
+  // is responsible for handing acyclic IR to the strata pipeline.
+  // Cycles in session wiring (instance A wires to instance B's output,
+  // B wires back to A) are broken here via synthetic regs before
+  // strata runs.
+  const acyclic = breakInstanceCycles(synthetic).lowered
+  const lowered = strataPipeline(acyclic)
 
   // Read back the post-strata inlined alive expressions by name.
   const inlinedAlives = new Map<string, ResolvedExpr>()
