@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { extractMarkdown } from '../parse/markdown.js'
 import { parseProgram } from '../parse/declarations.js'
 import { raiseProgram } from '../parse/raise.js'
-import { elaborate, type ExternalProgramResolver } from './elaborator.js'
+import { elaborate, _elaborateForCyclicTest, type ExternalProgramResolver } from './elaborator.js'
 import { traceCycles } from './trace_cycles.js'
 import { cloneResolvedProgram } from './clone.js'
 import { strataPipeline } from './strata.js'
@@ -37,6 +37,15 @@ const STDLIB_DIR = join(__dirname, '../../stdlib')
 
 function elab(src: string, resolver?: ExternalProgramResolver): ResolvedProgram {
   return elaborate(parseProgram(src), resolver)
+}
+
+/** Cyclic-source variant: this test file specifically exercises the
+ *  cycle-break helper on programs the elaborator would otherwise
+ *  reject under Phase 4b's strict policy. Uses the elaborator's test
+ *  escape hatch to construct cyclic ResolvedPrograms for downstream
+ *  testing. */
+function elabCyclic(src: string, resolver?: ExternalProgramResolver): ResolvedProgram {
+  return _elaborateForCyclicTest(parseProgram(src), resolver)
 }
 
 function instanceDecls(prog: ResolvedProgram): InstanceDecl[] {
@@ -85,7 +94,7 @@ describe('traceCycles — identity cases', () => {
 describe('traceCycles — two-instance cycle', () => {
   test('inserts a synthetic delay; later member reads it instead of NestedOut', () => {
     // a reads b.out, b reads a.out — a 2-cycle.
-    const p = elab(`
+    const p = elabCyclic(`
       program Top() -> (out: float) {
         program Inner(in_: float) -> (out_: float) { out_ = in_ + 1 }
         a = Inner(in_: b.out_)
@@ -131,7 +140,7 @@ describe('traceCycles — two-instance cycle', () => {
 
 describe('traceCycles — three-instance cycle', () => {
   test('a → b → c → a: a single back-edge is broken', () => {
-    const p = elab(`
+    const p = elabCyclic(`
       program Top() -> (out: float) {
         program Inner(in_: float) -> (out_: float) { out_ = in_ + 1 }
         a = Inner(in_: c.out_)
@@ -165,7 +174,7 @@ describe('traceCycles — InstanceDecl identity is consistent for cloneResolvedP
   // was changed to mutate inputs in place.
 
   test('two-instance cycle survives cloneResolvedProgram', () => {
-    const p = elab(`
+    const p = elabCyclic(`
       program Top() -> (out: float) {
         program Inner(in_: float) -> (out_: float) { out_ = in_ + 1 }
         a = Inner(in_: b.out_)
@@ -182,7 +191,7 @@ describe('traceCycles — InstanceDecl identity is consistent for cloneResolvedP
     // cross_fm_4.json bug. Each VCO's freq reads the other delay's
     // output; each delay's input reads the matching VCO's output.
     // All 4 instances form one SCC.
-    const p = elab(`
+    const p = elabCyclic(`
       program Top() -> (out: float) {
         program VCO(freq: float) -> (sine: float) { sine = freq + 1 }
         program Delay(x: float) -> (y: float) { y = x }
@@ -345,7 +354,10 @@ function buildReferenceSession(ref: ProgramNode, instance = 'r'): ReturnType<typ
 }
 
 function elabFromNode(node: ProgramNode): ResolvedProgram {
-  return elaborate(raiseProgram(node))
+  // The Phase A tests build cyclic JSON test programs; the elaborator's
+  // strict-cycle-policy check would reject them at parse time, so use
+  // the test-only escape hatch.
+  return _elaborateForCyclicTest(raiseProgram(node))
 }
 
 describe('Phase A — cycle topologies (TDD plan)', () => {
@@ -407,13 +419,15 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     }
     const reference = buildReferenceSession(RefSelf)
 
-    const cand = interpretSession(candidate, 8)
+    // Phase 4b: session-level cycles without explicit `delay()` in
+    // the wire expression throw `CycleViolation` at materialization
+    // time. The legacy "candidate (cyclic) vs. reference (explicit
+    // delay)" denotation comparison no longer applies — the candidate
+    // is now a structural error. Reference still interprets cleanly.
+    expect(() => interpretSession(candidate, 8)).toThrow()
     const ref = interpretSession(reference, 8)
-    // Audio mix is divided by 20.0 in interpretSession; the spec
-    // [1,2,3,...] is the pre-mix recurrence value.
     const expected = [1,2,3,4,5,6,7,8].map(v => v / 20.0)
     for (let i = 0; i < 8; i++) {
-      expect(cand[i]).toBeCloseTo(expected[i], 12)
       expect(ref[i]).toBeCloseTo(expected[i], 12)
     }
   })
@@ -480,12 +494,13 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       },
     })
 
-    const cand = interpretSession(candidate, 8)
+    // Phase 4b: candidate has session-level cycles without explicit
+    // `delay()` — throws at materialization. Reference (explicit
+    // user delay) still interprets cleanly.
+    expect(() => interpretSession(candidate, 8)).toThrow()
     const ref = interpretSession(reference, 8)
-    // a.y is the only audio output here; b.y / c.y / d.y don't appear
-    // in the mix. Pin the candidate against the single-cycle reference.
     for (let i = 0; i < 8; i++) {
-      expect(cand[i]).toBeCloseTo(ref[i], 12)
+      expect(Number.isFinite(ref[i])).toBe(true)
     }
   })
 
@@ -579,12 +594,12 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       },
     }
     const reference = buildReferenceSession(RefDiamond)
-    const cand = interpretSession(candidate, 8)
+    // Phase 4b: candidate has session-level cycles without explicit
+    // `delay()` — throws at materialization. Reference interprets.
+    expect(() => interpretSession(candidate, 8)).toThrow()
     const ref = interpretSession(reference, 8)
-    // The candidate's break target is `a` (first source-order member of the
-    // SCC); the reference breaks at the same point. Outputs should match.
     for (let i = 0; i < 8; i++) {
-      expect(cand[i]).toBeCloseTo(ref[i], 12)
+      expect(Number.isFinite(ref[i])).toBe(true)
     }
   })
 
@@ -666,7 +681,11 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       ]},
       audio_outputs: [{ instance: 'a', output: 'y' }],
     }, session)
-    const cand = interpretSession(session, 8)
+    // Phase 4b: this session has a self-cycle (a's inputs reference
+    // b/c which reference back to a). materializeSession throws.
+    expect(() => interpretSession(session, 8)).toThrow()
+    // Reference still interprets cleanly. (Legacy cand vs ref
+    // comparison removed.)
     // Reference: track the recurrence directly. With a's outputs broken
     // by synthetic delays:
     //   sample 0: prev_a_y = 0, prev_a_z = 0
@@ -713,7 +732,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     const reference = buildReferenceSession(RefMultiOut)
     const ref = interpretSession(reference, 8)
     for (let i = 0; i < 8; i++) {
-      expect(cand[i]).toBeCloseTo(ref[i], 12)
+      expect(Number.isFinite(ref[i])).toBe(true)
     }
   })
 
@@ -753,19 +772,14 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       audio_outputs: [{ instance: 'a', output: 'y' }],
     }, session)
     // Each instance's wire references its own .y via NestedOut, but a
-    // NestedOut on *yourself* is a self-edge in the instance graph. So
-    // traceCycles will see this as a self-loop and try to break it.
-    // We focus on denotation: the IR has a user delayDecl inside Wrap,
-    // and after inlineInstances it surfaces in the top-level program.
-    // For ≥64 samples, candidate vs. itself (the test's invariant) is
-    // trivially identical — we instead pin the recurrence by absolute
-    // value: y_t = (y_{t-1} + 1)_{delayed by 1 sample of the user delay
-    // OR the synthetic delay}. For this fixture, both should yield the
-    // same monotonically increasing sequence.
-    const out = interpretSession(session, 64)
-    for (let i = 0; i < 64; i++) {
-      expect(Number.isFinite(out[i])).toBe(true)
-    }
+    // NestedOut on *yourself* is a self-edge in the instance graph.
+    // Phase 4b: even though Wrap's TYPE contains an internal delay,
+    // the self-edge IS a session-level cycle (a.x = f(a.y)), so the
+    // session-materializer's strict-cycle-check throws. To break this
+    // cycle at the session level the user would wrap the wire in
+    // `delay(...)` explicitly: `inputs: { x: { op: 'add', args: [
+    //   { op: 'delay', args: [{op:'ref',instance:'a',output:'y'}] }, 1] }}`.
+    expect(() => interpretSession(session, 64)).toThrow()
     // Pin the first 4 samples by the absolute recurrence value:
     //   sample 0: a.y = mem (init 0) = 0
     //   sample 1: mem became (a.y_prev + 1) = 1; a.y = 1. But wait, the
@@ -776,9 +790,8 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     //   asserting "no synthetic added"; the test's purpose is denotation.
     // We assert non-decreasing: each sample is >= previous — the cycle
     // is causally broken, so values evolve monotonically.
-    for (let i = 1; i < 8; i++) {
-      expect(out[i]).toBeGreaterThanOrEqual(out[i - 1])
-    }
+    // (Removed under Phase 4b — the session throws above before any
+    // samples are produced.)
   })
 
   // ──────────────────────────────────────────────────────────

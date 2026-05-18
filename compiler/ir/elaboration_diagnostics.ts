@@ -92,3 +92,21 @@ export function buildSuggestedFix(broken: BrokenCycle): string {
 export function emitWarning(d: CycleDiagnostic): void {
   console.warn(formatCycleDiagnostic(d))
 }
+
+// ─────────────────────────────────────────────────────────────
+// Phase 4b — strict error class
+// ─────────────────────────────────────────────────────────────
+
+/** Thrown by the elaborator (or any other resolved-IR producer) when
+ *  source contains an inter-instance cycle that doesn't pass through
+ *  an explicit user register. Carries the SCCs as structured data so
+ *  callers can render the violation precisely. */
+export class CycleViolation extends Error {
+  readonly diagnostics: ReadonlyArray<CycleDiagnostic>
+  constructor(diagnostics: ReadonlyArray<CycleDiagnostic>) {
+    const body = diagnostics.map(formatCycleDiagnostic).join('\n\n')
+    super(`tropical: strict cycle policy violated:\n${body}`)
+    this.name = 'CycleViolation'
+    this.diagnostics = diagnostics
+  }
+}

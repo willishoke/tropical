@@ -79,7 +79,7 @@ import type {
 } from './nodes.js'
 import { ElaborationError } from './nodes.js'
 import { findInstanceCycles } from './lowering/cycle_break.js'
-import { emitWarning } from './elaboration_diagnostics.js'
+import { CycleViolation, type CycleDiagnostic } from './elaboration_diagnostics.js'
 
 const SCALAR_KINDS: ReadonlySet<string> = new Set(['float', 'int', 'bool'])
 const SCALAR_ALIASES: ReadonlySet<string> = new Set([
@@ -274,7 +274,10 @@ export type ExternalProgramResolver = (name: string) => ResolvedProgram | undefi
  *  Optional `resolveExternalProgram`: when an `InstanceDecl` names a
  *  program type that isn't nested in this program's body, the elaborator
  *  consults the resolver. This is how stdlib elaboration works — sibling
- *  programs are elaborated first, then fed in via the resolver. */
+ *  programs are elaborated first, then fed in via the resolver.
+ *
+ *  Post-Phase 4b: inter-instance cycles that don't pass through an
+ *  explicit user register throw `CycleViolation`. */
 export function elaborate(
   prog: ParsedProgram,
   resolveExternalProgram?: ExternalProgramResolver,
@@ -282,10 +285,27 @@ export function elaborate(
   return elaborateProgram(prog, undefined, resolveExternalProgram)
 }
 
+/** Test-only escape hatch: elaborate without the strict-cycle-policy
+ *  check. Used by trace_cycles.test.ts and friends to construct
+ *  cyclic ResolvedPrograms for downstream pipeline testing (the
+ *  cycle-break helper itself, decl-identity clone behavior under
+ *  cycles, etc.). Production code paths must use `elaborate`. */
+export function _elaborateForCyclicTest(
+  prog: ParsedProgram,
+  resolveExternalProgram?: ExternalProgramResolver,
+): ResolvedProgram {
+  return elaborateProgram(prog, undefined, resolveExternalProgram, { skipCycleCheck: true })
+}
+
+interface ElaborateInternalOpts {
+  skipCycleCheck?: boolean
+}
+
 function elaborateProgram(
   prog: ParsedProgram,
   parent: Scope | undefined,
   resolveExternalProgram?: ExternalProgramResolver,
+  internalOpts: ElaborateInternalOpts = {},
 ): ResolvedProgram {
   const scope = emptyScope(parent)
   scope.resolveExternalProgram = resolveExternalProgram
@@ -338,7 +358,7 @@ function elaborateProgram(
   //    shells with placeholder expressions; pairing is recorded so the
   //    second pass can fill them in.
   const pairing = new Map<ParsedBodyDecl, BodyDecl>()
-  const decls = registerBodyDecls(prog.body, scope, pairing)
+  const decls = registerBodyDecls(prog.body, scope, pairing, internalOpts)
 
   // 5. Resolve expressions inside body decls (init/update/instance inputs).
   for (const [parsed, resolved] of pairing) {
@@ -365,33 +385,26 @@ function elaborateProgram(
     body: block,
   }
 
-  // Phase 4a: detect cycles in this program's inter-instance graph and
-  // emit a warning per non-trivial SCC. The downstream caller
-  // (`programTypeFromResolved` / `materializeSession`) still auto-fixes
-  // via `breakInstanceCycles` before strata, so audio output is
-  // unchanged — this is an insurance pass before Phase 4b flips the
-  // policy to strict-error.
-  warnOnCycles(resolved)
+  // Phase 4b: strict cycle policy. Cycles in source code that don't
+  // pass through an explicit user register throw `CycleViolation`.
+  // The error message is port-detailed (Tier 2): names the cycle
+  // members and the explicit `delay` statement the user could add to
+  // break it. Tests that construct cyclic IR for downstream pipeline
+  // exercise (the cycle-break helper, clone identity under cycles)
+  // can opt out via the `_elaborateForCyclicTest` entry point.
+  if (!internalOpts.skipCycleCheck) throwOnCycles(resolved)
 
   // Make this program visible to its containing scope (for sibling
   // nested programs) — caller registers the wrapping ProgramDecl.
   return resolved
 }
 
-function warnOnCycles(prog: ResolvedProgram): void {
+function throwOnCycles(prog: ResolvedProgram): void {
   const cycles = findInstanceCycles(prog)
   if (cycles.length === 0) return
-  // The cycle-break helper mutates the input (rewrites InstanceDecl
-  // inputs in place to preserve decl identity), so we must not call
-  // it on the elaborator's live program. Build a generic suggestion
-  // instead. Phase 4b's strict path will run on a path that hasn't
-  // been auto-fixed yet (the elaborator throws BEFORE the realization
-  // layer calls breakInstanceCycles), so it can call the helper
-  // freely there.
-  for (const scc of cycles) {
-    // SCC members in source-encounter order: this is already what
-    // tarjanSCC returns. Pick first member as the suggested break
-    // target (matches the auto-fix's choice).
+  // The cycle-break helper mutates the input, so we never call it
+  // here. Build the suggested-fix snippet manually from the SCC.
+  const diagnostics: CycleDiagnostic[] = cycles.map(scc => {
     const sortedScc = [...scc]
     const target = sortedScc[0]
     const suggestedFix =
@@ -399,13 +412,14 @@ function warnOnCycles(prog: ResolvedProgram): void {
       `output ports to break the cycle explicitly. ` +
       `Example: 'delay ${target.name}_out_delayed = ${target.name}.<port> init 0' ` +
       `and route cycle members from ${target.name}_out_delayed instead.`
-    emitWarning({
+    return {
       kind: 'cycle',
       scc: sortedScc,
       programName: prog.name,
       suggestedFix,
-    })
-  }
+    }
+  })
+  throw new CycleViolation(diagnostics)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -548,13 +562,14 @@ function registerBodyDecls(
   body: ParsedBlock,
   scope: Scope,
   pairing: Map<ParsedBodyDecl, BodyDecl>,
+  internalOpts: ElaborateInternalOpts = {},
 ): BodyDecl[] {
   const out: BodyDecl[] = []
   // Programs first: nested sub-programs need to be resolved before any
   // sibling instance decls reference them.
   for (const d of body.decls ?? []) {
     if (isParsedProgramDecl(d)) {
-      const inner = elaborateProgram(d.program, scope)
+      const inner = elaborateProgram(d.program, scope, undefined, internalOpts)
       const decl: ProgramDecl = { op: 'programDecl', name: d.name, program: inner }
       if (scope.programs.has(d.name)) {
         throw new ElaborationError(`duplicate nested program '${d.name}'`)

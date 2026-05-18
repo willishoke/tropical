@@ -1,21 +1,22 @@
 /**
- * elaboration_diagnostics.test.ts — Phase 4a (detect-and-warn).
+ * elaboration_diagnostics.test.ts — Phase 4b (strict cycle policy).
  *
  * Pinned behavior:
- *   1. A program with no instance-level cycles elaborates with zero warnings.
- *   2. A cyclic program produces a CycleDiagnostic per SCC, formatted
- *      with the cycle members and a suggested-fix snippet naming the
- *      break-target instance.
- *   3. The stdlib (all 31 .trop programs) elaborates with zero warnings —
- *      no inter-instance cycles in any stdlib program.
- *   4. The downstream auto-fix still runs (compile/interpret produce
- *      correct audio for cyclic patches) — warning does NOT replace
- *      the auto-fix in this phase.
+ *   1. A program with no instance-level cycles elaborates cleanly.
+ *   2. A cyclic program throws `CycleViolation` with port-detailed
+ *      Tier-2 error messages naming the cycle members and suggested
+ *      `delay` insertion.
+ *   3. A user-explicit `delay` between would-be-cycle members
+ *      elaborates successfully (the user broke the cycle).
+ *   4. The stdlib (all 31 .trop programs) elaborates cleanly — no
+ *      inter-instance cycles in any stdlib program.
+ *   5. The CycleViolation carries the SCCs as structured data.
  */
 
-import { describe, test, expect, beforeEach, afterEach, mock } from 'bun:test'
+import { describe, test, expect } from 'bun:test'
 import { parseProgram } from '../parse/declarations.js'
 import { elaborate } from './elaborator.js'
+import { CycleViolation } from './elaboration_diagnostics.js'
 import { loadStdlib } from '../program.js'
 import { makeSession } from '../session.js'
 import type { ResolvedProgram } from './nodes.js'
@@ -24,75 +25,76 @@ function elab(src: string): ResolvedProgram {
   return elaborate(parseProgram(src))
 }
 
-describe('Phase 4a — elaborator cycle warnings', () => {
-  let warnSpy: ReturnType<typeof mock>
-  let originalWarn: typeof console.warn
-
-  beforeEach(() => {
-    warnSpy = mock(() => {})
-    originalWarn = console.warn
-    console.warn = warnSpy as unknown as typeof console.warn
+describe('Phase 4b — elaborator strict cycle policy', () => {
+  test('acyclic program: elaborates cleanly', () => {
+    expect(() => elab('program X(a: float) -> (out: float) { out = a + 1 }')).not.toThrow()
   })
 
-  afterEach(() => {
-    console.warn = originalWarn
-  })
-
-  test('acyclic program: zero warnings', () => {
-    elab('program X(a: float) -> (out: float) { out = a + 1 }')
-    expect(warnSpy.mock.calls.length).toBe(0)
-  })
-
-  test('two-instance cycle: one warning naming both members', () => {
-    elab(`
+  test('two-instance cycle: throws CycleViolation', () => {
+    expect(() => elab(`
       program Top() -> (out: float) {
         program Inner(in_: float) -> (out_: float) { out_ = in_ + 1 }
         a = Inner(in_: b.out_)
         b = Inner(in_: a.out_)
         out = a.out_
       }
-    `)
-    expect(warnSpy.mock.calls.length).toBe(1)
-    const msg = warnSpy.mock.calls[0][0] as string
-    expect(msg).toContain("cycle in program 'Top'")
-    expect(msg).toContain('Instances in cycle')
-    expect(msg).toContain('Suggested fix')
-    // Both cycle members named in the path.
-    expect(/a/.test(msg) && /b/.test(msg)).toBe(true)
+    `)).toThrow(CycleViolation)
   })
 
-  test('user-broken cycle (delay in between): no warning', () => {
-    elab(`
+  test('user-broken cycle (delay in between): elaborates cleanly', () => {
+    expect(() => elab(`
       program Top() -> (out: float) {
         program Inner(in_: float) -> (out_: float) { out_ = in_ + 1 }
         delay z = a.out_ init 0
         a = Inner(in_: z)
         out = a.out_
       }
-    `)
-    expect(warnSpy.mock.calls.length).toBe(0)
+    `)).not.toThrow()
   })
 
-  test('stdlib: every .trop program elaborates with zero warnings', () => {
+  test('three-instance cycle: throws with all members named', () => {
+    try {
+      elab(`
+        program Top() -> (out: float) {
+          program Inner(in_: float) -> (out_: float) { out_ = in_ + 1 }
+          a = Inner(in_: c.out_)
+          b = Inner(in_: a.out_)
+          c = Inner(in_: b.out_)
+          out = a.out_
+        }
+      `)
+      throw new Error('expected CycleViolation')
+    } catch (e) {
+      expect(e).toBeInstanceOf(CycleViolation)
+      const v = e as CycleViolation
+      expect(v.diagnostics.length).toBe(1)
+      const memberNames = new Set(v.diagnostics[0].scc.map(i => i.name))
+      expect(memberNames).toEqual(new Set(['a', 'b', 'c']))
+      expect(v.message).toContain("cycle in program 'Top'")
+      expect(v.message).toContain('Suggested fix')
+    }
+  })
+
+  test('CycleViolation carries Tier-2 port-detail in suggested fix', () => {
+    try {
+      elab(`
+        program Top() -> (out: float) {
+          program Inner(in_: float) -> (out_: float) { out_ = in_ + 1 }
+          a = Inner(in_: b.out_)
+          b = Inner(in_: a.out_)
+          out = a.out_
+        }
+      `)
+      throw new Error('expected CycleViolation')
+    } catch (e) {
+      expect(e).toBeInstanceOf(CycleViolation)
+      const v = e as CycleViolation
+      expect(v.diagnostics[0].suggestedFix).toMatch(/delay (a|b)_out_delayed = (a|b)\./)
+    }
+  })
+
+  test('stdlib: every .trop program elaborates cleanly', () => {
     const session = makeSession(8)
-    loadStdlib(session)
-    expect(warnSpy.mock.calls.length).toBe(0)
-  })
-
-  test('suggested-fix snippet names the break-target', () => {
-    elab(`
-      program Top() -> (out: float) {
-        program Inner(in_: float) -> (out_: float) { out_ = in_ + 1 }
-        a = Inner(in_: b.out_)
-        b = Inner(in_: a.out_)
-        out = a.out_
-      }
-    `)
-    expect(warnSpy.mock.calls.length).toBe(1)
-    const msg = warnSpy.mock.calls[0][0] as string
-    // The break-target is the first member in source order.
-    // Suggested fix mentions a synthetic delay name based on the
-    // break-target instance.
-    expect(msg).toMatch(/delay (a|b)_out_delayed = (a|b)\./)
+    expect(() => loadStdlib(session)).not.toThrow()
   })
 })

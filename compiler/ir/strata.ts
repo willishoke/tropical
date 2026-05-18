@@ -37,7 +37,6 @@ import { inlineInstances } from './inline_instances.js'
 import { arrayLower } from './array_lower.js'
 import { identityElim } from './identity_elim.js'
 import { assertAcyclic } from './acyclic.js'
-import { breakInstanceCycles } from './lowering/cycle_break.js'
 
 export interface StrataOptions {
   /** Whether to flatten nested `InstanceDecl`s via `inlineInstances`.
@@ -84,9 +83,10 @@ export function programTypeFromResolved(
   typeArgs: ReadonlyMap<TypeParamDecl, number>,
   opts?: { displayName?: string },
 ): Compiled {
-  // Post-Phase 3: the cycle-break helper runs before strataPipeline.
-  // Single edit point that propagates to all callers; Phase 4b will
-  // replace this with strict elaborator-level cycle detection.
-  const acyclic = breakInstanceCycles(prog).lowered
-  return makeCompiled(strataPipeline(acyclic, typeArgs), opts)
+  // Post-Phase 4b: the elaborator throws on cyclic source code, and
+  // lifted wire-programs are acyclic by construction (no
+  // InstanceDecls). The strataPipeline's `assertAcyclic` at entry
+  // confirms the contract; no separate cycle-break call is needed
+  // here.
+  return makeCompiled(strataPipeline(prog, typeArgs), opts)
 }

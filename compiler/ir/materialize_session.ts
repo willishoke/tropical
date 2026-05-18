@@ -63,7 +63,8 @@ import type { ExprNode } from '../expr.js'
 import type { SessionState } from '../session.js'
 import type { Instance } from '../program_types.js'
 import { strataPipeline } from './strata.js'
-import { breakInstanceCycles } from './lowering/cycle_break.js'
+import { findInstanceCycles } from './lowering/cycle_break.js'
+import { CycleViolation, type CycleDiagnostic } from './elaboration_diagnostics.js'
 import { specializeProgram } from './specialize.js'
 import { cloneResolvedProgram } from './clone.js'
 
@@ -99,13 +100,32 @@ export function materializeSessionForEmit(session: SessionState): {
     aliveOutputDecls.set(instName, decl)
   }
 
-  // Post-Phase 3: the materializer (a "standard realization" producer)
-  // is responsible for handing acyclic IR to the strata pipeline.
+  // Post-Phase 4b: strict cycle policy at the session boundary.
   // Cycles in session wiring (instance A wires to instance B's output,
-  // B wires back to A) are broken here via synthetic regs before
-  // strata runs.
-  const acyclic = breakInstanceCycles(synthetic).lowered
-  const lowered = strataPipeline(acyclic)
+  // B wires back to A) that don't pass through an explicit `delay()`
+  // in the wire throw `CycleViolation` here, with port-detailed
+  // error messages referencing session-level instance names.
+  // Sessions can break cycles explicitly via `delay(...)` in wire
+  // expressions, which materializes to a synthetic RegDecl and
+  // breaks the inter-instance dependency chain.
+  const cycles = findInstanceCycles(synthetic)
+  if (cycles.length > 0) {
+    const diagnostics: CycleDiagnostic[] = cycles.map(scc => {
+      const sortedScc = [...scc]
+      const target = sortedScc[0]
+      return {
+        kind: 'cycle',
+        scc: sortedScc,
+        programName: '__session__',
+        suggestedFix:
+          `Suggested fix: wrap a wire from '${target.name}' in 'delay(...)' ` +
+          `to break the cycle explicitly. Example: wire { instance: '${sortedScc[1]?.name ?? '<consumer>'}', ` +
+          `input: '<port>', expr: { op: 'delay', args: [{ op: 'ref', instance: '${target.name}', output: '<port>' }] } }.`,
+      }
+    })
+    throw new CycleViolation(diagnostics)
+  }
+  const lowered = strataPipeline(synthetic)
 
   // Read back the post-strata inlined alive expressions by name.
   const inlinedAlives = new Map<string, ResolvedExpr>()
