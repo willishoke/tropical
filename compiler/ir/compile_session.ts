@@ -24,6 +24,7 @@ import type { SessionState } from '../session.js'
 import type { FlatPlan } from '../flat_plan'
 import { liftWiresToInstances } from './lift_wires.js'
 import { extractSessionDelays } from './lowering/extract_session_delays.js'
+import { assertSessionAcyclic } from './lowering/session_cycle_check.js'
 
 export function compileSession(session: SessionState): FlatPlan {
   // Pre-compile: hoist array-literal wires to anonymous programs.
@@ -31,6 +32,12 @@ export function compileSession(session: SessionState): FlatPlan {
 
   // Pre-compile: hoist unit-delay wires to module slots.
   extractSessionDelays(session)
+
+  // Defensive invariant: after Phase 2+4 the instance dep graph is
+  // acyclic by construction for every MCP-built session. This check
+  // catches programmatic sessions that bypass `setWireExpr` and
+  // produce true cycles.
+  assertSessionAcyclic(session)
 
   // Lazy import to avoid a circular dependency (compile_session_slotted's
   // helpers import session.js types).
