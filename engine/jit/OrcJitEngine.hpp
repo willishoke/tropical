@@ -137,10 +137,13 @@ struct InstanceProgram
 };
 
 // Top-level driver: runs once per sample. Preamble fires before any
-// instance dispatch; postamble fires after.
+// instance dispatch; postamble fires after. state_evolution sits
+// between instance dispatch and postamble — holds delay-slot updates
+// from MCP wire auto-delays. Empty for legacy plans.
 struct SchedulerProgram
 {
   std::vector<FlatInstr>       preamble;
+  std::vector<FlatInstr>       state_evolution;
   std::vector<FlatInstr>       postamble;
 };
 

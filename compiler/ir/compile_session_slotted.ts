@@ -143,10 +143,14 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
   const dacEndRaw = preambleNextTempRaw + dac.tempCount
 
   const schedulerFunction: SchedulerFunction = {
-    preamble:       schedulerPreamble,
-    postamble:      dac.instructions,
-    output_targets: dac.outputTargets,
-    outputs:        dac.outputs,
+    preamble:        schedulerPreamble,
+    // Populated by Phase 4's `extractSessionDelays` extension to this
+    // compile pass. Empty in Phase 3 — additive field; no behavior
+    // change until Phase 4 emits delay-slot updates here.
+    state_evolution: [],
+    postamble:       dac.instructions,
+    output_targets:  dac.outputTargets,
+    outputs:         dac.outputs,
   }
 
   return {
