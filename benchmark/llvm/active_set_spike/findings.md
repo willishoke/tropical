@@ -311,10 +311,22 @@ enabling skip" — holds. The remaining work is implementation: getting
 the schema, compiler, and engine to produce the right LLVM IR. The
 LLVM side cooperates fully.
 
-## Files produced (disposable)
+## Source artifacts
 
-- `/tmp/active_set_spike/spike.c` — four-variant test
-- `/tmp/active_set_spike/spike.ll` — optimized IR (24KB)
-- `/tmp/active_set_spike/phaser.c` — scaling test
-- `/tmp/active_set_spike/phaser.ll` — optimized IR (9KB)
-- `active_set_spike_findings.md` — this report (untracked)
+Checked in alongside this doc:
+
+- `spike.c` — four-variant test (A: always-on; B: dynamic alive
+  per-sample; C: per-block alive; D: mixed)
+- `current_vs_proposed.c` — flat-unified vs `alwaysinline`+conditional
+  comparison; specifically probes mem2reg + LICM behavior
+- `phaser.c` — Phaser16 scaling test (16-stage allpass cascade
+  inside a sleep-eligible instance)
+- `phaser_compare.c` — does per-sample conditional inhibit LICM and
+  phi-promotion of 16 reg states
+- `ir-dumps/` — optimized LLVM IR dumps for each source at the
+  optimization levels referenced above (`spike.ll`, `spike_O2.ll`,
+  `cvp_O2.ll`, `phaser.ll`, `phaser_O2.ll`, `pc_O2.ll`)
+
+Reproducing: compile each `.c` with `clang -O3 -emit-llvm -S` (or
+`-O2` for the JIT-default cases) and inspect the resulting `.ll` to
+verify the findings above still hold under a current LLVM toolchain.
