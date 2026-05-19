@@ -162,6 +162,28 @@ export interface SessionState {
   resolvedRegistry: Map<string, import('./ir/nodes.js').ResolvedProgram>
   /** Name counter for auto-generated instance names. */
   nameCounters: Map<string, number>
+  /** Delay slots extracted from MCP-auto-delayed wires. Populated by
+   *  `extractSessionDelays` (compile-time pre-pass). One entry per
+   *  unit-delay wire; the `sourceExpr` is translated into a `WriteSlot`
+   *  in the scheduler's `state_evolution` phase, and the wire itself
+   *  is rewritten to `{op: 'sessionSlot', index: slotIdx}`. */
+  delaySlotRegistry: DelaySlotEntry[]
+}
+
+/** One extracted unit-delay wire. */
+export interface DelaySlotEntry {
+  /** Index in the unified slot array. */
+  slotIdx:    number
+  /** Stable slot name (used for hot-swap state transfer). */
+  slotName:   string
+  /** Initial slot value (set in `slot_defaults`). */
+  init:       number
+  /** Un-delayed source expression; lowered to NInstrs in
+   *  `state_evolution` each sample. */
+  sourceExpr: ExprNode
+  /** Scalar type for the WriteSlot (always 'float' today; slot
+   *  array is float64-backed). */
+  scalarType: 'float' | 'int' | 'bool'
 }
 
 export function makeSession(bufferLength = 512): SessionState {
@@ -194,6 +216,7 @@ export function makeSession(bufferLength = 512): SessionState {
       dispose: () => runtime.dispose(),
     },
     nameCounters: new Map(),
+    delaySlotRegistry: [],
   }
 }
 

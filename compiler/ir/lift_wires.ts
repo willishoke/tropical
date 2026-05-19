@@ -37,18 +37,20 @@ import { allocateOutputSlots } from '../session.js'
 // ─── Detection: which wires need to be lifted? ────────────────────────────
 
 /** Returns true if any subtree of `expr` contains a form that
- *  `translateNode` in `compile_session_slotted_helpers.ts` rejects. The
- *  positive list of rejections (in M11 terms): array literals (bare or
- *  `{op:'array'}` / `{op:'arrayLiteral'}`) and session-level
- *  `{op:'delay'}`. Other shapes are conservatively assumed to be OK
- *  for `translateNode`. */
+ *  `translateNode` in `compile_session_slotted_helpers.ts` rejects.
+ *  Only array literals trigger a lift: `delay()` is now handled by
+ *  the session-level extraction pass (`extractSessionDelays`) which
+ *  allocates a module slot and emits a `WriteSlot` instruction into
+ *  the scheduler's state-evolution phase. Lifting delays into
+ *  anonymous wire-program instances would recreate the dep-graph
+ *  cycle the delay was meant to break — the session-level extraction
+ *  keeps the dep graph acyclic by construction. */
 export function needsWireLift(expr: ExprNode): boolean {
   if (Array.isArray(expr)) return true   // bare array literal
   if (typeof expr !== 'object' || expr === null) return false
   const obj = expr as Record<string, unknown>
   const op = obj.op
   if (op === 'array' || op === 'arrayLiteral') return true
-  if (op === 'delay') return true
   // Recurse into known child-shapes.
   if (Array.isArray(obj.args)) {
     for (const a of obj.args as ExprNode[]) if (needsWireLift(a)) return true

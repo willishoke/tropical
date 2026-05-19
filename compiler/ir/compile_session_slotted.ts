@@ -40,6 +40,7 @@ import {
   computeInstanceTopoOrder, emitDacStitch,
   type PreambleEmitter,
   translateAliveExpr,
+  translateNode,
 } from './compile_session_slotted_helpers.js'
 import {
   type ModuleSlotIdx,
@@ -142,12 +143,38 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
   const dac = emitDacStitch(session, tempOffset(preambleNextTempRaw))
   const dacEndRaw = preambleNextTempRaw + dac.tempCount
 
+  // ── State-evolution phase: one WriteSlot per extracted delay.
+  //    Runs after instance kernels (which produce the current sample's
+  //    output slot values) and before the postamble. Reads source
+  //    instances' current-sample outputs and writes them to the delay
+  //    slot; next sample, the wire's slot read returns this value —
+  //    exactly one sample of latency per MCP wire.
+  const stateEvolution: NInstr[] = []
+  let stateEvolutionNextTempRaw = dacEndRaw
+  const stateEvolutionEmitter: PreambleEmitter = {
+    instrs: stateEvolution,
+    allocTemp: () => {
+      const slot = tempIdx(stateEvolutionNextTempRaw)
+      stateEvolutionNextTempRaw += 1
+      return slot
+    },
+  }
+  for (const entry of session.delaySlotRegistry) {
+    const sourceOp = translateNode(
+      entry.sourceExpr,
+      entry.scalarType,
+      session,
+      stateEvolutionEmitter,
+      entry.slotName,
+    )
+    stateEvolution.push(
+      instrWriteSlot(moduleSlotIdx(entry.slotIdx), sourceOp, entry.scalarType),
+    )
+  }
+
   const schedulerFunction: SchedulerFunction = {
     preamble:        schedulerPreamble,
-    // Populated by Phase 4's `extractSessionDelays` extension to this
-    // compile pass. Empty in Phase 3 — additive field; no behavior
-    // change until Phase 4 emits delay-slot updates here.
-    state_evolution: [],
+    state_evolution: stateEvolution,
     postamble:       dac.instructions,
     output_targets:  dac.outputTargets,
     outputs:         dac.outputs,
@@ -162,7 +189,7 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
     array_slot_names:  acc.arraySlotNames,
     array_slot_count:  acc.nextArrayRaw,
     array_slot_sizes:  acc.arraySlotSizes,
-    register_count:    dacEndRaw,
+    register_count:    stateEvolutionNextTempRaw,
     instance_functions: instanceFunctions,
     scheduler_function: schedulerFunction,
     ...buildSlotMetadata(session),
@@ -186,6 +213,10 @@ function buildSlotMetadata(session: SessionState): {
     slotNames[idx] = `param:${name}`
     const param = session.paramRegistry.get(name)
     if (param !== undefined) slotDefaults[idx] = param.value
+  }
+  for (const entry of session.delaySlotRegistry) {
+    slotNames[entry.slotIdx]    = entry.slotName
+    slotDefaults[entry.slotIdx] = entry.init
   }
   return { slot_count: slotCount, slot_names: slotNames, slot_defaults: slotDefaults }
 }

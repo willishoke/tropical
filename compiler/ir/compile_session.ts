@@ -1,25 +1,36 @@
 /**
  * compile_session.ts — JIT-side session emit boundary.
  *
- * Two-phase compile:
+ * Three-phase compile:
  *   1. `liftWiresToInstances` — wire pre-process. Wires whose expressions
- *      contain forms `translateNode` doesn't handle (array literals,
- *      session-level `delay()`) are extracted into anonymous
- *      `__wire_${i}` instances at session pre-compile time. The lifted
- *      programs go through the full strata pipeline so combinators
- *      lower correctly. After this pass, every wire is a simple
- *      `translateNode`-compatible form.
- *   2. `compileSessionSlotted` — produces the `tropical_plan_5` FlatPlan
+ *      contain array literals are extracted into anonymous `__wire_${i}`
+ *      instances at session pre-compile time. The lifted programs go
+ *      through the full strata pipeline so combinators lower correctly.
+ *      Session-level `delay()` ops are *not* lifted here — they're
+ *      handled by step 2.
+ *   2. `extractSessionDelays` — hoists every top-level `delay()`-wrapped
+ *      wire into a fresh module slot. The wire is rewritten to a
+ *      `sessionSlot` read; the source expression is recorded in
+ *      `session.delaySlotRegistry` for `compileSessionSlotted` to emit
+ *      as a `WriteSlot` in the scheduler's `state_evolution` phase.
+ *      This is the structural mechanism that keeps the MCP-built IR
+ *      acyclic — every wire becomes a slot-to-slot copy with one
+ *      sample of latency.
+ *   3. `compileSessionSlotted` — produces the `tropical_plan_5` FlatPlan
  *      via the per-instance compile path.
  */
 
 import type { SessionState } from '../session.js'
 import type { FlatPlan } from '../flat_plan'
 import { liftWiresToInstances } from './lift_wires.js'
+import { extractSessionDelays } from './lowering/extract_session_delays.js'
 
 export function compileSession(session: SessionState): FlatPlan {
-  // Pre-compile: hoist complex wires to anonymous programs.
+  // Pre-compile: hoist array-literal wires to anonymous programs.
   liftWiresToInstances(session)
+
+  // Pre-compile: hoist unit-delay wires to module slots.
+  extractSessionDelays(session)
 
   // Lazy import to avoid a circular dependency (compile_session_slotted's
   // helpers import session.js types).

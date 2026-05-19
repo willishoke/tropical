@@ -79,8 +79,11 @@ export interface PreambleEmitter {
 }
 
 /** Translate an arbitrary ExprNode into NInstrs emitted to the
- *  preamble, returning the operand that holds the result. */
-function translateNode(
+ *  preamble, returning the operand that holds the result.
+ *
+ *  Exported so `extractSessionDelays`'s WriteSlot emission can reuse
+ *  the same translator that drives input wires. */
+export function translateNode(
   expr: ExprNode,
   scalarType: ScalarType,
   session: SessionState,
@@ -142,6 +145,15 @@ function translateNode(
   // ── builtins ──
   if (op === 'sampleRate')  return { kind: 'rate', scalar_type: scalarType }
   if (op === 'sampleIndex') return { kind: 'tick', scalar_type: scalarType }
+
+  // ── session-internal slot read (emitted by extractSessionDelays) ──
+  // The wire was a `delay()` that got hoisted to a module slot in the
+  // pre-emit pass. The slot is updated each sample by the scheduler's
+  // state_evolution phase; reading it returns the previous sample's
+  // source value — the unit-delay endomorphism.
+  if (op === 'sessionSlot' && typeof obj.index === 'number') {
+    return opSlot(moduleSlotIdx(obj.index), scalarType)
+  }
 
   // ── arithmetic / logical / comparison ──
   if (typeof op === 'string' && BINARY_TAG[op]) {
