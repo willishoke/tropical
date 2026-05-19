@@ -3,8 +3,18 @@
  *
  * Composes the strata passes in order:
  *
- *   specialize → sumLower → traceCycles → inlineInstances
- *              → arrayLower → identityElim
+ *   assertAcyclic → specialize → sumLower → inlineInstances
+ *                 → arrayLower → identityElim
+ *
+ * Post-Phase 3, `strataPipeline` is a *checking* pipeline: it requires
+ * its input to be already-acyclic. Cycle-breaking is the responsibility
+ * of the caller (the "standard realization" — elaborator output and
+ * session materialization). The two entry points
+ * (`programTypeFromResolved` and `materializeSession`) run
+ * `breakInstanceCycles` on their inputs before invoking
+ * `strataPipeline`; the `assertAcyclic` at strata entry guarantees
+ * any escape would surface immediately rather than producing a
+ * malformed plan.
  *
  * `identityElim` (M11 Phase 2) is the categorical identity-law rewrite:
  * it eliminates `InstanceDecl`s whose program body is the identity
@@ -23,10 +33,10 @@ import type { ResolvedProgram, TypeParamDecl } from './nodes.js'
 import { type Compiled, makeCompiled } from '../program_types.js'
 import { specializeProgram } from './specialize.js'
 import { sumLower } from './sum_lower.js'
-import { traceCycles } from './trace_cycles.js'
 import { inlineInstances } from './inline_instances.js'
 import { arrayLower } from './array_lower.js'
 import { identityElim } from './identity_elim.js'
+import { assertAcyclic } from './acyclic.js'
 
 export interface StrataOptions {
   /** Whether to flatten nested `InstanceDecl`s via `inlineInstances`.
@@ -43,10 +53,14 @@ export function strataPipeline(
   options: StrataOptions = {},
 ): ResolvedProgram {
   const { inlineNested = true } = options
+  // Acyclicity is the strataPipeline contract — callers must run
+  // `breakInstanceCycles` (or equivalent) before invoking this. The
+  // standard realization's call sites (`programTypeFromResolved` and
+  // `materializeSession`) do this for the user.
+  assertAcyclic(prog)
   const specialized = specializeProgram(prog, typeArgs)
   const summed = sumLower(specialized)
-  const cyclic = traceCycles(summed)
-  const inlined = inlineNested ? inlineInstances(cyclic) : cyclic
+  const inlined = inlineNested ? inlineInstances(summed) : summed
   const arrayed = arrayLower(inlined)
   return identityElim(arrayed)
 }
@@ -69,5 +83,10 @@ export function programTypeFromResolved(
   typeArgs: ReadonlyMap<TypeParamDecl, number>,
   opts?: { displayName?: string },
 ): Compiled {
+  // Post-Phase 4b: the elaborator throws on cyclic source code, and
+  // lifted wire-programs are acyclic by construction (no
+  // InstanceDecls). The strataPipeline's `assertAcyclic` at entry
+  // confirms the contract; no separate cycle-break call is needed
+  // here.
   return makeCompiled(strataPipeline(prog, typeArgs), opts)
 }

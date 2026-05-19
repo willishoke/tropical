@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'bun:test'
 import type { ExprNode } from '../expr.js'
 import type {
-  ResolvedExpr, InputRef, ParamDecl, DelayDecl, OutputAssign,
+  ResolvedExpr, InputRef, ParamDecl, RegDecl, OutputAssign,
 } from './nodes.js'
 import { freeRefs, liftWireToProgram } from './wire_program.js'
 import {
@@ -224,19 +224,22 @@ describe('liftWireToProgram — structure', () => {
     expect(expr.args[1]).toBe(2.5)
   })
 
-  test('delay() produces a synthetic DelayDecl in the body', () => {
+  test('delay() produces a synthetic update-bearing RegDecl in the body', () => {
+    // Post-Phase-0a: session `delay()` lowers to a RegDecl with update
+    // populated. Reads of the value are RegRefs.
     const e: ExprNode = {
       op: 'delay',
       args: [{ op: 'ref', instance: 'b', output: 'y' }],
       init: 0.5,
     }
     const prog = liftWireToProgram(e, freeRefs(e), instanceName('w'))
-    const delays = prog.body.decls.filter(d => d.op === 'delayDecl') as DelayDecl[]
-    expect(delays.length).toBe(1)
-    expect(delays[0].name).toBe('__sd0')
-    expect(delays[0].init).toBe(0.5)
+    const regs = prog.body.decls.filter(d => d.op === 'regDecl') as RegDecl[]
+    expect(regs.length).toBe(1)
+    expect(regs[0].name).toBe('__sd0')
+    expect(regs[0].init).toBe(0.5)
+    expect(regs[0].update).toBeDefined()
     const assign = prog.body.assigns[0] as OutputAssign
-    expect((assign.expr as { op: string }).op).toBe('delayRef')
+    expect((assign.expr as { op: string }).op).toBe('regRef')
   })
 
   test('param ref produces a private ParamDecl', () => {
@@ -342,6 +345,7 @@ describe('liftWireToProgram — strata round-trip', () => {
   })
 
   test('lifted program with delay passes through strata cleanly', () => {
+    // Post-Phase-0a: delay desugars to RegDecl-with-update.
     const e: ExprNode = {
       op: 'delay',
       args: [{ op: 'ref', instance: 'b', output: 'y' }],
@@ -349,7 +353,9 @@ describe('liftWireToProgram — strata round-trip', () => {
     }
     const prog = liftWireToProgram(e, freeRefs(e), instanceName('__wire_delay'))
     const after = strataPipeline(prog)
-    const delays = after.body.decls.filter(d => d.op === 'delayDecl')
-    expect(delays.length).toBe(1)
+    const regs = after.body.decls.filter(
+      d => d.op === 'regDecl' && d.update !== undefined,
+    )
+    expect(regs.length).toBe(1)
   })
 })

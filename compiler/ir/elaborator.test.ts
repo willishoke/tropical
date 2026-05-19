@@ -15,11 +15,11 @@ import { elaborate, type ExternalProgramResolver } from './elaborator.js'
 import { ElaborationError } from './nodes.js'
 import type {
   ResolvedProgram, ResolvedExpr, ResolvedExprOp,
-  RegRef, InputRef, DelayRef, ParamRef, TypeParamRef, BindingRef,
+  RegRef, InputRef, ParamRef, TypeParamRef, BindingRef,
   NestedOut, BinaryOp, Clamp, Select,
   Tag, Match, Let, Fold, Generate,
-  RegDecl, DelayDecl, ParamDecl, InputDecl, TypeParamDecl,
-  InstanceDecl, ProgramDecl, OutputAssign, NextUpdate,
+  RegDecl, ParamDecl, InputDecl, TypeParamDecl,
+  InstanceDecl, ProgramDecl, OutputAssign,
   SumTypeDef, AliasTypeDef,
   Zeros, ArraySet,
 } from './nodes.js'
@@ -43,6 +43,8 @@ describe('elaborator — value references', () => {
   })
 
   test('reg ref: nameRef resolves to RegRef.decl === the regDecl', () => {
+    // Post-Phase-0a: `next s = e` folds into RegDecl.update at
+    // elaboration; the resolved IR has no NextUpdate body-assign.
     const p = elabSrc(`
       program X() -> (out: float) {
         reg s: float = 0
@@ -52,30 +54,32 @@ describe('elaborator — value references', () => {
     `)
     const regDecl = p.body.decls[0] as RegDecl
     const out = p.body.assigns[0] as OutputAssign
-    const next = p.body.assigns[1] as NextUpdate
     const outRef = out.expr as RegRef
-    const nextRef = next.expr as RegRef
     expect(outRef.op).toBe('regRef')
     expect(outRef.decl).toBe(regDecl)
-    expect(nextRef.decl).toBe(regDecl)
-    // Both refs point at the same object — graph edge identity.
-    expect(outRef.decl).toBe(nextRef.decl)
-    // nextUpdate.target also points at the same RegDecl.
-    expect(next.target).toBe(regDecl)
+    // The folded update reads s — same decl identity.
+    expect(regDecl.update).toBeDefined()
+    expect((regDecl.update as RegRef).decl).toBe(regDecl)
   })
 
-  test('delay ref: nameRef resolves to DelayRef.decl', () => {
+  test('delay-form RegDecl: nameRef resolves to RegRef on the decl', () => {
+    // Post-Phase-0a: `delay z = u init v` desugars to a RegDecl with
+    // update populated. Reads of z are RegRefs.
     const p = elabSrc(`
       program X(x: float) -> (out: float) {
         delay z = x init 0
         out = z
       }
     `)
-    const delayDecl = p.body.decls[0] as DelayDecl
+    const regDecl = p.body.decls[0] as RegDecl
+    expect(regDecl.op).toBe('regDecl')
+    expect(regDecl.name).toBe('z')
+    expect(regDecl.update).toBeDefined()
+    expect(regDecl.init).toBe(0)
     const out = p.body.assigns[0] as OutputAssign
-    const ref = out.expr as DelayRef
-    expect(ref.op).toBe('delayRef')
-    expect(ref.decl).toBe(delayDecl)
+    const ref = out.expr as RegRef
+    expect(ref.op).toBe('regRef')
+    expect(ref.decl).toBe(regDecl)
   })
 
   test('param ref: nameRef resolves to ParamRef.decl', () => {
@@ -649,7 +653,9 @@ describe('elaborator — graph integrity', () => {
     expect(aReg.init).toEqual(bReg.init)
   })
 
-  test('feedback through a register is a graph cycle (decl referenced via next)', () => {
+  test('feedback through a register is a graph cycle (decl referenced via update)', () => {
+    // Post-Phase-0a: next-update folds into RegDecl.update; the cycle
+    // is decl ↔ update.regRef ↔ decl.
     const p = elabSrc(`
       program X(x: float) -> (out: float) {
         reg s: float = 0
@@ -658,12 +664,8 @@ describe('elaborator — graph integrity', () => {
       }
     `)
     const regDecl = p.body.decls[0] as RegDecl
-    const next = p.body.assigns[1] as NextUpdate
-    // The reg's nextUpdate target points at the same RegDecl as
-    // p.body.decls[0]. The expr graph contains a regRef that also points
-    // at it. This is a cycle in the graph (decl ↔ ref ↔ decl).
-    expect(next.target).toBe(regDecl)
-    const expr = next.expr as BinaryOp
+    expect(regDecl.update).toBeDefined()
+    const expr = regDecl.update as BinaryOp
     expect((expr.args[0] as RegRef).decl).toBe(regDecl)
   })
 })
@@ -842,8 +844,8 @@ describe('elaborator — new builtin calls', () => {
         next buf = zeros(N)
       }
     `)
-    const next = p.body.assigns[1] as NextUpdate
-    const z = next.expr as Zeros
+    const regDecl = p.body.decls[0] as RegDecl
+    const z = regDecl.update as Zeros
     expect(z.op).toBe('zeros')
     const ref = z.count as TypeParamRef
     expect(ref.op).toBe('typeParamRef')
@@ -858,8 +860,8 @@ describe('elaborator — new builtin calls', () => {
         next buf = arraySet(buf, sampleIndex() % N, x)
       }
     `)
-    const next = p.body.assigns[1] as NextUpdate
-    const a = next.expr as ArraySet
+    const regDecl = p.body.decls[0] as RegDecl
+    const a = regDecl.update as ArraySet
     expect(a.op).toBe('arraySet')
     expect(a.args.length).toBe(3)
   })

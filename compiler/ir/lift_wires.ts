@@ -6,10 +6,13 @@
  * forms that `translateNode` doesn't support (array literals, session-
  * level `delay()`) are extracted into anonymous programs at session
  * pre-compile time. The lifted program goes through the full strata
- * pipeline — `arrayLower` handles array literals, `traceCycles` /
- * `delay()` synthesis handles session delays — and the existing
- * per-instance compile path then treats the lifted instance like any
- * other.
+ * pipeline — `arrayLower` handles array literals; `delay()` desugars
+ * to a synthetic `RegDecl` with `update` populated, which the
+ * standard slot allocator handles like any user-written reg — and
+ * the existing per-instance compile path then treats the lifted
+ * instance like any other. The lifted programs have no InstanceDecls
+ * in their bodies, so they're acyclic by construction and satisfy
+ * `strataPipeline`'s acyclic-input contract.
  *
  * After this pass:
  *   - `session.inputExprNodes` entries contain only "simple" wires that
@@ -85,7 +88,7 @@ function liftOneWire(
   const lifted = liftWireToProgram(expr, refs, synthName)
 
   // Run strata to lower combinators (let, array literals via
-  // arrayLower; session delay via traceCycles).
+  // arrayLower; session delay desugars to a synthetic RegDecl).
   const compiled = programTypeFromResolved(lifted, new Map(), {
     displayName: rawName(synthName),
   })

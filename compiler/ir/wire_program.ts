@@ -35,7 +35,7 @@
 import type { ExprNode } from '../expr.js'
 import type {
   ResolvedProgram, ResolvedExpr,
-  InputDecl, OutputDecl, ParamDecl, DelayDecl,
+  InputDecl, OutputDecl, ParamDecl, RegDecl,
   BodyDecl,
   ResolvedBlock,
 } from './nodes.js'
@@ -131,8 +131,9 @@ interface TranslateContext {
   /** Param/Trigger decls accumulated during translation. Keyed by param
    *  name. Mutated as the translator encounters new refs. */
   readonly paramDecls: Map<string, ParamDecl>
-  /** Synthetic DelayDecls created from `delay()` expressions. */
-  readonly syntheticDelays: DelayDecl[]
+  /** Synthetic RegDecls (post-Phase-0a: `update` populated, semantically
+   *  a one-sample delay) created from `delay()` expressions. */
+  readonly syntheticRegs: RegDecl[]
 }
 
 /** Lift a wire `ExprNode` to a `ResolvedProgram` with the given synthesized
@@ -143,7 +144,8 @@ interface TranslateContext {
  *  - one `OutputDecl` named `out`
  *  - one `outputAssign` binding `out` to the translated expression
  *  - inline `ParamDecl`s for any `param`/`trigger` refs in the expression
- *  - inline `DelayDecl`s for any `delay()` calls in the expression
+ *  - inline `RegDecl`s (with `update` populated) for any `delay()` calls
+ *    in the expression — post-Phase-0a the unified state primitive
  *
  *  Pure, total. Output is shape-identical to a user-authored single-decl
  *  program; the per-program strata pipeline accepts it without
@@ -177,14 +179,14 @@ export function liftWireToProgram(
   const ctx: TranslateContext = {
     refToInput,
     paramDecls: new Map(),
-    syntheticDelays: [],
+    syntheticRegs: [],
   }
 
   const translated = translateExpr(expr, ctx)
 
   const bodyDecls: BodyDecl[] = [
     ...ctx.paramDecls.values(),
-    ...ctx.syntheticDelays,
+    ...ctx.syntheticRegs,
   ]
 
   const body: ResolvedBlock = {
@@ -280,7 +282,7 @@ function translateExpr(expr: ExprNode, ctx: TranslateContext): ResolvedExpr {
     return items as ResolvedExpr
   }
 
-  // ── Session-level delay → synthetic DelayDecl + delayRef ──
+  // ── Session-level delay → synthetic RegDecl-with-update + regRef ──
   if (op === 'delay') {
     const argsArr = obj.args as ExprNode[]
     if (!Array.isArray(argsArr) || argsArr.length !== 1) {
@@ -288,14 +290,14 @@ function translateExpr(expr: ExprNode, ctx: TranslateContext): ResolvedExpr {
     }
     const update = translateExpr(argsArr[0], ctx)
     const init = typeof obj.init === 'number' ? obj.init : 0
-    const decl: DelayDecl = {
-      op: 'delayDecl',
-      name: `__sd${ctx.syntheticDelays.length}`,
+    const decl: RegDecl = {
+      op: 'regDecl',
+      name: `__sd${ctx.syntheticRegs.length}`,
       update,
       init,
     }
-    ctx.syntheticDelays.push(decl)
-    return { op: 'delayRef', decl }
+    ctx.syntheticRegs.push(decl)
+    return { op: 'regRef', decl }
   }
 
   throw new Error(`liftWireToProgram: unhandled wire-form op '${op}'`)

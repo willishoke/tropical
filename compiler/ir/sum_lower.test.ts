@@ -17,7 +17,7 @@ import { elaborate } from './elaborator.js'
 import { sumLower } from './sum_lower.js'
 import type {
   ResolvedProgram, ResolvedExpr, ResolvedExprOp,
-  DelayDecl, OutputAssign,
+  RegDecl, OutputAssign,
 } from './nodes.js'
 
 function elab(src: string): ResolvedProgram {
@@ -41,9 +41,12 @@ function findOps(prog: ResolvedProgram, targets: string[]): string[] {
     walkChildren(e, visitExpr)
   }
   for (const d of prog.body.decls) {
-    if (d.op === 'regDecl') visitExpr(d.init)
-    else if (d.op === 'delayDecl') { visitExpr(d.init); visitExpr(d.update) }
-    else if (d.op === 'instanceDecl') for (const i of d.inputs) visitExpr(i.value)
+    if (d.op === 'regDecl') {
+      visitExpr(d.init)
+      if (d.update !== undefined) visitExpr(d.update)
+    } else if (d.op === 'instanceDecl') {
+      for (const i of d.inputs) visitExpr(i.value)
+    }
   }
   for (const a of prog.body.assigns) visitExpr(a.expr)
   return out
@@ -90,8 +93,8 @@ describe('sumLower — nullary-only enum', () => {
     // (no payload variants → just the discriminator).
     expect(out.body.decls.length).toBe(1)
     const d = out.body.decls[0]
-    expect(d.op).toBe('delayDecl')
-    if (d.op === 'delayDecl') {
+    expect(d.op).toBe('regDecl')
+    if (d.op === 'regDecl') {
       expect(d.name).toBe('state#tag')
       // init = variant index of `Off` = 0.
       expect(d.init).toBe(0)
@@ -126,32 +129,32 @@ describe('sumLower — payload variant', () => {
     const out = sumLower(p)
     // Two slots: `state#tag` (int discriminator) + `state#Decaying__level` (float payload).
     expect(out.body.decls.length).toBe(2)
-    const names = out.body.decls.map(d => (d as DelayDecl).name)
+    const names = out.body.decls.map(d => (d as RegDecl).name)
     expect(names).toEqual(['state#tag', 'state#Decaying__level'])
     // No tag / match remain anywhere.
     expect(findOps(out, ['tag', 'match'])).toEqual([])
-    // The output expression's payload binding (`level`) was rewritten
-    // to a DelayRef reading state#Decaying__level. We assert the
-    // structural shape: the output is a select chain whose `then`
-    // branch (Decaying arm) eventually contains a delayRef whose decl
-    // is the state#Decaying__level slot.
+    // Post-Phase-0a: the output expression's payload binding (`level`)
+    // was rewritten to a RegRef reading state#Decaying__level. We
+    // assert the structural shape: the output is a select chain whose
+    // `then` branch (Decaying arm) eventually contains a regRef whose
+    // decl is the state#Decaying__level slot.
     const a = out.body.assigns[0] as OutputAssign
-    const refs = collectDelayRefNames(a.expr)
+    const refs = collectRegRefNames(a.expr)
     expect(refs).toContain('state#Decaying__level')
     expect(refs).toContain('state#tag')
   })
 })
 
-/** Collect delay-decl names referenced by `delayRef` nodes in the
- *  given expression. Does NOT recurse through `delayRef.decl` (the
- *  decl carries its own update expression which would re-enter the
- *  walker indefinitely). */
-function collectDelayRefNames(expr: ResolvedExpr): string[] {
+/** Collect reg-decl names referenced by `regRef` nodes in the given
+ *  expression. Does NOT recurse through `regRef.decl` (the decl
+ *  carries its own update expression which would re-enter the walker
+ *  indefinitely). */
+function collectRegRefNames(expr: ResolvedExpr): string[] {
   const out: string[] = []
   const walk = (e: ResolvedExpr): void => {
     if (typeof e !== 'object' || e === null) return
     if (Array.isArray(e)) { e.forEach(walk); return }
-    if (e.op === 'delayRef') { out.push(e.decl.name); return }
+    if (e.op === 'regRef') { out.push(e.decl.name); return }
     // Recurse into structured children only — skip back-pointer fields.
     walkChildren(e, walk)
   }
@@ -180,7 +183,7 @@ function walkChildren(node: ResolvedExprOp, k: (e: ResolvedExpr) => void): void 
     case 'let': for (const b of node.binders) k(b.value); k(node.in); return
     case 'tag': for (const p of node.payload) k(p.value); return
     case 'match': k(node.scrutinee); for (const arm of node.arms) k(arm.body); return
-    case 'inputRef': case 'regRef': case 'delayRef': case 'paramRef':
+    case 'inputRef': case 'regRef': case 'paramRef':
     case 'typeParamRef': case 'bindingRef': case 'nestedOut':
     case 'sampleRate': case 'sampleIndex':
       return

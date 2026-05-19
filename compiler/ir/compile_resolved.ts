@@ -13,7 +13,7 @@
  * runnable-plan boundary.
  */
 
-import type { ResolvedProgram, ResolvedExpr, OutputDecl, RegDecl, DelayDecl, ParamDecl, PortType, InstanceDecl } from './nodes.js'
+import type { ResolvedProgram, ResolvedExpr, OutputDecl, RegDecl, ParamDecl, PortType, InstanceDecl } from './nodes.js'
 import type { PerInstancePlan } from '../flat_plan.js'
 import { buildSlotMaps, type SlotMaps } from './slots.js'
 import { emitResolvedProgram, type EmitSlots, type ScalarType } from './emit_resolved.js'
@@ -64,14 +64,12 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
   })
 
   // ── Register update expressions ──
-  const regUpdateByDecl   = new Map<RegDecl, ResolvedExpr>()
-  const delayUpdateByDecl = new Map<DelayDecl, ResolvedExpr>()
-  for (const a of prog.body.assigns) {
-    if (a.op !== 'nextUpdate') continue
-    if (a.target.op === 'regDecl')   regUpdateByDecl.set(a.target, a.expr)
-    if (a.target.op === 'delayDecl') delayUpdateByDecl.set(a.target, a.expr)
-  }
-
+  // Post-Phase-0a: every reg's update (if any) lives on `decl.update`.
+  // NextUpdate body-assigns are gone (folded into the decl by the
+  // elaborator). A reg with `update === undefined` holds its current
+  // value (semantically a register); a reg with `update` set evaluates
+  // the expression to produce the next sample's value (semantically a
+  // delay or stateful accumulator).
   const registerExprs: (ResolvedExpr | null)[] = []
   const stateInit:     (number | boolean | number[])[] = []
   const registerNames: string[] = []
@@ -81,16 +79,7 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     registerNames.push(d.name)
     registerTypes.push(regScalarType(d))
     stateInit.push(regInit(d))
-    const u = regUpdateByDecl.get(d)
-    registerExprs.push(u === undefined ? null : u)
-  }
-
-  for (const d of slots.delayDecls) {
-    registerNames.push(d.name)
-    registerTypes.push(delayScalarType(d))
-    stateInit.push(delayInit(d))
-    const u = delayUpdateByDecl.get(d) ?? d.update
-    registerExprs.push(u)
+    registerExprs.push(d.update === undefined ? null : d.update)
   }
 
   const inputPortTypes: ScalarType[] = slots.inputDecls.map(d => {
@@ -104,7 +93,6 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
   const emitSlots: EmitSlots = {
     inputs:           slots.inputs,
     regs:             slots.regs,
-    delays:           slots.delays,
     regCount:         slots.regDecls.length,
     paramHandles:     ctx.paramHandles     ?? new Map(),
     nestedOutputSlots: ctx.nestedOutputSlots,
@@ -167,10 +155,6 @@ function regInit(d: RegDecl): number | boolean | number[] {
   throw new Error('compileResolved: register init must lower to a literal value')
 }
 
-function delayScalarType(_d: DelayDecl): ScalarType {
-  return 'float'
-}
-
 /** Total scalar slot count for an output port's declared shape. Scalar
  *  and alias ports count as 1; array ports as the product of their
  *  shape dimensions. Used to drive `output_targets` expansion. */
@@ -191,12 +175,6 @@ function outputPortScalarCount(decl: OutputDecl): number {
     total *= dim
   }
   return total
-}
-
-function delayInit(d: DelayDecl): number {
-  if (typeof d.init === 'number') return d.init
-  if (typeof d.init === 'boolean') return d.init ? 1 : 0
-  return 0
 }
 
 void buildSlotMaps

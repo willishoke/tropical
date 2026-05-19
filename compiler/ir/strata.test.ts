@@ -12,7 +12,7 @@ import { parseProgram } from '../parse/declarations.js'
 import { elaborate } from './elaborator.js'
 import { specializeProgram } from './specialize.js'
 import { sumLower } from './sum_lower.js'
-import { traceCycles } from './trace_cycles.js'
+import { breakInstanceCycles } from './lowering/cycle_break.js'
 import { inlineInstances } from './inline_instances.js'
 import { arrayLower } from './array_lower.js'
 import { strataPipeline } from './strata.js'
@@ -57,7 +57,7 @@ describe('strata — pass-through on trivial programs', () => {
 
   test('traceCycles: stub passes through unchanged', () => {
     const p = elab(TRIVIAL)
-    expect(traceCycles(p)).toBe(p)
+    expect(breakInstanceCycles(p).lowered).toBe(p)
   })
 
   test('inlineInstances: no instances returns input unchanged', () => {
@@ -114,8 +114,8 @@ describe('strata — throws on unsupported features', () => {
     // (no payload variants → just the discriminator).
     expect(out.body.decls.length).toBe(1)
     const d = out.body.decls[0]
-    expect(d.op).toBe('delayDecl')
-    if (d.op === 'delayDecl') expect(d.name).toBe('state#tag')
+    expect(d.op).toBe('regDecl')
+    if (d.op === 'regDecl') expect(d.name).toBe('state#tag')
   })
 
   test('arrayLower: program with let combinator returns a let-free program', () => {

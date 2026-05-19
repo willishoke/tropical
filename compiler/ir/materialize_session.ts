@@ -48,14 +48,14 @@
  *    `findOutput(instance, outputName)`. Every reference becomes a
  *    direct decl-identity ResolvedExpr ref.
  *  - Decl creation is bounded: the materializer creates fresh
- *    `DelayDecl` objects for session-level `delay()` nodes and fresh
- *    `OutputDecl` objects for graph_outputs.
+ *    `RegDecl` objects (with `update` populated) for session-level
+ *    `delay()` nodes and fresh `OutputDecl` objects for graph_outputs.
  */
 
 import type {
   ResolvedProgram, ResolvedExpr, ResolvedExprOp, ResolvedBlock,
   ResolvedProgramPorts,
-  InputDecl, OutputDecl, RegDecl, ParamDecl, DelayDecl, InstanceDecl,
+  InputDecl, OutputDecl, RegDecl, ParamDecl, InstanceDecl,
   BodyDecl, BodyAssign, OutputAssign,
   TypeParamDecl,
 } from './nodes.js'
@@ -63,6 +63,8 @@ import type { ExprNode } from '../expr.js'
 import type { SessionState } from '../session.js'
 import type { Instance } from '../program_types.js'
 import { strataPipeline } from './strata.js'
+import { findInstanceCycles } from './lowering/cycle_break.js'
+import { CycleViolation, type CycleDiagnostic } from './elaboration_diagnostics.js'
 import { specializeProgram } from './specialize.js'
 import { cloneResolvedProgram } from './clone.js'
 
@@ -98,6 +100,31 @@ export function materializeSessionForEmit(session: SessionState): {
     aliveOutputDecls.set(instName, decl)
   }
 
+  // Post-Phase 4b: strict cycle policy at the session boundary.
+  // Cycles in session wiring (instance A wires to instance B's output,
+  // B wires back to A) that don't pass through an explicit `delay()`
+  // in the wire throw `CycleViolation` here, with port-detailed
+  // error messages referencing session-level instance names.
+  // Sessions can break cycles explicitly via `delay(...)` in wire
+  // expressions, which materializes to a synthetic RegDecl and
+  // breaks the inter-instance dependency chain.
+  const cycles = findInstanceCycles(synthetic)
+  if (cycles.length > 0) {
+    const diagnostics: CycleDiagnostic[] = cycles.map(scc => {
+      const sortedScc = [...scc]
+      const target = sortedScc[0]
+      return {
+        kind: 'cycle',
+        scc: sortedScc,
+        programName: '__session__',
+        suggestedFix:
+          `Suggested fix: wrap a wire from '${target.name}' in 'delay(...)' ` +
+          `to break the cycle explicitly. Example: wire { instance: '${sortedScc[1]?.name ?? '<consumer>'}', ` +
+          `input: '<port>', expr: { op: 'delay', args: [{ op: 'ref', instance: '${target.name}', output: '<port>' }] } }.`,
+      }
+    })
+    throw new CycleViolation(diagnostics)
+  }
   const lowered = strataPipeline(synthetic)
 
   // Read back the post-strata inlined alive expressions by name.
@@ -126,59 +153,44 @@ export function materializeSessionForEmit(session: SessionState): {
   return { lowered, paramDecls: ctx.paramDecls }
 }
 
-/** Wrap every lifted reg/delay update and output expression whose
- *  origin is an alive-eligible session instance with `select(alive,
- *  raw, fallback)`. Identifies origin via the `_liftedFrom`
- *  provenance tag stamped by `inlineInstances:liftClonedBody`.
+/** Wrap every lifted reg update whose origin is an alive-eligible
+ *  session instance with `select(alive, raw, fallback)`. Identifies
+ *  origin via the `_liftedFrom` provenance tag stamped by
+ *  `inlineInstances:liftClonedBody`.
  *
- *  Synthetic delays from `traceCycles` are tagged
- *  `_liftedFrom: 'synthetic'` and don't belong to any instance —
- *  skipped here. */
+ *  Post-Phase 0a: reg updates live on `decl.update`; NextUpdate
+ *  body-assigns are gone. The wrap is applied directly to the decl.
+ *
+ *  Post-Phase 4b: cycle-break is performed upstream (or throws at the
+ *  session boundary), so no synthetic cycle-break regs survive to this
+ *  pass — the legacy `_liftedFrom: 'synthetic'` skip is no longer
+ *  needed. */
 function applyAliveWraps(
   prog: ResolvedProgram,
   aliveInstances: ReadonlyMap<string, ResolvedExpr>,
 ): void {
   const aliveFor = (decl: { _liftedFrom?: string }): ResolvedExpr | null => {
     if (decl._liftedFrom === undefined) return null
-    if (decl._liftedFrom === 'synthetic') return null
     const a = aliveInstances.get(decl._liftedFrom)
     return a === undefined ? null : a
   }
 
   // Skip an expression that was already wrapped pre-strata (the
   // alive instance's OWN decls had `select(alive, raw, fallback)`
-  // applied by `wrapTypeOutputsPreStrata`, and strata's input
+  // applied by `wrapTypeOutputsForAlive`, and strata's input
   // substitution embedded the same `alive` object identity).
   const alreadyWrapped = (expr: ResolvedExpr, alive: ResolvedExpr): boolean => {
     return typeof expr === 'object' && expr !== null && !Array.isArray(expr)
       && expr.op === 'select' && expr.args[0] === alive
   }
 
-  // Wrap nextUpdate assigns whose target reg/delay was lifted from an
-  // alive-eligible instance.
-  for (const a of prog.body.assigns) {
-    if (a.op !== 'nextUpdate') continue
-    const alive = aliveFor(a.target)
-    if (alive === null) continue
-    if (alreadyWrapped(a.expr, alive)) continue
-    const fallback: ResolvedExpr = a.target.op === 'regDecl'
-      ? { op: 'regRef', decl: a.target as RegDecl }
-      : { op: 'delayRef', decl: a.target as DelayDecl }
-    a.expr = { op: 'select', args: [alive, a.expr, fallback] }
-  }
-
-  // Wrap delay decls' decl.update field for delays without a parallel
-  // nextUpdate.
   for (const d of prog.body.decls) {
-    if (d.op !== 'delayDecl') continue
+    if (d.op !== 'regDecl') continue
+    if (d.update === undefined) continue
     const alive = aliveFor(d)
     if (alive === null) continue
-    const haveNextUpdate = prog.body.assigns.some(
-      a => a.op === 'nextUpdate' && a.target === d,
-    )
-    if (haveNextUpdate) continue
     if (alreadyWrapped(d.update, alive)) continue
-    const fallback: ResolvedExpr = { op: 'delayRef', decl: d }
+    const fallback: ResolvedExpr = { op: 'regRef', decl: d }
     d.update = { op: 'select', args: [alive, d.update, fallback] }
   }
 
@@ -193,7 +205,7 @@ function makeContext(session: SessionState): MaterializeContext {
   return {
     instanceDecls:       new Map(),
     paramDecls:          new Map(),
-    syntheticDelayDecls: [],
+    syntheticRegDecls:   [],
     exprMemo:            new WeakMap(),
     aliveInstances:      new Map(),
     session,
@@ -210,7 +222,11 @@ export const _materializeSessionForTesting = materializeSession
 interface MaterializeContext {
   instanceDecls: Map<string, InstanceDecl>
   paramDecls: Map<string, ParamDecl>
-  syntheticDelayDecls: DelayDecl[]
+  /** Synthetic RegDecls (with update populated) generated from session-
+   *  level `delay()` expressions in wires. Each becomes a stateful slot
+   *  one sample late. Named `__sd${idx}` for uniqueness within the
+   *  session-level synthetic program. */
+  syntheticRegDecls: RegDecl[]
   exprMemo: WeakMap<object, ResolvedExpr>
   /** For each session instance with an explicit aliveInput, the
    *  resolved alive expression to apply post-strata. Wrapping happens
@@ -272,7 +288,7 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
   }
 
   const bodyDecls: BodyDecl[] = []
-  for (const decl of ctx.syntheticDelayDecls)   bodyDecls.push(decl)
+  for (const decl of ctx.syntheticRegDecls)      bodyDecls.push(decl)
   for (const decl of ctx.instanceDecls.values()) bodyDecls.push(decl)
   for (const decl of ctx.paramDecls.values())    bodyDecls.push(decl)
 
@@ -359,11 +375,11 @@ function buildInstanceDecl(
   }
 
   // Alive wrap: same two-phase mechanism as the legacy gateable wrap.
-  //   - PRE-STRATA: wrap the type's outputAssigns + own
-  //     regDecl/delayDecl updates with `select(alive, raw,
-  //     fallback)`. Necessary because strata's nestedOut substitution
-  //     captures the alive instance's output expression at inline
-  //     time — wrapping post-strata would miss it.
+  //   - PRE-STRATA: wrap the type's outputAssigns + own RegDecl
+  //     updates with `select(alive, raw, fallback)`. Necessary because
+  //     strata's nestedOut substitution captures the alive instance's
+  //     output expression at inline time — wrapping post-strata would
+  //     miss it.
   //   - POST-STRATA: wrap any decls lifted from sub-instances
   //     (matched by `_liftedFrom`). These don't exist pre-strata.
   //
@@ -389,22 +405,13 @@ function wrapTypeOutputsForAlive(decl: InstanceDecl, aliveExpr: ResolvedExpr): v
   const aliveRef: ResolvedExpr = { op: 'inputRef', decl: aliveInputDecl }
 
   for (const a of cloned.body.assigns) {
-    if (a.op === 'outputAssign') {
-      a.expr = { op: 'select', args: [aliveRef, a.expr, 0] }
-    } else if (a.op === 'nextUpdate') {
-      const fallback: ResolvedExpr = a.target.op === 'regDecl'
-        ? { op: 'regRef', decl: a.target as RegDecl }
-        : { op: 'delayRef', decl: a.target as DelayDecl }
-      a.expr = { op: 'select', args: [aliveRef, a.expr, fallback] }
-    }
+    // Post-Phase-0a: BodyAssign is OutputAssign-only.
+    a.expr = { op: 'select', args: [aliveRef, a.expr, 0] }
   }
   for (const d of cloned.body.decls) {
-    if (d.op !== 'delayDecl') continue
-    const haveNextUpdate = cloned.body.assigns.some(
-      a => a.op === 'nextUpdate' && a.target === d,
-    )
-    if (haveNextUpdate) continue
-    const fallback: ResolvedExpr = { op: 'delayRef', decl: d }
+    if (d.op !== 'regDecl') continue
+    if (d.update === undefined) continue
+    const fallback: ResolvedExpr = { op: 'regRef', decl: d }
     d.update = { op: 'select', args: [aliveRef, d.update, fallback] }
   }
 
@@ -520,9 +527,11 @@ function translateOpNode(
   if (op === 'delay') {
     const update = translateExpr((obj.args as ExprNode[])[0], ctx)
     const init = typeof obj.init === 'number' ? obj.init : 0
-    const decl: DelayDecl = { op: 'delayDecl', name: `__sd${ctx.syntheticDelayDecls.length}`, update, init }
-    ctx.syntheticDelayDecls.push(decl)
-    return { op: 'delayRef', decl }
+    // Post-Phase-0a: session `delay()` lowers to a synthetic RegDecl
+    // with update populated. Reads of the value are RegRefs.
+    const decl: RegDecl = { op: 'regDecl', name: `__sd${ctx.syntheticRegDecls.length}`, update, init }
+    ctx.syntheticRegDecls.push(decl)
+    return { op: 'regRef', decl }
   }
 
   throw new Error(`compileSession: unhandled wiring op '${op}'.`)

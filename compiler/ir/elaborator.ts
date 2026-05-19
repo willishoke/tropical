@@ -62,12 +62,12 @@ import type {
   ResolvedProgram, ResolvedBlock, ResolvedProgramPorts,
   ResolvedExpr, ResolvedExprOp,
   InputDecl, OutputDecl, TypeParamDecl,
-  RegDecl, DelayDecl, ParamDecl, InstanceDecl, ProgramDecl, BodyDecl,
-  BodyAssign, OutputAssign, NextUpdate,
+  RegDecl, ParamDecl, InstanceDecl, ProgramDecl, BodyDecl,
+  BodyAssign, OutputAssign,
   TypeDef, StructTypeDef, SumTypeDef, SumVariant, AliasTypeDef, StructField,
   PortType, ShapeDim, ScalarKind,
   BinderDecl,
-  InputRef, RegRef, DelayRef, ParamRef, TypeParamRef, BindingRef,
+  InputRef, RegRef, ParamRef, TypeParamRef, BindingRef,
   NestedOut,
   Tag, Match, MatchArm,
   Let,
@@ -78,6 +78,8 @@ import type {
   SampleRate, SampleIndex,
 } from './nodes.js'
 import { ElaborationError } from './nodes.js'
+import { findInstanceCycles } from './lowering/cycle_break.js'
+import { CycleViolation, type CycleDiagnostic } from './elaboration_diagnostics.js'
 
 const SCALAR_KINDS: ReadonlySet<string> = new Set(['float', 'int', 'bool'])
 const SCALAR_ALIASES: ReadonlySet<string> = new Set([
@@ -140,8 +142,10 @@ interface Scope {
   inputs: Map<string, InputDecl>
   outputs: Map<string, OutputDecl>
   typeParams: Map<string, TypeParamDecl>
+  /** Unified state-bearing decls. After Phase 0a, regs and former-delays
+   *  share this single map; surface `delay` desugars at elaboration into
+   *  a RegDecl with `update` populated. */
   regs: Map<string, RegDecl>
-  delays: Map<string, DelayDecl>
   params: Map<string, ParamDecl>
   instances: Map<string, InstanceDecl>
   /** Sub-program decls visible in this scope (nested programDecl). */
@@ -170,7 +174,6 @@ function emptyScope(parent?: Scope): Scope {
     outputs: new Map(),
     typeParams: new Map(),
     regs: new Map(),
-    delays: new Map(),
     params: new Map(),
     instances: new Map(),
     programs: new Map(),
@@ -200,11 +203,6 @@ function lookupValueRef(scope: Scope, name: string): ResolvedExprOp | null {
   const reg = scope.regs.get(name)
   if (reg) {
     const ref: RegRef = { op: 'regRef', decl: reg }
-    return ref
-  }
-  const delay = scope.delays.get(name)
-  if (delay) {
-    const ref: DelayRef = { op: 'delayRef', decl: delay }
     return ref
   }
   const param = scope.params.get(name)
@@ -276,7 +274,10 @@ export type ExternalProgramResolver = (name: string) => ResolvedProgram | undefi
  *  Optional `resolveExternalProgram`: when an `InstanceDecl` names a
  *  program type that isn't nested in this program's body, the elaborator
  *  consults the resolver. This is how stdlib elaboration works — sibling
- *  programs are elaborated first, then fed in via the resolver. */
+ *  programs are elaborated first, then fed in via the resolver.
+ *
+ *  Post-Phase 4b: inter-instance cycles that don't pass through an
+ *  explicit user register throw `CycleViolation`. */
 export function elaborate(
   prog: ParsedProgram,
   resolveExternalProgram?: ExternalProgramResolver,
@@ -284,10 +285,27 @@ export function elaborate(
   return elaborateProgram(prog, undefined, resolveExternalProgram)
 }
 
+/** Test-only escape hatch: elaborate without the strict-cycle-policy
+ *  check. Used by trace_cycles.test.ts and friends to construct
+ *  cyclic ResolvedPrograms for downstream pipeline testing (the
+ *  cycle-break helper itself, decl-identity clone behavior under
+ *  cycles, etc.). Production code paths must use `elaborate`. */
+export function _elaborateForCyclicTest(
+  prog: ParsedProgram,
+  resolveExternalProgram?: ExternalProgramResolver,
+): ResolvedProgram {
+  return elaborateProgram(prog, undefined, resolveExternalProgram, { skipCycleCheck: true })
+}
+
+interface ElaborateInternalOpts {
+  skipCycleCheck?: boolean
+}
+
 function elaborateProgram(
   prog: ParsedProgram,
   parent: Scope | undefined,
   resolveExternalProgram?: ExternalProgramResolver,
+  internalOpts: ElaborateInternalOpts = {},
 ): ResolvedProgram {
   const scope = emptyScope(parent)
   scope.resolveExternalProgram = resolveExternalProgram
@@ -340,17 +358,21 @@ function elaborateProgram(
   //    shells with placeholder expressions; pairing is recorded so the
   //    second pass can fill them in.
   const pairing = new Map<ParsedBodyDecl, BodyDecl>()
-  const decls = registerBodyDecls(prog.body, scope, pairing)
+  const decls = registerBodyDecls(prog.body, scope, pairing, internalOpts)
 
   // 5. Resolve expressions inside body decls (init/update/instance inputs).
   for (const [parsed, resolved] of pairing) {
     resolveDeclExpressions(parsed, resolved, scope)
   }
 
-  // 6. Resolve body assigns.
+  // 6. Resolve body assigns. NextUpdate assigns fold into their target
+  //    reg's `update` field directly (A-canonical); resolveAssign
+  //    returns null for those, which we filter out so the assigns array
+  //    holds only structural assigns (OutputAssign today).
   const assigns: BodyAssign[] = []
   for (const a of prog.body.assigns ?? []) {
-    assigns.push(resolveAssign(a, scope))
+    const resolved = resolveAssign(a, scope)
+    if (resolved !== null) assigns.push(resolved)
   }
 
   const block: ResolvedBlock = { op: 'block', decls, assigns }
@@ -363,9 +385,41 @@ function elaborateProgram(
     body: block,
   }
 
+  // Phase 4b: strict cycle policy. Cycles in source code that don't
+  // pass through an explicit user register throw `CycleViolation`.
+  // The error message is port-detailed (Tier 2): names the cycle
+  // members and the explicit `delay` statement the user could add to
+  // break it. Tests that construct cyclic IR for downstream pipeline
+  // exercise (the cycle-break helper, clone identity under cycles)
+  // can opt out via the `_elaborateForCyclicTest` entry point.
+  if (!internalOpts.skipCycleCheck) throwOnCycles(resolved)
+
   // Make this program visible to its containing scope (for sibling
   // nested programs) — caller registers the wrapping ProgramDecl.
   return resolved
+}
+
+function throwOnCycles(prog: ResolvedProgram): void {
+  const cycles = findInstanceCycles(prog)
+  if (cycles.length === 0) return
+  // The cycle-break helper mutates the input, so we never call it
+  // here. Build the suggested-fix snippet manually from the SCC.
+  const diagnostics: CycleDiagnostic[] = cycles.map(scc => {
+    const sortedScc = [...scc]
+    const target = sortedScc[0]
+    const suggestedFix =
+      `Suggested fix: insert a 'delay' statement on one of '${target.name}'’s ` +
+      `output ports to break the cycle explicitly. ` +
+      `Example: 'delay ${target.name}_out_delayed = ${target.name}.<port> init 0' ` +
+      `and route cycle members from ${target.name}_out_delayed instead.`
+    return {
+      kind: 'cycle',
+      scc: sortedScc,
+      programName: prog.name,
+      suggestedFix,
+    }
+  })
+  throw new CycleViolation(diagnostics)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -508,13 +562,14 @@ function registerBodyDecls(
   body: ParsedBlock,
   scope: Scope,
   pairing: Map<ParsedBodyDecl, BodyDecl>,
+  internalOpts: ElaborateInternalOpts = {},
 ): BodyDecl[] {
   const out: BodyDecl[] = []
   // Programs first: nested sub-programs need to be resolved before any
   // sibling instance decls reference them.
   for (const d of body.decls ?? []) {
     if (isParsedProgramDecl(d)) {
-      const inner = elaborateProgram(d.program, scope)
+      const inner = elaborateProgram(d.program, scope, undefined, internalOpts)
       const decl: ProgramDecl = { op: 'programDecl', name: d.name, program: inner }
       if (scope.programs.has(d.name)) {
         throw new ElaborationError(`duplicate nested program '${d.name}'`)
@@ -571,12 +626,22 @@ function registerRegDecl(d: ParsedRegDecl, scope: Scope): RegDecl {
   return decl
 }
 
-function registerDelayDecl(d: ParsedDelayDecl, scope: Scope): DelayDecl {
-  if (scope.delays.has(d.name)) {
-    throw new ElaborationError(`duplicate delay '${d.name}'`)
+/** Parsed `delay name = u init v` is surface sugar for a RegDecl with
+ *  `update: u` and `init: v`. Both reg-class names (parsed regDecl and
+ *  parsed delayDecl) land in the same unified scope.regs map. The
+ *  `init` and `update` fields are populated during the second-pass
+ *  expression resolution (resolveDeclExpressions). */
+function registerDelayDecl(d: ParsedDelayDecl, scope: Scope): RegDecl {
+  if (scope.regs.has(d.name)) {
+    throw new ElaborationError(`duplicate reg/delay '${d.name}'`)
   }
-  const decl: DelayDecl = { op: 'delayDecl', name: d.name, update: 0, init: 0 }
-  scope.delays.set(d.name, decl)
+  // init resolved later; update placeholder marks "expects update from
+  // resolveDeclExpressions" but the placeholder is overwritten before
+  // any consumer sees it. We avoid using `undefined` here so a stray
+  // next-update can still detect the conflict (delay-form already
+  // commits to having an update on the decl).
+  const decl: RegDecl = { op: 'regDecl', name: d.name, init: 0, update: 0 }
+  scope.regs.set(d.name, decl)
   return decl
 }
 
@@ -646,9 +711,11 @@ function resolveDeclExpressions(
 ): void {
   if (parsed.op === 'regDecl' && resolved.op === 'regDecl') {
     resolved.init = resolveExpr(parsed.init, scope)
+    // resolved.update intentionally not set here — a later NextUpdate
+    // assign (resolveNextUpdate) folds onto the decl if present.
     return
   }
-  if (parsed.op === 'delayDecl' && resolved.op === 'delayDecl') {
+  if (parsed.op === 'delayDecl' && resolved.op === 'regDecl') {
     resolved.update = resolveExpr(parsed.update, scope)
     resolved.init = resolveExpr(parsed.init, scope)
     return
@@ -709,9 +776,14 @@ function resolveInstanceArgs(
 // Body assigns
 // ─────────────────────────────────────────────────────────────
 
-function resolveAssign(a: ParsedBodyAssign, scope: Scope): BodyAssign {
+/** Returns either an OutputAssign body-assign, or null if the parsed
+ *  assign was a `next x = e` that's been folded into the target reg's
+ *  `update` field as an A-canonical side effect. The caller filters
+ *  nulls out of the assigns array. */
+function resolveAssign(a: ParsedBodyAssign, scope: Scope): BodyAssign | null {
   if (a.op === 'outputAssign') return resolveOutputAssign(a, scope)
-  return resolveNextUpdate(a, scope)
+  foldNextUpdateIntoDecl(a, scope)
+  return null
 }
 
 function resolveOutputAssign(a: ParsedOutputAssign, scope: Scope): OutputAssign {
@@ -730,19 +802,24 @@ function resolveOutputAssign(a: ParsedOutputAssign, scope: Scope): OutputAssign 
   return { op: 'outputAssign', target, expr: resolveExpr(a.expr, scope) }
 }
 
-function resolveNextUpdate(a: ParsedNextUpdate, scope: Scope): NextUpdate {
+/** A-canonical normalization: `next x = e` folds into the target reg's
+ *  `update` field directly. The resolved IR doesn't carry NextUpdate
+ *  as a body-assign — every reg's full specification lives on its decl. */
+function foldNextUpdateIntoDecl(a: ParsedNextUpdate, scope: Scope): void {
   const name = a.target.name
   const reg = scope.regs.get(name)
-  if (reg) {
-    return { op: 'nextUpdate', target: reg, expr: resolveExpr(a.expr, scope) }
+  if (!reg) {
+    throw new ElaborationError(
+      `next-update target '${name}' is not a declared reg or delay`,
+    )
   }
-  const delay = scope.delays.get(name)
-  if (delay) {
-    return { op: 'nextUpdate', target: delay, expr: resolveExpr(a.expr, scope) }
+  if (reg.update !== undefined) {
+    throw new ElaborationError(
+      `duplicate update for reg '${name}' (already set by ` +
+      `decl-side update or earlier next-update)`,
+    )
   }
-  throw new ElaborationError(
-    `nextUpdate target '${name}' is not a declared reg or delay`,
-  )
+  reg.update = resolveExpr(a.expr, scope)
 }
 
 // ─────────────────────────────────────────────────────────────

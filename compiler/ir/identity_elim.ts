@@ -142,7 +142,6 @@ function substOpNode(
     }
     case 'inputRef':
     case 'regRef':
-    case 'delayRef':
     case 'paramRef':
     case 'typeParamRef':
     case 'bindingRef':
@@ -297,9 +296,9 @@ export function identityElim(prog: ResolvedProgram): ResolvedProgram {
       }
     } else if (decl.op === 'regDecl') {
       decl.init = substExpr(decl.init, subst, memo)
-    } else if (decl.op === 'delayDecl') {
-      decl.init   = substExpr(decl.init,   subst, memo)
-      decl.update = substExpr(decl.update, subst, memo)
+      if (decl.update !== undefined) {
+        decl.update = substExpr(decl.update, subst, memo)
+      }
     }
     // ParamDecl, ProgramDecl — no expressions to rewrite; leave alone.
   }

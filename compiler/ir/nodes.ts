@@ -8,21 +8,21 @@
  *
  * Categorical shape
  * -----------------
- * Decls (introduction sites): InputDecl, OutputDecl, RegDecl, DelayDecl,
- *   ParamDecl, TypeParamDecl, InstanceDecl, ProgramDecl, BinderDecl, plus
- *   the sum-type members (SumTypeDef, SumVariant, StructTypeDef,
+ * Decls (introduction sites): InputDecl, OutputDecl, RegDecl, ParamDecl,
+ *   TypeParamDecl, InstanceDecl, ProgramDecl, BinderDecl, plus the
+ *   sum-type members (SumTypeDef, SumVariant, StructTypeDef,
  *   StructField, AliasTypeDef). Each carries an identity string `name`.
  *
- * Refs (uses): InputRef, RegRef, DelayRef, ParamRef, TypeParamRef,
- *   BindingRef. Each holds `decl: <its decl type>`. Refs hold the decl
- *   by reference identity (===) — two `RegRef.decl` for the same
- *   register are the same object.
+ * Refs (uses): InputRef, RegRef, ParamRef, TypeParamRef, BindingRef.
+ *   Each holds `decl: <its decl type>`. Refs hold the decl by reference
+ *   identity (===) — two `RegRef.decl` for the same register are the
+ *   same object.
  *
  * Bridges between term-and-type levels: NestedOut ties an instance ref
  * to a specific output port of its program type; ResolvedTagNode and
  * ResolvedMatchNode tie expressions to sum-type variants.
  *
- * Graph property: the resolved tree admits cycles. A delay's `update`
+ * Graph property: the resolved tree admits cycles. A reg's `update`
  * may transitively reference its own register; an instance's input may
  * reference a value that depends on the same instance via feedback.
  *
@@ -129,29 +129,28 @@ export interface TypeParamDecl {
 // ─────────────────────────────────────────────────────────────
 
 /** Provenance tag set by `inlineInstances:liftClonedBody` when a reg
- *  or delay was lifted from a sub-instance. The outer instance's name
- *  is the originating session-level instance (or 'synthetic' for cycle-
- *  break delays inserted by `traceCycles`). Used by post-strata passes
- *  that need to identify decls by their lineage without parsing the
- *  renamed `${instance}_${innerName}` prefix string. Replaces the
- *  §2.3 D7 name-prefix anti-pattern. */
-export type LiftedFrom = string | 'synthetic'
+ *  was lifted from a sub-instance. The value is the originating
+ *  session-level instance name. Used by post-strata passes that need
+ *  to identify decls by their lineage without parsing the renamed
+ *  `${instance}_${innerName}` prefix string. */
+export type LiftedFrom = string
 
+/** The single state-bearing IR primitive. Carries an init expression
+ *  (evaluated at sample 0) and an optional update expression (evaluated
+ *  at each subsequent sample to produce the next value). When `update`
+ *  is undefined, the reg holds its current value.
+ *
+ *  A-canonical shape: the elaborator folds parsed `delay name = u init v`
+ *  into `RegDecl { init: v, update: u }`, and folds parsed
+ *  `next x = e` body-assigns into the corresponding RegDecl's `update`
+ *  field. The resolved IR therefore has one canonical shape per concept:
+ *  every reg's full specification lives on the decl itself. */
 export interface RegDecl {
   op: 'regDecl'
   name: string
   init: ResolvedExpr
+  update?: ResolvedExpr
   type?: ScalarKind | AliasTypeDef
-  /** Optional provenance tag — set when the decl was lifted from a
-   *  sub-instance during `inlineInstances`. */
-  _liftedFrom?: LiftedFrom
-}
-
-export interface DelayDecl {
-  op: 'delayDecl'
-  name: string
-  update: ResolvedExpr
-  init: ResolvedExpr
   /** Optional provenance tag — set when the decl was lifted from a
    *  sub-instance during `inlineInstances`. */
   _liftedFrom?: LiftedFrom
@@ -190,7 +189,6 @@ export interface ProgramDecl {
 
 export type BodyDecl =
   | RegDecl
-  | DelayDecl
   | ParamDecl
   | InstanceDecl
   | ProgramDecl
@@ -207,13 +205,18 @@ export interface OutputAssign {
   expr: ResolvedExpr
 }
 
+/** NextUpdate exists only as a transitional surface-IR concept; the
+ *  elaborator folds it into `RegDecl.update` and the resolved IR no
+ *  longer carries it as a body-assign. Kept in the type union for
+ *  legacy callers that construct it directly; future cleanup may
+ *  remove it from BodyAssign entirely. */
 export interface NextUpdate {
   op: 'nextUpdate'
-  target: RegDecl | DelayDecl
+  target: RegDecl
   expr: ResolvedExpr
 }
 
-export type BodyAssign = OutputAssign | NextUpdate
+export type BodyAssign = OutputAssign
 
 // ─────────────────────────────────────────────────────────────
 // Binders — anonymous names introduced by let / combinators / match arms
@@ -233,7 +236,6 @@ export interface BinderDecl {
 
 export interface InputRef    { op: 'inputRef';    decl: InputDecl }
 export interface RegRef      { op: 'regRef';      decl: RegDecl }
-export interface DelayRef    { op: 'delayRef';    decl: DelayDecl }
 export interface ParamRef    { op: 'paramRef';    decl: ParamDecl }
 export interface TypeParamRef { op: 'typeParamRef'; decl: TypeParamDecl }
 export interface BindingRef  { op: 'bindingRef';  decl: BinderDecl }
@@ -439,7 +441,7 @@ export type ResolvedExprOp =
   // Array ops (lowered by array_lower in C6)
   | Zeros | ArraySet
   // References (graph edges)
-  | InputRef | RegRef | DelayRef | ParamRef | TypeParamRef | BindingRef
+  | InputRef | RegRef | ParamRef | TypeParamRef | BindingRef
   | NestedOut
   // Sentinels
   | SampleRate | SampleIndex

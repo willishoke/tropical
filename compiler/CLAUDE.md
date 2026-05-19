@@ -13,9 +13,20 @@ typed signal-flow graphs with a guarded trace — see the root
 day, but the shape of every pass matches it.
 
 ```
-parse  →  elaborate  →  specialize  →  sumLower  →  traceCycles
-       →  inlineInstances  →  arrayLower  →  compileResolved (or interpret_resolved, or emit_wasm)
+parse  →  elaborate  →  [strict cycle check]  →  strata
+       →  compileResolved (or interpret_resolved, or emit_wasm)
+
+strata = assertAcyclic → specialize → sumLower → inlineInstances → arrayLower → identityElim
 ```
+
+Cycle handling lives in the "standard realization" (elaborator + session
+materializer), not in the compiler. The elaborator rejects source code
+with inter-instance cycles that don't pass through an explicit user
+register; the session materializer rejects MCP session graphs with
+the same shape. Strata's `assertAcyclic` confirms the contract at the
+boundary. The shared cycle-detection algorithm lives in
+`compiler/ir/lowering/cycle_break.ts` for use by future realizations
+that want their own cycle-break policy (iterative, WDF, etc.).
 
 No audio runs in this layer; we produce JSON / WASM bytes and hand them
 to the engine.
@@ -46,7 +57,12 @@ ir/                   The strata pipeline + resolved-IR emit boundary
   elaborator.ts             ParsedProgram → ResolvedProgram (drops names)
   specialize.ts             clone-with-rewrite (drops type parameters)
   sum_lower.ts              variants → tag + scalar bundles (drops sum types)
-  trace_cycles.ts           Tarjan SCC + synthetic delays (the guarded trace operator)
+  lowering/cycle_break.ts   Tarjan SCC + synthetic-reg insertion (cycle-break
+                            helper for realization-side use; the compiler
+                            itself asserts acyclic, never breaks cycles)
+  acyclic.ts                strataPipeline-entry assertion + AcyclicityViolation
+  elaboration_diagnostics.ts  CycleDiagnostic record, CycleViolation error
+                            class, error formatter
   inline_instances.ts       splices InstanceDecls; lifts decls with _liftedFrom provenance
                             (drops nesting)
   array_lower.ts            unrolls fold/generate/map2/zipWith/chain/scan/iterate/let;
@@ -118,7 +134,7 @@ counterpart is encountered, registered in the appropriate scope, and
 re-used by reference at every site that names it.
 
 Output: `ResolvedProgram` (`ir/nodes.ts`). Every reference (`InputRef`,
-`RegRef`, `DelayRef`, `ParamRef`, `TypeParamRef`, `BindingRef`,
+`RegRef`, `ParamRef`, `TypeParamRef`, `BindingRef`,
 `NestedOut`) carries a direct decl-object pointer. After this pass, no
 string lookups, no scope walks. Decl identity (`===`) is the only
 substrate the rest of the compiler operates on.
@@ -135,8 +151,8 @@ identity).
 | Pass               | What it does |
 |--------------------|--------------|
 | `specialize`       | Drops type parameters. Substitutes integer values for `TypeParamDecl` refs in shape dims and expression-position `TypeParamRef`. Each `(template, args)` pair produces a fresh `ResolvedProgram`; the cloner shares sum/struct/alias type defs to preserve variant identity. |
-| `sumLower`         | Drops sum types. Sum-typed `DelayDecl`s decompose into one tag (int) slot plus one scalar slot per `(variant, field)` pair across all variants. `MatchExpr` becomes a select-chain; `TagExpr` becomes a tag literal + scalar writes. After this pass the IR has no `tag`, `match`, or sum-typed delay. |
-| `traceCycles`      | The trace operator's implementation. Tarjan SCC over inter-instance dependencies; each non-trivial SCC gets a synthetic `DelayDecl` on a chosen back-edge (init `0`), and dependent `NestedOut` refs rewrite to read it. The synthetic delay is tagged `_liftedFrom: 'synthetic'`. Causality is enforced by routing every cycle through the unit-delay endomorphism. |
+| `sumLower`         | Drops sum types. Sum-typed `RegDecl`s (those whose `init` is a `Tag`) decompose into one tag (int) slot plus one scalar slot per `(variant, field)` pair across all variants. `MatchExpr` becomes a select-chain; `TagExpr` becomes a tag literal + scalar writes. After this pass the IR has no `tag`, `match`, or sum-typed reg. |
+| `assertAcyclic`    | Confirms the caller honored the strataPipeline contract (input must be acyclic). Throws `AcyclicityViolation` otherwise. Trace handling lives upstream in the realization layer — the elaborator and session materializer throw `CycleViolation` on cyclic input source/wiring respectively, with port-detailed Tier-2 error messages and suggested explicit-delay fixes. |
 | `inlineInstances`  | Drops nesting. Each `InstanceDecl` is spliced into its parent: inner regs/delays lift into the outer body (renamed `${instance}_${inner}`, tagged `_liftedFrom: ${instance}`); inner inputs substitute the wired-in expressions; `NestedOut` refs replace by the inlined output expressions. After this pass the body has no `InstanceDecl` and no `NestedOut`. |
 | `arrayLower`       | Drops shapes and combinators. `let`, `fold`, `scan`, `generate`, `iterate`, `chain`, `map2`, `zipWith` unroll via static shape dims; their `BinderDecl`s are substituted away. `zeros{count}` materializes to inline arrays. `index` and `arraySet` survive as scalar ops over slot bundles. |
 
@@ -145,7 +161,8 @@ Post-strata invariants:
 - scalar-only (no surviving array decls; arrays survive only as inline
   literals in expressions or as backing stores for stateful arrays)
 - monomorphic (no `TypeParamDecl`, no `TypeParamRef`)
-- acyclic (every cycle is broken by a `DelayDecl`)
+- acyclic (cycles are an elaboration error; production code paths
+  never produce cyclic IR)
 - non-nested (no `InstanceDecl`, no `NestedOut`)
 - combinator-free (no `let`, `fold`, etc.)
 - decl-identity-keyed (refs hold decl objects, never strings)
@@ -163,12 +180,14 @@ Two files split the session-emit responsibility:
   `ExprNode`-shaped wiring into `ResolvedExpr`, materializes
   `dac.out` graph_outputs as `OutputAssign`s, synthesizes `ParamDecl`s
   on demand, extracts session-level `delay()` nodes into synthetic
-  `DelayDecl`s, and threads gate expressions through the strata
-  pipeline (gateable instances get a two-phase wrap — pre-strata on
-  the cloned type's outputs and own decls, post-strata on lifted
-  sub-instance decls keyed off `_liftedFrom`). Output is a post-strata
-  `ResolvedProgram` plus a `Map<string, ParamDecl>` for paramHandle
-  stitching. Shared by `compile_session.ts` and
+  `RegDecl`s with `update` populated, throws `CycleViolation` on
+  session graphs with cycles that don't pass through an explicit
+  session-level `delay()`, and threads gate expressions through the
+  strata pipeline (gateable instances get a two-phase wrap —
+  pre-strata on the cloned type's outputs and own decls, post-strata
+  on lifted sub-instance decls keyed off `_liftedFrom`). Output is a
+  post-strata `ResolvedProgram` plus a `Map<string, ParamDecl>` for
+  paramHandle stitching. Shared by `compile_session.ts` and
   `interpret_resolved.ts` so the JIT and the oracle see the same IR.
 
 - **`ir/compile_session.ts`** — JIT bookend. Calls
@@ -274,7 +293,8 @@ the repo root. Notable suites:
 Unit (in this directory):
 
 - `ir/*.test.ts` — strata pipeline unit tests (specialize, sum_lower,
-  trace_cycles, inline_instances, array_lower, slots, clone)
+  inline_instances, array_lower, slots, clone, acyclic,
+  cycle_break (in lowering/), elaboration_diagnostics)
 - `parse/*.test.ts` — lexer, parser, raise, round-trip,
   `stdlib_round_trip.test.ts` (every stdlib file print/re-parse)
 - `apply_plan.test.ts` — plan application integration (requires native lib)

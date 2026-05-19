@@ -22,9 +22,9 @@
  *   identity in `Match.arms[i].variant` and `Tag.variant`,
  *   which downstream passes (sum_lower) compare by `===`.
  * - All other decls (`InputDecl`, `OutputDecl`, `TypeParamDecl`,
- *   `RegDecl`, `DelayDecl`, `ParamDecl`, `InstanceDecl`,
- *   `ProgramDecl`, `BinderDecl`) — CLONED, with the `Map<old, new>`
- *   dedup table ensuring each appears at most once.
+ *   `RegDecl`, `ParamDecl`, `InstanceDecl`, `ProgramDecl`,
+ *   `BinderDecl`) — CLONED, with the `Map<old, new>` dedup table
+ *   ensuring each appears at most once.
  *
  * Construction discipline:
  * - For every decl, the new object is inserted into the dedup table
@@ -36,11 +36,11 @@
  */
 
 import type {
-  ResolvedProgram, ResolvedBlock, ResolvedProgramPorts,
+  ResolvedProgram,
   ResolvedExpr, ResolvedExprOp,
   InputDecl, OutputDecl, TypeParamDecl,
-  RegDecl, DelayDecl, ParamDecl, InstanceDecl, ProgramDecl, BodyDecl,
-  BodyAssign, OutputAssign, NextUpdate,
+  RegDecl, ParamDecl, InstanceDecl, ProgramDecl, BodyDecl,
+  BodyAssign, OutputAssign,
   PortType, ShapeDim,
   BinderDecl,
   Tag, Match, MatchArm,
@@ -56,8 +56,8 @@ interface CloneTable {
   inputs:     Map<InputDecl, InputDecl>
   outputs:    Map<OutputDecl, OutputDecl>
   typeParams: Map<TypeParamDecl, TypeParamDecl>
+  /** Unified state-bearing decls — former DelayDecls now live here too. */
   regs:       Map<RegDecl, RegDecl>
-  delays:     Map<DelayDecl, DelayDecl>
   params:     Map<ParamDecl, ParamDecl>
   instances:  Map<InstanceDecl, InstanceDecl>
   programs:   Map<ProgramDecl, ProgramDecl>
@@ -92,7 +92,6 @@ function emptyTable(): CloneTable {
     outputs:    new Map(),
     typeParams: new Map(),
     regs:       new Map(),
-    delays:     new Map(),
     params:     new Map(),
     instances:  new Map(),
     programs:   new Map(),
@@ -243,13 +242,10 @@ function cloneBodyDeclShell(d: BodyDecl, t: CloneTable): BodyDecl {
       const fresh: RegDecl = { op: 'regDecl', name: d.name, init: 0 as ResolvedExpr }
       if (d.type !== undefined) fresh.type = d.type   // ScalarKind | AliasTypeDef (shared)
       if (d._liftedFrom !== undefined) fresh._liftedFrom = d._liftedFrom
+      // update placeholder added only if original had one; the value is
+      // overwritten in fillBodyDecl.
+      if (d.update !== undefined) fresh.update = 0 as ResolvedExpr
       t.regs.set(d, fresh)
-      return fresh
-    }
-    case 'delayDecl': {
-      const fresh: DelayDecl = { op: 'delayDecl', name: d.name, update: 0, init: 0 }
-      if (d._liftedFrom !== undefined) fresh._liftedFrom = d._liftedFrom
-      t.delays.set(d, fresh)
       return fresh
     }
     case 'paramDecl': {
@@ -294,11 +290,9 @@ function cloneBodyDeclShell(d: BodyDecl, t: CloneTable): BodyDecl {
 function fillBodyDecl(orig: BodyDecl, fresh: BodyDecl, t: CloneTable): void {
   if (orig.op === 'regDecl' && fresh.op === 'regDecl') {
     fresh.init = cloneExpr(orig.init, t)
-    return
-  }
-  if (orig.op === 'delayDecl' && fresh.op === 'delayDecl') {
-    fresh.update = cloneExpr(orig.update, t)
-    fresh.init = cloneExpr(orig.init, t)
+    if (orig.update !== undefined) {
+      fresh.update = cloneExpr(orig.update, t)
+    }
     return
   }
   if (orig.op === 'instanceDecl' && fresh.op === 'instanceDecl') {
@@ -322,24 +316,14 @@ function fillBodyDecl(orig: BodyDecl, fresh: BodyDecl, t: CloneTable): void {
 // ─────────────────────────────────────────────────────────────
 
 function cloneAssign(a: BodyAssign, t: CloneTable): BodyAssign {
-  if (a.op === 'outputAssign') {
-    const target: OutputDecl | { kind: 'dac' } =
-      'op' in a.target
-        ? cloneOutputDecl(a.target, t)
-        : { kind: 'dac' }   // sentinel — fresh object, semantically a singleton
-    const fresh: OutputAssign = {
-      op: 'outputAssign',
-      target,
-      expr: cloneExpr(a.expr, t),
-    }
-    return fresh
-  }
-  // nextUpdate
-  const target: RegDecl | DelayDecl = a.target.op === 'regDecl'
-    ? lookupRegDecl(a.target, t)
-    : lookupDelayDecl(a.target, t)
-  const fresh: NextUpdate = {
-    op: 'nextUpdate',
+  // Post-Phase-0a: BodyAssign is OutputAssign-only. NextUpdate folded
+  // into RegDecl.update at elaboration time.
+  const target: OutputDecl | { kind: 'dac' } =
+    'op' in a.target
+      ? cloneOutputDecl(a.target, t)
+      : { kind: 'dac' }   // sentinel — fresh object, semantically a singleton
+  const fresh: OutputAssign = {
+    op: 'outputAssign',
     target,
     expr: cloneExpr(a.expr, t),
   }
@@ -349,12 +333,6 @@ function cloneAssign(a: BodyAssign, t: CloneTable): BodyAssign {
 function lookupRegDecl(d: RegDecl, t: CloneTable): RegDecl {
   const cloned = t.regs.get(d)
   if (!cloned) throw new Error(`clone: unregistered RegDecl '${d.name}'`)
-  return cloned
-}
-
-function lookupDelayDecl(d: DelayDecl, t: CloneTable): DelayDecl {
-  const cloned = t.delays.get(d)
-  if (!cloned) throw new Error(`clone: unregistered DelayDecl '${d.name}'`)
   return cloned
 }
 
@@ -424,7 +402,6 @@ function cloneOpNode(node: ResolvedExprOp, t: CloneTable): ResolvedExprOp {
     // Refs — point at the cloned decl via the dedup table.
     case 'inputRef':  return { op: 'inputRef',  decl: cloneInputDecl(node.decl, t) }
     case 'regRef':    return { op: 'regRef',    decl: lookupRegDecl(node.decl, t) }
-    case 'delayRef':  return { op: 'delayRef',  decl: lookupDelayDecl(node.decl, t) }
     case 'paramRef': {
       const cloned = t.params.get(node.decl)
       if (!cloned) throw new Error(`clone: unregistered ParamDecl '${node.decl.name}'`)

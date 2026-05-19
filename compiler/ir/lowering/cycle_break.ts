@@ -1,119 +1,164 @@
 /**
- * trace_cycles.ts — Phase C4-B: cycle detection on the resolved IR.
+ * compiler/ir/lowering/cycle_break.ts — shared cycle-break helper.
  *
- * Detects cycles in the inter-instance dependency graph of a
- * `ResolvedProgram` and inserts a synthetic `DelayDecl` on a chosen
- * back-edge for each cycle. The output is a fresh `ResolvedProgram`
- * (no in-place mutation) — see PHASE_C_PLAN.md §7e for the purity
- * argument.
+ * This module is the single home of the cycle-detection + cycle-break
+ * algorithm for tropical's resolved IR. Two consumers:
  *
- * Algorithm (mirrors `compiler/flatten.ts:927-986`):
- *   1. Build a directed graph: each `InstanceDecl` is a node; an edge
- *      A → B exists when an input wire of A references a `NestedOut`
- *      whose `instance === B`.
+ *   - `compiler/ir/trace_cycles.ts` — Phase 0+ shim that calls
+ *     `breakInstanceCycles` to produce the post-trace IR for the
+ *     compiler's strata pipeline. (Phase 3 retires this in-pipeline
+ *     use; cycle-breaking moves to the realization layer above the
+ *     compiler.)
+ *
+ *   - `compiler/ir/acyclic.ts` — the strataPipeline-boundary
+ *     acyclicity check, which consumes only `findInstanceCycles`
+ *     (the detector) and `AcyclicityViolation` to assert the
+ *     post-trace invariant.
+ *
+ * Algorithm:
+ *   1. Build an instance-level dependency graph: instance A depends
+ *      on instance B iff some `NestedOut` ref in A's input wires
+ *      reads from B's outputs.
  *   2. Run Tarjan's SCC over the graph.
- *   3. For each non-trivial SCC, designate the first member by source
- *      order (its position in `body.decls`) as the break target.
- *   4. For each output port of the break target referenced by another
- *      cycle member's input wires, allocate a synthetic `DelayDecl`
- *      whose update reads the original `NestedOut` and whose init is
- *      `0`. Rewrite the offending `NestedOut`s in cycle-member input
- *      wires to read the synthetic delay instead.
- *   5. Re-run Tarjan to confirm no cycles remain.
+ *   3. Non-trivial SCCs are cycles: more than one member, OR a
+ *      single member with a self-edge.
+ *   4. For each cycle, pick the first member by source order
+ *      (instance position in body.decls) as the break target.
+ *   5. For each output of the break target referenced by cycle
+ *      members, allocate a synthetic `RegDecl` whose update reads
+ *      the current-sample value of that output. The synthetic reg
+ *      is tagged `_liftedFrom: 'synthetic'`. Cycle members rewrite
+ *      `NestedOut(breakTarget.out)` to `RegRef(syntheticReg)`,
+ *      reading the previous-sample value and breaking the cycle
+ *      via the unit-delay semantics of the reg.
  *
- * For the C4 corpus the stdlib has no inter-instance cycles (cycles
- * exist only post-inlining, which is C5's territory; in stdlib source
- * any feedback loop is broken explicitly via a `delay`). So this pass
- * is the identity for every stdlib program today; the SCC plumbing
- * is implemented anyway because C5 will rely on it.
+ * Pure: returns a fresh `ResolvedProgram` when rewrites occur, or
+ * the input by identity when no cycles are present.
  */
 
 import type {
   ResolvedProgram, ResolvedExpr, ResolvedExprOp,
   ResolvedBlock,
-  BodyDecl, BodyAssign, OutputAssign, NextUpdate,
-  InstanceDecl, OutputDecl, DelayDecl,
-  NestedOut,
-} from './nodes.js'
+  BodyDecl,
+  InstanceDecl, OutputDecl, RegDecl,
+} from '../nodes.js'
 
 // ─────────────────────────────────────────────────────────────
-// Public entry
+// Public API
 // ─────────────────────────────────────────────────────────────
 
-export function traceCycles(prog: ResolvedProgram): ResolvedProgram {
+/** Find every non-trivial SCC in `prog`'s inter-instance dependency
+ *  graph. A non-trivial SCC has more than one member OR a single
+ *  member with a self-edge. Pure: no mutation, no side effects. */
+export function findInstanceCycles(prog: ResolvedProgram): InstanceDecl[][] {
   const instances = collectInstances(prog.body.decls)
-  // A program with no instances has no inter-instance graph. A program with
-  // exactly one instance can still have a self-loop (instance 'a' wires its
-  // own input from its own output) — so don't skip the deps build for the
-  // 1-instance case; only the 0-instance case is a guaranteed identity.
-  if (instances.length === 0) return prog
-
-  const deps = buildInstanceDeps(prog, instances)
+  if (instances.length === 0) return []
+  const deps = buildInstanceDeps(instances)
   const sccs = tarjanSCC(instances, deps)
-  // Filter to non-trivial SCCs (more than one member, OR a single
-  // member with a self-edge — possible if an instance's input wires
-  // contain a NestedOut to itself).
-  const nontrivial = sccs.filter(scc =>
-    scc.length > 1 || (scc.length === 1 && deps.get(scc[0])?.has(scc[0])))
-  if (nontrivial.length === 0) return prog
+  return sccs.filter(scc =>
+    scc.length > 1 || (scc.length === 1 && deps.get(scc[0])?.has(scc[0])),
+  )
+}
 
-  // For each non-trivial SCC, pick the first member by source order
-  // and rewrite the cycle. Source order for an SCC = the smallest
-  // index in `instances` (which is body-decl order).
+/** Provenance for one broken cycle. Returned alongside the lowered
+ *  program so callers (debuggers, error formatters) can localize. */
+export interface BrokenCycle {
+  readonly scc: ReadonlyArray<InstanceDecl>
+  readonly breakTarget: InstanceDecl
+  /** Output ports of `breakTarget` that were promoted to synthetic
+   *  regs (one per port referenced by other cycle members). */
+  readonly breakPorts: ReadonlyArray<OutputDecl>
+}
+
+/** Result of `breakInstanceCycles`. */
+export interface CycleBreakResult {
+  readonly lowered: ResolvedProgram
+  readonly syntheticRegs: ReadonlyArray<RegDecl>
+  readonly cycles: ReadonlyArray<BrokenCycle>
+}
+
+/** Break every cycle in `prog`'s inter-instance graph by inserting
+ *  synthetic regs (one-sample-delay registers). Returns the lowered
+ *  acyclic program plus provenance metadata. When `prog` has no
+ *  cycles, returns the input by identity (lowered === prog,
+ *  syntheticRegs empty, cycles empty). */
+export function breakInstanceCycles(prog: ResolvedProgram): CycleBreakResult {
+  const instances = collectInstances(prog.body.decls)
+  if (instances.length === 0) {
+    return { lowered: prog, syntheticRegs: [], cycles: [] }
+  }
+
+  const deps = buildInstanceDeps(instances)
+  const sccs = tarjanSCC(instances, deps)
+  const nontrivial = sccs.filter(scc =>
+    scc.length > 1 || (scc.length === 1 && deps.get(scc[0])?.has(scc[0])),
+  )
+  if (nontrivial.length === 0) {
+    return { lowered: prog, syntheticRegs: [], cycles: [] }
+  }
+
+  // Per non-trivial SCC: pick the first member by source order
+  // (smallest index in `instances`, which is body-decl order) as
+  // the break target. Record the (cycle-member → break-target)
+  // edges so the rewriter can rewrite NestedOuts pointing at the
+  // break target.
   const orderIndex = new Map<InstanceDecl, number>()
   instances.forEach((inst, i) => orderIndex.set(inst, i))
 
-  // Accumulators for the rewritten body.
-  const syntheticDelays: DelayDecl[] = []
-  // Map (breakInstance, outputDecl) → synthetic delay holding its
-  // previous-sample value.
-  const breakerDelay = new Map<string, DelayDecl>()
-  // Set of (cycle-member, breakInstance) pairs; if a NestedOut belongs
-  // to one of these, rewrite to a DelayRef on the breaker.
+  const syntheticRegs: RegDecl[] = []
+  const breakerReg = new Map<string, RegDecl>()
   const rewriteTargets = new Map<InstanceDecl, Set<InstanceDecl>>()
+  const cyclesProvenance: BrokenCycle[] = []
+  const breakerPortsByCycle = new Map<InstanceDecl, OutputDecl[]>()
 
   for (const scc of nontrivial) {
     const sortedScc = [...scc].sort((a, b) => orderIndex.get(a)! - orderIndex.get(b)!)
     const breakTarget = sortedScc[0]
+    breakerPortsByCycle.set(breakTarget, [])
     for (const member of sortedScc) {
-      // Don't skip the breakTarget itself: in a single-member SCC with a
-      // self-edge, the only wire that closes the cycle is the breakTarget's
-      // own wire to itself. Including it in rewriteTargets ensures that
-      // wire becomes a delayRef on the synthetic delay. For multi-member
-      // SCCs, the breakTarget never references itself, so this is a no-op
-      // there.
       let s = rewriteTargets.get(member)
       if (!s) { s = new Set(); rewriteTargets.set(member, s) }
       s.add(breakTarget)
     }
+    cyclesProvenance.push({
+      scc: sortedScc,
+      breakTarget,
+      breakPorts: breakerPortsByCycle.get(breakTarget)!,
+    })
   }
 
-  // Lookup helper: for a given (instance, output) pair, allocate the
-  // synthetic delay lazily on first use.
-  const breakerFor = (inst: InstanceDecl, output: OutputDecl): DelayDecl => {
+  // Allocate the synthetic reg for a given (breakTarget, output) on
+  // first use; subsequent references resolve to the same reg.
+  const breakerFor = (inst: InstanceDecl, output: OutputDecl): RegDecl => {
     const key = `${inst.name}::${output.name}`
-    let d = breakerDelay.get(key)
+    let d = breakerReg.get(key)
     if (d) return d
     d = {
-      op: 'delayDecl',
+      op: 'regDecl',
       name: `_feedback_${inst.name}_${output.name}`,
-      // Update reads the current sample of the broken output. The
-      // synthetic delay's role is to hold the previous sample so that
-      // cycle members read a one-sample-delayed view of the cycle
-      // breaker — same semantics as legacy flatten.ts.
+      // The synthetic reg's update reads the current sample of the
+      // broken output; the reg holds that value to make it readable
+      // one sample later by the cycle members. The `_feedback_` name
+      // prefix distinguishes these from user-written regs (consumed
+      // by trace_cycles.test.ts and any future analyses that want
+      // to identify cycle-break regs). Post-Phase 4b strict policy
+      // means production code paths never produce these (cycles in
+      // source throw at elaborate-time); the helper survives for
+      // direct invocation by tests and future realizations.
       update: { op: 'nestedOut', instance: inst, output },
       init: 0,
-      _liftedFrom: 'synthetic',
     }
-    breakerDelay.set(key, d)
-    syntheticDelays.push(d)
+    breakerReg.set(key, d)
+    syntheticRegs.push(d)
+    const ports = breakerPortsByCycle.get(inst)
+    if (ports) ports.push(output)
     return d
   }
 
   // Rewriter: in any expression that belongs to an instance in
   // `rewriteTargets`, replace `NestedOut` whose instance is one of
-  // the break-targets for that owner with a `DelayRef` to the
-  // appropriate synthetic delay.
+  // the break-targets for that owner with a `RegRef` to the
+  // appropriate synthetic reg.
   const rewriteForOwner = (expr: ResolvedExpr, breakSet: Set<InstanceDecl>): ResolvedExpr => {
     if (typeof expr === 'number' || typeof expr === 'boolean') return expr
     if (Array.isArray(expr)) return expr.map(e => rewriteForOwner(e, breakSet))
@@ -123,11 +168,11 @@ export function traceCycles(prog: ResolvedProgram): ResolvedProgram {
     switch (node.op) {
       case 'nestedOut': {
         if (breakSet.has(node.instance)) {
-          return { op: 'delayRef', decl: breakerFor(node.instance, node.output) }
+          return { op: 'regRef', decl: breakerFor(node.instance, node.output) }
         }
         return node
       }
-      case 'inputRef': case 'regRef': case 'delayRef': case 'paramRef':
+      case 'inputRef': case 'regRef': case 'paramRef':
       case 'typeParamRef': case 'bindingRef':
       case 'sampleRate': case 'sampleIndex':
       case 'tag':
@@ -190,17 +235,12 @@ export function traceCycles(prog: ResolvedProgram): ResolvedProgram {
     }
   }
 
-  // Rebuild instance decls with rewritten input wires.
-  //
-  // Identity invariant: we mutate `decl.inputs` in place rather than
-  // spread-cloning. The break target's decl is reused unchanged, and so
-  // are decls of any non-cycle instances; mixing fresh spread copies with
-  // reused originals would split InstanceDecl identity, so any nestedOut
-  // ref in the program (assigns, the break target's own inputs, the
-  // synthetic delay's `update` built above) that was not rewalked here
-  // would point at an orphaned original. Mutation keeps every reference
-  // valid. The strata pipeline doesn't share `prog` with anything else
-  // after this call, so in-place mutation is safe.
+  // Rebuild instance decls with rewritten input wires. We mutate
+  // `decl.inputs` in place rather than spread-cloning to preserve
+  // InstanceDecl identity — non-cycle instances stay the same object,
+  // so any other expression in the program (assigns, other decls'
+  // inits, synthetic regs' updates built above) referencing them
+  // remains valid by ===.
   const newDecls: BodyDecl[] = []
   for (const decl of prog.body.decls) {
     if (decl.op === 'instanceDecl' && rewriteTargets.has(decl)) {
@@ -212,22 +252,24 @@ export function traceCycles(prog: ResolvedProgram): ResolvedProgram {
     }
     newDecls.push(decl)
   }
-  // Append synthetic delays after instance decls so they appear at the
-  // tail of the body's decl list. (Legacy puts them in `sessionDelays`
-  // which gets allocated in append order; positioning at the end keeps
-  // existing slot indices stable.)
-  for (const d of syntheticDelays) newDecls.push(d)
+  // Synthetic regs go at the tail of the body's decl list, preserving
+  // existing slot-allocation order for non-synthetic decls.
+  for (const d of syntheticRegs) newDecls.push(d)
 
   const newBody: ResolvedBlock = {
     op: 'block',
     decls: newDecls,
     assigns: prog.body.assigns,
   }
-  return { ...prog, body: newBody }
+  return {
+    lowered: { ...prog, body: newBody },
+    syntheticRegs,
+    cycles: cyclesProvenance,
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
-// Graph construction
+// Internals — graph construction + SCC
 // ─────────────────────────────────────────────────────────────
 
 function collectInstances(decls: BodyDecl[]): InstanceDecl[] {
@@ -236,19 +278,12 @@ function collectInstances(decls: BodyDecl[]): InstanceDecl[] {
   return out
 }
 
-/**
- * Build an instance-level dependency map: A → set of instances whose
- * outputs A's input wires reference. Self-edges are recorded too
- * (a single-member SCC with a self-edge is still a cycle).
- */
 function buildInstanceDeps(
-  _prog: ResolvedProgram,
   instances: InstanceDecl[],
 ): Map<InstanceDecl, Set<InstanceDecl>> {
   const allInstances = new Set(instances)
   const deps = new Map<InstanceDecl, Set<InstanceDecl>>()
   for (const inst of instances) deps.set(inst, new Set())
-
   for (const inst of instances) {
     const set = deps.get(inst)!
     for (const wire of inst.inputs) {
@@ -264,7 +299,10 @@ function collectNestedOutInstances(
   allInstances: Set<InstanceDecl>,
 ): void {
   if (typeof expr !== 'object' || expr === null) return
-  if (Array.isArray(expr)) { for (const e of expr) collectNestedOutInstances(e, out, allInstances); return }
+  if (Array.isArray(expr)) {
+    for (const e of expr) collectNestedOutInstances(e, out, allInstances)
+    return
+  }
   switch (expr.op) {
     case 'nestedOut':
       if (allInstances.has(expr.instance)) out.add(expr.instance)
@@ -317,51 +355,41 @@ function collectNestedOutInstances(
     case 'clamp': case 'select': case 'index': case 'arraySet':
       for (const a of expr.args) collectNestedOutInstances(a, out, allInstances)
       return
-    case 'inputRef': case 'regRef': case 'delayRef': case 'paramRef':
+    case 'inputRef': case 'regRef': case 'paramRef':
     case 'typeParamRef': case 'bindingRef':
     case 'sampleRate': case 'sampleIndex':
       return
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// Tarjan's SCC over decl-keyed graphs
-// ─────────────────────────────────────────────────────────────
-
-/**
- * Decl-keyed Tarjan's SCC. Visits nodes in `nodes` order, which —
- * for `traceCycles` — is body-decl order. SCCs are emitted in
- * reverse-topo order; each SCC's internal order matches stack pop
- * order. Source-order tie-breaks happen at the call site.
- */
-function tarjanSCC<T extends object>(
+/** Tarjan's strongly connected components algorithm. */
+function tarjanSCC<T>(
   nodes: T[],
-  deps: Map<T, Set<T>>,
+  deps: ReadonlyMap<T, ReadonlySet<T>>,
 ): T[][] {
-  let idx = 0
-  const indices = new Map<T, number>()
-  const lowlinks = new Map<T, number>()
+  let index = 0
+  const indexOf = new Map<T, number>()
+  const lowlink = new Map<T, number>()
   const onStack = new Set<T>()
   const stack: T[] = []
   const sccs: T[][] = []
 
-  function visit(v: T): void {
-    indices.set(v, idx)
-    lowlinks.set(v, idx)
-    idx++
+  const strongConnect = (v: T): void => {
+    indexOf.set(v, index)
+    lowlink.set(v, index)
+    index++
     stack.push(v)
     onStack.add(v)
-
-    for (const w of deps.get(v) ?? []) {
-      if (!indices.has(w)) {
-        visit(w)
-        lowlinks.set(v, Math.min(lowlinks.get(v)!, lowlinks.get(w)!))
+    const successors = deps.get(v) ?? new Set<T>()
+    for (const w of successors) {
+      if (!indexOf.has(w)) {
+        strongConnect(w)
+        lowlink.set(v, Math.min(lowlink.get(v)!, lowlink.get(w)!))
       } else if (onStack.has(w)) {
-        lowlinks.set(v, Math.min(lowlinks.get(v)!, indices.get(w)!))
+        lowlink.set(v, Math.min(lowlink.get(v)!, indexOf.get(w)!))
       }
     }
-
-    if (lowlinks.get(v) === indices.get(v)) {
+    if (lowlink.get(v) === indexOf.get(v)) {
       const scc: T[] = []
       let w: T
       do {
@@ -373,8 +401,8 @@ function tarjanSCC<T extends object>(
     }
   }
 
-  for (const n of nodes) {
-    if (!indices.has(n)) visit(n)
+  for (const v of nodes) {
+    if (!indexOf.has(v)) strongConnect(v)
   }
   return sccs
 }

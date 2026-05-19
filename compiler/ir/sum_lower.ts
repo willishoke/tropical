@@ -1,57 +1,61 @@
 /**
  * sum_lower.ts — Phase C4: sum-type decomposition on the resolved IR.
  *
- * Decomposes every sum-typed `DelayDecl` (one whose `init` is a
- * `Tag`) into N+1 scalar `DelayDecl`s — a discriminator slot
- * (int) plus one slot per (variant, field) pair across all variants —
- * and lowers every `Match`/`Tag` to scalar select-chains and
- * variant-index literals.
+ * Decomposes every sum-typed `RegDecl` (one whose `init` is a `Tag`)
+ * into N+1 scalar `RegDecl`s — a discriminator slot (int) plus one
+ * slot per (variant, field) pair across all variants — and lowers
+ * every `Match`/`Tag` to scalar select-chains and variant-index
+ * literals.
  *
  * After this pass the program contains no `tag` or `match` expressions
- * and no sum-typed delays. Decl identity is preserved end-to-end:
- *   - Each replacement scalar `DelayDecl` is a fresh decl object.
- *   - References (`DelayRef`, `BindingRef`) are rewritten by
- *     identity replacement, never by name string.
+ * and no sum-typed regs. Decl identity is preserved end-to-end:
+ *   - Each replacement scalar `RegDecl` is a fresh decl object.
+ *   - References (`RegRef`, `BindingRef`) are rewritten by identity
+ *     replacement, never by name string.
  *
- * Algorithm mirrors `compiler/sum_lowering.ts` (legacy reference) so
- * the pre-`emit_numeric` slot layout of `EnvExpDecay`/`TriggerRamp`
- * matches the legacy pipeline byte-for-byte.
+ * Post-Phase-0a: the IR has a single unified `RegDecl` primitive with
+ * optional `update`. Sum-typed regs are recognized by `init` being a
+ * `Tag` expression; their `update` (when present) is the sum-valued
+ * next-state expression that gets per-slot-extracted into each
+ * replacement scalar slot. NextUpdate body-assigns are gone (folded
+ * into decl.update at elaboration), so the lowering operates entirely
+ * on decl-side update fields.
  *
  * Constraints (matching legacy):
- *   - A sum-typed delay's `init` MUST be a `Tag` (constant
- *     variant constructor). Anything else is a structural error.
+ *   - A sum-typed reg's `init` MUST be a `Tag` (constant variant
+ *     constructor). Anything else is a structural error.
  *   - Match-arm payload bindings are only supported when the
- *     scrutinee is a `DelayRef` to a sum-typed delay. Other
- *     scrutinee shapes throw.
+ *     scrutinee is a `RegRef` to a sum-typed reg. Other scrutinee
+ *     shapes throw.
  */
 
 import type {
   ResolvedProgram, ResolvedExpr, ResolvedExprOp,
   ResolvedBlock,
-  BodyDecl, BodyAssign, OutputAssign, NextUpdate,
-  DelayDecl, BinderDecl,
+  BodyDecl, BodyAssign, OutputAssign,
+  RegDecl, BinderDecl,
   SumTypeDef, SumVariant, StructField,
   Tag, Match, MatchArm,
-  DelayRef,
+  RegRef,
 } from './nodes.js'
 
 // ─────────────────────────────────────────────────────────────
-// Sum-delay table — built once before any rewriting starts
+// Sum-reg table — built once before any rewriting starts
 // ─────────────────────────────────────────────────────────────
 
-/** A single bundle slot replacing one sum-typed `DelayDecl`. */
+/** A single bundle slot replacing one sum-typed `RegDecl`. */
 interface SlotEntry {
-  /** The fresh scalar `DelayDecl` for this slot. */
-  decl: DelayDecl
+  /** The fresh scalar `RegDecl` for this slot. */
+  decl: RegDecl
   /** Variant this payload slot belongs to; undefined for the tag slot. */
   variant?: SumVariant
   /** Payload field this slot represents; undefined for the tag slot. */
   field?: StructField
 }
 
-/** Per-original-DelayDecl decomposition. */
-interface SumDelayInfo {
-  original: DelayDecl
+/** Per-original-RegDecl decomposition. */
+interface SumRegInfo {
+  original: RegDecl
   sumType: SumTypeDef
   /** Slot order: [tag, ...per-variant per-field-in-payload-order]. */
   slots: SlotEntry[]
@@ -61,79 +65,73 @@ interface SumDelayInfo {
   payloadByKey: Map<string, SlotEntry>
 }
 
-type SumDelayMap = Map<DelayDecl, SumDelayInfo>
+type SumRegMap = Map<RegDecl, SumRegInfo>
 
 // ─────────────────────────────────────────────────────────────
 // Public entry
 // ─────────────────────────────────────────────────────────────
 
 export function sumLower(prog: ResolvedProgram): ResolvedProgram {
-  const sumDelays = collectSumDelays(prog.body.decls)
-  if (sumDelays.size === 0 && !bodyHasSumExpr(prog.body)) return prog
+  const sumRegs = collectSumRegs(prog.body.decls)
+  if (sumRegs.size === 0 && !bodyHasSumExpr(prog.body)) return prog
 
-  // Pre-allocate fresh DelayDecl objects for every non-sum DelayDecl
-  // too. Reason: a sum-lowered program's `body.decls` contains the
-  // tag-slot decl in place of the original sum-typed delay. Non-sum
-  // delays in the same body must also be replaced (and their
-  // `DelayRef`s rewritten to point at the new objects), otherwise
+  // Pre-allocate fresh RegDecl objects for every non-sum stateful decl
+  // that carries an update too. Reason: a sum-lowered program's
+  // `body.decls` contains the tag-slot decl in place of the original
+  // sum-typed reg. Non-sum regs in the same body that we touch (those
+  // whose update needs rewriting) must also be replaced (and their
+  // RegRefs rewritten to point at the new objects), otherwise
   // expressions in `body.assigns` end up mixing fresh sum-slot decls
   // with the originals — and the slot-table built downstream by
   // `loadProgramDefFromResolved` rejects refs whose decl isn't in the
   // table by identity.
   //
-  // Sum-typed delays have their replacement decls already allocated
-  // by `collectSumDelays`; non-sum delays get a fresh shell here.
-  const delayMap = new Map<DelayDecl, DelayDecl>()
+  // Sum-typed regs have their replacement decls already allocated by
+  // `collectSumRegs`; non-sum regs with updates get a fresh shell
+  // here. Non-sum regs without updates (pure-hold registers) pass
+  // through unchanged.
+  const regMap = new Map<RegDecl, RegDecl>()
   for (const decl of prog.body.decls) {
-    if (decl.op !== 'delayDecl') continue
-    if (sumDelays.has(decl)) {
-      // Map the original to its tag-slot decl. Used by `DelayRef`
+    if (decl.op !== 'regDecl') continue
+    if (sumRegs.has(decl)) {
+      // Map the original to its tag-slot decl. Used by `RegRef`
       // rewriting outside of match-arm scrutinee contexts (e.g. when
-      // a sum-typed delay is read on its own — not exercised by the
+      // a sum-typed reg is read on its own — not exercised by the
       // current stdlib but legal to express).
-      delayMap.set(decl, sumDelays.get(decl)!.tagSlot.decl)
+      regMap.set(decl, sumRegs.get(decl)!.tagSlot.decl)
     } else {
-      const fresh: DelayDecl = { op: 'delayDecl', name: decl.name, update: 0, init: 0 }
+      const fresh: RegDecl = { op: 'regDecl', name: decl.name, init: 0 }
       if (decl.update !== undefined) fresh.update = decl.update
-      if (decl.init !== undefined) fresh.init = decl.init
-      delayMap.set(decl, fresh)
+      if (decl.type !== undefined) fresh.type = decl.type
+      if (decl._liftedFrom !== undefined) fresh._liftedFrom = decl._liftedFrom
+      regMap.set(decl, fresh)
     }
   }
 
-  const ctx: Ctx = { sumDelays, delayMap }
+  const ctx: Ctx = { sumRegs, regMap }
 
-  // Rewrite decls: replace each sum-typed DelayDecl with its per-slot
+  // Rewrite decls: replace each sum-typed RegDecl with its per-slot
   // expansion (preserving source position); for everything else,
   // recursively rewrite contained expressions.
   const newDecls: BodyDecl[] = []
   for (const decl of prog.body.decls) {
-    if (decl.op === 'delayDecl' && sumDelays.has(decl)) {
-      const info = sumDelays.get(decl)!
+    if (decl.op === 'regDecl' && sumRegs.has(decl)) {
+      const info = sumRegs.get(decl)!
       // The slots' decl objects were already created during collection.
       // Now fill in their init/update, which depend on the rewritten
       // versions of the original's init (a Tag) and update (a
-      // sum-valued expression).
-      fillSlotsForSumDelay(info, decl, ctx)
+      // sum-valued expression, optional).
+      fillSlotsForSumReg(info, decl, ctx)
       for (const slot of info.slots) newDecls.push(slot.decl)
     } else {
       newDecls.push(rewriteDecl(decl, ctx))
     }
   }
 
-  // Rewrite assigns: any next_update targeting a sum-typed delay must
-  // expand into N+1 next_updates (one per slot). Other assigns get
-  // their expr rewritten.
+  // Rewrite assigns: post-Phase-0a these are output-assigns only.
   const newAssigns: BodyAssign[] = []
   for (const assign of prog.body.assigns) {
-    if (assign.op === 'nextUpdate' && assign.target.op === 'delayDecl' && sumDelays.has(assign.target)) {
-      const info = sumDelays.get(assign.target)!
-      for (const slot of info.slots) {
-        const slotExpr = extractSlotFromSumExpr(assign.expr, info, slot, ctx)
-        newAssigns.push({ op: 'nextUpdate', target: slot.decl, expr: slotExpr })
-      }
-    } else {
-      newAssigns.push(rewriteAssign(assign, ctx))
-    }
+    newAssigns.push(rewriteAssign(assign, ctx))
   }
 
   const newBody: ResolvedBlock = { op: 'block', decls: newDecls, assigns: newAssigns }
@@ -141,29 +139,29 @@ export function sumLower(prog: ResolvedProgram): ResolvedProgram {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Sum-delay collection
+// Sum-reg collection
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Scan body decls for sum-typed `DelayDecl`s and pre-allocate their
+ * Scan body decls for sum-typed `RegDecl`s and pre-allocate their
  * per-slot replacements. The decls are created here (with placeholder
- * init/update set to 0) so cross-decl references — e.g. another
- * delay's update reads our delay — can be rewritten to point at the
- * fresh slot decls before init/update are filled in.
+ * init/update set to 0) so cross-decl references — e.g. another reg's
+ * update reads our reg — can be rewritten to point at the fresh slot
+ * decls before init/update are filled in.
  */
-function collectSumDelays(decls: BodyDecl[]): SumDelayMap {
-  const out: SumDelayMap = new Map()
+function collectSumRegs(decls: BodyDecl[]): SumRegMap {
+  const out: SumRegMap = new Map()
   for (const decl of decls) {
-    if (decl.op !== 'delayDecl') continue
-    const sumType = sumTypeOfDelayInit(decl)
+    if (decl.op !== 'regDecl') continue
+    const sumType = sumTypeOfRegInit(decl)
     if (!sumType) continue
 
     const slots: SlotEntry[] = []
-    const tagDecl: DelayDecl = {
-      op: 'delayDecl',
+    const tagDecl: RegDecl = {
+      op: 'regDecl',
       name: mangle(decl.name, 'tag'),
-      update: 0,
       init: 0,
+      update: 0,
     }
     const tagSlot: SlotEntry = { decl: tagDecl }
     slots.push(tagSlot)
@@ -171,11 +169,11 @@ function collectSumDelays(decls: BodyDecl[]): SumDelayMap {
     const payloadByKey = new Map<string, SlotEntry>()
     for (const variant of sumType.variants) {
       for (const field of variant.payload) {
-        const slotDecl: DelayDecl = {
-          op: 'delayDecl',
+        const slotDecl: RegDecl = {
+          op: 'regDecl',
           name: mangle(decl.name, `${variant.name}__${field.name}`),
-          update: 0,
           init: 0,
+          update: 0,
         }
         const slot: SlotEntry = { decl: slotDecl, variant, field }
         slots.push(slot)
@@ -188,7 +186,7 @@ function collectSumDelays(decls: BodyDecl[]): SumDelayMap {
   return out
 }
 
-function sumTypeOfDelayInit(decl: DelayDecl): SumTypeDef | undefined {
+function sumTypeOfRegInit(decl: RegDecl): SumTypeDef | undefined {
   const init = decl.init
   if (typeof init !== 'object' || init === null || Array.isArray(init)) return undefined
   if (init.op !== 'tag') return undefined
@@ -204,30 +202,30 @@ function mangle(base: string, suffix: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Slot init/update assembly for a sum-typed DelayDecl
+// Slot init/update assembly for a sum-typed RegDecl
 // ─────────────────────────────────────────────────────────────
 
 /**
  * After collection has pre-allocated slot decls, populate their
  * `init` (from the original's `Tag`) and `update` (per-slot
- * extraction of the sum-valued update expression).
+ * extraction of the sum-valued update expression, when present).
  */
-function fillSlotsForSumDelay(
-  info: SumDelayInfo,
-  orig: DelayDecl,
+function fillSlotsForSumReg(
+  info: SumRegInfo,
+  orig: RegDecl,
   ctx: Ctx,
 ): void {
   const init = orig.init
   if (typeof init !== 'object' || init === null || Array.isArray(init) || init.op !== 'tag') {
     throw new Error(
-      `sumLower: delay '${orig.name}': init must be a constant tag expression`,
+      `sumLower: reg '${orig.name}': init must be a constant tag expression`,
     )
   }
   const initTag = init as Tag
   const initVariantIdx = info.sumType.variants.indexOf(initTag.variant)
   if (initVariantIdx < 0) {
     throw new Error(
-      `sumLower: delay '${orig.name}': init variant '${initTag.variant.name}' not in '${info.sumType.name}'`,
+      `sumLower: reg '${orig.name}': init variant '${initTag.variant.name}' not in '${info.sumType.name}'`,
     )
   }
 
@@ -244,7 +242,14 @@ function fillSlotsForSumDelay(
     } else {
       slot.decl.init = 0
     }
-    slot.decl.update = extractSlotFromSumExpr(orig.update, info, slot, ctx)
+    // Per-slot update: extract from the (optional) sum-valued update.
+    if (orig.update !== undefined) {
+      slot.decl.update = extractSlotFromSumExpr(orig.update, info, slot, ctx)
+    } else {
+      // No source update — leave slot.decl.update as the 0 placeholder
+      // it was initialized with. (A pure-hold sum reg is unusual but
+      // legal; the slots simply hold their init values.)
+    }
   }
 }
 
@@ -253,13 +258,13 @@ function fillSlotsForSumDelay(
 // ─────────────────────────────────────────────────────────────
 
 interface Ctx {
-  sumDelays: SumDelayMap
-  /** Map every original DelayDecl in the body to its replacement.
+  sumRegs: SumRegMap
+  /** Map every original RegDecl in the body to its replacement.
    *  Sum-typed → the tag-slot decl; non-sum → a freshly cloned decl
    *  whose `update`/`init` will be filled in by `rewriteDecl`. Used
-   *  by `DelayRef` rewriting so refs in expressions point at the
-   *  decl objects that actually appear in the rewritten body. */
-  delayMap: Map<DelayDecl, DelayDecl>
+   *  by `RegRef` rewriting so refs in expressions point at the decl
+   *  objects that actually appear in the rewritten body. */
+  regMap: Map<RegDecl, RegDecl>
   /** Active per-binder substitutions introduced by match arms.
    *  A `BindingRef` whose decl is a key here is rewritten to the
    *  mapped expression. */
@@ -282,19 +287,19 @@ function withBindings(
 
 function rewriteDecl(decl: BodyDecl, ctx: Ctx): BodyDecl {
   switch (decl.op) {
-    case 'regDecl':
-      return { ...decl, init: rewriteExpr(decl.init, ctx) }
-    case 'delayDecl': {
-      // Non-sum delay: fill the pre-allocated fresh decl's update /
-      // init with rewritten expressions. The fresh decl was put in
-      // `delayMap` ahead of time so any DelayRef pointing at the
-      // original decl is rewritten to point at this fresh one.
-      const fresh = ctx.delayMap.get(decl)
+    case 'regDecl': {
+      // Non-sum reg: fill the pre-allocated fresh decl's update / init
+      // with rewritten expressions. The fresh decl was put in `regMap`
+      // ahead of time so any RegRef pointing at the original decl is
+      // rewritten to point at this fresh one.
+      const fresh = ctx.regMap.get(decl)
       if (!fresh) {
-        throw new Error(`sumLower: missing delayMap entry for non-sum delay '${decl.name}'`)
+        throw new Error(`sumLower: missing regMap entry for non-sum reg '${decl.name}'`)
       }
-      fresh.update = rewriteExpr(decl.update, ctx)
       fresh.init = rewriteExpr(decl.init, ctx)
+      if (decl.update !== undefined) {
+        fresh.update = rewriteExpr(decl.update, ctx)
+      }
       return fresh
     }
     case 'paramDecl':
@@ -309,18 +314,8 @@ function rewriteDecl(decl: BodyDecl, ctx: Ctx): BodyDecl {
 }
 
 function rewriteAssign(assign: BodyAssign, ctx: Ctx): BodyAssign {
-  if (assign.op === 'outputAssign') {
-    const out: OutputAssign = { op: 'outputAssign', target: assign.target, expr: rewriteExpr(assign.expr, ctx) }
-    return out
-  }
-  // nextUpdate: redirect the target to its delay-map replacement when
-  // the target is a delay (regs aren't cloned by sumLower).
-  let target = assign.target
-  if (target.op === 'delayDecl') {
-    const replacement = ctx.delayMap.get(target)
-    if (replacement) target = replacement
-  }
-  const out: NextUpdate = { op: 'nextUpdate', target, expr: rewriteExpr(assign.expr, ctx) }
+  // Post-Phase-0a: BodyAssign is OutputAssign-only.
+  const out: OutputAssign = { op: 'outputAssign', target: assign.target, expr: rewriteExpr(assign.expr, ctx) }
   return out
 }
 
@@ -342,15 +337,14 @@ function rewriteOp(node: ResolvedExprOp, ctx: Ctx): ResolvedExpr {
       return sub !== undefined ? sub : node
     }
 
-    // ── DelayRef: rewrite to the cloned/replacement decl. For a
-    //    sum-typed source delay this is the tag slot; for non-sum
-    //    it's the cloned scalar decl. (Match rewriting handles
-    //    payload reads via per-arm substitution before reaching
-    //    this case.) ──
-    case 'delayRef': {
-      const replacement = ctx.delayMap.get(node.decl)
+    // ── RegRef: rewrite to the cloned/replacement decl. For a
+    //    sum-typed source reg this is the tag slot; for non-sum it's
+    //    the cloned scalar decl. (Match rewriting handles payload
+    //    reads via per-arm substitution before reaching this case.) ──
+    case 'regRef': {
+      const replacement = ctx.regMap.get(node.decl)
       if (replacement && replacement !== node.decl) {
-        return { op: 'delayRef', decl: replacement }
+        return { op: 'regRef', decl: replacement }
       }
       return node
     }
@@ -377,7 +371,6 @@ function rewriteOp(node: ResolvedExprOp, ctx: Ctx): ResolvedExpr {
 
     // ── Pass-through references / leaves ──
     case 'inputRef':
-    case 'regRef':
     case 'paramRef':
     case 'typeParamRef':
     case 'sampleRate':
@@ -445,7 +438,7 @@ function rewriteOp(node: ResolvedExprOp, ctx: Ctx): ResolvedExpr {
 function lowerMatchToSelectChain(m: Match, ctx: Ctx): ResolvedExpr {
   // The scrutinee must reduce to a sum-typed value. We need access to
   // the per-variant payload slots to rewrite payload bindings.
-  // V1 (mirrors legacy): only DelayRef-to-sum-typed-delay scrutinees
+  // V1 (mirrors legacy): only RegRef-to-sum-typed-reg scrutinees
   // support payload-bearing arms. Nullary-only matches accept any
   // scrutinee that lowers to the variant's tag integer.
   const tagRead = scrutineeTagRead(m, ctx)
@@ -491,9 +484,9 @@ function lowerMatchToSelectChain(m: Match, ctx: Ctx): ResolvedExpr {
 }
 
 /**
- * Lower the scrutinee to its tag-slot read. For a sum-typed delay,
- * the tag-slot is `{ op: 'delayRef', decl: info.tagSlot.decl }`.
- * For a constant tag, the read is the variant index integer. Other
+ * Lower the scrutinee to its tag-slot read. For a sum-typed reg, the
+ * tag-slot is `{ op: 'regRef', decl: info.tagSlot.decl }`. For a
+ * constant tag, the read is the variant index integer. Other
  * scrutinee shapes fall through to a generic recursive rewrite —
  * sufficient for nullary-only matches whose scrutinee is itself a
  * `match` returning a tag.
@@ -504,8 +497,8 @@ function scrutineeTagRead(m: Match, ctx: Ctx): ResolvedExpr {
 
 /**
  * Build the per-binder substitution map for a payload-bearing arm.
- * Only supports `DelayRef`-to-sum-typed-delay scrutinees (matching
- * the legacy V1 limitation).
+ * Only supports `RegRef`-to-sum-typed-reg scrutinees (matching the
+ * legacy V1 limitation).
  */
 function bindingsForArm(
   scrutinee: ResolvedExpr,
@@ -516,16 +509,16 @@ function bindingsForArm(
   if (arm.binders.length === 0) return subs
 
   if (typeof scrutinee !== 'object' || scrutinee === null || Array.isArray(scrutinee)
-      || scrutinee.op !== 'delayRef') {
+      || scrutinee.op !== 'regRef') {
     throw new Error(
-      `sumLower: match arm '${arm.variant.name}' has payload bindings but scrutinee is not a delay_ref`,
+      `sumLower: match arm '${arm.variant.name}' has payload bindings but scrutinee is not a reg_ref`,
     )
   }
-  const dRef = scrutinee as DelayRef
-  const info = ctx.sumDelays.get(dRef.decl)
+  const rRef = scrutinee as RegRef
+  const info = ctx.sumRegs.get(rRef.decl)
   if (!info) {
     throw new Error(
-      `sumLower: match arm '${arm.variant.name}' scrutinee references non-sum delay '${dRef.decl.name}'`,
+      `sumLower: match arm '${arm.variant.name}' scrutinee references non-sum reg '${rRef.decl.name}'`,
     )
   }
   if (arm.binders.length !== arm.variant.payload.length) {
@@ -541,7 +534,7 @@ function bindingsForArm(
         `sumLower: match arm '${arm.variant.name}': missing slot for field '${field.name}'`,
       )
     }
-    subs.set(arm.binders[i], { op: 'delayRef', decl: slot.decl })
+    subs.set(arm.binders[i], { op: 'regRef', decl: slot.decl })
   }
   return subs
 }
@@ -551,19 +544,18 @@ function bindingsForArm(
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Extract the scalar update for one slot of a sum-typed delay's
- * update expression. Mirrors `extractSlotFromSumExpr` in
+ * Extract the scalar update for one slot of a sum-typed reg's update
+ * expression. Mirrors `extractSlotFromSumExpr` in
  * `compiler/sum_lowering.ts`.
  *
  * Recognized shapes for `expr`:
- *   - `Tag` — constant constructor; tag-slot gets the variant
- *     index, payload-slot gets either the literal value or 0
- *     depending on whether the slot's variant matches the tag.
- *   - `Match` returning a sum value — distribute slot extraction
- *     over each arm; build a select-chain over the scrutinee's tag
- *     read.
- *   - `DelayRef` to a sum-typed delay — read the matching slot of
- *     the source delay.
+ *   - `Tag` — constant constructor; tag-slot gets the variant index,
+ *     payload-slot gets either the literal value or 0 depending on
+ *     whether the slot's variant matches the tag.
+ *   - `Match` returning a sum value — distribute slot extraction over
+ *     each arm; build a select-chain over the scrutinee's tag read.
+ *   - `RegRef` to a sum-typed reg — read the matching slot of the
+ *     source reg.
  *   - `select(c, a, b)` where both branches are sum-valued —
  *     distribute: `select(c, extract(a), extract(b))`.
  *   - Otherwise return 0 (undefined behavior; caller's malformed
@@ -571,7 +563,7 @@ function bindingsForArm(
  */
 function extractSlotFromSumExpr(
   expr: ResolvedExpr,
-  info: SumDelayInfo,
+  info: SumRegInfo,
   slot: SlotEntry,
   ctx: Ctx,
 ): ResolvedExpr {
@@ -624,17 +616,17 @@ function extractSlotFromSumExpr(
       return chain
     }
 
-    case 'delayRef': {
-      const srcInfo = ctx.sumDelays.get(expr.decl)
+    case 'regRef': {
+      const srcInfo = ctx.sumRegs.get(expr.decl)
       if (!srcInfo) {
-        // Reading a scalar delay as a sum value is malformed.
+        // Reading a scalar reg as a sum value is malformed.
         return 0
       }
       if (slot.variant === undefined) {
-        return { op: 'delayRef', decl: srcInfo.tagSlot.decl }
+        return { op: 'regRef', decl: srcInfo.tagSlot.decl }
       }
       const srcSlot = srcInfo.payloadByKey.get(slotKey(slot.variant, slot.field!))
-      if (srcSlot) return { op: 'delayRef', decl: srcSlot.decl }
+      if (srcSlot) return { op: 'regRef', decl: srcSlot.decl }
       return 0
     }
 
@@ -671,8 +663,9 @@ function bodyHasSumExpr(body: ResolvedBlock): boolean {
 
 function declHasSumExpr(decl: BodyDecl): boolean {
   switch (decl.op) {
-    case 'regDecl':   return exprHasSumExpr(decl.init)
-    case 'delayDecl': return exprHasSumExpr(decl.init) || exprHasSumExpr(decl.update)
+    case 'regDecl':
+      return exprHasSumExpr(decl.init)
+        || (decl.update !== undefined && exprHasSumExpr(decl.update))
     case 'paramDecl': return false
     case 'instanceDecl':
       return decl.inputs.some(i => exprHasSumExpr(i.value))
