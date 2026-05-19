@@ -18,6 +18,21 @@ top-level `.md` file is a focused experiment or recorded result.
   `phaser_compare.c`) and their optimized IR dumps under
   `ir-dumps/`. See `active_set_spike/findings.md` for the writeup.
 
+- **`compile_time/`** — LTO vs no-LTO compile-time scaling for
+  monolithic (one TU) vs separate-modules (N TUs) layouts at
+  N ∈ {16, 64, 256, 512, 1024, 2048, 4096} stateful kernels. Code-golf
+  generator (`gen.py`) emits the C; `bench.py` sweeps and records to
+  `data/results.csv`. 15-second hard timeout per compile.
+
+  Findings (2026-05-14): monolithic-nolto scales roughly linearly to
+  ~1024 kernels in ~390 ms; LTO cost is superlinear (5.3× at N=1024,
+  10.3× at N=2048) and not worth its price for ORC's single-module
+  pipeline. Separate-modules is bottlenecked by clang frontend
+  overhead (~25 ms/TU), not LTO. The M11 fractal-compilation
+  architecture (one LLVM function, N nested basic blocks) maps onto
+  the monolithic row — the right choice for compile-time scaling.
+  See `compile_time/README.md`.
+
 ### In progress
 
 - **`inlining_across_modules/`** — investigates whether the

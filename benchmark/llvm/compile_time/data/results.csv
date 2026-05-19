@@ -1,0 +1,57 @@
+n_kernels,metric,value_ms,status
+16,mono_nolto,125.1,ok
+16,mono_lto,124.3,ok
+16,full_bc_total,434.7,ok
+16,full_bc_avg,27.2,ok
+16,full_lto_link,439.7,ok
+16,thin_bc_total,458.1,ok
+16,thin_bc_avg,28.6,ok
+16,thin_lto_link,443.7,ok
+64,mono_nolto,137.2,ok
+64,mono_lto,146.7,ok
+64,full_bc_total,1584.9,ok
+64,full_bc_avg,24.8,ok
+64,full_lto_link,1401.9,ok
+64,thin_bc_total,1590.7,ok
+64,thin_bc_avg,24.9,ok
+64,thin_lto_link,1399.1,ok
+256,mono_nolto,168.4,ok
+256,mono_lto,310.0,ok
+256,full_bc_total,6186.4,ok
+256,full_bc_avg,24.2,ok
+256,full_lto_link,5347.0,ok
+256,thin_bc_total,6160.0,ok
+256,thin_bc_avg,24.1,ok
+256,thin_lto_link,5222.9,ok
+512,mono_nolto,227.2,ok
+512,mono_lto,684.5,ok
+512,full_bc_total,12500.0,ok
+512,full_bc_avg,24.4,ok
+512,full_lto_link,10896.5,ok
+512,thin_bc_total,12299.7,ok
+512,thin_bc_avg,24.0,ok
+512,thin_lto_link,10108.4,ok
+1024,mono_nolto,377.2,ok
+1024,mono_lto,1983.2,ok
+1024,full_bc_total,24666.2,stage-B timeout
+1024,full_bc_avg,24.1,stage-B timeout
+1024,full_lto_link,,stage-B timeout
+1024,thin_bc_total,24544.3,stage-B timeout
+1024,thin_bc_avg,24.0,stage-B timeout
+1024,thin_lto_link,,stage-B timeout
+2048,mono_nolto,851.3,ok
+2048,mono_lto,8309.5,ok
+2048,full_bc_total,,skipped
+2048,full_bc_avg,,skipped
+2048,full_lto_link,,skipped
+2048,thin_bc_total,,skipped
+2048,thin_bc_avg,,skipped
+2048,thin_lto_link,,skipped
+4096,mono_nolto,2252.4,ok
+4096,mono_lto,15000.0,timeout
+4096,full_bc_total,,skipped
+4096,full_bc_avg,,skipped
+4096,full_lto_link,,skipped
+4096,thin_bc_total,,skipped
+4096,thin_bc_avg,,skipped
+4096,thin_lto_link,,skipped
