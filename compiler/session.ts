@@ -205,6 +205,72 @@ export function nextName(session: SessionState, prefix: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Wire storage — auto-delay convention
+// ─────────────────────────────────────────────────────────────
+//
+// Every wire stored via `setWireExpr` is wrapped in a session-level
+// unit delay: `{op: 'delay', args: [rawExpr], init: 0, id: ...}`. This
+// is the entire structural mechanism by which the MCP-built IR stays
+// acyclic — cycles in user wiring are broken at the wire layer, so the
+// compiler's instance dep graph (built by `computeInstanceTopoOrder`)
+// is acyclic by construction. The compile-time pre-emit pass
+// `extractSessionDelays` lowers each `delay()`-wrapped wire to a
+// session-level module slot whose update lives in the scheduler's
+// dedicated state-evolution phase, giving every MCP wire exactly one
+// sample of latency (VCV-Rack semantics).
+//
+// The auto-wrap is on this path only. Two wire kinds bypass it
+// intentionally:
+//
+//   - DAC wires (`session.graphOutputs`) — direct stitch into the
+//     audio mix; no extra latency on the output side.
+//   - Alive inputs (`Instance.aliveInput`) — already implicitly
+//     one-sample-delayed by the scheduler preamble mechanism.
+
+/** Options for `setWireExpr`. Both fields control the synthesized
+ *  delay-slot's identity: `init` becomes the slot's initial value
+ *  (defaults to 0); `id` becomes the stable name used for state
+ *  transfer across hot-swap. */
+export interface WireExprOpts {
+  readonly init?: number
+  readonly id?:   string
+}
+
+/** Wrap a raw wire expression in a session-level unit delay and store
+ *  it in `session.inputExprNodes` under `key`. Every MCP wire-setting
+ *  tool routes through this helper. */
+export function setWireExpr(
+  session: SessionState,
+  key:     string,
+  rawExpr: ExprNode,
+  opts:    WireExprOpts = {},
+): void {
+  const id = opts.id ?? `__autodelay:${key}`
+  session.inputExprNodes.set(key, wrapInUnitDelay(rawExpr, opts.init ?? 0, id))
+}
+
+/** Strip a top-level `delay()` wrapper if present, returning the raw
+ *  source expression. Used by combiner logic (fan-in, `wire` with
+ *  `combine`) to compose new sources with previously-stored wires
+ *  without double-wrapping the existing's outer delay inside the
+ *  combiner's new outer delay. */
+export function unwrapDelay(expr: ExprNode): ExprNode {
+  if (typeof expr !== 'object' || expr === null || Array.isArray(expr)) {
+    return expr
+  }
+  const obj = expr as { op?: unknown; args?: unknown }
+  if (obj.op === 'delay' && Array.isArray(obj.args) && obj.args.length === 1) {
+    return obj.args[0] as ExprNode
+  }
+  return expr
+}
+
+/** Construct the delay envelope. Pure. */
+function wrapInUnitDelay(expr: ExprNode, init: number, id: string): ExprNode {
+  return { op: 'delay', args: [expr], init, id } as ExprNode
+}
+
+// ─────────────────────────────────────────────────────────────
 // Slot allocation (M2 — additive helpers, no callers yet)
 // ─────────────────────────────────────────────────────────────
 
