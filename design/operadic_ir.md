@@ -103,16 +103,31 @@ categorically-closed world.
 
 ## Pre- and post-trace operads
 
-> **Status (2026-05, post Phase 4b trace-lift refactor):** the
-> compiler has been refactored to live entirely in the post-trace
-> operad. The "trace functor" is no longer a compiler pass —
-> cycle-handling moves up to the realization layer (the standard
-> realization is the elaborator + session materializer). Cyclic
-> source code throws `CycleViolation` at elaborate-time; the
+> **Status (2026-05, post Phase 4b trace-lift refactor + MCP-wire
+> auto-delay):** the compiler has been refactored to live entirely
+> in the post-trace operad. The "trace functor" is no longer a
+> compiler pass — cycle-handling moves up to the realization layer
+> (the standard realization is the elaborator + session materializer).
+> Cyclic source code throws `CycleViolation` at elaborate-time; the
 > compiler asserts acyclic input at `strataPipeline` entry and
-> refuses to lower cyclic IR. Below is the original design framing
-> kept for context; see `compiler/CLAUDE.md` for the current
-> pipeline architecture.
+> refuses to lower cyclic IR.
+>
+> For session graphs the trace-functor commitment is now delivered
+> uniformly across both realizations: every MCP wire is auto-wrapped
+> in a unit delay by `setWireExpr`; `extractSessionDelays` hoists
+> every `delay()` op in any wire to a session-level module slot
+> whose update runs in the scheduler's `state_evolution` phase
+> between per-instance kernel dispatches and the existing DAC-stitch
+> postamble. The JIT and the interpreter agree on wire semantics —
+> 1 sample of delay per MCP wire, by construction — closing the
+> asymmetry where the JIT silently tolerated cycles via slot
+> back-edges while the interpreter rejected them. The defensive
+> `assertSessionAcyclic` invariant at `compileSession`'s entry
+> catches any programmatic session that bypasses both auto-wrap
+> and explicit `delay()`.
+>
+> Below is the original design framing kept for context; see
+> `compiler/CLAUDE.md` for the current pipeline architecture.
 
 
 
