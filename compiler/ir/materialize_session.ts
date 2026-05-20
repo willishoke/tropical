@@ -489,12 +489,9 @@ function translateOpNode(
     return { op: 'nestedOut', instance: instDecl, output: outDecl }
   }
 
-  if (op === 'param' || op === 'paramExpr') {
-    return paramRef(obj.name as string, 'param', ctx)
-  }
-
-  if (op === 'trigger' || op === 'triggerParamExpr') {
-    return paramRef(obj.name as string, 'trigger', ctx)
+  if (op === 'param' || op === 'paramExpr'
+      || op === 'trigger' || op === 'triggerParamExpr') {
+    return paramRef(obj.name as string, ctx)
   }
 
   if (op === 'sampleRate')  return { op: 'sampleRate' }
@@ -538,15 +535,11 @@ function translateOpNode(
   throw new Error(`compileSession: unhandled wiring op '${op}'.`)
 }
 
-function paramRef(name: string, kind: 'param' | 'trigger', ctx: MaterializeContext): ResolvedExpr {
+function paramRef(name: string, ctx: MaterializeContext): ResolvedExpr {
   let decl = ctx.paramDecls.get(name)
   if (decl === undefined) {
-    decl = { op: 'paramDecl', name, kind }
+    decl = { op: 'paramDecl', name }
     ctx.paramDecls.set(name, decl)
-  } else if (decl.kind !== kind) {
-    throw new Error(
-      `compileSession: param/trigger name collision on '${name}' (declared as '${decl.kind}', ref demands '${kind}').`,
-    )
   }
   return { op: 'paramRef', decl }
 }

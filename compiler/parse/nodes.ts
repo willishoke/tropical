@@ -312,13 +312,10 @@ export interface DelayDecl {
   type?: NameRef
 }
 
-/** `param name: smoothed = default` or `param name: trigger`.
- *  The `type` field uses the IR vocabulary: surface `smoothed` →
- *  IR `'param'`. */
+/** `param name: smoothed = default`. */
 export interface ParamDecl {
   op: 'paramDecl'
   name: string
-  type: 'param' | 'trigger'
   value?: number
 }
 

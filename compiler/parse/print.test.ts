@@ -166,15 +166,6 @@ describe('printer — body decls', () => {
     `)
   })
 
-  test('paramDecl trigger', () => {
-    idempotent(`
-      program X() -> (out: signal) {
-        param fire: trigger
-        out = fire
-      }
-    `)
-  })
-
   test('instanceDecl with type-args + inputs', () => {
     idempotent(`
       program Outer() -> (out: signal) {

@@ -649,7 +649,7 @@ function registerParamDecl(d: ParsedParamDecl, scope: Scope): ParamDecl {
   if (scope.params.has(d.name)) {
     throw new ElaborationError(`duplicate param '${d.name}'`)
   }
-  const decl: ParamDecl = { op: 'paramDecl', name: d.name, kind: d.type }
+  const decl: ParamDecl = { op: 'paramDecl', name: d.name }
   if (d.value !== undefined) decl.value = d.value
   scope.params.set(d.name, decl)
   return decl

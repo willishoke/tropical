@@ -57,7 +57,7 @@ export type WireFormatOp =
   | 'input' | 'reg' | 'delayRef' | 'delayValue'
   | 'nestedOut' | 'nestedOutput' | 'binding' | 'typeParam'
   | 'sampleRate' | 'sampleIndex'
-  | 'param' | 'trigger' | 'paramExpr' | 'triggerParamExpr'
+  | 'param' | 'paramExpr'
   | 'const'
   // Combinators + ADTs (parse-time; flow through strata, validateExpr
   // rejects them at the MCP runtime boundary).
@@ -343,9 +343,6 @@ export interface SampleIndexNode { op: 'sampleIndex' }
  *  before parameter handles are resolved to FFI pointers). */
 export interface ParamRefNode { op: 'param'; name: string }
 
-/** Pre-resolution trigger reference by name (mirrors ParamRefNode). */
-export interface TriggerRefNode { op: 'trigger'; name: string }
-
 /** Typed scalar literal emitted by specialize.ts after type-arg substitution. */
 export interface ConstNode {
   op: 'const'
@@ -358,7 +355,7 @@ export type LeafNode =
   | InputNode | RegRefNode | DelayRefNode | DelayValueNode
   | NestedOutNode | NestedOutputNode | BindingNode | TypeParamNode
   | SampleRateNode | SampleIndexNode
-  | ParamRefNode | TriggerRefNode | ConstNode
+  | ParamRefNode | ConstNode
 
 // ── Decl ops (top-level only — appear at decl/assign positions) ─────────
 
@@ -817,12 +814,10 @@ const LEAF_OPS = new Set([
   'delayValue', 'delayRef',
   'nestedOutput', 'nestedOut',
   'binding',
-  // Pre-resolution param/trigger refs (`{op:'param',name}` /
-  // `{op:'trigger',name}`). The materializer resolves the name to an
-  // FFI handle (or SAB slot for WASM) at compile time. Both spellings
-  // are accepted on the wire — the snake_case `paramExpr`/
-  // `triggerParamExpr` mirror the elaborator's NULLARY map.
-  'param', 'trigger', 'paramExpr', 'triggerParamExpr',
+  // Pre-resolution param refs. The materializer resolves the name to
+  // an FFI handle (or SAB slot for WASM) at compile time. `paramExpr`
+  // is the snake_case spelling mirroring the elaborator's NULLARY map.
+  'param', 'paramExpr',
 ])
 
 /**

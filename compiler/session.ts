@@ -674,7 +674,6 @@ export function prettyExpr(
   }
   if (op === 'input')     return `input(${n.name})`
   if (op === 'param')     return `param(${n.name})`
-  if (op === 'trigger')   return `trigger(${n.name})`
   if (op === 'binding')   return `$${n.name}`
   if (op === 'sampleRate')  return 'sampleRate'
   if (op === 'sampleIndex') return 'sampleIndex'
