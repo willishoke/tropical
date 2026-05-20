@@ -41,6 +41,7 @@ import {
   tempOffset, stateRegOffset, arraySlotOffset,
 } from './slot_indices.js'
 import { type ScalarType, instrWriteSlot, opConst } from './emit_resolved.js'
+import { instanceName as toInstanceName } from './branded_names.js'
 import { compileResolved } from './compile_resolved.js'
 import { cloneWithInputSubst } from './clone.js'
 import { makeCompiled, type Compiled } from '../program_types.js'
@@ -157,7 +158,7 @@ export function partitionKernel(
     const childCompiled = makeCompiled(substChildProg, { displayName: decl.type.name })
 
     // Allocate output slots (+ __alive__) for the child.
-    allocateOutputSlots(session, childPath, childCompiled)
+    allocateOutputSlots(session, toInstanceName(childPath), childCompiled)
 
     // Build slot map for parent's NestedOut → child output reads.
     const childSlotMap = new Map<OutputDecl, number>()

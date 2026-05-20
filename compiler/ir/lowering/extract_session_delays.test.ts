@@ -6,12 +6,17 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, setWireExpr } from '../../session.js'
 import { extractSessionDelays } from './extract_session_delays.js'
+import { portRef, instanceName, portName } from '../branded_names.js'
+
+/** Local sugar: build a PortRef from raw strings — keeps test
+ *  expectations readable without bypassing the branded constructors. */
+const pr = (i: string, p: string) => portRef(instanceName(i), portName(p))
 
 describe('extractSessionDelays', () => {
   test('hoists a top-level delay wire to a sessionSlot read', () => {
     const session = makeSession()
     const baseSlotCount = session.slotCount
-    setWireExpr(session, 'a:in', {
+    setWireExpr(session, pr('a', 'in'), {
       op: 'ref', instance: 'b', output: 'out',
     })
 
@@ -36,7 +41,7 @@ describe('extractSessionDelays', () => {
 
   test('honors explicit init and id on the delay wrap', () => {
     const session = makeSession()
-    setWireExpr(session, 'osc:phase',
+    setWireExpr(session, pr('osc', 'phase'),
       { op: 'ref', instance: 'src', output: 'y' },
       { init: 0.5, id: 'feedback-tap' },
     )
@@ -65,7 +70,7 @@ describe('extractSessionDelays', () => {
 
   test('idempotent: re-running finds no delays to extract', () => {
     const session = makeSession()
-    setWireExpr(session, 'a:in', {
+    setWireExpr(session, pr('a', 'in'), {
       op: 'ref', instance: 'b', output: 'out',
     })
     extractSessionDelays(session)
@@ -82,8 +87,8 @@ describe('extractSessionDelays', () => {
   test('handles multiple delays in allocation order', () => {
     const session = makeSession()
     const baseSlot = session.slotCount
-    setWireExpr(session, 'a:in', { op: 'ref', instance: 'b', output: 'out' })
-    setWireExpr(session, 'b:in', { op: 'ref', instance: 'a', output: 'out' })
+    setWireExpr(session, pr('a', 'in'), { op: 'ref', instance: 'b', output: 'out' })
+    setWireExpr(session, pr('b', 'in'), { op: 'ref', instance: 'a', output: 'out' })
 
     extractSessionDelays(session)
 

@@ -382,13 +382,16 @@ export function loadProgramAsSession(
     // Slot model: allocate output slots for the instance, parallel to
     // what MCP add_instance does. Required for the per-instance
     // compile path (M9a+) to find each output's slot index.
-    allocateOutputSlots(session, instance.name, type)
+    allocateOutputSlots(session, toInstanceName(instance.name), type)
 
     // Populate wiring from instance inputs
     if (inst.inputs) {
       for (const [input, expr] of Object.entries(inst.inputs)) {
         validateExpr(expr, `${inst.name}.${input}`)
-        session.inputExprNodes.set(`${inst.name}:${input}`, expr)
+        session.inputExprNodes.set(
+          wireKey(portRef(toInstanceName(inst.name), toPortName(input))),
+          expr,
+        )
       }
     }
   }
@@ -397,7 +400,7 @@ export function loadProgramAsSession(
   for (const [name, inst] of session.instanceRegistry) {
     const defaults = rawInputDefaults(inst)
     for (const [inputName, value] of Object.entries(defaults)) {
-      const key = `${name}:${inputName}`
+      const key = wireKey(portRef(toInstanceName(name), toPortName(inputName)))
       if (!session.inputExprNodes.has(key)) {
         session.inputExprNodes.set(key, value)
       }
@@ -543,13 +546,16 @@ export function mergeProgramIntoSession(
     // Slot model: allocate output slots for the instance, parallel to
     // what MCP add_instance does. Required for the per-instance
     // compile path (M9a+) to find each output's slot index.
-    allocateOutputSlots(session, instance.name, type)
+    allocateOutputSlots(session, toInstanceName(instance.name), type)
 
     // Populate wiring from instance inputs
     if (inst.inputs) {
       for (const [input, expr] of Object.entries(inst.inputs)) {
         validateExpr(expr, `${inst.name}.${input}`)
-        session.inputExprNodes.set(`${inst.name}:${input}`, expr)
+        session.inputExprNodes.set(
+          wireKey(portRef(toInstanceName(inst.name), toPortName(input))),
+          expr,
+        )
       }
     }
   }
@@ -558,7 +564,7 @@ export function mergeProgramIntoSession(
   for (const [name, inst] of session.instanceRegistry) {
     const defaults = rawInputDefaults(inst)
     for (const [inputName, value] of Object.entries(defaults)) {
-      const key = `${name}:${inputName}`
+      const key = wireKey(portRef(toInstanceName(name), toPortName(inputName)))
       if (!session.inputExprNodes.has(key)) {
         session.inputExprNodes.set(key, value)
       }

@@ -33,6 +33,7 @@
  */
 
 import { allocateOutputSlots, type SessionState } from '../session.js'
+import { instanceName as toInstanceName } from './branded_names.js'
 import type { FlatPlan, InstanceFunction, SchedulerFunction } from '../flat_plan.js'
 import type { NInstr, NOperand } from './emit_resolved.js'
 import { instrWriteSlot, opConst } from './emit_resolved.js'
@@ -59,7 +60,7 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
   // pre-allocated. `add_instance` / `loadProgramAsSession` already do
   // this eagerly; tests sometimes poke `instanceRegistry` directly.
   for (const [name, inst] of session.instanceRegistry) {
-    if (inst.compiled !== undefined) allocateOutputSlots(session, name, inst.compiled)
+    if (inst.compiled !== undefined) allocateOutputSlots(session, toInstanceName(name), inst.compiled)
   }
 
   const order = computeInstanceTopoOrder(session)

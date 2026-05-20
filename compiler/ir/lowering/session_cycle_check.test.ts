@@ -7,6 +7,9 @@ import { describe, test, expect } from 'bun:test'
 import { makeSession, setWireExpr, type ExprNode } from '../../session.js'
 import { extractSessionDelays } from './extract_session_delays.js'
 import { assertSessionAcyclic, SessionCycleViolation } from './session_cycle_check.js'
+import { portRef, instanceName, portName } from '../branded_names.js'
+
+const pr = (i: string, p: string) => portRef(instanceName(i), portName(p))
 
 function makeInstance(session: ReturnType<typeof makeSession>, name: string): void {
   // We don't need a real Compiled here — assertSessionAcyclic only
@@ -27,8 +30,8 @@ describe('assertSessionAcyclic', () => {
     const session = makeSession()
     makeInstance(session, 'a')
     makeInstance(session, 'b')
-    setWireExpr(session, 'a:in', { op: 'ref', instance: 'b', output: 'out' })
-    setWireExpr(session, 'b:in', { op: 'ref', instance: 'a', output: 'out' })
+    setWireExpr(session, pr('a', 'in'), { op: 'ref', instance: 'b', output: 'out' })
+    setWireExpr(session, pr('b', 'in'), { op: 'ref', instance: 'a', output: 'out' })
     extractSessionDelays(session)
     expect(() => assertSessionAcyclic(session)).not.toThrow()
   })

@@ -103,7 +103,7 @@ function liftOneWire(
     baseTypeName: rawName(synthName),
   })
   session.instanceRegistry.set(rawName(synthName), inst)
-  allocateOutputSlots(session, rawName(synthName), compiled)
+  allocateOutputSlots(session, synthName, compiled)
 
   // Wire each free ref to its corresponding input on the lifted
   // instance. The input naming convention matches `liftWireToProgram`:

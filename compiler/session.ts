@@ -28,6 +28,11 @@ import {
 import type { PortType as IRPortType, ScalarKind as IRScalarKind } from './ir/nodes.js'
 import { programTypeFromResolved } from './ir/strata.js'
 import type { TypeParamDecl } from './ir/nodes.js'
+import {
+  type PortRef, type WireKey, type SlotKey,
+  type InstanceName,
+  wireKey, slotKey,
+} from './ir/branded_names.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -101,8 +106,9 @@ export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON | AliasTypeDefJSON
  *  After strata, sums/structs/products/units are gone — only scalar,
  *  alias, and array remain. */
 export interface WirePortMeta {
-  /** "${instance}.${port}[0]" / etc. — one entry per scalar slot. */
-  scalarSlotNames: string[]
+  /** Branded SlotKey per scalar slot — `${instance}.${port}` for
+   *  scalar ports, `${instance}.${port}[0]` etc. for array elements. */
+  scalarSlotNames: SlotKey[]
   /** One ScalarKind per slot; length === scalarSlotNames.length. */
   scalarTypes:     IRScalarKind[]
   /** The original IR PortType, retained for combine typecheck. */
@@ -260,15 +266,18 @@ export interface WireExprOpts {
 }
 
 /** Wrap a raw wire expression in a session-level unit delay and store
- *  it in `session.inputExprNodes` under `key`. Every MCP wire-setting
- *  tool routes through this helper. */
+ *  it in `session.inputExprNodes` at the consumer port `ref`. Every
+ *  MCP wire-setting tool routes through this helper. Callers must
+ *  construct the `PortRef` via `portRef(instanceName, portName)` —
+ *  the brand on `WireKey` makes raw-string keys impossible. */
 export function setWireExpr(
   session: SessionState,
-  key:     string,
+  ref:     PortRef,
   rawExpr: ExprNode,
   opts:    WireExprOpts = {},
 ): void {
-  const id = opts.id ?? `__autodelay:${key}`
+  const key = wireKey(ref)
+  const id  = opts.id ?? `__autodelay:${key}`
   session.inputExprNodes.set(key, wrapInUnitDelay(rawExpr, opts.init ?? 0, id))
 }
 
@@ -309,9 +318,9 @@ function wrapInUnitDelay(expr: ExprNode, init: number, id: string): ExprNode {
  *  Uses the IR (post-strata) PortType. Sum/struct/product/unit don't
  *  appear here because strata lowered them all. */
 export function expandPortToSlots(
-  baseName: string,
+  baseName: SlotKey,
   type: IRPortType,
-): { names: string[]; types: IRScalarKind[] } {
+): { names: SlotKey[]; types: IRScalarKind[] } {
   switch (type.kind) {
     case 'scalar':
       return { names: [baseName], types: [type.scalar] }
@@ -340,10 +349,13 @@ export function expandPortToSlots(
         }
         total *= dim
       }
-      const names: string[] = []
+      const names: SlotKey[] = []
       const types: IRScalarKind[] = []
       for (let i = 0; i < total; i++) {
-        names.push(`${baseName}[${i}]`)
+        // `${baseName}[i]` preserves the SlotKey shape — the baseName
+        // is already `inst.port`, and `inst.port[0]` is a valid SlotKey
+        // (slotKey's slotName parameter explicitly allows brackets).
+        names.push(`${baseName}[${i}]` as SlotKey)
         types.push(elemKind)
       }
       return { names, types }
@@ -365,13 +377,13 @@ const DEFAULT_OUTPUT_PORT_TYPE: IRPortType = { kind: 'scalar', scalar: 'float' }
  *  after LLVM folds the conditional. Idempotent. */
 export function allocateOutputSlots(
   session: SessionState,
-  instanceName: string,
+  instName: InstanceName,
   type: Compiled,
 ): void {
   const portNames = outputNames(type)
   for (let idx = 0; idx < portNames.length; idx++) {
     const portName = portNames[idx]
-    const portKey = `${instanceName}.${portName}`
+    const portKey = slotKey(instName, portName)
     if (session.outputPortMeta.has(portKey)) continue  // idempotent
     const portType = outputPortType(type, idx) ?? DEFAULT_OUTPUT_PORT_TYPE
     const { names, types } = expandPortToSlots(portKey, portType)
@@ -386,7 +398,7 @@ export function allocateOutputSlots(
     session.slotCount += names.length
   }
 
-  const aliveKey = `${instanceName}.__alive__`
+  const aliveKey = slotKey(instName, '__alive__')
   if (!session.outputSlotRegistry.has(aliveKey)) {
     session.outputSlotRegistry.set(aliveKey, session.slotCount)
     session.slotCount += 1
