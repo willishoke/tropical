@@ -14,14 +14,14 @@
  *
  * The module exports a single shared memory. Layout is fixed at emit time
  * by wasm_memory_layout.ts:
- *   inputs | registers | temps | arrays | param_table | param_frame | output
+ *   inputs | registers | temps | arrays | param_table | slots | output
  *
  * Storage:
  *   - registers[]  → i64 cells (float bitcast; int signed; bool zext 0/1)
  *   - temps[]      → i64 cells (same encoding)
  *   - arrays[]     → f64 cells (state transfer stays WASM-only)
  *   - param_table  → f64 cells written by the host
- *   - param_frame  → f64 cells snapshotted per block for TriggerParam
+ *   - slots        → f64 cells (inter-module shared array)
  */
 
 import type { FlatPlan } from './flat_plan'
@@ -420,7 +420,6 @@ type EmitCtx = {
 
 function emitInstruction(c: Code, instr: NInstr, ctx: EmitCtx): void {
   if (instr.tag === 'SmoothParam') return emitSmoothParam(c, instr, ctx)
-  if (instr.tag === 'TriggerParam') return emitTriggerParam(c, instr, ctx)
   if (instr.tag === 'WriteSlot') return emitWriteSlot(c, instr, ctx)
   if (instr.tag === 'Pack') return emitPack(c, instr, ctx)
   if (instr.tag === 'Index') return emitIndex(c, instr, ctx)
@@ -553,15 +552,6 @@ function emitSmoothParam(c: Code, instr: NInstr, ctx: EmitCtx): void {
   c.i32c(0); c.localGet(L_AF); c.f64Store(regOff)
   // store → temps[dst]
   c.i32c(0); c.localGet(L_BF); c.f64Store(ctx.layout.tempsOffset + rawIdx(dstAsTemp(instr)) * 8)
-}
-
-function emitTriggerParam(c: Code, instr: NInstr, ctx: EmitCtx): void {
-  const pOp = instr.args[0]!
-  if (pOp.kind !== 'param') throw new Error('TriggerParam: arg must be param')
-  const pIdx = ctx.paramIndex.get(pOp.ptr) ?? 0
-  c.i32c(0); c.f64Load(ctx.layout.paramFrameOffset + pIdx * 8)
-  c.localSet(L_AF)
-  c.i32c(0); c.localGet(L_AF); c.f64Store(ctx.layout.tempsOffset + rawIdx(dstAsTemp(instr)) * 8)
 }
 
 function emitPack(c: Code, instr: NInstr, ctx: EmitCtx): void {

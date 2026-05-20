@@ -1,9 +1,9 @@
 /**
- * Param and Trigger — control-rate parameters. Port of tropical/param.py.
+ * Param — control-rate parameter. Port of tropical/param.py.
  *
- * Wiring references these by name (`{op:'param', name}` / `{op:'trigger', name}`);
- * the materializer (`compiler/ir/materialize_session.ts`) looks up the FFI
- * handle off the session's paramRegistry / triggerRegistry at compile time.
+ * Wiring references these by name (`{op:'param', name}`); the materializer
+ * (`compiler/ir/materialize_session.ts`) looks up the FFI handle off the
+ * session's paramRegistry at compile time.
  */
 
 import * as b from './bindings.js'
@@ -39,25 +39,3 @@ export class Param {
   }
 }
 
-export class Trigger {
-  readonly _h: unknown
-
-  constructor() {
-    this._h = b.check(b.tropical_param_new_trigger(), 'param_new_trigger')
-    _registry.register(this, this._h, this)
-  }
-
-  /** Arm the trigger (atomic store of 1.0). Safe from any thread. */
-  fire(): void {
-    b.tropical_param_set(this._h, 1.0)
-  }
-
-  get value(): number {
-    return b.tropical_param_get(this._h) as number
-  }
-
-  dispose(): void {
-    _registry.unregister(this)
-    b.tropical_param_free(this._h)
-  }
-}

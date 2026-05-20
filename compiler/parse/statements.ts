@@ -229,25 +229,20 @@ function parseDelayDecl(ctx: Ctx): DelayDecl {
   return out
 }
 
-/** `param name: smoothed|trigger [= default]`.
- *  Surface kind `smoothed` maps to IR `type: 'param'`; `trigger` is identity.
+/** `param name: smoothed [= default]`.
  *  ('smoothed' is the surface word because 'param' is reserved as the
  *  declaration keyword.) */
 function parseParamDecl(ctx: Ctx): ParamDecl {
   consume(ctx, 'param', 'param keyword')
   const name = consume(ctx, 'ident', 'param name').value as string
   consume(ctx, ':', 'param `:` before kind')
-  const kindTok = consume(ctx, 'ident', 'param kind (smoothed|trigger)')
+  const kindTok = consume(ctx, 'ident', 'param kind (smoothed)')
   const kindRaw = kindTok.value as string
-  let irKind: 'param' | 'trigger'
-  if (kindRaw === 'smoothed') irKind = 'param'
-  else if (kindRaw === 'trigger') irKind = 'trigger'
-  else throw new ParseError(`param kind must be 'smoothed' or 'trigger', got '${kindRaw}'`, kindTok)
-  const out: ParamDecl = { op: 'paramDecl', name, type: irKind }
+  if (kindRaw !== 'smoothed') {
+    throw new ParseError(`param kind must be 'smoothed', got '${kindRaw}'`, kindTok)
+  }
+  const out: ParamDecl = { op: 'paramDecl', name }
   if (eat(ctx, '=')) {
-    if (irKind === 'trigger') {
-      throw new ParseError(`trigger params cannot have a default value`, peek(ctx))
-    }
     const valueExpr = parseExpr(ctx)
     if (typeof valueExpr !== 'number') {
       throw new ParseError(`param default must be a number literal`, peek(ctx))

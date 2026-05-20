@@ -72,12 +72,6 @@ double tropical_param_get(tropical_param_t p)
   return static_cast<TropicalParam *>(p)->param->value.load(std::memory_order_relaxed);
 }
 
-tropical_param_t tropical_param_new_trigger(void)
-{
-  try { return new TropicalParam(0.0, 0.0); }
-  catch (const std::exception & e) { set_error(e.what()); return nullptr; }
-}
-
 // ---------- Device enumeration ----------
 
 unsigned int tropical_audio_device_count(void)

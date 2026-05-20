@@ -159,7 +159,6 @@ export interface RegDecl {
 export interface ParamDecl {
   op: 'paramDecl'
   name: string
-  kind: 'param' | 'trigger'   // surface 'smoothed' → IR 'param'
   value?: number
 }
 

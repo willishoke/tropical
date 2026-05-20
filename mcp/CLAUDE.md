@@ -51,7 +51,7 @@ error envelope (see below) and the previous kernel keeps playing.
 - `instanceRegistry: Map<string, ProgramInstance>` — live instances
 - `inputExprNodes: Map<"inst:input", ExprNode>` — wiring
 - `graphOutputs: Array<{instance, output}>` — what wires to dac
-- `paramRegistry`, `triggerRegistry` — control parameters by name
+- `paramRegistry` — control parameters by name
   (the materializer turns names into FFI handles at compile time)
 - `runtime: Runtime` — native `tropical_runtime_t`
 - `dac: DAC | null` — created lazily on first `start_audio`

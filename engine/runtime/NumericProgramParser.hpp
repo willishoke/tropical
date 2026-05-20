@@ -69,7 +69,6 @@ inline tropical_jit::OpTag parse_op_tag(const std::string & s)
     {"ToBool",      T::ToBool},
     {"ToFloat",     T::ToFloat},
     {"SmoothParam", T::SmoothParam},
-    {"TriggerParam",T::TriggerParam},
     {"WriteSlot",   T::WriteSlot},
   };
   const auto it = MAP.find(s);

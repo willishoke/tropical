@@ -25,7 +25,6 @@ describe('stdlib loader — every .trop file loads cleanly', () => {
       typeRegistry: new Map<string, Compiled>(),
       instanceRegistry: new Map(),
       paramRegistry: new Map(),
-      triggerRegistry: new Map(),
       specializationCache: new Map(),
       genericTemplatesResolved: new Map<string, unknown>(),
       resolvedRegistry: new Map<string, unknown>(),

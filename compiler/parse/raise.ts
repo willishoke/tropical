@@ -33,9 +33,9 @@
  *   {op:'delayRef',id}         → nameRef(id)
  *   {op:'typeParam',name}      → nameRef(name)              [expr position]
  *   {op:'param',name}          → nameRef(name)
- *   {op:'trigger',name}        → nameRef(name)
+ *   {op:'trigger',name}        → nameRef(name)              [legacy alias for 'param']
  *   {op:'paramExpr',name}      → nameRef(name)
- *   {op:'triggerParamExpr',n}  → nameRef(name)
+ *   {op:'triggerParamExpr',n}  → nameRef(name)              [legacy alias for 'paramExpr']
  *   {op:'binding',name}        → Binding {op:'binding',name}    [pass-through]
  *   {op:'sampleRate'}          → call(nameRef('sampleRate'), [])
  *   {op:'sampleIndex'}         → call(nameRef('sampleIndex'), [])
@@ -314,7 +314,6 @@ function raiseParamDecl(d: Record<string, unknown>): ParsedParamDecl {
   const out: ParsedParamDecl = {
     op: 'paramDecl',
     name: d.name as string,
-    type: d.type === 'trigger' ? 'trigger' : 'param',
   }
   if (typeof d.value === 'number') out.value = d.value
   return out

@@ -248,15 +248,14 @@ describe('liftWireToProgram — structure', () => {
     const params = prog.body.decls.filter(d => d.op === 'paramDecl') as ParamDecl[]
     expect(params.length).toBe(1)
     expect(params[0].name).toBe('cutoff')
-    expect(params[0].kind).toBe('param')
   })
 
-  test('trigger ref produces a private ParamDecl with kind=trigger', () => {
+  test('legacy {op:trigger} ref aliases to a ParamDecl', () => {
     const e: ExprNode = { op: 'trigger', name: 'fire' }
     const prog = liftWireToProgram(e, freeRefs(e), instanceName('w'))
     const params = prog.body.decls.filter(d => d.op === 'paramDecl') as ParamDecl[]
     expect(params.length).toBe(1)
-    expect(params[0].kind).toBe('trigger')
+    expect(params[0].name).toBe('fire')
   })
 
   test('repeated param ref reuses one ParamDecl', () => {
@@ -305,7 +304,7 @@ describe('liftWireToProgram — errors', () => {
     )
   })
 
-  test('rejects param/trigger name collision (same name, different kind)', () => {
+  test('param and legacy {op:trigger} with same name share one ParamDecl', () => {
     const e: ExprNode = {
       op: 'add',
       args: [
@@ -313,9 +312,10 @@ describe('liftWireToProgram — errors', () => {
         { op: 'trigger', name: 'shared' },
       ],
     }
-    expect(() => liftWireToProgram(e, freeRefs(e), instanceName('w'))).toThrow(
-      /name collision on 'shared'/,
-    )
+    const prog = liftWireToProgram(e, freeRefs(e), instanceName('w'))
+    const params = prog.body.decls.filter(d => d.op === 'paramDecl') as ParamDecl[]
+    expect(params.length).toBe(1)
+    expect(params[0].name).toBe('shared')
   })
 })
 

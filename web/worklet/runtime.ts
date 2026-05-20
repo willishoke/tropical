@@ -135,15 +135,13 @@ export class WasmRuntime {
   private snapshotParams(slot: Slot): void {
     // slot.paramPtrs are the canonical order used by emit_wasm.
     // Each ptr is a decimal-stringified SAB index (picked by WebParam on main thread).
-    // SAB layout: params[i*2] = value, params[i*2 + 1] = frame_value
+    // SAB layout: params[i*2] = value (slot 2*i+1 is unused legacy frame_value).
     const memView = new Float64Array(slot.memory.buffer)
     const tableBase = slot.layout.paramTableOffset / 8
-    const frameBase = slot.layout.paramFrameOffset / 8
     for (let i = 0; i < slot.paramPtrs.length; i++) {
       const sabIdx = parseInt(slot.paramPtrs[i]!, 10)
       if (!Number.isFinite(sabIdx) || sabIdx < 0 || sabIdx * 2 >= this.paramsShared.length) continue
       memView[tableBase + i] = this.paramsShared[sabIdx * 2]!
-      memView[frameBase + i] = this.paramsShared[sabIdx * 2 + 1]!
     }
     void this.maxParams
   }

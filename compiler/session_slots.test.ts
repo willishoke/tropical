@@ -124,7 +124,6 @@ describe('session slot allocation', () => {
     allocateOutputSlots(s, 'lp1', onePole)
     expect(s.inputExprNodes.size).toBe(0)
     expect(s.paramRegistry.size).toBe(0)
-    expect(s.triggerRegistry.size).toBe(0)
   })
 
   test('output ports without explicit PortType fall back to one scalar slot', () => {
@@ -180,9 +179,10 @@ describe('M3: applyParamSpecs allocates param slots transitively', () => {
     }
     const topLevel = {}
     loadProgramAsSession(prog as any, topLevel as any, s)
-    // Both legacy registries populated
+    // Both names land in the unified paramRegistry (legacy `type: trigger`
+    // becomes a non-smoothed param after the trigger refactor).
     expect(s.paramRegistry.has('cutoff')).toBe(true)
-    expect(s.triggerRegistry.has('fire')).toBe(true)
+    expect(s.paramRegistry.has('fire')).toBe(true)
     // ALSO populated by the slot model (M3 wire-up via allocateParamSlot)
     expect(s.paramSlotRegistry.get('cutoff')).toBeDefined()
     expect(s.paramSlotRegistry.get('fire')).toBeDefined()

@@ -79,30 +79,23 @@ describe('body — paramDecl', () => {
   test('smoothed param with default', () => {
     const b = parseBody('{ param cutoff: smoothed = 1000 }')
     expect(b.decls).toEqual([
-      { op: 'paramDecl', name: 'cutoff', type: 'param', value: 1000 },
+      { op: 'paramDecl', name: 'cutoff', value: 1000 },
     ])
   })
 
   test('smoothed param without default', () => {
     const b = parseBody('{ param freq: smoothed }')
     expect(b.decls).toEqual([
-      { op: 'paramDecl', name: 'freq', type: 'param' },
+      { op: 'paramDecl', name: 'freq' },
     ])
   })
 
-  test('trigger param', () => {
-    const b = parseBody('{ param fire: trigger }')
-    expect(b.decls).toEqual([
-      { op: 'paramDecl', name: 'fire', type: 'trigger' },
-    ])
-  })
-
-  test('trigger param with default rejected', () => {
-    expect(() => parseBody('{ param fire: trigger = 1 }')).toThrow(/cannot have a default/)
+  test('trigger param rejected (removed in trigger refactor)', () => {
+    expect(() => parseBody('{ param fire: trigger }')).toThrow(/'smoothed'/)
   })
 
   test('unknown param kind rejected', () => {
-    expect(() => parseBody('{ param x: knob }')).toThrow(/'smoothed' or 'trigger'/)
+    expect(() => parseBody('{ param x: knob }')).toThrow(/'smoothed'/)
   })
 
   test('param default must be a number literal', () => {

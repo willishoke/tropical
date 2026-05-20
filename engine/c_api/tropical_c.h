@@ -26,11 +26,6 @@ void           tropical_param_set(tropical_param_t, double value);
 /* Thread-safe read (atomic load) */
 double         tropical_param_get(tropical_param_t);
 
-/* Create a trigger parameter. Fires once per frame: set value to 1.0 from the UI
-   thread; the DSP evaluator reads and atomically clears it each frame.
-   The Param must outlive all modules that reference the returned expression. */
-tropical_param_t tropical_param_new_trigger(void);
-
 /* ---------- Device enumeration (no DAC instance required) ---------- */
 
 typedef struct {

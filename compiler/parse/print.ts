@@ -186,8 +186,7 @@ function printDelayDecl(d: DelayDecl): string {
 }
 
 function printParamDecl(d: ParamDecl): string {
-  const surface = d.type === 'param' ? 'smoothed' : 'trigger'
-  let out = `param ${d.name}: ${surface}`
+  let out = `param ${d.name}: smoothed`
   if (d.value !== undefined) out += ` = ${d.value}`
   return out
 }

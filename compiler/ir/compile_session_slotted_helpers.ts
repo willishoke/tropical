@@ -127,20 +127,13 @@ export function translateNode(
     }
     return opSlot(moduleSlotIdx(slotIdxRaw), scalarType)
   }
-  if ((op === 'param' || op === 'paramExpr') && typeof obj.name === 'string') {
+  if ((op === 'param' || op === 'paramExpr'
+       || op === 'trigger' || op === 'triggerParamExpr')
+      && typeof obj.name === 'string') {
     const slotIdxRaw = session.paramSlotRegistry.get(obj.name)
     if (slotIdxRaw === undefined) {
       throw new SlotShapeUnsupportedError(
         `compileSessionSlotted: param '${obj.name}' at '${context}' has no allocated slot.`,
-      )
-    }
-    return opSlot(moduleSlotIdx(slotIdxRaw), scalarType)
-  }
-  if ((op === 'trigger' || op === 'triggerParamExpr') && typeof obj.name === 'string') {
-    const slotIdxRaw = session.paramSlotRegistry.get(obj.name)
-    if (slotIdxRaw === undefined) {
-      throw new SlotShapeUnsupportedError(
-        `compileSessionSlotted: trigger '${obj.name}' at '${context}' has no allocated slot.`,
       )
     }
     return opSlot(moduleSlotIdx(slotIdxRaw), scalarType)

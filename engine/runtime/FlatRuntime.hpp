@@ -44,9 +44,6 @@ struct KernelState
   // Output extraction
   uint32_t output_count = 0;
 
-  // Trigger params (need per-frame snapshot)
-  std::vector<tropical_expr::ControlParam *> trigger_params;
-
   // ── Slot model state (M5) ────────────────────────────────────────────────
   // Inter-module slot array. M5 uses it for control-plane writes only
   // (via tropical_runtime_set_slot); M6 introduces JIT codegen that
@@ -109,14 +106,6 @@ public:
       std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
       audio_processing_.store(false, std::memory_order_release);
       return;
-    }
-
-    // Snapshot trigger params once per buffer
-    for (auto * p : state.trigger_params)
-    {
-      p->frame_value.store(
-        p->value.exchange(0.0, std::memory_order_acq_rel),
-        std::memory_order_relaxed);
     }
 
     // Single kernel call processes the entire buffer

@@ -244,12 +244,10 @@ function translateExpr(expr: ExprNode, ctx: TranslateContext): ResolvedExpr {
     return { op: 'inputRef', decl: inputDecl }
   }
 
-  // ── Param/trigger refs → inline ParamDecls in the lifted program ──
-  if (op === 'param' || op === 'paramExpr') {
-    return paramOrTriggerRef(obj.name as string, 'param', ctx)
-  }
-  if (op === 'trigger' || op === 'triggerParamExpr') {
-    return paramOrTriggerRef(obj.name as string, 'trigger', ctx)
+  // ── Param refs → inline ParamDecls in the lifted program ──
+  if (op === 'param' || op === 'paramExpr'
+      || op === 'trigger' || op === 'triggerParamExpr') {
+    return paramRefIntoCtx(obj.name as string, ctx)
   }
 
   // ── Sentinels ──
@@ -303,20 +301,14 @@ function translateExpr(expr: ExprNode, ctx: TranslateContext): ResolvedExpr {
   throw new Error(`liftWireToProgram: unhandled wire-form op '${op}'`)
 }
 
-function paramOrTriggerRef(
+function paramRefIntoCtx(
   name: string,
-  kind: 'param' | 'trigger',
   ctx: TranslateContext,
 ): ResolvedExpr {
   let decl = ctx.paramDecls.get(name)
   if (decl === undefined) {
-    decl = { op: 'paramDecl', name, kind }
+    decl = { op: 'paramDecl', name }
     ctx.paramDecls.set(name, decl)
-  } else if (decl.kind !== kind) {
-    throw new Error(
-      `liftWireToProgram: param/trigger name collision on '${name}' ` +
-      `(declared as '${decl.kind}', ref demands '${kind}')`,
-    )
   }
   return { op: 'paramRef', decl }
 }

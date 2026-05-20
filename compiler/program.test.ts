@@ -329,7 +329,7 @@ describe('typeResolver', () => {
 // ─────────────────────────────────────────────────────────────
 
 describe('paramDecl in body decls (Phase A3)', () => {
-  test('loadProgramAsSession populates Param/Trigger registry from body paramDecls', () => {
+  test('loadProgramAsSession populates Param registry from body paramDecls', () => {
     const session = makeTestSession()
     const prog: Program = {
       op: 'program',
@@ -345,7 +345,8 @@ describe('paramDecl in body decls (Phase A3)', () => {
     loadProgramAsSession(prog, {}, session)
 
     expect(session.paramRegistry.has('cutoff')).toBe(true)
-    expect(session.triggerRegistry.has('gate')).toBe(true)
+    // Legacy `type: 'trigger'` paramDecls become non-smoothed params.
+    expect(session.paramRegistry.has('gate')).toBe(true)
     const p = session.paramRegistry.get('cutoff')!
     expect(p.value).toBeCloseTo(1234.0)
 
@@ -375,12 +376,13 @@ describe('paramDecl in body decls (Phase A3)', () => {
     expect(paramDeclEntries).toHaveLength(2)
     const byName = new Map(paramDeclEntries.map(d => [d.name as string, d]))
     expect(byName.get('freq')?.value).toBeCloseTo(440.0)
-    expect(byName.get('fire')?.type).toBe('trigger')
+    // After trigger removal, the saved paramDecl carries no `type` field.
+    expect(byName.get('fire')?.type).toBeUndefined()
 
     session.graph.dispose()
   })
 
-  test('round-trip: save then load preserves param values and trigger names', () => {
+  test('round-trip: save then load preserves param values', () => {
     const session = makeTestSession()
     const prog: Program = {
       op: 'program',
@@ -402,7 +404,7 @@ describe('paramDecl in body decls (Phase A3)', () => {
     const session2 = makeTestSession()
     loadProgramAsSession(node, topLevel, session2)
     expect(session2.paramRegistry.get('q')?.value).toBeCloseTo(0.42)
-    expect(session2.triggerRegistry.has('reset')).toBe(true)
+    expect(session2.paramRegistry.has('reset')).toBe(true)
 
     session.graph.dispose()
     session2.graph.dispose()
@@ -423,7 +425,8 @@ describe('paramDecl in body decls (Phase A3)', () => {
     }
     loadProgramAsSession(prog, topLevel, session)
     expect(session.paramRegistry.get('legacy')?.value).toBeCloseTo(7.5)
-    expect(session.triggerRegistry.has('tap')).toBe(true)
+    // Legacy `type: 'trigger'` → param with no smoothing.
+    expect(session.paramRegistry.has('tap')).toBe(true)
     session.graph.dispose()
   })
 

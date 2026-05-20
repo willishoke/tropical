@@ -23,12 +23,12 @@
  *  • BitCrusher — uses `pow`, which `emit_numeric` substitutes 0 for
  *    (broken in JIT) and `interpret.ts` throws on. Tracked in
  *    project_testing_gaps memory.
- *  • Trigger-shaped boolean inputs on SampleHold, TriggerRamp,
- *    EnvExpDecay, Bubble, BubbleCloud, NoiseLFSR, Seq4MinorTranspose,
- *    Sequencer — these fail at wire time on type narrowing
- *    ("literal 0.5 cannot narrow to bool") because their inputs require
- *    `to_bool`-shaped wiring this test doesn't synthesize. The gateable
- *    test in `jit_vs_interp.test.ts` covers a subset of these.
+ *  • Sequencer / Seq4MinorTranspose / BubbleCloud — array-typed input
+ *    ports or voice-steering patterns that hit per-instance compile
+ *    limitations unrelated to triggers (tracked as active-set M11
+ *    follow-ups).
+ *  • NoiseLFSR — int64 LFSR state diverges in JS (same root cause as
+ *    WhiteNoise).
  *
  * Requires libtropical.dylib (build with `make build` first).
  */
@@ -86,6 +86,17 @@ const STDLIB_EQUIV_TARGETS: Array<[string, Record<string, number>?]> = [
   // a follow-up. Track in active-set M11.
   ['AllpassDelay'], ['CombDelay'],
   ['Delay', { N: 1024 }],
+  // Trigger-input programs — previously excluded for `to_bool`-shaped
+  // wiring concerns. After the trigger refactor, `trigger` and `clock`
+  // ports are signal-shaped and edge detection is user-level;
+  // pulseEvery() supplies the right shape.
+  ['SampleHold'], ['TriggerRamp'], ['EnvExpDecay'], ['Bubble'],
+  // Sequencer / Seq4MinorTranspose — array-typed input port
+  // (`sequence: int[N]`) hits a per-instance compile-path limitation
+  // unrelated to triggers (active-set M11 follow-up).
+  // BubbleCloud — composes 8 Bubble voices via voice_idx steering;
+  // the per-voice gating expression interacts with the active-set
+  // path in ways that warrant a separate equivalence audit.
 ]
 
 function setupStdlibInstance(
