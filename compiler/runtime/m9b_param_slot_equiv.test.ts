@@ -23,7 +23,7 @@ import { loadStdlib } from '../program.ts'
 import { instantiate } from '../program_types.ts'
 import { compileSessionSlotted } from '../ir/compile_session_slotted.ts'
 import { toWirePlan } from '../flat_plan.ts'
-import { Param, Trigger } from './param.ts'
+import { Param } from './param.ts'
 import { wireKey, portRef, instanceName, portName } from '../ir/branded_names.js'
 
 const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
@@ -147,16 +147,17 @@ describe('M9b: params as slot reads in per-instance path', () => {
   })
 })
 
-describe('M9b: triggers as slot reads', () => {
-  test('triggerParamExpr compiles to slot operand', () => {
+describe('M9b: legacy trigger refs as slot reads', () => {
+  test('triggerParamExpr (legacy alias) compiles to slot operand', () => {
     const s = makeSession()
     loadStdlib(s)
     const sin = s.typeRegistry.get('SinOsc')!
     s.instanceRegistry.set('osc', instantiate(sin, 'osc'))
     allocateOutputSlots(s, 'osc', sin)
-    s.triggerRegistry.set('go', new Trigger())
+    s.paramRegistry.set('go', new Param(0.0, 0.0))
     const trigSlot = allocateParamSlot(s, 'go')
-    // Wire trigger into freq — odd but exercises the compile path
+    // Legacy {op:'triggerParamExpr'} routes through the same slot lookup as
+    // {op:'paramExpr'}; both compile to a slot read at the destination.
     s.inputExprNodes.set(wk("osc", "freq"), { op: 'triggerParamExpr', name: 'go' })
     s.graphOutputs.push({ instance: 'osc', output: 'sine' })
 

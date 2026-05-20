@@ -16,7 +16,7 @@ import {
 import { Runtime } from './runtime/runtime.js'
 import { loadProgramAsSession, type PortTypeDecl, type ProgramNode, type ProgramTopLevel } from './program.js'
 import { parseProgramV2 } from './schema.js'
-import { Param, Trigger } from './runtime/param.js'
+import { Param } from './runtime/param.js'
 import {
   specializationCacheKey, resolveTypeArgs,
   type RawTypeArgs, type ResolvedTypeArgs,
@@ -130,7 +130,6 @@ export interface SessionState {
   instanceRegistry: Map<string, Instance>
   graphOutputs: Array<{ instance: string; output: string }>
   paramRegistry: Map<string, Param>
-  triggerRegistry: Map<string, Trigger>
   /** Canonical input wiring: key is the branded `${instance}:${port}`
    *  wire identity, value is the ExprNode for round-trip save. Only
    *  `setWireExpr` (via `wireKey(portRef(...))`) may construct keys;
@@ -211,7 +210,6 @@ export function makeSession(bufferLength = 512): SessionState {
     instanceRegistry: new Map(),
     graphOutputs: [],
     paramRegistry: new Map(),
-    triggerRegistry: new Map(),
     inputExprNodes: new Map(),
     outputSlotRegistry: new Map(),
     paramSlotRegistry:  new Map(),
@@ -524,7 +522,7 @@ export function decodePortTypeDecl(
 // Generic program resolution
 // ─────────────────────────────────────────────────────────────
 
-type ResolveSession = Pick<SessionState, 'typeRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'> &
+type ResolveSession = Pick<SessionState, 'typeRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'instanceRegistry' | 'paramRegistry'> &
   Partial<Pick<SessionState, 'typeResolver' | 'typeAliasRegistry'>>
 
 /**

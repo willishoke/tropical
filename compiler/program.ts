@@ -11,7 +11,7 @@ import { validateExpr } from './expr.js'
 import type { TypeDefJSON, SessionState } from './session.js'
 import { resolveProgramType, allocateParamSlot, allocateOutputSlots } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
-import { Param, Trigger } from './runtime/param.js'
+import { Param } from './runtime/param.js'
 import {
   type Compiled,
   instantiate,
@@ -148,10 +148,9 @@ function* programDecls(prog: ProgramNode): Iterable<{ name: string; program: Pro
 }
 
 /** Iterate paramDecl entries in a ProgramNode's body. Each entry declares a
- *  smoothed param or fire-once trigger that the program reads via paramExpr /
- *  triggerParamExpr. Only the top-level program's paramDecls populate
- *  session.paramRegistry / session.triggerRegistry; nested-program paramDecls
- *  (inside `programDecl` entries) are not auto-hoisted. */
+ *  control-rate param that the program reads via paramExpr. Only the top-level
+ *  program's paramDecls populate session.paramRegistry; nested-program
+ *  paramDecls (inside `programDecl` entries) are not auto-hoisted. */
 export function* paramDecls(prog: ProgramNode): Iterable<{
   name: string
   value?: number
@@ -218,23 +217,18 @@ function mergeParamSources(prog: ProgramNode, topLevel: ProgramTopLevel): ParamS
 }
 let _topLevelParamsWarned = false
 
-/** Populate session.paramRegistry / session.triggerRegistry from a ParamSpec list.
- *  Idempotent within a single load: skip names already present (prevents
- *  duplicate registration during merge with body+topLevel both supplying same name). */
+/** Populate session.paramRegistry from a ParamSpec list. Legacy trigger
+ *  specs become plain Params with init=0 and time_const=0 (no smoothing) —
+ *  the trigger primitive at the runtime layer was dead code; from the
+ *  control thread's view, "fire" is just `param.value = 1.0`.
+ *  Idempotent: skip names already present. */
 function applyParamSpecs(session: SessionState, specs: ParamSpec[]): void {
   for (const p of specs) {
-    if (p.type === 'trigger') {
-      if (!session.triggerRegistry.has(p.name)) {
-        session.triggerRegistry.set(p.name, new Trigger())
-      }
-    } else {
-      if (!session.paramRegistry.has(p.name)) {
-        session.paramRegistry.set(p.name, new Param(p.value ?? 0.0, p.time_const ?? 0.005))
-      }
+    if (!session.paramRegistry.has(p.name)) {
+      const initValue = p.value ?? 0.0
+      const timeConst = p.type === 'trigger' ? 0.0 : (p.time_const ?? 0.005)
+      session.paramRegistry.set(p.name, new Param(initValue, timeConst))
     }
-    // Slot model (M3, additive): allocate a slot for every param/trigger
-    // alongside the legacy registries. Idempotent — safe to call on
-    // every param spec, even if already registered.
     allocateParamSlot(session, p.name)
   }
 }
@@ -328,7 +322,6 @@ export function loadProgramAsSession(
   session.instanceRegistry.clear()
   session.graphOutputs.length = 0
   session.paramRegistry.clear()
-  session.triggerRegistry.clear()
   session.inputExprNodes.clear()
   session.nameCounters.clear()
   session.typeAliasRegistry.clear()
@@ -434,7 +427,7 @@ export function loadProgramAsSession(
  */
 export function loadProgramAsType(
   prog: ProgramNode,
-  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'sumTypeRegistry' | 'structTypeRegistry'>>,
+  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'sumTypeRegistry' | 'structTypeRegistry'>>,
 ): Compiled | undefined {
   // Register type defs (aliases, sums, structs) from type_defs before processing subprograms
   for (const td of prog.ports?.type_defs ?? []) {
@@ -507,8 +500,8 @@ export function mergeProgramIntoSession(
       throw new Error(`merge collision: instance '${inst.name}' already exists.`)
   }
   for (const p of mergeParamSources(prog, topLevel)) {
-    if (session.paramRegistry.has(p.name) || session.triggerRegistry.has(p.name))
-      throw new Error(`merge collision: param/trigger '${p.name}' already exists.`)
+    if (session.paramRegistry.has(p.name))
+      throw new Error(`merge collision: param '${p.name}' already exists.`)
   }
 
   // Register type defs (aliases, sums, structs) from type_defs (additive)
@@ -599,12 +592,12 @@ const __dirname = dirname(__filename)
 
 type StdlibTarget =
   | Map<string, Compiled>
-  | (Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'>
+  | (Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'>
     & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>)
 
 function asLoadSession(target: StdlibTarget): Pick<
   SessionState,
-  'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'triggerRegistry'
+  'typeRegistry' | 'instanceRegistry' | 'paramRegistry'
   | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'
 > & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>> {
   if (target instanceof Map) {
@@ -612,7 +605,6 @@ function asLoadSession(target: StdlibTarget): Pick<
       typeRegistry: target,
       instanceRegistry: new Map(),
       paramRegistry: new Map(),
-      triggerRegistry: new Map(),
       specializationCache: new Map(),
       genericTemplatesResolved: new Map(),
       resolvedRegistry: new Map(),
@@ -733,12 +725,9 @@ export function saveProgramFromSession(
   const decls: ExprNode[] = []
 
   // paramDecls go first so they're declared before the instances that may
-  // reference them via paramExpr / triggerParamExpr.
+  // reference them via paramExpr.
   for (const [name, p] of session.paramRegistry) {
-    decls.push({ op: 'paramDecl', name, value: p.value, time_const: 0.005 } as ExprNode)
-  }
-  for (const [name] of session.triggerRegistry) {
-    decls.push({ op: 'paramDecl', name, type: 'trigger' } as ExprNode)
+    decls.push({ op: 'paramDecl', name, value: p.value } as ExprNode)
   }
 
   for (const [name, inst] of session.instanceRegistry) {

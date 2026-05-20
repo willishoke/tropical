@@ -35,7 +35,6 @@ import {
   exportSessionAsProgram, loadStdlib as loadBuiltins, instanceDecls,
 } from '../compiler/program.js'
 import { DAC }                 from '../compiler/runtime/audio.js'
-import { Param, Trigger }      from '../compiler/runtime/param.js'
 import { applyFlatPlan }  from '../compiler/apply_plan.js'
 import { checkArrayConnection } from '../compiler/array_wiring.js'
 import { validateExpr }         from '../compiler/expr.js'
@@ -687,7 +686,7 @@ const TOOLS = [
   },
   {
     name: 'list_params',
-    description: 'List all registered Params and Triggers with their current values.',
+    description: 'List all registered Params with their current values.',
     inputSchema: { type: 'object', properties: {} },
   },
 
@@ -1354,7 +1353,6 @@ function handleLoad(args: Record<string, unknown>) {
       wiring:      session.inputExprNodes.size,
       outputs:     session.graphOutputs.length,
       params:      [...session.paramRegistry.keys()],
-      triggers:    [...session.triggerRegistry.keys()],
       timing: { wall_ms },
     }
   })
@@ -1378,7 +1376,6 @@ function handleMerge(args: Record<string, unknown>) {
       wiring:      session.inputExprNodes.size,
       outputs:     session.graphOutputs.length,
       params:      [...session.paramRegistry.keys()],
-      triggers:    [...session.triggerRegistry.keys()],
     }
   })
 }
@@ -1522,13 +1519,9 @@ function handleTool(name: string, args: Record<string, unknown>) {
     })
 
     case 'list_params': return wrap(() => {
-      const params = [...session.paramRegistry.entries()].map(([name, p]) => ({
-        name, type: 'param', value: p.value,
+      return [...session.paramRegistry.entries()].map(([name, p]) => ({
+        name, value: p.value,
       }))
-      const triggers = [...session.triggerRegistry.keys()].map(name => ({
-        name, type: 'trigger',
-      }))
-      return [...params, ...triggers]
     })
 
     default:
@@ -1641,7 +1634,7 @@ Used in instance input wiring and inline program process definitions.
 - **Literal**: \`3.14\` or \`true\`
 - **Reference**: \`{ "op": "ref", "instance": "osc", "output": "sin" }\` — routes another instance's output to this input
 - **Input port**: \`{ "op": "input", "name": "freq" }\` — (inside program definitions only)
-- **Param / Trigger**: \`{ "op": "param", "name": "cutoff" }\` / \`{ "op": "trigger", "name": "gate" }\`
+- **Param**: \`{ "op": "param", "name": "cutoff" }\`
 - **Binary**: \`{ "op": "mul", "args": [<expr>, <expr>] }\`
   - Arithmetic: \`add\`, \`sub\`, \`mul\`, \`div\`, \`floor_div\`, \`mod\`, \`pow\`, \`matmul\`
   - Compare: \`lt\`, \`lte\`, \`gt\`, \`gte\`, \`eq\`, \`neq\`

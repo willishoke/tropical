@@ -27,7 +27,6 @@ type StdlibTarget =
       | 'typeRegistry'
       | 'instanceRegistry'
       | 'paramRegistry'
-      | 'triggerRegistry'
       | 'specializationCache'
       | 'genericTemplatesResolved'
       | 'resolvedRegistry'
@@ -39,7 +38,6 @@ function toSession(target: StdlibTarget) {
       typeRegistry: target,
       instanceRegistry: new Map(),
       paramRegistry: new Map(),
-      triggerRegistry: new Map(),
       specializationCache: new Map(),
       genericTemplatesResolved: new Map<string, ResolvedProgram>(),
       resolvedRegistry: new Map<string, ResolvedProgram>(),
@@ -48,7 +46,6 @@ function toSession(target: StdlibTarget) {
       | 'typeRegistry'
       | 'instanceRegistry'
       | 'paramRegistry'
-      | 'triggerRegistry'
       | 'specializationCache'
       | 'genericTemplatesResolved'
       | 'resolvedRegistry'

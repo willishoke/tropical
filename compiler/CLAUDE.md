@@ -109,7 +109,7 @@ runtime/
   bindings.ts               koffi FFI declarations matching tropical_c.h
   runtime.ts                Runtime class (tropical_runtime_t wrapper, FinalizationRegistry)
   audio.ts                  DAC class (tropical_dac_t wrapper, device listing)
-  param.ts                  Param (smoothed) and Trigger (fire-once); referenced by name
+  param.ts                  Param (smoothed scalar with one-pole lowpass); referenced by name
                             in wiring; the materializer resolves the name to an FFI handle
   audio_smoke.ts            Smoke test for audio output
 ```
@@ -305,11 +305,12 @@ by `loadStdlibFromSources()`.
 - `runtime.ts` — `Runtime` wraps `tropical_runtime_t`. FinalizationRegistry
   for GC-driven cleanup.
 - `audio.ts` — `DAC` wraps `tropical_dac_t`. Static `listDevices()`.
-- `param.ts` — `Param` (smoothed) and `Trigger` (fire-once). Wiring
-  references them by name (`{op:'param', name}` /
-  `{op:'trigger', name}`); the materializer resolves the name to a
-  handle (`tropical_param_t` for the JIT, SAB slot index stringified
-  to `param.ptr` for WASM) at compile time.
+- `param.ts` — `Param`: control-rate scalar with one-pole lowpass smoothing.
+  Wiring references them by name (`{op:'param', name}`); the materializer
+  resolves the name to a handle (`tropical_param_t` for the JIT, SAB slot
+  index stringified to `param.ptr` for WASM) at compile time. Legacy
+  `{op:'trigger', name}` refs are still accepted on the wire and aliased
+  to `{op:'param'}` at materialization.
 
 ## Tests
 

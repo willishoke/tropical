@@ -39,19 +39,3 @@ export class Param {
   }
 }
 
-/** Compatibility shim — legacy trigger behavior was "param with no smoothing,
- *  initial value 0, fire() sets value to 1.0." The trigger primitive at the
- *  runtime layer was dead code (no kernel ever read the snapshot); a Trigger
- *  is now a thin convenience wrapper over Param. */
-export class Trigger {
-  private readonly _p: Param
-  get _h(): unknown { return this._p._h }
-
-  constructor() {
-    this._p = new Param(0.0, 0.0)
-  }
-
-  fire(): void { this._p.value = 1.0 }
-  get value(): number { return this._p.value }
-  dispose(): void { this._p.dispose() }
-}
