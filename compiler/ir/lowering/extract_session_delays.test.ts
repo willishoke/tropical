@@ -6,7 +6,9 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, setWireExpr } from '../../session.js'
 import { extractSessionDelays } from './extract_session_delays.js'
-import { portRef, instanceName, portName } from '../branded_names.js'
+import { portRef, instanceName, portName, wireKey } from '../branded_names.js'
+
+const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
 
 /** Local sugar: build a PortRef from raw strings — keeps test
  *  expectations readable without bypassing the branded constructors. */
@@ -33,7 +35,7 @@ describe('extractSessionDelays', () => {
     })
 
     // Wire is rewritten to a sessionSlot read pointing at the new slot.
-    expect(session.inputExprNodes.get('a:in')).toEqual({
+    expect(session.inputExprNodes.get(wk("a", "in"))).toEqual({
       op: 'sessionSlot', index: baseSlotCount,
     })
     expect(session.slotCount).toBe(baseSlotCount + 1)
@@ -58,11 +60,11 @@ describe('extractSessionDelays', () => {
     const session = makeSession()
     // Direct write, bypassing setWireExpr — simulates a legacy
     // patch ingest path.
-    session.inputExprNodes.set('a:gain', { op: 'param', name: 'gain' })
+    session.inputExprNodes.set(wk("a", "gain"), { op: 'param', name: 'gain' })
 
-    const before = session.inputExprNodes.get('a:gain')
+    const before = session.inputExprNodes.get(wk("a", "gain"))
     extractSessionDelays(session)
-    const after = session.inputExprNodes.get('a:gain')
+    const after = session.inputExprNodes.get(wk("a", "gain"))
 
     expect(after).toEqual(before!)
     expect(session.delaySlotRegistry).toHaveLength(0)

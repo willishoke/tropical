@@ -11,6 +11,9 @@ import { loadStdlib as loadBuiltins, loadProgramAsType } from './program'
 import type { ProgramNode, ProgramFile } from './program'
 import { applySessionWiring, applyFlatPlan } from './apply_plan'
 import { Runtime } from './runtime/runtime'
+import { wireKey, portRef, instanceName, portName } from './ir/branded_names.js'
+
+const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
 
 /** Minimal test oscillator — naive saw + sin, phase accumulator. */
 const TEST_OSC: ProgramNode = {
@@ -72,9 +75,9 @@ describe('applySessionWiring', () => {
       amp1: { program: 'VCA' },
     })
 
-    session.inputExprNodes.set('osc1:freq', 440)
-    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
-    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.inputExprNodes.set(wk("osc1", "freq"), 440)
+    session.inputExprNodes.set(wk("amp1", "audio"), { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set(wk("amp1", "cv"), 1.0)
     session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     applySessionWiring(session)
@@ -112,9 +115,9 @@ describe('applySessionWiring', () => {
       osc1: { program: 'TestOsc' },
       amp1: { program: 'VCA' },
     })
-    session.inputExprNodes.set('osc1:freq', 440)
-    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
-    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.inputExprNodes.set(wk("osc1", "freq"), 440)
+    session.inputExprNodes.set(wk("amp1", "audio"), { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set(wk("amp1", "cv"), 1.0)
     session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     applySessionWiring(session)
@@ -136,16 +139,16 @@ describe('applySessionWiring', () => {
       amp1: { program: 'VCA' },
     })
 
-    session.inputExprNodes.set('osc1:freq', 440)
-    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
-    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.inputExprNodes.set(wk("osc1", "freq"), 440)
+    session.inputExprNodes.set(wk("amp1", "audio"), { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set(wk("amp1", "cv"), 1.0)
     session.graphOutputs.push({ instance: 'amp1', output: 'out' })
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
     expect(peak(session.graph.outputBuffer)).toBeGreaterThan(0)
 
-    session.inputExprNodes.delete('amp1:audio')
+    session.inputExprNodes.delete(wk("amp1", "audio"))
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
@@ -162,9 +165,9 @@ describe('applySessionWiring', () => {
       amp1: { program: 'VCA' },
     })
 
-    session.inputExprNodes.set('osc1:freq', 440)
-    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
-    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.inputExprNodes.set(wk("osc1", "freq"), 440)
+    session.inputExprNodes.set(wk("amp1", "audio"), { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set(wk("amp1", "cv"), 1.0)
     session.graphOutputs.push({ instance: 'amp1', output: 'out' })
     applySessionWiring(session)
     session.graph.primeJit()
@@ -172,7 +175,7 @@ describe('applySessionWiring', () => {
     const buf1 = new Float64Array(session.graph.outputBuffer)
     expect(peak(buf1)).toBeGreaterThan(0)
 
-    session.inputExprNodes.set('osc2:freq', 880)
+    session.inputExprNodes.set(wk("osc2", "freq"), 880)
     session.graphOutputs = [{ instance: 'osc2', output: 'saw' }]
     applySessionWiring(session)
     session.graph.primeJit()
@@ -196,13 +199,13 @@ describe('applySessionWiring', () => {
       amp1: { program: 'VCA' },
     })
 
-    session.inputExprNodes.set('osc1:freq', 440)
-    session.inputExprNodes.set('osc2:freq', 880)
-    session.inputExprNodes.set('amp1:audio', {
+    session.inputExprNodes.set(wk("osc1", "freq"), 440)
+    session.inputExprNodes.set(wk("osc2", "freq"), 880)
+    session.inputExprNodes.set(wk("amp1", "audio"), {
       op: 'add',
       args: [{ op: 'ref', instance: 'osc1', output: 'saw' }, { op: 'ref', instance: 'osc2', output: 'saw' }],
     } as ExprNode)
-    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.inputExprNodes.set(wk("amp1", "cv"), 1.0)
     session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     applySessionWiring(session)
@@ -221,17 +224,17 @@ describe('applySessionWiring', () => {
       amp1: { program: 'VCA' },
     })
 
-    session.inputExprNodes.set('osc1:freq', 440)
-    session.inputExprNodes.set('osc2:freq', 880)
-    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
-    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.inputExprNodes.set(wk("osc1", "freq"), 440)
+    session.inputExprNodes.set(wk("osc2", "freq"), 880)
+    session.inputExprNodes.set(wk("amp1", "audio"), { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set(wk("amp1", "cv"), 1.0)
     session.graphOutputs.push({ instance: 'amp1', output: 'out' })
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
     const buf1 = new Float64Array(session.graph.outputBuffer)
 
-    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc2', output: 'saw' })
+    session.inputExprNodes.set(wk("amp1", "audio"), { op: 'ref', instance: 'osc2', output: 'saw' })
     applySessionWiring(session)
     session.graph.primeJit()
     session.graph.process()
@@ -255,12 +258,12 @@ describe('applySessionWiring', () => {
       amp1: { program: 'VCA' },
     })
 
-    session.inputExprNodes.set('osc1:freq', 440)
-    session.inputExprNodes.set('amp1:audio', {
+    session.inputExprNodes.set(wk("osc1", "freq"), 440)
+    session.inputExprNodes.set(wk("amp1", "audio"), {
       op: 'mul',
       args: [{ op: 'ref', instance: 'osc1', output: 'saw' }, 0.5],
     } as ExprNode)
-    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.inputExprNodes.set(wk("amp1", "cv"), 1.0)
     session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     applySessionWiring(session)
@@ -282,9 +285,9 @@ describe('applyFlatPlan', () => {
       amp1: { program: 'VCA' },
     })
 
-    session.inputExprNodes.set('osc1:freq', 440)
-    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
-    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.inputExprNodes.set(wk("osc1", "freq"), 440)
+    session.inputExprNodes.set(wk("amp1", "audio"), { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set(wk("amp1", "cv"), 1.0)
     session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     const rt = new Runtime(256)
@@ -307,8 +310,8 @@ describe('applyFlatPlan', () => {
       Clock1: { program: 'Clock' },
     })
 
-    session.inputExprNodes.set('Clock1:freq', 1.0)
-    session.inputExprNodes.set('Clock1:ratios_in', [1.0])
+    session.inputExprNodes.set(wk("Clock1", "freq"), 1.0)
+    session.inputExprNodes.set(wk("Clock1", "ratios_in"), [1.0])
     session.graphOutputs.push({ instance: 'Clock1', output: 'output' })
 
     const rt = new Runtime(256)
@@ -327,9 +330,9 @@ describe('applyFlatPlan', () => {
       osc1: { program: 'TestOsc' },
       amp1: { program: 'VCA' },
     })
-    session.inputExprNodes.set('osc1:freq', 440)
-    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
-    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.inputExprNodes.set(wk("osc1", "freq"), 440)
+    session.inputExprNodes.set(wk("amp1", "audio"), { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set(wk("amp1", "cv"), 1.0)
     session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     const rt = new Runtime(256)
@@ -359,9 +362,9 @@ describe('applyFlatPlan', () => {
       amp1: { program: 'VCA' },
     })
 
-    session.inputExprNodes.set('osc1:freq', 440)
-    session.inputExprNodes.set('amp1:audio', { op: 'ref', instance: 'osc1', output: 'saw' })
-    session.inputExprNodes.set('amp1:cv', 1.0)
+    session.inputExprNodes.set(wk("osc1", "freq"), 440)
+    session.inputExprNodes.set(wk("amp1", "audio"), { op: 'ref', instance: 'osc1', output: 'saw' })
+    session.inputExprNodes.set(wk("amp1", "cv"), 1.0)
     session.graphOutputs.push({ instance: 'amp1', output: 'out' })
 
     const rt = new Runtime(256)
@@ -370,7 +373,7 @@ describe('applyFlatPlan', () => {
     for (let i = 0; i < 10; i++) rt.process()
     const buf1 = new Float64Array(rt.outputBuffer)
 
-    session.inputExprNodes.set('amp1:cv', 0.5)
+    session.inputExprNodes.set(wk("amp1", "cv"), 0.5)
     applyFlatPlan(session, rt)
     rt.process()
     const buf2 = rt.outputBuffer

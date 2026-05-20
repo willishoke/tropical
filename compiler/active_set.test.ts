@@ -24,6 +24,9 @@ import { instantiate } from './program_types.js'
 import { compileSession } from './ir/compile_session.js'
 import { toWirePlan } from './flat_plan.js'
 import { Runtime } from './runtime/runtime.js'
+import { wireKey, portRef, instanceName, portName } from './ir/branded_names.js'
+
+const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
 
 describe('active-set plan shape', () => {
   test('every session instance contributes one InstanceFunction', () => {
@@ -35,9 +38,9 @@ describe('active-set plan shape', () => {
     s.instanceRegistry.set('lp', instantiate(onePole, 'lp'))
     allocateOutputSlots(s, 'osc', sinOsc)
     allocateOutputSlots(s, 'lp', onePole)
-    s.inputExprNodes.set('osc:freq', 220)
-    s.inputExprNodes.set('lp:input', { op: 'ref', instance: 'osc', output: 'sine' })
-    s.inputExprNodes.set('lp:g', 0.1)
+    s.inputExprNodes.set(wk("osc", "freq"), 220)
+    s.inputExprNodes.set(wk("lp", "input"), { op: 'ref', instance: 'osc', output: 'sine' })
+    s.inputExprNodes.set(wk("lp", "g"), 0.1)
     s.graphOutputs.push({ instance: 'lp', output: 'out' })
 
     const plan = compileSession(s)
@@ -61,7 +64,7 @@ describe('active-set plan shape', () => {
     for (let i = 0; i < 4; i++) {
       s.instanceRegistry.set(`v${i}`, instantiate(sinOsc, `v${i}`))
       allocateOutputSlots(s, `v${i}`, sinOsc)
-      s.inputExprNodes.set(`v${i}:freq`, 110 * (i + 1))
+      s.inputExprNodes.set(wk(`v${i}`, `freq`), 110 * (i + 1))
       s.graphOutputs.push({ instance: `v${i}`, output: 'sine' })
     }
     const plan = compileSession(s)
@@ -91,7 +94,7 @@ describe('active-set audio invariance', () => {
       if (aliveExpr !== undefined) inst.aliveInput = aliveExpr
       s.instanceRegistry.set('osc', inst)
       allocateOutputSlots(s, 'osc', sinOsc)
-      s.inputExprNodes.set('osc:freq', 440)
+      s.inputExprNodes.set(wk("osc", "freq"), 440)
       s.graphOutputs.push({ instance: 'osc', output: 'sine' })
       return s
     }
@@ -124,7 +127,7 @@ describe('active-set audio invariance', () => {
     inst.aliveInput = false  // never alive
     s.instanceRegistry.set('osc', inst)
     allocateOutputSlots(s, 'osc', sinOsc)
-    s.inputExprNodes.set('osc:freq', 440)
+    s.inputExprNodes.set(wk("osc", "freq"), 440)
     s.graphOutputs.push({ instance: 'osc', output: 'sine' })
 
     const rt = new Runtime(64)
@@ -180,7 +183,7 @@ describe('active-set audio invariance', () => {
         inst.aliveInput = i < nAlive
         s.instanceRegistry.set(`v${i}`, inst)
         allocateOutputSlots(s, `v${i}`, sinOsc)
-        s.inputExprNodes.set(`v${i}:freq`, 110 * (i + 1))
+        s.inputExprNodes.set(wk(`v${i}`, `freq`), 110 * (i + 1))
         s.graphOutputs.push({ instance: `v${i}`, output: 'sine' })
       }
       return s

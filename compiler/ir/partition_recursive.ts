@@ -41,7 +41,7 @@ import {
   tempOffset, stateRegOffset, arraySlotOffset,
 } from './slot_indices.js'
 import { type ScalarType, instrWriteSlot, opConst } from './emit_resolved.js'
-import { instanceName as toInstanceName } from './branded_names.js'
+import { instanceName as toInstanceName, slotKey } from './branded_names.js'
 import { compileResolved } from './compile_resolved.js'
 import { cloneWithInputSubst } from './clone.js'
 import { makeCompiled, type Compiled } from '../program_types.js'
@@ -101,7 +101,7 @@ function lookupOutputSlot(
   instancePath: string,
   portName: string,
 ): number | undefined {
-  const portKey = `${instancePath}.${portName}`
+  const portKey = slotKey(toInstanceName(instancePath), portName)
   const meta = session.outputPortMeta.get(portKey)
   if (meta === undefined || meta.scalarSlotNames.length === 0) return undefined
   return session.outputSlotRegistry.get(meta.scalarSlotNames[0])
@@ -222,7 +222,7 @@ export function partitionKernel(
   const { preamble, body, writeSlots, tempsConsumed } = remapInstancePlan(plan, ctx, session)
   const instanceInstructions: NInstr[] = [...preamble, ...body, ...writeSlots]
 
-  const aliveSlotRaw = session.outputSlotRegistry.get(`${instancePath}.__alive__`)
+  const aliveSlotRaw = session.outputSlotRegistry.get(slotKey(toInstanceName(instancePath), '__alive__'))
   if (aliveSlotRaw === undefined) {
     throw new Error(
       `partitionKernel: '${instancePath}' has no __alive__ slot — allocateOutputSlots should have reserved it`,

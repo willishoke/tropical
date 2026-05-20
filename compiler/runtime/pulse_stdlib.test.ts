@@ -14,6 +14,9 @@ import { loadStdlib } from '../program.ts'
 import { instantiate } from '../program_types.ts'
 import { compileSessionSlotted } from '../ir/compile_session_slotted.ts'
 import { toWirePlan } from '../flat_plan.ts'
+import { wireKey, portRef, instanceName, portName } from '../ir/branded_names.js'
+
+const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
 
 describe('M9b: Pulse stdlib emits rising-edge pulses', () => {
   test('Pulse fires exactly once per low-to-high transition', () => {
@@ -31,7 +34,7 @@ describe('M9b: Pulse stdlib emits rising-edge pulses', () => {
     // uses allocateParamSlot + paramRegistry lookup.
     s.paramRegistry.set('fire', { value: 0 } as any)
     allocateParamSlot(s, 'fire')
-    s.inputExprNodes.set('p:signal', { op: 'param', name: 'fire' })
+    s.inputExprNodes.set(wk("p", "signal"), { op: 'param', name: 'fire' })
     s.graphOutputs.push({ instance: 'p', output: 'out' })
 
     process.env.TROPICAL_SLOT_OPS = '1'

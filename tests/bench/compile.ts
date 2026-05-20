@@ -5,6 +5,9 @@ import { makeSession, SessionState, instantiate, outputNames } from '../../compi
 import { loadStdlib as loadBuiltins } from '../../compiler/program.js'
 import { compileSession } from '../../compiler/ir/compile_session'
 import { toWirePlan } from '../../compiler/flat_plan.js'
+import { wireKey, portRef, instanceName, portName } from '../../compiler/ir/branded_names.js'
+
+const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
 
 const session: SessionState = makeSession()
 loadBuiltins(session)
@@ -33,7 +36,7 @@ for (const [typeName, instanceName] of modules) {
 }
 
 // Set the input that triggers wire()
-session.inputExprNodes.set('Clock1:freq', 2.1667)
+session.inputExprNodes.set(wk("Clock1", "freq"), 2.1667)
 
 // Test individual modules to find which is slow
 for (const [typeName, instanceName] of modules) {

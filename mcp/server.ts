@@ -1138,14 +1138,18 @@ function handleGetInfo(instanceName: string) {
       name: instanceName,
       program: inst.baseTypeName,
       type_args: inst.typeArgs ?? null,
-      inputs:  inputNames(inst).map((n, i) => ({
-        name: n, index: i,
-        type: inputPortType(inst, i) ?? null,
-        expr: session.inputExprNodes.get(`${instanceName}:${n}`) ?? null,
-        pretty: session.inputExprNodes.has(`${instanceName}:${n}`)
-          ? prettyExpr(session.inputExprNodes.get(`${instanceName}:${n}`)!, session.instanceRegistry)
-          : null,
-      })),
+      inputs:  inputNames(inst).map((n, i) => {
+        const key = wireKey(portRef(toInstanceName(instanceName), toPortName(n)))
+        const expr = session.inputExprNodes.get(key)
+        return {
+          name: n, index: i,
+          type: inputPortType(inst, i) ?? null,
+          expr: expr ?? null,
+          pretty: expr !== undefined
+            ? prettyExpr(expr, session.instanceRegistry)
+            : null,
+        }
+      }),
       outputs: outputNames(inst).map((n, i) => ({
         name: n, index: i,
         type: outputPortType(inst, i) ?? null,
@@ -1253,7 +1257,7 @@ function handleWire(args: Record<string, unknown>) {
       const inst = requireInstance(r.instance, 'remove[].instance')
       const inputId = resolveInputIdx(inst, r.input)
       const resolvedName = inputNames(inst)[inputId] ?? String(inputId)
-      session.inputExprNodes.delete(`${r.instance}:${resolvedName}`)
+      session.inputExprNodes.delete(wireKey(portRef(toInstanceName(r.instance), toPortName(resolvedName))))
     }
 
     // Process sets

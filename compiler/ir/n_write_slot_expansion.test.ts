@@ -13,6 +13,9 @@ import { describe, test, expect } from 'bun:test'
 import { makeSession } from '../session.js'
 import { loadProgramAsType } from '../program.js'
 import { compileSession } from './compile_session.js'
+import { slotKey, instanceName } from './branded_names.js'
+
+const sk = (i: string, n: string) => slotKey(instanceName(i), n)
 
 describe('Phase 3 — N-WriteSlot expansion for array output ports', () => {
   test('an instance with array_out: float[3] emits 3 WriteSlots', () => {
@@ -47,7 +50,7 @@ describe('Phase 3 — N-WriteSlot expansion for array output ports', () => {
     } as Parameters<typeof loadJSON>[0], session)
 
     // Confirm slot allocation expanded to 3 for the array port.
-    const aMeta = session.outputPortMeta.get('a.arr')
+    const aMeta = session.outputPortMeta.get(sk("a", "arr"))
     expect(aMeta).toBeDefined()
     expect(aMeta!.scalarSlotNames).toEqual(['a.arr[0]', 'a.arr[1]', 'a.arr[2]'])
 

@@ -131,16 +131,23 @@ export interface SessionState {
   graphOutputs: Array<{ instance: string; output: string }>
   paramRegistry: Map<string, Param>
   triggerRegistry: Map<string, Trigger>
-  /** Canonical input wiring: key is `${instance}:${input}`, value is the ExprNode for round-trip save. */
-  inputExprNodes: Map<string, ExprNode>  // key: `${instance}:${input}`
+  /** Canonical input wiring: key is the branded `${instance}:${port}`
+   *  wire identity, value is the ExprNode for round-trip save. Only
+   *  `setWireExpr` (via `wireKey(portRef(...))`) may construct keys;
+   *  raw strings are rejected at the type level. */
+  inputExprNodes: Map<WireKey, ExprNode>
 
   // ── Slot model state (populated by M3+; empty in legacy path) ───────────
-  /** "${instance}.${scalarSlotName}" → slot index in the shared slot[] array. */
-  outputSlotRegistry: Map<string, number>
-  /** Param/trigger name → slot index. Same flat slot[] as outputs. */
+  /** Branded `${instance}.${slotName}` → slot index in the shared
+   *  slot[] array. Constructed only via `slotKey(instName, slotName)`. */
+  outputSlotRegistry: Map<SlotKey, number>
+  /** Param/trigger name → slot index. Same flat slot[] as outputs.
+   *  Param names are plain strings (no instance context to brand
+   *  against). */
   paramSlotRegistry:  Map<string, number>
-  /** Per-output-port metadata captured at allocate time. */
-  outputPortMeta:     Map<string, WirePortMeta>  // key: "${instance}.${port}"
+  /** Per-output-port metadata captured at allocate time. Keyed by the
+   *  port's SlotKey (`${instance}.${port}`). */
+  outputPortMeta:     Map<SlotKey, WirePortMeta>
   /** Next slot index to allocate. Always equals outputSlotRegistry.size + paramSlotRegistry.size. */
   slotCount:          number
   /** Input expressions keyed by scalar-slot name "${instance}:${scalarSlotName}".

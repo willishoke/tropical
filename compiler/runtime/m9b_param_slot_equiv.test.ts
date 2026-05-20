@@ -24,6 +24,9 @@ import { instantiate } from '../program_types.ts'
 import { compileSessionSlotted } from '../ir/compile_session_slotted.ts'
 import { toWirePlan } from '../flat_plan.ts'
 import { Param, Trigger } from './param.ts'
+import { wireKey, portRef, instanceName, portName } from '../ir/branded_names.js'
+
+const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
 
 let prevEnv: string | undefined
 beforeEach(() => {
@@ -45,7 +48,7 @@ describe('M9b: params as slot reads in per-instance path', () => {
     // Declare a 'cutoff' param at the session level and wire it
     s.paramRegistry.set('cutoff', new Param(880, 0))   // unsmoothed (time_const=0)
     const paramSlotIdx = allocateParamSlot(s, 'cutoff')
-    s.inputExprNodes.set('osc:freq', { op: 'param', name: 'cutoff' })
+    s.inputExprNodes.set(wk("osc", "freq"), { op: 'param', name: 'cutoff' })
     s.graphOutputs.push({ instance: 'osc', output: 'sine' })
 
     const plan = compileSessionSlotted(s)
@@ -75,7 +78,7 @@ describe('M9b: params as slot reads in per-instance path', () => {
     allocateOutputSlots(sParam, 'osc', sin)
     sParam.paramRegistry.set('freq', new Param(FREQ, 0))
     const slotIdx = allocateParamSlot(sParam, 'freq')
-    sParam.inputExprNodes.set('osc:freq', { op: 'param', name: 'freq' })
+    sParam.inputExprNodes.set(wk("osc", "freq"), { op: 'param', name: 'freq' })
     sParam.graphOutputs.push({ instance: 'osc', output: 'sine' })
     const planParam = compileSessionSlotted(sParam)
 
@@ -85,7 +88,7 @@ describe('M9b: params as slot reads in per-instance path', () => {
     const sin2 = sLit.typeRegistry.get('SinOsc')!
     sLit.instanceRegistry.set('osc', instantiate(sin2, 'osc'))
     allocateOutputSlots(sLit, 'osc', sin2)
-    sLit.inputExprNodes.set('osc:freq', FREQ)
+    sLit.inputExprNodes.set(wk("osc", "freq"), FREQ)
     sLit.graphOutputs.push({ instance: 'osc', output: 'sine' })
     const planLit = compileSessionSlotted(sLit)
 
@@ -117,7 +120,7 @@ describe('M9b: params as slot reads in per-instance path', () => {
     allocateOutputSlots(s, 'osc', sin)
     s.paramRegistry.set('f', new Param(110, 0))
     allocateParamSlot(s, 'f')
-    s.inputExprNodes.set('osc:freq', { op: 'param', name: 'f' })
+    s.inputExprNodes.set(wk("osc", "freq"), { op: 'param', name: 'f' })
     s.graphOutputs.push({ instance: 'osc', output: 'sine' })
 
     const plan = compileSessionSlotted(s)
@@ -154,7 +157,7 @@ describe('M9b: triggers as slot reads', () => {
     s.triggerRegistry.set('go', new Trigger())
     const trigSlot = allocateParamSlot(s, 'go')
     // Wire trigger into freq — odd but exercises the compile path
-    s.inputExprNodes.set('osc:freq', { op: 'triggerParamExpr', name: 'go' })
+    s.inputExprNodes.set(wk("osc", "freq"), { op: 'triggerParamExpr', name: 'go' })
     s.graphOutputs.push({ instance: 'osc', output: 'sine' })
 
     const plan = compileSessionSlotted(s)
