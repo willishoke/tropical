@@ -369,7 +369,6 @@ export function mapChildren<T extends ExprOpNodeStrict>(
     case 'sampleRate':
     case 'sampleIndex':
     case 'param':
-    case 'trigger':
     case 'const':
       return node
 
