@@ -40,11 +40,11 @@ import type {
   ResolvedBlock,
 } from './nodes.js'
 import {
-  type InstanceName, type PortName, type PortRef,
+  type InstanceName, type PortName, type PortRef, type WireKey,
   instanceName as makeInstanceName,
   portName as makePortName,
   portRef as makePortRef,
-  portRefKey, rawName,
+  wireKey, rawName,
 } from './branded_names.js'
 
 // ─── Op sets ────────────────────────────────────────────────────────────────
@@ -101,7 +101,7 @@ export function freeRefs(expr: ExprNode): ReadonlySet<PortRef> {
         )
       }
       const ref = makePortRef(makeInstanceName(instStr), makePortName(outVal))
-      const key = portRefKey(ref)
+      const key = wireKey(ref)
       if (!byKey.has(key)) byKey.set(key, ref)
       return
     }
@@ -126,8 +126,8 @@ export function freeRefs(expr: ExprNode): ReadonlySet<PortRef> {
 // ─── Lift to ResolvedProgram ───────────────────────────────────────────────
 
 interface TranslateContext {
-  /** Map from canonical PortRef key to the InputDecl that represents it. */
-  readonly refToInput: ReadonlyMap<string, InputDecl>
+  /** Map from canonical wire key to the InputDecl that represents it. */
+  readonly refToInput: ReadonlyMap<WireKey, InputDecl>
   /** Param/Trigger decls accumulated during translation. Keyed by param
    *  name. Mutated as the translator encounters new refs. */
   readonly paramDecls: Map<string, ParamDecl>
@@ -158,11 +158,11 @@ export function liftWireToProgram(
   // Sort refs by canonical key so input ordering is deterministic
   // across calls (the same wire produces the same program shape).
   const sortedRefs = Array.from(freeRefSet).sort((a, b) =>
-    portRefKey(a).localeCompare(portRefKey(b)),
+    wireKey(a).localeCompare(wireKey(b)),
   )
 
   const inputDecls: InputDecl[] = []
-  const refToInput = new Map<string, InputDecl>()
+  const refToInput = new Map<WireKey, InputDecl>()
   for (const ref of sortedRefs) {
     // Name the input deterministically from the ref. Double-underscore
     // separator avoids collisions with user port names (which can't
@@ -171,7 +171,7 @@ export function liftWireToProgram(
     const inputName = `${rawName(ref.instance).replace(/\./g, '_')}__${rawName(ref.port)}`
     const decl: InputDecl = { op: 'inputDecl', name: inputName }
     inputDecls.push(decl)
-    refToInput.set(portRefKey(ref), decl)
+    refToInput.set(wireKey(ref), decl)
   }
 
   const outputDecl: OutputDecl = { op: 'outputDecl', name: 'out' }
@@ -231,13 +231,13 @@ function translateExpr(expr: ExprNode, ctx: TranslateContext): ResolvedExpr {
     const instStr = obj.instance as string
     const outStr = obj.output as string
     const ref = makePortRef(makeInstanceName(instStr), makePortName(outStr))
-    const inputDecl = ctx.refToInput.get(portRefKey(ref))
+    const inputDecl = ctx.refToInput.get(wireKey(ref))
     if (inputDecl === undefined) {
       // Should not happen: freeRefs collected this ref. Either the
       // caller passed a stale freeRefSet, or the expression mutated
       // between scanning and lifting.
       throw new Error(
-        `liftWireToProgram: ref ${portRefKey(ref)} not in freeRefSet — ` +
+        `liftWireToProgram: ref ${wireKey(ref)} not in freeRefSet — ` +
         `pass the same set returned by freeRefs(expr)`,
       )
     }
