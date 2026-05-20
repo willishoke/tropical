@@ -572,7 +572,7 @@ cross-check that:
 - `tests/equiv/web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches the JIT output.
 - `tests/equiv/migration_audio.test.ts` — new pipeline matches
-  pre-active-set goldens byte-for-byte.
+  legacy goldens byte-for-byte.
 
 Any disagreement is a strata, materialize, or backend bug; the suite
 localises which.
@@ -911,7 +911,7 @@ Run via `bun test`. The load-bearing suites:
 - `tests/equiv/wasm_vs_jit.test.ts`,
   `tests/equiv/web_plans_vs_jit.test.ts` — WASM emission equivalence
 - `tests/equiv/migration_audio.test.ts` — new pipeline vs.
-  pre-active-set goldens
+  legacy goldens
 - `ir/*.test.ts` — strata pipeline unit tests (specialize,
   sum_lower, trace_cycles, inline_instances, array_lower, slots,
   clone)

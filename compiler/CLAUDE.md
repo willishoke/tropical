@@ -327,19 +327,16 @@ Unit (in this directory):
   `stdlib_round_trip.test.ts` (every stdlib file print/re-parse)
 - `apply_plan.test.ts` — plan application integration (requires native lib)
 - `wasm_runtime.test.ts`, `emit_wasm.test.ts` — WASM emission unit tests
-- `active_set.test.ts` — IR-shape gate for the active-set runtime
 
 Cross-backend (in `tests/equiv/`):
 
-- `jit_vs_interp.test.ts` — JIT vs. `interpret_resolved` on the same
-  post-strata IR
-- `jit_vs_interp_stdlib.test.ts` — same, expanded to every viable
-  stdlib program
+- `jit_vs_interp_stdlib.test.ts` — JIT vs. `interpret_resolved` across
+  the stdlib corpus
 - `wasm_vs_jit.test.ts` — WASM emit vs. JIT, sample-for-sample
 - `web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches JIT output
-- `migration_audio.test.ts` — new pipeline vs. pre-active-set
-  goldens, byte-for-byte
+- `migration_audio.test.ts` — new pipeline vs. legacy goldens,
+  byte-for-byte
 
 Benchmarks (in `tests/bench/`):
 

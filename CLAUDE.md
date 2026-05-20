@@ -145,8 +145,8 @@ post-strata ResolvedProgram (per-program path)  /  SessionState (session path)
         │      NumericProgramParser → FlatProgram (multi-function)
         │      OrcJitEngine → LLVM IR — one kernel function whose body is:
         │          for each sample:
-        │            preamble (alive WriteSlots)
-        │            for each instance: (alive ? body + writebacks)
+        │            preamble (currently empty; reserved for future setup)
+        │            for each instance: body + writebacks
         │            state_evolution (delay-slot WriteSlots)
         │            postamble (DAC stitch reads)
         │            output mix
@@ -156,30 +156,27 @@ post-strata ResolvedProgram (per-program path)  /  SessionState (session path)
         ├─→ interpret_resolved (compiler/interpret_resolved.ts)
         │      pure-TS evaluator over a materialized ResolvedProgram.
         │      `materialize_session.ts` flattens the session for the
-        │      oracle; alive instances get `select(alive, raw,
-        │      fallback)` wraps. Independent of the JIT structure.
+        │      oracle. Independent of the JIT structure.
         │
         └─→ emit_wasm (compiler/emit_wasm.ts + compiler/wasm_memory_layout.ts)
                tropical_plan_5 → WebAssembly bytes + linear-memory layout.
-               Same per-sample sequencing as the C++ scheduler; the
-               alive conditional is emitted inline (no alwaysinline-
-               equivalent on the web target).
+               Same per-sample sequencing as the C++ scheduler.
                compilePlan (web/host/compiler.ts)
                WasmRuntime (web/worklet/runtime.ts) — same hot-swap logic as FlatRuntime,
                state transfer by name, smoothstep fade
                AudioWorkletProcessor (web/worklet/processor.ts) → audio output
 ```
 
-**Active-set runtime.** Every session instance has an `__alive__`
-slot defaulting to `1.0`. The scheduler reads each instance's alive
-slot before dispatching; if `alive > 0.5` the instance's body runs,
-otherwise its kernel is skipped and its output slots retain their
-last-written values. The user controls alive per instance via
-`add_instance(..., alive_input: ExprNode)` or `wire({instance: "v0",
-input: "alive", expr: ...})`. Default alive (no `alive_input`)
-collapses to `if (1) ...` post-LLVM GVN — zero runtime cost.
+**Fixed-topology compilation.** Tropical compiles a session graph to
+one monolithic kernel; the topology is fixed for the lifetime of the
+kernel. Topology changes (adding/removing instances, rewiring) trigger
+hot-swap to a freshly compiled kernel with state transferred by name.
+There is no per-instance runtime gating — every instance runs every
+sample, and the JIT fuses across instances aggressively. This is the
+shape of synthesis the language is good at; dynamic-lifecycle
+semantics belong in a different language with a different runtime.
 
-Param/Trigger handles are the only thing that differs between
+Param handles are the only thing that differs between
 backends. Wiring expressions reference parameters by name
 (`{op:'param', name}` / `{op:'trigger', name}`); the materializer
 resolves names to handles at compile time. For the JIT path the handle
@@ -190,14 +187,11 @@ backend-agnostic.
 ## Equivalence gates
 
 The pipeline is correct only if every pass and every backend agrees
-with the per-sample semantics on the input. Four test suites pin that
-down by cross-checking outputs:
+with the per-sample semantics on the input. Three test suites pin
+that down by cross-checking outputs:
 
-- `compiler/active_set.test.ts` — IR-shape gate for the active-set
-  runtime: every instance gets a `__alive__` slot, the scheduler
-  preamble writes literal 1.0 by default, the conditional folds.
-- `tests/equiv/jit_vs_interp.test.ts` — JIT and `interpret_resolved`
-  agree sample-for-sample on the same post-strata IR.
+- `tests/equiv/jit_vs_interp_stdlib.test.ts` — JIT and
+  `interpret_resolved` agree sample-for-sample across the stdlib corpus.
 - `tests/equiv/wasm_vs_jit.test.ts` — WASM and JIT agree
   sample-for-sample.
 - `tests/equiv/web_plans_vs_jit.test.ts` — every precompiled plan in
@@ -213,7 +207,7 @@ Two distinct JSON schemas; do not confuse them.
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_2` | `compiler/program.ts`, `compiler/parse/raise.ts` | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in `.trop`) or by agents (over MCP). |
-| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: per-instance instruction streams plus a scheduler preamble (alive WriteSlots) and postamble (DAC stitch). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel form) for hand-crafted unit tests; it's lifted into a one-instance plan_5 at parse time. |
+| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: per-instance instruction streams plus a scheduler postamble (DAC stitch) and state-evolution phase (delay-slot updates). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel form) for hand-crafted unit tests; it's lifted into a one-instance plan_5 at parse time. |
 
 Going from the first to the second without losing meaning is exactly
 what the strata pipeline does.
