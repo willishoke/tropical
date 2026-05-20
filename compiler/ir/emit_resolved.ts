@@ -17,10 +17,9 @@
  *
  * All instruction emission goes through typed constructors
  * (`instrScalar`, `instrArray`, `instrPack`, `instrSetElement`,
- * `instrIndex`, `instrWriteSlot`, `instrSmoothParam`,
- * `instrTriggerParam`) — direct object-literal construction of
- * `NInstr` is avoided. Constructors enforce the dst's namespace
- * matches the tag's writeback class.
+ * `instrIndex`, `instrWriteSlot`, `instrSmoothParam`) — direct
+ * object-literal construction of `NInstr` is avoided. Constructors
+ * enforce the dst's namespace matches the tag's writeback class.
  *
  * ## Wire format
  *
@@ -139,12 +138,6 @@ export const instrSmoothParam = (
     { kind: 'state_reg', slot: stateRegSlot, scalar_type: 'float' },
     { kind: 'const', val: coeff, scalar_type: 'float' },
   ],
-  loop_count: 1, strides: [], result_type: 'float',
-})
-
-export const instrTriggerParam = (dst: TempIdx, paramPtr: string): NInstr => ({
-  tag: 'TriggerParam', dst: { kind: 'temp', slot: dst },
-  args: [{ kind: 'param', ptr: paramPtr, scalar_type: 'float' }],
   loop_count: 1, strides: [], result_type: 'float',
 })
 
