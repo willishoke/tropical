@@ -78,7 +78,6 @@ export const tropical_param_new          = lib.func('tropical_param_new',       
 export const tropical_param_free         = lib.func('tropical_param_free',         'void',   ['void *'])
 export const tropical_param_set          = lib.func('tropical_param_set',          'void',   ['void *', 'double'])
 export const tropical_param_get          = lib.func('tropical_param_get',          'double', ['void *'])
-export const tropical_param_new_trigger  = lib.func('tropical_param_new_trigger',  'void *', [])
 
 // ---------- DAC API ----------
 

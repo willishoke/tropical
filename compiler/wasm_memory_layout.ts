@@ -22,7 +22,6 @@ export type WasmLayout = {
   arraysOffset:      number
   arrayOffsets:      number[]     // per array slot: absolute byte offset
   paramTableOffset:  number       // f64[paramCount]
-  paramFrameOffset:  number       // f64[paramCount] — trigger snapshot per block
   slotsOffset:       number       // f64[slotCount] — inter-module slot array (M10)
   outputOffset:      number       // f64[maxBlockSize]
   totalBytes:        number
@@ -81,9 +80,6 @@ export function computeLayout(args: {
   const paramTableOffset = cursor
   cursor = align8(cursor + paramPtrs.length * f64)
 
-  const paramFrameOffset = cursor
-  cursor = align8(cursor + paramPtrs.length * f64)
-
   // Inter-module slot array (M10). Slot-mode plans pass slotCount > 0;
   // legacy plans omit it and the region is zero-sized.
   const slotsOffset = cursor
@@ -102,7 +98,6 @@ export function computeLayout(args: {
     arraysOffset,
     arrayOffsets,
     paramTableOffset,
-    paramFrameOffset,
     slotsOffset,
     outputOffset,
     totalBytes,

@@ -51,7 +51,6 @@ enum class OpTag : uint8_t
   Pack,     // args = scalar values → arrays[dst]
   // Stateful param ops (special handling)
   SmoothParam,   // args[0]=Param(ptr), args[1]=StateReg(slot), args[2]=Const(coeff)
-  TriggerParam,  // args[0]=Param(ptr)
   // M6+: write a computed value to slots[dst]. `dst` is the slot index;
   // `args[0]` is the value to write (scalar). No temp slot consumed.
   WriteSlot,

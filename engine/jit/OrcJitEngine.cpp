@@ -921,28 +921,6 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       return llvm::Error::success();
     }
 
-    // ── TriggerParam ── (reads frame_value via ptr; no smoothing)
-    if (instr.tag == OpTag::TriggerParam)
-    {
-      // ControlParam::frame_value is the second double field after value.
-      // Offset: sizeof(std::atomic<double>) ≈ 8 bytes for value + 8 bytes for frame_value.
-      // We read frame_value via a pointer offset identical to the existing NumericOp path.
-      const uint64_t param_ptr = instr.args[0].ptr;
-      auto pi = param_index.find(param_ptr);
-      uint64_t canonical_idx = (pi != param_index.end()) ? pi->second : 0;
-      llvm::Value * pp_slot = builder.CreateInBoundsGEP(i64_ty, param_ptrs_arg, builder.getInt64(canonical_idx));
-      llvm::Value * pp_raw  = builder.CreateLoad(i64_ty, pp_slot);
-      // frame_value is at offset +16 bytes (two atomic<double> fields: value, frame_value)
-      llvm::Value * pp_base = builder.CreateIntToPtr(pp_raw, ptr_ty);
-      llvm::Value * fv_ptr  = builder.CreateInBoundsGEP(
-        builder.getInt8Ty(), pp_base, builder.getInt64(16));
-      auto * fv_ld = builder.CreateAlignedLoad(f64_ty, fv_ptr, llvm::Align(sizeof(double)));
-      fv_ld->setAtomic(llvm::AtomicOrdering::Monotonic);
-      store_temp_f64(instr.dst, fv_ld);
-      temp_types[instr.dst] = ST::Float;
-      return llvm::Error::success();
-    }
-
     // ── WriteSlot: write a computed value to slots[dst] (M6+) ──
     // Used by slot-mode plans to commit each module instance's outputs
     // to the shared inter-module slot array. `dst` is the slot index;

@@ -1,9 +1,9 @@
 /**
- * Param and Trigger — control-rate parameters. Port of tropical/param.py.
+ * Param — control-rate parameter. Port of tropical/param.py.
  *
- * Wiring references these by name (`{op:'param', name}` / `{op:'trigger', name}`);
- * the materializer (`compiler/ir/materialize_session.ts`) looks up the FFI
- * handle off the session's paramRegistry / triggerRegistry at compile time.
+ * Wiring references these by name (`{op:'param', name}`); the materializer
+ * (`compiler/ir/materialize_session.ts`) looks up the FFI handle off the
+ * session's paramRegistry at compile time.
  */
 
 import * as b from './bindings.js'
@@ -39,25 +39,19 @@ export class Param {
   }
 }
 
+/** Compatibility shim — legacy trigger behavior was "param with no smoothing,
+ *  initial value 0, fire() sets value to 1.0." The trigger primitive at the
+ *  runtime layer was dead code (no kernel ever read the snapshot); a Trigger
+ *  is now a thin convenience wrapper over Param. */
 export class Trigger {
-  readonly _h: unknown
+  private readonly _p: Param
+  get _h(): unknown { return this._p._h }
 
   constructor() {
-    this._h = b.check(b.tropical_param_new_trigger(), 'param_new_trigger')
-    _registry.register(this, this._h, this)
+    this._p = new Param(0.0, 0.0)
   }
 
-  /** Arm the trigger (atomic store of 1.0). Safe from any thread. */
-  fire(): void {
-    b.tropical_param_set(this._h, 1.0)
-  }
-
-  get value(): number {
-    return b.tropical_param_get(this._h) as number
-  }
-
-  dispose(): void {
-    _registry.unregister(this)
-    b.tropical_param_free(this._h)
-  }
+  fire(): void { this._p.value = 1.0 }
+  get value(): number { return this._p.value }
+  dispose(): void { this._p.dispose() }
 }
