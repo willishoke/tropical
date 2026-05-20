@@ -67,6 +67,7 @@ import { findInstanceCycles } from './lowering/cycle_break.js'
 import { CycleViolation, type CycleDiagnostic } from './elaboration_diagnostics.js'
 import { specializeProgram } from './specialize.js'
 import { cloneResolvedProgram } from './clone.js'
+import { parseWireKey } from './branded_names.js'
 
 /** Run the session-to-ResolvedProgram materialization end-to-end. */
 export function materializeSessionToResolvedIR(session: SessionState): ResolvedProgram {
@@ -248,10 +249,10 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
   }
 
   for (const [key, expr] of session.inputExprNodes) {
-    const colon = key.indexOf(':')
-    if (colon < 0) continue
-    const instName = key.slice(0, colon)
-    const inputName = key.slice(colon + 1)
+    let ref
+    try { ref = parseWireKey(key) } catch { continue }
+    const instName = ref.instance
+    const inputName = ref.port
     const instDecl = ctx.instanceDecls.get(instName)
     if (instDecl === undefined) continue
     const port = instDecl.type.ports.inputs.find(p => p.name === inputName)

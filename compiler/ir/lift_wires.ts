@@ -29,7 +29,10 @@
 
 import type { SessionState, ExprNode } from '../session.js'
 import { freeRefs, liftWireToProgram } from './wire_program.js'
-import { instanceName, rawName, type PortRef } from './branded_names.js'
+import {
+  instanceName, rawName, type PortRef, type WireKey,
+  wireKey as toWireKey, portRef, portName as toPortName,
+} from './branded_names.js'
 import { programTypeFromResolved } from './strata.js'
 import { instantiate } from '../program_types.js'
 import { allocateOutputSlots } from '../session.js'
@@ -103,7 +106,7 @@ function liftOneWire(
     baseTypeName: rawName(synthName),
   })
   session.instanceRegistry.set(rawName(synthName), inst)
-  allocateOutputSlots(session, rawName(synthName), compiled)
+  allocateOutputSlots(session, synthName, compiled)
 
   // Wire each free ref to its corresponding input on the lifted
   // instance. The input naming convention matches `liftWireToProgram`:
@@ -115,10 +118,10 @@ function liftOneWire(
   )
   for (const ref of refList) {
     const inputName = `${rawName(ref.instance).replace(/\./g, '_')}__${rawName(ref.port)}`
-    const wireKey = `${rawName(synthName)}:${inputName}`
+    const key = toWireKey(portRef(synthName, toPortName(inputName)))
     // Forward the original ref expression unchanged — this is now a
     // simple `{op:'ref',...}` wire that translateNode handles.
-    session.inputExprNodes.set(wireKey, {
+    session.inputExprNodes.set(key, {
       op: 'ref',
       instance: rawName(ref.instance),
       output: rawName(ref.port),
@@ -138,7 +141,7 @@ function liftOneWire(
 export function liftWiresToInstances(session: SessionState): void {
   // Capture wires before mutation; we'll modify the map as we go but
   // never want to re-lift a wire we just inserted.
-  const toLift: Array<{ key: string; expr: ExprNode }> = []
+  const toLift: Array<{ key: WireKey; expr: ExprNode }> = []
   for (const [key, expr] of session.inputExprNodes) {
     if (needsWireLift(expr)) toLift.push({ key, expr })
   }

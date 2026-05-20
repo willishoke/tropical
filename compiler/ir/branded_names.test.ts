@@ -2,8 +2,9 @@ import { describe, test, expect } from 'bun:test'
 import {
   instanceName, portName, rawName,
   childInstance, instancePathParts, isTopLevel, parentOf, leafOf,
-  portRef, portRefEq, portRefKey, parsePortRefKey,
+  portRef, portRefEq, wireKey, parseWireKey, slotKey,
   type InstanceName, type PortName, type PortRef,
+  type WireKey, type SlotKey,
 } from './branded_names.js'
 
 describe('InstanceName / PortName constructors', () => {
@@ -102,33 +103,65 @@ describe('PortRef', () => {
     expect(portRefEq(a, d)).toBe(false)
   })
 
-  test('portRefKey serializes to canonical form', () => {
+  test('wireKey serializes to canonical form', () => {
     const r = portRef(instanceName('voice1'), portName('freq'))
-    expect(portRefKey(r)).toBe('voice1:freq')
+    expect(wireKey(r)).toBe('voice1:freq')
   })
 
-  test('portRefKey handles nested instance paths', () => {
+  test('wireKey handles nested instance paths', () => {
     const r = portRef(instanceName('voice1.env'), portName('alive'))
-    expect(portRefKey(r)).toBe('voice1.env:alive')
+    expect(wireKey(r)).toBe('voice1.env:alive')
   })
 
-  test('parsePortRefKey is inverse of portRefKey', () => {
+  test('parseWireKey is inverse of wireKey', () => {
     const r = portRef(instanceName('voice1.env'), portName('alive'))
-    const k = portRefKey(r)
-    const back = parsePortRefKey(k)
+    const k = wireKey(r)
+    const back = parseWireKey(k)
     expect(portRefEq(r, back)).toBe(true)
   })
 
-  test('parsePortRefKey throws on missing separator', () => {
-    expect(() => parsePortRefKey('voice1')).toThrow(/missing ':'/)
+  test('parseWireKey throws on missing separator', () => {
+    expect(() => parseWireKey('voice1')).toThrow(/missing ':'/)
   })
 
-  test('parsePortRefKey splits on first colon only', () => {
+  test('parseWireKey splits on first colon only', () => {
     // contrived but: instance names can contain dots, but not colons.
     // ports also cannot contain colons. so the first colon is canonical.
-    const back = parsePortRefKey('voice1:in')
+    const back = parseWireKey('voice1:in')
     expect(rawName(back.instance)).toBe('voice1')
     expect(rawName(back.port)).toBe('in')
+  })
+
+  test('parseWireKey accepts raw string at JSON deser boundary', () => {
+    // The parser is the entry-point for untrusted/serialized data; it
+    // takes `WireKey | string`. Passing a raw string should work.
+    const raw: string = 'instA:portB'
+    const back = parseWireKey(raw)
+    expect(rawName(back.instance)).toBe('instA')
+    expect(rawName(back.port)).toBe('portB')
+  })
+})
+
+describe('SlotKey', () => {
+  test('slotKey serializes (instance, slotName) with dot separator', () => {
+    expect(slotKey(instanceName('lp1'), 'out')).toBe('lp1.out')
+  })
+
+  test('slotKey allows brackets in slotName (array elements)', () => {
+    expect(slotKey(instanceName('seq'), 'values[3]')).toBe('seq.values[3]')
+  })
+
+  test('slotKey allows synthetic slot names like __alive__', () => {
+    expect(slotKey(instanceName('a'), '__alive__')).toBe('a.__alive__')
+  })
+
+  test('slotKey allows dotted instance paths (nesting + slot dot are both present)', () => {
+    // voice1.env.out — two dots, second one is the slot separator.
+    expect(slotKey(instanceName('voice1.env'), 'out')).toBe('voice1.env.out')
+  })
+
+  test('slotKey rejects empty slotName', () => {
+    expect(() => slotKey(instanceName('a'), '')).toThrow(/empty/)
   })
 })
 

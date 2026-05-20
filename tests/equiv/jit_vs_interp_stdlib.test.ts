@@ -41,6 +41,9 @@ import { applyFlatPlan } from '../../compiler/apply_plan.js'
 import { interpretSession } from '../../compiler/interpret_resolved'
 import { EDGE_FIXTURES } from '../fixtures/equiv/edge_cases.js'
 import { loadProgramAsType } from '../../compiler/program.js'
+import { wireKey, portRef, instanceName, portName } from '../../compiler/ir/branded_names.js'
+
+const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
 
 // 256 * 4 = 1024 samples per fixture — large enough to expose
 // state-transfer drift and 4-buffer continuity, small enough to keep
@@ -96,7 +99,7 @@ function setupStdlibInstance(
   session.instanceRegistry.set('inst', inst)
   for (const portName of inputNames(inst)) {
     if (portName in DEFAULT_INPUTS) {
-      session.inputExprNodes.set(`inst:${portName}`, DEFAULT_INPUTS[portName])
+      session.inputExprNodes.set(wk(`inst`, portName), DEFAULT_INPUTS[portName])
     }
   }
   session.graphOutputs.push({ instance: 'inst', output: outputNames(inst)[0] })
@@ -172,7 +175,7 @@ describe('JIT ↔ interpreter equivalence — edge cases (Phase D P0.1)', () => 
       session.instanceRegistry.set('inst', inst)
       if (fixture.inputs) {
         for (const [k, v] of Object.entries(fixture.inputs)) {
-          session.inputExprNodes.set(`inst:${k}`, v)
+          session.inputExprNodes.set(wk(`inst`, k), v)
         }
       }
       const outName = fixture.output ?? outputNames(inst)[0]
@@ -288,7 +291,7 @@ describe('JIT state transfer across loadPlan (Phase D P0.1)', () => {
     // Plan B: same SinOsc, but modulate the freq input. Crucially, the
     // SinOsc's phase register should carry over from plan A — we are
     // exercising the FlatRuntime's name-keyed state-transfer path.
-    session.inputExprNodes.set('inst:freq', 220)  // halved
+    session.inputExprNodes.set(wk("inst", "freq"), 220)  // halved
     applyFlatPlan(session, session.runtime)
     session.graph.process()
     const afterRewire = new Float64Array(session.graph.outputBuffer)
@@ -322,8 +325,7 @@ describe('JIT state transfer across loadPlan (Phase D P0.1)', () => {
     // Plan B: change the input gain (mul by 0.5). Phaser's allpass
     // chain registers should transfer; the post-rewire output peak
     // should be ~half the pre-rewire output peak after the crossfade.
-    session.inputExprNodes.set(
-      'inst:input',
+    session.inputExprNodes.set(wk("inst", "input"),
       { op: 'mul', args: [0.5, 0.5] },
     )
     applyFlatPlan(session, session.runtime)

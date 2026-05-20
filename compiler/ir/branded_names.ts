@@ -42,6 +42,19 @@ export type InstanceName = BrandedName<'InstanceName'>
  *  dots are not allowed (ports are not nested). */
 export type PortName = BrandedName<'PortName'>
 
+/** Canonical key into `session.inputExprNodes` — identifies a wire by
+ *  the consumer (instance, input port) pair. Serialized as
+ *  `${instance}:${port}` for use as a Map key. Constructed only via
+ *  `wireKey(portRef)`; parsed only via `parseWireKey(key)`. */
+export type WireKey = BrandedName<'WireKey'>
+
+/** Canonical key into `session.outputSlotRegistry` and
+ *  `session.outputPortMeta` — identifies one allocated slot by the
+ *  (instance, slotName) pair. Slot names may be plain port names
+ *  ("out"), array elements ("out[0]"), or synthetic ("__alive__").
+ *  Serialized as `${instance}.${slotName}`; never parsed back. */
+export type SlotKey = BrandedName<'SlotKey'>
+
 // ─── Constructors ───────────────────────────────────────────────────────────
 
 const construct = <B extends string>(name: B, s: string, allowDots: boolean): BrandedName<B> => {
@@ -123,16 +136,22 @@ export const portRef = (inst: InstanceName, port: PortName): PortRef => ({
 export const portRefEq = (a: PortRef, b: PortRef): boolean =>
   a.instance === b.instance && a.port === b.port
 
-/** Canonical string form for use as a Map key or in JSON. Uses `:` as
- *  the instance/port separator (distinct from `.` which separates
- *  nesting levels in the instance path). */
-export const portRefKey = (r: PortRef): string => `${r.instance}:${r.port}`
+/** Canonical wire-key serialization. Uses `:` as the instance/port
+ *  separator (distinct from `.` which separates nesting levels in
+ *  the instance path). The return is a branded `WireKey`; consumers
+ *  that store wire keys (e.g. `Map<WireKey, ExprNode>`) reject raw
+ *  strings at the type level. */
+export const wireKey = (r: PortRef): WireKey =>
+  `${r.instance}:${r.port}` as WireKey
 
-/** Inverse of `portRefKey`. Throws on malformed input. */
-export const parsePortRefKey = (key: string): PortRef => {
+/** Inverse of `wireKey`. Accepts a raw string for use at JSON ingest
+ *  / deserialization boundaries. Returns the structured `PortRef`;
+ *  the brand only travels with the serialized form, so the parser
+ *  always returns the inner structure. */
+export const parseWireKey = (key: WireKey | string): PortRef => {
   const idx = key.indexOf(':')
   if (idx < 0) {
-    throw new Error(`parsePortRefKey: malformed key '${key}' — missing ':'`)
+    throw new Error(`parseWireKey: malformed key '${key}' — missing ':'`)
   }
   const instPart = key.slice(0, idx)
   const portPart = key.slice(idx + 1)
@@ -140,4 +159,18 @@ export const parsePortRefKey = (key: string): PortRef => {
     instance: instanceName(instPart),
     port:     portName(portPart),
   }
+}
+
+// ─── SlotKey ────────────────────────────────────────────────────────────────
+
+/** Canonical slot-key serialization. Used as the key into
+ *  `session.outputSlotRegistry` and `session.outputPortMeta`. The
+ *  `slotName` is allowed to contain brackets (`out[0]`) and synthetic
+ *  prefixes (`__alive__`); only the instance portion is validated
+ *  through `InstanceName`'s discipline. */
+export const slotKey = (inst: InstanceName, slotName: string): SlotKey => {
+  if (typeof slotName !== 'string' || slotName.length === 0) {
+    throw new Error(`slotKey: empty or non-string slotName`)
+  }
+  return `${inst}.${slotName}` as SlotKey
 }

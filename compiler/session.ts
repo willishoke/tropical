@@ -28,6 +28,11 @@ import {
 import type { PortType as IRPortType, ScalarKind as IRScalarKind } from './ir/nodes.js'
 import { programTypeFromResolved } from './ir/strata.js'
 import type { TypeParamDecl } from './ir/nodes.js'
+import {
+  type PortRef, type WireKey, type SlotKey,
+  type InstanceName,
+  wireKey, slotKey,
+} from './ir/branded_names.js'
 
 // ─────────────────────────────────────────────────────────────
 // JSON schema types
@@ -101,8 +106,9 @@ export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON | AliasTypeDefJSON
  *  After strata, sums/structs/products/units are gone — only scalar,
  *  alias, and array remain. */
 export interface WirePortMeta {
-  /** "${instance}.${port}[0]" / etc. — one entry per scalar slot. */
-  scalarSlotNames: string[]
+  /** Branded SlotKey per scalar slot — `${instance}.${port}` for
+   *  scalar ports, `${instance}.${port}[0]` etc. for array elements. */
+  scalarSlotNames: SlotKey[]
   /** One ScalarKind per slot; length === scalarSlotNames.length. */
   scalarTypes:     IRScalarKind[]
   /** The original IR PortType, retained for combine typecheck. */
@@ -125,16 +131,23 @@ export interface SessionState {
   graphOutputs: Array<{ instance: string; output: string }>
   paramRegistry: Map<string, Param>
   triggerRegistry: Map<string, Trigger>
-  /** Canonical input wiring: key is `${instance}:${input}`, value is the ExprNode for round-trip save. */
-  inputExprNodes: Map<string, ExprNode>  // key: `${instance}:${input}`
+  /** Canonical input wiring: key is the branded `${instance}:${port}`
+   *  wire identity, value is the ExprNode for round-trip save. Only
+   *  `setWireExpr` (via `wireKey(portRef(...))`) may construct keys;
+   *  raw strings are rejected at the type level. */
+  inputExprNodes: Map<WireKey, ExprNode>
 
   // ── Slot model state (populated by M3+; empty in legacy path) ───────────
-  /** "${instance}.${scalarSlotName}" → slot index in the shared slot[] array. */
-  outputSlotRegistry: Map<string, number>
-  /** Param/trigger name → slot index. Same flat slot[] as outputs. */
+  /** Branded `${instance}.${slotName}` → slot index in the shared
+   *  slot[] array. Constructed only via `slotKey(instName, slotName)`. */
+  outputSlotRegistry: Map<SlotKey, number>
+  /** Param/trigger name → slot index. Same flat slot[] as outputs.
+   *  Param names are plain strings (no instance context to brand
+   *  against). */
   paramSlotRegistry:  Map<string, number>
-  /** Per-output-port metadata captured at allocate time. */
-  outputPortMeta:     Map<string, WirePortMeta>  // key: "${instance}.${port}"
+  /** Per-output-port metadata captured at allocate time. Keyed by the
+   *  port's SlotKey (`${instance}.${port}`). */
+  outputPortMeta:     Map<SlotKey, WirePortMeta>
   /** Next slot index to allocate. Always equals outputSlotRegistry.size + paramSlotRegistry.size. */
   slotCount:          number
   /** Input expressions keyed by scalar-slot name "${instance}:${scalarSlotName}".
@@ -260,15 +273,18 @@ export interface WireExprOpts {
 }
 
 /** Wrap a raw wire expression in a session-level unit delay and store
- *  it in `session.inputExprNodes` under `key`. Every MCP wire-setting
- *  tool routes through this helper. */
+ *  it in `session.inputExprNodes` at the consumer port `ref`. Every
+ *  MCP wire-setting tool routes through this helper. Callers must
+ *  construct the `PortRef` via `portRef(instanceName, portName)` —
+ *  the brand on `WireKey` makes raw-string keys impossible. */
 export function setWireExpr(
   session: SessionState,
-  key:     string,
+  ref:     PortRef,
   rawExpr: ExprNode,
   opts:    WireExprOpts = {},
 ): void {
-  const id = opts.id ?? `__autodelay:${key}`
+  const key = wireKey(ref)
+  const id  = opts.id ?? `__autodelay:${key}`
   session.inputExprNodes.set(key, wrapInUnitDelay(rawExpr, opts.init ?? 0, id))
 }
 
@@ -309,9 +325,9 @@ function wrapInUnitDelay(expr: ExprNode, init: number, id: string): ExprNode {
  *  Uses the IR (post-strata) PortType. Sum/struct/product/unit don't
  *  appear here because strata lowered them all. */
 export function expandPortToSlots(
-  baseName: string,
+  baseName: SlotKey,
   type: IRPortType,
-): { names: string[]; types: IRScalarKind[] } {
+): { names: SlotKey[]; types: IRScalarKind[] } {
   switch (type.kind) {
     case 'scalar':
       return { names: [baseName], types: [type.scalar] }
@@ -340,10 +356,13 @@ export function expandPortToSlots(
         }
         total *= dim
       }
-      const names: string[] = []
+      const names: SlotKey[] = []
       const types: IRScalarKind[] = []
       for (let i = 0; i < total; i++) {
-        names.push(`${baseName}[${i}]`)
+        // `${baseName}[i]` preserves the SlotKey shape — the baseName
+        // is already `inst.port`, and `inst.port[0]` is a valid SlotKey
+        // (slotKey's slotName parameter explicitly allows brackets).
+        names.push(`${baseName}[${i}]` as SlotKey)
         types.push(elemKind)
       }
       return { names, types }
@@ -365,13 +384,13 @@ const DEFAULT_OUTPUT_PORT_TYPE: IRPortType = { kind: 'scalar', scalar: 'float' }
  *  after LLVM folds the conditional. Idempotent. */
 export function allocateOutputSlots(
   session: SessionState,
-  instanceName: string,
+  instName: InstanceName,
   type: Compiled,
 ): void {
   const portNames = outputNames(type)
   for (let idx = 0; idx < portNames.length; idx++) {
     const portName = portNames[idx]
-    const portKey = `${instanceName}.${portName}`
+    const portKey = slotKey(instName, portName)
     if (session.outputPortMeta.has(portKey)) continue  // idempotent
     const portType = outputPortType(type, idx) ?? DEFAULT_OUTPUT_PORT_TYPE
     const { names, types } = expandPortToSlots(portKey, portType)
@@ -386,7 +405,7 @@ export function allocateOutputSlots(
     session.slotCount += names.length
   }
 
-  const aliveKey = `${instanceName}.__alive__`
+  const aliveKey = slotKey(instName, '__alive__')
   if (!session.outputSlotRegistry.has(aliveKey)) {
     session.outputSlotRegistry.set(aliveKey, session.slotCount)
     session.slotCount += 1

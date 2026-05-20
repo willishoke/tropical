@@ -53,6 +53,10 @@ import {
   ZERO_TEMP_OFFSET,
 } from './slot_indices.js'
 import { topologicalSort } from '../compiler.js'
+import {
+  parseWireKey, slotKey,
+  instanceName as toInstanceName,
+} from './branded_names.js'
 
 /** Raised when a session uses a shape the per-instance compile path
  *  doesn't yet support. Marker class for diagnostics. */
@@ -114,7 +118,7 @@ export function translateNode(
 
   // ── refs and params (leaves) ──
   if (op === 'ref' && typeof obj.instance === 'string' && typeof obj.output === 'string') {
-    const key = `${obj.instance}.${obj.output}`
+    const key = slotKey(toInstanceName(obj.instance), obj.output)
     const slotIdxRaw = session.outputSlotRegistry.get(key)
     if (slotIdxRaw === undefined) {
       throw new SlotShapeUnsupportedError(
@@ -274,9 +278,8 @@ export function computeInstanceTopoOrder(session: SessionState): string[] {
     deps.set(name, new Set())
   }
   for (const [key, expr] of session.inputExprNodes) {
-    const colon = key.indexOf(':')
-    if (colon < 0) continue
-    const consumer = key.slice(0, colon)
+    let consumer
+    try { consumer = parseWireKey(key).instance } catch { continue }
     const producers = deps.get(consumer)
     if (producers === undefined) continue
     collectInstanceRefs(expr, producers)
@@ -423,7 +426,7 @@ export function remapInstancePlan(
   let targetIdx = 0
   for (let portI = 0; portI < ctx.outputPortNames.length; portI++) {
     const portName = ctx.outputPortNames[portI]
-    const portKey  = `${ctx.instanceName}.${portName}`
+    const portKey  = slotKey(toInstanceName(ctx.instanceName), portName)
     const meta = session.outputPortMeta.get(portKey)
     if (meta === undefined) {
       throw new Error(
@@ -498,7 +501,7 @@ export function emitDacStitch(
 
   for (let i = 0; i < session.graphOutputs.length; i++) {
     const go = session.graphOutputs[i]
-    const key = `${go.instance}.${go.output}`
+    const key = slotKey(toInstanceName(go.instance), go.output)
     const slotIdxRaw = session.outputSlotRegistry.get(key)
     if (slotIdxRaw === undefined) {
       throw new SlotShapeUnsupportedError(

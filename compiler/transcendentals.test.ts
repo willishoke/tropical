@@ -15,6 +15,9 @@ import { describe, test, expect } from 'bun:test'
 import { makeSession, resolveProgramType, instantiate } from './session'
 import { loadStdlib } from './program'
 import { interpretSession } from './interpret_resolved'
+import { wireKey, portRef, instanceName, portName } from './ir/branded_names.js'
+
+const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
 
 // One shared session for the whole suite — cuts ~400× repeated stdlib
 // loads down to one. evalProgram resets the per-call state (instance
@@ -42,7 +45,7 @@ function evalProgram(
   const { type } = resolveProgramType(sharedSession, programName, undefined, undefined)
   const inst = instantiate(type, 'it', { baseTypeName: programName })
   sharedSession.instanceRegistry.set('it', inst)
-  for (const [k, v] of Object.entries(inputs)) sharedSession.inputExprNodes.set(`it:${k}`, v)
+  for (const [k, v] of Object.entries(inputs)) sharedSession.inputExprNodes.set(wk(`it`, k), v)
   sharedSession.graphOutputs.push({ instance: 'it', output: outputName })
   const buf = interpretSession(sharedSession, 1)
   return buf[0] * 20.0   // undo interpretSession's /20 audio mix scaling

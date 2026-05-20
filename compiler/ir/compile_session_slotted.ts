@@ -33,6 +33,10 @@
  */
 
 import { allocateOutputSlots, type SessionState } from '../session.js'
+import {
+  instanceName as toInstanceName, portName as toPortName,
+  portRef, wireKey,
+} from './branded_names.js'
 import type { FlatPlan, InstanceFunction, SchedulerFunction } from '../flat_plan.js'
 import type { NInstr, NOperand } from './emit_resolved.js'
 import { instrWriteSlot, opConst } from './emit_resolved.js'
@@ -59,7 +63,7 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
   // pre-allocated. `add_instance` / `loadProgramAsSession` already do
   // this eagerly; tests sometimes poke `instanceRegistry` directly.
   for (const [name, inst] of session.instanceRegistry) {
-    if (inst.compiled !== undefined) allocateOutputSlots(session, name, inst.compiled)
+    if (inst.compiled !== undefined) allocateOutputSlots(session, toInstanceName(name), inst.compiled)
   }
 
   const order = computeInstanceTopoOrder(session)
@@ -86,8 +90,10 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
       /* prog           */ compiled.prog,
       /* compiled       */ compiled,
       /* aliveInput     */ inst.aliveInput,
-      /* inputBindingFor*/ (portName) => {
-        const expr = session.inputExprNodes.get(`${instName}:${portName}`)
+      /* inputBindingFor*/ (portNameStr) => {
+        const expr = session.inputExprNodes.get(
+          wireKey(portRef(toInstanceName(instName), toPortName(portNameStr))),
+        )
         if (expr !== undefined) return { kind: 'wired', expr }
         return undefined
       },

@@ -23,6 +23,11 @@ import {
 import { exprDependencies, reachableInstances, buildDependencyGraph, topologicalSort } from './compiler.js'
 import type { RawTypeArgs } from './specialize.js'
 import { Float, portTypeEqual } from './ir/port_type.js'
+import {
+  wireKey, parseWireKey, portRef, rawName,
+  instanceName as toInstanceName, portName as toPortName,
+  type WireKey,
+} from './ir/branded_names.js'
 import { raiseProgram } from './parse/raise.js'
 import { elaborate, type ExternalProgramResolver } from './ir/elaborator.js'
 import { programTypeFromResolved } from './ir/strata.js'
@@ -381,13 +386,16 @@ export function loadProgramAsSession(
     // Slot model: allocate output slots for the instance, parallel to
     // what MCP add_instance does. Required for the per-instance
     // compile path (M9a+) to find each output's slot index.
-    allocateOutputSlots(session, instance.name, type)
+    allocateOutputSlots(session, toInstanceName(instance.name), type)
 
     // Populate wiring from instance inputs
     if (inst.inputs) {
       for (const [input, expr] of Object.entries(inst.inputs)) {
         validateExpr(expr, `${inst.name}.${input}`)
-        session.inputExprNodes.set(`${inst.name}:${input}`, expr)
+        session.inputExprNodes.set(
+          wireKey(portRef(toInstanceName(inst.name), toPortName(input))),
+          expr,
+        )
       }
     }
   }
@@ -396,7 +404,7 @@ export function loadProgramAsSession(
   for (const [name, inst] of session.instanceRegistry) {
     const defaults = rawInputDefaults(inst)
     for (const [inputName, value] of Object.entries(defaults)) {
-      const key = `${name}:${inputName}`
+      const key = wireKey(portRef(toInstanceName(name), toPortName(inputName)))
       if (!session.inputExprNodes.has(key)) {
         session.inputExprNodes.set(key, value)
       }
@@ -542,13 +550,16 @@ export function mergeProgramIntoSession(
     // Slot model: allocate output slots for the instance, parallel to
     // what MCP add_instance does. Required for the per-instance
     // compile path (M9a+) to find each output's slot index.
-    allocateOutputSlots(session, instance.name, type)
+    allocateOutputSlots(session, toInstanceName(instance.name), type)
 
     // Populate wiring from instance inputs
     if (inst.inputs) {
       for (const [input, expr] of Object.entries(inst.inputs)) {
         validateExpr(expr, `${inst.name}.${input}`)
-        session.inputExprNodes.set(`${inst.name}:${input}`, expr)
+        session.inputExprNodes.set(
+          wireKey(portRef(toInstanceName(inst.name), toPortName(input))),
+          expr,
+        )
       }
     }
   }
@@ -557,7 +568,7 @@ export function mergeProgramIntoSession(
   for (const [name, inst] of session.instanceRegistry) {
     const defaults = rawInputDefaults(inst)
     for (const [inputName, value] of Object.entries(defaults)) {
-      const key = `${name}:${inputName}`
+      const key = wireKey(portRef(toInstanceName(name), toPortName(inputName)))
       if (!session.inputExprNodes.has(key)) {
         session.inputExprNodes.set(key, value)
       }
@@ -738,7 +749,7 @@ export function saveProgramFromSession(
     // Merge wiring for this instance
     const inputs: Record<string, ExprNode> = {}
     for (const portName of inputNames(inst)) {
-      const key = `${name}:${portName}`
+      const key = wireKey(portRef(toInstanceName(name), toPortName(portName)))
       const expr = session.inputExprNodes.get(key)
       if (expr !== undefined) inputs[portName] = expr
     }
@@ -818,17 +829,25 @@ export function exportSessionAsProgram(
     rootExprs.push(refExpr)
   }
 
-  // Validate input mappings
+  // Validate input mappings. exposedKeys collects validated wire
+  // keys (brand re-applied after parse — the input strings came from
+  // user JSON, so they're untrusted until parseWireKey accepts them).
   const inputKeys = Object.keys(inputs)
-  const exposedKeys = new Set<string>()   // "instance:port" keys being exposed as inputs
+  const exposedKeys = new Set<WireKey>()
   for (const [inputName, target] of Object.entries(inputs)) {
-    const [instName, portName] = target.split(':')
-    if (!portName) throw new Error(`export: input '${inputName}' target must be "instance:port", got '${target}'.`)
+    let ref
+    try {
+      ref = parseWireKey(target)
+    } catch {
+      throw new Error(`export: input '${inputName}' target must be "instance:port", got '${target}'.`)
+    }
+    const instName = ref.instance
+    const portNameStr = ref.port
     const inst = session.instanceRegistry.get(instName)
     if (!inst) throw new Error(`export: input '${inputName}' references unknown instance '${instName}'.`)
-    if (!inputNames(inst).includes(portName))
-      throw new Error(`export: instance '${instName}' has no input '${portName}'. Available: ${inputNames(inst).join(', ')}`)
-    exposedKeys.add(target)
+    if (!inputNames(inst).includes(portNameStr))
+      throw new Error(`export: instance '${instName}' has no input '${portNameStr}'. Available: ${inputNames(inst).join(', ')}`)
+    exposedKeys.add(wireKey(ref))
   }
 
   // Walk backward from outputs to find all needed instances
@@ -906,10 +925,12 @@ export function exportSessionAsProgram(
     }
   }
 
-  // Collect per-port defaults from current wiring of exposed ports
+  // Collect per-port defaults from current wiring of exposed ports.
+  // Targets were already validated at the start of this function; re-
+  // parse to recover the brand for the Map lookup.
   const inputDefaults: Record<string, ExprNode> = {}
   for (const [inputName, target] of Object.entries(inputs)) {
-    const currentExpr = session.inputExprNodes.get(target)
+    const currentExpr = session.inputExprNodes.get(wireKey(parseWireKey(target)))
     if (currentExpr !== undefined) {
       inputDefaults[inputName] = rewriteRefs(currentExpr)
     }
@@ -917,9 +938,9 @@ export function exportSessionAsProgram(
 
   const inputEntries: Array<string | ProgramPortSpec> = inputKeys.map(inputName => {
     const target = inputs[inputName]
-    const [instName, portName] = target.split(':')
-    const inst = session.instanceRegistry.get(instName)!
-    const idx = inputIndex(inst, portName)
+    const ref = parseWireKey(target)
+    const inst = session.instanceRegistry.get(ref.instance)!
+    const idx = inputIndex(inst, ref.port)
     const pt = inputPortType(inst, idx)
     const dflt = inputDefaults[inputName]
     const entry: ProgramPortSpec = { name: inputName }
@@ -969,7 +990,7 @@ export function exportSessionAsProgram(
     // and ref→nested_out for sibling instances
     const instInputs: Record<string, ExprNode> = {}
     for (const portName of inputNames(inst)) {
-      const key = `${instName}:${portName}`
+      const key = wireKey(portRef(toInstanceName(instName), toPortName(portName)))
       if (exposedKeys.has(key)) {
         const inputName = Object.entries(inputs).find(([_, t]) => t === key)![0]
         instInputs[portName] = { op: 'input', name: inputName }

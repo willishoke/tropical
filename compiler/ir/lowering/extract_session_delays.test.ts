@@ -6,12 +6,19 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, setWireExpr } from '../../session.js'
 import { extractSessionDelays } from './extract_session_delays.js'
+import { portRef, instanceName, portName, wireKey } from '../branded_names.js'
+
+const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
+
+/** Local sugar: build a PortRef from raw strings — keeps test
+ *  expectations readable without bypassing the branded constructors. */
+const pr = (i: string, p: string) => portRef(instanceName(i), portName(p))
 
 describe('extractSessionDelays', () => {
   test('hoists a top-level delay wire to a sessionSlot read', () => {
     const session = makeSession()
     const baseSlotCount = session.slotCount
-    setWireExpr(session, 'a:in', {
+    setWireExpr(session, pr('a', 'in'), {
       op: 'ref', instance: 'b', output: 'out',
     })
 
@@ -28,7 +35,7 @@ describe('extractSessionDelays', () => {
     })
 
     // Wire is rewritten to a sessionSlot read pointing at the new slot.
-    expect(session.inputExprNodes.get('a:in')).toEqual({
+    expect(session.inputExprNodes.get(wk("a", "in"))).toEqual({
       op: 'sessionSlot', index: baseSlotCount,
     })
     expect(session.slotCount).toBe(baseSlotCount + 1)
@@ -36,7 +43,7 @@ describe('extractSessionDelays', () => {
 
   test('honors explicit init and id on the delay wrap', () => {
     const session = makeSession()
-    setWireExpr(session, 'osc:phase',
+    setWireExpr(session, pr('osc', 'phase'),
       { op: 'ref', instance: 'src', output: 'y' },
       { init: 0.5, id: 'feedback-tap' },
     )
@@ -53,11 +60,11 @@ describe('extractSessionDelays', () => {
     const session = makeSession()
     // Direct write, bypassing setWireExpr — simulates a legacy
     // patch ingest path.
-    session.inputExprNodes.set('a:gain', { op: 'param', name: 'gain' })
+    session.inputExprNodes.set(wk("a", "gain"), { op: 'param', name: 'gain' })
 
-    const before = session.inputExprNodes.get('a:gain')
+    const before = session.inputExprNodes.get(wk("a", "gain"))
     extractSessionDelays(session)
-    const after = session.inputExprNodes.get('a:gain')
+    const after = session.inputExprNodes.get(wk("a", "gain"))
 
     expect(after).toEqual(before!)
     expect(session.delaySlotRegistry).toHaveLength(0)
@@ -65,7 +72,7 @@ describe('extractSessionDelays', () => {
 
   test('idempotent: re-running finds no delays to extract', () => {
     const session = makeSession()
-    setWireExpr(session, 'a:in', {
+    setWireExpr(session, pr('a', 'in'), {
       op: 'ref', instance: 'b', output: 'out',
     })
     extractSessionDelays(session)
@@ -82,8 +89,8 @@ describe('extractSessionDelays', () => {
   test('handles multiple delays in allocation order', () => {
     const session = makeSession()
     const baseSlot = session.slotCount
-    setWireExpr(session, 'a:in', { op: 'ref', instance: 'b', output: 'out' })
-    setWireExpr(session, 'b:in', { op: 'ref', instance: 'a', output: 'out' })
+    setWireExpr(session, pr('a', 'in'), { op: 'ref', instance: 'b', output: 'out' })
+    setWireExpr(session, pr('b', 'in'), { op: 'ref', instance: 'a', output: 'out' })
 
     extractSessionDelays(session)
 

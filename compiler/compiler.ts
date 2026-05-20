@@ -9,6 +9,7 @@
 import type { ExprNode } from './session'
 import type { ExprOpNodeStrict } from './expr.js'
 import { mapChildren } from './walk.js'
+import { parseWireKey } from './ir/branded_names.js'
 
 // ─────────────────────────────────────────────────────────────
 // Errors
@@ -117,12 +118,12 @@ export function buildDependencyGraph(
   for (const name of nameSet) graph.set(name, new Set())
 
   for (const [key, expr] of inputExprNodes) {
-    const instanceName = key.split(':')[0]
-    if (!nameSet.has(instanceName)) continue
+    const { instance } = parseWireKey(key)
+    if (!nameSet.has(instance)) continue
     const refs = exprDependencies(expr)
-    const deps = graph.get(instanceName)!
+    const deps = graph.get(instance)!
     for (const ref of refs) {
-      if (nameSet.has(ref) && ref !== instanceName) {
+      if (nameSet.has(ref) && ref !== instance) {
         // Skip edges to cycle-breaking modules — their outputs are
         // previous-sample register reads, not combinational dependencies.
         if (cycleBreakers?.has(ref)) continue

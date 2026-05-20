@@ -41,6 +41,11 @@ import { checkArrayConnection } from '../compiler/array_wiring.js'
 import { validateExpr }         from '../compiler/expr.js'
 import { exprDependencies }     from '../compiler/compiler.js'
 import { portTypeToString } from '../compiler/ir/port_type.js'
+import {
+  parseWireKey, portRef, wireKey,
+  instanceName as toInstanceName,
+  portName as toPortName,
+} from '../compiler/ir/branded_names.js'
 import type { PortType } from '../compiler/ir/nodes.js'
 
 const portTypeOrNull = (t: PortType | undefined): string | null =>
@@ -761,7 +766,7 @@ function handleAddInstance(
     // Slot model (M3, additive): populate the output slot registry
     // alongside the legacy instanceRegistry. Nothing consumes these
     // yet; M4 wires them into the new compile path.
-    allocateOutputSlots(session, instanceName, type)
+    allocateOutputSlots(session, toInstanceName(instanceName), type)
     return instanceSummary(instanceName)
   })
 }
@@ -803,7 +808,7 @@ function handleReplicate(
       const { type, typeArgs: resolved } = resolveProgramTypeOrFail(programName, typeArgs, 'program')
       const inst = instantiate(type, name, { baseTypeName: programName, typeArgs: resolved })
       session.instanceRegistry.set(name, inst)
-      allocateOutputSlots(session, name, type)
+      allocateOutputSlots(session, toInstanceName(name), type)
       created.push(instanceSummary(name))
     }
     return { created }
@@ -846,7 +851,7 @@ function handleWireChain(args: Record<string, unknown>) {
       const firstInst  = insts[0]
       const inputName  = resolveInputName(firstInst, inputPort)
       const { expr }   = adaptInputExpr(initialExpr, inputPortType(firstInst, inputNames(firstInst).indexOf(inputName)), firstName, inputName)
-      setWireExpr(session, `${firstName}:${inputName}`, expr)
+      setWireExpr(session, portRef(toInstanceName(firstName), toPortName(inputName)), expr)
     }
 
     // Wire instances[i].output → instances[i+1].input
@@ -860,7 +865,7 @@ function handleWireChain(args: Record<string, unknown>) {
       const inName   = resolveInputName(dstInst, inputPort)
       const refExpr  = { op: 'ref' as const, instance: srcName, output: outName }
       const { expr } = adaptInputExpr(refExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), dstName, inName)
-      setWireExpr(session, `${dstName}:${inName}`, expr)
+      setWireExpr(session, portRef(toInstanceName(dstName), toPortName(inName)), expr)
       linked.push(`${srcName}.${outName} → ${dstName}.${inName}`)
     }
 
@@ -892,7 +897,7 @@ function handleWireZip(args: Record<string, unknown>) {
       const inName   = resolveInputName(dstInst, dst.input)
       const refExpr  = { op: 'ref' as const, instance: src.instance, output: outName }
       const { expr } = adaptInputExpr(refExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), dst.instance, inName)
-      setWireExpr(session, `${dst.instance}:${inName}`, expr)
+      setWireExpr(session, portRef(toInstanceName(dst.instance), toPortName(inName)), expr)
       linked.push(`${src.instance}.${outName} → ${dst.instance}.${inName}`)
     }
 
@@ -930,7 +935,7 @@ function handleFanOut(args: Record<string, unknown>) {
       const dstInst = requireInstance(dst.instance, 'targets[].instance')
       const inName   = resolveInputName(dstInst, dst.input)
       const { expr } = adaptInputExpr(sourceExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), dst.instance, inName)
-      setWireExpr(session, `${dst.instance}:${inName}`, expr)
+      setWireExpr(session, portRef(toInstanceName(dst.instance), toPortName(inName)), expr)
       linked.push(`${sourceLabel} → ${dst.instance}.${inName}`)
     }
 
@@ -966,7 +971,7 @@ function handleFanIn(args: Record<string, unknown>) {
 
     const inName   = resolveInputName(dstInst, target.input)
     const { expr } = adaptInputExpr(sumExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), target.instance, inName)
-    setWireExpr(session, `${target.instance}:${inName}`, expr)
+    setWireExpr(session, portRef(toInstanceName(target.instance), toPortName(inName)), expr)
 
     return { mixed: sources.length, target: `${target.instance}.${inName}`, ...wire() }
   })
@@ -994,7 +999,7 @@ function handleFeedback(args: Record<string, unknown>) {
     const refExpr: ExprNode = { op: 'ref' as const, instance: from.instance, output: outName }
     validateExpr(refExpr, `${to.instance}.${inName}`)
     const { expr } = adaptInputExpr(refExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), to.instance, inName)
-    setWireExpr(session, `${to.instance}:${inName}`, expr, { init, id: delayId })
+    setWireExpr(session, portRef(toInstanceName(to.instance), toPortName(inName)), expr, { init, id: delayId })
 
     return {
       feedback: `${from.instance}.${outName} →[delay init=${init}]→ ${to.instance}.${inName}`,
@@ -1133,14 +1138,18 @@ function handleGetInfo(instanceName: string) {
       name: instanceName,
       program: inst.baseTypeName,
       type_args: inst.typeArgs ?? null,
-      inputs:  inputNames(inst).map((n, i) => ({
-        name: n, index: i,
-        type: inputPortType(inst, i) ?? null,
-        expr: session.inputExprNodes.get(`${instanceName}:${n}`) ?? null,
-        pretty: session.inputExprNodes.has(`${instanceName}:${n}`)
-          ? prettyExpr(session.inputExprNodes.get(`${instanceName}:${n}`)!, session.instanceRegistry)
-          : null,
-      })),
+      inputs:  inputNames(inst).map((n, i) => {
+        const key = wireKey(portRef(toInstanceName(instanceName), toPortName(n)))
+        const expr = session.inputExprNodes.get(key)
+        return {
+          name: n, index: i,
+          type: inputPortType(inst, i) ?? null,
+          expr: expr ?? null,
+          pretty: expr !== undefined
+            ? prettyExpr(expr, session.instanceRegistry)
+            : null,
+        }
+      }),
       outputs: outputNames(inst).map((n, i) => ({
         name: n, index: i,
         type: outputPortType(inst, i) ?? null,
@@ -1248,7 +1257,7 @@ function handleWire(args: Record<string, unknown>) {
       const inst = requireInstance(r.instance, 'remove[].instance')
       const inputId = resolveInputIdx(inst, r.input)
       const resolvedName = inputNames(inst)[inputId] ?? String(inputId)
-      session.inputExprNodes.delete(`${r.instance}:${resolvedName}`)
+      session.inputExprNodes.delete(wireKey(portRef(toInstanceName(r.instance), toPortName(resolvedName))))
     }
 
     // Process sets
@@ -1293,13 +1302,13 @@ function handleWire(args: Record<string, unknown>) {
       // single outer delay (applied by `setWireExpr`) rather than a
       // nested-delay-inside-delay shape that would give the existing
       // source two samples of latency.
-      const key = `${s.instance}:${resolvedName}`
-      const existing = session.inputExprNodes.get(key)
+      const ref = portRef(toInstanceName(s.instance), toPortName(resolvedName))
+      const existing = session.inputExprNodes.get(wireKey(ref))
       let toStore: ExprNode = expr
       if (existing !== undefined && s.combine !== undefined) {
         toStore = { op: s.combine, args: [unwrapDelay(existing), expr] } as ExprNode
       }
-      setWireExpr(session, key, toStore)
+      setWireExpr(session, ref, toStore)
       results.push({ instance: s.instance, input: resolvedName, expr: toStore })
     }
 
@@ -1317,11 +1326,9 @@ function handleListWiring(filterInstance?: string) {
   return wrap(() => {
     const results: Array<{ instance: string; input: string; expr: string }> = []
     for (const [key, node] of session.inputExprNodes) {
-      const colonIdx = key.indexOf(':')
-      const inst  = key.slice(0, colonIdx)
-      const input = key.slice(colonIdx + 1)
-      if (filterInstance && inst !== filterInstance) continue
-      results.push({ instance: inst, input, expr: prettyExpr(node, session.instanceRegistry) })
+      const { instance, port } = parseWireKey(key)
+      if (filterInstance && instance !== filterInstance) continue
+      results.push({ instance, input: port, expr: prettyExpr(node, session.instanceRegistry) })
     }
     return results
   })

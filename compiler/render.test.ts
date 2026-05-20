@@ -28,6 +28,9 @@ import {
   dominantFrequency,
   writeWav,
 } from './test_utils/audio'
+import { wireKey, portRef, instanceName, portName } from './ir/branded_names.js'
+
+const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
@@ -120,7 +123,7 @@ describe('renderFrames / buffer backend', () => {
 
     renderFrames(session.runtime, 8)
 
-    session.inputExprNodes.set('osc:freq', 440)
+    session.inputExprNodes.set(wk("osc", "freq"), 440)
     applySessionWiring(session)
 
     const samples = renderFrames(session.runtime, 174)

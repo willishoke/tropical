@@ -12,6 +12,9 @@ import { describe, test, expect } from 'bun:test'
 import { makeSession, resolveProgramType, instantiate, outputNames } from '../session.js'
 import { loadStdlib } from '../program.js'
 import { compileSession } from './compile_session.js'
+import { wireKey, portRef, instanceName, portName } from './branded_names.js'
+
+const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
 
 function singleInstanceSession(typeName: string) {
   const session = makeSession()
@@ -72,8 +75,8 @@ describe('compileSession — two-instance refs', () => {
     session.instanceRegistry.set('osc', sinInst)
     session.instanceRegistry.set('amp', vcaInst)
 
-    session.inputExprNodes.set('amp:audio', { op: 'ref', instance: 'osc', output: 'out' })
-    session.inputExprNodes.set('amp:cv', 0.5)
+    session.inputExprNodes.set(wk("amp", "audio"), { op: 'ref', instance: 'osc', output: 'out' })
+    session.inputExprNodes.set(wk("amp", "cv"), 0.5)
 
     session.graphOutputs.push({ instance: 'amp', output: 'out' })
 

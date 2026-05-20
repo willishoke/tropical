@@ -5,7 +5,7 @@ import type {
 } from './nodes.js'
 import { freeRefs, liftWireToProgram } from './wire_program.js'
 import {
-  instanceName, portName, portRef, portRefKey, rawName,
+  instanceName, portName, portRef, rawName,
   type InstanceName,
 } from './branded_names.js'
 import { strataPipeline } from './strata.js'
