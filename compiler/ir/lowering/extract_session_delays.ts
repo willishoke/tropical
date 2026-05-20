@@ -45,11 +45,15 @@
 
 import type { ExprNode, SessionState, DelaySlotEntry } from '../../session.js'
 
-interface DelayNode {
-  op: 'delay'
-  args: [ExprNode]
+type DelayNode = {
+  op:    'delay'
+  args:  [ExprNode]
   init?: number
-  id?: string
+  id?:   string
+  // ExprNode's object variant carries an open `[key: string]: unknown`
+  // index signature; mirror it here so the type predicate below is
+  // assignable to ExprNode.
+  [key: string]: unknown
 }
 
 /** Detect a session-level `delay()` op. */
