@@ -41,6 +41,7 @@ import { checkArrayConnection } from '../compiler/array_wiring.js'
 import { validateExpr }         from '../compiler/expr.js'
 import { exprDependencies }     from '../compiler/compiler.js'
 import { portTypeToString } from '../compiler/ir/port_type.js'
+import { parseWireKey } from '../compiler/ir/branded_names.js'
 import type { PortType } from '../compiler/ir/nodes.js'
 
 const portTypeOrNull = (t: PortType | undefined): string | null =>
@@ -1317,11 +1318,9 @@ function handleListWiring(filterInstance?: string) {
   return wrap(() => {
     const results: Array<{ instance: string; input: string; expr: string }> = []
     for (const [key, node] of session.inputExprNodes) {
-      const colonIdx = key.indexOf(':')
-      const inst  = key.slice(0, colonIdx)
-      const input = key.slice(colonIdx + 1)
-      if (filterInstance && inst !== filterInstance) continue
-      results.push({ instance: inst, input, expr: prettyExpr(node, session.instanceRegistry) })
+      const { instance, port } = parseWireKey(key)
+      if (filterInstance && instance !== filterInstance) continue
+      results.push({ instance, input: port, expr: prettyExpr(node, session.instanceRegistry) })
     }
     return results
   })

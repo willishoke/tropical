@@ -18,6 +18,7 @@
 
 import type { SessionState, ExprNode } from '../../session.js'
 import { tarjanSCC } from '../../compiler.js'
+import { parseWireKey } from '../branded_names.js'
 
 export class SessionCycleViolation extends Error {
   constructor(public readonly cycles: ReadonlyArray<ReadonlyArray<string>>) {
@@ -72,9 +73,8 @@ export function assertSessionAcyclic(session: SessionState): void {
     deps.set(name, new Set())
   }
   for (const [key, expr] of session.inputExprNodes) {
-    const colon = key.indexOf(':')
-    if (colon < 0) continue
-    const consumer = key.slice(0, colon)
+    let consumer
+    try { consumer = parseWireKey(key).instance } catch { continue }
     const producers = deps.get(consumer)
     if (producers === undefined) continue
     collectInstanceRefs(expr, producers)

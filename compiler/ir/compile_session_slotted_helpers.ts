@@ -53,6 +53,7 @@ import {
   ZERO_TEMP_OFFSET,
 } from './slot_indices.js'
 import { topologicalSort } from '../compiler.js'
+import { parseWireKey } from './branded_names.js'
 
 /** Raised when a session uses a shape the per-instance compile path
  *  doesn't yet support. Marker class for diagnostics. */
@@ -274,9 +275,8 @@ export function computeInstanceTopoOrder(session: SessionState): string[] {
     deps.set(name, new Set())
   }
   for (const [key, expr] of session.inputExprNodes) {
-    const colon = key.indexOf(':')
-    if (colon < 0) continue
-    const consumer = key.slice(0, colon)
+    let consumer
+    try { consumer = parseWireKey(key).instance } catch { continue }
     const producers = deps.get(consumer)
     if (producers === undefined) continue
     collectInstanceRefs(expr, producers)

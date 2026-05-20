@@ -23,6 +23,7 @@ import {
 import { exprDependencies, reachableInstances, buildDependencyGraph, topologicalSort } from './compiler.js'
 import type { RawTypeArgs } from './specialize.js'
 import { Float, portTypeEqual } from './ir/port_type.js'
+import { wireKey, parseWireKey, portRef, instanceName as toInstanceName, portName as toPortName, rawName } from './ir/branded_names.js'
 import { raiseProgram } from './parse/raise.js'
 import { elaborate, type ExternalProgramResolver } from './ir/elaborator.js'
 import { programTypeFromResolved } from './ir/strata.js'
@@ -822,12 +823,18 @@ export function exportSessionAsProgram(
   const inputKeys = Object.keys(inputs)
   const exposedKeys = new Set<string>()   // "instance:port" keys being exposed as inputs
   for (const [inputName, target] of Object.entries(inputs)) {
-    const [instName, portName] = target.split(':')
-    if (!portName) throw new Error(`export: input '${inputName}' target must be "instance:port", got '${target}'.`)
+    let ref
+    try {
+      ref = parseWireKey(target)
+    } catch {
+      throw new Error(`export: input '${inputName}' target must be "instance:port", got '${target}'.`)
+    }
+    const instName = ref.instance
+    const portNameStr = ref.port
     const inst = session.instanceRegistry.get(instName)
     if (!inst) throw new Error(`export: input '${inputName}' references unknown instance '${instName}'.`)
-    if (!inputNames(inst).includes(portName))
-      throw new Error(`export: instance '${instName}' has no input '${portName}'. Available: ${inputNames(inst).join(', ')}`)
+    if (!inputNames(inst).includes(portNameStr))
+      throw new Error(`export: instance '${instName}' has no input '${portNameStr}'. Available: ${inputNames(inst).join(', ')}`)
     exposedKeys.add(target)
   }
 
@@ -917,9 +924,9 @@ export function exportSessionAsProgram(
 
   const inputEntries: Array<string | ProgramPortSpec> = inputKeys.map(inputName => {
     const target = inputs[inputName]
-    const [instName, portName] = target.split(':')
-    const inst = session.instanceRegistry.get(instName)!
-    const idx = inputIndex(inst, portName)
+    const ref = parseWireKey(target)
+    const inst = session.instanceRegistry.get(ref.instance)!
+    const idx = inputIndex(inst, ref.port)
     const pt = inputPortType(inst, idx)
     const dflt = inputDefaults[inputName]
     const entry: ProgramPortSpec = { name: inputName }
