@@ -5,7 +5,6 @@
  * and produces a tree of `InstanceFunction`s — one per `InstanceDecl` at
  * every level of nesting. Each kernel:
  *
- *   - has its own alive slot (full-path name: `voice1.env.__alive__`)
  *   - has its own state-reg / temp / array-slot offsets in the unified
  *     namespaces (no per-kernel isolation; just bookkeeping)
  *   - has its own output slots (full-path: `voice1.env.out` etc.)
@@ -20,10 +19,6 @@
  * resolve to slot reads via `compileResolved`'s `nestedOutputSlots`
  * context — populated here as we allocate child output slots before
  * compiling the parent.
- *
- * No engine-side change needed: `OrcJitEngine.cpp::emit_kernel_block`
- * already recursively emits child basic blocks inside the parent's
- * alive-conditional.
  */
 
 import type {
@@ -36,11 +31,10 @@ import type {
 import { TempTarget, ArrayManagedTarget } from '../flat_plan.js'
 import type { NInstr } from './emit_resolved.js'
 import {
-  type TempIdx, type ModuleSlotIdx,
   tempIdx, moduleSlotIdx,
   tempOffset, stateRegOffset, arraySlotOffset,
 } from './slot_indices.js'
-import { type ScalarType, instrWriteSlot, opConst } from './emit_resolved.js'
+import { type ScalarType } from './emit_resolved.js'
 import { instanceName as toInstanceName, slotKey } from './branded_names.js'
 import { compileResolved } from './compile_resolved.js'
 import { cloneWithInputSubst } from './clone.js'
@@ -67,9 +61,6 @@ export interface PartitionAccumulators {
   stateInit:         (number | boolean)[]
   arraySlotSizes:    number[]
   arraySlotNames:    string[]
-  /** Alive-slot preamble emissions, one per kernel. Filled as we walk
-   *  the tree; appended to the scheduler preamble at the end. */
-  alivePreambleOps:  Array<{ aliveSlot: ModuleSlotIdx; expr: ExprNode | undefined }>
 }
 
 export function makeAccumulators(): PartitionAccumulators {
@@ -82,7 +73,6 @@ export function makeAccumulators(): PartitionAccumulators {
     stateInit:         [],
     arraySlotSizes:    [],
     arraySlotNames:    [],
-    alivePreambleOps:  [],
   }
 }
 
@@ -121,7 +111,7 @@ export interface PartitionedKernel {
 }
 
 /** Partition a single kernel (recursively). Mutates `session` (slot
- *  allocations) and `acc` (offset accumulators + alive preamble ops).
+ *  allocations) and `acc` (offset accumulators).
  *
  *  `inputBindingFor` provides the binding for each input port of THIS
  *  kernel. For top-level session instances, it consults
@@ -134,7 +124,6 @@ export function partitionKernel(
   instancePath: string,
   prog: ResolvedProgram,
   compiled: Compiled,
-  aliveInput: ExprNode | undefined,
   inputBindingFor: (portName: string) => InputBinding | undefined,
   defaults: Record<string, ExprNode>,
   paramHandles: Map<ParamDecl, { ptr: string }>,
@@ -169,11 +158,9 @@ export function partitionKernel(
     nestedOutputSlots.set(decl, childSlotMap)
 
     // Recursively compile the child. Children inherit their parent's
-    // paramHandles. AliveInput is undefined for nested (default 1.0).
-    // No external input bindings — all substituted into the body.
+    // paramHandles. No external input bindings — all substituted into the body.
     const childResult = partitionKernel(
       childPath, substChildProg, childCompiled,
-      /* aliveInput     */ undefined,
       /* inputBindingFor*/ () => undefined,
       /* defaults       */ rawInputDefaults(childCompiled),
       paramHandles,
@@ -222,19 +209,6 @@ export function partitionKernel(
   const { preamble, body, writeSlots, tempsConsumed } = remapInstancePlan(plan, ctx, session)
   const instanceInstructions: NInstr[] = [...preamble, ...body, ...writeSlots]
 
-  const aliveSlotRaw = session.outputSlotRegistry.get(slotKey(toInstanceName(instancePath), '__alive__'))
-  if (aliveSlotRaw === undefined) {
-    throw new Error(
-      `partitionKernel: '${instancePath}' has no __alive__ slot — allocateOutputSlots should have reserved it`,
-    )
-  }
-  const aliveSlot = moduleSlotIdx(aliveSlotRaw)
-
-  // Record this kernel's alive expression so the caller can build the
-  // scheduler preamble (which writes 1.0 or the alive expr each sample,
-  // letting GVN fold the default-alive case).
-  acc.alivePreambleOps.push({ aliveSlot, expr: aliveInput })
-
   // Shift per-instance register_targets into the unified temp space.
   const shiftedTargets: RegTarget[] = plan.register_targets.map(t => {
     if (t.kind === 'arrayManaged') return ArrayManagedTarget
@@ -250,7 +224,6 @@ export function partitionKernel(
     array_slot_offset: arraySlotOffset(acc.nextArrayRaw),
     register_count:    plan.register_count + tempsConsumed,
     register_targets:  shiftedTargets,
-    alive_slot_index:  aliveSlot,
     children,
   }
 

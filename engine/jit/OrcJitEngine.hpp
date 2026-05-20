@@ -110,28 +110,24 @@ struct FlatInstr
 };
 
 // Per-instance kernel slice. Each session instance contributes one of
-// these to the multi-function plan. The compiler emits nested
-// alive-conditional basic blocks inside one LLVM function — `children`
-// are emitted recursively inside the parent's body block (M11 fractal
-// architecture).
+// these to the multi-function plan. The compiler emits all instances
+// inline within one LLVM function — `children` are emitted recursively
+// inside the parent's body (M11 fractal architecture).
 struct InstanceProgram
 {
   std::string                  instance_name;     // dotted path (e.g. voice1.env)
   std::vector<FlatInstr>       instructions;      // already shifted into unified offset space
   uint32_t                     register_count = 0; // local temp count
-  uint32_t                     alive_slot_index = 0; // slot driving the dispatch conditional
   /** State register writebacks for this instance. Each entry pairs a
    *  state register slot index (absolute, into the unified register
-   *  array) with the temp index (also absolute) whose value feeds it.
-   *  Lives inside the instance function so the writeback skips
-   *  alongside the body when the instance is asleep. */
+   *  array) with the temp index (also absolute) whose value feeds it. */
   struct Writeback {
     uint32_t state_slot;   // index into the unified state-register array
     int32_t  temp_slot;    // index into the unified temp array (-1 = skip)
   };
   std::vector<Writeback>       writebacks;
   /** Nested child kernels. Emitted recursively inside this kernel's
-   *  alive-conditional body block. Empty for leaf kernels. */
+   *  body. Empty for leaf kernels. */
   std::vector<InstanceProgram> children;
 };
 

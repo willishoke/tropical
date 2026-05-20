@@ -3,26 +3,14 @@
  *
  * Each session instance compiles standalone (via `compileResolved`) and
  * lands in its own `InstanceFunction` entry. The JIT emits a single
- * LLVM kernel that loops the audio buffer; per sample it evaluates
- * the alive expression of each instance (in the scheduler preamble),
- * conditionally runs the instance's body + writebacks, then reads
+ * LLVM kernel that loops the audio buffer; per sample it runs each
+ * instance's body + writebacks in topological order, then reads
  * graphOutput slots in the postamble:
  *
  *     for each sample:
- *       <preamble: alive_i ← WriteSlot of evaluated expression>
- *       for i in 0..N: if (slots[alive_slot_i] > 0.5) { body_i; writebacks_i }
+ *       for i in 0..N: body_i; writebacks_i
+ *       <state evolution: WriteSlot per extracted delay>
  *       <postamble: DAC stitch — read graphOutput slots into mix temps>
- *
- * Default-alive instances see a `WriteSlot const 1.0` in the
- * preamble. LLVM's GVN forwards the store-to-load through the same
- * kernel pass, folds the conditional to `if (true)`, and jump-
- * threading eliminates the branch — the body inlines
- * unconditionally, matching a unified kernel byte-for-byte.
- *
- * Asleep instances skip their internal compute; their last-published
- * output slot persists. `materialize_session.ts` (interpreter oracle)
- * realizes the same I/O semantics structurally via `select(alive,
- * raw, fallback)` wraps.
  *
  * ## Branded discipline
  *
@@ -38,16 +26,14 @@ import {
   portRef, wireKey,
 } from './branded_names.js'
 import type { FlatPlan, InstanceFunction, SchedulerFunction } from '../flat_plan.js'
-import type { NInstr, NOperand } from './emit_resolved.js'
-import { instrWriteSlot, opConst } from './emit_resolved.js'
+import type { NInstr } from './emit_resolved.js'
+import { instrWriteSlot } from './emit_resolved.js'
 import {
   computeInstanceTopoOrder, emitDacStitch,
   type PreambleEmitter,
-  translateAliveExpr,
   translateNode,
 } from './compile_session_slotted_helpers.js'
 import {
-  type ModuleSlotIdx,
   tempIdx, moduleSlotIdx, tempOffset,
   rawOffset,
 } from './slot_indices.js'
@@ -70,8 +56,8 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
 
   // Recursive partition: for each top-level session instance, walk its
   // ResolvedProgram tree and emit a kernel per InstanceDecl at every
-  // level. Slot allocations, register/state/array offsets, alive
-  // preamble operands are all threaded through `acc`.
+  // level. Slot allocations and register/state/array offsets are
+  // threaded through `acc`.
   const acc = makeAccumulators()
   const instanceFunctions: InstanceFunction[] = []
 
@@ -89,7 +75,6 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
       /* instancePath   */ instName,
       /* prog           */ compiled.prog,
       /* compiled       */ compiled,
-      /* aliveInput     */ inst.aliveInput,
       /* inputBindingFor*/ (portNameStr) => {
         const expr = session.inputExprNodes.get(
           wireKey(portRef(toInstanceName(instName), toPortName(portNameStr))),
@@ -98,8 +83,6 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
         return undefined
       },
       /* defaults       */ (() => {
-        // rawInputDefaults is imported from program_types.js — but we
-        // need the Compiled here. Use lazy access via property.
         const out: Record<string, import('../session.js').ExprNode> = {}
         for (const d of compiled.prog.ports.inputs) {
           if (d.default !== undefined) {
@@ -118,36 +101,11 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
     instanceFunctions.push(fn)
   }
 
-  // ── Scheduler preamble: emit alive WriteSlots for every kernel in
-  //    the tree. Writing every sample lets GVN forward the constant 1.0
-  //    in the default case so the dispatch conditional folds to inline.
-  //    Done in a second pass so nested kernels' alive emissions are
-  //    included; acc.alivePreambleOps was populated during partition.
-  const schedulerPreamble: NInstr[] = []
-  let preambleNextTempRaw = acc.nextRegRaw
-  const aliveEmitter: PreambleEmitter = {
-    instrs: schedulerPreamble,
-    allocTemp: () => {
-      const slot = tempIdx(preambleNextTempRaw)
-      preambleNextTempRaw += 1
-      return slot
-    },
-  }
-
-  for (const op of acc.alivePreambleOps) {
-    const aliveOperand: NOperand = op.expr === undefined
-      ? opConst(1, 'float')
-      : translateAliveExpr(
-          op.expr, session, aliveEmitter,
-          `__alive__@${rawOffset(op.aliveSlot)}`,
-        )
-    schedulerPreamble.push(instrWriteSlot(op.aliveSlot, aliveOperand, 'float'))
-  }
-
   // DAC stitching reads each graphOutput slot AFTER all instances
   // dispatch — observes the current sample's WriteSlots.
-  const dac = emitDacStitch(session, tempOffset(preambleNextTempRaw))
-  const dacEndRaw = preambleNextTempRaw + dac.tempCount
+  const schedulerPreamble: NInstr[] = []
+  const dac = emitDacStitch(session, tempOffset(acc.nextRegRaw))
+  const dacEndRaw = acc.nextRegRaw + dac.tempCount
 
   // ── State-evolution phase: one WriteSlot per extracted delay.
   //    Runs after instance kernels (which produce the current sample's
@@ -211,9 +169,6 @@ function buildSlotMetadata(session: SessionState): {
   const slotDefaults = new Array<number>(slotCount).fill(0)
   for (const [name, idx] of session.outputSlotRegistry) {
     slotNames[idx] = name
-    // __alive__ slots default to 1.0 so an instance is alive until
-    // explicitly silenced.
-    if (name.endsWith('.__alive__')) slotDefaults[idx] = 1
   }
   for (const [name, idx] of session.paramSlotRegistry) {
     slotNames[idx] = `param:${name}`

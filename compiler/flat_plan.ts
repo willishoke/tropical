@@ -24,13 +24,12 @@
  * Each session instance compiles to its own `InstanceFunction` slice;
  * the `SchedulerFunction` orchestrates them per sample:
  *
- *     preamble (alive WriteSlots)
- *       for each instance: if (slots[alive_slot_index] > 0.5)
- *                            instance body + writebacks
+ *     preamble (currently empty; reserved for future per-sample setup)
+ *       for each instance: instance body + writebacks
+ *     state_evolution (WriteSlot per extracted delay)
  *     postamble (DAC reads)
  *     output mix
  *
- * Default-alive instances see `if (1) ...` post-GVN — folds to inline.
  * Hot-swap stays compatible: the entire `KernelState` swaps atomically;
  * state transfer matches register/array/slot names regardless of which
  * instance function they belong to.
@@ -124,22 +123,17 @@ export interface InstanceFunction {
   /** Writebacks for this instance — entries are either an absolute
    *  unified temp index or `arrayManaged`. */
   register_targets:  RegTarget[]
-  /** Slot driving the dispatch conditional. */
-  alive_slot_index:  ModuleSlotIdx
   /** Nested kernels (M11 fractal architecture). Sub-InstanceDecls
    *  within this program's body become child kernels, emitted inside
-   *  this kernel's alive-conditional block. Empty for leaf kernels and
-   *  for legacy/non-fractal compiles. */
+   *  this kernel's body. Empty for leaf kernels. */
   children:          InstanceFunction[]
 }
 
 // ─── SchedulerFunction: the top-level per-sample driver ─────────────────────
 
 export interface SchedulerFunction {
-  /** Per-sample setup. Holds alive-expression evaluation + WriteSlot
-   *  to each instance's `__alive__` slot. Slot reads here see the
-   *  previous sample's WriteSlots (alive is implicitly one-sample-
-   *  delayed in its inter-instance references). */
+  /** Per-sample setup. Currently empty; reserved for future per-sample
+   *  scheduler work. Runs before any instance bodies. */
   preamble:        NInstr[]
   /** Per-sample state evolution. Runs after instance dispatches and
    *  before the observation postamble. Holds `WriteSlot` instructions
@@ -153,9 +147,7 @@ export interface SchedulerFunction {
   state_evolution: NInstr[]
   /** Per-sample observation / teardown. Holds DAC mix-bus reads from
    *  each graphOutput slot — observes the current sample's WriteSlot
-   *  values (asleep instances retain). Post-Phase-3 this phase is
-   *  observation-only; state-evolution writes live in
-   *  `state_evolution` above. */
+   *  values. */
   postamble:       NInstr[]
   /** Temps (in the unified register space) summed into the audio output. */
   output_targets:  TempIdx[]
@@ -202,7 +194,6 @@ export interface WireInstanceFunction {
   array_slot_offset: number
   register_count:    number
   register_targets:  number[]
-  alive_slot_index:  number
   /** Nested kernels. May be missing in legacy JSON (parsed as []). */
   children?:         WireInstanceFunction[]
 }
@@ -293,7 +284,6 @@ const parseInstanceFn = (inst: WireInstanceFunction): InstanceFunction => ({
   array_slot_offset: arraySlotOffset(inst.array_slot_offset),
   register_count:    inst.register_count,
   register_targets:  inst.register_targets.map(parseRegTargetFromWire),
-  alive_slot_index:  moduleSlotIdx(inst.alive_slot_index),
   children:          (inst.children ?? []).map(parseInstanceFn),
 })
 
@@ -307,7 +297,6 @@ const toWireInstanceFn = (inst: InstanceFunction): WireInstanceFunction => ({
   array_slot_offset: rawOffset(inst.array_slot_offset),
   register_count:    inst.register_count,
   register_targets:  inst.register_targets.map(toWireRegTarget),
-  alive_slot_index:  rawIdx(inst.alive_slot_index),
   // Omit `children` from the wire when empty so existing JSON consumers
   // (golden fixtures, hand-crafted plan_5 tests) see exactly the bytes
   // they expect today. Populated children are emitted normally.

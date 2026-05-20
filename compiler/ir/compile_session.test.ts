@@ -52,12 +52,6 @@ describe('compileSession — single-instance sessions', () => {
       expect(plan.scheduler_function.outputs.length).toBe(session.graphOutputs.length)
       expect(plan.scheduler_function.output_targets.length).toBe(plan.scheduler_function.outputs.length)
       expect(plan.instance_functions.length).toBe(session.instanceRegistry.size)
-      // Every instance has an alive slot.
-      for (const inst of plan.instance_functions) {
-        expect(inst.alive_slot_index).toBeGreaterThanOrEqual(0)
-        expect(inst.alive_slot_index).toBeLessThan(plan.slot_count)
-        expect(plan.slot_defaults[inst.alive_slot_index]).toBe(1)  // default-alive
-      }
       expect(plan.array_slot_sizes.length).toBe(plan.array_slot_count)
     })
   }

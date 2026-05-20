@@ -291,16 +291,13 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   const sampleRate = opts.sampleRate ?? plan.config.sampleRate
 
   // WASM consumes plan_5 by flattening per sample: scheduler.preamble
-  // (alive WriteSlots) → for each instance: (alive ? body +
-  // writebacks) → scheduler.postamble. Matches the C++ scheduler
-  // structure exactly; the only implementation difference is that
-  // WASM emits inline conditionals rather than `alwaysinline` LLVM
-  // calls (no alwaysinline + cross-function GVN on the web target,
-  // so active-set perf wins land in a follow-up).
+  // → for each instance: body + writebacks → state_evolution →
+  // scheduler.postamble. Matches the C++ scheduler structure exactly.
   const allInstructions: NInstr[] = []
   for (const i of plan.scheduler_function.preamble) allInstructions.push(i)
   for (const inst of plan.instance_functions)
     for (const i of inst.instructions) allInstructions.push(i)
+  for (const i of plan.scheduler_function.state_evolution) allInstructions.push(i)
   for (const i of plan.scheduler_function.postamble) allInstructions.push(i)
 
   const flatProgram = {
@@ -335,17 +332,11 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   c.u8(OP.I64_ADD)
   c.localSet(L_SIDX)
 
-  // Scheduler preamble (alive writes + any other per-sample setup)
+  // Scheduler preamble
   for (const instr of plan.scheduler_function.preamble) emitInstruction(c, instr, ctx)
 
-  // Per-instance conditional dispatch:
-  //   if (slots[alive_slot] > 0.5) { body; writebacks }
+  // Per-instance body + writebacks (unconditional — every instance runs every sample).
   for (const inst of plan.instance_functions) {
-    const aliveOffset = layout.slotsOffset + rawIdx(inst.alive_slot_index) * 8
-    c.i32c(0); c.f64Load(aliveOffset)
-    c.f64c(0.5); c.u8(OP.F64_GT)
-    c.u8(OP.IF); c.u8(0x40)  // if-then block (no result)
-
     for (const instr of inst.instructions) emitInstruction(c, instr, ctx)
 
     // Per-instance writebacks. Pattern-match on the RegTarget sum
@@ -369,9 +360,10 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
         c.i32c(0); c.localGet(L_AI); c.i64Store(regOff)
       }
     }
-
-    c.u8(OP.END)  // close if-then
   }
+
+  // State-evolution (per-sample WriteSlots for extracted delays)
+  for (const instr of plan.scheduler_function.state_evolution) emitInstruction(c, instr, ctx)
 
   // Scheduler postamble (DAC stitch reads)
   for (const instr of plan.scheduler_function.postamble) emitInstruction(c, instr, ctx)

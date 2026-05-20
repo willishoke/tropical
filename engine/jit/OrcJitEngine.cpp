@@ -443,7 +443,6 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     append(&nfns, sizeof(uint32_t));
     for (const auto & inst : program.instance_functions)
     {
-      append(&inst.alive_slot_index, sizeof(uint32_t));
       append(&inst.register_count, sizeof(uint32_t));
       uint32_t nameLen = static_cast<uint32_t>(inst.instance_name.size());
       append(&nameLen, sizeof(uint32_t));
@@ -1162,11 +1161,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     return llvm::Error::success();
   };
 
-  // ── Emit a single instance's writebacks (state register updates).
-  // Lives inside the instance's conditional dispatch so an asleep
-  // instance's registers don't update — matching the JIT skip-kernel
-  // semantic and the interpreter's `select(alive, raw_next, current)`
-  // wrap. ──
+  // ── Emit a single instance's writebacks (state register updates). ──
   auto emit_writebacks = [&](const std::vector<InstanceProgram::Writeback> & wbs) {
     for (const auto & wb : wbs)
     {
@@ -1189,52 +1184,28 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     }
   };
 
-  // ── Scheduler preamble: alive expression writes + any other
-  //    per-sample setup. Runs BEFORE any instance dispatches, so
-  //    alive expressions reading other instances' slot values see
-  //    the previous-sample writes. ──
+  // ── Scheduler preamble: per-sample setup, runs before any
+  //    instance bodies. ──
   if (auto err = emit_instrs(program.scheduler.preamble)) return std::move(err);
 
-  // ── Per-instance conditional dispatch ──
+  // ── Per-instance dispatch ──
   //
   // For each instance:
-  //   alive_v = load slots[alive_slot_index]
-  //   if (alive_v > 0.5) {
-  //     for each child: emit_kernel_block(child)   // recursive
-  //     <instance body instructions>
-  //     <instance writebacks>
-  //   }
+  //   for each child: emit_kernel_block(child)   // recursive
+  //   <instance body instructions>
+  //   <instance writebacks>
   //
   // Children run BEFORE the parent's own body so the parent can read
-  // its children's freshly-written slot values (M11 fractal). For
-  // default-alive instances the preamble wrote `1.0` to the alive slot;
-  // LLVM's GVN forwards the store-to-load, folds the compare to
-  // `true`, and jump-threading eliminates the branch — nested
-  // default-alive folds away the same way the flat case does.
+  // its children's freshly-written slot values (M11 fractal).
   std::function<llvm::Error(const tropical_jit::InstanceProgram &)> emit_kernel_block =
     [&](const tropical_jit::InstanceProgram & inst) -> llvm::Error
   {
-    llvm::Value * alive_v = load_slot_f64(inst.alive_slot_index);
-    llvm::Value * alive_b = builder.CreateFCmpOGT(
-      alive_v, llvm::ConstantFP::get(f64_ty, 0.5), "alive_" + inst.instance_name);
-
-    llvm::BasicBlock * body_bb  = llvm::BasicBlock::Create(
-      *context, "inst_" + inst.instance_name + "_body", fn);
-    llvm::BasicBlock * merge_bb = llvm::BasicBlock::Create(
-      *context, "inst_" + inst.instance_name + "_after", fn);
-    builder.CreateCondBr(alive_b, body_bb, merge_bb);
-
-    builder.SetInsertPoint(body_bb);
-    // Recursive: emit child kernels inside the parent's alive-body.
     for (const auto & child : inst.children)
     {
       if (auto err = emit_kernel_block(child)) return err;
     }
     if (auto err = emit_instrs(inst.instructions)) return err;
     emit_writebacks(inst.writebacks);
-    builder.CreateBr(merge_bb);
-
-    builder.SetInsertPoint(merge_bb);
     return llvm::Error::success();
   };
 
