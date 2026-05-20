@@ -374,6 +374,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     for (const auto & instr : program.scheduler.preamble) fn(instr);
     for (const auto & inst : program.instance_functions)
       for (const auto & instr : inst.instructions) fn(instr);
+    for (const auto & instr : program.scheduler.state_evolution) fn(instr);
     for (const auto & instr : program.scheduler.postamble) fn(instr);
   };
 
@@ -427,10 +428,13 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     };
 
     append(&program.register_count, sizeof(uint32_t));
-    // Scheduler preamble + postamble
+    // Scheduler: preamble + state_evolution + postamble
     uint32_t npre = static_cast<uint32_t>(program.scheduler.preamble.size());
     append(&npre, sizeof(uint32_t));
     for (const auto & instr : program.scheduler.preamble) serialize_instr(instr);
+    uint32_t nstate = static_cast<uint32_t>(program.scheduler.state_evolution.size());
+    append(&nstate, sizeof(uint32_t));
+    for (const auto & instr : program.scheduler.state_evolution) serialize_instr(instr);
     uint32_t npost = static_cast<uint32_t>(program.scheduler.postamble.size());
     append(&npost, sizeof(uint32_t));
     for (const auto & instr : program.scheduler.postamble) serialize_instr(instr);
@@ -1261,10 +1265,18 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     if (auto err = emit_kernel_block(inst)) return std::move(err);
   }
 
-  // ── Scheduler postamble: DAC stitch reads. Runs AFTER all
-  //    instances dispatched, so slot reads observe the current
-  //    sample's WriteSlot values (asleep instances retain their
-  //    previous-sample slot value). ──
+  // ── Scheduler state-evolution: delay-slot updates from MCP wire
+  //    auto-delays. Runs AFTER all instance dispatches and BEFORE
+  //    the observation postamble. Writes here become visible to the
+  //    NEXT sample's instance kernels (which read these slots at the
+  //    start of their bodies and therefore see the previous-sample
+  //    WriteSlot — one sample of latency per wire, by construction). ──
+  if (auto err = emit_instrs(program.scheduler.state_evolution)) return std::move(err);
+
+  // ── Scheduler postamble: DAC stitch reads. Runs AFTER state
+  //    evolution, so slot reads observe the current sample's
+  //    WriteSlot values from instance kernels (asleep instances
+  //    retain their previous-sample slot value). ──
   if (auto err = emit_instrs(program.scheduler.postamble)) return std::move(err);
 
   // ── Output mixing: accumulate mix_output_temps, scale, store to output_buffer[s] ──

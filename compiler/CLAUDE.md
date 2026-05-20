@@ -28,6 +28,17 @@ boundary. The shared cycle-detection algorithm lives in
 `compiler/ir/lowering/cycle_break.ts` for use by future realizations
 that want their own cycle-break policy (iterative, WDF, etc.).
 
+For session graphs specifically, every MCP wire is auto-wrapped in
+a unit delay by `setWireExpr` (`session.ts`), and
+`extractSessionDelays` (`ir/lowering/extract_session_delays.ts`)
+hoists every `delay()` op in any wire to a fresh module slot
+updated in the scheduler's `state_evolution` phase. This makes the
+session-level inter-instance dep graph acyclic by construction
+before `compileSessionSlotted` ever runs. The defensive
+`assertSessionAcyclic` (`ir/lowering/session_cycle_check.ts`)
+catches any programmatic session that bypasses both auto-wrap and
+explicit `delay()`.
+
 No audio runs in this layer; we produce JSON / WASM bytes and hand them
 to the engine.
 
@@ -57,9 +68,16 @@ ir/                   The strata pipeline + resolved-IR emit boundary
   elaborator.ts             ParsedProgram → ResolvedProgram (drops names)
   specialize.ts             clone-with-rewrite (drops type parameters)
   sum_lower.ts              variants → tag + scalar bundles (drops sum types)
-  lowering/cycle_break.ts   Tarjan SCC + synthetic-reg insertion (cycle-break
-                            helper for realization-side use; the compiler
-                            itself asserts acyclic, never breaks cycles)
+  lowering/cycle_break.ts          Tarjan SCC + synthetic-reg insertion (cycle-break
+                                   helper for realization-side use; the compiler
+                                   itself asserts acyclic, never breaks cycles)
+  lowering/extract_session_delays.ts
+                                   pre-emit pass: hoist every `delay()` in a wire
+                                   to a session module slot whose update lands in
+                                   the scheduler's `state_evolution` phase
+  lowering/session_cycle_check.ts  defensive `assertSessionAcyclic` invariant
+                                   run at compileSession's entry after delay
+                                   extraction
   acyclic.ts                strataPipeline-entry assertion + AcyclicityViolation
   elaboration_diagnostics.ts  CycleDiagnostic record, CycleViolation error
                             class, error formatter
@@ -190,10 +208,19 @@ Two files split the session-emit responsibility:
   paramHandle stitching. Shared by `compile_session.ts` and
   `interpret_resolved.ts` so the JIT and the oracle see the same IR.
 
-- **`ir/compile_session.ts`** — JIT bookend. Calls
-  `materializeSessionForEmit`, builds a `Map<ParamDecl, {ptr}>` from
-  the session's param/trigger registries, and hands both to
-  `compileResolved`.
+- **`ir/compile_session.ts`** — JIT bookend. Runs three pre-emit
+  passes — `liftWiresToInstances` (anonymous-instance lift for
+  array-literal wires), `extractSessionDelays` (hoist every
+  `delay()` op in a wire to a fresh module slot whose update
+  registers in `session.delaySlotRegistry`), and
+  `assertSessionAcyclic` (defensive invariant on the
+  post-extraction dep graph) — then calls `compileSessionSlotted`.
+  The slotted compiler emits one `WriteSlot` per delay-registry
+  entry into the scheduler's `state_evolution` phase between
+  per-instance kernel dispatches and the existing DAC-stitch
+  postamble, threading slot names and init values into
+  `slot_defaults` so hot-swap state transfer works the same way it
+  does for output and param slots.
 
 The per-program path uses `programTypeFromResolved(prog, typeArgs)`
 (`ir/strata.ts`): full strata pipeline, then `new ProgramType(...)`.

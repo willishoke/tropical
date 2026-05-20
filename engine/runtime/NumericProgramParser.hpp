@@ -248,6 +248,12 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
     if (jsched.contains("preamble"))
       for (const auto & ji : jsched["preamble"])
         prog.scheduler.preamble.push_back(parse_instr(ji));
+    // state_evolution: optional in the wire format (legacy plans
+    // predating Phase 3 omit it; treated as empty list). Holds
+    // delay-slot updates from MCP wire auto-delays.
+    if (jsched.contains("state_evolution"))
+      for (const auto & ji : jsched["state_evolution"])
+        prog.scheduler.state_evolution.push_back(parse_instr(ji));
     if (jsched.contains("postamble"))
       for (const auto & ji : jsched["postamble"])
         prog.scheduler.postamble.push_back(parse_instr(ji));

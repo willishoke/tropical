@@ -401,11 +401,13 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     expect(() => cloneResolvedProgram(traced)).not.toThrow()
     expect(() => strataPipeline(breakInstanceCycles(elabFromNode(TopSelf)).lowered)).not.toThrow()
 
-    // ── Denotation ── compare candidate vs. reference; pin first 8.
-    // Candidate at session level: `a = IncInner(x: a.y)`.
-    const candidate = buildCycleSession(INNER_INC, [
+    // ── Denotation ── reference still pins the recurrence; the
+    // candidate (cyclic session) now throws at session build time.
+    // Phase 5 catches the cycle at `compileSession`'s entry, before
+    // `loadJSON` finishes priming the JIT runtime.
+    expect(() => buildCycleSession(INNER_INC, [
       { name: 'a', inputs: { x: { op: 'ref', instance: 'a', output: 'y' } } },
-    ], { instance: 'a', output: 'y' })
+    ], { instance: 'a', output: 'y' })).toThrow()
 
     // Reference: y = prev + 1; next prev = prev + 1 (init 0).
     const RefSelf: ProgramNode = {
@@ -421,12 +423,6 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     }
     const reference = buildReferenceSession(RefSelf)
 
-    // Phase 4b: session-level cycles without explicit `delay()` in
-    // the wire expression throw `CycleViolation` at materialization
-    // time. The legacy "candidate (cyclic) vs. reference (explicit
-    // delay)" denotation comparison no longer applies — the candidate
-    // is now a structural error. Reference still interprets cleanly.
-    expect(() => interpretSession(candidate, 8)).toThrow()
     const ref = interpretSession(reference, 8)
     const expected = [1,2,3,4,5,6,7,8].map(v => v / 20.0)
     for (let i = 0; i < 8; i++) {
@@ -439,12 +435,14 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
   // ──────────────────────────────────────────────────────────
   test('(D) two disjoint SCCs: 2 synthetic delays with distinct names', () => {
     // (a↔b) cycle wired to dac as a.y; (c↔d) cycle wired to dac as c.y.
-    const candidate = buildCycleSession(INNER_INC, [
+    // Phase 5: session construction throws at compileSession's entry
+    // for any session containing inter-instance cycles.
+    expect(() => buildCycleSession(INNER_INC, [
       { name: 'a', inputs: { x: { op: 'ref', instance: 'b', output: 'y' } } },
       { name: 'b', inputs: { x: { op: 'ref', instance: 'a', output: 'y' } } },
       { name: 'c', inputs: { x: { op: 'ref', instance: 'd', output: 'y' } } },
       { name: 'd', inputs: { x: { op: 'ref', instance: 'c', output: 'y' } } },
-    ], { instance: 'a', output: 'y' })
+    ], { instance: 'a', output: 'y' })).toThrow()
 
     // IR shape — re-run materializer's IR to inspect post-trace shape.
     // The session's loadProgramAsType has already run strata over
@@ -496,10 +494,6 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       },
     })
 
-    // Phase 4b: candidate has session-level cycles without explicit
-    // `delay()` — throws at materialization. Reference (explicit
-    // user delay) still interprets cleanly.
-    expect(() => interpretSession(candidate, 8)).toThrow()
     const ref = interpretSession(reference, 8)
     for (let i = 0; i < 8; i++) {
       expect(Number.isFinite(ref[i])).toBe(true)
@@ -513,7 +507,8 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     // a → b → d → a and a → c → d → a. d and a both have wires that
     // close the cycle. With breakTarget = a (source order first), all
     // other members rewrite their wires to a's outputs as delayRefs.
-    const candidate = buildCycleSession(INNER_INC, [
+    // Phase 5: this cyclic session throws at compileSession's entry.
+    expect(() => buildCycleSession(INNER_INC, [
       { name: 'a', inputs: { x: { op: 'ref', instance: 'd', output: 'y' } } },
       { name: 'b', inputs: { x: { op: 'ref', instance: 'a', output: 'y' } } },
       { name: 'c', inputs: { x: { op: 'ref', instance: 'a', output: 'y' } } },
@@ -521,7 +516,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
         { op: 'ref', instance: 'b', output: 'y' },
         { op: 'ref', instance: 'c', output: 'y' },
       ]}}},
-    ], { instance: 'd', output: 'y' })
+    ], { instance: 'd', output: 'y' })).toThrow()
 
     // IR: traceCycles must break exactly the back-edge, leaving a DAG.
     const TopDiamond: ProgramNode = {
@@ -596,9 +591,6 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       },
     }
     const reference = buildReferenceSession(RefDiamond)
-    // Phase 4b: candidate has session-level cycles without explicit
-    // `delay()` — throws at materialization. Reference interprets.
-    expect(() => interpretSession(candidate, 8)).toThrow()
     const ref = interpretSession(reference, 8)
     for (let i = 0; i < 8; i++) {
       expect(Number.isFinite(ref[i])).toBe(true)
@@ -663,11 +655,12 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     expect(names.has('_feedback_a_y')).toBe(true)
     expect(names.has('_feedback_a_z')).toBe(true)
 
-    // Denotation: candidate session.
+    // Denotation: candidate session. Phase 5 catches the inter-instance
+    // cycle (a ↔ b, a ↔ c) at compileSession's entry.
     const session = makeSession(8)
     loadProgramAsType(INNER_INC_2OUT, session)
     loadProgramAsType(INNER_INC, session)
-    loadJSON({
+    expect(() => loadJSON({
       schema: 'tropical_program_2',
       name: 'patch',
       body: { op: 'block', decls: [
@@ -682,10 +675,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
           inputs: { x: { op: 'ref', instance: 'a', output: 'z' } } },
       ]},
       audio_outputs: [{ instance: 'a', output: 'y' }],
-    }, session)
-    // Phase 4b: this session has a self-cycle (a's inputs reference
-    // b/c which reference back to a). materializeSession throws.
-    expect(() => interpretSession(session, 8)).toThrow()
+    }, session)).toThrow()
     // Reference still interprets cleanly. (Legacy cand vs ref
     // comparison removed.)
     // Reference: track the recurrence directly. With a's outputs broken
@@ -759,10 +749,14 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       },
     }
     // Build session: a feeds back into itself but through Wrap's delay.
-    // a.x = a.y, but a.y reads the delay (last-sample input). No SCC.
+    // Even though Wrap's TYPE contains an internal delay, the self-edge
+    // a.x = f(a.y) IS a session-level cycle, so Phase 5's
+    // assertSessionAcyclic throws at loadJSON time. To break this cycle
+    // at the session level the user would wrap the wire in `delay(...)`
+    // explicitly (or use the MCP wire helpers, which auto-wrap).
     const session = makeSession(8)
     loadProgramAsType(Wrap, session)
-    loadJSON({
+    expect(() => loadJSON({
       schema: 'tropical_program_2',
       name: 'patch',
       body: { op: 'block', decls: [
@@ -772,16 +766,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
           ]}}},
       ]},
       audio_outputs: [{ instance: 'a', output: 'y' }],
-    }, session)
-    // Each instance's wire references its own .y via NestedOut, but a
-    // NestedOut on *yourself* is a self-edge in the instance graph.
-    // Phase 4b: even though Wrap's TYPE contains an internal delay,
-    // the self-edge IS a session-level cycle (a.x = f(a.y)), so the
-    // session-materializer's strict-cycle-check throws. To break this
-    // cycle at the session level the user would wrap the wire in
-    // `delay(...)` explicitly: `inputs: { x: { op: 'add', args: [
-    //   { op: 'delay', args: [{op:'ref',instance:'a',output:'y'}] }, 1] }}`.
-    expect(() => interpretSession(session, 64)).toThrow()
+    }, session)).toThrow()
     // Pin the first 4 samples by the absolute recurrence value:
     //   sample 0: a.y = mem (init 0) = 0
     //   sample 1: mem became (a.y_prev + 1) = 1; a.y = 1. But wait, the

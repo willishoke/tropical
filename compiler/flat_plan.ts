@@ -141,9 +141,21 @@ export interface SchedulerFunction {
    *  previous sample's WriteSlots (alive is implicitly one-sample-
    *  delayed in its inter-instance references). */
   preamble:        NInstr[]
-  /** Per-sample teardown. Holds DAC mix-bus reads from each
-   *  graphOutput slot — observes the current sample's WriteSlot
-   *  values (asleep instances retain). */
+  /** Per-sample state evolution. Runs after instance dispatches and
+   *  before the observation postamble. Holds `WriteSlot` instructions
+   *  that update session-level delay slots from the current sample's
+   *  source instance outputs — the MCP wire auto-delay convention is
+   *  realized here. Reads in this phase see the current sample's
+   *  instance writebacks; writes become visible to the NEXT sample's
+   *  preamble and instance kernels (which read these slots at the
+   *  start of their bodies and therefore see the previous postamble-
+   *  era write = one sample of latency per wire). */
+  state_evolution: NInstr[]
+  /** Per-sample observation / teardown. Holds DAC mix-bus reads from
+   *  each graphOutput slot — observes the current sample's WriteSlot
+   *  values (asleep instances retain). Post-Phase-3 this phase is
+   *  observation-only; state-evolution writes live in
+   *  `state_evolution` above. */
   postamble:       NInstr[]
   /** Temps (in the unified register space) summed into the audio output. */
   output_targets:  TempIdx[]
@@ -197,6 +209,11 @@ export interface WireInstanceFunction {
 
 export interface WireSchedulerFunction {
   preamble:        WireNInstr[]
+  /** Optional in the wire format for backward compatibility with
+   *  hand-crafted JSON fixtures and previously-captured precompiled
+   *  plans that predate the dedicated state-evolution phase. Parsed
+   *  as `[]` when missing. */
+  state_evolution?: WireNInstr[]
   postamble:       WireNInstr[]
   output_targets:  number[]
   outputs:         number[]
@@ -316,10 +333,14 @@ export function parseWirePlan(wire: WireFlatPlan): FlatPlan {
     slot_defaults:    wire.slot_defaults,
     instance_functions: wire.instance_functions.map(parseInstanceFn),
     scheduler_function: {
-      preamble:       wire.scheduler_function.preamble.map(parseInstr),
-      postamble:      wire.scheduler_function.postamble.map(parseInstr),
-      output_targets: wire.scheduler_function.output_targets.map(tempIdx),
-      outputs:        wire.scheduler_function.outputs,
+      preamble:        wire.scheduler_function.preamble.map(parseInstr),
+      // Omitted from legacy wire-format plans → empty list (no
+      // state-evolution work to perform; equivalent to the pre-Phase-3
+      // pipeline).
+      state_evolution: (wire.scheduler_function.state_evolution ?? []).map(parseInstr),
+      postamble:       wire.scheduler_function.postamble.map(parseInstr),
+      output_targets:  wire.scheduler_function.output_targets.map(tempIdx),
+      outputs:         wire.scheduler_function.outputs,
     },
   }
 }
@@ -345,6 +366,13 @@ export function toWirePlan(plan: FlatPlan): WireFlatPlan {
     instance_functions: plan.instance_functions.map(toWireInstanceFn),
     scheduler_function: {
       preamble:       plan.scheduler_function.preamble.map(toWireInstr),
+      // Omit empty state_evolution from the wire format so existing
+      // golden JSON fixtures (which predate this field) don't gain
+      // a spurious empty array. Populated state_evolution arrays
+      // emit normally.
+      ...(plan.scheduler_function.state_evolution.length > 0
+        ? { state_evolution: plan.scheduler_function.state_evolution.map(toWireInstr) }
+        : {}),
       postamble:      plan.scheduler_function.postamble.map(toWireInstr),
       output_targets: plan.scheduler_function.output_targets.map(rawIdx),
       outputs:        plan.scheduler_function.outputs,

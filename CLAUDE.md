@@ -111,6 +111,21 @@ SessionState  (instances + wiring + dac.out + params)
 ResolvedProgram (top-level synthetic)  →  strata pipeline  →  post-strata
 ```
 
+**The IR is acyclic by construction.** Source-level cycles that
+don't pass through an explicit user register are rejected at the
+elaborator. Session-level cycles in MCP-built graphs are broken at
+the wire layer: every wire stored via `setWireExpr` is wrapped in a
+unit delay (`{op:'delay', args:[expr], init:0}`), and
+`extractSessionDelays` (a compileSession pre-pass) hoists every
+`delay()` op in any wire to a fresh session-level module slot
+updated in the scheduler's `state_evolution` phase. Hand-written
+JSON patches with cross-coupled instances must wrap their own
+back-edges in `delay()` to break the session-level cycle —
+`assertSessionAcyclic` (`compiler/ir/lowering/session_cycle_check.ts`)
+runs as a defensive invariant at compileSession's entry. Every MCP
+wire gains exactly one sample of latency (~21µs at 48kHz), matching
+VCV Rack's per-wire-delay mental model.
+
 ## What sits below post-strata
 
 Three *backends* consume the post-strata `ResolvedProgram`. They are
@@ -122,14 +137,17 @@ suites assert they agree pointwise.
 post-strata ResolvedProgram (per-program path)  /  SessionState (session path)
         │
         ├─→ compileSession (compiler/ir/compile_session.ts)
-        │      compileSessionSlotted: per-instance compileResolved →
-        │      tropical_plan_5 JSON (instance_functions[] + scheduler).
+        │      liftWiresToInstances → extractSessionDelays →
+        │      assertSessionAcyclic → compileSessionSlotted:
+        │      per-instance compileResolved → tropical_plan_5 JSON
+        │      (instance_functions[] + scheduler).
         │      ──── C API boundary (engine/c_api/tropical_c.h, koffi FFI) ────
         │      NumericProgramParser → FlatProgram (multi-function)
         │      OrcJitEngine → LLVM IR — one kernel function whose body is:
         │          for each sample:
         │            preamble (alive WriteSlots)
         │            for each instance: (alive ? body + writebacks)
+        │            state_evolution (delay-slot WriteSlots)
         │            postamble (DAC stitch reads)
         │            output mix
         │      FlatRuntime → buffer loop, double-buffered hot-swap

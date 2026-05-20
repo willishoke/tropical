@@ -28,6 +28,7 @@ import {
   inputPortType, outputPortType, registerPortType,
   rawInputDefaults,
   allocateOutputSlots,
+  setWireExpr, unwrapDelay,
 } from '../compiler/session.js'
 import {
   saveProgramFromSession, loadProgramAsType, mergeProgramIntoSession,
@@ -845,7 +846,7 @@ function handleWireChain(args: Record<string, unknown>) {
       const firstInst  = insts[0]
       const inputName  = resolveInputName(firstInst, inputPort)
       const { expr }   = adaptInputExpr(initialExpr, inputPortType(firstInst, inputNames(firstInst).indexOf(inputName)), firstName, inputName)
-      session.inputExprNodes.set(`${firstName}:${inputName}`, expr)
+      setWireExpr(session, `${firstName}:${inputName}`, expr)
     }
 
     // Wire instances[i].output → instances[i+1].input
@@ -859,7 +860,7 @@ function handleWireChain(args: Record<string, unknown>) {
       const inName   = resolveInputName(dstInst, inputPort)
       const refExpr  = { op: 'ref' as const, instance: srcName, output: outName }
       const { expr } = adaptInputExpr(refExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), dstName, inName)
-      session.inputExprNodes.set(`${dstName}:${inName}`, expr)
+      setWireExpr(session, `${dstName}:${inName}`, expr)
       linked.push(`${srcName}.${outName} → ${dstName}.${inName}`)
     }
 
@@ -891,7 +892,7 @@ function handleWireZip(args: Record<string, unknown>) {
       const inName   = resolveInputName(dstInst, dst.input)
       const refExpr  = { op: 'ref' as const, instance: src.instance, output: outName }
       const { expr } = adaptInputExpr(refExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), dst.instance, inName)
-      session.inputExprNodes.set(`${dst.instance}:${inName}`, expr)
+      setWireExpr(session, `${dst.instance}:${inName}`, expr)
       linked.push(`${src.instance}.${outName} → ${dst.instance}.${inName}`)
     }
 
@@ -929,7 +930,7 @@ function handleFanOut(args: Record<string, unknown>) {
       const dstInst = requireInstance(dst.instance, 'targets[].instance')
       const inName   = resolveInputName(dstInst, dst.input)
       const { expr } = adaptInputExpr(sourceExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), dst.instance, inName)
-      session.inputExprNodes.set(`${dst.instance}:${inName}`, expr)
+      setWireExpr(session, `${dst.instance}:${inName}`, expr)
       linked.push(`${sourceLabel} → ${dst.instance}.${inName}`)
     }
 
@@ -965,7 +966,7 @@ function handleFanIn(args: Record<string, unknown>) {
 
     const inName   = resolveInputName(dstInst, target.input)
     const { expr } = adaptInputExpr(sumExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), target.instance, inName)
-    session.inputExprNodes.set(`${target.instance}:${inName}`, expr)
+    setWireExpr(session, `${target.instance}:${inName}`, expr)
 
     return { mixed: sources.length, target: `${target.instance}.${inName}`, ...wire() }
   })
@@ -973,6 +974,12 @@ function handleFanIn(args: Record<string, unknown>) {
 
 function handleFeedback(args: Record<string, unknown>) {
   return wrap(() => {
+    // Post-auto-delay: every MCP wire is implicitly one-sample-delayed
+    // via `setWireExpr`. `feedback` becomes a `wire` alias that exposes
+    // two extra knobs — `init` (initial value of the underlying delay
+    // slot) and `delay_id` (stable identifier for hot-swap state
+    // transfer). Both are preserved by passing them through to
+    // setWireExpr's `WireExprOpts`.
     const from    = args.from     as { instance: string; output: string | number }
     const to      = args.to       as { instance: string; input:  string | number }
     const init    = (args.init    as number | undefined) ?? 0
@@ -985,13 +992,9 @@ function handleFeedback(args: Record<string, unknown>) {
     const inName  = resolveInputName(dstInst, to.input)
 
     const refExpr: ExprNode = { op: 'ref' as const, instance: from.instance, output: outName }
-    const delayExpr: ExprNode = delayId !== undefined
-      ? { op: 'delay' as const, args: [refExpr], init, id: delayId }
-      : { op: 'delay' as const, args: [refExpr], init }
-
-    validateExpr(delayExpr, `${to.instance}.${inName}`)
-    const { expr } = adaptInputExpr(delayExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), to.instance, inName)
-    session.inputExprNodes.set(`${to.instance}:${inName}`, expr)
+    validateExpr(refExpr, `${to.instance}.${inName}`)
+    const { expr } = adaptInputExpr(refExpr, inputPortType(dstInst, inputNames(dstInst).indexOf(inName)), to.instance, inName)
+    setWireExpr(session, `${to.instance}:${inName}`, expr, { init, id: delayId })
 
     return {
       feedback: `${from.instance}.${outName} →[delay init=${init}]→ ${to.instance}.${inName}`,
@@ -1284,17 +1287,19 @@ function handleWire(args: Record<string, unknown>) {
       const { expr } = adaptInputExpr(s.expr, inputPortType(inst, inputId), s.instance, resolvedName)
       // M9d: fan-in support. If the input already has a wired
       // expression and the caller provided `combine`, wrap both in
-      // {op:combine, args:[existing, new]}. Without `combine`, behave
-      // as before (replace) for backward compat with single-wire
-      // MCP callers. Future tightening (require combine on duplicate
-      // writes) deferred to M9d-strict.
+      // {op:combine, args:[existing_raw, new]}. The auto-delay on
+      // stored wires means `existing` carries an outer `delay(...)`;
+      // strip it with `unwrapDelay` so the combined expression has a
+      // single outer delay (applied by `setWireExpr`) rather than a
+      // nested-delay-inside-delay shape that would give the existing
+      // source two samples of latency.
       const key = `${s.instance}:${resolvedName}`
       const existing = session.inputExprNodes.get(key)
       let toStore: ExprNode = expr
       if (existing !== undefined && s.combine !== undefined) {
-        toStore = { op: s.combine, args: [existing, expr] } as ExprNode
+        toStore = { op: s.combine, args: [unwrapDelay(existing), expr] } as ExprNode
       }
-      session.inputExprNodes.set(key, toStore)
+      setWireExpr(session, key, toStore)
       results.push({ instance: s.instance, input: resolvedName, expr: toStore })
     }
 
