@@ -68,19 +68,28 @@ arrived at this lives in
 
 ## How it gets built
 
-Tropical is built almost entirely through Claude Code with Opus 4.7
-(1M context). The model writes the code; I drive the architecture,
-review the changes, and own the design decisions. I'm not going to
-overstate this — I haven't built out a fleet of specialized
-subagents or a custom multi-agent review loop. What I have is a
-tight feedback cycle between a person who knows what the system
-should look like and a frontier model that can hold an unusual
-amount of the codebase in context at once. That's the leverage.
+Tropical is built through Claude Code with Opus 4.7 (1M context).
+The workflow is task-level parallelism: a fleet of agents working
+on independent pieces of the codebase in parallel, managed by one
+person who holds the architectural picture. Opus 4.7's context
+window is the leverage — it can hold a large fraction of this
+codebase at once and reason about cross-cutting changes that would
+otherwise require careful staging.
 
-The discipline that makes this work is end-to-end validation. The
-codebase is built around the assumption that a model is going to
-make subtle structural mistakes and the test suite has to catch
-them before they reach production:
+Architectural decisions go through rigorous written specs: phased
+implementation plans, clear correctness criteria, agreement on
+what counts as "done" before code gets written. The specs are
+cross-disciplinary by default. Each decision gets viewed through
+whichever practitioner traditions are relevant to the problem
+(category theory, type theory, systems programming, DSP,
+real-time audio), and the tensions between those views get worked
+out in the spec rather than in the code. The structure of the IR,
+the runtime, and the stdlib all carry marks of that process.
+
+What makes this tractable is end-to-end validation. The codebase
+is built around the assumption that a model is going to make
+subtle structural mistakes and the test suite has to catch them
+before they reach production:
 
 - **Sample-for-sample equivalence gates** between three backends —
   the LLVM ORC JIT, a pure-TS reference interpreter, and the
@@ -101,33 +110,23 @@ them before they reach production:
   YAML lint) on every PR against GitHub Actions, with LLVM 20
   pinned. Local development runs the same gates via `make validate`.
 
-The result is that the model can refactor aggressively — the
-recent removal of triggers as a first-class primitive, the removal
-of alive-gating, the switch from `tropical_plan_4` to a per-instance
-`tropical_plan_5` with a scheduler — without me having to read
-every diff carefully. The tests do the reading.
+With this surface in place, refactors that would otherwise need
+careful manual review go through cleanly. The recent removal of
+triggers as a first-class primitive, the removal of alive-gating,
+the switch from `tropical_plan_4` to a per-instance
+`tropical_plan_5` with a scheduler — all landed as multi-commit
+branches without per-diff human inspection. The tests do the
+reading.
 
-That's the actual workflow: a frontier model with deep context,
-plus a test surface dense enough that the model's mistakes show up
-as failed CI runs rather than as bugs.
+## Where to read next
 
-## Why you might care
-
-If you're a hiring manager who got here from a résumé: I build
-ambitious systems in domains that don't usually overlap, using the
-current generation of frontier models as a force multiplier, and I
-have a real working theory of how to organize a codebase so that
-this scales rather than producing slop. The shape of this repo is
-the demonstration. Read
-[`design/architecture.md`](design/architecture.md), look at
-[`tests/equiv/`](tests/equiv/), or grep for "Phase" comments in
-`compiler/ir/` to see how the IR has migrated over time without
-breaking the equivalence gates.
-
-If you want to run it: see [`INSTALL.md`](INSTALL.md). If you want
-to point an agent at it: the MCP server is documented in
-[`mcp/CLAUDE.md`](mcp/CLAUDE.md). If you want to read the code: the
-top-level [`CLAUDE.md`](CLAUDE.md) is the contributor map.
+- [`design/architecture.md`](design/architecture.md) — the full IR
+  walkthrough, top to bottom.
+- [`tests/equiv/`](tests/equiv/) — the sample-for-sample equivalence
+  suites that pin the three backends to each other.
+- [`CLAUDE.md`](CLAUDE.md) — contributor map.
+- [`INSTALL.md`](INSTALL.md) — build prerequisites.
+- [`mcp/CLAUDE.md`](mcp/CLAUDE.md) — MCP server and tool reference.
 
 ## License
 
