@@ -1,6 +1,6 @@
 # stdlib/
 
-The 31 built-in DSP program types, written in tropical's `.trop` surface
+The 32 built-in DSP program types, written in tropical's `.trop` surface
 syntax. Loaded by `loadStdlib()` (`compiler/program.ts`); for the browser
 build the same files are inlined into `compiler/stdlib_bundled.ts` by
 `web/bundle_stdlib.ts`.

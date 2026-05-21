@@ -22,7 +22,7 @@ through to the load in each instance's alive check, and constant-folds
 the conditional away. This requires the writer and reader to be in the
 same LLVM function.
 
-The architectural direction discussed in `design/operadic_ir.md` —
+The architectural direction discussed in `design/archive/operadic_ir.md` —
 fractal compilation, per-operation kernels, multi-realization
 architecture — implies a future where kernels might be compiled
 separately:

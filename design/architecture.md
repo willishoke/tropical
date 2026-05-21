@@ -11,15 +11,63 @@ program — and is designed around one rule: a pass never carries
 forward structure the next pass would rather not see. Surface
 syntax, names, type parameters, sum types, instance nesting, array
 shapes, combinators all get retired at the right moment. By the end
-of the chain, the IR is `tropical_plan_4`: a flat instruction stream
-over typed scalar slots. Three backends interpret that low-detail IR
-— JIT, pure-TS interpreter, WebAssembly — and equivalence test
-suites cross-check them sample-for-sample.
+of the chain, the IR is `tropical_plan_5`: per-instance instruction
+streams over typed scalar slots plus a scheduler that drives them
+per-sample. Three backends interpret that low-detail IR — JIT,
+pure-TS interpreter, WebAssembly — and equivalence test suites
+cross-check them sample-for-sample.
 
-For the higher-level framing — programs as a cartesian category of
-typed signal-flow graphs with a guarded trace — see the root
-`CLAUDE.md`. The shape of every pass below matches that picture; the
-vocabulary doesn't have to be load-bearing in this document.
+## What tropical is, categorically
+
+A single sentence to hang the system off:
+
+> tropical's IR is a DAG-shaped operad — programs are typed
+> signal-flow graphs with cycles broken explicitly by a single state
+> primitive (`RegDecl`), and the compiler is a functor between this
+> operad and the slot-operational operad consumed by the runtime.
+
+The vocabulary doesn't have to be load-bearing day to day, but the
+shape of the codebase matches it precisely:
+
+- **Colors** = post-strata port types (`float`, `int`, `bool`,
+  fixed-shape arrays of these).
+- **Operations** = primitive ops (`add`, `mul`, `delay`, …) plus
+  user-defined programs.
+- **Composition** = wiring an output to an input.
+- **Tensor (parallel composition)** = placing instances side by side
+  in a `body.decls` list.
+- **Encapsulation** = an instance's body can only see its own input
+  ports; cross-program communication happens at the parent's level
+  by writing into a child's input slot. This is structural, not a
+  discipline: the IR types make boundary-crossing references
+  inexpressible.
+
+**The IR is acyclic by construction.** Source-level cycles that
+don't pass through an explicit user register are rejected at the
+elaborator (`CycleViolation`, with port-detailed Tier-2 errors and a
+suggested explicit-delay fix). Session-level cycles in MCP-built
+graphs are broken at the wire layer: every wire stored via
+`setWireExpr` is wrapped in a unit delay, and a pre-emit pass hoists
+those delays out of the wires into session-level slots updated in
+the scheduler's `state_evolution` phase. Hand-written JSON patches
+with cross-coupled instances must wrap their own back-edges in
+`delay()` to break the session-level cycle —
+`assertSessionAcyclic` (`compiler/ir/lowering/session_cycle_check.ts`)
+runs as a defensive invariant at `compileSession`'s entry. Every
+MCP wire gains exactly one sample of latency (~21 µs at 48 kHz),
+matching VCV Rack's per-wire-delay mental model.
+
+For the longer categorical story — the choice of trace functor (we
+sit at "implicit cycle-breaking via explicit user delays"), the
+pre-trace/post-trace operad split, multi-realization (WDF,
+iterative fixed-point, FFI), and the continuous → discrete → finite-
+precision semantic hierarchy — see the archived design conversation
+at `design/archive/operadic_ir.md`. Most of it is the framing that
+produced the current shape; some of it (multi-realization, slot
+unification, fractal compilation) is infrastructure-complete but
+not yet on the default path.
+
+## Pipeline at a glance
 
 ```
 .trop / tropical_program_2 / MCP edits
@@ -28,50 +76,60 @@ vocabulary doesn't have to be load-bearing in this document.
     ▼
 ParsedProgram
     │
-    │   elaborate          drops names (every NameRef → decl object)
+    │   elaborate          drops names (every NameRef → decl object);
+    │                      enforces acyclic-source invariant
     ▼
-ResolvedProgram
+ResolvedProgram                              ◀── DAG-shaped graph IR
     │
     │   strata pipeline:
+    │     assertAcyclic    confirms caller honored the contract
     │     specialize       drops type parameters
     │     sumLower         drops sum types
-    │     traceCycles      breaks cycles via the guarded trace (cycles → DelayDecls)
     │     inlineInstances  drops nesting
     │     arrayLower       drops shapes and combinators
+    │     identityElim     categorical identity-law rewrite
     ▼
-ResolvedProgram (post-strata) — scalar-only, monomorphic, acyclic, non-nested, combinator-free
+ResolvedProgram (post-strata)
+    │      scalar-only · monomorphic · acyclic · non-nested · combinator-free
     │
-    │   ┌─→ compileResolved → tropical_plan_4
+    │   ┌─→ compileSession → tropical_plan_5  (JIT path)
+    │   │       │
+    │   │       │ liftWiresToInstances → extractSessionDelays
+    │   │       │     → assertSessionAcyclic → compileSessionSlotted
+    │   │       │     (per-instance compileResolved into
+    │   │       │      instance_functions[] + scheduler_function)
     │   │       │
     │   │       │   ──── C API boundary (engine/c_api/tropical_c.h, koffi FFI) ────
-    │   │       │
     │   │       ▼
-    │   │   FlatRuntime::load_plan → OrcJitEngine::compile_flat_program → native kernel
-    │   │       │
-    │   │       ▼
-    │   │   audio callback (RtAudio / CoreAudio)
+    │   │   NumericProgramParser → FlatProgram (multi-function)
+    │   │   OrcJitEngine → LLVM IR (one kernel function whose body is the scheduler)
+    │   │   FlatRuntime → buffer loop, double-buffered hot-swap
+    │   │   TropicalDAC (RtAudio) → audio output
     │   │
-    │   ├─→ interpret_resolved (pure-TS evaluator; oracle for tests)
+    │   ├─→ interpret_resolved   (pure-TS evaluator; oracle for tests)
+    │   │       (uses materialize_session to flatten the session into
+    │   │        a single ResolvedProgram for evaluation)
     │   │
-    │   └─→ emit_wasm → WebAssembly bytes
+    │   └─→ emit_wasm  → WebAssembly bytes
     │           │
     │           ▼
     │       WasmRuntime in AudioWorklet (web/worklet/runtime.ts)
 ```
 
-Sessions (graphs in flight, edited over MCP) plug into the same
-pipeline through one extra step that lifts the partially-typed
-session graph into a top-level `ResolvedProgram`:
+Sessions plug into the same pipeline through one extra step. Two
+paths split because the JIT and the interpreter have different
+needs:
 
-```
-SessionState (instances + wiring + dac.out + params)
-    │
-    │   materializeSession (compiler/ir/materialize_session.ts)
-    │     lift the session graph into the same ResolvedProgram shape
-    │     the per-program path produces.
-    ▼
-ResolvedProgram (top-level synthetic)  →  strata pipeline  →  post-strata
-```
+- **JIT path** keeps each session instance compiled independently
+  (one `InstanceFunction` per instance, packed into the FlatPlan by
+  the scheduler). The kernel is one LLVM function whose body
+  dispatches each instance in topological order per sample.
+- **Interpreter path** uses `materializeSession` to flatten the
+  session into a single synthetic top-level `ResolvedProgram` and
+  evaluates that.
+
+Both paths see the same post-strata invariants on each piece, and
+the equivalence tests pin them sample-for-sample to each other.
 
 Every pass below is presented as input IR, output IR, and the
 structure dropped between them.
@@ -133,9 +191,9 @@ syntactic and semantic concerns.
 
 **Input:** `ParsedProgram`.
 **Output:** `ResolvedProgram` (`compiler/ir/nodes.ts`).
-**Drops:** names.
+**Drops:** names. Enforces the **acyclic-source** invariant.
 **Keeps:** every other piece of surface structure (type params, sum
-types, nesting, cycles, combinators, shapes).
+types, nesting, combinators, shapes).
 
 `compiler/ir/elaborator.ts` is the unique site of name resolution.
 A single top-down pass over the parsed program: each declaration is
@@ -144,18 +202,23 @@ registered in the appropriate scope, and re-used by reference at
 every site that names it.
 
 The output is a graph IR. Decls (`InputDecl`, `OutputDecl`,
-`RegDecl`, `DelayDecl`, `ParamDecl`, `TypeParamDecl`,
-`InstanceDecl`, `ProgramDecl`, `BinderDecl`, plus sum/struct/alias
-type defs) are introduction sites. Refs (`InputRef`, `RegRef`,
-`DelayRef`, `ParamRef`, `TypeParamRef`, `BindingRef`, `NestedOut`)
-are uses. Every ref carries its `decl` field as a direct object
-pointer — `===` identity, not a string lookup.
+`RegDecl`, `ParamDecl`, `TypeParamDecl`, `InstanceDecl`,
+`ProgramDecl`, `BinderDecl`, plus sum/struct/alias type defs) are
+introduction sites. Refs (`InputRef`, `RegRef`, `ParamRef`,
+`TypeParamRef`, `BindingRef`, `NestedOut`) are uses. Every ref
+carries its `decl` field as a direct object pointer — `===`
+identity, not a string lookup. `RegDecl` is the single state
+primitive: surface `delay name = u init v` is sugar for
+`reg name { init: v, update: u }`.
 
-The IR admits cycles. A delay's `update` may transitively reference
-its own register; an instance's input may reference a value that
-depends on the same instance via feedback. Those structures are
-present in the resolved IR; later strata break them when they need
-to.
+The elaborator also runs **strict cycle detection** at the source
+level. Inter-instance cycles that don't pass through an explicit
+user register throw `CycleViolation` here, with a port-detailed
+Tier-2 error message and a suggested explicit-delay fix.
+Acyclic-by-source is what makes everything downstream straight-
+line: the strata pipeline never needs to break cycles, and
+`assertAcyclic` at strata entry catches any caller that bypassed
+the contract.
 
 After this pass, no string lookups, no scope walks, no shadowing
 disambiguation. Decl identity is the only substrate the rest of the
@@ -165,23 +228,36 @@ compiler operates on.
 
 ## 3. Strata pipeline
 
-`compiler/ir/strata.ts` orchestrates five passes:
+`compiler/ir/strata.ts` orchestrates six passes:
 
 ```typescript
-export function strataPipeline(prog, typeArgs = new Map()) {
+export function strataPipeline(prog, typeArgs = new Map(), options = {}) {
+  assertAcyclic(prog)
   const specialized = specializeProgram(prog, typeArgs)
   const summed     = sumLower(specialized)
-  const cyclic     = traceCycles(summed)
-  const inlined    = inlineInstances(cyclic)
-  return arrayLower(inlined)
+  const inlined    = options.inlineNested === false ? summed : inlineInstances(summed)
+  const arrayed    = arrayLower(inlined)
+  return identityElim(arrayed)
 }
 ```
 
 Each pass is pure: returns a fresh `ResolvedProgram`, or — in the
 no-op fast path — the input by identity. None of them mutate decls
-on the input.
+on the input. **Acyclicity is the strataPipeline contract**; the
+callers (`programTypeFromResolved` and `materializeSession`)
+guarantee it, `assertAcyclic` confirms it.
 
-### 3.1 specialize — drops type parameters
+### 3.1 assertAcyclic — boundary check
+
+`compiler/ir/acyclic.ts`. Re-uses the SCC finder from
+`compiler/ir/lowering/cycle_break.ts` (the shared cycle algorithm,
+also available to future realizations that want their own
+cycle-break policy — iterative, WDF, etc.). Throws
+`AcyclicityViolation` if any non-trivial SCC survives into strata
+input. In the standard path this never fires; the elaborator and
+session materializer have already ensured acyclicity.
+
+### 3.2 specialize — drops type parameters
 
 `compiler/ir/specialize.ts`. Takes a generic program and a map
 `Map<TypeParamDecl, number>`; produces a fresh program with the
@@ -203,53 +279,27 @@ The session-emit cache (`session.specializationCache`) memoizes on
 `(template, args)` keys. The pass itself doesn't consult the cache —
 that's the loader's job.
 
-### 3.2 sumLower — drops sum types
+### 3.3 sumLower — drops sum types
 
-`compiler/ir/sum_lower.ts`. Decomposes every sum-typed `DelayDecl`
-into N+1 scalar `DelayDecl`s — a discriminator slot (int) plus one
+`compiler/ir/sum_lower.ts`. Decomposes every sum-typed `RegDecl`
+into N+1 scalar `RegDecl`s — a discriminator slot (int) plus one
 slot per `(variant, field)` pair across all variants — and lowers
 `MatchExpr` to scalar select-chains and `TagExpr` to tag-literal
 writes.
 
 Constraints:
-- a sum-typed delay's `init` MUST be a `TagExpr` (constant variant
+- a sum-typed reg's `init` MUST be a `TagExpr` (constant variant
   constructor); anything else is a structural error
 - match-arm payload bindings are only supported when the scrutinee
-  is a `DelayRef` to a sum-typed delay
+  is a `RegRef` to a sum-typed reg
 
-After this pass: no `tag` op, no `match` op, no sum-typed delay.
+After this pass: no `tag` op, no `match` op, no sum-typed reg.
 Decl identity is preserved end-to-end; all replacements are fresh
 decls and refs are rewritten by identity.
 
 `EnvExpDecay` and `TriggerRamp` in the stdlib are the canonical
 examples — both define a two-variant sum that this pass decomposes
 into a tag register plus a payload register.
-
-### 3.3 traceCycles — the guarded trace
-
-`compiler/ir/trace_cycles.ts`. Tarjan's SCC over the inter-instance
-dependency graph. Each non-trivial SCC chooses a break target by
-source order; for each output port of the break target referenced by
-another cycle member, allocate a synthetic `DelayDecl` whose update
-reads the original `NestedOut` and whose init is `0`. Rewrite the
-offending `NestedOut`s to read the synthetic delay.
-
-This is the implementation of the guarded trace operator from the
-ideological framing in the root `CLAUDE.md`. Every back-edge is
-forced through the unit-delay endomorphism, which is what makes the
-resulting graph causal: there's no instantaneous feedback path. Once
-this pass has run, the resulting `ResolvedProgram` is acyclic in the
-strict sense — register/delay reads don't loop back.
-
-Synthetic delays carry `_liftedFrom: 'synthetic'` provenance so
-downstream passes (especially `applyGateableWraps` in
-`materialize_session.ts`) can distinguish them from
-inlined-from-an-instance decls.
-
-For most stdlib programs this pass is the identity — feedback is
-already broken explicitly via `delay`. The plumbing exists because
-post-`inlineInstances` cycles can appear that weren't visible
-pre-inlining.
 
 ### 3.4 inlineInstances — drops nesting
 
@@ -268,12 +318,12 @@ For each instance, depth-first bottom-up:
    whose decl is in the inner's `ports.inputs` is replaced by the
    wired-in expression from `instanceDecl.inputs[port]`. Substituted
    expressions pass through by reference, preserving DAG sharing.
-4. Lift cloned `RegDecl`s and `DelayDecl`s into the outer body,
-   renamed `${instance.name}_${innerName}` and tagged
+4. Lift cloned `RegDecl`s into the outer body, renamed
+   `${instance.name}_${innerName}` and tagged
    `_liftedFrom: instance.name`. Lift cloned `next_update` assigns
    with their `target` rewritten. Lift `ProgramDecl`s and
-   `ParamDecl`s as-is (no rename: ParamDecls are session-scoped by
-   name; ProgramDecls are passive type bindings).
+   `ParamDecl`s as-is (no rename: `ParamDecl`s are session-scoped
+   by name; `ProgramDecl`s are passive type bindings).
 5. Record cloned `outputAssign` expressions in a substitution table
    keyed by the *template's* `OutputDecl` (matched by position to
    the cloned program's outputs). Replace every `NestedOut {
@@ -282,6 +332,14 @@ For each instance, depth-first bottom-up:
 `_liftedFrom` is the post-strata replacement for the legacy
 name-prefix parsing pattern. Identifying a decl's lineage is now an
 object-field check, not a string regex.
+
+The `inlineNested: false` option is the entry point for the future
+fractal-compilation path: when it's flipped, sub-instances survive
+as kernel boundaries and `partitionKernel` (the recursive
+partitioner in `compile_session_slotted.ts`) emits an
+`InstanceFunction` for every `InstanceDecl` at every level. The
+infrastructure is complete; activation is gated on cross-kernel
+input-wiring resolution.
 
 ### 3.5 arrayLower — drops shapes and combinators
 
@@ -314,7 +372,17 @@ Each combinator iteration uses a fresh `WeakMap` memo. A memo is
 valid only for one substitution map; reusing one across iterations
 would conflate different `acc`/`elem` values.
 
-### 3.6 Post-strata invariants
+### 3.6 identityElim — categorical identity-law rewrite
+
+`compiler/ir/identity_elim.ts`. Eliminates `InstanceDecl`s whose
+program body is the identity morphism (each output assigns the
+corresponding input untouched). In the per-program path
+`inlineInstances` already absorbs trivial sub-instances first, so
+this pass rarely fires today; it carries weight in the session-
+level path where lifted wire-programs sometimes lower to a
+no-op kernel that the pass collapses cleanly.
+
+### 3.7 Post-strata invariants
 
 What you get from `strataPipeline`:
 
@@ -322,87 +390,116 @@ What you get from `strataPipeline`:
   inline literals in expressions or as backing stores for stateful
   arrays
 - **monomorphic** — no `TypeParamDecl`, no `TypeParamRef`
-- **acyclic** — every cycle is broken by a `DelayDecl`
+- **acyclic** — confirmed at strata entry; production code paths
+  never produce cyclic IR
 - **non-nested** — no `InstanceDecl`, no `NestedOut`
 - **combinator-free** — no `let`, `fold`, `scan`, `generate`,
   `iterate`, `chain`, `map2`, `zipWith`
 - **decl-identity-keyed** — refs hold decl objects, never strings
 
 That's the smallest sub-IR sufficient for any per-sample evaluator.
-The three backends below operate on this image.
+The backends below operate on this image.
 
 ---
 
-## 4. Materialize: sessions into the same shape as per-program
+## 4. Sessions: materialize and compile
 
-**Input:** `SessionState` (`compiler/session.ts`).
-**Output:** `ResolvedProgram` (top-level synthetic).
-**Drops:** the difference between "a session of instances + wiring"
-and "a single program".
+A session is the runtime view of a graph in flight: a registry of
+typed `Instance`s, a wiring map keyed by `(instance, input)`, a
+list of graph outputs wired into the synthetic `dac` instance, and
+a parameter registry. The MCP server owns one long-lived session;
+patches in `tropical_program_2` JSON are loaded into a session and
+saved back out from one.
 
-`compiler/ir/materialize_session.ts` lifts a partially-typed graph of
-`ProgramInstance`s plus session-keyed wiring `ExprNode`s plus
-`dac.out` graph_outputs into a synthetic top-level `ResolvedProgram`
-whose body has:
+Two paths consume a session.
 
-- one `InstanceDecl` per session instance, type pre-specialized (the
-  instance type was resolved either out of `session.resolvedRegistry`
-  for non-generics or via `specializeProgram` against
-  `session.genericTemplatesResolved` for generics)
+### 4.1 JIT path — `compileSession` (per-instance)
+
+`compiler/ir/compile_session.ts` runs three pre-emit passes and
+hands the result to `compileSessionSlotted`:
+
+1. **`liftWiresToInstances`** (`compiler/ir/lift_wires.ts`) —
+   anonymous-instance lift. Wires whose expressions contain array
+   literals are extracted into anonymous `__wire_${i}` instances at
+   session pre-compile time. The lifted programs go through the
+   full strata pipeline so combinators lower correctly.
+
+2. **`extractSessionDelays`**
+   (`compiler/ir/lowering/extract_session_delays.ts`) — hoists every
+   top-level `delay()`-wrapped wire into a fresh module slot. The
+   wire is rewritten to a `sessionSlot` read; the source expression
+   is recorded in `session.delaySlotRegistry` for
+   `compileSessionSlotted` to emit as a `WriteSlot` in the
+   scheduler's `state_evolution` phase. This is the structural
+   mechanism that keeps the MCP-built IR acyclic — every wire becomes
+   a slot-to-slot copy with one sample of latency.
+
+3. **`assertSessionAcyclic`**
+   (`compiler/ir/lowering/session_cycle_check.ts`) — defensive
+   invariant on the post-extraction dep graph. Catches programmatic
+   sessions that bypass both `setWireExpr`'s auto-wrap and explicit
+   `delay()`.
+
+Then `compileSessionSlotted` compiles each instance standalone
+through `compileResolved` and packs the results into a
+`tropical_plan_5` `FlatPlan` with one `InstanceFunction` per
+instance plus one `SchedulerFunction`. The scheduler's four phases
+sequence the per-sample work:
+
+```
+for each sample:
+  preamble        (currently empty; reserved for future setup)
+  for each instance, in topo order: body + writebacks
+  state_evolution (WriteSlot per extracted delay)
+  postamble       (DAC stitch — read graphOutput slots into mix temps)
+  output mix
+```
+
+Branded indices throughout (`TempIdx`, `StateRegIdx`,
+`ArraySlotIdx`, `ModuleSlotIdx`) make cross-namespace arithmetic a
+compile error — the literal shape of a Phaser-era slot-mixing bug.
+See `compiler/ir/slot_indices.ts`.
+
+### 4.2 Interpreter path — `materializeSession`
+
+`compiler/ir/materialize_session.ts` lifts the session into one
+synthetic top-level `ResolvedProgram`:
+
+- one `InstanceDecl` per session instance, type pre-specialized
 - session wiring expressions translated `ExprNode → ResolvedExpr`
   with shared identity preserved via `ctx.exprMemo`
 - `dac.out` `graphOutputs` materialized as `OutputAssign`s on
   fresh `OutputDecl`s named `${instance}.${output}`
 - `ParamDecl`s synthesized lazily as `paramRef` translations
-  encounter them; each `(name, kind)` pair gets one decl, reused at
-  every reference
+  encounter them; each name gets one decl, reused at every
+  reference
 - session-level `delay()` ExprNodes extracted into synthetic
-  `DelayDecl`s named `__sd${i}`
+  `RegDecl`s named `__sd${i}`
 
-Once that synthetic program exists, the rest of the pipeline applies
-uniformly: it goes through `strataPipeline` and lands in the same
-post-strata form a per-program build does.
+The result runs through `strataPipeline` and lands in the same
+post-strata form a per-program build does. `interpret_resolved.ts`
+evaluates it. The JIT no longer uses this materialization (it
+compiles per-instance via the path above), but the interpreter
+treats it as the oracle and `tests/equiv/jit_vs_interp` cross-checks
+the two evaluators sample-for-sample.
 
-### 4.1 Gateable two-phase wrap
+`materializeSession` also handles the gateable two-phase wrap
+(carrying a gate expression through strata's `nestedOut` inlining,
+then applying `select(gate, raw, fallback)` on the lifted decls
+post-strata). This used to be the production code path for gated
+instances and is preserved for the interpreter side; the JIT path
+covers gating via direct slot writes from the scheduler.
 
-A session instance can be marked `gateable` with a gate
-`ExprNode`. The materializer wraps that instance's outputs and own
-state in `select(gate, raw, fallback)` so external observers see
-zero (and state stalls) when the gate is false.
+### 4.3 Fixed-topology compilation
 
-The wrap happens in two phases because of how strata's
-`nestedOut` substitution works:
-
-- **Pre-strata**: clone the instance type, append a synthetic
-  `__gate__` input, and wrap every `outputAssign.expr` and own
-  `regDecl`/`delayDecl` update with `select(gateRef, raw, fallback)`.
-  Strata's input-substitution will splice the actual gate expression
-  in at inline time, and the wrapped form captures into wherever
-  `instance.out` is referenced.
-- **Post-strata**: walk every lifted reg/delay (identified by
-  `_liftedFrom === instance.name`) and apply the same select-wrap
-  that wasn't possible pre-strata because those decls didn't exist
-  yet.
-
-To route gate expressions through strata's `nestedOut` inlining, the
-materializer also injects a per-gate synthetic `outputDecl` named
-`__gate__${instance}` carrying the gate expression. Strata inlines
-the gate's `nestedOut` refs alongside everything else; post-strata
-the materializer reads back the inlined gate, strips the synthetic
-output, and uses the inlined form for the lifted-decl wraps.
-
-### 4.2 Param handle threading
-
-`materializeSessionForEmit` returns the synthetic `ResolvedProgram`
-plus a `Map<string, ParamDecl>` keyed by name. `compile_session.ts`
-uses that map to build a `Map<ParamDecl, {ptr: string}>` from the
-session's param/trigger registries — the FFI handles get bound to
-decl identity, not to names. `compileResolved` consumes that map and
-emits `param` operands with the right `.ptr` field.
-
-The same materializer feeds the pure-TS interpreter
-(`interpret_resolved.ts`), which doesn't care about handles — it
-keeps a `Map<ParamDecl, number>` of current values instead.
+Tropical compiles a session graph to one monolithic kernel; the
+topology is fixed for the lifetime of the kernel. Topology changes
+(adding/removing instances, rewiring) trigger hot-swap to a freshly
+compiled kernel with state transferred by name. There is no
+per-instance runtime gating — every instance runs every sample, and
+LLVM fuses across instances aggressively. This is the shape of
+synthesis the language is good at; dynamic-lifecycle semantics
+belong in a different language with a different runtime.
 
 ---
 
@@ -410,26 +507,34 @@ keeps a `Map<ParamDecl, number>` of current values instead.
 
 The three sections below are not further compiler stages. They are
 parallel interpretations of the same post-strata `ResolvedProgram`
-into different targets.
+into different targets. Param handles are the only thing that
+differs between them: wiring expressions reference parameters by
+name (`{op:'param', name}`); the materializer resolves names to
+handles at compile time. For the JIT path the handle is a native
+pointer (`tropical_param_t`); for the WASM path it's a SAB slot
+index, stringified to keep the `tropical_plan_5` schema backend-
+agnostic.
 
-### 5.1 compileResolved → tropical_plan_4 → JIT
+### 5.1 compileResolved → tropical_plan_5 → JIT
 
-**`compiler/ir/compile_resolved.ts`** is the per-program emit:
+**`compiler/ir/compile_resolved.ts`** is the per-instance emit:
 
 1. `buildSlotMaps(prog)` — assign integer slots to decl objects
    (`Map<RegDecl, number>`, etc.). Slot identity, not slot name, is
    what the JIT consumes.
 2. `emitNumericProgram` (`compiler/ir/emit_resolved.ts`) — walk the
-   lowered IR, emit a `FlatProgram` matching the `tropical_plan_4`
-   schema in `compiler/flat_plan.ts`.
-3. Wrap the result in a `FlatPlan` JSON object, returned as the
-   compile output.
+   lowered IR, emit a `PerInstancePlan` whose instructions follow
+   the `tropical_plan_5` schema in `compiler/flat_plan.ts`.
+
+`compile_session_slotted.ts` packs N `PerInstancePlan`s into
+`instance_functions[]` of a `FlatPlan`, shifting indices by the
+per-instance offsets, and builds the `SchedulerFunction` with the
+DAC stitch postamble and the `state_evolution` `WriteSlot`s.
 
 **Structural CSE.** `emit_resolved.ts` keys CSE on a bottom-up
 structural id (interned via `${op}|${field=}|${child_id}` strings),
 not node identity. This catches duplicates that strata's
-clone-then-substitute introduces (e.g. when the same expression is
-referenced from multiple instance inputs after inlining).
+clone-then-substitute introduces.
 
 **Operand kinds.** `NOperand` discriminates: `const`, `input`, `reg`,
 `array_reg`, `state_reg`, `param`, `rate`, `tick`. Terminals
@@ -441,44 +546,48 @@ elementwise loop. `strides[i]` controls whether each argument
 advances with the loop index (array stride = 1) or broadcasts
 (stride = 0).
 
-**Gateable groups.** When `sourceTag` wraps survive into the
-post-strata IR (less common; the materializer's two-phase wrap
-usually folds them into `select` ops earlier), the emitter ships a
-`groups` array carrying gate metadata so the JIT can short-circuit.
-
 ### 5.2 The JIT path
 
 The plan crosses the C API boundary as JSON. On the C++ side:
 
 ```
-NumericProgramParser::parse_plan4()    ← engine/runtime/NumericProgramParser.hpp
-  └─ thin JSON deserializer; reads instructions into a FlatProgram struct.
-     No expression walking — the IR is already a flat instruction stream.
+NumericProgramParser::parse_plan5()    ← engine/runtime/NumericProgramParser.hpp
+  └─ thin JSON deserializer; reads per-instance plans plus the
+     scheduler into a FlatProgram (multi-function) struct. A
+     backcompat lift exists for single-kernel plan_4 inputs (hand-
+     crafted unit tests, legacy saved plans).
 OrcJitEngine::compile_flat_program()   ← engine/jit/OrcJitEngine.{hpp,cpp}
   └─ singleton LLVM ORC.
      1. Build canonical cache key (MD5 of serialized program with
         param pointers replaced by ordinals).
      2. Check in-memory cache; then disk cache at
-        ~/.cache/tropical/kernels/<build-id>/. Build-id derived from
-        LC_UUID (macOS) / ELF build-id, so dylib rebuild auto-invalidates.
-     3. Generate typed LLVM IR. Outer sample loop iterates
-        `buffer_length`; per-instruction operand resolution emits
-        f64/i64/i1 with explicit coercion; array loops when
-        loop_count > 1; output[s] = sum(mix targets).
+        ~/.cache/tropical/kernels/<build-id>/. Build-id derived
+        from LC_UUID (macOS) / ELF build-id, so dylib rebuild
+        auto-invalidates.
+     3. Generate typed LLVM IR. One outer kernel function whose
+        body, per sample, runs:
+            preamble (currently empty)
+            for each instance: body + writebacks
+            state_evolution (delay-slot WriteSlots)
+            postamble (DAC stitch reads)
+            output mix
+        Per-instruction operand resolution emits f64/i64/i1 with
+        explicit coercion; array loops when loop_count > 1.
      4. LLJIT compile, look up symbol → NumericKernelFn.
 FlatRuntime::load_plan()              ← engine/runtime/FlatRuntime.{hpp,cpp}
-  └─ State init: stateInit values written into i64 backing store with
-     type-aware bit-cast. Named state transfer: registers and arrays
-     copied by name from outgoing kernel for click-free hot-swap.
-     Atomic active-slot store-release publishes the new kernel.
+  └─ State init: stateInit values written into i64 backing store
+     with type-aware bit-cast. Named state transfer: registers,
+     arrays, and module slots copied by name from the outgoing
+     kernel for click-free hot-swap. Atomic active-slot
+     store-release publishes the new kernel.
 FlatRuntime::process()                 (audio thread)
-  └─ Acquire active state. Snapshot trigger params (atomic exchange).
-     Call kernel (single invocation processes the buffer). Advance
-     sample_index. Apply 2048-sample smoothstep fade envelope.
+  └─ Acquire active state. Call kernel (single invocation processes
+     the buffer). Advance sample_index. Apply 2048-sample smoothstep
+     fade envelope.
 TropicalDAC::audio_callback            ← engine/dac/TropicalDAC.hpp
   └─ Templated RtAudio driver. Copies mono output to all channels.
-     Watcher thread polls 50ms for device disconnect; recovers with
-     500ms backoff + fade-in. switch_device() is explicit live-switch.
+     Watcher thread polls 50 ms for device disconnect; recovers with
+     500 ms backoff + fade-in. switch_device() is explicit live-switch.
 ```
 
 **No transcendentals in the JIT.** `sin`, `cos`, `tanh`, `exp`,
@@ -504,17 +613,20 @@ the strata passes that traverse it, and the other two backends
 **`compiler/interpret_resolved.ts`**. Pure-TS evaluator over
 `ResolvedExpr` against a state map keyed by decl identity. No FFI,
 no kernel compilation. Reaches every backend that rests on the same
-post-strata IR; a JIT bug shows up here as a cross-backend divergence.
+post-strata IR; a JIT bug shows up here as a cross-backend
+divergence.
 
-This is the independent oracle for `tests/equiv/jit_vs_interp.test.ts`.
+This is the independent oracle for
+`tests/equiv/jit_vs_interp_stdlib.test.ts`.
 
 ### 5.4 emit_wasm — the WebAssembly backend
 
 **`compiler/emit_wasm.ts`** + **`compiler/wasm_memory_layout.ts`**.
-A third interpretation of post-strata `ResolvedProgram`, reusing the
-same `tropical_plan_4` boundary type. The emitter produces a
-standalone WASM module exporting a single `process(buffer_length,
-start_sample_index)` function plus a shared `memory`.
+A third interpretation of post-strata `ResolvedProgram`, consuming
+the same `tropical_plan_5` boundary type. The emitter produces a
+standalone WASM module exporting a single
+`process(buffer_length, start_sample_index)` function plus a shared
+`memory`.
 
 **Linear-memory layout** (`wasm_memory_layout.ts`):
 
@@ -531,27 +643,21 @@ output        f64[maxBlockSize]              — kernel writes mono audio out
 8-byte aligned, contiguous from offset 0. Layout is shared with
 `web/worklet/runtime.ts` so offsets stay in sync.
 
-**WASM kernel structure** mirrors the LLVM kernel:
+**WASM kernel structure** mirrors the LLVM kernel: same per-sample
+sequencing (preamble / per-instance bodies + writebacks / state
+evolution / postamble / output mix), implemented in WASM bytecode
+over the linear memory layout above.
 
-```
-for s in 0..buffer_length:
-  sample_idx = start_sample_index + s
-  (run all instructions, writing to temps[])
-  register writeback: temps[register_targets[i]] → registers[i]
-  output[s] = sum(temps[output_targets[outputs[i]]]) / 20
-```
-
-**Encoding.** `i64` cells store either an f64 bitcast, a signed int,
-or a zero-extended bool; the per-instruction `result_type` tells the
-codegen which load/store to use. f64 cells back arrays and the
-output buffer.
+**Encoding.** `i64` cells store either an f64 bitcast, a signed
+int, or a zero-extended bool; the per-instruction `result_type`
+tells the codegen which load/store to use. f64 cells back arrays
+and the output buffer.
 
 **Param flow.** Plan `param.ptr` strings hold SAB slot indices
 instead of native pointers (`tropical_param_t*`). The kernel emits
-`f64.load (paramTableOffset + ptr*8)` for `param` operands and
-`f64.load (paramFrameOffset + ptr*8)` for trigger snapshots. The host
-populates these regions per-block from a `SharedArrayBuffer` shared
-with `web/host/params.ts:WebParam`.
+`f64.load (paramTableOffset + ptr*8)` for `param` operands. The
+host populates these regions per-block from a `SharedArrayBuffer`
+shared with `web/host/params.ts:WebParam`.
 
 The runtime side — instantiation, hot-swap, fade envelope, param
 snapshotting — lives in `web/worklet/runtime.ts` and mirrors
@@ -560,59 +666,37 @@ snapshotting — lives in `web/worklet/runtime.ts` and mirrors
 ### 5.5 Equivalence
 
 The pipeline is correct only if every pass and every backend agrees
-with the per-sample semantics on the input. Four test suites
+with the per-sample semantics on the input. Three test suites
 cross-check that:
 
-- `tests/equiv/jit_vs_interp.test.ts` — JIT and `interpret_resolved`
-  agree sample-for-sample on the same post-strata IR.
-- `tests/equiv/jit_vs_interp_stdlib.test.ts` — same, expanded to
-  every viable stdlib program.
+- `tests/equiv/jit_vs_interp_stdlib.test.ts` — JIT and
+  `interpret_resolved` agree sample-for-sample across the stdlib
+  corpus.
 - `tests/equiv/wasm_vs_jit.test.ts` — WASM emit and JIT agree
   sample-for-sample.
 - `tests/equiv/web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches the JIT output.
-- `tests/equiv/migration_audio.test.ts` — new pipeline matches
-  legacy goldens byte-for-byte.
 
-Any disagreement is a strata, materialize, or backend bug; the suite
-localises which.
+Any disagreement is a strata, materialize, or backend bug; the
+suite localises which.
 
 ---
 
-## 6. ProgramType and ProgramInstance
+## 6. ProgramType and Compiled
 
 `compiler/program_types.ts`. Thin wrapper over a post-strata
 `ResolvedProgram`. The wrapper is metadata; the IR is the value.
+Free-function helpers (`inputNames`, `outputNames`,
+`registerNames`, `inputPortTypes`, …) read off the resolved IR;
+slot-derived fields cache lazily via `buildSlotMaps`.
 
-```typescript
-class ProgramType {
-  readonly prog: ResolvedProgram
-
-  get name():    string
-  get inputNames():  string[]
-  get outputNames(): string[]
-  get inputPortTypes():    (PortType | undefined)[]
-  get outputPortTypes():   (PortType | undefined)[]
-  get registerNames():     string[]                 // lazy via buildSlotMaps
-  get registerPortTypes(): (PortType | undefined)[] // lazy via buildSlotMaps
-  get rawInputDefaults():  Record<string, ExprNode> // lazy
-  rename(newName: string): void                     // for cache-key rebranding
-  instantiateAs(name, opts?): ProgramInstance
-}
-```
-
-There is no `_def` field, no slot-indexed copy, no upfront
-flattening. When you need port metadata, you walk `prog.ports`; when
-you need register slots, the lazy cache runs `buildSlotMaps` once
-and memoizes.
-
-`ProgramInstance` holds a `ProgramType` plus an instance name,
-`baseTypeName`, optional `typeArgs`, plus session-level `gateable` /
-`gateInput` fields. Getter accesses delegate to `type`.
+`Instance` holds a `Compiled` plus an instance name, `baseTypeName`,
+optional `typeArgs`, plus session-level `gateable` / `gateInput`
+fields.
 
 `session.ts:resolveProgramType` calls
 `programTypeFromResolved(template, subst)` (full strata pipeline +
-wrap), then `type.rename(key)` so the specialization cache key
+wrap), then `rename(key)` so the specialization cache key
 (`Type<N=8>`) shows up as the program's name in serialized output.
 
 ---
@@ -623,11 +707,14 @@ Two distinct JSON schemas; do not confuse them.
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_program_2` | `compiler/program.ts`, `compiler/parse/raise.ts` | The high-detail input shape: program with typed ports, body block of decls/assigns, optional `type_params`. Authored by humans (in `.trop`) or by agents (over MCP). |
-| `tropical_plan_4` | `compiler/ir/compile_resolved.ts` (schema in `compiler/flat_plan.ts`) | The low-detail output: flat instruction stream over typed scalar slots. C++ JIT and WASM emitter both consume this shape. |
+| `tropical_program_2` | `compiler/program.ts`, `compiler/parse/raise.ts` | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in `.trop`) or by agents (over MCP). |
+| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: per-instance instruction streams (`instance_functions[]`) plus a `scheduler_function` with preamble / state_evolution / postamble phases. The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel form) for hand-crafted unit tests; it's lifted into a one-instance plan_5 at parse time. |
 
 Schema validation: `compiler/schema.ts` (Zod) for input;
-`compiler/flat_plan.ts` (TypeScript types) for output.
+`compiler/flat_plan.ts` (branded TypeScript types) for output.
+
+Going from the first to the second without losing meaning is exactly
+what the strata pipeline does.
 
 ### 7.1 tropical_program_2 sketch
 
@@ -652,34 +739,32 @@ Schema validation: `compiler/schema.ts` (Zod) for input;
 }
 ```
 
-### 7.2 tropical_plan_4 sketch
+### 7.2 tropical_plan_5 shape
 
-```json
+```
 {
-  "schema": "tropical_plan_4",
-  "config": { "sample_rate": 44100.0 },
-  "state_init": [0.0, /* ... */],
-  "register_names": ["sin1_phase", /* ... */],
-  "register_types": ["float", /* ... */],
-  "array_slot_names": [],
-  "instructions": [
-    { "tag": "Mul", "dst": 0, "args": [{ "kind": "const", "val": 6.283185307179586 }, { "kind": "tick" }],
-      "loop_count": 1, "strides": [], "result_type": "float" },
-    /* ... */
+  schema: "tropical_plan_5",
+  config: { sample_rate, ... },
+  instance_functions: [
+    { name, register_count, state_init, register_names, register_types,
+      array_slot_sizes, instructions, output_targets, register_targets, ... },
+    ...
   ],
-  "outputs": [/* indices into output_targets */],
-  "output_targets": [/* temp slot indices */],
-  "register_count": 1,
-  "register_targets": [/* ... */],
-  "array_slot_sizes": [],
-  "array_slot_count": 0
+  scheduler_function: {
+    preamble:        NInstr[],   // currently empty
+    state_evolution: NInstr[],   // WriteSlot per extracted delay
+    postamble:       NInstr[],   // DAC stitch reads
+    outputs:         number[],   // indices into output mix
+    ...
+  }
 }
 ```
 
-The `tropical_plan_4` shape is the C-API contract. Anything the
-backends need to know about the program — names, types, slot
-counts, instruction stream, init state — is in there; everything the
-compiler decided to forget along the way is gone.
+The `tropical_plan_5` shape is the C-API contract. Anything the
+backends need to know about the program — instance kernels, the
+scheduler that drives them, names, types, slot counts, init state —
+is in there; everything the compiler decided to forget along the
+way is gone.
 
 ---
 
@@ -694,10 +779,13 @@ All handles are opaque `void*`. Errors are thread-local, fetched via
 - `tropical_param_new(init_value, time_const)` — smoothed parameter
   with one-pole lowpass; `time_const` is τ in seconds (e.g. `0.005`
   for ~5 ms ramp; `0.0` for no smoothing)
-- `tropical_param_new_trigger()` — fire-once trigger; per-frame
-  read+clear via atomic exchange
 - `tropical_param_set` / `tropical_param_get` — atomic store / load
 - `tropical_param_free`
+
+`Param` is now the only control-parameter primitive. The legacy
+`Trigger` type (fire-once via atomic exchange) was retired; on the
+wire, `{op:'trigger', name}` refs are still accepted and aliased to
+`{op:'param', name}` at materialization for backcompat.
 
 ### 8.2 FlatRuntime
 
@@ -748,10 +836,9 @@ TypeScript wrappers over the C API via koffi.
   FinalizationRegistry for GC-driven cleanup.
 - `audio.ts` — `DAC` class wrapping `tropical_dac_t`. Static
   `listDevices()`.
-- `param.ts` — `Param` (smoothed) and `Trigger` (fire-once)
-  wrapping `tropical_param_t`. Wiring references them by name; the
-  materializer resolves the name to a `_h` handle and threads it
-  into the plan via `paramHandles`.
+- `param.ts` — `Param` wrapping `tropical_param_t`. Wiring
+  references parameters by name; the materializer resolves the name
+  to a `_h` handle and threads it into the plan via `paramHandles`.
 
 ---
 
@@ -760,16 +847,16 @@ TypeScript wrappers over the C API via koffi.
 The primary agent interface. Runs on stdio, uses
 `@modelcontextprotocol/sdk`. Maintains one long-lived `SessionState`.
 
-22 tools, grouped by purpose. Every tool that mutates the signal
+23 tools, grouped by purpose. Every tool that mutates the signal
 graph ultimately calls `wire()` → `applyFlatPlan(session, runtime)`,
 which runs the full compile pipeline:
 
 ```
 SessionState
   → compileSession (compiler/ir/compile_session.ts)
-       → materializeSessionForEmit (compiler/ir/materialize_session.ts)
-       → strataPipeline
-       → compileResolved → tropical_plan_4 JSON
+       → liftWiresToInstances → extractSessionDelays
+         → assertSessionAcyclic → compileSessionSlotted
+       → per-instance compileResolved → tropical_plan_5 JSON
   → JSON.stringify
   → runtime.loadPlan (NumericProgramParser → OrcJitEngine → FlatRuntime hot-swap)
 ```
@@ -786,7 +873,7 @@ SessionState integration, and error envelope shape.
 ## 11. Web backend (`web/`)
 
 Browser co-implementation of the audio runtime. Same compiler
-front-end, same strata pipeline, same `tropical_plan_4` boundary;
+front-end, same strata pipeline, same `tropical_plan_5` boundary;
 different emit target (WebAssembly vs. LLVM IR) and different param
 handle representation (SAB slot index vs. native pointer).
 
@@ -800,10 +887,10 @@ web/
   host/               Main thread
     compiler.ts       compilePlan(FlatPlan) → LoadedPlan via emit_wasm
     context.ts        AudioContext + AudioWorkletNode wiring
-    params.ts         ParamBank (SharedArrayBuffer), WebParam, WebTrigger
+    params.ts         ParamBank (SharedArrayBuffer), WebParam
   worklet/            Audio thread
     runtime.ts        WasmRuntime: dual-slot hot-swap, fade envelope, snapshotParams
-    processor.ts      AudioWorkletProcessor delegate; postMessage protocol
+    processor.ts     AudioWorkletProcessor delegate; postMessage protocol
   site/               Browser UI
     app.ts, index.html
 ```
@@ -883,10 +970,10 @@ shape mismatches inside compatible broadcast rules insert
 { "mcpServers": { "tropical": { "command": "bun", "args": ["run", "mcp/server.ts"] } } }
 ```
 
-### CI (`.github/workflows/ci.yml`)
+### CI (`.github/workflows/`)
 
-Two jobs: typecheck (`bunx tsc --noEmit`) and build-and-test (LLVM
-20, libasound2-dev, `bun test` + `ctest`).
+Three jobs: typecheck (`bunx tsc --noEmit`), build-and-test (LLVM
+20, libasound2-dev, `bun test` + `ctest`), and YAML lint.
 
 ---
 
@@ -895,11 +982,10 @@ Two jobs: typecheck (`bunx tsc --noEmit`) and build-and-test (LLVM
 ### 14.1 C++ tests (`engine/tests/test_module_process.cpp`)
 
 Custom harness, no framework dependency. Exercises FlatRuntime C
-API and JIT without an audio device. Tests build `tropical_plan_4`
-JSON strings directly and assert on output buffer values. Covers
-sawtooth, clock with array ratios, integer sequences, multi-instance
-fusion, smoothed params, trigger params, hot-swap state transfer,
-typed int/bool ops.
+API and JIT without an audio device. Tests build plan JSON strings
+directly and assert on output buffer values. Covers sawtooth, clock
+with array ratios, integer sequences, multi-instance fusion,
+smoothed params, hot-swap state transfer, typed int/bool ops.
 
 `cmake --build build -j4 && ctest --test-dir build`.
 
@@ -907,18 +993,19 @@ typed int/bool ops.
 
 Run via `bun test`. The load-bearing suites:
 
-- `tests/equiv/jit_vs_interp.test.ts` — JIT vs. `interpret_resolved`
+- `tests/equiv/jit_vs_interp_stdlib.test.ts` — JIT vs.
+  `interpret_resolved` across the stdlib corpus
 - `tests/equiv/wasm_vs_jit.test.ts`,
   `tests/equiv/web_plans_vs_jit.test.ts` — WASM emission equivalence
-- `tests/equiv/migration_audio.test.ts` — new pipeline vs.
-  legacy goldens
 - `ir/*.test.ts` — strata pipeline unit tests (specialize,
-  sum_lower, trace_cycles, inline_instances, array_lower, slots,
-  clone)
+  sum_lower, inline_instances, array_lower, identity_elim, slots,
+  clone, acyclic, lowering/cycle_break, elaboration_diagnostics)
 - `parse/*.test.ts` — lexer, parser, raise, round-trip,
   `stdlib_round_trip.test.ts` (every `.trop` print/re-parse)
 - `apply_plan.test.ts` — plan application integration (requires
   `make build`)
+- `compiler/wasm_runtime.test.ts`, `compiler/emit_wasm.test.ts` —
+  WASM emission unit tests
 
 ### 14.3 Stdlib audit
 
@@ -930,23 +1017,38 @@ every `stdlib/*.trop` and confirms post-strata invariants. Run by
 
 ## 15. Key design decisions
 
-### Single-kernel fusion
+### Acyclic by construction
 
-The whole patch compiles to one native function. No instance
-boundaries at runtime, no per-instance dispatch, no interpreter on
-the audio thread. LLVM gets to optimize across the full graph.
+Cycles in source code throw `CycleViolation` at elaborate-time;
+cycles in session wiring are broken at the wire layer by
+`setWireExpr`'s auto-wrap + `extractSessionDelays`'s hoist into the
+scheduler. The compiler's strata pipeline asserts acyclic input at
+its boundary and refuses to lower cyclic IR. This closes the
+asymmetry where the JIT silently tolerated cycles via slot
+back-edges while the interpreter rejected them, and makes "the
+trace functor" a property of the realization layer (elaborator +
+materializer), not the compiler.
+
+### Single-kernel fusion, fixed topology
+
+The whole session compiles to one native kernel function. No
+instance boundaries at runtime, no per-instance dispatch, no
+interpreter on the audio thread. LLVM gets to optimize across the
+full graph. Topology changes hot-swap a freshly compiled kernel
+with state transferred by name; per-instance lifecycle semantics
+belong in a different runtime.
 
 ### Pipeline of structure-dropping passes
 
-We resisted "layers" as a framing. The compiler is a chain of IR-to-IR
-passes where each pass drops a specific kind of structure once it's
-been consumed. That shape is what makes the layout of `compiler/ir/`
-predictable, makes it clear where new passes belong, and makes
-sample-for-sample cross-backend agreement the right correctness
-criterion. The shape also matches a more theoretical reading
-(cartesian category of typed signal-flow graphs with a guarded
-trace) sketched in the root `CLAUDE.md`, but you can program against
-the pipeline without that vocabulary.
+The compiler is a chain of IR-to-IR passes where each pass drops a
+specific kind of structure once it's been consumed. That shape is
+what makes the layout of `compiler/ir/` predictable, makes it clear
+where new passes belong, and makes sample-for-sample cross-backend
+agreement the right correctness criterion. The shape also matches
+the operadic reading sketched at the top of this document and in
+`design/archive/operadic_ir.md` — the strata pipeline is a
+composition of operad morphisms — but you can program against the
+pipeline without that vocabulary.
 
 ### Decl identity instead of strings
 
@@ -954,7 +1056,10 @@ Past `elaborate`, every reference is a TypeScript object pointer.
 String-based scope walks would make later passes re-derive
 information the elaborator already established. `_liftedFrom`
 replaced what had been name-prefix string regex; this is the same
-move, applied to a different kind of provenance.
+move, applied to a different kind of provenance. Branded indices
+in the plan layer (`TempIdx`, `StateRegIdx`, `ArraySlotIdx`,
+`ModuleSlotIdx`) extend the same discipline to integer slot
+identifiers, making cross-namespace arithmetic a compile error.
 
 ### Hot-swap via double-buffered kernels
 
@@ -987,6 +1092,5 @@ swap a file to change the math. See `stdlib/README.md`.
 ### Thread-safe control parameters
 
 `ControlParam` uses atomic load/store with relaxed ordering.
-Smoothed params apply one-pole lowpass per sample. Triggers fire
-once via atomic exchange. Safe from any thread; the audio thread
-never blocks.
+Smoothed params apply one-pole lowpass per sample. Safe from any
+thread; the audio thread never blocks.

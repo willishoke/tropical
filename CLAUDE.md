@@ -227,7 +227,7 @@ engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio o
 mcp/                  MCP server — primary agent interface over stdio
 web/                  WASM/browser backend — host (main thread), worklet (audio thread), build
 patches/              Example patches (tropical_program_2 JSON)
-stdlib/               31 .trop programs; see stdlib/README.md
+stdlib/               32 .trop programs; see stdlib/README.md
 tests/                Cross-cutting test surface (see tests/ for layout)
   equiv/              Cross-backend equivalence suites (the integration layer)
   bench/              Compile-time and runtime benchmarks

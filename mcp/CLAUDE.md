@@ -2,7 +2,7 @@
 
 MCP server — the primary agent interface. Runs on stdio via
 `@modelcontextprotocol/sdk`. Maintains a long-lived `SessionState`
-(`compiler/session.ts`) and exposes 22 tools that mutate it.
+(`compiler/session.ts`) and exposes 23 tools that mutate it.
 
 ## Running
 
@@ -27,13 +27,24 @@ which runs `applyFlatPlan(session, runtime)`:
 ```
 SessionState
   → compileSession (compiler/ir/compile_session.ts)
-       → materializeSessionForEmit (compiler/ir/materialize_session.ts)
-            session graph + wiring → top-level synthetic ResolvedProgram
-       → strataPipeline (specialize, sumLower, traceCycles, inlineInstances, arrayLower)
-       → compileResolved → tropical_plan_4 JSON
+       → liftWiresToInstances  (anonymous-instance lift for array-literal wires)
+       → extractSessionDelays  (hoist auto-wrap delays into scheduler state_evolution slots)
+       → assertSessionAcyclic  (defensive invariant)
+       → compileSessionSlotted (per-instance compileResolved into instance_functions[] + scheduler)
+       → tropical_plan_5 JSON
   → JSON.stringify
   → runtime.loadPlan  (C++: NumericProgramParser → OrcJitEngine → FlatRuntime hot-swap)
 ```
+
+The strata pipeline (now `assertAcyclic → specialize → sumLower →
+inlineInstances → arrayLower → identityElim`) runs per-instance
+inside `compileResolved`. Session-level cycle handling lives in the
+wire layer: `setWireExpr` wraps every wire in a unit delay,
+`extractSessionDelays` hoists it to a module slot whose update
+lands in the scheduler's `state_evolution` phase. The interpreter
+side reaches strata via `materializeSession` (which flattens the
+session into one synthetic top-level program) and is held to
+sample-for-sample equivalence with the JIT.
 
 A compile error doesn't kill the session; it returns a structured
 error envelope (see below) and the previous kernel keeps playing.
@@ -107,9 +118,10 @@ graph patterns.
 
 ### Control parameters
 
-- `set_param` — update a smoothed `Param` or `Trigger`. Thread-safe
-  (atomic store on the C++ side); the smoothing time-constant is set
-  at param creation.
+- `set_param` — update a smoothed `Param`. Thread-safe (atomic
+  store on the C++ side); the smoothing time-constant is set at
+  param creation. (Wire format still accepts `{op:'trigger', name}`
+  for backcompat — aliased to `{op:'param', name}` at materialization.)
 - `list_params` — registered params and their current values.
 
 ### Audio control
