@@ -111,23 +111,15 @@ That's the actual workflow: a frontier model with deep context,
 plus a test surface dense enough that the model's mistakes show up
 as failed CI runs rather than as bugs.
 
-## Why you might care
+## Where to read next
 
-If you're a hiring manager who got here from a résumé: I build
-ambitious systems in domains that don't usually overlap, using the
-current generation of frontier models as a force multiplier, and I
-have a real working theory of how to organize a codebase so that
-this scales rather than producing slop. The shape of this repo is
-the demonstration. Read
-[`design/architecture.md`](design/architecture.md), look at
-[`tests/equiv/`](tests/equiv/), or grep for "Phase" comments in
-`compiler/ir/` to see how the IR has migrated over time without
-breaking the equivalence gates.
-
-If you want to run it: see [`INSTALL.md`](INSTALL.md). If you want
-to point an agent at it: the MCP server is documented in
-[`mcp/CLAUDE.md`](mcp/CLAUDE.md). If you want to read the code: the
-top-level [`CLAUDE.md`](CLAUDE.md) is the contributor map.
+- [`design/architecture.md`](design/architecture.md) — the full IR
+  walkthrough, top to bottom.
+- [`tests/equiv/`](tests/equiv/) — the sample-for-sample equivalence
+  suites that pin the three backends to each other.
+- [`CLAUDE.md`](CLAUDE.md) — contributor map.
+- [`INSTALL.md`](INSTALL.md) — build prerequisites.
+- [`mcp/CLAUDE.md`](mcp/CLAUDE.md) — MCP server and tool reference.
 
 ## License
 
