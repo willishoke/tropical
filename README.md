@@ -68,19 +68,18 @@ arrived at this lives in
 
 ## How it gets built
 
-Tropical is built almost entirely through Claude Code with Opus 4.7
-(1M context). The model writes the code; I drive the architecture,
-review the changes, and own the design decisions. I'm not going to
-overstate this — I haven't built out a fleet of specialized
-subagents or a custom multi-agent review loop. What I have is a
-tight feedback cycle between a person who knows what the system
-should look like and a frontier model that can hold an unusual
-amount of the codebase in context at once. That's the leverage.
+Tropical is built through Claude Code with Opus 4.7 (1M context).
+The workflow is task-level parallelism: a fleet of agents working
+on independent pieces of the codebase in parallel, managed by one
+person who holds the architectural picture. Opus 4.7's context
+window is the leverage — it can hold a large fraction of this
+codebase at once and reason about cross-cutting changes that would
+otherwise require careful staging.
 
-The discipline that makes this work is end-to-end validation. The
-codebase is built around the assumption that a model is going to
-make subtle structural mistakes and the test suite has to catch
-them before they reach production:
+What makes this tractable is end-to-end validation. The codebase
+is built around the assumption that a model is going to make
+subtle structural mistakes and the test suite has to catch them
+before they reach production:
 
 - **Sample-for-sample equivalence gates** between three backends —
   the LLVM ORC JIT, a pure-TS reference interpreter, and the
@@ -101,15 +100,13 @@ them before they reach production:
   YAML lint) on every PR against GitHub Actions, with LLVM 20
   pinned. Local development runs the same gates via `make validate`.
 
-The result is that the model can refactor aggressively — the
-recent removal of triggers as a first-class primitive, the removal
-of alive-gating, the switch from `tropical_plan_4` to a per-instance
-`tropical_plan_5` with a scheduler — without me having to read
-every diff carefully. The tests do the reading.
-
-That's the actual workflow: a frontier model with deep context,
-plus a test surface dense enough that the model's mistakes show up
-as failed CI runs rather than as bugs.
+With this surface in place, refactors that would otherwise need
+careful manual review go through cleanly. The recent removal of
+triggers as a first-class primitive, the removal of alive-gating,
+the switch from `tropical_plan_4` to a per-instance
+`tropical_plan_5` with a scheduler — all landed as multi-commit
+branches without per-diff human inspection. The tests do the
+reading.
 
 ## Where to read next
 
