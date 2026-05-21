@@ -76,6 +76,16 @@ window is the leverage — it can hold a large fraction of this
 codebase at once and reason about cross-cutting changes that would
 otherwise require careful staging.
 
+Architectural decisions go through rigorous written specs: phased
+implementation plans, clear correctness criteria, agreement on
+what counts as "done" before code gets written. The specs are
+cross-disciplinary by default. Each decision gets viewed through
+whichever practitioner traditions are relevant to the problem
+(category theory, type theory, systems programming, DSP,
+real-time audio), and the tensions between those views get worked
+out in the spec rather than in the code. The structure of the IR,
+the runtime, and the stdlib all carry marks of that process.
+
 What makes this tractable is end-to-end validation. The codebase
 is built around the assumption that a model is going to make
 subtle structural mistakes and the test suite has to catch them
