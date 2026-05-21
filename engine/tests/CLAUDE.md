@@ -28,7 +28,7 @@ cmake --build build -j4 && ctest --test-dir build   # run tests
 ### Structure
 
 - Tests use `tropical_runtime_new`, `tropical_runtime_load_plan`, `tropical_runtime_process`, `tropical_runtime_output_buffer`
-- Each test builds a `tropical_plan_4` JSON string directly (no TypeScript, no modules)
+- Each test builds a `tropical_plan_4` JSON string directly (hand-crafted single-kernel form; the parser lifts it to a one-instance `plan_5` automatically). No TypeScript, no modules.
 - Plan JSON includes `instructions`, `state_init`, `register_names`, `register_types`, `register_count`, `output_targets`, `register_targets`, `outputs`
 
 ## CI note
@@ -37,4 +37,4 @@ LLVM ORC JIT is always enabled. CI runners need LLVM installed to build. Always 
 
 ## Adding tests
 
-Add a new `run_test(...)` call in `main()`. Build plan JSON strings directly using the `tropical_plan_4` schema, then use `tropical_runtime_*` C API functions to load and process. Assert on output buffer values.
+Add a new `run_test(...)` call in `main()`. Build plan JSON strings directly using the `tropical_plan_4` schema (the parser auto-lifts to `plan_5`), then use `tropical_runtime_*` C API functions to load and process. Assert on output buffer values.

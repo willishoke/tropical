@@ -155,7 +155,6 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
   tropical_jit::InstanceProgram inst;
   inst.instance_name    = jf.value("instance_name", std::string{});
   inst.register_count   = jf.value("register_count", 0u);
-  inst.alive_slot_index = jf.at("alive_slot_index").get<uint32_t>();
   if (jf.contains("instructions"))
     for (const auto & ji : jf["instructions"])
       inst.instructions.push_back(parse_instr(ji));
@@ -290,7 +289,7 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
 // so hand-crafted plan_4 unit tests and any disk-saved plans continue
 // to load. The legacy plan's whole `instructions[]` becomes the body
 // of `instance_functions[0]`; DAC stitching moves to the scheduler
-// postamble; an `__alive__` slot is synthesized with default 1.0.
+// postamble.
 // ─────────────────────────────────────────────────────────────────────────────
 
 inline ParsedPlan5 parse_plan4(const nlohmann::json & plan)
@@ -323,10 +322,6 @@ inline ParsedPlan5 parse_plan4(const nlohmann::json & plan)
 
   auto & prog = result.program;
   prog.register_types = result.register_types;
-  // plan_4 register_count covers ONLY instance-body temps; the lifted
-  // plan needs one extra temp for the synthetic alive slot's
-  // WriteSlot value. We allocate that as a new const-fed slot so no
-  // extra temp is needed — `WriteSlot dst=alive_slot, args=[const 1.0]`.
   prog.register_count = plan.value("register_count", 0u);
   if (plan.contains("array_slot_sizes"))
     for (const auto & s : plan["array_slot_sizes"])
@@ -351,9 +346,6 @@ inline ParsedPlan5 parse_plan4(const nlohmann::json & plan)
   inst.instance_name = "legacy_kernel";
   inst.register_count = prog.register_count;
 
-  // The synthetic alive slot lives at the end of the slot array. We
-  // append it after parsing slot_count below.
-
   if (plan.contains("instructions"))
     for (const auto & ji : plan["instructions"])
       inst.instructions.push_back(parse_instr(ji));
@@ -366,7 +358,7 @@ inline ParsedPlan5 parse_plan4(const nlohmann::json & plan)
     inst.writebacks.push_back({j, prog.register_targets[j]});
   }
 
-  // ── Slot array (with synthetic alive slot appended) ──
+  // ── Slot array ──
   if (plan.contains("slot_count") && plan["slot_count"].is_number())
     result.slot_count = plan["slot_count"].get<uint32_t>();
   if (plan.contains("slot_names"))
@@ -376,24 +368,7 @@ inline ParsedPlan5 parse_plan4(const nlohmann::json & plan)
     for (const auto & v : plan["slot_defaults"])
       result.slot_defaults.push_back(v.get<double>());
 
-  const uint32_t alive_slot = result.slot_count;
-  result.slot_count += 1;
-  result.slot_names.push_back("__legacy_kernel.__alive__");
-  result.slot_defaults.push_back(1.0);
-  inst.alive_slot_index = alive_slot;
-
   prog.instance_functions.push_back(std::move(inst));
-
-  // Scheduler: preamble writes 1.0 to the alive slot so GVN folds the
-  // conditional to inline. No postamble (DAC stitch lives in the
-  // legacy instruction stream).
-  tropical_jit::FlatInstr alive_write;
-  alive_write.tag         = tropical_jit::OpTag::WriteSlot;
-  alive_write.result_type = tropical_jit::JitScalarType::Float;
-  alive_write.dst         = alive_slot;
-  alive_write.loop_count  = 1;
-  alive_write.args.push_back(tropical_jit::Operand::make_const(1.0));
-  prog.scheduler.preamble.push_back(std::move(alive_write));
 
   return result;
 }

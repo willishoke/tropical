@@ -42,7 +42,7 @@ top-level `.md` file is a focused experiment or recorded result.
   asks whether the same optimization survives when kernels live in
   *separate* modules linked together — relevant to the operadic
   substrate's hot-swap granularity and external-primitive realization
-  paths discussed in `design/operadic_ir.md`.
+  paths discussed in `design/archive/operadic_ir.md`.
   
   Initial results (2026-05-14): linear-chain tree, 4 variants;
   **LTO dissolves the module boundary** (monolithic and separate-

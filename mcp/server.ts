@@ -397,14 +397,13 @@ const TOOLS = [
   },
   {
     name: 'add_instance',
-    description: 'Create a named instance of a registered program type. For generic programs (those declaring type_params — see list_programs), supply type_args with concrete integer values (e.g. {"N": 44100}). Pass alive_input as a Bool-typed expression to drive an active-set conditional: when the expression evaluates false, the instance\'s per-sample kernel does not run and its output slots retain their last-written values. Use wire() with `{instance: "<name>", input: "alive"}` to update the alive expression after creation. The default (no alive_input) is "always alive" with zero runtime cost.',
+    description: 'Create a named instance of a registered program type. For generic programs (those declaring type_params — see list_programs), supply type_args with concrete integer values (e.g. {"N": 44100}).',
     inputSchema: {
       type: 'object',
       properties: {
         program:       { type: 'string', description: 'Registered program/type name (builtin or user-defined)' },
         instance_name: { type: 'string', description: 'Unique name for this instance' },
         type_args:     { type: 'object', description: 'Compile-time type args for generic programs, e.g. {"N": 44100}. Omit for non-generic programs.' },
-        alive_input:   { description: 'Optional ExprNode producing a Bool-typed scalar. When false, the instance kernel skips and slots hold. Omit for always-alive.' },
       },
       required: ['program', 'instance_name'],
     },
@@ -741,7 +740,6 @@ function handleAddInstance(
   programName: string,
   instanceName: string,
   typeArgs?: Record<string, number>,
-  aliveInput?: ExprNode,
 ) {
   return wrap(() => {
     if (instanceName === DAC_INSTANCE_NAME)
@@ -760,7 +758,6 @@ function handleAddInstance(
       })
     const { type, typeArgs: resolved } = resolveProgramTypeOrFail(programName, typeArgs, 'program')
     const inst = instantiate(type, instanceName, { baseTypeName: programName, typeArgs: resolved })
-    if (aliveInput !== undefined) inst.aliveInput = aliveInput
     session.instanceRegistry.set(instanceName, inst)
     // Slot model (M3, additive): populate the output slot registry
     // alongside the legacy instanceRegistry. Nothing consumes these
@@ -1245,14 +1242,6 @@ function handleWire(args: Record<string, unknown>) {
         session.graphOutputs.length = 0
         continue
       }
-      // Synthetic `alive` port: clears the instance's aliveInput so it
-      // reverts to default-true. Stored on Instance, not in
-      // inputExprNodes.
-      if (r.input === 'alive') {
-        const inst = requireInstance(r.instance, 'remove[].instance')
-        inst.aliveInput = undefined
-        continue
-      }
       const inst = requireInstance(r.instance, 'remove[].instance')
       const inputId = resolveInputIdx(inst, r.input)
       const resolvedName = inputNames(inst)[inputId] ?? String(inputId)
@@ -1276,16 +1265,6 @@ function handleWire(args: Record<string, unknown>) {
         const resolved = resolveDacSource(s.expr)
         session.graphOutputs.push(resolved)
         dacWires.push({ instance: s.instance, input: s.input, expr: s.expr })
-        continue
-      }
-      // Synthetic `alive` port: drives the instance's active-set
-      // conditional. Stored on Instance (not in inputExprNodes) so
-      // the scheduler can compile it in its preamble.
-      if (s.input === 'alive') {
-        const inst = requireInstance(s.instance, 'set[].instance')
-        validateExpr(s.expr, `${s.instance}.alive`)
-        inst.aliveInput = s.expr
-        results.push({ instance: s.instance, input: 'alive', expr: s.expr })
         continue
       }
       const inst = requireInstance(s.instance, 'set[].instance')
@@ -1395,7 +1374,6 @@ function handleTool(name: string, args: Record<string, unknown>) {
         args.program as string,
         args.instance_name as string,
         args.type_args as Record<string, number> | undefined,
-        args.alive_input as ExprNode | undefined,
       )
 
     case 'remove_instance':

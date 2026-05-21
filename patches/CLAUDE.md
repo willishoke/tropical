@@ -62,9 +62,10 @@ IR. The closed op set lives in `compiler/expr.ts:WireFormatOp`.
 - **Ternary** — `{"op": "select", "args": [<cond>, <then>, <else>]}` /
   `{"op": "clamp", "args": [<v>, <lo>, <hi>]}`
 - **Sentinels** — `{"op": "sample_rate"}`, `{"op": "sample_index"}`
-- **Param / trigger** — `{"op": "param", "name": "cutoff"}`,
-  `{"op": "trigger", "name": "kick"}`. The materializer resolves the
-  name to an FFI handle at compile time.
+- **Param** — `{"op": "param", "name": "cutoff"}`. The materializer
+  resolves the name to an FFI handle at compile time. Legacy
+  `{"op": "trigger", "name": "kick"}` refs are still accepted on the
+  wire and aliased to `{op:'param'}` at materialization.
 
 Available scalar ops: `add`, `sub`, `mul`, `div`, `mod`, `floor_div`,
 `neg`, `abs`, `sqrt`, `ldexp`, `float_exponent`, `lt`, `lte`, `gt`,

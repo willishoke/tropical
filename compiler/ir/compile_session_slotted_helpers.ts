@@ -227,18 +227,6 @@ function isLogicalTag(tag: string): boolean {
   return tag === 'And' || tag === 'Or'
 }
 
-/** Compile a session's `aliveInput` ExprNode. The result operand
- *  feeds the WriteSlot into the instance's `__alive__` slot from
- *  the scheduler preamble. */
-export function translateAliveExpr(
-  expr: ExprNode,
-  session: SessionState,
-  emitter: PreambleEmitter,
-  context: string,
-): NOperand {
-  return translateNode(expr, 'bool', session, emitter, context)
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Topological order
 // ─────────────────────────────────────────────────────────────────────────────

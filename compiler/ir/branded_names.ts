@@ -51,8 +51,8 @@ export type WireKey = BrandedName<'WireKey'>
 /** Canonical key into `session.outputSlotRegistry` and
  *  `session.outputPortMeta` — identifies one allocated slot by the
  *  (instance, slotName) pair. Slot names may be plain port names
- *  ("out"), array elements ("out[0]"), or synthetic ("__alive__").
- *  Serialized as `${instance}.${slotName}`; never parsed back. */
+ *  ("out") or array elements ("out[0]"). Serialized as
+ *  `${instance}.${slotName}`; never parsed back. */
 export type SlotKey = BrandedName<'SlotKey'>
 
 // ─── Constructors ───────────────────────────────────────────────────────────
@@ -165,9 +165,8 @@ export const parseWireKey = (key: WireKey | string): PortRef => {
 
 /** Canonical slot-key serialization. Used as the key into
  *  `session.outputSlotRegistry` and `session.outputPortMeta`. The
- *  `slotName` is allowed to contain brackets (`out[0]`) and synthetic
- *  prefixes (`__alive__`); only the instance portion is validated
- *  through `InstanceName`'s discipline. */
+ *  `slotName` is allowed to contain brackets (`out[0]`); only the
+ *  instance portion is validated through `InstanceName`'s discipline. */
 export const slotKey = (inst: InstanceName, slotName: string): SlotKey => {
   if (typeof slotName !== 'string' || slotName.length === 0) {
     throw new Error(`slotKey: empty or non-string slotName`)

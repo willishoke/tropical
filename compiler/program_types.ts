@@ -127,16 +127,6 @@ export type Instance = {
   readonly baseTypeName: string
   /** Resolved compile-time args if this instance was specialized. */
   readonly typeArgs?: Record<string, number>
-  /** Optional alive expression. When undefined, the instance is
-   *  unconditionally alive (the JIT's scheduler emits a literal `1`
-   *  alive value, which folds the conditional away post-inlining).
-   *  When defined, the scheduler evaluates this expression once per
-   *  sample to drive the instance's `__alive__` slot — when the slot
-   *  evaluates to false, the instance's kernel doesn't run and its
-   *  output slots retain their last-written values. Inter-instance
-   *  refs inside this expression are one-sample-delayed: alive reads
-   *  see each other instance's previous-sample slot value. */
-  aliveInput?: ExprNode
 }
 
 export function instantiate(

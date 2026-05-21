@@ -13,34 +13,6 @@
  * resolved IR produced here, and `tests/equiv/jit_vs_interp` cross-checks the
  * two evaluators sample-for-sample.
  *
- * ## Alive semantics in the oracle
- *
- * The JIT realizes `aliveInput` by skipping the instance's kernel
- * when alive evaluates to false; the instance's output slot retains
- * its last write. The interpreter (single-program oracle) realizes
- * the same I/O semantics structurally via `select(alive, raw,
- * fallback)` wraps on the gated instance's outputs and own
- * reg/delay updates:
- *
- *   - **Output wrap** (pre-strata): `out = select(alive, raw_out, 0)`
- *     ensures consumers downstream see a held value, not the live
- *     computation, when alive is false.
- *   - **Reg/delay wrap** (pre-strata for own decls; post-strata for
- *     decls lifted by `inlineInstances` from nested sub-instances):
- *     `next_value = select(alive, raw_next, current_value)` ensures
- *     state freezes while alive is false.
- *
- * Inter-instance refs inside the alive expression are translated as
- * normal (current-sample reads). The JIT side reads slot values from
- * the start of the sample loop (previous-sample writes), so there is
- * a one-sample-delay discrepancy when an alive expression references
- * another instance's current-sample output. For most patches —
- * param-driven alive, self-referencing envelope alive — the
- * discrepancy is structural (alive depends on register state, which
- * is one-sample-delayed in both backends anyway). Tests that exercise
- * cross-instance current-sample alive references should drive
- * through the JIT path only.
- *
  * ## Invariants
  *
  *  - Zero scope analysis. The translator does no name resolution other
@@ -66,7 +38,6 @@ import { strataPipeline } from './strata.js'
 import { findInstanceCycles } from './lowering/cycle_break.js'
 import { CycleViolation, type CycleDiagnostic } from './elaboration_diagnostics.js'
 import { specializeProgram } from './specialize.js'
-import { cloneResolvedProgram } from './clone.js'
 import { parseWireKey } from './branded_names.js'
 
 /** Run the session-to-ResolvedProgram materialization end-to-end. */
@@ -83,32 +54,14 @@ export function materializeSessionForEmit(session: SessionState): {
 } {
   const ctx = makeContext(session)
   const synthetic = materializeSessionInner(session, ctx)
-  const aliveInstances = ctx.aliveInstances
 
-  // For each instance with explicit alive wiring, append a synthetic
-  // outputDecl + outputAssign carrying its alive expression. This
-  // routes the alive expressions through `strataPipeline` so any
-  // `nestedOut` refs to other instances get inlined alongside the
-  // rest. Post-strata, we read the inlined alive back off the
-  // synthetic output, then strip both the output decl and assign
-  // before passing to `compileResolved` so the alive expression
-  // doesn't appear in the plan's audio outputs.
-  const aliveOutputDecls = new Map<string, OutputDecl>()
-  for (const [instName, alive] of aliveInstances) {
-    const decl: OutputDecl = { op: 'outputDecl', name: `__alive__${instName}` }
-    synthetic.ports.outputs.push(decl)
-    synthetic.body.assigns.push({ op: 'outputAssign', target: decl, expr: alive })
-    aliveOutputDecls.set(instName, decl)
-  }
-
-  // Post-Phase 4b: strict cycle policy at the session boundary.
-  // Cycles in session wiring (instance A wires to instance B's output,
-  // B wires back to A) that don't pass through an explicit `delay()`
-  // in the wire throw `CycleViolation` here, with port-detailed
-  // error messages referencing session-level instance names.
-  // Sessions can break cycles explicitly via `delay(...)` in wire
-  // expressions, which materializes to a synthetic RegDecl and
-  // breaks the inter-instance dependency chain.
+  // Strict cycle policy at the session boundary. Cycles in session
+  // wiring that don't pass through an explicit `delay()` in the wire
+  // throw `CycleViolation` here, with port-detailed error messages
+  // referencing session-level instance names. Sessions can break
+  // cycles explicitly via `delay(...)` in wire expressions, which
+  // materializes to a synthetic RegDecl and breaks the inter-instance
+  // dependency chain.
   const cycles = findInstanceCycles(synthetic)
   if (cycles.length > 0) {
     const diagnostics: CycleDiagnostic[] = cycles.map(scc => {
@@ -127,79 +80,7 @@ export function materializeSessionForEmit(session: SessionState): {
     throw new CycleViolation(diagnostics)
   }
   const lowered = strataPipeline(synthetic)
-
-  // Read back the post-strata inlined alive expressions by name.
-  const inlinedAlives = new Map<string, ResolvedExpr>()
-  const synthOutputNames = new Set<string>()
-  for (const instName of aliveInstances.keys()) synthOutputNames.add(`__alive__${instName}`)
-  for (const a of lowered.body.assigns) {
-    if (a.op !== 'outputAssign') continue
-    if (!('op' in a.target)) continue
-    if (a.target.op !== 'outputDecl') continue
-    if (!a.target.name.startsWith('__alive__')) continue
-    const instName = a.target.name.slice('__alive__'.length)
-    inlinedAlives.set(instName, a.expr)
-  }
-  // Strip the synthetic outputs and assigns.
-  if (synthOutputNames.size > 0) {
-    lowered.ports.outputs = lowered.ports.outputs.filter(o => !synthOutputNames.has(o.name))
-    lowered.body.assigns = lowered.body.assigns.filter(a => {
-      if (a.op !== 'outputAssign') return true
-      if (!('op' in a.target)) return true
-      return !synthOutputNames.has(a.target.name)
-    })
-  }
-
-  if (inlinedAlives.size > 0) applyAliveWraps(lowered, inlinedAlives)
   return { lowered, paramDecls: ctx.paramDecls }
-}
-
-/** Wrap every lifted reg update whose origin is an alive-eligible
- *  session instance with `select(alive, raw, fallback)`. Identifies
- *  origin via the `_liftedFrom` provenance tag stamped by
- *  `inlineInstances:liftClonedBody`.
- *
- *  Post-Phase 0a: reg updates live on `decl.update`; NextUpdate
- *  body-assigns are gone. The wrap is applied directly to the decl.
- *
- *  Post-Phase 4b: cycle-break is performed upstream (or throws at the
- *  session boundary), so no synthetic cycle-break regs survive to this
- *  pass — the legacy `_liftedFrom: 'synthetic'` skip is no longer
- *  needed. */
-function applyAliveWraps(
-  prog: ResolvedProgram,
-  aliveInstances: ReadonlyMap<string, ResolvedExpr>,
-): void {
-  const aliveFor = (decl: { _liftedFrom?: string }): ResolvedExpr | null => {
-    if (decl._liftedFrom === undefined) return null
-    const a = aliveInstances.get(decl._liftedFrom)
-    return a === undefined ? null : a
-  }
-
-  // Skip an expression that was already wrapped pre-strata (the
-  // alive instance's OWN decls had `select(alive, raw, fallback)`
-  // applied by `wrapTypeOutputsForAlive`, and strata's input
-  // substitution embedded the same `alive` object identity).
-  const alreadyWrapped = (expr: ResolvedExpr, alive: ResolvedExpr): boolean => {
-    return typeof expr === 'object' && expr !== null && !Array.isArray(expr)
-      && expr.op === 'select' && expr.args[0] === alive
-  }
-
-  for (const d of prog.body.decls) {
-    if (d.op !== 'regDecl') continue
-    if (d.update === undefined) continue
-    const alive = aliveFor(d)
-    if (alive === null) continue
-    if (alreadyWrapped(d.update, alive)) continue
-    const fallback: ResolvedExpr = { op: 'regRef', decl: d }
-    d.update = { op: 'select', args: [alive, d.update, fallback] }
-  }
-
-  // dac-target outputAssigns from alive-eligible instances are
-  // ALREADY wrapped: pre-strata, the instance's own outputAssigns got
-  // `select(__alive__, raw, 0)`. Strata's nestedOut substitution
-  // carried that wrapped form into wherever the output was
-  // referenced.
 }
 
 function makeContext(session: SessionState): MaterializeContext {
@@ -208,7 +89,6 @@ function makeContext(session: SessionState): MaterializeContext {
     paramDecls:          new Map(),
     syntheticRegDecls:   [],
     exprMemo:            new WeakMap(),
-    aliveInstances:      new Map(),
     session,
   }
 }
@@ -229,12 +109,6 @@ interface MaterializeContext {
    *  session-level synthetic program. */
   syntheticRegDecls: RegDecl[]
   exprMemo: WeakMap<object, ResolvedExpr>
-  /** For each session instance with an explicit aliveInput, the
-   *  resolved alive expression to apply post-strata. Wrapping happens
-   *  after `inlineInstances` has lifted all sub-instance regs/delays
-   *  into the synthetic top-level so every register in the alive
-   *  lineage gets wrapped. */
-  aliveInstances: Map<string, ResolvedExpr>
   session: SessionState
 }
 
@@ -375,49 +249,7 @@ function buildInstanceDecl(
     inputs: [],
   }
 
-  // Alive wrap: same two-phase mechanism as the legacy gateable wrap.
-  //   - PRE-STRATA: wrap the type's outputAssigns + own RegDecl
-  //     updates with `select(alive, raw, fallback)`. Necessary because
-  //     strata's nestedOut substitution captures the alive instance's
-  //     output expression at inline time — wrapping post-strata would
-  //     miss it.
-  //   - POST-STRATA: wrap any decls lifted from sub-instances
-  //     (matched by `_liftedFrom`). These don't exist pre-strata.
-  //
-  // The alive value is plumbed in as a synthetic `__alive__` input on
-  // the cloned type so cloning doesn't have to handle outer-scope
-  // refs in an embedded alive expression.
-  if (inst.aliveInput !== undefined) {
-    const aliveExpr = translateExpr(inst.aliveInput, ctx)
-    ctx.aliveInstances.set(name, aliveExpr)
-    wrapTypeOutputsForAlive(decl, aliveExpr)
-  }
-
   return decl
-}
-
-/** Pre-strata wrap of an alive-eligible instance's TYPE outputs and
- *  own reg/delay updates via a synthetic `__alive__` input. */
-function wrapTypeOutputsForAlive(decl: InstanceDecl, aliveExpr: ResolvedExpr): void {
-  const cloned = cloneResolvedProgram(decl.type)
-  const aliveInputDecl: InputDecl = { op: 'inputDecl', name: '__alive__' }
-  cloned.ports.inputs.push(aliveInputDecl)
-
-  const aliveRef: ResolvedExpr = { op: 'inputRef', decl: aliveInputDecl }
-
-  for (const a of cloned.body.assigns) {
-    // Post-Phase-0a: BodyAssign is OutputAssign-only.
-    a.expr = { op: 'select', args: [aliveRef, a.expr, 0] }
-  }
-  for (const d of cloned.body.decls) {
-    if (d.op !== 'regDecl') continue
-    if (d.update === undefined) continue
-    const fallback: ResolvedExpr = { op: 'regRef', decl: d }
-    d.update = { op: 'select', args: [aliveRef, d.update, fallback] }
-  }
-
-  decl.type = cloned
-  decl.inputs.push({ port: aliveInputDecl, value: aliveExpr })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 Browser backend. A complete co-implementation of the audio runtime,
 sitting alongside the C++ JIT. Same compiler front-end, same strata
-pipeline, same `tropical_plan_4` boundary; the only thing that
+pipeline, same `tropical_plan_5` boundary; the only thing that
 differs is the emit target (WebAssembly vs. LLVM IR) and the param
 handle representation (SAB slot index vs. native pointer).
 
@@ -21,7 +21,7 @@ web/
   host/                  Main thread (UI, plan compile, param updates)
     compiler.ts          compilePlan(FlatPlan) → LoadedPlan via emit_wasm
     context.ts           AudioContext + AudioWorkletNode wiring
-    params.ts            ParamBank (SharedArrayBuffer), WebParam, WebTrigger
+    params.ts            ParamBank (SharedArrayBuffer), WebParam
   worklet/               Audio thread (real-time render)
     runtime.ts           WasmRuntime: dual-slot hot-swap, fade envelope, snapshotParams
     processor.ts         AudioWorkletProcessor delegate; postMessage protocol
@@ -35,14 +35,14 @@ web/
 The TS compiler pipeline (`parse → elaborate → strata`) runs offline,
 on the build host. We cannot run it inside the browser bundle today
 because its transitive imports pull in `koffi` (used by the native
-runtime path). The output of that pipeline — `tropical_plan_4` JSON —
+runtime path). The output of that pipeline — `tropical_plan_5` JSON —
 is the boundary that crosses into the browser:
 
 ```
 build host (Bun + native)               browser
   parse/elaborate/strata     →           fetch /patches/<slug>.plan.json
   → compileSession                       → compilePlan(plan)
-  → tropical_plan_4 JSON                    → emitWasm → WebAssembly bytes
+  → tropical_plan_5 JSON                    → emitWasm → WebAssembly bytes
   written to web/dist/patches/              → postMessage to AudioWorklet
                                             → WebAssembly.instantiate
                                             → WasmRuntime.process per block
@@ -68,13 +68,13 @@ offset 0
   temps         i64[registerCount]             — per-sample scratch (same encoding)
   arrays        f64[arraySlotSizes...]         — array-typed register backing stores
   param_table   f64[paramCount]                — host writes per-block snapshot of Param.value
-  param_frame   f64[paramCount]                — host writes per-block snapshot of Trigger.frame_value
+  param_frame   f64[paramCount]                — host writes per-block snapshot (legacy trigger.frame_value slot, retained for backcompat)
   output        f64[maxBlockSize]              — kernel writes mono audio out
 ```
 
 All regions are 8-byte aligned. The encoding mirrors the native
 engine: `i64` cells store either a float bitcast, a signed int, or a
-zero-extended bool; the op's `result_type` (per `tropical_plan_4`
+zero-extended bool; the op's `result_type` (per `tropical_plan_5`
 instruction) tells the codegen which load/store to emit.
 
 ## Param flow
@@ -89,10 +89,6 @@ JS main thread:                 worklet (audio thread):           WASM kernel:
   → bank.view[i*2] = 440          reads bank.view[i*2]               from param_table
                                   writes WASM mem at                  per sample
                                   param_table + i*8
-
-  WebTrigger.fire()               reads bank.view[i*2+1]              f64.load
-  → bank.view[i*2+1] = 1          writes param_frame + i*8            from param_frame
-                                                                      per block
 ```
 
 The slot index is the param's handle. Wiring expressions (in
@@ -100,12 +96,11 @@ The slot index is the param's handle. Wiring expressions (in
 the materializer turns the name into the `WebParam._h` (slot index),
 and `emit_wasm.ts` stringifies that index to a `param.ptr` field in
 the plan. The WASM kernel emits `f64.load (paramTableOffset + ptr*8)`
-for `param` operands and `f64.load (paramFrameOffset + ptr*8)` for
-trigger snapshots.
+for `param` operands.
 
 This is the same `param.ptr` shape the native plan uses, just
 populated with a SAB index instead of a native `tropical_param_t*`.
-The `tropical_plan_4` schema is backend-agnostic.
+The `tropical_plan_5` schema is backend-agnostic on this axis.
 
 ## Hot-swap
 
@@ -147,7 +142,7 @@ sync with `stdlib/`.
 
 For the demo build the full TS pipeline doesn't actually run in the
 browser — patches are precompiled at build time by
-`web/build_patches.ts` and shipped as `tropical_plan_4` JSON. The
+`web/build_patches.ts` and shipped as `tropical_plan_5` JSON. The
 in-browser compile path exists (and the bundled stdlib feeds it) but
 is not on the demo's hot path today.
 
@@ -158,7 +153,7 @@ Three test suites lock the WASM backend to the JIT:
 - `compiler/wasm_runtime.test.ts` — `WasmRuntime` in isolation (no
   AudioWorklet): block-driven render, fade envelope, state-transfer
   invariants.
-- `tests/equiv/wasm_vs_jit.test.ts` — same `tropical_plan_4` through
+- `tests/equiv/wasm_vs_jit.test.ts` — same `tropical_plan_5` through
   both backends; sample-for-sample agreement required.
 - `tests/equiv/web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches the JIT output. Run after

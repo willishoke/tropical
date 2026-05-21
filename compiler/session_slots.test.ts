@@ -59,11 +59,8 @@ describe('session slot allocation', () => {
     loadStdlib(s)
     const onePole = s.typeRegistry.get('OnePole')!
     allocateOutputSlots(s, 'lp1', onePole)
-    // OnePole has one output 'out' (scalar float); plus the
-    // auto-allocated `__alive__` slot (active-set runtime).
     expect(s.outputSlotRegistry.get(sk("lp1", "out"))).toBe(0)
-    expect(s.outputSlotRegistry.get(sk("lp1", "__alive__"))).toBe(1)
-    expect(s.slotCount).toBe(2)
+    expect(s.slotCount).toBe(1)
     const meta = s.outputPortMeta.get(sk("lp1", "out"))!
     expect(meta.scalarSlotNames).toEqual(['lp1.out'])
     expect(meta.scalarTypes).toEqual(['float'])
@@ -75,7 +72,7 @@ describe('session slot allocation', () => {
     const onePole = s.typeRegistry.get('OnePole')!
     allocateOutputSlots(s, 'lp1', onePole)
     allocateOutputSlots(s, 'lp1', onePole)  // second call: no-op
-    expect(s.slotCount).toBe(2)  // out + __alive__
+    expect(s.slotCount).toBe(1)
   })
 
   test('allocateOutputSlots assigns distinct slots to distinct instances', () => {
@@ -85,10 +82,8 @@ describe('session slot allocation', () => {
     allocateOutputSlots(s, 'lp1', onePole)
     allocateOutputSlots(s, 'lp2', onePole)
     expect(s.outputSlotRegistry.get(sk("lp1", "out"))).toBe(0)
-    expect(s.outputSlotRegistry.get(sk("lp1", "__alive__"))).toBe(1)
-    expect(s.outputSlotRegistry.get(sk("lp2", "out"))).toBe(2)
-    expect(s.outputSlotRegistry.get(sk("lp2", "__alive__"))).toBe(3)
-    expect(s.slotCount).toBe(4)
+    expect(s.outputSlotRegistry.get(sk("lp2", "out"))).toBe(1)
+    expect(s.slotCount).toBe(2)
   })
 
   test('allocateParamSlot returns unique indices and is idempotent by name', () => {
@@ -106,15 +101,13 @@ describe('session slot allocation', () => {
     const s = makeSession()
     loadStdlib(s)
     const onePole = s.typeRegistry.get('OnePole')!
-    allocateOutputSlots(s, 'lp1', onePole)            // slots 0 (out) + 1 (__alive__)
-    const p = allocateParamSlot(s, 'cutoff')          // slot 2
-    allocateOutputSlots(s, 'lp2', onePole)            // slots 3 (out) + 4 (__alive__)
+    allocateOutputSlots(s, 'lp1', onePole)            // slot 0 (out)
+    const p = allocateParamSlot(s, 'cutoff')          // slot 1
+    allocateOutputSlots(s, 'lp2', onePole)            // slot 2 (out)
     expect(s.outputSlotRegistry.get(sk("lp1", "out"))).toBe(0)
-    expect(s.outputSlotRegistry.get(sk("lp1", "__alive__"))).toBe(1)
-    expect(p).toBe(2)
-    expect(s.outputSlotRegistry.get(sk("lp2", "out"))).toBe(3)
-    expect(s.outputSlotRegistry.get(sk("lp2", "__alive__"))).toBe(4)
-    expect(s.slotCount).toBe(5)
+    expect(p).toBe(1)
+    expect(s.outputSlotRegistry.get(sk("lp2", "out"))).toBe(2)
+    expect(s.slotCount).toBe(3)
   })
 
   test('legacy state untouched by slot allocation', () => {
@@ -153,8 +146,7 @@ describe('session slot allocation', () => {
     }
     allocateOutputSlots(s, 'fp1', fakePortless as any)
     expect(s.outputSlotRegistry.get(sk(`fp1`, onePole.prog.ports.outputs[0].name))).toBe(0)
-    expect(s.outputSlotRegistry.get(sk("fp1", "__alive__"))).toBe(1)
-    expect(s.slotCount).toBe(2)
+    expect(s.slotCount).toBe(1)
   })
 })
 
@@ -193,9 +185,9 @@ describe('M3: applyParamSpecs allocates param slots transitively', () => {
     const s = makeSession()
     loadStdlib(s)
     const onePole = s.typeRegistry.get('OnePole')!
-    allocateOutputSlots(s, 'lp1', onePole)            // slotCount = 2 (out + __alive__)
-    allocateParamSlot(s, 'cutoff')                     // slotCount = 3
-    expect(s.slotCount).toBe(3)
+    allocateOutputSlots(s, 'lp1', onePole)            // slotCount = 1 (out)
+    allocateParamSlot(s, 'cutoff')                     // slotCount = 2
+    expect(s.slotCount).toBe(2)
     // Loading any program should reset the slot state cleanly.
     loadProgramAsSession(
       { name: 'Empty', ports: { inputs: [], outputs: [] }, body: { op: 'block', decls: [], assigns: [] } } as any,

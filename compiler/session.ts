@@ -253,13 +253,9 @@ export function nextName(session: SessionState, prefix: string): string {
 // dedicated state-evolution phase, giving every MCP wire exactly one
 // sample of latency (VCV-Rack semantics).
 //
-// The auto-wrap is on this path only. Two wire kinds bypass it
-// intentionally:
-//
-//   - DAC wires (`session.graphOutputs`) — direct stitch into the
-//     audio mix; no extra latency on the output side.
-//   - Alive inputs (`Instance.aliveInput`) — already implicitly
-//     one-sample-delayed by the scheduler preamble mechanism.
+// The auto-wrap is on this path only. DAC wires
+// (`session.graphOutputs`) bypass it intentionally — they stitch
+// directly into the audio mix with no extra latency on the output side.
 
 /** Options for `setWireExpr`. Both fields control the synthesized
  *  delay-slot's identity: `init` becomes the slot's initial value
@@ -376,10 +372,7 @@ const DEFAULT_OUTPUT_PORT_TYPE: IRPortType = { kind: 'scalar', scalar: 'float' }
 
 /** Allocate slot indices for every output port of an instance. Records
  *  slot indices in `outputSlotRegistry` and full PortMeta in
- *  `outputPortMeta`. Also reserves an `__alive__` slot — every
- *  session instance has one, defaulting to literal `1.0` so the
- *  default behavior matches "always alive" with zero runtime cost
- *  after LLVM folds the conditional. Idempotent. */
+ *  `outputPortMeta`. Idempotent. */
 export function allocateOutputSlots(
   session: SessionState,
   instName: InstanceName,
@@ -401,12 +394,6 @@ export function allocateOutputSlots(
       portType,
     })
     session.slotCount += names.length
-  }
-
-  const aliveKey = slotKey(instName, '__alive__')
-  if (!session.outputSlotRegistry.has(aliveKey)) {
-    session.outputSlotRegistry.set(aliveKey, session.slotCount)
-    session.slotCount += 1
   }
 }
 

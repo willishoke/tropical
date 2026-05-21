@@ -241,45 +241,6 @@ describe('generic programs round-trip', () => {
     expect(p1.type_args).toBeUndefined()
   })
 
-  test('alive_input round-trips through schema, loader, and saver', () => {
-    const session = makeSession()
-    const passthrough: Program = {
-      op: 'program',
-      name: 'Passthrough',
-      ports: { inputs: ['x'], outputs: ['y'] },
-      body: { op: 'block',
-        assigns: [{ op: 'outputAssign', name: 'y', expr: { op: 'input', name: 'x' } }],
-      },
-    }
-    loadProgramAsType(passthrough, session)
-
-    const raw = {
-      schema: 'tropical_program_2',
-      name: 'Patch',
-      body: { op: 'block', decls: [
-        { op: 'instanceDecl', name: 'voice_0', program: 'Passthrough',
-          inputs: { x: 1.0 }, alive_input: true },
-      ]},
-      audio_outputs: [{ instance: 'voice_0', output: 'y' }],
-    }
-
-    const prog = parseProgramV2(raw)
-    const decl = (prog.body as { decls?: Array<Record<string, unknown>> }).decls!
-      .find(d => d.op === 'instanceDecl' && d.name === 'voice_0')!
-    expect(decl.alive_input).toBe(true)
-
-    loadProgramAsSession(prog as unknown as Program, {
-      audio_outputs: (raw as { audio_outputs: ProgramTopLevel['audio_outputs'] }).audio_outputs,
-    }, session)
-    const inst = session.instanceRegistry.get('voice_0')!
-    expect(inst.aliveInput).toBe(true)
-
-    const { node: savedNode } = saveProgramFromSession(session)
-    const savedDecl = [...instanceDecls(savedNode)].find(d => d.name === 'voice_0')!
-    expect(savedDecl.alive_input).toBe(true)
-
-    session.graph.dispose()
-  })
 })
 
 describe('typeResolver', () => {

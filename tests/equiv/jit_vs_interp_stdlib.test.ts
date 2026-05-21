@@ -25,8 +25,7 @@
  *    project_testing_gaps memory.
  *  • Sequencer / Seq4MinorTranspose / BubbleCloud — array-typed input
  *    ports or voice-steering patterns that hit per-instance compile
- *    limitations unrelated to triggers (tracked as active-set M11
- *    follow-ups).
+ *    limitations (M11 follow-ups).
  *  • NoiseLFSR — int64 LFSR state diverges in JS (same root cause as
  *    WhiteNoise).
  *
@@ -81,9 +80,9 @@ const STDLIB_EQUIV_TARGETS: Array<[string, Record<string, number>?]> = [
   ['OnePole'], ['BlepSaw'], ['SoftClip'], ['VCA'], ['CrossFade'],
   ['SVF'], ['LadderFilter'], ['Phaser'], ['Phaser16'],
   // ['Clock'] — has `ratios_out: float[1]` (array-typed output). The
-  // active-set per-instance path emits one WriteSlot per output port
-  // by name; expansion into N WriteSlots for array outputs lands as
-  // a follow-up. Track in active-set M11.
+  // per-instance compile path emits one WriteSlot per output port by
+  // name; expansion into N WriteSlots for array outputs lands as an
+  // M11 follow-up.
   ['AllpassDelay'], ['CombDelay'],
   ['Delay', { N: 1024 }],
   // Trigger-input programs — previously excluded for `to_bool`-shaped
