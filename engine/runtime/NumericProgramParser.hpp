@@ -175,11 +175,13 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
       inst.instructions.push_back(parse_instr(ji));
   // M11 fractal slot-based input wiring. Optional in the wire format
   // (legacy plans don't have it; absent → empty). Same instruction
-  // shape as `instructions`; difference is purely WHEN they emit
-  // (before children, not after).
-  if (jf.contains("pre_child_instructions"))
-    for (const auto & ji : jf["pre_child_instructions"])
-      inst.pre_child_instructions.push_back(parse_instr(ji));
+  // shape as `instructions`; difference is purely WHEN they emit —
+  // the parent's emit_kernel_block runs each child's
+  // pre_input_instructions immediately before recursing into that
+  // child's body.
+  if (jf.contains("pre_input_instructions"))
+    for (const auto & ji : jf["pre_input_instructions"])
+      inst.pre_input_instructions.push_back(parse_instr(ji));
   // Writebacks: each entry of register_targets[] is the (absolute,
   // already shifted) temp slot whose value feeds the state register at
   // position j among this instance's slots, which sits at

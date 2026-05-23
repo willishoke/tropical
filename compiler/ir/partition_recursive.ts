@@ -151,7 +151,7 @@ export function partitionKernel(
   //    For each child:
   //      • Allocate output slots (parent reads via NestedOut → Slot)
   //      • Allocate INPUT slots (parent writes via WriteSlot in
-  //        pre_child_instructions; child reads via Slot in its body)
+  //        per_child_pre_input[k]; child reads via Slot in its body)
   //      • Build per-child slot maps for both directions
   //      • Recurse into the child WITHOUT substituting its inputs —
   //        the child's InputRefs lower via `inputSlotOverride` instead
@@ -209,7 +209,7 @@ export function partitionKernel(
 
   // ── 2. Compile this kernel's body via compileResolved. With the
   //    nested context populated, `compileResolved` will:
-  //      • Emit WriteSlots into `pre_child_instructions` for each
+  //      • Emit WriteSlots into `per_child_pre_input[k]` for each
   //        child input wire (using nestedInputSlots)
   //      • Lower NestedOut refs in the parent body via nestedOutputSlots
   //      • Lower InputRef refs in THIS kernel's body via
@@ -252,8 +252,30 @@ export function partitionKernel(
     outputScalarTypes: outPortTypes,
   }
 
-  const { preamble, preChildInstructions, body, writeSlots, tempsConsumed } = remapInstancePlan(plan, ctx, session)
+  const { preamble, perChildPreInput, body, writeSlots, tempsConsumed } = remapInstancePlan(plan, ctx, session)
   const instanceInstructions: NInstr[] = [...preamble, ...body, ...writeSlots]
+
+  // Attach each per-child pre-input block to its corresponding child
+  // InstanceFunction. The pre-input wires live in THIS kernel's
+  // namespace (parent evaluates them) but are stored on the child so
+  // the engine's `emit_kernel_block` runs `child.pre_input_instructions`
+  // immediately before recursing into that child — preserving sibling-
+  // to-sibling NestedOut dependencies.
+  //
+  // `children` and `perChildPreInput` are kept parallel by construction:
+  // both are built from `prog.body.decls` in the same order (this
+  // function above; compileResolved's nestedInstances collection).
+  if (perChildPreInput.length !== children.length) {
+    throw new Error(
+      `partitionKernel: instance '${instancePath}': perChildPreInput length ` +
+      `(${perChildPreInput.length}) does not match children length ` +
+      `(${children.length}). emit_resolved + compileResolved must produce ` +
+      `one block per nested InstanceDecl in body order.`,
+    )
+  }
+  for (let i = 0; i < children.length; i++) {
+    children[i] = { ...children[i], pre_input_instructions: perChildPreInput[i] }
+  }
 
   // Shift per-instance register_targets into the unified temp space.
   const shiftedTargets: RegTarget[] = plan.register_targets.map(t => {
@@ -265,7 +287,13 @@ export function partitionKernel(
     name:              `instance_${instancePath.replace(/\./g, '_')}`,
     instance_name:     instancePath,
     instructions:      instanceInstructions,
-    pre_child_instructions: preChildInstructions,
+    // Top-level kernels run no parent-side pre-input wires (their
+    // inputs come from session inputBindings translated into the
+    // preamble). Sub-kernels get this populated by the parent's
+    // partitionKernel call via the `for (let i = 0; ...)` loop above
+    // — that loop overwrites `children[i]` with a copy carrying the
+    // child's `pre_input_instructions`.
+    pre_input_instructions: [],
     register_offset:   tempOffset(acc.nextRegRaw),
     state_reg_offset:  stateRegOffset(acc.nextStateRaw),
     array_slot_offset: arraySlotOffset(acc.nextArrayRaw),

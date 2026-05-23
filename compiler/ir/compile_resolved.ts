@@ -31,8 +31,9 @@ export interface CompileResolvedContext {
   /** Per-sub-instance, per-input-port module-slot map. Populated by
    *  `partition_recursive` for the M11 slot-based input wiring. The
    *  parent's compile emits a `WriteSlot` into each named slot;
-   *  the entries land in `pre_child_instructions` so the engine
-   *  runs them before recursing into the child. */
+   *  the entries land in `per_child_pre_input[k]` (parallel to the
+   *  body's nested-instance order) so the engine runs each block
+   *  immediately before recursing into its corresponding child. */
   nestedInputSlots?:  Map<InstanceDecl, Map<InputDecl, number>>
   /** Module-slot indices for THIS program's own input ports. Set when
    *  the program is being compiled as a sub-instance kernel — its
@@ -112,8 +113,11 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
 
   // M11 fractal: collect sub-instance decls so emit_resolved can emit
   // a `WriteSlot` for each of their wired inputs in
-  // `pre_child_instructions`. Empty when the program has no nested
-  // instances (legacy flat path).
+  // `per_child_pre_input[k]`. The order here is significant — it's
+  // the dispatch order partition_recursive will use when packing
+  // children into the InstanceFunction tree, so per_child_pre_input
+  // and the children array stay parallel. Empty when the program has
+  // no nested instances (legacy flat path).
   const nestedInstances: InstanceDecl[] = []
   for (const d of prog.body.decls) {
     if (d.op === 'instanceDecl') nestedInstances.push(d)
@@ -145,7 +149,7 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     array_slot_count: program.array_slot_count,
     array_slot_sizes: program.array_slot_sizes,
     instructions:     program.instructions,
-    pre_child_instructions: program.pre_child_instructions,
+    per_child_pre_input: program.per_child_pre_input,
     output_targets:   program.output_targets,
     register_targets: program.register_targets,
     state_init:       stateInit as (number | boolean)[],

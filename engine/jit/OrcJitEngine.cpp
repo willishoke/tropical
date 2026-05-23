@@ -523,23 +523,32 @@ struct EmitCtx
   // ── Per-instance writebacks ──
   void emit_writebacks(const std::vector<InstanceProgram::Writeback> & wbs);
 
-  // ── Per-instance dispatch (M11 fractal four-phase order) ──
-  // Order matters for the slot-based wiring contract:
-  //   1. pre_child_instructions: evaluate child input wires in THIS
-  //      kernel's scope, WriteSlot the value to the child's input slot
-  //   2. children (recursive): each child's body reads its input slots
-  //      and writes its output slots
-  //   3. instructions: parent body (may read child outputs via NestedOut
-  //      → Slot read, which sees the slot values from step 2)
-  //   4. writebacks: parent's state-register updates
+  // ── Per-instance dispatch (M11 fractal interleaved order) ──
+  // For each child:
+  //   1. emit child.pre_input_instructions (in THIS kernel's namespace
+  //      — wire expressions referencing parent regs/inputs/params resolve,
+  //      results land in WriteSlot to the child's input slots)
+  //   2. emit child.body recursively (reads input slots, writes output
+  //      slots; nested children dispatch the same way)
+  // Then:
+  //   3. emit THIS kernel's main instructions (may read child outputs via
+  //      NestedOut → Slot read, observing the values from step 2 of each
+  //      child)
+  //   4. emit THIS kernel's writebacks (state-register updates)
   //
-  // Legacy plans (inlineNested:true) have empty pre_child_instructions
-  // and empty children — phases 1-2 are no-ops and the behavior reduces
-  // to "main body then writebacks", same as before.
+  // Interleaving step 1 with step 2 per-child (vs hoisting all step-1
+  // blocks ahead of all step-2 blocks) preserves sibling-to-sibling
+  // NestedOut dependencies: child[k]'s wires can read child[j].output
+  // for j < k because child[j]'s body has already executed.
+  //
+  // Legacy plans (inlineNested:true) have empty children and empty
+  // pre_input_instructions throughout — the loop is a no-op and the
+  // behavior reduces to "main body then writebacks", same as before.
   llvm::Error emit_kernel_block(const InstanceProgram & inst) {
-    if (auto err = emit_instrs(inst.pre_child_instructions)) return err;
-    for (const auto & child : inst.children)
+    for (const auto & child : inst.children) {
+      if (auto err = emit_instrs(child.pre_input_instructions)) return err;
       if (auto err = emit_kernel_block(child)) return err;
+    }
     if (auto err = emit_instrs(inst.instructions)) return err;
     emit_writebacks(inst.writebacks);
     return llvm::Error::success();
