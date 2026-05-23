@@ -45,6 +45,28 @@ import {
 } from './ir/slot_indices'
 import { toWireInstr } from './ir/emit_resolved'
 
+// ─── CompilationMode: how the engine should realize the plan ───────────────
+// `fused` (default, legacy): one monolithic LLVM kernel function that
+// inlines every instance body inside the outer sample loop.
+// `microkernel`: N+1 LLVM functions in one module (preamble, per-instance
+// kernels, state_evolution, postamble_mix); the C++ scheduler dispatches
+// them via function pointers per sample. The field is part of the plan
+// because the cache must be partitioned by mode — different return types
+// from `compile_*` mean a fused-mode cache hit cannot satisfy a
+// microkernel-mode query.
+
+export type CompilationMode = 'fused' | 'microkernel'
+
+/** Parse a wire-format mode string, defaulting to 'fused' for legacy
+ *  plans that pre-date the field. Throws on unknown strings — we fail
+ *  closed rather than silently picking a default the caller didn't
+ *  intend. */
+export function parseCompilationMode(s: string | undefined): CompilationMode {
+  if (s === undefined || s === 'fused') return 'fused'
+  if (s === 'microkernel') return 'microkernel'
+  throw new Error(`flat_plan: unknown compilation_mode '${s}' (expected 'fused' | 'microkernel')`)
+}
+
 // ─── RegTarget: sum type replacing the `-1`-sentinel int field ──────────────
 // Each state register either consumes a scalar temp (`temp`) or is
 // managed entirely by inline array-write instructions earlier in the
@@ -161,6 +183,9 @@ export interface FlatPlan {
   schema: 'tropical_plan_5'
   config: { sampleRate: number }
 
+  /** Engine realization strategy. See `CompilationMode`. */
+  compilation_mode: CompilationMode
+
   // ── Unified state (across all instance functions + scheduler) ────────
   state_init:       (number | boolean)[]
   register_names:   string[]
@@ -213,6 +238,9 @@ export interface WireSchedulerFunction {
 export interface WireFlatPlan {
   schema:           'tropical_plan_5'
   config:           { sampleRate: number }
+  /** Optional on the wire: omitted means 'fused' (legacy default).
+   *  When present, must be 'fused' | 'microkernel'. */
+  compilation_mode?: CompilationMode
   state_init:       (number | boolean)[]
   register_names:   string[]
   register_types:   ScalarType[]
@@ -310,6 +338,7 @@ export function parseWirePlan(wire: WireFlatPlan): FlatPlan {
   return {
     schema:           wire.schema,
     config:           wire.config,
+    compilation_mode: parseCompilationMode(wire.compilation_mode),
     state_init:       wire.state_init,
     register_names:   wire.register_names,
     register_types:   wire.register_types,
@@ -342,6 +371,12 @@ export function toWirePlan(plan: FlatPlan): WireFlatPlan {
   return {
     schema:           plan.schema,
     config:           plan.config,
+    // Omit 'fused' from the wire format so golden JSON fixtures
+    // (which predate this field) don't gain a spurious key. Only
+    // 'microkernel' emits explicitly.
+    ...(plan.compilation_mode === 'microkernel'
+      ? { compilation_mode: 'microkernel' as const }
+      : {}),
     state_init:       plan.state_init,
     register_names:   plan.register_names,
     register_types:   plan.register_types,

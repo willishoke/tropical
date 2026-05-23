@@ -25,7 +25,7 @@ import {
   instanceName as toInstanceName, portName as toPortName,
   portRef, wireKey,
 } from './branded_names.js'
-import type { FlatPlan, InstanceFunction, SchedulerFunction } from '../flat_plan.js'
+import type { FlatPlan, InstanceFunction, SchedulerFunction, CompilationMode } from '../flat_plan.js'
 import type { NInstr } from './emit_resolved.js'
 import { instrWriteSlot } from './emit_resolved.js'
 import {
@@ -39,12 +39,23 @@ import {
 } from './slot_indices.js'
 import { partitionKernel, makeAccumulators } from './partition_recursive.js'
 
-/** Compile the session into a `tropical_plan_5` `FlatPlan`. */
-export function compileSessionSlotted(session: SessionState): FlatPlan {
-  return compileSessionSlottedPerInstance(session)
+export interface CompileSessionSlottedOptions {
+  /** Engine realization strategy. Defaults to `'fused'`. */
+  compilation_mode?: CompilationMode
 }
 
-function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
+/** Compile the session into a `tropical_plan_5` `FlatPlan`. */
+export function compileSessionSlotted(
+  session: SessionState,
+  options: CompileSessionSlottedOptions = {},
+): FlatPlan {
+  return compileSessionSlottedPerInstance(session, options.compilation_mode ?? 'fused')
+}
+
+function compileSessionSlottedPerInstance(
+  session: SessionState,
+  compilationMode: CompilationMode,
+): FlatPlan {
   // Auto-allocate output slots for any instance whose owner hasn't
   // pre-allocated. `add_instance` / `loadProgramAsSession` already do
   // this eagerly; tests sometimes poke `instanceRegistry` directly.
@@ -147,6 +158,7 @@ function compileSessionSlottedPerInstance(session: SessionState): FlatPlan {
   return {
     schema: 'tropical_plan_5',
     config: { sampleRate: 44100 },
+    compilation_mode:  compilationMode,
     state_init:        acc.stateInit,
     register_names:    acc.registerNames,
     register_types:    acc.registerTypes,
