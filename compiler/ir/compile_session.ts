@@ -21,12 +21,20 @@
  */
 
 import type { SessionState } from '../session.js'
-import type { FlatPlan } from '../flat_plan'
+import type { FlatPlan, CompilationMode } from '../flat_plan'
 import { liftWiresToInstances } from './lift_wires.js'
 import { extractSessionDelays } from './lowering/extract_session_delays.js'
 import { assertSessionAcyclic } from './lowering/session_cycle_check.js'
 
-export function compileSession(session: SessionState): FlatPlan {
+export interface CompileSessionOptions {
+  /** Engine realization strategy. Defaults to `'fused'`. */
+  compilation_mode?: CompilationMode
+}
+
+export function compileSession(
+  session: SessionState,
+  options: CompileSessionOptions = {},
+): FlatPlan {
   // Pre-compile: hoist array-literal wires to anonymous programs.
   liftWiresToInstances(session)
 
@@ -43,7 +51,7 @@ export function compileSession(session: SessionState): FlatPlan {
   // helpers import session.js types).
   const { compileSessionSlotted } = require('./compile_session_slotted.js') as
     typeof import('./compile_session_slotted.js')
-  return compileSessionSlotted(session)
+  return compileSessionSlotted(session, options)
 }
 
 export type { Instance } from '../program_types.js'

@@ -12,8 +12,12 @@
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/Passes/OptimizationLevel.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/MD5.h>
+#if LLVM_VERSION_MAJOR >= 21
+#include <llvm/Support/ModRef.h>
+#endif
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
@@ -346,6 +350,627 @@ llvm::Expected<uint64_t> OrcJitEngine::lookup(const std::string & symbol_name)
 
 
 // ---------------------------------------------------------------------------
+// EmitCtx — per-compilation emission context for the microkernel-mode path.
+//
+// Holds the LLVM builder, the in-flight function's argument bindings, the
+// per-temp scalar-type table, and the cached intrinsic declarations. Methods
+// on EmitCtx are the codegen shared between the N+3 LLVM functions a single
+// microkernel-mode compile emits (preamble, per-instance kernels,
+// state_evolution, postamble_mix). Each function gets its own EmitCtx with
+// its own argument bindings; the temp_types pointer is shared across them
+// so a write in one function's body is observable to a later function's
+// read of the same unified-namespace temp slot.
+//
+// compile_flat_program (fused mode) does NOT use EmitCtx — its in-place
+// lambdas are kept byte-identical to the pre-spike codegen so fused mode
+// stays a known-good reference for the microkernel-vs-fused equivalence
+// suite (Phase 6). The methods below are functionally identical to those
+// lambdas; the duplication is honest spike scaffolding. If the spike
+// graduates, a follow-up commit can switch compile_flat_program over to
+// EmitCtx and the dual maintenance burden disappears.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+using ST = JitScalarType;
+using TypedVal = std::pair<llvm::Value *, ST>;
+
+struct EmitCtx
+{
+  // Required references (set once at construction)
+  llvm::LLVMContext * context  = nullptr;
+  llvm::IRBuilder<> * builder  = nullptr;
+  llvm::Module      * module   = nullptr;
+  llvm::Function    * fn       = nullptr;
+
+  // LLVM types
+  llvm::Type * void_ty = nullptr;
+  llvm::Type * f64_ty  = nullptr;
+  llvm::Type * i64_ty  = nullptr;
+  llvm::Type * i1_ty   = nullptr;
+  llvm::Type * ptr_ty  = nullptr;
+
+  // Common constants
+  llvm::Value * zero_f64 = nullptr;
+  llvm::Value * one_f64  = nullptr;
+  llvm::Value * zero_i64 = nullptr;
+  llvm::Value * zero_i1  = nullptr;
+
+  // Cached intrinsic declarations (created per-module)
+  llvm::FunctionCallee llvm_sqrt;
+  llvm::FunctionCallee llvm_floor;
+  llvm::FunctionCallee llvm_ceil;
+  llvm::FunctionCallee llvm_round;
+  llvm::FunctionCallee llvm_fabs;
+
+  // Per-function argument values. inputs_arg may be null in microkernel
+  // mode (session-built plans don't emit Input operands).
+  llvm::Value * inputs_arg      = nullptr;
+  llvm::Value * regs_arg        = nullptr;
+  llvm::Value * arrays_arg      = nullptr;
+  llvm::Value * array_sizes_arg = nullptr;
+  llvm::Value * temps_arg       = nullptr;
+  llvm::Value * sample_rate_arg = nullptr;
+  llvm::Value * param_ptrs_arg  = nullptr;
+  llvm::Value * slots_arg       = nullptr;
+
+  // Set per-function in microkernel mode (function arg). Tick operands
+  // read this.
+  llvm::Value * current_sample_idx = nullptr;
+
+  // Program context
+  const FlatProgram                                   * program     = nullptr;
+  const std::unordered_map<uint64_t, uint64_t>        * param_index = nullptr;
+
+  // Per-temp scalar type table. Pointer so multiple EmitCtxs in a single
+  // compile share the same symbol table.
+  std::vector<ST> * temp_types = nullptr;
+
+  // ── Slot helpers ──
+  llvm::Value * gep_temp(uint32_t idx) const {
+    return builder->CreateInBoundsGEP(i64_ty, temps_arg, builder->getInt64(idx));
+  }
+  llvm::Value * load_temp_f64(uint32_t idx) const {
+    return builder->CreateBitCast(builder->CreateLoad(i64_ty, gep_temp(idx)), f64_ty);
+  }
+  void store_temp_f64(uint32_t idx, llvm::Value * v) const {
+    builder->CreateStore(builder->CreateBitCast(v, i64_ty), gep_temp(idx));
+  }
+  llvm::Value * load_reg_f64(uint32_t slot) const {
+    llvm::Value * ptr = builder->CreateInBoundsGEP(i64_ty, regs_arg, builder->getInt64(slot));
+    return builder->CreateBitCast(builder->CreateLoad(i64_ty, ptr), f64_ty);
+  }
+  llvm::Value * load_input_f64(uint32_t slot) const {
+    llvm::Value * ptr = builder->CreateInBoundsGEP(i64_ty, inputs_arg, builder->getInt64(slot));
+    return builder->CreateBitCast(builder->CreateLoad(i64_ty, ptr), f64_ty);
+  }
+  llvm::Value * load_array_ptr_f(uint32_t slot) const {
+    llvm::Value * pp = builder->CreateInBoundsGEP(ptr_ty, arrays_arg, builder->getInt64(slot));
+    return builder->CreateLoad(ptr_ty, pp);
+  }
+  llvm::Value * load_array_size_f(uint32_t slot) const {
+    llvm::Value * sp = builder->CreateInBoundsGEP(i64_ty, array_sizes_arg, builder->getInt64(slot));
+    return builder->CreateLoad(i64_ty, sp);
+  }
+  llvm::Value * load_slot_f64(uint32_t idx) const {
+    llvm::Value * ptr = builder->CreateInBoundsGEP(f64_ty, slots_arg, builder->getInt64(idx));
+    return builder->CreateLoad(f64_ty, ptr);
+  }
+  void store_slot_f64(uint32_t idx, llvm::Value * v) const {
+    llvm::Value * ptr = builder->CreateInBoundsGEP(f64_ty, slots_arg, builder->getInt64(idx));
+    builder->CreateStore(v, ptr);
+  }
+
+  // ── Typed load/store ──
+  llvm::Value * load_temp_typed(uint32_t idx, ST ty) const {
+    llvm::Value * raw = builder->CreateLoad(i64_ty, gep_temp(idx));
+    switch (ty) {
+      case ST::Float: return builder->CreateBitCast(raw, f64_ty);
+      case ST::Int:   return raw;
+      case ST::Bool:  return builder->CreateTrunc(raw, i1_ty);
+    }
+    return builder->CreateBitCast(raw, f64_ty);
+  }
+  void store_temp_typed(uint32_t idx, llvm::Value * v, ST ty) const {
+    llvm::Value * as_i64;
+    switch (ty) {
+      case ST::Float: as_i64 = builder->CreateBitCast(v, i64_ty); break;
+      case ST::Int:   as_i64 = v; break;
+      case ST::Bool:  as_i64 = builder->CreateZExt(v, i64_ty); break;
+    }
+    builder->CreateStore(as_i64, gep_temp(idx));
+  }
+  llvm::Value * load_reg_typed(uint32_t slot, ST ty) const {
+    llvm::Value * ptr = builder->CreateInBoundsGEP(i64_ty, regs_arg, builder->getInt64(slot));
+    llvm::Value * raw = builder->CreateLoad(i64_ty, ptr);
+    switch (ty) {
+      case ST::Float: return builder->CreateBitCast(raw, f64_ty);
+      case ST::Int:   return raw;
+      case ST::Bool:  return builder->CreateTrunc(raw, i1_ty);
+    }
+    return builder->CreateBitCast(raw, f64_ty);
+  }
+  llvm::Value * coerce_val(llvm::Value * v, ST from, ST to) const {
+    if (from == to) return v;
+    if (from == ST::Float && to == ST::Int)   return builder->CreateFPToSI(v, i64_ty);
+    if (from == ST::Float && to == ST::Bool)  return builder->CreateFCmpUNE(v, zero_f64);
+    if (from == ST::Int   && to == ST::Float) return builder->CreateSIToFP(v, f64_ty);
+    if (from == ST::Int   && to == ST::Bool)  return builder->CreateICmpNE(v, zero_i64);
+    if (from == ST::Bool  && to == ST::Float) return builder->CreateUIToFP(v, f64_ty);
+    if (from == ST::Bool  && to == ST::Int)   return builder->CreateZExt(v, i64_ty);
+    return v;
+  }
+
+  // ── Operand resolution ──
+  TypedVal resolve_typed(const Operand & op) const;
+  llvm::Value * resolve_as_f64(const Operand & op) const {
+    auto [v, t] = resolve_typed(op);
+    return v ? coerce_val(v, t, ST::Float) : nullptr;
+  }
+
+  // ── Operation emit (out-of-line; large switch) ──
+  TypedVal emit_typed_op(OpTag tag, ST result_type, const std::vector<TypedVal> & tv) const;
+
+  // ── Instruction emit (out-of-line; large switch) ──
+  llvm::Error emit_instr(const FlatInstr & instr);
+  llvm::Error emit_instrs(const std::vector<FlatInstr> & instrs) {
+    for (const auto & instr : instrs)
+      if (auto err = emit_instr(instr)) return err;
+    return llvm::Error::success();
+  }
+
+  // ── Per-instance writebacks ──
+  void emit_writebacks(const std::vector<InstanceProgram::Writeback> & wbs);
+
+  // ── Per-instance dispatch (M11 fractal: children before parent body) ──
+  llvm::Error emit_kernel_block(const InstanceProgram & inst) {
+    for (const auto & child : inst.children)
+      if (auto err = emit_kernel_block(child)) return err;
+    if (auto err = emit_instrs(inst.instructions)) return err;
+    emit_writebacks(inst.writebacks);
+    return llvm::Error::success();
+  }
+};
+
+// Bind type / constant / intrinsic members from an LLVM context, builder,
+// and module. Argument values (regs_arg etc.) are bound separately by the
+// caller after the function is created and its args are pulled.
+inline void emit_ctx_init_module(EmitCtx & c,
+                                 llvm::LLVMContext & context,
+                                 llvm::IRBuilder<> & builder,
+                                 llvm::Module & module)
+{
+  c.context = &context;
+  c.builder = &builder;
+  c.module  = &module;
+
+  c.void_ty = builder.getVoidTy();
+  c.f64_ty  = builder.getDoubleTy();
+  c.i64_ty  = builder.getInt64Ty();
+  c.i1_ty   = builder.getInt1Ty();
+  c.ptr_ty  = llvm::PointerType::get(context, 0);
+
+  c.zero_f64 = llvm::ConstantFP::get(c.f64_ty, 0.0);
+  c.one_f64  = llvm::ConstantFP::get(c.f64_ty, 1.0);
+  c.zero_i64 = builder.getInt64(0);
+  c.zero_i1  = builder.getFalse();
+
+  auto intr1 = [&](llvm::Intrinsic::ID id) {
+    return llvm::Intrinsic::getOrInsertDeclaration(&module, id, {c.f64_ty});
+  };
+  c.llvm_sqrt  = intr1(llvm::Intrinsic::sqrt);
+  c.llvm_floor = intr1(llvm::Intrinsic::floor);
+  c.llvm_ceil  = intr1(llvm::Intrinsic::ceil);
+  c.llvm_round = intr1(llvm::Intrinsic::round);
+  c.llvm_fabs  = intr1(llvm::Intrinsic::fabs);
+}
+
+TypedVal EmitCtx::resolve_typed(const Operand & op) const
+{
+  switch (op.kind) {
+    case OperandKind::Const:
+      switch (op.scalar_type) {
+        case ST::Int:   return {builder->getInt64(static_cast<int64_t>(op.const_val)), ST::Int};
+        case ST::Bool:  return {builder->getInt1(op.const_val != 0.0), ST::Bool};
+        default:        return {llvm::ConstantFP::get(f64_ty, op.const_val), ST::Float};
+      }
+    case OperandKind::Input:    return {load_input_f64(op.slot), ST::Float};
+    case OperandKind::Reg:      return {load_temp_typed(op.slot, (*temp_types)[op.slot]), (*temp_types)[op.slot]};
+    case OperandKind::StateReg: return {load_reg_typed(op.slot, op.scalar_type), op.scalar_type};
+    case OperandKind::Rate:     return {sample_rate_arg, ST::Float};
+    case OperandKind::Tick:     return {current_sample_idx, ST::Int};
+    case OperandKind::Slot: {
+      llvm::Value * v = load_slot_f64(op.slot);
+      switch (op.scalar_type) {
+        case ST::Float: return {v, ST::Float};
+        case ST::Int:   return {builder->CreateFPToSI(v, i64_ty), ST::Int};
+        case ST::Bool:  return {builder->CreateFCmpONE(v, llvm::ConstantFP::get(f64_ty, 0.0)), ST::Bool};
+      }
+      return {v, ST::Float};
+    }
+    case OperandKind::ArrayReg:
+    case OperandKind::Param:    return {nullptr, ST::Float};
+  }
+  return {nullptr, ST::Float};
+}
+
+TypedVal EmitCtx::emit_typed_op(OpTag tag, ST result_type,
+                                 const std::vector<TypedVal> & tv) const
+{
+  auto arg_as = [&](size_t i, ST target) -> llvm::Value * {
+    return coerce_val(tv[i].first, tv[i].second, target);
+  };
+
+  switch (tag) {
+    case OpTag::Add:
+      if (result_type == ST::Int)   return {builder->CreateAdd(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+      return {builder->CreateFAdd(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Float};
+    case OpTag::Sub:
+      if (result_type == ST::Int)   return {builder->CreateSub(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+      return {builder->CreateFSub(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Float};
+    case OpTag::Mul:
+      if (result_type == ST::Int)   return {builder->CreateMul(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+      return {builder->CreateFMul(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Float};
+    case OpTag::Div: {
+      if (result_type == ST::Int) {
+        llvm::Value * b = arg_as(1, ST::Int);
+        return {builder->CreateSelect(builder->CreateICmpEQ(b, zero_i64), zero_i64, builder->CreateSDiv(arg_as(0, ST::Int), b)), ST::Int};
+      }
+      llvm::Value * b = arg_as(1, ST::Float);
+      return {builder->CreateSelect(builder->CreateFCmpOEQ(b, zero_f64), zero_f64, builder->CreateFDiv(arg_as(0, ST::Float), b)), ST::Float};
+    }
+    case OpTag::Mod: {
+      if (result_type == ST::Int) {
+        llvm::Value * b = arg_as(1, ST::Int);
+        return {builder->CreateSelect(builder->CreateICmpEQ(b, zero_i64), zero_i64, builder->CreateSRem(arg_as(0, ST::Int), b)), ST::Int};
+      }
+      llvm::Value * b = arg_as(1, ST::Float);
+      llvm::Value * a = arg_as(0, ST::Float);
+      llvm::Value * is_zero = builder->CreateFCmpOEQ(b, zero_f64);
+      llvm::Value * q = builder->CreateFDiv(a, b);
+      llvm::Value * fq = builder->CreateCall(llvm_floor, {q});
+      llvm::Value * fmod_result = builder->CreateFSub(a, builder->CreateFMul(fq, b));
+      return {builder->CreateSelect(is_zero, zero_f64, fmod_result), ST::Float};
+    }
+    case OpTag::FloorDiv: {
+      if (result_type == ST::Int) {
+        llvm::Value * b = arg_as(1, ST::Int);
+        return {builder->CreateSelect(builder->CreateICmpEQ(b, zero_i64), zero_i64, builder->CreateSDiv(arg_as(0, ST::Int), b)), ST::Int};
+      }
+      llvm::Value * b = arg_as(1, ST::Float);
+      llvm::Value * dv = builder->CreateSelect(builder->CreateFCmpOEQ(b, zero_f64), zero_f64, builder->CreateFDiv(arg_as(0, ST::Float), b));
+      return {builder->CreateCall(llvm_floor, {dv}), ST::Float};
+    }
+    case OpTag::Less:
+      if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+        return {builder->CreateICmpSLT(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+      return {builder->CreateFCmpOLT(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+    case OpTag::LessEq:
+      if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+        return {builder->CreateICmpSLE(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+      return {builder->CreateFCmpOLE(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+    case OpTag::Greater:
+      if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+        return {builder->CreateICmpSGT(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+      return {builder->CreateFCmpOGT(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+    case OpTag::GreaterEq:
+      if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+        return {builder->CreateICmpSGE(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+      return {builder->CreateFCmpOGE(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+    case OpTag::Equal:
+      if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+        return {builder->CreateICmpEQ(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+      return {builder->CreateFCmpOEQ(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+    case OpTag::NotEqual:
+      if (tv[0].second == ST::Int || tv[1].second == ST::Int)
+        return {builder->CreateICmpNE(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
+      return {builder->CreateFCmpUNE(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
+    case OpTag::And:  return {builder->CreateAnd(arg_as(0, ST::Bool), arg_as(1, ST::Bool)), ST::Bool};
+    case OpTag::Or:   return {builder->CreateOr (arg_as(0, ST::Bool), arg_as(1, ST::Bool)), ST::Bool};
+    case OpTag::BitAnd:  return {builder->CreateAnd(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+    case OpTag::BitOr:   return {builder->CreateOr(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+    case OpTag::BitXor:  return {builder->CreateXor(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+    case OpTag::LShift:  return {builder->CreateShl(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+    case OpTag::RShift:  return {builder->CreateAShr(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
+    case OpTag::Neg:
+      if (result_type == ST::Int)   return {builder->CreateNeg(arg_as(0, ST::Int)), ST::Int};
+      return {builder->CreateFNeg(arg_as(0, ST::Float)), ST::Float};
+    case OpTag::Abs: {
+      if (result_type == ST::Int) {
+        llvm::Value * v = arg_as(0, ST::Int);
+        llvm::Value * neg = builder->CreateNeg(v);
+        return {builder->CreateSelect(builder->CreateICmpSLT(v, zero_i64), neg, v), ST::Int};
+      }
+      return {builder->CreateCall(llvm_fabs, {arg_as(0, ST::Float)}), ST::Float};
+    }
+    case OpTag::Sqrt:   return {builder->CreateCall(llvm_sqrt,  {arg_as(0, ST::Float)}), ST::Float};
+    case OpTag::Floor:  return {builder->CreateCall(llvm_floor, {arg_as(0, ST::Float)}), ST::Float};
+    case OpTag::Ceil:   return {builder->CreateCall(llvm_ceil,  {arg_as(0, ST::Float)}), ST::Float};
+    case OpTag::Round:  return {builder->CreateCall(llvm_round, {arg_as(0, ST::Float)}), ST::Float};
+    case OpTag::Ldexp: {
+      llvm::Value * x  = arg_as(0, ST::Float);
+      llvm::Value * ni = builder->CreateFPToSI(arg_as(1, ST::Float), i64_ty);
+      llvm::Value * bias  = builder->CreateShl(builder->CreateAdd(ni, builder->getInt64(1023)), 52);
+      llvm::Value * scale = builder->CreateBitCast(bias, f64_ty);
+      return {builder->CreateFMul(x, scale), ST::Float};
+    }
+    case OpTag::FloatExponent: {
+      llvm::Value * bits = builder->CreateBitCast(arg_as(0, ST::Float), i64_ty);
+      llvm::Value * e    = builder->CreateSub(builder->CreateAShr(bits, 52), builder->getInt64(1023));
+      return {builder->CreateSIToFP(e, f64_ty), ST::Float};
+    }
+    case OpTag::Not: {
+      if (tv[0].second == ST::Bool)  return {builder->CreateNot(tv[0].first), ST::Bool};
+      if (tv[0].second == ST::Int)   return {builder->CreateICmpEQ(tv[0].first, zero_i64), ST::Bool};
+      return {builder->CreateFCmpOEQ(tv[0].first, zero_f64), ST::Bool};
+    }
+    case OpTag::BitNot:
+      return {builder->CreateNot(arg_as(0, ST::Int)), ST::Int};
+    case OpTag::ToInt:
+      return {coerce_val(tv[0].first, tv[0].second, ST::Int), ST::Int};
+    case OpTag::ToBool:
+      return {coerce_val(tv[0].first, tv[0].second, ST::Bool), ST::Bool};
+    case OpTag::ToFloat:
+      return {coerce_val(tv[0].first, tv[0].second, ST::Float), ST::Float};
+    case OpTag::Clamp: {
+      if (result_type == ST::Int) {
+        llvm::Value * val = arg_as(0, ST::Int);
+        llvm::Value * lo = arg_as(1, ST::Int);
+        llvm::Value * hi = arg_as(2, ST::Int);
+        llvm::Value * lo_c = builder->CreateSelect(builder->CreateICmpSGT(val, lo), val, lo);
+        return {builder->CreateSelect(builder->CreateICmpSLT(lo_c, hi), lo_c, hi), ST::Int};
+      }
+      llvm::Value * val = arg_as(0, ST::Float);
+      llvm::Value * lo = arg_as(1, ST::Float);
+      llvm::Value * hi = arg_as(2, ST::Float);
+      llvm::Value * lo_c = builder->CreateSelect(builder->CreateFCmpOGT(val, lo), val, lo);
+      return {builder->CreateSelect(builder->CreateFCmpOLT(lo_c, hi), lo_c, hi), ST::Float};
+    }
+    case OpTag::Select: {
+      llvm::Value * cond_val;
+      if (tv[0].second == ST::Bool)
+        cond_val = tv[0].first;
+      else if (tv[0].second == ST::Int)
+        cond_val = builder->CreateICmpNE(tv[0].first, zero_i64);
+      else
+        cond_val = builder->CreateFCmpUNE(tv[0].first, zero_f64);
+      return {builder->CreateSelect(cond_val, arg_as(1, result_type), arg_as(2, result_type)), result_type};
+    }
+    default:
+      return {nullptr, ST::Float};
+  }
+}
+
+void EmitCtx::emit_writebacks(const std::vector<InstanceProgram::Writeback> & wbs)
+{
+  for (const auto & wb : wbs) {
+    if (wb.temp_slot < 0) continue;
+    const uint32_t ti = static_cast<uint32_t>(wb.temp_slot);
+    const ST src_ty = (*temp_types)[ti];
+    const ST dst_ty = (wb.state_slot < program->register_types.size())
+      ? program->register_types[wb.state_slot] : ST::Float;
+    llvm::Value * typed_val = load_temp_typed(ti, src_ty);
+    llvm::Value * coerced   = coerce_val(typed_val, src_ty, dst_ty);
+    llvm::Value * as_i64 = nullptr;
+    if (dst_ty == ST::Float)
+      as_i64 = builder->CreateBitCast(coerced, i64_ty);
+    else if (dst_ty == ST::Int)
+      as_i64 = builder->CreateSExtOrBitCast(coerced, i64_ty);
+    else
+      as_i64 = builder->CreateZExt(coerced, i64_ty);
+    llvm::Value * reg_ptr = builder->CreateInBoundsGEP(i64_ty, regs_arg, builder->getInt64(wb.state_slot));
+    builder->CreateStore(as_i64, reg_ptr);
+  }
+}
+
+llvm::Error EmitCtx::emit_instr(const FlatInstr & instr)
+{
+  if (instr.tag == OpTag::SmoothParam) {
+    const uint64_t param_ptr = instr.args[0].ptr;
+    const uint32_t state_slot = instr.args[1].slot;
+    const double coeff = instr.args[2].const_val;
+
+    llvm::Value * reg_gep = builder->CreateInBoundsGEP(i64_ty, regs_arg, builder->getInt64(state_slot));
+    llvm::Value * current  = builder->CreateBitCast(builder->CreateLoad(i64_ty, reg_gep), f64_ty);
+
+    auto pi = param_index->find(param_ptr);
+    uint64_t canonical_idx = (pi != param_index->end()) ? pi->second : 0;
+    llvm::Value * pp_slot = builder->CreateInBoundsGEP(i64_ty, param_ptrs_arg, builder->getInt64(canonical_idx));
+    llvm::Value * pp_raw  = builder->CreateLoad(i64_ty, pp_slot);
+    llvm::Value * pp_addr = builder->CreateIntToPtr(pp_raw, ptr_ty);
+    auto * target_ld = builder->CreateAlignedLoad(f64_ty, pp_addr, llvm::Align(sizeof(double)));
+    target_ld->setAtomic(llvm::AtomicOrdering::Monotonic);
+
+    llvm::Value * diff    = builder->CreateFSub(target_ld, current);
+    llvm::Value * new_val = builder->CreateFAdd(current, builder->CreateFMul(llvm::ConstantFP::get(f64_ty, coeff), diff));
+    builder->CreateStore(builder->CreateBitCast(new_val, i64_ty), reg_gep);
+    store_temp_f64(instr.dst, new_val);
+    (*temp_types)[instr.dst] = ST::Float;
+    return llvm::Error::success();
+  }
+  if (instr.tag == OpTag::WriteSlot) {
+    auto [v, t] = resolve_typed(instr.args[0]);
+    llvm::Value * v_f64 = coerce_val(v, t, ST::Float);
+    store_slot_f64(instr.dst, v_f64);
+    return llvm::Error::success();
+  }
+  if (instr.tag == OpTag::Pack) {
+    llvm::Value * dst_ptr = load_array_ptr_f(instr.dst);
+    for (std::size_t i = 0; i < instr.args.size(); ++i) {
+      llvm::Value * val = resolve_as_f64(instr.args[i]);
+      llvm::Value * ep  = builder->CreateInBoundsGEP(i64_ty, dst_ptr, builder->getInt64(static_cast<int64_t>(i)));
+      builder->CreateStore(builder->CreateBitCast(val, i64_ty), ep);
+    }
+    return llvm::Error::success();
+  }
+  if (instr.tag == OpTag::Index) {
+    const uint32_t arr_slot = instr.args[0].slot;
+    llvm::Value * array_size = load_array_size_f(arr_slot);
+    llvm::Value * array_ptr  = load_array_ptr_f(arr_slot);
+    auto [idx_v, idx_t] = resolve_typed(instr.args[1]);
+    llvm::Value * raw_idx = coerce_val(idx_v, idx_t, ST::Int);
+    llvm::Value * in_range = builder->CreateAnd(
+      builder->CreateNot(builder->CreateICmpSLT(raw_idx, builder->getInt64(0))),
+      builder->CreateICmpULT(raw_idx, array_size));
+    llvm::Value * ep  = builder->CreateInBoundsGEP(i64_ty, array_ptr, raw_idx);
+    llvm::Value * val = builder->CreateBitCast(builder->CreateLoad(i64_ty, ep), f64_ty);
+    store_temp_f64(instr.dst, builder->CreateSelect(in_range, val, zero_f64));
+    (*temp_types)[instr.dst] = ST::Float;
+    return llvm::Error::success();
+  }
+  if (instr.tag == OpTag::SetElement) {
+    const uint32_t arr_slot = instr.args[0].slot;
+    llvm::Value * array_size = load_array_size_f(arr_slot);
+    llvm::Value * array_ptr  = load_array_ptr_f(arr_slot);
+    auto [idx_v, idx_t] = resolve_typed(instr.args[1]);
+    llvm::Value * raw_idx = coerce_val(idx_v, idx_t, ST::Int);
+    llvm::Value * in_range = builder->CreateAnd(
+      builder->CreateNot(builder->CreateICmpSLT(raw_idx, builder->getInt64(0))),
+      builder->CreateICmpULT(raw_idx, array_size));
+    llvm::BasicBlock * write_bb = llvm::BasicBlock::Create(*context, "set_elem_write", fn);
+    llvm::BasicBlock * merge_bb = llvm::BasicBlock::Create(*context, "set_elem_merge", fn);
+    builder->CreateCondBr(in_range, write_bb, merge_bb);
+    builder->SetInsertPoint(write_bb);
+    llvm::Value * ep = builder->CreateInBoundsGEP(i64_ty, array_ptr, raw_idx);
+    builder->CreateStore(builder->CreateBitCast(resolve_as_f64(instr.args[2]), i64_ty), ep);
+    builder->CreateBr(merge_bb);
+    builder->SetInsertPoint(merge_bb);
+    return llvm::Error::success();
+  }
+  if (instr.loop_count > 1) {
+    const std::size_t nargs = instr.args.size();
+    std::vector<llvm::Value *> arr_ptrs(nargs, nullptr);
+    std::vector<TypedVal> scalar_tvs(nargs, {nullptr, ST::Float});
+    for (std::size_t i = 0; i < nargs; ++i) {
+      if (i < instr.strides.size() && instr.strides[i] == 1)
+        arr_ptrs[i] = load_array_ptr_f(instr.args[i].slot);
+      else
+        scalar_tvs[i] = resolve_typed(instr.args[i]);
+    }
+
+    auto is_simd_float_op = [](OpTag t) {
+      return t == OpTag::Add || t == OpTag::Sub
+          || t == OpTag::Mul || t == OpTag::Div
+          || t == OpTag::Neg || t == OpTag::Abs
+          || t == OpTag::Sqrt;
+    };
+    bool simd_ok = (instr.result_type == ST::Float)
+                && is_simd_float_op(instr.tag)
+                && (instr.strides.size() == nargs);
+    for (std::size_t i = 0; simd_ok && i < nargs; ++i) {
+      const uint8_t s = instr.strides[i];
+      if (s != 0 && s != 1) simd_ok = false;
+    }
+    if (simd_ok) {
+      const uint32_t N = instr.loop_count;
+      llvm::Type * vec_ty = llvm::FixedVectorType::get(f64_ty, N);
+      llvm::Value * dst_ptr_v = load_array_ptr_f(instr.dst);
+
+      std::vector<llvm::Value *> vops(nargs, nullptr);
+      for (std::size_t i = 0; i < nargs; ++i) {
+        if (instr.strides[i] == 1) {
+          vops[i] = builder->CreateAlignedLoad(vec_ty, arr_ptrs[i], llvm::Align(sizeof(double)));
+        } else {
+          llvm::Value * sv = coerce_val(scalar_tvs[i].first, scalar_tvs[i].second, ST::Float);
+          vops[i] = builder->CreateVectorSplat(N, sv);
+        }
+      }
+
+      llvm::Value * vres = nullptr;
+      switch (instr.tag) {
+        case OpTag::Add: vres = builder->CreateFAdd(vops[0], vops[1]); break;
+        case OpTag::Sub: vres = builder->CreateFSub(vops[0], vops[1]); break;
+        case OpTag::Mul: vres = builder->CreateFMul(vops[0], vops[1]); break;
+        case OpTag::Div: {
+          llvm::Value * zv = llvm::ConstantFP::get(vec_ty, 0.0);
+          llvm::Value * is_zero = builder->CreateFCmpOEQ(vops[1], zv);
+          llvm::Value * dv = builder->CreateFDiv(vops[0], vops[1]);
+          vres = builder->CreateSelect(is_zero, zv, dv);
+          break;
+        }
+        case OpTag::Neg:  vres = builder->CreateFNeg(vops[0]); break;
+        case OpTag::Abs: {
+          llvm::FunctionCallee fabs_v = llvm::Intrinsic::getOrInsertDeclaration(
+            module, llvm::Intrinsic::fabs, {vec_ty});
+          vres = builder->CreateCall(fabs_v, {vops[0]});
+          break;
+        }
+        case OpTag::Sqrt: {
+          llvm::FunctionCallee sqrt_v = llvm::Intrinsic::getOrInsertDeclaration(
+            module, llvm::Intrinsic::sqrt, {vec_ty});
+          vres = builder->CreateCall(sqrt_v, {vops[0]});
+          break;
+        }
+        default: break;
+      }
+
+      if (vres) {
+        builder->CreateAlignedStore(vres, dst_ptr_v, llvm::Align(sizeof(double)));
+        return llvm::Error::success();
+      }
+    }
+
+    llvm::Value * loop_n    = builder->getInt64(instr.loop_count);
+    llvm::Value * dst_ptr   = load_array_ptr_f(instr.dst);
+    llvm::Value * idx_alloc = builder->CreateAlloca(i64_ty, nullptr, "ew_idx");
+    builder->CreateStore(builder->getInt64(0), idx_alloc);
+
+    llvm::BasicBlock * cond_bb = llvm::BasicBlock::Create(*context, "ew_cond", fn);
+    llvm::BasicBlock * body_bb = llvm::BasicBlock::Create(*context, "ew_body", fn);
+    llvm::BasicBlock * end_bb  = llvm::BasicBlock::Create(*context, "ew_end",  fn);
+    builder->CreateBr(cond_bb);
+
+    builder->SetInsertPoint(cond_bb);
+    llvm::Value * idx = builder->CreateLoad(i64_ty, idx_alloc);
+    builder->CreateCondBr(builder->CreateICmpULT(idx, loop_n), body_bb, end_bb);
+
+    builder->SetInsertPoint(body_bb);
+    std::vector<TypedVal> iter_tvs(nargs, {nullptr, ST::Float});
+    for (std::size_t i = 0; i < nargs; ++i) {
+      if (arr_ptrs[i]) {
+        llvm::Value * ep = builder->CreateInBoundsGEP(i64_ty, arr_ptrs[i], idx);
+        iter_tvs[i] = {builder->CreateBitCast(builder->CreateLoad(i64_ty, ep), f64_ty), ST::Float};
+      } else {
+        iter_tvs[i] = scalar_tvs[i];
+      }
+    }
+    auto [elem_result, elem_actual_ty] = emit_typed_op(instr.tag, instr.result_type, iter_tvs);
+    if (!elem_result) {
+      return llvm::make_error<llvm::StringError>(
+        "emit_instr: unsupported OpTag in elementwise loop",
+        llvm::inconvertibleErrorCode());
+    }
+    llvm::Value * as_f64 = coerce_val(elem_result, elem_actual_ty, ST::Float);
+    llvm::Value * dep = builder->CreateInBoundsGEP(i64_ty, dst_ptr, idx);
+    builder->CreateStore(builder->CreateBitCast(as_f64, i64_ty), dep);
+    builder->CreateStore(builder->CreateAdd(idx, builder->getInt64(1)), idx_alloc);
+    builder->CreateBr(cond_bb);
+
+    builder->SetInsertPoint(end_bb);
+    return llvm::Error::success();
+  }
+
+  std::vector<TypedVal> tvs;
+  tvs.reserve(instr.args.size());
+  for (const auto & arg : instr.args)
+    tvs.push_back(resolve_typed(arg));
+
+  auto [result, actual_ty] = emit_typed_op(instr.tag, instr.result_type, tvs);
+  if (!result) {
+    return llvm::make_error<llvm::StringError>(
+      "emit_instr: unsupported scalar OpTag",
+      llvm::inconvertibleErrorCode());
+  }
+  llvm::Value * coerced = coerce_val(result, actual_ty, instr.result_type);
+  store_temp_typed(instr.dst, coerced, instr.result_type);
+  (*temp_types)[instr.dst] = instr.result_type;
+  return llvm::Error::success();
+}
+
+} // anonymous namespace
+
+// ---------------------------------------------------------------------------
 // compile_flat_program — emission path for tropical_plan_4 / FlatProgram.
 //
 // Terminals (Const, Input, Reg, StateReg, Param, Rate, Tick) are Operands
@@ -516,356 +1141,44 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   // M6: tag slots explicitly so GVN can prove no-alias and forward
   // store-to-load. Without these, even with IRTransformLayer running
   // GVN, slot loads may not be eliminated (spike #3 finding).
+  //
+  // LLVM 21 replaced the boolean `NoCapture` attribute with the
+  // granular `Captures` attribute carrying a `CaptureInfo`. The
+  // semantic equivalent of the old NoCapture is
+  // `CaptureInfo::none()` — pointer is not captured at all.
+#if LLVM_VERSION_MAJOR >= 21
+  slots_arg_a->addAttr(llvm::Attribute::getWithCaptureInfo(*context, llvm::CaptureInfo::none()));
+#else
   slots_arg_a->addAttr(llvm::Attribute::NoCapture);
+#endif
   slots_arg_a->addAttr(llvm::Attribute::NoAlias);
 
   llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
   builder.SetInsertPoint(entry);
 
-  // ── Slot helpers ──
-  auto gep_temp = [&](uint32_t idx) {
-    return builder.CreateInBoundsGEP(i64_ty, temps_arg, builder.getInt64(idx));
-  };
-  auto load_temp_f64 = [&](uint32_t idx) -> llvm::Value * {
-    return builder.CreateBitCast(builder.CreateLoad(i64_ty, gep_temp(idx)), f64_ty);
-  };
-  auto store_temp_f64 = [&](uint32_t idx, llvm::Value * v) {
-    builder.CreateStore(builder.CreateBitCast(v, i64_ty), gep_temp(idx));
-  };
-  auto load_reg_f64 = [&](uint32_t slot) -> llvm::Value * {
-    llvm::Value * ptr = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(slot));
-    return builder.CreateBitCast(builder.CreateLoad(i64_ty, ptr), f64_ty);
-  };
-  auto load_input_f64 = [&](uint32_t slot) -> llvm::Value * {
-    llvm::Value * ptr = builder.CreateInBoundsGEP(i64_ty, inputs_arg, builder.getInt64(slot));
-    return builder.CreateBitCast(builder.CreateLoad(i64_ty, ptr), f64_ty);
-  };
-  auto load_array_ptr_f = [&](uint32_t slot) -> llvm::Value * {
-    llvm::Value * pp = builder.CreateInBoundsGEP(ptr_ty, arrays_arg, builder.getInt64(slot));
-    return builder.CreateLoad(ptr_ty, pp);
-  };
-  auto load_array_size_f = [&](uint32_t slot) -> llvm::Value * {
-    llvm::Value * sp = builder.CreateInBoundsGEP(i64_ty, array_sizes_arg, builder.getInt64(slot));
-    return builder.CreateLoad(i64_ty, sp);
-  };
-
-  // M6: slot helpers. Slots are stored as double[] (not int64 like
-  // temps/registers/inputs) — direct f64 load/store, no bit-cast
-  // round-trip. Spike #1 confirmed GVN eliminates redundant slot
-  // loads when the slots arg has nocapture+noalias attributes (set
-  // above).
-  auto load_slot_f64 = [&](uint32_t idx) -> llvm::Value * {
-    llvm::Value * ptr = builder.CreateInBoundsGEP(f64_ty, slots_arg, builder.getInt64(idx));
-    return builder.CreateLoad(f64_ty, ptr);
-  };
-  auto store_slot_f64 = [&](uint32_t idx, llvm::Value * v) {
-    llvm::Value * ptr = builder.CreateInBoundsGEP(f64_ty, slots_arg, builder.getInt64(idx));
-    builder.CreateStore(v, ptr);
-  };
-
-  // ── Typed load/store helpers ──
-  using ST = JitScalarType;
-
-  auto load_temp_typed = [&](uint32_t idx, ST ty) -> llvm::Value * {
-    llvm::Value * raw = builder.CreateLoad(i64_ty, gep_temp(idx));
-    switch (ty)
-    {
-      case ST::Float: return builder.CreateBitCast(raw, f64_ty);
-      case ST::Int:   return raw;
-      case ST::Bool:  return builder.CreateTrunc(raw, i1_ty);
-    }
-    return builder.CreateBitCast(raw, f64_ty);
-  };
-
-  auto store_temp_typed = [&](uint32_t idx, llvm::Value * v, ST ty) {
-    llvm::Value * as_i64;
-    switch (ty)
-    {
-      case ST::Float: as_i64 = builder.CreateBitCast(v, i64_ty); break;
-      case ST::Int:   as_i64 = v; break;  // already i64
-      case ST::Bool:  as_i64 = builder.CreateZExt(v, i64_ty); break;
-    }
-    builder.CreateStore(as_i64, gep_temp(idx));
-  };
-
-  auto load_reg_typed = [&](uint32_t slot, ST ty) -> llvm::Value * {
-    llvm::Value * ptr = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(slot));
-    llvm::Value * raw = builder.CreateLoad(i64_ty, ptr);
-    switch (ty)
-    {
-      case ST::Float: return builder.CreateBitCast(raw, f64_ty);
-      case ST::Int:   return raw;
-      case ST::Bool:  return builder.CreateTrunc(raw, i1_ty);
-    }
-    return builder.CreateBitCast(raw, f64_ty);
-  };
-
-  // ── Constants ──
-  llvm::Value * zero_f64  = llvm::ConstantFP::get(f64_ty, 0.0);
-  llvm::Value * one_f64   = llvm::ConstantFP::get(f64_ty, 1.0);
-  llvm::Value * zero_i64  = builder.getInt64(0);
-  llvm::Value * zero_i1   = builder.getFalse();
-
-  // ── Coercion helper ──
-  auto coerce = [&](llvm::Value * v, ST from, ST to) -> llvm::Value * {
-    if (from == to) return v;
-    if (from == ST::Float && to == ST::Int)   return builder.CreateFPToSI(v, i64_ty);
-    if (from == ST::Float && to == ST::Bool)  return builder.CreateFCmpUNE(v, zero_f64);
-    if (from == ST::Int   && to == ST::Float) return builder.CreateSIToFP(v, f64_ty);
-    if (from == ST::Int   && to == ST::Bool)  return builder.CreateICmpNE(v, zero_i64);
-    if (from == ST::Bool  && to == ST::Float) return builder.CreateUIToFP(v, f64_ty);
-    if (from == ST::Bool  && to == ST::Int)   return builder.CreateZExt(v, i64_ty);
-    return v;
-  };
-  auto intr1 = [&](llvm::Intrinsic::ID id) {
-    return llvm::Intrinsic::getOrInsertDeclaration(module.get(), id, {f64_ty});
-  };
-  // Hardware single-instruction ops — keep as intrinsics
-  llvm::FunctionCallee llvm_sqrt  = intr1(llvm::Intrinsic::sqrt);
-  llvm::FunctionCallee llvm_floor = intr1(llvm::Intrinsic::floor);
-  llvm::FunctionCallee llvm_ceil  = intr1(llvm::Intrinsic::ceil);
-  llvm::FunctionCallee llvm_round = intr1(llvm::Intrinsic::round);
-  llvm::FunctionCallee llvm_fabs  = intr1(llvm::Intrinsic::fabs);
-
-  // current_sample_idx is set inside the buffer loop (PHI node)
-  llvm::Value * current_sample_idx = nullptr;
-
-  // Typed value: LLVM value + its JIT scalar type
-  using TypedVal = std::pair<llvm::Value *, ST>;
-
-  // Per-temp register type tracking (updated per instruction)
+  // ── EmitCtx setup ──
+  // The slot/typed/coerce/resolve/emit_* helpers live as methods on EmitCtx
+  // so both fused-mode (here) and microkernel-mode (compile_microkernel)
+  // share one codegen path. EmitCtx holds the per-compilation builder +
+  // types + intrinsics + per-temp type table; argument values are bound
+  // just below from this function's signature.
+  EmitCtx ctx;
+  emit_ctx_init_module(ctx, *context, builder, *module);
+  ctx.fn              = fn;
+  ctx.inputs_arg      = inputs_arg;
+  ctx.regs_arg        = regs_arg;
+  ctx.arrays_arg      = arrays_arg;
+  ctx.array_sizes_arg = array_sizes_arg;
+  ctx.temps_arg       = temps_arg;
+  ctx.sample_rate_arg = sample_rate_arg;
+  ctx.param_ptrs_arg  = param_ptrs_arg;
+  ctx.slots_arg       = slots_arg;
+  ctx.program         = &program;
+  ctx.param_index     = &param_index;
+  // Per-temp register type tracking (updated per instruction). Lives on
+  // the stack so its lifetime spans the whole compile; ctx points to it.
   std::vector<ST> temp_types(program.register_count, ST::Float);
-
-  // ── resolve_typed: Operand → (llvm::Value*, JitScalarType) ──
-  auto resolve_typed = [&](const Operand & op) -> TypedVal {
-    switch (op.kind)
-    {
-      case OperandKind::Const:
-        switch (op.scalar_type)
-        {
-          case ST::Int:   return {builder.getInt64(static_cast<int64_t>(op.const_val)), ST::Int};
-          case ST::Bool:  return {builder.getInt1(op.const_val != 0.0), ST::Bool};
-          default:        return {llvm::ConstantFP::get(f64_ty, op.const_val), ST::Float};
-        }
-      case OperandKind::Input:    return {load_input_f64(op.slot), ST::Float};
-      case OperandKind::Reg:      return {load_temp_typed(op.slot, temp_types[op.slot]), temp_types[op.slot]};
-      case OperandKind::StateReg: return {load_reg_typed(op.slot, op.scalar_type), op.scalar_type};
-      case OperandKind::Rate:     return {sample_rate_arg, ST::Float};
-      case OperandKind::Tick:     return {current_sample_idx, ST::Int};
-      // M6: slot operand. Stored as f64; coerce to declared scalar_type
-      // for int/bool slots (matches the temp/reg coercion convention).
-      case OperandKind::Slot: {
-        llvm::Value * v = load_slot_f64(op.slot);
-        switch (op.scalar_type)
-        {
-          case ST::Float: return {v, ST::Float};
-          case ST::Int:   return {builder.CreateFPToSI(v, i64_ty), ST::Int};
-          case ST::Bool:  return {builder.CreateFCmpONE(v, llvm::ConstantFP::get(f64_ty, 0.0)), ST::Bool};
-        }
-        return {v, ST::Float};
-      }
-      case OperandKind::ArrayReg:
-      case OperandKind::Param:    return {nullptr, ST::Float};
-    }
-    return {nullptr, ST::Float};
-  };
-
-  // Convenience: resolve and coerce to f64 (for legacy/array paths)
-  auto resolve_as_f64 = [&](const Operand & op) -> llvm::Value * {
-    auto [v, t] = resolve_typed(op);
-    return v ? coerce(v, t, ST::Float) : nullptr;
-  };
-
-  // ── emit_typed_op: OpTag × result_type × [(Value*, Type)] → (Value*, actual_type) ──
-  // Returns the computed value and its actual LLVM scalar type.
-  // The caller coerces from actual_type → result_type before storing.
-  auto emit_typed_op = [&](OpTag tag, ST result_type,
-                           const std::vector<TypedVal> & tv) -> TypedVal
-  {
-    // Helper: coerce arg to a target type
-    auto arg_as = [&](size_t i, ST target) -> llvm::Value * {
-      return coerce(tv[i].first, tv[i].second, target);
-    };
-
-    switch (tag)
-    {
-      // ── Arithmetic (type-directed, actual == result_type) ──
-      case OpTag::Add:
-        if (result_type == ST::Int)   return {builder.CreateAdd(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
-        return {builder.CreateFAdd(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Float};
-      case OpTag::Sub:
-        if (result_type == ST::Int)   return {builder.CreateSub(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
-        return {builder.CreateFSub(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Float};
-      case OpTag::Mul:
-        if (result_type == ST::Int)   return {builder.CreateMul(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
-        return {builder.CreateFMul(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Float};
-      case OpTag::Div:
-      {
-        if (result_type == ST::Int)
-        {
-          llvm::Value * b = arg_as(1, ST::Int);
-          return {builder.CreateSelect(builder.CreateICmpEQ(b, zero_i64), zero_i64, builder.CreateSDiv(arg_as(0, ST::Int), b)), ST::Int};
-        }
-        llvm::Value * b = arg_as(1, ST::Float);
-        return {builder.CreateSelect(builder.CreateFCmpOEQ(b, zero_f64), zero_f64, builder.CreateFDiv(arg_as(0, ST::Float), b)), ST::Float};
-      }
-      case OpTag::Mod:
-      {
-        if (result_type == ST::Int)
-        {
-          llvm::Value * b = arg_as(1, ST::Int);
-          return {builder.CreateSelect(builder.CreateICmpEQ(b, zero_i64), zero_i64, builder.CreateSRem(arg_as(0, ST::Int), b)), ST::Int};
-        }
-        // fmod(a, b) = a - floor(a/b) * b — no libm call
-        llvm::Value * b = arg_as(1, ST::Float);
-        llvm::Value * a = arg_as(0, ST::Float);
-        llvm::Value * is_zero = builder.CreateFCmpOEQ(b, zero_f64);
-        llvm::Value * q = builder.CreateFDiv(a, b);
-        llvm::Value * fq = builder.CreateCall(llvm_floor, {q});
-        llvm::Value * fmod_result = builder.CreateFSub(a, builder.CreateFMul(fq, b));
-        return {builder.CreateSelect(is_zero, zero_f64, fmod_result), ST::Float};
-      }
-      case OpTag::FloorDiv:
-      {
-        if (result_type == ST::Int)
-        {
-          llvm::Value * b = arg_as(1, ST::Int);
-          return {builder.CreateSelect(builder.CreateICmpEQ(b, zero_i64), zero_i64, builder.CreateSDiv(arg_as(0, ST::Int), b)), ST::Int};
-        }
-        llvm::Value * b = arg_as(1, ST::Float);
-        llvm::Value * dv = builder.CreateSelect(builder.CreateFCmpOEQ(b, zero_f64), zero_f64, builder.CreateFDiv(arg_as(0, ST::Float), b));
-        return {builder.CreateCall(llvm_floor, {dv}), ST::Float};
-      }
-
-      // ── Comparisons → always Bool (i1) ──
-      case OpTag::Less:
-        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
-          return {builder.CreateICmpSLT(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
-        return {builder.CreateFCmpOLT(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
-      case OpTag::LessEq:
-        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
-          return {builder.CreateICmpSLE(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
-        return {builder.CreateFCmpOLE(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
-      case OpTag::Greater:
-        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
-          return {builder.CreateICmpSGT(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
-        return {builder.CreateFCmpOGT(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
-      case OpTag::GreaterEq:
-        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
-          return {builder.CreateICmpSGE(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
-        return {builder.CreateFCmpOGE(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
-      case OpTag::Equal:
-        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
-          return {builder.CreateICmpEQ(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
-        return {builder.CreateFCmpOEQ(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
-      case OpTag::NotEqual:
-        if (tv[0].second == ST::Int || tv[1].second == ST::Int)
-          return {builder.CreateICmpNE(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Bool};
-        return {builder.CreateFCmpUNE(arg_as(0, ST::Float), arg_as(1, ST::Float)), ST::Bool};
-
-      // ── Logical → always Bool (i1), coerces any input type via truthy check ──
-      case OpTag::And:  return {builder.CreateAnd(arg_as(0, ST::Bool), arg_as(1, ST::Bool)), ST::Bool};
-      case OpTag::Or:   return {builder.CreateOr (arg_as(0, ST::Bool), arg_as(1, ST::Bool)), ST::Bool};
-
-      // ── Bitwise → always Int (i64) ──
-      case OpTag::BitAnd:  return {builder.CreateAnd(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
-      case OpTag::BitOr:   return {builder.CreateOr(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
-      case OpTag::BitXor:  return {builder.CreateXor(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
-      case OpTag::LShift:  return {builder.CreateShl(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
-      case OpTag::RShift:  return {builder.CreateAShr(arg_as(0, ST::Int), arg_as(1, ST::Int)), ST::Int};
-
-      // ── Unary ──
-      case OpTag::Neg:
-        if (result_type == ST::Int)   return {builder.CreateNeg(arg_as(0, ST::Int)), ST::Int};
-        return {builder.CreateFNeg(arg_as(0, ST::Float)), ST::Float};
-      case OpTag::Abs:
-      {
-        if (result_type == ST::Int)
-        {
-          llvm::Value * v = arg_as(0, ST::Int);
-          llvm::Value * neg = builder.CreateNeg(v);
-          return {builder.CreateSelect(builder.CreateICmpSLT(v, zero_i64), neg, v), ST::Int};
-        }
-        return {builder.CreateCall(llvm_fabs, {arg_as(0, ST::Float)}), ST::Float};
-      }
-
-      // ── Float math (sqrt uses hardware; other transcendentals live in stdlib) ──
-      case OpTag::Sqrt:   return {builder.CreateCall(llvm_sqrt,  {arg_as(0, ST::Float)}), ST::Float};
-      case OpTag::Floor:  return {builder.CreateCall(llvm_floor, {arg_as(0, ST::Float)}), ST::Float};
-      case OpTag::Ceil:   return {builder.CreateCall(llvm_ceil,  {arg_as(0, ST::Float)}), ST::Float};
-      case OpTag::Round:  return {builder.CreateCall(llvm_round, {arg_as(0, ST::Float)}), ST::Float};
-
-      // ── Float bit-level ops (range reconstruction for pure-ExprNode exp/log) ──
-      // Ldexp(x, n): x * 2^n where n is a float-valued integer.
-      // Builds the 2^n scale via IEEE-754 exponent injection (single fmul, no libm).
-      case OpTag::Ldexp:
-      {
-        llvm::Value * x  = arg_as(0, ST::Float);
-        llvm::Value * ni = builder.CreateFPToSI(arg_as(1, ST::Float), i64_ty);
-        llvm::Value * bias  = builder.CreateShl(builder.CreateAdd(ni, builder.getInt64(1023)), 52);
-        llvm::Value * scale = builder.CreateBitCast(bias, f64_ty);
-        return {builder.CreateFMul(x, scale), ST::Float};
-      }
-      // FloatExponent(x): unbiased IEEE-754 exponent of x, returned as a float-valued integer.
-      case OpTag::FloatExponent:
-      {
-        llvm::Value * bits = builder.CreateBitCast(arg_as(0, ST::Float), i64_ty);
-        llvm::Value * e    = builder.CreateSub(builder.CreateAShr(bits, 52), builder.getInt64(1023));
-        return {builder.CreateSIToFP(e, f64_ty), ST::Float};
-      }
-
-      // ── Boolean/bitwise unary ──
-      case OpTag::Not:
-      {
-        if (tv[0].second == ST::Bool)  return {builder.CreateNot(tv[0].first), ST::Bool};
-        if (tv[0].second == ST::Int)   return {builder.CreateICmpEQ(tv[0].first, zero_i64), ST::Bool};
-        return {builder.CreateFCmpOEQ(tv[0].first, zero_f64), ST::Bool};
-      }
-      case OpTag::BitNot:
-        return {builder.CreateNot(arg_as(0, ST::Int)), ST::Int};
-
-      // ── Scalar-type cast ops (explicit narrowing) ──
-      // FPToSI semantics: truncate toward zero. For floor-to-int, use
-      // to_int(floor(x)); for round-to-nearest, use to_int(round(x)).
-      case OpTag::ToInt:
-        return {coerce(tv[0].first, tv[0].second, ST::Int), ST::Int};
-      case OpTag::ToBool:
-        return {coerce(tv[0].first, tv[0].second, ST::Bool), ST::Bool};
-      case OpTag::ToFloat:
-        return {coerce(tv[0].first, tv[0].second, ST::Float), ST::Float};
-
-      // ── Ternary ──
-      case OpTag::Clamp:
-      {
-        if (result_type == ST::Int)
-        {
-          llvm::Value * val = arg_as(0, ST::Int);
-          llvm::Value * lo = arg_as(1, ST::Int);
-          llvm::Value * hi = arg_as(2, ST::Int);
-          llvm::Value * lo_c = builder.CreateSelect(builder.CreateICmpSGT(val, lo), val, lo);
-          return {builder.CreateSelect(builder.CreateICmpSLT(lo_c, hi), lo_c, hi), ST::Int};
-        }
-        llvm::Value * val = arg_as(0, ST::Float);
-        llvm::Value * lo = arg_as(1, ST::Float);
-        llvm::Value * hi = arg_as(2, ST::Float);
-        llvm::Value * lo_c = builder.CreateSelect(builder.CreateFCmpOGT(val, lo), val, lo);
-        return {builder.CreateSelect(builder.CreateFCmpOLT(lo_c, hi), lo_c, hi), ST::Float};
-      }
-      case OpTag::Select:
-      {
-        llvm::Value * cond_val;
-        if (tv[0].second == ST::Bool)
-          cond_val = tv[0].first;
-        else if (tv[0].second == ST::Int)
-          cond_val = builder.CreateICmpNE(tv[0].first, zero_i64);
-        else
-          cond_val = builder.CreateFCmpUNE(tv[0].first, zero_f64);
-        return {builder.CreateSelect(cond_val, arg_as(1, result_type), arg_as(2, result_type)), result_type};
-      }
-      default:
-        return {nullptr, ST::Float};
-    }
-  };
+  ctx.temp_types      = &temp_types;
 
   // ── Buffer loop: process buffer_length samples ──
   llvm::BasicBlock * loop_cond_bb = llvm::BasicBlock::Create(*context, "loop_cond", fn);
@@ -878,7 +1191,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   builder.SetInsertPoint(loop_cond_bb);
   llvm::PHINode * loop_counter = builder.CreatePHI(i64_ty, 2, "s");
   loop_counter->addIncoming(builder.getInt64(0), entry);
-  current_sample_idx = builder.CreateAdd(start_sample_idx_arg, loop_counter, "current_idx");
+  ctx.current_sample_idx = builder.CreateAdd(start_sample_idx_arg, loop_counter, "current_idx");
   llvm::Value * loop_cond_val = builder.CreateICmpULT(loop_counter, buffer_length_arg);
   builder.CreateCondBr(loop_cond_val, loop_body_bb, loop_end_bb);
 
@@ -886,332 +1199,19 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   //            + writeback (per-instance, inside conditional) + output mixing
   builder.SetInsertPoint(loop_body_bb);
 
-  // Instruction emitter for a single FlatInstr. Used by the scheduler's
-  // preamble/postamble and by each instance's body — all of which
-  // share the unified temp/state/array spaces, so the per-temp type
-  // tracking is a single vector accumulating across the entire
-  // per-sample sequence.
-  auto emit_instr = [&](const FlatInstr & instr) -> llvm::Error
-  {
-    // ── SmoothParam ──
-    if (instr.tag == OpTag::SmoothParam)
-    {
-      // args: [Param(ptr), StateReg(slot), Const(coeff)]
-      const uint64_t param_ptr = instr.args[0].ptr;
-      const uint32_t state_slot = instr.args[1].slot;
-      const double coeff = instr.args[2].const_val;
-
-      llvm::Value * reg_gep = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(state_slot));
-      llvm::Value * current  = builder.CreateBitCast(builder.CreateLoad(i64_ty, reg_gep), f64_ty);
-
-      auto pi = param_index.find(param_ptr);
-      uint64_t canonical_idx = (pi != param_index.end()) ? pi->second : 0;
-      llvm::Value * pp_slot = builder.CreateInBoundsGEP(i64_ty, param_ptrs_arg, builder.getInt64(canonical_idx));
-      llvm::Value * pp_raw  = builder.CreateLoad(i64_ty, pp_slot);
-      llvm::Value * pp_addr = builder.CreateIntToPtr(pp_raw, ptr_ty);
-      auto * target_ld = builder.CreateAlignedLoad(f64_ty, pp_addr, llvm::Align(sizeof(double)));
-      target_ld->setAtomic(llvm::AtomicOrdering::Monotonic);
-
-      llvm::Value * diff    = builder.CreateFSub(target_ld, current);
-      llvm::Value * new_val = builder.CreateFAdd(current, builder.CreateFMul(llvm::ConstantFP::get(f64_ty, coeff), diff));
-      builder.CreateStore(builder.CreateBitCast(new_val, i64_ty), reg_gep);
-      store_temp_f64(instr.dst, new_val);
-      temp_types[instr.dst] = ST::Float;
-      return llvm::Error::success();
-    }
-
-    // ── WriteSlot: write a computed value to slots[dst] (M6+) ──
-    // Used by slot-mode plans to commit each module instance's outputs
-    // to the shared inter-module slot array. `dst` is the slot index;
-    // `args[0]` is the value to write. No temp is consumed, no result
-    // is produced — pure side effect.
-    if (instr.tag == OpTag::WriteSlot)
-    {
-      auto [v, t] = resolve_typed(instr.args[0]);
-      llvm::Value * v_f64 = coerce(v, t, ST::Float);
-      store_slot_f64(instr.dst, v_f64);
-      return llvm::Error::success();
-    }
-
-    // ── Pack: N scalar args → arrays[dst] ──
-    if (instr.tag == OpTag::Pack)
-    {
-      llvm::Value * dst_ptr = load_array_ptr_f(instr.dst);
-      for (std::size_t i = 0; i < instr.args.size(); ++i)
-      {
-        llvm::Value * val = resolve_as_f64(instr.args[i]);
-        llvm::Value * ep  = builder.CreateInBoundsGEP(i64_ty, dst_ptr, builder.getInt64(static_cast<int64_t>(i)));
-        builder.CreateStore(builder.CreateBitCast(val, i64_ty), ep);
-      }
-      return llvm::Error::success();
-    }
-
-    // ── Index: arrays[args[0].slot][args[1]] → temps[dst] ──
-    if (instr.tag == OpTag::Index)
-    {
-      const uint32_t arr_slot = instr.args[0].slot;
-      llvm::Value * array_size = load_array_size_f(arr_slot);
-      llvm::Value * array_ptr  = load_array_ptr_f(arr_slot);
-      auto [idx_v, idx_t] = resolve_typed(instr.args[1]);
-      llvm::Value * raw_idx = coerce(idx_v, idx_t, ST::Int);
-      llvm::Value * in_range   = builder.CreateAnd(
-        builder.CreateNot(builder.CreateICmpSLT(raw_idx, builder.getInt64(0))),
-        builder.CreateICmpULT(raw_idx, array_size));
-      llvm::Value * ep  = builder.CreateInBoundsGEP(i64_ty, array_ptr, raw_idx);
-      llvm::Value * val = builder.CreateBitCast(builder.CreateLoad(i64_ty, ep), f64_ty);
-      store_temp_f64(instr.dst, builder.CreateSelect(in_range, val, zero_f64));
-      temp_types[instr.dst] = ST::Float;
-      return llvm::Error::success();
-    }
-
-    // ── SetElement: side-effect write to arrays[args[0].slot] ──
-    if (instr.tag == OpTag::SetElement)
-    {
-      const uint32_t arr_slot = instr.args[0].slot;
-      llvm::Value * array_size = load_array_size_f(arr_slot);
-      llvm::Value * array_ptr  = load_array_ptr_f(arr_slot);
-      auto [idx_v, idx_t] = resolve_typed(instr.args[1]);
-      llvm::Value * raw_idx = coerce(idx_v, idx_t, ST::Int);
-      llvm::Value * in_range   = builder.CreateAnd(
-        builder.CreateNot(builder.CreateICmpSLT(raw_idx, builder.getInt64(0))),
-        builder.CreateICmpULT(raw_idx, array_size));
-      llvm::BasicBlock * write_bb = llvm::BasicBlock::Create(*context, "set_elem_write", fn);
-      llvm::BasicBlock * merge_bb = llvm::BasicBlock::Create(*context, "set_elem_merge", fn);
-      builder.CreateCondBr(in_range, write_bb, merge_bb);
-      builder.SetInsertPoint(write_bb);
-      llvm::Value * ep = builder.CreateInBoundsGEP(i64_ty, array_ptr, raw_idx);
-      builder.CreateStore(builder.CreateBitCast(resolve_as_f64(instr.args[2]), i64_ty), ep);
-      builder.CreateBr(merge_bb);
-      builder.SetInsertPoint(merge_bb);
-      return llvm::Error::success();
-    }
-
-    // ── Elementwise loop (loop_count > 1) ──
-    if (instr.loop_count > 1)
-    {
-      // Pre-resolve non-iterating args (stride == 0) and collect array ptrs for iterating args.
-      // Elementwise ops operate on f64 arrays — coerce scalars to f64.
-      const std::size_t nargs = instr.args.size();
-      std::vector<llvm::Value *> arr_ptrs(nargs, nullptr);
-      std::vector<TypedVal> scalar_tvs(nargs, {nullptr, ST::Float});
-      for (std::size_t i = 0; i < nargs; ++i)
-      {
-        if (i < instr.strides.size() && instr.strides[i] == 1)
-          arr_ptrs[i] = load_array_ptr_f(instr.args[i].slot);
-        else
-          scalar_tvs[i] = resolve_typed(instr.args[i]);
-      }
-
-      // ── Vectorized fast path ───────────────────────────────────────────
-      // For Float-result f64 SIMD-friendly ops with all strides ∈ {0, 1},
-      // emit a single <N x double> load/op/store per arg instead of a
-      // runtime LLVM scalar loop. Lets LLVM's backend pick a SIMD width
-      // matching the host vector unit; the equivalent scalar-loop form
-      // is not vectorized by loop-vectorize/SLP on this codebase.
-      auto is_simd_float_op = [](OpTag t) {
-        return t == OpTag::Add || t == OpTag::Sub
-            || t == OpTag::Mul || t == OpTag::Div
-            || t == OpTag::Neg || t == OpTag::Abs
-            || t == OpTag::Sqrt;
-      };
-      bool simd_ok = (instr.result_type == ST::Float)
-                  && is_simd_float_op(instr.tag)
-                  && (instr.strides.size() == nargs);
-      for (std::size_t i = 0; simd_ok && i < nargs; ++i)
-      {
-        const uint8_t s = instr.strides[i];
-        if (s != 0 && s != 1) simd_ok = false;
-      }
-      if (simd_ok)
-      {
-        const uint32_t N = instr.loop_count;
-        llvm::Type * vec_ty = llvm::FixedVectorType::get(f64_ty, N);
-        llvm::Value * dst_ptr_v = load_array_ptr_f(instr.dst);
-
-        // Build N-wide operand vectors: vector load for stride==1,
-        // splat-broadcast for stride==0.
-        std::vector<llvm::Value *> vops(nargs, nullptr);
-        for (std::size_t i = 0; i < nargs; ++i)
-        {
-          if (instr.strides[i] == 1)
-          {
-            vops[i] = builder.CreateAlignedLoad(vec_ty, arr_ptrs[i],
-                                                llvm::Align(sizeof(double)));
-          }
-          else
-          {
-            llvm::Value * sv = coerce(scalar_tvs[i].first,
-                                      scalar_tvs[i].second, ST::Float);
-            vops[i] = builder.CreateVectorSplat(N, sv);
-          }
-        }
-
-        llvm::Value * vres = nullptr;
-        switch (instr.tag)
-        {
-          case OpTag::Add: vres = builder.CreateFAdd(vops[0], vops[1]); break;
-          case OpTag::Sub: vres = builder.CreateFSub(vops[0], vops[1]); break;
-          case OpTag::Mul: vres = builder.CreateFMul(vops[0], vops[1]); break;
-          case OpTag::Div:
-          {
-            // Match scalar Div semantics: divide-by-zero → 0.
-            llvm::Value * zv = llvm::ConstantFP::get(vec_ty, 0.0);
-            llvm::Value * is_zero = builder.CreateFCmpOEQ(vops[1], zv);
-            llvm::Value * dv = builder.CreateFDiv(vops[0], vops[1]);
-            vres = builder.CreateSelect(is_zero, zv, dv);
-            break;
-          }
-          case OpTag::Neg:  vres = builder.CreateFNeg(vops[0]); break;
-          case OpTag::Abs:
-          {
-            llvm::FunctionCallee fabs_v = llvm::Intrinsic::getOrInsertDeclaration(
-              module.get(), llvm::Intrinsic::fabs, {vec_ty});
-            vres = builder.CreateCall(fabs_v, {vops[0]});
-            break;
-          }
-          case OpTag::Sqrt:
-          {
-            llvm::FunctionCallee sqrt_v = llvm::Intrinsic::getOrInsertDeclaration(
-              module.get(), llvm::Intrinsic::sqrt, {vec_ty});
-            vres = builder.CreateCall(sqrt_v, {vops[0]});
-            break;
-          }
-          default: break;  // is_simd_float_op gate prevents this
-        }
-
-        if (vres)
-        {
-          builder.CreateAlignedStore(vres, dst_ptr_v,
-                                     llvm::Align(sizeof(double)));
-          return llvm::Error::success();  // skip scalar fallback below
-        }
-      }
-      // ── End vectorized fast path ───────────────────────────────────────
-
-      llvm::Value * loop_n    = builder.getInt64(instr.loop_count);
-      llvm::Value * dst_ptr   = load_array_ptr_f(instr.dst);
-      llvm::Value * idx_alloc = builder.CreateAlloca(i64_ty, nullptr, "ew_idx");
-      builder.CreateStore(builder.getInt64(0), idx_alloc);
-
-      llvm::BasicBlock * cond_bb = llvm::BasicBlock::Create(*context, "ew_cond", fn);
-      llvm::BasicBlock * body_bb = llvm::BasicBlock::Create(*context, "ew_body", fn);
-      llvm::BasicBlock * end_bb  = llvm::BasicBlock::Create(*context, "ew_end",  fn);
-      builder.CreateBr(cond_bb);
-
-      builder.SetInsertPoint(cond_bb);
-      llvm::Value * idx = builder.CreateLoad(i64_ty, idx_alloc);
-      builder.CreateCondBr(builder.CreateICmpULT(idx, loop_n), body_bb, end_bb);
-
-      builder.SetInsertPoint(body_bb);
-      std::vector<TypedVal> iter_tvs(nargs, {nullptr, ST::Float});
-      for (std::size_t i = 0; i < nargs; ++i)
-      {
-        if (arr_ptrs[i])
-        {
-          llvm::Value * ep = builder.CreateInBoundsGEP(i64_ty, arr_ptrs[i], idx);
-          iter_tvs[i] = {builder.CreateBitCast(builder.CreateLoad(i64_ty, ep), f64_ty), ST::Float};
-        }
-        else
-        {
-          iter_tvs[i] = scalar_tvs[i];
-        }
-      }
-      auto [elem_result, elem_actual_ty] = emit_typed_op(instr.tag, instr.result_type, iter_tvs);
-      if (!elem_result)
-      {
-        return llvm::make_error<llvm::StringError>(
-          "compile_flat_program: unsupported OpTag in elementwise loop",
-          llvm::inconvertibleErrorCode());
-      }
-      // Store result as f64 into array (arrays are f64-backed i64 stores)
-      llvm::Value * as_f64 = coerce(elem_result, elem_actual_ty, ST::Float);
-      llvm::Value * dep = builder.CreateInBoundsGEP(i64_ty, dst_ptr, idx);
-      builder.CreateStore(builder.CreateBitCast(as_f64, i64_ty), dep);
-      builder.CreateStore(builder.CreateAdd(idx, builder.getInt64(1)), idx_alloc);
-      builder.CreateBr(cond_bb);
-
-      builder.SetInsertPoint(end_bb);
-      return llvm::Error::success();
-    }
-
-    // ── Scalar instruction ──
-    std::vector<TypedVal> tvs;
-    tvs.reserve(instr.args.size());
-    for (const auto & arg : instr.args)
-      tvs.push_back(resolve_typed(arg));
-
-    auto [result, actual_ty] = emit_typed_op(instr.tag, instr.result_type, tvs);
-    if (!result)
-    {
-      return llvm::make_error<llvm::StringError>(
-        "compile_flat_program: unsupported scalar OpTag",
-        llvm::inconvertibleErrorCode());
-    }
-    // Coerce from actual IR type to declared result_type, then store
-    llvm::Value * coerced = coerce(result, actual_ty, instr.result_type);
-    store_temp_typed(instr.dst, coerced, instr.result_type);
-    temp_types[instr.dst] = instr.result_type;
-    return llvm::Error::success();
-  };  // end emit_instr lambda
-
-  auto emit_instrs = [&](const std::vector<FlatInstr> & instrs) -> llvm::Error
-  {
-    for (const auto & instr : instrs)
-      if (auto err = emit_instr(instr)) return err;
-    return llvm::Error::success();
-  };
-
-  // ── Emit a single instance's writebacks (state register updates). ──
-  auto emit_writebacks = [&](const std::vector<InstanceProgram::Writeback> & wbs) {
-    for (const auto & wb : wbs)
-    {
-      if (wb.temp_slot < 0) continue;
-      const uint32_t ti = static_cast<uint32_t>(wb.temp_slot);
-      const ST src_ty = temp_types[ti];
-      const ST dst_ty = (wb.state_slot < program.register_types.size())
-        ? program.register_types[wb.state_slot] : ST::Float;
-      llvm::Value * typed_val = load_temp_typed(ti, src_ty);
-      llvm::Value * coerced   = coerce(typed_val, src_ty, dst_ty);
-      llvm::Value * as_i64 = nullptr;
-      if (dst_ty == ST::Float)
-        as_i64 = builder.CreateBitCast(coerced, i64_ty);
-      else if (dst_ty == ST::Int)
-        as_i64 = builder.CreateSExtOrBitCast(coerced, i64_ty);
-      else
-        as_i64 = builder.CreateZExt(coerced, i64_ty);
-      llvm::Value * reg_ptr = builder.CreateInBoundsGEP(i64_ty, regs_arg, builder.getInt64(wb.state_slot));
-      builder.CreateStore(as_i64, reg_ptr);
-    }
-  };
-
   // ── Scheduler preamble: per-sample setup, runs before any
   //    instance bodies. ──
-  if (auto err = emit_instrs(program.scheduler.preamble)) return std::move(err);
+  if (auto err = ctx.emit_instrs(program.scheduler.preamble)) return std::move(err);
 
   // ── Per-instance dispatch ──
-  //
-  // For each instance:
-  //   for each child: emit_kernel_block(child)   // recursive
-  //   <instance body instructions>
-  //   <instance writebacks>
-  //
-  // Children run BEFORE the parent's own body so the parent can read
-  // its children's freshly-written slot values (M11 fractal).
-  std::function<llvm::Error(const tropical_jit::InstanceProgram &)> emit_kernel_block =
-    [&](const tropical_jit::InstanceProgram & inst) -> llvm::Error
-  {
-    for (const auto & child : inst.children)
-    {
-      if (auto err = emit_kernel_block(child)) return err;
-    }
-    if (auto err = emit_instrs(inst.instructions)) return err;
-    emit_writebacks(inst.writebacks);
-    return llvm::Error::success();
-  };
+  // For each top-level instance, EmitCtx::emit_kernel_block recursively
+  // emits its M11 children inside the parent's body, then the parent's
+  // own instructions, then writebacks. Children run BEFORE the parent
+  // so it can read their freshly-written slot values (M11 fractal).
 
   for (const auto & inst : program.instance_functions)
   {
-    if (auto err = emit_kernel_block(inst)) return std::move(err);
+    if (auto err = ctx.emit_kernel_block(inst)) return std::move(err);
   }
 
   // ── Scheduler state-evolution: delay-slot updates from MCP wire
@@ -1220,21 +1220,21 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   //    NEXT sample's instance kernels (which read these slots at the
   //    start of their bodies and therefore see the previous-sample
   //    WriteSlot — one sample of latency per wire, by construction). ──
-  if (auto err = emit_instrs(program.scheduler.state_evolution)) return std::move(err);
+  if (auto err = ctx.emit_instrs(program.scheduler.state_evolution)) return std::move(err);
 
   // ── Scheduler postamble: DAC stitch reads. Runs AFTER state
   //    evolution, so slot reads observe the current sample's
   //    WriteSlot values from instance kernels (asleep instances
   //    retain their previous-sample slot value). ──
-  if (auto err = emit_instrs(program.scheduler.postamble)) return std::move(err);
+  if (auto err = ctx.emit_instrs(program.scheduler.postamble)) return std::move(err);
 
   // ── Output mixing: accumulate mix_output_temps, scale, store to output_buffer[s] ──
   {
-    llvm::Value * mixed = zero_f64;
+    llvm::Value * mixed = ctx.zero_f64;
     for (uint32_t mt : program.mix_output_temps)
     {
-      llvm::Value * val = load_temp_typed(mt, temp_types[mt]);
-      llvm::Value * f64_val = coerce(val, temp_types[mt], ST::Float);
+      llvm::Value * val = ctx.load_temp_typed(mt, temp_types[mt]);
+      llvm::Value * f64_val = ctx.coerce_val(val, temp_types[mt], ST::Float);
       mixed = builder.CreateFAdd(mixed, f64_val);
     }
     llvm::Value * scaled = builder.CreateFDiv(mixed, llvm::ConstantFP::get(f64_ty, 20.0));
@@ -1273,6 +1273,372 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   auto kernel = reinterpret_cast<NumericKernelFn>(*addr_or_err);
   kernel_cache_.emplace(std::move(cache_key), kernel);
   return kernel;
+}
+
+// ---------------------------------------------------------------------------
+// compile_microkernel — emission path for the microkernel execution model.
+//
+// Emits N+3 LLVM functions in a single module:
+//   - mk_<hash>_preamble        : scheduler.preamble  (per-sample)
+//   - mk_<hash>_inst_<i>        : one per instance_functions[i]
+//   - mk_<hash>_state_evo       : scheduler.state_evolution
+//   - mk_<hash>_postamble_mix   : scheduler.postamble + output-mix write
+//
+// preamble, per-instance kernels, and state_evolution share a slim
+// PerSampleFn signature (sample_index in, no buffer length). postamble_mix
+// adds output_buffer + output_index so the mix write stays inside the
+// optimizer's view.
+//
+// All functions share the unified register / temp / slot / array buffers
+// through pointer args; the C++ scheduler in FlatRuntime walks the buffer
+// sample-by-sample and calls each function in topo order per sample.
+// ---------------------------------------------------------------------------
+
+llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
+  const FlatProgram & program)
+{
+  if (!jit_)
+  {
+    return llvm::make_error<llvm::StringError>(
+      "ORC JIT is not available: " + init_error_,
+      llvm::inconvertibleErrorCode());
+  }
+
+  std::lock_guard<std::mutex> lock(jit_mutex_);
+
+  // ── Param index + cache-key serialization ──
+  // Duplicated from compile_flat_program with the only diff being the
+  // mode tag prefix on the cache key. Sharing the serialization across
+  // both modes is a follow-up if the spike graduates.
+  auto visit_all_instructions = [&](auto && fn) {
+    for (const auto & instr : program.scheduler.preamble) fn(instr);
+    for (const auto & inst : program.instance_functions)
+      for (const auto & instr : inst.instructions) fn(instr);
+    for (const auto & instr : program.scheduler.state_evolution) fn(instr);
+    for (const auto & instr : program.scheduler.postamble) fn(instr);
+  };
+
+  std::unordered_map<uint64_t, uint64_t> param_index;
+  visit_all_instructions([&](const FlatInstr & instr) {
+    for (const auto & arg : instr.args) {
+      if (arg.kind == OperandKind::Param && arg.ptr != 0 &&
+          param_index.find(arg.ptr) == param_index.end()) {
+        param_index.emplace(arg.ptr, static_cast<uint64_t>(param_index.size()));
+      }
+    }
+  });
+
+  std::string cache_key;
+  // Mode-tagged: keeps microkernel cache disjoint from fused mode's
+  // "flat5:fused:" entries — both compile_* methods return different
+  // types, so a wrong-mode hit would be a type-confusion bug.
+  cache_key += "flat5:mk:";
+  cache_key += opt_level_tag(opt_level_);
+  cache_key += ":";
+  {
+    auto append = [&](const void * data, std::size_t size) {
+      cache_key.append(static_cast<const char *>(data), size);
+    };
+    auto serialize_instr = [&](const FlatInstr & instr) {
+      append(&instr.tag,        sizeof(OpTag));
+      append(&instr.result_type, sizeof(JitScalarType));
+      append(&instr.dst,        sizeof(uint32_t));
+      append(&instr.loop_count, sizeof(uint32_t));
+      uint32_t na = static_cast<uint32_t>(instr.args.size());
+      append(&na, sizeof(uint32_t));
+      for (const auto & arg : instr.args) {
+        append(&arg.kind,      sizeof(OperandKind));
+        append(&arg.const_val, sizeof(double));
+        append(&arg.slot,      sizeof(uint32_t));
+        uint64_t canonical_ptr = 0;
+        if (arg.kind == OperandKind::Param && arg.ptr != 0) {
+          auto it = param_index.find(arg.ptr);
+          if (it != param_index.end()) canonical_ptr = it->second;
+        }
+        append(&canonical_ptr, sizeof(uint64_t));
+      }
+      uint32_t ns = static_cast<uint32_t>(instr.strides.size());
+      append(&ns, sizeof(uint32_t));
+      if (!instr.strides.empty())
+        append(instr.strides.data(), instr.strides.size());
+    };
+
+    append(&program.register_count, sizeof(uint32_t));
+    uint32_t npre = static_cast<uint32_t>(program.scheduler.preamble.size());
+    append(&npre, sizeof(uint32_t));
+    for (const auto & instr : program.scheduler.preamble) serialize_instr(instr);
+    uint32_t nstate = static_cast<uint32_t>(program.scheduler.state_evolution.size());
+    append(&nstate, sizeof(uint32_t));
+    for (const auto & instr : program.scheduler.state_evolution) serialize_instr(instr);
+    uint32_t npost = static_cast<uint32_t>(program.scheduler.postamble.size());
+    append(&npost, sizeof(uint32_t));
+    for (const auto & instr : program.scheduler.postamble) serialize_instr(instr);
+    uint32_t nfns = static_cast<uint32_t>(program.instance_functions.size());
+    append(&nfns, sizeof(uint32_t));
+    for (const auto & inst : program.instance_functions) {
+      append(&inst.register_count, sizeof(uint32_t));
+      uint32_t nameLen = static_cast<uint32_t>(inst.instance_name.size());
+      append(&nameLen, sizeof(uint32_t));
+      if (!inst.instance_name.empty())
+        append(inst.instance_name.data(), inst.instance_name.size());
+      uint32_t ni = static_cast<uint32_t>(inst.instructions.size());
+      append(&ni, sizeof(uint32_t));
+      for (const auto & instr : inst.instructions) serialize_instr(instr);
+    }
+    uint32_t nm = static_cast<uint32_t>(program.mix_output_temps.size());
+    append(&nm, sizeof(uint32_t));
+    for (uint32_t mt : program.mix_output_temps)
+      append(&mt, sizeof(uint32_t));
+    uint32_t nrt = static_cast<uint32_t>(program.register_targets.size());
+    append(&nrt, sizeof(uint32_t));
+    for (int32_t rt : program.register_targets)
+      append(&rt, sizeof(int32_t));
+    uint32_t nrty = static_cast<uint32_t>(program.register_types.size());
+    append(&nrty, sizeof(uint32_t));
+    for (JitScalarType t : program.register_types)
+      append(&t, sizeof(JitScalarType));
+  }
+
+  auto cache_it = microkernel_cache_.find(cache_key);
+  if (cache_it != microkernel_cache_.end())
+    return cache_it->second;
+
+  const std::string hash = md5_hex(cache_key);
+
+  // ── LLVM module setup ──
+  auto context = std::make_unique<llvm::LLVMContext>();
+  auto module  = std::make_unique<llvm::Module>(hash, *context);
+  module->setDataLayout(jit_->getDataLayout());
+
+  llvm::IRBuilder<> builder(*context);
+  llvm::Type * void_ty = builder.getVoidTy();
+  llvm::Type * f64_ty  = builder.getDoubleTy();
+  llvm::Type * i64_ty  = builder.getInt64Ty();
+  llvm::Type * ptr_ty  = llvm::PointerType::get(*context, 0);
+
+  // PerSampleFn signature:
+  //   (regs, arrays, array_sizes, temps, sample_rate, sample_index,
+  //    param_ptrs, slots) → void
+  llvm::FunctionType * per_sample_ty = llvm::FunctionType::get(
+    void_ty,
+    {ptr_ty, ptr_ty, ptr_ty, ptr_ty, f64_ty, i64_ty, ptr_ty, ptr_ty},
+    false);
+  // PostambleMixFn signature: adds (output_buffer, output_index)
+  llvm::FunctionType * postamble_mix_ty = llvm::FunctionType::get(
+    void_ty,
+    {ptr_ty, ptr_ty, ptr_ty, ptr_ty, f64_ty, i64_ty, ptr_ty, ptr_ty, ptr_ty, i64_ty},
+    false);
+
+  // Per-temp scalar type table, shared across the N+3 EmitCtxs. Each
+  // function call observes writes from prior calls' bodies because the
+  // table outlives any single function emission.
+  std::vector<ST> temp_types(program.register_count, ST::Float);
+
+  // ── Helper: bind arg names + slots_arg attributes for a PerSampleFn ──
+  auto bind_per_sample_args = [&](llvm::Function * fn, EmitCtx & ctx) {
+    auto it = fn->arg_begin();
+    ctx.regs_arg        = &*it++;  ctx.regs_arg->setName("registers");
+    ctx.arrays_arg      = &*it++;  ctx.arrays_arg->setName("arrays");
+    ctx.array_sizes_arg = &*it++;  ctx.array_sizes_arg->setName("array_sizes");
+    ctx.temps_arg       = &*it++;  ctx.temps_arg->setName("temps");
+    ctx.sample_rate_arg = &*it++;  ctx.sample_rate_arg->setName("sampleRate");
+    ctx.current_sample_idx = &*it++; ctx.current_sample_idx->setName("sample_index");
+    ctx.param_ptrs_arg  = &*it++;  ctx.param_ptrs_arg->setName("param_ptrs");
+    llvm::Argument * slots_a = &*it++; slots_a->setName("slots");
+    ctx.slots_arg = slots_a;
+    ctx.inputs_arg = nullptr;  // microkernel mode: no Input operands
+    // Match fused-mode slot attributes so GVN can fold redundant loads.
+#if LLVM_VERSION_MAJOR >= 21
+    slots_a->addAttr(llvm::Attribute::getWithCaptureInfo(*context, llvm::CaptureInfo::none()));
+#else
+    slots_a->addAttr(llvm::Attribute::NoCapture);
+#endif
+    slots_a->addAttr(llvm::Attribute::NoAlias);
+  };
+
+  // ── Emit one PerSampleFn from a list of instructions ──
+  auto emit_per_sample_function = [&](
+    const std::string & sym,
+    const std::vector<FlatInstr> & instrs) -> llvm::Error
+  {
+    llvm::Function * fn = llvm::Function::Create(
+      per_sample_ty, llvm::Function::ExternalLinkage, sym, module.get());
+    EmitCtx ctx;
+    emit_ctx_init_module(ctx, *context, builder, *module);
+    ctx.fn          = fn;
+    ctx.program     = &program;
+    ctx.param_index = &param_index;
+    ctx.temp_types  = &temp_types;
+    bind_per_sample_args(fn, ctx);
+
+    llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
+    builder.SetInsertPoint(entry);
+    if (auto err = ctx.emit_instrs(instrs)) return err;
+    builder.CreateRetVoid();
+
+    if (llvm::verifyFunction(*fn, &llvm::errs()))
+      return llvm::make_error<llvm::StringError>(
+        "compile_microkernel: invalid IR in " + sym,
+        llvm::inconvertibleErrorCode());
+    return llvm::Error::success();
+  };
+
+  // ── Emit one PerSampleFn from one InstanceProgram (body + writebacks + children) ──
+  // Recursive: M11 children are inlined into this function's body via
+  // EmitCtx::emit_kernel_block. One LLVM function per top-level session
+  // instance.
+  auto emit_instance_function = [&](
+    const std::string & sym,
+    const InstanceProgram & inst) -> llvm::Error
+  {
+    llvm::Function * fn = llvm::Function::Create(
+      per_sample_ty, llvm::Function::ExternalLinkage, sym, module.get());
+    EmitCtx ctx;
+    emit_ctx_init_module(ctx, *context, builder, *module);
+    ctx.fn          = fn;
+    ctx.program     = &program;
+    ctx.param_index = &param_index;
+    ctx.temp_types  = &temp_types;
+    bind_per_sample_args(fn, ctx);
+
+    llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
+    builder.SetInsertPoint(entry);
+    if (auto err = ctx.emit_kernel_block(inst)) return err;
+    builder.CreateRetVoid();
+
+    if (llvm::verifyFunction(*fn, &llvm::errs()))
+      return llvm::make_error<llvm::StringError>(
+        "compile_microkernel: invalid IR in " + sym,
+        llvm::inconvertibleErrorCode());
+    return llvm::Error::success();
+  };
+
+  // ── Emit postamble_mix: scheduler.postamble + output mix store ──
+  auto emit_postamble_mix_function = [&](const std::string & sym) -> llvm::Error
+  {
+    llvm::Function * fn = llvm::Function::Create(
+      postamble_mix_ty, llvm::Function::ExternalLinkage, sym, module.get());
+    EmitCtx ctx;
+    emit_ctx_init_module(ctx, *context, builder, *module);
+    ctx.fn          = fn;
+    ctx.program     = &program;
+    ctx.param_index = &param_index;
+    ctx.temp_types  = &temp_types;
+
+    auto it = fn->arg_begin();
+    ctx.regs_arg        = &*it++;  ctx.regs_arg->setName("registers");
+    ctx.arrays_arg      = &*it++;  ctx.arrays_arg->setName("arrays");
+    ctx.array_sizes_arg = &*it++;  ctx.array_sizes_arg->setName("array_sizes");
+    ctx.temps_arg       = &*it++;  ctx.temps_arg->setName("temps");
+    ctx.sample_rate_arg = &*it++;  ctx.sample_rate_arg->setName("sampleRate");
+    ctx.current_sample_idx = &*it++; ctx.current_sample_idx->setName("sample_index");
+    ctx.param_ptrs_arg  = &*it++;  ctx.param_ptrs_arg->setName("param_ptrs");
+    llvm::Argument * slots_a = &*it++; slots_a->setName("slots");
+    ctx.slots_arg = slots_a;
+    llvm::Value * output_buffer_arg = &*it++; output_buffer_arg->setName("output_buffer");
+    llvm::Value * output_index_arg  = &*it++; output_index_arg->setName("output_index");
+    ctx.inputs_arg = nullptr;
+#if LLVM_VERSION_MAJOR >= 21
+    slots_a->addAttr(llvm::Attribute::getWithCaptureInfo(*context, llvm::CaptureInfo::none()));
+#else
+    slots_a->addAttr(llvm::Attribute::NoCapture);
+#endif
+    slots_a->addAttr(llvm::Attribute::NoAlias);
+
+    llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
+    builder.SetInsertPoint(entry);
+
+    if (auto err = ctx.emit_instrs(program.scheduler.postamble)) return err;
+
+    // Output mix: same as fused-mode tail.
+    llvm::Value * mixed = ctx.zero_f64;
+    for (uint32_t mt : program.mix_output_temps) {
+      llvm::Value * val = ctx.load_temp_typed(mt, temp_types[mt]);
+      llvm::Value * f64_val = ctx.coerce_val(val, temp_types[mt], ST::Float);
+      mixed = builder.CreateFAdd(mixed, f64_val);
+    }
+    llvm::Value * scaled = builder.CreateFDiv(mixed, llvm::ConstantFP::get(f64_ty, 20.0));
+    llvm::Value * out_ptr = builder.CreateInBoundsGEP(f64_ty, output_buffer_arg, output_index_arg);
+    builder.CreateStore(scaled, out_ptr);
+
+    builder.CreateRetVoid();
+
+    if (llvm::verifyFunction(*fn, &llvm::errs()))
+      return llvm::make_error<llvm::StringError>(
+        "compile_microkernel: invalid IR in " + sym,
+        llvm::inconvertibleErrorCode());
+    return llvm::Error::success();
+  };
+
+  // ── Emit all functions ──
+  // One LLVM function per top-level session instance, with M11 children
+  // inlined recursively via emit_kernel_block. Plus preamble,
+  // state_evolution, and postamble_mix as their own functions.
+  const std::string sym_preamble        = "mk_" + hash + "_preamble";
+  const std::string sym_state_evolution = "mk_" + hash + "_state_evo";
+  const std::string sym_postamble_mix   = "mk_" + hash + "_postamble_mix";
+  std::vector<std::string> sym_instances;
+  sym_instances.reserve(program.instance_functions.size());
+  for (std::size_t i = 0; i < program.instance_functions.size(); ++i)
+    sym_instances.push_back("mk_" + hash + "_inst_" + std::to_string(i));
+
+  // Emit in the order the scheduler will call them so that the
+  // temp_types table is built up consistently with the runtime
+  // dispatch sequence.
+  if (auto err = emit_per_sample_function(sym_preamble, program.scheduler.preamble))
+    return std::move(err);
+  for (std::size_t i = 0; i < program.instance_functions.size(); ++i) {
+    if (auto err = emit_instance_function(sym_instances[i], program.instance_functions[i]))
+      return std::move(err);
+  }
+  if (auto err = emit_per_sample_function(sym_state_evolution, program.scheduler.state_evolution))
+    return std::move(err);
+  if (auto err = emit_postamble_mix_function(sym_postamble_mix))
+    return std::move(err);
+
+  if (std::getenv("TROPICAL_DUMP_IR"))
+    module->print(llvm::errs(), nullptr);
+
+  if (llvm::verifyModule(*module, &llvm::errs()))
+    return llvm::make_error<llvm::StringError>(
+      "compile_microkernel: generated invalid LLVM module",
+      llvm::inconvertibleErrorCode());
+
+  if (auto err = add_module(std::move(context), std::move(module)))
+    return std::move(err);
+
+  // ── Look up each symbol and populate the result struct ──
+  auto lookup_fn = [&](const std::string & sym) -> llvm::Expected<uint64_t> {
+    auto a = lookup(sym);
+    if (!a) return a.takeError();
+    return *a;
+  };
+
+  MicrokernelKernels result;
+  {
+    auto a = lookup_fn(sym_preamble);
+    if (!a) return a.takeError();
+    result.preamble = reinterpret_cast<PerSampleFn>(*a);
+  }
+  result.instances.reserve(sym_instances.size());
+  for (const auto & s : sym_instances) {
+    auto a = lookup_fn(s);
+    if (!a) return a.takeError();
+    result.instances.push_back(reinterpret_cast<PerSampleFn>(*a));
+  }
+  {
+    auto a = lookup_fn(sym_state_evolution);
+    if (!a) return a.takeError();
+    result.state_evolution = reinterpret_cast<PerSampleFn>(*a);
+  }
+  {
+    auto a = lookup_fn(sym_postamble_mix);
+    if (!a) return a.takeError();
+    result.postamble_mix = reinterpret_cast<PostambleMixFn>(*a);
+  }
+
+  microkernel_cache_.emplace(std::move(cache_key), result);
+  return result;
 }
 
 } // namespace tropical_jit

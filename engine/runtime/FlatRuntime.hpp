@@ -26,7 +26,14 @@ namespace tropical_runtime
 
 struct KernelState
 {
-  tropical_jit::NumericKernelFn kernel = nullptr;
+  // ── Execution mode + kernel handles ──────────────────────────────────────
+  // Fused mode populates `kernel` (single NumericKernelFn). Microkernel
+  // mode populates `microkernels` (preamble, N instance kernels,
+  // state_evolution, postamble_mix); `kernel` is nullptr in that case.
+  // The audio-thread process() loop branches on `mode`.
+  tropical_jit::CompilationMode      mode   = tropical_jit::CompilationMode::Fused;
+  tropical_jit::NumericKernelFn      kernel = nullptr;
+  tropical_jit::MicrokernelKernels   microkernels{};
 
   // Flat buffers passed to kernel (matches NumericKernelFn signature)
   std::vector<int64_t> registers;
@@ -101,26 +108,62 @@ public:
 
     KernelState & state = states_[state_idx];
 
-    if (!state.kernel)
+    // No active kernel — emit silence (covers both fused and microkernel
+    // modes; the "no kernel" predicate is mode-specific).
+    const bool fused_ready = state.mode == tropical_jit::CompilationMode::Fused
+                          && state.kernel != nullptr;
+    const bool mk_ready    = state.mode == tropical_jit::CompilationMode::Microkernel
+                          && state.microkernels.preamble != nullptr;
+    if (!fused_ready && !mk_ready)
     {
       std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
       audio_processing_.store(false, std::memory_order_release);
       return;
     }
 
-    // Single kernel call processes the entire buffer
-    state.kernel(
-      nullptr,                       // no inputs (all embedded in expressions)
-      state.registers.data(),
-      state.array_ptrs.data(),
-      state.array_sizes.data(),
-      state.temps.data(),
-      state.sample_rate,
-      state.sample_index,
-      state.param_ptrs.data(),
-      outputBuffer.data(),
-      buffer_length_,
-      state.slots.data());          // M6: shared inter-module slot array
+    if (state.mode == tropical_jit::CompilationMode::Fused)
+    {
+      // Single kernel call processes the entire buffer.
+      state.kernel(
+        nullptr,                       // no inputs (all embedded in expressions)
+        state.registers.data(),
+        state.array_ptrs.data(),
+        state.array_sizes.data(),
+        state.temps.data(),
+        state.sample_rate,
+        state.sample_index,
+        state.param_ptrs.data(),
+        outputBuffer.data(),
+        buffer_length_,
+        state.slots.data());          // M6: shared inter-module slot array
+    }
+    else
+    {
+      // Microkernel: outer sample loop in C++, dispatching the N+3
+      // per-sample functions in scheduler order. This is the
+      // architectural shape the scoped-lifetime / per-voice
+      // microkernel roadmap needs; the spike measures whether the
+      // dispatch cost is acceptable for realtime synthesis.
+      const auto & mk = state.microkernels;
+      int64_t *      regs        = state.registers.data();
+      int64_t **     arrays      = state.array_ptrs.data();
+      const uint64_t * arr_sizes = state.array_sizes.data();
+      int64_t *      temps       = state.temps.data();
+      const double   sr          = state.sample_rate;
+      const uint64_t * params    = state.param_ptrs.data();
+      double *       slots       = state.slots.data();
+      double *       out         = outputBuffer.data();
+      const uint64_t start_idx   = state.sample_index;
+      for (unsigned int i = 0; i < buffer_length_; ++i)
+      {
+        const uint64_t s = start_idx + i;
+        mk.preamble(regs, arrays, arr_sizes, temps, sr, s, params, slots);
+        for (auto fn : mk.instances)
+          fn(regs, arrays, arr_sizes, temps, sr, s, params, slots);
+        mk.state_evolution(regs, arrays, arr_sizes, temps, sr, s, params, slots);
+        mk.postamble_mix(regs, arrays, arr_sizes, temps, sr, s, params, slots, out, i);
+      }
+    }
 
     state.sample_index += buffer_length_;
 

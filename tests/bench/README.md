@@ -5,10 +5,24 @@ via `bun run`, not `bun test` — these are scripts, not assertions.
 
 | File              | What it measures |
 |-------------------|------------------|
-| `compile.ts`      | TS-pipeline-only cost. Times `compileSession` end-to-end on a fixed 13-module patch and per-module to find bottlenecks. |
-| `jit_runtime.ts`  | End-to-end: TS pipeline → JSON.stringify → JIT loadPlan → `runtime.process` loop. Per-patch ns/sample and realtime ratio. Wipes the kernel cache for cold compiles. |
-| `wasm_vs_jit.ts`  | Head-to-head: same FlatPlan compiled through both backends. Compile-time (TS, WASM emit/instantiate, JIT load) and runtime (ns/sample). |
-| `corpus.ts`       | Shared list of patches that currently compile through `compileSession`. Other patches in `patches/` are blocked on known limitations (see file). |
+| `compile.ts`               | TS-pipeline-only cost. Times `compileSession` end-to-end on a fixed 13-module patch and per-module to find bottlenecks. |
+| `jit_runtime.ts`           | End-to-end: TS pipeline → JSON.stringify → JIT loadPlan → `runtime.process` loop. Per-patch ns/sample and realtime ratio. Wipes the kernel cache for cold compiles. |
+| `wasm_vs_jit.ts`           | Head-to-head: same FlatPlan compiled through both backends. Compile-time (TS, WASM emit/instantiate, JIT load) and runtime (ns/sample). |
+| `microkernel_vs_fused.ts`  | Head-to-head: same session compiled in `fused` mode vs `microkernel` mode. Per-mode ns/sample, compile latency, and rt-ratio across small/medium/polyphony cases. |
+| `corpus.ts`                | Shared list of patches that currently compile through `compileSession`. Other patches in `patches/` are blocked on known limitations (see file). |
+
+## Snapshots
+
+Frozen-in-time benchmark captures live alongside the scripts that
+produced them, named `<script>_<YYYY-MM-DD>.md`. Each file's header
+records the commit hash, hardware, LLVM version, and reproduce
+command. Re-capture against a new commit when the engine's emit
+strategy materially shifts; the old file stays as a historical
+record.
+
+| File                                       | What it captures |
+|--------------------------------------------|------------------|
+| `microkernel_vs_fused_2026-05-23.md`       | First-cut microkernel-vs-fused numbers. Baseline for the per-voice / scoped-lifetime roadmap. |
 
 ## Quick reference
 
@@ -21,6 +35,9 @@ bun run tests/bench/jit_runtime.ts patches/cross_fm_4.json --frames=4096
 
 # WASM vs JIT, multiple patches
 bun run tests/bench/wasm_vs_jit.ts patches/bubble_cloud.json patches/cross_fm_4.json patches/cross_fm_evolved.json --frames=2048
+
+# Microkernel vs fused, all built-in cases
+bun run tests/bench/microkernel_vs_fused.ts
 ```
 
 ## What "ns/sample" means
