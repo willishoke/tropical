@@ -117,6 +117,14 @@ struct InstanceProgram
 {
   std::string                  instance_name;     // dotted path (e.g. voice1.env)
   std::vector<FlatInstr>       instructions;      // already shifted into unified offset space
+  /** M11 fractal slot-based input wiring. Runs BEFORE this kernel's
+   *  children. For each wired input of each child, the parent emits a
+   *  `WriteSlot` here that evaluates the wire expression in its own
+   *  scope and writes the value to the child's pre-allocated input
+   *  slot. The child reads from that slot when its body runs. Empty
+   *  for leaf kernels and for the legacy flat-IR (inlineNested:true)
+   *  path. */
+  std::vector<FlatInstr>       pre_child_instructions;
   uint32_t                     register_count = 0; // local temp count
   /** State register writebacks for this instance. Each entry pairs a
    *  state register slot index (absolute, into the unified register

@@ -330,10 +330,11 @@ export function remapInstancePlan(
   ctx: RemapContext,
   session: SessionState,
 ): {
-  preamble:      NInstr[]
-  body:          NInstr[]
-  writeSlots:    NInstr[]
-  tempsConsumed: number
+  preamble:             NInstr[]
+  preChildInstructions: NInstr[]
+  body:                 NInstr[]
+  writeSlots:           NInstr[]
+  tempsConsumed:        number
 } {
   // Preamble emitter: allocates fresh temps in the unified register
   // space, starting after the instance's own register_count block.
@@ -387,6 +388,18 @@ export function remapInstancePlan(
   }
 
   const body: NInstr[] = plan.instructions.map(instr => ({
+    ...instr,
+    dst:  shiftDst(instr.dst, ctx),
+    args: instr.args.map(remapOperand),
+  }))
+
+  // M11 fractal slot-based input wiring: pre_child_instructions get
+  // the same per-instance operand/dst remap as the main body. They
+  // reference the same temp/state/array spaces (Emitter allocates
+  // both in one namespace), and WriteSlot dst's are already absolute
+  // module-slot indices. Returned separately so the engine can run
+  // them BEFORE recursing into the child kernels.
+  const preChildInstructions: NInstr[] = plan.pre_child_instructions.map(instr => ({
     ...instr,
     dst:  shiftDst(instr.dst, ctx),
     args: instr.args.map(remapOperand),
@@ -447,6 +460,7 @@ export function remapInstancePlan(
 
   return {
     preamble,
+    preChildInstructions,
     body,
     writeSlots,
     tempsConsumed: preambleNext - (rawOffset(ctx.regOffset) + plan.register_count),

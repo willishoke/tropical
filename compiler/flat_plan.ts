@@ -105,6 +105,14 @@ export interface PerInstancePlan {
   array_slot_count: number
   array_slot_sizes: number[]
   instructions:     NInstr[]
+  /** Instructions that must run BEFORE this kernel's children
+   *  (M11 fractal — slot-based input wiring). For each wired input
+   *  on each child instance, the parent evaluates the wire expression
+   *  in its own scope and emits a WriteSlot into the child's
+   *  pre-allocated input slot. The child then reads from that slot
+   *  at the start of its kernel body. Empty for leaf kernels and
+   *  for the legacy `inlineNested:true` path. */
+  pre_child_instructions: NInstr[]
   /** Per-output-port temp index (local). */
   output_targets:   TempIdx[]
   /** State register writeback: `register_targets[i]` is the local
@@ -134,6 +142,12 @@ export interface InstanceFunction {
   instance_name:     string
   /** Instructions with operands already shifted into unified space. */
   instructions:      NInstr[]
+  /** Instructions that run BEFORE this kernel's children. M11 fractal
+   *  slot-based input wiring: parent evaluates each child's wire
+   *  expression in its own scope and emits a WriteSlot into the
+   *  child's pre-allocated input slot. Empty for leaf kernels and
+   *  for `inlineNested:true` plans. */
+  pre_child_instructions: NInstr[]
   /** Cumulative offset into the unified temp space. */
   register_offset:   TempOffset
   /** Cumulative offset into the unified state-register space. */
@@ -214,6 +228,9 @@ export interface WireInstanceFunction {
   name:              string
   instance_name:     string
   instructions:      WireNInstr[]
+  /** M11 fractal slot-based input wiring. May be missing in legacy
+   *  JSON (parsed as []). */
+  pre_child_instructions?: WireNInstr[]
   register_offset:   number
   state_reg_offset:  number
   array_slot_offset: number
@@ -307,6 +324,7 @@ const parseInstanceFn = (inst: WireInstanceFunction): InstanceFunction => ({
   name:              inst.name,
   instance_name:     inst.instance_name,
   instructions:      inst.instructions.map(parseInstr),
+  pre_child_instructions: (inst.pre_child_instructions ?? []).map(parseInstr),
   register_offset:   tempOffset(inst.register_offset),
   state_reg_offset:  stateRegOffset(inst.state_reg_offset),
   array_slot_offset: arraySlotOffset(inst.array_slot_offset),
@@ -325,9 +343,13 @@ const toWireInstanceFn = (inst: InstanceFunction): WireInstanceFunction => ({
   array_slot_offset: rawOffset(inst.array_slot_offset),
   register_count:    inst.register_count,
   register_targets:  inst.register_targets.map(toWireRegTarget),
-  // Omit `children` from the wire when empty so existing JSON consumers
-  // (golden fixtures, hand-crafted plan_5 tests) see exactly the bytes
-  // they expect today. Populated children are emitted normally.
+  // Omit `pre_child_instructions` and `children` from the wire when
+  // empty so existing JSON consumers (golden fixtures, hand-crafted
+  // plan_5 tests) see exactly the bytes they expect today. Populated
+  // entries are emitted normally.
+  ...(inst.pre_child_instructions.length > 0
+    ? { pre_child_instructions: inst.pre_child_instructions.map(toWireInstr) }
+    : {}),
   ...(inst.children.length > 0 ? { children: inst.children.map(toWireInstanceFn) } : {}),
 })
 

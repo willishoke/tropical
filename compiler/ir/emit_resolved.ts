@@ -79,6 +79,10 @@ export interface FlatProgram {
   array_slot_count: number
   array_slot_sizes: number[]
   instructions:     NInstr[]
+  /** M11 fractal slot-based input wiring. Populated when this kernel
+   *  has sub-instances whose input wires were emitted via `WriteSlot`.
+   *  Empty for leaf kernels and the legacy flat path. */
+  pre_child_instructions: NInstr[]
   /** Per-output-port temp index (local; the session compiler shifts). */
   output_targets:   TempIdx[]
   register_targets: RegTarget[]
@@ -250,6 +254,20 @@ export interface EmitSlots {
    *  When undefined (legacy / per-program path), NestedOut throws as
    *  before. */
   nestedOutputSlots?: Map<InstanceDecl, Map<OutputDecl, number>>
+  /** Module slot indices for THIS program's own input ports, populated
+   *  by the M11 fractal path. When set, `InputRef(d)` lowers to a Slot
+   *  read from `inputSlotOverride.get(d)` instead of an `Input`
+   *  operand. The parent kernel has written the slot's value via a
+   *  `WriteSlot` in its `pre_child_instructions` just before this
+   *  kernel runs. */
+  inputSlotOverride?: Map<InputDecl, number>
+  /** Per-child module-slot map for sub-instance INPUTS. Used by the
+   *  M11 fractal path when emitting a parent kernel: for each child
+   *  instance and each of its wired inputs, the parent emits a
+   *  `WriteSlot` into the slot named here. Map shape:
+   *  instanceDecl → inputDecl → moduleSlotIdx. Read in conjunction
+   *  with `EmitResolvedInputs.nestedInstances`. */
+  nestedInputSlots?: Map<InstanceDecl, Map<InputDecl, number>>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -387,6 +405,16 @@ class Emitter {
         const slot = this.slots.inputs.get(obj.decl)
         if (slot === undefined) throw new Error(`emit_resolved: input '${obj.decl.name}' missing from slot table`)
         const portT = this.inputPortTypes[slot] ?? 'float'
+        // M11 fractal path: when the program is being compiled as a
+        // sub-instance kernel, its inputs live in module slots
+        // pre-written by the parent's WriteSlot in pre_child_instructions.
+        // Lower `InputRef(d)` to a slot read instead of opInput.
+        if (this.slots.inputSlotOverride !== undefined) {
+          const overrideSlot = this.slots.inputSlotOverride.get(obj.decl)
+          if (overrideSlot !== undefined) {
+            return { op: opSlot(moduleSlotIdx(overrideSlot), portT), scalarType: portT }
+          }
+        }
         return { op: opInput(inputPortIdx(slot), portT), scalarType: portT }
       }
       case 'regRef': {
@@ -748,9 +776,60 @@ class Emitter {
     outputExprs: ResolvedExpr[],
     registerExprs: (ResolvedExpr | null)[],
     outputPortScalarCounts: number[],
+    nestedInstances?: InstanceDecl[],
   ): FlatProgram {
     const output_targets: TempIdx[] = []
     const register_targets: RegTarget[] = []
+
+    // ── M11 fractal: emit pre-child WriteSlots for sub-instance inputs ──
+    // For each child instance, evaluate each wired input expression in
+    // THIS kernel's scope (where the wire's refs to our regs, params,
+    // and inputs resolve naturally) and emit a WriteSlot into the
+    // child's pre-allocated input slot. The child reads from that
+    // slot when its kernel body runs after our pre-child stage.
+    //
+    // We snapshot the instructions list before/after this phase and
+    // hand the WriteSlots back as a separate `pre_child_instructions`
+    // list so the engine's emit_kernel_block can emit them BEFORE
+    // recursing into the child (the M11 dispatch order is: pre-child
+    // → children → main body → writebacks).
+    //
+    // Temps allocated here share the same per-instance namespace as
+    // the main body; in the fused kernel they live in the same LLVM
+    // function and are visible across the pre-child / child / main
+    // boundary.
+    const preChildStart = this.instrs.length
+    if (nestedInstances !== undefined && this.slots.nestedInputSlots !== undefined) {
+      for (const decl of nestedInstances) {
+        const childSlotMap = this.slots.nestedInputSlots.get(decl)
+        if (childSlotMap === undefined) continue
+        for (const inp of decl.inputs) {
+          const slotIdx = childSlotMap.get(inp.port)
+          if (slotIdx === undefined) continue
+          const portT = inputDeclScalarType(inp.port)
+          const r = this.compileNode(inp.value, portT)
+          // Wires are scalar (array-typed child input ports aren't
+          // currently exercised by the slot-based path). If the wire
+          // resolves to an array, project element 0 to match the
+          // scalar-port semantics.
+          const valOp: NOperand = r.isArray
+            ? (() => {
+                const dst = this.allocReg()
+                this.regTypes.set(dst, r.scalarType)
+                this.emit(instrIndex(dst, [r.op, opConst(0, 'int')], r.scalarType))
+                return opTemp(dst, r.scalarType)
+              })()
+            : r.op
+          this.emit(instrWriteSlot(moduleSlotIdx(slotIdx), valOp, portT))
+        }
+      }
+    }
+    const preChildEnd = this.instrs.length
+    const pre_child_instructions = this.instrs.slice(preChildStart, preChildEnd)
+    // Remove the pre-child instructions from the main list — they're
+    // returned separately. (The CSE memo and reg counters stay
+    // populated; the temps survive into main-body emission.)
+    this.instrs = this.instrs.slice(0, preChildStart)
 
     // Output-targets contract (M11 Phase 3): ONE entry per scalar slot
     // of every declared output port. Scalar/alias ports contribute 1
@@ -862,10 +941,18 @@ class Emitter {
       array_slot_count: this.nextArraySlot,
       array_slot_sizes: this.arraySizes,
       instructions:     this.instrs,
+      pre_child_instructions,
       output_targets,
       register_targets,
     }
   }
+}
+
+function inputDeclScalarType(d: InputDecl): ScalarType {
+  if (d.type === undefined) return 'float'
+  if (d.type.kind === 'scalar') return d.type.scalar
+  if (d.type.kind === 'alias')  return d.type.alias.base
+  return 'float'
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -884,9 +971,17 @@ export interface EmitResolvedInputs {
   stateRegTypes: ScalarType[]
   inputPortTypes: ScalarType[]
   slots: EmitSlots
+  /** M11 fractal: sub-instance decls whose input wires need parent-side
+   *  WriteSlot emission. Each entry's `inp.value` (wire expression) is
+   *  compiled in the parent's scope; the result is written to the slot
+   *  named in `slots.nestedInputSlots.get(decl).get(inp.port)`. The
+   *  WriteSlot instructions land in `pre_child_instructions`, separate
+   *  from the parent's main `instructions`, so the engine can run them
+   *  before recursing into the child. */
+  nestedInstances?: InstanceDecl[]
 }
 
 export function emitResolvedProgram(input: EmitResolvedInputs): FlatProgram {
   const e = new Emitter(input.slots, input.stateInit, input.stateRegTypes, input.inputPortTypes)
-  return e.emitProgram(input.outputExprs, input.registerExprs, input.outputPortScalarCounts)
+  return e.emitProgram(input.outputExprs, input.registerExprs, input.outputPortScalarCounts, input.nestedInstances)
 }

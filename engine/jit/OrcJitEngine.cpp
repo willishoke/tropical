@@ -523,8 +523,21 @@ struct EmitCtx
   // ── Per-instance writebacks ──
   void emit_writebacks(const std::vector<InstanceProgram::Writeback> & wbs);
 
-  // ── Per-instance dispatch (M11 fractal: children before parent body) ──
+  // ── Per-instance dispatch (M11 fractal four-phase order) ──
+  // Order matters for the slot-based wiring contract:
+  //   1. pre_child_instructions: evaluate child input wires in THIS
+  //      kernel's scope, WriteSlot the value to the child's input slot
+  //   2. children (recursive): each child's body reads its input slots
+  //      and writes its output slots
+  //   3. instructions: parent body (may read child outputs via NestedOut
+  //      → Slot read, which sees the slot values from step 2)
+  //   4. writebacks: parent's state-register updates
+  //
+  // Legacy plans (inlineNested:true) have empty pre_child_instructions
+  // and empty children — phases 1-2 are no-ops and the behavior reduces
+  // to "main body then writebacks", same as before.
   llvm::Error emit_kernel_block(const InstanceProgram & inst) {
+    if (auto err = emit_instrs(inst.pre_child_instructions)) return err;
     for (const auto & child : inst.children)
       if (auto err = emit_kernel_block(child)) return err;
     if (auto err = emit_instrs(inst.instructions)) return err;
