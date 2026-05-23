@@ -1,10 +1,23 @@
-# Microkernel-Mode Spike — Benchmark Results
+# Benchmark Results: microkernel-mode spike
 
-**Date:** 2026-05-23
-**Branch:** `microkernel-mode-spike`
-**Decision:** **GO** — proceed with the broader rearchitecture (Phase E
-plan: voice scopes, affine types at scope boundaries, per-kernel
-hot-swap).
+| Field           | Value                                       |
+|-----------------|---------------------------------------------|
+| Date            | 2026-05-23                                  |
+| Branch          | `microkernel-mode-spike`                    |
+| Captured at     | commit `599aa01` (post deep-mode revert)   |
+| Hardware        | darwin/aarch64 (Apple Silicon)              |
+| LLVM            | 22.1.1                                      |
+| Opt level       | `OptimizationLevel::O2`                     |
+| Reproduce       | `bun run tests/bench/microkernel_vs_fused.ts` |
+
+Benchmark numbers are temporal artifacts. When the bench script
+changes shape or the engine's emit strategy materially shifts, this
+file should be re-captured against the new commit hash. Treat it as
+a snapshot, not a spec.
+
+**Decision (at time of capture):** **GO** — proceed with the broader
+rearchitecture (Phase E plan: voice scopes, affine types at scope
+boundaries, per-kernel hot-swap).
 
 ## What was measured
 
