@@ -12,8 +12,12 @@
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
 #include <llvm/Passes/OptimizationLevel.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Support/MD5.h>
+#if LLVM_VERSION_MAJOR >= 21
+#include <llvm/Support/ModRef.h>
+#endif
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
@@ -516,7 +520,16 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   // M6: tag slots explicitly so GVN can prove no-alias and forward
   // store-to-load. Without these, even with IRTransformLayer running
   // GVN, slot loads may not be eliminated (spike #3 finding).
+  //
+  // LLVM 21 replaced the boolean `NoCapture` attribute with the
+  // granular `Captures` attribute carrying a `CaptureInfo`. The
+  // semantic equivalent of the old NoCapture is
+  // `CaptureInfo::none()` — pointer is not captured at all.
+#if LLVM_VERSION_MAJOR >= 21
+  slots_arg_a->addAttr(llvm::Attribute::getWithCaptureInfo(*context, llvm::CaptureInfo::none()));
+#else
   slots_arg_a->addAttr(llvm::Attribute::NoCapture);
+#endif
   slots_arg_a->addAttr(llvm::Attribute::NoAlias);
 
   llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
