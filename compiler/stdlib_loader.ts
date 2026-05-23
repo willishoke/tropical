@@ -30,7 +30,7 @@ type StdlibTarget =
       | 'specializationCache'
       | 'genericTemplatesResolved'
       | 'resolvedRegistry'
-    > & Partial<Pick<SessionState, 'typeResolver'>>
+    > & Partial<Pick<SessionState, 'typeResolver' | 'inlineNested'>>
 
 function toSession(target: StdlibTarget) {
   if (target instanceof Map) {
@@ -119,7 +119,7 @@ export function loadStdlibFromMap(
       continue
     }
     if (session.typeRegistry.has(name)) continue
-    const type = programTypeFromResolved(prog, new Map())
+    const type = programTypeFromResolved(prog, new Map(), { inlineNested: session.inlineNested })
     session.typeRegistry.set(name, type)
     session.resolvedRegistry.set(name, prog)
   }
@@ -183,7 +183,7 @@ export function loadStdlibFromSources(
       continue
     }
     if (session.typeRegistry.has(name)) continue
-    const type = programTypeFromResolved(prog, new Map())
+    const type = programTypeFromResolved(prog, new Map(), { inlineNested: session.inlineNested })
     session.typeRegistry.set(name, type)
     session.resolvedRegistry.set(name, prog)
   }

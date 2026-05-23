@@ -474,7 +474,7 @@ export function loadProgramAsType(
     return undefined
   }
 
-  const type = programTypeFromResolved(resolved, new Map())
+  const type = programTypeFromResolved(resolved, new Map(), { inlineNested: session.inlineNested })
   session.typeRegistry.set(prog.name, type)
   session.resolvedRegistry.set(prog.name, resolved)
   return type
@@ -687,7 +687,7 @@ function loadStdlibFromResolved(
       continue
     }
     if (session.typeRegistry.has(name)) continue
-    const type = programTypeFromResolved(prog, new Map())
+    const type = programTypeFromResolved(prog, new Map(), { inlineNested: session.inlineNested })
     session.typeRegistry.set(name, type)
     session.resolvedRegistry.set(name, prog)
   }

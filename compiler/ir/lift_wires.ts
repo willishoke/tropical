@@ -95,7 +95,8 @@ function liftOneWire(
   // Run strata to lower combinators (let, array literals via
   // arrayLower; session delay desugars to a synthetic RegDecl).
   const compiled = programTypeFromResolved(lifted, new Map(), {
-    displayName: rawName(synthName),
+    displayName:  rawName(synthName),
+    inlineNested: session.inlineNested,
   })
 
   // Register the type so materializeSession (oracle path) can find it

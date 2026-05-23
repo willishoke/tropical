@@ -152,6 +152,13 @@ export interface SessionState {
   /** Input expressions keyed by scalar-slot name "${instance}:${scalarSlotName}".
    *  Coexists with inputExprNodes during the migration; M8 unifies them. */
   inputExprs:         Map<string, ExprNode>
+  /** Whether the strata pipeline should flatten nested `InstanceDecl`s
+   *  via `inlineInstances`. Default `true` (legacy flat-IR path).
+   *  When `false`, sub-instance kernels survive as kernel boundaries
+   *  in `partition_recursive` — the M11 fractal path. All program-
+   *  loading entry points consult this field to keep the IR shape
+   *  consistent across a session. */
+  inlineNested:       boolean
   /** FlatRuntime — all audio goes through this. */
   runtime: Runtime
   /** Thin proxy over runtime that matches the old Graph interface for tests and legacy callers. */
@@ -198,7 +205,10 @@ export interface DelaySlotEntry {
   scalarType: 'float' | 'int' | 'bool'
 }
 
-export function makeSession(bufferLength = 512): SessionState {
+export function makeSession(
+  bufferLength = 512,
+  options: { inlineNested?: boolean } = {},
+): SessionState {
   const runtime = new Runtime(bufferLength)
   return {
     bufferLength,
@@ -216,6 +226,7 @@ export function makeSession(bufferLength = 512): SessionState {
     outputPortMeta:     new Map(),
     slotCount:          0,
     inputExprs:         new Map(),
+    inlineNested:       options.inlineNested ?? true,
     specializationCache: new Map(),
     genericTemplatesResolved: new Map(),
     resolvedRegistry: new Map(),
@@ -510,7 +521,7 @@ export function decodePortTypeDecl(
 // ─────────────────────────────────────────────────────────────
 
 type ResolveSession = Pick<SessionState, 'typeRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'instanceRegistry' | 'paramRegistry'> &
-  Partial<Pick<SessionState, 'typeResolver' | 'typeAliasRegistry'>>
+  Partial<Pick<SessionState, 'typeResolver' | 'typeAliasRegistry' | 'inlineNested'>>
 
 /**
  * Resolve a (baseName, type_args) pair to a concrete Compiled.
@@ -548,7 +559,10 @@ export function resolveProgramType(
       }
       subst.set(decl, value)
     }
-    const type = programTypeFromResolved(template, subst, { displayName: key })
+    const type = programTypeFromResolved(template, subst, {
+      displayName:  key,
+      inlineNested: session.inlineNested,
+    })
     session.specializationCache.set(key, type)
     return { type, typeArgs: resolved }
   }
