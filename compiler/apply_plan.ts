@@ -12,7 +12,7 @@
  */
 
 import type { SessionState } from './session'
-import { compileSession } from './ir/compile_session'
+import { compileSession, type CompileSessionOptions } from './ir/compile_session'
 import { toWirePlan } from './flat_plan'
 import type { Runtime } from './runtime/runtime'
 
@@ -20,13 +20,24 @@ import type { Runtime } from './runtime/runtime'
  * Compile the session's program graph through the resolved-IR
  * pipeline and push to a FlatRuntime. Call this after any mutation
  * to `inputExprNodes` or `graphOutputs`.
+ *
+ * `options.compilation_mode` selects the engine realization
+ * strategy (default `'fused'`; pass `'microkernel'` to dispatch
+ * via the per-sample N+3 function path).
  */
-export function applyFlatPlan(session: SessionState, runtime: Runtime): void {
-  const plan = compileSession(session)
+export function applyFlatPlan(
+  session: SessionState,
+  runtime: Runtime,
+  options: CompileSessionOptions = {},
+): void {
+  const plan = compileSession(session, options)
   const json = JSON.stringify(toWirePlan(plan))
   runtime.loadPlan(json)
 }
 
-export function applySessionWiring(session: SessionState): void {
-  applyFlatPlan(session, session.runtime)
+export function applySessionWiring(
+  session: SessionState,
+  options: CompileSessionOptions = {},
+): void {
+  applyFlatPlan(session, session.runtime, options)
 }
