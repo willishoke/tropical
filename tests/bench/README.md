@@ -11,9 +11,18 @@ via `bun run`, not `bun test` — these are scripts, not assertions.
 | `microkernel_vs_fused.ts`  | Head-to-head: same session compiled in `fused` mode vs `microkernel` mode. Per-mode ns/sample, compile latency, and rt-ratio across small/medium/polyphony cases. |
 | `corpus.ts`                | Shared list of patches that currently compile through `compileSession`. Other patches in `patches/` are blocked on known limitations (see file). |
 
-| File              | What it captures |
-|-------------------|------------------|
-| `RESULTS.md`      | Frozen-in-time snapshot of bench numbers tied to a specific commit. Re-capture against a new commit when the engine's emit strategy materially shifts. |
+## Snapshots
+
+Frozen-in-time benchmark captures live alongside the scripts that
+produced them, named `<script>_<YYYY-MM-DD>.md`. Each file's header
+records the commit hash, hardware, LLVM version, and reproduce
+command. Re-capture against a new commit when the engine's emit
+strategy materially shifts; the old file stays as a historical
+record.
+
+| File                                       | What it captures |
+|--------------------------------------------|------------------|
+| `microkernel_vs_fused_2026-05-23.md`       | First-cut microkernel-vs-fused numbers. Baseline for the per-voice / scoped-lifetime roadmap. |
 
 ## Quick reference
 
