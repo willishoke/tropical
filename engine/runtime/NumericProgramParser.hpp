@@ -140,11 +140,26 @@ struct ParsedPlan5
   std::vector<uint32_t>                    mix_indices;
   double                                   sample_rate = 44100.0;
 
+  // Engine realization strategy. Defaults to Fused for legacy plans
+  // and any plan whose `compilation_mode` field is absent.
+  tropical_jit::CompilationMode compilation_mode = tropical_jit::CompilationMode::Fused;
+
   // Inter-module slot array.
   uint32_t                 slot_count = 0;
   std::vector<std::string> slot_names;
   std::vector<double>      slot_defaults;
 };
+
+// Parse the optional `compilation_mode` JSON string. Fails closed on
+// unknown values — mirrors parseCompilationMode in compiler/flat_plan.ts.
+inline tropical_jit::CompilationMode parse_compilation_mode(const nlohmann::json & plan)
+{
+  if (!plan.contains("compilation_mode")) return tropical_jit::CompilationMode::Fused;
+  const std::string s = plan["compilation_mode"].get<std::string>();
+  if (s == "fused")       return tropical_jit::CompilationMode::Fused;
+  if (s == "microkernel") return tropical_jit::CompilationMode::Microkernel;
+  throw std::runtime_error("NumericProgramParser: unknown compilation_mode '" + s + "'");
+}
 
 /** Parse a single `InstanceProgram` from JSON, recursing into nested
  *  `children`. Each child kernel's writebacks resolve against its own
@@ -193,6 +208,8 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
 
   result.sample_rate = plan.value("config", nlohmann::json::object())
                            .value("sampleRate", 44100.0);
+
+  result.compilation_mode = parse_compilation_mode(plan);
 
   if (plan.contains("state_init"))
   {
@@ -297,6 +314,8 @@ inline ParsedPlan5 parse_plan4(const nlohmann::json & plan)
   ParsedPlan5 result;
   result.sample_rate = plan.value("config", nlohmann::json::object())
                            .value("sampleRate", 44100.0);
+
+  result.compilation_mode = parse_compilation_mode(plan);
 
   if (plan.contains("state_init"))
   {

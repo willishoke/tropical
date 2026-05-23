@@ -24,17 +24,32 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
   else
     throw std::runtime_error("FlatRuntime: unsupported schema '" + schema + "'");
 
-  auto kernel_result = tropical_jit::OrcJitEngine::instance().compile_flat_program(parsed.program);
-  if (!kernel_result)
-  {
-    std::string err;
-    llvm::handleAllErrors(kernel_result.takeError(),
-      [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
-    throw std::runtime_error("FlatRuntime: JIT compilation failed: " + err);
-  }
-
   KernelState new_state;
-  new_state.kernel         = *kernel_result;
+  new_state.mode = parsed.compilation_mode;
+  if (parsed.compilation_mode == tropical_jit::CompilationMode::Microkernel)
+  {
+    auto mk_result = tropical_jit::OrcJitEngine::instance().compile_microkernel(parsed.program);
+    if (!mk_result)
+    {
+      std::string err;
+      llvm::handleAllErrors(mk_result.takeError(),
+        [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
+      throw std::runtime_error("FlatRuntime: microkernel JIT compilation failed: " + err);
+    }
+    new_state.microkernels = *mk_result;
+  }
+  else
+  {
+    auto kernel_result = tropical_jit::OrcJitEngine::instance().compile_flat_program(parsed.program);
+    if (!kernel_result)
+    {
+      std::string err;
+      llvm::handleAllErrors(kernel_result.takeError(),
+        [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
+      throw std::runtime_error("FlatRuntime: JIT compilation failed: " + err);
+    }
+    new_state.kernel = *kernel_result;
+  }
   new_state.sample_rate    = parsed.sample_rate;
   new_state.output_count   = static_cast<uint32_t>(parsed.program.output_targets.size());
   new_state.register_names = parsed.register_names;
@@ -84,7 +99,14 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
   const auto & old_state = states_[active];
 
   new_state.sample_index = old_state.sample_index;
-  if (old_state.kernel != nullptr)
+  // Hot-swap state transfer runs whenever the old state has a populated
+  // kernel of EITHER mode. Mode may change between loads (e.g. control
+  // surface flips a session between fused and microkernel for A/B
+  // testing); state transfer by name is mode-agnostic.
+  const bool old_has_kernel =
+    (old_state.mode == tropical_jit::CompilationMode::Fused      && old_state.kernel != nullptr) ||
+    (old_state.mode == tropical_jit::CompilationMode::Microkernel && old_state.microkernels.preamble != nullptr);
+  if (old_has_kernel)
   {
     const auto mapping       = compute_register_mapping(old_state, new_state);
     const auto array_mapping = compute_array_mapping(old_state, new_state);
