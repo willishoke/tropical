@@ -157,12 +157,29 @@ struct FlatProgram
   SchedulerProgram             scheduler;
 };
 
-// Kernel signature. `slots` (M6+) is the shared inter-module slot array
-// passed by reference for both reads (slot operands) and writes
-// (WriteSlot instructions). Always passed; legacy plans pass an empty
-// vector's data ptr (the kernel just doesn't reference it). The
-// argument is annotated `nocapture noalias` in the IR so GVN /
-// store-to-load forwarding can engage on slot reads (per spike #3).
+// Engine realization strategy.
+//
+//   Fused       — one monolithic LLVM kernel function that inlines every
+//                 instance body inside the outer sample loop. Legacy
+//                 default; consumed by FlatRuntime via NumericKernelFn.
+//   Microkernel — N+1 LLVM functions in one module (preamble, N per-
+//                 instance kernels, state_evolution, postamble_mix);
+//                 the C++ scheduler dispatches them via function
+//                 pointers per sample. Consumed by FlatRuntime via
+//                 MicrokernelKernels.
+//
+// Distinguished by *return type* from the compiler, not by a runtime
+// flag — the cache must be partitioned by mode so a fused-mode cache
+// hit cannot satisfy a microkernel-mode query.
+enum class CompilationMode : uint8_t { Fused, Microkernel };
+
+// ── Fused-mode kernel signature ──
+// `slots` (M6+) is the shared inter-module slot array passed by
+// reference for both reads (slot operands) and writes (WriteSlot
+// instructions). Always passed; legacy plans pass an empty vector's
+// data ptr (the kernel just doesn't reference it). The argument is
+// annotated `nocapture noalias` in the IR so GVN / store-to-load
+// forwarding can engage on slot reads (per spike #3).
 using NumericKernelFn = void (*)(
   const int64_t * inputs,
   int64_t * registers,
@@ -175,6 +192,55 @@ using NumericKernelFn = void (*)(
   double * output_buffer,
   uint64_t buffer_length,
   double * slots);
+
+// ── Microkernel-mode function-pointer signatures ──
+//
+// Per-sample, not per-buffer. The C++ scheduler in FlatRuntime supplies
+// `sample_index` (= state.sample_index + i within the current buffer)
+// and walks the buffer one sample at a time, calling each function in
+// order. The slim signature drops `buffer_length` (= 1 implicitly) and
+// `output_buffer` (only `postamble_mix` writes audio); both would be
+// dead args for the per-sample callers.
+//
+// `inputs` is omitted for the same reason — fused-mode plans pass a
+// null pointer here and the kernels never read it (the parser doesn't
+// emit Input operands for session-built plans). If a future use case
+// needs per-call inputs, we'll widen the signature.
+//
+// `preamble`, `instance_i`, and `state_evolution` share an identical
+// signature (PerSampleFn). `postamble_mix` widens it with the audio
+// buffer and the per-sample destination index, because it is the
+// single LLVM-land site that touches `output_buffer`. Keeping the mix
+// inside LLVM preserves the optimizer's view of mix-temp coercions.
+using PerSampleFn = void (*)(
+  int64_t * registers,
+  int64_t * const * arrays,
+  const uint64_t * array_sizes,
+  int64_t * temps,
+  double sample_rate,
+  uint64_t sample_index,
+  const uint64_t * param_ptrs,
+  double * slots);
+
+using PostambleMixFn = void (*)(
+  int64_t * registers,
+  int64_t * const * arrays,
+  const uint64_t * array_sizes,
+  int64_t * temps,
+  double sample_rate,
+  uint64_t sample_index,
+  const uint64_t * param_ptrs,
+  double * slots,
+  double * output_buffer,
+  uint64_t output_index);
+
+struct MicrokernelKernels
+{
+  PerSampleFn               preamble        = nullptr;
+  std::vector<PerSampleFn>  instances;   // one per FlatProgram::instance_functions entry
+  PerSampleFn               state_evolution = nullptr;
+  PostambleMixFn            postamble_mix   = nullptr;
+};
 
 class KernelObjectCache;
 
@@ -192,7 +258,14 @@ class OrcJitEngine
 
     llvm::Expected<uint64_t> lookup(const std::string & symbol_name);
 
+    /** Fused-mode codegen: one LLVM function per plan. */
     llvm::Expected<NumericKernelFn> compile_flat_program(
+      const FlatProgram & program);
+
+    /** Microkernel-mode codegen: N+1 LLVM functions in one module.
+     *  Phase 3 supplies the implementation; Phase 2 lands the type
+     *  surface and a stub that errors. */
+    llvm::Expected<MicrokernelKernels> compile_microkernel(
       const FlatProgram & program);
 
   private:
@@ -201,7 +274,11 @@ class OrcJitEngine
     std::unique_ptr<llvm::orc::LLJIT> jit_;
     std::string init_error_;
     mutable std::mutex jit_mutex_;
-    std::unordered_map<std::string, NumericKernelFn> kernel_cache_;
+    std::unordered_map<std::string, NumericKernelFn>      kernel_cache_;
+    /** Microkernel cache lives alongside the fused-mode cache because
+     *  the return types differ. Phase 5 mode-tags the keys so the two
+     *  caches never collide on a shared program hash. */
+    std::unordered_map<std::string, MicrokernelKernels>   microkernel_cache_;
     std::unique_ptr<KernelObjectCache> object_cache_;
     llvm::OptimizationLevel opt_level_ = llvm::OptimizationLevel::O2;
 };

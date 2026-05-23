@@ -1288,4 +1288,17 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   return kernel;
 }
 
+llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
+  const FlatProgram & /*program*/)
+{
+  // Phase 3 lands the implementation. Phase 2 establishes the type
+  // surface (CompilationMode, MicrokernelKernels, function-pointer
+  // signatures) and the cache slot (microkernel_cache_) so that the
+  // FlatRuntime and NumericProgramParser wiring (Phase 4) can compile
+  // against the stable engine API while the codegen is still pending.
+  return llvm::make_error<llvm::StringError>(
+    "compile_microkernel: not implemented (Phase 3 of microkernel-mode spike)",
+    llvm::inconvertibleErrorCode());
+}
+
 } // namespace tropical_jit
