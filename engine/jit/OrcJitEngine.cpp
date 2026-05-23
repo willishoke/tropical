@@ -1963,13 +1963,10 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   });
 
   std::string cache_key;
-  // Mode-tag: "mk" = shallow microkernel (one fn per top-level instance,
-  // M11 children inlined); "mkd" = deep microkernel (one fn per
-  // InstanceProgram at every nesting level). Keep both disjoint from
-  // fused's "flat5:fused:".
-  const char * env_mk_deep_key = std::getenv("TROPICAL_MK_DEEP");
-  const bool deep_key = env_mk_deep_key != nullptr && std::string(env_mk_deep_key) == "1";
-  cache_key += deep_key ? "flat5:mkd:" : "flat5:mk:";
+  // Mode-tagged: keeps microkernel cache disjoint from fused mode's
+  // "flat5:fused:" entries — both compile_* methods return different
+  // types, so a wrong-mode hit would be a type-confusion bug.
+  cache_key += "flat5:mk:";
   cache_key += opt_level_tag(opt_level_);
   cache_key += ":";
   {
@@ -2121,19 +2118,12 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   };
 
   // ── Emit one PerSampleFn from one InstanceProgram (body + writebacks + children) ──
-  // include_children=true (default): recursive — children inlined into this
-  // function's body (M11 fractal compiled into one LLVM function). This is
-  // the shallow-microkernel default: each top-level session instance gets
-  // one function, with its M11 children inlined.
-  //
-  // include_children=false (deep mode): emit ONLY this node's instructions
-  // + writebacks. Used by the "all the way down" experiment, which flattens
-  // the instance tree and emits one LLVM function per node — the C++
-  // scheduler dispatches them in post-order (children before parents).
+  // Recursive: M11 children are inlined into this function's body via
+  // EmitCtx::emit_kernel_block. One LLVM function per top-level session
+  // instance.
   auto emit_instance_function = [&](
     const std::string & sym,
-    const InstanceProgram & inst,
-    bool include_children = true) -> llvm::Error
+    const InstanceProgram & inst) -> llvm::Error
   {
     llvm::Function * fn = llvm::Function::Create(
       per_sample_ty, llvm::Function::ExternalLinkage, sym, module.get());
@@ -2147,14 +2137,7 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
 
     llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
     builder.SetInsertPoint(entry);
-    if (include_children) {
-      if (auto err = ctx.emit_kernel_block(inst)) return err;
-    } else {
-      // Emit just this node's body + writebacks. Children are emitted as
-      // their own LLVM functions in the outer flatten loop.
-      if (auto err = ctx.emit_instrs(inst.instructions)) return err;
-      ctx.emit_writebacks(inst.writebacks);
-    }
+    if (auto err = ctx.emit_kernel_block(inst)) return err;
     builder.CreateRetVoid();
 
     if (llvm::verifyFunction(*fn, &llvm::errs()))
@@ -2222,39 +2205,15 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   };
 
   // ── Emit all functions ──
-  // "Deep" mode (TROPICAL_KEEP_NESTED=1 + the strata pipeline preserves
-  // children via inlineNested:false) emits one LLVM function per
-  // InstanceProgram at every nesting level, dispatched in post-order
-  // (children before parents). This is the experimental "all the way down"
-  // mode — measures the dispatch cost of going below session-instance
-  // granularity into the M11 fractal.
-  //
-  // Default ("shallow") mode emits one function per TOP-LEVEL instance with
-  // M11 children inlined into the parent's function via the recursive
-  // emit_kernel_block. This is what the spike's main benchmark measured.
-  const char * env_mk_deep = std::getenv("TROPICAL_MK_DEEP");
-  const bool deep = env_mk_deep != nullptr && std::string(env_mk_deep) == "1";
-
+  // One LLVM function per top-level session instance, with M11 children
+  // inlined recursively via emit_kernel_block. Plus preamble,
+  // state_evolution, and postamble_mix as their own functions.
   const std::string sym_preamble        = "mk_" + hash + "_preamble";
   const std::string sym_state_evolution = "mk_" + hash + "_state_evo";
   const std::string sym_postamble_mix   = "mk_" + hash + "_postamble_mix";
   std::vector<std::string> sym_instances;
-
-  // Collect the InstanceProgram pointers to emit, in dispatch order.
-  std::vector<const InstanceProgram *> nodes;
-  if (deep) {
-    // Post-order flatten so children dispatch before parents.
-    std::function<void(const InstanceProgram &)> flatten =
-      [&](const InstanceProgram & inst) {
-        for (const auto & child : inst.children) flatten(child);
-        nodes.push_back(&inst);
-      };
-    for (const auto & top : program.instance_functions) flatten(top);
-  } else {
-    for (const auto & top : program.instance_functions) nodes.push_back(&top);
-  }
-  sym_instances.reserve(nodes.size());
-  for (std::size_t i = 0; i < nodes.size(); ++i)
+  sym_instances.reserve(program.instance_functions.size());
+  for (std::size_t i = 0; i < program.instance_functions.size(); ++i)
     sym_instances.push_back("mk_" + hash + "_inst_" + std::to_string(i));
 
   // Emit in the order the scheduler will call them so that the
@@ -2262,8 +2221,8 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   // dispatch sequence.
   if (auto err = emit_per_sample_function(sym_preamble, program.scheduler.preamble))
     return std::move(err);
-  for (std::size_t i = 0; i < nodes.size(); ++i) {
-    if (auto err = emit_instance_function(sym_instances[i], *nodes[i], /*include_children=*/!deep))
+  for (std::size_t i = 0; i < program.instance_functions.size(); ++i) {
+    if (auto err = emit_instance_function(sym_instances[i], program.instance_functions[i]))
       return std::move(err);
   }
   if (auto err = emit_per_sample_function(sym_state_evolution, program.scheduler.state_evolution))
