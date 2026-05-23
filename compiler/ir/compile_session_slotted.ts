@@ -191,6 +191,14 @@ function buildSlotMetadata(session: SessionState): {
     slotNames[entry.slotIdx]    = entry.slotName
     slotDefaults[entry.slotIdx] = entry.init
   }
+  // Input slots for sub-instance ports (M11 fractal path). Prefixed
+  // with `input:` so the namespace is distinct from output-slot names
+  // (which carry `instance.port` without prefix) and from
+  // `param:` / delay-slot names. Defaults are 0 (parent overwrites
+  // every sample via WriteSlot before the child reads).
+  for (const [name, idx] of session.inputSlotRegistry) {
+    slotNames[idx] = `input:${name}`
+  }
   return { slot_count: slotCount, slot_names: slotNames, slot_defaults: slotDefaults }
 }
 

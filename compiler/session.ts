@@ -10,6 +10,7 @@ import { type ExprNode } from './expr.js'
 import {
   type Compiled, type Instance,
   outputNames, outputPortType,
+  inputNames, inputPortType,
   // Note: re-exports below pick up Compiled/Instance + helpers for
   // callers that already import from session.js.
 } from './program_types.js'
@@ -147,7 +148,18 @@ export interface SessionState {
   /** Per-output-port metadata captured at allocate time. Keyed by the
    *  port's SlotKey (`${instance}.${port}`). */
   outputPortMeta:     Map<SlotKey, WirePortMeta>
-  /** Next slot index to allocate. Always equals outputSlotRegistry.size + paramSlotRegistry.size. */
+  /** Branded `${instance}.${slotName}` → slot index, for sub-instance
+   *  INPUT slots. Only populated by the slot-based input-wiring path
+   *  (`inlineNested:false` + `allocateInputSlots`); empty in legacy
+   *  flat-IR sessions. Coexists with `outputSlotRegistry` in the same
+   *  unified `slot[]` array — the unique indices come from the shared
+   *  `slotCount`. */
+  inputSlotRegistry:  Map<SlotKey, number>
+  /** Per-input-port metadata for sub-instance INPUT slots. Same shape
+   *  as `outputPortMeta`. */
+  inputPortMeta:      Map<SlotKey, WirePortMeta>
+  /** Next slot index to allocate. Always equals the sum of all four
+   *  per-namespace counts (output + param + input + delay). */
   slotCount:          number
   /** Input expressions keyed by scalar-slot name "${instance}:${scalarSlotName}".
    *  Coexists with inputExprNodes during the migration; M8 unifies them. */
@@ -224,6 +236,8 @@ export function makeSession(
     outputSlotRegistry: new Map(),
     paramSlotRegistry:  new Map(),
     outputPortMeta:     new Map(),
+    inputSlotRegistry:  new Map(),
+    inputPortMeta:      new Map(),
     slotCount:          0,
     inputExprs:         new Map(),
     inlineNested:       options.inlineNested ?? true,
@@ -400,6 +414,42 @@ export function allocateOutputSlots(
       session.outputSlotRegistry.set(names[i], session.slotCount + i)
     }
     session.outputPortMeta.set(portKey, {
+      scalarSlotNames: names,
+      scalarTypes:     types,
+      portType,
+    })
+    session.slotCount += names.length
+  }
+}
+
+/** Allocate slot indices for every INPUT port of an instance. Used by
+ *  `partition_recursive` when emitting slot-based parent→child input
+ *  wiring (the M11 fractal path with `inlineNested:false`). The parent
+ *  emits a `WriteSlot` into each of these slots before invoking the
+ *  child; the child's `InputRef`s lower to `Slot` reads via
+ *  `compileResolved`'s `nestedInputSlots` context.
+ *
+ *  Mirrors `allocateOutputSlots` exactly — same `expandPortToSlots`
+ *  decomposition, same unified `slotCount` accounting, same
+ *  idempotency guard. Different registry / port-meta maps so input
+ *  and output slot names live in disjoint keyspaces (a port can be
+ *  both an input and an output of different instances). */
+export function allocateInputSlots(
+  session: SessionState,
+  instName: InstanceName,
+  type: Compiled,
+): void {
+  const portNames = inputNames(type)
+  for (let idx = 0; idx < portNames.length; idx++) {
+    const portName = portNames[idx]
+    const portKey = slotKey(instName, portName)
+    if (session.inputPortMeta.has(portKey)) continue  // idempotent
+    const portType = inputPortType(type, idx) ?? DEFAULT_OUTPUT_PORT_TYPE
+    const { names, types } = expandPortToSlots(portKey, portType)
+    for (let i = 0; i < names.length; i++) {
+      session.inputSlotRegistry.set(names[i], session.slotCount + i)
+    }
+    session.inputPortMeta.set(portKey, {
       scalarSlotNames: names,
       scalarTypes:     types,
       portType,
