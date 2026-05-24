@@ -3,6 +3,8 @@ import type {
   ResolvedProgram, InstanceDecl, InputDecl, OutputDecl,
   ResolvedExpr, NestedOut, BinaryOp, RegDecl,
 } from './nodes.js'
+import { inputIdx, outputIdx, instanceIdx } from './nodes.js'
+import { mkProgram } from './decl_tables.js'
 import { identityElim } from './identity_elim.js'
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────
@@ -12,8 +14,7 @@ import { identityElim } from './identity_elim.js'
 function identityProgram(name = 'IdProg'): ResolvedProgram {
   const inDecl: InputDecl  = { op: 'inputDecl',  name: 'in_p' }
   const outDecl: OutputDecl = { op: 'outputDecl', name: 'out' }
-  return {
-    op: 'program',
+  return mkProgram({
     name,
     typeParams: [],
     ports: { inputs: [inDecl], outputs: [outDecl], typeDefs: [] },
@@ -22,19 +23,18 @@ function identityProgram(name = 'IdProg'): ResolvedProgram {
       decls: [],
       assigns: [{
         op: 'outputAssign',
-        target: outDecl,
-        expr: { op: 'inputRef', decl: inDecl },
+        target: outputIdx(0),
+        expr: { op: 'inputRef', idx: inputIdx(0) },
       }],
     },
-  }
+  })
 }
 
 /** Build a non-identity program: body assigns `out = inputRef(p) + 1`. */
 function nonIdentityProgram(name = 'NonIdProg'): ResolvedProgram {
   const inDecl: InputDecl  = { op: 'inputDecl',  name: 'in_p' }
   const outDecl: OutputDecl = { op: 'outputDecl', name: 'out' }
-  return {
-    op: 'program',
+  return mkProgram({
     name,
     typeParams: [],
     ports: { inputs: [inDecl], outputs: [outDecl], typeDefs: [] },
@@ -43,11 +43,11 @@ function nonIdentityProgram(name = 'NonIdProg'): ResolvedProgram {
       decls: [],
       assigns: [{
         op: 'outputAssign',
-        target: outDecl,
-        expr: { op: 'add', args: [{ op: 'inputRef', decl: inDecl }, 1] },
+        target: outputIdx(0),
+        expr: { op: 'add', args: [{ op: 'inputRef', idx: inputIdx(0) }, 1] },
       }],
     },
-  }
+  })
 }
 
 /** Build an InstanceDecl wrapping a program and wiring one input. */
@@ -61,7 +61,7 @@ function makeInstance(
     name: instName,
     type: prog,
     typeArgs: [],
-    inputs: [{ port: prog.ports.inputs[0], value: wireValue }],
+    inputs: [{ port: inputIdx(0), value: wireValue }],
   }
 }
 
@@ -89,8 +89,8 @@ describe('identityElim — no-op cases', () => {
         op: 'block', decls: [],
         assigns: [{
           op: 'outputAssign',
-          target: outDecl,
-          expr: { op: 'inputRef', decl: inDecl },
+          target: outputIdx(0),
+          expr: { op: 'inputRef', idx: inputIdx(0) },
         }],
       },
     }
@@ -105,19 +105,19 @@ describe('identityElim — no-op cases', () => {
     const idProg = nonIdentityProgram()
     const inst = makeInstance(idProg, 'i1', 42)
     const outerOut: OutputDecl = { op: 'outputDecl', name: 'out' }
-    const prog: ResolvedProgram = {
-      op: 'program', name: 'outer', typeParams: [],
+    const prog = mkProgram({
+      name: 'outer', typeParams: [],
       ports: { inputs: [], outputs: [outerOut], typeDefs: [] },
       body: {
         op: 'block',
         decls: [inst],
         assigns: [{
           op: 'outputAssign',
-          target: outerOut,
-          expr: { op: 'nestedOut', instance: inst, output: idProg.ports.outputs[0] },
+          target: outputIdx(0),
+          expr: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },
         }],
       },
-    }
+    })
     const after = identityElim(prog)
     expect(after.body.decls.length).toBe(1)   // not eliminated
   })
@@ -130,19 +130,19 @@ describe('identityElim — elimination', () => {
     const idProg = identityProgram()
     const inst = makeInstance(idProg, 'i1', 42)
     const outerOut: OutputDecl = { op: 'outputDecl', name: 'out' }
-    const prog: ResolvedProgram = {
-      op: 'program', name: 'outer', typeParams: [],
+    const prog = mkProgram({
+      name: 'outer', typeParams: [],
       ports: { inputs: [], outputs: [outerOut], typeDefs: [] },
       body: {
         op: 'block',
         decls: [inst],
         assigns: [{
           op: 'outputAssign',
-          target: outerOut,
-          expr: { op: 'nestedOut', instance: inst, output: idProg.ports.outputs[0] },
+          target: outputIdx(0),
+          expr: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },
         }],
       },
-    }
+    })
     const after = identityElim(prog)
     // The InstanceDecl is gone.
     expect(after.body.decls).toEqual([])
@@ -160,22 +160,22 @@ describe('identityElim — elimination', () => {
     const inst2 = makeInstance(
       idProg,
       'i2',
-      { op: 'nestedOut', instance: inst1, output: idProg.ports.outputs[0] },
+      { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },   // inst1 at body.decls[0]
     )
     const outerOut: OutputDecl = { op: 'outputDecl', name: 'out' }
-    const prog: ResolvedProgram = {
-      op: 'program', name: 'outer', typeParams: [],
+    const prog = mkProgram({
+      name: 'outer', typeParams: [],
       ports: { inputs: [], outputs: [outerOut], typeDefs: [] },
       body: {
         op: 'block',
         decls: [inst1, inst2],
         assigns: [{
           op: 'outputAssign',
-          target: outerOut,
-          expr: { op: 'nestedOut', instance: inst2, output: idProg.ports.outputs[0] },
+          target: outputIdx(0),
+          expr: { op: 'nestedOut', instance: instanceIdx(1), output: outputIdx(0) },   // inst2 at body.decls[1]
         }],
       },
-    }
+    })
     const after = identityElim(prog)
     expect(after.body.decls).toEqual([])
     expect((after.body.assigns[0] as { expr: ResolvedExpr }).expr).toBe(7)
@@ -186,21 +186,21 @@ describe('identityElim — elimination', () => {
     const inst = makeInstance(idProg, 'i1', 3.14)
     const outerOut: OutputDecl = { op: 'outputDecl', name: 'out' }
     const nestedRef: NestedOut = {
-      op: 'nestedOut', instance: inst, output: idProg.ports.outputs[0],
+      op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0),
     }
-    const prog: ResolvedProgram = {
-      op: 'program', name: 'outer', typeParams: [],
+    const prog = mkProgram({
+      name: 'outer', typeParams: [],
       ports: { inputs: [], outputs: [outerOut], typeDefs: [] },
       body: {
         op: 'block',
         decls: [inst],
         assigns: [{
           op: 'outputAssign',
-          target: outerOut,
+          target: outputIdx(0),
           expr: { op: 'mul', args: [nestedRef, 2] },
         }],
       },
-    }
+    })
     const after = identityElim(prog)
     expect(after.body.decls).toEqual([])
     const expr = (after.body.assigns[0] as { expr: ResolvedExpr }).expr as BinaryOp
@@ -215,25 +215,25 @@ describe('identityElim — elimination', () => {
     const idInst = makeInstance(idProg, 'id1', 5)
     const nonIdInst = makeInstance(nonIdProg, 'non1', 10)
     const outerOut: OutputDecl = { op: 'outputDecl', name: 'out' }
-    const prog: ResolvedProgram = {
-      op: 'program', name: 'outer', typeParams: [],
+    const prog = mkProgram({
+      name: 'outer', typeParams: [],
       ports: { inputs: [], outputs: [outerOut], typeDefs: [] },
       body: {
         op: 'block',
         decls: [idInst, nonIdInst],
         assigns: [{
           op: 'outputAssign',
-          target: outerOut,
+          target: outputIdx(0),
           expr: {
             op: 'add',
             args: [
-              { op: 'nestedOut', instance: idInst,    output: idProg.ports.outputs[0] },
-              { op: 'nestedOut', instance: nonIdInst, output: nonIdProg.ports.outputs[0] },
+              { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },   // idInst at body.decls[0]
+              { op: 'nestedOut', instance: instanceIdx(1), output: outputIdx(0) },   // nonIdInst at body.decls[1]
             ],
           },
         }],
       },
-    }
+    })
     const after = identityElim(prog)
     // Identity gone, non-identity remains. The pass clones the program
     // before mutating, so surviving InstanceDecls are fresh objects
@@ -247,10 +247,11 @@ describe('identityElim — elimination', () => {
     const expr = (after.body.assigns[0] as { expr: ResolvedExpr }).expr as BinaryOp
     expect(expr.args[0]).toBe(5)
     expect((expr.args[1] as NestedOut).op).toBe('nestedOut')
-    // The rhs NestedOut MUST reference the surviving instance (not the
-    // dangling original). This is the consistency invariant the
-    // clone-then-mutate approach preserves.
-    expect((expr.args[1] as NestedOut).instance).toBe(survivor)
+    // The rhs NestedOut MUST be remapped to point at the surviving
+    // instance's NEW position. nonIdInst was at body.decls[1] before
+    // elim; after elim (idInst dropped) it's at position 0.
+    expect((expr.args[1] as NestedOut).instance).toBe(0 as never)
+    expect(after.instances[(expr.args[1] as NestedOut).instance]).toBe(survivor)
   })
 
   test('substitution into RegDecl init / update fields', () => {
@@ -261,12 +262,12 @@ describe('identityElim — elimination', () => {
     const reg: RegDecl = {
       op: 'regDecl',
       name: 'r',
-      init: { op: 'nestedOut', instance: inst, output: idProg.ports.outputs[0] },
-      update: { op: 'nestedOut', instance: inst, output: idProg.ports.outputs[0] },
+      init:   { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },
+      update: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },
     }
     const outerOut: OutputDecl = { op: 'outputDecl', name: 'out' }
-    const prog: ResolvedProgram = {
-      op: 'program', name: 'outer', typeParams: [],
+    const prog = mkProgram({
+      name: 'outer', typeParams: [],
       ports: { inputs: [], outputs: [outerOut], typeDefs: [] },
       body: {
         op: 'block',
@@ -274,12 +275,12 @@ describe('identityElim — elimination', () => {
         assigns: [
           {
             op: 'outputAssign',
-            target: outerOut,
-            expr: { op: 'regRef', decl: reg },
+            target: outputIdx(0),
+            expr: { op: 'regRef', idx: 0 as never },   // reg is at body.regs[0]
           },
         ],
       },
-    }
+    })
     const after = identityElim(prog)
     expect(after.body.decls.length).toBe(1)   // only the RegDecl
     expect(after.body.decls[0].op).toBe('regDecl')
@@ -296,19 +297,19 @@ describe('identityElim — properties', () => {
     const idProg = identityProgram()
     const inst = makeInstance(idProg, 'i1', 99)
     const outerOut: OutputDecl = { op: 'outputDecl', name: 'out' }
-    const prog: ResolvedProgram = {
-      op: 'program', name: 'outer', typeParams: [],
+    const prog = mkProgram({
+      name: 'outer', typeParams: [],
       ports: { inputs: [], outputs: [outerOut], typeDefs: [] },
       body: {
         op: 'block',
         decls: [inst],
         assigns: [{
           op: 'outputAssign',
-          target: outerOut,
-          expr: { op: 'nestedOut', instance: inst, output: idProg.ports.outputs[0] },
+          target: outputIdx(0),
+          expr: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },
         }],
       },
-    }
+    })
     const once = identityElim(prog)
     const twice = identityElim(once)
     expect(JSON.stringify(twice)).toEqual(JSON.stringify(once))
@@ -318,19 +319,19 @@ describe('identityElim — properties', () => {
     const idProg = identityProgram()
     const inst = makeInstance(idProg, 'i1', 99)
     const outerOut: OutputDecl = { op: 'outputDecl', name: 'out' }
-    const prog: ResolvedProgram = {
-      op: 'program', name: 'outer', typeParams: [],
+    const prog = mkProgram({
+      name: 'outer', typeParams: [],
       ports: { inputs: [], outputs: [outerOut], typeDefs: [] },
       body: {
         op: 'block',
         decls: [inst],
         assigns: [{
           op: 'outputAssign',
-          target: outerOut,
-          expr: { op: 'nestedOut', instance: inst, output: idProg.ports.outputs[0] },
+          target: outputIdx(0),
+          expr: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },
         }],
       },
-    }
+    })
     const snapshot = JSON.stringify(prog)
     identityElim(prog)
     expect(JSON.stringify(prog)).toBe(snapshot)

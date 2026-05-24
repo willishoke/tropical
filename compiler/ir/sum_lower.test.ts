@@ -139,7 +139,7 @@ describe('sumLower — payload variant', () => {
     // `then` branch (Decaying arm) eventually contains a regRef whose
     // decl is the state#Decaying__level slot.
     const a = out.body.assigns[0] as OutputAssign
-    const refs = collectRegRefNames(a.expr)
+    const refs = collectRegRefNames(a.expr, out)
     expect(refs).toContain('state#Decaying__level')
     expect(refs).toContain('state#tag')
   })
@@ -149,12 +149,15 @@ describe('sumLower — payload variant', () => {
  *  expression. Does NOT recurse through `regRef.decl` (the decl
  *  carries its own update expression which would re-enter the walker
  *  indefinitely). */
-function collectRegRefNames(expr: ResolvedExpr): string[] {
+function collectRegRefNames(expr: ResolvedExpr, prog?: ResolvedProgram): string[] {
   const out: string[] = []
   const walk = (e: ResolvedExpr): void => {
     if (typeof e !== 'object' || e === null) return
     if (Array.isArray(e)) { e.forEach(walk); return }
-    if (e.op === 'regRef') { out.push(e.decl.name); return }
+    if (e.op === 'regRef') {
+      const name = prog?.regs[e.idx]?.name ?? `<idx ${e.idx}>`
+      out.push(name); return
+    }
     // Recurse into structured children only — skip back-pointer fields.
     walkChildren(e, walk)
   }

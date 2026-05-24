@@ -46,7 +46,11 @@ import type {
   Tag, Match, MatchArm,
   Let,
   Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith,
+  InputIdx, TypeParamIdx,
+  RegIdx as RegIdx_t, ParamIdx as ParamIdx_t, InstanceIdx as InstanceIdx_t,
 } from './nodes.js'
+import { typeParamIdx } from './nodes.js'
+import { buildDeclTables } from './decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Dedup table — Map<old, new> covers every cloned decl kind
@@ -67,23 +71,38 @@ interface CloneTable {
    *  nested program share the cloned program object. */
   nestedPrograms: Map<ResolvedProgram, ResolvedProgram>
   /** Optional substitution map for Phase C3 specialize: TypeParamRef
-   *  in expression position and TypeParamDecl in ShapeDim position
-   *  whose decl is a key here are rewritten to the corresponding
-   *  integer. Refs whose decl is NOT in subst are passed through —
-   *  they belong to a nested program's own type-params that this
-   *  caller is not specializing. */
-  subst?: ReadonlyMap<TypeParamDecl, number>
+   *  whose idx is a key here is rewritten to the corresponding integer.
+   *  Refs whose idx is NOT in subst pass through — they belong to a
+   *  nested program's own type-params (caller isn't specializing them).
+   *  Keyed by TypeParamIdx (position in the root program's typeParams).
+   *  ShapeDim substitution uses `substByDecl` because ShapeDim carries
+   *  TypeParamDecl pointers, not indices. */
+  subst?:        ReadonlyMap<TypeParamIdx, number>
+  /** Mirror of `subst` keyed by decl object — used for ShapeDim
+   *  substitution where the dim is `number | TypeParamDecl` (no idx).
+   *  Built alongside `subst` in cloneWithSubst. */
+  substByDecl?:  ReadonlyMap<TypeParamDecl, number>
   /** The program whose `typeParams` should be emptied in the clone
    *  (the specialization root). Nested programs retain their own
    *  `typeParams` since this caller isn't substituting them. */
   rootProgram?: ResolvedProgram
   /** Optional substitution map for Phase C5 inlineInstances: InputRef
-   *  whose decl is a key here is replaced by the corresponding
+   *  whose idx is a key here is replaced by the corresponding
    *  ResolvedExpr (from the wired-in expression at the outer site).
    *  The substituted expression is in the *outer* program's namespace
    *  and is not cloned again — it passes through by reference, which
    *  preserves DAG sharing across multiple uses. */
-  inputSubst?: ReadonlyMap<InputDecl, ResolvedExpr>
+  inputSubst?: ReadonlyMap<InputIdx, ResolvedExpr>
+  /** Idx offsets applied to surviving indexed refs in the cloned
+   *  program. After cloning, the cloned program's decls will be lifted
+   *  into an outer program at known offsets; refs inside the cloned
+   *  body need to point at the lifted positions, not the cloned-local
+   *  positions. Applied to RegRef, ParamRef, NestedOut.instance.
+   *  Zero (or unset) means no shift — useful for standalone clones
+   *  that aren't being lifted. */
+  regOffset?:      number
+  paramOffset?:    number
+  instanceOffset?: number
 }
 
 function emptyTable(): CloneTable {
@@ -121,7 +140,16 @@ export function cloneWithSubst(
   subst: ReadonlyMap<TypeParamDecl, number>,
 ): ResolvedProgram {
   const t = emptyTable()
-  t.subst = subst
+  // Build the index-keyed mirror of subst for ref-position substitution.
+  // ShapeDim sites still use the decl-keyed map because ShapeDim's
+  // TypeParamDecl variant carries a decl pointer, not an index.
+  const byIdx = new Map<TypeParamIdx, number>()
+  for (let i = 0; i < prog.typeParams.length; i++) {
+    const v = subst.get(prog.typeParams[i])
+    if (v !== undefined) byIdx.set(typeParamIdx(i), v)
+  }
+  t.subst       = byIdx
+  t.substByDecl = subst
   t.rootProgram = prog
   return cloneProgram(prog, t)
 }
@@ -140,10 +168,14 @@ export function cloneWithSubst(
  */
 export function cloneWithInputSubst(
   prog: ResolvedProgram,
-  inputSubst: ReadonlyMap<InputDecl, ResolvedExpr>,
+  inputSubst: ReadonlyMap<InputIdx, ResolvedExpr>,
+  shifts?: { regOffset?: number; paramOffset?: number; instanceOffset?: number },
 ): ResolvedProgram {
   const t = emptyTable()
   t.inputSubst = inputSubst
+  if (shifts?.regOffset      !== undefined) t.regOffset      = shifts.regOffset
+  if (shifts?.paramOffset    !== undefined) t.paramOffset    = shifts.paramOffset
+  if (shifts?.instanceOffset !== undefined) t.instanceOffset = shifts.instanceOffset
   return cloneProgram(prog, t)
 }
 
@@ -155,12 +187,21 @@ function cloneProgram(prog: ResolvedProgram, t: CloneTable): ResolvedProgram {
   // memo on recursion (e.g., a nested program decl whose body refers
   // back through scope to itself, though current parser disallows
   // that — defensive against future shapes).
+  // Shell satisfies ResolvedProgram with empty decl tables; the tables
+  // are re-derived after fill-in completes (line near return below).
+  // Clone uses a shell-then-fill pattern (mutation during construction)
+  // to handle cross-decl references. Phase 0 just adds the table re-
+  // derivation; the structural cleanup of the shell pattern itself is
+  // a later phase.
   const shell: ResolvedProgram = {
     op: 'program',
     name: prog.name,
     typeParams: [],
     ports: { inputs: [], outputs: [], typeDefs: prog.ports.typeDefs },
     body: { op: 'block', decls: [], assigns: [] },
+    regs:      [],
+    params:    [],
+    instances: [],
   }
   t.nestedPrograms.set(prog, shell)
 
@@ -197,6 +238,16 @@ function cloneProgram(prog: ResolvedProgram, t: CloneTable): ResolvedProgram {
   shell.body.decls = declShells
 
   shell.body.assigns = prog.body.assigns.map(a => cloneAssign(a, t))
+
+  // Re-derive decl tables now that body.decls is fully populated. The
+  // tables on the shell were placeholder `[]` during the fill phase
+  // (necessary so cross-decl references in the table cache could be
+  // resolved against the shell's identity); now that fill is done the
+  // tables are projected from the canonical body.decls.
+  const tables = buildDeclTables(shell.body.decls)
+  shell.regs      = tables.regs
+  shell.params    = tables.params
+  shell.instances = tables.instances
 
   return shell
 }
@@ -296,14 +347,16 @@ function fillBodyDecl(orig: BodyDecl, fresh: BodyDecl, t: CloneTable): void {
     return
   }
   if (orig.op === 'instanceDecl' && fresh.op === 'instanceDecl') {
-    // typeArgs reference the cloned program's typeParams. Use the
-    // cloned-program's typeParams via the dedup table.
+    // typeArgs and inputs are indexed (positions into the target
+    // program's typeParams[] / ports.inputs[]). Since cloneProgram
+    // preserves the order of decls, the target's positions don't
+    // shift — indices pass through unchanged.
     fresh.typeArgs = orig.typeArgs.map(a => ({
-      param: cloneTypeParamDecl(a.param, t),
+      param: a.param,
       value: a.value,
     }))
     fresh.inputs = orig.inputs.map(i => ({
-      port:  cloneInputDecl(i.port, t),
+      port:  i.port,
       value: cloneExpr(i.value, t),
     }))
     return
@@ -317,11 +370,13 @@ function fillBodyDecl(orig: BodyDecl, fresh: BodyDecl, t: CloneTable): void {
 
 function cloneAssign(a: BodyAssign, t: CloneTable): BodyAssign {
   // Post-Phase-0a: BodyAssign is OutputAssign-only. NextUpdate folded
-  // into RegDecl.update at elaboration time.
-  const target: OutputDecl | { kind: 'dac' } =
-    'op' in a.target
-      ? cloneOutputDecl(a.target, t)
-      : { kind: 'dac' }   // sentinel — fresh object, semantically a singleton
+  // into RegDecl.update at elaboration time. Target is now OutputIdx
+  // (index into prog.ports.outputs[]) or the dac sentinel — cloning
+  // preserves output order, so the index passes through unchanged.
+  const target: typeof a.target =
+    typeof a.target === 'object' && 'kind' in a.target
+      ? { kind: 'dac' }                 // sentinel — fresh object
+      : a.target                         // OutputIdx — pass through
   const fresh: OutputAssign = {
     op: 'outputAssign',
     target,
@@ -354,8 +409,8 @@ function clonePortType(pt: PortType, t: CloneTable): PortType {
 
 function cloneShapeDim(d: ShapeDim, t: CloneTable): ShapeDim {
   if (typeof d === 'number') return d
-  if (t.subst !== undefined) {
-    const v = t.subst.get(d)
+  if (t.substByDecl !== undefined) {
+    const v = t.substByDecl.get(d)
     if (v !== undefined) return v
   }
   return cloneTypeParamDecl(d, t)
@@ -368,22 +423,27 @@ function cloneShapeDim(d: ShapeDim, t: CloneTable): ShapeDim {
 function cloneExpr(e: ResolvedExpr, t: CloneTable): ResolvedExpr {
   if (typeof e === 'number' || typeof e === 'boolean') return e
   if (Array.isArray(e)) return e.map(x => cloneExpr(x, t))
-  // Specialize-time substitution: a TypeParamRef whose decl is a key
-  // in the subst map collapses to the integer literal. Refs whose decl
-  // is NOT in subst (i.e., the decl belongs to a nested program's own
-  // type-params) pass through to cloneOpNode, where they get the usual
-  // ref-clone treatment.
+  // Specialize-time substitution: a TypeParamRef whose idx is a key
+  // in the subst map collapses to the integer literal. The subst map
+  // is keyed by TypeParamIdx (position in the ROOT program's
+  // typeParams), populated by cloneWithSubst. Refs whose idx is NOT
+  // in subst (i.e., the ref belongs to a nested program's own
+  // type-params) pass through to cloneOpNode for the usual ref-clone
+  // treatment. (Nested-program scope tracking is not yet supported
+  // here — tropical's stdlib has no nested programDecls, so this
+  // hasn't been an issue in practice; if it becomes one, push the
+  // current-program onto a stack in CloneTable and disambiguate.)
   if (t.subst !== undefined && e.op === 'typeParamRef') {
-    const v = t.subst.get(e.decl)
+    const v = t.subst.get(e.idx)
     if (v !== undefined) return v
   }
-  // Inline-time substitution (Phase C5): an InputRef whose decl is a
+  // Inline-time substitution (Phase C5): an InputRef whose idx is a
   // key in inputSubst collapses to the wired-in expression from the
   // outer site. The substituted expression is already in the outer's
   // namespace; pass it through by reference (preserves DAG sharing
   // when the same input is used multiple times in the inner body).
   if (t.inputSubst !== undefined && typeof e === 'object' && e.op === 'inputRef') {
-    const v = t.inputSubst.get(e.decl)
+    const v = t.inputSubst.get(e.idx)
     if (v !== undefined) return v
   }
   return cloneOpNode(e, t)
@@ -399,23 +459,37 @@ function cloneBinder(b: BinderDecl, t: CloneTable): BinderDecl {
 
 function cloneOpNode(node: ResolvedExprOp, t: CloneTable): ResolvedExprOp {
   switch (node.op) {
-    // Refs — point at the cloned decl via the dedup table.
-    case 'inputRef':  return { op: 'inputRef',  decl: cloneInputDecl(node.decl, t) }
-    case 'regRef':    return { op: 'regRef',    decl: lookupRegDecl(node.decl, t) }
-    case 'paramRef': {
-      const cloned = t.params.get(node.decl)
-      if (!cloned) throw new Error(`clone: unregistered ParamDecl '${node.decl.name}'`)
-      return { op: 'paramRef', decl: cloned }
+    // Indexed refs pass through, with optional offset shifting applied
+    // for inlineInstances' lift scenario. Cloning alone preserves decl
+    // order, but a clone being lifted into another program needs its
+    // indices remapped to the outer's namespace. The InputSubst case
+    // doesn't shift inputRefs because they're substituted to outer
+    // expressions before they could need remapping.
+    case 'inputRef':     return { op: 'inputRef',     idx: node.idx }
+    case 'regRef':       return {
+      op: 'regRef',
+      idx: (t.regOffset !== undefined
+        ? (node.idx as number) + t.regOffset
+        : node.idx) as RegIdx_t,
     }
-    case 'typeParamRef': return { op: 'typeParamRef', decl: cloneTypeParamDecl(node.decl, t) }
+    case 'paramRef':     return {
+      op: 'paramRef',
+      idx: (t.paramOffset !== undefined
+        ? (node.idx as number) + t.paramOffset
+        : node.idx) as ParamIdx_t,
+    }
+    case 'typeParamRef': return { op: 'typeParamRef', idx: node.idx }
+    case 'nestedOut':    return {
+      op: 'nestedOut',
+      instance: (t.instanceOffset !== undefined
+        ? (node.instance as number) + t.instanceOffset
+        : node.instance) as InstanceIdx_t,
+      output: node.output,
+    }
+    // BindingRef is pointer-based (see issue #156). Binders are
+    // dedup-cloned to fresh objects so refs across an arm body all
+    // point at the same fresh binder.
     case 'bindingRef':   return { op: 'bindingRef',   decl: cloneBinder(node.decl, t) }
-    case 'nestedOut': {
-      const inst = t.instances.get(node.instance)
-      if (!inst) throw new Error(`clone: unregistered InstanceDecl '${node.instance.name}'`)
-      // The output decl belongs to inst.type (the cloned nested program);
-      // resolve it via cloneOutputDecl which routes through the table.
-      return { op: 'nestedOut', instance: inst, output: cloneOutputDecl(node.output, t) }
-    }
     case 'sampleRate':  return { op: 'sampleRate' }
     case 'sampleIndex': return { op: 'sampleIndex' }
 

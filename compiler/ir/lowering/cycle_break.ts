@@ -41,7 +41,10 @@ import type {
   ResolvedBlock,
   BodyDecl,
   InstanceDecl, OutputDecl, RegDecl,
+  RegIdx, InstanceIdx, OutputIdx,
 } from '../nodes.js'
+import { regIdx } from '../nodes.js'
+import { withDeclTables } from '../decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Public API
@@ -127,32 +130,36 @@ export function breakInstanceCycles(prog: ResolvedProgram): CycleBreakResult {
     })
   }
 
-  // Allocate the synthetic reg for a given (breakTarget, output) on
-  // first use; subsequent references resolve to the same reg.
-  const breakerFor = (inst: InstanceDecl, output: OutputDecl): RegDecl => {
-    const key = `${inst.name}::${output.name}`
-    let d = breakerReg.get(key)
-    if (d) return d
-    d = {
+  // Allocate the synthetic reg for a given (breakTargetIdx, outputIdx)
+  // on first use; subsequent references resolve to the same reg. Returns
+  // the new RegIdx (position in the EVENTUAL post-break body, which is
+  // existing regs followed by syntheticRegs).
+  const existingRegCount = prog.regs.length
+  const breakerIdxFor = (instI: InstanceIdx, outputI: OutputIdx): RegIdx => {
+    const inst = prog.instances[instI]
+    const outputDecl = inst.type.ports.outputs[outputI]
+    const key = `${inst.name}::${outputDecl.name}`
+    const cached = breakerReg.get(key)
+    if (cached) {
+      const cachedIdx = syntheticRegs.indexOf(cached)
+      return regIdx(existingRegCount + cachedIdx)
+    }
+    const newRegIdx = regIdx(existingRegCount + syntheticRegs.length)
+    const d: RegDecl = {
       op: 'regDecl',
-      name: `_feedback_${inst.name}_${output.name}`,
+      name: `_feedback_${inst.name}_${outputDecl.name}`,
       // The synthetic reg's update reads the current sample of the
       // broken output; the reg holds that value to make it readable
       // one sample later by the cycle members. The `_feedback_` name
-      // prefix distinguishes these from user-written regs (consumed
-      // by trace_cycles.test.ts and any future analyses that want
-      // to identify cycle-break regs). Post-Phase 4b strict policy
-      // means production code paths never produce these (cycles in
-      // source throw at elaborate-time); the helper survives for
-      // direct invocation by tests and future realizations.
-      update: { op: 'nestedOut', instance: inst, output },
+      // prefix distinguishes these from user-written regs.
+      update: { op: 'nestedOut', instance: instI, output: outputI },
       init: 0,
     }
     breakerReg.set(key, d)
     syntheticRegs.push(d)
     const ports = breakerPortsByCycle.get(inst)
-    if (ports) ports.push(output)
-    return d
+    if (ports) ports.push(outputDecl)
+    return newRegIdx
   }
 
   // Rewriter: in any expression that belongs to an instance in
@@ -167,8 +174,9 @@ export function breakInstanceCycles(prog: ResolvedProgram): CycleBreakResult {
   const rewriteOpForOwner = (node: ResolvedExprOp, breakSet: Set<InstanceDecl>): ResolvedExpr => {
     switch (node.op) {
       case 'nestedOut': {
-        if (breakSet.has(node.instance)) {
-          return { op: 'regRef', decl: breakerFor(node.instance, node.output) }
+        const inst = prog.instances[node.instance]
+        if (inst && breakSet.has(inst)) {
+          return { op: 'regRef', idx: breakerIdxFor(node.instance, node.output) }
         }
         return node
       }
@@ -262,7 +270,7 @@ export function breakInstanceCycles(prog: ResolvedProgram): CycleBreakResult {
     assigns: prog.body.assigns,
   }
   return {
-    lowered: { ...prog, body: newBody },
+    lowered: withDeclTables({ ...prog, body: newBody }),
     syntheticRegs,
     cycles: cyclesProvenance,
   }
@@ -284,10 +292,14 @@ function buildInstanceDeps(
   const allInstances = new Set(instances)
   const deps = new Map<InstanceDecl, Set<InstanceDecl>>()
   for (const inst of instances) deps.set(inst, new Set())
+  // collectNestedOutInstances resolves nestedOut.instance (now InstanceIdx)
+  // against the local instances array — these ARE the body's instances
+  // in order, matching the InstanceIdx assignment.
+  const instanceByIdx = instances
   for (const inst of instances) {
     const set = deps.get(inst)!
     for (const wire of inst.inputs) {
-      collectNestedOutInstances(wire.value, set, allInstances)
+      collectNestedOutInstances(wire.value, set, allInstances, instanceByIdx)
     }
   }
   return deps
@@ -297,52 +309,55 @@ function collectNestedOutInstances(
   expr: ResolvedExpr,
   out: Set<InstanceDecl>,
   allInstances: Set<InstanceDecl>,
+  instanceByIdx: readonly InstanceDecl[],
 ): void {
   if (typeof expr !== 'object' || expr === null) return
   if (Array.isArray(expr)) {
-    for (const e of expr) collectNestedOutInstances(e, out, allInstances)
+    for (const e of expr) collectNestedOutInstances(e, out, allInstances, instanceByIdx)
     return
   }
   switch (expr.op) {
-    case 'nestedOut':
-      if (allInstances.has(expr.instance)) out.add(expr.instance)
+    case 'nestedOut': {
+      const inst = instanceByIdx[expr.instance]
+      if (inst && allInstances.has(inst)) out.add(inst)
       return
+    }
     case 'match':
-      collectNestedOutInstances(expr.scrutinee, out, allInstances)
-      for (const arm of expr.arms) collectNestedOutInstances(arm.body, out, allInstances)
+      collectNestedOutInstances(expr.scrutinee, out, allInstances, instanceByIdx)
+      for (const arm of expr.arms) collectNestedOutInstances(arm.body, out, allInstances, instanceByIdx)
       return
     case 'fold': case 'scan':
-      collectNestedOutInstances(expr.over, out, allInstances)
-      collectNestedOutInstances(expr.init, out, allInstances)
-      collectNestedOutInstances(expr.body, out, allInstances)
+      collectNestedOutInstances(expr.over, out, allInstances, instanceByIdx)
+      collectNestedOutInstances(expr.init, out, allInstances, instanceByIdx)
+      collectNestedOutInstances(expr.body, out, allInstances, instanceByIdx)
       return
     case 'generate':
-      collectNestedOutInstances(expr.count, out, allInstances)
-      collectNestedOutInstances(expr.body, out, allInstances)
+      collectNestedOutInstances(expr.count, out, allInstances, instanceByIdx)
+      collectNestedOutInstances(expr.body, out, allInstances, instanceByIdx)
       return
     case 'iterate': case 'chain':
-      collectNestedOutInstances(expr.count, out, allInstances)
-      collectNestedOutInstances(expr.init, out, allInstances)
-      collectNestedOutInstances(expr.body, out, allInstances)
+      collectNestedOutInstances(expr.count, out, allInstances, instanceByIdx)
+      collectNestedOutInstances(expr.init, out, allInstances, instanceByIdx)
+      collectNestedOutInstances(expr.body, out, allInstances, instanceByIdx)
       return
     case 'map2':
-      collectNestedOutInstances(expr.over, out, allInstances)
-      collectNestedOutInstances(expr.body, out, allInstances)
+      collectNestedOutInstances(expr.over, out, allInstances, instanceByIdx)
+      collectNestedOutInstances(expr.body, out, allInstances, instanceByIdx)
       return
     case 'zipWith':
-      collectNestedOutInstances(expr.a, out, allInstances)
-      collectNestedOutInstances(expr.b, out, allInstances)
-      collectNestedOutInstances(expr.body, out, allInstances)
+      collectNestedOutInstances(expr.a, out, allInstances, instanceByIdx)
+      collectNestedOutInstances(expr.b, out, allInstances, instanceByIdx)
+      collectNestedOutInstances(expr.body, out, allInstances, instanceByIdx)
       return
     case 'let':
-      for (const b of expr.binders) collectNestedOutInstances(b.value, out, allInstances)
-      collectNestedOutInstances(expr.in, out, allInstances)
+      for (const b of expr.binders) collectNestedOutInstances(b.value, out, allInstances, instanceByIdx)
+      collectNestedOutInstances(expr.in, out, allInstances, instanceByIdx)
       return
     case 'tag':
-      for (const p of expr.payload) collectNestedOutInstances(p.value, out, allInstances)
+      for (const p of expr.payload) collectNestedOutInstances(p.value, out, allInstances, instanceByIdx)
       return
     case 'zeros':
-      collectNestedOutInstances(expr.count, out, allInstances)
+      collectNestedOutInstances(expr.count, out, allInstances, instanceByIdx)
       return
     case 'add': case 'sub': case 'mul': case 'div': case 'mod':
     case 'lt': case 'lte': case 'gt': case 'gte': case 'eq': case 'neq':
@@ -353,7 +368,7 @@ function collectNestedOutInstances(
     case 'sqrt': case 'abs': case 'floor': case 'ceil': case 'round':
     case 'floatExponent': case 'toInt': case 'toBool': case 'toFloat':
     case 'clamp': case 'select': case 'index': case 'arraySet':
-      for (const a of expr.args) collectNestedOutInstances(a, out, allInstances)
+      for (const a of expr.args) collectNestedOutInstances(a, out, allInstances, instanceByIdx)
       return
     case 'inputRef': case 'regRef': case 'paramRef':
     case 'typeParamRef': case 'bindingRef':

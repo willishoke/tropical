@@ -53,7 +53,7 @@ describe('clone — reference identity (within-clone)', () => {
     const assign = copy.body.assigns[0] as OutputAssign
     const ref = assign.expr as InputRef
     expect(ref.op).toBe('inputRef')
-    expect(ref.decl).toBe(inputDecl)
+    expect(copy.ports.inputs[ref.idx]).toBe(inputDecl)
   })
 
   test('self-referential RegDecl: update on decl points at the regDecl in the clone', () => {
@@ -68,9 +68,9 @@ describe('clone — reference identity (within-clone)', () => {
     const regDecl = copy.body.decls[0] as RegDecl
     const out  = copy.body.assigns[0] as OutputAssign
     expect(out.expr).toMatchObject({ op: 'regRef' })
-    expect((out.expr as RegRef).decl).toBe(regDecl)
+    expect(copy.regs[(out.expr as RegRef).idx]).toBe(regDecl)
     expect(regDecl.update).toBeDefined()
-    expect((regDecl.update as RegRef).decl).toBe(regDecl)
+    expect(copy.regs[(regDecl.update as RegRef).idx]).toBe(regDecl)
   })
 
   test('multiple RegRefs to same RegDecl all point at the same cloned decl', () => {
@@ -83,13 +83,13 @@ describe('clone — reference identity (within-clone)', () => {
     `)
     const regDecl = copy.body.decls[0] as RegDecl
     const out = copy.body.assigns[0] as OutputAssign
-    // Walk the (s + s + s) tree; collect every RegRef.decl.
+    // Walk the (s + s + s) tree; collect every regRef.idx → resolve to RegDecl.
     const refs: RegDecl[] = []
     function walk(n: unknown): void {
       if (typeof n !== 'object' || n === null) return
       if (Array.isArray(n)) { n.forEach(walk); return }
-      const o = n as { op?: string; decl?: unknown; args?: unknown }
-      if (o.op === 'regRef') { refs.push(o.decl as RegDecl); return }
+      const o = n as { op?: string; idx?: number; args?: unknown }
+      if (o.op === 'regRef') { refs.push(copy.regs[o.idx as number]); return }
       if (Array.isArray(o.args)) o.args.forEach(walk)
     }
     walk(out.expr)
@@ -99,7 +99,7 @@ describe('clone — reference identity (within-clone)', () => {
 
   test('delay-form RegDecl clone preserves RegRef identity', () => {
     // Post-Phase-0a: `delay z = u init v` desugars to a RegDecl with
-    // update populated. Reads of z are RegRefs.
+    // update populated. Reads of z are RegRefs (by idx into copy.regs).
     const { copy } = clab(`
       program X(x: float) -> (out: float) {
         delay z = x init 0
@@ -110,7 +110,7 @@ describe('clone — reference identity (within-clone)', () => {
     const out = copy.body.assigns[0] as OutputAssign
     const ref = out.expr as RegRef
     expect(ref.op).toBe('regRef')
-    expect(ref.decl).toBe(regDecl)
+    expect(copy.regs[ref.idx]).toBe(regDecl)
     expect(regDecl.update).toBeDefined()
   })
 

@@ -251,12 +251,11 @@ describe('specialize — InstanceDecl.typeArgs survive substitution', () => {
     expect(inst.op).toBe('instanceDecl')
     expect(inst.typeArgs.length).toBe(1)
     expect(inst.typeArgs[0].value).toBe(8)
-    // The param ref on the typeArg points at the cloned Delay's N decl
-    // (the cloner walks instance.type, which clones Delay and its
-    // typeParams). The post-condition is that typeArgs[0].param is a
-    // TypeParamDecl on the instance's referenced program.
+    // The param ref on the typeArg is now a TypeParamIdx into the
+    // instance's referenced program's typeParams[]. The post-condition
+    // is that typeArgs[0].param resolves to the 'N' decl on the target.
     expect(inst.type.typeParams.length).toBe(1)
-    expect(inst.typeArgs[0].param).toBe(inst.type.typeParams[0])
-    expect(inst.typeArgs[0].param.name).toBe('N')
+    expect(inst.type.typeParams[inst.typeArgs[0].param]).toBe(inst.type.typeParams[0])
+    expect(inst.type.typeParams[inst.typeArgs[0].param].name).toBe('N')
   })
 })

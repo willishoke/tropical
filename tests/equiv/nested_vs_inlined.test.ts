@@ -78,6 +78,13 @@ const STDLIB_TARGETS: Array<[string, Record<string, number>?]> = [
   ['SinOsc'], ['Sin'], ['Cos'], ['Tanh'], ['Exp'], ['Log'], ['Pow'],
   ['OnePole'], ['BlepSaw'], ['SoftClip'], ['VCA'], ['CrossFade'],
   ['SVF'], ['LadderFilter'], ['Phaser'], ['Phaser16'],
+  // Depth-3 cases unlocked by the bubble-fix-via-levels work:
+  // Bubble contains sum-typed state regs (TriggerRamp's state,
+  // EnvExpDecay's state) that previously failed to compile in
+  // nested mode because the slot path arrived at them un-strata-
+  // processed. The topological registry build (Phase 3) +
+  // sumLower's pure construction (Phase 2) close the gap.
+  ['Bubble'], ['BubbleCloud'],
   ['AllpassDelay'], ['CombDelay'],
   ['Delay', { N: 1024 }],
 ]

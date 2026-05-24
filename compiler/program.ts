@@ -32,6 +32,7 @@ import { raiseProgram } from './parse/raise.js'
 import { elaborate, type ExternalProgramResolver } from './ir/elaborator.js'
 import { programTypeFromResolved } from './ir/strata.js'
 import type { ResolvedProgram, PortType } from './ir/nodes.js'
+import { relinkInstanceTypes } from './ir/decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Program schema
@@ -680,16 +681,33 @@ function loadStdlibFromResolved(
   }
 
   // Walk in elaboration order (insertion order in localResolved is
-  // dependency-respecting by construction).
+  // dependency-respecting by construction). For each program, relink
+  // its sub-instance type pointers to the canonical strata-processed
+  // versions already in the registry-being-built, then strata-process
+  // and register. This is the topological build: by the time a program
+  // is consumed downstream, every sub-instance's `instanceDecl.type`
+  // points at the canonical processed program — not at the raw
+  // elaborated version returned by the elaborator's resolver during
+  // the try-elaborate loop above.
+  //
+  // Without this relink, sub-instance programs would arrive at
+  // consumers (compileResolved, partition_recursive,
+  // materialize_session) with un-strata-processed body — which is
+  // exactly the gap that Bubble/BubbleCloud have been hitting in
+  // nested mode ("compileResolved: register init must lower to a
+  // literal value").
+  const processedByName = new Map<string, ResolvedProgram>()
   for (const [name, prog] of localResolved) {
     if (prog.typeParams.length > 0) {
       session.genericTemplatesResolved.set(name, prog)
       continue
     }
     if (session.typeRegistry.has(name)) continue
-    const type = programTypeFromResolved(prog, new Map(), { inlineNested: session.inlineNested })
+    const relinked = relinkInstanceTypes(prog, processedByName)
+    const type = programTypeFromResolved(relinked, new Map(), { inlineNested: session.inlineNested })
     session.typeRegistry.set(name, type)
-    session.resolvedRegistry.set(name, prog)
+    session.resolvedRegistry.set(name, type.prog)   // canonical processed (not raw)
+    processedByName.set(name, type.prog)
   }
 
   // typeResolver: callers fall back here when looking up a stdlib type

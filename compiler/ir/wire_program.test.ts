@@ -196,7 +196,9 @@ describe('liftWireToProgram — structure', () => {
     expect(prog.body.assigns.length).toBe(1)
     const assign = prog.body.assigns[0] as OutputAssign
     expect(assign.op).toBe('outputAssign')
-    expect(assign.target).toBe(prog.ports.outputs[0])
+    // Lifted programs have one output at position 0.
+    expect(assign.target).toBe(0)
+    expect(prog.ports.outputs[assign.target as number]).toBe(prog.ports.outputs[0])
   })
 
   test('ref translation: target is the inputRef pointing at the matching input decl', () => {
@@ -205,7 +207,7 @@ describe('liftWireToProgram — structure', () => {
     const assign = prog.body.assigns[0] as OutputAssign
     const expr = assign.expr as InputRef
     expect(expr.op).toBe('inputRef')
-    expect(expr.decl).toBe(prog.ports.inputs[0])
+    expect(prog.ports.inputs[expr.idx]).toBe(prog.ports.inputs[0])
   })
 
   test('binary op translates with both args translated', () => {

@@ -56,10 +56,13 @@ import type {
   Tag, Match, MatchArm,
   Let,
   Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith,
+  InputIdx, OutputIdx, InstanceIdx,
 } from './nodes.js'
+import { inputIdx, outputIdx, instanceIdx } from './nodes.js'
 import { specializeProgram } from './specialize.js'
 import { sumLower } from './sum_lower.js'
 import { cloneResolvedProgram, cloneWithInputSubst } from './clone.js'
+import { mkProgram } from './decl_tables.js'
 
 export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   // Fast path: no instances at this level means there's nothing to do.
@@ -95,18 +98,40 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   // memoizes nested programs), so an OutputDecl alone can't
   // distinguish them. The InstanceDecl is the disambiguator.
   const liftedDecls: BodyDecl[] = []
-  const nestedOutSubst = new Map<InstanceDecl, Map<OutputDecl, ResolvedExpr>>()
+  // Substitution key is InstanceIdx (position in outer.instances[]) so
+  // substExpr can look up node.instance directly. Inner key is OutputIdx.
+  const nestedOutSubst = new Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>()
 
   const survivingDecls: BodyDecl[] = []
+  // Track instance position as we iterate body.decls (matches the
+  // ordering used by elaborator + decl_tables to assign InstanceIdx).
+  //
+  // For lifting: every RegRef / ParamRef inside a cloned sub-program's
+  // body uses idx values that are valid in the CLONED program. After
+  // lifting into outer, those idx values need to point at positions in
+  // the merged body. The merged body is `survivingDecls + liftedDecls`,
+  // so per-kind position = outer's own count + count lifted from
+  // earlier instances + position-within-this-lift. We pass offsets
+  // (outer count + lifted-so-far) to cloneWithInputSubst, which adds
+  // them during clone — the cloned program comes out with already-
+  // shifted refs that point at the lifted positions.
+  const outerRegCount   = outer.regs.length
+  const outerParamCount = outer.params.length
+  let instCount = 0
   for (const decl of outer.body.decls) {
     if (decl.op !== 'instanceDecl') {
       survivingDecls.push(decl)
       continue
     }
+    const regOffset   = outerRegCount   + liftedDecls.filter(d => d.op === 'regDecl').length
+    const paramOffset = outerParamCount + liftedDecls.filter(d => d.op === 'paramDecl').length
     inlineOneInstance(
       decl,
+      instanceIdx(instCount++),
       liftedDecls,
       nestedOutSubst,
+      regOffset,
+      paramOffset,
     )
   }
 
@@ -137,13 +162,12 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   const newAssigns: BodyAssign[] = outer.body.assigns.map(a => substAssign(a, nestedOutSubst, memo))
 
   const block: ResolvedBlock = { op: 'block', decls: newDecls, assigns: newAssigns }
-  return {
-    op: 'program',
+  return mkProgram({
     name: outer.name,
     typeParams: outer.typeParams,
     ports: outer.ports,
     body: block,
-  }
+  })
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -152,8 +176,11 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
 
 function inlineOneInstance(
   decl: InstanceDecl,
+  instIdx: InstanceIdx,
   liftedDecls: BodyDecl[],
-  nestedOutSubst: Map<InstanceDecl, Map<OutputDecl, ResolvedExpr>>,
+  nestedOutSubst: Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>,
+  regOffset: number,
+  paramOffset: number,
 ): void {
   // 1. Specialize the inner program. For non-generic instances
   //    (typeArgs.length === 0), this is a no-op identity — the
@@ -185,9 +212,13 @@ function inlineOneInstance(
   const inputSubst = buildInputSubst(decl, flattened)
 
   // 4. Clone the (specialized + sub-inlined) inner with input
-  //    substitution. The result has fresh decl identity throughout;
-  //    InputRefs to substituted decls are replaced inline.
-  const cloned = cloneWithInputSubst(flattened, inputSubst)
+  //    substitution AND idx shifting. The cloned program's RegRefs /
+  //    ParamRefs get their idx shifted by (outer's existing count +
+  //    previously-lifted count), so when the cloned decls are appended
+  //    to the outer's body, the refs already point at the lifted
+  //    positions. InputRefs are substituted to outer expressions
+  //    before any shift could matter.
+  const cloned = cloneWithInputSubst(flattened, inputSubst, { regOffset, paramOffset })
 
   // 5. Lift the cloned inner's body decls into the outer. Names are
   //    prefixed with the instance name to avoid collisions when
@@ -197,10 +228,9 @@ function inlineOneInstance(
   liftClonedBody(decl.name, cloned, liftedDecls)
 
   // 6. Record output expressions for NestedOut substitution.
-  //    The outer's NestedOut refs still point at the *template's*
-  //    OutputDecls (decl.type.ports.outputs[i]), not the cloned ones.
-  //    We index by position to translate.
-  recordOutputs(decl, cloned, nestedOutSubst)
+  //    NestedOut.output is now OutputIdx (position into the target's
+  //    ports.outputs[]); we map each position to its cloned expression.
+  recordOutputs(decl, instIdx, cloned, nestedOutSubst)
 }
 
 /**
@@ -212,8 +242,19 @@ function specializeInner(decl: InstanceDecl): ResolvedProgram {
   if (decl.type.typeParams.length === 0 && decl.typeArgs.length === 0) {
     return decl.type
   }
+  // typeArgs.param is now TypeParamIdx (position in target's typeParams[]).
+  // Convert idx → decl by looking up in decl.type.typeParams.
   const subst = new Map<TypeParamDecl, number>()
-  for (const a of decl.typeArgs) subst.set(a.param, a.value)
+  for (const a of decl.typeArgs) {
+    const pd = decl.type.typeParams[a.param]
+    if (pd === undefined) {
+      throw new Error(
+        `inlineInstances: instance '${decl.name}' typeArg idx=${a.param} out of range ` +
+        `(target '${decl.type.name}' has ${decl.type.typeParams.length} typeParams)`,
+      )
+    }
+    subst.set(pd, a.value)
+  }
   return specializeProgram(decl.type, subst)
 }
 
@@ -228,29 +269,30 @@ function specializeInner(decl: InstanceDecl): ResolvedProgram {
 function buildInputSubst(
   decl: InstanceDecl,
   inner: ResolvedProgram,
-): ReadonlyMap<InputDecl, ResolvedExpr> {
-  const subst = new Map<InputDecl, ResolvedExpr>()
-  const wiredByPort = new Map<InputDecl, ResolvedExpr>()
-  for (const w of decl.inputs) wiredByPort.set(w.port, w.value)
-  // The instance's `inputs` array uses the *template's* InputDecls.
-  // After specialization, we need to map each template InputDecl to
-  // the corresponding cloned InputDecl by position.
+): ReadonlyMap<InputIdx, ResolvedExpr> {
+  // decl.inputs[k].port is now InputIdx into decl.type.ports.inputs[].
+  // The cloned `inner` may have different InputDecl objects but the
+  // positions match (specialize preserves port order). The output
+  // map is keyed by InputIdx — positions in `inner.ports.inputs[]`,
+  // which is what InputRef.idx inside the cloned body references.
+  const wiredByIdx = new Map<number, ResolvedExpr>()
+  for (const w of decl.inputs) wiredByIdx.set(w.port, w.value)
+  const subst = new Map<InputIdx, ResolvedExpr>()
   for (let i = 0; i < decl.type.ports.inputs.length; i++) {
-    const templatePort = decl.type.ports.inputs[i]
-    const innerPort    = inner.ports.inputs[i]
+    const innerPort = inner.ports.inputs[i]
     if (innerPort === undefined) {
       throw new Error(
         `inlineInstances: instance '${decl.name}' input arity mismatch ` +
         `(template: ${decl.type.ports.inputs.length}, specialized: ${inner.ports.inputs.length})`,
       )
     }
-    const wired = wiredByPort.get(templatePort)
+    const wired = wiredByIdx.get(i)
     if (wired !== undefined) {
-      subst.set(innerPort, wired)
+      subst.set(inputIdx(i), wired)
       continue
     }
     if (innerPort.default !== undefined) {
-      subst.set(innerPort, innerPort.default)
+      subst.set(inputIdx(i), innerPort.default)
       continue
     }
     // No wire, no default: the elaborator should have caught it.
@@ -325,53 +367,44 @@ function liftClonedBody(
  */
 function recordOutputs(
   decl: InstanceDecl,
+  instIdx: InstanceIdx,
   cloned: ResolvedProgram,
-  nestedOutSubst: Map<InstanceDecl, Map<OutputDecl, ResolvedExpr>>,
+  nestedOutSubst: Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>,
 ): void {
-  // Build cloned-output-decl → expression map from the cloned assigns.
-  const clonedOutToExpr = new Map<OutputDecl, ResolvedExpr>()
+  // Build cloned-output-position → expression map from the cloned
+  // assigns. After the migration, OutputAssign.target is an OutputIdx
+  // (position into cloned.ports.outputs[]).
+  const clonedOutExprByIdx = new Map<number, ResolvedExpr>()
   for (const a of cloned.body.assigns) {
     if (a.op !== 'outputAssign') continue
-    if (!('op' in a.target)) continue   // skip 'dac' sentinel
-    if (a.target.op === 'outputDecl') {
-      clonedOutToExpr.set(a.target, a.expr)
-    }
+    if (typeof a.target === 'number') clonedOutExprByIdx.set(a.target, a.expr)
   }
 
-  // For each output of the template, find the cloned output at the
-  // same position and bind its expression. The outer's NestedOut refs
-  // use template OutputDecls (decl.type.ports.outputs).
-  // Two instances of the same program type share OutputDecl objects
-  // (the clone-memo aliases nested programs), so we partition the
-  // substitution table by InstanceDecl identity.
-  const perInstance = new Map<OutputDecl, ResolvedExpr>()
-  nestedOutSubst.set(decl, perInstance)
+  // For each output position of the template, bind the cloned
+  // expression. The outer's NestedOut refs carry the template's
+  // OutputIdx (same position, since specialize preserves output
+  // order). Key the per-instance substitution table by OutputIdx so
+  // the outer's substExpr pass can look it up directly.
+  const perInstance = new Map<OutputIdx, ResolvedExpr>()
+  nestedOutSubst.set(instIdx, perInstance)
 
   const templateOutputs = decl.type.ports.outputs
   const clonedOutputs   = cloned.ports.outputs
   for (let i = 0; i < templateOutputs.length; i++) {
-    const templateOut = templateOutputs[i]
-    const clonedOut   = clonedOutputs[i]
-    if (clonedOut === undefined) {
+    if (clonedOutputs[i] === undefined) {
       throw new Error(
         `inlineInstances: instance '${decl.name}' output arity mismatch ` +
         `(template: ${templateOutputs.length}, cloned: ${clonedOutputs.length})`,
       )
     }
-    const expr = clonedOutToExpr.get(clonedOut)
+    const expr = clonedOutExprByIdx.get(i)
     if (expr === undefined) {
       throw new Error(
         `inlineInstances: instance '${decl.name}': program '${cloned.name}' has no ` +
-        `output_assign for output '${clonedOut.name}'`,
+        `output_assign for output '${clonedOutputs[i].name}' (idx ${i})`,
       )
     }
-    perInstance.set(templateOut, expr)
-    // Also register under the cloned OutputDecl. After the
-    // outer-clone, the outer's NestedOut refs key off the cloned
-    // OutputDecls (cloneResolvedProgram routed them through the
-    // dedup table). The template OutputDecls won't match — cover
-    // both for safety.
-    if (clonedOut !== templateOut) perInstance.set(clonedOut, expr)
+    perInstance.set(outputIdx(i), expr)
   }
 }
 
@@ -401,7 +434,7 @@ function hasInstanceDecl(prog: ResolvedProgram): boolean {
  */
 function substDecl(
   d: BodyDecl,
-  subst: Map<InstanceDecl, Map<OutputDecl, ResolvedExpr>>,
+  subst: Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>,
   memo: WeakMap<object, ResolvedExpr>,
 ): BodyDecl {
   switch (d.op) {
@@ -428,7 +461,7 @@ function substDecl(
  */
 function substAssign(
   a: BodyAssign,
-  subst: Map<InstanceDecl, Map<OutputDecl, ResolvedExpr>>,
+  subst: Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>,
   memo: WeakMap<object, ResolvedExpr>,
 ): BodyAssign {
   const fresh: OutputAssign = { op: 'outputAssign', target: a.target, expr: substExpr(a.expr, subst, memo) }
@@ -437,7 +470,7 @@ function substAssign(
 
 function substExpr(
   e: ResolvedExpr,
-  subst: Map<InstanceDecl, Map<OutputDecl, ResolvedExpr>>,
+  subst: Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>,
   memo: WeakMap<object, ResolvedExpr>,
 ): ResolvedExpr {
   if (typeof e === 'number' || typeof e === 'boolean') return e
@@ -457,7 +490,7 @@ function substExpr(
 
 function substOpNode(
   node: ResolvedExprOp,
-  subst: Map<InstanceDecl, Map<OutputDecl, ResolvedExpr>>,
+  subst: Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>,
   memo: WeakMap<object, ResolvedExpr>,
 ): ResolvedExpr {
   const recur = (x: ResolvedExpr) => substExpr(x, subst, memo)
@@ -467,15 +500,15 @@ function substOpNode(
       const perInstance = subst.get(node.instance)
       if (perInstance === undefined) {
         throw new Error(
-          `inlineInstances: nestedOut to instance '${node.instance.name}'.` +
-          `${node.output.name} — instance not inlined?`,
+          `inlineInstances: nestedOut to instance idx=${node.instance} output idx=${node.output} ` +
+          `— instance not inlined?`,
         )
       }
       const v = perInstance.get(node.output)
       if (v === undefined) {
         throw new Error(
-          `inlineInstances: nestedOut to instance '${node.instance.name}'.` +
-          `${node.output.name} has no resolved expression for that output`,
+          `inlineInstances: nestedOut to instance idx=${node.instance} output idx=${node.output} ` +
+          `has no resolved expression for that output`,
         )
       }
       // Walk the substituted expression too: the recorded expression

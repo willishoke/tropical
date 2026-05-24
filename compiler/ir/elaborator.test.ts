@@ -33,13 +33,13 @@ function elabSrc(src: string): ResolvedProgram {
 // ─────────────────────────────────────────────────────────────
 
 describe('elaborator — value references', () => {
-  test('input ref: nameRef resolves to InputRef.decl === the input port', () => {
+  test('input ref: nameRef resolves to InputRef.idx === the input port position', () => {
     const p = elabSrc('program X(freq: float) -> (out: float) { out = freq }')
     const inputDecl = p.ports.inputs[0]
     const outputAssign = p.body.assigns[0] as OutputAssign
     const expr = outputAssign.expr as InputRef
     expect(expr.op).toBe('inputRef')
-    expect(expr.decl).toBe(inputDecl)  // reference identity
+    expect(p.ports.inputs[expr.idx]).toBe(inputDecl)
   })
 
   test('reg ref: nameRef resolves to RegRef.decl === the regDecl', () => {
@@ -56,10 +56,10 @@ describe('elaborator — value references', () => {
     const out = p.body.assigns[0] as OutputAssign
     const outRef = out.expr as RegRef
     expect(outRef.op).toBe('regRef')
-    expect(outRef.decl).toBe(regDecl)
-    // The folded update reads s — same decl identity.
+    expect(p.regs[outRef.idx]).toBe(regDecl)
+    // The folded update reads s — same decl identity (resolved via idx).
     expect(regDecl.update).toBeDefined()
-    expect((regDecl.update as RegRef).decl).toBe(regDecl)
+    expect(p.regs[(regDecl.update as RegRef).idx]).toBe(regDecl)
   })
 
   test('delay-form RegDecl: nameRef resolves to RegRef on the decl', () => {
@@ -79,10 +79,10 @@ describe('elaborator — value references', () => {
     const out = p.body.assigns[0] as OutputAssign
     const ref = out.expr as RegRef
     expect(ref.op).toBe('regRef')
-    expect(ref.decl).toBe(regDecl)
+    expect(p.regs[ref.idx]).toBe(regDecl)
   })
 
-  test('param ref: nameRef resolves to ParamRef.decl', () => {
+  test('param ref: nameRef resolves to ParamRef.idx', () => {
     const p = elabSrc(`
       program X() -> (out: float) {
         param cutoff: smoothed = 1000
@@ -93,10 +93,10 @@ describe('elaborator — value references', () => {
     const out = p.body.assigns[0] as OutputAssign
     const ref = out.expr as ParamRef
     expect(ref.op).toBe('paramRef')
-    expect(ref.decl).toBe(paramDecl)
+    expect(p.params[ref.idx]).toBe(paramDecl)
   })
 
-  test('type-param ref: nameRef resolves to TypeParamRef.decl', () => {
+  test('type-param ref: nameRef resolves to TypeParamRef.idx', () => {
     const p = elabSrc(`
       program X<N: int = 4>() -> (out: float) {
         out = N
@@ -106,7 +106,7 @@ describe('elaborator — value references', () => {
     const out = p.body.assigns[0] as OutputAssign
     const ref = out.expr as TypeParamRef
     expect(ref.op).toBe('typeParamRef')
-    expect(ref.decl).toBe(typeParam)
+    expect(p.typeParams[ref.idx]).toBe(typeParam)
   })
 
   test('unknown name: clear error', () => {
@@ -428,15 +428,15 @@ describe('elaborator — instances + nested programs', () => {
     const instDecl = p.body.decls[1] as InstanceDecl
     expect(instDecl.op).toBe('instanceDecl')
     expect(instDecl.type).toBe(progDecl.program)  // shared reference
-    // Input wire is keyed by the actual InputDecl
+    // Input wire is keyed by the input port's position in the target
     expect(instDecl.inputs.length).toBe(1)
-    expect(instDecl.inputs[0].port).toBe(progDecl.program.ports.inputs[0])
-    // The output assign uses NestedOut with OutputDecl reference
+    expect(progDecl.program.ports.inputs[instDecl.inputs[0].port]).toBe(progDecl.program.ports.inputs[0])
+    // The output assign uses NestedOut with instance + output indices
     const out = p.body.assigns[0] as OutputAssign
     const nest = out.expr as NestedOut
     expect(nest.op).toBe('nestedOut')
-    expect(nest.instance).toBe(instDecl)
-    expect(nest.output).toBe(progDecl.program.ports.outputs[0])
+    expect(p.instances[nest.instance]).toBe(instDecl)
+    expect(progDecl.program.ports.outputs[nest.output]).toBe(progDecl.program.ports.outputs[0])
   })
 
   test('instance with unknown program type errors', () => {
@@ -479,7 +479,7 @@ describe('elaborator — instances + nested programs', () => {
     const progDecl = p.body.decls[0] as ProgramDecl
     const instDecl = p.body.decls[1] as InstanceDecl
     expect(instDecl.typeArgs.length).toBe(1)
-    expect(instDecl.typeArgs[0].param).toBe(progDecl.program.typeParams[0])
+    expect(progDecl.program.typeParams[instDecl.typeArgs[0].param]).toBe(progDecl.program.typeParams[0])
     expect(instDecl.typeArgs[0].value).toBe(8)
   })
 })
@@ -492,10 +492,10 @@ describe('elaborator — output assigns', () => {
   test('outputAssign target is the actual OutputDecl', () => {
     const p = elabSrc('program X() -> (out: float) { out = 1 }')
     const out = p.body.assigns[0] as OutputAssign
-    if (out.target !== null && typeof out.target === 'object' && 'kind' in out.target) {
-      throw new Error('expected OutputDecl, got dac sentinel')
+    if (typeof out.target !== 'number') {
+      throw new Error('expected OutputIdx, got dac sentinel')
     }
-    expect(out.target).toBe(p.ports.outputs[0])
+    expect(p.ports.outputs[out.target]).toBe(p.ports.outputs[0])
   })
 
   test('dac.out target is the dac sentinel', () => {
@@ -618,16 +618,16 @@ describe('elaborator — graph integrity', () => {
       }
     `)
     const regDecl = p.body.decls[0] as RegDecl
-    // Walk all references; every regRef.decl is the same object.
+    // Walk all references; every regRef.idx resolves to the same RegDecl.
     const seen: unknown[] = []
     walk(p, (obj) => {
       if ((obj as { op?: string }).op === 'regRef') {
-        seen.push((obj as { decl: unknown }).decl)
+        seen.push(p.regs[(obj as { idx: number }).idx])
       }
     })
     expect(seen.length).toBeGreaterThan(0)
     for (const s of seen) {
-      expect(s).toBe(regDecl)  // strict reference identity
+      expect(s).toBe(regDecl)  // strict reference identity (via idx → decl)
     }
   })
 
@@ -666,7 +666,7 @@ describe('elaborator — graph integrity', () => {
     const regDecl = p.body.decls[0] as RegDecl
     expect(regDecl.update).toBeDefined()
     const expr = regDecl.update as BinaryOp
-    expect((expr.args[0] as RegRef).decl).toBe(regDecl)
+    expect(p.regs[(expr.args[0] as RegRef).idx]).toBe(regDecl)
   })
 })
 
@@ -693,7 +693,7 @@ describe('elaborator — external program resolver', () => {
     expect(inst.op).toBe('instanceDecl')
     // The instance's program type IS the externally-supplied object.
     expect(inst.type).toBe(inner)
-    expect(inst.inputs[0].port).toBe(inner.ports.inputs[0])
+    expect(inner.ports.inputs[inst.inputs[0].port]).toBe(inner.ports.inputs[0])
   })
 
   test('resolver returns undefined → instance error mentions resolver', () => {
@@ -849,7 +849,7 @@ describe('elaborator — new builtin calls', () => {
     expect(z.op).toBe('zeros')
     const ref = z.count as TypeParamRef
     expect(ref.op).toBe('typeParamRef')
-    expect(ref.decl).toBe(p.typeParams[0])
+    expect(p.typeParams[ref.idx]).toBe(p.typeParams[0])
   })
 
   test('arraySet(arr, idx, val) resolves to ArraySet with three args', () => {

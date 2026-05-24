@@ -29,6 +29,14 @@ bun test --exclude compiler/apply_plan.test.ts        # pure-TS subset (no nativ
 `build/libtropical.dylib` via koffi. Run `make build` first or use the
 exclude form above.
 
+**If equivalence tests fail unexpectedly, clear the JIT cache first.**
+`rm -rf ~/.cache/tropical/kernels` — the LLVM-IR cache is keyed by an MD5
+of the serialized plan plus the dylib's build-id, but a fix that changes
+*runtime* behavior without changing the emitted plan (e.g., the engine
+emits an existing instruction field that the parser previously ignored)
+can leave stale kernels in place. Clearing the cache is cheap; chasing
+a phantom regression is not.
+
 ## Ideological backbone
 
 If you want a single sentence to hang the whole codebase off:

@@ -100,7 +100,8 @@ function walkExprChildren(
 function outputExpr(prog: ResolvedProgram, name = 'out'): ResolvedExpr {
   for (const a of prog.body.assigns) {
     if (a.op !== 'outputAssign') continue
-    if ('op' in a.target && a.target.op === 'outputDecl' && a.target.name === name) return a.expr
+    // Post-migration: a.target is OutputIdx (a number) or {kind:'dac'}.
+    if (typeof a.target === 'number' && prog.ports.outputs[a.target]?.name === name) return a.expr
   }
   throw new Error(`outputExpr: no assign for output '${name}'`)
 }

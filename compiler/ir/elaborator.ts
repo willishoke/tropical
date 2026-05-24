@@ -69,6 +69,7 @@ import type {
   BinderDecl,
   InputRef, RegRef, ParamRef, TypeParamRef, BindingRef,
   NestedOut,
+  RegIdx, InputIdx, OutputIdx, ParamIdx, InstanceIdx, TypeParamIdx,
   Tag, Match, MatchArm,
   Let,
   Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith,
@@ -77,7 +78,11 @@ import type {
   BinaryOp, BinaryOpTag, UnaryOp, UnaryOpTag,
   SampleRate, SampleIndex,
 } from './nodes.js'
-import { ElaborationError } from './nodes.js'
+import {
+  ElaborationError,
+  regIdx, inputIdx, outputIdx, paramIdx, instanceIdx, typeParamIdx,
+} from './nodes.js'
+import { mkProgram } from './decl_tables.js'
 import { findInstanceCycles } from './lowering/cycle_break.js'
 import { CycleViolation, type CycleDiagnostic } from './elaboration_diagnostics.js'
 
@@ -148,6 +153,16 @@ interface Scope {
   regs: Map<string, RegDecl>
   params: Map<string, ParamDecl>
   instances: Map<string, InstanceDecl>
+  /** Decl → de Bruijn level (position in eventual program table).
+   *  Populated as decls are registered; looked up by ref construction
+   *  to fill in `RegRef.idx` / `InputRef.idx` / etc. Each map is
+   *  scope-local — nested programs have their own indexing. */
+  regIdxByDecl:       Map<RegDecl, RegIdx>
+  inputIdxByDecl:     Map<InputDecl, InputIdx>
+  outputIdxByDecl:    Map<OutputDecl, OutputIdx>
+  paramIdxByDecl:     Map<ParamDecl, ParamIdx>
+  instanceIdxByDecl:  Map<InstanceDecl, InstanceIdx>
+  typeParamIdxByDecl: Map<TypeParamDecl, TypeParamIdx>
   /** Sub-program decls visible in this scope (nested programDecl). */
   programs: Map<string, ResolvedProgram>
   /** Type defs (struct/sum/alias) by name. */
@@ -176,6 +191,12 @@ function emptyScope(parent?: Scope): Scope {
     regs: new Map(),
     params: new Map(),
     instances: new Map(),
+    regIdxByDecl:       new Map(),
+    inputIdxByDecl:     new Map(),
+    outputIdxByDecl:    new Map(),
+    paramIdxByDecl:     new Map(),
+    instanceIdxByDecl:  new Map(),
+    typeParamIdxByDecl: new Map(),
     programs: new Map(),
     typeDefs: new Map(),
     variantOf: new Map(),
@@ -194,7 +215,9 @@ function emptyScope(parent?: Scope): Scope {
  *  fixed semantic intent (a value-producing reference), and we try each
  *  applicable scope. */
 function lookupValueRef(scope: Scope, name: string): ResolvedExprOp | null {
-  // Local binders (innermost-first via the Scope's own state)
+  // Local binders (innermost-first via the Scope's own state). Binders
+  // are the one ref kind that keeps a direct pointer — see issue #156
+  // for the locally-nameless migration that would index them too.
   const binder = scope.binders.get(name)
   if (binder) {
     const ref: BindingRef = { op: 'bindingRef', decl: binder }
@@ -202,22 +225,30 @@ function lookupValueRef(scope: Scope, name: string): ResolvedExprOp | null {
   }
   const reg = scope.regs.get(name)
   if (reg) {
-    const ref: RegRef = { op: 'regRef', decl: reg }
+    const i = scope.regIdxByDecl.get(reg)
+    if (i === undefined) throw new ElaborationError(`internal: reg '${name}' has no index in scope`)
+    const ref: RegRef = { op: 'regRef', idx: i }
     return ref
   }
   const param = scope.params.get(name)
   if (param) {
-    const ref: ParamRef = { op: 'paramRef', decl: param }
+    const i = scope.paramIdxByDecl.get(param)
+    if (i === undefined) throw new ElaborationError(`internal: param '${name}' has no index in scope`)
+    const ref: ParamRef = { op: 'paramRef', idx: i }
     return ref
   }
   const input = scope.inputs.get(name)
   if (input) {
-    const ref: InputRef = { op: 'inputRef', decl: input }
+    const i = scope.inputIdxByDecl.get(input)
+    if (i === undefined) throw new ElaborationError(`internal: input '${name}' has no index in scope`)
+    const ref: InputRef = { op: 'inputRef', idx: i }
     return ref
   }
   const tp = scope.typeParams.get(name)
   if (tp) {
-    const ref: TypeParamRef = { op: 'typeParamRef', decl: tp }
+    const i = scope.typeParamIdxByDecl.get(tp)
+    if (i === undefined) throw new ElaborationError(`internal: type-param '${name}' has no index in scope`)
+    const ref: TypeParamRef = { op: 'typeParamRef', idx: i }
     return ref
   }
   return null
@@ -326,6 +357,7 @@ function elaborateProgram(
       const decl: TypeParamDecl = { op: 'typeParamDecl', name }
       if (info.default !== undefined) decl.default = info.default
       scope.typeParams.set(name, decl)
+      scope.typeParamIdxByDecl.set(decl, typeParamIdx(typeParams.length))
       typeParams.push(decl)
     }
   }
@@ -340,6 +372,7 @@ function elaborateProgram(
       throw new ElaborationError(`duplicate input port '${decl.name}'`)
     }
     scope.inputs.set(decl.name, decl)
+    scope.inputIdxByDecl.set(decl, inputIdx(inputs.length))
     inputs.push(decl)
   }
   const outputs: OutputDecl[] = []
@@ -349,6 +382,7 @@ function elaborateProgram(
       throw new ElaborationError(`duplicate output port '${decl.name}'`)
     }
     scope.outputs.set(decl.name, decl)
+    scope.outputIdxByDecl.set(decl, outputIdx(outputs.length))
     outputs.push(decl)
   }
 
@@ -377,13 +411,12 @@ function elaborateProgram(
 
   const block: ResolvedBlock = { op: 'block', decls, assigns }
   const ports: ResolvedProgramPorts = { inputs, outputs, typeDefs }
-  const resolved: ResolvedProgram = {
-    op: 'program',
+  const resolved: ResolvedProgram = mkProgram({
     name: prog.name,
     typeParams,
     ports,
     body: block,
-  }
+  })
 
   // Phase 4b: strict cycle policy. Cycles in source code that don't
   // pass through an explicit user register throw `CycleViolation`.
@@ -585,11 +618,22 @@ function registerBodyDecls(
   // expressions left as placeholders) and register them in scope, so
   // forward refs work. Expressions are resolved in a second pass via
   // the pairing map.
+  // Per-kind index tracking: as each decl is appended, record its
+  // de Bruijn level in the appropriate scope map. The level is the
+  // index into the per-kind table on the eventual program (regs[],
+  // params[], instances[]) — consumers later read via prog.regs[idx].
+  let regCount = 0, paramCount = 0, instanceCount = 0
   for (const d of body.decls ?? []) {
     if (isParsedProgramDecl(d)) continue  // already handled
     const decl = registerOneDecl(d, scope)
     pairing.set(d, decl)
     out.push(decl)
+    switch (decl.op) {
+      case 'regDecl':      scope.regIdxByDecl.set(decl, regIdx(regCount++));               break
+      case 'paramDecl':    scope.paramIdxByDecl.set(decl, paramIdx(paramCount++));         break
+      case 'instanceDecl': scope.instanceIdxByDecl.set(decl, instanceIdx(instanceCount++)); break
+      case 'programDecl':  /* programDecl is type-only, no index */ break
+    }
   }
   return out
 }
@@ -737,38 +781,40 @@ function resolveInstanceArgs(
   scope: Scope,
 ): void {
   const targetProgram = resolved.type
-  // Type args: resolve param NameRef → the target's TypeParamDecl.
+  // Type args: resolve param NameRef → position in target's typeParams[].
   for (const entry of parsed.type_args ?? []) {
-    const paramDecl = targetProgram.typeParams.find(p => p.name === entry.param.name)
-    if (!paramDecl) {
+    const pos = targetProgram.typeParams.findIndex(p => p.name === entry.param.name)
+    if (pos < 0) {
       const expected = targetProgram.typeParams.map(p => p.name).join(', ') || '(none)'
       throw new ElaborationError(
         `instance '${resolved.name}': type-arg '${entry.param.name}' is not a declared type-param of '${targetProgram.name}' (have: ${expected})`,
       )
     }
-    if (resolved.typeArgs.some(a => a.param === paramDecl)) {
+    const paramI = typeParamIdx(pos)
+    if (resolved.typeArgs.some(a => a.param === paramI)) {
       throw new ElaborationError(
         `instance '${resolved.name}': duplicate type-arg '${entry.param.name}'`,
       )
     }
-    resolved.typeArgs.push({ param: paramDecl, value: entry.value })
+    resolved.typeArgs.push({ param: paramI, value: entry.value })
   }
-  // Inputs: resolve port NameRef → the target's InputDecl, value-expr resolved.
+  // Inputs: resolve port NameRef → position in target's ports.inputs[].
   for (const entry of parsed.inputs ?? []) {
-    const portDecl = targetProgram.ports.inputs.find(p => p.name === entry.port.name)
-    if (!portDecl) {
+    const pos = targetProgram.ports.inputs.findIndex(p => p.name === entry.port.name)
+    if (pos < 0) {
       const expected = targetProgram.ports.inputs.map(p => p.name).join(', ') || '(none)'
       throw new ElaborationError(
         `instance '${resolved.name}': input '${entry.port.name}' is not a declared port of '${targetProgram.name}' (have: ${expected})`,
       )
     }
-    if (resolved.inputs.some(i => i.port === portDecl)) {
+    const portI = inputIdx(pos)
+    if (resolved.inputs.some(i => i.port === portI)) {
       throw new ElaborationError(
         `instance '${resolved.name}': duplicate input '${entry.port.name}'`,
       )
     }
     const value = resolveExpr(entry.value, scope)
-    resolved.inputs.push({ port: portDecl, value })
+    resolved.inputs.push({ port: portI, value })
   }
 }
 
@@ -797,7 +843,11 @@ function resolveOutputAssign(a: ParsedOutputAssign, scope: Scope): OutputAssign 
         `outputAssign references unknown output port '${a.name}'`,
       )
     }
-    target = out
+    const i = scope.outputIdxByDecl.get(out)
+    if (i === undefined) {
+      throw new ElaborationError(`internal: output '${a.name}' has no index in scope`)
+    }
+    target = i
   }
   return { op: 'outputAssign', target, expr: resolveExpr(a.expr, scope) }
 }
@@ -903,23 +953,34 @@ function resolveNestedOut(node: ParsedNestedOut, scope: Scope): NestedOut {
       `instance '${node.ref.name}' is not declared in this scope`,
     )
   }
+  const instIdx = scope.instanceIdxByDecl.get(inst)
+  if (instIdx === undefined) {
+    throw new ElaborationError(`internal: instance '${node.ref.name}' has no index in scope`)
+  }
   // node.output is NameRef | number; the parser preserves whichever form
-  // the user wrote.
+  // the user wrote. Output position is into the TARGET program's
+  // ports.outputs[] (inst.type is the still-pointer-based ResolvedProgram
+  // for now; the topological registry build ensures it's canonical).
   const targetProgram = inst.type
-  let output: OutputDecl | undefined
+  let outIdxRaw: number
   if (typeof node.output === 'number') {
-    output = targetProgram.ports.outputs[node.output]
+    if (node.output < 0 || node.output >= targetProgram.ports.outputs.length) {
+      const portList = targetProgram.ports.outputs.map(p => p.name).join(', ')
+      throw new ElaborationError(
+        `instance '${node.ref.name}': program '${targetProgram.name}' has no output index ${node.output} (have: ${portList})`,
+      )
+    }
+    outIdxRaw = node.output
   } else {
-    output = targetProgram.ports.outputs.find(p => p.name === node.output.name)
+    outIdxRaw = targetProgram.ports.outputs.findIndex(p => p.name === node.output.name)
+    if (outIdxRaw < 0) {
+      const portList = targetProgram.ports.outputs.map(p => p.name).join(', ')
+      throw new ElaborationError(
+        `instance '${node.ref.name}': program '${targetProgram.name}' has no output '${node.output.name}' (have: ${portList})`,
+      )
+    }
   }
-  if (!output) {
-    const portList = targetProgram.ports.outputs.map(p => p.name).join(', ')
-    const requested = typeof node.output === 'number' ? `index ${node.output}` : `'${node.output.name}'`
-    throw new ElaborationError(
-      `instance '${node.ref.name}': program '${targetProgram.name}' has no output ${requested} (have: ${portList})`,
-    )
-  }
-  return { op: 'nestedOut', instance: inst, output }
+  return { op: 'nestedOut', instance: instIdx, output: outputIdx(outIdxRaw) }
 }
 
 function resolveIndex(node: ParsedIndex, scope: Scope): Index {

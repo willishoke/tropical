@@ -38,7 +38,9 @@ import type {
   InputDecl, OutputDecl, ParamDecl, RegDecl,
   BodyDecl,
   ResolvedBlock,
+  InputIdx,
 } from './nodes.js'
+import { inputIdx, outputIdx, paramIdx, regIdx } from './nodes.js'
 import {
   type InstanceName, type PortName, type PortRef, type WireKey,
   instanceName as makeInstanceName,
@@ -46,6 +48,7 @@ import {
   portRef as makePortRef,
   wireKey, rawName,
 } from './branded_names.js'
+import { mkProgram } from './decl_tables.js'
 
 // ─── Op sets ────────────────────────────────────────────────────────────────
 // Mirror the sets in `materialize_session.ts:translateExpr`. Keep these in
@@ -126,10 +129,13 @@ export function freeRefs(expr: ExprNode): ReadonlySet<PortRef> {
 // ─── Lift to ResolvedProgram ───────────────────────────────────────────────
 
 interface TranslateContext {
-  /** Map from canonical wire key to the InputDecl that represents it. */
-  readonly refToInput: ReadonlyMap<WireKey, InputDecl>
+  /** Map from canonical wire key to the InputIdx that represents it.
+   *  Indices are the position of the InputDecl in the synthesized
+   *  program's ports.inputs[] (assigned at decl creation time). */
+  readonly refToInputIdx: ReadonlyMap<WireKey, InputIdx>
   /** Param/Trigger decls accumulated during translation. Keyed by param
-   *  name. Mutated as the translator encounters new refs. */
+   *  name. Mutated as the translator encounters new refs. ParamIdx is
+   *  derived from iteration position at lookup time. */
   readonly paramDecls: Map<string, ParamDecl>
   /** Synthetic RegDecls (post-Phase-0a: `update` populated, semantically
    *  a one-sample delay) created from `delay()` expressions. */
@@ -162,7 +168,7 @@ export function liftWireToProgram(
   )
 
   const inputDecls: InputDecl[] = []
-  const refToInput = new Map<WireKey, InputDecl>()
+  const refToInputIdx = new Map<WireKey, InputIdx>()
   for (const ref of sortedRefs) {
     // Name the input deterministically from the ref. Double-underscore
     // separator avoids collisions with user port names (which can't
@@ -170,14 +176,15 @@ export function liftWireToProgram(
     // a stable, distinctive infix).
     const inputName = `${rawName(ref.instance).replace(/\./g, '_')}__${rawName(ref.port)}`
     const decl: InputDecl = { op: 'inputDecl', name: inputName }
+    const i = inputIdx(inputDecls.length)
     inputDecls.push(decl)
-    refToInput.set(wireKey(ref), decl)
+    refToInputIdx.set(wireKey(ref), i)
   }
 
   const outputDecl: OutputDecl = { op: 'outputDecl', name: 'out' }
 
   const ctx: TranslateContext = {
-    refToInput,
+    refToInputIdx,
     paramDecls: new Map(),
     syntheticRegs: [],
   }
@@ -192,11 +199,11 @@ export function liftWireToProgram(
   const body: ResolvedBlock = {
     op: 'block',
     decls: bodyDecls,
-    assigns: [{ op: 'outputAssign', target: outputDecl, expr: translated }],
+    // Lifted programs have exactly one output ('out') at position 0.
+    assigns: [{ op: 'outputAssign', target: outputIdx(0), expr: translated }],
   }
 
-  return {
-    op: 'program',
+  return mkProgram({
     name: rawName(synthName),
     typeParams: [],
     ports: {
@@ -205,7 +212,7 @@ export function liftWireToProgram(
       typeDefs: [],
     },
     body,
-  }
+  })
 }
 
 // ─── Internal: ExprNode → ResolvedExpr ─────────────────────────────────────
@@ -231,8 +238,8 @@ function translateExpr(expr: ExprNode, ctx: TranslateContext): ResolvedExpr {
     const instStr = obj.instance as string
     const outStr = obj.output as string
     const ref = makePortRef(makeInstanceName(instStr), makePortName(outStr))
-    const inputDecl = ctx.refToInput.get(wireKey(ref))
-    if (inputDecl === undefined) {
+    const i = ctx.refToInputIdx.get(wireKey(ref))
+    if (i === undefined) {
       // Should not happen: freeRefs collected this ref. Either the
       // caller passed a stale freeRefSet, or the expression mutated
       // between scanning and lifting.
@@ -241,7 +248,7 @@ function translateExpr(expr: ExprNode, ctx: TranslateContext): ResolvedExpr {
         `pass the same set returned by freeRefs(expr)`,
       )
     }
-    return { op: 'inputRef', decl: inputDecl }
+    return { op: 'inputRef', idx: i }
   }
 
   // ── Param refs → inline ParamDecls in the lifted program ──
@@ -288,6 +295,10 @@ function translateExpr(expr: ExprNode, ctx: TranslateContext): ResolvedExpr {
     }
     const update = translateExpr(argsArr[0], ctx)
     const init = typeof obj.init === 'number' ? obj.init : 0
+    // body.decls = [...paramDecls, ...syntheticRegs]; only RegDecls
+    // contribute to body.regs[]. So RegIdx for a synthetic reg = its
+    // position within ctx.syntheticRegs.
+    const newIdx = regIdx(ctx.syntheticRegs.length)
     const decl: RegDecl = {
       op: 'regDecl',
       name: `__sd${ctx.syntheticRegs.length}`,
@@ -295,7 +306,7 @@ function translateExpr(expr: ExprNode, ctx: TranslateContext): ResolvedExpr {
       init,
     }
     ctx.syntheticRegs.push(decl)
-    return { op: 'regRef', decl }
+    return { op: 'regRef', idx: newIdx }
   }
 
   throw new Error(`liftWireToProgram: unhandled wire-form op '${op}'`)
@@ -310,5 +321,12 @@ function paramRefIntoCtx(
     decl = { op: 'paramDecl', name }
     ctx.paramDecls.set(name, decl)
   }
-  return { op: 'paramRef', decl }
+  // ParamIdx is the position in ctx.paramDecls iteration order.
+  let pi = -1
+  let i = 0
+  for (const n of ctx.paramDecls.keys()) {
+    if (n === name) { pi = i; break }
+    i++
+  }
+  return { op: 'paramRef', idx: paramIdx(pi) }
 }
