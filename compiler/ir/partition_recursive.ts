@@ -265,7 +265,16 @@ export function partitionKernel(
   }
 
   const { preamble, perChildPreInput, body, writeSlots, tempsConsumed } = remapInstancePlan(plan, ctx, session)
-  const instanceInstructions: NInstr[] = [...preamble, ...body, ...writeSlots]
+  // The preamble holds temp-computes for session-wired input translations
+  // (e.g., a wire's `pulseEvery(64)` expression resolves to instructions
+  // emitting into a temp). Those temps are referenced by the per-child
+  // WriteSlots in perChildPreInput. Children dispatch BEFORE this kernel's
+  // main `instructions`, so the preamble has to live in a separate field
+  // that the engine emits before children. Bundling it into
+  // `instructions` (as the legacy code did) puts the compute AFTER its
+  // use — works for literal session inputs (no preamble emission), broken
+  // for expression-shaped session inputs like Bubble's pulseEvery trigger.
+  const instanceInstructions: NInstr[] = [...body, ...writeSlots]
 
   // Attach each per-child pre-input block to its corresponding child
   // InstanceFunction. The pre-input wires live in THIS kernel's
@@ -298,6 +307,7 @@ export function partitionKernel(
   const fn: InstanceFunction = {
     name:              `instance_${instancePath.replace(/\./g, '_')}`,
     instance_name:     instancePath,
+    preamble_instructions:  preamble,
     instructions:      instanceInstructions,
     // Top-level kernels run no parent-side pre-input wires (their
     // inputs come from session inputBindings translated into the

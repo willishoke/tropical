@@ -116,6 +116,14 @@ struct FlatInstr
 struct InstanceProgram
 {
   std::string                  instance_name;     // dotted path (e.g. voice1.env)
+  /** Preamble — emitted at the START of this kernel's block, before
+   *  any child dispatch. Holds temp-compute instructions for
+   *  session-wired input translations whose results are referenced by
+   *  child pre_input_instructions. Splitting this out of
+   *  `instructions` is essential: child dispatch happens before
+   *  `instructions`, so the temps that pre_input writes must already
+   *  be computed by the time children start. */
+  std::vector<FlatInstr>       preamble_instructions;
   std::vector<FlatInstr>       instructions;      // already shifted into unified offset space
   /** M11 fractal slot-based input wiring. Per-child block — runs in
    *  the PARENT's namespace immediately before THIS kernel's body. The

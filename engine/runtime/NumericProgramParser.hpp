@@ -179,6 +179,9 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
   // the parent's emit_kernel_block runs each child's
   // pre_input_instructions immediately before recursing into that
   // child's body.
+  if (jf.contains("preamble_instructions"))
+    for (const auto & ji : jf["preamble_instructions"])
+      inst.preamble_instructions.push_back(parse_instr(ji));
   if (jf.contains("pre_input_instructions"))
     for (const auto & ji : jf["pre_input_instructions"])
       inst.pre_input_instructions.push_back(parse_instr(ji));

@@ -34,7 +34,7 @@ import type {
   RegDecl, InputDecl, InstanceDecl, OutputDecl, ParamDecl, PortType,
   InputIdx, OutputIdx, ParamIdx, InstanceIdx,
 } from './nodes.js'
-import { instanceIdx } from './nodes.js'
+import { instanceIdx, inputIdx as inputIdxOf } from './nodes.js'
 import {
   type TempIdx, type StateRegIdx, type ArraySlotIdx, type ModuleSlotIdx,
   type InputPortIdx,
@@ -823,14 +823,25 @@ class Emitter {
         const childStart = this.instrs.length
         const childSlotMap = slotMaps?.get(instanceIdx(k))
         if (childSlotMap !== undefined) {
-          for (const inp of decl.inputs) {
-            const slotIdx = childSlotMap.get(inp.port)
+          // Build a wired-by-port lookup so we can iterate ALL ports
+          // (not just decl.inputs). Unwired ports need to receive
+          // their declared port default — otherwise the slot retains
+          // its allocation-time default of 0, which silently masks
+          // the port's actual default (e.g., Bubble's attack_g: 0.05
+          // becomes 0 if a parent program doesn't wire it explicitly,
+          // killing env_smooth evolution).
+          const wiredByPort = new Map<number, ResolvedExpr>()
+          for (const inp of decl.inputs) wiredByPort.set(inp.port as number, inp.value)
+          const ports = decl.type.ports.inputs
+          for (let i = 0; i < ports.length; i++) {
+            const slotIdx = childSlotMap.get(inputIdxOf(i))
             if (slotIdx === undefined) continue
-            // inp.port is InputIdx into the child's ports.inputs; look up
-            // the InputDecl for type info.
-            const portDecl = decl.type.ports.inputs[inp.port as number]
+            const portDecl = ports[i]
             const portT = inputDeclScalarType(portDecl)
-            const r = this.compileNode(inp.value, portT)
+            const wireExpr = wiredByPort.get(i)
+              ?? portDecl.default
+              ?? 0
+            const r = this.compileNode(wireExpr, portT)
             // Wires are scalar (array-typed child input ports aren't
             // currently exercised by the slot-based path). If the wire
             // resolves to an array, project element 0.

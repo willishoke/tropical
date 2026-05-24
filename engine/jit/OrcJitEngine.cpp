@@ -545,6 +545,10 @@ struct EmitCtx
   // pre_input_instructions throughout — the loop is a no-op and the
   // behavior reduces to "main body then writebacks", same as before.
   llvm::Error emit_kernel_block(const InstanceProgram & inst) {
+    // Preamble runs first: temp-computes for session-wired input
+    // translations whose results are referenced by child pre_input
+    // WriteSlots. Must precede child dispatch.
+    if (auto err = emit_instrs(inst.preamble_instructions)) return err;
     for (const auto & child : inst.children) {
       if (auto err = emit_instrs(child.pre_input_instructions)) return err;
       if (auto err = emit_kernel_block(child)) return err;

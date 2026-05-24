@@ -145,6 +145,18 @@ export interface InstanceFunction {
   /** Session instance name (e.g., `voice7`). May be a dotted path
    *  (`voice7.env`) for nested kernels in the fractal architecture. */
   instance_name:     string
+  /** Instructions that run at the START of this kernel's block —
+   *  before children dispatch, before main body. Holds the temp-
+   *  compute instructions produced by translating session-wired
+   *  input expressions (e.g., `trigger: pulseEvery(64)`) into
+   *  temps that the child pre_input WriteSlots reference. Splitting
+   *  this out of `instructions` matters: children get dispatched
+   *  before `instructions` in the engine's emit_kernel_block, so any
+   *  temp a child's pre_input references MUST exist before children
+   *  start. Pre-Phase-3 (Bubble fix), this was concatenated into
+   *  `instructions` and Bubble's per-child trigger writes wrote
+   *  zeros. */
+  preamble_instructions: NInstr[]
   /** Instructions with operands already shifted into unified space. */
   instructions:      NInstr[]
   /** M11 fractal slot-based input wiring. Instructions the PARENT
@@ -238,6 +250,12 @@ export interface WireInstanceFunction {
   name:              string
   instance_name:     string
   instructions:      WireNInstr[]
+  /** Preamble — runs at the start of this kernel's block, before
+   *  children dispatch. Used for translating session-wired input
+   *  expressions into temps that child pre_input WriteSlots
+   *  reference. Optional in the wire format (legacy plans had this
+   *  bundled inside `instructions`; parsed as [] when missing). */
+  preamble_instructions?: WireNInstr[]
   /** M11 fractal slot-based input wiring (per-child). Parent's
    *  WriteSlot instructions that run just before this kernel's body.
    *  May be missing in legacy JSON (parsed as []). */
@@ -335,6 +353,7 @@ const parseInstanceFn = (inst: WireInstanceFunction): InstanceFunction => ({
   name:              inst.name,
   instance_name:     inst.instance_name,
   instructions:      inst.instructions.map(parseInstr),
+  preamble_instructions:  (inst.preamble_instructions  ?? []).map(parseInstr),
   pre_input_instructions: (inst.pre_input_instructions ?? []).map(parseInstr),
   register_offset:   tempOffset(inst.register_offset),
   state_reg_offset:  stateRegOffset(inst.state_reg_offset),
@@ -354,10 +373,13 @@ const toWireInstanceFn = (inst: InstanceFunction): WireInstanceFunction => ({
   array_slot_offset: rawOffset(inst.array_slot_offset),
   register_count:    inst.register_count,
   register_targets:  inst.register_targets.map(toWireRegTarget),
-  // Omit `pre_input_instructions` and `children` from the wire when
-  // empty so existing JSON consumers (golden fixtures, hand-crafted
-  // plan_5 tests) see exactly the bytes they expect today. Populated
-  // entries are emitted normally.
+  // Omit `preamble_instructions`, `pre_input_instructions`, and
+  // `children` from the wire when empty so existing JSON consumers
+  // (golden fixtures, hand-crafted plan_5 tests) see exactly the bytes
+  // they expect today. Populated entries are emitted normally.
+  ...(inst.preamble_instructions.length > 0
+    ? { preamble_instructions: inst.preamble_instructions.map(toWireInstr) }
+    : {}),
   ...(inst.pre_input_instructions.length > 0
     ? { pre_input_instructions: inst.pre_input_instructions.map(toWireInstr) }
     : {}),
