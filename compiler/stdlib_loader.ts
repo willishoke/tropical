@@ -28,8 +28,7 @@ type StdlibTarget =
       | 'instanceRegistry'
       | 'paramRegistry'
       | 'specializationCache'
-      | 'genericTemplatesResolved'
-      | 'resolvedRegistry'
+      | 'programs'
     > & Partial<Pick<SessionState, 'typeResolver' | 'inlineNested'>>
 
 function toSession(target: StdlibTarget) {
@@ -39,16 +38,14 @@ function toSession(target: StdlibTarget) {
       instanceRegistry: new Map(),
       paramRegistry: new Map(),
       specializationCache: new Map(),
-      genericTemplatesResolved: new Map<string, ResolvedProgram>(),
-      resolvedRegistry: new Map<string, ResolvedProgram>(),
+      programs: new Map<string, ResolvedProgram>(),
     } as Pick<
       SessionState,
       | 'typeRegistry'
       | 'instanceRegistry'
       | 'paramRegistry'
       | 'specializationCache'
-      | 'genericTemplatesResolved'
-      | 'resolvedRegistry'
+      | 'programs'
     > &
       Partial<Pick<SessionState, 'typeResolver' | 'inlineNested'>>
   }
@@ -115,13 +112,14 @@ export function loadStdlibFromMap(
 
   for (const [name, prog] of localResolved) {
     if (prog.typeParams.length > 0) {
-      session.genericTemplatesResolved.set(name, prog)
+      // Generic template — stored raw in the unified registry.
+      session.programs.set(name, prog)
       continue
     }
     if (session.typeRegistry.has(name)) continue
     const type = programTypeFromResolved(prog, new Map(), { inlineNested: session.inlineNested })
     session.typeRegistry.set(name, type)
-    session.resolvedRegistry.set(name, prog)
+    session.programs.set(name, type.prog)   // canonical post-strata
   }
 
   if (!session.typeResolver) {
@@ -179,13 +177,14 @@ export function loadStdlibFromSources(
 
   for (const [name, prog] of localResolved) {
     if (prog.typeParams.length > 0) {
-      session.genericTemplatesResolved.set(name, prog)
+      // Generic template — stored raw in the unified registry.
+      session.programs.set(name, prog)
       continue
     }
     if (session.typeRegistry.has(name)) continue
     const type = programTypeFromResolved(prog, new Map(), { inlineNested: session.inlineNested })
     session.typeRegistry.set(name, type)
-    session.resolvedRegistry.set(name, prog)
+    session.programs.set(name, type.prog)   // canonical post-strata
   }
 
   if (!session.typeResolver) {

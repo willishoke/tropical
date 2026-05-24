@@ -54,9 +54,12 @@ error envelope (see below) and the previous kernel keeps playing.
 `server.ts` owns one `SessionState`. The fields tools read and mutate:
 
 - `typeRegistry: Map<string, ProgramType>` — registered concrete types
-  (`define_program`, stdlib loading)
-- `genericTemplatesResolved: Map<string, ResolvedProgram>` — generic
-  templates (programs with `type_params`)
+  (`define_program`, stdlib loading); `ProgramType` is the
+  metadata-wrapper form
+- `programs: Map<string, ResolvedProgram>` — unified registry of
+  every registered program, both concrete (post-strata, `typeParams=[]`)
+  and generic templates (raw, `typeParams.length > 0`). Pre-Phase-5
+  this was split into `resolvedRegistry` + `genericTemplatesResolved`.
 - `specializationCache: Map<string, ProgramType>` — keyed by
   `Type<N=8>`-style cache keys
 - `instanceRegistry: Map<string, ProgramInstance>` — live instances

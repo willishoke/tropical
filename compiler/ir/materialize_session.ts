@@ -240,15 +240,19 @@ function buildInstanceDecl(
   const baseTypeName = inst.baseTypeName
   const rawTypeArgs = inst.typeArgs ?? {}
 
-  const registered = session.resolvedRegistry.get(baseTypeName)
+  const registered = session.programs.get(baseTypeName)
   let resolvedType: ResolvedProgram | undefined
   let typeArgsList: Array<{ param: TypeParamDecl; value: number }> = []
 
   if (registered !== undefined && registered.typeParams.length === 0) {
+    // Non-generic: use the canonical post-strata form directly.
     resolvedType = registered
   } else {
-    const template = session.genericTemplatesResolved.get(baseTypeName)
-      ?? registered
+    // Generic template (or missing); specialize with the supplied
+    // type args. After Phase 5 unification, templates and concrete
+    // programs both live in session.programs — distinguished by
+    // typeParams length.
+    const template = registered
     if (template === undefined) {
       throw new Error(
         `compileSession: instance '${name}' has type '${baseTypeName}' which is not registered as a resolved program.`,

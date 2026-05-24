@@ -179,18 +179,23 @@ export interface SessionState {
   typeResolver?: (name: string) => Compiled | undefined
   /** Monomorphized specializations of generic programs, keyed by `Type<k1=v1,k2=v2>`. */
   specializationCache: Map<string, Compiled>
-  /** ResolvedProgram templates for generic programs. Keyed by type name.
-   *  Only populated for programs declaring type_params. The strata pipeline's
-   *  `specializeProgram` consumes these at instantiation time, producing a
-   *  fresh `Compiled` per (template, type-args) pair via the
-   *  specialization cache. */
-  genericTemplatesResolved: Map<string, import('./ir/nodes.js').ResolvedProgram>
-  /** Pre-strata `ResolvedProgram` for every non-generic registered type,
-   *  keyed by type name. The elaborator consults this when an inline
-   *  `instanceDecl` references a previously registered sibling — without
-   *  it, follow-up `define_program` calls couldn't resolve cross-program
-   *  references. Generic templates live in `genericTemplatesResolved`. */
-  resolvedRegistry: Map<string, import('./ir/nodes.js').ResolvedProgram>
+  /** Single registry of `ResolvedProgram`s keyed by type name.
+   *  Phase 5 of issue #156 unified the previous split between
+   *  `resolvedRegistry` (non-generics, post-strata) and
+   *  `genericTemplatesResolved` (generic templates, pre-strata) — the
+   *  two-map design forced consumers to consult both with confusing
+   *  fallback logic.
+   *
+   *  The kind is determined by the program's own shape:
+   *    - `prog.typeParams.length === 0`: fully resolved, ready to
+   *      consume (instantiate, materialize). The loader stores the
+   *      post-strata canonical form here.
+   *    - `prog.typeParams.length > 0`: generic template, pre-strata.
+   *      Consumers (materialize_session, resolveProgramType) call
+   *      `specializeProgram` with concrete typeArgs and store the
+   *      result in `specializationCache` (cross-cutting Compiled
+   *      cache); this template itself is never overwritten. */
+  programs: Map<string, import('./ir/nodes.js').ResolvedProgram>
   /** Name counter for auto-generated instance names. */
   nameCounters: Map<string, number>
   /** Delay slots extracted from MCP-auto-delayed wires. Populated by
@@ -242,8 +247,7 @@ export function makeSession(
     inputExprs:         new Map(),
     inlineNested:       options.inlineNested ?? true,
     specializationCache: new Map(),
-    genericTemplatesResolved: new Map(),
-    resolvedRegistry: new Map(),
+    programs: new Map(),
     runtime,
     graph: {
       primeJit: () => {},
@@ -570,17 +574,19 @@ export function decodePortTypeDecl(
 // Generic program resolution
 // ─────────────────────────────────────────────────────────────
 
-type ResolveSession = Pick<SessionState, 'typeRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'instanceRegistry' | 'paramRegistry'> &
+type ResolveSession = Pick<SessionState, 'typeRegistry' | 'specializationCache' | 'programs' | 'instanceRegistry' | 'paramRegistry'> &
   Partial<Pick<SessionState, 'typeResolver' | 'typeAliasRegistry' | 'inlineNested'>>
 
 /**
  * Resolve a (baseName, type_args) pair to a concrete Compiled.
- * Generic types monomorphize on demand, keyed by fully-resolved integer args.
- * Non-generic types reject non-empty type_args.
+ * Generic types monomorphize on demand, keyed by fully-resolved
+ * integer args. Non-generic types reject non-empty type_args.
  *
- * The strata pipeline is the only path: generic templates live in
- * `genericTemplatesResolved` as `ResolvedProgram`s; instantiation routes
- * through `programTypeFromResolved` to produce a fresh `Compiled`.
+ * Templates and non-generic forms live together in `session.programs`
+ * (Phase 5 unification); the program's own `typeParams.length` tells
+ * us which kind we got. The strata pipeline is the only path —
+ * specialization routes through `programTypeFromResolved` to produce
+ * a fresh `Compiled` per `(template, type-args)` pair.
  */
 export function resolveProgramType(
   session: ResolveSession,
@@ -600,7 +606,6 @@ export function resolveProgramType(
     const key = specializationCacheKey(baseName, resolved)
     const cached = session.specializationCache.get(key)
     if (cached) return { type: cached, typeArgs: resolved }
-    // Build the TypeParamDecl-keyed substitution map expected by specializeProgram.
     const subst = new Map<TypeParamDecl, number>()
     for (const [name, value] of Object.entries(resolved)) {
       const decl = template.typeParams.find(p => p.name === name)
@@ -617,24 +622,46 @@ export function resolveProgramType(
     return { type, typeArgs: resolved }
   }
 
-  const resolvedTemplate = session.genericTemplatesResolved.get(baseName)
-  if (resolvedTemplate) return specializeFromResolvedTemplate(resolvedTemplate)
+  // Look up the program in the unified registry. typeResolver may
+  // register baseName lazily as a side effect — re-check after the
+  // resolver fires so the lazy-load path works for both generic and
+  // concrete entries.
+  const lookup = (): import('./ir/nodes.js').ResolvedProgram | undefined =>
+    session.programs.get(baseName)
 
-  // typeResolver may register baseName lazily (returning undefined for the
-  // generic-template case — the resolver populates `genericTemplatesResolved`
-  // as a side effect). Re-check after the resolver fires so the lazy-load
-  // path works.
-  const concrete = session.typeRegistry.get(baseName) ?? session.typeResolver?.(baseName)
-  if (concrete === undefined) {
-    const lateResolved = session.genericTemplatesResolved.get(baseName)
-    if (lateResolved) return specializeFromResolvedTemplate(lateResolved)
+  let prog = lookup()
+  if (prog === undefined) {
+    // typeResolver returns the concrete `Compiled` for non-generics
+    // (we use that below) and undefined for generics (which the
+    // resolver populates into `session.programs` as a side effect).
+    const concrete = session.typeResolver?.(baseName)
+    prog = lookup()
+    if (prog === undefined && concrete === undefined) {
+      const known = [
+        ...session.typeRegistry.keys(),
+        ...session.programs.keys(),
+      ].join(', ')
+      throw new Error(`Unknown program type '${baseName}'. Known: ${known || '(none)'}`)
+    }
+    // Concrete typeRegistry path (no specialization needed).
+    if (prog === undefined) {
+      if (rawTypeArgs && Object.keys(rawTypeArgs).length > 0) {
+        throw new Error(`Program '${baseName}' does not declare type_params; got type_args: ${Object.keys(rawTypeArgs).join(', ')}`)
+      }
+      return { type: concrete! }
+    }
   }
+
+  if (prog.typeParams.length > 0) {
+    return specializeFromResolvedTemplate(prog)
+  }
+  // Non-generic: typeRegistry should also have a Compiled wrapper.
+  const concrete = session.typeRegistry.get(baseName) ?? session.typeResolver?.(baseName)
   if (!concrete) {
-    const known = [
-      ...session.typeRegistry.keys(),
-      ...session.genericTemplatesResolved.keys(),
-    ].join(', ')
-    throw new Error(`Unknown program type '${baseName}'. Known: ${known || '(none)'}`)
+    throw new Error(
+      `resolveProgramType: '${baseName}' is in programs but has no Compiled in typeRegistry. ` +
+      `Loader invariant violated — every non-generic program in session.programs should be paired with a typeRegistry entry.`,
+    )
   }
   if (rawTypeArgs && Object.keys(rawTypeArgs).length > 0) {
     throw new Error(`Program '${baseName}' does not declare type_params; got type_args: ${Object.keys(rawTypeArgs).join(', ')}`)
