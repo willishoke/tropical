@@ -21,10 +21,15 @@
  *   per-specialization data; cloning them would break variant
  *   identity in `Match.arms[i].variant` and `Tag.variant`,
  *   which downstream passes (sum_lower) compare by `===`.
- * - All other decls (`InputDecl`, `OutputDecl`, `TypeParamDecl`,
- *   `RegDecl`, `ParamDecl`, `InstanceDecl`, `ProgramDecl`,
- *   `BinderDecl`) — CLONED, with the `Map<old, new>` dedup table
+ * - Decls with pointer identity (`InputDecl`, `OutputDecl`,
+ *   `TypeParamDecl`, `RegDecl`, `ParamDecl`, `InstanceDecl`,
+ *   `ProgramDecl`) — CLONED, with the `Map<old, new>` dedup table
  *   ensuring each appears at most once.
+ * - `BinderDecl` — cloned per-occurrence with the optional
+ *   `binderOffset` applied to the idx. No dedup table needed:
+ *   `BinderDecl` identity is the integer `idx`, not the object,
+ *   so two clones with the same (possibly shifted) idx are
+ *   semantically identical.
  *
  * Construction discipline:
  * - For every decl, the new object is inserted into the dedup table
@@ -48,8 +53,9 @@ import type {
   Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith,
   InputIdx, TypeParamIdx,
   RegIdx as RegIdx_t, ParamIdx as ParamIdx_t, InstanceIdx as InstanceIdx_t,
+  BinderIdx as BinderIdx_t,
 } from './nodes.js'
-import { typeParamIdx } from './nodes.js'
+import { typeParamIdx, binderIdx } from './nodes.js'
 import { buildDeclTables } from './decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
@@ -65,7 +71,6 @@ interface CloneTable {
   params:     Map<ParamDecl, ParamDecl>
   instances:  Map<InstanceDecl, InstanceDecl>
   programs:   Map<ProgramDecl, ProgramDecl>
-  binders:    Map<BinderDecl, BinderDecl>
   /** Nested ResolvedPrograms (held by `InstanceDecl.type` and
    *  `ProgramDecl.program`). Memoized so two instances of the same
    *  nested program share the cloned program object. */
@@ -103,6 +108,11 @@ interface CloneTable {
   regOffset?:      number
   paramOffset?:    number
   instanceOffset?: number
+  /** Idx offset applied to BinderDecl.idx and BindingRef.idx
+   *  throughout the cloned subtree. Like regOffset/paramOffset, used
+   *  when lifting a sub-program's binders into an outer program's
+   *  binder namespace during inlineInstances. */
+  binderOffset?:   number
 }
 
 function emptyTable(): CloneTable {
@@ -114,7 +124,6 @@ function emptyTable(): CloneTable {
     params:     new Map(),
     instances:  new Map(),
     programs:   new Map(),
-    binders:    new Map(),
     nestedPrograms: new Map(),
   }
 }
@@ -169,13 +178,14 @@ export function cloneWithSubst(
 export function cloneWithInputSubst(
   prog: ResolvedProgram,
   inputSubst: ReadonlyMap<InputIdx, ResolvedExpr>,
-  shifts?: { regOffset?: number; paramOffset?: number; instanceOffset?: number },
+  shifts?: { regOffset?: number; paramOffset?: number; instanceOffset?: number; binderOffset?: number },
 ): ResolvedProgram {
   const t = emptyTable()
   t.inputSubst = inputSubst
   if (shifts?.regOffset      !== undefined) t.regOffset      = shifts.regOffset
   if (shifts?.paramOffset    !== undefined) t.paramOffset    = shifts.paramOffset
   if (shifts?.instanceOffset !== undefined) t.instanceOffset = shifts.instanceOffset
+  if (shifts?.binderOffset   !== undefined) t.binderOffset   = shifts.binderOffset
   return cloneProgram(prog, t)
 }
 
@@ -202,6 +212,7 @@ function cloneProgram(prog: ResolvedProgram, t: CloneTable): ResolvedProgram {
     regs:      [],
     params:    [],
     instances: [],
+    binderCount: prog.binderCount + (t.binderOffset ?? 0),
   }
   t.nestedPrograms.set(prog, shell)
 
@@ -449,12 +460,14 @@ function cloneExpr(e: ResolvedExpr, t: CloneTable): ResolvedExpr {
   return cloneOpNode(e, t)
 }
 
+/** Clone a BinderDecl, applying the optional binderOffset. No dedup
+ *  table: BinderDecl identity is the (possibly shifted) idx, not the
+ *  object — two clones of the same source binder produce semantically
+ *  equivalent BinderDecl objects with the same idx, which is what
+ *  matters for substitution lookups in array_lower/sum_lower. */
 function cloneBinder(b: BinderDecl, t: CloneTable): BinderDecl {
-  const cached = t.binders.get(b)
-  if (cached) return cached
-  const fresh: BinderDecl = { op: 'binderDecl', name: b.name }
-  t.binders.set(b, fresh)
-  return fresh
+  const shifted = (b.idx as number) + (t.binderOffset ?? 0)
+  return { op: 'binderDecl', name: b.name, idx: binderIdx(shifted) }
 }
 
 function cloneOpNode(node: ResolvedExprOp, t: CloneTable): ResolvedExprOp {
@@ -486,10 +499,17 @@ function cloneOpNode(node: ResolvedExprOp, t: CloneTable): ResolvedExprOp {
         : node.instance) as InstanceIdx_t,
       output: node.output,
     }
-    // BindingRef is pointer-based (see issue #156). Binders are
-    // dedup-cloned to fresh objects so refs across an arm body all
-    // point at the same fresh binder.
-    case 'bindingRef':   return { op: 'bindingRef',   decl: cloneBinder(node.decl, t) }
+    // BindingRef: shift the idx by binderOffset (parallel to RegRef,
+    // ParamRef, NestedOut.instance shifting). No object identity to
+    // preserve; the same source idx + same offset always yields the
+    // same target idx, so all refs to the same binder in the source
+    // collapse to the same idx in the clone.
+    case 'bindingRef':   return {
+      op: 'bindingRef',
+      idx: (t.binderOffset !== undefined
+        ? (node.idx as number) + t.binderOffset
+        : node.idx) as BinderIdx_t,
+    }
     case 'sampleRate':  return { op: 'sampleRate' }
     case 'sampleIndex': return { op: 'sampleIndex' }
 

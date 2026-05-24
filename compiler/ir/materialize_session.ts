@@ -210,6 +210,10 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     typeParams: [] as TypeParamDecl[],
     ports,
     body: block,
+    // Session-level wires are scalar expressions with no combinators
+    // or let-bindings — no binders are introduced. The synthetic
+    // program's binderCount is therefore 0.
+    binderCount: 0,
   })
 }
 

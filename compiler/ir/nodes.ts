@@ -14,9 +14,13 @@
  *   StructField, AliasTypeDef). Each carries an identity string `name`.
  *
  * Refs (uses): InputRef, RegRef, ParamRef, TypeParamRef, BindingRef.
- *   Each holds `decl: <its decl type>`. Refs hold the decl by reference
- *   identity (===) — two `RegRef.decl` for the same register are the
- *   same object.
+ *   Each holds an `idx` — a branded integer identifying the referent.
+ *   Position-indexed refs (RegRef, InputRef, ParamRef, OutputRef-in-
+ *   assigns, TypeParamRef, NestedOut) index into the enclosing
+ *   program's typed decl tables. BindingRef carries a unique-per-
+ *   program `BinderIdx` minted by the elaborator at binder-creation
+ *   time — same ID means same binder, different ID means different
+ *   binder, regardless of name (shadowing is structurally impossible).
  *
  * Bridges between term-and-type levels: NestedOut ties an instance ref
  * to a specific output port of its program type; ResolvedTagNode and
@@ -224,11 +228,23 @@ export type BodyAssign = OutputAssign
 // ─────────────────────────────────────────────────────────────
 
 /** A single anonymous binder. The parent node (Let, Fold, etc.,
- *  or MatchArm) determines the binder's role. The `name` is an identity
- *  string — the user's chosen label, not a reference. */
+ *  or MatchArm) determines the binder's role.
+ *
+ *  `idx` is a unique-per-program integer ID minted by the elaborator;
+ *  BindingRefs use this idx (not pointer identity) to refer back to a
+ *  binder. `name` is an identity string — the user's chosen label,
+ *  retained for diagnostics; it is NOT a reference and is not used for
+ *  lookup post-elaboration.
+ *
+ *  IDs are stable across rewrites that preserve the binder's structural
+ *  role; passes that lift expressions across program boundaries
+ *  (`inline_instances` lifting sub-program decls into a parent) shift
+ *  binder IDs by an offset, parallel to how reg/param/instance indices
+ *  are shifted. */
 export interface BinderDecl {
   op: 'binderDecl'
   name: string
+  idx: BinderIdx
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -247,10 +263,17 @@ export interface BinderDecl {
  *    into the TARGET program's tables — resolution requires the
  *    target program in hand.
  *  - TypeParamIdx indexes `typeParams[]`.
- *  - BindingRef is the only ref that keeps a direct decl pointer —
- *    locally-scoped binders don't fit the program-table model and
- *    the locally-nameless migration for binders is tracked
- *    separately as issue #156. */
+ *  - BinderIdx is a unique-per-program ID minted by the elaborator
+ *    for each `let` / combinator / match-arm binder. Unlike the other
+ *    indices, BinderIdx is NOT a position into a program-level
+ *    table — binders live nested inside combinator-body subexpressions,
+ *    so a flat table would have to walk the whole IR to populate.
+ *    The ID is what `BindingRef.idx` carries; the BinderDecl itself
+ *    is reachable via the combinator that introduced it. Cross-program
+ *    lifting (`inline_instances`) shifts BinderIdx by an offset
+ *    parallel to RegIdx/ParamIdx/InstanceIdx shifting; substitution
+ *    passes (`array_lower`, `sum_lower`) key their substitution maps
+ *    by BinderIdx. */
 declare const __ir_idx_brand: unique symbol
 export type IrIdx<B extends string> = number & { readonly [__ir_idx_brand]: B }
 
@@ -260,6 +283,7 @@ export type OutputIdx    = IrIdx<'OutputIdx'>
 export type ParamIdx     = IrIdx<'ParamIdx'>
 export type InstanceIdx  = IrIdx<'InstanceIdx'>
 export type TypeParamIdx = IrIdx<'TypeParamIdx'>
+export type BinderIdx    = IrIdx<'BinderIdx'>
 
 /** Brand-applying constructors. Use these everywhere indices are
  *  built; never `as RegIdx` casts at call sites. */
@@ -269,6 +293,7 @@ export const outputIdx    = (n: number): OutputIdx    => n as OutputIdx
 export const paramIdx     = (n: number): ParamIdx     => n as ParamIdx
 export const instanceIdx  = (n: number): InstanceIdx  => n as InstanceIdx
 export const typeParamIdx = (n: number): TypeParamIdx => n as TypeParamIdx
+export const binderIdx    = (n: number): BinderIdx    => n as BinderIdx
 
 // ─────────────────────────────────────────────────────────────
 // Refs — uses of decls by de Bruijn level
@@ -278,7 +303,7 @@ export interface InputRef     { op: 'inputRef';     idx: InputIdx }
 export interface RegRef       { op: 'regRef';       idx: RegIdx }
 export interface ParamRef     { op: 'paramRef';     idx: ParamIdx }
 export interface TypeParamRef { op: 'typeParamRef'; idx: TypeParamIdx }
-export interface BindingRef   { op: 'bindingRef';   decl: BinderDecl }   // pointer-based; see issue #156
+export interface BindingRef   { op: 'bindingRef';   idx: BinderIdx }
 
 /** Dotted port reference, indexed: parent's instance position +
  *  the output port position inside the instance's program type. To
@@ -530,6 +555,12 @@ export interface ResolvedProgram {
   regs:      RegDecl[]
   params:    ParamDecl[]
   instances: InstanceDecl[]
+  /** Next-fresh BinderIdx for this program. The elaborator increments
+   *  this for every binder it creates (let entries, combinator binders,
+   *  match-arm payload binders). Cross-program lifting
+   *  (`inline_instances`) shifts inner binder IDs by an offset and
+   *  bumps the outer's `binderCount` by the inner's. */
+  binderCount: number
 }
 
 // ─────────────────────────────────────────────────────────────

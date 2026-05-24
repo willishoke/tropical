@@ -84,13 +84,15 @@ export function mkProgram(args: {
   typeParams: ResolvedProgram['typeParams']
   ports: ResolvedProgramPorts
   body: ResolvedBlock
+  binderCount: number
 }): ResolvedProgram {
   return {
     op: 'program',
-    name:       args.name,
-    typeParams: args.typeParams,
-    ports:      args.ports,
-    body:       args.body,
+    name:        args.name,
+    typeParams:  args.typeParams,
+    ports:       args.ports,
+    body:        args.body,
+    binderCount: args.binderCount,
     ...buildDeclTables(args.body.decls),
   }
 }
@@ -110,11 +112,12 @@ export function withDeclTables(
         Partial<Pick<ResolvedProgram, 'regs' | 'params' | 'instances'>>,
 ): ResolvedProgram {
   return {
-    op:         'program',
-    name:       prog.name,
-    typeParams: prog.typeParams,
-    ports:      prog.ports,
-    body:       prog.body,
+    op:          'program',
+    name:        prog.name,
+    typeParams:  prog.typeParams,
+    ports:       prog.ports,
+    body:        prog.body,
+    binderCount: prog.binderCount,
     ...buildDeclTables(prog.body.decls),
   }
 }

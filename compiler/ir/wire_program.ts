@@ -212,6 +212,10 @@ export function liftWireToProgram(
       typeDefs: [],
     },
     body,
+    // Wire-lifted programs translate session ExprNodes (scalar
+    // arithmetic only) to ResolvedExpr — no combinators, no
+    // let-bindings, no binders.
+    binderCount: 0,
   })
 }
 

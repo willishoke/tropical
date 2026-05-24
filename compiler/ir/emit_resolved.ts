@@ -519,12 +519,10 @@ class Emitter {
       const obj = node as Record<string, unknown>
       const op = String(obj.op)
       // Indexed refs: key on op + integer idx (stable across rewrites).
-      // BindingRef keeps the pointer-based decl identity (issue #156).
       if (op === 'regRef' || op === 'paramRef'
-          || op === 'inputRef' || op === 'typeParamRef') {
+          || op === 'inputRef' || op === 'typeParamRef'
+          || op === 'bindingRef') {
         key = `op:${op}|idx=${obj.idx as number}`
-      } else if (op === 'bindingRef') {
-        key = `op:${op}|decl=${this.declIdOf(obj.decl as object)}`
       } else if (op === 'nestedOut') {
         key = `op:${op}|inst=${obj.instance as number}|out=${obj.output as number}`
       } else {

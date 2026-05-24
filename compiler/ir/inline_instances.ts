@@ -117,21 +117,28 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   // shifted refs that point at the lifted positions.
   const outerRegCount   = outer.regs.length
   const outerParamCount = outer.params.length
+  // Track binder ID allocation as we lift sub-program binders. Each
+  // inlined inner contributes its binderCount; subsequent inlines
+  // start at the running total. After the loop the running total goes
+  // into the merged program's binderCount.
+  let liftedBinderCount = 0
   let instCount = 0
   for (const decl of outer.body.decls) {
     if (decl.op !== 'instanceDecl') {
       survivingDecls.push(decl)
       continue
     }
-    const regOffset   = outerRegCount   + liftedDecls.filter(d => d.op === 'regDecl').length
-    const paramOffset = outerParamCount + liftedDecls.filter(d => d.op === 'paramDecl').length
-    inlineOneInstance(
+    const regOffset    = outerRegCount    + liftedDecls.filter(d => d.op === 'regDecl').length
+    const paramOffset  = outerParamCount  + liftedDecls.filter(d => d.op === 'paramDecl').length
+    const binderOffset = outer.binderCount + liftedBinderCount
+    liftedBinderCount += inlineOneInstance(
       decl,
       instanceIdx(instCount++),
       liftedDecls,
       nestedOutSubst,
       regOffset,
       paramOffset,
+      binderOffset,
     )
   }
 
@@ -167,6 +174,7 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
     typeParams: outer.typeParams,
     ports: outer.ports,
     body: block,
+    binderCount: outer.binderCount + liftedBinderCount,
   })
 }
 
@@ -181,7 +189,8 @@ function inlineOneInstance(
   nestedOutSubst: Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>,
   regOffset: number,
   paramOffset: number,
-): void {
+  binderOffset: number,
+): number {
   // 1. Specialize the inner program. For non-generic instances
   //    (typeArgs.length === 0), this is a no-op identity — the
   //    instance's program is already concrete.
@@ -218,7 +227,7 @@ function inlineOneInstance(
   //    to the outer's body, the refs already point at the lifted
   //    positions. InputRefs are substituted to outer expressions
   //    before any shift could matter.
-  const cloned = cloneWithInputSubst(flattened, inputSubst, { regOffset, paramOffset })
+  const cloned = cloneWithInputSubst(flattened, inputSubst, { regOffset, paramOffset, binderOffset })
 
   // 5. Lift the cloned inner's body decls into the outer. Names are
   //    prefixed with the instance name to avoid collisions when
@@ -231,6 +240,11 @@ function inlineOneInstance(
   //    NestedOut.output is now OutputIdx (position into the target's
   //    ports.outputs[]); we map each position to its cloned expression.
   recordOutputs(decl, instIdx, cloned, nestedOutSubst)
+
+  // Return the inner's binderCount so the caller can advance its
+  // running total — subsequent inlines start their binderOffset
+  // beyond this inner's allocations.
+  return flattened.binderCount
 }
 
 /**

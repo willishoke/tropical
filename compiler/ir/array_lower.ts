@@ -22,11 +22,11 @@
  * Substitution discipline (the categorical win over the legacy):
  * the legacy `compiler/lower_arrays.ts` substitutes by name string,
  * which forced an elaborate "shielded scope" map for nested binders
- * with shadowing variable names. Here every `BindingRef.decl` is a
- * pointer to a `BinderDecl` set up by the elaborator — substitution
- * is by identity (Map<BinderDecl, ResolvedExpr>), so shadowing is
- * structurally impossible and we don't carry the legacy's shielding
- * apparatus.
+ * with shadowing variable names. Here every `BindingRef.idx` is a
+ * unique-per-program integer minted by the elaborator at binder-
+ * creation time — substitution is by idx-keyed map
+ * (`Map<BinderIdx, ResolvedExpr>`), so shadowing is structurally
+ * impossible and we don't carry the legacy's shielding apparatus.
  *
  * Sharing: each combinator iteration uses a fresh `WeakMap` memo. A
  * memo is only valid for one substitution map (the bindings present at
@@ -40,7 +40,7 @@ import type {
   ResolvedProgram,
   ResolvedExpr, ResolvedExprOp,
   BodyDecl, BodyAssign, OutputAssign,
-  BinderDecl,
+  BinderDecl, BinderIdx,
   Tag, Match, MatchArm,
 } from './nodes.js'
 import { cloneResolvedProgram } from './clone.js'
@@ -171,21 +171,21 @@ function opNeedsLowering(node: ResolvedExprOp): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Substitution map — keyed by BinderDecl identity (no name strings)
+// Substitution map — keyed by BinderIdx (unique-per-program integer)
 // ─────────────────────────────────────────────────────────────
 
-type SubstMap = ReadonlyMap<BinderDecl, ResolvedExpr>
+type SubstMap = ReadonlyMap<BinderIdx, ResolvedExpr>
 const EMPTY_SUBST: SubstMap = new Map()
 
-/** Extend `subst` with one (decl → expr) pair. Returns a fresh map. */
-function extend1(subst: SubstMap, decl: BinderDecl, expr: ResolvedExpr): SubstMap {
+/** Extend `subst` with one (idx → expr) pair. Returns a fresh map. */
+function extend1(subst: SubstMap, idx: BinderIdx, expr: ResolvedExpr): SubstMap {
   const m = new Map(subst)
-  m.set(decl, expr)
+  m.set(idx, expr)
   return m
 }
 
 /** Extend `subst` with multiple pairs. Returns a fresh map. */
-function extendN(subst: SubstMap, pairs: Array<[BinderDecl, ResolvedExpr]>): SubstMap {
+function extendN(subst: SubstMap, pairs: Array<[BinderIdx, ResolvedExpr]>): SubstMap {
   const m = new Map(subst)
   for (const [d, e] of pairs) m.set(d, e)
   return m
@@ -286,7 +286,7 @@ function lowerOp(node: ResolvedExprOp, subst: SubstMap, memo: Memo): ResolvedExp
     //    entered) survive — the caller's wrapping iteration will resolve
     //    them when it pushes its own bindings. ──
     case 'bindingRef': {
-      const v = subst.get(node.decl)
+      const v = subst.get(node.idx)
       return v !== undefined ? v : node
     }
 
@@ -407,7 +407,7 @@ function lowerLet(
   let cur: SubstMap = subst
   for (const entry of node.binders) {
     const value = lowerExpr(entry.value, cur, new WeakMap())
-    cur = extend1(cur, entry.binder, value)
+    cur = extend1(cur, entry.binder.idx, value)
   }
   return lowerExpr(node.in, cur, new WeakMap())
 }
@@ -426,7 +426,7 @@ function lowerFold(
   }
   let acc = lowerExpr(node.init, subst, memo)
   for (const elem of overLowered) {
-    const inner = extendN(subst, [[node.acc, acc], [node.elem, elem]])
+    const inner = extendN(subst, [[node.acc.idx, acc], [node.elem.idx, elem]])
     acc = lowerExpr(node.body, inner, new WeakMap())
   }
   return acc
@@ -448,7 +448,7 @@ function lowerScan(
   const out: ResolvedExpr[] = []
   let acc = lowerExpr(node.init, subst, memo)
   for (const elem of overLowered) {
-    const inner = extendN(subst, [[node.acc, acc], [node.elem, elem]])
+    const inner = extendN(subst, [[node.acc.idx, acc], [node.elem.idx, elem]])
     acc = lowerExpr(node.body, inner, new WeakMap())
     out.push(acc)
   }
@@ -469,7 +469,7 @@ function lowerGenerate(
   }
   const out: ResolvedExpr[] = []
   for (let i = 0; i < n; i++) {
-    const inner = extend1(subst, node.iter, i)
+    const inner = extend1(subst, node.iter.idx, i)
     out.push(lowerExpr(node.body, inner, new WeakMap()))
   }
   return out
@@ -492,7 +492,7 @@ function lowerIterate(
   let cur = lowerExpr(node.init, subst, memo)
   for (let i = 0; i < n; i++) {
     out.push(cur)
-    const inner = extend1(subst, node.iter, cur)
+    const inner = extend1(subst, node.iter.idx, cur)
     cur = lowerExpr(node.body, inner, new WeakMap())
   }
   return out
@@ -512,7 +512,7 @@ function lowerChain(
   }
   let cur = lowerExpr(node.init, subst, memo)
   for (let i = 0; i < n; i++) {
-    const inner = extend1(subst, node.iter, cur)
+    const inner = extend1(subst, node.iter.idx, cur)
     cur = lowerExpr(node.body, inner, new WeakMap())
   }
   return cur
@@ -529,7 +529,7 @@ function lowerMap2(
     throw new Error(`arrayLower: map2's 'over' did not lower to a static array`)
   }
   return overLowered.map(e => {
-    const inner = extend1(subst, node.elem, e)
+    const inner = extend1(subst, node.elem.idx, e)
     return lowerExpr(node.body, inner, new WeakMap())
   })
 }
@@ -549,7 +549,7 @@ function lowerZipWith(
   const n = Math.min(aLowered.length, bLowered.length)
   const out: ResolvedExpr[] = []
   for (let i = 0; i < n; i++) {
-    const inner = extendN(subst, [[node.x, aLowered[i]], [node.y, bLowered[i]]])
+    const inner = extendN(subst, [[node.x.idx, aLowered[i]], [node.y.idx, bLowered[i]]])
     out.push(lowerExpr(node.body, inner, new WeakMap()))
   }
   return out
