@@ -21,6 +21,8 @@ import { parseProgram } from '../parse/declarations.js'
 import { elaborate } from './elaborator.js'
 import { assertAcyclic, findInstanceCycles, AcyclicityViolation } from './acyclic.js'
 import type { ResolvedProgram, InstanceDecl, OutputDecl, InputDecl } from './nodes.js'
+import { inputIdx, outputIdx, instanceIdx } from './nodes.js'
+import { mkProgram } from './decl_tables.js'
 
 function elab(src: string): ResolvedProgram {
   return elaborate(parseProgram(src))
@@ -52,16 +54,18 @@ describe('assertAcyclic / findInstanceCycles', () => {
     // and we want to test the assertion in isolation.
     const innerIn: InputDecl  = { op: 'inputDecl', name: 'in_' }
     const innerOut: OutputDecl = { op: 'outputDecl', name: 'out_' }
-    const innerProg: ResolvedProgram = {
-      op: 'program', name: 'Inner', typeParams: [],
+    const innerProg = mkProgram({
+      name: 'Inner', typeParams: [],
       ports: { inputs: [innerIn], outputs: [innerOut], typeDefs: [] },
       body: {
         op: 'block',
         decls: [],
-        assigns: [{ op: 'outputAssign', target: innerOut, expr: { op: 'inputRef', decl: innerIn } }],
+        assigns: [{ op: 'outputAssign', target: outputIdx(0), expr: { op: 'inputRef', idx: inputIdx(0) } }],
       },
-    }
-    // Build two instances of Inner that reference each other.
+    })
+    // Build two instances of Inner that reference each other. Inputs
+    // are positional indices into the target's ports.inputs; NestedOut
+    // carries InstanceIdx (in this program) + OutputIdx (in target).
     const a: InstanceDecl = {
       op: 'instanceDecl', name: 'a', type: innerProg,
       typeArgs: [], inputs: [],
@@ -70,14 +74,14 @@ describe('assertAcyclic / findInstanceCycles', () => {
       op: 'instanceDecl', name: 'b', type: innerProg,
       typeArgs: [], inputs: [],
     }
-    // Now wire them cyclically: a.in_ = b.out_, b.in_ = a.out_.
-    a.inputs.push({ port: innerIn, value: { op: 'nestedOut', instance: b, output: innerOut } })
-    b.inputs.push({ port: innerIn, value: { op: 'nestedOut', instance: a, output: innerOut } })
-    const cyclic: ResolvedProgram = {
-      op: 'program', name: 'Cyclic', typeParams: [],
+    // a is body.decls[0] → InstanceIdx 0; b is [1] → InstanceIdx 1.
+    a.inputs.push({ port: inputIdx(0), value: { op: 'nestedOut', instance: instanceIdx(1), output: outputIdx(0) } })
+    b.inputs.push({ port: inputIdx(0), value: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) } })
+    const cyclic = mkProgram({
+      name: 'Cyclic', typeParams: [],
       ports: { inputs: [], outputs: [], typeDefs: [] },
       body: { op: 'block', decls: [a, b], assigns: [] },
-    }
+    })
     const cycles = findInstanceCycles(cyclic)
     expect(cycles.length).toBe(1)
     expect(new Set(cycles[0].map(i => i.name))).toEqual(new Set(['a', 'b']))
@@ -87,25 +91,26 @@ describe('assertAcyclic / findInstanceCycles', () => {
   test('a self-loop SCC (single instance with self-edge) is detected', () => {
     const innerIn: InputDecl  = { op: 'inputDecl', name: 'in_' }
     const innerOut: OutputDecl = { op: 'outputDecl', name: 'out_' }
-    const innerProg: ResolvedProgram = {
-      op: 'program', name: 'Inner', typeParams: [],
+    const innerProg = mkProgram({
+      name: 'Inner', typeParams: [],
       ports: { inputs: [innerIn], outputs: [innerOut], typeDefs: [] },
       body: {
         op: 'block',
         decls: [],
-        assigns: [{ op: 'outputAssign', target: innerOut, expr: { op: 'inputRef', decl: innerIn } }],
+        assigns: [{ op: 'outputAssign', target: outputIdx(0), expr: { op: 'inputRef', idx: inputIdx(0) } }],
       },
-    }
+    })
     const self: InstanceDecl = {
       op: 'instanceDecl', name: 'self', type: innerProg,
       typeArgs: [], inputs: [],
     }
-    self.inputs.push({ port: innerIn, value: { op: 'nestedOut', instance: self, output: innerOut } })
-    const cyclic: ResolvedProgram = {
-      op: 'program', name: 'SelfLoop', typeParams: [],
+    // self is body.decls[0] → InstanceIdx 0; it refs itself.
+    self.inputs.push({ port: inputIdx(0), value: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) } })
+    const cyclic = mkProgram({
+      name: 'SelfLoop', typeParams: [],
       ports: { inputs: [], outputs: [], typeDefs: [] },
       body: { op: 'block', decls: [self], assigns: [] },
-    }
+    })
     const cycles = findInstanceCycles(cyclic)
     expect(cycles.length).toBe(1)
     expect(cycles[0].map(i => i.name)).toEqual(['self'])
@@ -114,24 +119,24 @@ describe('assertAcyclic / findInstanceCycles', () => {
   test('AcyclicityViolation carries the detected SCCs as structured data', () => {
     const innerIn: InputDecl  = { op: 'inputDecl', name: 'in_' }
     const innerOut: OutputDecl = { op: 'outputDecl', name: 'out_' }
-    const innerProg: ResolvedProgram = {
-      op: 'program', name: 'Inner', typeParams: [],
+    const innerProg = mkProgram({
+      name: 'Inner', typeParams: [],
       ports: { inputs: [innerIn], outputs: [innerOut], typeDefs: [] },
       body: {
         op: 'block',
         decls: [],
-        assigns: [{ op: 'outputAssign', target: innerOut, expr: { op: 'inputRef', decl: innerIn } }],
+        assigns: [{ op: 'outputAssign', target: outputIdx(0), expr: { op: 'inputRef', idx: inputIdx(0) } }],
       },
-    }
+    })
     const a: InstanceDecl = { op: 'instanceDecl', name: 'a', type: innerProg, typeArgs: [], inputs: [] }
     const b: InstanceDecl = { op: 'instanceDecl', name: 'b', type: innerProg, typeArgs: [], inputs: [] }
-    a.inputs.push({ port: innerIn, value: { op: 'nestedOut', instance: b, output: innerOut } })
-    b.inputs.push({ port: innerIn, value: { op: 'nestedOut', instance: a, output: innerOut } })
-    const cyclic: ResolvedProgram = {
-      op: 'program', name: 'Cyclic', typeParams: [],
+    a.inputs.push({ port: inputIdx(0), value: { op: 'nestedOut', instance: instanceIdx(1), output: outputIdx(0) } })
+    b.inputs.push({ port: inputIdx(0), value: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) } })
+    const cyclic = mkProgram({
+      name: 'Cyclic', typeParams: [],
       ports: { inputs: [], outputs: [], typeDefs: [] },
       body: { op: 'block', decls: [a, b], assigns: [] },
-    }
+    })
     try {
       assertAcyclic(cyclic)
       throw new Error('expected throw')

@@ -13,7 +13,7 @@
  * runnable-plan boundary.
  */
 
-import type { ResolvedProgram, ResolvedExpr, OutputDecl, RegDecl, ParamDecl, PortType, InstanceDecl, InputDecl } from './nodes.js'
+import type { ResolvedProgram, ResolvedExpr, OutputDecl, RegDecl, ParamDecl, PortType, InstanceDecl, InputDecl, ParamIdx, InputIdx, OutputIdx, InstanceIdx } from './nodes.js'
 import type { PerInstancePlan } from '../flat_plan.js'
 import { buildSlotMaps, type SlotMaps } from './slots.js'
 import { emitResolvedProgram, type EmitSlots, type ScalarType } from './emit_resolved.js'
@@ -22,24 +22,26 @@ import { emitResolvedProgram, type EmitSlots, type ScalarType } from './emit_res
  *  program type's body, plus optional nested-output and nested-input
  *  slot maps for the M11 fractal compile path. */
 export interface CompileResolvedContext {
-  paramHandles?:      Map<ParamDecl, { ptr: string }>
-  /** Per-sub-instance, per-output-port module-slot map. Populated by
-   *  `partition_recursive` when compiling a parent kernel whose body
-   *  contains child kernels. `NestedOut` refs lower to Slot reads
-   *  via this map. */
-  nestedOutputSlots?: Map<InstanceDecl, Map<OutputDecl, number>>
-  /** Per-sub-instance, per-input-port module-slot map. Populated by
-   *  `partition_recursive` for the M11 slot-based input wiring. The
-   *  parent's compile emits a `WriteSlot` into each named slot;
-   *  the entries land in `per_child_pre_input[k]` (parallel to the
-   *  body's nested-instance order) so the engine runs each block
-   *  immediately before recursing into its corresponding child. */
-  nestedInputSlots?:  Map<InstanceDecl, Map<InputDecl, number>>
+  /** Keyed by ParamIdx. */
+  paramHandles?:      Map<ParamIdx, { ptr: string }>
+  /** Per-sub-instance, per-output-port module-slot map. Keyed by
+   *  InstanceIdx (in this program) and OutputIdx (in the instance's
+   *  type). Populated by `partition_recursive` for M11 fractal compile;
+   *  `NestedOut` refs lower to Slot reads via this map. */
+  nestedOutputSlots?: Map<InstanceIdx, Map<OutputIdx, number>>
+  /** Per-sub-instance, per-input-port module-slot map. Keyed by
+   *  InstanceIdx and InputIdx. Populated by `partition_recursive` for
+   *  the M11 slot-based input wiring. The parent's compile emits a
+   *  `WriteSlot` into each named slot; entries land in
+   *  `per_child_pre_input[k]` (parallel to the body's nested-instance
+   *  order) so the engine runs each block immediately before recursing
+   *  into its corresponding child. */
+  nestedInputSlots?:  Map<InstanceIdx, Map<InputIdx, number>>
   /** Module-slot indices for THIS program's own input ports. Set when
    *  the program is being compiled as a sub-instance kernel — its
-   *  `InputRef(d)` lowers to a slot read from `inputSlotOverride.get(d)`
-   *  instead of the legacy `opInput`. */
-  inputSlotOverride?: Map<InputDecl, number>
+   *  `InputRef(idx)` lowers to a slot read from
+   *  `inputSlotOverride.get(idx)` instead of the legacy `opInput`. */
+  inputSlotOverride?: Map<InputIdx, number>
 }
 
 /** Compile a `ResolvedProgram` to a `PerInstancePlan`.
@@ -59,15 +61,18 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
   // emit_resolved's terminal check throw a descriptive message.
 
   // ── Output expressions ──
-  const outputExprByDecl = new Map<OutputDecl, ResolvedExpr>()
+  // OutputAssign.target is now OutputIdx (or the dac sentinel). Map
+  // output position → expression; iterate output ports in order to
+  // produce the per-port expression array.
+  const outputExprByIdx = new Map<number, ResolvedExpr>()
   for (const a of prog.body.assigns) {
     if (a.op !== 'outputAssign') continue
-    if ('op' in a.target && a.target.op === 'outputDecl') {
-      outputExprByDecl.set(a.target, a.expr)
+    if (typeof a.target === 'number') {
+      outputExprByIdx.set(a.target, a.expr)
     }
   }
-  const outputExprs: ResolvedExpr[] = prog.ports.outputs.map(out => {
-    const expr = outputExprByDecl.get(out)
+  const outputExprs: ResolvedExpr[] = prog.ports.outputs.map((out, i) => {
+    const expr = outputExprByIdx.get(i)
     if (expr === undefined) {
       throw new Error(`compileResolved: program '${prog.name}' output '${out.name}' has no outputAssign.`)
     }

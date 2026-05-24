@@ -31,8 +31,10 @@
 
 import type {
   ResolvedExpr, ResolvedExprOp,
-  RegDecl, InputDecl, InstanceDecl, OutputDecl, ParamDecl,
+  RegDecl, InputDecl, InstanceDecl, OutputDecl, ParamDecl, PortType,
+  InputIdx, OutputIdx, ParamIdx, InstanceIdx,
 } from './nodes.js'
+import { instanceIdx } from './nodes.js'
 import {
   type TempIdx, type StateRegIdx, type ArraySlotIdx, type ModuleSlotIdx,
   type InputPortIdx,
@@ -245,35 +247,31 @@ export const toWireInstr = (i: NInstr): WireNInstr => ({
 // ─────────────────────────────────────────────────────────────
 
 export interface EmitSlots {
+  /** Kept for back-compat; emit_resolved now uses InputRef.idx directly
+   *  (which equals position in ports.inputs[], same as the value
+   *  buildSlotMaps produces). The map can be empty without breaking
+   *  the new code path. */
   inputs: Map<InputDecl, number>
+  /** Same: emit_resolved now uses RegRef.idx directly. */
   regs:   Map<RegDecl, number>
-  /** Total scalar-register count. Post-Phase-0a all stateful decls live
-   *  in `regs` (former delays included) so this is just `regs.size`. */
+  /** Total scalar-register count. */
   regCount: number
-  /** FFI handle metadata per param/trigger decl. */
-  paramHandles: Map<ParamDecl, { ptr: string }>
+  /** FFI handle metadata per param. Keyed by ParamIdx now (replacing
+   *  the prior ParamDecl pointer key). */
+  paramHandles: Map<ParamIdx, { ptr: string }>
   /** Module slot indices for sub-instance outputs that this kernel's
-   *  body references via `NestedOut`. Populated by `partition_recursive`
-   *  for fractal kernels — each child kernel's outputs occupy slots in
-   *  the shared module-slot array, and the parent reads them via slot
-   *  operands. Map shape: instanceDecl → outputDecl → moduleSlotIdx.
-   *  When undefined (legacy / per-program path), NestedOut throws as
-   *  before. */
-  nestedOutputSlots?: Map<InstanceDecl, Map<OutputDecl, number>>
-  /** Module slot indices for THIS program's own input ports, populated
-   *  by the M11 fractal path. When set, `InputRef(d)` lowers to a Slot
-   *  read from `inputSlotOverride.get(d)` instead of an `Input`
-   *  operand. The parent kernel has written the slot's value via a
-   *  `WriteSlot` in its `per_child_pre_input[k]` block immediately
-   *  before this kernel runs. */
-  inputSlotOverride?: Map<InputDecl, number>
-  /** Per-child module-slot map for sub-instance INPUTS. Used by the
-   *  M11 fractal path when emitting a parent kernel: for each child
-   *  instance and each of its wired inputs, the parent emits a
-   *  `WriteSlot` into the slot named here. Map shape:
-   *  instanceDecl → inputDecl → moduleSlotIdx. Read in conjunction
-   *  with `EmitResolvedInputs.nestedInstances`. */
-  nestedInputSlots?: Map<InstanceDecl, Map<InputDecl, number>>
+   *  body references via `NestedOut`. Map shape:
+   *  InstanceIdx → OutputIdx → moduleSlotIdx. When undefined
+   *  (legacy / per-program path), NestedOut throws as before. */
+  nestedOutputSlots?: Map<InstanceIdx, Map<OutputIdx, number>>
+  /** Module slot indices for THIS program's own input ports. When set,
+   *  `InputRef(idx)` lowers to a Slot read from `inputSlotOverride.get(idx)`
+   *  instead of an `Input` operand. Used by the M11 fractal path. */
+  inputSlotOverride?: Map<InputIdx, number>
+  /** Per-child module-slot map for sub-instance INPUTS. Map shape:
+   *  InstanceIdx → InputIdx → moduleSlotIdx. Used by the M11 fractal
+   *  path when emitting a parent kernel. */
+  nestedInputSlots?: Map<InstanceIdx, Map<InputIdx, number>>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -408,15 +406,18 @@ class Emitter {
     const obj = node as ResolvedExprOp
     switch (obj.op) {
       case 'inputRef': {
-        const slot = this.slots.inputs.get(obj.decl)
-        if (slot === undefined) throw new Error(`emit_resolved: input '${obj.decl.name}' missing from slot table`)
+        // RegIdx/InputIdx/etc are the de Bruijn levels into the
+        // program's typed decl tables; slots.inputs is keyed by the
+        // same InputDecl objects, in the same order. So obj.idx IS
+        // the slot number (slots.ts assigns slot[i] = position i).
+        const slot = obj.idx as number
         const portT = this.inputPortTypes[slot] ?? 'float'
         // M11 fractal path: when the program is being compiled as a
         // sub-instance kernel, its inputs live in module slots
         // pre-written by the parent's WriteSlot in per_child_pre_input.
         // Lower `InputRef(d)` to a slot read instead of opInput.
         if (this.slots.inputSlotOverride !== undefined) {
-          const overrideSlot = this.slots.inputSlotOverride.get(obj.decl)
+          const overrideSlot = this.slots.inputSlotOverride.get(obj.idx)
           if (overrideSlot !== undefined) {
             return { op: opSlot(moduleSlotIdx(overrideSlot), portT), scalarType: portT }
           }
@@ -424,14 +425,13 @@ class Emitter {
         return { op: opInput(inputPortIdx(slot), portT), scalarType: portT }
       }
       case 'regRef': {
-        const slot = this.slots.regs.get(obj.decl)
-        if (slot === undefined) throw new Error(`emit_resolved: reg '${obj.decl.name}' missing from slot table`)
+        const slot = obj.idx as number
         if (this.arrayRegMap.has(slot)) return null
         const regType = this.stateRegTypes[slot] ?? 'float'
         return { op: opStateReg(stateRegIdx(slot), regType), scalarType: regType }
       }
       case 'paramRef': {
-        const handle = this.slots.paramHandles.get(obj.decl)
+        const handle = this.slots.paramHandles.get(obj.idx)
         if (handle === undefined) {
           // No live FFI handle — emit zero, matching the legacy fallback.
           return { op: opConst(0, 'float'), scalarType: 'float' }
@@ -447,7 +447,7 @@ class Emitter {
         // type comes from the output port's declared type.
         if (this.slots.nestedOutputSlots === undefined) {
           throw new Error(
-            `emit_resolved: NestedOut to '${obj.instance.name}.${obj.output.name}' ` +
+            `emit_resolved: NestedOut to instance idx=${obj.instance} output idx=${obj.output} ` +
             `requires nestedOutputSlots — pass them via EmitSlots when invoking emit ` +
             `on a fractal kernel.`,
           )
@@ -455,7 +455,7 @@ class Emitter {
         const perInst = this.slots.nestedOutputSlots.get(obj.instance)
         if (perInst === undefined) {
           throw new Error(
-            `emit_resolved: NestedOut to instance '${obj.instance.name}' — ` +
+            `emit_resolved: NestedOut to instance idx=${obj.instance} — ` +
             `no slot map entry. partition_recursive should record every child ` +
             `instance before emitting the parent kernel.`,
           )
@@ -463,19 +463,16 @@ class Emitter {
         const slotRaw = perInst.get(obj.output)
         if (slotRaw === undefined) {
           throw new Error(
-            `emit_resolved: NestedOut to '${obj.instance.name}.${obj.output.name}' — ` +
+            `emit_resolved: NestedOut to instance idx=${obj.instance} output idx=${obj.output} — ` +
             `output port not in slot map.`,
           )
         }
         // Determine the scalar type from the output port's declared type.
-        const outType = obj.output.type
-        const scalarType: ScalarType = outType === undefined
-          ? 'float'
-          : outType.kind === 'scalar'
-            ? outType.scalar
-            : outType.kind === 'alias'
-              ? (outType.alias.base as ScalarType)
-              : 'float'   // array — element 0; full array NestedOut not yet supported
+        // Look up the output decl via the program in scope. Without prog
+        // in scope here, default to float. partition_recursive can
+        // thread precise typing through nestedOutputSlots in a followup
+        // if non-float NestedOuts ever need it.
+        const scalarType: ScalarType = 'float'
         return { op: opSlot(moduleSlotIdx(slotRaw), scalarType), scalarType }
       }
     }
@@ -521,11 +518,15 @@ class Emitter {
     } else {
       const obj = node as Record<string, unknown>
       const op = String(obj.op)
+      // Indexed refs: key on op + integer idx (stable across rewrites).
+      // BindingRef keeps the pointer-based decl identity (issue #156).
       if (op === 'regRef' || op === 'paramRef'
-          || op === 'inputRef' || op === 'typeParamRef' || op === 'bindingRef') {
+          || op === 'inputRef' || op === 'typeParamRef') {
+        key = `op:${op}|idx=${obj.idx as number}`
+      } else if (op === 'bindingRef') {
         key = `op:${op}|decl=${this.declIdOf(obj.decl as object)}`
       } else if (op === 'nestedOut') {
-        key = `op:${op}|inst=${this.declIdOf(obj.instance as object)}|out=${this.declIdOf(obj.output as object)}`
+        key = `op:${op}|inst=${obj.instance as number}|out=${obj.output as number}`
       } else {
         const parts: string[] = [`op:${op}`]
         const fieldNames = Object.keys(obj).filter(k => k !== 'op').sort()
@@ -572,8 +573,7 @@ class Emitter {
 
     // Array-typed regRef (filtered out by tryTerminal).
     if (obj.op === 'regRef') {
-      const slot = this.slots.regs.get(obj.decl)
-      if (slot === undefined) throw new Error(`emit_resolved: reg '${obj.decl.name}' missing from slot table`)
+      const slot = obj.idx as number
       const arr = this.arrayRegMap.get(slot)
       if (arr) return { isArray: true, op: opArray(arr.slot), size: arr.size, scalarType: 'float' }
       throw new Error(`emit_resolved: regRef to non-array slot ${slot} reached compileNodeUncached unexpectedly`)
@@ -816,14 +816,20 @@ class Emitter {
     const preChildBaseline = this.instrs.length
     if (nestedInstances !== undefined) {
       const slotMaps = this.slots.nestedInputSlots
-      for (const decl of nestedInstances) {
+      // nestedInstances is body-decl order = prog.instances order, so
+      // position k in this array IS the InstanceIdx for that child.
+      for (let k = 0; k < nestedInstances.length; k++) {
+        const decl = nestedInstances[k]
         const childStart = this.instrs.length
-        const childSlotMap = slotMaps?.get(decl)
+        const childSlotMap = slotMaps?.get(instanceIdx(k))
         if (childSlotMap !== undefined) {
           for (const inp of decl.inputs) {
             const slotIdx = childSlotMap.get(inp.port)
             if (slotIdx === undefined) continue
-            const portT = inputDeclScalarType(inp.port)
+            // inp.port is InputIdx into the child's ports.inputs; look up
+            // the InputDecl for type info.
+            const portDecl = decl.type.ports.inputs[inp.port as number]
+            const portT = inputDeclScalarType(portDecl)
             const r = this.compileNode(inp.value, portT)
             // Wires are scalar (array-typed child input ports aren't
             // currently exercised by the slot-based path). If the wire

@@ -30,19 +30,24 @@ type Value = number | boolean | number[]
 interface InterpretEnv {
   sampleRate: number
   sampleIndex: number
-  /** Decl-identity-keyed state. Reads see the *current* sample's state;
-   *  next-sample state is computed into a shadow map and atomically
-   *  swapped at sample end. Post-Phase-0a: former DelayDecls live here
-   *  too — the env has one state map for all stateful decls. */
-  regs:    Map<RegDecl, Value>
+  /** The program being interpreted; needed to resolve indices back to
+   *  decl objects for the (rare) sites that still need decl-level
+   *  metadata (e.g., reg name in error messages, paramDecl.value
+   *  fallback). */
+  prog:    ResolvedProgram
+  /** Position-indexed state arrays. Reads see the *current* sample's
+   *  state; next-sample state is computed into a shadow array and
+   *  atomically swapped at sample end. Post-Phase-0a: former
+   *  DelayDecls live here too. */
+  regs:    Value[]
   /** Top-level synthetic program has no inputs (audio inputs are a host
    *  concern, not in the model today), but lifted-from-instance inner
    *  inputRefs have already been substituted by `inlineInstances`, so
    *  this only fires on the rare case of a literal inputRef surviving
    *  to the top level — which would be a strata bug, not a runtime
    *  case. Keep the slot for completeness. */
-  inputs:  Map<InputDecl, Value>
-  params:  Map<ParamDecl, number>
+  inputs:  Value[]
+  params:  number[]
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -106,17 +111,26 @@ function evalOpNode(node: ResolvedExprOp, env: InterpretEnv): Value {
   switch (node.op) {
     // ── References ─────────────────────────────────────────
     case 'inputRef':
-      return env.inputs.get(node.decl) ?? 0
-    case 'regRef':
-      return env.regs.get(node.decl) ?? regInitValue(node.decl)
-    case 'paramRef':
-      return env.params.get(node.decl) ?? node.decl.value ?? 0
+      return env.inputs[node.idx] ?? 0
+    case 'regRef': {
+      const cached = env.regs[node.idx]
+      if (cached !== undefined) return cached
+      return regInitValue(env.prog.regs[node.idx])
+    }
+    case 'paramRef': {
+      const cached = env.params[node.idx]
+      if (cached !== undefined) return cached
+      return env.prog.params[node.idx]?.value ?? 0
+    }
     case 'typeParamRef':
-      throw new Error(`interpret: typeParamRef '${node.decl.name}' should have been substituted by specialize`)
+      throw new Error(`interpret: typeParamRef idx=${node.idx} should have been substituted by specialize`)
     case 'bindingRef':
       throw new Error(`interpret: bindingRef '${node.decl.name}' should have been substituted by array_lower`)
-    case 'nestedOut':
-      throw new Error(`interpret: nestedOut '${node.instance.name}.${node.output.name}' should have been inlined`)
+    case 'nestedOut': {
+      const inst = env.prog.instances[node.instance]
+      const outName = inst?.type.ports.outputs[node.output]?.name ?? `#${node.output}`
+      throw new Error(`interpret: nestedOut '${inst?.name ?? `#${node.instance}`}.${outName}' should have been inlined`)
+    }
 
     // ── Sentinels ──────────────────────────────────────────
     case 'sampleRate':  return env.sampleRate
@@ -282,34 +296,28 @@ export function interpretSession(
 ): Float64Array {
   const prog = materializeSessionToResolvedIR(session)
 
-  // Build initial state from decl init values.
+  // Position-indexed state arrays, parallel to prog.regs / prog.params /
+  // prog.ports.inputs. Indices in refs are direct positions in these
+  // arrays.
   const env: InterpretEnv = {
     sampleRate: 44100,
     sampleIndex: 0,
-    regs:    new Map(),
-    inputs:  new Map(),
-    params:  new Map(),
-  }
-  for (const d of prog.body.decls) {
-    if (d.op === 'regDecl') env.regs.set(d, regInitValue(d))
-    else if (d.op === 'paramDecl') {
-      const v = params?.get(d.name) ?? d.value ?? 0
-      env.params.set(d, v)
-    }
+    prog,
+    regs:   prog.regs.map(d => regInitValue(d)),
+    inputs: prog.ports.inputs.map(_ => 0 as Value),
+    params: prog.params.map(d => params?.get(d.name) ?? d.value ?? 0),
   }
 
-  // Find audio outputs: the OutputDecls in `ports.outputs` whose names
-  // are `${instance}.${output}` (synthesized by `compile_session.ts`
-  // step 3). Their outputAssigns drive the audio mix.
-  const outputAssignByDecl = new Map<typeof prog.ports.outputs[number], ResolvedExpr>()
+  // Find audio outputs: outputAssigns whose target is an OutputIdx
+  // (not the dac sentinel). The synthesized session program puts each
+  // session-level output as an outputAssign per port.
+  const outputExprByIdx = new Map<number, ResolvedExpr>()
   for (const a of prog.body.assigns) {
     if (a.op !== 'outputAssign') continue
-    if (!('op' in a.target)) continue
-    if (a.target.op !== 'outputDecl') continue
-    outputAssignByDecl.set(a.target, a.expr)
+    if (typeof a.target === 'number') outputExprByIdx.set(a.target, a.expr)
   }
-  const outputExprs: ResolvedExpr[] = prog.ports.outputs.map(out => {
-    const expr = outputAssignByDecl.get(out)
+  const outputExprs: ResolvedExpr[] = prog.ports.outputs.map((out, i) => {
+    const expr = outputExprByIdx.get(i)
     if (expr === undefined) throw new Error(`interpret: output '${out.name}' has no outputAssign`)
     return expr
   })
@@ -319,11 +327,8 @@ export function interpretSession(
   // semantics); a defined expression means "compute next value each
   // sample" (former delay or accumulator semantics). NextUpdate body-
   // assigns are gone (folded into the decl by the elaborator).
-  const regUpdateByDecl = new Map<RegDecl, ResolvedExpr | null>()
-  for (const d of prog.body.decls) {
-    if (d.op !== 'regDecl') continue
-    regUpdateByDecl.set(d, d.update ?? null)
-  }
+  // Indexed by reg position to parallel env.regs.
+  const regUpdates: (ResolvedExpr | null)[] = prog.regs.map(d => d.update ?? null)
 
   const output = new Float64Array(nSamples)
 
@@ -338,14 +343,14 @@ export function interpretSession(
     }
 
     // 2. Evaluate register updates against the current state.
-    const newRegs = new Map<RegDecl, Value>()
-    for (const [d, update] of regUpdateByDecl) {
-      if (update === null) newRegs.set(d, env.regs.get(d) ?? regInitValue(d))
-      else newRegs.set(d, evalExpr(update, env))
+    const newRegs: Value[] = new Array(env.regs.length)
+    for (let i = 0; i < regUpdates.length; i++) {
+      const update = regUpdates[i]
+      newRegs[i] = update === null ? env.regs[i] : evalExpr(update, env)
     }
 
     // 3. Atomic writeback.
-    for (const [d, v] of newRegs) env.regs.set(d, v)
+    for (let i = 0; i < newRegs.length; i++) env.regs[i] = newRegs[i]
 
     // 4. Mix + scale (matches the C++ runtime's /20 gain compensation).
     output[s] = mixed / 20.0

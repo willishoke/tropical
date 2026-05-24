@@ -30,7 +30,9 @@ import type {
   InputDecl, OutputDecl, RegDecl, ParamDecl, InstanceDecl,
   BodyDecl, BodyAssign, OutputAssign,
   TypeParamDecl,
+  InputIdx, OutputIdx, ParamIdx, InstanceIdx, RegIdx,
 } from './nodes.js'
+import { inputIdx, outputIdx, paramIdx, instanceIdx, regIdx } from './nodes.js'
 import type { ExprNode } from '../expr.js'
 import type { SessionState } from '../session.js'
 import type { Instance } from '../program_types.js'
@@ -130,14 +132,25 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     const inputName = ref.port
     const instDecl = ctx.instanceDecls.get(instName)
     if (instDecl === undefined) continue
-    const port = instDecl.type.ports.inputs.find(p => p.name === inputName)
-    if (port === undefined) {
+    const portI = instDecl.type.ports.inputs.findIndex(p => p.name === inputName)
+    if (portI < 0) {
       throw new Error(
         `compileSession: instance '${instName}' has no input port '${inputName}' on type '${instDecl.type.name}'.`,
       )
     }
     const value = translateExpr(expr, ctx)
-    instDecl.inputs.push({ port, value })
+    instDecl.inputs.push({ port: inputIdx(portI), value })
+  }
+
+  // Compute InstanceIdx for each session instance: their position in
+  // the eventual body.instances[], which is the iteration order of
+  // ctx.instanceDecls (Maps preserve insertion order).
+  const instanceIdxByName = new Map<string, InstanceIdx>()
+  {
+    let pos = 0
+    for (const name of ctx.instanceDecls.keys()) {
+      instanceIdxByName.set(name, instanceIdx(pos++))
+    }
   }
 
   const outputDecls: OutputDecl[] = []
@@ -147,20 +160,26 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     if (instDecl === undefined) {
       throw new Error(`compileSession: graph output references unknown instance '${go.instance}'.`)
     }
-    const outDecl = instDecl.type.ports.outputs.find(p => p.name === go.output)
-    if (outDecl === undefined) {
+    const outputI = instDecl.type.ports.outputs.findIndex(p => p.name === go.output)
+    if (outputI < 0) {
       throw new Error(
         `compileSession: instance '${go.instance}' has no output port '${go.output}' on type '${instDecl.type.name}'.`,
       )
     }
+    const outDecl = instDecl.type.ports.outputs[outputI]
     const sessionOutput: OutputDecl = {
       op: 'outputDecl',
       name: `${go.instance}.${go.output}`,
     }
     if (outDecl.type !== undefined) sessionOutput.type = outDecl.type
+    const sessionOutI = outputDecls.length
     outputDecls.push(sessionOutput)
-    const ref: ResolvedExprOp = { op: 'nestedOut', instance: instDecl, output: outDecl }
-    outputAssigns.push({ op: 'outputAssign', target: sessionOutput, expr: ref })
+    const ref: ResolvedExprOp = {
+      op: 'nestedOut',
+      instance: instanceIdxByName.get(go.instance)!,
+      output: outputIdx(outputI),
+    }
+    outputAssigns.push({ op: 'outputAssign', target: outputIdx(sessionOutI), expr: ref })
   }
 
   const bodyDecls: BodyDecl[] = []
@@ -312,13 +331,22 @@ function translateOpNode(
     if (instDecl === undefined) {
       throw new Error(`compileSession: ref to unknown instance '${instName}'.`)
     }
-    const outDecl = instDecl.type.ports.outputs.find(p => p.name === outputName)
-    if (outDecl === undefined) {
+    const outputI = instDecl.type.ports.outputs.findIndex(p => p.name === outputName)
+    if (outputI < 0) {
       throw new Error(
         `compileSession: ref to '${instName}.${outputName}' — '${outputName}' is not a port on type '${instDecl.type.name}'.`,
       )
     }
-    return { op: 'nestedOut', instance: instDecl, output: outDecl }
+    // InstanceIdx is the iteration position of instName in ctx.instanceDecls.
+    // Maps preserve insertion order, so this matches the order the instance
+    // decls land in body.decls (and thus body.instances) later.
+    let instI = -1
+    let i = 0
+    for (const name of ctx.instanceDecls.keys()) {
+      if (name === instName) { instI = i; break }
+      i++
+    }
+    return { op: 'nestedOut', instance: instanceIdx(instI), output: outputIdx(outputI) }
   }
 
   if (op === 'param' || op === 'paramExpr'
@@ -358,10 +386,14 @@ function translateOpNode(
     const update = translateExpr((obj.args as ExprNode[])[0], ctx)
     const init = typeof obj.init === 'number' ? obj.init : 0
     // Post-Phase-0a: session `delay()` lowers to a synthetic RegDecl
-    // with update populated. Reads of the value are RegRefs.
+    // with update populated. Reads of the value are RegRefs. The
+    // synthetic regs are placed at the FRONT of body.decls (before
+    // instance decls and param decls — see materializeSessionInner),
+    // so their RegIdx equals their position in ctx.syntheticRegDecls.
+    const newIdx = regIdx(ctx.syntheticRegDecls.length)
     const decl: RegDecl = { op: 'regDecl', name: `__sd${ctx.syntheticRegDecls.length}`, update, init }
     ctx.syntheticRegDecls.push(decl)
-    return { op: 'regRef', decl }
+    return { op: 'regRef', idx: newIdx }
   }
 
   throw new Error(`compileSession: unhandled wiring op '${op}'.`)
@@ -373,5 +405,15 @@ function paramRef(name: string, ctx: MaterializeContext): ResolvedExpr {
     decl = { op: 'paramDecl', name }
     ctx.paramDecls.set(name, decl)
   }
-  return { op: 'paramRef', decl }
+  // ParamIdx is the iteration position in ctx.paramDecls. Params land
+  // in body.decls after syntheticRegDecls and instanceDecls, but ParamIdx
+  // indexes into body.params[] (filtered by op), which preserves
+  // insertion order of paramDecls.
+  let pi = -1
+  let i = 0
+  for (const n of ctx.paramDecls.keys()) {
+    if (n === name) { pi = i; break }
+    i++
+  }
+  return { op: 'paramRef', idx: paramIdx(pi) }
 }

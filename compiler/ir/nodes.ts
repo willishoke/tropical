@@ -165,16 +165,16 @@ export interface ParamDecl {
 export interface InstanceDecl {
   op: 'instanceDecl'
   name: string
+  /** Pointer to the instance's program type. Stays pointer-based in
+   *  this PR; the Bubble fix (via topological registry build, Phase 3)
+   *  ensures the pointer is set to the canonical strata-processed
+   *  program at construction time. Migrating to `type: ProgramKey`
+   *  (registry-keyed string) is a separate followup. */
   type: ResolvedProgram
-  /** Type-arg pairs: each holds a reference to one of the target's
-   *  declared type params plus the integer value supplied at the
-   *  instance site. */
-  typeArgs: Array<{ param: TypeParamDecl; value: number }>
-  /** Input wires: each holds a reference to one of the target's declared
-   *  input ports plus the value-expression wired into it. The elaborator
-   *  validates that every required input is supplied (defaults handle
-   *  missing entries). */
-  inputs: Array<{ port: InputDecl; value: ResolvedExpr }>
+  /** Type-arg bindings, by position in the target's `typeParams[]`. */
+  typeArgs: Array<{ param: TypeParamIdx; value: number }>
+  /** Input-wire bindings, by position in the target's `ports.inputs[]`. */
+  inputs: Array<{ port: InputIdx; value: ResolvedExpr }>
 }
 
 /** A nested `program` declaration introduces a program type into the
@@ -198,9 +198,11 @@ export type BodyDecl =
 
 export interface OutputAssign {
   op: 'outputAssign'
-  /** Either an OutputDecl from this program's outputs, or the special
-   *  `'dac'` boundary leaf for top-level patches that wire to the DAC. */
-  target: OutputDecl | { kind: 'dac' }
+  /** Either an OutputIdx into this program's `ports.outputs[]`, or the
+   *  special `'dac'` boundary leaf for top-level patches that wire to
+   *  the DAC. Migrated from `OutputDecl` pointer alongside the rest of
+   *  the global-ref de Bruijn levels migration. */
+  target: OutputIdx | { kind: 'dac' }
   expr: ResolvedExpr
 }
 
@@ -230,21 +232,62 @@ export interface BinderDecl {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Refs — uses of decl objects
+// De Bruijn levels — branded indices into program-level tables
 // ─────────────────────────────────────────────────────────────
 
-export interface InputRef    { op: 'inputRef';    decl: InputDecl }
-export interface RegRef      { op: 'regRef';      decl: RegDecl }
-export interface ParamRef    { op: 'paramRef';    decl: ParamDecl }
-export interface TypeParamRef { op: 'typeParamRef'; decl: TypeParamDecl }
-export interface BindingRef  { op: 'bindingRef';  decl: BinderDecl }
+/** Branded position-indices. Position in the table IS the decl's
+ *  identity. Stable across rewrites (an index doesn't shift just
+ *  because a sibling decl was reshaped).
+ *
+ *  - RegIdx / ParamIdx / InstanceIdx index this program's
+ *    `regs[]` / `params[]` / `instances[]` tables.
+ *  - InputIdx / OutputIdx index `ports.inputs[]` / `ports.outputs[]`.
+ *    Where they appear on a cross-program reference (InstanceDecl's
+ *    typeArgs.param / inputs.port, NestedOut.output) they're indices
+ *    into the TARGET program's tables — resolution requires the
+ *    target program in hand.
+ *  - TypeParamIdx indexes `typeParams[]`.
+ *  - BindingRef is the only ref that keeps a direct decl pointer —
+ *    locally-scoped binders don't fit the program-table model and
+ *    the locally-nameless migration for binders is tracked
+ *    separately as issue #156. */
+declare const __ir_idx_brand: unique symbol
+export type IrIdx<B extends string> = number & { readonly [__ir_idx_brand]: B }
 
-/** Dotted port reference resolved: a specific instance + a specific
- *  output port of that instance's program type. Both held by reference. */
+export type RegIdx       = IrIdx<'RegIdx'>
+export type InputIdx     = IrIdx<'InputIdx'>
+export type OutputIdx    = IrIdx<'OutputIdx'>
+export type ParamIdx     = IrIdx<'ParamIdx'>
+export type InstanceIdx  = IrIdx<'InstanceIdx'>
+export type TypeParamIdx = IrIdx<'TypeParamIdx'>
+
+/** Brand-applying constructors. Use these everywhere indices are
+ *  built; never `as RegIdx` casts at call sites. */
+export const regIdx       = (n: number): RegIdx       => n as RegIdx
+export const inputIdx     = (n: number): InputIdx     => n as InputIdx
+export const outputIdx    = (n: number): OutputIdx    => n as OutputIdx
+export const paramIdx     = (n: number): ParamIdx     => n as ParamIdx
+export const instanceIdx  = (n: number): InstanceIdx  => n as InstanceIdx
+export const typeParamIdx = (n: number): TypeParamIdx => n as TypeParamIdx
+
+// ─────────────────────────────────────────────────────────────
+// Refs — uses of decls by de Bruijn level
+// ─────────────────────────────────────────────────────────────
+
+export interface InputRef     { op: 'inputRef';     idx: InputIdx }
+export interface RegRef       { op: 'regRef';       idx: RegIdx }
+export interface ParamRef     { op: 'paramRef';     idx: ParamIdx }
+export interface TypeParamRef { op: 'typeParamRef'; idx: TypeParamIdx }
+export interface BindingRef   { op: 'bindingRef';   decl: BinderDecl }   // pointer-based; see issue #156
+
+/** Dotted port reference, indexed: parent's instance position +
+ *  the output port position inside the instance's program type. To
+ *  resolve: instance via `prog.instances[instance]`, then read
+ *  `instance.type.ports.outputs[output]`. */
 export interface NestedOut {
   op: 'nestedOut'
-  instance: InstanceDecl
-  output: OutputDecl
+  instance: InstanceIdx
+  output:   OutputIdx
 }
 
 // ─────────────────────────────────────────────────────────────
