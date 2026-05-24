@@ -50,7 +50,7 @@ function toSession(target: StdlibTarget) {
       | 'genericTemplatesResolved'
       | 'resolvedRegistry'
     > &
-      Partial<Pick<SessionState, 'typeResolver'>>
+      Partial<Pick<SessionState, 'typeResolver' | 'inlineNested'>>
   }
   return target
 }

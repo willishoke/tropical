@@ -421,7 +421,7 @@ export function loadProgramAsSession(
  */
 export function loadProgramAsType(
   prog: ProgramNode,
-  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'sumTypeRegistry' | 'structTypeRegistry'>>,
+  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'sumTypeRegistry' | 'structTypeRegistry' | 'inlineNested'>>,
 ): Compiled | undefined {
   // Register type defs (aliases, sums, structs) from type_defs before processing subprograms
   for (const td of prog.ports?.type_defs ?? []) {
@@ -583,13 +583,13 @@ const __dirname = dirname(__filename)
 type StdlibTarget =
   | Map<string, Compiled>
   | (Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'>
-    & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>>)
+    & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'inlineNested'>>)
 
 function asLoadSession(target: StdlibTarget): Pick<
   SessionState,
   'typeRegistry' | 'instanceRegistry' | 'paramRegistry'
   | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'
-> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver'>> {
+> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'inlineNested'>> {
   if (target instanceof Map) {
     return {
       typeRegistry: target,
