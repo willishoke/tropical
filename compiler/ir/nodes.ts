@@ -169,20 +169,10 @@ export interface ParamDecl {
 export interface InstanceDecl {
   op: 'instanceDecl'
   name: string
-  /** Pointer to the instance's program type. Retained during Phase 4a
-   *  of issue #156 alongside the new `typeKey` field for dual-read;
-   *  Phase 4b drops this pointer and the `typeKey` becomes the sole
-   *  identity. The Bubble fix from PR #158 (Phase 3, topological
-   *  registry build) ensures the pointer is set to the canonical
-   *  strata-processed program at construction time. */
-  type: ResolvedProgram
   /** Lookup key for the instance's program type in the enclosing
-   *  program's `programRegistry`. During Phase 4a this is the parallel
-   *  rep of `.type`; the cross-check
-   *  `tests/equiv/registry_vs_pointer.test.ts` asserts they always
-   *  agree. Phase 4b drops `.type` and reads exclusively through this
-   *  key. Value convention: the target program's `name` (matches the
-   *  existing `session.resolvedRegistry` keying). */
+   *  program's `programRegistry`. To resolve to the ResolvedProgram,
+   *  use `getInstanceType(enclosing, instance)` (decl_tables.ts).
+   *  Value convention: equals the target program's `name`. */
   typeKey: ProgramKey
   /** Type-arg bindings, by position in the target's `typeParams[]`. */
   typeArgs: Array<{ param: TypeParamIdx; value: number }>

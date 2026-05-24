@@ -26,31 +26,35 @@ import type {
   ProgramKey,
 } from './nodes.js'
 
-/** Pure rewire of every `InstanceDecl.type` pointer in `prog` to the
- *  canonical version found in `byName`. Used by the topological
+/** Replace every entry in `prog.programRegistry` whose key appears in
+ *  `byName` with the canonical version. Used by the topological
  *  typeRegistry build (`compiler/program.ts`) to ensure that by the
  *  time a program is consumed (by `materialize_session`,
- *  `partition_recursive`, etc.), every sub-instance's `.type` already
- *  points at a strata-processed program — not at the raw elaborated
- *  version still hanging around from the elaborator's resolver.
+ *  `partition_recursive`, etc.), every reachable program in the
+ *  registry is its strata-processed canonical form rather than the
+ *  raw elaborated version still hanging around from the elaborator's
+ *  resolver.
  *
  *  Returns the same program (by identity) if no relinking happens,
  *  so the strata fast-path of "no-op identity" still triggers
  *  downstream. */
-export function relinkInstanceTypes(
+export function relinkProgramRegistry(
   prog: ResolvedProgram,
   byName: ReadonlyMap<string, ResolvedProgram>,
 ): ResolvedProgram {
+  const newReg = new Map<ProgramKey, ResolvedProgram>()
   let changed = false
-  const newDecls = prog.body.decls.map(d => {
-    if (d.op !== 'instanceDecl') return d
-    const canonical = byName.get(d.type.name)
-    if (!canonical || canonical === d.type) return d
-    changed = true
-    return { ...d, type: canonical }
-  })
+  for (const [key, value] of prog.programRegistry) {
+    const canonical = byName.get(key)
+    if (canonical && canonical !== value) {
+      newReg.set(key, canonical)
+      changed = true
+    } else {
+      newReg.set(key, value)
+    }
+  }
   if (!changed) return prog
-  return withDeclTables({ ...prog, body: { ...prog.body, decls: newDecls } })
+  return withDeclTables({ ...prog, programRegistry: newReg })
 }
 
 /** Project a flat `BodyDecl[]` into typed tables by kind. Order
@@ -75,46 +79,45 @@ export function buildDeclTables(decls: readonly BodyDecl[]): {
   return { regs, params, instances }
 }
 
-/** Build the per-program `programRegistry` from the program's
- *  instances and their (transitive) sub-instance registries. For each
- *  `InstanceDecl`, this adds an entry mapping `instance.typeKey` →
- *  `instance.type` and merges in everything the sub-program already
- *  reaches.
- *
- *  Phase 4a invariant: by the time this runs, every InstanceDecl's
- *  `.typeKey` matches `programKey(instance.type.name)` and the `.type`
- *  pointer has been canonicalized by `relinkInstanceTypes` so two
- *  instances of the same program type share a single ResolvedProgram
- *  object. Conflicting entries in the merged registry (same key, two
- *  ResolvedProgram values) indicate a stale relinking and the build
- *  throws — surfacing the inconsistency at construction time rather
- *  than letting Phase 4b's lookup quietly diverge from `.type`. */
-export function buildProgramRegistry(
+/** Look up the `ResolvedProgram` for an `InstanceDecl` via its
+ *  enclosing program's `programRegistry`. Post-Phase-4b this is the
+ *  ONLY way to resolve an instance's type — the `.type` pointer is
+ *  gone. Throws if the registry has no entry (a registry-build bug,
+ *  not a user error). */
+export function getInstanceType(
+  enclosing: ResolvedProgram,
+  inst: InstanceDecl,
+): ResolvedProgram {
+  const t = enclosing.programRegistry.get(inst.typeKey)
+  if (t === undefined) {
+    throw new Error(
+      `getInstanceType: instance '${inst.name}' typeKey '${inst.typeKey}' ` +
+      `not found in enclosing program '${enclosing.name}' registry ` +
+      `(keys: ${[...enclosing.programRegistry.keys()].join(', ')}). ` +
+      `This is a registry-build bug; check buildProgramRegistry call sites.`,
+    )
+  }
+  return t
+}
+
+/** Validate that an explicitly-supplied `programRegistry` covers
+ *  every `InstanceDecl`'s `typeKey`. Construction sites (elaborator,
+ *  clone, materialize_session) build the registry as they build the
+ *  program; this just confirms they didn't miss anything. */
+export function validateProgramRegistry(
   instances: readonly InstanceDecl[],
-): ReadonlyMap<ProgramKey, ResolvedProgram> {
-  const reg = new Map<ProgramKey, ResolvedProgram>()
+  registry: ReadonlyMap<ProgramKey, ResolvedProgram>,
+): void {
   for (const inst of instances) {
-    const key = inst.typeKey
-    const existing = reg.get(key)
-    if (existing && existing !== inst.type) {
+    if (!registry.has(inst.typeKey)) {
       throw new Error(
-        `buildProgramRegistry: conflicting entries for key '${key}' — two distinct ResolvedProgram pointers. ` +
-        `Phase 4a expects \`relinkInstanceTypes\` to have made InstanceDecl.type canonical before registry build.`,
+        `validateProgramRegistry: instance '${inst.name}' typeKey '${inst.typeKey}' ` +
+        `is not in the supplied program registry ` +
+        `(keys present: ${[...registry.keys()].join(', ') || '(empty)'}). ` +
+        `Construction site must add the target program to the registry before mkProgram/withDeclTables.`,
       )
     }
-    if (!existing) reg.set(key, inst.type)
-    // Merge in the sub-program's registry too — transitive reach.
-    for (const [k, v] of inst.type.programRegistry) {
-      const prev = reg.get(k)
-      if (prev && prev !== v) {
-        throw new Error(
-          `buildProgramRegistry: transitive registry merge conflict for key '${k}' — distinct ResolvedProgram pointers across nesting levels.`,
-        )
-      }
-      if (!prev) reg.set(k, v)
-    }
   }
-  return reg
 }
 
 /** Construct a `ResolvedProgram` from its constituent parts, projecting
@@ -128,8 +131,15 @@ export function mkProgram(args: {
   ports: ResolvedProgramPorts
   body: ResolvedBlock
   binderCount: number
+  /** Optional. Defaults to an empty map; programs with no `InstanceDecl`s
+   *  in `body.decls` get away with the default. Callers whose body
+   *  contains instances MUST supply a registry covering every
+   *  `instance.typeKey` — `validateProgramRegistry` throws otherwise. */
+  programRegistry?: ReadonlyMap<ProgramKey, ResolvedProgram>
 }): ResolvedProgram {
   const tables = buildDeclTables(args.body.decls)
+  const registry = args.programRegistry ?? new Map<ProgramKey, ResolvedProgram>()
+  validateProgramRegistry(tables.instances, registry)
   return {
     op: 'program',
     name:        args.name,
@@ -138,7 +148,7 @@ export function mkProgram(args: {
     body:        args.body,
     binderCount: args.binderCount,
     ...tables,
-    programRegistry: buildProgramRegistry(tables.instances),
+    programRegistry: registry,
   }
 }
 
@@ -153,10 +163,12 @@ export function mkProgram(args: {
  *  missing) and returns a structurally-complete one. The decl objects
  *  themselves are reused (no clone); only the tables are rebuilt. */
 export function withDeclTables(
-  prog: Omit<ResolvedProgram, 'regs' | 'params' | 'instances' | 'programRegistry'> &
-        Partial<Pick<ResolvedProgram, 'regs' | 'params' | 'instances' | 'programRegistry'>>,
+  prog: Omit<ResolvedProgram, 'regs' | 'params' | 'instances'> &
+        Partial<Pick<ResolvedProgram, 'regs' | 'params' | 'instances'>>,
 ): ResolvedProgram {
   const tables = buildDeclTables(prog.body.decls)
+  const registry = prog.programRegistry ?? new Map<ProgramKey, ResolvedProgram>()
+  validateProgramRegistry(tables.instances, registry)
   return {
     op:          'program',
     name:        prog.name,
@@ -165,6 +177,6 @@ export function withDeclTables(
     body:        prog.body,
     binderCount: prog.binderCount,
     ...tables,
-    programRegistry: buildProgramRegistry(tables.instances),
+    programRegistry: registry,
   }
 }

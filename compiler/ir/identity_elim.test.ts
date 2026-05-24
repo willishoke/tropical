@@ -59,7 +59,6 @@ function makeInstance(
   return {
     op: 'instanceDecl',
     name: instName,
-    type: prog,
     typeKey: programKey(prog.name),
     typeArgs: [],
     inputs: [{ port: inputIdx(0), value: wireValue }],
@@ -118,6 +117,7 @@ describe('identityElim — no-op cases', () => {
           expr: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },
         }],
       },
+      programRegistry: new Map([[programKey(idProg.name), idProg]]),
     })
     const after = identityElim(prog)
     expect(after.body.decls.length).toBe(1)   // not eliminated
@@ -143,6 +143,7 @@ describe('identityElim — elimination', () => {
           expr: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },
         }],
       },
+      programRegistry: new Map([[programKey(idProg.name), idProg]]),
     })
     const after = identityElim(prog)
     // The InstanceDecl is gone.
@@ -176,6 +177,7 @@ describe('identityElim — elimination', () => {
           expr: { op: 'nestedOut', instance: instanceIdx(1), output: outputIdx(0) },   // inst2 at body.decls[1]
         }],
       },
+      programRegistry: new Map([[programKey(idProg.name), idProg]]),
     })
     const after = identityElim(prog)
     expect(after.body.decls).toEqual([])
@@ -201,6 +203,7 @@ describe('identityElim — elimination', () => {
           expr: { op: 'mul', args: [nestedRef, 2] },
         }],
       },
+      programRegistry: new Map([[programKey(idProg.name), idProg]]),
     })
     const after = identityElim(prog)
     expect(after.body.decls).toEqual([])
@@ -234,6 +237,10 @@ describe('identityElim — elimination', () => {
           },
         }],
       },
+      programRegistry: new Map([
+        [programKey(idProg.name), idProg],
+        [programKey(nonIdProg.name), nonIdProg],
+      ]),
     })
     const after = identityElim(prog)
     // Identity gone, non-identity remains. The pass clones the program
@@ -281,6 +288,7 @@ describe('identityElim — elimination', () => {
           },
         ],
       },
+      programRegistry: new Map([[programKey(idProg.name), idProg]]),
     })
     const after = identityElim(prog)
     expect(after.body.decls.length).toBe(1)   // only the RegDecl
@@ -310,6 +318,7 @@ describe('identityElim — properties', () => {
           expr: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },
         }],
       },
+      programRegistry: new Map([[programKey(idProg.name), idProg]]),
     })
     const once = identityElim(prog)
     const twice = identityElim(once)
@@ -332,6 +341,7 @@ describe('identityElim — properties', () => {
           expr: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) },
         }],
       },
+      programRegistry: new Map([[programKey(idProg.name), idProg]]),
     })
     const snapshot = JSON.stringify(prog)
     identityElim(prog)

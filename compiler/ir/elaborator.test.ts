@@ -427,7 +427,10 @@ describe('elaborator — instances + nested programs', () => {
     // The instance
     const instDecl = p.body.decls[1] as InstanceDecl
     expect(instDecl.op).toBe('instanceDecl')
-    expect(instDecl.type).toBe(progDecl.program)  // shared reference
+    // Post-Phase-4b: InstanceDecl carries a typeKey; resolves through
+    // the enclosing program's registry to the nested program decl's
+    // ResolvedProgram.
+    expect(p.programRegistry.get(instDecl.typeKey)).toBe(progDecl.program)
     // Input wire is keyed by the input port's position in the target
     expect(instDecl.inputs.length).toBe(1)
     expect(progDecl.program.ports.inputs[instDecl.inputs[0].port]).toBe(progDecl.program.ports.inputs[0])
@@ -691,8 +694,9 @@ describe('elaborator — external program resolver', () => {
     `), resolver)
     const inst = outer.body.decls[0] as InstanceDecl
     expect(inst.op).toBe('instanceDecl')
-    // The instance's program type IS the externally-supplied object.
-    expect(inst.type).toBe(inner)
+    // The instance's program type is the externally-supplied object,
+    // resolved through the outer's programRegistry by typeKey.
+    expect(outer.programRegistry.get(inst.typeKey)).toBe(inner)
     expect(inner.ports.inputs[inst.inputs[0].port]).toBe(inner.ports.inputs[0])
   })
 
@@ -735,7 +739,7 @@ describe('elaborator — external program resolver', () => {
     `), resolver)
     const wrap = (outer.body.decls[0] as ProgramDecl).program
     const innerInst = wrap.body.decls[0] as InstanceDecl
-    expect(innerInst.type).toBe(sib)
+    expect(wrap.programRegistry.get(innerInst.typeKey)).toBe(sib)
   })
 })
 

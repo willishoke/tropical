@@ -44,7 +44,7 @@ import type {
 } from './nodes.js'
 import { instanceIdx, outputIdx } from './nodes.js'
 import { cloneResolvedProgram } from './clone.js'
-import { withDeclTables } from './decl_tables.js'
+import { withDeclTables, getInstanceType } from './decl_tables.js'
 
 // ─── Detection ─────────────────────────────────────────────────────────────
 
@@ -62,8 +62,8 @@ interface IdentityDeclRewrite {
  *  morphism. A program is identity when its body has no decls (no
  *  state, no nested instances), and every output is assigned exactly
  *  one `inputRef` (each output forwards a specific input). */
-function detectIdentity(inst: InstanceDecl): IdentityDeclRewrite | null {
-  const prog = inst.type
+function detectIdentity(inst: InstanceDecl, enclosing: ResolvedProgram): IdentityDeclRewrite | null {
+  const prog = getInstanceType(enclosing, inst)
 
   // No state, no nested instances, no parameters in the body.
   if (prog.body.decls.length > 0) return null
@@ -283,7 +283,7 @@ export function identityElim(prog: ResolvedProgram): ResolvedProgram {
   // Fast path: detect any identities on the input WITHOUT cloning. If
   // none, return the original program unchanged.
   const anyIdentity = prog.body.decls.some(
-    d => d.op === 'instanceDecl' && detectIdentity(d) !== null,
+    d => d.op === 'instanceDecl' && detectIdentity(d, prog) !== null,
   )
   if (!anyIdentity) return prog
 
@@ -299,7 +299,7 @@ export function identityElim(prog: ResolvedProgram): ResolvedProgram {
     let newPos = 0
     for (let oldPos = 0; oldPos < cloned.instances.length; oldPos++) {
       const inst = cloned.instances[oldPos]
-      const id = detectIdentity(inst)
+      const id = detectIdentity(inst, cloned)
       if (id !== null) {
         eliminatedSub.set(instanceIdx(oldPos), id.outputSub)
       } else {

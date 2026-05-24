@@ -54,9 +54,10 @@ import type {
   InputIdx, TypeParamIdx,
   RegIdx as RegIdx_t, ParamIdx as ParamIdx_t, InstanceIdx as InstanceIdx_t,
   BinderIdx as BinderIdx_t,
+  ProgramKey,
 } from './nodes.js'
 import { typeParamIdx, binderIdx } from './nodes.js'
-import { buildDeclTables, buildProgramRegistry } from './decl_tables.js'
+import { buildDeclTables } from './decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Dedup table — Map<old, new> covers every cloned decl kind
@@ -213,7 +214,10 @@ function cloneProgram(prog: ResolvedProgram, t: CloneTable): ResolvedProgram {
     params:    [],
     instances: [],
     binderCount: prog.binderCount + (t.binderOffset ?? 0),
-    // Placeholder; rebuilt from cloned instances at end of cloneProgram.
+    // Placeholder; populated below by deep-cloning each source registry
+    // entry so the cloned program references CLONED sub-programs (not
+    // shared with the source). array_lower's M11 fractal mode mutates
+    // these clones in place, so sharing would corrupt the source.
     programRegistry: new Map(),
   }
   t.nestedPrograms.set(prog, shell)
@@ -261,12 +265,16 @@ function cloneProgram(prog: ResolvedProgram, t: CloneTable): ResolvedProgram {
   shell.regs      = tables.regs
   shell.params    = tables.params
   shell.instances = tables.instances
-  // Rebuild programRegistry now that cloned instances exist. Each
-  // cloned InstanceDecl's typeKey was copied verbatim from the source;
-  // the cloned `.type` ResolvedProgram is the canonical version for
-  // this clone tree (via t.nestedPrograms memo), so the registry
-  // entries are consistent.
-  shell.programRegistry = buildProgramRegistry(tables.instances)
+  // Deep-clone the source registry into the shell's registry. Each
+  // source sub-program is cloned via cloneProgram (which hits the
+  // nestedPrograms memo, so identical sub-programs share one clone).
+  // The cloned registry keeps the same keys; values are the cloned
+  // sub-programs.
+  const clonedReg = new Map<ProgramKey, ResolvedProgram>()
+  for (const [key, srcSub] of prog.programRegistry) {
+    clonedReg.set(key, cloneProgram(srcSub, t))
+  }
+  shell.programRegistry = clonedReg
 
   return shell
 }
@@ -333,15 +341,15 @@ function cloneBodyDeclShell(d: BodyDecl, t: CloneTable): BodyDecl {
       return d
     }
     case 'instanceDecl': {
-      // Instance type-program is cloned via the nested-program memo
-      // (so two instances of the same nested program share cloned type).
-      // typeKey is preserved across clone — cloneProgram doesn't rename
-      // the program, so the same key still resolves it in the (rebuilt)
-      // registry.
+      // Sub-programs are cloned (rather than shared) so that downstream
+      // passes — notably array_lower's M11 fractal mode — can mutate
+      // their bodies in place without affecting the source. The
+      // ResolvedProgram for d.typeKey lives in the source program's
+      // registry; we clone it via the nestedPrograms memo so multiple
+      // instances of the same source program share one clone.
       const fresh: InstanceDecl = {
         op: 'instanceDecl',
         name: d.name,
-        type: cloneProgram(d.type, t),
         typeKey: d.typeKey,
         typeArgs: [],
         inputs: [],

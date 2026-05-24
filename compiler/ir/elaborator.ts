@@ -70,6 +70,7 @@ import type {
   InputRef, RegRef, ParamRef, TypeParamRef, BindingRef,
   NestedOut,
   RegIdx, InputIdx, OutputIdx, ParamIdx, InstanceIdx, TypeParamIdx, BinderIdx,
+  ProgramKey,
   Tag, Match, MatchArm,
   Let,
   Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith,
@@ -183,6 +184,11 @@ interface Scope {
    *  registrations, not for binders). The final value is copied into
    *  `ResolvedProgram.binderCount` when the program is built. */
   binderCount: number
+  /** Accumulator for the program-being-elaborated's `programRegistry`.
+   *  Each time the elaborator creates an InstanceDecl, the target
+   *  program is recorded here keyed by ProgramKey. The map is passed
+   *  to `mkProgram` when the enclosing program is built. */
+  programRegistryEntries: Map<ProgramKey, ResolvedProgram>
   /** Parent scope — for nested programs to read outer type-defs and
    *  external program types. (Decls themselves don't leak — only
    *  type-defs and program registrations.) */
@@ -212,6 +218,7 @@ function emptyScope(parent?: Scope): Scope {
     variantOf: new Map(),
     binders: new Map(),
     binderCount: 0,
+    programRegistryEntries: new Map(),
     parent,
   }
   // Nested programs inherit the resolver from their parent scope.
@@ -429,6 +436,7 @@ function elaborateProgram(
     ports,
     body: block,
     binderCount: scope.binderCount,
+    programRegistry: scope.programRegistryEntries,
   })
 
   // Phase 4b: strict cycle policy. Cycles in source code that don't
@@ -734,11 +742,21 @@ function registerInstanceDecl(d: ParsedInstanceDecl, scope: Scope): InstanceDecl
       `to resolve cross-program references (e.g. stdlib types).`,
     )
   }
+  const tk = programKey(targetProgram.name)
+  scope.programRegistryEntries.set(tk, targetProgram)
+  // Also pull in the target's transitive registry so the enclosing
+  // program's registry covers every program any sub-instance might
+  // reach (matches the merge that buildProgramRegistry used to do
+  // automatically in Phase 4a from the `.type` pointer walk).
+  for (const [k, v] of targetProgram.programRegistry) {
+    if (!scope.programRegistryEntries.has(k)) {
+      scope.programRegistryEntries.set(k, v)
+    }
+  }
   const decl: InstanceDecl = {
     op: 'instanceDecl',
     name: d.name,
-    type: targetProgram,
-    typeKey: programKey(targetProgram.name),
+    typeKey: tk,
     typeArgs: [],
     inputs: [],
   }
@@ -794,7 +812,12 @@ function resolveInstanceArgs(
   resolved: InstanceDecl,
   scope: Scope,
 ): void {
-  const targetProgram = resolved.type
+  const targetProgram = scope.programRegistryEntries.get(resolved.typeKey)
+  if (!targetProgram) {
+    throw new ElaborationError(
+      `internal: instance '${resolved.name}' typeKey '${resolved.typeKey}' not in scope registry`,
+    )
+  }
   // Type args: resolve param NameRef → position in target's typeParams[].
   for (const entry of parsed.type_args ?? []) {
     const pos = targetProgram.typeParams.findIndex(p => p.name === entry.param.name)
@@ -973,9 +996,14 @@ function resolveNestedOut(node: ParsedNestedOut, scope: Scope): NestedOut {
   }
   // node.output is NameRef | number; the parser preserves whichever form
   // the user wrote. Output position is into the TARGET program's
-  // ports.outputs[] (inst.type is the still-pointer-based ResolvedProgram
-  // for now; the topological registry build ensures it's canonical).
-  const targetProgram = inst.type
+  // ports.outputs[]; resolved via the in-scope registry built during
+  // elaboration.
+  const targetProgram = scope.programRegistryEntries.get(inst.typeKey)
+  if (!targetProgram) {
+    throw new ElaborationError(
+      `internal: instance '${inst.name}' typeKey '${inst.typeKey}' not in scope registry`,
+    )
+  }
   let outIdxRaw: number
   if (typeof node.output === 'number') {
     if (node.output < 0 || node.output >= targetProgram.ports.outputs.length) {

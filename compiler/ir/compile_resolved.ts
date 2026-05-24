@@ -141,7 +141,7 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     stateRegTypes: registerTypes,
     inputPortTypes,
     slots: emitSlots,
-    nestedInstances: nestedInstances.length > 0 ? nestedInstances : undefined,
+    nested: { instances: nestedInstances, enclosing: prog },
   })
 
   const arraySlotNames: string[] = []

@@ -32,7 +32,7 @@ import { raiseProgram } from './parse/raise.js'
 import { elaborate, type ExternalProgramResolver } from './ir/elaborator.js'
 import { programTypeFromResolved } from './ir/strata.js'
 import type { ResolvedProgram, PortType } from './ir/nodes.js'
-import { relinkInstanceTypes } from './ir/decl_tables.js'
+import { relinkProgramRegistry } from './ir/decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Program schema
@@ -703,7 +703,7 @@ function loadStdlibFromResolved(
       continue
     }
     if (session.typeRegistry.has(name)) continue
-    const relinked = relinkInstanceTypes(prog, processedByName)
+    const relinked = relinkProgramRegistry(prog, processedByName)
     const type = programTypeFromResolved(relinked, new Map(), { inlineNested: session.inlineNested })
     session.typeRegistry.set(name, type)
     session.resolvedRegistry.set(name, type.prog)   // canonical processed (not raw)

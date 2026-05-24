@@ -62,7 +62,7 @@ import { inputIdx, outputIdx, instanceIdx } from './nodes.js'
 import { specializeProgram } from './specialize.js'
 import { sumLower } from './sum_lower.js'
 import { cloneResolvedProgram, cloneWithInputSubst } from './clone.js'
-import { mkProgram } from './decl_tables.js'
+import { mkProgram, getInstanceType } from './decl_tables.js'
 
 export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   // Fast path: no instances at this level means there's nothing to do.
@@ -133,6 +133,7 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
     const binderOffset = outer.binderCount + liftedBinderCount
     liftedBinderCount += inlineOneInstance(
       decl,
+      outer,
       instanceIdx(instCount++),
       liftedDecls,
       nestedOutSubst,
@@ -175,6 +176,10 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
     ports: outer.ports,
     body: block,
     binderCount: outer.binderCount + liftedBinderCount,
+    // Post-inline: every instance has been lifted away. Zero remaining
+    // InstanceDecls means zero typeKey references means an empty
+    // registry is sufficient (validateProgramRegistry will pass).
+    programRegistry: new Map(),
   })
 }
 
@@ -184,6 +189,7 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
 
 function inlineOneInstance(
   decl: InstanceDecl,
+  enclosing: ResolvedProgram,
   instIdx: InstanceIdx,
   liftedDecls: BodyDecl[],
   nestedOutSubst: Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>,
@@ -194,7 +200,7 @@ function inlineOneInstance(
   // 1. Specialize the inner program. For non-generic instances
   //    (typeArgs.length === 0), this is a no-op identity — the
   //    instance's program is already concrete.
-  const specialized = specializeInner(decl)
+  const specialized = specializeInner(decl, enclosing)
 
   // 2a. Lower sums in the specialized inner BEFORE recursing into
   //     deeper instances or lifting decls. The strata pipeline runs
@@ -218,7 +224,7 @@ function inlineOneInstance(
   //    expression. Any inputs the user didn't wire fall back to the
   //    inner's declared default; missing required inputs are an
   //    elaboration-time error and shouldn't reach this pass.
-  const inputSubst = buildInputSubst(decl, flattened)
+  const inputSubst = buildInputSubst(decl, flattened, enclosing)
 
   // 4. Clone the (specialized + sub-inlined) inner with input
   //    substitution AND idx shifting. The cloned program's RegRefs /
@@ -239,7 +245,7 @@ function inlineOneInstance(
   // 6. Record output expressions for NestedOut substitution.
   //    NestedOut.output is now OutputIdx (position into the target's
   //    ports.outputs[]); we map each position to its cloned expression.
-  recordOutputs(decl, instIdx, cloned, nestedOutSubst)
+  recordOutputs(decl, enclosing, instIdx, cloned, nestedOutSubst)
 
   // Return the inner's binderCount so the caller can advance its
   // running total — subsequent inlines start their binderOffset
@@ -252,24 +258,25 @@ function inlineOneInstance(
  * substitution map from the instance's typeArgs (which carry decl
  * references directly).
  */
-function specializeInner(decl: InstanceDecl): ResolvedProgram {
-  if (decl.type.typeParams.length === 0 && decl.typeArgs.length === 0) {
-    return decl.type
+function specializeInner(decl: InstanceDecl, enclosing: ResolvedProgram): ResolvedProgram {
+  const declType = getInstanceType(enclosing, decl)
+  if (declType.typeParams.length === 0 && decl.typeArgs.length === 0) {
+    return declType
   }
   // typeArgs.param is now TypeParamIdx (position in target's typeParams[]).
-  // Convert idx → decl by looking up in decl.type.typeParams.
+  // Convert idx → decl by looking up in declType.typeParams.
   const subst = new Map<TypeParamDecl, number>()
   for (const a of decl.typeArgs) {
-    const pd = decl.type.typeParams[a.param]
+    const pd = declType.typeParams[a.param]
     if (pd === undefined) {
       throw new Error(
         `inlineInstances: instance '${decl.name}' typeArg idx=${a.param} out of range ` +
-        `(target '${decl.type.name}' has ${decl.type.typeParams.length} typeParams)`,
+        `(target '${declType.name}' has ${declType.typeParams.length} typeParams)`,
       )
     }
     subst.set(pd, a.value)
   }
-  return specializeProgram(decl.type, subst)
+  return specializeProgram(declType, subst)
 }
 
 /**
@@ -283,21 +290,24 @@ function specializeInner(decl: InstanceDecl): ResolvedProgram {
 function buildInputSubst(
   decl: InstanceDecl,
   inner: ResolvedProgram,
+  enclosing: ResolvedProgram,
 ): ReadonlyMap<InputIdx, ResolvedExpr> {
-  // decl.inputs[k].port is now InputIdx into decl.type.ports.inputs[].
-  // The cloned `inner` may have different InputDecl objects but the
-  // positions match (specialize preserves port order). The output
-  // map is keyed by InputIdx — positions in `inner.ports.inputs[]`,
-  // which is what InputRef.idx inside the cloned body references.
+  // decl.inputs[k].port is InputIdx into the template's
+  // ports.inputs[]. The cloned `inner` may have different InputDecl
+  // objects but the positions match (specialize preserves port order).
+  // The output map is keyed by InputIdx — positions in
+  // `inner.ports.inputs[]`, which is what InputRef.idx inside the
+  // cloned body references.
+  const declType = getInstanceType(enclosing, decl)
   const wiredByIdx = new Map<number, ResolvedExpr>()
   for (const w of decl.inputs) wiredByIdx.set(w.port, w.value)
   const subst = new Map<InputIdx, ResolvedExpr>()
-  for (let i = 0; i < decl.type.ports.inputs.length; i++) {
+  for (let i = 0; i < declType.ports.inputs.length; i++) {
     const innerPort = inner.ports.inputs[i]
     if (innerPort === undefined) {
       throw new Error(
         `inlineInstances: instance '${decl.name}' input arity mismatch ` +
-        `(template: ${decl.type.ports.inputs.length}, specialized: ${inner.ports.inputs.length})`,
+        `(template: ${declType.ports.inputs.length}, specialized: ${inner.ports.inputs.length})`,
       )
     }
     const wired = wiredByIdx.get(i)
@@ -381,6 +391,7 @@ function liftClonedBody(
  */
 function recordOutputs(
   decl: InstanceDecl,
+  enclosing: ResolvedProgram,
   instIdx: InstanceIdx,
   cloned: ResolvedProgram,
   nestedOutSubst: Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>,
@@ -402,7 +413,7 @@ function recordOutputs(
   const perInstance = new Map<OutputIdx, ResolvedExpr>()
   nestedOutSubst.set(instIdx, perInstance)
 
-  const templateOutputs = decl.type.ports.outputs
+  const templateOutputs = getInstanceType(enclosing, decl).ports.outputs
   const clonedOutputs   = cloned.ports.outputs
   for (let i = 0; i < templateOutputs.length; i++) {
     if (clonedOutputs[i] === undefined) {

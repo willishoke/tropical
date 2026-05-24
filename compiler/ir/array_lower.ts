@@ -44,6 +44,7 @@ import type {
   Tag, Match, MatchArm,
 } from './nodes.js'
 import { cloneResolvedProgram } from './clone.js'
+import { getInstanceType } from './decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Public entry
@@ -88,7 +89,7 @@ export function arrayLower(prog: ResolvedProgram): ResolvedProgram {
   }
 
   for (const decl of cloned.body.decls) {
-    lowerDeclInPlace(decl, empty, memo)
+    lowerDeclInPlace(decl, cloned, empty, memo)
   }
 
   // Rewrite assigns. Their `target` refs (the cloned RegDecl/DelayDecl
@@ -107,7 +108,7 @@ function progNeedsLowering(prog: ResolvedProgram): boolean {
     if (inp.default !== undefined && exprNeedsLowering(inp.default)) return true
   }
   for (const decl of prog.body.decls) {
-    if (declNeedsLowering(decl)) return true
+    if (declNeedsLowering(decl, prog)) return true
   }
   for (const assign of prog.body.assigns) {
     if (exprNeedsLowering(assign.expr)) return true
@@ -115,17 +116,19 @@ function progNeedsLowering(prog: ResolvedProgram): boolean {
   return false
 }
 
-function declNeedsLowering(decl: BodyDecl): boolean {
+function declNeedsLowering(decl: BodyDecl, enclosing: ResolvedProgram): boolean {
   switch (decl.op) {
     case 'regDecl':
       return exprNeedsLowering(decl.init)
         || (decl.update !== undefined && exprNeedsLowering(decl.update))
     case 'paramDecl':    return false
-    case 'instanceDecl':
+    case 'instanceDecl': {
       // M11 fractal: also check sub-program for surviving combinators.
       // Sub-program bodies are lowered recursively when arrayLower fires.
+      const subType = getInstanceType(enclosing, decl)
       return decl.inputs.some(i => exprNeedsLowering(i.value))
-        || progNeedsLowering(decl.type)
+        || progNeedsLowering(subType)
+    }
     case 'programDecl':  return false
   }
 }
@@ -200,7 +203,7 @@ type Memo = WeakMap<ResolvedExprOp, ResolvedExpr>
 /** Lower a body decl in place. Mutates the decl's expression-shaped
  *  fields when lowering produces a different expression; otherwise
  *  leaves them alone. Decl identity is preserved by reference. */
-function lowerDeclInPlace(decl: BodyDecl, subst: SubstMap, memo: Memo): void {
+function lowerDeclInPlace(decl: BodyDecl, enclosing: ResolvedProgram, subst: SubstMap, memo: Memo): void {
   switch (decl.op) {
     case 'regDecl': {
       const init = lowerExpr(decl.init, subst, memo)
@@ -225,15 +228,17 @@ function lowerDeclInPlace(decl: BodyDecl, subst: SubstMap, memo: Memo): void {
         const value = lowerExpr(i.value, subst, memo)
         if (value !== i.value) i.value = value
       }
-      // Recurse into the sub-program's body. The clone-then-lower
-      // discipline still holds because cloneResolvedProgram deep-clones
-      // through InstanceDecl.type, so `decl.type` is a fresh tree we
-      // can mutate.
+      // Recurse into the sub-program's body. Post-Phase-4b, the sub-
+      // program lives in the enclosing program's registry. The clone
+      // performed at arrayLower's top deep-clones every registry entry,
+      // so the sub-program we mutate here is the clone's private copy,
+      // not shared with any other program.
+      const subType = getInstanceType(enclosing, decl)
       const subEmpty: SubstMap = EMPTY_SUBST
-      for (const subDecl of decl.type.body.decls) {
-        lowerDeclInPlace(subDecl, subEmpty, memo)
+      for (const subDecl of subType.body.decls) {
+        lowerDeclInPlace(subDecl, subType, subEmpty, memo)
       }
-      decl.type.body.assigns = decl.type.body.assigns.map(a => lowerAssign(a, subEmpty, memo))
+      subType.body.assigns = subType.body.assigns.map(a => lowerAssign(a, subEmpty, memo))
       return
     }
   }
