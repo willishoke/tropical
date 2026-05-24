@@ -38,6 +38,7 @@ import type {
   Tag, Match, MatchArm,
   RegRef,
 } from './nodes.js'
+import { withDeclTables } from './decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Sum-reg table — built once before any rewriting starts
@@ -135,7 +136,7 @@ export function sumLower(prog: ResolvedProgram): ResolvedProgram {
   }
 
   const newBody: ResolvedBlock = { op: 'block', decls: newDecls, assigns: newAssigns }
-  return { ...prog, body: newBody }
+  return withDeclTables({ ...prog, body: newBody })
 }
 
 // ─────────────────────────────────────────────────────────────

@@ -42,6 +42,7 @@ import type {
   BodyDecl,
   InstanceDecl, OutputDecl, RegDecl,
 } from '../nodes.js'
+import { withDeclTables } from '../decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Public API
@@ -262,7 +263,7 @@ export function breakInstanceCycles(prog: ResolvedProgram): CycleBreakResult {
     assigns: prog.body.assigns,
   }
   return {
-    lowered: { ...prog, body: newBody },
+    lowered: withDeclTables({ ...prog, body: newBody }),
     syntheticRegs,
     cycles: cyclesProvenance,
   }

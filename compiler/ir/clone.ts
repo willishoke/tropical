@@ -47,6 +47,7 @@ import type {
   Let,
   Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith,
 } from './nodes.js'
+import { buildDeclTables } from './decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Dedup table — Map<old, new> covers every cloned decl kind
@@ -155,12 +156,21 @@ function cloneProgram(prog: ResolvedProgram, t: CloneTable): ResolvedProgram {
   // memo on recursion (e.g., a nested program decl whose body refers
   // back through scope to itself, though current parser disallows
   // that — defensive against future shapes).
+  // Shell satisfies ResolvedProgram with empty decl tables; the tables
+  // are re-derived after fill-in completes (line near return below).
+  // Clone uses a shell-then-fill pattern (mutation during construction)
+  // to handle cross-decl references. Phase 0 just adds the table re-
+  // derivation; the structural cleanup of the shell pattern itself is
+  // a later phase.
   const shell: ResolvedProgram = {
     op: 'program',
     name: prog.name,
     typeParams: [],
     ports: { inputs: [], outputs: [], typeDefs: prog.ports.typeDefs },
     body: { op: 'block', decls: [], assigns: [] },
+    regs:      [],
+    params:    [],
+    instances: [],
   }
   t.nestedPrograms.set(prog, shell)
 
@@ -197,6 +207,16 @@ function cloneProgram(prog: ResolvedProgram, t: CloneTable): ResolvedProgram {
   shell.body.decls = declShells
 
   shell.body.assigns = prog.body.assigns.map(a => cloneAssign(a, t))
+
+  // Re-derive decl tables now that body.decls is fully populated. The
+  // tables on the shell were placeholder `[]` during the fill phase
+  // (necessary so cross-decl references in the table cache could be
+  // resolved against the shell's identity); now that fill is done the
+  // tables are projected from the canonical body.decls.
+  const tables = buildDeclTables(shell.body.decls)
+  shell.regs      = tables.regs
+  shell.params    = tables.params
+  shell.instances = tables.instances
 
   return shell
 }

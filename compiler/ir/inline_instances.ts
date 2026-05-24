@@ -60,6 +60,7 @@ import type {
 import { specializeProgram } from './specialize.js'
 import { sumLower } from './sum_lower.js'
 import { cloneResolvedProgram, cloneWithInputSubst } from './clone.js'
+import { mkProgram } from './decl_tables.js'
 
 export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   // Fast path: no instances at this level means there's nothing to do.
@@ -137,13 +138,12 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   const newAssigns: BodyAssign[] = outer.body.assigns.map(a => substAssign(a, nestedOutSubst, memo))
 
   const block: ResolvedBlock = { op: 'block', decls: newDecls, assigns: newAssigns }
-  return {
-    op: 'program',
+  return mkProgram({
     name: outer.name,
     typeParams: outer.typeParams,
     ports: outer.ports,
     body: block,
-  }
+  })
 }
 
 // ─────────────────────────────────────────────────────────────

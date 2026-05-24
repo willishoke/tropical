@@ -78,6 +78,7 @@ import type {
   SampleRate, SampleIndex,
 } from './nodes.js'
 import { ElaborationError } from './nodes.js'
+import { mkProgram } from './decl_tables.js'
 import { findInstanceCycles } from './lowering/cycle_break.js'
 import { CycleViolation, type CycleDiagnostic } from './elaboration_diagnostics.js'
 
@@ -377,13 +378,12 @@ function elaborateProgram(
 
   const block: ResolvedBlock = { op: 'block', decls, assigns }
   const ports: ResolvedProgramPorts = { inputs, outputs, typeDefs }
-  const resolved: ResolvedProgram = {
-    op: 'program',
+  const resolved: ResolvedProgram = mkProgram({
     name: prog.name,
     typeParams,
     ports,
     body: block,
-  }
+  })
 
   // Phase 4b: strict cycle policy. Cycles in source code that don't
   // pass through an explicit user register throw `CycleViolation`.

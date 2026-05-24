@@ -475,6 +475,18 @@ export interface ResolvedProgram {
   typeParams: TypeParamDecl[]
   ports: ResolvedProgramPorts
   body: ResolvedBlock
+  /** Typed decl tables, projected from `body.decls` by kind. Position
+   *  in each array IS the decl's identity for the de Bruijn levels
+   *  migration — the same `RegDecl` object appears at `body.decls[i]`
+   *  and at `regs[k]` for some k. Populated by `withDeclTables`
+   *  (`compiler/ir/decl_tables.ts`); every ResolvedProgram constructor
+   *  must route through that helper to keep the tables in sync with
+   *  `body.decls`. `InputDecl` and `OutputDecl` positional identity
+   *  already lives in `ports.inputs` / `ports.outputs` — those arrays
+   *  ARE their tables; no top-level duplicate. */
+  regs:      RegDecl[]
+  params:    ParamDecl[]
+  instances: InstanceDecl[]
 }
 
 // ─────────────────────────────────────────────────────────────

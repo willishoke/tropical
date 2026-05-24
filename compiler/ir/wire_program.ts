@@ -46,6 +46,7 @@ import {
   portRef as makePortRef,
   wireKey, rawName,
 } from './branded_names.js'
+import { mkProgram } from './decl_tables.js'
 
 // ─── Op sets ────────────────────────────────────────────────────────────────
 // Mirror the sets in `materialize_session.ts:translateExpr`. Keep these in
@@ -195,8 +196,7 @@ export function liftWireToProgram(
     assigns: [{ op: 'outputAssign', target: outputDecl, expr: translated }],
   }
 
-  return {
-    op: 'program',
+  return mkProgram({
     name: rawName(synthName),
     typeParams: [],
     ports: {
@@ -205,7 +205,7 @@ export function liftWireToProgram(
       typeDefs: [],
     },
     body,
-  }
+  })
 }
 
 // ─── Internal: ExprNode → ResolvedExpr ─────────────────────────────────────

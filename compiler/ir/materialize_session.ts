@@ -39,6 +39,7 @@ import { findInstanceCycles } from './lowering/cycle_break.js'
 import { CycleViolation, type CycleDiagnostic } from './elaboration_diagnostics.js'
 import { specializeProgram } from './specialize.js'
 import { parseWireKey } from './branded_names.js'
+import { mkProgram } from './decl_tables.js'
 
 /** Run the session-to-ResolvedProgram materialization end-to-end. */
 export function materializeSessionToResolvedIR(session: SessionState): ResolvedProgram {
@@ -181,13 +182,12 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     typeDefs: [],
   }
 
-  return {
-    op: 'program',
+  return mkProgram({
     name: '__session__',
     typeParams: [] as TypeParamDecl[],
     ports,
     body: block,
-  }
+  })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
