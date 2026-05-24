@@ -21,7 +21,6 @@ import { parseProgram } from '../parse/declarations.js'
 import { raiseProgram } from '../parse/raise.js'
 import { elaborate, _elaborateForCyclicTest, type ExternalProgramResolver } from './elaborator.js'
 import { breakInstanceCycles } from './lowering/cycle_break.js'
-import { cloneResolvedProgram } from './clone.js'
 import { strataPipeline } from './strata.js'
 import { makeSession, loadJSON } from '../session.js'
 import { loadProgramAsType, type ProgramNode } from '../program.js'
@@ -162,31 +161,19 @@ describe('traceCycles — three-instance cycle', () => {
 })
 
 // ─────────────────────────────────────────────────────────────
-// Identity consistency under downstream clone
+// Identity consistency under downstream walks
 // ─────────────────────────────────────────────────────────────
 
-describe('traceCycles — InstanceDecl identity is consistent for cloneResolvedProgram', () => {
+describe('traceCycles — InstanceDecl identity is consistent under strata', () => {
   // After traceCycles, every nestedOut.instance ref in the resulting
   // program (in instance inputs, body assigns, and synthetic delay
-  // updates) must point at an InstanceDecl that is registered in
-  // body.decls. Otherwise cloneResolvedProgram throws "unregistered
-  // InstanceDecl 'X'" when the next stratum (inlineInstances) tries to
-  // clone the program. This is the exact bug that broke cross-coupled
-  // delay topologies (e.g. cross_fm_4.json) before the rebuild loop
-  // was changed to mutate inputs in place.
-
-  test('two-instance cycle survives cloneResolvedProgram', () => {
-    const p = elabCyclic(`
-      program Top() -> (out: float) {
-        program Inner(in_: float) -> (out_: float) { out_ = in_ + 1 }
-        a = Inner(in_: b.out_)
-        b = Inner(in_: a.out_)
-        out = b.out_
-      }
-    `)
-    const traced = breakInstanceCycles(p).lowered
-    expect(() => cloneResolvedProgram(traced)).not.toThrow()
-  })
+  // updates) must point at an InstanceDecl registered in body.decls.
+  // Pre-Phase-4b this property was checked by running cloneResolvedProgram
+  // (which threw "unregistered InstanceDecl 'X'" when the rebuild
+  // loop's identity drifted). Post-clone.ts dissolution (Phase 3 of
+  // issue #156), the equivalent check is to run the full strata
+  // pipeline — its functional rewrites walk the same paths and would
+  // surface the same identity drift as a lookup failure.
 
   test('cross-coupled delay topology compiles through full strata pipeline', () => {
     // 2 oscillators + 2 delays cross-coupled — minimal repro of the
@@ -398,7 +385,6 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     const traced = breakInstanceCycles(elabFromNode(TopSelf)).lowered
     const afterDelays = syntheticBreakerRegs(traced).length
     expect(afterDelays - beforeDelays).toBe(1)
-    expect(() => cloneResolvedProgram(traced)).not.toThrow()
     expect(() => strataPipeline(breakInstanceCycles(elabFromNode(TopSelf)).lowered)).not.toThrow()
 
     // ── Denotation ── reference still pins the recurrence; the

@@ -38,13 +38,13 @@
 
 import type {
   ResolvedProgram, ResolvedExpr, ResolvedExprOp,
-  InstanceDecl, InputDecl, OutputDecl,
+  InstanceDecl, InputDecl, OutputDecl, BodyDecl, BodyAssign,
+  RegDecl,
   InstanceIdx, OutputIdx,
   Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith, Let, Tag, Match,
 } from './nodes.js'
 import { instanceIdx, outputIdx } from './nodes.js'
-import { cloneResolvedProgram } from './clone.js'
-import { withDeclTables, getInstanceType } from './decl_tables.js'
+import { mkProgram, getInstanceType } from './decl_tables.js'
 
 // ─── Detection ─────────────────────────────────────────────────────────────
 
@@ -280,16 +280,13 @@ function substOpNode(
  *  pass: nestedOut(eliminatedIdx) → expr; nestedOut(survivorOldIdx) →
  *  nestedOut(survivorNewIdx). */
 export function identityElim(prog: ResolvedProgram): ResolvedProgram {
-  // Fast path: detect any identities on the input WITHOUT cloning. If
-  // none, return the original program unchanged.
+  // Fast path: detect any identities on the input. If none, return
+  // the original program unchanged (identity-preserved fast path
+  // matches the rest of the strata pipeline).
   const anyIdentity = prog.body.decls.some(
     d => d.op === 'instanceDecl' && detectIdentity(d, prog) !== null,
   )
   if (!anyIdentity) return prog
-
-  // Clone so we can mutate freely. Clone preserves decl positions so
-  // InstanceIdx values transfer directly across the boundary.
-  const cloned = cloneResolvedProgram(prog)
 
   // Build position-keyed identity table: oldInstanceIdx → outputSub map
   // OR (for survivors) → newInstanceIdx after eliminated decls drop out.
@@ -297,9 +294,9 @@ export function identityElim(prog: ResolvedProgram): ResolvedProgram {
   const survivorRemap = new Map<InstanceIdx, InstanceIdx>()
   {
     let newPos = 0
-    for (let oldPos = 0; oldPos < cloned.instances.length; oldPos++) {
-      const inst = cloned.instances[oldPos]
-      const id = detectIdentity(inst, cloned)
+    for (let oldPos = 0; oldPos < prog.instances.length; oldPos++) {
+      const inst = prog.instances[oldPos]
+      const id = detectIdentity(inst, prog)
       if (id !== null) {
         eliminatedSub.set(instanceIdx(oldPos), id.outputSub)
       } else {
@@ -307,41 +304,53 @@ export function identityElim(prog: ResolvedProgram): ResolvedProgram {
       }
     }
   }
-  if (eliminatedSub.size === 0) return cloned   // defensive
+  if (eliminatedSub.size === 0) return prog   // defensive
 
   const ctx: SubstCtx = { eliminatedSub, survivorRemap }
   const memo = new WeakMap<object, ResolvedExpr>()
+  const sub = (e: ResolvedExpr) => substExpr(e, ctx, memo)
 
-  // Walk every expression once: rewrite nestedOut for both eliminated
-  // (substitute) and survivor (remap idx) cases. Surviving instances'
-  // input wires also get walked.
-  for (const decl of cloned.body.decls) {
+  // Functional rewrite: walk source body.decls, for each non-
+  // eliminated decl produce a fresh decl with substituted expressions.
+  // Eliminated InstanceDecls are dropped (filtered out). Surviving
+  // instances' typeArgs/typeKey pass through; their input wires get
+  // the nestedOut substitution applied.
+  const newDecls: BodyDecl[] = []
+  for (const decl of prog.body.decls) {
     if (decl.op === 'instanceDecl') {
-      const oldIdx = cloned.instances.indexOf(decl) as number   // safe: decl is in cloned.instances
+      const oldIdx = prog.instances.indexOf(decl)
       if (eliminatedSub.has(instanceIdx(oldIdx))) continue   // dropping it
-      for (const i of decl.inputs) {
-        i.value = substExpr(i.value, ctx, memo)
-      }
+      newDecls.push({
+        op: 'instanceDecl',
+        name: decl.name,
+        typeKey: decl.typeKey,
+        typeArgs: decl.typeArgs.map(a => ({ param: a.param, value: a.value })),
+        inputs:   decl.inputs.map(i => ({ port: i.port, value: sub(i.value) })),
+      })
     } else if (decl.op === 'regDecl') {
-      decl.init = substExpr(decl.init, ctx, memo)
-      if (decl.update !== undefined) {
-        decl.update = substExpr(decl.update, ctx, memo)
-      }
+      const fresh: RegDecl = { op: 'regDecl', name: decl.name, init: sub(decl.init) }
+      if (decl.type !== undefined) fresh.type = decl.type
+      if (decl._liftedFrom !== undefined) fresh._liftedFrom = decl._liftedFrom
+      if (decl.update !== undefined) fresh.update = sub(decl.update)
+      newDecls.push(fresh)
+    } else {
+      // paramDecl / programDecl have no expression-shaped fields to
+      // substitute; pass through by identity.
+      newDecls.push(decl)
     }
   }
-  for (const a of cloned.body.assigns) {
-    a.expr = substExpr(a.expr, ctx, memo)
-  }
+  const newAssigns: BodyAssign[] = prog.body.assigns.map(a => ({
+    op: 'outputAssign',
+    target: a.target,
+    expr: sub(a.expr),
+  }))
 
-  // Drop eliminated InstanceDecls from the body.
-  cloned.body.decls = cloned.body.decls.filter(d => {
-    if (d.op !== 'instanceDecl') return true
-    const oldIdx = cloned.instances.indexOf(d)
-    return !eliminatedSub.has(instanceIdx(oldIdx))
-  })
-  // Re-project tables to match the post-filter body.
-  return withDeclTables({
-    ...cloned,
-    body: { ...cloned.body },   // already mutated in place
+  return mkProgram({
+    name: prog.name,
+    typeParams: prog.typeParams,
+    ports: prog.ports,
+    body: { op: 'block', decls: newDecls, assigns: newAssigns },
+    binderCount: prog.binderCount,
+    programRegistry: prog.programRegistry,
   })
 }

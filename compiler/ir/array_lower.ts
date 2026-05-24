@@ -40,63 +40,70 @@ import type {
   ResolvedProgram,
   ResolvedExpr, ResolvedExprOp,
   BodyDecl, BodyAssign, OutputAssign,
+  InputDecl, RegDecl, InstanceDecl,
   BinderDecl, BinderIdx,
+  ProgramKey,
   Tag, Match, MatchArm,
 } from './nodes.js'
-import { cloneResolvedProgram } from './clone.js'
-import { getInstanceType } from './decl_tables.js'
+import { mkProgram, getInstanceType } from './decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Public entry
 // ─────────────────────────────────────────────────────────────
 
 /**
- * arrayLower clones the input program (when work is needed) and mutates
- * the clone's decls in place. Why:
+ * Functional rewrite: produces a fresh `ResolvedProgram` (or returns
+ * the input by reference when no lowering is needed). Indexed refs in
+ * `body.assigns` and decls carry idx values (post-Phase-1), so
+ * substituting expressions while preserving decl positions keeps
+ * every ref valid without any pointer-identity discipline.
  *
- *   - Decl identity must be preserved across this pass. A `RegRef` /
- *     `DelayRef` in `body.assigns` (a NextUpdate.target) is matched
- *     against the decls in `body.decls` by `===` identity in
- *     `loadProgramDefFromResolved`'s slot table. Replacing decls with
- *     `{...decl, init, update}` (the natural functional approach)
- *     would orphan every existing ref and break the slot lookup.
- *
- *   - Mutating the *input* would surprise callers — strataPipeline can
- *     receive the same `ResolvedProgram` multiple times (e.g.
- *     `phase_c_equiv.test.ts` runs each fixture through the pipeline
- *     once, then re-runs partial paths for byte-equality). Side
- *     effects would corrupt subsequent runs.
- *
- *   - Cloning produces fresh decls; mutating those clones is safe.
- *     The `progNeedsLowering` precheck means we only clone (and incur
- *     allocation cost) when there's actual work to do — for trivial
- *     programs the input passes through unchanged by reference.
+ * M11 fractal: surviving `InstanceDecl`s' sub-programs are lowered
+ * recursively via `prog.programRegistry` — we build a new registry
+ * with each entry mapped, and the InstanceDecls keep their `typeKey`
+ * pointing at the same key (the LOWERED sub-program now lives behind
+ * that key in the new registry).
  */
 export function arrayLower(prog: ResolvedProgram): ResolvedProgram {
   if (!progNeedsLowering(prog)) return prog
 
-  const cloned = cloneResolvedProgram(prog)
   const memo = new WeakMap<ResolvedExprOp, ResolvedExpr>()
   const empty: SubstMap = EMPTY_SUBST
 
-  // Lower input defaults in place on the cloned port decls. Defaults
-  // are typically literals; combinators here are uncommon but legal.
-  for (const inp of cloned.ports.inputs) {
-    if (inp.default !== undefined) {
-      const lowered = lowerExpr(inp.default, empty, memo)
-      if (lowered !== inp.default) inp.default = lowered
-    }
+  // Recursively lower each sub-program in the registry. The
+  // InstanceDecls' typeKeys are stable; the registry entry behind a
+  // given key is now the lowered version.
+  const newRegistry = new Map<ProgramKey, ResolvedProgram>()
+  for (const [key, subProg] of prog.programRegistry) {
+    newRegistry.set(key, arrayLower(subProg))
   }
 
-  for (const decl of cloned.body.decls) {
-    lowerDeclInPlace(decl, cloned, empty, memo)
-  }
+  // Lower port input defaults (uncommon but admissible).
+  const newInputs = prog.ports.inputs.map(i => {
+    if (i.default === undefined) return i
+    const lowered = lowerExpr(i.default, empty, memo)
+    if (lowered === i.default) return i
+    const fresh: InputDecl = { op: 'inputDecl', name: i.name }
+    if (i.type !== undefined) fresh.type = i.type
+    fresh.default = lowered
+    return fresh
+  })
 
-  // Rewrite assigns. Their `target` refs (the cloned RegDecl/DelayDecl
-  // objects via the cloner's dedup table) carry through unchanged.
-  cloned.body.assigns = cloned.body.assigns.map(a => lowerAssign(a, empty, memo))
+  const newDecls: BodyDecl[] = prog.body.decls.map(d => lowerDecl(d, empty, memo))
+  const newAssigns: BodyAssign[] = prog.body.assigns.map(a => lowerAssign(a, empty, memo))
 
-  return cloned
+  return mkProgram({
+    name: prog.name,
+    typeParams: prog.typeParams,
+    ports: {
+      inputs: newInputs,
+      outputs: prog.ports.outputs,
+      typeDefs: prog.ports.typeDefs,
+    },
+    body: { op: 'block', decls: newDecls, assigns: newAssigns },
+    binderCount: prog.binderCount,
+    programRegistry: newRegistry,
+  })
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -200,46 +207,44 @@ function extendN(subst: SubstMap, pairs: Array<[BinderIdx, ResolvedExpr]>): Subs
 
 type Memo = WeakMap<ResolvedExprOp, ResolvedExpr>
 
-/** Lower a body decl in place. Mutates the decl's expression-shaped
- *  fields when lowering produces a different expression; otherwise
- *  leaves them alone. Decl identity is preserved by reference. */
-function lowerDeclInPlace(decl: BodyDecl, enclosing: ResolvedProgram, subst: SubstMap, memo: Memo): void {
+/** Lower a body decl, returning a fresh decl when lowering produced
+ *  a different expression. Pass-through (by reference) when nothing
+ *  changed — preserves DAG sharing in the cheap case. */
+function lowerDecl(decl: BodyDecl, subst: SubstMap, memo: Memo): BodyDecl {
   switch (decl.op) {
     case 'regDecl': {
-      const init = lowerExpr(decl.init, subst, memo)
-      if (init !== decl.init) decl.init = init
-      if (decl.update !== undefined) {
-        const update = lowerExpr(decl.update, subst, memo)
-        if (update !== decl.update) decl.update = update
-      }
-      return
+      const init   = lowerExpr(decl.init, subst, memo)
+      const update = decl.update !== undefined ? lowerExpr(decl.update, subst, memo) : undefined
+      if (init === decl.init && update === decl.update) return decl
+      const fresh: RegDecl = { op: 'regDecl', name: decl.name, init }
+      if (decl.type !== undefined) fresh.type = decl.type
+      if (decl._liftedFrom !== undefined) fresh._liftedFrom = decl._liftedFrom
+      if (update !== undefined) fresh.update = update
+      return fresh
     }
     case 'paramDecl':
     case 'programDecl':
-      return
+      return decl
     case 'instanceDecl': {
-      // M11 fractal: InstanceDecls survive through strata. Lower this
-      // instance's input expressions AND recursively lower the sub-
-      // program's body (its own `let`/`fold`/combinators must be
-      // lowered here — arrayLower only sees the top-level program of
-      // each call, and the per-type strata that constructed this
-      // sub-program lowered ITS top-level but not its grand-children).
-      for (const i of decl.inputs) {
+      // M11 fractal: surviving InstanceDecls keep their typeKey; the
+      // sub-program behind that key was already lowered into the new
+      // registry by arrayLower's top-level loop. We just lower this
+      // instance's input wire expressions in the current scope.
+      let changed = false
+      const newInputs = decl.inputs.map(i => {
         const value = lowerExpr(i.value, subst, memo)
-        if (value !== i.value) i.value = value
+        if (value !== i.value) changed = true
+        return value === i.value ? i : { port: i.port, value }
+      })
+      if (!changed) return decl
+      const fresh: InstanceDecl = {
+        op: 'instanceDecl',
+        name: decl.name,
+        typeKey: decl.typeKey,
+        typeArgs: decl.typeArgs.map(a => ({ param: a.param, value: a.value })),
+        inputs: newInputs,
       }
-      // Recurse into the sub-program's body. Post-Phase-4b, the sub-
-      // program lives in the enclosing program's registry. The clone
-      // performed at arrayLower's top deep-clones every registry entry,
-      // so the sub-program we mutate here is the clone's private copy,
-      // not shared with any other program.
-      const subType = getInstanceType(enclosing, decl)
-      const subEmpty: SubstMap = EMPTY_SUBST
-      for (const subDecl of subType.body.decls) {
-        lowerDeclInPlace(subDecl, subType, subEmpty, memo)
-      }
-      subType.body.assigns = subType.body.assigns.map(a => lowerAssign(a, subEmpty, memo))
-      return
+      return fresh
     }
   }
 }
