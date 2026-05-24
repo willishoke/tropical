@@ -23,6 +23,7 @@
 import type {
   ResolvedProgram, ResolvedProgramPorts, ResolvedBlock,
   RegDecl, ParamDecl, InstanceDecl, BodyDecl,
+  ProgramKey,
 } from './nodes.js'
 
 /** Pure rewire of every `InstanceDecl.type` pointer in `prog` to the
@@ -74,6 +75,48 @@ export function buildDeclTables(decls: readonly BodyDecl[]): {
   return { regs, params, instances }
 }
 
+/** Build the per-program `programRegistry` from the program's
+ *  instances and their (transitive) sub-instance registries. For each
+ *  `InstanceDecl`, this adds an entry mapping `instance.typeKey` →
+ *  `instance.type` and merges in everything the sub-program already
+ *  reaches.
+ *
+ *  Phase 4a invariant: by the time this runs, every InstanceDecl's
+ *  `.typeKey` matches `programKey(instance.type.name)` and the `.type`
+ *  pointer has been canonicalized by `relinkInstanceTypes` so two
+ *  instances of the same program type share a single ResolvedProgram
+ *  object. Conflicting entries in the merged registry (same key, two
+ *  ResolvedProgram values) indicate a stale relinking and the build
+ *  throws — surfacing the inconsistency at construction time rather
+ *  than letting Phase 4b's lookup quietly diverge from `.type`. */
+export function buildProgramRegistry(
+  instances: readonly InstanceDecl[],
+): ReadonlyMap<ProgramKey, ResolvedProgram> {
+  const reg = new Map<ProgramKey, ResolvedProgram>()
+  for (const inst of instances) {
+    const key = inst.typeKey
+    const existing = reg.get(key)
+    if (existing && existing !== inst.type) {
+      throw new Error(
+        `buildProgramRegistry: conflicting entries for key '${key}' — two distinct ResolvedProgram pointers. ` +
+        `Phase 4a expects \`relinkInstanceTypes\` to have made InstanceDecl.type canonical before registry build.`,
+      )
+    }
+    if (!existing) reg.set(key, inst.type)
+    // Merge in the sub-program's registry too — transitive reach.
+    for (const [k, v] of inst.type.programRegistry) {
+      const prev = reg.get(k)
+      if (prev && prev !== v) {
+        throw new Error(
+          `buildProgramRegistry: transitive registry merge conflict for key '${k}' — distinct ResolvedProgram pointers across nesting levels.`,
+        )
+      }
+      if (!prev) reg.set(k, v)
+    }
+  }
+  return reg
+}
+
 /** Construct a `ResolvedProgram` from its constituent parts, projecting
  *  the decl tables from `body.decls` in one step. THE only canonical
  *  way to build a `ResolvedProgram` — every constructor site (elaborator,
@@ -86,6 +129,7 @@ export function mkProgram(args: {
   body: ResolvedBlock
   binderCount: number
 }): ResolvedProgram {
+  const tables = buildDeclTables(args.body.decls)
   return {
     op: 'program',
     name:        args.name,
@@ -93,7 +137,8 @@ export function mkProgram(args: {
     ports:       args.ports,
     body:        args.body,
     binderCount: args.binderCount,
-    ...buildDeclTables(args.body.decls),
+    ...tables,
+    programRegistry: buildProgramRegistry(tables.instances),
   }
 }
 
@@ -108,9 +153,10 @@ export function mkProgram(args: {
  *  missing) and returns a structurally-complete one. The decl objects
  *  themselves are reused (no clone); only the tables are rebuilt. */
 export function withDeclTables(
-  prog: Omit<ResolvedProgram, 'regs' | 'params' | 'instances'> &
-        Partial<Pick<ResolvedProgram, 'regs' | 'params' | 'instances'>>,
+  prog: Omit<ResolvedProgram, 'regs' | 'params' | 'instances' | 'programRegistry'> &
+        Partial<Pick<ResolvedProgram, 'regs' | 'params' | 'instances' | 'programRegistry'>>,
 ): ResolvedProgram {
+  const tables = buildDeclTables(prog.body.decls)
   return {
     op:          'program',
     name:        prog.name,
@@ -118,6 +164,7 @@ export function withDeclTables(
     ports:       prog.ports,
     body:        prog.body,
     binderCount: prog.binderCount,
-    ...buildDeclTables(prog.body.decls),
+    ...tables,
+    programRegistry: buildProgramRegistry(tables.instances),
   }
 }

@@ -81,6 +81,7 @@ import type {
 import {
   ElaborationError,
   regIdx, inputIdx, outputIdx, paramIdx, instanceIdx, typeParamIdx, binderIdx,
+  programKey,
 } from './nodes.js'
 import { mkProgram } from './decl_tables.js'
 import { findInstanceCycles } from './lowering/cycle_break.js'
@@ -737,6 +738,7 @@ function registerInstanceDecl(d: ParsedInstanceDecl, scope: Scope): InstanceDecl
     op: 'instanceDecl',
     name: d.name,
     type: targetProgram,
+    typeKey: programKey(targetProgram.name),
     typeArgs: [],
     inputs: [],
   }

@@ -56,7 +56,7 @@ import type {
   BinderIdx as BinderIdx_t,
 } from './nodes.js'
 import { typeParamIdx, binderIdx } from './nodes.js'
-import { buildDeclTables } from './decl_tables.js'
+import { buildDeclTables, buildProgramRegistry } from './decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Dedup table — Map<old, new> covers every cloned decl kind
@@ -213,6 +213,8 @@ function cloneProgram(prog: ResolvedProgram, t: CloneTable): ResolvedProgram {
     params:    [],
     instances: [],
     binderCount: prog.binderCount + (t.binderOffset ?? 0),
+    // Placeholder; rebuilt from cloned instances at end of cloneProgram.
+    programRegistry: new Map(),
   }
   t.nestedPrograms.set(prog, shell)
 
@@ -259,6 +261,12 @@ function cloneProgram(prog: ResolvedProgram, t: CloneTable): ResolvedProgram {
   shell.regs      = tables.regs
   shell.params    = tables.params
   shell.instances = tables.instances
+  // Rebuild programRegistry now that cloned instances exist. Each
+  // cloned InstanceDecl's typeKey was copied verbatim from the source;
+  // the cloned `.type` ResolvedProgram is the canonical version for
+  // this clone tree (via t.nestedPrograms memo), so the registry
+  // entries are consistent.
+  shell.programRegistry = buildProgramRegistry(tables.instances)
 
   return shell
 }
@@ -327,10 +335,14 @@ function cloneBodyDeclShell(d: BodyDecl, t: CloneTable): BodyDecl {
     case 'instanceDecl': {
       // Instance type-program is cloned via the nested-program memo
       // (so two instances of the same nested program share cloned type).
+      // typeKey is preserved across clone — cloneProgram doesn't rename
+      // the program, so the same key still resolves it in the (rebuilt)
+      // registry.
       const fresh: InstanceDecl = {
         op: 'instanceDecl',
         name: d.name,
         type: cloneProgram(d.type, t),
+        typeKey: d.typeKey,
         typeArgs: [],
         inputs: [],
       }

@@ -3,7 +3,7 @@ import type {
   ResolvedProgram, InstanceDecl, InputDecl, OutputDecl,
   ResolvedExpr, NestedOut, BinaryOp, RegDecl,
 } from './nodes.js'
-import { inputIdx, outputIdx, instanceIdx } from './nodes.js'
+import { inputIdx, outputIdx, instanceIdx, programKey } from './nodes.js'
 import { mkProgram } from './decl_tables.js'
 import { identityElim } from './identity_elim.js'
 
@@ -60,6 +60,7 @@ function makeInstance(
     op: 'instanceDecl',
     name: instName,
     type: prog,
+    typeKey: programKey(prog.name),
     typeArgs: [],
     inputs: [{ port: inputIdx(0), value: wireValue }],
   }

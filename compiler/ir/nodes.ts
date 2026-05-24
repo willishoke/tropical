@@ -169,17 +169,32 @@ export interface ParamDecl {
 export interface InstanceDecl {
   op: 'instanceDecl'
   name: string
-  /** Pointer to the instance's program type. Stays pointer-based in
-   *  this PR; the Bubble fix (via topological registry build, Phase 3)
-   *  ensures the pointer is set to the canonical strata-processed
-   *  program at construction time. Migrating to `type: ProgramKey`
-   *  (registry-keyed string) is a separate followup. */
+  /** Pointer to the instance's program type. Retained during Phase 4a
+   *  of issue #156 alongside the new `typeKey` field for dual-read;
+   *  Phase 4b drops this pointer and the `typeKey` becomes the sole
+   *  identity. The Bubble fix from PR #158 (Phase 3, topological
+   *  registry build) ensures the pointer is set to the canonical
+   *  strata-processed program at construction time. */
   type: ResolvedProgram
+  /** Lookup key for the instance's program type in the enclosing
+   *  program's `programRegistry`. During Phase 4a this is the parallel
+   *  rep of `.type`; the cross-check
+   *  `tests/equiv/registry_vs_pointer.test.ts` asserts they always
+   *  agree. Phase 4b drops `.type` and reads exclusively through this
+   *  key. Value convention: the target program's `name` (matches the
+   *  existing `session.resolvedRegistry` keying). */
+  typeKey: ProgramKey
   /** Type-arg bindings, by position in the target's `typeParams[]`. */
   typeArgs: Array<{ param: TypeParamIdx; value: number }>
   /** Input-wire bindings, by position in the target's `ports.inputs[]`. */
   inputs: Array<{ port: InputIdx; value: ResolvedExpr }>
 }
+
+/** Branded string key for a `ResolvedProgram` in a `programRegistry`.
+ *  Convention: equals the target program's `name`. */
+declare const __program_key_brand: unique symbol
+export type ProgramKey = string & { readonly [__program_key_brand]: 'ProgramKey' }
+export const programKey = (s: string): ProgramKey => s as ProgramKey
 
 /** A nested `program` declaration introduces a program type into the
  *  outer's body scope. The `program` field is the resolved nested program
@@ -561,6 +576,13 @@ export interface ResolvedProgram {
    *  (`inline_instances`) shifts inner binder IDs by an offset and
    *  bumps the outer's `binderCount` by the inner's. */
   binderCount: number
+  /** Registry of program types this program (transitively) references
+   *  through its `instances`. Keyed by `ProgramKey` (the target
+   *  program's `name`). Phase 4a of issue #156: dual-read with
+   *  `instance.type`; the cross-check test asserts
+   *  `instance.type === programRegistry.get(instance.typeKey)`.
+   *  Phase 4b drops `instance.type` and this becomes the sole resolver. */
+  programRegistry: ReadonlyMap<ProgramKey, ResolvedProgram>
 }
 
 // ─────────────────────────────────────────────────────────────

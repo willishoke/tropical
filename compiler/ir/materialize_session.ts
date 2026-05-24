@@ -32,7 +32,7 @@ import type {
   TypeParamDecl,
   InputIdx, OutputIdx, ParamIdx, InstanceIdx, RegIdx,
 } from './nodes.js'
-import { inputIdx, outputIdx, paramIdx, instanceIdx, regIdx } from './nodes.js'
+import { inputIdx, outputIdx, paramIdx, instanceIdx, regIdx, programKey } from './nodes.js'
 import type { ExprNode } from '../expr.js'
 import type { SessionState } from '../session.js'
 import type { Instance } from '../program_types.js'
@@ -272,6 +272,7 @@ function buildInstanceDecl(
     op: 'instanceDecl',
     name,
     type: resolvedType,
+    typeKey: programKey(resolvedType.name),
     typeArgs: [],
     inputs: [],
   }
