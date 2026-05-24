@@ -115,9 +115,37 @@ const polyphony8xPhaser16Factory: SessionFactory = (mode) => {
   return session
 }
 
+const bubbleFactory: SessionFactory = (mode) => {
+  const session = makeSession(FRAME_SIZE, { inlineNested: mode === 'flat' })
+  loadStdlib(session)
+  const { type, typeArgs } = resolveProgramType(session, 'Bubble', undefined, undefined)
+  const inst = instantiate(type, 'inst', { baseTypeName: 'Bubble', typeArgs })
+  session.instanceRegistry.set('inst', inst)
+  for (const pn of inputNames(inst)) {
+    if (pn in DEFAULT_INPUTS) session.inputExprNodes.set(wk('inst', pn), DEFAULT_INPUTS[pn])
+  }
+  session.graphOutputs.push({ instance: 'inst', output: outputNames(inst)[0] })
+  return session
+}
+
+const bubbleCloudFactory: SessionFactory = (mode) => {
+  const session = makeSession(FRAME_SIZE, { inlineNested: mode === 'flat' })
+  loadStdlib(session)
+  const { type, typeArgs } = resolveProgramType(session, 'BubbleCloud', undefined, undefined)
+  const inst = instantiate(type, 'inst', { baseTypeName: 'BubbleCloud', typeArgs })
+  session.instanceRegistry.set('inst', inst)
+  for (const pn of inputNames(inst)) {
+    if (pn in DEFAULT_INPUTS) session.inputExprNodes.set(wk('inst', pn), DEFAULT_INPUTS[pn])
+  }
+  session.graphOutputs.push({ instance: 'inst', output: outputNames(inst)[0] })
+  return session
+}
+
 interface BenchCase { name: string; factory: SessionFactory }
 const CASES: BenchCase[] = [
   { name: 'OnePole',                 factory: onePoleFactory },
+  { name: 'Bubble',                  factory: bubbleFactory },
+  { name: 'BubbleCloud',             factory: bubbleCloudFactory },
   { name: 'polyphony_8x_Phaser16',   factory: polyphony8xPhaser16Factory },
 ]
 
