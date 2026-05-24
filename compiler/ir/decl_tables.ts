@@ -25,6 +25,33 @@ import type {
   RegDecl, ParamDecl, InstanceDecl, BodyDecl,
 } from './nodes.js'
 
+/** Pure rewire of every `InstanceDecl.type` pointer in `prog` to the
+ *  canonical version found in `byName`. Used by the topological
+ *  typeRegistry build (`compiler/program.ts`) to ensure that by the
+ *  time a program is consumed (by `materialize_session`,
+ *  `partition_recursive`, etc.), every sub-instance's `.type` already
+ *  points at a strata-processed program — not at the raw elaborated
+ *  version still hanging around from the elaborator's resolver.
+ *
+ *  Returns the same program (by identity) if no relinking happens,
+ *  so the strata fast-path of "no-op identity" still triggers
+ *  downstream. */
+export function relinkInstanceTypes(
+  prog: ResolvedProgram,
+  byName: ReadonlyMap<string, ResolvedProgram>,
+): ResolvedProgram {
+  let changed = false
+  const newDecls = prog.body.decls.map(d => {
+    if (d.op !== 'instanceDecl') return d
+    const canonical = byName.get(d.type.name)
+    if (!canonical || canonical === d.type) return d
+    changed = true
+    return { ...d, type: canonical }
+  })
+  if (!changed) return prog
+  return withDeclTables({ ...prog, body: { ...prog.body, decls: newDecls } })
+}
+
 /** Project a flat `BodyDecl[]` into typed tables by kind. Order
  *  within each table matches body-decl order — the same order
  *  `buildSlotMaps` uses for slot allocation. */
