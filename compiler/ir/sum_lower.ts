@@ -1,5 +1,5 @@
 /**
- * sum_lower.ts — Phase C4: sum-type decomposition on the resolved IR.
+ * sum_lower.ts — sum-type decomposition on the resolved IR.
  *
  * Decomposes every sum-typed `RegDecl` (one whose `init` is a `Tag`)
  * into N+1 scalar `RegDecl`s — a discriminator slot (int) plus one
@@ -8,20 +8,37 @@
  * literals.
  *
  * After this pass the program contains no `tag` or `match` expressions
- * and no sum-typed regs. Decl identity is preserved end-to-end:
- *   - Each replacement scalar `RegDecl` is a fresh decl object.
- *   - References (`RegRef`, `BindingRef`) are rewritten by identity
- *     replacement, never by name string.
+ * and no sum-typed regs.
  *
- * Post-Phase-0a: the IR has a single unified `RegDecl` primitive with
- * optional `update`. Sum-typed regs are recognized by `init` being a
- * `Tag` expression; their `update` (when present) is the sum-valued
- * next-state expression that gets per-slot-extracted into each
- * replacement scalar slot. NextUpdate body-assigns are gone (folded
- * into decl.update at elaboration), so the lowering operates entirely
- * on decl-side update fields.
+ * ## Pure construction
  *
- * Constraints (matching legacy):
+ * The pass is structured as three pure phases:
+ *
+ *   1. `buildSpecs(prog)` — pure data. Walks the input body's decls,
+ *      identifies which are sum-typed, and assigns the new RegIdx
+ *      (position in the rewritten body's regs[] table) for every
+ *      decl that will exist after lowering. Sum regs get N+1
+ *      consecutive indices (tag + per-variant per-field payloads);
+ *      non-sum regs get one index each. Returns a `SpecMap`.
+ *
+ *   2. `buildNewDecls(prog, specs)` — construction. For each old
+ *      decl, builds the fully-formed replacement(s) with `init` and
+ *      `update` expressions set at construction time. Sum regs
+ *      expand to a tag-slot decl plus payload-slot decls; non-sum
+ *      regs become fresh decls with rewritten expressions; instance
+ *      decls get their input wires rewritten; param/program decls
+ *      pass through.
+ *
+ *   3. `rewriteAssigns(prog, specs)` — same pattern for body assigns.
+ *
+ *  No mutation. No pre-allocated shells that get back-patched. Refs
+ *  resolve via `specs` lookup (idx → spec → new idx) — the knot-tying
+ *  problem dissolves because indices are pure data assigned in
+ *  phase 1, valid as targets for refs constructed in phase 2/3 even
+ *  though the target decl objects haven't been built yet.
+ *
+ * ## Constraints (matching legacy):
+ *
  *   - A sum-typed reg's `init` MUST be a `Tag` (constant variant
  *     constructor). Anything else is a structural error.
  *   - Match-arm payload bindings are only supported when the
@@ -43,169 +60,85 @@ import { regIdx } from './nodes.js'
 import { withDeclTables } from './decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
-// Sum-reg table — built once before any rewriting starts
+// Specs — pure structural data describing each old reg's new shape
 // ─────────────────────────────────────────────────────────────
 
-/** A single bundle slot replacing one sum-typed `RegDecl`. */
-interface SlotEntry {
-  /** The fresh scalar `RegDecl` for this slot. */
-  decl: RegDecl
+/** A single bundle slot replacing one sum-typed `RegDecl`. Position
+ *  in the rewritten body's regs[] is recorded; the decl object itself
+ *  is constructed later, in `buildSumRegSlots`. */
+interface SlotSpec {
+  /** Index in the rewritten body's regs[] table. */
+  idx: RegIdx
   /** Variant this payload slot belongs to; undefined for the tag slot. */
   variant?: SumVariant
   /** Payload field this slot represents; undefined for the tag slot. */
   field?: StructField
 }
 
-/** Per-original-RegDecl decomposition. */
+/** Per-original-RegDecl decomposition for a sum-typed reg. */
 interface SumRegInfo {
-  original: RegDecl
   sumType: SumTypeDef
   /** Slot order: [tag, ...per-variant per-field-in-payload-order]. */
-  slots: SlotEntry[]
-  /** Convenience lookup: the single tag slot. */
-  tagSlot: SlotEntry
-  /** Lookup keyed by `${variantName}__${fieldName}` for payload slots. */
-  payloadByKey: Map<string, SlotEntry>
+  slots: SlotSpec[]
+  tagSlot: SlotSpec
+  payloadByKey: Map<string, SlotSpec>
 }
 
-type SumRegMap = Map<RegDecl, SumRegInfo>
+type RegSpec =
+  | { kind: 'sum';    info: SumRegInfo }
+  | { kind: 'nonSum'; idx: RegIdx }
+
+type SpecMap = Map<RegDecl, RegSpec>
 
 // ─────────────────────────────────────────────────────────────
 // Public entry
 // ─────────────────────────────────────────────────────────────
 
 export function sumLower(prog: ResolvedProgram): ResolvedProgram {
-  const sumRegs = collectSumRegs(prog.body.decls)
-  if (sumRegs.size === 0 && !bodyHasSumExpr(prog.body)) return prog
+  if (!progHasAnySumWork(prog)) return prog
 
-  // Pre-allocate fresh RegDecl objects for every non-sum stateful decl
-  // that carries an update too. Reason: a sum-lowered program's
-  // `body.decls` contains the tag-slot decl in place of the original
-  // sum-typed reg. Non-sum regs in the same body that we touch (those
-  // whose update needs rewriting) must also be replaced (and their
-  // RegRefs rewritten to point at the new objects), otherwise
-  // expressions in `body.assigns` end up mixing fresh sum-slot decls
-  // with the originals — and the slot-table built downstream by
-  // `loadProgramDefFromResolved` rejects refs whose decl isn't in the
-  // table by identity.
-  //
-  // Sum-typed regs have their replacement decls already allocated by
-  // `collectSumRegs`; non-sum regs with updates get a fresh shell
-  // here. Non-sum regs without updates (pure-hold registers) pass
-  // through unchanged.
-  const regMap = new Map<RegDecl, RegDecl>()
-  for (const decl of prog.body.decls) {
-    if (decl.op !== 'regDecl') continue
-    if (sumRegs.has(decl)) {
-      // Map the original to its tag-slot decl. Used by `RegRef`
-      // rewriting outside of match-arm scrutinee contexts (e.g. when
-      // a sum-typed reg is read on its own — not exercised by the
-      // current stdlib but legal to express).
-      regMap.set(decl, sumRegs.get(decl)!.tagSlot.decl)
-    } else {
-      const fresh: RegDecl = { op: 'regDecl', name: decl.name, init: 0 }
-      if (decl.update !== undefined) fresh.update = decl.update
-      if (decl.type !== undefined) fresh.type = decl.type
-      if (decl._liftedFrom !== undefined) fresh._liftedFrom = decl._liftedFrom
-      regMap.set(decl, fresh)
-    }
-  }
+  // Phase 1 — pure data: assign new indices, identify sum-typed regs.
+  const specs = buildSpecs(prog.body.decls)
 
-  // Pre-compute new RegIdx positions: walk decls in order and assign
-  // a fresh idx to every new RegDecl that will live in the rewritten
-  // body's regs[] table. Sum decls expand to (tag + payloads); non-sum
-  // regs map to their fresh shell. ParamDecl/InstanceDecl/ProgramDecl
-  // don't contribute. This must run BEFORE rewriteExpr because cross-
-  // decl forward refs need the full idx table populated.
-  const newRegIdxByDecl = new Map<RegDecl, RegIdx>()
-  let nextRegIdx = 0
-  for (const decl of prog.body.decls) {
-    if (decl.op !== 'regDecl') continue
-    if (sumRegs.has(decl)) {
-      for (const slot of sumRegs.get(decl)!.slots) {
-        newRegIdxByDecl.set(slot.decl, regIdx(nextRegIdx++))
-      }
-    } else {
-      newRegIdxByDecl.set(regMap.get(decl)!, regIdx(nextRegIdx++))
-    }
-  }
+  // Phase 2 — construction: build new decls with init/update fully set.
+  const ctx: Ctx = { inProg: prog, specs }
+  const newDecls = buildNewDecls(prog.body.decls, ctx)
 
-  const ctx: Ctx = { sumRegs, inProg: prog, regMap, newRegIdxByDecl }
-
-  // Rewrite decls: replace each sum-typed RegDecl with its per-slot
-  // expansion (preserving source position); for everything else,
-  // recursively rewrite contained expressions.
-  const newDecls: BodyDecl[] = []
-  for (const decl of prog.body.decls) {
-    if (decl.op === 'regDecl' && sumRegs.has(decl)) {
-      const info = sumRegs.get(decl)!
-      // The slots' decl objects were already created during collection.
-      // Now fill in their init/update, which depend on the rewritten
-      // versions of the original's init (a Tag) and update (a
-      // sum-valued expression, optional).
-      fillSlotsForSumReg(info, decl, ctx)
-      for (const slot of info.slots) newDecls.push(slot.decl)
-    } else {
-      newDecls.push(rewriteDecl(decl, ctx))
-    }
-  }
-
-  // Rewrite assigns: post-Phase-0a these are output-assigns only.
-  const newAssigns: BodyAssign[] = []
-  for (const assign of prog.body.assigns) {
-    newAssigns.push(rewriteAssign(assign, ctx))
-  }
+  // Phase 3 — rewrite assigns.
+  const newAssigns = prog.body.assigns.map(a => rewriteAssign(a, ctx))
 
   const newBody: ResolvedBlock = { op: 'block', decls: newDecls, assigns: newAssigns }
   return withDeclTables({ ...prog, body: newBody })
 }
 
 // ─────────────────────────────────────────────────────────────
-// Sum-reg collection
+// Phase 1 — spec collection
 // ─────────────────────────────────────────────────────────────
 
-/**
- * Scan body decls for sum-typed `RegDecl`s and pre-allocate their
- * per-slot replacements. The decls are created here (with placeholder
- * init/update set to 0) so cross-decl references — e.g. another reg's
- * update reads our reg — can be rewritten to point at the fresh slot
- * decls before init/update are filled in.
- */
-function collectSumRegs(decls: BodyDecl[]): SumRegMap {
-  const out: SumRegMap = new Map()
+function buildSpecs(decls: readonly BodyDecl[]): SpecMap {
+  const specs: SpecMap = new Map()
+  let nextIdx = 0
   for (const decl of decls) {
     if (decl.op !== 'regDecl') continue
     const sumType = sumTypeOfRegInit(decl)
-    if (!sumType) continue
-
-    const slots: SlotEntry[] = []
-    const tagDecl: RegDecl = {
-      op: 'regDecl',
-      name: mangle(decl.name, 'tag'),
-      init: 0,
-      update: 0,
-    }
-    const tagSlot: SlotEntry = { decl: tagDecl }
-    slots.push(tagSlot)
-
-    const payloadByKey = new Map<string, SlotEntry>()
-    for (const variant of sumType.variants) {
-      for (const field of variant.payload) {
-        const slotDecl: RegDecl = {
-          op: 'regDecl',
-          name: mangle(decl.name, `${variant.name}__${field.name}`),
-          init: 0,
-          update: 0,
+    if (sumType) {
+      const slots: SlotSpec[] = []
+      const tagSlot: SlotSpec = { idx: regIdx(nextIdx++) }
+      slots.push(tagSlot)
+      const payloadByKey = new Map<string, SlotSpec>()
+      for (const variant of sumType.variants) {
+        for (const field of variant.payload) {
+          const slot: SlotSpec = { idx: regIdx(nextIdx++), variant, field }
+          slots.push(slot)
+          payloadByKey.set(slotKey(variant, field), slot)
         }
-        const slot: SlotEntry = { decl: slotDecl, variant, field }
-        slots.push(slot)
-        payloadByKey.set(slotKey(variant, field), slot)
       }
+      specs.set(decl, { kind: 'sum', info: { sumType, slots, tagSlot, payloadByKey } })
+    } else {
+      specs.set(decl, { kind: 'nonSum', idx: regIdx(nextIdx++) })
     }
-
-    out.set(decl, { original: decl, sumType, slots, tagSlot, payloadByKey })
   }
-  return out
+  return specs
 }
 
 function sumTypeOfRegInit(decl: RegDecl): SumTypeDef | undefined {
@@ -224,24 +157,37 @@ function mangle(base: string, suffix: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Slot init/update assembly for a sum-typed RegDecl
+// Phase 2 — decl construction (pure)
 // ─────────────────────────────────────────────────────────────
 
-/**
- * After collection has pre-allocated slot decls, populate their
- * `init` (from the original's `Tag`) and `update` (per-slot
- * extraction of the sum-valued update expression, when present).
- */
-function fillSlotsForSumReg(
-  info: SumRegInfo,
-  orig: RegDecl,
-  ctx: Ctx,
-): void {
+function buildNewDecls(decls: readonly BodyDecl[], ctx: Ctx): BodyDecl[] {
+  const out: BodyDecl[] = []
+  for (const decl of decls) {
+    if (decl.op === 'regDecl') {
+      const spec = ctx.specs.get(decl)
+      if (!spec) throw new Error(`sumLower: no spec for reg '${decl.name}' (internal)`)
+      if (spec.kind === 'sum') {
+        out.push(...buildSumRegSlots(decl, spec.info, ctx))
+      } else {
+        out.push(buildNonSumReg(decl, ctx))
+      }
+    } else if (decl.op === 'instanceDecl') {
+      out.push({
+        ...decl,
+        inputs: decl.inputs.map(i => ({ port: i.port, value: rewriteExpr(i.value, ctx) })),
+      })
+    } else {
+      // paramDecl, programDecl — pass through unchanged.
+      out.push(decl)
+    }
+  }
+  return out
+}
+
+function buildSumRegSlots(orig: RegDecl, info: SumRegInfo, ctx: Ctx): RegDecl[] {
   const init = orig.init
   if (typeof init !== 'object' || init === null || Array.isArray(init) || init.op !== 'tag') {
-    throw new Error(
-      `sumLower: reg '${orig.name}': init must be a constant tag expression`,
-    )
+    throw new Error(`sumLower: reg '${orig.name}': init must be a constant tag expression`)
   }
   const initTag = init as Tag
   const initVariantIdx = info.sumType.variants.indexOf(initTag.variant)
@@ -250,29 +196,46 @@ function fillSlotsForSumReg(
       `sumLower: reg '${orig.name}': init variant '${initTag.variant.name}' not in '${info.sumType.name}'`,
     )
   }
-
   const initPayload = new Map<string, ResolvedExpr>()
   for (const entry of initTag.payload) initPayload.set(entry.field.name, entry.value)
 
+  const out: RegDecl[] = []
   for (const slot of info.slots) {
+    let slotInit: ResolvedExpr
     if (slot.variant === undefined) {
-      // Tag slot.
-      slot.decl.init = initVariantIdx
+      slotInit = initVariantIdx
     } else if (slot.variant === initTag.variant && slot.field !== undefined) {
       const v = initPayload.get(slot.field.name)
-      slot.decl.init = v !== undefined ? rewriteExpr(v, ctx) : 0
+      slotInit = v !== undefined ? rewriteExpr(v, ctx) : 0
     } else {
-      slot.decl.init = 0
+      slotInit = 0
     }
-    // Per-slot update: extract from the (optional) sum-valued update.
+    const slotName = slot.variant === undefined
+      ? mangle(orig.name, 'tag')
+      : mangle(orig.name, `${slot.variant.name}__${slot.field!.name}`)
+    const decl: RegDecl = {
+      op: 'regDecl',
+      name: slotName,
+      init: slotInit,
+    }
     if (orig.update !== undefined) {
-      slot.decl.update = extractSlotFromSumExpr(orig.update, info, slot, ctx)
-    } else {
-      // No source update — leave slot.decl.update as the 0 placeholder
-      // it was initialized with. (A pure-hold sum reg is unusual but
-      // legal; the slots simply hold their init values.)
+      decl.update = extractSlotFromSumExpr(orig.update, info, slot, ctx)
     }
+    out.push(decl)
   }
+  return out
+}
+
+function buildNonSumReg(orig: RegDecl, ctx: Ctx): RegDecl {
+  const decl: RegDecl = {
+    op: 'regDecl',
+    name: orig.name,
+    init: rewriteExpr(orig.init, ctx),
+  }
+  if (orig.update !== undefined) decl.update = rewriteExpr(orig.update, ctx)
+  if (orig.type !== undefined) decl.type = orig.type
+  if (orig._liftedFrom !== undefined) decl._liftedFrom = orig._liftedFrom
+  return decl
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -280,20 +243,12 @@ function fillSlotsForSumReg(
 // ─────────────────────────────────────────────────────────────
 
 interface Ctx {
-  sumRegs: SumRegMap
-  /** Input program; needed to resolve old RegRef.idx → source RegDecl. */
+  /** Input program; resolves old RegRef.idx → source RegDecl. */
   inProg: ResolvedProgram
-  /** Map every original RegDecl in the body to its replacement.
-   *  Sum-typed → the tag-slot decl; non-sum → a freshly cloned decl
-   *  whose `update`/`init` will be filled in by `rewriteDecl`. Used
-   *  by `RegRef` rewriting so refs in expressions point at the decl
-   *  objects that actually appear in the rewritten body. */
-  regMap: Map<RegDecl, RegDecl>
-  /** Map from new RegDecl object to its de Bruijn level in the
-   *  rewritten program's regs[] table. Populated in sumLower's main
-   *  body BEFORE rewriteExpr runs (so cross-decl forward refs work).
-   *  Used to compute the new idx for every rewritten RegRef. */
-  newRegIdxByDecl: Map<RegDecl, RegIdx>
+  /** Per-old-reg spec: either { kind: 'sum', info } or { kind: 'nonSum', idx }.
+   *  Looked up via `ctx.specs.get(srcDecl)` after the source decl is
+   *  found in `inProg.regs[oldIdx]`. */
+  specs: SpecMap
   /** Active per-binder substitutions introduced by match arms.
    *  A `BindingRef` whose decl is a key here is rewritten to the
    *  mapped expression. */
@@ -311,45 +266,20 @@ function withBindings(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Decl / assign recursion
+// Phase 3 — assign rewriting (delegates to expr rewriter)
 // ─────────────────────────────────────────────────────────────
 
-function rewriteDecl(decl: BodyDecl, ctx: Ctx): BodyDecl {
-  switch (decl.op) {
-    case 'regDecl': {
-      // Non-sum reg: fill the pre-allocated fresh decl's update / init
-      // with rewritten expressions. The fresh decl was put in `regMap`
-      // ahead of time so any RegRef pointing at the original decl is
-      // rewritten to point at this fresh one.
-      const fresh = ctx.regMap.get(decl)
-      if (!fresh) {
-        throw new Error(`sumLower: missing regMap entry for non-sum reg '${decl.name}'`)
-      }
-      fresh.init = rewriteExpr(decl.init, ctx)
-      if (decl.update !== undefined) {
-        fresh.update = rewriteExpr(decl.update, ctx)
-      }
-      return fresh
-    }
-    case 'paramDecl':
-    case 'programDecl':
-      return decl
-    case 'instanceDecl':
-      return {
-        ...decl,
-        inputs: decl.inputs.map(i => ({ port: i.port, value: rewriteExpr(i.value, ctx) })),
-      }
-  }
-}
-
 function rewriteAssign(assign: BodyAssign, ctx: Ctx): BodyAssign {
-  // Post-Phase-0a: BodyAssign is OutputAssign-only.
-  const out: OutputAssign = { op: 'outputAssign', target: assign.target, expr: rewriteExpr(assign.expr, ctx) }
+  const out: OutputAssign = {
+    op: 'outputAssign',
+    target: assign.target,
+    expr: rewriteExpr(assign.expr, ctx),
+  }
   return out
 }
 
 // ─────────────────────────────────────────────────────────────
-// Expression rewriting
+// Expression rewriting (pure; no mutation, no shells)
 // ─────────────────────────────────────────────────────────────
 
 function rewriteExpr(expr: ResolvedExpr, ctx: Ctx): ResolvedExpr {
@@ -366,22 +296,16 @@ function rewriteOp(node: ResolvedExprOp, ctx: Ctx): ResolvedExpr {
       return sub !== undefined ? sub : node
     }
 
-    // ── RegRef: rewrite to the cloned/replacement decl. For a
+    // ── RegRef: rewrite to the new RegIdx via the spec map. For a
     //    sum-typed source reg this is the tag slot; for non-sum it's
-    //    the cloned scalar decl. (Match rewriting handles payload
-    //    reads via per-arm substitution before reaching this case.)
-    //    Migrated to indices: look up the source decl from the input
-    //    program via node.idx, find its replacement, then compute the
-    //    new idx via newRegIdxByDecl. ──
+    //    the new fresh decl's idx. Match-arm payload reads are handled
+    //    via per-arm binding substitution before reaching this case. ──
     case 'regRef': {
       const srcDecl = ctx.inProg.regs[node.idx]
       if (!srcDecl) throw new Error(`sumLower: regRef idx=${node.idx} has no source in input program`)
-      const replacement = ctx.regMap.get(srcDecl)
-      if (!replacement) return node
-      const newIdx = ctx.newRegIdxByDecl.get(replacement)
-      if (newIdx === undefined) {
-        throw new Error(`sumLower: replacement for reg '${srcDecl.name}' has no idx in rewritten program`)
-      }
+      const spec = ctx.specs.get(srcDecl)
+      if (!spec) return node
+      const newIdx = spec.kind === 'sum' ? spec.info.tagSlot.idx : spec.idx
       return { op: 'regRef', idx: newIdx }
     }
 
@@ -468,21 +392,11 @@ function rewriteOp(node: ResolvedExprOp, ctx: Ctx): ResolvedExpr {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Match → select chain (scalar-valued match)
+// Match lowering
 // ─────────────────────────────────────────────────────────────
 
 function lowerMatchToSelectChain(m: Match, ctx: Ctx): ResolvedExpr {
-  // The scrutinee must reduce to a sum-typed value. We need access to
-  // the per-variant payload slots to rewrite payload bindings.
-  // V1 (mirrors legacy): only RegRef-to-sum-typed-reg scrutinees
-  // support payload-bearing arms. Nullary-only matches accept any
-  // scrutinee that lowers to the variant's tag integer.
   const tagRead = scrutineeTagRead(m, ctx)
-
-  // Build select chain in legacy order: iterate variants in the sum
-  // type's declaration order; the LAST variant is the chain tail (its
-  // body is the else-branch of the deepest select, with no comparison
-  // — exhaustiveness guarantees one arm matches).
   const variants = m.type.variants
   const armBy = new Map<SumVariant, MatchArm>()
   for (const arm of m.arms) armBy.set(arm.variant, arm)
@@ -519,23 +433,10 @@ function lowerMatchToSelectChain(m: Match, ctx: Ctx): ResolvedExpr {
   return chain
 }
 
-/**
- * Lower the scrutinee to its tag-slot read. For a sum-typed reg, the
- * tag-slot is `{ op: 'regRef', decl: info.tagSlot.decl }`. For a
- * constant tag, the read is the variant index integer. Other
- * scrutinee shapes fall through to a generic recursive rewrite —
- * sufficient for nullary-only matches whose scrutinee is itself a
- * `match` returning a tag.
- */
 function scrutineeTagRead(m: Match, ctx: Ctx): ResolvedExpr {
   return rewriteExpr(m.scrutinee, ctx)
 }
 
-/**
- * Build the per-binder substitution map for a payload-bearing arm.
- * Only supports `RegRef`-to-sum-typed-reg scrutinees (matching the
- * legacy V1 limitation).
- */
 function bindingsForArm(
   scrutinee: ResolvedExpr,
   arm: MatchArm,
@@ -555,8 +456,8 @@ function bindingsForArm(
   if (!srcDecl) {
     throw new Error(`sumLower: match arm scrutinee regRef idx=${rRef.idx} has no source decl`)
   }
-  const info = ctx.sumRegs.get(srcDecl)
-  if (!info) {
+  const spec = ctx.specs.get(srcDecl)
+  if (!spec || spec.kind !== 'sum') {
     throw new Error(
       `sumLower: match arm '${arm.variant.name}' scrutinee references non-sum reg '${srcDecl.name}'`,
     )
@@ -568,17 +469,13 @@ function bindingsForArm(
   }
   for (let i = 0; i < arm.binders.length; i++) {
     const field = arm.variant.payload[i]
-    const slot = info.payloadByKey.get(slotKey(arm.variant, field))
+    const slot = spec.info.payloadByKey.get(slotKey(arm.variant, field))
     if (!slot) {
       throw new Error(
         `sumLower: match arm '${arm.variant.name}': missing slot for field '${field.name}'`,
       )
     }
-    const newIdx = ctx.newRegIdxByDecl.get(slot.decl)
-    if (newIdx === undefined) {
-      throw new Error(`sumLower: payload slot '${slot.decl.name}' has no idx in rewritten program`)
-    }
-    subs.set(arm.binders[i], { op: 'regRef', idx: newIdx })
+    subs.set(arm.binders[i], { op: 'regRef', idx: slot.idx })
   }
   return subs
 }
@@ -589,8 +486,7 @@ function bindingsForArm(
 
 /**
  * Extract the scalar update for one slot of a sum-typed reg's update
- * expression. Mirrors `extractSlotFromSumExpr` in
- * `compiler/sum_lowering.ts`.
+ * expression.
  *
  * Recognized shapes for `expr`:
  *   - `Tag` — constant constructor; tag-slot gets the variant index,
@@ -602,13 +498,12 @@ function bindingsForArm(
  *     source reg.
  *   - `select(c, a, b)` where both branches are sum-valued —
  *     distribute: `select(c, extract(a), extract(b))`.
- *   - Otherwise return 0 (undefined behavior; caller's malformed
- *     update).
+ *   - Otherwise return 0 (undefined behavior; caller's malformed update).
  */
 function extractSlotFromSumExpr(
   expr: ResolvedExpr,
   info: SumRegInfo,
-  slot: SlotEntry,
+  slot: SlotSpec,
   ctx: Ctx,
 ): ResolvedExpr {
   if (typeof expr !== 'object' || expr === null || Array.isArray(expr)) return 0
@@ -663,22 +558,16 @@ function extractSlotFromSumExpr(
     case 'regRef': {
       const srcDecl = ctx.inProg.regs[expr.idx]
       if (!srcDecl) return 0
-      const srcInfo = ctx.sumRegs.get(srcDecl)
-      if (!srcInfo) {
+      const srcSpec = ctx.specs.get(srcDecl)
+      if (!srcSpec || srcSpec.kind !== 'sum') {
         // Reading a scalar reg as a sum value is malformed.
         return 0
       }
       if (slot.variant === undefined) {
-        const i = ctx.newRegIdxByDecl.get(srcInfo.tagSlot.decl)
-        if (i === undefined) throw new Error(`sumLower: tag-slot decl has no idx`)
-        return { op: 'regRef', idx: i }
+        return { op: 'regRef', idx: srcSpec.info.tagSlot.idx }
       }
-      const srcSlot = srcInfo.payloadByKey.get(slotKey(slot.variant, slot.field!))
-      if (srcSlot) {
-        const i = ctx.newRegIdxByDecl.get(srcSlot.decl)
-        if (i === undefined) throw new Error(`sumLower: payload-slot decl has no idx`)
-        return { op: 'regRef', idx: i }
-      }
+      const srcSlot = srcSpec.info.payloadByKey.get(slotKey(slot.variant, slot.field!))
+      if (srcSlot) return { op: 'regRef', idx: srcSlot.idx }
       return 0
     }
 
@@ -700,8 +589,15 @@ function extractSlotFromSumExpr(
 }
 
 // ─────────────────────────────────────────────────────────────
-// Body inspection helpers
+// Fast-path detection: skip if no work to do
 // ─────────────────────────────────────────────────────────────
+
+function progHasAnySumWork(prog: ResolvedProgram): boolean {
+  for (const decl of prog.body.decls) {
+    if (decl.op === 'regDecl' && sumTypeOfRegInit(decl) !== undefined) return true
+  }
+  return bodyHasSumExpr(prog.body)
+}
 
 function bodyHasSumExpr(body: ResolvedBlock): boolean {
   for (const decl of body.decls) {
@@ -718,35 +614,24 @@ function declHasSumExpr(decl: BodyDecl): boolean {
     case 'regDecl':
       return exprHasSumExpr(decl.init)
         || (decl.update !== undefined && exprHasSumExpr(decl.update))
-    case 'paramDecl': return false
     case 'instanceDecl':
       return decl.inputs.some(i => exprHasSumExpr(i.value))
+    case 'paramDecl':
     case 'programDecl':
       return false
   }
 }
 
-function exprHasSumExpr(expr: ResolvedExpr): boolean {
-  if (typeof expr !== 'object' || expr === null) return false
-  if (Array.isArray(expr)) return expr.some(exprHasSumExpr)
-  switch (expr.op) {
-    case 'tag':
-    case 'match':
-      return true
-    case 'fold': case 'scan':
-      return exprHasSumExpr(expr.over) || exprHasSumExpr(expr.init) || exprHasSumExpr(expr.body)
-    case 'generate':
-      return exprHasSumExpr(expr.count) || exprHasSumExpr(expr.body)
-    case 'iterate': case 'chain':
-      return exprHasSumExpr(expr.count) || exprHasSumExpr(expr.init) || exprHasSumExpr(expr.body)
-    case 'map2':
-      return exprHasSumExpr(expr.over) || exprHasSumExpr(expr.body)
-    case 'zipWith':
-      return exprHasSumExpr(expr.a) || exprHasSumExpr(expr.b) || exprHasSumExpr(expr.body)
-    case 'let':
-      return expr.binders.some(b => exprHasSumExpr(b.value)) || exprHasSumExpr(expr.in)
-    case 'zeros':
-      return exprHasSumExpr(expr.count)
+function exprHasSumExpr(e: ResolvedExpr): boolean {
+  if (typeof e !== 'object' || e === null) return false
+  if (Array.isArray(e)) return e.some(exprHasSumExpr)
+  const op = e.op
+  if (op === 'tag' || op === 'match') return true
+  switch (op) {
+    case 'inputRef': case 'regRef': case 'paramRef':
+    case 'typeParamRef': case 'bindingRef':
+    case 'sampleRate': case 'sampleIndex': case 'nestedOut':
+      return false
     case 'add': case 'sub': case 'mul': case 'div': case 'mod':
     case 'lt': case 'lte': case 'gt': case 'gte': case 'eq': case 'neq':
     case 'and': case 'or':
@@ -756,8 +641,20 @@ function exprHasSumExpr(expr: ResolvedExpr): boolean {
     case 'sqrt': case 'abs': case 'floor': case 'ceil': case 'round':
     case 'floatExponent': case 'toInt': case 'toBool': case 'toFloat':
     case 'clamp': case 'select': case 'index': case 'arraySet':
-      return expr.args.some(exprHasSumExpr)
-    default:
-      return false
+      return (e.args as ResolvedExpr[]).some(exprHasSumExpr)
+    case 'zeros':
+      return exprHasSumExpr(e.count)
+    case 'fold': case 'scan':
+      return exprHasSumExpr(e.over) || exprHasSumExpr(e.init) || exprHasSumExpr(e.body)
+    case 'generate':
+      return exprHasSumExpr(e.count) || exprHasSumExpr(e.body)
+    case 'iterate': case 'chain':
+      return exprHasSumExpr(e.count) || exprHasSumExpr(e.init) || exprHasSumExpr(e.body)
+    case 'map2':
+      return exprHasSumExpr(e.over) || exprHasSumExpr(e.body)
+    case 'zipWith':
+      return exprHasSumExpr(e.a) || exprHasSumExpr(e.b) || exprHasSumExpr(e.body)
+    case 'let':
+      return e.binders.some(b => exprHasSumExpr(b.value)) || exprHasSumExpr(e.in)
   }
 }
