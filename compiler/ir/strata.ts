@@ -70,23 +70,25 @@ export function strataPipeline(
  *  port/register/default metadata via free functions over the resolved
  *  IR.
  *
- *  Currently uses default inlining (`inlineNested: true`). The fractal
- *  architecture (M11) is fully infrastructured — `partition_recursive`,
- *  `NestedOut → slot read` in emit_resolved, recursive JIT emit, schema
- *  field for `children` — but ACTIVATION (flipping to `inlineNested:
- *  false`) is deferred: the cross-kernel input-wiring path (child
- *  refers to parent's `inputRef`) needs an ancestor-resolution step
- *  before partition. Once that lands, set `inlineNested: false` here
- *  and full fractal activates uniformly. */
+ *  Default behavior uses `inlineNested: true` — the legacy flat-IR
+ *  path. The fractal session path (M11 activation) passes
+ *  `inlineNested: false` so sub-instance `InstanceDecl`s survive
+ *  into `partition_recursive`, where they become real kernel
+ *  boundaries instead of being splatted into their parent's body.
+ *  The slot-based input-wiring redesign makes the `false` path
+ *  correct end-to-end; until that lands, callers should leave
+ *  `inlineNested` at its default. */
 export function programTypeFromResolved(
   prog: ResolvedProgram,
   typeArgs: ReadonlyMap<TypeParamDecl, number>,
-  opts?: { displayName?: string },
+  opts?: { displayName?: string; inlineNested?: boolean },
 ): Compiled {
   // Post-Phase 4b: the elaborator throws on cyclic source code, and
   // lifted wire-programs are acyclic by construction (no
   // InstanceDecls). The strataPipeline's `assertAcyclic` at entry
   // confirms the contract; no separate cycle-break call is needed
   // here.
-  return makeCompiled(strataPipeline(prog, typeArgs), opts)
+  const strataOptions: StrataOptions = opts?.inlineNested !== undefined
+    ? { inlineNested: opts.inlineNested } : {}
+  return makeCompiled(strataPipeline(prog, typeArgs, strataOptions), opts)
 }

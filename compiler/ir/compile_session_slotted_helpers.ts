@@ -330,10 +330,14 @@ export function remapInstancePlan(
   ctx: RemapContext,
   session: SessionState,
 ): {
-  preamble:      NInstr[]
-  body:          NInstr[]
-  writeSlots:    NInstr[]
-  tempsConsumed: number
+  preamble:             NInstr[]
+  /** Per-child pre-input WriteSlot blocks, parallel to the body's
+   *  sub-instance order. Each block runs in THIS instance's namespace
+   *  immediately before the corresponding child's body. */
+  perChildPreInput:     NInstr[][]
+  body:                 NInstr[]
+  writeSlots:           NInstr[]
+  tempsConsumed:        number
 } {
   // Preamble emitter: allocates fresh temps in the unified register
   // space, starting after the instance's own register_count block.
@@ -392,6 +396,22 @@ export function remapInstancePlan(
     args: instr.args.map(remapOperand),
   }))
 
+  // M11 fractal slot-based input wiring: each child's pre-input block
+  // (parent's wires → WriteSlot to that child's input slot) gets the
+  // same per-instance operand/dst remap as the main body. The blocks
+  // reference the same temp/state/array spaces (Emitter allocates them
+  // in one namespace), and WriteSlot dst's are already absolute
+  // module-slot indices. Returned as a per-child array so the caller
+  // can attach each block to its corresponding child InstanceFunction
+  // — the engine then dispatches `block → child.body` interleaved.
+  const perChildPreInput: NInstr[][] = plan.per_child_pre_input.map(block =>
+    block.map(instr => ({
+      ...instr,
+      dst:  shiftDst(instr.dst, ctx),
+      args: instr.args.map(remapOperand),
+    })),
+  )
+
   // WriteSlot per scalar slot of every output port. For scalar ports
   // that's 1 WriteSlot. For array-typed ports of shape `[N]` (or any
   // shape; `expandPortToSlots` flattens row-major) that's N WriteSlots,
@@ -447,6 +467,7 @@ export function remapInstancePlan(
 
   return {
     preamble,
+    perChildPreInput,
     body,
     writeSlots,
     tempsConsumed: preambleNext - (rawOffset(ctx.regOffset) + plan.register_count),

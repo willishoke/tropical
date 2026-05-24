@@ -117,6 +117,18 @@ struct InstanceProgram
 {
   std::string                  instance_name;     // dotted path (e.g. voice1.env)
   std::vector<FlatInstr>       instructions;      // already shifted into unified offset space
+  /** M11 fractal slot-based input wiring. Per-child block — runs in
+   *  the PARENT's namespace immediately before THIS kernel's body. The
+   *  parent's emit_kernel_block dispatches each child as:
+   *      emit_instrs(child.pre_input_instructions)
+   *      emit_kernel_block(child)
+   *  Per-child placement (vs hoisting into a parent-wide pre-children
+   *  block) preserves sibling-to-sibling NestedOut dependencies: a
+   *  later sibling's wire can read an earlier sibling's output slot
+   *  because the earlier sibling's body has already executed. Empty
+   *  for top-level kernels and for the legacy flat-IR
+   *  (inlineNested:true) path. */
+  std::vector<FlatInstr>       pre_input_instructions;
   uint32_t                     register_count = 0; // local temp count
   /** State register writebacks for this instance. Each entry pairs a
    *  state register slot index (absolute, into the unified register

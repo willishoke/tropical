@@ -247,3 +247,43 @@ Tests that cross compilation/backend boundaries live under `tests/equiv/`.
 - C++ is header-heavy by design (templates, inlining for audio perf)
 - JIT failures are fatal — no interpreter fallback on the audio path
   (`interpret_resolved` is an oracle for tests, not a runtime)
+
+## Don't bake in audio-specific assumptions where it's free not to
+
+Tropical's v2 roadmap includes video synthesis, control-rate signals,
+and multi-backend codegen at independent rates. Most of the
+infrastructure to support that doesn't need to exist yet — but where
+it costs nothing to be neutral, prefer neutral. The asymmetry: small
+unforced assumptions today compound into many call-site refactors
+when a second signal type or rate or backend arrives.
+
+This is *hygiene*, not abstraction. Don't build generic frameworks
+ahead of need; do avoid accidentally precluding generality.
+
+Concrete forms:
+- **Naming.** If a parameter is `rate` (just a rate), don't name it
+  `sampleRate` — that bakes in "audio." If a slot's element type is
+  configurable, don't name the field `audioValue`. Names that don't
+  forbid generality cost nothing extra to write.
+- **Element types.** Don't hardcode `double` as a slot/wire/array
+  element type where the type is already parameterized or could
+  trivially be. Audio-rate-double-precision is what v1 uses, but
+  there's no reason for that to be load-bearing at every layer.
+- **Hardware/timing assumptions.** Don't assume "44100" or "48000"
+  or "block of 256 samples" in places where the actual sample rate
+  / block size is already available as a parameter. The audio
+  callback knows its own rate; pass it, don't redeclare it.
+- **Cross-cutting concepts.** "Signal" and "wire" and "slot" are
+  rate- and color-agnostic at the conceptual level. Keep them that
+  way in code where it's free. The same goes for "kernel",
+  "instance", "port" — these are not "audio kernels" / "audio
+  ports" / "audio instances" by nature, they're nature-agnostic.
+
+What this isn't a license to do: build abstract frameworks, define
+type-level operad machinery, parameterize over backend types
+speculatively. The cost-asymmetry is on **unforced** assumptions —
+the things you'd be neutral about anyway if you weren't on autopilot.
+Anything that requires a deliberate design choice (a new type
+parameter, a new module, a new abstraction layer) should wait until
+there's concrete evidence the abstraction pays off — typically: a
+second concrete consumer.

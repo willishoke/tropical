@@ -22,7 +22,7 @@
  */
 
 import type {
-  ResolvedProgram, ResolvedExpr, InstanceDecl, InputDecl, OutputDecl, ParamDecl,
+  ResolvedProgram, InstanceDecl, InputDecl, OutputDecl, ParamDecl,
 } from './nodes.js'
 import type { SessionState, ExprNode } from '../session.js'
 import type {
@@ -37,12 +37,11 @@ import {
 import { type ScalarType } from './emit_resolved.js'
 import { instanceName as toInstanceName, slotKey } from './branded_names.js'
 import { compileResolved } from './compile_resolved.js'
-import { cloneWithInputSubst } from './clone.js'
 import { makeCompiled, type Compiled } from '../program_types.js'
 import {
   inputNames, outputNames, outputPortTypes, rawInputDefaults,
 } from '../program_types.js'
-import { allocateOutputSlots } from '../session.js'
+import { allocateOutputSlots, allocateInputSlots } from '../session.js'
 import {
   remapInstancePlan, type RemapContext, type InputBinding,
 } from './compile_session_slotted_helpers.js'
@@ -97,6 +96,19 @@ function lookupOutputSlot(
   return session.outputSlotRegistry.get(meta.scalarSlotNames[0])
 }
 
+/** Look up the (first scalar) slot index for an instance's INPUT port.
+ *  Mirror of `lookupOutputSlot` against the M11 input-slot registry. */
+function lookupInputSlot(
+  session: SessionState,
+  instancePath: string,
+  portName: string,
+): number | undefined {
+  const portKey = slotKey(toInstanceName(instancePath), portName)
+  const meta = session.inputPortMeta.get(portKey)
+  if (meta === undefined || meta.scalarSlotNames.length === 0) return undefined
+  return session.inputSlotRegistry.get(meta.scalarSlotNames[0])
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────
 
 /** Result of compiling a single kernel: the InstanceFunction (with
@@ -129,50 +141,84 @@ export function partitionKernel(
   paramHandles: Map<ParamDecl, { ptr: string }>,
   session: SessionState,
   acc: PartitionAccumulators,
+  /** M11 slot-based input wiring: when set, THIS kernel is being
+   *  compiled as a sub-instance. Its `InputRef(d)` operands lower to
+   *  Slot reads from the slot indices recorded here, instead of the
+   *  legacy `opInput`. Top-level callers pass `undefined`. */
+  inputSlotOverride?: Map<InputDecl, number>,
 ): PartitionedKernel {
-  // ── 1. Recurse into sub-InstanceDecls. Substitute their inputs;
-  //    allocate their output slots; build the nestedOutputSlots map for
-  //    this kernel's NestedOut refs.
+  // ── 1. Recurse into sub-InstanceDecls.
+  //    For each child:
+  //      • Allocate output slots (parent reads via NestedOut → Slot)
+  //      • Allocate INPUT slots (parent writes via WriteSlot in
+  //        per_child_pre_input[k]; child reads via Slot in its body)
+  //      • Build per-child slot maps for both directions
+  //      • Recurse into the child WITHOUT substituting its inputs —
+  //        the child's InputRefs lower via `inputSlotOverride` instead
+  //
+  //    The slot-based path replaces the legacy `cloneWithInputSubst`
+  //    substitution, which leaked scope (wire expressions could carry
+  //    refs into the child's namespace where they couldn't resolve).
+  //    Under slots, the wire is evaluated in the parent's scope where
+  //    every ref resolves, and only the *value* crosses the boundary.
   const children: InstanceFunction[] = []
   const nestedOutputSlots = new Map<InstanceDecl, Map<OutputDecl, number>>()
+  const nestedInputSlots  = new Map<InstanceDecl, Map<InputDecl, number>>()
 
   for (const decl of prog.body.decls) {
     if (decl.op !== 'instanceDecl') continue
     const childPath = `${instancePath}.${decl.name}`
 
-    // Substitute the child's input refs with the parent's wired expressions.
-    const inputSubst = new Map<InputDecl, ResolvedExpr>()
-    for (const inp of decl.inputs) inputSubst.set(inp.port, inp.value)
-    const substChildProg = cloneWithInputSubst(decl.type, inputSubst)
-    const childCompiled = makeCompiled(substChildProg, { displayName: decl.type.name })
+    const childCompiled = makeCompiled(decl.type, { displayName: decl.type.name })
 
-    // Allocate output slots (+ __alive__) for the child.
+    // Allocate both directions of slots for this child.
     allocateOutputSlots(session, toInstanceName(childPath), childCompiled)
+    allocateInputSlots (session, toInstanceName(childPath), childCompiled)
 
     // Build slot map for parent's NestedOut → child output reads.
-    const childSlotMap = new Map<OutputDecl, number>()
+    const childOutputMap = new Map<OutputDecl, number>()
     for (const outDecl of decl.type.ports.outputs) {
       const slotIdx = lookupOutputSlot(session, childPath, outDecl.name)
-      if (slotIdx !== undefined) childSlotMap.set(outDecl, slotIdx)
+      if (slotIdx !== undefined) childOutputMap.set(outDecl, slotIdx)
     }
-    nestedOutputSlots.set(decl, childSlotMap)
+    nestedOutputSlots.set(decl, childOutputMap)
 
-    // Recursively compile the child. Children inherit their parent's
-    // paramHandles. No external input bindings — all substituted into the body.
+    // Build slot map for parent's WriteSlot → child input writes.
+    const childInputMap = new Map<InputDecl, number>()
+    for (const inDecl of decl.type.ports.inputs) {
+      const slotIdx = lookupInputSlot(session, childPath, inDecl.name)
+      if (slotIdx !== undefined) childInputMap.set(inDecl, slotIdx)
+    }
+    nestedInputSlots.set(decl, childInputMap)
+
+    // Recursively compile the child. Pass childInputMap as
+    // `inputSlotOverride` so the child's InputRefs lower to Slot
+    // reads instead of `opInput`. The child's program is unmodified
+    // (no cloneWithInputSubst) — the boundary is the slot, not the
+    // substituted expression.
     const childResult = partitionKernel(
-      childPath, substChildProg, childCompiled,
+      childPath, decl.type, childCompiled,
       /* inputBindingFor*/ () => undefined,
       /* defaults       */ rawInputDefaults(childCompiled),
       paramHandles,
       session, acc,
+      /* inputSlotOverride */ childInputMap,
     )
     children.push(childResult.fn)
   }
 
-  // ── 2. Compile this kernel's body via compileResolved.
+  // ── 2. Compile this kernel's body via compileResolved. With the
+  //    nested context populated, `compileResolved` will:
+  //      • Emit WriteSlots into `per_child_pre_input[k]` for each
+  //        child input wire (using nestedInputSlots)
+  //      • Lower NestedOut refs in the parent body via nestedOutputSlots
+  //      • Lower InputRef refs in THIS kernel's body via
+  //        inputSlotOverride (when this kernel is itself a child)
   const plan = compileResolved(prog, {
     paramHandles,
     nestedOutputSlots,
+    nestedInputSlots,
+    inputSlotOverride,
   })
 
   // ── 3. Remap the plan into the unified slot/temp space.
@@ -206,8 +252,30 @@ export function partitionKernel(
     outputScalarTypes: outPortTypes,
   }
 
-  const { preamble, body, writeSlots, tempsConsumed } = remapInstancePlan(plan, ctx, session)
+  const { preamble, perChildPreInput, body, writeSlots, tempsConsumed } = remapInstancePlan(plan, ctx, session)
   const instanceInstructions: NInstr[] = [...preamble, ...body, ...writeSlots]
+
+  // Attach each per-child pre-input block to its corresponding child
+  // InstanceFunction. The pre-input wires live in THIS kernel's
+  // namespace (parent evaluates them) but are stored on the child so
+  // the engine's `emit_kernel_block` runs `child.pre_input_instructions`
+  // immediately before recursing into that child — preserving sibling-
+  // to-sibling NestedOut dependencies.
+  //
+  // `children` and `perChildPreInput` are kept parallel by construction:
+  // both are built from `prog.body.decls` in the same order (this
+  // function above; compileResolved's nestedInstances collection).
+  if (perChildPreInput.length !== children.length) {
+    throw new Error(
+      `partitionKernel: instance '${instancePath}': perChildPreInput length ` +
+      `(${perChildPreInput.length}) does not match children length ` +
+      `(${children.length}). emit_resolved + compileResolved must produce ` +
+      `one block per nested InstanceDecl in body order.`,
+    )
+  }
+  for (let i = 0; i < children.length; i++) {
+    children[i] = { ...children[i], pre_input_instructions: perChildPreInput[i] }
+  }
 
   // Shift per-instance register_targets into the unified temp space.
   const shiftedTargets: RegTarget[] = plan.register_targets.map(t => {
@@ -219,6 +287,13 @@ export function partitionKernel(
     name:              `instance_${instancePath.replace(/\./g, '_')}`,
     instance_name:     instancePath,
     instructions:      instanceInstructions,
+    // Top-level kernels run no parent-side pre-input wires (their
+    // inputs come from session inputBindings translated into the
+    // preamble). Sub-kernels get this populated by the parent's
+    // partitionKernel call via the `for (let i = 0; ...)` loop above
+    // — that loop overwrites `children[i]` with a copy carrying the
+    // child's `pre_input_instructions`.
+    pre_input_instructions: [],
     register_offset:   tempOffset(acc.nextRegRaw),
     state_reg_offset:  stateRegOffset(acc.nextStateRaw),
     array_slot_offset: arraySlotOffset(acc.nextArrayRaw),

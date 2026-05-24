@@ -105,6 +105,19 @@ export interface PerInstancePlan {
   array_slot_count: number
   array_slot_sizes: number[]
   instructions:     NInstr[]
+  /** Per-child WriteSlot instructions, parallel to the body's
+   *  `InstanceDecl` order. `per_child_pre_input[k]` is the wire-
+   *  computation + WriteSlot block that runs immediately BEFORE the
+   *  k-th child's kernel body. Each block evaluates the child's input
+   *  wires in THIS kernel's scope (where every ref resolves) and
+   *  WriteSlots the result to the child's pre-allocated input slot.
+   *  Interleaving with the child dispatch (vs running all blocks
+   *  upfront) preserves sibling-to-sibling NestedOut dependencies:
+   *  child[k]'s wire can read child[j].output for j < k because
+   *  child[j] has already written its output slot by the time
+   *  child[k]'s wires evaluate. Empty array for leaf kernels and
+   *  for the legacy `inlineNested:true` path. */
+  per_child_pre_input: NInstr[][]
   /** Per-output-port temp index (local). */
   output_targets:   TempIdx[]
   /** State register writeback: `register_targets[i]` is the local
@@ -134,6 +147,17 @@ export interface InstanceFunction {
   instance_name:     string
   /** Instructions with operands already shifted into unified space. */
   instructions:      NInstr[]
+  /** M11 fractal slot-based input wiring. Instructions the PARENT
+   *  runs in its own namespace just before invoking this kernel:
+   *  evaluate each wire expression, then `WriteSlot` the value to
+   *  this kernel's pre-allocated input slot. The child reads from
+   *  the slot at the start of its body. Per-child placement (vs
+   *  hoisted to a single pre-children block on the parent) preserves
+   *  sibling-to-sibling NestedOut dependencies — child[k]'s wire can
+   *  read child[j].output for j < k because child[j]'s body has
+   *  already run by the time child[k]'s pre-input wires evaluate.
+   *  Empty for top-level kernels and for `inlineNested:true` plans. */
+  pre_input_instructions: NInstr[]
   /** Cumulative offset into the unified temp space. */
   register_offset:   TempOffset
   /** Cumulative offset into the unified state-register space. */
@@ -214,6 +238,10 @@ export interface WireInstanceFunction {
   name:              string
   instance_name:     string
   instructions:      WireNInstr[]
+  /** M11 fractal slot-based input wiring (per-child). Parent's
+   *  WriteSlot instructions that run just before this kernel's body.
+   *  May be missing in legacy JSON (parsed as []). */
+  pre_input_instructions?: WireNInstr[]
   register_offset:   number
   state_reg_offset:  number
   array_slot_offset: number
@@ -307,6 +335,7 @@ const parseInstanceFn = (inst: WireInstanceFunction): InstanceFunction => ({
   name:              inst.name,
   instance_name:     inst.instance_name,
   instructions:      inst.instructions.map(parseInstr),
+  pre_input_instructions: (inst.pre_input_instructions ?? []).map(parseInstr),
   register_offset:   tempOffset(inst.register_offset),
   state_reg_offset:  stateRegOffset(inst.state_reg_offset),
   array_slot_offset: arraySlotOffset(inst.array_slot_offset),
@@ -325,9 +354,13 @@ const toWireInstanceFn = (inst: InstanceFunction): WireInstanceFunction => ({
   array_slot_offset: rawOffset(inst.array_slot_offset),
   register_count:    inst.register_count,
   register_targets:  inst.register_targets.map(toWireRegTarget),
-  // Omit `children` from the wire when empty so existing JSON consumers
-  // (golden fixtures, hand-crafted plan_5 tests) see exactly the bytes
-  // they expect today. Populated children are emitted normally.
+  // Omit `pre_input_instructions` and `children` from the wire when
+  // empty so existing JSON consumers (golden fixtures, hand-crafted
+  // plan_5 tests) see exactly the bytes they expect today. Populated
+  // entries are emitted normally.
+  ...(inst.pre_input_instructions.length > 0
+    ? { pre_input_instructions: inst.pre_input_instructions.map(toWireInstr) }
+    : {}),
   ...(inst.children.length > 0 ? { children: inst.children.map(toWireInstanceFn) } : {}),
 })
 

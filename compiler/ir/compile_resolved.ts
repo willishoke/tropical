@@ -13,22 +13,33 @@
  * runnable-plan boundary.
  */
 
-import type { ResolvedProgram, ResolvedExpr, OutputDecl, RegDecl, ParamDecl, PortType, InstanceDecl } from './nodes.js'
+import type { ResolvedProgram, ResolvedExpr, OutputDecl, RegDecl, ParamDecl, PortType, InstanceDecl, InputDecl } from './nodes.js'
 import type { PerInstancePlan } from '../flat_plan.js'
 import { buildSlotMaps, type SlotMaps } from './slots.js'
 import { emitResolvedProgram, type EmitSlots, type ScalarType } from './emit_resolved.js'
 
 /** Param-handle bindings for FFI param/trigger decls embedded in a
- *  program type's body, plus optional nested-output slot map for the
- *  fractal compile path. When `nestedOutputSlots` is provided, this
- *  kernel's body may reference sub-`InstanceDecl`s via `NestedOut`,
- *  and `emit_resolved` reads each ref as a slot operand. */
+ *  program type's body, plus optional nested-output and nested-input
+ *  slot maps for the M11 fractal compile path. */
 export interface CompileResolvedContext {
   paramHandles?:      Map<ParamDecl, { ptr: string }>
   /** Per-sub-instance, per-output-port module-slot map. Populated by
    *  `partition_recursive` when compiling a parent kernel whose body
-   *  contains child kernels. */
+   *  contains child kernels. `NestedOut` refs lower to Slot reads
+   *  via this map. */
   nestedOutputSlots?: Map<InstanceDecl, Map<OutputDecl, number>>
+  /** Per-sub-instance, per-input-port module-slot map. Populated by
+   *  `partition_recursive` for the M11 slot-based input wiring. The
+   *  parent's compile emits a `WriteSlot` into each named slot;
+   *  the entries land in `per_child_pre_input[k]` (parallel to the
+   *  body's nested-instance order) so the engine runs each block
+   *  immediately before recursing into its corresponding child. */
+  nestedInputSlots?:  Map<InstanceDecl, Map<InputDecl, number>>
+  /** Module-slot indices for THIS program's own input ports. Set when
+   *  the program is being compiled as a sub-instance kernel — its
+   *  `InputRef(d)` lowers to a slot read from `inputSlotOverride.get(d)`
+   *  instead of the legacy `opInput`. */
+  inputSlotOverride?: Map<InputDecl, number>
 }
 
 /** Compile a `ResolvedProgram` to a `PerInstancePlan`.
@@ -96,6 +107,20 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     regCount:         slots.regDecls.length,
     paramHandles:     ctx.paramHandles     ?? new Map(),
     nestedOutputSlots: ctx.nestedOutputSlots,
+    nestedInputSlots:  ctx.nestedInputSlots,
+    inputSlotOverride: ctx.inputSlotOverride,
+  }
+
+  // M11 fractal: collect sub-instance decls so emit_resolved can emit
+  // a `WriteSlot` for each of their wired inputs in
+  // `per_child_pre_input[k]`. The order here is significant — it's
+  // the dispatch order partition_recursive will use when packing
+  // children into the InstanceFunction tree, so per_child_pre_input
+  // and the children array stay parallel. Empty when the program has
+  // no nested instances (legacy flat path).
+  const nestedInstances: InstanceDecl[] = []
+  for (const d of prog.body.decls) {
+    if (d.op === 'instanceDecl') nestedInstances.push(d)
   }
 
   // Per-port scalar slot counts derived from declared output shapes.
@@ -111,6 +136,7 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     stateRegTypes: registerTypes,
     inputPortTypes,
     slots: emitSlots,
+    nestedInstances: nestedInstances.length > 0 ? nestedInstances : undefined,
   })
 
   const arraySlotNames: string[] = []
@@ -123,6 +149,7 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     array_slot_count: program.array_slot_count,
     array_slot_sizes: program.array_slot_sizes,
     instructions:     program.instructions,
+    per_child_pre_input: program.per_child_pre_input,
     output_targets:   program.output_targets,
     register_targets: program.register_targets,
     state_init:       stateInit as (number | boolean)[],
