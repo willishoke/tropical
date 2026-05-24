@@ -44,7 +44,7 @@ import type {
   RegIdx, InstanceIdx, OutputIdx,
 } from '../nodes.js'
 import { regIdx } from '../nodes.js'
-import { withDeclTables } from '../decl_tables.js'
+import { withDeclTables, getInstanceType } from '../decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Public API
@@ -137,7 +137,7 @@ export function breakInstanceCycles(prog: ResolvedProgram): CycleBreakResult {
   const existingRegCount = prog.regs.length
   const breakerIdxFor = (instI: InstanceIdx, outputI: OutputIdx): RegIdx => {
     const inst = prog.instances[instI]
-    const outputDecl = inst.type.ports.outputs[outputI]
+    const outputDecl = getInstanceType(prog, inst).ports.outputs[outputI]
     const key = `${inst.name}::${outputDecl.name}`
     const cached = breakerReg.get(key)
     if (cached) {

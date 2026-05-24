@@ -212,6 +212,13 @@ export function liftWireToProgram(
       typeDefs: [],
     },
     body,
+    // Wire-lifted programs translate session ExprNodes (scalar
+    // arithmetic only) to ResolvedExpr — no combinators, no
+    // let-bindings, no binders.
+    binderCount: 0,
+    // No InstanceDecls in the lifted body (wire expressions are pure
+    // arithmetic over ports + regs), so the registry is empty.
+    programRegistry: new Map(),
   })
 }
 

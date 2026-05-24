@@ -45,7 +45,7 @@ import {
   instanceName as toInstanceName,
   portName as toPortName,
 } from '../compiler/ir/branded_names.js'
-import type { PortType } from '../compiler/ir/nodes.js'
+import type { PortType, InputDecl, OutputDecl, TypeParamDecl } from '../compiler/ir/nodes.js'
 
 const portTypeOrNull = (t: PortType | undefined): string | null =>
   t === undefined ? null : portTypeToString(t)
@@ -286,7 +286,7 @@ function resolveProgramTypeOrFail(
   try {
     return resolveProgramType(session, programName, typeArgs, undefined)
   } catch (e) {
-    const registered = session.typeRegistry.has(programName) || session.genericTemplatesResolved.has(programName)
+    const registered = session.typeRegistry.has(programName) || session.programs.has(programName)
     if (!registered) {
       failEnum({
         code:    'unknown_program',
@@ -294,7 +294,7 @@ function resolveProgramTypeOrFail(
         value:   programName,
         options: [
           ...session.typeRegistry.keys(),
-          ...session.genericTemplatesResolved.keys(),
+          ...session.programs.keys(),
         ],
       })
     }
@@ -1096,26 +1096,31 @@ function handleListPrograms() {
       }
     })
 
-    const generic = [...session.genericTemplatesResolved.entries()].map(([typeName, prog]) => ({
-      program_name: typeName,
-      inputs: prog.ports.inputs.map(i => ({
-        name: i.name,
-        type: null,
-        default: null,
-      })),
-      outputs: prog.ports.outputs.map(o => ({
-        name: o.name,
-        type: null,
-      })),
-      registers: [] as Array<{ name: string; type: string | null }>,
-      type_params: prog.typeParams.length > 0
-        ? Object.fromEntries(prog.typeParams.map(tp => {
-            const entry: { type: 'int'; default?: number } = { type: 'int' }
-            if (tp.default !== undefined) entry.default = tp.default
-            return [tp.name, entry]
-          }))
-        : null,
-    }))
+    // Generic templates live in session.programs alongside concrete
+    // programs; distinguish by typeParams.length > 0. Concrete entries
+    // are surfaced via typeRegistry above; filter to generics here.
+    const generic = [...session.programs.entries()]
+      .filter(([_typeName, prog]) => prog.typeParams.length > 0)
+      .map(([typeName, prog]) => ({
+        program_name: typeName,
+        inputs: prog.ports.inputs.map((i: InputDecl) => ({
+          name: i.name,
+          type: null,
+          default: null,
+        })),
+        outputs: prog.ports.outputs.map((o: OutputDecl) => ({
+          name: o.name,
+          type: null,
+        })),
+        registers: [] as Array<{ name: string; type: string | null }>,
+        type_params: prog.typeParams.length > 0
+          ? Object.fromEntries(prog.typeParams.map((tp: TypeParamDecl) => {
+              const entry: { type: 'int'; default?: number } = { type: 'int' }
+              if (tp.default !== undefined) entry.default = tp.default
+              return [tp.name, entry]
+            }))
+          : null,
+      }))
 
     return [...concrete, ...generic]
   })

@@ -21,6 +21,7 @@ import { parseProgram } from '../parse/declarations.js'
 import { elaborate } from './elaborator.js'
 import { assertAcyclic, findInstanceCycles, AcyclicityViolation } from './acyclic.js'
 import type { ResolvedProgram, InstanceDecl, OutputDecl, InputDecl } from './nodes.js'
+import { programKey } from './nodes.js'
 import { inputIdx, outputIdx, instanceIdx } from './nodes.js'
 import { mkProgram } from './decl_tables.js'
 
@@ -67,11 +68,11 @@ describe('assertAcyclic / findInstanceCycles', () => {
     // are positional indices into the target's ports.inputs; NestedOut
     // carries InstanceIdx (in this program) + OutputIdx (in target).
     const a: InstanceDecl = {
-      op: 'instanceDecl', name: 'a', type: innerProg,
+      op: 'instanceDecl', name: 'a', typeKey: programKey(innerProg.name),
       typeArgs: [], inputs: [],
     }
     const b: InstanceDecl = {
-      op: 'instanceDecl', name: 'b', type: innerProg,
+      op: 'instanceDecl', name: 'b', typeKey: programKey(innerProg.name),
       typeArgs: [], inputs: [],
     }
     // a is body.decls[0] → InstanceIdx 0; b is [1] → InstanceIdx 1.
@@ -81,6 +82,7 @@ describe('assertAcyclic / findInstanceCycles', () => {
       name: 'Cyclic', typeParams: [],
       ports: { inputs: [], outputs: [], typeDefs: [] },
       body: { op: 'block', decls: [a, b], assigns: [] },
+      programRegistry: new Map([[programKey(innerProg.name), innerProg]]),
     })
     const cycles = findInstanceCycles(cyclic)
     expect(cycles.length).toBe(1)
@@ -101,7 +103,7 @@ describe('assertAcyclic / findInstanceCycles', () => {
       },
     })
     const self: InstanceDecl = {
-      op: 'instanceDecl', name: 'self', type: innerProg,
+      op: 'instanceDecl', name: 'self', typeKey: programKey(innerProg.name),
       typeArgs: [], inputs: [],
     }
     // self is body.decls[0] → InstanceIdx 0; it refs itself.
@@ -110,6 +112,7 @@ describe('assertAcyclic / findInstanceCycles', () => {
       name: 'SelfLoop', typeParams: [],
       ports: { inputs: [], outputs: [], typeDefs: [] },
       body: { op: 'block', decls: [self], assigns: [] },
+      programRegistry: new Map([[programKey(innerProg.name), innerProg]]),
     })
     const cycles = findInstanceCycles(cyclic)
     expect(cycles.length).toBe(1)
@@ -128,14 +131,15 @@ describe('assertAcyclic / findInstanceCycles', () => {
         assigns: [{ op: 'outputAssign', target: outputIdx(0), expr: { op: 'inputRef', idx: inputIdx(0) } }],
       },
     })
-    const a: InstanceDecl = { op: 'instanceDecl', name: 'a', type: innerProg, typeArgs: [], inputs: [] }
-    const b: InstanceDecl = { op: 'instanceDecl', name: 'b', type: innerProg, typeArgs: [], inputs: [] }
+    const a: InstanceDecl = { op: 'instanceDecl', name: 'a', typeKey: programKey(innerProg.name), typeArgs: [], inputs: [] }
+    const b: InstanceDecl = { op: 'instanceDecl', name: 'b', typeKey: programKey(innerProg.name), typeArgs: [], inputs: [] }
     a.inputs.push({ port: inputIdx(0), value: { op: 'nestedOut', instance: instanceIdx(1), output: outputIdx(0) } })
     b.inputs.push({ port: inputIdx(0), value: { op: 'nestedOut', instance: instanceIdx(0), output: outputIdx(0) } })
     const cyclic = mkProgram({
       name: 'Cyclic', typeParams: [],
       ports: { inputs: [], outputs: [], typeDefs: [] },
       body: { op: 'block', decls: [a, b], assigns: [] },
+      programRegistry: new Map([[programKey(innerProg.name), innerProg]]),
     })
     try {
       assertAcyclic(cyclic)

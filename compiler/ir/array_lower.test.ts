@@ -243,6 +243,27 @@ describe('arrayLower — fold', () => {
     const out = arrayLower(p)
     expect(findOps(out, [...COMBINATORS, 'bindingRef'])).toEqual([])
   })
+
+  test('nested fold: inner body references both inner and outer binders', () => {
+    // Each outer iteration runs an inner fold whose body uses the outer
+    // accumulator. Validates idx-keyed substitution (issue #156 Phase 2):
+    // outer acc/elem and inner acc/elem all carry distinct unique-per-
+    // program BinderIdx values, so the substitution maps never confuse
+    // them. Computation:
+    //   outer init 0; for e in [10, 20]:
+    //     outer_acc = fold([1, 2], outer_acc, (ia, ic) => ia + ic + e)
+    //   iter 1 (e=10): inner fold over [1,2] from 0 → ((0+1+10)+2+10) = 23
+    //   iter 2 (e=20): inner fold over [1,2] from 23 → ((23+1+20)+2+20) = 66
+    const p = elab(`
+      program X() -> (out: float) {
+        out = fold([10, 20], 0, (oa, oe) =>
+          fold([1, 2], oa, (ia, ic) => ia + ic + oe)
+        )
+      }
+    `)
+    const out = arrayLower(p)
+    expect(findOps(out, [...COMBINATORS, 'bindingRef'])).toEqual([])
+  })
 })
 
 // ─────────────────────────────────────────────────────────────

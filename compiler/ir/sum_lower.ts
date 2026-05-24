@@ -50,7 +50,7 @@ import type {
   ResolvedProgram, ResolvedExpr, ResolvedExprOp,
   ResolvedBlock,
   BodyDecl, BodyAssign, OutputAssign,
-  RegDecl, BinderDecl,
+  RegDecl, BinderDecl, BinderIdx,
   SumTypeDef, SumVariant, StructField,
   Tag, Match, MatchArm,
   RegRef,
@@ -250,14 +250,14 @@ interface Ctx {
    *  found in `inProg.regs[oldIdx]`. */
   specs: SpecMap
   /** Active per-binder substitutions introduced by match arms.
-   *  A `BindingRef` whose decl is a key here is rewritten to the
+   *  A `BindingRef` whose `idx` is a key here is rewritten to the
    *  mapped expression. */
-  bindings?: Map<BinderDecl, ResolvedExpr>
+  bindings?: Map<BinderIdx, ResolvedExpr>
 }
 
 function withBindings(
   ctx: Ctx,
-  extra: Map<BinderDecl, ResolvedExpr>,
+  extra: Map<BinderIdx, ResolvedExpr>,
 ): Ctx {
   if (extra.size === 0) return ctx
   const merged = new Map(ctx.bindings ?? [])
@@ -292,7 +292,7 @@ function rewriteOp(node: ResolvedExprOp, ctx: Ctx): ResolvedExpr {
   switch (node.op) {
     // ── Bindings: substitute when the binder is in the active map. ──
     case 'bindingRef': {
-      const sub = ctx.bindings?.get(node.decl)
+      const sub = ctx.bindings?.get(node.idx)
       return sub !== undefined ? sub : node
     }
 
@@ -441,8 +441,8 @@ function bindingsForArm(
   scrutinee: ResolvedExpr,
   arm: MatchArm,
   ctx: Ctx,
-): Map<BinderDecl, ResolvedExpr> {
-  const subs = new Map<BinderDecl, ResolvedExpr>()
+): Map<BinderIdx, ResolvedExpr> {
+  const subs = new Map<BinderIdx, ResolvedExpr>()
   if (arm.binders.length === 0) return subs
 
   if (typeof scrutinee !== 'object' || scrutinee === null || Array.isArray(scrutinee)
@@ -475,7 +475,7 @@ function bindingsForArm(
         `sumLower: match arm '${arm.variant.name}': missing slot for field '${field.name}'`,
       )
     }
-    subs.set(arm.binders[i], { op: 'regRef', idx: slot.idx })
+    subs.set(arm.binders[i].idx, { op: 'regRef', idx: slot.idx })
   }
   return subs
 }

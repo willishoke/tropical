@@ -202,10 +202,10 @@ describe('elaborator — binders are decl objects with refs', () => {
     const left = body.args[0] as BindingRef
     const right = body.args[1] as BindingRef
     expect(left.op).toBe('bindingRef')
-    expect(left.decl).toBe(xBinder)
-    expect(right.decl).toBe(xBinder)
-    // Both occurrences share the same binder decl — graph edge identity.
-    expect(left.decl).toBe(right.decl)
+    expect(left.idx).toBe(xBinder.idx)
+    expect(right.idx).toBe(xBinder.idx)
+    // Both occurrences share the same binder idx — graph edge identity.
+    expect(left.idx).toBe(right.idx)
   })
 
   test('shadowing: inner let binder shadows outer; refs distinguish', () => {
@@ -219,9 +219,9 @@ describe('elaborator — binders are decl objects with refs', () => {
     const inner = outer.in as Let
     const outerX = outer.binders[0].binder
     const innerX = inner.binders[0].binder
-    expect(outerX).not.toBe(innerX)  // distinct decl objects
+    expect(outerX.idx).not.toBe(innerX.idx)  // distinct binder idx
     const innerRef = inner.in as BindingRef
-    expect(innerRef.decl).toBe(innerX)  // refers to inner, not outer
+    expect(innerRef.idx).toBe(innerX.idx)  // refers to inner, not outer
   })
 
   test('fold binders (acc, elem) become two BinderDecls', () => {
@@ -240,8 +240,8 @@ describe('elaborator — binders are decl objects with refs', () => {
     const body = fold.body as BinaryOp
     const lhs = body.args[0] as BindingRef
     const rhs = body.args[1] as BindingRef
-    expect(lhs.decl).toBe(accBinder)
-    expect(rhs.decl).toBe(elemBinder)
+    expect(lhs.idx).toBe(accBinder.idx)
+    expect(rhs.idx).toBe(elemBinder.idx)
   })
 
   test('generate binder', () => {
@@ -256,8 +256,8 @@ describe('elaborator — binders are decl objects with refs', () => {
     const body = gen.body as BinaryOp
     const lhs = body.args[0] as BindingRef
     const rhs = body.args[1] as BindingRef
-    expect(lhs.decl).toBe(iterBinder)
-    expect(rhs.decl).toBe(iterBinder)
+    expect(lhs.idx).toBe(iterBinder.idx)
+    expect(rhs.idx).toBe(iterBinder.idx)
   })
 
   test('binders do not leak outside their parent', () => {
@@ -366,8 +366,8 @@ describe('elaborator — match', () => {
     const body = hzArm.body as BinaryOp
     const lhs = body.args[0] as BindingRef
     const rhs = body.args[1] as BindingRef
-    expect(lhs.decl).toBe(hzArm.binders[0])
-    expect(rhs.decl).toBe(hzArm.binders[1])
+    expect(lhs.idx).toBe(hzArm.binders[0].idx)
+    expect(rhs.idx).toBe(hzArm.binders[1].idx)
   })
 
   test('non-exhaustive match errors with missing variant name', () => {
@@ -427,7 +427,10 @@ describe('elaborator — instances + nested programs', () => {
     // The instance
     const instDecl = p.body.decls[1] as InstanceDecl
     expect(instDecl.op).toBe('instanceDecl')
-    expect(instDecl.type).toBe(progDecl.program)  // shared reference
+    // Post-Phase-4b: InstanceDecl carries a typeKey; resolves through
+    // the enclosing program's registry to the nested program decl's
+    // ResolvedProgram.
+    expect(p.programRegistry.get(instDecl.typeKey)).toBe(progDecl.program)
     // Input wire is keyed by the input port's position in the target
     expect(instDecl.inputs.length).toBe(1)
     expect(progDecl.program.ports.inputs[instDecl.inputs[0].port]).toBe(progDecl.program.ports.inputs[0])
@@ -691,8 +694,9 @@ describe('elaborator — external program resolver', () => {
     `), resolver)
     const inst = outer.body.decls[0] as InstanceDecl
     expect(inst.op).toBe('instanceDecl')
-    // The instance's program type IS the externally-supplied object.
-    expect(inst.type).toBe(inner)
+    // The instance's program type is the externally-supplied object,
+    // resolved through the outer's programRegistry by typeKey.
+    expect(outer.programRegistry.get(inst.typeKey)).toBe(inner)
     expect(inner.ports.inputs[inst.inputs[0].port]).toBe(inner.ports.inputs[0])
   })
 
@@ -735,7 +739,7 @@ describe('elaborator — external program resolver', () => {
     `), resolver)
     const wrap = (outer.body.decls[0] as ProgramDecl).program
     const innerInst = wrap.body.decls[0] as InstanceDecl
-    expect(innerInst.type).toBe(sib)
+    expect(wrap.programRegistry.get(innerInst.typeKey)).toBe(sib)
   })
 })
 
@@ -759,8 +763,8 @@ describe('elaborator — sequential let* binding', () => {
     expect(c2Value.op).toBe('mul')
     const lhs = c2Value.args[0] as BindingRef
     const rhs = c2Value.args[1] as BindingRef
-    expect(lhs.decl).toBe(cBinder)
-    expect(rhs.decl).toBe(cBinder)
+    expect(lhs.idx).toBe(cBinder.idx)
+    expect(rhs.idx).toBe(cBinder.idx)
   })
 
   test('the body sees every binder in the let block', () => {
@@ -791,10 +795,10 @@ describe('elaborator — sequential let* binding', () => {
     // inner binder isn't in scope until after its value is resolved.
     const innerValue = inner.binders[0].value as BinaryOp
     const ref = innerValue.args[0] as BindingRef
-    expect(ref.decl).toBe(outerA)
+    expect(ref.idx).toBe(outerA.idx)
     // The body of the inner let sees the inner binder.
     const body = inner.in as BindingRef
-    expect(body.decl).toBe(innerA)
+    expect(body.idx).toBe(innerA.idx)
   })
 })
 

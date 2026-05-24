@@ -20,23 +20,23 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const stdlibDir = join(__dirname, '../../stdlib')
 
 describe('stdlib loader — every .trop file loads cleanly', () => {
-  test('typeRegistry + genericTemplatesResolved cover every top-level program in stdlib/', () => {
+  test('session.programs covers every top-level program in stdlib/', () => {
     const session = {
       typeRegistry: new Map<string, Compiled>(),
       instanceRegistry: new Map(),
       paramRegistry: new Map(),
       specializationCache: new Map(),
-      genericTemplatesResolved: new Map<string, unknown>(),
-      resolvedRegistry: new Map<string, unknown>(),
+      programs: new Map<string, unknown>(),
     }
     loadStdlib(session as Parameters<typeof loadStdlib>[0])
 
     const tropFiles = readdirSync(stdlibDir).filter(f => f.endsWith('.trop')).sort()
     const expected = tropFiles.map(f => f.replace(/\.trop$/, ''))
-    const loaded = new Set([
-      ...session.typeRegistry.keys(),
-      ...session.genericTemplatesResolved.keys(),
-    ])
+    // Phase 5 (issue #156): session.programs is the unified registry
+    // holding both concrete (post-strata) and generic (raw template)
+    // entries. typeRegistry covers only concretes; the combined
+    // expected set lives in programs.
+    const loaded = new Set(session.programs.keys())
     for (const name of expected) {
       expect(loaded.has(name)).toBe(true)
     }

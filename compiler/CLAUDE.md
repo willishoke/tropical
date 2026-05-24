@@ -153,9 +153,12 @@ counterpart is encountered, registered in the appropriate scope, and
 re-used by reference at every site that names it.
 
 Output: `ResolvedProgram` (`ir/nodes.ts`). Every reference (`InputRef`,
-`RegRef`, `ParamRef`, `TypeParamRef`, `BindingRef`,
-`NestedOut`) carries a direct decl-object pointer. After this pass, no
-string lookups, no scope walks. Decl identity (`===`) is the only
+`RegRef`, `ParamRef`, `TypeParamRef`, `BindingRef`, `NestedOut`)
+carries a branded integer `idx` — a position into one of the program's
+typed decl tables (`regs`, `params`, `instances`, `ports.inputs`,
+`ports.outputs`, `typeParams`) for the position-indexed refs, or a
+unique-per-program ID for `BindingRef`. After this pass, no string
+lookups, no scope walks. Index equality (with the brand) is the only
 substrate the rest of the compiler operates on.
 
 The IR admits cycles (delays, feedback). The elaborator produces a
@@ -184,7 +187,9 @@ Post-strata invariants:
   never produce cyclic IR)
 - non-nested (no `InstanceDecl`, no `NestedOut`)
 - combinator-free (no `let`, `fold`, etc.)
-- decl-identity-keyed (refs hold decl objects, never strings)
+- index-keyed (refs hold branded integer `idx` values; position in the
+  decl tables — or, for `BindingRef`, a unique-per-program ID — is the
+  ref's identity; no strings, no decl-object pointers)
 
 That's the smallest sub-IR that's sufficient for any per-sample
 evaluator. The three backends below operate on this image.

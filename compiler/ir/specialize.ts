@@ -1,20 +1,19 @@
 /**
- * specialize.ts — Phase C3: clone-and-rewrite specializer on resolved IR.
+ * specialize.ts — Phase C3: type-param substitution on resolved IR.
  *
- * Substitutes integer values for `TypeParamDecl` references throughout
- * a program (shape dims, expression-position `TypeParamRef` nodes),
- * producing a fresh `ResolvedProgram` per (template, type-args) pair.
+ * Functional rewrite (no clone). Produces a fresh `ResolvedProgram`
+ * per (template, type-args) pair by walking the source with
+ * `mapExpr` + small helpers, substituting:
+ *   - `TypeParamRef.idx` (in expression position) → integer literal
+ *   - `ShapeDim` that's a `TypeParamDecl` → integer
  *
- * Algorithm: option-A interleaved clone-with-rewrite via
- * `cloneWithSubst` in `clone.ts`. The cloner:
- *   - rewrites `TypeParamRef.decl ∈ subst` → numeric literal (in expr position)
- *   - rewrites `ShapeDim` that's a `TypeParamDecl ∈ subst` → integer
- *   - drops the root program's `typeParams` list
- *   - clones every reachable decl freshly per call, so `Delay<N=8>`
- *     and `Delay<N=44100>` produce structurally distinct `RegDecl`s
- *     with shapes `[8]` and `[44100]`
- *   - shares sum/struct/alias type defs (preserves variant identity
- *     for match arms; required by Phase C4 sum_lower)
+ * The root program's `typeParams` list is emptied (no params remain
+ * after substitution). Nested programs in `programRegistry` are
+ * shared by reference — they're separate compilation units with
+ * their own typeParams scopes; this caller isn't specializing them.
+ * Sum/struct/alias type defs and port-type aliases pass through
+ * shared (they carry no per-specialization data; sum_lower compares
+ * variants by `===`).
  *
  * Purity: this function does not consult or modify any cache. The
  * cache lives in the loader (Phase C7) — the call site is responsible
@@ -22,11 +21,19 @@
  *
  * `InstanceDecl.typeArgs[i].value` is currently typed as `number`
  * (parser only admits integer literals), so no substitution is needed
- * there. The cloner passes the value through unchanged.
+ * there. The value passes through unchanged.
  */
 
-import type { ResolvedProgram, TypeParamDecl } from './nodes.js'
-import { cloneWithSubst } from './clone.js'
+import type {
+  ResolvedProgram, ResolvedExpr,
+  TypeParamDecl, ShapeDim, PortType,
+  InputDecl, OutputDecl, BodyDecl, BodyAssign, OutputAssign,
+  RegDecl, InstanceDecl,
+  TypeParamIdx,
+} from './nodes.js'
+import { typeParamIdx } from './nodes.js'
+import { mkProgram } from './decl_tables.js'
+import { mapExpr, mapPortType, NoRewrite, type ExprRewrite } from './recursion.js'
 
 export function specializeProgram(
   prog: ResolvedProgram,
@@ -38,7 +45,104 @@ export function specializeProgram(
   // the stratum a no-op for the common stdlib case where every program
   // is non-generic, which the strata orchestrator relies on.
   if (subst.size === 0) return prog
-  return cloneWithSubst(prog, subst)
+
+  // Idx-keyed mirror of subst for TypeParamRef lookup (refs carry
+  // TypeParamIdx into the source program's typeParams[]).
+  const byIdx = new Map<TypeParamIdx, number>()
+  for (let i = 0; i < prog.typeParams.length; i++) {
+    const v = subst.get(prog.typeParams[i])
+    if (v !== undefined) byIdx.set(typeParamIdx(i), v)
+  }
+
+  const exprRewrite: ExprRewrite = e => {
+    if (typeof e === 'object' && !Array.isArray(e) && 'op' in e && e.op === 'typeParamRef') {
+      const v = byIdx.get(e.idx)
+      if (v !== undefined) return v
+    }
+    return NoRewrite
+  }
+  const rewriteExpr = (e: ResolvedExpr) => mapExpr(e, { expr: exprRewrite })
+
+  const shapeDim = (d: ShapeDim): ShapeDim => {
+    if (typeof d === 'number') return d
+    const v = subst.get(d)
+    return v !== undefined ? v : d
+  }
+
+  const portType = (pt: PortType) => mapPortType(pt, shapeDim)
+
+  const mapInputDecl = (i: InputDecl): InputDecl => {
+    const fresh: InputDecl = { op: 'inputDecl', name: i.name }
+    if (i.type    !== undefined) fresh.type    = portType(i.type)
+    if (i.default !== undefined) fresh.default = rewriteExpr(i.default)
+    return fresh
+  }
+  const mapOutputDecl = (o: OutputDecl): OutputDecl => {
+    const fresh: OutputDecl = { op: 'outputDecl', name: o.name }
+    if (o.type !== undefined) fresh.type = portType(o.type)
+    return fresh
+  }
+
+  const mapDecl = (d: BodyDecl): BodyDecl => {
+    switch (d.op) {
+      case 'regDecl': {
+        const fresh: RegDecl = {
+          op: 'regDecl',
+          name: d.name,
+          init: rewriteExpr(d.init),
+        }
+        if (d.type !== undefined) fresh.type = d.type   // ScalarKind | AliasTypeDef (shared)
+        if (d._liftedFrom !== undefined) fresh._liftedFrom = d._liftedFrom
+        if (d.update !== undefined) fresh.update = rewriteExpr(d.update)
+        return fresh
+      }
+      case 'paramDecl':
+        // Session-scoped by name; preserved by identity (the materializer's
+        // paramHandles table keys on this object).
+        return d
+      case 'instanceDecl': {
+        const fresh: InstanceDecl = {
+          op: 'instanceDecl',
+          name: d.name,
+          typeKey: d.typeKey,
+          typeArgs: d.typeArgs.map(a => ({ param: a.param, value: a.value })),
+          inputs:   d.inputs.map(i => ({ port: i.port, value: rewriteExpr(i.value) })),
+        }
+        return fresh
+      }
+      case 'programDecl':
+        // Nested program decls aren't specialized (they have their own
+        // typeParams scope). Pass through; their `program` field is a
+        // separate ResolvedProgram value, shared by reference.
+        return d
+    }
+  }
+
+  const mapAssign = (a: BodyAssign): BodyAssign => {
+    const fresh: OutputAssign = {
+      op: 'outputAssign',
+      target: a.target,
+      expr: rewriteExpr(a.expr),
+    }
+    return fresh
+  }
+
+  return mkProgram({
+    name: prog.name,
+    typeParams: [],   // emptied: every reference to a typeParam has been substituted
+    ports: {
+      inputs:   prog.ports.inputs.map(mapInputDecl),
+      outputs:  prog.ports.outputs.map(mapOutputDecl),
+      typeDefs: prog.ports.typeDefs,
+    },
+    body: {
+      op: 'block',
+      decls:   prog.body.decls.map(mapDecl),
+      assigns: prog.body.assigns.map(mapAssign),
+    },
+    binderCount: prog.binderCount,
+    programRegistry: prog.programRegistry,   // sub-programs shared
+  })
 }
 
 /**
@@ -54,7 +158,6 @@ function buildSubst(
   typeArgs: ReadonlyMap<TypeParamDecl, number>,
 ): ReadonlyMap<TypeParamDecl, number> {
   const declared = new Set(prog.typeParams)
-  // Extra-arg check: every key in typeArgs must be a declared type-param.
   for (const param of typeArgs.keys()) {
     if (!declared.has(param)) {
       throw new Error(
@@ -63,7 +166,6 @@ function buildSubst(
       )
     }
   }
-  // Build the resolved subst, filling defaults; missing-required-throw.
   const subst = new Map<TypeParamDecl, number>()
   for (const param of prog.typeParams) {
     if (typeArgs.has(param)) {

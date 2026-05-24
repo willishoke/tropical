@@ -32,7 +32,7 @@ import { raiseProgram } from './parse/raise.js'
 import { elaborate, type ExternalProgramResolver } from './ir/elaborator.js'
 import { programTypeFromResolved } from './ir/strata.js'
 import type { ResolvedProgram, PortType } from './ir/nodes.js'
-import { relinkInstanceTypes } from './ir/decl_tables.js'
+import { relinkProgramRegistry } from './ir/decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Program schema
@@ -333,9 +333,9 @@ export function loadProgramAsSession(
   session.outputPortMeta.clear()
   session.inputExprs.clear()
   session.slotCount = 0
-  // Note: typeRegistry, genericTemplatesResolved, resolvedRegistry, and
-  // specializationCache are NOT cleared — they hold the stdlib + any
-  // session-defined types that the loaded program may instantiate.
+  // Note: typeRegistry, programs, and specializationCache are NOT
+  // cleared — they hold the stdlib + any session-defined types that
+  // the loaded program may instantiate.
 
   // Register type defs (aliases, sums, structs) from ports.type_defs before anything else
   for (const td of prog.ports?.type_defs ?? []) {
@@ -417,12 +417,12 @@ export function loadProgramAsSession(
  * `ParsedProgramNode`, elaborated against the session's type registry to a
  * `ResolvedProgram`, and (for non-generics) compiled through
  * `programTypeFromResolved`. Generic programs (with `type_params`) are
- * stored in `genericTemplatesResolved` and materialize on instantiation via
- * `resolveProgramType`.
+ * stored in `session.programs` as raw templates and materialize on
+ * instantiation via `resolveProgramType`.
  */
 export function loadProgramAsType(
   prog: ProgramNode,
-  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'sumTypeRegistry' | 'structTypeRegistry' | 'inlineNested'>>,
+  session: Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'specializationCache' | 'programs'> & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'sumTypeRegistry' | 'structTypeRegistry' | 'inlineNested'>>,
 ): Compiled | undefined {
   // Register type defs (aliases, sums, structs) from type_defs before processing subprograms
   for (const td of prog.ports?.type_defs ?? []) {
@@ -448,36 +448,33 @@ export function loadProgramAsType(
     loadProgramAsType({ ...sub.program, name: sub.name }, session)
   }
 
-  // Raise to ParsedProgramNode + elaborate against the session-built registry.
-  // The external resolver lets nested instanceDecls reference previously
-  // registered sibling programs (concrete or generic).
+  // Raise to ParsedProgramNode + elaborate against the session-built
+  // registry. The external resolver lets nested instanceDecls
+  // reference previously registered sibling programs — generic
+  // templates and concrete programs both live in `session.programs`.
   const parsed = raiseProgram(prog)
   const externalResolver: ExternalProgramResolver = name => {
-    const resolvedTemplate = session.genericTemplatesResolved.get(name)
-    if (resolvedTemplate) return resolvedTemplate
-    const cached = session.resolvedRegistry.get(name)
+    const cached = session.programs.get(name)
     if (cached) return cached
-    // Trigger lazy load (e.g. stdlib resolver) which populates resolvedRegistry.
+    // Trigger lazy load (e.g. stdlib resolver) which populates session.programs.
     if (session.typeResolver) {
       session.typeResolver(name)
-      const lateGeneric = session.genericTemplatesResolved.get(name)
-      if (lateGeneric) return lateGeneric
-      const lateConcrete = session.resolvedRegistry.get(name)
-      if (lateConcrete) return lateConcrete
+      const late = session.programs.get(name)
+      if (late) return late
     }
     return undefined
   }
   const resolved = elaborate(parsed, externalResolver)
 
-  // Generic: stash the resolved template, defer compilation to instantiation.
+  // Generic: stash the raw template; specialization happens lazily.
   if (resolved.typeParams.length > 0) {
-    session.genericTemplatesResolved.set(prog.name, resolved)
+    session.programs.set(prog.name, resolved)
     return undefined
   }
 
   const type = programTypeFromResolved(resolved, new Map(), { inlineNested: session.inlineNested })
   session.typeRegistry.set(prog.name, type)
-  session.resolvedRegistry.set(prog.name, resolved)
+  session.programs.set(prog.name, type.prog)   // canonical post-strata
   return type
 }
 
@@ -583,13 +580,13 @@ const __dirname = dirname(__filename)
 
 type StdlibTarget =
   | Map<string, Compiled>
-  | (Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'>
+  | (Pick<SessionState, 'typeRegistry' | 'instanceRegistry' | 'paramRegistry' | 'specializationCache' | 'programs'>
     & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'inlineNested'>>)
 
 function asLoadSession(target: StdlibTarget): Pick<
   SessionState,
   'typeRegistry' | 'instanceRegistry' | 'paramRegistry'
-  | 'specializationCache' | 'genericTemplatesResolved' | 'resolvedRegistry'
+  | 'specializationCache' | 'programs'
 > & Partial<Pick<SessionState, 'typeAliasRegistry' | 'typeResolver' | 'inlineNested'>> {
   if (target instanceof Map) {
     return {
@@ -597,8 +594,7 @@ function asLoadSession(target: StdlibTarget): Pick<
       instanceRegistry: new Map(),
       paramRegistry: new Map(),
       specializationCache: new Map(),
-      genericTemplatesResolved: new Map(),
-      resolvedRegistry: new Map(),
+      programs: new Map(),
     }
   }
   return target
@@ -611,11 +607,10 @@ function asLoadSession(target: StdlibTarget): Pick<
  *     read → extractMarkdown → parseProgram → elaborate → ResolvedProgram →
  *     strataPipeline → loadProgramDefFromResolved
  *
- * Generic programs (with type_params) land in `genericTemplatesResolved`;
- * non-generics get compiled and added to `typeRegistry`. Both branches also
- * stash the pre-strata `ResolvedProgram` in `resolvedRegistry` so that
- * later `define_program` calls can resolve cross-program references via
- * the elaborator.
+ * Both generic templates and non-generic programs land in
+ * `session.programs` (the unified registry); non-generics ALSO get
+ * compiled and added to `typeRegistry`. Cross-program references via
+ * the elaborator find their targets in `session.programs`.
  *
  * Browser builds use `loadStdlibFromMap` (in `stdlib_loader.ts`) directly
  * with a bundled JSON map (see compiler/stdlib_bundled.ts, generated by
@@ -699,20 +694,23 @@ function loadStdlibFromResolved(
   const processedByName = new Map<string, ResolvedProgram>()
   for (const [name, prog] of localResolved) {
     if (prog.typeParams.length > 0) {
-      session.genericTemplatesResolved.set(name, prog)
+      // Generic template: store raw (typeParams populated) in the
+      // unified registry. Specialization happens at instantiation
+      // time via resolveProgramType.
+      session.programs.set(name, prog)
       continue
     }
     if (session.typeRegistry.has(name)) continue
-    const relinked = relinkInstanceTypes(prog, processedByName)
+    const relinked = relinkProgramRegistry(prog, processedByName)
     const type = programTypeFromResolved(relinked, new Map(), { inlineNested: session.inlineNested })
     session.typeRegistry.set(name, type)
-    session.resolvedRegistry.set(name, type.prog)   // canonical processed (not raw)
+    session.programs.set(name, type.prog)   // canonical post-strata
     processedByName.set(name, type.prog)
   }
 
   // typeResolver: callers fall back here when looking up a stdlib type
   // that wasn't pre-registered concretely (e.g. a generic template name
-  // that resolveProgramType then re-checks against genericTemplatesResolved).
+  // that resolveProgramType then re-checks against session.programs).
   if (!session.typeResolver) {
     session.typeResolver = (n: string): Compiled | undefined => {
       return session.typeRegistry.get(n)

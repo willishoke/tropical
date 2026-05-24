@@ -69,7 +69,8 @@ import type {
   BinderDecl,
   InputRef, RegRef, ParamRef, TypeParamRef, BindingRef,
   NestedOut,
-  RegIdx, InputIdx, OutputIdx, ParamIdx, InstanceIdx, TypeParamIdx,
+  RegIdx, InputIdx, OutputIdx, ParamIdx, InstanceIdx, TypeParamIdx, BinderIdx,
+  ProgramKey,
   Tag, Match, MatchArm,
   Let,
   Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith,
@@ -80,7 +81,8 @@ import type {
 } from './nodes.js'
 import {
   ElaborationError,
-  regIdx, inputIdx, outputIdx, paramIdx, instanceIdx, typeParamIdx,
+  regIdx, inputIdx, outputIdx, paramIdx, instanceIdx, typeParamIdx, binderIdx,
+  programKey,
 } from './nodes.js'
 import { mkProgram } from './decl_tables.js'
 import { findInstanceCycles } from './lowering/cycle_break.js'
@@ -173,6 +175,20 @@ interface Scope {
   variantOf: Map<string, SumVariant>
   /** Active anonymous binders (let/combinator/match-arm). */
   binders: Map<string, BinderDecl>
+  /** Next-fresh BinderIdx for this program. Mutated by `mintBinder`
+   *  each time a binder is created (let entry, combinator binder,
+   *  match-arm payload binder). Each program (including each nested
+   *  program) has its own binder namespace; nested programs start
+   *  fresh from 0 even when their elaboration scope has a `parent`
+   *  (the parent linkage is only for type-defs and program
+   *  registrations, not for binders). The final value is copied into
+   *  `ResolvedProgram.binderCount` when the program is built. */
+  binderCount: number
+  /** Accumulator for the program-being-elaborated's `programRegistry`.
+   *  Each time the elaborator creates an InstanceDecl, the target
+   *  program is recorded here keyed by ProgramKey. The map is passed
+   *  to `mkProgram` when the enclosing program is built. */
+  programRegistryEntries: Map<ProgramKey, ResolvedProgram>
   /** Parent scope — for nested programs to read outer type-defs and
    *  external program types. (Decls themselves don't leak — only
    *  type-defs and program registrations.) */
@@ -201,6 +217,8 @@ function emptyScope(parent?: Scope): Scope {
     typeDefs: new Map(),
     variantOf: new Map(),
     binders: new Map(),
+    binderCount: 0,
+    programRegistryEntries: new Map(),
     parent,
   }
   // Nested programs inherit the resolver from their parent scope.
@@ -215,12 +233,13 @@ function emptyScope(parent?: Scope): Scope {
  *  fixed semantic intent (a value-producing reference), and we try each
  *  applicable scope. */
 function lookupValueRef(scope: Scope, name: string): ResolvedExprOp | null {
-  // Local binders (innermost-first via the Scope's own state). Binders
-  // are the one ref kind that keeps a direct pointer — see issue #156
-  // for the locally-nameless migration that would index them too.
+  // Local binders (innermost-first via the Scope's own state).
+  // BindingRef carries the binder's unique-per-program idx (minted by
+  // `mintBinder`); shadowing is structurally impossible because each
+  // mint produces a fresh idx.
   const binder = scope.binders.get(name)
   if (binder) {
-    const ref: BindingRef = { op: 'bindingRef', decl: binder }
+    const ref: BindingRef = { op: 'bindingRef', idx: binder.idx }
     return ref
   }
   const reg = scope.regs.get(name)
@@ -416,6 +435,8 @@ function elaborateProgram(
     typeParams,
     ports,
     body: block,
+    binderCount: scope.binderCount,
+    programRegistry: scope.programRegistryEntries,
   })
 
   // Phase 4b: strict cycle policy. Cycles in source code that don't
@@ -721,10 +742,21 @@ function registerInstanceDecl(d: ParsedInstanceDecl, scope: Scope): InstanceDecl
       `to resolve cross-program references (e.g. stdlib types).`,
     )
   }
+  const tk = programKey(targetProgram.name)
+  scope.programRegistryEntries.set(tk, targetProgram)
+  // Also pull in the target's transitive registry so the enclosing
+  // program's registry covers every program any sub-instance might
+  // reach (matches the merge that buildProgramRegistry used to do
+  // automatically in Phase 4a from the `.type` pointer walk).
+  for (const [k, v] of targetProgram.programRegistry) {
+    if (!scope.programRegistryEntries.has(k)) {
+      scope.programRegistryEntries.set(k, v)
+    }
+  }
   const decl: InstanceDecl = {
     op: 'instanceDecl',
     name: d.name,
-    type: targetProgram,
+    typeKey: tk,
     typeArgs: [],
     inputs: [],
   }
@@ -780,7 +812,12 @@ function resolveInstanceArgs(
   resolved: InstanceDecl,
   scope: Scope,
 ): void {
-  const targetProgram = resolved.type
+  const targetProgram = scope.programRegistryEntries.get(resolved.typeKey)
+  if (!targetProgram) {
+    throw new ElaborationError(
+      `internal: instance '${resolved.name}' typeKey '${resolved.typeKey}' not in scope registry`,
+    )
+  }
   // Type args: resolve param NameRef → position in target's typeParams[].
   for (const entry of parsed.type_args ?? []) {
     const pos = targetProgram.typeParams.findIndex(p => p.name === entry.param.name)
@@ -943,7 +980,7 @@ function resolveParsedBinding(node: ParsedBinding, scope: Scope): BindingRef {
       `binding '${node.name}' is not in scope (parser said it was bound — likely a parser bug)`,
     )
   }
-  return { op: 'bindingRef', decl: binder }
+  return { op: 'bindingRef', idx: binder.idx }
 }
 
 function resolveNestedOut(node: ParsedNestedOut, scope: Scope): NestedOut {
@@ -959,9 +996,14 @@ function resolveNestedOut(node: ParsedNestedOut, scope: Scope): NestedOut {
   }
   // node.output is NameRef | number; the parser preserves whichever form
   // the user wrote. Output position is into the TARGET program's
-  // ports.outputs[] (inst.type is the still-pointer-based ResolvedProgram
-  // for now; the topological registry build ensures it's canonical).
-  const targetProgram = inst.type
+  // ports.outputs[]; resolved via the in-scope registry built during
+  // elaboration.
+  const targetProgram = scope.programRegistryEntries.get(inst.typeKey)
+  if (!targetProgram) {
+    throw new ElaborationError(
+      `internal: instance '${inst.name}' typeKey '${inst.typeKey}' not in scope registry`,
+    )
+  }
   let outIdxRaw: number
   if (typeof node.output === 'number') {
     if (node.output < 0 || node.output >= targetProgram.ports.outputs.length) {
@@ -1196,7 +1238,7 @@ function resolveMatch(node: ParsedMatch, scope: Scope): Match {
         )
       }
       bindByField.delete(field.name)
-      return { op: 'binderDecl', name: bindName }
+      return mintBinder(scope, bindName)
     })
     if (bindByField.size > 0) {
       const extras = [...bindByField.keys()].join(', ')
@@ -1241,7 +1283,7 @@ function resolveLet(node: ParsedLet, scope: Scope): Let {
   const prior: Array<{ name: string; was: BinderDecl | undefined }> = []
   try {
     for (const [name, valueExpr] of Object.entries(node.bind)) {
-      const binder: BinderDecl = { op: 'binderDecl', name }
+      const binder = mintBinder(scope, name)
       const value = resolveExpr(valueExpr, scope)
       binders.push({ binder, value })
       // After resolving the value, push this binder so subsequent
@@ -1260,8 +1302,8 @@ function resolveLet(node: ParsedLet, scope: Scope): Let {
 }
 
 function resolveFold(node: ParsedFold, scope: Scope): Fold {
-  const acc: BinderDecl = { op: 'binderDecl', name: node.acc_var }
-  const elem: BinderDecl = { op: 'binderDecl', name: node.elem_var }
+  const acc  = mintBinder(scope, node.acc_var)
+  const elem = mintBinder(scope, node.elem_var)
   const body = withBinders(scope, [acc, elem], () => resolveExpr(node.body, scope))
   return {
     op: 'fold',
@@ -1272,8 +1314,8 @@ function resolveFold(node: ParsedFold, scope: Scope): Fold {
 }
 
 function resolveScan(node: ParsedScan, scope: Scope): Scan {
-  const acc: BinderDecl = { op: 'binderDecl', name: node.acc_var }
-  const elem: BinderDecl = { op: 'binderDecl', name: node.elem_var }
+  const acc  = mintBinder(scope, node.acc_var)
+  const elem = mintBinder(scope, node.elem_var)
   const body = withBinders(scope, [acc, elem], () => resolveExpr(node.body, scope))
   return {
     op: 'scan',
@@ -1284,13 +1326,13 @@ function resolveScan(node: ParsedScan, scope: Scope): Scan {
 }
 
 function resolveGenerate(node: ParsedGenerate, scope: Scope): Generate {
-  const iter: BinderDecl = { op: 'binderDecl', name: node.var }
+  const iter = mintBinder(scope, node.var)
   const body = withBinders(scope, [iter], () => resolveExpr(node.body, scope))
   return { op: 'generate', count: resolveExpr(node.count, scope), iter, body }
 }
 
 function resolveIterate(node: ParsedIterate, scope: Scope): Iterate {
-  const iter: BinderDecl = { op: 'binderDecl', name: node.var }
+  const iter = mintBinder(scope, node.var)
   const body = withBinders(scope, [iter], () => resolveExpr(node.body, scope))
   return {
     op: 'iterate',
@@ -1301,7 +1343,7 @@ function resolveIterate(node: ParsedIterate, scope: Scope): Iterate {
 }
 
 function resolveChain(node: ParsedChain, scope: Scope): Chain {
-  const iter: BinderDecl = { op: 'binderDecl', name: node.var }
+  const iter = mintBinder(scope, node.var)
   const body = withBinders(scope, [iter], () => resolveExpr(node.body, scope))
   return {
     op: 'chain',
@@ -1312,14 +1354,14 @@ function resolveChain(node: ParsedChain, scope: Scope): Chain {
 }
 
 function resolveMap2(node: ParsedMap2, scope: Scope): Map2 {
-  const elem: BinderDecl = { op: 'binderDecl', name: node.elem_var }
+  const elem = mintBinder(scope, node.elem_var)
   const body = withBinders(scope, [elem], () => resolveExpr(node.body, scope))
   return { op: 'map2', over: resolveExpr(node.over, scope), elem, body }
 }
 
 function resolveZipWith(node: ParsedZipWith, scope: Scope): ZipWith {
-  const x: BinderDecl = { op: 'binderDecl', name: node.x_var }
-  const y: BinderDecl = { op: 'binderDecl', name: node.y_var }
+  const x = mintBinder(scope, node.x_var)
+  const y = mintBinder(scope, node.y_var)
   const body = withBinders(scope, [x, y], () => resolveExpr(node.body, scope))
   return {
     op: 'zipWith',
@@ -1332,6 +1374,16 @@ function resolveZipWith(node: ParsedZipWith, scope: Scope): ZipWith {
 // ─────────────────────────────────────────────────────────────
 // Binder scope management
 // ─────────────────────────────────────────────────────────────
+
+/** Allocate a fresh `BinderDecl` with a unique-per-program idx. The
+ *  caller is responsible for pushing the binder into scope (via
+ *  `withBinders` or hand-rolled push/pop). Idx assignment and scope
+ *  push are separated because `let`-style sequential binding needs to
+ *  mint a binder before pushing it (each binder's value is resolved in
+ *  a scope that includes only prior binders). */
+function mintBinder(scope: Scope, name: string): BinderDecl {
+  return { op: 'binderDecl', name, idx: binderIdx(scope.binderCount++) }
+}
 
 function withBinders<T>(scope: Scope, binders: BinderDecl[], body: () => T): T {
   const prior: Array<{ name: string; was: BinderDecl | undefined }> = []

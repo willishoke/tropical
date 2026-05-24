@@ -30,11 +30,12 @@
  */
 
 import type {
-  ResolvedExpr, ResolvedExprOp,
+  ResolvedExpr, ResolvedExprOp, ResolvedProgram,
   RegDecl, InputDecl, InstanceDecl, OutputDecl, ParamDecl, PortType,
   InputIdx, OutputIdx, ParamIdx, InstanceIdx,
 } from './nodes.js'
 import { instanceIdx, inputIdx as inputIdxOf } from './nodes.js'
+import { getInstanceType } from './decl_tables.js'
 import {
   type TempIdx, type StateRegIdx, type ArraySlotIdx, type ModuleSlotIdx,
   type InputPortIdx,
@@ -519,12 +520,10 @@ class Emitter {
       const obj = node as Record<string, unknown>
       const op = String(obj.op)
       // Indexed refs: key on op + integer idx (stable across rewrites).
-      // BindingRef keeps the pointer-based decl identity (issue #156).
       if (op === 'regRef' || op === 'paramRef'
-          || op === 'inputRef' || op === 'typeParamRef') {
+          || op === 'inputRef' || op === 'typeParamRef'
+          || op === 'bindingRef') {
         key = `op:${op}|idx=${obj.idx as number}`
-      } else if (op === 'bindingRef') {
-        key = `op:${op}|decl=${this.declIdOf(obj.decl as object)}`
       } else if (op === 'nestedOut') {
         key = `op:${op}|inst=${obj.instance as number}|out=${obj.output as number}`
       } else {
@@ -782,7 +781,7 @@ class Emitter {
     outputExprs: ResolvedExpr[],
     registerExprs: (ResolvedExpr | null)[],
     outputPortScalarCounts: number[],
-    nestedInstances?: InstanceDecl[],
+    nested: NestedContext,
   ): FlatProgram {
     const output_targets: TempIdx[] = []
     const register_targets: RegTarget[] = []
@@ -814,12 +813,13 @@ class Emitter {
     // pre-child boundary.
     const per_child_pre_input: NInstr[][] = []
     const preChildBaseline = this.instrs.length
-    if (nestedInstances !== undefined) {
+    {
       const slotMaps = this.slots.nestedInputSlots
-      // nestedInstances is body-decl order = prog.instances order, so
+      // nested.instances is body-decl order = prog.instances order, so
       // position k in this array IS the InstanceIdx for that child.
-      for (let k = 0; k < nestedInstances.length; k++) {
-        const decl = nestedInstances[k]
+      // Empty list = legacy flat path, loop body never runs.
+      for (let k = 0; k < nested.instances.length; k++) {
+        const decl = nested.instances[k]
         const childStart = this.instrs.length
         const childSlotMap = slotMaps?.get(instanceIdx(k))
         if (childSlotMap !== undefined) {
@@ -832,7 +832,7 @@ class Emitter {
           // killing env_smooth evolution).
           const wiredByPort = new Map<number, ResolvedExpr>()
           for (const inp of decl.inputs) wiredByPort.set(inp.port as number, inp.value)
-          const ports = decl.type.ports.inputs
+          const ports = getInstanceType(nested.enclosing, decl).ports.inputs
           for (let i = 0; i < ports.length; i++) {
             const slotIdx = childSlotMap.get(inputIdxOf(i))
             if (slotIdx === undefined) continue
@@ -1016,10 +1016,20 @@ export interface EmitResolvedInputs {
    *  WriteSlot instructions land in `per_child_pre_input[k]`, parallel
    *  to `nestedInstances[k]`, so the engine can run each block
    *  immediately before recursing into its corresponding child. */
-  nestedInstances?: InstanceDecl[]
+  /** M11 fractal context. The list is empty when this kernel has no
+   *  surviving sub-instances (legacy flat path); the `enclosing`
+   *  program is always present because it's the program whose kernel
+   *  we're emitting — there's no "missing enclosing" case. Resolving
+   *  each `instances[k].typeKey` reads `enclosing.programRegistry`. */
+  nested: NestedContext
+}
+
+export interface NestedContext {
+  instances: InstanceDecl[]
+  enclosing: ResolvedProgram
 }
 
 export function emitResolvedProgram(input: EmitResolvedInputs): FlatProgram {
   const e = new Emitter(input.slots, input.stateInit, input.stateRegTypes, input.inputPortTypes)
-  return e.emitProgram(input.outputExprs, input.registerExprs, input.outputPortScalarCounts, input.nestedInstances)
+  return e.emitProgram(input.outputExprs, input.registerExprs, input.outputPortScalarCounts, input.nested)
 }

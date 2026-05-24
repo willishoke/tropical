@@ -22,11 +22,11 @@
  * Substitution discipline (the categorical win over the legacy):
  * the legacy `compiler/lower_arrays.ts` substitutes by name string,
  * which forced an elaborate "shielded scope" map for nested binders
- * with shadowing variable names. Here every `BindingRef.decl` is a
- * pointer to a `BinderDecl` set up by the elaborator — substitution
- * is by identity (Map<BinderDecl, ResolvedExpr>), so shadowing is
- * structurally impossible and we don't carry the legacy's shielding
- * apparatus.
+ * with shadowing variable names. Here every `BindingRef.idx` is a
+ * unique-per-program integer minted by the elaborator at binder-
+ * creation time — substitution is by idx-keyed map
+ * (`Map<BinderIdx, ResolvedExpr>`), so shadowing is structurally
+ * impossible and we don't carry the legacy's shielding apparatus.
  *
  * Sharing: each combinator iteration uses a fresh `WeakMap` memo. A
  * memo is only valid for one substitution map (the bindings present at
@@ -40,62 +40,70 @@ import type {
   ResolvedProgram,
   ResolvedExpr, ResolvedExprOp,
   BodyDecl, BodyAssign, OutputAssign,
-  BinderDecl,
+  InputDecl, RegDecl, InstanceDecl,
+  BinderDecl, BinderIdx,
+  ProgramKey,
   Tag, Match, MatchArm,
 } from './nodes.js'
-import { cloneResolvedProgram } from './clone.js'
+import { mkProgram, getInstanceType } from './decl_tables.js'
 
 // ─────────────────────────────────────────────────────────────
 // Public entry
 // ─────────────────────────────────────────────────────────────
 
 /**
- * arrayLower clones the input program (when work is needed) and mutates
- * the clone's decls in place. Why:
+ * Functional rewrite: produces a fresh `ResolvedProgram` (or returns
+ * the input by reference when no lowering is needed). Indexed refs in
+ * `body.assigns` and decls carry idx values (post-Phase-1), so
+ * substituting expressions while preserving decl positions keeps
+ * every ref valid without any pointer-identity discipline.
  *
- *   - Decl identity must be preserved across this pass. A `RegRef` /
- *     `DelayRef` in `body.assigns` (a NextUpdate.target) is matched
- *     against the decls in `body.decls` by `===` identity in
- *     `loadProgramDefFromResolved`'s slot table. Replacing decls with
- *     `{...decl, init, update}` (the natural functional approach)
- *     would orphan every existing ref and break the slot lookup.
- *
- *   - Mutating the *input* would surprise callers — strataPipeline can
- *     receive the same `ResolvedProgram` multiple times (e.g.
- *     `phase_c_equiv.test.ts` runs each fixture through the pipeline
- *     once, then re-runs partial paths for byte-equality). Side
- *     effects would corrupt subsequent runs.
- *
- *   - Cloning produces fresh decls; mutating those clones is safe.
- *     The `progNeedsLowering` precheck means we only clone (and incur
- *     allocation cost) when there's actual work to do — for trivial
- *     programs the input passes through unchanged by reference.
+ * M11 fractal: surviving `InstanceDecl`s' sub-programs are lowered
+ * recursively via `prog.programRegistry` — we build a new registry
+ * with each entry mapped, and the InstanceDecls keep their `typeKey`
+ * pointing at the same key (the LOWERED sub-program now lives behind
+ * that key in the new registry).
  */
 export function arrayLower(prog: ResolvedProgram): ResolvedProgram {
   if (!progNeedsLowering(prog)) return prog
 
-  const cloned = cloneResolvedProgram(prog)
   const memo = new WeakMap<ResolvedExprOp, ResolvedExpr>()
   const empty: SubstMap = EMPTY_SUBST
 
-  // Lower input defaults in place on the cloned port decls. Defaults
-  // are typically literals; combinators here are uncommon but legal.
-  for (const inp of cloned.ports.inputs) {
-    if (inp.default !== undefined) {
-      const lowered = lowerExpr(inp.default, empty, memo)
-      if (lowered !== inp.default) inp.default = lowered
-    }
+  // Recursively lower each sub-program in the registry. The
+  // InstanceDecls' typeKeys are stable; the registry entry behind a
+  // given key is now the lowered version.
+  const newRegistry = new Map<ProgramKey, ResolvedProgram>()
+  for (const [key, subProg] of prog.programRegistry) {
+    newRegistry.set(key, arrayLower(subProg))
   }
 
-  for (const decl of cloned.body.decls) {
-    lowerDeclInPlace(decl, empty, memo)
-  }
+  // Lower port input defaults (uncommon but admissible).
+  const newInputs = prog.ports.inputs.map(i => {
+    if (i.default === undefined) return i
+    const lowered = lowerExpr(i.default, empty, memo)
+    if (lowered === i.default) return i
+    const fresh: InputDecl = { op: 'inputDecl', name: i.name }
+    if (i.type !== undefined) fresh.type = i.type
+    fresh.default = lowered
+    return fresh
+  })
 
-  // Rewrite assigns. Their `target` refs (the cloned RegDecl/DelayDecl
-  // objects via the cloner's dedup table) carry through unchanged.
-  cloned.body.assigns = cloned.body.assigns.map(a => lowerAssign(a, empty, memo))
+  const newDecls: BodyDecl[] = prog.body.decls.map(d => lowerDecl(d, empty, memo))
+  const newAssigns: BodyAssign[] = prog.body.assigns.map(a => lowerAssign(a, empty, memo))
 
-  return cloned
+  return mkProgram({
+    name: prog.name,
+    typeParams: prog.typeParams,
+    ports: {
+      inputs: newInputs,
+      outputs: prog.ports.outputs,
+      typeDefs: prog.ports.typeDefs,
+    },
+    body: { op: 'block', decls: newDecls, assigns: newAssigns },
+    binderCount: prog.binderCount,
+    programRegistry: newRegistry,
+  })
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -107,7 +115,7 @@ function progNeedsLowering(prog: ResolvedProgram): boolean {
     if (inp.default !== undefined && exprNeedsLowering(inp.default)) return true
   }
   for (const decl of prog.body.decls) {
-    if (declNeedsLowering(decl)) return true
+    if (declNeedsLowering(decl, prog)) return true
   }
   for (const assign of prog.body.assigns) {
     if (exprNeedsLowering(assign.expr)) return true
@@ -115,17 +123,19 @@ function progNeedsLowering(prog: ResolvedProgram): boolean {
   return false
 }
 
-function declNeedsLowering(decl: BodyDecl): boolean {
+function declNeedsLowering(decl: BodyDecl, enclosing: ResolvedProgram): boolean {
   switch (decl.op) {
     case 'regDecl':
       return exprNeedsLowering(decl.init)
         || (decl.update !== undefined && exprNeedsLowering(decl.update))
     case 'paramDecl':    return false
-    case 'instanceDecl':
+    case 'instanceDecl': {
       // M11 fractal: also check sub-program for surviving combinators.
       // Sub-program bodies are lowered recursively when arrayLower fires.
+      const subType = getInstanceType(enclosing, decl)
       return decl.inputs.some(i => exprNeedsLowering(i.value))
-        || progNeedsLowering(decl.type)
+        || progNeedsLowering(subType)
+    }
     case 'programDecl':  return false
   }
 }
@@ -171,21 +181,21 @@ function opNeedsLowering(node: ResolvedExprOp): boolean {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Substitution map — keyed by BinderDecl identity (no name strings)
+// Substitution map — keyed by BinderIdx (unique-per-program integer)
 // ─────────────────────────────────────────────────────────────
 
-type SubstMap = ReadonlyMap<BinderDecl, ResolvedExpr>
+type SubstMap = ReadonlyMap<BinderIdx, ResolvedExpr>
 const EMPTY_SUBST: SubstMap = new Map()
 
-/** Extend `subst` with one (decl → expr) pair. Returns a fresh map. */
-function extend1(subst: SubstMap, decl: BinderDecl, expr: ResolvedExpr): SubstMap {
+/** Extend `subst` with one (idx → expr) pair. Returns a fresh map. */
+function extend1(subst: SubstMap, idx: BinderIdx, expr: ResolvedExpr): SubstMap {
   const m = new Map(subst)
-  m.set(decl, expr)
+  m.set(idx, expr)
   return m
 }
 
 /** Extend `subst` with multiple pairs. Returns a fresh map. */
-function extendN(subst: SubstMap, pairs: Array<[BinderDecl, ResolvedExpr]>): SubstMap {
+function extendN(subst: SubstMap, pairs: Array<[BinderIdx, ResolvedExpr]>): SubstMap {
   const m = new Map(subst)
   for (const [d, e] of pairs) m.set(d, e)
   return m
@@ -197,44 +207,44 @@ function extendN(subst: SubstMap, pairs: Array<[BinderDecl, ResolvedExpr]>): Sub
 
 type Memo = WeakMap<ResolvedExprOp, ResolvedExpr>
 
-/** Lower a body decl in place. Mutates the decl's expression-shaped
- *  fields when lowering produces a different expression; otherwise
- *  leaves them alone. Decl identity is preserved by reference. */
-function lowerDeclInPlace(decl: BodyDecl, subst: SubstMap, memo: Memo): void {
+/** Lower a body decl, returning a fresh decl when lowering produced
+ *  a different expression. Pass-through (by reference) when nothing
+ *  changed — preserves DAG sharing in the cheap case. */
+function lowerDecl(decl: BodyDecl, subst: SubstMap, memo: Memo): BodyDecl {
   switch (decl.op) {
     case 'regDecl': {
-      const init = lowerExpr(decl.init, subst, memo)
-      if (init !== decl.init) decl.init = init
-      if (decl.update !== undefined) {
-        const update = lowerExpr(decl.update, subst, memo)
-        if (update !== decl.update) decl.update = update
-      }
-      return
+      const init   = lowerExpr(decl.init, subst, memo)
+      const update = decl.update !== undefined ? lowerExpr(decl.update, subst, memo) : undefined
+      if (init === decl.init && update === decl.update) return decl
+      const fresh: RegDecl = { op: 'regDecl', name: decl.name, init }
+      if (decl.type !== undefined) fresh.type = decl.type
+      if (decl._liftedFrom !== undefined) fresh._liftedFrom = decl._liftedFrom
+      if (update !== undefined) fresh.update = update
+      return fresh
     }
     case 'paramDecl':
     case 'programDecl':
-      return
+      return decl
     case 'instanceDecl': {
-      // M11 fractal: InstanceDecls survive through strata. Lower this
-      // instance's input expressions AND recursively lower the sub-
-      // program's body (its own `let`/`fold`/combinators must be
-      // lowered here — arrayLower only sees the top-level program of
-      // each call, and the per-type strata that constructed this
-      // sub-program lowered ITS top-level but not its grand-children).
-      for (const i of decl.inputs) {
+      // M11 fractal: surviving InstanceDecls keep their typeKey; the
+      // sub-program behind that key was already lowered into the new
+      // registry by arrayLower's top-level loop. We just lower this
+      // instance's input wire expressions in the current scope.
+      let changed = false
+      const newInputs = decl.inputs.map(i => {
         const value = lowerExpr(i.value, subst, memo)
-        if (value !== i.value) i.value = value
+        if (value !== i.value) changed = true
+        return value === i.value ? i : { port: i.port, value }
+      })
+      if (!changed) return decl
+      const fresh: InstanceDecl = {
+        op: 'instanceDecl',
+        name: decl.name,
+        typeKey: decl.typeKey,
+        typeArgs: decl.typeArgs.map(a => ({ param: a.param, value: a.value })),
+        inputs: newInputs,
       }
-      // Recurse into the sub-program's body. The clone-then-lower
-      // discipline still holds because cloneResolvedProgram deep-clones
-      // through InstanceDecl.type, so `decl.type` is a fresh tree we
-      // can mutate.
-      const subEmpty: SubstMap = EMPTY_SUBST
-      for (const subDecl of decl.type.body.decls) {
-        lowerDeclInPlace(subDecl, subEmpty, memo)
-      }
-      decl.type.body.assigns = decl.type.body.assigns.map(a => lowerAssign(a, subEmpty, memo))
-      return
+      return fresh
     }
   }
 }
@@ -286,7 +296,7 @@ function lowerOp(node: ResolvedExprOp, subst: SubstMap, memo: Memo): ResolvedExp
     //    entered) survive — the caller's wrapping iteration will resolve
     //    them when it pushes its own bindings. ──
     case 'bindingRef': {
-      const v = subst.get(node.decl)
+      const v = subst.get(node.idx)
       return v !== undefined ? v : node
     }
 
@@ -407,7 +417,7 @@ function lowerLet(
   let cur: SubstMap = subst
   for (const entry of node.binders) {
     const value = lowerExpr(entry.value, cur, new WeakMap())
-    cur = extend1(cur, entry.binder, value)
+    cur = extend1(cur, entry.binder.idx, value)
   }
   return lowerExpr(node.in, cur, new WeakMap())
 }
@@ -426,7 +436,7 @@ function lowerFold(
   }
   let acc = lowerExpr(node.init, subst, memo)
   for (const elem of overLowered) {
-    const inner = extendN(subst, [[node.acc, acc], [node.elem, elem]])
+    const inner = extendN(subst, [[node.acc.idx, acc], [node.elem.idx, elem]])
     acc = lowerExpr(node.body, inner, new WeakMap())
   }
   return acc
@@ -448,7 +458,7 @@ function lowerScan(
   const out: ResolvedExpr[] = []
   let acc = lowerExpr(node.init, subst, memo)
   for (const elem of overLowered) {
-    const inner = extendN(subst, [[node.acc, acc], [node.elem, elem]])
+    const inner = extendN(subst, [[node.acc.idx, acc], [node.elem.idx, elem]])
     acc = lowerExpr(node.body, inner, new WeakMap())
     out.push(acc)
   }
@@ -469,7 +479,7 @@ function lowerGenerate(
   }
   const out: ResolvedExpr[] = []
   for (let i = 0; i < n; i++) {
-    const inner = extend1(subst, node.iter, i)
+    const inner = extend1(subst, node.iter.idx, i)
     out.push(lowerExpr(node.body, inner, new WeakMap()))
   }
   return out
@@ -492,7 +502,7 @@ function lowerIterate(
   let cur = lowerExpr(node.init, subst, memo)
   for (let i = 0; i < n; i++) {
     out.push(cur)
-    const inner = extend1(subst, node.iter, cur)
+    const inner = extend1(subst, node.iter.idx, cur)
     cur = lowerExpr(node.body, inner, new WeakMap())
   }
   return out
@@ -512,7 +522,7 @@ function lowerChain(
   }
   let cur = lowerExpr(node.init, subst, memo)
   for (let i = 0; i < n; i++) {
-    const inner = extend1(subst, node.iter, cur)
+    const inner = extend1(subst, node.iter.idx, cur)
     cur = lowerExpr(node.body, inner, new WeakMap())
   }
   return cur
@@ -529,7 +539,7 @@ function lowerMap2(
     throw new Error(`arrayLower: map2's 'over' did not lower to a static array`)
   }
   return overLowered.map(e => {
-    const inner = extend1(subst, node.elem, e)
+    const inner = extend1(subst, node.elem.idx, e)
     return lowerExpr(node.body, inner, new WeakMap())
   })
 }
@@ -549,7 +559,7 @@ function lowerZipWith(
   const n = Math.min(aLowered.length, bLowered.length)
   const out: ResolvedExpr[] = []
   for (let i = 0; i < n; i++) {
-    const inner = extendN(subst, [[node.x, aLowered[i]], [node.y, bLowered[i]]])
+    const inner = extendN(subst, [[node.x.idx, aLowered[i]], [node.y.idx, bLowered[i]]])
     out.push(lowerExpr(node.body, inner, new WeakMap()))
   }
   return out

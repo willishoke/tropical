@@ -26,6 +26,7 @@ import type {
   InputIdx, OutputIdx, InstanceIdx, ParamIdx,
 } from './nodes.js'
 import { inputIdx, outputIdx, instanceIdx } from './nodes.js'
+import { getInstanceType } from './decl_tables.js'
 import type { SessionState, ExprNode } from '../session.js'
 import type {
   InstanceFunction, RegTarget,
@@ -177,27 +178,28 @@ export function partitionKernel(
     const childPath = `${instancePath}.${decl.name}`
     const thisInstIdx = instanceIdx(childInstIdx++)
 
-    const childCompiled = makeCompiled(decl.type, { displayName: decl.type.name })
+    const declType = getInstanceType(prog, decl)
+    const childCompiled = makeCompiled(declType, { displayName: declType.name })
 
     // Allocate both directions of slots for this child.
     allocateOutputSlots(session, toInstanceName(childPath), childCompiled)
     allocateInputSlots (session, toInstanceName(childPath), childCompiled)
 
     // Build slot map for parent's NestedOut → child output reads,
-    // keyed by OutputIdx (position in decl.type.ports.outputs).
+    // keyed by OutputIdx (position in declType.ports.outputs).
     const childOutputMap = new Map<OutputIdx, number>()
-    for (let i = 0; i < decl.type.ports.outputs.length; i++) {
-      const outDecl = decl.type.ports.outputs[i]
+    for (let i = 0; i < declType.ports.outputs.length; i++) {
+      const outDecl = declType.ports.outputs[i]
       const slotIdx = lookupOutputSlot(session, childPath, outDecl.name)
       if (slotIdx !== undefined) childOutputMap.set(outputIdx(i), slotIdx)
     }
     nestedOutputSlots.set(thisInstIdx, childOutputMap)
 
     // Build slot map for parent's WriteSlot → child input writes,
-    // keyed by InputIdx (position in decl.type.ports.inputs).
+    // keyed by InputIdx (position in declType.ports.inputs).
     const childInputMap = new Map<InputIdx, number>()
-    for (let i = 0; i < decl.type.ports.inputs.length; i++) {
-      const inDecl = decl.type.ports.inputs[i]
+    for (let i = 0; i < declType.ports.inputs.length; i++) {
+      const inDecl = declType.ports.inputs[i]
       const slotIdx = lookupInputSlot(session, childPath, inDecl.name)
       if (slotIdx !== undefined) childInputMap.set(inputIdx(i), slotIdx)
     }
@@ -209,7 +211,7 @@ export function partitionKernel(
     // (no cloneWithInputSubst) — the boundary is the slot, not the
     // substituted expression.
     const childResult = partitionKernel(
-      childPath, decl.type, childCompiled,
+      childPath, declType, childCompiled,
       /* inputBindingFor*/ () => undefined,
       /* defaults       */ rawInputDefaults(childCompiled),
       paramHandles,

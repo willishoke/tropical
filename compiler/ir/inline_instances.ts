@@ -52,17 +52,19 @@ import type {
   ResolvedExpr, ResolvedExprOp,
   BodyDecl, BodyAssign, OutputAssign,
   InputDecl, OutputDecl, InstanceDecl,
+  RegDecl, BinderDecl,
   TypeParamDecl,
   Tag, Match, MatchArm,
   Let,
   Fold, Scan, Generate, Iterate, Chain, Map2, ZipWith,
   InputIdx, OutputIdx, InstanceIdx,
+  RegIdx, ParamIdx, BinderIdx,
 } from './nodes.js'
-import { inputIdx, outputIdx, instanceIdx } from './nodes.js'
+import { inputIdx, outputIdx, instanceIdx, binderIdx } from './nodes.js'
 import { specializeProgram } from './specialize.js'
 import { sumLower } from './sum_lower.js'
-import { cloneResolvedProgram, cloneWithInputSubst } from './clone.js'
-import { mkProgram } from './decl_tables.js'
+import { mkProgram, getInstanceType } from './decl_tables.js'
+import { mapExpr, NoRewrite, type ExprRewrite } from './recursion.js'
 
 export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   // Fast path: no instances at this level means there's nothing to do.
@@ -71,67 +73,47 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
   // evaluates them, so we don't pay clone cost on those.)
   if (!hasInstanceDecl(prog)) return prog
 
-  // Clone the outer first so we have full ownership of decl identity.
-  // After cloning, surviving reg/delay decls are fresh objects, and
-  // their RegRef/DelayRef sites in body.assigns and other decls' init
-  // expressions point at those fresh objects. We can then splice in
-  // the inlined-inner bodies, mutating the cloned outer's body in
-  // place without touching the input.
-  const outer = cloneResolvedProgram(prog)
-
-  // Process every instance in declaration order. We build:
-  //   - liftedDecls: cloned reg/param/programDecls to append (post-
-  //     Phase-0a regs carry their update expression on the decl, so
-  //     no separate lifted-assigns table is needed)
-  //   - nestedOutSubst: Map<template OutputDecl, resolved expr> for
-  //     replacing NestedOut refs in the outer's surviving expressions
+  // Functional rewrite: walk prog's body in order, partition decls
+  // into survivors (non-instance) and lifted (from inlined inners).
+  // Surviving InstanceDecls are absorbed by `inlineOneInstance`,
+  // which calls `inlineSubstProgram` to produce fresh inner decls
+  // (with offsets pre-shifted) and pushes them into `liftedDecls`.
+  // The original `prog` is never mutated; the result is built fresh
+  // via `mkProgram` at the bottom.
   //
-  // Note: when the outer is cloned by cloneResolvedProgram, each
-  // InstanceDecl's `type` field is *also* deep-cloned (via the
-  // nestedPrograms memo). The cloned InstanceDecl's typeArgs use the
-  // cloned program's typeParams; specializeProgram below handles
-  // those correctly. The outer's NestedOut refs now key off the
-  // cloned OutputDecls (since cloneResolvedProgram routes nested-out
-  // through the dedup table to the cloned program's outputs).
-  // Keyed by (instance, output): two instances of the same program
-  // share the same OutputDecl objects (because cloneResolvedProgram
-  // memoizes nested programs), so an OutputDecl alone can't
-  // distinguish them. The InstanceDecl is the disambiguator.
+  // Per-kind offset rule: every RegRef / ParamRef inside a freshly
+  // substituted sub-program uses idx values that are valid in that
+  // (private) sub-program. After lifting into outer, those idx values
+  // need to point at positions in the merged body
+  // `survivingDecls ++ liftedDecls`. So per-kind position =
+  // outer's own count + count lifted from earlier instances +
+  // position-within-this-lift. We pass offsets (outer count +
+  // lifted-so-far) to `inlineSubstProgram`, which adds them to every
+  // surviving indexed ref during the rewrite.
   const liftedDecls: BodyDecl[] = []
-  // Substitution key is InstanceIdx (position in outer.instances[]) so
-  // substExpr can look up node.instance directly. Inner key is OutputIdx.
   const nestedOutSubst = new Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>()
-
   const survivingDecls: BodyDecl[] = []
-  // Track instance position as we iterate body.decls (matches the
-  // ordering used by elaborator + decl_tables to assign InstanceIdx).
-  //
-  // For lifting: every RegRef / ParamRef inside a cloned sub-program's
-  // body uses idx values that are valid in the CLONED program. After
-  // lifting into outer, those idx values need to point at positions in
-  // the merged body. The merged body is `survivingDecls + liftedDecls`,
-  // so per-kind position = outer's own count + count lifted from
-  // earlier instances + position-within-this-lift. We pass offsets
-  // (outer count + lifted-so-far) to cloneWithInputSubst, which adds
-  // them during clone — the cloned program comes out with already-
-  // shifted refs that point at the lifted positions.
-  const outerRegCount   = outer.regs.length
-  const outerParamCount = outer.params.length
+  const outerRegCount   = prog.regs.length
+  const outerParamCount = prog.params.length
+  let liftedBinderCount = 0
   let instCount = 0
-  for (const decl of outer.body.decls) {
+  for (const decl of prog.body.decls) {
     if (decl.op !== 'instanceDecl') {
       survivingDecls.push(decl)
       continue
     }
-    const regOffset   = outerRegCount   + liftedDecls.filter(d => d.op === 'regDecl').length
-    const paramOffset = outerParamCount + liftedDecls.filter(d => d.op === 'paramDecl').length
-    inlineOneInstance(
+    const regOffset    = outerRegCount    + liftedDecls.filter(d => d.op === 'regDecl').length
+    const paramOffset  = outerParamCount  + liftedDecls.filter(d => d.op === 'paramDecl').length
+    const binderOffset = prog.binderCount + liftedBinderCount
+    liftedBinderCount += inlineOneInstance(
       decl,
+      prog,
       instanceIdx(instCount++),
       liftedDecls,
       nestedOutSubst,
       regOffset,
       paramOffset,
+      binderOffset,
     )
   }
 
@@ -159,14 +141,19 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
     ...survivingDecls.map(d => substDecl(d, nestedOutSubst, memo)),
     ...liftedDecls.map(d => substDecl(d, nestedOutSubst, memo)),
   ]
-  const newAssigns: BodyAssign[] = outer.body.assigns.map(a => substAssign(a, nestedOutSubst, memo))
+  const newAssigns: BodyAssign[] = prog.body.assigns.map(a => substAssign(a, nestedOutSubst, memo))
 
   const block: ResolvedBlock = { op: 'block', decls: newDecls, assigns: newAssigns }
   return mkProgram({
-    name: outer.name,
-    typeParams: outer.typeParams,
-    ports: outer.ports,
+    name: prog.name,
+    typeParams: prog.typeParams,
+    ports: prog.ports,
     body: block,
+    binderCount: prog.binderCount + liftedBinderCount,
+    // Post-inline: every instance has been lifted away. Zero remaining
+    // InstanceDecls means zero typeKey references means an empty
+    // registry is sufficient (validateProgramRegistry will pass).
+    programRegistry: new Map(),
   })
 }
 
@@ -176,16 +163,18 @@ export function inlineInstances(prog: ResolvedProgram): ResolvedProgram {
 
 function inlineOneInstance(
   decl: InstanceDecl,
+  enclosing: ResolvedProgram,
   instIdx: InstanceIdx,
   liftedDecls: BodyDecl[],
   nestedOutSubst: Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>,
   regOffset: number,
   paramOffset: number,
-): void {
+  binderOffset: number,
+): number {
   // 1. Specialize the inner program. For non-generic instances
   //    (typeArgs.length === 0), this is a no-op identity — the
   //    instance's program is already concrete.
-  const specialized = specializeInner(decl)
+  const specialized = specializeInner(decl, enclosing)
 
   // 2a. Lower sums in the specialized inner BEFORE recursing into
   //     deeper instances or lifting decls. The strata pipeline runs
@@ -209,16 +198,16 @@ function inlineOneInstance(
   //    expression. Any inputs the user didn't wire fall back to the
   //    inner's declared default; missing required inputs are an
   //    elaboration-time error and shouldn't reach this pass.
-  const inputSubst = buildInputSubst(decl, flattened)
+  const inputSubst = buildInputSubst(decl, flattened, enclosing)
 
-  // 4. Clone the (specialized + sub-inlined) inner with input
-  //    substitution AND idx shifting. The cloned program's RegRefs /
-  //    ParamRefs get their idx shifted by (outer's existing count +
-  //    previously-lifted count), so when the cloned decls are appended
-  //    to the outer's body, the refs already point at the lifted
-  //    positions. InputRefs are substituted to outer expressions
-  //    before any shift could matter.
-  const cloned = cloneWithInputSubst(flattened, inputSubst, { regOffset, paramOffset })
+  // 4. Functional rewrite of the (specialized + sub-inlined) inner
+  //    with input substitution AND idx shifting. The rewritten
+  //    program's RegRefs / ParamRefs get their idx shifted by (outer's
+  //    existing count + previously-lifted count), so when the lifted
+  //    decls are appended to the outer's body, the refs already point
+  //    at the lifted positions. InputRefs are substituted to outer
+  //    expressions before any shift could matter.
+  const cloned = inlineSubstProgram(flattened, inputSubst, { regOffset, paramOffset, binderOffset })
 
   // 5. Lift the cloned inner's body decls into the outer. Names are
   //    prefixed with the instance name to avoid collisions when
@@ -230,7 +219,12 @@ function inlineOneInstance(
   // 6. Record output expressions for NestedOut substitution.
   //    NestedOut.output is now OutputIdx (position into the target's
   //    ports.outputs[]); we map each position to its cloned expression.
-  recordOutputs(decl, instIdx, cloned, nestedOutSubst)
+  recordOutputs(decl, enclosing, instIdx, cloned, nestedOutSubst)
+
+  // Return the inner's binderCount so the caller can advance its
+  // running total — subsequent inlines start their binderOffset
+  // beyond this inner's allocations.
+  return flattened.binderCount
 }
 
 /**
@@ -238,24 +232,25 @@ function inlineOneInstance(
  * substitution map from the instance's typeArgs (which carry decl
  * references directly).
  */
-function specializeInner(decl: InstanceDecl): ResolvedProgram {
-  if (decl.type.typeParams.length === 0 && decl.typeArgs.length === 0) {
-    return decl.type
+function specializeInner(decl: InstanceDecl, enclosing: ResolvedProgram): ResolvedProgram {
+  const declType = getInstanceType(enclosing, decl)
+  if (declType.typeParams.length === 0 && decl.typeArgs.length === 0) {
+    return declType
   }
   // typeArgs.param is now TypeParamIdx (position in target's typeParams[]).
-  // Convert idx → decl by looking up in decl.type.typeParams.
+  // Convert idx → decl by looking up in declType.typeParams.
   const subst = new Map<TypeParamDecl, number>()
   for (const a of decl.typeArgs) {
-    const pd = decl.type.typeParams[a.param]
+    const pd = declType.typeParams[a.param]
     if (pd === undefined) {
       throw new Error(
         `inlineInstances: instance '${decl.name}' typeArg idx=${a.param} out of range ` +
-        `(target '${decl.type.name}' has ${decl.type.typeParams.length} typeParams)`,
+        `(target '${declType.name}' has ${declType.typeParams.length} typeParams)`,
       )
     }
     subst.set(pd, a.value)
   }
-  return specializeProgram(decl.type, subst)
+  return specializeProgram(declType, subst)
 }
 
 /**
@@ -269,21 +264,24 @@ function specializeInner(decl: InstanceDecl): ResolvedProgram {
 function buildInputSubst(
   decl: InstanceDecl,
   inner: ResolvedProgram,
+  enclosing: ResolvedProgram,
 ): ReadonlyMap<InputIdx, ResolvedExpr> {
-  // decl.inputs[k].port is now InputIdx into decl.type.ports.inputs[].
-  // The cloned `inner` may have different InputDecl objects but the
-  // positions match (specialize preserves port order). The output
-  // map is keyed by InputIdx — positions in `inner.ports.inputs[]`,
-  // which is what InputRef.idx inside the cloned body references.
+  // decl.inputs[k].port is InputIdx into the template's
+  // ports.inputs[]. The cloned `inner` may have different InputDecl
+  // objects but the positions match (specialize preserves port order).
+  // The output map is keyed by InputIdx — positions in
+  // `inner.ports.inputs[]`, which is what InputRef.idx inside the
+  // cloned body references.
+  const declType = getInstanceType(enclosing, decl)
   const wiredByIdx = new Map<number, ResolvedExpr>()
   for (const w of decl.inputs) wiredByIdx.set(w.port, w.value)
   const subst = new Map<InputIdx, ResolvedExpr>()
-  for (let i = 0; i < decl.type.ports.inputs.length; i++) {
+  for (let i = 0; i < declType.ports.inputs.length; i++) {
     const innerPort = inner.ports.inputs[i]
     if (innerPort === undefined) {
       throw new Error(
         `inlineInstances: instance '${decl.name}' input arity mismatch ` +
-        `(template: ${decl.type.ports.inputs.length}, specialized: ${inner.ports.inputs.length})`,
+        `(template: ${declType.ports.inputs.length}, specialized: ${inner.ports.inputs.length})`,
       )
     }
     const wired = wiredByIdx.get(i)
@@ -367,6 +365,7 @@ function liftClonedBody(
  */
 function recordOutputs(
   decl: InstanceDecl,
+  enclosing: ResolvedProgram,
   instIdx: InstanceIdx,
   cloned: ResolvedProgram,
   nestedOutSubst: Map<InstanceIdx, Map<OutputIdx, ResolvedExpr>>,
@@ -388,7 +387,7 @@ function recordOutputs(
   const perInstance = new Map<OutputIdx, ResolvedExpr>()
   nestedOutSubst.set(instIdx, perInstance)
 
-  const templateOutputs = decl.type.ports.outputs
+  const templateOutputs = getInstanceType(enclosing, decl).ports.outputs
   const clonedOutputs   = cloned.ports.outputs
   for (let i = 0; i < templateOutputs.length; i++) {
     if (clonedOutputs[i] === undefined) {
@@ -422,11 +421,12 @@ function hasInstanceDecl(prog: ResolvedProgram): boolean {
 // ─────────────────────────────────────────────────────────────
 
 /**
- * Substitute NestedOut refs in a decl's expression-shaped fields.
- * The decl object's identity is preserved (mutates init/update of
- * the cloned decl in place). Identity preservation matters because
- * RegRef/DelayRef sites elsewhere in the program point at this
- * decl object — replacing the decl would orphan those refs.
+ * Substitute NestedOut refs in a decl's expression-shaped fields,
+ * returning a fresh decl when the rewrite changed anything (or the
+ * input by reference when unchanged). Indexed refs in expressions
+ * (RegRef/ParamRef/InputRef) carry integers post-Phase-1, so
+ * replacing the decl object doesn't orphan anything — positions
+ * stay stable because the body.decls order is preserved.
  *
  * Memoization (`memo`) preserves DAG sharing across the whole
  * program: a subexpression visited via two different paths gets
@@ -438,12 +438,16 @@ function substDecl(
   memo: WeakMap<object, ResolvedExpr>,
 ): BodyDecl {
   switch (d.op) {
-    case 'regDecl':
-      d.init = substExpr(d.init, subst, memo)
-      if (d.update !== undefined) {
-        d.update = substExpr(d.update, subst, memo)
-      }
-      return d
+    case 'regDecl': {
+      const init   = substExpr(d.init, subst, memo)
+      const update = d.update !== undefined ? substExpr(d.update, subst, memo) : undefined
+      if (init === d.init && update === d.update) return d
+      const fresh: RegDecl = { op: 'regDecl', name: d.name, init }
+      if (d.type !== undefined) fresh.type = d.type
+      if (d._liftedFrom !== undefined) fresh._liftedFrom = d._liftedFrom
+      if (update !== undefined) fresh.update = update
+      return fresh
+    }
     case 'paramDecl':
     case 'programDecl':
       return d
@@ -658,4 +662,132 @@ function substOpNode(
       return fresh
     }
   }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Functional input-substitution + offset shifting
+// (replaces the former cloneWithInputSubst from clone.ts)
+// ─────────────────────────────────────────────────────────────
+
+/** Produce a fresh `ResolvedProgram` from `inner` with:
+ *  - every `InputRef.idx` in `inputSubst` replaced by the outer-site
+ *    expression (passed through by reference; the outer caller owns
+ *    namespace consistency).
+ *  - every surviving `RegRef`, `ParamRef`, `BindingRef`, and
+ *    `BinderDecl.idx` shifted by the corresponding offset so the
+ *    rewritten program's decls can be appended into the outer body
+ *    at their final positions.
+ *
+ *  Sub-programs in `inner.programRegistry` are shared by reference —
+ *  the inner is already strata-processed and its sub-programs are
+ *  immutable values. */
+function inlineSubstProgram(
+  inner: ResolvedProgram,
+  inputSubst: ReadonlyMap<InputIdx, ResolvedExpr>,
+  shifts: { regOffset: number; paramOffset: number; binderOffset: number },
+): ResolvedProgram {
+  const { regOffset, paramOffset, binderOffset } = shifts
+
+  const exprRewrite: ExprRewrite = e => {
+    if (typeof e !== 'object' || Array.isArray(e)) return NoRewrite
+    if (e.op === 'inputRef') {
+      const v = inputSubst.get(e.idx)
+      // Substituted outer expression passes through by reference;
+      // mapExpr will not descend into it because we return a value
+      // (not NoRewrite). Preserves DAG sharing of the outer wires.
+      return v !== undefined ? v : NoRewrite
+    }
+    if (e.op === 'regRef') {
+      return { op: 'regRef', idx: ((e.idx as number) + regOffset) as RegIdx }
+    }
+    if (e.op === 'paramRef') {
+      return { op: 'paramRef', idx: ((e.idx as number) + paramOffset) as ParamIdx }
+    }
+    if (e.op === 'bindingRef') {
+      return { op: 'bindingRef', idx: ((e.idx as number) + binderOffset) as BinderIdx }
+    }
+    return NoRewrite
+  }
+
+  const binderHook = (b: BinderDecl): BinderDecl => ({
+    op: 'binderDecl',
+    name: b.name,
+    idx: binderIdx((b.idx as number) + binderOffset),
+  })
+
+  const rewriteExpr = (e: ResolvedExpr) => mapExpr(e, { expr: exprRewrite, binder: binderHook })
+
+  const mapInputDecl = (i: InputDecl): InputDecl => {
+    // Inputs become orphaned post-lift (the outer doesn't reference
+    // them) but we still clone the structure for completeness. Default
+    // expressions go through the rewrite so any RegRefs/etc. inside
+    // them are shifted consistently.
+    const fresh: InputDecl = { op: 'inputDecl', name: i.name }
+    if (i.type    !== undefined) fresh.type    = i.type
+    if (i.default !== undefined) fresh.default = rewriteExpr(i.default)
+    return fresh
+  }
+  const mapOutputDecl = (o: OutputDecl): OutputDecl => {
+    const fresh: OutputDecl = { op: 'outputDecl', name: o.name }
+    if (o.type !== undefined) fresh.type = o.type
+    return fresh
+  }
+
+  const mapDecl = (d: BodyDecl): BodyDecl => {
+    switch (d.op) {
+      case 'regDecl': {
+        const fresh: RegDecl = {
+          op: 'regDecl',
+          name: d.name,
+          init: rewriteExpr(d.init),
+        }
+        if (d.type !== undefined) fresh.type = d.type
+        if (d._liftedFrom !== undefined) fresh._liftedFrom = d._liftedFrom
+        if (d.update !== undefined) fresh.update = rewriteExpr(d.update)
+        return fresh
+      }
+      case 'paramDecl':
+        return d   // session-scoped; preserve identity
+      case 'instanceDecl': {
+        // Post-recurse `flattened` should have no instances, but be
+        // defensive: pass through with rewritten input wire exprs.
+        const fresh: InstanceDecl = {
+          op: 'instanceDecl',
+          name: d.name,
+          typeKey: d.typeKey,
+          typeArgs: d.typeArgs.map(a => ({ param: a.param, value: a.value })),
+          inputs:   d.inputs.map(i => ({ port: i.port, value: rewriteExpr(i.value) })),
+        }
+        return fresh
+      }
+      case 'programDecl':
+        return d
+    }
+  }
+
+  const mapAssign = (a: BodyAssign): BodyAssign => {
+    const fresh: OutputAssign = {
+      op: 'outputAssign',
+      target: a.target,
+      expr: rewriteExpr(a.expr),
+    }
+    return fresh
+  }
+
+  return mkProgram({
+    name: inner.name,
+    typeParams: inner.typeParams,
+    ports: {
+      inputs:   inner.ports.inputs.map(mapInputDecl),
+      outputs:  inner.ports.outputs.map(mapOutputDecl),
+      typeDefs: inner.ports.typeDefs,
+    },
+    body: {
+      op: 'block',
+      decls:   inner.body.decls.map(mapDecl),
+      assigns: inner.body.assigns.map(mapAssign),
+    },
+    binderCount: inner.binderCount + binderOffset,
+    programRegistry: inner.programRegistry,
+  })
 }

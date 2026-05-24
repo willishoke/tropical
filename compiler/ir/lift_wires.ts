@@ -102,7 +102,7 @@ function liftOneWire(
   // Register the type so materializeSession (oracle path) can find it
   // by name, then instantiate and allocate output slots.
   session.typeRegistry.set(rawName(synthName), compiled)
-  session.resolvedRegistry.set(rawName(synthName), lifted)
+  session.programs.set(rawName(synthName), lifted)
   const inst = instantiate(compiled, rawName(synthName), {
     baseTypeName: rawName(synthName),
   })

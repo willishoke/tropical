@@ -125,10 +125,11 @@ function evalOpNode(node: ResolvedExprOp, env: InterpretEnv): Value {
     case 'typeParamRef':
       throw new Error(`interpret: typeParamRef idx=${node.idx} should have been substituted by specialize`)
     case 'bindingRef':
-      throw new Error(`interpret: bindingRef '${node.decl.name}' should have been substituted by array_lower`)
+      throw new Error(`interpret: bindingRef idx=${node.idx} should have been substituted by array_lower`)
     case 'nestedOut': {
       const inst = env.prog.instances[node.instance]
-      const outName = inst?.type.ports.outputs[node.output]?.name ?? `#${node.output}`
+      const instType = inst ? env.prog.programRegistry.get(inst.typeKey) : undefined
+      const outName = instType?.ports.outputs[node.output]?.name ?? `#${node.output}`
       throw new Error(`interpret: nestedOut '${inst?.name ?? `#${node.instance}`}.${outName}' should have been inlined`)
     }
 

@@ -31,8 +31,9 @@ import type {
   BodyDecl, BodyAssign, OutputAssign,
   TypeParamDecl,
   InputIdx, OutputIdx, ParamIdx, InstanceIdx, RegIdx,
+  ProgramKey,
 } from './nodes.js'
-import { inputIdx, outputIdx, paramIdx, instanceIdx, regIdx } from './nodes.js'
+import { inputIdx, outputIdx, paramIdx, instanceIdx, regIdx, programKey } from './nodes.js'
 import type { ExprNode } from '../expr.js'
 import type { SessionState } from '../session.js'
 import type { Instance } from '../program_types.js'
@@ -94,6 +95,7 @@ function makeContext(session: SessionState): MaterializeContext {
   return {
     instanceDecls:       new Map(),
     paramDecls:          new Map(),
+    programRegistry:     new Map(),
     syntheticRegDecls:   [],
     exprMemo:            new WeakMap(),
     session,
@@ -110,6 +112,11 @@ export const _materializeSessionForTesting = materializeSession
 interface MaterializeContext {
   instanceDecls: Map<string, InstanceDecl>
   paramDecls: Map<string, ParamDecl>
+  /** Per-typeKey ResolvedProgram for each instance type referenced in
+   *  the session. Populated by `buildInstanceDecl` and used by the
+   *  port-lookup sites below to resolve instance type info without
+   *  the dropped `.type` pointer. */
+  programRegistry: Map<ProgramKey, ResolvedProgram>
   /** Synthetic RegDecls (with update populated) generated from session-
    *  level `delay()` expressions in wires. Each becomes a stateful slot
    *  one sample late. Named `__sd${idx}` for uniqueness within the
@@ -136,10 +143,11 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     const inputName = ref.port
     const instDecl = ctx.instanceDecls.get(instName)
     if (instDecl === undefined) continue
-    const portI = instDecl.type.ports.inputs.findIndex(p => p.name === inputName)
+    const instType = ctx.programRegistry.get(instDecl.typeKey)!
+    const portI = instType.ports.inputs.findIndex(p => p.name === inputName)
     if (portI < 0) {
       throw new Error(
-        `compileSession: instance '${instName}' has no input port '${inputName}' on type '${instDecl.type.name}'.`,
+        `compileSession: instance '${instName}' has no input port '${inputName}' on type '${instType.name}'.`,
       )
     }
     const value = translateExpr(expr, ctx)
@@ -164,13 +172,14 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     if (instDecl === undefined) {
       throw new Error(`compileSession: graph output references unknown instance '${go.instance}'.`)
     }
-    const outputI = instDecl.type.ports.outputs.findIndex(p => p.name === go.output)
+    const instType = ctx.programRegistry.get(instDecl.typeKey)!
+    const outputI = instType.ports.outputs.findIndex(p => p.name === go.output)
     if (outputI < 0) {
       throw new Error(
-        `compileSession: instance '${go.instance}' has no output port '${go.output}' on type '${instDecl.type.name}'.`,
+        `compileSession: instance '${go.instance}' has no output port '${go.output}' on type '${instType.name}'.`,
       )
     }
-    const outDecl = instDecl.type.ports.outputs[outputI]
+    const outDecl = instType.ports.outputs[outputI]
     const sessionOutput: OutputDecl = {
       op: 'outputDecl',
       name: `${go.instance}.${go.output}`,
@@ -210,6 +219,11 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     typeParams: [] as TypeParamDecl[],
     ports,
     body: block,
+    // Session-level wires are scalar expressions with no combinators
+    // or let-bindings — no binders are introduced. The synthetic
+    // program's binderCount is therefore 0.
+    binderCount: 0,
+    programRegistry: ctx.programRegistry,
   })
 }
 
@@ -226,15 +240,19 @@ function buildInstanceDecl(
   const baseTypeName = inst.baseTypeName
   const rawTypeArgs = inst.typeArgs ?? {}
 
-  const registered = session.resolvedRegistry.get(baseTypeName)
+  const registered = session.programs.get(baseTypeName)
   let resolvedType: ResolvedProgram | undefined
   let typeArgsList: Array<{ param: TypeParamDecl; value: number }> = []
 
   if (registered !== undefined && registered.typeParams.length === 0) {
+    // Non-generic: use the canonical post-strata form directly.
     resolvedType = registered
   } else {
-    const template = session.genericTemplatesResolved.get(baseTypeName)
-      ?? registered
+    // Generic template (or missing); specialize with the supplied
+    // type args. After Phase 5 unification, templates and concrete
+    // programs both live in session.programs — distinguished by
+    // typeParams length.
+    const template = registered
     if (template === undefined) {
       throw new Error(
         `compileSession: instance '${name}' has type '${baseTypeName}' which is not registered as a resolved program.`,
@@ -264,10 +282,16 @@ function buildInstanceDecl(
     resolvedType = specializeProgram(template, subst)
   }
 
+  const tk = programKey(resolvedType.name)
+  // Register the resolved type so port-lookup sites can resolve it
+  // without a `.type` pointer. If two instances share the same type,
+  // the registry holds one canonical entry (matches the existing
+  // session.resolvedRegistry canonicalization).
+  ctx.programRegistry.set(tk, resolvedType)
   const decl: InstanceDecl = {
     op: 'instanceDecl',
     name,
-    type: resolvedType,
+    typeKey: tk,
     typeArgs: [],
     inputs: [],
   }
@@ -335,10 +359,11 @@ function translateOpNode(
     if (instDecl === undefined) {
       throw new Error(`compileSession: ref to unknown instance '${instName}'.`)
     }
-    const outputI = instDecl.type.ports.outputs.findIndex(p => p.name === outputName)
+    const instType = ctx.programRegistry.get(instDecl.typeKey)!
+    const outputI = instType.ports.outputs.findIndex(p => p.name === outputName)
     if (outputI < 0) {
       throw new Error(
-        `compileSession: ref to '${instName}.${outputName}' — '${outputName}' is not a port on type '${instDecl.type.name}'.`,
+        `compileSession: ref to '${instName}.${outputName}' — '${outputName}' is not a port on type '${instType.name}'.`,
       )
     }
     // InstanceIdx is the iteration position of instName in ctx.instanceDecls.
