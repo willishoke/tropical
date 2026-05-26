@@ -20,18 +20,18 @@ import { emitResolvedProgram, type EmitSlots, type ScalarType } from './emit_res
 
 /** Param-handle bindings for FFI param/trigger decls embedded in a
  *  program type's body, plus optional nested-output and nested-input
- *  slot maps for the M11 fractal compile path. */
+ *  slot maps for the fractal compile path. */
 export interface CompileResolvedContext {
   /** Keyed by ParamIdx. */
   paramHandles?:      Map<ParamIdx, { ptr: string }>
   /** Per-sub-instance, per-output-port module-slot map. Keyed by
    *  InstanceIdx (in this program) and OutputIdx (in the instance's
-   *  type). Populated by `partition_recursive` for M11 fractal compile;
+   *  type). Populated by `partition_recursive` for fractal compile;
    *  `NestedOut` refs lower to Slot reads via this map. */
   nestedOutputSlots?: Map<InstanceIdx, Map<OutputIdx, number>>
   /** Per-sub-instance, per-input-port module-slot map. Keyed by
    *  InstanceIdx and InputIdx. Populated by `partition_recursive` for
-   *  the M11 slot-based input wiring. The parent's compile emits a
+   *  slot-based input wiring. The parent's compile emits a
    *  `WriteSlot` into each named slot; entries land in
    *  `per_child_pre_input[k]` (parallel to the body's nested-instance
    *  order) so the engine runs each block immediately before recursing
@@ -116,13 +116,13 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     inputSlotOverride: ctx.inputSlotOverride,
   }
 
-  // M11 fractal: collect sub-instance decls so emit_resolved can emit
+  // Fractal: collect sub-instance decls so emit_resolved can emit
   // a `WriteSlot` for each of their wired inputs in
   // `per_child_pre_input[k]`. The order here is significant — it's
   // the dispatch order partition_recursive will use when packing
   // children into the InstanceFunction tree, so per_child_pre_input
   // and the children array stay parallel. Empty when the program has
-  // no nested instances (legacy flat path).
+  // no nested instances (flat path).
   const nestedInstances: InstanceDecl[] = []
   for (const d of prog.body.decls) {
     if (d.op === 'instanceDecl') nestedInstances.push(d)

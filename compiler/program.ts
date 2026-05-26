@@ -373,7 +373,7 @@ export function loadProgramAsSession(
     session.instanceRegistry.set(instance.name, instance)
     // Slot model: allocate output slots for the instance, parallel to
     // what MCP add_instance does. Required for the per-instance
-    // compile path (M9a+) to find each output's slot index.
+    // compile path to find each output's slot index.
     allocateOutputSlots(session, toInstanceName(instance.name), type)
 
     // Populate wiring from instance inputs
@@ -530,7 +530,7 @@ export function mergeProgramIntoSession(
     session.instanceRegistry.set(instance.name, instance)
     // Slot model: allocate output slots for the instance, parallel to
     // what MCP add_instance does. Required for the per-instance
-    // compile path (M9a+) to find each output's slot index.
+    // compile path to find each output's slot index.
     allocateOutputSlots(session, toInstanceName(instance.name), type)
 
     // Populate wiring from instance inputs

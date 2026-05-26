@@ -3,11 +3,11 @@
  *
  * A wire is a `ref(instance, output)` and a transformation expression
  * that turns one or more such refs into a value consumed by a downstream
- * instance. Today wires are handled by a parallel mini-compiler
- * (`translateNode` in `compile_session_slotted_helpers.ts`) that knows
- * only a subset of expression shapes. Under the fractal architecture
- * (M11 Phase 5), wires lift to anonymous programs and flow through the
- * same per-program path as user-authored types.
+ * instance. The fractal-architecture path lifts each wire to an
+ * anonymous program that flows through the same per-program path as
+ * user-authored types; the legacy parallel mini-compiler
+ * (`translateNode` in `compile_session_slotted_helpers.ts`) still
+ * handles wires whose shape is a strict subset of the fractal lift.
  *
  * The lift is precise: given an `ExprNode` `e` with free refs `r₁..rₖ`,
  * we synthesize a program shape-identical to one a user could have
@@ -28,8 +28,8 @@
  * anywhere else.
  *
  * Both exports are pure, total, and stateless. No engine, no FFI, no
- * session. They are the foundational lift; Phase 4's partitioner and
- * Phase 5's materializer consume them.
+ * session. They are the foundational lift; `partition_recursive` and
+ * the session materializer consume them.
  */
 
 import type { ExprNode } from '../expr.js'

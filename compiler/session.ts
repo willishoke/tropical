@@ -162,14 +162,15 @@ export interface SessionState {
    *  per-namespace counts (output + param + input + delay). */
   slotCount:          number
   /** Input expressions keyed by scalar-slot name "${instance}:${scalarSlotName}".
-   *  Coexists with inputExprNodes during the migration; M8 unifies them. */
+   *  Coexists with `inputExprNodes`; a future cleanup will unify them. */
   inputExprs:         Map<string, ExprNode>
   /** Whether the strata pipeline should flatten nested `InstanceDecl`s
-   *  via `inlineInstances`. Default `true` (legacy flat-IR path).
-   *  When `false`, sub-instance kernels survive as kernel boundaries
-   *  in `partition_recursive` — the M11 fractal path. All program-
-   *  loading entry points consult this field to keep the IR shape
-   *  consistent across a session. */
+   *  via `inlineInstances`. Default `true` (the flat-IR path, production
+   *  default per the depth-vs-flat cost tradeoff). When `false`,
+   *  sub-instance kernels survive as kernel boundaries in
+   *  `partition_recursive` — the fractal path. All program-loading
+   *  entry points consult this field to keep the IR shape consistent
+   *  across a session. */
   inlineNested:       boolean
   /** FlatRuntime — all audio goes through this. */
   runtime: Runtime
@@ -428,7 +429,7 @@ export function allocateOutputSlots(
 
 /** Allocate slot indices for every INPUT port of an instance. Used by
  *  `partition_recursive` when emitting slot-based parent→child input
- *  wiring (the M11 fractal path with `inlineNested:false`). The parent
+ *  wiring (the fractal path with `inlineNested:false`). The parent
  *  emits a `WriteSlot` into each of these slots before invoking the
  *  child; the child's `InputRef`s lower to `Slot` reads via
  *  `compileResolved`'s `nestedInputSlots` context.

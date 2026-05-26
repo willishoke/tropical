@@ -396,7 +396,7 @@ export function remapInstancePlan(
     args: instr.args.map(remapOperand),
   }))
 
-  // M11 fractal slot-based input wiring: each child's pre-input block
+  // Slot-based parent→child input wiring: each child's pre-input block
   // (parent's wires → WriteSlot to that child's input slot) gets the
   // same per-instance operand/dst remap as the main body. The blocks
   // reference the same temp/state/array spaces (Emitter allocates them

@@ -361,13 +361,11 @@ llvm::Expected<uint64_t> OrcJitEngine::lookup(const std::string & symbol_name)
 // so a write in one function's body is observable to a later function's
 // read of the same unified-namespace temp slot.
 //
-// compile_flat_program (fused mode) does NOT use EmitCtx — its in-place
-// lambdas are kept byte-identical to the pre-spike codegen so fused mode
-// stays a known-good reference for the microkernel-vs-fused equivalence
-// suite (Phase 6). The methods below are functionally identical to those
-// lambdas; the duplication is honest spike scaffolding. If the spike
-// graduates, a follow-up commit can switch compile_flat_program over to
-// EmitCtx and the dual maintenance burden disappears.
+// Both compile_flat_program (fused mode) and compile_microkernel
+// (microkernel mode) build an EmitCtx; codegen is shared via the methods
+// on this struct. The microkernel-vs-fused equivalence suite
+// (tests/equiv/microkernel_vs_fused.test.ts) covers the shared path
+// sample-for-sample at 1e-12.
 // ---------------------------------------------------------------------------
 
 namespace
@@ -523,7 +521,7 @@ struct EmitCtx
   // ── Per-instance writebacks ──
   void emit_writebacks(const std::vector<InstanceProgram::Writeback> & wbs);
 
-  // ── Per-instance dispatch (M11 fractal interleaved order) ──
+  // ── Per-instance dispatch (fractal interleaved order) ──
   // For each child:
   //   1. emit child.pre_input_instructions (in THIS kernel's namespace
   //      — wire expressions referencing parent regs/inputs/params resolve,
@@ -1231,9 +1229,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
 
   // ── Per-instance dispatch ──
   // For each top-level instance, EmitCtx::emit_kernel_block recursively
-  // emits its M11 children inside the parent's body, then the parent's
-  // own instructions, then writebacks. Children run BEFORE the parent
-  // so it can read their freshly-written slot values (M11 fractal).
+  // emits its nested children inside the parent's body, then the
+  // parent's own instructions, then writebacks. Children run BEFORE
+  // the parent so it can read their freshly-written slot values.
 
   for (const auto & inst : program.instance_functions)
   {
@@ -1334,8 +1332,8 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
 
   // ── Param index + cache-key serialization ──
   // Duplicated from compile_flat_program with the only diff being the
-  // mode tag prefix on the cache key. Sharing the serialization across
-  // both modes is a follow-up if the spike graduates.
+  // mode tag prefix on the cache key. A future refactor could share
+  // the serialization across both modes.
   auto visit_all_instructions = [&](auto && fn) {
     for (const auto & instr : program.scheduler.preamble) fn(instr);
     for (const auto & inst : program.instance_functions)
@@ -1510,9 +1508,9 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   };
 
   // ── Emit one PerSampleFn from one InstanceProgram (body + writebacks + children) ──
-  // Recursive: M11 children are inlined into this function's body via
-  // EmitCtx::emit_kernel_block. One LLVM function per top-level session
-  // instance.
+  // Recursive: nested children are inlined into this function's body
+  // via EmitCtx::emit_kernel_block. One LLVM function per top-level
+  // session instance.
   auto emit_instance_function = [&](
     const std::string & sym,
     const InstanceProgram & inst) -> llvm::Error
@@ -1597,8 +1595,8 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   };
 
   // ── Emit all functions ──
-  // One LLVM function per top-level session instance, with M11 children
-  // inlined recursively via emit_kernel_block. Plus preamble,
+  // One LLVM function per top-level session instance, with nested
+  // children inlined recursively via emit_kernel_block. Plus preamble,
   // state_evolution, and postamble_mix as their own functions.
   const std::string sym_preamble        = "mk_" + hash + "_preamble";
   const std::string sym_state_evolution = "mk_" + hash + "_state_evo";

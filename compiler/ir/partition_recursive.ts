@@ -100,7 +100,7 @@ function lookupOutputSlot(
 }
 
 /** Look up the (first scalar) slot index for an instance's INPUT port.
- *  Mirror of `lookupOutputSlot` against the M11 input-slot registry. */
+ *  Mirror of `lookupOutputSlot` against the input-slot registry. */
 function lookupInputSlot(
   session: SessionState,
   instancePath: string,
@@ -130,10 +130,12 @@ export interface PartitionedKernel {
  *
  *  `inputBindingFor` provides the binding for each input port of THIS
  *  kernel. For top-level session instances, it consults
- *  `session.inputExprNodes`. For nested kernels, all input ports have
- *  been substituted out by `cloneWithInputSubst`, so this function is
- *  unused (no `opInput` operands survive). Pass `() => undefined` for
- *  nested calls; the defaults-fallback handles unused declared inputs.
+ *  `session.inputExprNodes`. For nested kernels, all input ports are
+ *  handled by slot-based parent→child wiring (the child's
+ *  `InputRef(idx)` lowers to a Slot read via `inputSlotOverride`), so
+ *  this function is unused (no `opInput` operands survive). Pass
+ *  `() => undefined` for nested calls; the defaults-fallback handles
+ *  unused declared inputs.
  */
 export function partitionKernel(
   instancePath: string,
@@ -144,7 +146,7 @@ export function partitionKernel(
   paramHandles: Map<ParamIdx, { ptr: string }>,
   session: SessionState,
   acc: PartitionAccumulators,
-  /** M11 slot-based input wiring: when set, THIS kernel is being
+  /** Slot-based input wiring: when set, THIS kernel is being
    *  compiled as a sub-instance. Its `InputRef(idx)` operands lower to
    *  Slot reads from the slot indices recorded here, instead of the
    *  legacy `opInput`. Top-level callers pass `undefined`. */

@@ -14,21 +14,21 @@
  * wired into `p` at the consumer site, and the `InstanceDecl` is dropped
  * from the body.
  *
- * Under the fractal architecture (M11 Phase 4+, `inlineInstances`
- * retired), trivial wires lifted by `liftWireToProgram` would survive
- * as identity `InstanceDecl`s — one kernel per trivial wire — bloating
- * slot space and adding pointless read/write instructions per sample.
- * `identityElim` recognizes and eliminates them, returning the wire to
- * a direct slot-read on the consumer side. The pass is the structural
- * analogue of compiler peephole optimizations, but it isn't a peephole:
- * it's a categorical equation made operational, exactly parallel to the
- * other strata passes (each one mechanizes some category-theoretic law
- * about the IR).
+ * In the `inlineNested: false` fractal path, trivial wires lifted by
+ * `liftWireToProgram` would survive as identity `InstanceDecl`s —
+ * one kernel per trivial wire — bloating slot space and adding
+ * pointless read/write instructions per sample. `identityElim`
+ * recognizes and eliminates them, returning the wire to a direct
+ * slot-read on the consumer side. The pass is the structural
+ * analogue of compiler peephole optimizations, but it isn't a
+ * peephole: it's a categorical equation made operational, exactly
+ * parallel to the other strata passes (each one mechanizes some
+ * category-theoretic law about the IR).
  *
- * Implementation discipline: we never mutate the input. When work needs
- * to be done, we deep-clone via `cloneResolvedProgram` and mutate the
- * clone freely. This keeps the rewrite local — surviving `InstanceDecl`
- * objects preserve their identity inside the clone, so cross-decl
+ * Implementation discipline: we never mutate the input. When work
+ * needs to be done, the rewrite is constructed via `mkProgram` over
+ * the surviving decls plus rewritten output assigns. Surviving
+ * `InstanceDecl` objects preserve their identity, so cross-decl
  * `NestedOut` refs stay consistent without an explicit rename pass.
  *
  * Pure, idempotent, meaning-preserving. Runs at every level of the

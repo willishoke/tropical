@@ -2,10 +2,9 @@
  * lift_wires.ts — pre-compile pass that lifts complex wire expressions
  * to anonymous program instances.
  *
- * Phase 5 of M11 fractal compilation. Wires whose expression contains
- * forms that `translateNode` doesn't support (array literals, session-
- * level `delay()`) are extracted into anonymous programs at session
- * pre-compile time. The lifted program goes through the full strata
+ * Wires whose expression contains forms that `translateNode` doesn't
+ * support (array literals, session-level `delay()`) are extracted
+ * into anonymous programs at session pre-compile time. The lifted program goes through the full strata
  * pipeline — `arrayLower` handles array literals; `delay()` desugars
  * to a synthetic `RegDecl` with `update` populated, which the
  * standard slot allocator handles like any user-written reg — and

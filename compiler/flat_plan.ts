@@ -159,8 +159,9 @@ export interface InstanceFunction {
   preamble_instructions: NInstr[]
   /** Instructions with operands already shifted into unified space. */
   instructions:      NInstr[]
-  /** M11 fractal slot-based input wiring. Instructions the PARENT
-   *  runs in its own namespace just before invoking this kernel:
+  /** Slot-based parent→child input wiring (the fractal path).
+   *  Instructions the PARENT runs in its own namespace just before
+   *  invoking this kernel:
    *  evaluate each wire expression, then `WriteSlot` the value to
    *  this kernel's pre-allocated input slot. The child reads from
    *  the slot at the start of its body. Per-child placement (vs
@@ -181,9 +182,10 @@ export interface InstanceFunction {
   /** Writebacks for this instance — entries are either an absolute
    *  unified temp index or `arrayManaged`. */
   register_targets:  RegTarget[]
-  /** Nested kernels (M11 fractal architecture). Sub-InstanceDecls
-   *  within this program's body become child kernels, emitted inside
-   *  this kernel's body. Empty for leaf kernels. */
+  /** Nested kernels (the fractal architecture: one kernel per
+   *  InstanceDecl at every nesting depth). Sub-InstanceDecls within
+   *  this program's body become child kernels, emitted inside this
+   *  kernel's body. Empty for leaf kernels. */
   children:          InstanceFunction[]
 }
 
@@ -256,7 +258,7 @@ export interface WireInstanceFunction {
    *  reference. Optional in the wire format (legacy plans had this
    *  bundled inside `instructions`; parsed as [] when missing). */
   preamble_instructions?: WireNInstr[]
-  /** M11 fractal slot-based input wiring (per-child). Parent's
+  /** Slot-based parent→child input wiring (per-child). Parent's
    *  WriteSlot instructions that run just before this kernel's body.
    *  May be missing in legacy JSON (parsed as []). */
   pre_input_instructions?: WireNInstr[]

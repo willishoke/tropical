@@ -333,13 +333,20 @@ For each instance, depth-first bottom-up:
 name-prefix parsing pattern. Identifying a decl's lineage is now an
 object-field check, not a string regex.
 
-The `inlineNested: false` option is the entry point for the future
-fractal-compilation path: when it's flipped, sub-instances survive
-as kernel boundaries and `partitionKernel` (the recursive
-partitioner in `compile_session_slotted.ts`) emits an
-`InstanceFunction` for every `InstanceDecl` at every level. The
-infrastructure is complete; activation is gated on cross-kernel
-input-wiring resolution.
+The `inlineNested: false` option is the entry point for the
+fractal-compilation path: sub-instances survive as kernel boundaries
+and `partitionKernel` (the recursive partitioner in
+`compile_session_slotted.ts`) emits an `InstanceFunction` for every
+`InstanceDecl` at every level. Cross-kernel input wiring is handled
+by slot-based parent→child writes: the parent's body emits
+`WriteSlot` ops into a per-child `pre_child_instructions` block
+(evaluated in the parent's scope, so every ref resolves), and the
+child reads its inputs via slot reads in its own body. Both paths
+(`inlineNested: true` flat, `inlineNested: false` fractal) are
+verified sample-for-sample at 1e-12 by
+`tests/equiv/nested_vs_inlined.test.ts`; the choice between them is
+a runtime-cost tradeoff documented in
+`tests/bench/depth_vs_flat_*.md`.
 
 ### 3.5 arrayLower — drops shapes and combinators
 
@@ -492,14 +499,27 @@ covers gating via direct slot writes from the scheduler.
 
 ### 4.3 Fixed-topology compilation
 
-Tropical compiles a session graph to one monolithic kernel; the
-topology is fixed for the lifetime of the kernel. Topology changes
-(adding/removing instances, rewiring) trigger hot-swap to a freshly
-compiled kernel with state transferred by name. There is no
-per-instance runtime gating — every instance runs every sample, and
-LLVM fuses across instances aggressively. This is the shape of
-synthesis the language is good at; dynamic-lifecycle semantics
-belong in a different language with a different runtime.
+Tropical compiles a session graph to native code with a fixed
+topology for the lifetime of the kernel. Two compilation modes
+selected by `FlatPlan.compilation_mode`:
+
+- `'fused'` (default) — one monolithic LLVM function for the whole
+  session per buffer. LLVM fuses across instances aggressively.
+- `'microkernel'` — one LLVM function per top-level session instance,
+  plus preamble / state_evolution / postamble_mix; the per-sample
+  outer loop runs in C++ and dispatches them via function pointers.
+  Trades cross-instance fusion for superlinear cold-compile speedup
+  (LLVM optimizer scales worse on one huge function than on N
+  smaller ones). Sample-for-sample equivalent to fused at 1e-12 per
+  `tests/equiv/microkernel_vs_fused.test.ts`.
+
+Topology changes (adding/removing instances, rewiring) trigger
+hot-swap to a freshly compiled kernel with state transferred by
+name; both modes use the same hot-swap mechanism. There is no
+per-instance runtime gating — every instance runs every sample.
+This is the shape of synthesis the language is good at;
+dynamic-lifecycle semantics belong in a different language with a
+different runtime.
 
 ---
 
