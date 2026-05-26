@@ -1049,14 +1049,36 @@ class Emitter {
                 `has size ${arrayInfo.size}, wire expression evaluates to array of size ${r.size}`,
               )
             }
-            this.emit(instrSessionArray(
-              'Add',
-              arraySlotIdx(arrayInfo.slot),
-              [r.op, opConst(0, 'float')],
-              arrayInfo.size,
-              [1, 0],
-              'float',
-            ))
+            // Engine-gate workaround for size==1 (see arrayCopies
+            // emission near `register_targets` for the explanation):
+            // per-element Index+SetElement for size==1, loop-Add for
+            // size > 1.
+            if (arrayInfo.size === 1) {
+              const tmp = this.allocReg()
+              this.regTypes.set(tmp, 'float')
+              this.emit(instrIndex(tmp, [r.op, opConst(0, 'int')], 'float'))
+              this.emit({
+                tag: 'SetElement',
+                dst: { kind: 'sessionArray', slot: arraySlotIdx(arrayInfo.slot) },
+                args: [
+                  { kind: 'session_array_reg', slot: arraySlotIdx(arrayInfo.slot) },
+                  opConst(0, 'int'),
+                  opTemp(tmp, 'float'),
+                ],
+                loop_count: 1,
+                strides: [],
+                result_type: 'float',
+              })
+            } else {
+              this.emit(instrSessionArray(
+                'Add',
+                arraySlotIdx(arrayInfo.slot),
+                [r.op, opConst(0, 'float')],
+                arrayInfo.size,
+                [1, 0],
+                'float',
+              ))
+            }
             continue
           }
           // Port has no allocated parent-side slot — nothing to emit.
@@ -1176,7 +1198,26 @@ class Emitter {
       }
     }
     for (const c of arrayCopies) {
-      this.emit(instrArray('Add', c.dst, [c.src, opConst(0, 'float')], c.size, [1, 0], 'float'))
+      // The engine's elementwise-loop emission is gated on
+      // `loop_count > 1`; for size==1, an `Add` with loop_count=1
+      // falls through to the scalar emission path which assumes
+      // `instr.dst` is a TEMP slot, not an array slot — producing
+      // an out-of-bounds store. For the degenerate size==1 case,
+      // emit `Index + SetElement` instead (the pointwise primitive
+      // pair, which the engine dispatches correctly regardless of
+      // loop_count). For size > 1 the elementwise loop is fine and
+      // emits fewer instructions.
+      if (c.size === 1) {
+        const tmp = this.allocReg()
+        this.regTypes.set(tmp, 'float')
+        this.emit(instrIndex(tmp, [c.src, opConst(0, 'int')], 'float'))
+        this.emit(instrSetElement(
+          c.dst,
+          [opArray(c.dst), opConst(0, 'int'), opTemp(tmp, 'float')],
+        ))
+      } else {
+        this.emit(instrArray('Add', c.dst, [c.src, opConst(0, 'float')], c.size, [1, 0], 'float'))
+      }
     }
 
     return {

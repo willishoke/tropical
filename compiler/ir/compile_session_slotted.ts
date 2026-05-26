@@ -31,7 +31,8 @@ import type { ResolvedProgram, InputIdx } from './nodes.js'
 import { inputIdx } from './nodes.js'
 import { getInstanceType } from './decl_tables.js'
 import type { NInstr } from './emit_resolved.js'
-import { instrWriteSlot } from './emit_resolved.js'
+import { instrWriteSlot, instrIndex, instrSetElement, opArray, opConst, opTemp } from './emit_resolved.js'
+import { arraySlotIdx } from './slot_indices.js'
 import {
   computeInstanceTopoOrder, emitDacStitch,
   type PreambleEmitter,
@@ -245,6 +246,64 @@ function compileSessionSlottedPerInstance(
     },
   }
   for (const entry of session.delaySlotRegistry) {
+    if (entry.isArray) {
+      // Array delay: emit `delaySlot[i] = src[i]` for i in [0, size)
+      // as a pair of (Index source → temp, SetElement delay[i] = temp)
+      // per element. Same emission pattern the per-instance output
+      // writeback uses for array ports — `Index` + `SetElement` are
+      // pointwise primitives the engine handles uniformly across
+      // bodies, scheduler preamble, and state_evolution. Elementwise
+      // `Add` with stride-0 const broadcast could fuse this into one
+      // instruction, but the existing infrastructure for that path
+      // assumes per-instance namespace context that state_evolution
+      // doesn't carry; pointwise emission is the conservative move.
+      //
+      // Source is constrained to `{op:'ref', instance, output}` to
+      // an array-typed output — the only shape extractSessionDelays
+      // currently produces array entries for. Richer array source
+      // expressions (arithmetic on refs, etc.) would route through
+      // an array-capable translateNode in a separate follow-up.
+      if (entry.arraySlot === undefined || entry.arraySize === undefined) {
+        throw new Error(
+          `compileSessionSlotted: array delay entry '${entry.slotName}' missing arraySlot/arraySize`,
+        )
+      }
+      const sourceExpr = entry.sourceExpr
+      if (typeof sourceExpr !== 'object' || sourceExpr === null || Array.isArray(sourceExpr)) {
+        throw new Error(
+          `compileSessionSlotted: array delay '${entry.slotName}' source must be a ref`,
+        )
+      }
+      const obj = sourceExpr as Record<string, unknown>
+      if (obj.op !== 'ref' || typeof obj.instance !== 'string' || typeof obj.output !== 'string') {
+        throw new Error(
+          `compileSessionSlotted: array delay '${entry.slotName}' source must be {op:'ref', instance, output}`,
+        )
+      }
+      const producerKey = slotKey(toInstanceName(obj.instance), obj.output)
+      const producerMeta = session.outputPortMeta.get(producerKey)
+      if (producerMeta?.arraySlot === undefined) {
+        throw new Error(
+          `compileSessionSlotted: array delay '${entry.slotName}' source '${producerKey}' has no array output slot`,
+        )
+      }
+      const dstArrSlot = arraySlotIdx(entry.arraySlot)
+      const srcArrOp   = opArray(arraySlotIdx(producerMeta.arraySlot))
+      for (let elemI = 0; elemI < entry.arraySize; elemI++) {
+        const tmp = stateEvolutionEmitter.allocTemp()
+        stateEvolution.push(instrIndex(tmp, [srcArrOp, opConst(elemI, 'int')], 'float'))
+        stateEvolution.push(instrSetElement(
+          dstArrSlot,
+          [opArray(dstArrSlot), opConst(elemI, 'int'), opTemp(tmp, 'float')],
+        ))
+      }
+      continue
+    }
+    if (entry.slotIdx === undefined) {
+      throw new Error(
+        `compileSessionSlotted: scalar delay entry '${entry.slotName}' missing slotIdx`,
+      )
+    }
     const sourceOp = translateNode(
       entry.sourceExpr,
       entry.scalarType,
@@ -298,6 +357,12 @@ function buildSlotMetadata(session: SessionState): {
     if (param !== undefined) slotDefaults[idx] = param.value
   }
   for (const entry of session.delaySlotRegistry) {
+    // Scalar delays occupy module slots in this registry; array
+    // delays use the session ioArraySlot space and don't show up
+    // here. The metadata for array delays lives on the FlatPlan's
+    // `array_slot_names` / `array_slot_sizes` (seeded from
+    // `session.ioArraySlot*` at compile time).
+    if (entry.slotIdx === undefined) continue
     slotNames[entry.slotIdx]    = entry.slotName
     slotDefaults[entry.slotIdx] = entry.init
   }

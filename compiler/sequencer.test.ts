@@ -59,14 +59,21 @@ describe('stdlib Sequencer<N>', () => {
     session.graph.dispose()
   })
 
-  test('Sequencer<4> compiles via the MCP path (setWireExpr) without scalar-delay-wrapping the array wire', () => {
-    // Regression test for QA's report: `setWireExpr` used to auto-wrap
-    // every wire in a scalar `delay()` envelope. For an array-typed
-    // input port the delay node carries `init: 0` (scalar) and the
-    // emitter lifts it to a synthetic RegDecl whose scalar init is
-    // paired with an array-valued update — emit_resolved throws
-    // `array-result update on non-array reg`. The fix in
-    // `setWireExpr` skips the wrap for array-typed input ports.
+  test('Sequencer<4> compiles via the MCP path (setWireExpr) — shape-polymorphic delay over an array literal', () => {
+    // Regression test for QA's report: `setWireExpr` auto-wraps every
+    // wire in a `delay()` envelope. The pre-fix path treated `delay`
+    // as scalar-only — the lift produced a synthetic `RegDecl` whose
+    // `init: 0` (scalar) was paired with an array-valued `update`,
+    // which `emit_resolved` rejected as `array-result update on
+    // non-array reg`.
+    //
+    // The fix: `delay` is shape-polymorphic at the IR level. The lift
+    // inspects the source expression's shape after translation; if
+    // array-shaped, the scalar `init` broadcasts to a constant-of-
+    // shape (`[0, 0, …, 0]` of matching length). The auto-delay wrap
+    // then applies uniformly — every MCP wire, scalar or array, gets
+    // one sample of latency, cycles break structurally regardless of
+    // wire shape.
     const session = makeSession(256, { inlineNested: false })
     loadStdlib(session)
     const { type } = resolveProgramType(session, 'Sequencer', { N: 4 }, undefined)
@@ -74,24 +81,23 @@ describe('stdlib Sequencer<N>', () => {
     session.instanceRegistry.set(inst.name, inst)
     allocateOutputSlots(session, toInstanceName(inst.name), type)
 
-    // MCP-style wiring: every set goes through setWireExpr. The
-    // array wire MUST land in inputExprNodes unwrapped; the scalar
-    // wire MUST land wrapped in the auto-delay envelope (existing
-    // cycle-breaking convention).
     setWireExpr(session, portRef(toInstanceName('seq'), toPortName('values')), [110, 220, 440, 880])
     setWireExpr(session, portRef(toInstanceName('seq'), toPortName('clock')),  0.0)
 
+    // Both wires are wrapped in delay envelopes; the lift handles
+    // shape-polymorphism downstream.
     const valuesWire = session.inputExprNodes.get(
       wireKey(portRef(toInstanceName('seq'), toPortName('values'))),
     )
     const clockWire = session.inputExprNodes.get(
       wireKey(portRef(toInstanceName('seq'), toPortName('clock'))),
     )
-    expect(valuesWire).toEqual([110, 220, 440, 880])  // raw array, no delay wrap
-    expect(clockWire).toMatchObject({ op: 'delay' })  // scalar wire, wrapped
+    expect(valuesWire).toMatchObject({ op: 'delay' })
+    expect(clockWire) .toMatchObject({ op: 'delay' })
 
     session.graphOutputs.push({ instance: 'seq', output: 'value' })
-    // Compile must succeed — the pre-fix shape threw at emit time.
+    // Compile must succeed — the pre-fix shape threw at emit time
+    // with `array-result update on non-array reg`.
     const plan = compileSession(session)
     expect(plan.schema).toBe('tropical_plan_5')
     expect(plan.array_slot_count).toBeGreaterThanOrEqual(1)

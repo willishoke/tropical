@@ -237,20 +237,38 @@ export interface SessionState {
   delaySlotRegistry: DelaySlotEntry[]
 }
 
-/** One extracted unit-delay wire. */
+/** One extracted unit-delay wire.
+ *
+ *  Two shapes — scalar and array — discriminated by `isArray`. Scalar
+ *  delays allocate a single module slot (the `slotIdx` field) and
+ *  emit one `WriteSlot` per sample in the scheduler's
+ *  state-evolution phase. Array delays allocate an ioArraySlot (the
+ *  `arraySlot` / `arraySize` fields) and emit one elementwise
+ *  `instrArray('Add', …, [src, 0], size, [1, 0])` per sample — the
+ *  shape-polymorphic delay primitive's session-level realization.
+ *
+ *  `init` carries the scalar initial value uniformly; for array
+ *  delays it broadcasts to a constant-of-shape at slot-init time
+ *  (same broadcast semantics the lift uses for delay-as-RegDecl in
+ *  `liftWireToProgram`). */
 export interface DelaySlotEntry {
-  /** Index in the unified slot array. */
-  slotIdx:    number
   /** Stable slot name (used for hot-swap state transfer). */
   slotName:   string
-  /** Initial slot value (set in `slot_defaults`). */
+  /** Initial value. Scalar; broadcasts for array delays. */
   init:       number
-  /** Un-delayed source expression; lowered to NInstrs in
-   *  `state_evolution` each sample. */
+  /** Un-delayed source expression; emitted into `state_evolution`. */
   sourceExpr: ExprNode
-  /** Scalar type for the WriteSlot (always 'float' today; slot
-   *  array is float64-backed). */
+  /** Scalar element type. For arrays this is the element type. */
   scalarType: 'float' | 'int' | 'bool'
+  /** Discriminator: true → consult `arraySlot`/`arraySize`; false/
+   *  undefined → consult `slotIdx`. */
+  isArray?:   boolean
+  /** Scalar-only: module slot index. Unused when `isArray` is true. */
+  slotIdx?:   number
+  /** Array-only: ioArraySlot index. */
+  arraySlot?: number
+  /** Array-only: element count (product of shape dims). */
+  arraySize?: number
 }
 
 export function makeSession(
@@ -335,27 +353,15 @@ export interface WireExprOpts {
  *  construct the `PortRef` via `portRef(instanceName, portName)` —
  *  the brand on `WireKey` makes raw-string keys impossible.
  *
- *  The auto-delay convention applies only to **scalar** wires. Array-
- *  typed wires are stored unwrapped because:
- *
- *    1. A session-level `delay()` allocates a single module slot
- *       (float64) and emits a scalar `WriteSlot` in the scheduler's
- *       state-evolution phase. Wrapping an array-valued expression
- *       in this scalar machinery produces a malformed slot — the
- *       lift creates a synthetic `RegDecl` whose `init: 0` (scalar)
- *       is paired with an array-valued `update`, which `emit_resolved`
- *       rejects with `array-result update on non-array reg`.
- *    2. Array wires use **alias** semantics (see `tryAliasInputArrayWire`
- *       in `allocateInputSlots`): when the wire is a single `ref` to
- *       an array output, the consumer's input array slot binds
- *       directly to the producer's slot — no per-sample copy, no
- *       latency. Adding a session-level unit delay to an array wire
- *       would defeat the alias by interposing a slot copy.
- *    3. The cycle-breaking purpose of auto-delay (the original
- *       motivation) is also weaker for arrays: the alias plus topo
- *       order handle one-step producer→consumer chains; truly
- *       cyclic array-wire patterns need an explicit array-typed
- *       feedback primitive, which is its own follow-up. */
+ *  The wrap is uniform regardless of the source expression's shape.
+ *  Shape-polymorphism is handled downstream: scalar wires become
+ *  scalar delay slots; array wires become array delay slots via the
+ *  shape-polymorphic `delay` primitive (see `liftWireToProgram`'s
+ *  `delay` case, which broadcasts the scalar `init` to match the
+ *  source expression's shape). The cycle-breaking purpose of the
+ *  auto-wrap then holds uniformly across scalar and array wires —
+ *  every MCP wire gets one sample of latency, every cycle is broken
+ *  structurally at the wire layer. */
 export function setWireExpr(
   session: SessionState,
   ref:     PortRef,
@@ -363,33 +369,8 @@ export function setWireExpr(
   opts:    WireExprOpts = {},
 ): void {
   const key = wireKey(ref)
-  if (isArrayInputPort(session, ref)) {
-    session.inputExprNodes.set(key, rawExpr)
-    return
-  }
   const id  = opts.id ?? `__autodelay:${key}`
   session.inputExprNodes.set(key, wrapInUnitDelay(rawExpr, opts.init ?? 0, id))
-}
-
-/** Resolve a `PortRef` against the session's instance registry and
- *  determine whether it refers to an array-typed input port. Used by
- *  `setWireExpr` to gate the auto-delay wrap.
- *
- *  Returns `false` when the instance hasn't been registered yet, when
- *  it carries no `Compiled` type, or when the named port isn't found
- *  in the program's input decls — conservative default: behave as
- *  scalar (apply the wrap). Returning `true` requires the program
- *  type and port to be present and the port's IR type to be
- *  `{kind: 'array', …}`. */
-function isArrayInputPort(session: SessionState, ref: PortRef): boolean {
-  const inst = session.instanceRegistry.get(ref.instance as string)
-  if (inst === undefined || inst.compiled === undefined) return false
-  for (const port of inst.compiled.prog.ports.inputs) {
-    if (port.name === (ref.port as string)) {
-      return port.type !== undefined && port.type.kind === 'array'
-    }
-  }
-  return false
 }
 
 /** Strip a top-level `delay()` wrapper if present, returning the raw
@@ -640,13 +621,23 @@ function tryAliasInputArrayWire(
   if (typeof wireExpr !== 'object' || wireExpr === null) return undefined
   if (Array.isArray(wireExpr)) return undefined
   const obj = wireExpr as Record<string, unknown>
-  if (obj.op !== 'ref') return undefined
-  if (typeof obj.instance !== 'string' || typeof obj.output !== 'string') return undefined
-  const sourceKey = slotKey(toInstanceName(obj.instance), obj.output)
-  const meta = session.outputPortMeta.get(sourceKey)
-  if (meta === undefined) return undefined
-  if (meta.arraySlot === undefined || meta.arraySize === undefined) return undefined
-  return { slot: meta.arraySlot, size: meta.arraySize }
+  // Direct array ref: bind to the producer's output array slot.
+  if (obj.op === 'ref' && typeof obj.instance === 'string' && typeof obj.output === 'string') {
+    const sourceKey = slotKey(toInstanceName(obj.instance), obj.output)
+    const meta = session.outputPortMeta.get(sourceKey)
+    if (meta === undefined) return undefined
+    if (meta.arraySlot === undefined || meta.arraySize === undefined) return undefined
+    return { slot: meta.arraySlot, size: meta.arraySize }
+  }
+  // Post-extractSessionDelays array delay: the wire has been rewritten
+  // to `{op: 'sessionArraySlot', index, size}` pointing at the delay's
+  // allocated ioArraySlot. Bind the consumer directly to that slot —
+  // same alias-quotient pattern as the ref case, just with the delay
+  // slot standing in for a producer's output slot.
+  if (obj.op === 'sessionArraySlot' && typeof obj.index === 'number' && typeof obj.size === 'number') {
+    return { slot: obj.index, size: obj.size }
+  }
+  return undefined
 }
 
 /** Allocate a single param/trigger slot owned by the control plane.

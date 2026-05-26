@@ -53,7 +53,7 @@ export type WireFormatOp =
   | 'reshape' | 'transpose' | 'slice' | 'reduce' | 'broadcastTo' | 'map'
   | 'matmul'
   // Wiring + leaves
-  | 'ref' | 'call' | 'delay' | 'sourceTag' | 'sessionSlot'
+  | 'ref' | 'call' | 'delay' | 'sourceTag' | 'sessionSlot' | 'sessionArraySlot'
   | 'input' | 'reg' | 'delayRef' | 'delayValue'
   | 'nestedOut' | 'nestedOutput' | 'binding' | 'typeParam'
   | 'sampleRate' | 'sampleIndex'
