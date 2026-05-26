@@ -110,6 +110,35 @@ inline tropical_jit::Operand parse_operand(const nlohmann::json & j)
   throw std::runtime_error("NumericProgramParser: unknown operand kind '" + kind + "'");
 }
 
+inline tropical_jit::DstKind parse_dst_kind(const std::string & s)
+{
+  using K = tropical_jit::DstKind;
+  if (s == "temp")       return K::Temp;
+  if (s == "array")      return K::Array;
+  if (s == "moduleSlot") return K::ModuleSlot;
+  throw std::runtime_error("NumericProgramParser: unknown dst_kind '" + s + "'");
+}
+
+/** Legacy fallback: derive the writeback namespace from the op tag +
+ *  `loop_count` proxy. Used only when the wire format omits the
+ *  explicit `dst_kind` field — newer producers (`compile_session_slotted.ts`)
+ *  always emit it. The derivation matches what the JIT used to assume
+ *  before `dst_kind` was carried explicitly, so pre-existing fixtures
+ *  parse identically. */
+inline tropical_jit::DstKind derive_legacy_dst_kind(tropical_jit::OpTag tag, uint32_t loop_count)
+{
+  using T = tropical_jit::OpTag;
+  using K = tropical_jit::DstKind;
+  switch (tag) {
+    case T::WriteSlot:   return K::ModuleSlot;
+    case T::Pack:        return K::Array;
+    case T::SetElement:  return K::Array;
+    case T::Index:       return K::Temp;
+    case T::SmoothParam: return K::Temp;
+    default:             return loop_count > 1 ? K::Array : K::Temp;
+  }
+}
+
 inline tropical_jit::FlatInstr parse_instr(const nlohmann::json & ji)
 {
   tropical_jit::FlatInstr instr;
@@ -117,6 +146,11 @@ inline tropical_jit::FlatInstr parse_instr(const nlohmann::json & ji)
   instr.result_type = parse_scalar_type(ji.value("result_type", "float"));
   instr.dst         = ji.at("dst").get<uint32_t>();
   instr.loop_count  = ji.value("loop_count", 1u);
+  if (ji.contains("dst_kind")) {
+    instr.dst_kind = parse_dst_kind(ji["dst_kind"].get<std::string>());
+  } else {
+    instr.dst_kind = derive_legacy_dst_kind(instr.tag, instr.loop_count);
+  }
   if (ji.contains("args"))
     for (const auto & a : ji["args"])
       instr.args.push_back(parse_operand(a));

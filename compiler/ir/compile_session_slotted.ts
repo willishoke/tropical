@@ -31,7 +31,7 @@ import type { ResolvedProgram, InputIdx } from './nodes.js'
 import { inputIdx } from './nodes.js'
 import { getInstanceType } from './decl_tables.js'
 import type { NInstr } from './emit_resolved.js'
-import { instrWriteSlot, instrIndex, instrSetElement, opArray, opConst, opTemp } from './emit_resolved.js'
+import { instrWriteSlot, instrArray, opArray, opConst } from './emit_resolved.js'
 import { arraySlotIdx } from './slot_indices.js'
 import {
   computeInstanceTopoOrder, emitDacStitch,
@@ -248,15 +248,11 @@ function compileSessionSlottedPerInstance(
   for (const entry of session.delaySlotRegistry) {
     if (entry.isArray) {
       // Array delay: emit `delaySlot[i] = src[i]` for i in [0, size)
-      // as a pair of (Index source → temp, SetElement delay[i] = temp)
-      // per element. Same emission pattern the per-instance output
-      // writeback uses for array ports — `Index` + `SetElement` are
-      // pointwise primitives the engine handles uniformly across
-      // bodies, scheduler preamble, and state_evolution. Elementwise
-      // `Add` with stride-0 const broadcast could fuse this into one
-      // instruction, but the existing infrastructure for that path
-      // assumes per-instance namespace context that state_evolution
-      // doesn't carry; pointwise emission is the conservative move.
+      // as a single elementwise `Add` with stride-0 const broadcast.
+      // The engine dispatches on the instruction's `dst_kind` tag,
+      // so a `kind:'array'` dst with `loop_count=1` (size-1 case)
+      // takes the same elementwise path as larger N — no scalar
+      // fallthrough, no proxy-on-loop_count surprises.
       //
       // Source is constrained to `{op:'ref', instance, output}` to
       // an array-typed output — the only shape extractSessionDelays
@@ -287,16 +283,14 @@ function compileSessionSlottedPerInstance(
           `compileSessionSlotted: array delay '${entry.slotName}' source '${producerKey}' has no array output slot`,
         )
       }
-      const dstArrSlot = arraySlotIdx(entry.arraySlot)
-      const srcArrOp   = opArray(arraySlotIdx(producerMeta.arraySlot))
-      for (let elemI = 0; elemI < entry.arraySize; elemI++) {
-        const tmp = stateEvolutionEmitter.allocTemp()
-        stateEvolution.push(instrIndex(tmp, [srcArrOp, opConst(elemI, 'int')], 'float'))
-        stateEvolution.push(instrSetElement(
-          dstArrSlot,
-          [opArray(dstArrSlot), opConst(elemI, 'int'), opTemp(tmp, 'float')],
-        ))
-      }
+      stateEvolution.push(instrArray(
+        'Add',
+        arraySlotIdx(entry.arraySlot),
+        [opArray(arraySlotIdx(producerMeta.arraySlot)), opConst(0, 'float')],
+        entry.arraySize,
+        [1, 0],
+        'float',
+      ))
       continue
     }
     if (entry.slotIdx === undefined) {

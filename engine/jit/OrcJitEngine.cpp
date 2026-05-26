@@ -891,7 +891,14 @@ llvm::Error EmitCtx::emit_instr(const FlatInstr & instr)
     builder->SetInsertPoint(merge_bb);
     return llvm::Error::success();
   }
-  if (instr.loop_count > 1) {
+  // Array dst: emit elementwise. Dispatch is on `dst_kind`, not on
+  // `loop_count > 1` — the latter was an unreliable proxy that silently
+  // misclassified degenerate `loop_count == 1` writes to array slots
+  // as scalar emissions, storing a scalar result via `store_temp_f64`
+  // at an array-slot index (out-of-bounds into the temp buffer).
+  // `dst_kind` is the honest discriminator carried through the wire
+  // format from the TS `DstSlot` union.
+  if (instr.dst_kind == DstKind::Array) {
     const std::size_t nargs = instr.args.size();
     std::vector<llvm::Value *> arr_ptrs(nargs, nullptr);
     std::vector<TypedVal> scalar_tvs(nargs, {nullptr, ST::Float});
@@ -908,8 +915,14 @@ llvm::Error EmitCtx::emit_instr(const FlatInstr & instr)
           || t == OpTag::Neg || t == OpTag::Abs
           || t == OpTag::Sqrt;
     };
+    // SIMD path is an OPTIMIZATION trigger — only worth it for N > 1.
+    // For N == 1 (degenerate single-element array write) fall straight
+    // to the scalar-loop body below; LLVM emits one iteration's
+    // worth of GEP + load + op + store, which the optimizer collapses
+    // to the right two-instruction store.
     bool simd_ok = (instr.result_type == ST::Float)
                 && is_simd_float_op(instr.tag)
+                && instr.loop_count > 1
                 && (instr.strides.size() == nargs);
     for (std::size_t i = 0; simd_ok && i < nargs; ++i) {
       const uint8_t s = instr.strides[i];
@@ -1002,6 +1015,19 @@ llvm::Error EmitCtx::emit_instr(const FlatInstr & instr)
 
     builder->SetInsertPoint(end_bb);
     return llvm::Error::success();
+  }
+
+  // Fallthrough: scalar emission writes to a temp slot. Assert the
+  // dst_kind matches — the tag-specific handlers above (WriteSlot,
+  // Pack, Index, SetElement, SmoothParam) catch all non-Temp tags,
+  // and the array-dst branch above catches all elementwise array
+  // writes. Reaching here with a non-Temp dst is a contract
+  // violation from the producer.
+  if (instr.dst_kind != DstKind::Temp) {
+    return llvm::make_error<llvm::StringError>(
+      "emit_instr: scalar fallthrough reached with non-Temp dst_kind — "
+      "producer emitted a scalar op pointing at an Array/ModuleSlot dst",
+      llvm::inconvertibleErrorCode());
   }
 
   std::vector<TypedVal> tvs;

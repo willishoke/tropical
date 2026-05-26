@@ -239,13 +239,37 @@ export type WireNOperand =
   | { kind: 'tick';      scalar_type: ScalarType }
   | { kind: 'slot';      index: number; scalar_type: ScalarType }
 
+export type WireDstKind = 'temp' | 'array' | 'moduleSlot'
+
 export interface WireNInstr {
   tag: string
+  /** The slot index in the writeback namespace selected by `dst_kind`. */
   dst: number
+  /** Discriminator for `dst` — preserves the in-memory `DstSlot` union's
+   *  kind tag through serialization. Reconstructed by the engine into
+   *  a typed `DstKind` so dispatch in `emit_instr` is direct (no
+   *  reconstruction from `tag + loop_count` proxies, which silently
+   *  misclassifies degenerate `loop_count==1` array writes). */
+  dst_kind: WireDstKind
   args: WireNOperand[]
   loop_count: number
   strides: number[]
   result_type: ScalarType
+}
+
+/** Project the `DstSlot` kind tag to its wire-format string. Mirrors
+ *  `dstSlotToWire`'s exhaustive switch so the two stay in lockstep. */
+export const dstSlotKindToWire = (d: DstSlot): WireDstKind => {
+  switch (d.kind) {
+    case 'temp':         return 'temp'
+    case 'array':        return 'array'
+    case 'moduleSlot':   return 'moduleSlot'
+    case 'sessionArray':
+      throw new Error(
+        `dstSlotKindToWire: 'sessionArray' dst leaked to wire format. ` +
+        `remapInstancePlan must convert it to 'array' before serialization.`,
+      )
+  }
 }
 
 export const dstSlotToWire = (d: DstSlot): number => {
@@ -300,6 +324,7 @@ export const dstAsModuleSlot = (i: NInstr): ModuleSlotIdx => {
 export const toWireInstr = (i: NInstr): WireNInstr => ({
   tag:         i.tag,
   dst:         dstSlotToWire(i.dst),
+  dst_kind:    dstSlotKindToWire(i.dst),
   // Branded primitives erase at runtime; the cast tells TS to drop
   // the brand without producing a value-level conversion.
   args:        i.args as unknown as WireNOperand[],
@@ -1049,36 +1074,14 @@ class Emitter {
                 `has size ${arrayInfo.size}, wire expression evaluates to array of size ${r.size}`,
               )
             }
-            // Engine-gate workaround for size==1 (see arrayCopies
-            // emission near `register_targets` for the explanation):
-            // per-element Index+SetElement for size==1, loop-Add for
-            // size > 1.
-            if (arrayInfo.size === 1) {
-              const tmp = this.allocReg()
-              this.regTypes.set(tmp, 'float')
-              this.emit(instrIndex(tmp, [r.op, opConst(0, 'int')], 'float'))
-              this.emit({
-                tag: 'SetElement',
-                dst: { kind: 'sessionArray', slot: arraySlotIdx(arrayInfo.slot) },
-                args: [
-                  { kind: 'session_array_reg', slot: arraySlotIdx(arrayInfo.slot) },
-                  opConst(0, 'int'),
-                  opTemp(tmp, 'float'),
-                ],
-                loop_count: 1,
-                strides: [],
-                result_type: 'float',
-              })
-            } else {
-              this.emit(instrSessionArray(
-                'Add',
-                arraySlotIdx(arrayInfo.slot),
-                [r.op, opConst(0, 'float')],
-                arrayInfo.size,
-                [1, 0],
-                'float',
-              ))
-            }
+            this.emit(instrSessionArray(
+              'Add',
+              arraySlotIdx(arrayInfo.slot),
+              [r.op, opConst(0, 'float')],
+              arrayInfo.size,
+              [1, 0],
+              'float',
+            ))
             continue
           }
           // Port has no allocated parent-side slot — nothing to emit.
@@ -1198,26 +1201,7 @@ class Emitter {
       }
     }
     for (const c of arrayCopies) {
-      // The engine's elementwise-loop emission is gated on
-      // `loop_count > 1`; for size==1, an `Add` with loop_count=1
-      // falls through to the scalar emission path which assumes
-      // `instr.dst` is a TEMP slot, not an array slot — producing
-      // an out-of-bounds store. For the degenerate size==1 case,
-      // emit `Index + SetElement` instead (the pointwise primitive
-      // pair, which the engine dispatches correctly regardless of
-      // loop_count). For size > 1 the elementwise loop is fine and
-      // emits fewer instructions.
-      if (c.size === 1) {
-        const tmp = this.allocReg()
-        this.regTypes.set(tmp, 'float')
-        this.emit(instrIndex(tmp, [c.src, opConst(0, 'int')], 'float'))
-        this.emit(instrSetElement(
-          c.dst,
-          [opArray(c.dst), opConst(0, 'int'), opTemp(tmp, 'float')],
-        ))
-      } else {
-        this.emit(instrArray('Add', c.dst, [c.src, opConst(0, 'float')], c.size, [1, 0], 'float'))
-      }
+      this.emit(instrArray('Add', c.dst, [c.src, opConst(0, 'float')], c.size, [1, 0], 'float'))
     }
 
     return {

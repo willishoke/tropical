@@ -320,16 +320,27 @@ export interface WireFlatPlan {
 // namespace forward and downstream consumers pattern-match on it
 // instead of reapplying the rule.
 
-const isArrayDst = (i: WireNInstr): boolean =>
-  i.loop_count > 1 || i.tag === 'Pack' || i.tag === 'SetElement'
-
-const isModuleSlotDst = (i: WireNInstr): boolean =>
-  i.tag === 'WriteSlot'
-
+/** Parse the wire-format `dst_kind` tag into the in-memory `DstSlot`
+ *  union. Falls back to the legacy proxy (`tag + loop_count`) for
+ *  fixtures that pre-date the explicit `dst_kind` field — `Pack`/
+ *  `SetElement` → array, `WriteSlot` → moduleSlot, `loop_count > 1`
+ *  → array, otherwise temp. New plans always carry `dst_kind`;
+ *  legacy fixtures (some test cases, older patches) hit the
+ *  fallback. */
 const parseDstSlot = (i: WireNInstr): DstSlot => {
-  if (isModuleSlotDst(i)) return { kind: 'moduleSlot', index: moduleSlotIdx(i.dst) }
-  if (isArrayDst(i))      return { kind: 'array',      slot:  arraySlotIdx(i.dst) }
-  return                         { kind: 'temp',       slot:  tempIdx(i.dst) }
+  const kind = i.dst_kind ?? deriveLegacyDstKind(i)
+  switch (kind) {
+    case 'moduleSlot': return { kind: 'moduleSlot', index: moduleSlotIdx(i.dst) }
+    case 'array':      return { kind: 'array',      slot:  arraySlotIdx(i.dst) }
+    case 'temp':       return { kind: 'temp',       slot:  tempIdx(i.dst) }
+  }
+}
+
+const deriveLegacyDstKind = (i: WireNInstr): 'temp' | 'array' | 'moduleSlot' => {
+  if (i.tag === 'WriteSlot') return 'moduleSlot'
+  if (i.tag === 'Pack' || i.tag === 'SetElement') return 'array'
+  if (i.loop_count > 1) return 'array'
+  return 'temp'
 }
 
 const parseOperand = (o: WireNOperand): NOperand => {
