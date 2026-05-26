@@ -333,7 +333,29 @@ export interface WireExprOpts {
  *  it in `session.inputExprNodes` at the consumer port `ref`. Every
  *  MCP wire-setting tool routes through this helper. Callers must
  *  construct the `PortRef` via `portRef(instanceName, portName)` —
- *  the brand on `WireKey` makes raw-string keys impossible. */
+ *  the brand on `WireKey` makes raw-string keys impossible.
+ *
+ *  The auto-delay convention applies only to **scalar** wires. Array-
+ *  typed wires are stored unwrapped because:
+ *
+ *    1. A session-level `delay()` allocates a single module slot
+ *       (float64) and emits a scalar `WriteSlot` in the scheduler's
+ *       state-evolution phase. Wrapping an array-valued expression
+ *       in this scalar machinery produces a malformed slot — the
+ *       lift creates a synthetic `RegDecl` whose `init: 0` (scalar)
+ *       is paired with an array-valued `update`, which `emit_resolved`
+ *       rejects with `array-result update on non-array reg`.
+ *    2. Array wires use **alias** semantics (see `tryAliasInputArrayWire`
+ *       in `allocateInputSlots`): when the wire is a single `ref` to
+ *       an array output, the consumer's input array slot binds
+ *       directly to the producer's slot — no per-sample copy, no
+ *       latency. Adding a session-level unit delay to an array wire
+ *       would defeat the alias by interposing a slot copy.
+ *    3. The cycle-breaking purpose of auto-delay (the original
+ *       motivation) is also weaker for arrays: the alias plus topo
+ *       order handle one-step producer→consumer chains; truly
+ *       cyclic array-wire patterns need an explicit array-typed
+ *       feedback primitive, which is its own follow-up. */
 export function setWireExpr(
   session: SessionState,
   ref:     PortRef,
@@ -341,8 +363,33 @@ export function setWireExpr(
   opts:    WireExprOpts = {},
 ): void {
   const key = wireKey(ref)
+  if (isArrayInputPort(session, ref)) {
+    session.inputExprNodes.set(key, rawExpr)
+    return
+  }
   const id  = opts.id ?? `__autodelay:${key}`
   session.inputExprNodes.set(key, wrapInUnitDelay(rawExpr, opts.init ?? 0, id))
+}
+
+/** Resolve a `PortRef` against the session's instance registry and
+ *  determine whether it refers to an array-typed input port. Used by
+ *  `setWireExpr` to gate the auto-delay wrap.
+ *
+ *  Returns `false` when the instance hasn't been registered yet, when
+ *  it carries no `Compiled` type, or when the named port isn't found
+ *  in the program's input decls — conservative default: behave as
+ *  scalar (apply the wrap). Returning `true` requires the program
+ *  type and port to be present and the port's IR type to be
+ *  `{kind: 'array', …}`. */
+function isArrayInputPort(session: SessionState, ref: PortRef): boolean {
+  const inst = session.instanceRegistry.get(ref.instance as string)
+  if (inst === undefined || inst.compiled === undefined) return false
+  for (const port of inst.compiled.prog.ports.inputs) {
+    if (port.name === (ref.port as string)) {
+      return port.type !== undefined && port.type.kind === 'array'
+    }
+  }
+  return false
 }
 
 /** Strip a top-level `delay()` wrapper if present, returning the raw
