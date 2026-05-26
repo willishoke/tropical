@@ -180,19 +180,30 @@ struct FlatProgram
 
 // Engine realization strategy.
 //
-//   Fused       — one monolithic LLVM kernel function that inlines every
-//                 instance body inside the outer sample loop. Legacy
-//                 default; consumed by FlatRuntime via NumericKernelFn.
-//   Microkernel — N+1 LLVM functions in one module (preamble, N per-
-//                 instance kernels, state_evolution, postamble_mix);
-//                 the C++ scheduler dispatches them via function
-//                 pointers per sample. Consumed by FlatRuntime via
-//                 MicrokernelKernels.
+//   Fused           — one monolithic LLVM kernel function that inlines
+//                     every instance body inside the outer sample loop.
+//                     Legacy default; consumed by FlatRuntime via
+//                     NumericKernelFn.
+//   Microkernel     — N+3 LLVM functions in one module (preamble, N per-
+//                     instance kernels, state_evolution, postamble_mix);
+//                     the C++ scheduler dispatches them via function
+//                     pointers per sample. Top-level session instances
+//                     each get their own function; nested children are
+//                     inlined into their parent's function. Consumed by
+//                     FlatRuntime via MicrokernelKernels.
+//   MicrokernelDeep — like Microkernel, but children are also emitted
+//                     as their own LLVM functions instead of being
+//                     inlined — one function per `InstanceProgram` at
+//                     every nesting depth. Requires plans with non-
+//                     empty `children` arrays. Codegen lands in a
+//                     follow-up (Phase 2); the parser accepts the value
+//                     so plans round-trip, but the compile path throws
+//                     "not yet implemented" if asked to realize it.
 //
 // Distinguished by *return type* from the compiler, not by a runtime
 // flag — the cache must be partitioned by mode so a fused-mode cache
 // hit cannot satisfy a microkernel-mode query.
-enum class CompilationMode : uint8_t { Fused, Microkernel };
+enum class CompilationMode : uint8_t { Fused, Microkernel, MicrokernelDeep };
 
 // ── Fused-mode kernel signature ──
 // `slots` (M6+) is the shared inter-module slot array passed by
@@ -283,11 +294,22 @@ class OrcJitEngine
     llvm::Expected<NumericKernelFn> compile_flat_program(
       const FlatProgram & program);
 
-    /** Microkernel-mode codegen: N+1 LLVM functions in one module.
-     *  Phase 3 supplies the implementation; Phase 2 lands the type
-     *  surface and a stub that errors. */
+    /** Microkernel-mode codegen: N+3 LLVM functions in one module.
+     *
+     *  `deep = false` (default): one function per top-level session
+     *  instance, with nested children inlined into the parent's
+     *  function via recursive emit_kernel_block. Cache prefix:
+     *  "flat5:mk:".
+     *
+     *  `deep = true`: one function per InstanceProgram at EVERY
+     *  nesting depth. The tree is post-order flattened so children
+     *  emit (and dispatch) before their parents — the unified
+     *  temp/slot dataflow stays intact. Cache prefix: "flat5:mkd:".
+     *  Requires the plan to carry non-empty `children` arrays
+     *  (i.e., the session was compiled with inlineNested:false). */
     llvm::Expected<MicrokernelKernels> compile_microkernel(
-      const FlatProgram & program);
+      const FlatProgram & program,
+      bool deep = false);
 
   private:
     OrcJitEngine();

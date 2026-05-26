@@ -8,7 +8,7 @@ via `bun run`, not `bun test` — these are scripts, not assertions.
 | `compile.ts`               | TS-pipeline-only cost. Times `compileSession` end-to-end on a fixed 13-module patch and per-module to find bottlenecks. |
 | `jit_runtime.ts`           | End-to-end: TS pipeline → JSON.stringify → JIT loadPlan → `runtime.process` loop. Per-patch ns/sample and realtime ratio. Wipes the kernel cache for cold compiles. |
 | `wasm_vs_jit.ts`           | Head-to-head: same FlatPlan compiled through both backends. Compile-time (TS, WASM emit/instantiate, JIT load) and runtime (ns/sample). |
-| `microkernel_vs_fused.ts`  | Head-to-head: same session compiled in `fused` mode vs `microkernel` mode. Per-mode ns/sample, compile latency, and rt-ratio across small/medium/polyphony cases. |
+| `microkernel_vs_fused.ts`  | Head-to-head: same session compiled in `fused`, `microkernel`, and `microkernel-deep` modes. Per-mode ns/sample, compile latency, and rt-ratio across small/medium/polyphony cases. Polyphony cases use `inlineNested:false` so deep mode actually exercises per-sub-instance dispatch (e.g. each SinOsc voice's nested Sin child is its own LLVM function); patch-file cases use the default `inlineNested:true` and deep mode degenerates to shallow there. |
 | `corpus.ts`                | Shared list of patches that currently compile through `compileSession`. Other patches in `patches/` are blocked on known limitations (see file). |
 
 ## Snapshots

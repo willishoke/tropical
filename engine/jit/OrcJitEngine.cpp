@@ -425,6 +425,13 @@ struct EmitCtx
   // compile share the same symbol table.
   std::vector<ST> * temp_types = nullptr;
 
+  // ── Deep-mode dispatch ──
+  // When set, `emit_kernel_block` emits `CreateCall(child_fn, args)` for
+  // each child instead of recursing inline. The map gives each
+  // InstanceProgram its pre-declared LLVM function. nullptr → shallow
+  // mode (inline recursion).
+  const std::unordered_map<const InstanceProgram*, llvm::Function*> * deep_child_fns = nullptr;
+
   // ── Slot helpers ──
   llvm::Value * gep_temp(uint32_t idx) const {
     return builder->CreateInBoundsGEP(i64_ty, temps_arg, builder->getInt64(idx));
@@ -549,7 +556,29 @@ struct EmitCtx
     if (auto err = emit_instrs(inst.preamble_instructions)) return err;
     for (const auto & child : inst.children) {
       if (auto err = emit_instrs(child.pre_input_instructions)) return err;
-      if (auto err = emit_kernel_block(child)) return err;
+      if (deep_child_fns != nullptr) {
+        // Deep mode: each child is its own LLVM function. Call it
+        // with the same per-sample args we received; the child's
+        // body executes (and may recursively call its own children).
+        // The four-phase order is preserved across the function
+        // boundary because pre_input ran above in OUR scope, and the
+        // child's body runs as a leaf operation here.
+        auto it = deep_child_fns->find(&child);
+        if (it == deep_child_fns->end()) {
+          return llvm::make_error<llvm::StringError>(
+            "emit_kernel_block: deep mode missing function for child '"
+            + child.instance_name + "'",
+            llvm::inconvertibleErrorCode());
+        }
+        llvm::Value * args[] = {
+          regs_arg, arrays_arg, array_sizes_arg, temps_arg,
+          sample_rate_arg, current_sample_idx, param_ptrs_arg, slots_arg,
+        };
+        builder->CreateCall(it->second, args);
+      } else {
+        // Shallow mode: inline the child's body recursively.
+        if (auto err = emit_kernel_block(child)) return err;
+      }
     }
     if (auto err = emit_instrs(inst.instructions)) return err;
     emit_writebacks(inst.writebacks);
@@ -1319,7 +1348,8 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
 // ---------------------------------------------------------------------------
 
 llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
-  const FlatProgram & program)
+  const FlatProgram & program,
+  bool deep)
 {
   if (!jit_)
   {
@@ -1354,9 +1384,11 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
 
   std::string cache_key;
   // Mode-tagged: keeps microkernel cache disjoint from fused mode's
-  // "flat5:fused:" entries — both compile_* methods return different
-  // types, so a wrong-mode hit would be a type-confusion bug.
-  cache_key += "flat5:mk:";
+  // "flat5:fused:" entries, and keeps shallow ("flat5:mk:") and deep
+  // ("flat5:mkd:") modes disjoint from each other — both compile_*
+  // calls return different LLVM module shapes for the same input
+  // FlatProgram, so a wrong-mode hit would be a type-confusion bug.
+  cache_key += deep ? "flat5:mkd:" : "flat5:mk:";
   cache_key += opt_level_tag(opt_level_);
   cache_key += ":";
   {
@@ -1507,22 +1539,56 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
     return llvm::Error::success();
   };
 
-  // ── Emit one PerSampleFn from one InstanceProgram (body + writebacks + children) ──
-  // Recursive: nested children are inlined into this function's body
-  // via EmitCtx::emit_kernel_block. One LLVM function per top-level
-  // session instance.
+  // ── Pre-declare LLVM functions for deep mode ──
+  // In deep mode, each InstanceProgram (top-level AND every descendant)
+  // becomes its own LLVM function. The parent's body emits CreateCall
+  // to each child's function instead of inlining. All function symbols
+  // must exist BEFORE any function body is emitted, so we pre-declare
+  // every node's function first, then emit bodies in a second pass.
+  //
+  // `nested_to_emit` lists ONLY the descendants (not top-level), since
+  // top-level functions are created in the main emission loop below
+  // anyway and have the C++-scheduler-visible symbols.
+  std::unordered_map<const InstanceProgram *, llvm::Function *> node_to_fn;
+  std::vector<std::pair<const InstanceProgram *, llvm::Function *>> nested_to_emit;
+  if (deep) {
+    std::function<void(const InstanceProgram &, const std::string &)> declare_descendants =
+      [&](const InstanceProgram & inst, const std::string & path) {
+        for (std::size_t i = 0; i < inst.children.size(); ++i) {
+          const auto & child = inst.children[i];
+          const std::string sub_path = path + "_c" + std::to_string(i);
+          llvm::Function * child_fn = llvm::Function::Create(
+            per_sample_ty, llvm::Function::ExternalLinkage,
+            "mk_" + hash + sub_path, module.get());
+          node_to_fn[&child] = child_fn;
+          nested_to_emit.push_back({&child, child_fn});
+          declare_descendants(child, sub_path);
+        }
+      };
+    for (std::size_t i = 0; i < program.instance_functions.size(); ++i) {
+      declare_descendants(program.instance_functions[i], "_inst_" + std::to_string(i));
+    }
+  }
+
+  // ── Emit one PerSampleFn from one InstanceProgram (preamble + per-child {pre_input + child} + main + writebacks) ──
+  // Shallow mode (`deep_child_fns == nullptr`): emit_kernel_block
+  // recurses inline — one LLVM function per top-level session
+  // instance, children inlined.
+  // Deep mode (`deep_child_fns` populated): emit_kernel_block emits
+  // CreateCall to each child's pre-declared function. The C++
+  // scheduler still only iterates top-level instances; the recursive
+  // tree of calls happens entirely in LLVM IR.
   auto emit_instance_function = [&](
-    const std::string & sym,
+    llvm::Function * fn,
     const InstanceProgram & inst) -> llvm::Error
   {
-    llvm::Function * fn = llvm::Function::Create(
-      per_sample_ty, llvm::Function::ExternalLinkage, sym, module.get());
     EmitCtx ctx;
     emit_ctx_init_module(ctx, *context, builder, *module);
     ctx.fn          = fn;
     ctx.program     = &program;
     ctx.param_index = &param_index;
     ctx.temp_types  = &temp_types;
+    ctx.deep_child_fns = deep ? &node_to_fn : nullptr;
     bind_per_sample_args(fn, ctx);
 
     llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
@@ -1532,7 +1598,7 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
 
     if (llvm::verifyFunction(*fn, &llvm::errs()))
       return llvm::make_error<llvm::StringError>(
-        "compile_microkernel: invalid IR in " + sym,
+        "compile_microkernel: invalid IR in " + std::string(fn->getName()),
         llvm::inconvertibleErrorCode());
     return llvm::Error::success();
   };
@@ -1595,24 +1661,54 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   };
 
   // ── Emit all functions ──
-  // One LLVM function per top-level session instance, with nested
-  // children inlined recursively via emit_kernel_block. Plus preamble,
-  // state_evolution, and postamble_mix as their own functions.
+  // Both modes emit one LLVM function per top-level session instance;
+  // the C++ scheduler iterates only those. The shapes differ inside:
+  // shallow inlines nested children; deep emits each nested child as
+  // its own LLVM function and the parent calls them via CreateCall.
+  // Either way, preamble / state_evolution / postamble_mix are their
+  // own functions.
   const std::string sym_preamble        = "mk_" + hash + "_preamble";
   const std::string sym_state_evolution = "mk_" + hash + "_state_evo";
   const std::string sym_postamble_mix   = "mk_" + hash + "_postamble_mix";
+
+  // Top-level instance function names. The C++ scheduler dispatches
+  // these in source order per sample.
   std::vector<std::string> sym_instances;
   sym_instances.reserve(program.instance_functions.size());
-  for (std::size_t i = 0; i < program.instance_functions.size(); ++i)
-    sym_instances.push_back("mk_" + hash + "_inst_" + std::to_string(i));
+  std::vector<llvm::Function *> top_fns;
+  top_fns.reserve(program.instance_functions.size());
+  for (std::size_t i = 0; i < program.instance_functions.size(); ++i) {
+    const std::string sym = "mk_" + hash + "_inst_" + std::to_string(i);
+    sym_instances.push_back(sym);
+    llvm::Function * fn = llvm::Function::Create(
+      per_sample_ty, llvm::Function::ExternalLinkage, sym, module.get());
+    if (deep) {
+      // Register the top-level function in node_to_fn too, in case any
+      // sibling references it (shouldn't normally happen — children
+      // can't reference top-level instances — but the map is the
+      // authoritative lookup for child dispatches).
+      node_to_fn[&program.instance_functions[i]] = fn;
+    }
+    top_fns.push_back(fn);
+  }
 
-  // Emit in the order the scheduler will call them so that the
-  // temp_types table is built up consistently with the runtime
-  // dispatch sequence.
+  // Emit in scheduler-call order so temp_types builds up consistently
+  // with the runtime dispatch sequence.
   if (auto err = emit_per_sample_function(sym_preamble, program.scheduler.preamble))
     return std::move(err);
+  // In deep mode, emit nested-child function bodies first (any order is
+  // safe — they all call into each other via pre-declared symbols),
+  // then top-levels. Bodies don't depend on emission order because
+  // cross-function data flow uses the unified slot/state-reg arrays,
+  // not LLVM SSA across function boundaries.
+  if (deep) {
+    for (const auto & [inst_ptr, fn] : nested_to_emit) {
+      if (auto err = emit_instance_function(fn, *inst_ptr))
+        return std::move(err);
+    }
+  }
   for (std::size_t i = 0; i < program.instance_functions.size(); ++i) {
-    if (auto err = emit_instance_function(sym_instances[i], program.instance_functions[i]))
+    if (auto err = emit_instance_function(top_fns[i], program.instance_functions[i]))
       return std::move(err);
   }
   if (auto err = emit_per_sample_function(sym_state_evolution, program.scheduler.state_evolution))

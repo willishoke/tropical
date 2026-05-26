@@ -48,14 +48,21 @@ import { toWireInstr } from './ir/emit_resolved'
 // ─── CompilationMode: how the engine should realize the plan ───────────────
 // `fused` (default, legacy): one monolithic LLVM kernel function that
 // inlines every instance body inside the outer sample loop.
-// `microkernel`: N+1 LLVM functions in one module (preamble, per-instance
+// `microkernel`: N+3 LLVM functions in one module (preamble, per-instance
 // kernels, state_evolution, postamble_mix); the C++ scheduler dispatches
-// them via function pointers per sample. The field is part of the plan
-// because the cache must be partitioned by mode — different return types
-// from `compile_*` mean a fused-mode cache hit cannot satisfy a
-// microkernel-mode query.
+// them via function pointers per sample. Top-level session instances
+// each get their own function; nested children are inlined into their
+// parent's function.
+// `microkernel-deep`: like `microkernel`, but children are also emitted
+// as their own LLVM functions instead of being inlined — one function
+// per `InstanceFunction` at every nesting depth. Requires the plan to
+// carry non-empty `children` arrays (i.e., the session was compiled
+// with `inlineNested: false`).
+// The field is part of the plan because the cache must be partitioned
+// by mode — different return types from `compile_*` mean a fused-mode
+// cache hit cannot satisfy a microkernel-mode query.
 
-export type CompilationMode = 'fused' | 'microkernel'
+export type CompilationMode = 'fused' | 'microkernel' | 'microkernel-deep'
 
 /** Parse a wire-format mode string, defaulting to 'fused' for legacy
  *  plans that pre-date the field. Throws on unknown strings — we fail
@@ -63,8 +70,9 @@ export type CompilationMode = 'fused' | 'microkernel'
  *  intend. */
 export function parseCompilationMode(s: string | undefined): CompilationMode {
   if (s === undefined || s === 'fused') return 'fused'
-  if (s === 'microkernel') return 'microkernel'
-  throw new Error(`flat_plan: unknown compilation_mode '${s}' (expected 'fused' | 'microkernel')`)
+  if (s === 'microkernel')      return 'microkernel'
+  if (s === 'microkernel-deep') return 'microkernel-deep'
+  throw new Error(`flat_plan: unknown compilation_mode '${s}' (expected 'fused' | 'microkernel' | 'microkernel-deep')`)
 }
 
 // ─── RegTarget: sum type replacing the `-1`-sentinel int field ──────────────
@@ -429,11 +437,11 @@ export function toWirePlan(plan: FlatPlan): WireFlatPlan {
     schema:           plan.schema,
     config:           plan.config,
     // Omit 'fused' from the wire format so golden JSON fixtures
-    // (which predate this field) don't gain a spurious key. Only
-    // 'microkernel' emits explicitly.
-    ...(plan.compilation_mode === 'microkernel'
-      ? { compilation_mode: 'microkernel' as const }
-      : {}),
+    // (which predate this field) don't gain a spurious key. Other
+    // modes emit explicitly.
+    ...(plan.compilation_mode === 'fused'
+      ? {}
+      : { compilation_mode: plan.compilation_mode }),
     state_init:       plan.state_init,
     register_names:   plan.register_names,
     register_types:   plan.register_types,

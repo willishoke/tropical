@@ -108,12 +108,15 @@ public:
 
     KernelState & state = states_[state_idx];
 
-    // No active kernel — emit silence (covers both fused and microkernel
-    // modes; the "no kernel" predicate is mode-specific).
+    // No active kernel — emit silence (covers fused, microkernel, and
+    // microkernel-deep modes; the "no kernel" predicate is mode-
+    // specific).
     const bool fused_ready = state.mode == tropical_jit::CompilationMode::Fused
                           && state.kernel != nullptr;
-    const bool mk_ready    = state.mode == tropical_jit::CompilationMode::Microkernel
-                          && state.microkernels.preamble != nullptr;
+    const bool mk_ready    =
+      (state.mode == tropical_jit::CompilationMode::Microkernel
+       || state.mode == tropical_jit::CompilationMode::MicrokernelDeep)
+      && state.microkernels.preamble != nullptr;
     if (!fused_ready && !mk_ready)
     {
       std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);

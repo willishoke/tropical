@@ -26,15 +26,21 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
 
   KernelState new_state;
   new_state.mode = parsed.compilation_mode;
-  if (parsed.compilation_mode == tropical_jit::CompilationMode::Microkernel)
+  if (parsed.compilation_mode == tropical_jit::CompilationMode::Microkernel
+      || parsed.compilation_mode == tropical_jit::CompilationMode::MicrokernelDeep)
   {
-    auto mk_result = tropical_jit::OrcJitEngine::instance().compile_microkernel(parsed.program);
+    const bool deep =
+      parsed.compilation_mode == tropical_jit::CompilationMode::MicrokernelDeep;
+    auto mk_result = tropical_jit::OrcJitEngine::instance().compile_microkernel(parsed.program, deep);
     if (!mk_result)
     {
       std::string err;
       llvm::handleAllErrors(mk_result.takeError(),
         [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
-      throw std::runtime_error("FlatRuntime: microkernel JIT compilation failed: " + err);
+      throw std::runtime_error(
+        std::string("FlatRuntime: ") +
+        (deep ? "microkernel-deep" : "microkernel") +
+        " JIT compilation failed: " + err);
     }
     new_state.microkernels = *mk_result;
   }
@@ -104,8 +110,9 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
   // surface flips a session between fused and microkernel for A/B
   // testing); state transfer by name is mode-agnostic.
   const bool old_has_kernel =
-    (old_state.mode == tropical_jit::CompilationMode::Fused      && old_state.kernel != nullptr) ||
-    (old_state.mode == tropical_jit::CompilationMode::Microkernel && old_state.microkernels.preamble != nullptr);
+    (old_state.mode == tropical_jit::CompilationMode::Fused          && old_state.kernel != nullptr) ||
+    (old_state.mode == tropical_jit::CompilationMode::Microkernel    && old_state.microkernels.preamble != nullptr) ||
+    (old_state.mode == tropical_jit::CompilationMode::MicrokernelDeep && old_state.microkernels.preamble != nullptr);
   if (old_has_kernel)
   {
     const auto mapping       = compute_register_mapping(old_state, new_state);

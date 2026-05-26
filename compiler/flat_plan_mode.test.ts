@@ -1,18 +1,18 @@
 /**
  * flat_plan_mode.test.ts — round-trip coverage for the `compilation_mode`
- * field added in Phase 1 of the microkernel-mode spike.
+ * field.
  *
  * Pure-TS test: no FFI, no native runtime. The compileSession →
  * compileSessionSlotted threading is covered transitively by the
- * cross-mode equivalence suite (Phase 6); this file pins the
- * data-format contract.
+ * cross-mode equivalence suite; this file pins the data-format
+ * contract.
  *
- * Three properties under test:
- *   1. `parseCompilationMode` accepts 'fused' / 'microkernel' / undefined,
- *      fails closed on anything else.
- *   2. `toWirePlan` / `parseWirePlan` round-trip the mode losslessly; the
- *      legacy default 'fused' is *omitted* from the wire format so
- *      pre-existing golden fixtures don't gain a spurious key.
+ * Properties under test:
+ *   1. `parseCompilationMode` accepts 'fused' / 'microkernel' /
+ *      'microkernel-deep' / undefined, fails closed on anything else.
+ *   2. `toWirePlan` / `parseWirePlan` round-trip the mode losslessly;
+ *      the legacy default 'fused' is *omitted* from the wire format
+ *      so pre-existing golden fixtures don't gain a spurious key.
  *   3. `parseWirePlan` on legacy wire plans (no `compilation_mode`
  *      field) yields `'fused'`.
  */
@@ -56,15 +56,17 @@ describe('parseCompilationMode', () => {
     expect(parseCompilationMode(undefined)).toBe('fused')
   })
 
-  test('explicit fused / microkernel pass through', () => {
+  test('explicit fused / microkernel / microkernel-deep pass through', () => {
     expect(parseCompilationMode('fused')).toBe('fused')
     expect(parseCompilationMode('microkernel')).toBe('microkernel')
+    expect(parseCompilationMode('microkernel-deep')).toBe('microkernel-deep')
   })
 
   test('unknown strings fail closed', () => {
     expect(() => parseCompilationMode('FUSED')).toThrow(/unknown compilation_mode/)
     expect(() => parseCompilationMode('')).toThrow(/unknown compilation_mode/)
     expect(() => parseCompilationMode('hybrid')).toThrow(/unknown compilation_mode/)
+    expect(() => parseCompilationMode('microkernel_deep')).toThrow(/unknown compilation_mode/)  // underscore, not hyphen
   })
 })
 
@@ -87,6 +89,12 @@ describe('parseWirePlan: legacy compatibility', () => {
     const plan = parseWirePlan(wire)
     expect(plan.compilation_mode).toBe('microkernel')
   })
+
+  test("wire plan with compilation_mode: 'microkernel-deep' parses as microkernel-deep", () => {
+    const wire: WireFlatPlan = { ...makeEmptyWirePlan(), compilation_mode: 'microkernel-deep' }
+    const plan = parseWirePlan(wire)
+    expect(plan.compilation_mode).toBe('microkernel-deep')
+  })
 })
 
 describe('toWirePlan: serialization', () => {
@@ -107,6 +115,13 @@ describe('toWirePlan: serialization', () => {
     const wire = toWirePlan(plan)
     expect(wire.compilation_mode).toBe('microkernel')
   })
+
+  test('microkernel-deep mode is emitted explicitly', () => {
+    const wire0 = makeEmptyWirePlan()
+    const plan: FlatPlan = { ...parseWirePlan(wire0), compilation_mode: 'microkernel-deep' }
+    const wire = toWirePlan(plan)
+    expect(wire.compilation_mode).toBe('microkernel-deep')
+  })
 })
 
 describe('full round-trip', () => {
@@ -121,6 +136,22 @@ describe('full round-trip', () => {
     const plan: FlatPlan = { ...parseWirePlan(wire0), compilation_mode: 'microkernel' }
     const roundTripped = parseWirePlan(toWirePlan(plan))
     expect(roundTripped.compilation_mode).toBe('microkernel')
+  })
+
+  test('microkernel-deep: parseWirePlan ∘ toWirePlan = identity', () => {
+    const wire0 = makeEmptyWirePlan()
+    const plan: FlatPlan = { ...parseWirePlan(wire0), compilation_mode: 'microkernel-deep' }
+    const roundTripped = parseWirePlan(toWirePlan(plan))
+    expect(roundTripped.compilation_mode).toBe('microkernel-deep')
+  })
+
+  test('JSON-string round trip preserves microkernel-deep mode', () => {
+    const wire0 = makeEmptyWirePlan()
+    const plan: FlatPlan = { ...parseWirePlan(wire0), compilation_mode: 'microkernel-deep' }
+    const json = JSON.stringify(toWirePlan(plan))
+    const wire = JSON.parse(json) as WireFlatPlan
+    expect(wire.compilation_mode).toBe('microkernel-deep')
+    expect(parseWirePlan(wire).compilation_mode).toBe('microkernel-deep')
   })
 
   test('JSON-string round trip preserves microkernel mode', () => {

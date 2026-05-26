@@ -35,6 +35,25 @@ export function compileSession(
   session: SessionState,
   options: CompileSessionOptions = {},
 ): FlatPlan {
+  // Auto-flip: `microkernel-deep` mode requires the plan to carry
+  // non-empty `children` arrays at every nesting level so the engine
+  // can emit one LLVM function per `InstanceFunction`. That shape
+  // comes from `inlineNested: false` in the strata pipeline. Force
+  // the session to honor it before materialize-time strata runs.
+  //
+  // Known limitation: program types loaded into the session BEFORE
+  // this point were strata-processed with whatever `inlineNested`
+  // value the session had at load time. For sub-instances inside
+  // those program types to survive as kernel boundaries, the caller
+  // must have constructed the session with `inlineNested: false`
+  // (e.g., `makeSession(N, { inlineNested: false })`). This auto-
+  // flip handles the session-level synthetic top-level program only.
+  // A future refinement may make `compilation_mode` a session-
+  // construction-time argument so the two stay coupled by design.
+  if (options.compilation_mode === 'microkernel-deep' && session.inlineNested) {
+    session.inlineNested = false
+  }
+
   // Pre-compile: hoist array-literal wires to anonymous programs.
   liftWiresToInstances(session)
 
