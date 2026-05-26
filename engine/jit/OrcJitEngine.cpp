@@ -361,13 +361,11 @@ llvm::Expected<uint64_t> OrcJitEngine::lookup(const std::string & symbol_name)
 // so a write in one function's body is observable to a later function's
 // read of the same unified-namespace temp slot.
 //
-// compile_flat_program (fused mode) does NOT use EmitCtx — its in-place
-// lambdas are kept byte-identical to the pre-spike codegen so fused mode
-// stays a known-good reference for the microkernel-vs-fused equivalence
-// suite (Phase 6). The methods below are functionally identical to those
-// lambdas; the duplication is honest spike scaffolding. If the spike
-// graduates, a follow-up commit can switch compile_flat_program over to
-// EmitCtx and the dual maintenance burden disappears.
+// Both compile_flat_program (fused mode) and compile_microkernel
+// (microkernel mode) build an EmitCtx; codegen is shared via the methods
+// on this struct. The microkernel-vs-fused equivalence suite
+// (tests/equiv/microkernel_vs_fused.test.ts) covers the shared path
+// sample-for-sample at 1e-12.
 // ---------------------------------------------------------------------------
 
 namespace
@@ -1334,8 +1332,8 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
 
   // ── Param index + cache-key serialization ──
   // Duplicated from compile_flat_program with the only diff being the
-  // mode tag prefix on the cache key. Sharing the serialization across
-  // both modes is a follow-up if the spike graduates.
+  // mode tag prefix on the cache key. A future refactor could share
+  // the serialization across both modes.
   auto visit_all_instructions = [&](auto && fn) {
     for (const auto & instr : program.scheduler.preamble) fn(instr);
     for (const auto & inst : program.instance_functions)

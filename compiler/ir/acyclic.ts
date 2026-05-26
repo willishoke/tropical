@@ -7,12 +7,13 @@
  * with the cycle-break helper; this module supplies the
  * strataPipeline-specific assertion + error class.
  *
- * Currently called from inside `strataPipeline` immediately after
- * `traceCycles`, where the assertion is a tautology (the cycle pass
- * just ran). Phase 3 moves `traceCycles` out of the compiler and the
- * assertion becomes load-bearing: any cycle reaching `strataPipeline`
- * is a caller bug, surfaced immediately rather than producing a
- * malformed plan downstream.
+ * Called from inside `strataPipeline` to enforce the contract that
+ * its input is acyclic. Cycle-breaking is the responsibility of the
+ * realization layer above the compiler — the elaborator throws on
+ * source-level cycles and the session materializer extracts session-
+ * level `delay()` ops. Any cycle reaching `strataPipeline` is a
+ * caller bug, surfaced immediately rather than producing a malformed
+ * plan downstream.
  */
 
 import type { ResolvedProgram, InstanceDecl } from './nodes.js'

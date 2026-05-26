@@ -741,7 +741,7 @@ class Emitter {
         `emit_resolved: 'index' op has non-array operand. This usually means an ` +
         `array-typed input port (e.g. \`sequence: int[N]\`) is being indexed inside ` +
         `the program body — the per-instance compile path doesn't yet materialize ` +
-        `array input operands. Tracked as a follow-up to active-set M11.`,
+        `array input operands.`,
       )
     }
     const dst = this.allocReg()

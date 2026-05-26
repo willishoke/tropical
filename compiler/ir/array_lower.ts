@@ -1,5 +1,5 @@
 /**
- * array_lower.ts — Phase C6: combinator unrolling and array-op lowering.
+ * array_lower.ts — combinator unrolling and array-op lowering.
  *
  * After this pass:
  *   - No `let`, `fold`, `scan`, `generate`, `iterate`, `chain`, `map2`,

@@ -2,18 +2,15 @@
  * compiler/ir/lowering/cycle_break.ts — shared cycle-break helper.
  *
  * This module is the single home of the cycle-detection + cycle-break
- * algorithm for tropical's resolved IR. Two consumers:
- *
- *   - `compiler/ir/trace_cycles.ts` — Phase 0+ shim that calls
- *     `breakInstanceCycles` to produce the post-trace IR for the
- *     compiler's strata pipeline. (Phase 3 retires this in-pipeline
- *     use; cycle-breaking moves to the realization layer above the
- *     compiler.)
- *
- *   - `compiler/ir/acyclic.ts` — the strataPipeline-boundary
- *     acyclicity check, which consumes only `findInstanceCycles`
- *     (the detector) and `AcyclicityViolation` to assert the
- *     post-trace invariant.
+ * algorithm for tropical's resolved IR. Cycle-breaking is the
+ * responsibility of the realization layer above the compiler (the
+ * elaborator throws `CycleViolation` on source-level cycles, the
+ * session materializer extracts session-level `delay()` ops); this
+ * file exposes the shared algorithm for realization-side use and for
+ * the strataPipeline-boundary acyclicity assertion in
+ * `compiler/ir/acyclic.ts`, which consumes only `findInstanceCycles`
+ * (the detector) and `AcyclicityViolation` to assert the invariant
+ * at the compile entry.
  *
  * Algorithm:
  *   1. Build an instance-level dependency graph: instance A depends

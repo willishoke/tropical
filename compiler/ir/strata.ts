@@ -6,23 +6,22 @@
  *   assertAcyclic → specialize → sumLower → inlineInstances
  *                 → arrayLower → identityElim
  *
- * Post-Phase 3, `strataPipeline` is a *checking* pipeline: it requires
- * its input to be already-acyclic. Cycle-breaking is the responsibility
- * of the caller (the "standard realization" — elaborator output and
- * session materialization). The two entry points
- * (`programTypeFromResolved` and `materializeSession`) run
- * `breakInstanceCycles` on their inputs before invoking
- * `strataPipeline`; the `assertAcyclic` at strata entry guarantees
- * any escape would surface immediately rather than producing a
- * malformed plan.
+ * `strataPipeline` is a *checking* pipeline: it requires its input to
+ * be already-acyclic. Cycle-breaking is the responsibility of the
+ * caller (the "standard realization" — elaborator output and session
+ * materialization). The two entry points (`programTypeFromResolved`
+ * and `materializeSession`) run `breakInstanceCycles` on their inputs
+ * before invoking `strataPipeline`; the `assertAcyclic` at strata
+ * entry guarantees any escape would surface immediately rather than
+ * producing a malformed plan.
  *
- * `identityElim` (M11 Phase 2) is the categorical identity-law rewrite:
- * it eliminates `InstanceDecl`s whose program body is the identity
- * morphism. Today (pre-Phase-4) it rarely fires at the per-program
- * level — `inlineInstances` runs first and absorbs trivial sub-instances.
- * Once Phase 4 retires `inlineInstances` from the session-level
- * pipeline, `identityElim` catches the trivial wire-programs that would
- * otherwise survive as no-op kernels.
+ * `identityElim` is the categorical identity-law rewrite: it
+ * eliminates `InstanceDecl`s whose program body is the identity
+ * morphism. In the default `inlineNested: true` path it rarely fires
+ * at the per-program level — `inlineInstances` runs first and
+ * absorbs trivial sub-instances. In the `inlineNested: false` fractal
+ * path it catches the trivial wire-programs that would otherwise
+ * survive as no-op kernels.
  *
  * After identityElim, the result is a post-strata `ResolvedProgram`
  * consumed by either `compileResolved` (the JIT path) or
@@ -40,10 +39,11 @@ import { assertAcyclic } from './acyclic.js'
 
 export interface StrataOptions {
   /** Whether to flatten nested `InstanceDecl`s via `inlineInstances`.
-   *  Default `true` (legacy / per-program-emit behavior). The fractal
-   *  session path passes `false` so sub-instances survive as kernel
-   *  boundaries — every `InstanceDecl` at every level becomes its own
-   *  kernel in `partition_recursive`. */
+   *  Default `true` (the flat-IR path; production default per the
+   *  depth-vs-flat cost tradeoff). The fractal session path passes
+   *  `false` so sub-instances survive as kernel boundaries — every
+   *  `InstanceDecl` at every level becomes its own kernel in
+   *  `partition_recursive`. */
   inlineNested?: boolean
 }
 
@@ -70,24 +70,24 @@ export function strataPipeline(
  *  port/register/default metadata via free functions over the resolved
  *  IR.
  *
- *  Default behavior uses `inlineNested: true` — the legacy flat-IR
- *  path. The fractal session path (M11 activation) passes
- *  `inlineNested: false` so sub-instance `InstanceDecl`s survive
- *  into `partition_recursive`, where they become real kernel
- *  boundaries instead of being splatted into their parent's body.
- *  The slot-based input-wiring redesign makes the `false` path
- *  correct end-to-end; until that lands, callers should leave
- *  `inlineNested` at its default. */
+ *  Default behavior uses `inlineNested: true` — the flat-IR path.
+ *  The fractal path passes `inlineNested: false` so sub-instance
+ *  `InstanceDecl`s survive into `partition_recursive`, where they
+ *  become real kernel boundaries via slot-based parent→child input
+ *  wiring instead of being splatted into their parent's body. Both
+ *  paths are correct end-to-end (verified sample-for-sample at 1e-12
+ *  by `tests/equiv/nested_vs_inlined.test.ts`); the choice is a
+ *  runtime-cost tradeoff documented in
+ *  `tests/bench/depth_vs_flat_*.md`. */
 export function programTypeFromResolved(
   prog: ResolvedProgram,
   typeArgs: ReadonlyMap<TypeParamDecl, number>,
   opts?: { displayName?: string; inlineNested?: boolean },
 ): Compiled {
-  // Post-Phase 4b: the elaborator throws on cyclic source code, and
-  // lifted wire-programs are acyclic by construction (no
-  // InstanceDecls). The strataPipeline's `assertAcyclic` at entry
-  // confirms the contract; no separate cycle-break call is needed
-  // here.
+  // The elaborator throws on cyclic source code, and lifted wire-
+  // programs are acyclic by construction (no InstanceDecls). The
+  // strataPipeline's `assertAcyclic` at entry confirms the contract;
+  // no separate cycle-break call is needed here.
   const strataOptions: StrataOptions = opts?.inlineNested !== undefined
     ? { inlineNested: opts.inlineNested } : {}
   return makeCompiled(strataPipeline(prog, typeArgs, strataOptions), opts)

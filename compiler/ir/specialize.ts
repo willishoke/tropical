@@ -1,5 +1,5 @@
 /**
- * specialize.ts — Phase C3: type-param substitution on resolved IR.
+ * specialize.ts — type-param substitution on resolved IR.
  *
  * Functional rewrite (no clone). Produces a fresh `ResolvedProgram`
  * per (template, type-args) pair by walking the source with
@@ -16,8 +16,8 @@
  * variants by `===`).
  *
  * Purity: this function does not consult or modify any cache. The
- * cache lives in the loader (Phase C7) — the call site is responsible
- * for memoizing on the (template, args) pair.
+ * cache lives in the loader — the call site is responsible for
+ * memoizing on the (template, args) pair.
  *
  * `InstanceDecl.typeArgs[i].value` is currently typed as `number`
  * (parser only admits integer literals), so no substitution is needed

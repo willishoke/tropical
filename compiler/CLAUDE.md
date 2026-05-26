@@ -116,7 +116,7 @@ runtime/
 ```
 
 `flatten.ts`, `interpret.ts`, `emit_numeric.ts`, and `ir/load.ts` /
-`ir/program_type_builder.ts` are gone. The post-Phase-D path is
+`ir/program_type_builder.ts` are gone. The path is
 `elaborate → strata → compile_resolved` (or `interpret_resolved` /
 `emit_wasm`), with `materialize_session` injecting sessions into the
 same pipeline.

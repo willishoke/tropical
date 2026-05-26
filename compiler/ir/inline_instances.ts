@@ -1,5 +1,5 @@
 /**
- * inline_instances.ts — Phase C5: splice each `InstanceDecl` into its parent.
+ * inline_instances.ts — splice each `InstanceDecl` into its parent.
  *
  * After this pass, `prog.body.decls` contains no `InstanceDecl` and
  * no expression in the program contains a `NestedOut` ref. The inner
@@ -10,18 +10,18 @@
  *   2. Sub-instances inside the (specialized) inner are inlined first
  *      (depth-first, bottom-up). After this, the inner has zero
  *      `InstanceDecl`s of its own.
- *   3. The inner is cloned with input substitution: every `InputRef`
- *      whose decl belongs to the inner's `ports.inputs` is replaced
- *      by the wired-in expression from `instanceDecl.inputs[port]`.
- *      The substituted expression passes through by reference,
- *      preserving DAG sharing.
- *   4. Cloned `RegDecl`s are lifted into the outer's `body.decls`,
- *      renamed `${instance.name}_${innerName}`. Post-Phase-0a the
- *      update expression travels on `decl.update` (no separate
- *      NextUpdate assigns), so lifting the decl carries its update
- *      with it — no per-assign rewrite needed. `ProgramDecl`s and
- *      `ParamDecl`s are lifted as-is (no rename: ParamDecls are
- *      session-scoped by name, ProgramDecls are passive type bindings).
+ *   3. The inner is rewritten with input substitution: every
+ *      `InputRef` whose decl belongs to the inner's `ports.inputs`
+ *      is replaced by the wired-in expression from
+ *      `instanceDecl.inputs[port]`. The substituted expression
+ *      passes through by reference, preserving DAG sharing.
+ *   4. Rewritten `RegDecl`s are lifted into the outer's `body.decls`,
+ *      renamed `${instance.name}_${innerName}`. The update
+ *      expression travels on `decl.update`, so lifting the decl
+ *      carries its update with it — no per-assign rewrite needed.
+ *      `ProgramDecl`s and `ParamDecl`s are lifted as-is (no rename:
+ *      ParamDecls are session-scoped by name, ProgramDecls are
+ *      passive type bindings).
  *   5. The cloned inner's `outputAssign` expressions are recorded in
  *      a substitution table keyed by the *template's* `OutputDecl`
  *      (matched by position to the cloned program's outputs). Every

@@ -32,7 +32,8 @@
  *  - Bare-name ports (just `name`) emit a string entry
  *  - Nested `program` decls in body, recursive
  *
- * Out of scope (deferred to B5): ADTs and `match` (`type_defs` field).
+ * ADTs (struct/enum/type) parse into `type_defs`; the ADT parser
+ * lives in this file (see `parseADT` and friends below).
  */
 
 import { tokenize, type Tok } from './lexer.js'
