@@ -294,11 +294,22 @@ class OrcJitEngine
     llvm::Expected<NumericKernelFn> compile_flat_program(
       const FlatProgram & program);
 
-    /** Microkernel-mode codegen: N+1 LLVM functions in one module.
-     *  Phase 3 supplies the implementation; Phase 2 lands the type
-     *  surface and a stub that errors. */
+    /** Microkernel-mode codegen: N+3 LLVM functions in one module.
+     *
+     *  `deep = false` (default): one function per top-level session
+     *  instance, with nested children inlined into the parent's
+     *  function via recursive emit_kernel_block. Cache prefix:
+     *  "flat5:mk:".
+     *
+     *  `deep = true`: one function per InstanceProgram at EVERY
+     *  nesting depth. The tree is post-order flattened so children
+     *  emit (and dispatch) before their parents — the unified
+     *  temp/slot dataflow stays intact. Cache prefix: "flat5:mkd:".
+     *  Requires the plan to carry non-empty `children` arrays
+     *  (i.e., the session was compiled with inlineNested:false). */
     llvm::Expected<MicrokernelKernels> compile_microkernel(
-      const FlatProgram & program);
+      const FlatProgram & program,
+      bool deep = false);
 
   private:
     OrcJitEngine();

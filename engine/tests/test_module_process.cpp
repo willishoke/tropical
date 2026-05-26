@@ -912,24 +912,20 @@ static void test_microkernel_mode_sawtooth()
 }
 
 /**
- * 14. Microkernel-deep mode (Phase 1) — the schema is wired through
- *     but the engine doesn't yet realize this mode; loading a plan
- *     with `compilation_mode: "microkernel-deep"` must return false
- *     and surface a "not yet implemented" message via
- *     tropical_last_error. Phase 2 lands the codegen and updates this
- *     test to a positive equivalence assertion (mirroring
- *     test_microkernel_mode_sawtooth).
+ * 14. Microkernel-deep mode — same sawtooth plan as test 1, with
+ *     compilation_mode: "microkernel-deep". For a single-instance
+ *     plan (no nested children), deep mode is structurally identical
+ *     to shallow microkernel mode — one LLVM function for the lone
+ *     top-level instance — and the engine must produce the same
+ *     output. The TS-side equivalence suite covers the truly nested
+ *     cases (depth-2 stdlib programs) across the full corpus.
  */
-static void test_microkernel_deep_not_yet_implemented()
+static void test_microkernel_deep_sawtooth()
 {
   const unsigned int buf_len = 256;
   tropical_runtime_t rt = tropical_runtime_new(buf_len);
   ASSERT(rt != nullptr);
 
-  // Same plan shape as the microkernel sawtooth test, just the mode
-  // string differs. Plan_4 auto-lifts to one-instance plan_5; either
-  // way the engine sees compilation_mode = MicrokernelDeep and must
-  // refuse to compile.
   std::string plan = R"({
     "schema": "tropical_plan_4",
     "compilation_mode": "microkernel-deep",
@@ -938,36 +934,39 @@ static void test_microkernel_deep_not_yet_implemented()
     "register_names": ["phase"],
     "outputs": [0],
     "instructions": [
-      {"tag":"Add","dst":0,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+      {"tag":"Mul","dst":0,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":2.0}],"loop_count":1,"strides":[]},
+      {"tag":"Sub","dst":1,"args":[{"kind":"reg","slot":0},{"kind":"const","val":1.0}],"loop_count":1,"strides":[]},
+      {"tag":"Mul","dst":2,"args":[{"kind":"reg","slot":1},{"kind":"const","val":10.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":3,"args":[{"kind":"reg","slot":2},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Div","dst":4,"args":[{"kind":"const","val":440.0},{"kind":"rate"}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":5,"args":[{"kind":"state_reg","slot":0},{"kind":"reg","slot":4}],"loop_count":1,"strides":[]},
+      {"tag":"Mod","dst":6,"args":[{"kind":"reg","slot":5},{"kind":"const","val":1.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":7,"args":[{"kind":"reg","slot":6},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
     ],
-    "register_count": 1,
+    "register_count": 8,
     "array_slot_count": 0,
     "array_slot_sizes": [],
-    "output_targets": [0],
-    "register_targets": [0]
+    "output_targets": [3],
+    "register_targets": [7]
   })";
 
-  bool ok = tropical_runtime_load_plan(rt, plan.c_str(), plan.size());
-  if (ok) {
-    printf("FAIL\n    expected load_plan to fail for microkernel-deep "
-           "(Phase 1 throws 'not yet implemented')\n");
-    ++g_fail;
-    tropical_runtime_free(rt);
-    return;
-  }
+  ASSERT_OK(tropical_runtime_load_plan(rt, plan.c_str(), plan.size()));
+  tropical_runtime_process(rt);
 
-  const char* err = tropical_last_error();
-  ASSERT(err != nullptr);
-  // Match on a substring the throw site emits. If the message
-  // changes, update both this test and the throw site.
-  if (std::string(err).find("microkernel-deep") == std::string::npos ||
-      std::string(err).find("not yet implemented") == std::string::npos)
-  {
-    printf("FAIL\n    expected error to mention 'microkernel-deep' and "
-           "'not yet implemented'; got: %s\n", err);
-    ++g_fail;
-    tropical_runtime_free(rt);
-    return;
+  const double* buf = tropical_runtime_output_buffer(rt);
+  ASSERT(buf != nullptr);
+
+  // Same expectations as test_sawtooth / test_microkernel_mode_sawtooth:
+  // sample 0 audio = -0.5; sample 1 follows from the phase increment.
+  ASSERT_NEAR(buf[0], -0.5, 1e-6);
+
+  double phase1 = 440.0 / 44100.0;
+  double expected1 = (phase1 * 2.0 - 1.0) * 10.0 / 20.0;
+  ASSERT_NEAR(buf[1], expected1, 1e-6);
+
+  // Monotonic increase before the first phase wrap.
+  for (unsigned int i = 1; i < 50; ++i) {
+    ASSERT(buf[i] > buf[i - 1]);
   }
 
   tropical_runtime_free(rt);
@@ -992,7 +991,7 @@ int main()
   run_test("float→int register writeback coercion", test_float_to_int_register_writeback);
   run_test("cast ops (to_int/to_bool/to_float)", test_cast_ops);
   run_test("microkernel mode — sawtooth",    test_microkernel_mode_sawtooth);
-  run_test("microkernel-deep — not yet implemented (Phase 1)", test_microkernel_deep_not_yet_implemented);
+  run_test("microkernel-deep — sawtooth",   test_microkernel_deep_sawtooth);
 
   printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;
