@@ -17,7 +17,7 @@
                 "is_forward",
                 "step",
                 "seq_len",
-                "sequence"
+                { "name": "sequence", "type": { "element": "float", "shape": [8] } }
               ],
               "outputs": [
                 "value",

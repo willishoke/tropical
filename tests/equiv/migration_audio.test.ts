@@ -55,32 +55,7 @@ const fixtures = readdirSync(FIXTURE_DIR)
   .filter(f => f.endsWith('.json'))
   .sort()
 
-// Fixtures the active-set runtime's per-instance compile path doesn't
-// match against the legacy plan_4 golden output. The first-class
-// array-I/O refactor unblocked compilation; what remains are:
-//
-//  - `patch_int_seq_test.json` — inline `programDecl` with port names
-//    only (no port-type annotations). The elaborator infers all
-//    ports as scalar `float`; the body's `index(input("sequence"), …)`
-//    then throws because `sequence` is scalar. Pre-existing schema
-//    issue, orthogonal to array-I/O; needs port-type-from-usage
-//    inference or a schema migration.
-//
-//  - `patch_sequencer_demo.json` / `stdlib_sequencer.json` — compile
-//    cleanly, run, produce audio. The first non-zero sample differs
-//    from the legacy plan_4 golden by exactly one sample's worth of
-//    phase, suggesting the legacy injected an implicit latency on
-//    array wires that the alias-semantics path doesn't reproduce.
-//    Defensible call either way — but the goldens were captured
-//    under the legacy semantics, so the divergence is a goldens
-//    refresh, not a regression. Tracking as a follow-up so the
-//    decision (refresh goldens vs. add explicit delay) is its own
-//    conversation.
-const KNOWN_UNSUPPORTED = new Set([
-  'patch_int_seq_test.json',
-  'patch_sequencer_demo.json',
-  'stdlib_sequencer.json',
-])
+const KNOWN_UNSUPPORTED = new Set<string>([])
 
 describe('migration: old (plan_4) pipeline ≡ new (plan_5) pipeline audio', () => {
   for (const file of fixtures) {

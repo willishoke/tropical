@@ -39,6 +39,7 @@ import type {
   BodyDecl,
   ResolvedBlock,
   InputIdx,
+  PortType,
 } from './nodes.js'
 import { inputIdx, outputIdx, paramIdx, regIdx } from './nodes.js'
 import {
@@ -72,6 +73,31 @@ const UNARY_OPS: ReadonlySet<string> = new Set([
 const TERNARY_OPS: ReadonlySet<string> = new Set(['clamp', 'select', 'arraySet'])
 
 // ─── Free-variable scan ────────────────────────────────────────────────────
+
+/** Infer the lifted program's output port type from the top-level
+ *  expression shape. Currently handles only array literals (bare
+ *  arrays and `{op:'array'/'arrayLiteral', items:[…]}` shapes), which
+ *  is the closed set `needsWireLift` triggers on — keep this in sync.
+ *  Returns undefined for scalar-shaped expressions; the caller
+ *  defaults to scalar `float` in that case.
+ *
+ *  Element type defaults to `'float'`. The element scalars of an
+ *  array wire expression (which may be `ref`s, params, or
+ *  arithmetic) all read as `float` at the session-translate boundary.
+ *  Refinement (`int`/`bool` elements) is left to a later pass; the
+ *  IR shape doesn't yet need that distinction at the lift layer. */
+function inferOutputPortType(expr: ExprNode): PortType | undefined {
+  if (Array.isArray(expr)) {
+    return { kind: 'array', element: 'float', shape: [expr.length] }
+  }
+  if (typeof expr === 'object' && expr !== null) {
+    const obj = expr as Record<string, unknown>
+    if ((obj.op === 'array' || obj.op === 'arrayLiteral') && Array.isArray(obj.items)) {
+      return { kind: 'array', element: 'float', shape: [(obj.items as unknown[]).length] }
+    }
+  }
+  return undefined
+}
 
 /** Walk an `ExprNode` tree and collect every reference to an instance
  *  output. Returns deduplicated `PortRef`s; the iteration order matches
@@ -181,7 +207,17 @@ export function liftWireToProgram(
     refToInputIdx.set(wireKey(ref), i)
   }
 
-  const outputDecl: OutputDecl = { op: 'outputDecl', name: 'out' }
+  // Infer the output port type from the top-level expression shape.
+  // Array-shaped wires (bare `[...]` literals, or `{op:'array'/
+  // 'arrayLiteral', items:[...]}`) need an array-typed output so the
+  // session-level allocator sees the producer as an array source and
+  // the consumer's input alias logic can bind to it. Untyped (default
+  // `undefined`) means scalar `float` — fine for scalar wire
+  // expressions, wrong for array literals.
+  const outputType = inferOutputPortType(expr)
+  const outputDecl: OutputDecl = outputType === undefined
+    ? { op: 'outputDecl', name: 'out' }
+    : { op: 'outputDecl', name: 'out', type: outputType }
 
   const ctx: TranslateContext = {
     refToInputIdx,
