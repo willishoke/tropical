@@ -521,7 +521,7 @@ struct EmitCtx
   // ── Per-instance writebacks ──
   void emit_writebacks(const std::vector<InstanceProgram::Writeback> & wbs);
 
-  // ── Per-instance dispatch (M11 fractal interleaved order) ──
+  // ── Per-instance dispatch (fractal interleaved order) ──
   // For each child:
   //   1. emit child.pre_input_instructions (in THIS kernel's namespace
   //      — wire expressions referencing parent regs/inputs/params resolve,
@@ -1229,9 +1229,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
 
   // ── Per-instance dispatch ──
   // For each top-level instance, EmitCtx::emit_kernel_block recursively
-  // emits its M11 children inside the parent's body, then the parent's
-  // own instructions, then writebacks. Children run BEFORE the parent
-  // so it can read their freshly-written slot values (M11 fractal).
+  // emits its nested children inside the parent's body, then the
+  // parent's own instructions, then writebacks. Children run BEFORE
+  // the parent so it can read their freshly-written slot values.
 
   for (const auto & inst : program.instance_functions)
   {
@@ -1508,9 +1508,9 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   };
 
   // ── Emit one PerSampleFn from one InstanceProgram (body + writebacks + children) ──
-  // Recursive: M11 children are inlined into this function's body via
-  // EmitCtx::emit_kernel_block. One LLVM function per top-level session
-  // instance.
+  // Recursive: nested children are inlined into this function's body
+  // via EmitCtx::emit_kernel_block. One LLVM function per top-level
+  // session instance.
   auto emit_instance_function = [&](
     const std::string & sym,
     const InstanceProgram & inst) -> llvm::Error
@@ -1595,8 +1595,8 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   };
 
   // ── Emit all functions ──
-  // One LLVM function per top-level session instance, with M11 children
-  // inlined recursively via emit_kernel_block. Plus preamble,
+  // One LLVM function per top-level session instance, with nested
+  // children inlined recursively via emit_kernel_block. Plus preamble,
   // state_evolution, and postamble_mix as their own functions.
   const std::string sym_preamble        = "mk_" + hash + "_preamble";
   const std::string sym_state_evolution = "mk_" + hash + "_state_evo";

@@ -82,8 +82,9 @@ export interface FlatProgram {
   array_slot_count: number
   array_slot_sizes: number[]
   instructions:     NInstr[]
-  /** M11 fractal slot-based input wiring. Parallel to the caller's
-   *  `nestedInstances` array: `per_child_pre_input[k]` holds the
+  /** Slot-based parent→child input wiring (the fractal path).
+   *  Parallel to the caller's `nestedInstances` array:
+   *  `per_child_pre_input[k]` holds the
    *  WriteSlot block for the k-th sub-instance — the parent runs that
    *  block in its own namespace immediately before invoking that
    *  child's kernel body. Per-child placement (vs hoisting into a
@@ -267,10 +268,10 @@ export interface EmitSlots {
   nestedOutputSlots?: Map<InstanceIdx, Map<OutputIdx, number>>
   /** Module slot indices for THIS program's own input ports. When set,
    *  `InputRef(idx)` lowers to a Slot read from `inputSlotOverride.get(idx)`
-   *  instead of an `Input` operand. Used by the M11 fractal path. */
+   *  instead of an `Input` operand. Used by the fractal path. */
   inputSlotOverride?: Map<InputIdx, number>
   /** Per-child module-slot map for sub-instance INPUTS. Map shape:
-   *  InstanceIdx → InputIdx → moduleSlotIdx. Used by the M11 fractal
+   *  InstanceIdx → InputIdx → moduleSlotIdx. Used by the fractal
    *  path when emitting a parent kernel. */
   nestedInputSlots?: Map<InstanceIdx, Map<InputIdx, number>>
 }
@@ -413,7 +414,7 @@ class Emitter {
         // the slot number (slots.ts assigns slot[i] = position i).
         const slot = obj.idx as number
         const portT = this.inputPortTypes[slot] ?? 'float'
-        // M11 fractal path: when the program is being compiled as a
+        // Fractal path: when the program is being compiled as a
         // sub-instance kernel, its inputs live in module slots
         // pre-written by the parent's WriteSlot in per_child_pre_input.
         // Lower `InputRef(d)` to a slot read instead of opInput.
@@ -786,7 +787,7 @@ class Emitter {
     const output_targets: TempIdx[] = []
     const register_targets: RegTarget[] = []
 
-    // ── M11 fractal: emit per-child pre-input WriteSlots ──
+    // ── Fractal: emit per-child pre-input WriteSlots ──
     // For each child, evaluate each wired input expression in THIS
     // kernel's scope (where wire refs to our regs, params, and inputs
     // resolve naturally) and emit a WriteSlot into the child's pre-
@@ -869,8 +870,8 @@ class Emitter {
     // block, which the engine emits before the main body anyway).
     this.instrs = this.instrs.slice(0, preChildBaseline)
 
-    // Output-targets contract (M11 Phase 3): ONE entry per scalar slot
-    // of every declared output port. Scalar/alias ports contribute 1
+    // Output-targets contract: ONE entry per scalar slot of every
+    // declared output port. Scalar/alias ports contribute 1
     // entry; array ports of total scalar count N contribute N entries
     // in row-major order matching `expandPortToSlots`'s naming.
     //
@@ -1009,18 +1010,19 @@ export interface EmitResolvedInputs {
   stateRegTypes: ScalarType[]
   inputPortTypes: ScalarType[]
   slots: EmitSlots
-  /** M11 fractal: sub-instance decls whose input wires need parent-side
-   *  WriteSlot emission. Each entry's `inp.value` (wire expression) is
-   *  compiled in the parent's scope; the result is written to the slot
-   *  named in `slots.nestedInputSlots.get(decl).get(inp.port)`. The
-   *  WriteSlot instructions land in `per_child_pre_input[k]`, parallel
-   *  to `nestedInstances[k]`, so the engine can run each block
-   *  immediately before recursing into its corresponding child. */
-  /** M11 fractal context. The list is empty when this kernel has no
-   *  surviving sub-instances (legacy flat path); the `enclosing`
-   *  program is always present because it's the program whose kernel
-   *  we're emitting — there's no "missing enclosing" case. Resolving
-   *  each `instances[k].typeKey` reads `enclosing.programRegistry`. */
+  /** Fractal context: sub-instance decls whose input wires need
+   *  parent-side WriteSlot emission. Each entry's `inp.value` (wire
+   *  expression) is compiled in the parent's scope; the result is
+   *  written to the slot named in
+   *  `slots.nestedInputSlots.get(decl).get(inp.port)`. The WriteSlot
+   *  instructions land in `per_child_pre_input[k]`, parallel to
+   *  `nestedInstances[k]`, so the engine can run each block
+   *  immediately before recursing into its corresponding child. The
+   *  list is empty when this kernel has no surviving sub-instances
+   *  (flat path); the `enclosing` program is always present because
+   *  it's the program whose kernel we're emitting — there's no
+   *  "missing enclosing" case. Resolving each `instances[k].typeKey`
+   *  reads `enclosing.programRegistry`. */
   nested: NestedContext
 }
 

@@ -58,7 +58,7 @@ import { mkProgram, getInstanceType } from './decl_tables.js'
  * substituting expressions while preserving decl positions keeps
  * every ref valid without any pointer-identity discipline.
  *
- * M11 fractal: surviving `InstanceDecl`s' sub-programs are lowered
+ * Fractal: surviving `InstanceDecl`s' sub-programs are lowered
  * recursively via `prog.programRegistry` — we build a new registry
  * with each entry mapped, and the InstanceDecls keep their `typeKey`
  * pointing at the same key (the LOWERED sub-program now lives behind
@@ -130,7 +130,7 @@ function declNeedsLowering(decl: BodyDecl, enclosing: ResolvedProgram): boolean 
         || (decl.update !== undefined && exprNeedsLowering(decl.update))
     case 'paramDecl':    return false
     case 'instanceDecl': {
-      // M11 fractal: also check sub-program for surviving combinators.
+      // Fractal: also check sub-program for surviving combinators.
       // Sub-program bodies are lowered recursively when arrayLower fires.
       const subType = getInstanceType(enclosing, decl)
       return decl.inputs.some(i => exprNeedsLowering(i.value))
@@ -226,7 +226,7 @@ function lowerDecl(decl: BodyDecl, subst: SubstMap, memo: Memo): BodyDecl {
     case 'programDecl':
       return decl
     case 'instanceDecl': {
-      // M11 fractal: surviving InstanceDecls keep their typeKey; the
+      // Fractal: surviving InstanceDecls keep their typeKey; the
       // sub-program behind that key was already lowered into the new
       // registry by arrayLower's top-level loop. We just lower this
       // instance's input wire expressions in the current scope.

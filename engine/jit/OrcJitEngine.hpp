@@ -112,7 +112,8 @@ struct FlatInstr
 // Per-instance kernel slice. Each session instance contributes one of
 // these to the multi-function plan. The compiler emits all instances
 // inline within one LLVM function — `children` are emitted recursively
-// inside the parent's body (M11 fractal architecture).
+// inside the parent's body (the fractal architecture: one kernel per
+// InstanceDecl at every nesting depth).
 struct InstanceProgram
 {
   std::string                  instance_name;     // dotted path (e.g. voice1.env)
@@ -125,7 +126,7 @@ struct InstanceProgram
    *  be computed by the time children start. */
   std::vector<FlatInstr>       preamble_instructions;
   std::vector<FlatInstr>       instructions;      // already shifted into unified offset space
-  /** M11 fractal slot-based input wiring. Per-child block — runs in
+  /** Slot-based parent→child input wiring. Per-child block — runs in
    *  the PARENT's namespace immediately before THIS kernel's body. The
    *  parent's emit_kernel_block dispatches each child as:
    *      emit_instrs(child.pre_input_instructions)

@@ -86,7 +86,7 @@ export function materializeSessionForEmit(session: SessionState): {
   // Honor the session's inlineNested mode. The session lift's strata
   // run controls whether sub-instances inside the synthetic top-level
   // get inlined (inlineNested:true, default) or preserved as kernel
-  // boundaries for the M11 slot path (inlineNested:false).
+  // boundaries for the slot-based fractal path (inlineNested:false).
   const lowered = strataPipeline(synthetic, new Map(), { inlineNested: session.inlineNested })
   return { lowered, paramDecls: ctx.paramDecls }
 }

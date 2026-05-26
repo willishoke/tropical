@@ -420,7 +420,7 @@ function emitInstruction(c: Code, instr: NInstr, ctx: EmitCtx): void {
   return emitScalar(c, instr, ctx)
 }
 
-// ── WriteSlot: publish a temp value to slots[dst] (M10) ──
+// ── WriteSlot: publish a temp value to slots[dst] ──
 // `dst` is the slot index (not a temp); `args[0]` is the value. The
 // instruction produces no temp result — pure side effect. Coerces to
 // float since slots are stored as f64 (matching the JIT).
@@ -473,7 +473,7 @@ function pushOperand(c: Code, op: NOperand, ctx: EmitCtx): ScalarType {
       c.localGet(L_SIDX); return 'int'
     }
     case 'slot': {
-      // M10: inter-module slot read. Slots are stored as f64 in the
+      // Inter-module slot read. Slots are stored as f64 in the
       // dedicated `slotsOffset` region (mirrors the native engine —
       // see store_slot_f64 in OrcJitEngine.cpp). Result is always
       // float; callers `coerce` to int/bool as needed.

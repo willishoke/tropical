@@ -173,7 +173,7 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
   if (jf.contains("instructions"))
     for (const auto & ji : jf["instructions"])
       inst.instructions.push_back(parse_instr(ji));
-  // M11 fractal slot-based input wiring. Optional in the wire format
+  // Slot-based parent→child input wiring. Optional in the wire format
   // (legacy plans don't have it; absent → empty). Same instruction
   // shape as `instructions`; difference is purely WHEN they emit —
   // the parent's emit_kernel_block runs each child's
@@ -201,7 +201,8 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
       });
     }
   }
-  // Recurse into nested children (M11 fractal architecture). Absent or
+  // Recurse into nested children (the fractal architecture: one
+  // kernel per InstanceDecl at every nesting depth). Absent or
   // empty `children` array means a leaf kernel.
   if (jf.contains("children"))
     for (const auto & jc : jf["children"])
@@ -210,10 +211,10 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
 }
 
 /** Parse a tropical_plan_5 JSON object. The C++ side supports nested
- *  `instance_functions` (M11 fractal architecture): each function may
+ *  `instance_functions` (the fractal architecture): each function may
  *  have `children: InstanceFunction[]` that emit recursively inside the
- *  parent's alive-conditional. Legacy plans without nested children
- *  parse as leaf-only kernels. */
+ *  parent's body. Legacy plans without nested children parse as
+ *  leaf-only kernels. */
 inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
 {
   ParsedPlan5 result;

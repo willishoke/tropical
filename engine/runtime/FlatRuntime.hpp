@@ -51,12 +51,12 @@ struct KernelState
   // Output extraction
   uint32_t output_count = 0;
 
-  // ── Slot model state (M5) ────────────────────────────────────────────────
-  // Inter-module slot array. M5 uses it for control-plane writes only
-  // (via tropical_runtime_set_slot); M6 introduces JIT codegen that
-  // reads from it via 'slot' operands. Slots survive hot-swap by name
-  // so control values set from outside persist; this transfer becomes
-  // unnecessary in M8 once the kernel rewrites slots every sample.
+  // ── Slot model state ─────────────────────────────────────────────────────
+  // Inter-module slot array. Control-plane writes via
+  // tropical_runtime_set_slot; JIT codegen reads via 'slot' operands and
+  // writes via WriteSlot instructions (parent→child input wiring,
+  // MCP wire auto-delay, etc.). Slots survive hot-swap by name so
+  // control values set from outside persist across kernel rebuilds.
   std::vector<double>      slots;
   std::vector<std::string> slot_names;
 

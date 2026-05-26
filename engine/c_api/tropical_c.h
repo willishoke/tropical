@@ -84,13 +84,14 @@ void             tropical_runtime_begin_fade_in(tropical_runtime_t);
 void             tropical_runtime_begin_fade_out(tropical_runtime_t);
 bool             tropical_runtime_is_fade_out_complete(tropical_runtime_t);
 
-/* ---------- Slot model (M5+) ----------
+/* ---------- Slot model ----------
  *
- * Slots are an inter-module shared array introduced by the slot model.
- * Each output port of every instance + each control-plane param has a
- * dedicated slot index. Until M6 plumbs slot reads into the JIT IR,
- * only control-plane writes (set_slot) take effect; the kernel doesn't
- * yet read from slots.
+ * Slots are an inter-module shared array. Each output port of every
+ * instance + each control-plane param has a dedicated slot index. The
+ * JIT codegen reads slots via 'slot' operands and writes via WriteSlot
+ * instructions (parent→child input wiring, MCP wire auto-delay,
+ * session-level delay extraction). Control-plane writes from outside
+ * the kernel go through `set_slot`.
  *
  * `slot_index` returns UINT32_MAX when no slot with that name exists
  * in the active plan — typical lookup pattern is to resolve the name

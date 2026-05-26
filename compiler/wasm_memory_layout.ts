@@ -22,7 +22,7 @@ export type WasmLayout = {
   arraysOffset:      number
   arrayOffsets:      number[]     // per array slot: absolute byte offset
   paramTableOffset:  number       // f64[paramCount]
-  slotsOffset:       number       // f64[slotCount] — inter-module slot array (M10)
+  slotsOffset:       number       // f64[slotCount] — inter-module slot array
   outputOffset:      number       // f64[maxBlockSize]
   totalBytes:        number
   /** Number of 64 KiB WASM pages needed */
@@ -52,7 +52,7 @@ export function computeLayout(args: {
   paramPtrs: string[]
   /** Max audio block size the kernel will be asked to render in one call. */
   maxBlockSize: number
-  /** Number of inter-module slots (M10). 0 for legacy plans. */
+  /** Number of inter-module slots. 0 for legacy plans. */
   slotCount?: number
 }): WasmLayout {
   const { plan, inputCount, paramPtrs, maxBlockSize } = args
@@ -80,7 +80,7 @@ export function computeLayout(args: {
   const paramTableOffset = cursor
   cursor = align8(cursor + paramPtrs.length * f64)
 
-  // Inter-module slot array (M10). Slot-mode plans pass slotCount > 0;
+  // Inter-module slot array. Slot-mode plans pass slotCount > 0;
   // legacy plans omit it and the region is zero-sized.
   const slotsOffset = cursor
   cursor = align8(cursor + requestedSlotCount * f64)
