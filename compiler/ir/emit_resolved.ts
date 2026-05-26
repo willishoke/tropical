@@ -274,6 +274,22 @@ export interface EmitSlots {
    *  InstanceIdx → InputIdx → moduleSlotIdx. Used by the fractal
    *  path when emitting a parent kernel. */
   nestedInputSlots?: Map<InstanceIdx, Map<InputIdx, number>>
+  /** Session-level array-slot indices for THIS program's own array-
+   *  typed input ports. When set, `InputRef(arr_port)` lowers to an
+   *  `opArray` operand pointing at the recorded slot (the parent —
+   *  session-level wiring or a containing kernel — writes elements
+   *  into this slot via `arraySet` in `pre_input_instructions`).
+   *  Indexed by InputIdx; size info accompanies each entry. */
+  inputArraySlots?: Map<InputIdx, { slot: number; size: number }>
+  /** Per-child session-level array-slot indices for sub-instance
+   *  array-typed INPUTS. The parent kernel writes the child's input
+   *  array via `arraySet` against the recorded slot in its
+   *  per-child pre_input block. */
+  nestedInputArraySlots?: Map<InstanceIdx, Map<InputIdx, { slot: number; size: number }>>
+  /** Per-child session-level array-slot indices for sub-instance
+   *  array-typed OUTPUTS. The parent reads the child's array output
+   *  via `index` against the recorded slot. */
+  nestedOutputArraySlots?: Map<InstanceIdx, Map<OutputIdx, { slot: number; size: number }>>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -413,6 +429,15 @@ class Emitter {
         // same InputDecl objects, in the same order. So obj.idx IS
         // the slot number (slots.ts assigns slot[i] = position i).
         const slot = obj.idx as number
+        // Array-typed input port: defer to compileNodeUncached, which
+        // produces an `array_reg` operand pointing at the session-
+        // level array slot the port is bound to. Mirrors how state
+        // arrays (regRef + arrayRegMap.has(slot)) defer for non-
+        // scalar lowering.
+        if (this.slots.inputArraySlots !== undefined
+            && this.slots.inputArraySlots.has(obj.idx)) {
+          return null
+        }
         const portT = this.inputPortTypes[slot] ?? 'float'
         // Fractal path: when the program is being compiled as a
         // sub-instance kernel, its inputs live in module slots
@@ -443,6 +468,15 @@ class Emitter {
       case 'sampleRate':  return { op: opRate, scalarType: 'float' }
       case 'sampleIndex': return { op: opTick, scalarType: 'int' }
       case 'nestedOut': {
+        // Array-typed sub-instance output: defer to compileNodeUncached,
+        // which produces an `array_reg` operand pointing at the session-
+        // level array slot the child's output port is bound to.
+        if (this.slots.nestedOutputArraySlots !== undefined) {
+          const perInstArr = this.slots.nestedOutputArraySlots.get(obj.instance)
+          if (perInstArr !== undefined && perInstArr.has(obj.output)) {
+            return null
+          }
+        }
         // Fractal compile: a NestedOut references a sub-instance's
         // output, which lives in a module slot allocated by
         // partition_recursive. Read it as `slot[index]`. The scalar
@@ -577,6 +611,45 @@ class Emitter {
       const arr = this.arrayRegMap.get(slot)
       if (arr) return { isArray: true, op: opArray(arr.slot), size: arr.size, scalarType: 'float' }
       throw new Error(`emit_resolved: regRef to non-array slot ${slot} reached compileNodeUncached unexpectedly`)
+    }
+
+    // Array-typed inputRef (filtered out by tryTerminal). The port is
+    // bound to a session-level array slot recorded in
+    // `slots.inputArraySlots`. Returning an `array_reg` operand pointing
+    // at that slot lets `index(InputRef(arr), i)` and
+    // `arraySet(InputRef(arr), i, v)` lower the standard way — same
+    // path used for state arrays.
+    if (obj.op === 'inputRef') {
+      const info = this.slots.inputArraySlots?.get(obj.idx)
+      if (info === undefined) {
+        throw new Error(`emit_resolved: inputRef to non-array port idx=${obj.idx} reached compileNodeUncached unexpectedly`)
+      }
+      return {
+        isArray: true,
+        op: opArray(arraySlotIdx(info.slot)),
+        size: info.size,
+        scalarType: 'float',
+      }
+    }
+
+    // Array-typed NestedOut. Sub-instance has an array-typed output port
+    // bound to a session-level array slot via `slots.nestedOutputArraySlots`.
+    // The parent reads with `index(NestedOut(child, port), i)`; this returns
+    // the array operand for that read path.
+    if (obj.op === 'nestedOut') {
+      const perInst = this.slots.nestedOutputArraySlots?.get(obj.instance)
+      const info    = perInst?.get(obj.output)
+      if (info !== undefined) {
+        return {
+          isArray: true,
+          op: opArray(arraySlotIdx(info.slot)),
+          size: info.size,
+          scalarType: 'float',
+        }
+      }
+      // Fall through: this NestedOut isn't array-typed, so tryTerminal
+      // should have produced a scalar slot read. Reaching here is a bug.
+      throw new Error(`emit_resolved: nestedOut to non-array sub-instance output reached compileNodeUncached unexpectedly`)
     }
 
     const binTag = BINARY_TAG[obj.op]

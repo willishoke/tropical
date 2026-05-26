@@ -28,19 +28,24 @@ describe('expandPortToSlots', () => {
     expect(r).toEqual({ names: ['inst.gate'], types: ['bool'] })
   })
 
-  test('1-D array port → N indexed slots', () => {
+  test('1-D array port → one array slot, no scalar decomposition', () => {
+    // Post-array-materialization: array ports allocate ONE array slot
+    // of size product(shape) rather than decomposing into N scalar
+    // slots. Scalar slot names/types are empty; the array slot info
+    // travels on `arraySize` / `arrayElemType`.
     const r = expandPortToSlots('voice.bands', ArrayType('float', [4]))
-    expect(r.names).toEqual([
-      'voice.bands[0]', 'voice.bands[1]',
-      'voice.bands[2]', 'voice.bands[3]',
-    ])
-    expect(r.types).toEqual(['float', 'float', 'float', 'float'])
+    expect(r.names).toEqual([])
+    expect(r.types).toEqual([])
+    expect(r.arraySize).toBe(4)
+    expect(r.arrayElemType).toBe('float')
   })
 
-  test('2-D array port → product(shape) slots', () => {
+  test('2-D array port → array slot of size product(shape)', () => {
     const r = expandPortToSlots('m', ArrayType('int', [2, 3]))
-    expect(r.names.length).toBe(6)
-    expect(r.types).toEqual(['int', 'int', 'int', 'int', 'int', 'int'])
+    expect(r.names).toEqual([])
+    expect(r.types).toEqual([])
+    expect(r.arraySize).toBe(6)
+    expect(r.arrayElemType).toBe('int')
   })
 })
 

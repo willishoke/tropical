@@ -107,11 +107,24 @@ export type TypeDefJSON = StructTypeDefJSON | SumTypeDefJSON | AliasTypeDefJSON
  *  After strata, sums/structs/products/units are gone — only scalar,
  *  alias, and array remain. */
 export interface WirePortMeta {
-  /** Branded SlotKey per scalar slot — `${instance}.${port}` for
-   *  scalar ports, `${instance}.${port}[0]` etc. for array elements. */
+  /** Branded SlotKey per scalar slot. For scalar/alias ports this is
+   *  `[${instance}.${port}]` (a single entry). For array ports this is
+   *  EMPTY — the port is backed by an array slot recorded in
+   *  `arraySlot`/`arraySize` below rather than by N scalar slots.
+   *  (Pre-PR-N, array ports decomposed into N scalar slot entries here;
+   *  the decomposition was wrong-shaped and is now handled by the
+   *  array-slot mechanism.) */
   scalarSlotNames: SlotKey[]
-  /** One ScalarKind per slot; length === scalarSlotNames.length. */
+  /** One ScalarKind per scalar slot; length === scalarSlotNames.length.
+   *  Empty for array ports. */
   scalarTypes:     IRScalarKind[]
+  /** Array slot index (into the session's unified array-slot space) when
+   *  this port is array-typed. `undefined` for scalar/alias ports.
+   *  Both fields are set together. */
+  arraySlot?:      number
+  arraySize?:      number
+  /** Element scalar kind for array ports. `undefined` for scalar ports. */
+  arrayElemType?:  IRScalarKind
   /** The original IR PortType, retained for combine typecheck. */
   portType:        IRPortType
 }
@@ -161,6 +174,22 @@ export interface SessionState {
   /** Next slot index to allocate. Always equals the sum of all four
    *  per-namespace counts (output + param + input + delay). */
   slotCount:          number
+  /** Session-level array-slot space. Array-typed I/O ports get one
+   *  array slot each, indexed 0..ioArraySlotCount-1 in this list. The
+   *  per-instance compile path prepends these to its own array-slot
+   *  accumulator so the same slot indices are visible from both parent
+   *  and child kernels (parent's `arraySet` writes into a child's input
+   *  array slot via these indices; child's `index(InputRef, i)` reads
+   *  from the same slot).
+   *
+   *  Per-instance state arrays (e.g., Delay's `buf`) get allocated AFTER
+   *  these indices in the per-instance Emitter, so I/O arrays always
+   *  occupy the lowest indices and state arrays follow. */
+  ioArraySlotCount:   number
+  ioArraySlotSizes:   number[]
+  /** Names for hot-swap state transfer (e.g., `inst.values` for an
+   *  input port named `values` on instance `inst`). */
+  ioArraySlotNames:   string[]
   /** Input expressions keyed by scalar-slot name "${instance}:${scalarSlotName}".
    *  Coexists with `inputExprNodes`; a future cleanup will unify them. */
   inputExprs:         Map<string, ExprNode>
@@ -245,6 +274,9 @@ export function makeSession(
     inputSlotRegistry:  new Map(),
     inputPortMeta:      new Map(),
     slotCount:          0,
+    ioArraySlotCount:   0,
+    ioArraySlotSizes:   [],
+    ioArraySlotNames:   [],
     inputExprs:         new Map(),
     inlineNested:       options.inlineNested ?? true,
     specializationCache: new Map(),
@@ -337,21 +369,21 @@ function wrapInUnitDelay(expr: ExprNode, init: number, id: string): ExprNode {
 // Slot allocation (M2 — additive helpers, no callers yet)
 // ─────────────────────────────────────────────────────────────
 
-/** Expand a post-strata port type to its scalar-slot names + types.
+/** Expand a post-strata port type to its slot representation.
  *
- *    scalar  → 1 slot, suffix ""
- *    alias   → treated as 1 opaque scalar (the wrapped scalar kind comes
- *              from the alias's underlying type — defaults to 'float')
- *    array   → product(shape) slots, suffix "[i]" for each linear index;
- *              element must be scalar (post-strata guarantees this for
- *              array-of-scalar ports)
+ *    scalar  → 1 scalar slot, names: [baseName]
+ *    alias   → 1 scalar slot (alias treated as opaque scalar; underlying
+ *              layout computed elsewhere at read/write time)
+ *    array   → 1 array slot of size product(shape); names: [] (scalar
+ *              slot space unused for arrays); `arraySize` and
+ *              `arrayElemType` carry the array's shape info
  *
  *  Uses the IR (post-strata) PortType. Sum/struct/product/unit don't
  *  appear here because strata lowered them all. */
 export function expandPortToSlots(
   baseName: SlotKey,
   type: IRPortType,
-): { names: SlotKey[]; types: IRScalarKind[] } {
+): { names: SlotKey[]; types: IRScalarKind[]; arraySize?: number; arrayElemType?: IRScalarKind } {
   switch (type.kind) {
     case 'scalar':
       return { names: [baseName], types: [type.scalar] }
@@ -380,16 +412,11 @@ export function expandPortToSlots(
         }
         total *= dim
       }
-      const names: SlotKey[] = []
-      const types: IRScalarKind[] = []
-      for (let i = 0; i < total; i++) {
-        // `${baseName}[i]` preserves the SlotKey shape — the baseName
-        // is already `inst.port`, and `inst.port[0]` is a valid SlotKey
-        // (slotKey's slotName parameter explicitly allows brackets).
-        names.push(`${baseName}[${i}]` as SlotKey)
-        types.push(elemKind)
-      }
-      return { names, types }
+      // Array ports allocate ONE array slot of size `total`, not N scalar
+      // slots. The caller (allocateOutputSlots / allocateInputSlots)
+      // reads `arraySize`/`arrayElemType` to allocate from the array-slot
+      // space rather than the scalar slot space.
+      return { names: [], types: [], arraySize: total, arrayElemType: elemKind }
     }
   }
 }
@@ -400,9 +427,21 @@ export function expandPortToSlots(
  *  float at codegen, so do the same here. */
 const DEFAULT_OUTPUT_PORT_TYPE: IRPortType = { kind: 'scalar', scalar: 'float' }
 
-/** Allocate slot indices for every output port of an instance. Records
- *  slot indices in `outputSlotRegistry` and full PortMeta in
- *  `outputPortMeta`. Idempotent. */
+/** Allocate slot indices for every output port of an instance.
+ *
+ *  Scalar / alias ports: assigned a position in the unified module-slot
+ *  array (the same array that holds delay-extraction slots and param
+ *  slots), recorded in `outputSlotRegistry`. PortMeta carries the
+ *  single scalar slot name.
+ *
+ *  Array ports: assigned a position in the session-level array-slot
+ *  space (`ioArraySlotCount`), recorded on the PortMeta's `arraySlot`
+ *  / `arraySize` / `arrayElemType` fields. Not added to
+ *  `outputSlotRegistry` (which is scalar-only). The per-instance
+ *  Emitter consults `outputPortMeta` to find the array slot when
+ *  emitting `NestedOut` to an array-typed output.
+ *
+ *  Idempotent. */
 export function allocateOutputSlots(
   session: SessionState,
   instName: InstanceName,
@@ -414,16 +453,33 @@ export function allocateOutputSlots(
     const portKey = slotKey(instName, portName)
     if (session.outputPortMeta.has(portKey)) continue  // idempotent
     const portType = outputPortType(type, idx) ?? DEFAULT_OUTPUT_PORT_TYPE
-    const { names, types } = expandPortToSlots(portKey, portType)
-    for (let i = 0; i < names.length; i++) {
-      session.outputSlotRegistry.set(names[i], session.slotCount + i)
+    const { names, types, arraySize, arrayElemType } = expandPortToSlots(portKey, portType)
+    if (arraySize !== undefined) {
+      // Array port: allocate one slot in the session's array-slot space.
+      const arraySlot = session.ioArraySlotCount
+      session.ioArraySlotCount += 1
+      session.ioArraySlotSizes.push(arraySize)
+      session.ioArraySlotNames.push(portKey)
+      session.outputPortMeta.set(portKey, {
+        scalarSlotNames: [],
+        scalarTypes:     [],
+        arraySlot,
+        arraySize,
+        arrayElemType,
+        portType,
+      })
+    } else {
+      // Scalar / alias port: one slot in the unified module-slot array.
+      for (let i = 0; i < names.length; i++) {
+        session.outputSlotRegistry.set(names[i], session.slotCount + i)
+      }
+      session.outputPortMeta.set(portKey, {
+        scalarSlotNames: names,
+        scalarTypes:     types,
+        portType,
+      })
+      session.slotCount += names.length
     }
-    session.outputPortMeta.set(portKey, {
-      scalarSlotNames: names,
-      scalarTypes:     types,
-      portType,
-    })
-    session.slotCount += names.length
   }
 }
 
@@ -450,16 +506,34 @@ export function allocateInputSlots(
     const portKey = slotKey(instName, portName)
     if (session.inputPortMeta.has(portKey)) continue  // idempotent
     const portType = inputPortType(type, idx) ?? DEFAULT_OUTPUT_PORT_TYPE
-    const { names, types } = expandPortToSlots(portKey, portType)
-    for (let i = 0; i < names.length; i++) {
-      session.inputSlotRegistry.set(names[i], session.slotCount + i)
+    const { names, types, arraySize, arrayElemType } = expandPortToSlots(portKey, portType)
+    if (arraySize !== undefined) {
+      // Array port: one slot in the session's array-slot space (same
+      // namespace as array outputs; both sides use opArray with the
+      // recorded slot index).
+      const arraySlot = session.ioArraySlotCount
+      session.ioArraySlotCount += 1
+      session.ioArraySlotSizes.push(arraySize)
+      session.ioArraySlotNames.push(portKey)
+      session.inputPortMeta.set(portKey, {
+        scalarSlotNames: [],
+        scalarTypes:     [],
+        arraySlot,
+        arraySize,
+        arrayElemType,
+        portType,
+      })
+    } else {
+      for (let i = 0; i < names.length; i++) {
+        session.inputSlotRegistry.set(names[i], session.slotCount + i)
+      }
+      session.inputPortMeta.set(portKey, {
+        scalarSlotNames: names,
+        scalarTypes:     types,
+        portType,
+      })
+      session.slotCount += names.length
     }
-    session.inputPortMeta.set(portKey, {
-      scalarSlotNames: names,
-      scalarTypes:     types,
-      portType,
-    })
-    session.slotCount += names.length
   }
 }
 
