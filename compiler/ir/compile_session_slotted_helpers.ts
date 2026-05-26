@@ -317,6 +317,16 @@ function shiftDst(dst: DstSlot, ctx: RemapContext): DstSlot {
   switch (dst.kind) {
     case 'temp':       return { kind: 'temp',       slot:  shiftTemp(dst.slot, ctx.regOffset) }
     case 'array':      return { kind: 'array',      slot:  shiftArraySlot(dst.slot, ctx.arraySlotOffset) }
+    // Pre-remap-only dst. Slot is session-absolute (an index into
+    // session.ioArraySlot*); collapse to plain 'array' with the
+    // same value — the slot is already an absolute index into the
+    // FlatPlan's array_slot_sizes (session I/O slots occupy the
+    // bottom of that namespace per compileSessionSlotted's accumulator
+    // seeding). The categorical move: at this boundary, the
+    // kernel-local vs session-level distinction has done its job
+    // (telling shiftDst which arithmetic to apply); past here,
+    // every array dst is just an absolute global index.
+    case 'sessionArray': return { kind: 'array', slot: dst.slot }
     // Module slots (WriteSlot dst) are absolute already — the
     // session compiler emits them with the final slot index.
     case 'moduleSlot': return dst
@@ -377,6 +387,12 @@ export function remapInstancePlan(
       case 'reg':       return { ...op, slot: shiftTemp(op.slot, ctx.regOffset) }
       case 'state_reg': return { ...op, slot: shiftStateReg(op.slot, ctx.stateRegOffset) }
       case 'array_reg': return { ...op, slot: shiftArraySlot(op.slot, ctx.arraySlotOffset) }
+      // Pre-remap-only operand: slot is session-absolute. Collapse to
+      // plain `array_reg` with the same slot value; the kernel-local
+      // shift doesn't apply because the slot was never in the
+      // kernel-local namespace to begin with. See `shiftDst`'s
+      // 'sessionArray' case for the symmetric move on writebacks.
+      case 'session_array_reg': return { kind: 'array_reg', slot: op.slot }
       case 'param':
         // Session-level params resolve to `slot` operands via
         // `translateNode` before reaching here. A surviving `param`
@@ -412,17 +428,26 @@ export function remapInstancePlan(
     })),
   )
 
-  // WriteSlot per scalar slot of every output port. For scalar ports
-  // that's 1 WriteSlot. For array-typed ports of shape `[N]` (or any
-  // shape; `expandPortToSlots` flattens row-major) that's N WriteSlots,
-  // one per element. `plan.output_targets` is sized to match (one entry
-  // per scalar slot in port-major order — see emit_resolved.ts's
-  // emitProgram for the producer side).
+  // Output writebacks per declared port. Two dispatches:
   //
-  // The session's `outputPortMeta` is the authoritative per-port shape
-  // record (scalar slot names + types, allocated once in
-  // `allocateOutputSlots`). We iterate it in port order and consume
-  // output_targets monotonically.
+  //   scalar/alias ports → one WriteSlot to a module slot
+  //     (output_targets contributes 1 temp per scalar element).
+  //   array ports        → N SetElements into the port's session-
+  //     absolute array slot (output_targets contributes N temps,
+  //     one per element, in row-major order).
+  //
+  // We're now in session-level code (post per-instance emit, outside
+  // the kernel's local namespace) and constructing instructions in
+  // absolute coordinates directly — so writes to the array slot use
+  // `instrSetElement` (`array` dst kind, not the pre-remap
+  // `sessionArray`). Same for the `opArray` operand. The kernel-local
+  // ↔ session-absolute distinction only matters for instructions
+  // built INSIDE `emit_resolved`'s Emitter, where it informs the
+  // later remap shift; writeSlots constructed here never pass
+  // through remap.
+  //
+  // `plan.output_targets` is in port-major-then-element-major order;
+  // we walk it monotonically.
   const writeSlots: NInstr[] = []
   let targetIdx = 0
   for (let portI = 0; portI < ctx.outputPortNames.length; portI++) {
@@ -435,6 +460,29 @@ export function remapInstancePlan(
         `missing outputPortMeta entry (allocateOutputSlots should have run).`,
       )
     }
+    // Array port dispatch — meta.arraySlot is the session-absolute
+    // array-slot index; meta.arraySize is the element count.
+    if (meta.arraySlot !== undefined && meta.arraySize !== undefined) {
+      const arrSlot = arraySlotIdx(meta.arraySlot)
+      const arrOp   = opArray(arrSlot)
+      for (let elemI = 0; elemI < meta.arraySize; elemI++) {
+        const localTemp = plan.output_targets[targetIdx]
+        if (localTemp === undefined) {
+          throw new Error(
+            `compileSessionSlotted: instance '${ctx.instanceName}' missing output_targets[${targetIdx}] ` +
+            `for array port '${portName}' element ${elemI}.`,
+          )
+        }
+        const absTemp = shiftTemp(localTemp, ctx.regOffset)
+        writeSlots.push(instrSetElement(
+          arrSlot,
+          [arrOp, opConst(elemI, 'int'), opTemp(absTemp, 'float')],
+        ))
+        targetIdx++
+      }
+      continue
+    }
+    // Scalar/alias port dispatch.
     for (let scalarI = 0; scalarI < meta.scalarSlotNames.length; scalarI++) {
       const scalarSlotName = meta.scalarSlotNames[scalarI]
       const slotIdxRaw = session.outputSlotRegistry.get(scalarSlotName)
@@ -460,7 +508,7 @@ export function remapInstancePlan(
   if (targetIdx !== plan.output_targets.length) {
     throw new Error(
       `compileSessionSlotted: instance '${ctx.instanceName}' has ${plan.output_targets.length} ` +
-      `output_targets but only ${targetIdx} were consumed by scalar slot expansion. ` +
+      `output_targets but only ${targetIdx} were consumed by slot expansion. ` +
       `This indicates a port-shape / emit mismatch.`,
     )
   }

@@ -301,11 +301,7 @@ describe('applyFlatPlan', () => {
     session.graph.dispose()
   })
 
-  test.skip('Clock module through flat runtime produces output', () => {
-    // Skipped under the active-set runtime: Clock has array-typed
-    // input (`ratios_in: float[1]`) and array-typed output
-    // (`ratios_out: float[1]`); neither is supported by the
-    // per-instance compile path yet.
+  test('Clock module through flat runtime produces output', () => {
     const session = setupSession({
       Clock1: { program: 'Clock' },
     })

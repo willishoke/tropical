@@ -32,7 +32,8 @@ import type { TypeParamDecl } from './ir/nodes.js'
 import {
   type PortRef, type WireKey, type SlotKey,
   type InstanceName,
-  wireKey, slotKey,
+  wireKey, slotKey, portRef, portName as toPortName,
+  instanceName as toInstanceName,
 } from './ir/branded_names.js'
 
 // ─────────────────────────────────────────────────────────────
@@ -508,21 +509,51 @@ export function allocateInputSlots(
     const portType = inputPortType(type, idx) ?? DEFAULT_OUTPUT_PORT_TYPE
     const { names, types, arraySize, arrayElemType } = expandPortToSlots(portKey, portType)
     if (arraySize !== undefined) {
-      // Array port: one slot in the session's array-slot space (same
-      // namespace as array outputs; both sides use opArray with the
-      // recorded slot index).
-      const arraySlot = session.ioArraySlotCount
-      session.ioArraySlotCount += 1
-      session.ioArraySlotSizes.push(arraySize)
-      session.ioArraySlotNames.push(portKey)
-      session.inputPortMeta.set(portKey, {
-        scalarSlotNames: [],
-        scalarTypes:     [],
-        arraySlot,
-        arraySize,
-        arrayElemType,
-        portType,
-      })
+      // Array port. Alias check: if there's a session-level wire to
+      // this port that is a single `ref` to another instance's
+      // array-typed output, bind this port's WirePortMeta directly
+      // to the producer's session-array slot — no fresh allocation,
+      // no per-sample copy. Consumer's `index(InputRef, i)` reads
+      // the same memory the producer's emit writes; the topo order
+      // (computed via session.inputExprNodes) guarantees the producer
+      // dispatches first.
+      //
+      // For nested children, `session.inputExprNodes` is empty for
+      // their port keys (their inputs are wired in the parent's
+      // program body, not at the session level), so alias never
+      // matches and the fresh-allocation branch runs — matching the
+      // existing nested-child semantics.
+      const aliased = tryAliasInputArrayWire(session, instName, portName)
+      if (aliased !== undefined) {
+        if (aliased.size !== arraySize) {
+          throw new Error(
+            `allocateInputSlots: array-input alias size mismatch for '${portKey}': ` +
+            `consumer expects size ${arraySize}, producer slot has size ${aliased.size}`,
+          )
+        }
+        session.inputPortMeta.set(portKey, {
+          scalarSlotNames: [],
+          scalarTypes:     [],
+          arraySlot:       aliased.slot,
+          arraySize,
+          arrayElemType,
+          portType,
+        })
+      } else {
+        // Fresh allocation in the session array-slot space.
+        const arraySlot = session.ioArraySlotCount
+        session.ioArraySlotCount += 1
+        session.ioArraySlotSizes.push(arraySize)
+        session.ioArraySlotNames.push(portKey)
+        session.inputPortMeta.set(portKey, {
+          scalarSlotNames: [],
+          scalarTypes:     [],
+          arraySlot,
+          arraySize,
+          arrayElemType,
+          portType,
+        })
+      }
     } else {
       for (let i = 0; i < names.length; i++) {
         session.inputSlotRegistry.set(names[i], session.slotCount + i)
@@ -535,6 +566,40 @@ export function allocateInputSlots(
       session.slotCount += names.length
     }
   }
+}
+
+/** Determine whether an instance's input port can be aliased to a
+ *  producer's array output slot. Matches the shape
+ *  `{ op: 'ref', instance, output }` against `session.inputExprNodes`
+ *  and looks up the source's `outputPortMeta`. Returns the source's
+ *  array-slot info on match; undefined otherwise.
+ *
+ *  The categorical move: array wires that are a single `ref` are a
+ *  pure renaming — `consumer.in ≡ producer.out` — and the right way
+ *  to realize a renaming is to identify the storages (a quotient),
+ *  not to transport values across them (a morphism). The alternative
+ *  was a per-sample elementwise copy from producer's slot to a
+ *  freshly-allocated consumer slot, which is what scalar wires
+ *  effectively avoid by reading the producer slot directly via
+ *  `opSlot`. Aliasing extends that same simplicity to arrays. */
+function tryAliasInputArrayWire(
+  session: SessionState,
+  instName: InstanceName,
+  portNameStr: string,
+): { slot: number; size: number } | undefined {
+  const wkey = wireKey(portRef(instName, toPortName(portNameStr)))
+  const wireExpr = session.inputExprNodes.get(wkey)
+  if (wireExpr === undefined) return undefined
+  if (typeof wireExpr !== 'object' || wireExpr === null) return undefined
+  if (Array.isArray(wireExpr)) return undefined
+  const obj = wireExpr as Record<string, unknown>
+  if (obj.op !== 'ref') return undefined
+  if (typeof obj.instance !== 'string' || typeof obj.output !== 'string') return undefined
+  const sourceKey = slotKey(toInstanceName(obj.instance), obj.output)
+  const meta = session.outputPortMeta.get(sourceKey)
+  if (meta === undefined) return undefined
+  if (meta.arraySlot === undefined || meta.arraySize === undefined) return undefined
+  return { slot: meta.arraySlot, size: meta.arraySize }
 }
 
 /** Allocate a single param/trigger slot owned by the control plane.
