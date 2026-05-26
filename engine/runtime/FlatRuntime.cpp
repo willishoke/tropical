@@ -26,7 +26,19 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
 
   KernelState new_state;
   new_state.mode = parsed.compilation_mode;
-  if (parsed.compilation_mode == tropical_jit::CompilationMode::Microkernel)
+  if (parsed.compilation_mode == tropical_jit::CompilationMode::MicrokernelDeep)
+  {
+    // Schema is wired through (Phase 1); codegen lands in Phase 2.
+    // Fail loudly rather than silently falling back to a different
+    // mode — the cache-key partitioning and the deep-mode dispatch
+    // surface aren't there yet, so any silent fallback would produce
+    // wrong results.
+    throw std::runtime_error(
+      "FlatRuntime: compilation_mode 'microkernel-deep' is not yet "
+      "implemented in the engine (Phase 2). The schema is wired and "
+      "plans round-trip, but the JIT cannot realize this mode yet.");
+  }
+  else if (parsed.compilation_mode == tropical_jit::CompilationMode::Microkernel)
   {
     auto mk_result = tropical_jit::OrcJitEngine::instance().compile_microkernel(parsed.program);
     if (!mk_result)

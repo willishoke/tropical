@@ -180,19 +180,30 @@ struct FlatProgram
 
 // Engine realization strategy.
 //
-//   Fused       — one monolithic LLVM kernel function that inlines every
-//                 instance body inside the outer sample loop. Legacy
-//                 default; consumed by FlatRuntime via NumericKernelFn.
-//   Microkernel — N+1 LLVM functions in one module (preamble, N per-
-//                 instance kernels, state_evolution, postamble_mix);
-//                 the C++ scheduler dispatches them via function
-//                 pointers per sample. Consumed by FlatRuntime via
-//                 MicrokernelKernels.
+//   Fused           — one monolithic LLVM kernel function that inlines
+//                     every instance body inside the outer sample loop.
+//                     Legacy default; consumed by FlatRuntime via
+//                     NumericKernelFn.
+//   Microkernel     — N+3 LLVM functions in one module (preamble, N per-
+//                     instance kernels, state_evolution, postamble_mix);
+//                     the C++ scheduler dispatches them via function
+//                     pointers per sample. Top-level session instances
+//                     each get their own function; nested children are
+//                     inlined into their parent's function. Consumed by
+//                     FlatRuntime via MicrokernelKernels.
+//   MicrokernelDeep — like Microkernel, but children are also emitted
+//                     as their own LLVM functions instead of being
+//                     inlined — one function per `InstanceProgram` at
+//                     every nesting depth. Requires plans with non-
+//                     empty `children` arrays. Codegen lands in a
+//                     follow-up (Phase 2); the parser accepts the value
+//                     so plans round-trip, but the compile path throws
+//                     "not yet implemented" if asked to realize it.
 //
 // Distinguished by *return type* from the compiler, not by a runtime
 // flag — the cache must be partitioned by mode so a fused-mode cache
 // hit cannot satisfy a microkernel-mode query.
-enum class CompilationMode : uint8_t { Fused, Microkernel };
+enum class CompilationMode : uint8_t { Fused, Microkernel, MicrokernelDeep };
 
 // ── Fused-mode kernel signature ──
 // `slots` (M6+) is the shared inter-module slot array passed by

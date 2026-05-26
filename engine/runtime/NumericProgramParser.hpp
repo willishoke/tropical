@@ -156,8 +156,9 @@ inline tropical_jit::CompilationMode parse_compilation_mode(const nlohmann::json
 {
   if (!plan.contains("compilation_mode")) return tropical_jit::CompilationMode::Fused;
   const std::string s = plan["compilation_mode"].get<std::string>();
-  if (s == "fused")       return tropical_jit::CompilationMode::Fused;
-  if (s == "microkernel") return tropical_jit::CompilationMode::Microkernel;
+  if (s == "fused")             return tropical_jit::CompilationMode::Fused;
+  if (s == "microkernel")       return tropical_jit::CompilationMode::Microkernel;
+  if (s == "microkernel-deep")  return tropical_jit::CompilationMode::MicrokernelDeep;
   throw std::runtime_error("NumericProgramParser: unknown compilation_mode '" + s + "'");
 }
 
