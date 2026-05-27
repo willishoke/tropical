@@ -461,6 +461,16 @@ function pushOperand(c: Code, op: NOperand, ctx: EmitCtx): ScalarType {
     case 'array_reg':
       // Arrays aren't scalar — shouldn't be read as a scalar value. Push 0 as safety.
       c.f64c(0); return 'float'
+    case 'session_array_reg':
+      // Pre-remap-only kind. emit_wasm consumes the post-remap
+      // FlatPlan; reaching this means `remapInstancePlan` didn't run
+      // (or didn't run before serialization to WASM input). The
+      // collapsing of session_array_reg → array_reg is the canonical
+      // categorical boundary; bypassing it is a contract violation.
+      throw new Error(
+        `emit_wasm: 'session_array_reg' operand reached pushOperand. ` +
+        `remapInstancePlan must convert it to 'array_reg' before WASM emission.`,
+      )
     case 'param': {
       const idx = ctx.paramIndex.get(op.ptr) ?? 0
       c.i32c(0); c.f64Load(ctx.layout.paramTableOffset + idx * 8)
@@ -934,6 +944,14 @@ function emitScalar(c: Code, instr: NInstr, ctx: EmitCtx): void {
 
 function operandScalarType(op: NOperand): ScalarType {
   if (op.kind === 'array_reg') return 'float'
+  if (op.kind === 'session_array_reg') {
+    // Same lifecycle invariant as in pushOperand above: this kind is
+    // pre-remap-only and shouldn't reach WASM emission.
+    throw new Error(
+      `emit_wasm: 'session_array_reg' operand reached operandScalarType. ` +
+      `remapInstancePlan must convert it to 'array_reg' before WASM emission.`,
+    )
+  }
   if (op.kind === 'rate') return 'float'
   if (op.kind === 'tick') return 'int'
   return op.scalar_type

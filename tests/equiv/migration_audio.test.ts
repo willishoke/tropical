@@ -55,16 +55,7 @@ const fixtures = readdirSync(FIXTURE_DIR)
   .filter(f => f.endsWith('.json'))
   .sort()
 
-// Fixtures the active-set runtime's per-instance compile path doesn't
-// yet handle (array-typed instance ports). The new pipeline throws on
-// these, so we skip the audio comparison and rely on the original
-// fixtures as a record of the legacy plan_4 shape. Tracked as
-// follow-ups.
-const KNOWN_UNSUPPORTED = new Set([
-  'patch_int_seq_test.json',     // Sequencer — array-typed input
-  'patch_sequencer_demo.json',   // Sequencer + Clock — array I/O
-  'stdlib_sequencer.json',       // Sequencer — array-typed input
-])
+const KNOWN_UNSUPPORTED = new Set<string>([])
 
 describe('migration: old (plan_4) pipeline ≡ new (plan_5) pipeline audio', () => {
   for (const file of fixtures) {

@@ -39,6 +39,7 @@ import type {
   BodyDecl,
   ResolvedBlock,
   InputIdx,
+  PortType,
 } from './nodes.js'
 import { inputIdx, outputIdx, paramIdx, regIdx } from './nodes.js'
 import {
@@ -72,6 +73,41 @@ const UNARY_OPS: ReadonlySet<string> = new Set([
 const TERNARY_OPS: ReadonlySet<string> = new Set(['clamp', 'select', 'arraySet'])
 
 // ─── Free-variable scan ────────────────────────────────────────────────────
+
+/** Infer the lifted program's output port type from the top-level
+ *  expression shape. Handles:
+ *   - bare array literals `[...]`
+ *   - `{op:'array'/'arrayLiteral', items:[...]}` ops
+ *   - `delay()` wrappers around any of the above (recurses — `delay`
+ *     is shape-polymorphic, preserves the source's shape)
+ *
+ *  These three forms are the closed set under which `needsWireLift`
+ *  triggers AND the wire's outer shape becomes array. Keep in sync
+ *  with `needsWireLift`. Returns undefined for scalar-shaped
+ *  expressions; the caller defaults to scalar `float`.
+ *
+ *  Element type defaults to `'float'`. Refinement (`int`/`bool`
+ *  elements) is left to a later pass — the IR shape doesn't yet need
+ *  that distinction at the lift layer. */
+function inferOutputPortType(expr: ExprNode): PortType | undefined {
+  if (Array.isArray(expr)) {
+    return { kind: 'array', element: 'float', shape: [expr.length] }
+  }
+  if (typeof expr === 'object' && expr !== null) {
+    const obj = expr as Record<string, unknown>
+    if ((obj.op === 'array' || obj.op === 'arrayLiteral') && Array.isArray(obj.items)) {
+      return { kind: 'array', element: 'float', shape: [(obj.items as unknown[]).length] }
+    }
+    // `delay` is shape-polymorphic — peer through to determine the
+    // wrapped source's shape. This is the `setWireExpr` path: every
+    // MCP wire is auto-wrapped in `delay`, including array-valued
+    // wires, so the array shape is one level deep inside `delay.args[0]`.
+    if (obj.op === 'delay' && Array.isArray(obj.args) && obj.args.length === 1) {
+      return inferOutputPortType(obj.args[0] as ExprNode)
+    }
+  }
+  return undefined
+}
 
 /** Walk an `ExprNode` tree and collect every reference to an instance
  *  output. Returns deduplicated `PortRef`s; the iteration order matches
@@ -181,7 +217,17 @@ export function liftWireToProgram(
     refToInputIdx.set(wireKey(ref), i)
   }
 
-  const outputDecl: OutputDecl = { op: 'outputDecl', name: 'out' }
+  // Infer the output port type from the top-level expression shape.
+  // Array-shaped wires (bare `[...]` literals, or `{op:'array'/
+  // 'arrayLiteral', items:[...]}`) need an array-typed output so the
+  // session-level allocator sees the producer as an array source and
+  // the consumer's input alias logic can bind to it. Untyped (default
+  // `undefined`) means scalar `float` — fine for scalar wire
+  // expressions, wrong for array literals.
+  const outputType = inferOutputPortType(expr)
+  const outputDecl: OutputDecl = outputType === undefined
+    ? { op: 'outputDecl', name: 'out' }
+    : { op: 'outputDecl', name: 'out', type: outputType }
 
   const ctx: TranslateContext = {
     refToInputIdx,
@@ -295,17 +341,36 @@ function translateExpr(expr: ExprNode, ctx: TranslateContext): ResolvedExpr {
   }
 
   // ── Session-level delay → synthetic RegDecl-with-update + regRef ──
+  //
+  // `delay` is shape-polymorphic: the state cell's shape matches the
+  // source expression's shape. The IR signature is `delay : T → T`
+  // for any post-strata `T`; the implementation chooses per-shape:
+  //   - scalar source → scalar `init`, scalar `update`, scalar state cell
+  //   - array source  → array  `init`, array  `update`, array  state cell
+  //                     (init broadcasts from the scalar `obj.init` to
+  //                     a constant-of-shape — the only coherent reading
+  //                     of a pure-constant initial value against an
+  //                     array-shaped slot)
+  //
+  // Shape information lives on the translated update: bare array
+  // literals translate to JS arrays (the ResolvedExpr array variant),
+  // and the emitter+strata pipeline already treats array-init regs
+  // as array state cells (allocArraySlot in emit_resolved, the
+  // arrayManaged RegTarget) — this just feeds them the matching init.
   if (op === 'delay') {
     const argsArr = obj.args as ExprNode[]
     if (!Array.isArray(argsArr) || argsArr.length !== 1) {
       throw new Error(`liftWireToProgram: delay requires args: [expr], got ${JSON.stringify(argsArr)}`)
     }
     const update = translateExpr(argsArr[0], ctx)
-    const init = typeof obj.init === 'number' ? obj.init : 0
+    const scalarInit = typeof obj.init === 'number' ? obj.init : 0
     // body.decls = [...paramDecls, ...syntheticRegs]; only RegDecls
     // contribute to body.regs[]. So RegIdx for a synthetic reg = its
     // position within ctx.syntheticRegs.
     const newIdx = regIdx(ctx.syntheticRegs.length)
+    const init: ResolvedExpr = Array.isArray(update)
+      ? (Array(update.length).fill(scalarInit) as ResolvedExpr)
+      : scalarInit
     const decl: RegDecl = {
       op: 'regDecl',
       name: `__sd${ctx.syntheticRegs.length}`,

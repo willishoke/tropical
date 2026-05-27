@@ -50,10 +50,7 @@ describe('stdlib BubbleCloud', () => {
     expect(audibleWindows).toBeGreaterThanOrEqual(8)
   }, 15000)
 
-  test.skip('BubbleCloud JIT matches interpreter bit-exact', () => {
-    // Skipped under the active-set runtime: patch uses Clock which
-    // has array-typed inputs/outputs not yet supported by the
-    // per-instance compile path.
+  test('BubbleCloud JIT matches interpreter bit-exact', () => {
     const bufLen = 256
     const nCalls = 8
 

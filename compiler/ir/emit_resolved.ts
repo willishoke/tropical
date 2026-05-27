@@ -52,21 +52,39 @@ import { TempTarget, ArrayManagedTarget } from '../flat_plan.js'
 export type ScalarType = 'float' | 'int' | 'bool'
 
 export type NOperand =
-  | { kind: 'const';     val: number;          scalar_type: ScalarType }
-  | { kind: 'input';     slot: InputPortIdx;   scalar_type: ScalarType }
-  | { kind: 'reg';       slot: TempIdx;        scalar_type: ScalarType }
-  | { kind: 'array_reg'; slot: ArraySlotIdx }
-  | { kind: 'state_reg'; slot: StateRegIdx;    scalar_type: ScalarType }
-  | { kind: 'param';     ptr:  string;         scalar_type: ScalarType }
-  | { kind: 'rate';                            scalar_type: ScalarType }
-  | { kind: 'tick';                            scalar_type: ScalarType }
-  | { kind: 'slot';      index: ModuleSlotIdx; scalar_type: ScalarType }
+  | { kind: 'const';             val: number;          scalar_type: ScalarType }
+  | { kind: 'input';             slot: InputPortIdx;   scalar_type: ScalarType }
+  | { kind: 'reg';               slot: TempIdx;        scalar_type: ScalarType }
+  | { kind: 'array_reg';         slot: ArraySlotIdx }
+  /** Session-level array slot operand. Pre-remap-only kind: carries a
+   *  session-absolute array slot index (into `session.ioArraySlot*`).
+   *  `remapInstancePlan` converts to `array_reg` (passthrough slot value)
+   *  on its way to the FlatPlan, so the wire format never sees this
+   *  kind. Construction sites: array-typed `InputRef` / `NestedOut` in
+   *  per-instance compile, and array-typed source `ref` in session
+   *  translateNode. The categorical move this encodes: keep the
+   *  kernel-local vs session-level distinction as IR tag through
+   *  remap (where the distinction is consumed), drop it at the
+   *  FlatPlan boundary where the engine genuinely doesn't care. */
+  | { kind: 'session_array_reg'; slot: ArraySlotIdx }
+  | { kind: 'state_reg';         slot: StateRegIdx;    scalar_type: ScalarType }
+  | { kind: 'param';             ptr:  string;         scalar_type: ScalarType }
+  | { kind: 'rate';                                    scalar_type: ScalarType }
+  | { kind: 'tick';                                    scalar_type: ScalarType }
+  | { kind: 'slot';              index: ModuleSlotIdx; scalar_type: ScalarType }
 
 /** Discriminated dst — the namespace of an instruction's writeback. */
 export type DstSlot =
-  | { kind: 'temp';       slot: TempIdx }
-  | { kind: 'array';      slot: ArraySlotIdx }
-  | { kind: 'moduleSlot'; index: ModuleSlotIdx }
+  | { kind: 'temp';         slot: TempIdx }
+  | { kind: 'array';        slot: ArraySlotIdx }
+  /** Pre-remap-only dst. Mirror of `session_array_reg`: writes to a
+   *  session-absolute array slot (e.g., parent emitting `arraySet`
+   *  against a child's input array slot, or an array-typed output
+   *  port's element-store). `remapInstancePlan`'s `shiftDst` converts
+   *  to `kind: 'array'` (passthrough slot value). Wire format never
+   *  sees this kind — `dstSlotToWire` throws if it does. */
+  | { kind: 'sessionArray'; slot: ArraySlotIdx }
+  | { kind: 'moduleSlot';   index: ModuleSlotIdx }
 
 export type NInstr = {
   tag:         string
@@ -117,6 +135,21 @@ export const instrArray = (
   loop_count, strides, result_type,
 })
 
+/** Pre-remap-only: elementwise instruction writing to a session-
+ *  absolute array slot. Mirrors `instrArray`; remap converts the dst's
+ *  kind 'sessionArray' → 'array' (passthrough slot value). Used by
+ *  parent→child array-input wiring (elementwise copy from a wire's
+ *  array source into the child's input array slot) and array-typed
+ *  output emission (copy from the body's computed array into the
+ *  port's session-absolute output array slot). */
+export const instrSessionArray = (
+  tag: string, dst: ArraySlotIdx, args: NOperand[],
+  loop_count: number, strides: number[], result_type: ScalarType,
+): NInstr => ({
+  tag, dst: { kind: 'sessionArray', slot: dst }, args,
+  loop_count, strides, result_type,
+})
+
 export const instrPack = (dst: ArraySlotIdx, args: NOperand[]): NInstr => ({
   tag: 'Pack', dst: { kind: 'array', slot: dst }, args,
   loop_count: 1, strides: [], result_type: 'float',
@@ -126,6 +159,17 @@ export const instrSetElement = (
   dst: ArraySlotIdx, args: [NOperand, NOperand, NOperand],
 ): NInstr => ({
   tag: 'SetElement', dst: { kind: 'array', slot: dst }, args,
+  loop_count: 1, strides: [], result_type: 'float',
+})
+
+/** Pre-remap-only: SetElement against a session-absolute array slot.
+ *  remapInstancePlan converts `dst.kind: 'sessionArray'` → `'array'`
+ *  (passthrough slot value) so the post-remap FlatPlan only ever
+ *  contains 'array' dsts. */
+export const instrSessionSetElement = (
+  dst: ArraySlotIdx, args: [NOperand, NOperand, NOperand],
+): NInstr => ({
+  tag: 'SetElement', dst: { kind: 'sessionArray', slot: dst }, args,
   loop_count: 1, strides: [], result_type: 'float',
 })
 
@@ -163,6 +207,11 @@ export const opTemp     = (slot: TempIdx, scalar_type: ScalarType): NOperand =>
   ({ kind: 'reg', slot, scalar_type })
 export const opArray    = (slot: ArraySlotIdx): NOperand =>
   ({ kind: 'array_reg', slot })
+/** Pre-remap-only operand. See `session_array_reg` doc on NOperand for
+ *  the lifecycle. Slot is a session-absolute index into
+ *  `session.ioArraySlot*`. */
+export const opSessionArray = (slot: ArraySlotIdx): NOperand =>
+  ({ kind: 'session_array_reg', slot })
 export const opStateReg = (slot: StateRegIdx, scalar_type: ScalarType): NOperand =>
   ({ kind: 'state_reg', slot, scalar_type })
 export const opInput    = (slot: InputPortIdx, scalar_type: ScalarType): NOperand =>
@@ -190,20 +239,54 @@ export type WireNOperand =
   | { kind: 'tick';      scalar_type: ScalarType }
   | { kind: 'slot';      index: number; scalar_type: ScalarType }
 
+export type WireDstKind = 'temp' | 'array' | 'moduleSlot'
+
 export interface WireNInstr {
   tag: string
+  /** The slot index in the writeback namespace selected by `dst_kind`. */
   dst: number
+  /** Discriminator for `dst` — preserves the in-memory `DstSlot` union's
+   *  kind tag through serialization. Reconstructed by the engine into
+   *  a typed `DstKind` so dispatch in `emit_instr` is direct (no
+   *  reconstruction from `tag + loop_count` proxies, which silently
+   *  misclassifies degenerate `loop_count==1` array writes). */
+  dst_kind: WireDstKind
   args: WireNOperand[]
   loop_count: number
   strides: number[]
   result_type: ScalarType
 }
 
+/** Project the `DstSlot` kind tag to its wire-format string. Mirrors
+ *  `dstSlotToWire`'s exhaustive switch so the two stay in lockstep. */
+export const dstSlotKindToWire = (d: DstSlot): WireDstKind => {
+  switch (d.kind) {
+    case 'temp':         return 'temp'
+    case 'array':        return 'array'
+    case 'moduleSlot':   return 'moduleSlot'
+    case 'sessionArray':
+      throw new Error(
+        `dstSlotKindToWire: 'sessionArray' dst leaked to wire format. ` +
+        `remapInstancePlan must convert it to 'array' before serialization.`,
+      )
+  }
+}
+
 export const dstSlotToWire = (d: DstSlot): number => {
   switch (d.kind) {
-    case 'temp':       return rawIdx(d.slot)
-    case 'array':      return rawIdx(d.slot)
-    case 'moduleSlot': return rawIdx(d.index)
+    case 'temp':         return rawIdx(d.slot)
+    case 'array':        return rawIdx(d.slot)
+    case 'moduleSlot':   return rawIdx(d.index)
+    case 'sessionArray':
+      // Pre-remap kind reaching the wire format means a code path
+      // skipped `remapInstancePlan`. The remap is the ONLY place that
+      // collapses sessionArray → array. Loud failure here surfaces the
+      // bug at the boundary rather than silently corrupting the
+      // FlatPlan with a phantom slot index.
+      throw new Error(
+        `dstSlotToWire: 'sessionArray' dst leaked to wire format. ` +
+        `remapInstancePlan must convert it to 'array' before serialization.`,
+      )
   }
 }
 
@@ -221,7 +304,12 @@ export const dstAsTemp = (i: NInstr): TempIdx => {
 
 export const dstAsArray = (i: NInstr): ArraySlotIdx => {
   if (i.dst.kind !== 'array') {
-    throw new Error(`emit: expected array dst for tag='${i.tag}', got ${i.dst.kind}`)
+    // sessionArray reaching this accessor is a remap-omission bug.
+    // Other kinds are tag/dst mismatches at the construction site.
+    const hint = i.dst.kind === 'sessionArray'
+      ? ` (sessionArray indicates remapInstancePlan was bypassed)`
+      : ''
+    throw new Error(`emit: expected array dst for tag='${i.tag}', got ${i.dst.kind}${hint}`)
   }
   return i.dst.slot
 }
@@ -236,6 +324,7 @@ export const dstAsModuleSlot = (i: NInstr): ModuleSlotIdx => {
 export const toWireInstr = (i: NInstr): WireNInstr => ({
   tag:         i.tag,
   dst:         dstSlotToWire(i.dst),
+  dst_kind:    dstSlotKindToWire(i.dst),
   // Branded primitives erase at runtime; the cast tells TS to drop
   // the brand without producing a value-level conversion.
   args:        i.args as unknown as WireNOperand[],
@@ -274,6 +363,22 @@ export interface EmitSlots {
    *  InstanceIdx → InputIdx → moduleSlotIdx. Used by the fractal
    *  path when emitting a parent kernel. */
   nestedInputSlots?: Map<InstanceIdx, Map<InputIdx, number>>
+  /** Session-level array-slot indices for THIS program's own array-
+   *  typed input ports. When set, `InputRef(arr_port)` lowers to an
+   *  `opArray` operand pointing at the recorded slot (the parent —
+   *  session-level wiring or a containing kernel — writes elements
+   *  into this slot via `arraySet` in `pre_input_instructions`).
+   *  Indexed by InputIdx; size info accompanies each entry. */
+  inputArraySlots?: Map<InputIdx, { slot: number; size: number }>
+  /** Per-child session-level array-slot indices for sub-instance
+   *  array-typed INPUTS. The parent kernel writes the child's input
+   *  array via `arraySet` against the recorded slot in its
+   *  per-child pre_input block. */
+  nestedInputArraySlots?: Map<InstanceIdx, Map<InputIdx, { slot: number; size: number }>>
+  /** Per-child session-level array-slot indices for sub-instance
+   *  array-typed OUTPUTS. The parent reads the child's array output
+   *  via `index` against the recorded slot. */
+  nestedOutputArraySlots?: Map<InstanceIdx, Map<OutputIdx, { slot: number; size: number }>>
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -413,6 +518,15 @@ class Emitter {
         // same InputDecl objects, in the same order. So obj.idx IS
         // the slot number (slots.ts assigns slot[i] = position i).
         const slot = obj.idx as number
+        // Array-typed input port: defer to compileNodeUncached, which
+        // produces an `array_reg` operand pointing at the session-
+        // level array slot the port is bound to. Mirrors how state
+        // arrays (regRef + arrayRegMap.has(slot)) defer for non-
+        // scalar lowering.
+        if (this.slots.inputArraySlots !== undefined
+            && this.slots.inputArraySlots.has(obj.idx)) {
+          return null
+        }
         const portT = this.inputPortTypes[slot] ?? 'float'
         // Fractal path: when the program is being compiled as a
         // sub-instance kernel, its inputs live in module slots
@@ -443,6 +557,15 @@ class Emitter {
       case 'sampleRate':  return { op: opRate, scalarType: 'float' }
       case 'sampleIndex': return { op: opTick, scalarType: 'int' }
       case 'nestedOut': {
+        // Array-typed sub-instance output: defer to compileNodeUncached,
+        // which produces an `array_reg` operand pointing at the session-
+        // level array slot the child's output port is bound to.
+        if (this.slots.nestedOutputArraySlots !== undefined) {
+          const perInstArr = this.slots.nestedOutputArraySlots.get(obj.instance)
+          if (perInstArr !== undefined && perInstArr.has(obj.output)) {
+            return null
+          }
+        }
         // Fractal compile: a NestedOut references a sub-instance's
         // output, which lives in a module slot allocated by
         // partition_recursive. Read it as `slot[index]`. The scalar
@@ -577,6 +700,49 @@ class Emitter {
       const arr = this.arrayRegMap.get(slot)
       if (arr) return { isArray: true, op: opArray(arr.slot), size: arr.size, scalarType: 'float' }
       throw new Error(`emit_resolved: regRef to non-array slot ${slot} reached compileNodeUncached unexpectedly`)
+    }
+
+    // Array-typed inputRef (filtered out by tryTerminal). The port is
+    // bound to a session-level array slot recorded in
+    // `slots.inputArraySlots`. We emit a `session_array_reg` operand —
+    // the pre-remap kind that carries a session-absolute slot index.
+    // `remapInstancePlan` converts this to `array_reg` (passthrough
+    // slot value) so the post-remap FlatPlan / wire format only ever
+    // contains `array_reg`. Same operand kind for both `index` reads
+    // and `arraySet` writebacks (compileSetElement dispatches on the
+    // operand kind to choose the right dst).
+    if (obj.op === 'inputRef') {
+      const info = this.slots.inputArraySlots?.get(obj.idx)
+      if (info === undefined) {
+        throw new Error(`emit_resolved: inputRef to non-array port idx=${obj.idx} reached compileNodeUncached unexpectedly`)
+      }
+      return {
+        isArray: true,
+        op: opSessionArray(arraySlotIdx(info.slot)),
+        size: info.size,
+        scalarType: 'float',
+      }
+    }
+
+    // Array-typed NestedOut. Sub-instance has an array-typed output port
+    // bound to a session-level array slot via `slots.nestedOutputArraySlots`.
+    // The parent reads with `index(NestedOut(child, port), i)`; this returns
+    // the operand for that read path. Same `session_array_reg` lifecycle
+    // as the inputRef-array case above.
+    if (obj.op === 'nestedOut') {
+      const perInst = this.slots.nestedOutputArraySlots?.get(obj.instance)
+      const info    = perInst?.get(obj.output)
+      if (info !== undefined) {
+        return {
+          isArray: true,
+          op: opSessionArray(arraySlotIdx(info.slot)),
+          size: info.size,
+          scalarType: 'float',
+        }
+      }
+      // Fall through: this NestedOut isn't array-typed, so tryTerminal
+      // should have produced a scalar slot read. Reaching here is a bug.
+      throw new Error(`emit_resolved: nestedOut to non-array sub-instance output reached compileNodeUncached unexpectedly`)
     }
 
     const binTag = BINARY_TAG[obj.op]
@@ -769,11 +935,23 @@ class Emitter {
     const idxOp: NOperand = idx.isArray ? opConst(0, 'float') : idx.op
     const valOp: NOperand = val.isArray ? opConst(0, 'float') : val.op
     // The target array slot is the one the array operand already
-    // points at — `arr.op.kind === 'array_reg'` with a branded slot.
-    if (arr.op.kind !== 'array_reg') {
-      throw new Error(`emit_resolved: compileSetElement expected array_reg operand, got ${arr.op.kind}`)
+    // points at. Two array-bearing operand kinds reach here:
+    //   - `array_reg`         — kernel-local slot (gets shifted at remap)
+    //   - `session_array_reg` — session-absolute slot (passthrough at remap)
+    // Dispatch on kind so the dst carries the same namespace tag as
+    // the source operand; remapInstancePlan handles the rest.
+    switch (arr.op.kind) {
+      case 'array_reg':
+        this.emit(instrSetElement(arr.op.slot, [arrOp, idxOp, valOp]))
+        break
+      case 'session_array_reg':
+        this.emit(instrSessionSetElement(arr.op.slot, [arrOp, idxOp, valOp]))
+        break
+      default:
+        throw new Error(
+          `emit_resolved: compileSetElement expected array_reg or session_array_reg operand, got ${arr.op.kind}`,
+        )
     }
-    this.emit(instrSetElement(arr.op.slot, [arrOp, idxOp, valOp]))
     return { isArray: true, op: arr.op, size: arr.size, scalarType: 'float' }
   }
 
@@ -815,37 +993,44 @@ class Emitter {
     const per_child_pre_input: NInstr[][] = []
     const preChildBaseline = this.instrs.length
     {
-      const slotMaps = this.slots.nestedInputSlots
+      const scalarSlotMaps = this.slots.nestedInputSlots
+      const arraySlotMaps  = this.slots.nestedInputArraySlots
       // nested.instances is body-decl order = prog.instances order, so
       // position k in this array IS the InstanceIdx for that child.
       // Empty list = legacy flat path, loop body never runs.
       for (let k = 0; k < nested.instances.length; k++) {
         const decl = nested.instances[k]
         const childStart = this.instrs.length
-        const childSlotMap = slotMaps?.get(instanceIdx(k))
-        if (childSlotMap !== undefined) {
-          // Build a wired-by-port lookup so we can iterate ALL ports
-          // (not just decl.inputs). Unwired ports need to receive
-          // their declared port default — otherwise the slot retains
-          // its allocation-time default of 0, which silently masks
-          // the port's actual default (e.g., Bubble's attack_g: 0.05
-          // becomes 0 if a parent program doesn't wire it explicitly,
-          // killing env_smooth evolution).
-          const wiredByPort = new Map<number, ResolvedExpr>()
-          for (const inp of decl.inputs) wiredByPort.set(inp.port as number, inp.value)
-          const ports = getInstanceType(nested.enclosing, decl).ports.inputs
-          for (let i = 0; i < ports.length; i++) {
-            const slotIdx = childSlotMap.get(inputIdxOf(i))
-            if (slotIdx === undefined) continue
-            const portDecl = ports[i]
+        const childInstanceIdx = instanceIdx(k)
+        const childScalarMap = scalarSlotMaps?.get(childInstanceIdx)
+        const childArrayMap  = arraySlotMaps?.get(childInstanceIdx)
+        // Build a wired-by-port lookup so we can iterate ALL ports
+        // (not just decl.inputs). Unwired ports need to receive
+        // their declared port default — otherwise the slot retains
+        // its allocation-time default of 0, which silently masks
+        // the port's actual default (e.g., Bubble's attack_g: 0.05
+        // becomes 0 if a parent program doesn't wire it explicitly,
+        // killing env_smooth evolution).
+        const wiredByPort = new Map<number, ResolvedExpr>()
+        for (const inp of decl.inputs) wiredByPort.set(inp.port as number, inp.value)
+        const ports = getInstanceType(nested.enclosing, decl).ports.inputs
+        for (let i = 0; i < ports.length; i++) {
+          const portDecl = ports[i]
+          const wireExpr = wiredByPort.get(i)
+            ?? portDecl.default
+            ?? 0
+          const portIdx = inputIdxOf(i)
+          // Discriminate the port's allocation class. Scalar ports
+          // land in `nestedInputSlots` (module-slot indices); array
+          // ports land in `nestedInputArraySlots` (session-array slot
+          // indices + sizes). A port appears in at most one map; if
+          // it appears in neither, no parent-side wiring is needed.
+          const scalarSlot = childScalarMap?.get(portIdx)
+          const arrayInfo  = childArrayMap ?.get(portIdx)
+          if (scalarSlot !== undefined) {
             const portT = inputDeclScalarType(portDecl)
-            const wireExpr = wiredByPort.get(i)
-              ?? portDecl.default
-              ?? 0
             const r = this.compileNode(wireExpr, portT)
-            // Wires are scalar (array-typed child input ports aren't
-            // currently exercised by the slot-based path). If the wire
-            // resolves to an array, project element 0.
+            // Scalar port — if the wire resolves to an array, project element 0.
             const valOp: NOperand = r.isArray
               ? (() => {
                   const dst = this.allocReg()
@@ -854,8 +1039,52 @@ class Emitter {
                   return opTemp(dst, r.scalarType)
                 })()
               : r.op
-            this.emit(instrWriteSlot(moduleSlotIdx(slotIdx), valOp, portT))
+            this.emit(instrWriteSlot(moduleSlotIdx(scalarSlot), valOp, portT))
+            continue
           }
+          if (arrayInfo !== undefined) {
+            // Array port — compile the wire expression as an array,
+            // then emit a single elementwise copy into the child's
+            // session-absolute array slot. `instrSessionArray` carries
+            // a `sessionArray` dst kind that `remapInstancePlan`
+            // converts to `array` (passthrough slot value).
+            //
+            // The source operand may be `array_reg` (kernel-local —
+            // e.g., a literal `[60,64,67,72]` packed in this kernel's
+            // own array space) or `session_array_reg` (e.g., a NestedOut
+            // to a sibling instance's array output). Either flows
+            // through the engine's elementwise loop identically; remap
+            // shifts kernel-local slot refs and passes session-absolute
+            // ones through.
+            //
+            // Single Add-with-stride-0-on-rhs (size = arrayInfo.size,
+            // strides = [1, 0]) is the same elementwise-copy idiom
+            // used for array-reg writebacks in the register-update
+            // pass below.
+            const r = this.compileNode(wireExpr, 'float')
+            if (!r.isArray) {
+              throw new Error(
+                `emit_resolved: array-typed child input port at idx=${i} of '${decl.name}' ` +
+                `received scalar-shaped wire expression; expected array of size ${arrayInfo.size}`,
+              )
+            }
+            if (r.size !== arrayInfo.size) {
+              throw new Error(
+                `emit_resolved: array-typed child input port at idx=${i} of '${decl.name}' ` +
+                `has size ${arrayInfo.size}, wire expression evaluates to array of size ${r.size}`,
+              )
+            }
+            this.emit(instrSessionArray(
+              'Add',
+              arraySlotIdx(arrayInfo.slot),
+              [r.op, opConst(0, 'float')],
+              arrayInfo.size,
+              [1, 0],
+              'float',
+            ))
+            continue
+          }
+          // Port has no allocated parent-side slot — nothing to emit.
         }
         const childEnd = this.instrs.length
         per_child_pre_input.push(this.instrs.slice(childStart, childEnd))

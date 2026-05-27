@@ -20,11 +20,12 @@
  *      via the per-instance compile path.
  */
 
-import type { SessionState } from '../session.js'
+import { allocateOutputSlots, type SessionState } from '../session.js'
 import type { FlatPlan, CompilationMode } from '../flat_plan'
 import { liftWiresToInstances } from './lift_wires.js'
 import { extractSessionDelays } from './lowering/extract_session_delays.js'
 import { assertSessionAcyclic } from './lowering/session_cycle_check.js'
+import { instanceName as toInstanceName } from './branded_names.js'
 
 export interface CompileSessionOptions {
   /** Engine realization strategy. Defaults to `'fused'`. */
@@ -57,7 +58,24 @@ export function compileSession(
   // Pre-compile: hoist array-literal wires to anonymous programs.
   liftWiresToInstances(session)
 
-  // Pre-compile: hoist unit-delay wires to module slots.
+  // Eager: allocate output slots for every top-level instance before
+  // `extractSessionDelays` runs. The shape-polymorphic delay path
+  // needs to inspect each potential array-typed source's
+  // `outputPortMeta` to decide whether to allocate a scalar module
+  // slot or an ioArraySlot for the delay. `compileSessionSlotted`
+  // re-issues these calls idempotently in its own pre-pass; doing
+  // them here just shifts the timing earlier. Tests / MCP-style
+  // sessions that construct instances directly (without going
+  // through `loadJSON`'s per-instance allocation) need this; the
+  // `loadJSON` path already allocates outputs at instance-decl time.
+  for (const [name, inst] of session.instanceRegistry) {
+    if (inst.compiled !== undefined) {
+      allocateOutputSlots(session, toInstanceName(name), inst.compiled)
+    }
+  }
+
+  // Pre-compile: hoist unit-delay wires to module slots (scalar) or
+  // session-array slots (array-shaped sources).
   extractSessionDelays(session)
 
   // Defensive invariant: after Phase 2+4 the instance dep graph is

@@ -42,6 +42,23 @@ export interface CompileResolvedContext {
    *  `InputRef(idx)` lowers to a slot read from
    *  `inputSlotOverride.get(idx)` instead of the legacy `opInput`. */
   inputSlotOverride?: Map<InputIdx, number>
+  /** Session-level array-slot indices for THIS program's own
+   *  array-typed input ports. When set, `InputRef(arr_port)` lowers to
+   *  a `session_array_reg` operand pointing at the recorded slot.
+   *  Indexed by InputIdx; size accompanies each entry. */
+  inputArraySlots?:        Map<InputIdx, { slot: number; size: number }>
+  /** Per-sub-instance, per-input-port session-array-slot map. Keyed
+   *  by InstanceIdx and InputIdx. Populated when a child has array-
+   *  typed input ports. The parent's per_child_pre_input emission
+   *  uses these to write an elementwise copy from the wire expression
+   *  into the child's session-absolute input array slot. */
+  nestedInputArraySlots?:  Map<InstanceIdx, Map<InputIdx, { slot: number; size: number }>>
+  /** Per-sub-instance, per-output-port session-array-slot map. Keyed
+   *  by InstanceIdx and OutputIdx. Populated when a child has array-
+   *  typed output ports. The parent's `NestedOut(child, output_arr)`
+   *  lowers to a `session_array_reg` operand pointing at the recorded
+   *  slot. */
+  nestedOutputArraySlots?: Map<InstanceIdx, Map<OutputIdx, { slot: number; size: number }>>
 }
 
 /** Compile a `ResolvedProgram` to a `PerInstancePlan`.
@@ -107,13 +124,16 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
   })
 
   const emitSlots: EmitSlots = {
-    inputs:           slots.inputs,
-    regs:             slots.regs,
-    regCount:         slots.regDecls.length,
-    paramHandles:     ctx.paramHandles     ?? new Map(),
-    nestedOutputSlots: ctx.nestedOutputSlots,
-    nestedInputSlots:  ctx.nestedInputSlots,
-    inputSlotOverride: ctx.inputSlotOverride,
+    inputs:                  slots.inputs,
+    regs:                    slots.regs,
+    regCount:                slots.regDecls.length,
+    paramHandles:            ctx.paramHandles ?? new Map(),
+    nestedOutputSlots:       ctx.nestedOutputSlots,
+    nestedInputSlots:        ctx.nestedInputSlots,
+    inputSlotOverride:       ctx.inputSlotOverride,
+    inputArraySlots:         ctx.inputArraySlots,
+    nestedInputArraySlots:   ctx.nestedInputArraySlots,
+    nestedOutputArraySlots:  ctx.nestedOutputArraySlots,
   }
 
   // Fractal: collect sub-instance decls so emit_resolved can emit

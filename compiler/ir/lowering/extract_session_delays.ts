@@ -44,6 +44,7 @@
  */
 
 import type { ExprNode, SessionState, DelaySlotEntry } from '../../session.js'
+import { slotKey, instanceName as toInstanceName } from '../branded_names.js'
 
 type DelayNode = {
   op:    'delay'
@@ -54,6 +55,28 @@ type DelayNode = {
   // index signature; mirror it here so the type predicate below is
   // assignable to ExprNode.
   [key: string]: unknown
+}
+
+/** Determine whether a delay's source expression resolves to an array
+ *  shape, and if so, its element count. Currently recognizes only
+ *  `{op:'ref', instance, output}` against an array-typed output —
+ *  the closed set of array-shaped expressions that survive past
+ *  `liftWiresToInstances` (which lifts every wire containing an
+ *  array literal). Other array-producing patterns require their own
+ *  analysis pass and fall through to scalar handling. */
+function inferArraySourceShape(
+  expr: ExprNode,
+  session: SessionState,
+): { size: number } | undefined {
+  if (typeof expr !== 'object' || expr === null || Array.isArray(expr)) return undefined
+  const obj = expr as Record<string, unknown>
+  if (obj.op !== 'ref') return undefined
+  if (typeof obj.instance !== 'string' || typeof obj.output !== 'string') return undefined
+  const sourceKey = slotKey(toInstanceName(obj.instance), obj.output)
+  const meta = session.outputPortMeta.get(sourceKey)
+  if (meta === undefined) return undefined
+  if (meta.arraySlot === undefined || meta.arraySize === undefined) return undefined
+  return { size: meta.arraySize }
 }
 
 /** Detect a session-level `delay()` op. */
@@ -88,9 +111,44 @@ function rewriteAndCollect(
   if (isDelay(expr)) {
     const init = expr.init ?? 0
     const id   = expr.id   ?? `__autodelay:${context}#${session.delaySlotRegistry.length}`
+
+    // Shape-polymorphic delay: discriminate on source shape. Scalar
+    // sources allocate a module slot (the unified slot[] array,
+    // float64-backed); array sources allocate an ioArraySlot (the
+    // session's array-slot space). Both kinds get one entry in
+    // `delaySlotRegistry`; `state_evolution` branches on `isArray`
+    // to choose the WriteSlot vs. elementwise-Add emission path.
+    //
+    // Shape inference at this layer is intentionally limited to the
+    // forms `extractSessionDelays` actually encounters: `{op:'ref'}`
+    // to an array-typed output. Other array-producing forms (bare
+    // literals, `{op:'array'/'arrayLiteral'}`) are caught upstream
+    // by `liftWiresToInstances` and never reach here. Complex array-
+    // valued expressions (arithmetic on array refs, etc.) would
+    // need their own analysis pass; for now they fall through to the
+    // scalar path and surface as a clear error later.
+    const arrayShape = inferArraySourceShape(expr.args[0], session)
+    if (arrayShape !== undefined) {
+      const arraySlot = session.ioArraySlotCount
+      session.ioArraySlotCount += 1
+      session.ioArraySlotSizes.push(arrayShape.size)
+      session.ioArraySlotNames.push(id)
+      const entry: DelaySlotEntry = {
+        slotName:   id,
+        init,
+        sourceExpr: null as unknown as ExprNode,
+        scalarType: 'float',
+        isArray:    true,
+        arraySlot,
+        arraySize:  arrayShape.size,
+      }
+      session.delaySlotRegistry.push(entry)
+      entry.sourceExpr = rewriteAndCollect(expr.args[0], session, `${context}.delay`)
+      return { op: 'sessionArraySlot', index: arraySlot, size: arrayShape.size }
+    }
+
     const slotIdx = session.slotCount
     session.slotCount += 1
-
     // Push the outer entry first; the recursion into args[0] may
     // extract nested delays which append after. The state_evolution
     // emitter walks the registry in push order — outer-first writes

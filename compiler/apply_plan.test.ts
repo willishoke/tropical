@@ -6,7 +6,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, loadJSON, type ExprNode } from './session'
+import { makeSession, loadJSON, setWireExpr, type ExprNode } from './session'
 import { loadStdlib as loadBuiltins, loadProgramAsType } from './program'
 import type { ProgramNode, ProgramFile } from './program'
 import { applySessionWiring, applyFlatPlan } from './apply_plan'
@@ -301,11 +301,7 @@ describe('applyFlatPlan', () => {
     session.graph.dispose()
   })
 
-  test.skip('Clock module through flat runtime produces output', () => {
-    // Skipped under the active-set runtime: Clock has array-typed
-    // input (`ratios_in: float[1]`) and array-typed output
-    // (`ratios_out: float[1]`); neither is supported by the
-    // per-instance compile path yet.
+  test('Clock module through flat runtime produces output', () => {
     const session = setupSession({
       Clock1: { program: 'Clock' },
     })
@@ -324,6 +320,47 @@ describe('applyFlatPlan', () => {
     rt.dispose()
     session.graph.dispose()
   })
+
+  test('MCP-path chained array I/O (setWireExpr → extractSessionDelays array delay)', () => {
+    // End-to-end regression for the shape-polymorphic delay primitive
+    // at session level. Two Clocks chained: `b.ratios_in =
+    // ref(a.ratios_out)`. setWireExpr wraps in delay; needsWireLift
+    // doesn't trigger (no array literal in the expression);
+    // extractSessionDelays detects the array-shaped source via
+    // outputPortMeta lookup, allocates an ioArraySlot for the delay,
+    // and emits per-element Index+SetElement in state_evolution.
+    // The consumer's input array slot aliases to the delay slot via
+    // the `sessionArraySlot` branch of tryAliasInputArrayWire.
+    //
+    // Exercises:
+    //   - Path A: setWireExpr-wrapped array-typed ref
+    //   - extractSessionDelays array source detection
+    //   - sessionArraySlot wire-replacement
+    //   - alias-through-delay
+    //   - state_evolution per-element array copy
+    //   - the size==1 engine-gate workaround in arrayCopies/per_child
+    //     pre_input emission
+    const session = setupSession({
+      a: { program: 'Clock' },
+      b: { program: 'Clock' },
+    })
+
+    setWireExpr(session, portRef(instanceName('a'), portName('freq')), 4)
+    setWireExpr(session, portRef(instanceName('a'), portName('ratios_in')), [1])
+    setWireExpr(session, portRef(instanceName('b'), portName('ratios_in')),
+      { op: 'ref', instance: 'a', output: 'ratios_out' })
+    setWireExpr(session, portRef(instanceName('b'), portName('freq')), 8)
+    session.graphOutputs.push({ instance: 'b', output: 'output' })
+
+    const rt = new Runtime(256)
+    applyFlatPlan(session, rt)
+    rt.process()
+    const buf = rt.outputBuffer
+    expect(peak(buf)).toBeGreaterThan(0)
+    rt.dispose()
+    session.graph.dispose()
+  })
+
 
   test('flat runtime produces continuous output over two buffers', () => {
     const session = setupSession({

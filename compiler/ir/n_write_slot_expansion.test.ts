@@ -1,12 +1,17 @@
 /**
- * n_write_slot_expansion.test.ts — Phase 3 structural witness.
+ * n_write_slot_expansion.test.ts — array-output emit shape.
  *
- * Verifies that array-typed instance OUTPUT ports compile to N
- * WriteSlots (one per scalar element) rather than 1 WriteSlot per port.
+ * Verifies that the array-I/O refactor changed the per-port writeback
+ * shape as designed:
+ *   - scalar/alias output port  → 1 WriteSlot (into a module slot)
+ *   - array output port of shape [N] → 0 WriteSlots, N SetElement
+ *     instructions writing the per-element temps into the port's
+ *     session-array slot.
  *
- * The actual end-to-end stdlib tests (Clock equivalence, BubbleCloud
- * round-trip) are still blocked on Phase 5's array-input handling.
- * This test isolates the output-side fix.
+ * The old shape (N WriteSlots into N scalar slots per array port)
+ * was an artifact of decomposing arrays into scalar bundles at the
+ * slot layer. First-class array slots make that decomposition
+ * unnecessary; the test now witnesses the new shape.
  */
 
 import { describe, test, expect } from 'bun:test'
@@ -17,13 +22,15 @@ import { slotKey, instanceName } from './branded_names.js'
 
 const sk = (i: string, n: string) => slotKey(instanceName(i), n)
 
-describe('Phase 3 — N-WriteSlot expansion for array output ports', () => {
-  test('an instance with array_out: float[3] emits 3 WriteSlots', () => {
+describe('array-output writeback shape', () => {
+  test('an instance with array_out: float[3] emits 3 SetElements + 1 WriteSlot', () => {
     const session = makeSession(64)
 
-    // Register a type with BOTH an array-typed output (for WriteSlot
-    // expansion) and a scalar output (for the DAC wire). DAC stitch
-    // for array-typed graphOutputs is out of M11 Phase 3 scope.
+    // Register a type with BOTH an array-typed output (for SetElement
+    // expansion) and a scalar output (for the DAC wire). Array-typed
+    // graphOutputs are still out of scope for DAC stitching; using a
+    // scalar port for the audio output keeps the test focused on the
+    // structural assertion.
     loadProgramAsType({
       op: 'program',
       name: 'ArrayOut',
@@ -49,22 +56,35 @@ describe('Phase 3 — N-WriteSlot expansion for array output ports', () => {
       audio_outputs: [{ instance: 'a', output: 'single' }],
     } as Parameters<typeof loadJSON>[0], session)
 
-    // Confirm slot allocation expanded to 3 for the array port.
+    // Array outputs no longer decompose into scalar slot names. The
+    // port's WirePortMeta carries a session-array slot index instead.
     const aMeta = session.outputPortMeta.get(sk("a", "arr"))
     expect(aMeta).toBeDefined()
-    expect(aMeta!.scalarSlotNames).toEqual(['a.arr[0]', 'a.arr[1]', 'a.arr[2]'])
+    expect(aMeta!.scalarSlotNames).toEqual([])
+    expect(aMeta!.arraySlot).toBeDefined()
+    expect(aMeta!.arraySize).toBe(3)
 
-    // Compile and inspect.
     const plan = compileSession(session)
     expect(plan.instance_functions.length).toBe(1)
     const instFn = plan.instance_functions[0]
 
-    // Count WriteSlot instructions in the instance body. Expected:
-    //   3 for arr[0], arr[1], arr[2]
-    // + 1 for single
-    // = 4
+    // Scalar output port: one WriteSlot per scalar element (= 1 here).
     const writeSlots = instFn.instructions.filter(i => i.tag === 'WriteSlot')
-    expect(writeSlots.length).toBe(4)
+    expect(writeSlots.length).toBe(1)
+
+    // Array output port: one SetElement per element of the declared
+    // shape (= 3 here). The emit-side packing of the literal
+    // `[10,20,30]` produces its own SetElements too (via Pack
+    // unboxing), so the count is at least 3; assert lower-bound so
+    // the test isn't brittle to incidental Pack-emit shape changes.
+    const setElements = instFn.instructions.filter(i => i.tag === 'SetElement')
+    expect(setElements.length).toBeGreaterThanOrEqual(3)
+
+    // The array slot allocated for `arr` should appear in the FlatPlan's
+    // array_slot_sizes (at the session-absolute index recorded on the
+    // port meta).
+    expect(plan.array_slot_count).toBeGreaterThanOrEqual(1)
+    expect(plan.array_slot_sizes[aMeta!.arraySlot!]).toBe(3)
   })
 
   test('scalar output port still emits 1 WriteSlot', () => {

@@ -99,13 +99,28 @@ struct Operand
   { Operand o; o.kind = OperandKind::Slot; o.scalar_type = t; o.slot = s; return o; }
 };
 
+/** Writeback-namespace discriminator. Mirrors the TS-side `DstSlot`
+ *  union (`'temp' | 'array' | 'moduleSlot'`); the wire format carries
+ *  this as a string tag (`dst_kind`) and the parser reconstructs it
+ *  into this enum. Direct dispatch on this enum replaces the prior
+ *  "`loop_count > 1` implies array dst" proxy — the proxy silently
+ *  misclassified `loop_count==1` array writes (degenerate elementwise
+ *  ops on size-1 arrays), storing scalar results into temp slots at
+ *  array-slot indices. */
+enum class DstKind : uint8_t {
+  Temp,
+  Array,
+  ModuleSlot,
+};
+
 struct FlatInstr
 {
   OpTag                tag         = OpTag::Add;
   JitScalarType        result_type = JitScalarType::Float;
+  DstKind              dst_kind    = DstKind::Temp;
   uint32_t             dst         = 0;
   std::vector<Operand> args;
-  uint32_t             loop_count  = 1;       // 1 = scalar; N > 1 = elementwise loop
+  uint32_t             loop_count  = 1;       // iteration count for elementwise emission
   std::vector<uint8_t> strides;               // per-arg: 1 = iterate, 0 = broadcast
 };
 
