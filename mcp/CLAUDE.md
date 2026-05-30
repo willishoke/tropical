@@ -41,10 +41,9 @@ inlineInstances → arrayLower → identityElim`) runs per-instance
 inside `compileResolved`. Session-level cycle handling lives in the
 wire layer: `setWireExpr` wraps every wire in a unit delay,
 `extractSessionDelays` hoists it to a module slot whose update
-lands in the scheduler's `state_evolution` phase. The interpreter
-side reaches strata via `materializeSession` (which flattens the
-session into one synthetic top-level program) and is held to
-sample-for-sample equivalence with the JIT.
+lands in the scheduler's `state_evolution` phase. The WASM backend
+consumes the same `tropical_plan_5` and is held to sample-for-sample
+equivalence with the JIT (`tests/equiv/wasm_vs_jit`).
 
 A compile error doesn't kill the session; it returns a structured
 error envelope (see below) and the previous kernel keeps playing.

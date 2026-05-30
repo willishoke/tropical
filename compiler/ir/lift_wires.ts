@@ -98,7 +98,7 @@ function liftOneWire(
     inlineNested: session.inlineNested,
   })
 
-  // Register the type so materializeSession (oracle path) can find it
+  // Register the type so the session compile path can find it
   // by name, then instantiate and allocate output slots.
   session.typeRegistry.set(rawName(synthName), compiled)
   session.programs.set(rawName(synthName), lifted)

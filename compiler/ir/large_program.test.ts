@@ -17,7 +17,7 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON, type ExprNode } from '../session.js'
 import { loadStdlib, loadProgramAsType, type ProgramNode } from '../program.js'
-import { interpretSession } from '../interpret_resolved.js'
+import { renderFramesJit } from '../test_utils/audio'
 
 describe('Phase J — IR-size / stack blowup (resource gate)', () => {
   test('(S) 256-deep select chain + 1024-element fold: compiles and runs one sample', () => {
@@ -73,7 +73,7 @@ describe('Phase J — IR-size / stack blowup (resource gate)', () => {
     // Resource gate: compile + one-sample evaluation completes
     // without throwing. The expected pre-/20 value is 255 + 523776 =
     // 524031, but we only assert finiteness here per the plan.
-    const out = interpretSession(session, 1)
+    const out = renderFramesJit(session, 1)
     expect(Number.isFinite(out[0])).toBe(true)
   }, /* timeout */ 30_000)
 })

@@ -14,6 +14,8 @@
 
 import { writeFile } from 'node:fs/promises'
 import type { Runtime } from '../runtime/runtime'
+import type { SessionState } from '../session'
+import { applyFlatPlan } from '../apply_plan'
 
 // ─── Buffer backend ───────────────────────────────────────────────────────────
 
@@ -32,6 +34,30 @@ export function renderFrames(runtime: Runtime, nCalls: number): Float64Array {
     result.set(runtime.outputBuffer, i * bufLen)
   }
   return result
+}
+
+// ─── JIT render backend (the shipping path) ────────────────────────────────────
+
+/**
+ * Render `nSamples` of a session's audio output via the LLVM JIT — the
+ * production audio path. This replaces the old pure-TS interpreter as the
+ * session renderer for unit tests: property assertions now validate
+ * exactly what ships, with no second, independently-drifting evaluator.
+ *
+ * Compiles the session to `tropical_plan_5`, loads + JIT-compiles it, then
+ * drives the runtime synchronously and returns the first `nSamples` as a
+ * `Float64Array` (the engine's /20 mix gain is already applied). Requires
+ * `libtropical` to be present, as every session test does (`makeSession`
+ * loads the FFI bindings).
+ *
+ * Synchronous — the session renderer for unit tests.
+ */
+export function renderFramesJit(session: SessionState, nSamples: number): Float64Array {
+  applyFlatPlan(session, session.runtime)
+  session.graph.primeJit()
+  const bufLen = session.runtime.bufferLength
+  const nCalls = Math.ceil(nSamples / bufLen)
+  return renderFrames(session.runtime, nCalls).slice(0, nSamples)
 }
 
 // ─── Signal analysis ──────────────────────────────────────────────────────────

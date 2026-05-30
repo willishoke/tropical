@@ -18,7 +18,7 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON } from './session'
 import { loadStdlib } from './program'
-import { interpretSession } from './interpret_resolved'
+import { renderFramesJit } from './test_utils/audio'
 import type { ProgramFile } from './program'
 
 describe('flatten regression — wrapping stateful stdlib programs in program_decl', () => {
@@ -50,7 +50,7 @@ describe('flatten regression — wrapping stateful stdlib programs in program_de
         ]},
         audio_outputs: [{ instance: 'w', output: 'out' }],
       } as ProgramFile, session)
-      return interpretSession(session, 30)
+      return renderFramesJit(session, 30)
     })()
 
     const bare = (() => {
@@ -66,7 +66,7 @@ describe('flatten regression — wrapping stateful stdlib programs in program_de
         ]},
         audio_outputs: [{ instance: 'op', output: 'out' }],
       } as ProgramFile, session)
-      return interpretSession(session, 30)
+      return renderFramesJit(session, 30)
     })()
 
     for (let i = 0; i < 30; i++) {
@@ -114,10 +114,10 @@ describe('flatten regression — wrapping stateful stdlib programs in program_de
     }
 
     const sessionW = makeSession(44100); loadStdlib(sessionW); loadJSON(makeImpulsePatch(true), sessionW)
-    const wrapped = interpretSession(sessionW, 60)
+    const wrapped = renderFramesJit(sessionW, 60)
 
     const sessionB = makeSession(44100); loadStdlib(sessionB); loadJSON(makeImpulsePatch(false), sessionB)
-    const bare = interpretSession(sessionB, 60)
+    const bare = renderFramesJit(sessionB, 60)
 
     for (let i = 0; i < 60; i++) {
       expect(wrapped[i]).toBeCloseTo(bare[i], 10)
@@ -190,7 +190,7 @@ describe('flatten regression — wrapping stateful stdlib programs in program_de
         ]},
         audio_outputs: [{ instance: 'inst3', output: 'out' }],
       } as ProgramFile, session)
-      return interpretSession(session, 60)
+      return renderFramesJit(session, 60)
     })()
 
     const bare = (() => {
@@ -206,7 +206,7 @@ describe('flatten regression — wrapping stateful stdlib programs in program_de
         ]},
         audio_outputs: [{ instance: 'lf', output: 'lp' }],
       } as ProgramFile, session)
-      return interpretSession(session, 60)
+      return renderFramesJit(session, 60)
     })()
 
     for (let i = 0; i < 60; i++) {
@@ -253,7 +253,7 @@ describe('flatten regression — wrapping stateful stdlib programs in program_de
         audio_outputs: [{ instance: 'w', output: 'out' }],
       } as ProgramFile, session)
       // Run a single sample to confirm the lowered IR also evaluates.
-      interpretSession(session, 1)
+      renderFramesJit(session, 1)
     }).not.toThrow()
   })
 
@@ -286,7 +286,7 @@ describe('flatten regression — wrapping stateful stdlib programs in program_de
         ]},
         audio_outputs: [{ instance: 'w', output: 'out' }],
       } as ProgramFile, session)
-      return interpretSession(session, 300)
+      return renderFramesJit(session, 300)
     })()
 
     const bare = (() => {
@@ -302,7 +302,7 @@ describe('flatten regression — wrapping stateful stdlib programs in program_de
         ]},
         audio_outputs: [{ instance: 'b', output: 'out' }],
       } as ProgramFile, session)
-      return interpretSession(session, 300)
+      return renderFramesJit(session, 300)
     })()
 
     for (let i = 0; i < 300; i++) {

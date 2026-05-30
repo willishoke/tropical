@@ -8,9 +8,8 @@
  *
  * `strataPipeline` is a *checking* pipeline: it requires its input to
  * be already-acyclic. Cycle-breaking is the responsibility of the
- * caller (the "standard realization" — elaborator output and session
- * materialization). The two entry points (`programTypeFromResolved`
- * and `materializeSession`) run `breakInstanceCycles` on their inputs
+ * caller (the elaborator output). The entry point
+ * (`programTypeFromResolved`) runs `breakInstanceCycles` on its input
  * before invoking `strataPipeline`; the `assertAcyclic` at strata
  * entry guarantees any escape would surface immediately rather than
  * producing a malformed plan.
@@ -24,8 +23,8 @@
  * survive as no-op kernels.
  *
  * After identityElim, the result is a post-strata `ResolvedProgram`
- * consumed by either `compileResolved` (the JIT path) or
- * `interpret_resolved.ts` (the independent oracle).
+ * consumed by `compileResolved`, which lowers it to `tropical_plan_5`
+ * for the JIT and WebAssembly backends.
  */
 
 import type { ResolvedProgram, TypeParamDecl } from './nodes.js'
@@ -55,8 +54,8 @@ export function strataPipeline(
   const { inlineNested = true } = options
   // Acyclicity is the strataPipeline contract — callers must run
   // `breakInstanceCycles` (or equivalent) before invoking this. The
-  // standard realization's call sites (`programTypeFromResolved` and
-  // `materializeSession`) do this for the user.
+  // standard realization's call site (`programTypeFromResolved`) does
+  // this for the user.
   assertAcyclic(prog)
   const specialized = specializeProgram(prog, typeArgs)
   const summed = sumLower(specialized)

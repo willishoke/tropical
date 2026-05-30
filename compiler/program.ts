@@ -686,8 +686,8 @@ function loadStdlibFromResolved(
   // the try-elaborate loop above.
   //
   // Without this relink, sub-instance programs would arrive at
-  // consumers (compileResolved, partition_recursive,
-  // materialize_session) with un-strata-processed body — which is
+  // consumers (compileResolved, partition_recursive)
+  // with un-strata-processed body — which is
   // exactly the gap that Bubble/BubbleCloud have been hitting in
   // nested mode ("compileResolved: register init must lower to a
   // literal value").

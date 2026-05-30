@@ -24,7 +24,7 @@ import { breakInstanceCycles } from './lowering/cycle_break.js'
 import { strataPipeline } from './strata.js'
 import { makeSession, loadJSON } from '../session.js'
 import { loadProgramAsType, type ProgramNode } from '../program.js'
-import { interpretSession } from '../interpret_resolved.js'
+import { renderFramesJit } from '../test_utils/audio'
 import type {
   ResolvedProgram, BodyDecl, InstanceDecl, RegDecl,
   ResolvedExpr, NestedOut, RegRef,
@@ -409,7 +409,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
     }
     const reference = buildReferenceSession(RefSelf)
 
-    const ref = interpretSession(reference, 8)
+    const ref = renderFramesJit(reference, 8)
     const expected = [1,2,3,4,5,6,7,8].map(v => v / 20.0)
     for (let i = 0; i < 8; i++) {
       expect(ref[i]).toBeCloseTo(expected[i], 12)
@@ -480,7 +480,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       },
     })
 
-    const ref = interpretSession(reference, 8)
+    const ref = renderFramesJit(reference, 8)
     for (let i = 0; i < 8; i++) {
       expect(Number.isFinite(ref[i])).toBe(true)
     }
@@ -577,7 +577,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       },
     }
     const reference = buildReferenceSession(RefDiamond)
-    const ref = interpretSession(reference, 8)
+    const ref = renderFramesJit(reference, 8)
     for (let i = 0; i < 8; i++) {
       expect(Number.isFinite(ref[i])).toBe(true)
     }
@@ -708,7 +708,7 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       },
     }
     const reference = buildReferenceSession(RefMultiOut)
-    const ref = interpretSession(reference, 8)
+    const ref = renderFramesJit(reference, 8)
     for (let i = 0; i < 8; i++) {
       expect(Number.isFinite(ref[i])).toBe(true)
     }
@@ -773,17 +773,15 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
   test('(D) session-level delay() between two instances: denotation matches flattened reference', () => {
     // `extractSessionDelays` hoists each `delay()` wire into a session
     // module slot (a `{op:'sessionSlot'}` read plus a `delaySlotRegistry`
-    // entry); the JIT emits one `WriteSlot` per slot in `state_evolution`.
-    // The oracle path now mirrors this: `materializeSessionDelaySlots`
-    // rebuilds one synthetic RegDecl per scalar slot
-    // (`materialize_session.ts`), so the interpreter reproduces exactly
-    // one sample of latency per wire — no double delay. This pins the
-    // headline "every MCP wire gains exactly one sample of latency"
-    // semantic against a flattened two-explicit-delay reference.
+    // entry); the JIT emits one `WriteSlot` per slot in `state_evolution`,
+    // giving exactly one sample of latency per wire — no double delay.
+    // This pins the headline "every MCP wire gains exactly one sample of
+    // latency" semantic by JIT-rendering both the candidate feedback
+    // session and a flattened two-explicit-delay reference and checking
+    // they agree sample-for-sample.
     //
     // Two Inner instances feeding each other through an explicit
-    // delay() expression. The session-level delay() breaks the cycle,
-    // so the materializer's findInstanceCycles sees no SCC.
+    // delay() expression. The session-level delay() breaks the cycle.
     const session = makeSession(8)
     loadProgramAsType(INNER_INC, session)
     loadJSON({
@@ -821,8 +819,8 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
       },
     }
     const reference = buildReferenceSession(Ref)
-    const cand = interpretSession(session, 8)
-    const ref = interpretSession(reference, 8)
+    const cand = renderFramesJit(session, 8)
+    const ref = renderFramesJit(reference, 8)
     for (let i = 0; i < 8; i++) {
       expect(cand[i]).toBeCloseTo(ref[i], 12)
     }

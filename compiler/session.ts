@@ -222,7 +222,7 @@ export interface SessionState {
    *      consume (instantiate, materialize). The loader stores the
    *      post-strata canonical form here.
    *    - `prog.typeParams.length > 0`: generic template, pre-strata.
-   *      Consumers (materialize_session, resolveProgramType) call
+   *      Consumers (resolveProgramType, compileSession) call
    *      `specializeProgram` with concrete typeArgs and store the
    *      result in `specializationCache` (cross-cutting Compiled
    *      cache); this template itself is never overwritten. */
