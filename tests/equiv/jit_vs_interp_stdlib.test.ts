@@ -39,7 +39,7 @@ import { loadStdlib } from '../../compiler/program.js'
 import { applyFlatPlan } from '../../compiler/apply_plan.js'
 import { interpretSession } from '../../compiler/interpret_resolved'
 import { EDGE_FIXTURES } from '../fixtures/equiv/edge_cases.js'
-import { loadProgramAsType } from '../../compiler/program.js'
+import { loadProgramAsType, type ProgramNode } from '../../compiler/program.js'
 import { wireKey, portRef, instanceName, portName } from '../../compiler/ir/branded_names.js'
 
 const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
@@ -283,6 +283,62 @@ describe('Phase D — mutual register update absolute-value pin', () => {
     // After /20 mix scaling: out[t] = t / 20.
     for (let t = 0; t < 4; t++) {
       expect(buf[t] * 20).toBeCloseTo(t, 10)
+    }
+    session.graph.dispose()
+  })
+})
+
+describe('JIT ↔ interpreter equivalence — session-level feedback', () => {
+  // Two instances cross-coupled through explicit `delay()` wires — the
+  // inter-instance feedback shape the agentic/MCP path produces ("build
+  // a filter with self-oscillation"). `extractSessionDelays` hoists each
+  // delay into a session module slot (a `{op:'sessionSlot'}` read plus a
+  // `delaySlotRegistry` entry); the JIT emits one `WriteSlot` per slot in
+  // `state_evolution`, and the oracle rebuilds one synthetic `RegDecl`
+  // per slot (`materializeSessionDelaySlots`). Before that, the oracle
+  // threw `unhandled wiring op 'sessionSlot'`, so this case — the
+  // headline feature — sat entirely outside the equivalence gate. These
+  // tests put it back inside.
+  const INC: ProgramNode = {
+    op: 'program', name: 'IncEquiv',
+    ports: { inputs: [{ name: 'x', default: 0 }], outputs: ['y'] },
+    body: { op: 'block', assigns: [
+      { op: 'outputAssign', name: 'y',
+        expr: { op: 'add', args: [{ op: 'input', name: 'x' }, 1] } } ] },
+  }
+
+  function buildFeedbackSession() {
+    const session = makeSession(BUFFER_LENGTH)
+    loadStdlib(session)
+    const type = loadProgramAsType(INC, session)!
+    session.typeRegistry.set(INC.name, type)
+    session.instanceRegistry.set('a', instantiate(type, 'a'))
+    session.instanceRegistry.set('b', instantiate(type, 'b'))
+    // a.x = delay(b.y); b.x = delay(a.y) — a unit delay on each back-edge.
+    session.inputExprNodes.set(wk('a', 'x'),
+      { op: 'delay', init: 0, args: [{ op: 'ref', instance: 'b', output: 'y' }] })
+    session.inputExprNodes.set(wk('b', 'x'),
+      { op: 'delay', init: 0, args: [{ op: 'ref', instance: 'a', output: 'y' }] })
+    session.graphOutputs.push({ instance: 'a', output: 'y' })
+    return session
+  }
+
+  test('cross-coupled instances agree sample-for-sample', () => {
+    const session = buildFeedbackSession()
+    runEquivalence(session, { expectAllFinite: true })
+    session.graph.dispose()
+  })
+
+  test('exactly one sample of latency per wire: out[t] = t+1 (first 4 samples)', () => {
+    const session = buildFeedbackSession()
+    applyFlatPlan(session, session.runtime)
+    session.graph.primeJit()
+    session.graph.process()
+    const buf = session.graph.outputBuffer
+    // After /20 mix scaling: out[t] = (t+1)/20. The failure mode of the
+    // old double-delay bug is off-by-one-sample, so pin exact values.
+    for (let t = 0; t < 4; t++) {
+      expect(buf[t] * 20).toBeCloseTo(t + 1, 10)
     }
     session.graph.dispose()
   })

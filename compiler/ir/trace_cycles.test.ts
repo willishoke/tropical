@@ -770,22 +770,20 @@ describe('Phase A — cycle topologies (TDD plan)', () => {
   // ──────────────────────────────────────────────────────────
   // Test 6 — (D) Session-level feedback via session-level delay
   // ──────────────────────────────────────────────────────────
-  test.skip('(D) session-level delay() between two instances: denotation matches flattened reference', () => {
-    // Phase 5 of M11 lifts `delay()` wire expressions to anonymous
-    // programs whose body contains the delay. But this hides the
-    // session-level delay from traceCycles: the lift turns a 1-sample
-    // delay into a 2-sample delay (one from the lifted body's delay,
-    // one from traceCycles inserting a synthetic delay for the cycle
-    // it now sees with no explicit delay at the session edge).
+  test('(D) session-level delay() between two instances: denotation matches flattened reference', () => {
+    // `extractSessionDelays` hoists each `delay()` wire into a session
+    // module slot (a `{op:'sessionSlot'}` read plus a `delaySlotRegistry`
+    // entry); the JIT emits one `WriteSlot` per slot in `state_evolution`.
+    // The oracle path now mirrors this: `materializeSessionDelaySlots`
+    // rebuilds one synthetic RegDecl per scalar slot
+    // (`materialize_session.ts`), so the interpreter reproduces exactly
+    // one sample of latency per wire — no double delay. This pins the
+    // headline "every MCP wire gains exactly one sample of latency"
+    // semantic against a flattened two-explicit-delay reference.
     //
-    // Correct handling requires lifting that PRESERVES the delay at
-    // the session-edge level — either by leaving `delay()` at the
-    // session level and only lifting its arg, or by teaching
-    // traceCycles to detect existing delays inside lifted wire bodies.
-    // Tracked as a Phase 5 follow-up.
     // Two Inner instances feeding each other through an explicit
-    // delay() expression. The session-level delay() short-circuits the
-    // cycle so traceCycles sees no SCC.
+    // delay() expression. The session-level delay() breaks the cycle,
+    // so the materializer's findInstanceCycles sees no SCC.
     const session = makeSession(8)
     loadProgramAsType(INNER_INC, session)
     loadJSON({

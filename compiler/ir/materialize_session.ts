@@ -97,6 +97,7 @@ function makeContext(session: SessionState): MaterializeContext {
     paramDecls:          new Map(),
     programRegistry:     new Map(),
     syntheticRegDecls:   [],
+    slotToReg:           new Map(),
     exprMemo:            new WeakMap(),
     session,
   }
@@ -122,6 +123,13 @@ interface MaterializeContext {
    *  one sample late. Named `__sd${idx}` for uniqueness within the
    *  session-level synthetic program. */
   syntheticRegDecls: RegDecl[]
+  /** Maps a session module-slot index (the `index` carried by a
+   *  `{op:'sessionSlot'}` read) to the RegIdx of the synthetic RegDecl
+   *  that reproduces that hoisted delay. Populated by
+   *  `materializeSessionDelaySlots` before any wire is translated, so
+   *  `sessionSlot` reads — including those nested inside another slot's
+   *  source expression — resolve to a stable reg. */
+  slotToReg: Map<number, RegIdx>
   exprMemo: WeakMap<object, ResolvedExpr>
   session: SessionState
 }
@@ -135,6 +143,11 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     const decl = buildInstanceDecl(name, inst, ctx)
     ctx.instanceDecls.set(name, decl)
   }
+
+  // Reconstruct the synthetic RegDecls behind session-level delay
+  // slots before translating wires — a wire (or another slot's source)
+  // may read these slots via `{op:'sessionSlot'}`.
+  materializeSessionDelaySlots(session, ctx)
 
   for (const [key, expr] of session.inputExprNodes) {
     let ref
@@ -225,6 +238,72 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
     binderCount: 0,
     programRegistry: ctx.programRegistry,
   })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session delay slots → synthetic RegDecls
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Reconstruct synthetic `RegDecl`s for the session-level delay slots
+ *  that `extractSessionDelays` hoisted out of the wires into
+ *  `session.delaySlotRegistry` (rewriting each `delay()` to a
+ *  `{op:'sessionSlot', index}` read).
+ *
+ *  The JIT path emits one `WriteSlot` per registry entry in the
+ *  scheduler's `state_evolution` phase: the slot is read during the
+ *  sample and written, from the un-delayed source, at the end of the
+ *  sample. The interpreter oracle reproduces exactly this by giving
+ *  each scalar slot a synthetic `RegDecl` whose `update` is the
+ *  translated source expression and whose `init` seeds sample 0 — the
+ *  interpreter's read → snapshot-update → atomic-writeback loop
+ *  (`interpret_resolved.ts`) is the same unit-delay semantics, so the
+ *  oracle now agrees sample-for-sample with the JIT on session-level
+ *  feedback.
+ *
+ *  Reg idx equals position in `ctx.syntheticRegDecls` (the
+ *  front-of-body invariant from `materializeSessionInner`). Every
+ *  slot's reg is reserved first — populating `ctx.slotToReg` — before
+ *  any source expression is translated, because a source may itself
+ *  read another `sessionSlot` (nested `delay(delay(x))`). */
+function materializeSessionDelaySlots(
+  session: SessionState,
+  ctx: MaterializeContext,
+): void {
+  const regForSlot = new Map<number, RegDecl>()
+
+  // Pass 1: reserve a synthetic reg per scalar slot and record the
+  // slotIdx → RegIdx map (so cross-slot reads resolve in pass 2).
+  for (const entry of session.delaySlotRegistry) {
+    if (entry.isArray) {
+      throw new Error(
+        `interpret_resolved: session-level array delay (slot '${entry.slotName}', ` +
+        `size ${entry.arraySize ?? '?'}) is not yet supported by the pure-TS oracle; ` +
+        `scalar session delays are. The JIT path handles it via an array WriteSlot.`,
+      )
+    }
+    if (entry.slotIdx === undefined) {
+      throw new Error(
+        `materializeSession: scalar delay slot '${entry.slotName}' is missing slotIdx.`,
+      )
+    }
+    const regPos = ctx.syntheticRegDecls.length
+    const decl: RegDecl = {
+      op: 'regDecl', name: entry.slotName, init: entry.init, update: 0,
+    }
+    ctx.syntheticRegDecls.push(decl)
+    ctx.slotToReg.set(entry.slotIdx, regIdx(regPos))
+    regForSlot.set(entry.slotIdx, decl)
+  }
+
+  // Pass 2: translate each slot's un-delayed source into the reg's
+  // update. Instance decls are built and `slotToReg` is complete, so
+  // both `{op:'ref'}` (instance outputs) and `{op:'sessionSlot'}`
+  // (nested delays) resolve.
+  for (const entry of session.delaySlotRegistry) {
+    if (entry.isArray) continue
+    const decl = regForSlot.get(entry.slotIdx!)!
+    decl.update = translateExpr(entry.sourceExpr, ctx)
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -423,6 +502,33 @@ function translateOpNode(
     const decl: RegDecl = { op: 'regDecl', name: `__sd${ctx.syntheticRegDecls.length}`, update, init }
     ctx.syntheticRegDecls.push(decl)
     return { op: 'regRef', idx: newIdx }
+  }
+
+  if (op === 'sessionSlot') {
+    // A delay already hoisted out of the wires by `extractSessionDelays`.
+    // `materializeSessionDelaySlots` built the backing synthetic reg
+    // up front; read it.
+    const index = obj.index
+    if (typeof index !== 'number') {
+      throw new Error(`materializeSession: sessionSlot read missing numeric index.`)
+    }
+    const reg = ctx.slotToReg.get(index)
+    if (reg === undefined) {
+      throw new Error(
+        `materializeSession: sessionSlot index ${index} has no delaySlotRegistry entry.`,
+      )
+    }
+    return { op: 'regRef', idx: reg }
+  }
+
+  if (op === 'sessionArraySlot') {
+    // Reached only if a session array delay slipped past
+    // `materializeSessionDelaySlots` (which throws on array entries).
+    throw new Error(
+      `interpret_resolved: session-level array delay (sessionArraySlot index ` +
+      `${typeof obj.index === 'number' ? obj.index : '?'}) is not yet supported ` +
+      `by the pure-TS oracle.`,
+    )
   }
 
   throw new Error(`compileSession: unhandled wiring op '${op}'.`)
