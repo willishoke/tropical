@@ -206,13 +206,12 @@ Two files split the session-emit responsibility:
   on demand, extracts session-level `delay()` nodes into synthetic
   `RegDecl`s with `update` populated, throws `CycleViolation` on
   session graphs with cycles that don't pass through an explicit
-  session-level `delay()`, and threads gate expressions through the
-  strata pipeline (gateable instances get a two-phase wrap —
-  pre-strata on the cloned type's outputs and own decls, post-strata
-  on lifted sub-instance decls keyed off `_liftedFrom`). Output is a
-  post-strata `ResolvedProgram` plus a `Map<string, ParamDecl>` for
-  paramHandle stitching. Shared by `compile_session.ts` and
-  `interpret_resolved.ts` so the JIT and the oracle see the same IR.
+  session-level `delay()`. Output is a post-strata `ResolvedProgram`
+  plus a `Map<string, ParamDecl>` the interpreter threads param values
+  through. Consumed only by `interpret_resolved.ts` (the oracle); the
+  JIT path (`compile_session.ts`) lowers the session independently via
+  the per-instance slotted compiler, so the two agree through the
+  equivalence suite rather than by sharing this lift.
 
 - **`ir/compile_session.ts`** — JIT bookend. Runs three pre-emit
   passes — `liftWiresToInstances` (anonymous-instance lift for
@@ -249,8 +248,6 @@ compiler stage — they're parallel emits.
   passes still collapse. Operand kinds: `const`, `input`, `reg`,
   `array_reg`, `state_reg`, `param`, `rate`, `tick`. Array-loop ops
   carry `loop_count > 1` plus `strides` for broadcast vs. iterate.
-  Gateable group metadata (when `sourceTag` wraps survive) ships in
-  `groups`.
 
 - **`interpret_resolved.ts`** — pure-TS evaluator over `ResolvedExpr`
   against a state map keyed by decl identity. No FFI. The independent

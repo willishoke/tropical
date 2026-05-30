@@ -113,7 +113,7 @@ SessionState  (instances + wiring + dac.out + params)
   │
   │  materializeSession (compiler/ir/materialize_session.ts)
   │     lift a partially-typed session graph into a top-level
-  │     ResolvedProgram. handles gateable wraps, paramDecl synthesis,
+  │     ResolvedProgram. handles paramDecl synthesis,
   │     session-level delay() extraction.
   ▼
 ResolvedProgram (top-level synthetic)  →  strata pipeline  →  post-strata

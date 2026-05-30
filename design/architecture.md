@@ -490,13 +490,6 @@ compiles per-instance via the path above), but the interpreter
 treats it as the oracle and `tests/equiv/jit_vs_interp` cross-checks
 the two evaluators sample-for-sample.
 
-`materializeSession` also handles the gateable two-phase wrap
-(carrying a gate expression through strata's `nestedOut` inlining,
-then applying `select(gate, raw, fallback)` on the lifted decls
-post-strata). This used to be the production code path for gated
-instances and is preserved for the interpreter side; the JIT path
-covers gating via direct slot writes from the scheduler.
-
 ### 4.3 Fixed-topology compilation
 
 Tropical compiles a session graph to native code with a fixed
@@ -711,8 +704,7 @@ Free-function helpers (`inputNames`, `outputNames`,
 slot-derived fields cache lazily via `buildSlotMaps`.
 
 `Instance` holds a `Compiled` plus an instance name, `baseTypeName`,
-optional `typeArgs`, plus session-level `gateable` / `gateInput`
-fields.
+and optional `typeArgs`.
 
 `session.ts:resolveProgramType` calls
 `programTypeFromResolved(template, subst)` (full strata pipeline +
