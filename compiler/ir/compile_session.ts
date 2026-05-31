@@ -30,6 +30,13 @@ import { instanceName as toInstanceName } from './branded_names.js'
 export interface CompileSessionOptions {
   /** Engine realization strategy. Defaults to `'fused'`. */
   compilation_mode?: CompilationMode
+  /** Option A: lower the whole session as a single synthetic root
+   *  `ResolvedProgram` through the shared `partitionKernel` path
+   *  (instances → `InstanceDecl`s, per-wire unit delays → root
+   *  `RegDecl`s) instead of the per-instance scheduler path. Defaults
+   *  to false; `TROPICAL_ROOT_PROGRAM=1` forces it on (for the equiv
+   *  suite). Scalar-delay sessions only in Phase B. */
+  rootProgram?: boolean
 }
 
 export function compileSession(
