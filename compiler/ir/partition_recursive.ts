@@ -144,6 +144,23 @@ function lookupInputArraySlot(
   return { slot: meta.arraySlot, size: meta.arraySize }
 }
 
+/** Sentinel `instancePath` for the synthetic session root (Option A).
+ *  `partitionKernel` treats it as naming-transparent: the root's
+ *  children and its own registers carry BARE names (no `__root__.`
+ *  prefix), so child output-slot keys (`amp.out`) and per-instance
+ *  register names land byte-for-byte where the flat per-instance path
+ *  puts them. Without this the root would prefix every nested name and
+ *  break `emitDacStitch`'s `graphOutputs` slot lookup and hot-swap
+ *  state-transfer-by-name. */
+export const ROOT_INSTANCE_PATH = '__root__'
+
+/** Join an instance path with a child segment, transparently for the
+ *  synthetic root (no prefix). For any real instance path this is the
+ *  ordinary dotted join. */
+function joinInstancePath(parent: string, child: string): string {
+  return parent === ROOT_INSTANCE_PATH ? child : `${parent}.${child}`
+}
+
 // ─── Entry point ──────────────────────────────────────────────────────────
 
 /** Result of compiling a single kernel: the InstanceFunction (with
@@ -229,7 +246,7 @@ export function partitionKernel(
   let childInstIdx = 0
   for (const decl of prog.body.decls) {
     if (decl.op !== 'instanceDecl') continue
-    const childPath = `${instancePath}.${decl.name}`
+    const childPath = joinInstancePath(instancePath, decl.name)
     const thisInstIdx = instanceIdx(childInstIdx++)
 
     const declType = getInstanceType(prog, decl)
@@ -412,11 +429,11 @@ export function partitionKernel(
   // ── 4. Update accumulators (THIS kernel's contribution to the unified
   //    namespaces). Note: children's accumulator updates already happened
   //    via the recursive calls above, so we just add this kernel's own.
-  for (const n of plan.register_names) acc.registerNames.push(`${instancePath}.${n}`)
+  for (const n of plan.register_names) acc.registerNames.push(joinInstancePath(instancePath, n))
   acc.registerTypes.push(...plan.register_types)
   for (const v of plan.state_init) acc.stateInit.push(v as number | boolean)
   acc.arraySlotSizes.push(...plan.array_slot_sizes)
-  for (const n of plan.array_slot_names) acc.arraySlotNames.push(`${instancePath}.${n}`)
+  for (const n of plan.array_slot_names) acc.arraySlotNames.push(joinInstancePath(instancePath, n))
 
   acc.nextRegRaw   += plan.register_count + tempsConsumed
   acc.nextStateRaw += plan.state_init.length
