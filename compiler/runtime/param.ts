@@ -1,8 +1,8 @@
 /**
  * Param — control-rate parameter. Port of tropical/param.py.
  *
- * Wiring references these by name (`{op:'param', name}`); the materializer
- * (`compiler/ir/materialize_session.ts`) looks up the FFI handle off the
+ * Wiring references these by name (`{op:'param', name}`); the session compiler
+ * (`compile_session`) looks up the FFI handle off the
  * session's paramRegistry at compile time.
  */
 

@@ -51,9 +51,9 @@ build host (Bun + native)               browser
 Building runs the whole front-end on a chosen patch and produces a
 plan; the browser only runs the WASM emitter and the runtime. The
 WASM emitter (`compiler/emit_wasm.ts`) and the WASM runtime
-(`web/worklet/runtime.ts`) are the two halves of the third backend
-off post-strata `ResolvedProgram` (alongside `compileResolved` → JIT
-and `interpret_resolved`).
+(`web/worklet/runtime.ts`) are the two halves of the second backend
+off post-strata `ResolvedProgram` (the other is `compileResolved` →
+`tropical_plan_5` → JIT).
 
 ## Linear-memory layout
 
@@ -160,8 +160,8 @@ Three test suites lock the WASM backend to the JIT:
   `bun web/build_patches.ts` and `make build`.
 
 Any divergence is a bug in either `emit_wasm.ts`, the WASM runtime,
-or the underlying strata pipeline (the latter shows up across both
-`tests/equiv/jit_vs_interp` and `tests/equiv/wasm_vs_jit`).
+or the underlying strata pipeline (the latter shows up in
+`tests/equiv/wasm_vs_jit`).
 
 ## Build / run
 

@@ -29,7 +29,7 @@ import type {
 /** Replace every entry in `prog.programRegistry` whose key appears in
  *  `byName` with the canonical version. Used by the topological
  *  typeRegistry build (`compiler/program.ts`) to ensure that by the
- *  time a program is consumed (by `materialize_session`,
+ *  time a program is consumed (by `compileResolved`,
  *  `partition_recursive`, etc.), every reachable program in the
  *  registry is its strata-processed canonical form rather than the
  *  raw elaborated version still hanging around from the elaborator's
@@ -102,7 +102,7 @@ export function getInstanceType(
 
 /** Validate that an explicitly-supplied `programRegistry` covers
  *  every `InstanceDecl`'s `typeKey`. Construction sites (elaborator,
- *  clone, materialize_session) build the registry as they build the
+ *  clone, the strata passes) build the registry as they build the
  *  program; this just confirms they didn't miss anything. */
 export function validateProgramRegistry(
   instances: readonly InstanceDecl[],
@@ -123,7 +123,7 @@ export function validateProgramRegistry(
 /** Construct a `ResolvedProgram` from its constituent parts, projecting
  *  the decl tables from `body.decls` in one step. THE only canonical
  *  way to build a `ResolvedProgram` — every constructor site (elaborator,
- *  clone, strata passes, materialize_session) routes through here so the
+ *  clone, strata passes) routes through here so the
  *  tables can't drift from `body.decls`. */
 export function mkProgram(args: {
   name: string

@@ -14,46 +14,84 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, resolveProgramType, instantiate } from './session'
 import { loadStdlib } from './program'
-import { interpretSession } from './interpret_resolved'
+import { renderFramesJit } from './test_utils/audio'
+import type { ExprNode } from './expr'
 import { wireKey, portRef, instanceName, portName } from './ir/branded_names.js'
 
 const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
 
-// One shared session for the whole suite — cuts ~400× repeated stdlib
-// loads down to one. evalProgram resets the per-call state (instance
-// + wiring + graph outputs); the type registry survives.
-const sharedSession = makeSession(1)
-loadStdlib(sharedSession)
+// A fresh session per evaluation. Now that accuracy sweeps render as a
+// single JIT kernel each (`renderSweep`), the whole suite is only a
+// dozen-odd evaluations, so re-loading stdlib per call is cheap — and a
+// fresh session keeps the JIT slot-model state clean between renders (a
+// shared session accumulates slot allocations across applyFlatPlan calls,
+// which the old interpreter sidestepped by not using the slot model).
+function freshSession() {
+  const s = makeSession(512)
+  loadStdlib(s)
+  return s
+}
 
 /**
  * Evaluate `programName(inputs…) → outputName` at given numeric input values.
  *
- * Routes through `interpretSession`, which mixes audio outputs into a single
- * scalar with a /20 gain compensation — so we wire the program's target
- * output as the sole `dac.out` and undo the /20 scale post-hoc.
+ * Routes through `renderFramesJit` (the JIT), which mixes audio outputs into
+ * a single scalar with a /20 gain compensation — so we wire the program's
+ * target output as the sole `dac.out` and undo the /20 scale post-hoc.
  */
 function evalProgram(
   programName: string,
   inputs: Record<string, number>,
   outputName = 'out',
 ): number {
-  // Clear per-call state. typeRegistry / resolvedRegistry / etc. survive.
-  sharedSession.instanceRegistry.clear()
-  sharedSession.inputExprNodes.clear()
-  sharedSession.graphOutputs.length = 0
-
-  const { type } = resolveProgramType(sharedSession, programName, undefined, undefined)
+  const session = freshSession()
+  const { type } = resolveProgramType(session, programName, undefined, undefined)
   const inst = instantiate(type, 'it', { baseTypeName: programName })
-  sharedSession.instanceRegistry.set('it', inst)
-  for (const [k, v] of Object.entries(inputs)) sharedSession.inputExprNodes.set(wk(`it`, k), v)
-  sharedSession.graphOutputs.push({ instance: 'it', output: outputName })
-  const buf = interpretSession(sharedSession, 1)
-  return buf[0] * 20.0   // undo interpretSession's /20 audio mix scaling
+  session.instanceRegistry.set('it', inst)
+  for (const [k, v] of Object.entries(inputs)) session.inputExprNodes.set(wk(`it`, k), v)
+  session.graphOutputs.push({ instance: 'it', output: outputName })
+  const buf = renderFramesJit(session, 1)
+  return buf[0] * 20.0   // undo the /20 audio mix scaling
 }
 
-/** Max absolute error of `ours(x)` vs `ref(x)` across a linear sweep. */
+/** Wire expression for the i-th sweep point as a function of sampleIndex:
+ *  x(i) = lo + i * step, step = (hi - lo) / n, i = sampleIndex = 0..n. A
+ *  precomputed float step keeps the kernel multiply in floating point (no
+ *  integer-division ambiguity). The matching JS value is `sweepX`. */
+function rampExpr(lo: number, hi: number, n: number): ExprNode {
+  return { op: 'add', args: [lo, { op: 'mul', args: [{ op: 'sampleIndex' }, (hi - lo) / n] }] }
+}
+function sweepX(lo: number, hi: number, n: number, i: number): number {
+  return lo + i * ((hi - lo) / n)
+}
+
+/** Render a program over a `sampleIndex`-parameterized sweep in ONE JIT
+ *  kernel: wire each input to a `sampleIndex`-derived expression and render
+ *  `nSamples` samples. Returns the output at each sample (the /20 mix gain
+ *  undone). One compile per sweep instead of one per point — the per-point
+ *  path recompiled the kernel every call. */
+function renderSweep(
+  programName: string,
+  inputExprs: Record<string, ExprNode>,
+  nSamples: number,
+  outputName = 'out',
+): Float64Array {
+  const session = freshSession()
+  const { type } = resolveProgramType(session, programName, undefined, undefined)
+  const inst = instantiate(type, 'it', { baseTypeName: programName })
+  session.instanceRegistry.set('it', inst)
+  for (const [k, e] of Object.entries(inputExprs)) session.inputExprNodes.set(wk('it', k), e)
+  session.graphOutputs.push({ instance: 'it', output: outputName })
+
+  const buf = renderFramesJit(session, nSamples)
+  const out = new Float64Array(nSamples)
+  for (let i = 0; i < nSamples; i++) out[i] = buf[i] * 20.0   // undo the /20 mix scale
+  return out
+}
+
+/** Max absolute error of precomputed sweep outputs `ours[i]` vs `ref(x_i)`. */
 function sweepMaxAbsError(
-  f: (x: number) => number,
+  ours: Float64Array,
   ref: (x: number) => number,
   lo: number,
   hi: number,
@@ -61,16 +99,15 @@ function sweepMaxAbsError(
 ): number {
   let worst = 0
   for (let i = 0; i <= n; i++) {
-    const x = lo + (i / n) * (hi - lo)
-    const err = Math.abs(f(x) - ref(x))
+    const err = Math.abs(ours[i] - ref(sweepX(lo, hi, n, i)))
     if (err > worst) worst = err
   }
   return worst
 }
 
-/** Max relative error over a sweep — for values with large dynamic range (exp, pow). */
+/** Max relative error over a sweep — for large-dynamic-range fns (exp, pow). */
 function sweepMaxRelError(
-  f: (x: number) => number,
+  ours: Float64Array,
   ref: (x: number) => number,
   lo: number,
   hi: number,
@@ -78,10 +115,8 @@ function sweepMaxRelError(
 ): number {
   let worst = 0
   for (let i = 0; i <= n; i++) {
-    const x = lo + (i / n) * (hi - lo)
-    const r = ref(x)
-    const denom = Math.max(Math.abs(r), 1e-300)
-    const err = Math.abs(f(x) - r) / denom
+    const r = ref(sweepX(lo, hi, n, i))
+    const err = Math.abs(ours[i] - r) / Math.max(Math.abs(r), 1e-300)
     if (err > worst) worst = err
   }
   return worst
@@ -94,7 +129,7 @@ function sweepMaxRelError(
 describe('stdlib transcendentals vs Math.*', () => {
   test('Sin — 7th-order odd minimax, ≤ 5e-7 over [-4π, 4π]', () => {
     const err = sweepMaxAbsError(
-      x => evalProgram('Sin', { x }),
+      renderSweep('Sin', { x: rampExpr(-4 * Math.PI, 4 * Math.PI, 400) }, 401),
       Math.sin,
       -4 * Math.PI, 4 * Math.PI,
       400,
@@ -108,7 +143,7 @@ describe('stdlib transcendentals vs Math.*', () => {
 
   test('Cos — matches Math.cos, ≤ 5e-7 over [-4π, 4π]', () => {
     const err = sweepMaxAbsError(
-      x => evalProgram('Cos', { x }),
+      renderSweep('Cos', { x: rampExpr(-4 * Math.PI, 4 * Math.PI, 400) }, 401),
       Math.cos,
       -4 * Math.PI, 4 * Math.PI,
       400,
@@ -126,7 +161,7 @@ describe('stdlib transcendentals vs Math.*', () => {
     // near |x| ≈ 1.5. Intended as a waveshaper, not a precision tanh. If tight accuracy
     // is ever required, replace the polynomial; nothing else in stdlib depends on it.
     const err = sweepMaxAbsError(
-      x => evalProgram('Tanh', { x }),
+      renderSweep('Tanh', { x: rampExpr(-3, 3, 200) }, 201),
       Math.tanh,
       -3, 3,
       200,
@@ -143,7 +178,7 @@ describe('stdlib transcendentals vs Math.*', () => {
 
   test('Exp — Cody-Waite + Horner, ≤ 5e-7 relative over [-10, 10]', () => {
     const err = sweepMaxRelError(
-      x => evalProgram('Exp', { x }),
+      renderSweep('Exp', { x: rampExpr(-10, 10, 400) }, 401),
       Math.exp,
       -10, 10,
       400,
@@ -157,7 +192,7 @@ describe('stdlib transcendentals vs Math.*', () => {
 
   test('Log — Remez approximation, ≤ 5e-7 over [0.01, 100]', () => {
     const err = sweepMaxAbsError(
-      x => evalProgram('Log', { x }),
+      renderSweep('Log', { x: rampExpr(0.01, 100, 400) }, 401),
       Math.log,
       0.01, 100,
       400,
@@ -180,14 +215,20 @@ describe('stdlib transcendentals vs Math.*', () => {
   test('Pow — exp(y · log(x)), ≤ 1e-5 relative for x∈[0.5,5], y∈[-2,2]', () => {
     // Pow composes Log then Exp; error is roughly the sum of their errors
     // plus amplification from the multiply. Looser threshold than either alone.
+    // 21×21 grid rendered in ONE kernel: sample s → (xi = s ÷ 21, yi = s mod 21).
+    const N = 21
+    const xStep = 4.5 / (N - 1), yStep = 4 / (N - 1)
+    const ours = renderSweep('Pow', {
+      x: { op: 'add', args: [0.5, { op: 'mul', args: [{ op: 'floorDiv', args: [{ op: 'sampleIndex' }, N] }, xStep] }] },
+      y: { op: 'add', args: [-2,  { op: 'mul', args: [{ op: 'mod',      args: [{ op: 'sampleIndex' }, N] }, yStep] }] },
+    }, N * N)
     let worst = 0
-    for (let xi = 0; xi <= 20; xi++) {
-      const x = 0.5 + (xi / 20) * 4.5
-      for (let yi = 0; yi <= 20; yi++) {
-        const y = -2 + (yi / 20) * 4
-        const ours = evalProgram('Pow', { x, y })
+    for (let xi = 0; xi < N; xi++) {
+      const x = 0.5 + xi * xStep
+      for (let yi = 0; yi < N; yi++) {
+        const y = -2 + yi * yStep
         const ref = Math.pow(x, y)
-        const err = Math.abs(ours - ref) / Math.max(Math.abs(ref), 1e-300)
+        const err = Math.abs(ours[xi * N + yi] - ref) / Math.max(Math.abs(ref), 1e-300)
         if (err > worst) worst = err
       }
     }

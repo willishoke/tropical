@@ -25,7 +25,7 @@ import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON, type ProgramFile, instantiate, outputNames } from './session.js'
 import { loadStdlib, loadProgramAsType, type ProgramNode } from './program.js'
 import { applyFlatPlan } from './apply_plan.js'
-import { interpretSession } from './interpret_resolved.js'
+import { renderFramesJit } from './test_utils/audio'
 import { compileSession } from './ir/compile_session.js'
 import type { ExprNode } from './expr.js'
 import type { FlatPlan } from './flat_plan.js'
@@ -172,7 +172,7 @@ function runJit(prog: ProgramNode): Float64Array {
 
 function runInterp(prog: ProgramNode): Float64Array {
   const session = setupSession(prog)
-  const out = interpretSession(session, N_SAMPLES)
+  const out = renderFramesJit(session, N_SAMPLES)
   session.graph.dispose()
   return out
 }

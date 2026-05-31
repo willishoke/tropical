@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON } from './session'
 import { loadStdlib } from './program'
-import { interpretSession } from './interpret_resolved'
+import { renderFramesJit } from './test_utils/audio'
 
 describe('stdlib SampleHold', () => {
   test('latches on trigger rising edge', () => {
@@ -29,7 +29,7 @@ describe('stdlib SampleHold', () => {
       audio_outputs: [{ instance: 'sh', output: 'value' }],
     }, session)
 
-    const out = interpretSession(session, 300)
+    const out = renderFramesJit(session, 300)
 
     expect(out[50] / 20.0 / 0.05).toBeCloseTo(0, 5)
     const heldValue = out[200] * 20.0

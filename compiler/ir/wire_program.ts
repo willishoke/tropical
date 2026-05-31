@@ -52,7 +52,7 @@ import {
 import { mkProgram } from './decl_tables.js'
 
 // ─── Op sets ────────────────────────────────────────────────────────────────
-// Mirror the sets in `materialize_session.ts:translateExpr`. Keep these in
+// Mirror the op sets in the session wire translator
 // sync if either changes; the two should agree on which ops a wire-form
 // expression may carry.
 

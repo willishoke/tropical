@@ -103,20 +103,21 @@ ResolvedProgram (post-strata)
   the smallest sub-IR sufficient for any per-sample evaluator.
 ```
 
-Sessions (the MCP/runtime view of a graph in flight) plug into this
-pipeline through one extra step that lifts a partially-typed session
-graph into the same `ResolvedProgram` shape the per-program path
-produces:
+Sessions (the MCP/runtime view of a graph in flight) reuse the
+per-program pipeline at the instance level — each instance type is
+elaborated and strata-processed once at load (`resolveProgramType`) —
+and compose the already-reduced instances into one plan:
 
 ```
 SessionState  (instances + wiring + dac.out + params)
   │
-  │  materializeSession (compiler/ir/materialize_session.ts)
-  │     lift a partially-typed session graph into a top-level
-  │     ResolvedProgram. handles gateable wraps, paramDecl synthesis,
-  │     session-level delay() extraction.
+  │  compileSession (compiler/ir/compile_session.ts)
+  │     each instance is already a post-strata ResolvedProgram;
+  │     liftWiresToInstances + extractSessionDelays normalize the wiring,
+  │     then compileSessionSlotted runs per-instance compileResolved and
+  │     stitches them with a scheduler.
   ▼
-ResolvedProgram (top-level synthetic)  →  strata pipeline  →  post-strata
+tropical_plan_5  (instance_functions[] + scheduler_function)
 ```
 
 **The IR is acyclic by construction.** Source-level cycles that
@@ -136,9 +137,9 @@ VCV Rack's per-wire-delay mental model.
 
 ## What sits below post-strata
 
-Three *backends* consume the post-strata `ResolvedProgram`. They are
-not further compiler stages — they are interpretations of the same
-fully-reduced IR into different targets, and the equivalence test
+Two *backends* consume the post-strata IR (as `tropical_plan_5`). They
+are not further compiler stages — they are interpretations of the same
+fully-reduced plan into different targets, and the equivalence test
 suites assert they agree pointwise.
 
 ```
@@ -161,11 +162,6 @@ post-strata ResolvedProgram (per-program path)  /  SessionState (session path)
         │      FlatRuntime → buffer loop, double-buffered hot-swap
         │      TropicalDAC (RtAudio) → audio output
         │
-        ├─→ interpret_resolved (compiler/interpret_resolved.ts)
-        │      pure-TS evaluator over a materialized ResolvedProgram.
-        │      `materialize_session.ts` flattens the session for the
-        │      oracle. Independent of the JIT structure.
-        │
         └─→ emit_wasm (compiler/emit_wasm.ts + compiler/wasm_memory_layout.ts)
                tropical_plan_5 → WebAssembly bytes + linear-memory layout.
                Same per-sample sequencing as the C++ scheduler.
@@ -186,7 +182,7 @@ semantics belong in a different language with a different runtime.
 
 Param handles are the only thing that differs between
 backends. Wiring expressions reference parameters by name
-(`{op:'param', name}` / `{op:'trigger', name}`); the materializer
+(`{op:'param', name}` / `{op:'trigger', name}`); the session compiler
 resolves names to handles at compile time. For the JIT path the handle
 is a native pointer (`tropical_param_t`); for the WASM path it's a
 SAB slot index, stringified to keep the `tropical_plan_5` schema
@@ -195,18 +191,25 @@ backend-agnostic.
 ## Equivalence gates
 
 The pipeline is correct only if every pass and every backend agrees
-with the per-sample semantics on the input. Three test suites pin
-that down by cross-checking outputs:
+with the per-sample semantics on the input. The cross-checking suites:
 
-- `tests/equiv/jit_vs_interp_stdlib.test.ts` — JIT and
-  `interpret_resolved` agree sample-for-sample across the stdlib corpus.
 - `tests/equiv/wasm_vs_jit.test.ts` — WASM and JIT agree
-  sample-for-sample.
+  sample-for-sample (the two backends, both off `tropical_plan_5`).
+- `tests/equiv/microkernel_vs_fused.test.ts`,
+  `tests/equiv/nested_vs_inlined.test.ts`,
+  `tests/equiv/microkernel_deep.test.ts` — realization-variant
+  differentials *within* the JIT: fused vs. per-instance microkernel,
+  flat vs. nested. These exercise the scheduler/slot layer that the
+  JIT↔WASM pair shares.
+- `tests/equiv/migration_audio.test.ts` — byte-for-byte audio goldens
+  against frozen reference output.
 - `tests/equiv/web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches the JIT output.
 
-Any disagreement is a strata, materialize, or backend bug, and the
-suite localises it.
+Any disagreement is a strata or backend bug, and the suite localises
+it. (Property/invariant-based coverage to replace the former pure-TS
+interpreter oracle is a planned follow-up; unit tests now render the
+JIT directly via `renderFramesJit`.)
 
 ## Schema versions
 
@@ -254,7 +257,7 @@ Tests that cross compilation/backend boundaries live under `tests/equiv/`.
 - Input/output names: lowercase (`freq`, `signal`, `out`, `saw`)
 - C++ is header-heavy by design (templates, inlining for audio perf)
 - JIT failures are fatal — no interpreter fallback on the audio path
-  (`interpret_resolved` is an oracle for tests, not a runtime)
+  (cross-backend agreement is gated by `tests/equiv/wasm_vs_jit`)
 
 ## Don't bake in audio-specific assumptions where it's free not to
 

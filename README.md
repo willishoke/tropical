@@ -46,8 +46,8 @@ Three domains, one project:
 
 The interesting bit is that these three are not independent
 subsystems with adapters between them; they share one IR. The
-compiler's correctness criterion is "the JIT and the pure-TS
-interpreter agree on every sample for every input"; the realtime
+compiler's correctness criterion is "the JIT and the WebAssembly
+backend agree on every sample for every input"; the realtime
 constraint is "every edit must produce a fresh kernel inside the
 audio thread's latency budget"; the agentic constraint is "every
 sentence-scale edit must produce a syntactically well-typed graph
@@ -61,7 +61,7 @@ strict categorical sense, a functor from the source operad to the
 slot-operational operad consumed by the runtime. You don't have to
 think in those terms to read the code, but the framing is what
 makes the layout of `compiler/ir/` predictable and makes "the JIT
-and the interpreter must agree" the right correctness criterion
+and WebAssembly must agree" the right correctness criterion
 rather than an ambitious one. The longer design conversation that
 arrived at this lives in
 [`design/archive/operadic_ir.md`](design/archive/operadic_ir.md).
@@ -91,17 +91,18 @@ is built around the assumption that a model is going to make
 subtle structural mistakes and the test suite has to catch them
 before they reach production:
 
-- **Sample-for-sample equivalence gates** between three backends —
-  the LLVM ORC JIT, a pure-TS reference interpreter, and the
-  WebAssembly emitter — running across the full stdlib corpus
-  (`tests/equiv/`). Every IR-touching change has to keep these
-  three in agreement. A regression in any pass surfaces here, not
-  in audible artifacts a week later.
+- **Sample-for-sample equivalence gates** between the two backends —
+  the LLVM ORC JIT and the WebAssembly emitter, both consuming the
+  same `tropical_plan_5` — plus realization-variant differentials
+  inside the JIT (fused vs. per-instance microkernel; flat vs.
+  nested) and byte-for-byte audio goldens (`tests/equiv/`). A
+  regression in any pass surfaces here, not in audible artifacts a
+  week later.
 - **Round-trip and acyclicity invariants** at every IR boundary —
   the elaborator throws on cyclic source code, the strata pipeline
   asserts acyclic input, the session compiler runs a defensive
   cycle check after delay extraction. Mistakes that would once have
-  surfaced as silent JIT-vs-interpreter divergence now throw at the
+  surfaced as silent cross-backend divergence now throw at the
   boundary with a port-detailed error message.
 - **A stdlib audit** that parses, elaborates, and lowers every
   `stdlib/*.trop` file on every change, asserting every post-strata
@@ -123,7 +124,7 @@ reading.
 - [`design/architecture.md`](design/architecture.md) — the full IR
   walkthrough, top to bottom.
 - [`tests/equiv/`](tests/equiv/) — the sample-for-sample equivalence
-  suites that pin the three backends to each other.
+  suites that pin the JIT and WebAssembly backends to each other.
 - [`CLAUDE.md`](CLAUDE.md) — contributor map.
 - [`INSTALL.md`](INSTALL.md) — build prerequisites.
 - [`mcp/CLAUDE.md`](mcp/CLAUDE.md) — MCP server and tool reference.

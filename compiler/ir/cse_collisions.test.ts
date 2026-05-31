@@ -27,7 +27,7 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON, type ExprNode } from '../session.js'
 import { loadStdlib, loadProgramAsType, type ProgramNode } from '../program.js'
-import { interpretSession } from '../interpret_resolved.js'
+import { renderFramesJit } from '../test_utils/audio'
 import { compileSession } from './compile_session.js'
 
 const ACCUM: ProgramNode = {
@@ -91,7 +91,7 @@ describe('Phase I — CSE near-collisions', () => {
     expect(inits.includes(11)).toBe(true)
 
     // Denotation: at sample 0 the output reads init values ⇒ diff = -6.
-    const out = interpretSession(session, 1)
+    const out = renderFramesJit(session, 1)
     expect(out[0] * 20).toBeCloseTo(-6, 10)
   })
 
@@ -124,7 +124,7 @@ describe('Phase I — CSE near-collisions', () => {
     }, session)
 
     // Run via interp (no live JIT param-handle dependency).
-    const out = interpretSession(session, 4)
+    const out = renderFramesJit(session, 4)
     // Sample 0: a1=0, a2=0 → mix=0
     // Sample 1: a1=0.3, a2=0.7 → mix=1.0 → /20 = 0.05
     // Sample 2: a1=0.6, a2=1.4 → mix=2.0 → /20 = 0.1

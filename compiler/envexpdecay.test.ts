@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON } from './session'
 import { loadStdlib } from './program'
-import { interpretSession } from './interpret_resolved'
+import { renderFramesJit } from './test_utils/audio'
 
 describe('stdlib EnvExpDecay', () => {
   test('resets to 1 on trigger and decays exponentially', () => {
@@ -26,7 +26,7 @@ describe('stdlib EnvExpDecay', () => {
       audio_outputs: [{ instance: 'env', output: 'env' }],
     }, session)
 
-    const out = interpretSession(session, 200)
+    const out = renderFramesJit(session, 200)
 
     const peak = out[11] * 20.0
     expect(peak).toBeCloseTo(1.0, 3)

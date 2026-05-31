@@ -18,7 +18,7 @@ import { parseProgram } from '../parse/declarations.js'
 import { elaborate } from './elaborator.js'
 import { arrayLower } from './array_lower.js'
 import type { ResolvedProgram, ResolvedExpr } from './nodes.js'
-import { interpretSession } from '../interpret_resolved.js'
+import { renderFramesJit } from '../test_utils/audio'
 import { makeSession, loadJSON } from '../session.js'
 import { loadProgramAsType, type ProgramNode } from '../program.js'
 
@@ -58,7 +58,7 @@ function findOps(prog: ResolvedProgram, targets: string[]): string[] {
 
 const COMBINATORS = ['let', 'fold', 'scan', 'generate', 'iterate', 'chain', 'map2', 'zipWith']
 
-/** Run a one-instance program through interpretSession; return the
+/** Run a one-instance program through renderFramesJit; return the
  *  pre-/20 sample 0 value (×20 to undo the audio-mix scaling). */
 function evalSample0(prog: ProgramNode): number {
   const session = makeSession(8)
@@ -71,7 +71,7 @@ function evalSample0(prog: ProgramNode): number {
     ]},
     audio_outputs: [{ instance: 'x', output: prog.ports!.outputs![0] as string }],
   }, session)
-  const out = interpretSession(session, 1)
+  const out = renderFramesJit(session, 1)
   return out[0] * 20
 }
 
@@ -92,7 +92,7 @@ describe('Phase E — generate degenerates', () => {
     `)
     const out = arrayLower(p)
     expect(findOps(out, COMBINATORS)).toEqual([])
-    // fold over an empty array → init. So out = 99. Pin via interpretSession.
+    // fold over an empty array → init. So out = 99. Pin via renderFramesJit.
     expect(evalSample0({
       op: 'program', name: 'GenerateZero',
       ports: { inputs: [], outputs: ['out'] },

@@ -1,8 +1,7 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON } from './session'
 import { loadStdlib } from './program'
-import { interpretSession } from './interpret_resolved'
-import { renderFrames } from './test_utils/audio'
+import { renderFramesJit } from './test_utils/audio'
 
 describe('stdlib BubbleCloud', () => {
   test('single trigger fires exactly one voice; 8 triggers distribute round-robin', () => {
@@ -28,7 +27,7 @@ describe('stdlib BubbleCloud', () => {
       audio_outputs: [{ instance: 'c', output: 'out' }],
     }, session)
 
-    const out = interpretSession(session, 10000)
+    const out = renderFramesJit(session, 10000)
 
     let peak = 0
     for (const v of out) peak = Math.max(peak, Math.abs(v))
@@ -50,40 +49,4 @@ describe('stdlib BubbleCloud', () => {
     expect(audibleWindows).toBeGreaterThanOrEqual(8)
   }, 15000)
 
-  test('BubbleCloud JIT matches interpreter bit-exact', () => {
-    const bufLen = 256
-    const nCalls = 8
-
-    const setup = () => {
-      const session = makeSession(bufLen)
-      loadStdlib(session)
-      loadJSON({
-        schema: 'tropical_program_2',
-        name: 'test',
-        body: { op: 'block', decls: [
-          { op: 'instanceDecl', name: 'clk', program: 'Clock', inputs: { freq: 8, ratios_in: [1] }},
-          { op: 'instanceDecl', name: 'c', program: 'BubbleCloud', inputs: {
-            trigger: { op: 'ref', instance: 'clk', output: 'output' },
-            radius: 0.003,
-            amp_scale: 0.1,
-          }},
-        ]},
-        audio_outputs: [{ instance: 'c', output: 'out' }],
-      }, session)
-      return session
-    }
-
-    const interpSession = setup()
-    const interp = interpretSession(interpSession, bufLen * nCalls)
-
-    const jitSession = setup()
-    const jit = renderFrames(jitSession.runtime, nCalls)
-    jitSession.runtime.dispose()
-
-    let maxDiff = 0
-    for (let i = 0; i < interp.length; i++) {
-      maxDiff = Math.max(maxDiff, Math.abs(interp[i] - jit[i]))
-    }
-    expect(maxDiff).toBeLessThan(1e-9)
-  })
 })

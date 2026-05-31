@@ -13,9 +13,9 @@ syntax, names, type parameters, sum types, instance nesting, array
 shapes, combinators all get retired at the right moment. By the end
 of the chain, the IR is `tropical_plan_5`: per-instance instruction
 streams over typed scalar slots plus a scheduler that drives them
-per-sample. Three backends interpret that low-detail IR — JIT,
-pure-TS interpreter, WebAssembly — and equivalence test suites
-cross-check them sample-for-sample.
+per-sample. Two backends interpret that low-detail IR — the JIT and
+WebAssembly — and equivalence test suites cross-check them
+sample-for-sample.
 
 ## What tropical is, categorically
 
@@ -106,30 +106,19 @@ ResolvedProgram (post-strata)
     │   │   FlatRuntime → buffer loop, double-buffered hot-swap
     │   │   TropicalDAC (RtAudio) → audio output
     │   │
-    │   ├─→ interpret_resolved   (pure-TS evaluator; oracle for tests)
-    │   │       (uses materialize_session to flatten the session into
-    │   │        a single ResolvedProgram for evaluation)
-    │   │
     │   └─→ emit_wasm  → WebAssembly bytes
     │           │
     │           ▼
     │       WasmRuntime in AudioWorklet (web/worklet/runtime.ts)
 ```
 
-Sessions plug into the same pipeline through one extra step. Two
-paths split because the JIT and the interpreter have different
-needs:
-
-- **JIT path** keeps each session instance compiled independently
-  (one `InstanceFunction` per instance, packed into the FlatPlan by
-  the scheduler). The kernel is one LLVM function whose body
-  dispatches each instance in topological order per sample.
-- **Interpreter path** uses `materializeSession` to flatten the
-  session into a single synthetic top-level `ResolvedProgram` and
-  evaluates that.
-
-Both paths see the same post-strata invariants on each piece, and
-the equivalence tests pin them sample-for-sample to each other.
+Both backends consume the same `tropical_plan_5`: the session keeps
+each instance compiled independently (one `InstanceFunction` per
+instance, packed into the FlatPlan by the scheduler), and the kernel
+is one LLVM function (or, in WASM, one `process` export) whose body
+dispatches each instance in topological order per sample. The
+equivalence tests pin the JIT and WASM outputs sample-for-sample to
+each other.
 
 Every pass below is presented as input IR, output IR, and the
 structure dropped between them.
@@ -244,7 +233,7 @@ export function strataPipeline(prog, typeArgs = new Map(), options = {}) {
 Each pass is pure: returns a fresh `ResolvedProgram`, or — in the
 no-op fast path — the input by identity. None of them mutate decls
 on the input. **Acyclicity is the strataPipeline contract**; the
-callers (`programTypeFromResolved` and `materializeSession`)
+callers (`programTypeFromResolved`)
 guarantee it, `assertAcyclic` confirms it.
 
 ### 3.1 assertAcyclic — boundary check
@@ -255,7 +244,7 @@ also available to future realizations that want their own
 cycle-break policy — iterative, WDF, etc.). Throws
 `AcyclicityViolation` if any non-trivial SCC survives into strata
 input. In the standard path this never fires; the elaborator and
-session materializer have already ensured acyclicity.
+the session compiler have already ensured acyclicity.
 
 ### 3.2 specialize — drops type parameters
 
@@ -467,37 +456,7 @@ Branded indices throughout (`TempIdx`, `StateRegIdx`,
 compile error — the literal shape of a Phaser-era slot-mixing bug.
 See `compiler/ir/slot_indices.ts`.
 
-### 4.2 Interpreter path — `materializeSession`
-
-`compiler/ir/materialize_session.ts` lifts the session into one
-synthetic top-level `ResolvedProgram`:
-
-- one `InstanceDecl` per session instance, type pre-specialized
-- session wiring expressions translated `ExprNode → ResolvedExpr`
-  with shared identity preserved via `ctx.exprMemo`
-- `dac.out` `graphOutputs` materialized as `OutputAssign`s on
-  fresh `OutputDecl`s named `${instance}.${output}`
-- `ParamDecl`s synthesized lazily as `paramRef` translations
-  encounter them; each name gets one decl, reused at every
-  reference
-- session-level `delay()` ExprNodes extracted into synthetic
-  `RegDecl`s named `__sd${i}`
-
-The result runs through `strataPipeline` and lands in the same
-post-strata form a per-program build does. `interpret_resolved.ts`
-evaluates it. The JIT no longer uses this materialization (it
-compiles per-instance via the path above), but the interpreter
-treats it as the oracle and `tests/equiv/jit_vs_interp` cross-checks
-the two evaluators sample-for-sample.
-
-`materializeSession` also handles the gateable two-phase wrap
-(carrying a gate expression through strata's `nestedOut` inlining,
-then applying `select(gate, raw, fallback)` on the lifted decls
-post-strata). This used to be the production code path for gated
-instances and is preserved for the interpreter side; the JIT path
-covers gating via direct slot writes from the scheduler.
-
-### 4.3 Fixed-topology compilation
+### 4.2 Fixed-topology compilation
 
 Tropical compiles a session graph to native code with a fixed
 topology for the lifetime of the kernel. Two compilation modes
@@ -626,23 +585,12 @@ platforms. Swap `stdlib/Sin.trop` to change the approximation.
    `engine/jit/OrcJitEngine.cpp::compile_flat_program`.
 The same op also needs to land in `WireFormatOp` (`compiler/expr.ts`),
 the strata passes that traverse it, and the other two backends
-(`emit_resolved.ts`, `interpret_resolved.ts`, `emit_wasm.ts`).
+(`emit_resolved.ts`, `emit_wasm.ts`).
 
-### 5.3 interpret_resolved — the oracle
-
-**`compiler/interpret_resolved.ts`**. Pure-TS evaluator over
-`ResolvedExpr` against a state map keyed by decl identity. No FFI,
-no kernel compilation. Reaches every backend that rests on the same
-post-strata IR; a JIT bug shows up here as a cross-backend
-divergence.
-
-This is the independent oracle for
-`tests/equiv/jit_vs_interp_stdlib.test.ts`.
-
-### 5.4 emit_wasm — the WebAssembly backend
+### 5.3 emit_wasm — the WebAssembly backend
 
 **`compiler/emit_wasm.ts`** + **`compiler/wasm_memory_layout.ts`**.
-A third interpretation of post-strata `ResolvedProgram`, consuming
+The second interpretation of post-strata `ResolvedProgram`, consuming
 the same `tropical_plan_5` boundary type. The emitter produces a
 standalone WASM module exporting a single
 `process(buffer_length, start_sample_index)` function plus a shared
@@ -686,19 +634,23 @@ snapshotting — lives in `web/worklet/runtime.ts` and mirrors
 ### 5.5 Equivalence
 
 The pipeline is correct only if every pass and every backend agrees
-with the per-sample semantics on the input. Three test suites
-cross-check that:
+with the per-sample semantics on the input. The cross-checking
+suites:
 
-- `tests/equiv/jit_vs_interp_stdlib.test.ts` — JIT and
-  `interpret_resolved` agree sample-for-sample across the stdlib
-  corpus.
 - `tests/equiv/wasm_vs_jit.test.ts` — WASM emit and JIT agree
-  sample-for-sample.
+  sample-for-sample (the two backends, both off `tropical_plan_5`).
+- `tests/equiv/microkernel_vs_fused.test.ts`,
+  `tests/equiv/nested_vs_inlined.test.ts`,
+  `tests/equiv/microkernel_deep.test.ts` — realization-variant
+  differentials within the JIT (fused vs. per-instance microkernel,
+  flat vs. nested), exercising the scheduler/slot layer the two
+  backends share.
+- `tests/equiv/migration_audio.test.ts` — byte-for-byte audio goldens.
 - `tests/equiv/web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches the JIT output.
 
-Any disagreement is a strata, materialize, or backend bug; the
-suite localises which.
+Any disagreement is a strata or backend bug; the suite localises
+which.
 
 ---
 
@@ -1013,10 +965,12 @@ smoothed params, hot-swap state transfer, typed int/bool ops.
 
 Run via `bun test`. The load-bearing suites:
 
-- `tests/equiv/jit_vs_interp_stdlib.test.ts` — JIT vs.
-  `interpret_resolved` across the stdlib corpus
 - `tests/equiv/wasm_vs_jit.test.ts`,
   `tests/equiv/web_plans_vs_jit.test.ts` — WASM emission equivalence
+- `tests/equiv/microkernel_vs_fused.test.ts`,
+  `tests/equiv/nested_vs_inlined.test.ts`,
+  `tests/equiv/microkernel_deep.test.ts` — JIT realization-variant
+  differentials; `tests/equiv/migration_audio.test.ts` — audio goldens
 - `ir/*.test.ts` — strata pipeline unit tests (specialize,
   sum_lower, inline_instances, array_lower, identity_elim, slots,
   clone, acyclic, lowering/cycle_break, elaboration_diagnostics)
@@ -1047,7 +1001,7 @@ its boundary and refuses to lower cyclic IR. This closes the
 asymmetry where the JIT silently tolerated cycles via slot
 back-edges while the interpreter rejected them, and makes "the
 trace functor" a property of the realization layer (elaborator +
-materializer), not the compiler.
+session compiler), not the compiler.
 
 ### Single-kernel fusion, fixed topology
 
@@ -1092,9 +1046,9 @@ on both backends (FlatRuntime in C++, WasmRuntime in WASM).
 
 JIT failures are fatal at the runtime. Compile errors are caught
 upstream (in `applyFlatPlan` / over MCP) and never reach the
-runtime. `interpret_resolved` exists, but it's a test oracle, not a
-fallback — it's what guarantees the JIT and the WASM emit aren't
-silently disagreeing on the same IR.
+runtime. Cross-backend agreement is guaranteed instead by the
+`tests/equiv/wasm_vs_jit` equivalence gate (JIT vs. WASM), not by any
+runtime fallback.
 
 ### Static shapes for arrays
 

@@ -20,7 +20,6 @@ import { makeSession, loadJSON } from './session'
 import { loadStdlib as loadBuiltins, loadProgramAsType } from './program'
 import type { ProgramNode, ProgramFile } from './program'
 import { applySessionWiring } from './apply_plan'
-import { interpretSession } from './interpret_resolved'
 import {
   renderFrames,
   peak,

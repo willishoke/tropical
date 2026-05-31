@@ -1,7 +1,7 @@
 import { describe, test, expect } from 'bun:test'
 import { makeSession, loadJSON } from './session'
 import { loadStdlib } from './program'
-import { interpretSession } from './interpret_resolved'
+import { renderFramesJit } from './test_utils/audio'
 
 describe('stdlib Bubble', () => {
   test('single trigger produces decaying output with audible ringing', () => {
@@ -26,7 +26,7 @@ describe('stdlib Bubble', () => {
       audio_outputs: [{ instance: 'b', output: 'out' }],
     }, session)
 
-    const out = interpretSession(session, 8000)
+    const out = renderFramesJit(session, 8000)
 
     let maxAbs = 0
     for (const v of out) maxAbs = Math.max(maxAbs, Math.abs(v))
@@ -76,7 +76,7 @@ describe('stdlib Bubble', () => {
         audio_outputs: [{ instance: 'b', output: 'out' }],
       }, session)
 
-      const out = interpretSession(session, 2000)
+      const out = renderFramesJit(session, 2000)
       let zc = 0
       for (let i = 101; i < 2000; i++) {
         if ((out[i - 1] >= 0) !== (out[i] >= 0)) zc++
