@@ -42,13 +42,16 @@ import {
   tempIdx, moduleSlotIdx, tempOffset,
   rawOffset,
 } from './slot_indices.js'
-import { partitionKernel, makeAccumulators } from './partition_recursive.js'
+import { partitionKernel, makeAccumulators, ROOT_INSTANCE_PATH } from './partition_recursive.js'
+import { materializeSessionToResolvedIR } from './materialize_session.js'
 import { makeCompiled, type Compiled } from '../program_types.js'
 import { slotKey } from './branded_names.js'
 
 export interface CompileSessionSlottedOptions {
   /** Engine realization strategy. Defaults to `'fused'`. */
   compilation_mode?: CompilationMode
+  /** Option A root-program lowering (see CompileSessionOptions). */
+  rootProgram?: boolean
 }
 
 /** Compile the session into a `tropical_plan_5` `FlatPlan`. */
@@ -56,7 +59,33 @@ export function compileSessionSlotted(
   session: SessionState,
   options: CompileSessionSlottedOptions = {},
 ): FlatPlan {
-  return compileSessionSlottedPerInstance(session, options.compilation_mode ?? 'fused')
+  const mode = options.compilation_mode ?? 'fused'
+  const rootProgram = process.env.TROPICAL_ROOT_PROGRAM === '1' || options.rootProgram === true
+  // Phase B root lowering is scalar-only. A session that carries any
+  // array-typed wiring — array-typed instance ports, or array session
+  // delays — still needs the per-instance `state_evolution`/array-slot
+  // machinery (Phase C/D lifts this). Fall back transparently so the
+  // flag stays safe to force on across the whole corpus.
+  if (rootProgram && !sessionHasArrayWiring(session)) {
+    return compileSessionSlottedRoot(session, mode)
+  }
+  return compileSessionSlottedPerInstance(session, mode)
+}
+
+/** True if the session has any array-typed wiring the scalar-only root
+ *  lowering can't yet represent: an array-typed instance input/output
+ *  port, or an array-typed session delay. Internal array state (e.g. a
+ *  `Delay`'s ring buffer) does NOT count — it lives inside one
+ *  instance's scalar-port kernel and never crosses a session wire. */
+function sessionHasArrayWiring(session: SessionState): boolean {
+  if (session.delaySlotRegistry.some(e => e.isArray)) return true
+  for (const [, inst] of session.instanceRegistry) {
+    const prog = inst.compiled?.prog
+    if (prog === undefined) continue
+    for (const p of prog.ports.inputs)  if (p.type?.kind === 'array') return true
+    for (const p of prog.ports.outputs) if (p.type?.kind === 'array') return true
+  }
+  return false
 }
 
 /** Recursively allocate output slots for an instance and every nested
@@ -329,6 +358,108 @@ function compileSessionSlottedPerInstance(
     array_slot_count:  acc.nextArrayRaw,
     array_slot_sizes:  acc.arraySlotSizes,
     register_count:    stateEvolutionNextTempRaw,
+    instance_functions: instanceFunctions,
+    scheduler_function: schedulerFunction,
+    ...buildSlotMetadata(session),
+  }
+}
+
+/** Option A: compile the session as a single synthetic root
+ *  `ResolvedProgram` lowered through the shared `partitionKernel`
+ *  path, instead of composing per-instance plans with a scheduler.
+ *
+ *  The session's top-level instances survive as `InstanceDecl`
+ *  children of the root (boxes closed — `inlineNested:false`); the
+ *  per-wire unit delays that `extractSessionDelays` hoisted into
+ *  `delaySlotRegistry` become root-level `RegDecl`s whose writebacks
+ *  reproduce the one-sample latency that the per-instance path's
+ *  `state_evolution` `WriteSlot`s provided. The scheduler is reduced
+ *  to the DAC-stitch postamble (`state_evolution` is empty).
+ *
+ *  Scalar session delays only (Phase B). Array session delays still
+ *  route through the per-instance path. */
+function compileSessionSlottedRoot(
+  session: SessionState,
+  compilationMode: CompilationMode,
+): FlatPlan {
+  if (session.delaySlotRegistry.some(e => e.isArray)) {
+    throw new Error(
+      'compileSessionSlottedRoot: session-level array delays are not yet ' +
+      'supported on the root-program path (Phase D); use the per-instance path.',
+    )
+  }
+
+  // Two-phase slot pre-allocation — identical to the per-instance
+  // path. partitionKernel re-issues these idempotently during its own
+  // child walk.
+  for (const [name, inst] of session.instanceRegistry) {
+    if (inst.compiled !== undefined) {
+      preallocateOutputsRecursive(session, toInstanceName(name), inst.compiled.prog, inst.compiled)
+    }
+  }
+  for (const [name, inst] of session.instanceRegistry) {
+    if (inst.compiled !== undefined) {
+      preallocateInputsRecursive(session, toInstanceName(name), inst.compiled.prog, inst.compiled)
+    }
+  }
+
+  const acc = makeAccumulators()
+  // Seed the array-slot accumulator with the session-level I/O array
+  // slots (verbatim from the per-instance path) so kernel-local array
+  // slots land at globalIdx >= ioArraySlotCount.
+  for (let i = 0; i < session.ioArraySlotCount; i++) {
+    acc.arraySlotSizes.push(session.ioArraySlotSizes[i])
+    acc.arraySlotNames.push(session.ioArraySlotNames[i])
+  }
+  acc.nextArrayRaw = session.ioArraySlotCount
+
+  // Materialize the session → synthetic root and lower it once. The
+  // root path is naming-transparent (ROOT_INSTANCE_PATH), so child
+  // output slots / register names land under bare paths exactly where
+  // the flat per-instance path puts them — `emitDacStitch` and
+  // hot-swap state-transfer-by-name resolve unchanged.
+  const root = materializeSessionToResolvedIR(session)
+  const rootCompiled = makeCompiled(root, { displayName: '__session__' })
+
+  const { fn } = partitionKernel(
+    /* instancePath    */ ROOT_INSTANCE_PATH,
+    /* prog            */ root,
+    /* compiled        */ rootCompiled,
+    /* inputBindingFor */ () => undefined,
+    /* defaults        */ {},
+    /* paramHandles    */ new Map(),
+    session,
+    acc,
+  )
+  const instanceFunctions: InstanceFunction[] = [fn]
+
+  // DAC stitch is unchanged — reads each graphOutput slot in the
+  // postamble after the root kernel has run.
+  const dac = emitDacStitch(session, tempOffset(acc.nextRegRaw))
+  const dacEndRaw = acc.nextRegRaw + dac.tempCount
+
+  // No state-evolution phase: the per-wire delays became root RegDecl
+  // writebacks inside the root kernel (a trailing read-old/write-new
+  // batch), preserving one-sample latency by construction.
+  const schedulerFunction: SchedulerFunction = {
+    preamble:        [],
+    state_evolution: [],
+    postamble:       dac.instructions,
+    output_targets:  dac.outputTargets,
+    outputs:         dac.outputs,
+  }
+
+  return {
+    schema: 'tropical_plan_5',
+    config: { sampleRate: 44100 },
+    compilation_mode:  compilationMode,
+    state_init:        acc.stateInit,
+    register_names:    acc.registerNames,
+    register_types:    acc.registerTypes,
+    array_slot_names:  acc.arraySlotNames,
+    array_slot_count:  acc.nextArrayRaw,
+    array_slot_sizes:  acc.arraySlotSizes,
+    register_count:    dacEndRaw,
     instance_functions: instanceFunctions,
     scheduler_function: schedulerFunction,
     ...buildSlotMetadata(session),
