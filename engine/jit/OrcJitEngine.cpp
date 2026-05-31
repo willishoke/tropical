@@ -1131,6 +1131,42 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
         append(instr.strides.data(), instr.strides.size());
     };
 
+    // Serialize one instance function INCLUDING its preamble,
+    // pre_input, writebacks, and nested children. Recursing into
+    // children is essential: under the root-program (Option A)
+    // lowering every plan's single top-level function has an empty
+    // body and the same `instance_name` ("instance___root__"), so the
+    // whole plan's identity lives in the child subtree. Hashing only
+    // the top-level `instructions` (as before) made all such plans
+    // collide and serve each other's cached kernels. Leaf/flat plans
+    // are unaffected — their bodies were already distinct.
+    std::function<void(const InstanceProgram &)> serialize_fn =
+      [&](const InstanceProgram & inst) {
+        append(&inst.register_count, sizeof(uint32_t));
+        uint32_t nameLen = static_cast<uint32_t>(inst.instance_name.size());
+        append(&nameLen, sizeof(uint32_t));
+        if (!inst.instance_name.empty())
+          append(inst.instance_name.data(), inst.instance_name.size());
+        auto serialize_block = [&](const std::vector<FlatInstr> & block) {
+          uint32_t n = static_cast<uint32_t>(block.size());
+          append(&n, sizeof(uint32_t));
+          for (const auto & instr : block) serialize_instr(instr);
+        };
+        serialize_block(inst.preamble_instructions);
+        serialize_block(inst.pre_input_instructions);
+        serialize_block(inst.instructions);
+        uint32_t nwb = static_cast<uint32_t>(inst.writebacks.size());
+        append(&nwb, sizeof(uint32_t));
+        for (const auto & wb : inst.writebacks)
+        {
+          append(&wb.state_slot, sizeof(uint32_t));
+          append(&wb.temp_slot,  sizeof(int32_t));
+        }
+        uint32_t nch = static_cast<uint32_t>(inst.children.size());
+        append(&nch, sizeof(uint32_t));
+        for (const auto & child : inst.children) serialize_fn(child);
+      };
+
     append(&program.register_count, sizeof(uint32_t));
     // Scheduler: preamble + state_evolution + postamble
     uint32_t npre = static_cast<uint32_t>(program.scheduler.preamble.size());
@@ -1142,20 +1178,10 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     uint32_t npost = static_cast<uint32_t>(program.scheduler.postamble.size());
     append(&npost, sizeof(uint32_t));
     for (const auto & instr : program.scheduler.postamble) serialize_instr(instr);
-    // Instance functions
+    // Instance functions (recursively, including children)
     uint32_t nfns = static_cast<uint32_t>(program.instance_functions.size());
     append(&nfns, sizeof(uint32_t));
-    for (const auto & inst : program.instance_functions)
-    {
-      append(&inst.register_count, sizeof(uint32_t));
-      uint32_t nameLen = static_cast<uint32_t>(inst.instance_name.size());
-      append(&nameLen, sizeof(uint32_t));
-      if (!inst.instance_name.empty())
-        append(inst.instance_name.data(), inst.instance_name.size());
-      uint32_t ni = static_cast<uint32_t>(inst.instructions.size());
-      append(&ni, sizeof(uint32_t));
-      for (const auto & instr : inst.instructions) serialize_instr(instr);
-    }
+    for (const auto & inst : program.instance_functions) serialize_fn(inst);
     // Mix outputs
     uint32_t nm = static_cast<uint32_t>(program.mix_output_temps.size());
     append(&nm, sizeof(uint32_t));
@@ -1445,6 +1471,35 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
         append(instr.strides.data(), instr.strides.size());
     };
 
+    // Recurse into preamble/pre_input/writebacks/children — same
+    // completeness requirement as the fused cache key (a root-program
+    // plan's identity lives entirely in its child subtree).
+    std::function<void(const InstanceProgram &)> serialize_fn =
+      [&](const InstanceProgram & inst) {
+        append(&inst.register_count, sizeof(uint32_t));
+        uint32_t nameLen = static_cast<uint32_t>(inst.instance_name.size());
+        append(&nameLen, sizeof(uint32_t));
+        if (!inst.instance_name.empty())
+          append(inst.instance_name.data(), inst.instance_name.size());
+        auto serialize_block = [&](const std::vector<FlatInstr> & block) {
+          uint32_t n = static_cast<uint32_t>(block.size());
+          append(&n, sizeof(uint32_t));
+          for (const auto & instr : block) serialize_instr(instr);
+        };
+        serialize_block(inst.preamble_instructions);
+        serialize_block(inst.pre_input_instructions);
+        serialize_block(inst.instructions);
+        uint32_t nwb = static_cast<uint32_t>(inst.writebacks.size());
+        append(&nwb, sizeof(uint32_t));
+        for (const auto & wb : inst.writebacks) {
+          append(&wb.state_slot, sizeof(uint32_t));
+          append(&wb.temp_slot,  sizeof(int32_t));
+        }
+        uint32_t nch = static_cast<uint32_t>(inst.children.size());
+        append(&nch, sizeof(uint32_t));
+        for (const auto & child : inst.children) serialize_fn(child);
+      };
+
     append(&program.register_count, sizeof(uint32_t));
     uint32_t npre = static_cast<uint32_t>(program.scheduler.preamble.size());
     append(&npre, sizeof(uint32_t));
@@ -1457,16 +1512,7 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
     for (const auto & instr : program.scheduler.postamble) serialize_instr(instr);
     uint32_t nfns = static_cast<uint32_t>(program.instance_functions.size());
     append(&nfns, sizeof(uint32_t));
-    for (const auto & inst : program.instance_functions) {
-      append(&inst.register_count, sizeof(uint32_t));
-      uint32_t nameLen = static_cast<uint32_t>(inst.instance_name.size());
-      append(&nameLen, sizeof(uint32_t));
-      if (!inst.instance_name.empty())
-        append(inst.instance_name.data(), inst.instance_name.size());
-      uint32_t ni = static_cast<uint32_t>(inst.instructions.size());
-      append(&ni, sizeof(uint32_t));
-      for (const auto & instr : inst.instructions) serialize_instr(instr);
-    }
+    for (const auto & inst : program.instance_functions) serialize_fn(inst);
     uint32_t nm = static_cast<uint32_t>(program.mix_output_temps.size());
     append(&nm, sizeof(uint32_t));
     for (uint32_t mt : program.mix_output_temps)
