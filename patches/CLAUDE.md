@@ -13,13 +13,13 @@ the browser demo via `bun web/build_patches.ts`.
   "body": {
     "op": "block",
     "decls": [
-      { "op": "instance_decl", "name": "Osc1", "program": "Sin", "inputs": { "x": 440 } }
+      { "op": "instance_decl", "name": "Osc1", "program": "SinOsc", "inputs": { "freq": 440 } }
     ],
-    "assigns": []
-  },
-  "audio_outputs": [
-    { "instance": "Osc1", "output": "out" }
-  ]
+    "assigns": [
+      { "op": "output_assign", "name": "dac.out",
+        "expr": { "op": "ref", "instance": "Osc1", "output": "sine" } }
+    ]
+  }
 }
 ```
 
