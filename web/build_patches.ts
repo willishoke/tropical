@@ -36,8 +36,9 @@ const PATCHES: Patch[] = [
       name: 'pure_sine_440',
       body: { op: 'block', decls: [
         { op: 'instance_decl', name: 'osc', program: 'SinOsc', inputs: { freq: 440 } },
+      ], assigns: [
+        { op: 'output_assign', name: 'dac.out', expr: { op: 'ref', instance: 'osc', output: 'sine' } },
       ]},
-      audio_outputs: [{ instance: 'osc', output: 'sine' }],
     },
   },
   {
@@ -54,8 +55,9 @@ const PATCHES: Patch[] = [
           audio: { op: 'ref', instance: 'a', output: 'sine' },
           cv:    { op: 'ref', instance: 'b', output: 'sine' },
         }},
+      ], assigns: [
+        { op: 'output_assign', name: 'dac.out', expr: { op: 'ref', instance: 'm', output: 'out' } },
       ]},
-      audio_outputs: [{ instance: 'm', output: 'out' }],
     },
   },
   {
@@ -70,8 +72,9 @@ const PATCHES: Patch[] = [
         { op: 'instance_decl', name: 'car', program: 'SinOsc', inputs: {
           freq: { op: 'add', args: [220, { op: 'mul', args: [80, { op: 'ref', instance: 'mod', output: 'sine' }] }] },
         }},
+      ], assigns: [
+        { op: 'output_assign', name: 'dac.out', expr: { op: 'ref', instance: 'car', output: 'sine' } },
       ]},
-      audio_outputs: [{ instance: 'car', output: 'sine' }],
     },
   },
   {
@@ -89,8 +92,9 @@ const PATCHES: Patch[] = [
         { op: 'instance_decl', name: 'c',  program: 'SinOsc', inputs: {
           freq: { op: 'add', args: [220, { op: 'mul', args: [200, { op: 'ref', instance: 'm2', output: 'sine' }] }] },
         }},
+      ], assigns: [
+        { op: 'output_assign', name: 'dac.out', expr: { op: 'ref', instance: 'c', output: 'sine' } },
       ]},
-      audio_outputs: [{ instance: 'c', output: 'sine' }],
     },
   },
   {
@@ -102,8 +106,9 @@ const PATCHES: Patch[] = [
       name: 'blepsaw',
       body: { op: 'block', decls: [
         { op: 'instance_decl', name: 'o', program: 'BlepSaw', inputs: { freq: 110 } },
+      ], assigns: [
+        { op: 'output_assign', name: 'dac.out', expr: { op: 'ref', instance: 'o', output: 'saw' } },
       ]},
-      audio_outputs: [{ instance: 'o', output: 'saw' }],
     },
   },
 ]

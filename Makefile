@@ -1,4 +1,4 @@
-.PHONY: build repl run mcp-ts clean validate validate-write
+.PHONY: build repl run mcp-ts lean mcp-lean clean validate validate-write
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -23,6 +23,16 @@ run: repl
 
 mcp-ts: build
 	bun install --silent && bun run mcp/server.ts
+
+# Lean front-door (Turnstile). Builds the lean/ subtree, which pulls Turnstile
+# via Lake and links against the IR service (mcp/ir_service.ts) at runtime.
+lean:
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build
+
+# Launch the Lean front-door MCP server. It spawns mcp/ir_service.ts itself, so
+# this is the single command that brings up the whole Lean → IR → C++ stack.
+mcp-lean: build lean
+	bun install --silent && ./lean/.lake/build/bin/frontend
 
 clean:
 	rm -rf $(BUILD_DIR)
