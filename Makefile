@@ -1,4 +1,4 @@
-.PHONY: build repl run mcp-ts lean clean validate validate-write
+.PHONY: build repl run mcp-ts lean mcp-lean clean validate validate-write
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -28,6 +28,11 @@ mcp-ts: build
 # via Lake and links against the IR service (mcp/ir_service.ts) at runtime.
 lean:
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build
+
+# Launch the Lean front-door MCP server. It spawns mcp/ir_service.ts itself, so
+# this is the single command that brings up the whole Lean → IR → C++ stack.
+mcp-lean: build lean
+	bun install --silent && ./lean/.lake/build/bin/frontend
 
 clean:
 	rm -rf $(BUILD_DIR)
