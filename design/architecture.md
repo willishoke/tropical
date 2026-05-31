@@ -814,14 +814,22 @@ TypeScript wrappers over the C API via koffi.
 
 ---
 
-## 10. MCP server (`mcp/server.ts`)
+## 10. MCP server (`lean/` front door + `mcp/`)
 
-The primary agent interface. Runs on stdio, uses
-`@modelcontextprotocol/sdk`. Maintains one long-lived `SessionState`.
+The primary agent interface. The MCP server is a native **Lean front door**
+(`lean/`, built on the [Turnstile](https://github.com/willishoke/turnstile)
+framework): it validates each tool call against a typed schema, then relays it
+over JSON-RPC/stdio to the IR service (`mcp/ir_service.ts`), which drives the
+engine (`mcp/engine.ts`, owner of the long-lived `SessionState`). One server,
+the full MCP surface — 23 tools plus resources (program catalog, program-format
+doc) and the build-patch prompt.
 
-23 tools, grouped by purpose. Every tool that mutates the signal
-graph ultimately calls `wire()` → `applyFlatPlan(session, runtime)`,
-which runs the full compile pipeline:
+The old `mcp/server.ts` (an `@modelcontextprotocol/sdk` stdio server) has been
+retired: `engine.ts` holds its `SessionState` and tool handlers, and the Lean
+front door replaced its transport.
+
+Every tool that mutates the signal graph ultimately calls `wire()` →
+`applyFlatPlan(session, runtime)`, which runs the full compile pipeline:
 
 ```
 SessionState
@@ -834,11 +842,11 @@ SessionState
 ```
 
 Compile errors don't kill the session: they return a structured
-error envelope (`ErrorEnvelope` in `mcp/server.ts`) and the previous
+error envelope (`ErrorEnvelope` in `mcp/engine.ts`) and the previous
 kernel keeps playing.
 
-See [`mcp/CLAUDE.md`](../mcp/CLAUDE.md) for the full tool list,
-SessionState integration, and error envelope shape.
+See [`mcp/CLAUDE.md`](../mcp/CLAUDE.md) for the engine / ir_service split,
+the full tool list, and the error envelope shape.
 
 ---
 
@@ -924,7 +932,7 @@ shape mismatches inside compatible broadcast rules insert
 
 - `make build` — configure + build C++ core
 - `make profile` — build with profiling instrumentation
-- `make mcp-ts` — build + launch MCP server on stdio via Bun
+- `make mcp-lean` — build C++ + Lean front door, then launch the MCP server
 - `make validate` — `bun test` + `ctest` + stdlib audit
   (`scripts/validate_stdlib.ts`)
 - `make clean` — remove build directories
@@ -932,14 +940,16 @@ shape mismatches inside compatible broadcast rules insert
 ### Bun (`package.json`, `tsconfig.json`)
 
 - Runtime: Bun ≥ 1.3
-- Key deps: `@modelcontextprotocol/sdk`, `koffi`, `zod`
+- Key deps: `koffi`, `zod` (the MCP transport is the Lean front door /
+  Turnstile, not `@modelcontextprotocol/sdk`)
 - TypeScript: ES2022 / ESNext, strict, includes `compiler/` + `mcp/`,
   excludes `*.test.ts`
 
 ### MCP (`.mcp.json`)
 
 ```json
-{ "mcpServers": { "tropical": { "command": "bun", "args": ["run", "mcp/server.ts"] } } }
+{ "mcpServers": { "tropical": { "command": "sh",
+  "args": ["-c", "make -s lean 1>&2 && exec lean/.lake/build/bin/frontend"] } } }
 ```
 
 ### CI (`.github/workflows/`)
