@@ -17,6 +17,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js'
 import { inputNames, outputNames, rawInputDefaults } from '../compiler/session.js'
 import { session, handleTool } from './engine.js'
+import { PROGRAM_FORMAT_EXAMPLE } from './program_format_example.js'
 // ─── Tool definitions ─────────────────────────────────────────────────────────
 
 const TOOLS = [
@@ -399,33 +400,7 @@ and breaks_cycles sit alongside the body. **Audio output is an \`output_assign\`
 in the body with name \`"dac.out"\`** — wire the signal you want heard to it.
 Session metadata — \`params\`, \`config\` — is top-level.
 
-{ "schema": "tropical_program_2", "name": "MyPatch",
-  "body": { "op": "block",
-    "decls": [
-      { "op": "programDecl", "name": "Saw", "program": { "op": "program", "name": "Saw",
-        "ports": { "inputs": ["freq"], "outputs": ["out"] },
-        "body": { "op": "block",
-          "decls": [{ "op": "regDecl", "name": "phase", "init": 0 }],
-          "assigns": [
-            { "op": "outputAssign", "name": "out",
-              "expr": { "op": "sub", "args": [{ "op": "mul", "args": [2, { "op": "reg", "name": "phase" }] }, 1] } },
-            { "op": "nextUpdate", "target": { "kind": "reg", "name": "phase" },
-              "expr": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sampleRate" }] }] }, 1] } }
-          ],
-          "value": null
-        }
-      }},
-      { "op": "instanceDecl", "name": "osc", "program": "Saw", "inputs": { "freq": 440 } },
-      { "op": "instanceDecl", "name": "filt", "program": "LadderFilter",
-        "inputs": { "input": { "op": "ref", "instance": "osc", "output": "out" }, "cutoff": 2000 } }
-    ],
-    "assigns": [
-      { "op": "outputAssign", "name": "dac.out",
-        "expr": { "op": "ref", "instance": "filt", "output": "lp" } }
-    ],
-    "value": null
-  }
-}
+${JSON.stringify(PROGRAM_FORMAT_EXAMPLE, null, 2)}
 
 Key fields: schema, name, ports (inputs/outputs/type_defs), body (block),
 type_params, sample_rate, breaks_cycles, and top-level session metadata
