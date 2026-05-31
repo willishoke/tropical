@@ -54,6 +54,7 @@ import { findInstanceCycles } from './lowering/cycle_break.js'
 import { CycleViolation, type CycleDiagnostic } from './elaboration_diagnostics.js'
 import { parseWireKey } from './branded_names.js'
 import { mkProgram } from './decl_tables.js'
+import { computeInstanceTopoOrder } from './compile_session_slotted_helpers.js'
 
 /** Run the session → root `ResolvedProgram` materialization end-to-end.
  *  The result is the synthetic top-level program; callers lower it via
@@ -130,9 +131,22 @@ interface MaterializeContext {
 }
 
 function materializeSessionInner(session: SessionState, ctx: MaterializeContext): ResolvedProgram {
-  for (const [name, inst] of session.instanceRegistry) {
-    const decl = buildInstanceDecl(name, inst, ctx)
-    ctx.instanceDecls.set(name, decl)
+  // Build instances in TOPOLOGICAL order (producer before consumer),
+  // the same order the per-instance path's `instance_functions` use.
+  // This matters for same-sample (un-delayed) wires — array wires in
+  // particular, which `setWireExpr` does NOT auto-delay: the producer
+  // kernel must run before the consumer reads its (aliased) array
+  // slot. Scalar cross-instance wires are all delayed (their edges
+  // vanish after `extractSessionDelays`), so for purely-scalar
+  // sessions this degenerates to insertion order — the Phase B
+  // behavior. The chosen order also fixes `InstanceIdx` (iteration
+  // position in `ctx.instanceDecls`), which must agree with the
+  // instance order in `body.decls` for `compileResolved`.
+  const order = computeInstanceTopoOrder(session)
+  for (const name of order) {
+    const inst = session.instanceRegistry.get(name)
+    if (inst === undefined) continue
+    ctx.instanceDecls.set(name, buildInstanceDecl(name, inst, ctx))
   }
 
   // Reconstruct the synthetic RegDecls behind session-level delay
@@ -154,6 +168,13 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
         `materializeSession: instance '${instName}' has no input port '${inputName}' on type '${instType.name}'.`,
       )
     }
+    // Array-typed ports are carried on `InstanceDecl.inputs` just like
+    // scalar ports; `compileResolved` discriminates on the port's
+    // allocation class and lowers an array wire (a `nestedOut` to a
+    // producer's array output) via an elementwise copy into the child's
+    // session-array slot. The producer-before-consumer instance order
+    // above is what makes that child array slot resolve (the wire is
+    // same-sample, not delayed).
     const value = translateExpr(expr, ctx)
     instDecl.inputs.push({ port: inputIdx(portI), value })
   }

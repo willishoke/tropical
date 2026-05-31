@@ -61,31 +61,27 @@ export function compileSessionSlotted(
 ): FlatPlan {
   const mode = options.compilation_mode ?? 'fused'
   const rootProgram = process.env.TROPICAL_ROOT_PROGRAM === '1' || options.rootProgram === true
-  // Phase B root lowering is scalar-only. A session that carries any
-  // array-typed wiring — array-typed instance ports, or array session
-  // delays — still needs the per-instance `state_evolution`/array-slot
-  // machinery (Phase C/D lifts this). Fall back transparently so the
-  // flag stays safe to force on across the whole corpus.
-  if (rootProgram && !sessionHasArrayWiring(session)) {
+  // The root lowering handles scalar wiring and array-typed *port*
+  // wiring (array slots are delivered by aliasing + the recursive
+  // partitioner). Array session *delays* — `delay()` over an
+  // array-shaped source, hoisted to an `ioArraySlot` with an
+  // `isArray` registry entry — still need the per-instance
+  // `state_evolution` elementwise-copy path (a later phase lifts
+  // this). Fall back transparently so the flag stays safe to force on.
+  if (rootProgram && !sessionHasArrayDelay(session)) {
     return compileSessionSlottedRoot(session, mode)
   }
   return compileSessionSlottedPerInstance(session, mode)
 }
 
-/** True if the session has any array-typed wiring the scalar-only root
- *  lowering can't yet represent: an array-typed instance input/output
- *  port, or an array-typed session delay. Internal array state (e.g. a
- *  `Delay`'s ring buffer) does NOT count — it lives inside one
- *  instance's scalar-port kernel and never crosses a session wire. */
-function sessionHasArrayWiring(session: SessionState): boolean {
-  if (session.delaySlotRegistry.some(e => e.isArray)) return true
-  for (const [, inst] of session.instanceRegistry) {
-    const prog = inst.compiled?.prog
-    if (prog === undefined) continue
-    for (const p of prog.ports.inputs)  if (p.type?.kind === 'array') return true
-    for (const p of prog.ports.outputs) if (p.type?.kind === 'array') return true
-  }
-  return false
+/** True if the session has an array-typed session delay — a `delay()`
+ *  whose source is array-shaped, which `extractSessionDelays` hoists to
+ *  an `ioArraySlot` (`isArray` registry entry). The root path doesn't
+ *  represent these yet; they route to the per-instance path. Array
+ *  *ports* and internal array state (e.g. a `Delay`'s ring buffer) are
+ *  fully supported on the root path and do NOT count here. */
+function sessionHasArrayDelay(session: SessionState): boolean {
+  return session.delaySlotRegistry.some(e => e.isArray)
 }
 
 /** Recursively allocate output slots for an instance and every nested

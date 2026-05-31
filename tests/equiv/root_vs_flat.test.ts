@@ -165,6 +165,32 @@ describe('root-vs-flat multi-instance (auto-delayed wires)', () => {
   })
 })
 
+describe('root-vs-flat array-port wiring', () => {
+  // A Sequencer's `values: float[N]` array input wired with an array
+  // literal. `liftWiresToInstances` lifts the literal to an anonymous
+  // producer instance whose array output is aliased into the
+  // sequencer's input slot — a same-sample (un-delayed) array wire, so
+  // the root path must emit the producer before the consumer and copy
+  // the array into the child's session-array slot.
+  test('Sequencer with array-literal values', () => {
+    function setup() {
+      const session = makeSession(BUFFER_LENGTH)
+      loadStdlib(session)
+      const { type, typeArgs } = resolveProgramType(session, 'Sequencer', { N: 8 }, undefined)
+      const inst = instantiate(type, 'seq', { baseTypeName: 'Sequencer', typeArgs })
+      session.instanceRegistry.set('seq', inst)
+      session.inputExprNodes.set(wk('seq', 'clock'), pulseEvery(64))
+      session.inputExprNodes.set(wk('seq', 'values'),
+        { op: 'array', items: [110, 138.59, 164.81, 220, 261.63, 329.63, 220, 164.81] })
+      session.graphOutputs.push({ instance: 'seq', output: outputNames(inst)[0] })
+      return session
+    }
+    const flat = captureOutput(setup(), false)
+    const root = captureOutput(setup(), true)
+    assertEqual('Sequencer[values]', flat, root)
+  })
+})
+
 describe('root-vs-flat polyphony', () => {
   test('8x SinOsc voices', () => {
     function setupPolyphony() {
