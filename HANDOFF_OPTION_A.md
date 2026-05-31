@@ -101,11 +101,35 @@ This is a pure cache-key fix — no emitted-code or golden change. Rebuild requi
    inputs, so this never bites in practice; the `root_vs_flat` osc→amp case wires
    `freq` explicitly. NOT fixed (one-axis-at-a-time; arguably root is *more*
    correct). If a future patch relies on unwired typed defaults, revisit.
-3. **Phase C/D/E** per the plan: soak (flag still OFF), then remove the
-   array-refusal (`sessionHasArrayWiring`) + add array `RegDecl` support
-   (Phase D), then flip the default and delete `compileSessionSlottedPerInstance`
-   + the `state_evolution` emission (Phase E). Keep `delaySlotRegistry`,
-   `emitDacStitch`, `graphOutputs` as the bridge/DAC tap.
+3. **Phase D1 — array-typed PORT wiring: DONE.** Array-typed instance ports now
+   lower on the root path. Two materializer fixes: (a) emit the root's child
+   instances in `computeInstanceTopoOrder` (producer before consumer) — array
+   wires are same-sample (not auto-delayed), so the producer must run first;
+   (b) keep array ports on `InstanceDecl.inputs` so `compileResolved`'s
+   `arrayInfo` branch copies the array `nestedOut` into the child's session-array
+   slot. The dispatch fallback narrowed from `sessionHasArrayWiring` to
+   `sessionHasArrayDelay`. Gate: `root_vs_flat` Sequencer array-literal case;
+   migration goldens forced-on stay 11/11 (now via the root path).
+4. **Phase D2 — array session DELAYS: DONE.** A `delay()` over an array-shaped
+   source (hoisted to an `ioArraySlot`, `isArray` registry entry) now
+   materializes to an **array-typed root `RegDecl`**: `init` is an
+   `arraySize`-long literal array (so `compileResolved` allocates a backing array
+   slot via its `arrayRegMap`), and `update` is the translated array source
+   (`nestedOut` to the producer's array output). `emit_resolved` lowers the
+   array-result update to an elementwise copy at writeback — the same per-element
+   one-sample latency the per-instance `state_evolution` array `Add` gave.
+   `sessionArraySlot` reads translate to `regRef`. One supporting engine-free fix
+   in `emit_resolved.ts`: the array-reg writeback now accepts a
+   `session_array_reg` source (a sibling's array output), not just kernel-local
+   `array_reg` (`remapInstancePlan` already lowers it to an absolute slot). The
+   dispatch fallback is gone — array sessions go through the root path. Gate:
+   `root_vs_flat` array-session-delay case (`delay([s, s+10, s+20]) → ArrSum`,
+   25 pass) — a time-varying array source makes any latency/permutation bug
+   visible. Motivation: polyphony and any cross-voice array feedback will hit
+   this routinely.
+5. **Phase E — cutover** (after the WASM-root gap closes): flip the default and
+   delete `compileSessionSlottedPerInstance` + the `state_evolution` emission.
+   Keep `delaySlotRegistry`, `emitDacStitch`, `graphOutputs` as the bridge/DAC tap.
 
 ## Key invariants to preserve
 

@@ -1186,10 +1186,23 @@ class Emitter {
         if (!arrInfo) {
           throw new Error(`emitProgram: array-result update on non-array reg ${ri}`)
         }
-        if (r.op.kind !== 'array_reg') {
+        // The update may resolve to a kernel-local `array_reg` (e.g. an
+        // `arraySet` on the reg's own slot) or a `session_array_reg` —
+        // a read of a sibling instance's array output, which is how an
+        // array session delay's source (`nestedOut` to a producer's
+        // array port) surfaces in the synthetic root program. Both are
+        // valid array sources; `remapInstancePlan` lowers
+        // `session_array_reg` to an absolute `array_reg`.
+        if (r.op.kind !== 'array_reg' && r.op.kind !== 'session_array_reg') {
           throw new Error(`emitProgram: array result has non-array operand kind ${r.op.kind}`)
         }
-        if (rawIdx(r.op.slot) !== rawIdx(arrInfo.slot)) {
+        // Skip the copy only for an in-place kernel-local update whose
+        // source slot already IS the reg's backing slot. A
+        // `session_array_reg` source lives in the session-absolute
+        // namespace (distinct from the reg's kernel-local slot), so it
+        // always needs the elementwise copy.
+        const inPlace = r.op.kind === 'array_reg' && rawIdx(r.op.slot) === rawIdx(arrInfo.slot)
+        if (!inPlace) {
           arrayCopies.push({ src: r.op, dst: arrInfo.slot, size: arrInfo.size })
         }
         register_targets.push(ArrayManagedTarget)

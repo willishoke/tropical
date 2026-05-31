@@ -61,31 +61,13 @@ export function compileSessionSlotted(
 ): FlatPlan {
   const mode = options.compilation_mode ?? 'fused'
   const rootProgram = process.env.TROPICAL_ROOT_PROGRAM === '1' || options.rootProgram === true
-  // Phase B root lowering is scalar-only. A session that carries any
-  // array-typed wiring — array-typed instance ports, or array session
-  // delays — still needs the per-instance `state_evolution`/array-slot
-  // machinery (Phase C/D lifts this). Fall back transparently so the
-  // flag stays safe to force on across the whole corpus.
-  if (rootProgram && !sessionHasArrayWiring(session)) {
+  // The root lowering handles scalar wiring, array-typed *port* wiring
+  // (delivered by aliasing + the recursive partitioner), and array
+  // session *delays* (hoisted `ioArraySlot` entries → array `RegDecl`s).
+  if (rootProgram) {
     return compileSessionSlottedRoot(session, mode)
   }
   return compileSessionSlottedPerInstance(session, mode)
-}
-
-/** True if the session has any array-typed wiring the scalar-only root
- *  lowering can't yet represent: an array-typed instance input/output
- *  port, or an array-typed session delay. Internal array state (e.g. a
- *  `Delay`'s ring buffer) does NOT count — it lives inside one
- *  instance's scalar-port kernel and never crosses a session wire. */
-function sessionHasArrayWiring(session: SessionState): boolean {
-  if (session.delaySlotRegistry.some(e => e.isArray)) return true
-  for (const [, inst] of session.instanceRegistry) {
-    const prog = inst.compiled?.prog
-    if (prog === undefined) continue
-    for (const p of prog.ports.inputs)  if (p.type?.kind === 'array') return true
-    for (const p of prog.ports.outputs) if (p.type?.kind === 'array') return true
-  }
-  return false
 }
 
 /** Recursively allocate output slots for an instance and every nested
@@ -376,19 +358,13 @@ function compileSessionSlottedPerInstance(
  *  `state_evolution` `WriteSlot`s provided. The scheduler is reduced
  *  to the DAC-stitch postamble (`state_evolution` is empty).
  *
- *  Scalar session delays only (Phase B). Array session delays still
- *  route through the per-instance path. */
+ *  Scalar session delays become scalar `RegDecl`s; array session delays
+ *  become array `RegDecl`s (their elementwise-copy writeback replaces
+ *  the per-instance path's `state_evolution` array `Add`). */
 function compileSessionSlottedRoot(
   session: SessionState,
   compilationMode: CompilationMode,
 ): FlatPlan {
-  if (session.delaySlotRegistry.some(e => e.isArray)) {
-    throw new Error(
-      'compileSessionSlottedRoot: session-level array delays are not yet ' +
-      'supported on the root-program path (Phase D); use the per-instance path.',
-    )
-  }
-
   // Two-phase slot pre-allocation — identical to the per-instance
   // path. partitionKernel re-issues these idempotently during its own
   // child walk.

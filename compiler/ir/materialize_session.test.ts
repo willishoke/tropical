@@ -86,10 +86,13 @@ describe('materializeSessionToResolvedIR', () => {
     expect(amp.inputs.length).toBe(2)
   })
 
-  test('throws on array session delays (scalar-first guard)', () => {
+  test('array session delays become array RegDecls', () => {
     const session = makeOscAmpSession()
-    // Inject an array delay entry directly — the root path does not yet
-    // support array-typed RegDecls (Phase D).
+    // Inject an array delay entry directly (as `extractSessionDelays`
+    // would for a `delay()` over an array-shaped source). It should
+    // materialize to an array-typed root RegDecl whose init is a
+    // size-long literal array — the backing store `compileResolved`
+    // turns into an array slot.
     session.delaySlotRegistry.push({
       slotName: '__arr_delay_test',
       sourceExpr: { op: 'ref', instance: 'osc', output: 'saw' },
@@ -99,7 +102,14 @@ describe('materializeSessionToResolvedIR', () => {
       arraySlot: 0,
       arraySize: 8,
     })
-    expect(() => materializeSessionToResolvedIR(session)).toThrow(/array delay/)
+    const root = materializeSessionToResolvedIR(session)
+    const arrReg = root.regs.find(r => r.name === '__arr_delay_test')
+    expect(arrReg).toBeDefined()
+    // Array-typed init: a length-8 literal array (the scalar delays
+    // carry plain-number inits).
+    expect(Array.isArray(arrReg!.init)).toBe(true)
+    expect((arrReg!.init as unknown[]).length).toBe(8)
+    expect(arrReg!.update).toBeDefined()
   })
 
   test('throws CycleViolation on an undelayed inter-instance cycle', () => {

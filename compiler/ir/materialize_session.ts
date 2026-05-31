@@ -48,12 +48,13 @@ import type {
 } from './nodes.js'
 import { inputIdx, outputIdx, paramIdx, instanceIdx, regIdx, programKey } from './nodes.js'
 import type { ExprNode } from '../expr.js'
-import type { SessionState } from '../session.js'
+import type { SessionState, DelaySlotEntry } from '../session.js'
 import type { Instance } from '../program_types.js'
 import { findInstanceCycles } from './lowering/cycle_break.js'
 import { CycleViolation, type CycleDiagnostic } from './elaboration_diagnostics.js'
 import { parseWireKey } from './branded_names.js'
 import { mkProgram } from './decl_tables.js'
+import { computeInstanceTopoOrder } from './compile_session_slotted_helpers.js'
 
 /** Run the session → root `ResolvedProgram` materialization end-to-end.
  *  The result is the synthetic top-level program; callers lower it via
@@ -96,6 +97,7 @@ function makeContext(session: SessionState): MaterializeContext {
     programRegistry:     new Map(),
     syntheticRegDecls:   [],
     slotToReg:           new Map(),
+    arraySlotToReg:      new Map(),
     exprMemo:            new WeakMap(),
     session,
   }
@@ -125,14 +127,32 @@ interface MaterializeContext {
    *  `sessionSlot` reads — including those nested inside another slot's
    *  source expression — resolve to a stable reg. */
   slotToReg: Map<number, RegIdx>
+  /** Sibling of `slotToReg` for array session delays: maps an
+   *  `ioArraySlot` index (the `index` carried by a
+   *  `{op:'sessionArraySlot'}` read) to the RegIdx of the synthetic
+   *  array `RegDecl` reproducing that hoisted array delay. */
+  arraySlotToReg: Map<number, RegIdx>
   exprMemo: WeakMap<object, ResolvedExpr>
   session: SessionState
 }
 
 function materializeSessionInner(session: SessionState, ctx: MaterializeContext): ResolvedProgram {
-  for (const [name, inst] of session.instanceRegistry) {
-    const decl = buildInstanceDecl(name, inst, ctx)
-    ctx.instanceDecls.set(name, decl)
+  // Build instances in TOPOLOGICAL order (producer before consumer),
+  // the same order the per-instance path's `instance_functions` use.
+  // This matters for same-sample (un-delayed) wires — array wires in
+  // particular, which `setWireExpr` does NOT auto-delay: the producer
+  // kernel must run before the consumer reads its (aliased) array
+  // slot. Scalar cross-instance wires are all delayed (their edges
+  // vanish after `extractSessionDelays`), so for purely-scalar
+  // sessions this degenerates to insertion order — the Phase B
+  // behavior. The chosen order also fixes `InstanceIdx` (iteration
+  // position in `ctx.instanceDecls`), which must agree with the
+  // instance order in `body.decls` for `compileResolved`.
+  const order = computeInstanceTopoOrder(session)
+  for (const name of order) {
+    const inst = session.instanceRegistry.get(name)
+    if (inst === undefined) continue
+    ctx.instanceDecls.set(name, buildInstanceDecl(name, inst, ctx))
   }
 
   // Reconstruct the synthetic RegDecls behind session-level delay
@@ -154,6 +174,13 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
         `materializeSession: instance '${instName}' has no input port '${inputName}' on type '${instType.name}'.`,
       )
     }
+    // Array-typed ports are carried on `InstanceDecl.inputs` just like
+    // scalar ports; `compileResolved` discriminates on the port's
+    // allocation class and lowers an array wire (a `nestedOut` to a
+    // producer's array output) via an elementwise copy into the child's
+    // session-array slot. The producer-before-consumer instance order
+    // above is what makes that child array slot resolve (the wire is
+    // same-sample, not delayed).
     const value = translateExpr(expr, ctx)
     instDecl.inputs.push({ port: inputIdx(portI), value })
   }
@@ -216,47 +243,67 @@ function materializeSessionInner(session: SessionState, ctx: MaterializeContext)
  *
  *  Reg idx equals position in `ctx.syntheticRegDecls` (the
  *  front-of-body invariant from `materializeSessionInner`). Every
- *  slot's reg is reserved first — populating `ctx.slotToReg` — before
- *  any source expression is translated, because a source may itself
- *  read another `sessionSlot` (nested `delay(delay(x))`). */
+ *  slot's reg is reserved first — populating `ctx.slotToReg` /
+ *  `ctx.arraySlotToReg` — before any source expression is translated,
+ *  because a source may itself read another `sessionSlot` /
+ *  `sessionArraySlot` (nested `delay(delay(x))`).
+ *
+ *  Array session delays (`isArray` entries, hoisted by
+ *  `extractSessionDelays` to an `ioArraySlot`) become array-typed
+ *  `RegDecl`s: `init` is an `arraySize`-long literal array (so
+ *  `compileResolved` allocates a backing array slot via its
+ *  `arrayRegMap`), and `update` is the translated array source — a
+ *  `nestedOut` to the producer instance's array output. `emit_resolved`
+ *  lowers the array-result update to an elementwise copy from the
+ *  producer's output array slot into the reg's backing slot at
+ *  writeback time — the same one-sample latency the per-instance
+ *  path's `state_evolution` elementwise `Add` provides. */
 function materializeSessionDelaySlots(
   session: SessionState,
   ctx: MaterializeContext,
 ): void {
-  const regForSlot = new Map<number, RegDecl>()
+  const regForEntry = new Map<DelaySlotEntry, RegDecl>()
 
-  // Pass 1: reserve a synthetic reg per scalar slot and record the
-  // slotIdx → RegIdx map (so cross-slot reads resolve in pass 2).
+  // Pass 1: reserve a synthetic reg per delay slot (scalar → scalar
+  // reg, array → array reg) and record the slot → RegIdx maps so
+  // cross-slot reads resolve in pass 2.
   for (const entry of session.delaySlotRegistry) {
+    const regPos = ctx.syntheticRegDecls.length
     if (entry.isArray) {
-      throw new Error(
-        `materializeSession: session-level array delay (slot '${entry.slotName}', ` +
-        `size ${entry.arraySize ?? '?'}) is not yet supported on the root-program path; ` +
-        `scalar session delays are. Use the legacy flat-list path for array session delays.`,
-      )
+      if (entry.arraySlot === undefined || entry.arraySize === undefined) {
+        throw new Error(
+          `materializeSession: array delay slot '${entry.slotName}' is missing arraySlot/arraySize.`,
+        )
+      }
+      // Array-typed init: an `arraySize`-long literal array. `regInit`
+      // (compile_resolved) returns it as-is and `emit_resolved`'s
+      // constructor allocates the backing array slot (`arrayRegMap`).
+      const init: ResolvedExpr = new Array(entry.arraySize).fill(entry.init) as ResolvedExpr
+      const decl: RegDecl = { op: 'regDecl', name: entry.slotName, init, update: 0 }
+      ctx.syntheticRegDecls.push(decl)
+      ctx.arraySlotToReg.set(entry.arraySlot, regIdx(regPos))
+      regForEntry.set(entry, decl)
+      continue
     }
     if (entry.slotIdx === undefined) {
       throw new Error(
         `materializeSession: scalar delay slot '${entry.slotName}' is missing slotIdx.`,
       )
     }
-    const regPos = ctx.syntheticRegDecls.length
     const decl: RegDecl = {
       op: 'regDecl', name: entry.slotName, init: entry.init, update: 0,
     }
     ctx.syntheticRegDecls.push(decl)
     ctx.slotToReg.set(entry.slotIdx, regIdx(regPos))
-    regForSlot.set(entry.slotIdx, decl)
+    regForEntry.set(entry, decl)
   }
 
   // Pass 2: translate each slot's un-delayed source into the reg's
-  // update. Instance decls are built and `slotToReg` is complete, so
-  // both `{op:'ref'}` (instance outputs) and `{op:'sessionSlot'}`
-  // (nested delays) resolve.
+  // update. Instance decls are built and both slot maps are complete,
+  // so `{op:'ref'}` (instance outputs), `{op:'sessionSlot'}`, and
+  // `{op:'sessionArraySlot'}` (nested delays) all resolve.
   for (const entry of session.delaySlotRegistry) {
-    if (entry.isArray) continue
-    const decl = regForSlot.get(entry.slotIdx!)!
-    decl.update = translateExpr(entry.sourceExpr, ctx)
+    regForEntry.get(entry)!.update = translateExpr(entry.sourceExpr, ctx)
   }
 }
 
@@ -440,13 +487,23 @@ function translateOpNode(
   }
 
   if (op === 'sessionArraySlot') {
-    // Reached only if a session array delay slipped past
-    // `materializeSessionDelaySlots` (which throws on array entries).
-    throw new Error(
-      `materializeSession: session-level array delay (sessionArraySlot index ` +
-      `${typeof obj.index === 'number' ? obj.index : '?'}) is not yet supported ` +
-      `on the root-program path.`,
-    )
+    // An array delay already hoisted out of the wires by
+    // `extractSessionDelays` into an `ioArraySlot`.
+    // `materializeSessionDelaySlots` built the backing array reg up
+    // front; read it. The `regRef` to an array-init reg lowers (in
+    // `emit_resolved`) to an `array_reg` operand, which the consuming
+    // array-input port copies into its own slot.
+    const index = obj.index
+    if (typeof index !== 'number') {
+      throw new Error(`materializeSession: sessionArraySlot read missing numeric index.`)
+    }
+    const reg = ctx.arraySlotToReg.get(index)
+    if (reg === undefined) {
+      throw new Error(
+        `materializeSession: sessionArraySlot index ${index} has no array delaySlotRegistry entry.`,
+      )
+    }
+    return { op: 'regRef', idx: reg }
   }
 
   throw new Error(`materializeSession: unhandled wiring op '${op}'.`)
