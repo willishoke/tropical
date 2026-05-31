@@ -101,11 +101,28 @@ This is a pure cache-key fix — no emitted-code or golden change. Rebuild requi
    inputs, so this never bites in practice; the `root_vs_flat` osc→amp case wires
    `freq` explicitly. NOT fixed (one-axis-at-a-time; arguably root is *more*
    correct). If a future patch relies on unwired typed defaults, revisit.
-3. **Phase C/D/E** per the plan: soak (flag still OFF), then remove the
-   array-refusal (`sessionHasArrayWiring`) + add array `RegDecl` support
-   (Phase D), then flip the default and delete `compileSessionSlottedPerInstance`
-   + the `state_evolution` emission (Phase E). Keep `delaySlotRegistry`,
-   `emitDacStitch`, `graphOutputs` as the bridge/DAC tap.
+3. **Phase D1 — array-typed PORT wiring: DONE.** Array-typed instance ports now
+   lower on the root path. Two materializer fixes: (a) emit the root's child
+   instances in `computeInstanceTopoOrder` (producer before consumer) — array
+   wires are same-sample (not auto-delayed), so the producer must run first;
+   (b) keep array ports on `InstanceDecl.inputs` so `compileResolved`'s
+   `arrayInfo` branch copies the array `nestedOut` into the child's session-array
+   slot. The dispatch fallback narrowed from `sessionHasArrayWiring` to
+   `sessionHasArrayDelay`. Gate: `root_vs_flat` Sequencer array-literal case;
+   migration goldens forced-on stay 11/11 (now via the root path).
+4. **Phase D2 — array session DELAYS: deferred (fallback is correct).** A
+   `delay()` over an array-shaped source (hoisted to an `ioArraySlot`, `isArray`
+   registry entry) still routes to the per-instance path via
+   `sessionHasArrayDelay`. There is **no consumer in the current corpus** (no
+   fixture/patch produces one; they're hard to even construct — the source must
+   be a `ref` to an array output at extract time), and the fallback yields
+   byte-identical output. Per "don't build ahead of need," left as the narrow
+   fallback until a real array-delay session appears; then either add array
+   `RegDecl` support to the materializer or keep array delays on
+   `state_evolution` in the root path.
+5. **Phase E — cutover** (after the WASM-root gap closes): flip the default and
+   delete `compileSessionSlottedPerInstance` + the `state_evolution` emission.
+   Keep `delaySlotRegistry`, `emitDacStitch`, `graphOutputs` as the bridge/DAC tap.
 
 ## Key invariants to preserve
 
