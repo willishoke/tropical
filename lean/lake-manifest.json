@@ -1,0 +1,15 @@
+{"version": "1.1.0",
+ "packagesDir": ".lake/packages",
+ "packages":
+ [{"url": "https://github.com/willishoke/turnstile",
+   "type": "git",
+   "subDir": null,
+   "scope": "",
+   "rev": "53ee1ff598d5afca38c5456d7189b7dc26bf473f",
+   "name": "turnstile",
+   "manifestFile": "lake-manifest.json",
+   "inputRev": "main",
+   "inherited": false,
+   "configFile": "lakefile.toml"}],
+ "name": "tropical_frontend",
+ "lakeDir": ".lake"}

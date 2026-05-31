@@ -1,0 +1,13 @@
+name = "tropical_frontend"
+defaultTargets = ["frontend"]
+
+# The Turnstile MCP framework, pulled cross-repo. Must share the toolchain
+# pinned in lean-toolchain (v4.29.1).
+[[require]]
+name = "turnstile"
+git = "https://github.com/willishoke/turnstile"
+rev = "main"
+
+[[lean_exe]]
+name = "frontend"
+root = "Main"
