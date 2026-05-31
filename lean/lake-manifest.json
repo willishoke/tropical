@@ -5,7 +5,7 @@
    "type": "git",
    "subDir": null,
    "scope": "",
-   "rev": "53ee1ff598d5afca38c5456d7189b7dc26bf473f",
+   "rev": "a6c2a9774a9b1f6d3946293d3a19291e80c0b8b6",
    "name": "turnstile",
    "manifestFile": "lake-manifest.json",
    "inputRev": "main",

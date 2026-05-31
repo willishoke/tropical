@@ -10,7 +10,7 @@ delays and oscillators don't click.
 
 ```bash
 make build          # C++ core, outputs build/libtropical.dylib
-make mcp-ts         # build + launch MCP server on stdio (requires Bun)
+make mcp-lean       # build C++ + Lean front door, then launch the MCP server
 make validate       # build + bun test + ctest + stdlib validator
 make clean          # remove build directories
 ```

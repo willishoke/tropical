@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "mcp": "bun run mcp/server.ts"
+    "mcp": "make mcp-lean"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

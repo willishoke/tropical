@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "tropical": {
-      "command": "bun",
-      "args": ["run", "mcp/server.ts"]
+      "command": "sh",
+      "args": ["-c", "make -s lean 1>&2 && exec lean/.lake/build/bin/frontend"]
     }
   }
 }

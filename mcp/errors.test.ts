@@ -40,7 +40,7 @@ class Client {
   private nextId = 1
 
   constructor() {
-    const serverPath = resolve(import.meta.dir, 'server.ts')
+    const serverPath = resolve(import.meta.dir, 'ir_service.ts')
     this.proc = spawn('bun', ['run', serverPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: resolve(import.meta.dir, '..'),
@@ -86,19 +86,16 @@ class Client {
   }
 
   async init() {
-    await this.request('initialize', {
-      protocolVersion: '2024-11-05',
-      capabilities: {},
-      clientInfo: { name: 'errors-test', version: '0' },
-    })
-    this.notify('notifications/initialized', {})
+    // The IR service has no MCP handshake; one cheap call warms it up
+    // (engine import + native lib load) before the real assertions run.
+    await this.request('list_params', {})
   }
 
   async call(toolName: string, args: Record<string, unknown> = {}): Promise<{
     isError?: boolean
     result: ToolResult
   }> {
-    const resp = await this.request('tools/call', { name: toolName, arguments: args })
+    const resp = await this.request(toolName, args)
     const content = resp.result?.content?.[0]?.text
     if (typeof content !== 'string') throw new Error(`No text content in response: ${JSON.stringify(resp)}`)
     return { isError: resp.result.isError, result: JSON.parse(content) as ToolResult }

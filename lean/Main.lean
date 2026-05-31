@@ -220,6 +220,33 @@ def tropicalTools (r : Relay) : List Tool := [
   noArgTool          r "audio_status"    "Return current audio status including callback statistics."
 ]
 
+-- ── Resources & prompts ─────────────────────────────────────────────────────
+-- Discovered from the IR service at startup; read/get forward back to it.
+
+private def buildResources (r : Relay) (listResult : Json) : List Resource :=
+  match listResult.getObjVal? "resources" with
+  | .ok (.arr arr) => arr.toList.filterMap fun e =>
+      match e.getObjValAs? String "uri" with
+      | .ok uri => some {
+          uri, name := (e.getObjValAs? String "name").toOption.getD uri,
+          description := (e.getObjValAs? String "description").toOption.getD "",
+          mimeType := (e.getObjValAs? String "mimeType").toOption.getD "text/plain",
+          read := do
+            let res ← r.call "resources/read" (Json.mkObj [("uri", Json.str uri)])
+            pure ((res.getObjValAs? String "text").toOption.getD "") }
+      | .error _ => none
+  | _ => []
+
+private def buildPrompts (r : Relay) (listResult : Json) : List Prompt :=
+  match listResult.getObjVal? "prompts" with
+  | .ok (.arr arr) => arr.toList.filterMap fun e =>
+      match e.getObjValAs? String "name" with
+      | .ok name => some {
+          name, description := (e.getObjValAs? String "description").toOption.getD "",
+          get := r.call "prompts/get" (Json.mkObj [("name", Json.str name)]) }
+      | .error _ => none
+  | _ => []
+
 -- ── Entry point ─────────────────────────────────────────────────────────────
 
 def main : IO Unit := do
@@ -228,7 +255,11 @@ def main : IO Unit := do
     stdin := .piped, stdout := .piped, stderr := .inherit
   }
   let relay : Relay := { stdin := child.stdin, stdout := child.stdout }
-  let srv : Server := { name := "tropical", version := "0.1.0", tools := tropicalTools relay }
+  let resources := buildResources relay (← relay.call "resources/list" (Json.mkObj []))
+  let prompts   := buildPrompts   relay (← relay.call "prompts/list"   (Json.mkObj []))
+  let srv : Server := {
+    name := "tropical", version := "0.1.0",
+    tools := tropicalTools relay, resources, prompts }
   srv.run                       -- runs until the MCP client closes stdin
   child.kill
   let _ ← child.wait

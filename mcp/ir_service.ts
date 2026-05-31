@@ -14,7 +14,7 @@
  * Run with:  bun run mcp/ir_service.ts
  */
 
-import { handleTool } from './engine.js'
+import { handleTool, listResources, readResource, listPrompts, getPrompt } from './engine.js'
 
 function send(obj: unknown): void {
   process.stdout.write(JSON.stringify(obj) + '\n')
@@ -35,7 +35,15 @@ for await (const chunk of process.stdin) {
     try {
       const req = JSON.parse(line) as { id?: unknown; method: string; params?: unknown }
       id = req.id ?? null
-      const result = await handleTool(req.method, (req.params ?? {}) as Record<string, unknown>)
+      const params = (req.params ?? {}) as Record<string, unknown>
+      let result: unknown
+      switch (req.method) {
+        case 'resources/list': result = { resources: listResources() }; break
+        case 'resources/read': result = { text: readResource(String(params.uri ?? '')) }; break
+        case 'prompts/list':   result = { prompts: listPrompts() }; break
+        case 'prompts/get':    result = getPrompt(String(params.name ?? '')); break
+        default:               result = await handleTool(req.method, params)
+      }
       send({ jsonrpc: '2.0', id, result })
     } catch (e) {
       send({
