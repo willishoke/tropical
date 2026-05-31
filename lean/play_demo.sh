@@ -32,9 +32,10 @@ if [[ ! -x "$BIN" ]]; then
   PATH="$HOME/.elan/bin:$PATH" make lean
 fi
 
-echo "▶  $PROGRAM.$OUT_PORT @ ${FREQ}Hz ×${GAIN} → dac for ${SECS}s (Ctrl-C to stop early)" >&2
+echo "▶  $PROGRAM.$OUT_PORT @ ${FREQ}Hz → VCA(×${GAIN}) → dac for ${SECS}s (Ctrl-C to stop early)" >&2
 
-# Wire freq (if >0) and the scaled output to the DAC in one recompile.
+# The DAC boundary only accepts a ref-shaped expr, so the gain can't be inlined
+# at the dac wire — it goes through a VCA (out = audio * cv).
 FREQ_SET=""
 [ "${FREQ}" != "0" ] && FREQ_SET="{\"instance\":\"osc1\",\"input\":\"freq\",\"expr\":${FREQ}},"
 
@@ -42,10 +43,11 @@ FREQ_SET=""
   printf '%s\n' \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
     "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"add_instance\",\"arguments\":{\"program\":\"${PROGRAM}\",\"instance_name\":\"osc1\"}}}" \
-    "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"wire\",\"arguments\":{\"set\":[${FREQ_SET}{\"instance\":\"dac\",\"input\":\"out\",\"expr\":{\"op\":\"mul\",\"args\":[{\"op\":\"ref\",\"instance\":\"osc1\",\"output\":\"${OUT_PORT}\"},${GAIN}]}}]}}}" \
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"start_audio","arguments":{}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add_instance","arguments":{"program":"VCA","instance_name":"amp"}}}' \
+    "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"wire\",\"arguments\":{\"set\":[${FREQ_SET}{\"instance\":\"amp\",\"input\":\"audio\",\"expr\":{\"op\":\"ref\",\"instance\":\"osc1\",\"output\":\"${OUT_PORT}\"}},{\"instance\":\"amp\",\"input\":\"cv\",\"expr\":${GAIN}},{\"instance\":\"dac\",\"input\":\"out\",\"expr\":{\"op\":\"ref\",\"instance\":\"amp\",\"output\":\"out\"}}]}}}" \
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"start_audio","arguments":{}}}'
   sleep "$SECS"
-  printf '%s\n' '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"stop_audio","arguments":{}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"stop_audio","arguments":{}}}'
 } | "$BIN"
 
 echo "■  stopped." >&2
