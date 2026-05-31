@@ -1,4 +1,4 @@
-.PHONY: build repl run mcp-ts lean mcp-lean clean validate validate-write
+.PHONY: build repl run lean mcp-lean clean validate validate-write
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -20,9 +20,6 @@ repl: build
 	PYTHONPATH=$(BUILD_DIR) $(PYTHON)
 
 run: repl
-
-mcp-ts: build
-	bun install --silent && bun run mcp/server.ts
 
 # Lean front-door (Turnstile). Builds the lean/ subtree, which pulls Turnstile
 # via Lake and links against the IR service (mcp/ir_service.ts) at runtime.

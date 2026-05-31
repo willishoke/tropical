@@ -1,22 +1,38 @@
 # mcp/
 
-MCP server — the primary agent interface. Runs on stdio via
-`@modelcontextprotocol/sdk`. Maintains a long-lived `SessionState`
-(`compiler/session.ts`) and exposes 23 tools that mutate it.
+The IR engine and its JSON-RPC service. The MCP *server* itself now lives in
+`lean/` — a native Lean front door built on Turnstile — and this directory is
+what it drives. (The old `mcp/server.ts`, an `@modelcontextprotocol/sdk` server,
+has been retired; the Lean front door replaced it, validating each tool call
+against a typed schema before relaying.)
+
+- `engine.ts` owns a long-lived `SessionState` (`compiler/session.ts`) and the
+  23 tool handlers (`handleTool`), plus the MCP resources (program catalog,
+  program-format doc) and the build-patch prompt. Transport-agnostic.
+- `ir_service.ts` exposes that engine over plain newline JSON-RPC on stdio
+  (method = tool name; plus `resources/list`·`read` and `prompts/list`·`get`).
+  The Lean front door spawns it and relays validated calls.
 
 ## Running
 
 ```bash
-make mcp-ts    # build C++ core + launch MCP server
+make mcp-lean   # build C++ core + Lean front door, then launch the MCP server
 ```
 
-Also configured in `.mcp.json` for Claude Code integration.
+`make lean` builds just the `lean/` front door. Also configured in `.mcp.json`
+for Claude Code (it builds the front door and execs it).
 
 ## Layout
 
 ```
-server.ts      MCP server: session management, tool definitions, request handlers
-test_patch.ts  Standalone CLI smoke-tester: bun run mcp/test_patch.ts <patch.json> [n_frames]
+engine.ts                  Transport-agnostic IR engine: SessionState + handleTool
+                           + resources/prompts. No transport.
+ir_service.ts              Exposes the engine over newline JSON-RPC/stdio (the
+                           Lean front door spawns this).
+program_format_example.ts  The canonical tropical_program_2 example the
+                           program-format resource renders from.
+test_patch.ts              CLI smoke-tester: bun run mcp/test_patch.ts <patch.json> [n_frames]
+*.test.ts                  errors / wire_dac / program_format_example — drive ir_service
 ```
 
 ## Compile pipeline behind every mutation
@@ -50,7 +66,7 @@ error envelope (see below) and the previous kernel keeps playing.
 
 ## SessionState
 
-`server.ts` owns one `SessionState`. The fields tools read and mutate:
+`engine.ts` owns one `SessionState`. The fields tools read and mutate:
 
 - `typeRegistry: Map<string, ProgramType>` — registered concrete types
   (`define_program`, stdlib loading); `ProgramType` is the
@@ -137,7 +153,7 @@ graph patterns.
 
 ## Error envelope
 
-`server.ts` returns structured errors so agents can recover programmatically.
+`engine.ts` returns structured errors so agents can recover programmatically.
 
 ```typescript
 type ErrorCode =
@@ -162,7 +178,7 @@ type ErrorEnvelope = {
 }
 ```
 
-Helpers in `server.ts`:
+Helpers in `engine.ts`:
 
 - `failBare({ code, message, retryable?, param?, value? })` — plain
   error.
