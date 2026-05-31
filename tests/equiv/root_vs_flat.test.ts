@@ -26,7 +26,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, resolveProgramType, instantiate, inputNames, outputNames, setWireExpr } from '../../compiler/session.js'
+import { makeSession, loadJSON, resolveProgramType, instantiate, inputNames, outputNames, setWireExpr } from '../../compiler/session.js'
 import type { ExprNode } from '../../compiler/expr.js'
 import { loadStdlib } from '../../compiler/program.js'
 import { applyFlatPlan } from '../../compiler/apply_plan.js'
@@ -188,6 +188,47 @@ describe('root-vs-flat array-port wiring', () => {
     const flat = captureOutput(setup(), false)
     const root = captureOutput(setup(), true)
     assertEqual('Sequencer[values]', flat, root)
+  })
+})
+
+describe('root-vs-flat array session delay', () => {
+  // An array-shaped `delay()`: the wire `sum.a = delay([s, s+10, s+20])`
+  // carries a time-varying array literal. `liftWiresToInstances` lifts
+  // the literal to an anonymous producer instance; `extractSessionDelays`
+  // hoists the surrounding `delay()` into an `ioArraySlot` (an `isArray`
+  // registry entry). On the per-instance path that's a `state_evolution`
+  // elementwise array `Add`; on the root path it becomes an array
+  // `RegDecl` whose elementwise-copy writeback must reproduce the SAME
+  // one-sample, per-element latency. The time-varying source makes any
+  // latency or element-permutation bug visible.
+  const arrDelayProgram = {
+    schema: 'tropical_program_2', name: 'arr_delay_test',
+    body: { op: 'block', decls: [
+      { op: 'programDecl', name: 'ArrSum', program: {
+        op: 'program', name: 'ArrSum',
+        ports: { inputs: [{ name: 'a', type: { element: 'float', shape: [3] } }], outputs: ['out'] },
+        body: { op: 'block', decls: [], assigns: [
+          { op: 'outputAssign', name: 'out', expr: { op: 'add', args: [
+            { op: 'index', args: [{ op: 'input', name: 'a' }, 0] },
+            { op: 'mul', args: [{ op: 'index', args: [{ op: 'input', name: 'a' }, 1] }, 100] } ] } } ] } } },
+      { op: 'instanceDecl', name: 'sum', program: 'ArrSum', inputs: { a: { op: 'delay', args: [
+        { op: 'array', items: [
+          { op: 'sampleIndex' },
+          { op: 'add', args: [{ op: 'sampleIndex' }, 10] },
+          { op: 'add', args: [{ op: 'sampleIndex' }, 20] } ] } ] } } } ],
+      assigns: [] },
+    audio_outputs: [{ instance: 'sum', output: 'out' }],
+  }
+  test('delay([s, s+10, s+20]) → ArrSum', () => {
+    function setup() {
+      const session = makeSession(BUFFER_LENGTH)
+      loadStdlib(session)
+      loadJSON(arrDelayProgram as Parameters<typeof loadJSON>[0], session)
+      return session
+    }
+    const flat = captureOutput(setup(), false)
+    const root = captureOutput(setup(), true)
+    assertEqual('array-delay', flat, root)
   })
 })
 
