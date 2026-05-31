@@ -395,38 +395,42 @@ and assigns outputs and next-tick register updates.
 
 The body is a \`block\` of \`decls\` (reg_decl, delay_decl, instance_decl,
 program_decl) and \`assigns\` (output_assign, next_update). Ports, type_params,
-and breaks_cycles sit alongside the body. Session metadata — \`params\`,
-\`audio_outputs\`, \`config\` — is top-level.
+and breaks_cycles sit alongside the body. **Audio output is an \`output_assign\`
+in the body with name \`"dac.out"\`** — wire the signal you want heard to it.
+Session metadata — \`params\`, \`config\` — is top-level.
 
 { "schema": "tropical_program_2", "name": "MyPatch",
   "body": { "op": "block",
     "decls": [
-      { "op": "programDecl", "name": "Sine", "program": { "op": "program", "name": "Sine",
+      { "op": "programDecl", "name": "Saw", "program": { "op": "program", "name": "Saw",
         "ports": { "inputs": ["freq"], "outputs": ["out"] },
         "body": { "op": "block",
           "decls": [{ "op": "regDecl", "name": "phase", "init": 0 }],
           "assigns": [
             { "op": "outputAssign", "name": "out",
-              "expr": { "op": "sin", "args": [{ "op": "mul", "args": [6.283185307179586, { "op": "reg", "name": "phase" }] }] } },
+              "expr": { "op": "sub", "args": [{ "op": "mul", "args": [2, { "op": "reg", "name": "phase" }] }, 1] } },
             { "op": "nextUpdate", "target": { "kind": "reg", "name": "phase" },
               "expr": { "op": "mod", "args": [{ "op": "add", "args": [{ "op": "reg", "name": "phase" }, { "op": "div", "args": [{ "op": "input", "name": "freq" }, { "op": "sampleRate" }] }] }, 1] } }
           ],
           "value": null
         }
       }},
-      { "op": "instanceDecl", "name": "osc", "program": "Sine", "inputs": { "freq": 440 } },
+      { "op": "instanceDecl", "name": "osc", "program": "Saw", "inputs": { "freq": 440 } },
       { "op": "instanceDecl", "name": "filt", "program": "LadderFilter",
         "inputs": { "input": { "op": "ref", "instance": "osc", "output": "out" }, "cutoff": 2000 } }
     ],
-    "assigns": [],
+    "assigns": [
+      { "op": "outputAssign", "name": "dac.out",
+        "expr": { "op": "ref", "instance": "filt", "output": "lp" } }
+    ],
     "value": null
-  },
-  "audio_outputs": [{ "instance": "filt", "output": "lp" }]
+  }
 }
 
 Key fields: schema, name, ports (inputs/outputs/type_defs), body (block),
 type_params, sample_rate, breaks_cycles, and top-level session metadata
-(params, audio_outputs, config).
+(params, config). Send a signal to the speakers with a body \`output_assign\`
+named \`"dac.out"\`. (File-root \`audio_outputs\` is deprecated — don't use it.)
 
 Decl node shapes:
 - reg_decl:      { op, name, init, type? }
