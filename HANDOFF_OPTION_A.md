@@ -85,14 +85,16 @@ This is a pure cache-key fix — no emitted-code or golden change. Rebuild requi
 
 ## Known limitations / next steps
 
-1. **WASM backend does not support root plans yet.** With the flag forced ON
-   globally, `tests/equiv/wasm_vs_jit.test.ts` has 4 failures (SinOsc×2,
-   SinOsc→OnePole, the array-zipWith case). JIT-root is correct (proven by
-   `root_vs_flat`); the diverging side is `emit_wasm`, which doesn't handle the
-   root-program plan shape (deeper nesting + root `RegDecl` writebacks +
-   empty top-level body). Phase B targets the **JIT** path; WASM root support is
-   Phase C/E. The flag defaults OFF, so normal WASM operation is unaffected. If
-   you force the flag on, scope it to JIT suites.
+1. **WASM backend supports root plans: DONE.** `emit_wasm` now recurses through
+   nested `children` with the same four-phase order as the C++
+   `emit_kernel_block` (preamble → per-child {pre_input, child} → body →
+   writebacks), instead of treating each `instance_function` as a flat leaf. The
+   recursive `collectKernelInstrs` also walks the tree for param discovery /
+   layout sizing. No engine change; pure `emit_wasm.ts`. Both backends now agree
+   on the root-program shape: `tests/equiv/wasm_vs_jit.test.ts` gains two
+   permanent (non-env) root-mode cases, and the whole equiv suite is green with
+   `TROPICAL_ROOT_PROGRAM=1`. **The flag is now backend-complete — Phase E
+   cutover is unblocked.**
 2. **Unwired typed-bound defaults differ (documented, benign).** An UNWIRED
    input with a typed-bound default (`freq: freq = 440`) resolves to 0 on the
    flat top-level path (its plain-number-only `defaults` builder skips the

@@ -24,7 +24,7 @@
  *   - slots        → f64 cells (inter-module shared array)
  */
 
-import type { FlatPlan } from './flat_plan'
+import type { FlatPlan, InstanceFunction } from './flat_plan'
 import type { NInstr, NOperand, ScalarType } from './ir/emit_resolved'
 import { dstAsTemp, dstAsArray, dstAsModuleSlot } from './ir/emit_resolved'
 import { rawIdx, rawOffset } from './ir/slot_indices'
@@ -285,18 +285,36 @@ export type EmitWasmOptions = {
   sampleRate?: number
 }
 
+/** Depth-first collect every instruction a kernel (and its nested
+ *  children) executes, in execution order: preamble, then per child
+ *  {pre_input, child…}, then this kernel's body. Param operands and
+ *  array/temp refs can live in any nested block, so layout sizing +
+ *  param discovery must walk the whole tree. */
+function collectKernelInstrs(inst: InstanceFunction, out: NInstr[]): void {
+  for (const i of inst.preamble_instructions) out.push(i)
+  for (const child of inst.children) {
+    for (const i of child.pre_input_instructions) out.push(i)
+    collectKernelInstrs(child, out)
+  }
+  for (const i of inst.instructions) out.push(i)
+}
+
 export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmResult {
   const inputCount = opts.inputCount ?? 0
   const maxBlockSize = opts.maxBlockSize ?? 2048
   const sampleRate = opts.sampleRate ?? plan.config.sampleRate
 
   // WASM consumes plan_5 by flattening per sample: scheduler.preamble
-  // → for each instance: body + writebacks → state_evolution →
-  // scheduler.postamble. Matches the C++ scheduler structure exactly.
+  // → for each instance kernel (recursively: preamble, per-child
+  // {pre_input, child}, body + writebacks) → state_evolution →
+  // scheduler.postamble. Matches the C++ `emit_kernel_block` structure
+  // exactly, including the fractal (nested-`children`) shape the
+  // root-program session lowering produces. `allInstructions` is only
+  // used for param discovery + layout sizing, so it just needs to
+  // contain every instruction the kernel tree executes.
   const allInstructions: NInstr[] = []
   for (const i of plan.scheduler_function.preamble) allInstructions.push(i)
-  for (const inst of plan.instance_functions)
-    for (const i of inst.instructions) allInstructions.push(i)
+  for (const inst of plan.instance_functions) collectKernelInstrs(inst, allInstructions)
   for (const i of plan.scheduler_function.state_evolution) allInstructions.push(i)
   for (const i of plan.scheduler_function.postamble) allInstructions.push(i)
 
@@ -335,14 +353,24 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   // Scheduler preamble
   for (const instr of plan.scheduler_function.preamble) emitInstruction(c, instr, ctx)
 
-  // Per-instance body + writebacks (unconditional — every instance runs every sample).
-  for (const inst of plan.instance_functions) {
+  // Per-instance body + writebacks (unconditional — every instance runs
+  // every sample). `emitKernelBlock` recurses into nested children with
+  // the same four-phase order the C++ engine uses (preamble → per-child
+  // {pre_input, child} → body → writebacks), so the root-program plan's
+  // nested instance bodies are emitted, not just the empty root body.
+  const emitKernelBlock = (inst: InstanceFunction): void => {
+    for (const instr of inst.preamble_instructions) emitInstruction(c, instr, ctx)
+    for (const child of inst.children) {
+      for (const instr of child.pre_input_instructions) emitInstruction(c, instr, ctx)
+      emitKernelBlock(child)
+    }
     for (const instr of inst.instructions) emitInstruction(c, instr, ctx)
 
     // Per-instance writebacks. Pattern-match on the RegTarget sum
     // type — the `arrayManaged` case carries no temp index because
     // array regs persist via in-place SetElement / strided-Add
-    // instructions earlier in the body.
+    // instructions earlier in the body. Each kernel uses its OWN
+    // state_reg_offset, so nested kernels write the right slots.
     for (let j = 0; j < inst.register_targets.length; j++) {
       const target = inst.register_targets[j]!
       if (target.kind === 'arrayManaged') continue
@@ -361,6 +389,7 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
       }
     }
   }
+  for (const inst of plan.instance_functions) emitKernelBlock(inst)
 
   // State-evolution (per-sample WriteSlots for extracted delays)
   for (const instr of plan.scheduler_function.state_evolution) emitInstruction(c, instr, ctx)
