@@ -37,8 +37,8 @@ Three domains, one project:
 - **Agentic interfaces.** Patches are graphs that an agent edits
   incrementally over MCP. Cycles in MCP-built graphs are broken at
   the wire layer (every wire is wrapped in a unit delay; the
-  compile-side extractor hoists those delays into the scheduler's
-  `state_evolution` phase) so the agent can describe feedback loops
+  compile-side extractor hoists those delays into per-wire registers)
+  so the agent can describe feedback loops
   without thinking about topological order. This is the shape that
   let "build me a four-pole resonant filter with self-oscillation"
   go from a sentence to audible signal without any structural

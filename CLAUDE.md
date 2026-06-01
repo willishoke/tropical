@@ -106,16 +106,22 @@ ResolvedProgram (post-strata)
 Sessions (the MCP/runtime view of a graph in flight) reuse the
 per-program pipeline at the instance level — each instance type is
 elaborated and strata-processed once at load (`resolveProgramType`) —
-and compose the already-reduced instances into one plan:
+and, by default, **materialize into a single synthetic root
+`ResolvedProgram`** that is lowered through the *same* fractal path the
+per-program pipeline uses:
 
 ```
 SessionState  (instances + wiring + dac.out + params)
   │
   │  compileSession (compiler/ir/compile_session.ts)
   │     each instance is already a post-strata ResolvedProgram;
-  │     liftWiresToInstances + extractSessionDelays normalize the wiring,
-  │     then compileSessionSlotted runs per-instance compileResolved and
-  │     stitches them with a scheduler.
+  │     liftWiresToInstances + extractSessionDelays normalize the wiring;
+  │     then compileSessionSlotted (default = root-program lowering):
+  │       materialize_session → one root ResolvedProgram
+  │         (instances → InstanceDecls, per-wire delays → root RegDecls)
+  │       → partitionKernel → tropical_plan_5
+  │     (legacy per-instance scheduler path retained behind
+  │      rootProgram:false as the root_vs_flat oracle.)
   ▼
 tropical_plan_5  (instance_functions[] + scheduler_function)
 ```
@@ -126,8 +132,11 @@ elaborator. Session-level cycles in MCP-built graphs are broken at
 the wire layer: every wire stored via `setWireExpr` is wrapped in a
 unit delay (`{op:'delay', args:[expr], init:0}`), and
 `extractSessionDelays` (a compileSession pre-pass) hoists every
-`delay()` op in any wire to a fresh session-level module slot
-updated in the scheduler's `state_evolution` phase. Hand-written
+`delay()` op in any wire to a fresh slot recorded in
+`session.delaySlotRegistry` — which the default root-program lowering
+realizes as a root `RegDecl` (read-old/write-new register writeback)
+and the legacy per-instance lowering realizes as a `WriteSlot` in the
+scheduler's `state_evolution` phase. Hand-written
 JSON patches with cross-coupled instances must wrap their own
 back-edges in `delay()` to break the session-level cycle —
 `assertSessionAcyclic` (`compiler/ir/lowering/session_cycle_check.ts`)
@@ -148,15 +157,19 @@ post-strata ResolvedProgram (per-program path)  /  SessionState (session path)
         ├─→ compileSession (compiler/ir/compile_session.ts)
         │      liftWiresToInstances → extractSessionDelays →
         │      assertSessionAcyclic → compileSessionSlotted:
-        │      per-instance compileResolved → tropical_plan_5 JSON
-        │      (instance_functions[] + scheduler).
+        │      default = root-program (materialize_session → partitionKernel);
+        │      instance_functions = [root] with the session instances as
+        │      nested children, delays as root RegDecl writebacks, the
+        │      scheduler reduced to the DAC-stitch postamble.
         │      ──── C API boundary (engine/c_api/tropical_c.h, koffi FFI) ────
         │      NumericProgramParser → FlatProgram (multi-function)
         │      OrcJitEngine → LLVM IR — one kernel function whose body is:
         │          for each sample:
         │            preamble (currently empty; reserved for future setup)
-        │            for each instance: body + writebacks
-        │            state_evolution (delay-slot WriteSlots)
+        │            for each instance_function (recursively: preamble,
+        │              per-child {pre_input, child}, body, writebacks)
+        │            state_evolution (delay-slot WriteSlots; empty on the
+        │              root path — delays are root-kernel writebacks)
         │            postamble (DAC stitch reads)
         │            output mix
         │      FlatRuntime → buffer loop, double-buffered hot-swap
@@ -180,13 +193,16 @@ sample, and the JIT fuses across instances aggressively. This is the
 shape of synthesis the language is good at; dynamic-lifecycle
 semantics belong in a different language with a different runtime.
 
-Param handles are the only thing that differs between
-backends. Wiring expressions reference parameters by name
-(`{op:'param', name}` / `{op:'trigger', name}`); the session compiler
-resolves names to handles at compile time. For the JIT path the handle
-is a native pointer (`tropical_param_t`); for the WASM path it's a
-SAB slot index, stringified to keep the `tropical_plan_5` schema
-backend-agnostic.
+Params. Wiring expressions reference parameters by name
+(`{op:'param', name}` / `{op:'trigger', name}`). The **session**
+compiler resolves each to a `param:name` **module slot** read — the
+control plane drives it via `setSlot`, and hot-swap transfers it by
+name like any other slot (both session lowerings do this; the root
+path threads it as `paramSlots` so the root kernel's `ParamRef` lowers
+to the slot). The standalone **per-program** path instead binds params
+to FFI handles — a native pointer (`tropical_param_t`) on the JIT, a
+SAB slot index (stringified to keep `tropical_plan_5` backend-agnostic)
+on the WASM path.
 
 ## Equivalence gates
 
@@ -238,7 +254,7 @@ engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio o
 mcp/                  MCP server — primary agent interface over stdio
 web/                  WASM/browser backend — host (main thread), worklet (audio thread), build
 patches/              Example patches (tropical_program_2 JSON)
-stdlib/               32 .trop programs; see stdlib/README.md
+stdlib/               33 .trop programs; see stdlib/README.md
 tests/                Cross-cutting test surface (see tests/ for layout)
   equiv/              Cross-backend equivalence suites (the integration layer)
   bench/              Compile-time and runtime benchmarks

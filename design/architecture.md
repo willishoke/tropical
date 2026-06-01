@@ -48,8 +48,10 @@ elaborator (`CycleViolation`, with port-detailed Tier-2 errors and a
 suggested explicit-delay fix). Session-level cycles in MCP-built
 graphs are broken at the wire layer: every wire stored via
 `setWireExpr` is wrapped in a unit delay, and a pre-emit pass hoists
-those delays out of the wires into session-level slots updated in
-the scheduler's `state_evolution` phase. Hand-written JSON patches
+those delays out of the wires into `session.delaySlotRegistry` —
+realized by the default root-program lowering as per-wire register
+writebacks (and by the legacy per-instance lowering as
+`state_evolution` `WriteSlot`s). Hand-written JSON patches
 with cross-coupled instances must wrap their own back-edges in
 `delay()` to break the session-level cycle —
 `assertSessionAcyclic` (`compiler/ir/lowering/session_cycle_check.ts`)
@@ -112,13 +114,14 @@ ResolvedProgram (post-strata)
     │       WasmRuntime in AudioWorklet (web/worklet/runtime.ts)
 ```
 
-Both backends consume the same `tropical_plan_5`: the session keeps
-each instance compiled independently (one `InstanceFunction` per
-instance, packed into the FlatPlan by the scheduler), and the kernel
-is one LLVM function (or, in WASM, one `process` export) whose body
-dispatches each instance in topological order per sample. The
-equivalence tests pin the JIT and WASM outputs sample-for-sample to
-each other.
+Both backends consume the same `tropical_plan_5`: by default the
+session materializes into a single synthetic root program whose
+`InstanceFunction` carries the session instances as nested `children`
+(the legacy per-instance lowering packs one `InstanceFunction` per
+instance instead — see §4.1), and the kernel is one LLVM function (or,
+in WASM, one `process` export) whose body dispatches each instance
+per sample. The equivalence tests pin the JIT and WASM outputs
+sample-for-sample to each other.
 
 Every pass below is presented as input IR, output IR, and the
 structure dropped between them.
@@ -422,13 +425,13 @@ hands the result to `compileSessionSlotted`:
 
 2. **`extractSessionDelays`**
    (`compiler/ir/lowering/extract_session_delays.ts`) — hoists every
-   top-level `delay()`-wrapped wire into a fresh module slot. The
-   wire is rewritten to a `sessionSlot` read; the source expression
-   is recorded in `session.delaySlotRegistry` for
-   `compileSessionSlotted` to emit as a `WriteSlot` in the
-   scheduler's `state_evolution` phase. This is the structural
+   `delay()` op in a wire into a fresh slot. The wire is rewritten to
+   a `sessionSlot` / `sessionArraySlot` read; the source expression is
+   recorded in `session.delaySlotRegistry`. This is the structural
    mechanism that keeps the MCP-built IR acyclic — every wire becomes
-   a slot-to-slot copy with one sample of latency.
+   a slot read with one sample of latency, realized by whichever
+   lowering runs (root `RegDecl` writeback, or `state_evolution`
+   `WriteSlot`; see below).
 
 3. **`assertSessionAcyclic`**
    (`compiler/ir/lowering/session_cycle_check.ts`) — defensive
@@ -436,17 +439,37 @@ hands the result to `compileSessionSlotted`:
    sessions that bypass both `setWireExpr`'s auto-wrap and explicit
    `delay()`.
 
-Then `compileSessionSlotted` compiles each instance standalone
-through `compileResolved` and packs the results into a
-`tropical_plan_5` `FlatPlan` with one `InstanceFunction` per
-instance plus one `SchedulerFunction`. The scheduler's four phases
-sequence the per-sample work:
+Then `compileSessionSlotted` dispatches on the lowering:
+
+- **root-program (default).** The whole session materializes into one
+  synthetic root `ResolvedProgram` (`materialize_session.ts`):
+  instances become `InstanceDecl`s, per-wire scalar delays become root
+  scalar `RegDecl`s, array session delays become array `RegDecl`s. That
+  root is lowered through the *same* `partitionKernel` the per-program
+  fractal path uses (with `ROOT_INSTANCE_PATH` naming transparency, so
+  children and registers keep bare names). The result is a single
+  `InstanceFunction` (the root) whose `children` are the session
+  instances; the per-wire latency is the engine's read-old/write-new
+  register writeback, so the scheduler's `state_evolution` phase is
+  empty. Slot-based session params are threaded as `paramSlots`.
+- **per-instance (legacy, `rootProgram:false`).** Compiles each
+  instance standalone through `compileResolved`, packs one
+  `InstanceFunction` per instance, and emits one `WriteSlot` per
+  delay-registry entry into `state_evolution`. Retained as the
+  `root_vs_flat` differential oracle and an escape hatch
+  (`TROPICAL_ROOT_PROGRAM=0`).
+
+Both produce a `tropical_plan_5` `FlatPlan` with one
+`SchedulerFunction`. The scheduler's phases sequence the per-sample
+work (the per-instance dispatch recurses into nested `children`):
 
 ```
 for each sample:
   preamble        (currently empty; reserved for future setup)
-  for each instance, in topo order: body + writebacks
-  state_evolution (WriteSlot per extracted delay)
+  for each instance_function (recursively: preamble,
+    per-child {pre_input, child}, body, writebacks)
+  state_evolution (WriteSlot per extracted delay; empty on the root
+                   path — delays are root-kernel register writebacks)
   postamble       (DAC stitch — read graphOutput slots into mix temps)
   output mix
 ```
@@ -486,13 +509,15 @@ different runtime.
 
 The three sections below are not further compiler stages. They are
 parallel interpretations of the same post-strata `ResolvedProgram`
-into different targets. Param handles are the only thing that
-differs between them: wiring expressions reference parameters by
-name (`{op:'param', name}`); the materializer resolves names to
-handles at compile time. For the JIT path the handle is a native
-pointer (`tropical_param_t`); for the WASM path it's a SAB slot
-index, stringified to keep the `tropical_plan_5` schema backend-
-agnostic.
+into different targets. Wiring expressions reference parameters by
+name (`{op:'param', name}`). The **session** path resolves each to a
+`param:name` **module slot** read — the control plane drives it via
+`setSlot`, hot-swap transfers it by name (the root path threads it as
+`paramSlots` so the root kernel's `ParamRef` lowers to the slot). The
+standalone **per-program** path instead binds params to FFI handles:
+a native pointer (`tropical_param_t`) on the JIT, a SAB slot index
+(stringified to keep `tropical_plan_5` backend-agnostic) on the WASM
+path.
 
 ### 5.1 compileResolved → tropical_plan_5 → JIT
 
@@ -505,10 +530,13 @@ agnostic.
    lowered IR, emit a `PerInstancePlan` whose instructions follow
    the `tropical_plan_5` schema in `compiler/flat_plan.ts`.
 
-`compile_session_slotted.ts` packs N `PerInstancePlan`s into
+`compile_session_slotted.ts` packs `PerInstancePlan`s into
 `instance_functions[]` of a `FlatPlan`, shifting indices by the
-per-instance offsets, and builds the `SchedulerFunction` with the
-DAC stitch postamble and the `state_evolution` `WriteSlot`s.
+per-instance offsets, and builds the `SchedulerFunction` with the DAC
+stitch postamble. On the default root path that's a single root
+`InstanceFunction` (instances nested as its `children`) and an empty
+`state_evolution`; on the legacy per-instance path it's N functions
+plus the `state_evolution` `WriteSlot`s.
 
 **Structural CSE.** `emit_resolved.ts` keys CSE on a bottom-up
 structural id (interned via `${op}|${field=}|${child_id}` strings),
@@ -546,8 +574,10 @@ OrcJitEngine::compile_flat_program()   ← engine/jit/OrcJitEngine.{hpp,cpp}
      3. Generate typed LLVM IR. One outer kernel function whose
         body, per sample, runs:
             preamble (currently empty)
-            for each instance: body + writebacks
-            state_evolution (delay-slot WriteSlots)
+            for each instance_function (recursively: preamble,
+              per-child {pre_input, child}, body, writebacks)
+            state_evolution (delay-slot WriteSlots; empty on the
+              root path — delays are root-kernel writebacks)
             postamble (DAC stitch reads)
             output mix
         Per-instruction operand resolution emits f64/i64/i1 with
