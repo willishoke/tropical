@@ -1,26 +1,21 @@
 /**
- * Shared patch corpus for the benchmark scripts. Lists the patches in
- * `patches/` that currently compile through `compileSession`. Patches
- * blocked on known compile limitations (array-typed instance inputs,
- * missing stdlib programs) are excluded.
+ * Shared patch corpus for the benchmark scripts. Every patch in
+ * `patches/` compiles through `compileSession`; this is the runnable
+ * list the bench scripts iterate.
  *
- * When a blocker is resolved, move the entry from BLOCKED to COMPILES.
+ * (The dead patches that used to be parked in a BLOCKED list — broken
+ * files and ones referencing never-built stdlib types like Reverb /
+ * Compressor — were deleted; array-input patches were unblocked by the
+ * root-program lowering's array session-slot support.)
  */
 
 export const COMPILES: string[] = [
+  'acid_noise.json',
   'bubble_cloud.json',
+  'bubble_drip.json',
   'cross_fm_4.json',
   'cross_fm_evolved.json',
-]
-
-export const BLOCKED: { patch: string; reason: string }[] = [
-  { patch: 'bubble_drip.json',         reason: 'array-shaped input expression at clk.ratios_in (sequencer ratios)' },
-  { patch: 'sequencer_demo.json',      reason: 'array-shaped input expression at clk.ratios_in' },
-  { patch: 'acid_noise.json',          reason: 'array-shaped input expression at ClockBeat.ratios_in' },
-  { patch: 'odd_harmonics.json',       reason: 'array-shaped input expression at Clock1.ratios_in' },
-  { patch: 'arp_transpose.json',       reason: 'array-shaped input expression at clock1.ratios_in' },
-  { patch: 'int_seq_test.json',        reason: 'index op with non-array operand (array-typed input in slotted path)' },
-  { patch: 'compressor_harmonics.json', reason: "missing stdlib program 'Compressor'" },
-  { patch: 'melancholy_house.json',    reason: "missing stdlib program 'Compressor'" },
-  { patch: '31tet_otonal_seq.json',    reason: "missing stdlib program 'Reverb'" },
+  'harmonic_lfo_ring.json',
+  'odd_harmonics.json',
+  'sequencer_demo.json',
 ]

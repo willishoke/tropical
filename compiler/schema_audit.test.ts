@@ -24,16 +24,11 @@ const STDLIB_DIR = join(__dirname, '..', 'stdlib')
 /** Patches that still use `audio_outputs` instead of body `dac.out` wires.
  *  Migration is gated on D5 (snake_case op normalization at ingest). */
 const GRANDFATHERED_AUDIO_OUTPUTS: ReadonlySet<string> = new Set([
-  '31tet_otonal_seq.json',
   'acid_noise.json',
-  'arp_transpose.json',
   'bubble_cloud.json',
   'bubble_drip.json',
-  'compressor_harmonics.json',
   'cross_fm_4.json',
   'cross_fm_evolved.json',
-  'int_seq_test.json',
-  'melancholy_house.json',
   'odd_harmonics.json',
   'sequencer_demo.json',
 ])

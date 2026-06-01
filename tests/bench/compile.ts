@@ -1,42 +1,46 @@
 /**
- * Quick benchmark: reproduce the 13-module patch compilation to find bottleneck.
+ * Quick benchmark: a 13-module patch compilation, to find the TS-pipeline
+ * bottleneck (per-module and whole-session). Uses real stdlib types.
  */
 import { makeSession, SessionState, instantiate, outputNames } from '../../compiler/session.js'
 import { loadStdlib as loadBuiltins } from '../../compiler/program.js'
 import { compileSession } from '../../compiler/ir/compile_session'
-import { toWirePlan } from '../../compiler/flat_plan.js'
-import { wireKey, portRef, instanceName, portName } from '../../compiler/ir/branded_names.js'
-
-const wk = (i: string, p: string) => wireKey(portRef(instanceName(i), portName(p)))
+import { toWirePlan, type InstanceFunction } from '../../compiler/flat_plan.js'
 
 const session: SessionState = makeSession()
 loadBuiltins(session)
 
-// Instantiate the same 13 modules from the user's patch
+// 13 real (non-generic) stdlib modules — an oscillator/filter/effect mix.
 const modules: [string, string][] = [
-  ['Clock', 'Clock1'],
-  ['BassDrum', 'Kick1'],
-  ['ADEnvelope', 'BassEnv'],
-  ['VCO', 'BassVCO'],
-  ['LadderFilter', 'BassFilter'],
-  ['VCA', 'BassVCA'],
-  ['Compressor', 'BassComp'],
-  ['VCO', 'PadA'],
-  ['VCO', 'PadB'],
-  ['VCO', 'PadC'],
-  ['VCO', 'PadD'],
-  ['Reverb', 'PadReverb'],
-  ['Compressor', 'PadComp'],
+  ['SinOsc', 'Osc1'],
+  ['BlepSaw', 'Osc2'],
+  ['VCA', 'Amp1'],
+  ['OnePole', 'LP1'],
+  ['SVF', 'SVF1'],
+  ['CrossFade', 'XFade1'],
+  ['SoftClip', 'Clip1'],
+  ['AllpassDelay', 'AP1'],
+  ['CombDelay', 'Comb1'],
+  ['EnvExpDecay', 'Env1'],
+  ['SampleHold', 'SH1'],
+  ['Tanh', 'Sat1'],
+  ['WhiteNoise', 'Noise1'],
 ]
 
-for (const [typeName, instanceName] of modules) {
+for (const [typeName, name] of modules) {
   const type = session.typeRegistry.get(typeName)!
-  const inst = instantiate(type, instanceName)
-  session.instanceRegistry.set(instanceName, inst)
+  session.instanceRegistry.set(name, instantiate(type, name))
+  // Tap each module's first output into the DAC mix so the full session
+  // compile produces a non-degenerate plan.
+  session.graphOutputs.push({ instance: name, output: outputNames(type)[0] })
 }
 
-// Set the input that triggers wire()
-session.inputExprNodes.set(wk("Clock1", "freq"), 2.1667)
+/** Total instructions across a kernel and its nested children (the root
+ *  path nests instance bodies as children of one root function). */
+function countInstrs(fn: InstanceFunction): number {
+  return fn.preamble_instructions.length + fn.instructions.length
+    + fn.children.reduce((n, c) => n + c.pre_input_instructions.length + countInstrs(c), 0)
+}
 
 // Test individual modules to find which is slow
 for (const [typeName, instanceName] of modules) {
@@ -63,9 +67,9 @@ const t1 = performance.now()
 const instrCount =
     plan.scheduler_function.preamble.length
   + plan.scheduler_function.postamble.length
-  + plan.instance_functions.reduce((n, i) => n + i.instructions.length, 0)
+  + plan.instance_functions.reduce((n, i) => n + countInstrs(i), 0)
 console.log(`compileSession: ${(t1 - t0).toFixed(1)}ms`)
-console.log(`  instances: ${plan.instance_functions.length}`)
+console.log(`  instance_functions: ${plan.instance_functions.length} (root nests instances as children)`)
 console.log(`  instructions: ${instrCount} (${plan.scheduler_function.preamble.length} preamble + bodies + ${plan.scheduler_function.postamble.length} postamble)`)
 console.log(`  registers: ${plan.register_names.length}`)
 console.log(`  array_slots: ${plan.array_slot_sizes.length} (sizes: ${plan.array_slot_sizes.join(', ')})`)
