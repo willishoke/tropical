@@ -394,6 +394,54 @@ function wrapInUnitDelay(expr: ExprNode, init: number, id: string): ExprNode {
   return { op: 'delay', args: [expr], init, id } as ExprNode
 }
 
+/** Reverse `extractSessionDelays`: rewrite the hoisted `sessionSlot` /
+ *  `sessionArraySlot` reads a compile leaves in `inputExprNodes` back
+ *  into `delay(<source>, init)` using the registry. This is what makes
+ *  a post-compile wire round-trip — `save` must emit the authored
+ *  `delay()` form, not an opaque slot index, so a reload (which re-hoists
+ *  the delays) reproduces the same per-wire unit latency. Recurses into
+ *  the resolved source (nested `delay(delay(x))`) and is cycle-safe via
+ *  a visited-slot set. Non-slot expressions pass through structurally
+ *  unchanged. */
+export function reconstructWireDelays(
+  expr: ExprNode,
+  registry: readonly DelaySlotEntry[],
+  seen: ReadonlySet<string> = new Set(),
+): ExprNode {
+  if (typeof expr !== 'object' || expr === null) return expr
+  if (Array.isArray(expr)) return expr.map(e => reconstructWireDelays(e, registry, seen))
+
+  const n = expr as { op?: unknown; index?: unknown; [k: string]: unknown }
+  if ((n.op === 'sessionSlot' || n.op === 'sessionArraySlot') && typeof n.index === 'number') {
+    const isArray = n.op === 'sessionArraySlot'
+    const tag = `${isArray ? 'a' : 's'}${n.index}`
+    const entry = registry.find(e =>
+      isArray ? (e.isArray && e.arraySlot === n.index)
+              : (!e.isArray && e.slotIdx === n.index))
+    // Unknown slot or a cycle (malformed registry) — leave as-is rather
+    // than loop forever; the slot index at least survives.
+    if (entry === undefined || seen.has(tag)) return expr
+    const src = reconstructWireDelays(entry.sourceExpr, registry, new Set(seen).add(tag))
+    return { op: 'delay', args: [src], init: entry.init ?? 0 } as ExprNode
+  }
+
+  // Structural recurse into every expression-valued field (args, items,
+  // match arms, …) — mirrors extractSessionDelays' own generic walk.
+  const out: Record<string, unknown> = { ...n }
+  for (const [k, v] of Object.entries(n)) {
+    if (k === 'op') continue
+    if (Array.isArray(v)) {
+      out[k] = v.map(item =>
+        (typeof item === 'object' || typeof item === 'number' || typeof item === 'boolean')
+          ? reconstructWireDelays(item as ExprNode, registry, seen)
+          : item)
+    } else if (typeof v === 'object' && v !== null) {
+      out[k] = reconstructWireDelays(v as ExprNode, registry, seen)
+    }
+  }
+  return out as ExprNode
+}
+
 // ─────────────────────────────────────────────────────────────
 // Slot allocation (M2 — additive helpers, no callers yet)
 // ─────────────────────────────────────────────────────────────
