@@ -84,7 +84,7 @@ error envelope (see below) and the previous kernel keeps playing.
 - `inputExprNodes: Map<"inst:input", ExprNode>` — wiring
 - `graphOutputs: Array<{instance, output}>` — what wires to dac
 - `paramRegistry` — control parameters by name
-  (the materializer turns names into FFI handles at compile time)
+  (the session compiler turns names into FFI handles at compile time)
 - `runtime: Runtime` — native `tropical_runtime_t`
 - `dac: DAC | null` — created lazily on first `start_audio`
 

@@ -97,9 +97,12 @@ ir/                   The strata pipeline + resolved-IR emit boundary
                             extractSessionDelays → compileSessionSlotted.
   compile_session_slotted.ts session → tropical_plan_5. Dispatches:
                             root-program (default) vs per-instance (legacy).
-  materialize_session.ts    session → one synthetic root ResolvedProgram
-                            (the default root-program lowering: instances →
-                            InstanceDecls, per-wire delays → root RegDecls).
+  session_to_parsed.ts      session → ParsedProgram serializer. The default
+                            root-program lowering: buildSessionRoot feeds it
+                            to `elaborate` (instances → InstanceDecls via the
+                            ExternalProgramResolver hook; per-wire delays →
+                            `delay` decls → root RegDecls). Replaced the
+                            hand-rolled materialize_session.ts.
   partition_recursive.ts    partitionKernel: recursive box-closed lowering
                             (one kernel per InstanceDecl at every nesting
                             depth); shared by the root + per-program paths.
@@ -120,21 +123,26 @@ runtime/
   runtime.ts                Runtime class (tropical_runtime_t wrapper, FinalizationRegistry)
   audio.ts                  DAC class (tropical_dac_t wrapper, device listing)
   param.ts                  Param (smoothed scalar with one-pole lowpass); referenced by name
-                            in wiring; the materializer resolves the name to an FFI handle
+                            in wiring; the session compiler resolves the name to an FFI handle
   audio_smoke.ts            Smoke test for audio output
 ```
 
 `flatten.ts`, `interpret.ts`, `interpret_resolved.ts`, `emit_numeric.ts`,
-and `ir/load.ts` / `ir/program_type_builder.ts` are gone. The path is
-`elaborate → strata → compile_resolved` (or `emit_wasm`). For the
-**session** path, `compile_session` now defaults to the **root-program
-lowering** (`ir/materialize_session.ts`): the whole session materializes
-into one synthetic root `ResolvedProgram` — instances → `InstanceDecl`s,
-per-wire unit delays → root `RegDecl`s — lowered through the *same*
-`partitionKernel` the per-program fractal path uses. The legacy
-per-instance scheduler path (compose N plans + a `state_evolution`
-phase) is retained behind `rootProgram:false` as the `root_vs_flat`
-differential oracle and an escape hatch (`TROPICAL_ROOT_PROGRAM=0`).
+`ir/materialize_session.ts`, and `ir/load.ts` / `ir/program_type_builder.ts`
+are gone. The path is `elaborate → strata → compile_resolved` (or
+`emit_wasm`). For the **session** path, `compile_session` defaults to the
+**root-program lowering** (`ir/session_to_parsed.ts`): the whole session
+serializes back to a `ParsedProgram` and runs through the SAME `elaborate`
+front door — instances → `InstanceDecl`s (their already-resolved types fed
+in via the elaborator's `ExternalProgramResolver` hook, i.e. LINK not
+re-elaboration); per-wire unit delays → `delay` decls the elaborator folds
+into root `RegDecl`s — then lowered through the *same* `partitionKernel`
+the per-program fractal path uses. This replaced the hand-rolled
+`materialize_session.ts` (a partial re-implementation of the elaborator's
+name resolution). The legacy per-instance scheduler path (compose N plans +
+a `state_evolution` phase) is retained behind `rootProgram:false` as the
+`root_vs_flat` differential oracle and an escape hatch
+(`TROPICAL_ROOT_PROGRAM=0`).
 
 ## Surface in (parse + raise)
 
@@ -221,11 +229,13 @@ evaluator. The two backends below operate on this image.
   dep graph) — then calls `compileSessionSlotted`, which dispatches on
   the lowering:
 
-  - **root-program (default).** `compileSessionSlottedRoot`
-    materializes the session into one synthetic root `ResolvedProgram`
-    (`materialize_session.ts`) and lowers it through `partitionKernel`
-    (`ROOT_INSTANCE_PATH`, naming-transparent so children/registers keep
-    bare names). Per-wire scalar delays become root scalar `RegDecl`s;
+  - **root-program (default).** `compileSessionSlottedRoot`'s
+    `buildSessionRoot` serializes the session to a `ParsedProgram`
+    (`session_to_parsed.ts`) and runs it through `elaborate` to get one
+    synthetic root `ResolvedProgram`, then lowers it through
+    `partitionKernel` (`ROOT_INSTANCE_PATH`, naming-transparent so
+    children/registers keep bare names). Per-wire scalar delays become
+    root scalar `RegDecl`s (via `delay` decls the elaborator folds);
     array session delays become array `RegDecl`s; the per-wire
     one-sample latency is reproduced by the engine's read-old/write-new
     register writeback. The scheduler reduces to the DAC-stitch
@@ -319,7 +329,7 @@ by `loadStdlibFromSources()`.
   for GC-driven cleanup.
 - `audio.ts` — `DAC` wraps `tropical_dac_t`. Static `listDevices()`.
 - `param.ts` — `Param`: control-rate scalar with one-pole lowpass smoothing.
-  Wiring references them by name (`{op:'param', name}`); the materializer
+  Wiring references them by name (`{op:'param', name}`); the session compiler
   resolves the name to a handle (`tropical_param_t` for the JIT, SAB slot
   index stringified to `param.ptr` for WASM) at compile time. Legacy
   `{op:'trigger', name}` refs are still accepted on the wire and aliased

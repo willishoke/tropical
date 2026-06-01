@@ -1,30 +1,31 @@
 /**
- * session_to_parsed.ts — SPIKE: session → `ParsedProgram` serializer.
+ * session_to_parsed.ts — session → `ParsedProgram` serializer.
  *
- * This is exploratory, not a production path. It exists to answer one
- * architectural question: is `materialize_session.ts` a redundant,
- * hand-rolled re-implementation of the elaborator? (See the spike test
- * `tests/spike/session_as_parsed_program.test.ts`.)
- *
- * The claim under test: a session is morally a `tropical_program_2` —
+ * The session→root lowering. A session is morally a `tropical_program_2`:
  * a program whose body decls are its top-level instances wired together,
  * with per-wire unit delays expressed as `delay` decls and params as
- * `param` decls. If so, the session can serialize to a `ParsedProgram`
- * and feed the SAME `elaborate` front door the surface path uses, with
- * the instances' already-resolved types supplied through the elaborator's
- * existing `ExternalProgramResolver` hook (the LINK seam). Then
- * `materializeSessionToResolvedIR` + `extractSessionDelays`' bespoke
- * RegDecl reconstruction collapse into "emit NameRefs, call elaborate."
- *
- * Scope (Phase B slice): scalar wiring, scalar session delays, params,
- * non-generic or position-typeArg'd instances. Array wires / array
- * session delays / sum-typed wiring are out of slice and throw — the
- * spike is a differential against `materialize_session.ts`'s *scalar*
- * path, nothing more.
+ * `param` decls. `compile_session_slotted.ts:buildSessionRoot` serializes
+ * the session here and feeds the result to the SAME `elaborate` front door
+ * the surface path uses — the instances' already-resolved types are
+ * supplied through the elaborator's `ExternalProgramResolver` hook
+ * (`sessionTypeResolver`), so this LINKs the already-reduced instances
+ * rather than re-elaborating them from source. The elaborator folds the
+ * `delay` decls into root `RegDecl`s; its strict cycle policy rejects
+ * undelayed inter-instance cycles. This replaced the hand-rolled
+ * `materialize_session.ts` (a partial re-implementation of name resolution
+ * + RegDecl reconstruction) — see `git log` and `session_to_parsed.test.ts`.
  *
  * Consumes the session AFTER `liftWiresToInstances` + `extractSessionDelays`
- * have run (the same pre-state `materializeSessionToResolvedIR` consumes),
- * so the two builders take identical input and the differential is fair.
+ * have run: array-literal wires are already lifted to anonymous producer
+ * instances, and every `delay()` op is hoisted into
+ * `session.delaySlotRegistry` (scalar → `slotIdx`, array → `arraySlot`)
+ * with the wire rewritten to a `sessionSlot` / `sessionArraySlot` read.
+ *
+ * Handles the full session wire surface: scalar + array session delays,
+ * params, generics (already monomorphized in `inst.compiled.prog`), and
+ * lifted array-port wiring. Out-of-surface ops throw rather than
+ * mis-encode (none arise from the MCP wire tools or `.json` patches today;
+ * the equivalence gate is `tests/equiv/root_vs_flat.test.ts`).
  */
 
 import type { ExprNode, SessionState } from '../session.js'
@@ -87,40 +88,54 @@ export function sessionTypeResolver(
 export function sessionToParsedProgram(session: SessionState): ParsedProgram {
   // index → slotName for `{op:'sessionSlot', index}` reads (the rewrite
   // `extractSessionDelays` left behind), so a wire reading a hoisted
-  // delay resolves to the delay decl's name.
+  // delay resolves to the delay decl's name. Two namespaces:
+  // `{op:'sessionSlot', index}` (scalar) keys on `slotIdx`;
+  // `{op:'sessionArraySlot', index}` (array) keys on `arraySlot`.
   const slotNameByIndex = new Map<number, string>()
+  const arraySlotNameByIndex = new Map<number, string>()
   for (const entry of session.delaySlotRegistry) {
     if (entry.isArray) {
-      throw new Error('session_to_parsed: array session delays are out of slice')
+      if (entry.arraySlot === undefined) {
+        throw new Error(`session_to_parsed: array delay '${entry.slotName}' missing arraySlot`)
+      }
+      arraySlotNameByIndex.set(entry.arraySlot, entry.slotName)
+    } else {
+      if (entry.slotIdx === undefined) {
+        throw new Error(`session_to_parsed: scalar delay '${entry.slotName}' missing slotIdx`)
+      }
+      slotNameByIndex.set(entry.slotIdx, entry.slotName)
     }
-    if (entry.slotIdx === undefined) {
-      throw new Error('session_to_parsed: scalar delay entry missing slotIdx')
-    }
-    slotNameByIndex.set(entry.slotIdx, entry.slotName)
   }
+  const slots: SlotNames = { scalar: slotNameByIndex, array: arraySlotNameByIndex }
 
   const decls: ParsedBodyDecl[] = []
   const paramNames = new Set<string>()
 
-  // 1. Per-wire scalar delays → `delay` decls. `delay name = update init v`
-  //    is surface sugar the elaborator folds into `RegDecl { init, update }`
-  //    — exactly the synthetic reg `materializeSessionDelaySlots` builds by
-  //    hand. Same `slotName`, so the two line up by name.
+  // 1. Per-wire delays → `delay` decls. `delay name = update init v` is
+  //    surface sugar the elaborator folds into `RegDecl { init, update }`.
+  //    The `slotName` carries through as the reg name (the hot-swap state
+  //    key). Array session delays get an `arraySize`-long literal-array
+  //    init, so the elaborator types the reg as an array and the backend
+  //    allocates a backing slot.
   for (const entry of session.delaySlotRegistry) {
-    const update = wireExprToParsed(entry.sourceExpr, slotNameByIndex, paramNames)
-    const decl: ParsedDelayDecl = {
-      op: 'delayDecl',
-      name: entry.slotName,
-      update,
-      init: entry.init,
+    const update = wireExprToParsed(entry.sourceExpr, slots, paramNames)
+    let init: ParsedExpr
+    if (entry.isArray) {
+      if (entry.arraySize === undefined) {
+        throw new Error(`session_to_parsed: array delay '${entry.slotName}' missing arraySize`)
+      }
+      init = new Array<number>(entry.arraySize).fill(entry.init)
+    } else {
+      init = entry.init
     }
+    const decl: ParsedDelayDecl = { op: 'delayDecl', name: entry.slotName, update, init }
     decls.push(decl)
   }
 
-  // 2. Instances → instance decls, in topological order (the order
-  //    `materialize_session` uses; irrelevant to the elaborator, which
-  //    registers all decls before resolving expressions, but kept so the
-  //    serialized form mirrors the materializer's).
+  // 2. Instances → instance decls, in topological order. Order is
+  //    irrelevant to the elaborator (it registers all decls before
+  //    resolving expressions), but topo order keeps the serialized form
+  //    stable and matches the instance order the per-instance path uses.
   const order = computeInstanceTopoOrder(session)
   const wiresByInstance = groupWiresByInstance(session)
   for (const name of order) {
@@ -130,9 +145,9 @@ export function sessionToParsedProgram(session: SessionState): ParsedProgram {
     // monomorphized post-strata form — its name carries the specialization
     // (`Delay<N=8>`) and it declares no type-params. Re-emitting `<N=8>`
     // would ask the elaborator to specialize an already-specialized program
-    // and throw. This mirrors `buildInstanceDecl`'s `typeArgs: []`: the
-    // session resolves generics once at `resolveProgramType` time, and the
-    // root only ever LINKs the already-reduced result.
+    // and throw. The session resolves generics once at `resolveProgramType`
+    // time; the root only ever LINKs the already-reduced result, so it
+    // emits no `type_args`.
     const decl: ParsedInstanceDecl = {
       op: 'instanceDecl',
       name,
@@ -144,7 +159,7 @@ export function sessionToParsedProgram(session: SessionState): ParsedProgram {
       for (const { port, expr } of wires) {
         inputs.push({
           port: nameRef(port),
-          value: wireExprToParsed(expr, slotNameByIndex, paramNames),
+          value: wireExprToParsed(expr, slots, paramNames),
         })
       }
       decl.inputs = inputs
@@ -154,8 +169,9 @@ export function sessionToParsedProgram(session: SessionState): ParsedProgram {
 
   // 3. Params referenced anywhere in wiring → `param` decls. The
   //    elaborator resolves a bare `{op:'param', name}` (→ nameRef) against
-  //    the body's param decls, mirroring the ParamDecls
-  //    `materialize_session` synthesizes.
+  //    the body's param decls. The session compiler later resolves each
+  //    root `ParamDecl` to its control-plane slot (see `paramSlots` in
+  //    compile_session_slotted.ts).
   for (const pname of [...paramNames].sort()) {
     const decl: ParsedParamDecl = { op: 'paramDecl', name: pname }
     decls.push(decl)
@@ -163,8 +179,8 @@ export function sessionToParsedProgram(session: SessionState): ParsedProgram {
 
   const body: ParsedBlock = { op: 'block', decls, assigns: [] }
   // No ports: the root carries no input/output ports. DAC outputs stay a
-  // sidecar (`session.graphOutputs`), exactly as the root-program path
-  // keeps them off the materialized root today.
+  // sidecar (`session.graphOutputs`), tapped by `emitDacStitch` in the
+  // scheduler postamble — they never enter the root body.
   return { op: 'program', name: '__session__', body }
 }
 
@@ -186,18 +202,24 @@ function groupWiresByInstance(session: SessionState): Map<string, Wire[]> {
   return out
 }
 
+/** index→slotName maps for the two hoisted-delay namespaces. */
+interface SlotNames {
+  scalar: Map<number, string>
+  array:  Map<number, string>
+}
+
 /** Translate a session wire `ExprNode` to a `ParsedExpr`. Handles the
- *  closed set of ops scalar wires carry; throws on anything else so
+ *  closed set of ops session wires carry; throws on anything else so
  *  out-of-slice input fails loudly rather than mis-encoding. */
 function wireExprToParsed(
   expr: ExprNode,
-  slotNameByIndex: Map<number, string>,
+  slots: SlotNames,
   paramNames: Set<string>,
 ): ParsedExpr {
   if (typeof expr === 'number') return expr
   if (typeof expr === 'boolean') return expr
   if (Array.isArray(expr)) {
-    return expr.map(e => wireExprToParsed(e as ExprNode, slotNameByIndex, paramNames))
+    return expr.map(e => wireExprToParsed(e as ExprNode, slots, paramNames))
   }
   if (typeof expr !== 'object' || expr === null) {
     throw new Error(`session_to_parsed: invalid wire value ${JSON.stringify(expr)}`)
@@ -217,13 +239,25 @@ function wireExprToParsed(
       output: nameRef(obj.output as string),
     }
   }
-  // Hoisted-delay read → ref to the delay decl by its slot name.
+  // Hoisted scalar-delay read → ref to the delay decl by its slot name.
   if (op === 'sessionSlot') {
-    const name = slotNameByIndex.get(obj.index as number)
+    const name = slots.scalar.get(obj.index as number)
     if (name === undefined) {
       throw new Error(`session_to_parsed: sessionSlot index ${String(obj.index)} has no delay decl`)
     }
     return nameRef(name)
+  }
+  // Hoisted array-delay read → ref to the array delay decl by slot name.
+  if (op === 'sessionArraySlot') {
+    const name = slots.array.get(obj.index as number)
+    if (name === undefined) {
+      throw new Error(`session_to_parsed: sessionArraySlot index ${String(obj.index)} has no array delay decl`)
+    }
+    return nameRef(name)
+  }
+  // Array literal in op form (`{op:'array', items}`) → bare array literal.
+  if (op === 'array' && Array.isArray(obj.items)) {
+    return (obj.items as ExprNode[]).map(e => wireExprToParsed(e, slots, paramNames))
   }
   // Param / legacy trigger → name ref (collected for paramDecl emission).
   if (op === 'param' || op === 'trigger') {
@@ -234,15 +268,12 @@ function wireExprToParsed(
   if (op === 'delay') {
     throw new Error('session_to_parsed: unextracted delay() in wire — run extractSessionDelays first')
   }
-  if (op === 'sessionArraySlot') {
-    throw new Error('session_to_parsed: array session slot is out of slice')
-  }
 
   if (BUILTIN_NULLARY_OPS.has(op)) {
     return { op: 'call', callee: nameRef(op), args: [] }
   }
   if (BUILTIN_CALL_OPS.has(op)) {
-    const args = (obj.args as ExprNode[]).map(a => wireExprToParsed(a, slotNameByIndex, paramNames))
+    const args = (obj.args as ExprNode[]).map(a => wireExprToParsed(a, slots, paramNames))
     return { op: 'call', callee: nameRef(op), args }
   }
   if (BINARY_OPS.has(op)) {
@@ -250,14 +281,14 @@ function wireExprToParsed(
     return {
       op: op as never,
       args: [
-        wireExprToParsed(args[0], slotNameByIndex, paramNames),
-        wireExprToParsed(args[1], slotNameByIndex, paramNames),
+        wireExprToParsed(args[0], slots, paramNames),
+        wireExprToParsed(args[1], slots, paramNames),
       ],
     }
   }
   if (UNARY_OPS.has(op)) {
     const args = obj.args as [ExprNode]
-    return { op: op as never, args: [wireExprToParsed(args[0], slotNameByIndex, paramNames)] }
+    return { op: op as never, args: [wireExprToParsed(args[0], slots, paramNames)] }
   }
 
   throw new Error(`session_to_parsed: out-of-slice wire op '${op}'`)

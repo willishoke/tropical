@@ -106,9 +106,10 @@ ResolvedProgram (post-strata)
 Sessions (the MCP/runtime view of a graph in flight) reuse the
 per-program pipeline at the instance level — each instance type is
 elaborated and strata-processed once at load (`resolveProgramType`) —
-and, by default, **materialize into a single synthetic root
-`ResolvedProgram`** that is lowered through the *same* fractal path the
-per-program pipeline uses:
+and, by default, serialize the whole session **back into a
+`ParsedProgram` and run it through the SAME `elaborate` front door** the
+surface path uses, producing one synthetic root `ResolvedProgram`
+lowered through the same fractal path:
 
 ```
 SessionState  (instances + wiring + dac.out + params)
@@ -117,8 +118,11 @@ SessionState  (instances + wiring + dac.out + params)
   │     each instance is already a post-strata ResolvedProgram;
   │     liftWiresToInstances + extractSessionDelays normalize the wiring;
   │     then compileSessionSlotted (default = root-program lowering):
-  │       materialize_session → one root ResolvedProgram
-  │         (instances → InstanceDecls, per-wire delays → root RegDecls)
+  │       buildSessionRoot: sessionToParsedProgram → elaborate
+  │         (instances → InstanceDecls; per-wire delays → `delay` decls
+  │          the elaborator folds into root RegDecls; the instances'
+  │          already-resolved types are supplied via the elaborator's
+  │          ExternalProgramResolver hook — LINK, not re-elaboration)
   │       → partitionKernel → tropical_plan_5
   │     (legacy per-instance scheduler path retained behind
   │      rootProgram:false as the root_vs_flat oracle.)
@@ -157,7 +161,7 @@ post-strata ResolvedProgram (per-program path)  /  SessionState (session path)
         ├─→ compileSession (compiler/ir/compile_session.ts)
         │      liftWiresToInstances → extractSessionDelays →
         │      assertSessionAcyclic → compileSessionSlotted:
-        │      default = root-program (materialize_session → partitionKernel);
+        │      default = root-program (sessionToParsedProgram → elaborate → partitionKernel);
         │      instance_functions = [root] with the session instances as
         │      nested children, delays as root RegDecl writebacks, the
         │      scheduler reduced to the DAC-stitch postamble.

@@ -115,7 +115,8 @@ ResolvedProgram (post-strata)
 ```
 
 Both backends consume the same `tropical_plan_5`: by default the
-session materializes into a single synthetic root program whose
+session is serialized to a `ParsedProgram` and elaborated into a single
+synthetic root program whose
 `InstanceFunction` carries the session instances as nested `children`
 (the legacy per-instance lowering packs one `InstanceFunction` per
 instance instead — see §4.1), and the kernel is one LLVM function (or,
@@ -441,10 +442,14 @@ hands the result to `compileSessionSlotted`:
 
 Then `compileSessionSlotted` dispatches on the lowering:
 
-- **root-program (default).** The whole session materializes into one
-  synthetic root `ResolvedProgram` (`materialize_session.ts`):
-  instances become `InstanceDecl`s, per-wire scalar delays become root
-  scalar `RegDecl`s, array session delays become array `RegDecl`s. That
+- **root-program (default).** `buildSessionRoot` serializes the whole
+  session back to a `ParsedProgram` (`session_to_parsed.ts`) and runs it
+  through the SAME `elaborate` front door the surface path uses, yielding
+  one synthetic root `ResolvedProgram`: instances become `InstanceDecl`s
+  (their already-resolved types supplied via the elaborator's
+  `ExternalProgramResolver` hook — LINK, not re-elaboration), per-wire
+  scalar delays become root scalar `RegDecl`s (via `delay` decls the
+  elaborator folds), array session delays become array `RegDecl`s. That
   root is lowered through the *same* `partitionKernel` the per-program
   fractal path uses (with `ROOT_INSTANCE_PATH` naming transparency, so
   children and registers keep bare names). The result is a single
@@ -839,7 +844,7 @@ TypeScript wrappers over the C API via koffi.
 - `audio.ts` — `DAC` class wrapping `tropical_dac_t`. Static
   `listDevices()`.
 - `param.ts` — `Param` wrapping `tropical_param_t`. Wiring
-  references parameters by name; the materializer resolves the name
+  references parameters by name; the session compiler resolves the name
   to a `_h` handle and threads it into the plan via `paramHandles`.
 
 ---

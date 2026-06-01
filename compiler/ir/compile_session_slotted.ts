@@ -43,7 +43,8 @@ import {
   rawOffset,
 } from './slot_indices.js'
 import { partitionKernel, makeAccumulators, ROOT_INSTANCE_PATH } from './partition_recursive.js'
-import { materializeSessionToResolvedIR } from './materialize_session.js'
+import { elaborate } from './elaborator.js'
+import { sessionToParsedProgram, sessionTypeResolver } from './session_to_parsed.js'
 import { makeCompiled, type Compiled } from '../program_types.js'
 import { slotKey } from './branded_names.js'
 
@@ -52,14 +53,6 @@ export interface CompileSessionSlottedOptions {
   compilation_mode?: CompilationMode
   /** Option A root-program lowering (see CompileSessionOptions). */
   rootProgram?: boolean
-  /** Seam for the session-as-ParsedProgram experiment: lower this root
-   *  `ResolvedProgram` through the backend tail instead of calling
-   *  `materializeSessionToResolvedIR`. The caller is responsible for
-   *  building a root from the SAME post-extraction session state the
-   *  materializer would see (instances → InstanceDecls, per-wire scalar
-   *  delays → root RegDecls). Defaults to the materializer. Only consulted
-   *  on the root-program path. */
-  rootOverride?: ResolvedProgram
 }
 
 /** Compile the session into a `tropical_plan_5` `FlatPlan`. */
@@ -76,7 +69,7 @@ export function compileSessionSlotted(
   // explicit option is passed.
   const rootProgram = options.rootProgram ?? (process.env.TROPICAL_ROOT_PROGRAM !== '0')
   if (rootProgram) {
-    return compileSessionSlottedRoot(session, mode, options.rootOverride)
+    return compileSessionSlottedRoot(session, mode)
   }
   return compileSessionSlottedPerInstance(session, mode)
 }
@@ -372,10 +365,22 @@ function compileSessionSlottedPerInstance(
  *  Scalar session delays become scalar `RegDecl`s; array session delays
  *  become array `RegDecl`s (their elementwise-copy writeback replaces
  *  the per-instance path's `state_evolution` array `Add`). */
+/** Serialize a (post-extraction) session into a synthetic root
+ *  `ResolvedProgram` by running it through the shared `elaborate` front
+ *  door. The session's instances are already post-strata `ResolvedProgram`s;
+ *  `sessionTypeResolver` hands them to the elaborator by name through its
+ *  `ExternalProgramResolver` hook, so this LINKs the already-reduced
+ *  instances rather than re-elaborating them from source. Per-wire unit
+ *  delays (hoisted into `session.delaySlotRegistry` by
+ *  `extractSessionDelays`) serialize to `delay` decls the elaborator folds
+ *  into root `RegDecl`s; params serialize to `param` decls. */
+function buildSessionRoot(session: SessionState): ResolvedProgram {
+  return elaborate(sessionToParsedProgram(session), sessionTypeResolver(session))
+}
+
 function compileSessionSlottedRoot(
   session: SessionState,
   compilationMode: CompilationMode,
-  rootOverride?: ResolvedProgram,
 ): FlatPlan {
   // Two-phase slot pre-allocation — identical to the per-instance
   // path. partitionKernel re-issues these idempotently during its own
@@ -401,12 +406,15 @@ function compileSessionSlottedRoot(
   }
   acc.nextArrayRaw = session.ioArraySlotCount
 
-  // Materialize the session → synthetic root and lower it once. The
-  // root path is naming-transparent (ROOT_INSTANCE_PATH), so child
-  // output slots / register names land under bare paths exactly where
-  // the flat per-instance path puts them — `emitDacStitch` and
-  // hot-swap state-transfer-by-name resolve unchanged.
-  const root = rootOverride ?? materializeSessionToResolvedIR(session)
+  // Build the session's synthetic root and lower it once. The root is the
+  // session serialized to a `ParsedProgram` and run through the SAME
+  // `elaborate` front door the surface path uses, with the instances'
+  // already-resolved types supplied via the elaborator's external-resolver
+  // hook (LINK, not re-elaboration). The root is naming-transparent
+  // (ROOT_INSTANCE_PATH), so child output slots / register names land under
+  // bare paths exactly where the flat per-instance path puts them —
+  // `emitDacStitch` and hot-swap state-transfer-by-name resolve unchanged.
+  const root = buildSessionRoot(session)
   const rootCompiled = makeCompiled(root, { displayName: '__session__' })
 
   // Session params are slot-based (`param:name` module slots driven by
