@@ -23,6 +23,8 @@ record.
 | File                                       | What it captures |
 |--------------------------------------------|------------------|
 | `microkernel_vs_fused_2026-05-23.md`       | First-cut microkernel-vs-fused numbers. Baseline for the per-voice / scoped-lifetime roadmap. |
+| `jit_runtime_2026-05-31.md`                | First capture on the **root-program default** (post Option A cutover). Runtime ≤1.4% of realtime budget; cold compile dominated by LLVM. |
+| `microkernel_vs_fused_2026-05-31.md`       | Mode comparison on the root default — confirms the `microkernel` compile-time escape valve still works (32-voice fused 1362 ms → microkernel 559 ms). |
 
 ## Quick reference
 
