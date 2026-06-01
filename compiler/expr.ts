@@ -350,12 +350,21 @@ export interface ConstNode {
   type?: ScalarKind
 }
 
+/** A read of a hoisted unit-delay module slot, produced by
+ *  `extractSessionDelays` when it lifts a `delay()` out of a wire. The
+ *  delayed source lives in `session.delaySlotRegistry[index]`, not here,
+ *  so this is a leaf (no ExprNode children). */
+export interface SessionSlotNode { op: 'sessionSlot'; index: number }
+/** Array sibling of `SessionSlotNode` (a hoisted array delay slot). */
+export interface SessionArraySlotNode { op: 'sessionArraySlot'; index: number; size?: number }
+
 /** All leaf ops in a single union. */
 export type LeafNode =
   | InputNode | RegRefNode | DelayRefNode | DelayValueNode
   | NestedOutNode | NestedOutputNode | BindingNode | TypeParamNode
   | SampleRateNode | SampleIndexNode
   | ParamRefNode | ConstNode
+  | SessionSlotNode | SessionArraySlotNode
 
 // ── Decl ops (top-level only — appear at decl/assign positions) ─────────
 
