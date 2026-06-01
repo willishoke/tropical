@@ -25,9 +25,11 @@
  */
 
 import { describe, test, expect } from 'bun:test'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   makeSession, resolveProgramType, instantiate, outputNames,
-  allocateOutputSlots, allocateParamSlot, setWireExpr,
+  allocateOutputSlots, allocateParamSlot, setWireExpr, loadJSON,
 } from '../../compiler/session.js'
 import { loadStdlib } from '../../compiler/program.js'
 import { compileSession } from '../../compiler/ir/compile_session.js'
@@ -259,6 +261,38 @@ describe('Q3 — elaborator-built root yields identical plan bytes (sidecar rejo
     const viaElab = JSON.stringify(compileViaElaborate(wiredPairWithParam()))
     expect(viaElab).toBe(JSON.stringify(basePlan))
   })
+})
+
+// ── Q4: the live surface — every example patch matches byte-for-byte ──
+//
+// The audit, as a regression test. Load each `patches/*.json` (the real
+// MCP authoring surface — multi-instance, nested generics, lifted
+// array-literal wires, hand-written `delay()`s) and assert the
+// elaborator-built root yields a byte-identical plan. Across this corpus
+// `arrayDelays === 0` (the materializer's `isArray` delay branch is dead
+// code on the live surface); the scalar + lifted-wire slice covers 100%
+// of what real patches generate.
+
+const PATCHES_DIR = join(import.meta.dir, '..', '..', 'patches')
+
+function loadPatch(file: string): SessionState {
+  const s = makeSession()
+  loadStdlib(s)
+  loadJSON(JSON.parse(readFileSync(join(PATCHES_DIR, file), 'utf8')), s)
+  return s
+}
+
+describe('Q4 — every example patch: elaborator root ≡ materializer (byte-identical)', () => {
+  const files = readdirSync(PATCHES_DIR).filter(f => f.endsWith('.json'))
+  // Guard: the corpus must be non-empty, else this whole block is vacuous.
+  test('corpus is non-empty', () => { expect(files.length).toBeGreaterThan(0) })
+  for (const file of files) {
+    test(file, () => {
+      const baseline = JSON.stringify(compileSession(loadPatch(file)))
+      const viaElab = JSON.stringify(compileViaElaborate(loadPatch(file)))
+      expect(viaElab).toBe(baseline)
+    })
+  }
 })
 
 // ── Q2: compileSession is byte-deterministic across re-elaboration ───

@@ -37,7 +37,6 @@ import type {
   ParamDecl as ParsedParamDecl,
   InstanceDecl as ParsedInstanceDecl,
   InstanceInputEntry,
-  TypeArgEntry,
 } from '../parse/nodes.js'
 import { nameRef } from '../parse/nodes.js'
 import type { ResolvedProgram } from './nodes.js'
@@ -127,17 +126,17 @@ export function sessionToParsedProgram(session: SessionState): ParsedProgram {
   for (const name of order) {
     const inst = session.instanceRegistry.get(name)
     if (inst === undefined) continue
+    // NB: no `type_args`. `inst.compiled.prog` is already the specialized,
+    // monomorphized post-strata form — its name carries the specialization
+    // (`Delay<N=8>`) and it declares no type-params. Re-emitting `<N=8>`
+    // would ask the elaborator to specialize an already-specialized program
+    // and throw. This mirrors `buildInstanceDecl`'s `typeArgs: []`: the
+    // session resolves generics once at `resolveProgramType` time, and the
+    // root only ever LINKs the already-reduced result.
     const decl: ParsedInstanceDecl = {
       op: 'instanceDecl',
       name,
       program: nameRef(inst.compiled.prog.name),
-    }
-    if (inst.typeArgs !== undefined) {
-      const entries: TypeArgEntry[] = []
-      for (const [param, value] of Object.entries(inst.typeArgs)) {
-        entries.push({ param: nameRef(param), value })
-      }
-      if (entries.length > 0) decl.type_args = entries
     }
     const wires = wiresByInstance.get(name)
     if (wires !== undefined && wires.length > 0) {
