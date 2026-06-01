@@ -27,9 +27,11 @@
 import { describe, test, expect } from 'bun:test'
 import {
   makeSession, resolveProgramType, instantiate, outputNames,
+  allocateOutputSlots, allocateParamSlot, setWireExpr,
 } from '../../compiler/session.js'
 import { loadStdlib } from '../../compiler/program.js'
 import { compileSession } from '../../compiler/ir/compile_session.js'
+import { compileSessionSlotted } from '../../compiler/ir/compile_session_slotted.js'
 import { materializeSessionToResolvedIR } from '../../compiler/ir/materialize_session.js'
 import { liftWiresToInstances } from '../../compiler/ir/lift_wires.js'
 import { extractSessionDelays } from '../../compiler/ir/lowering/extract_session_delays.js'
@@ -37,7 +39,8 @@ import { elaborate } from '../../compiler/ir/elaborator.js'
 import {
   sessionToParsedProgram, sessionTypeResolver,
 } from '../../compiler/ir/session_to_parsed.js'
-import { wireKey, portRef, instanceName, portName } from '../../compiler/ir/branded_names.js'
+import { portRef, instanceName, portName } from '../../compiler/ir/branded_names.js'
+import type { FlatPlan } from '../../compiler/flat_plan.js'
 import type { SessionState } from '../../compiler/session.js'
 import type { ResolvedProgram, ResolvedExpr, BodyDecl } from '../../compiler/ir/nodes.js'
 
@@ -129,8 +132,6 @@ function wiredPair(): SessionState {
   s.instanceRegistry.set('osc', instantiate(sin, 'osc', { baseTypeName: 'Sin' }))
   s.instanceRegistry.set('amp', instantiate(vca, 'amp', { baseTypeName: 'VCA' }))
   // MCP-style wires: each is auto-wrapped in a unit delay by setWireExpr.
-  // setWireExpr is imported lazily to keep the import list focused.
-  const { setWireExpr } = require('../../compiler/session.js') as typeof import('../../compiler/session.js')
   setWireExpr(s, portRef(instanceName('amp'), portName('audio')),
     { op: 'ref', instance: 'osc', output: 'out' } as never, { id: 'w_audio' })
   setWireExpr(s, portRef(instanceName('amp'), portName('cv')),
@@ -139,12 +140,49 @@ function wiredPair(): SessionState {
   return s
 }
 
-/** Run the same pre-emit passes `compile_session` runs before
- *  `materializeSessionToResolvedIR` sees the session, so both builders
- *  consume identical post-extraction state. */
+/** Like `wiredPair`, but the cv wire reads a control-plane param. This is
+ *  the case that exercises the PARAM-SLOT sidecar: the wire lowers to a
+ *  `param:gain` module-slot read, and the plan's slot metadata must carry
+ *  it. If the elaborator-built root produces the same plan bytes here, the
+ *  param sidecar provably rejoins by name. */
+function wiredPairWithParam(): SessionState {
+  const s = makeSession()
+  loadStdlib(s)
+  const sin = resolveProgramType(s, 'Sin', undefined, undefined).type
+  const vca = resolveProgramType(s, 'VCA', undefined, undefined).type
+  s.instanceRegistry.set('osc', instantiate(sin, 'osc', { baseTypeName: 'Sin' }))
+  s.instanceRegistry.set('amp', instantiate(vca, 'amp', { baseTypeName: 'VCA' }))
+  allocateParamSlot(s, 'gain')
+  setWireExpr(s, portRef(instanceName('amp'), portName('audio')),
+    { op: 'ref', instance: 'osc', output: 'out' } as never, { id: 'w_audio' })
+  setWireExpr(s, portRef(instanceName('amp'), portName('cv')),
+    { op: 'param', name: 'gain' } as never, { id: 'w_cv' })
+  s.graphOutputs.push({ instance: 'amp', output: 'out' })
+  return s
+}
+
+/** Mirror `compile_session`'s pre-emit passes (lift → eager output-slot
+ *  alloc → delay extraction) so both root builders consume identical
+ *  post-extraction session state. */
 function prepare(s: SessionState): void {
   liftWiresToInstances(s)
+  for (const [name, inst] of s.instanceRegistry) {
+    if (inst.compiled !== undefined) {
+      allocateOutputSlots(s, instanceName(name), inst.compiled)
+    }
+  }
   extractSessionDelays(s)
+}
+
+/** The cutover shape: run the pre-passes, build the root via the shared
+ *  elaborator front door (instead of `materializeSessionToResolvedIR`),
+ *  and lower it through the SAME backend tail via the `rootOverride` seam.
+ *  Everything downstream of the root — slot allocation, DAC stitch,
+ *  param-slot threading — is the production code, unchanged. */
+function compileViaElaborate(s: SessionState): FlatPlan {
+  prepare(s)
+  const root = elaborate(sessionToParsedProgram(s), sessionTypeResolver(s))
+  return compileSessionSlotted(s, { rootProgram: true, rootOverride: root })
 }
 
 const SINGLE_TYPES = [
@@ -189,12 +227,47 @@ describe('Q1 — materialize_session ≡ elaborate∘sessionToParsedProgram', ()
   })
 })
 
+// ── Q3: the sidecar rejoins — full plan bytes match through the tail ──
+//
+// Lower the elaborator-built root through the production backend tail
+// (slot alloc + partitionKernel + DAC stitch + param-slot threading) via
+// the `rootOverride` seam, and compare the resulting `tropical_plan_5`
+// bytes against the materializer path. Byte-identity ⇒ the DAC and
+// param-slot sidecars rejoin by name with zero divergence, i.e.
+// `materialize_session.ts` is replaceable with no downstream change.
+
+describe('Q3 — elaborator-built root yields identical plan bytes (sidecar rejoins)', () => {
+  for (const typeName of SINGLE_TYPES) {
+    test(`single instance: ${typeName}`, () => {
+      const baseline = JSON.stringify(compileSession(singleInstance(typeName)))
+      const viaElab = JSON.stringify(compileViaElaborate(singleInstance(typeName)))
+      expect(viaElab).toBe(baseline)
+    })
+  }
+
+  test('two-instance wired pair (DAC stitch + per-wire delays)', () => {
+    const baseline = JSON.stringify(compileSession(wiredPair()))
+    const viaElab = JSON.stringify(compileViaElaborate(wiredPair()))
+    expect(viaElab).toBe(baseline)
+  })
+
+  test('wired pair with control-plane param (param-slot sidecar)', () => {
+    const basePlan = compileSession(wiredPairWithParam())
+    // Non-vacuity: the param-slot sidecar must actually be present, else
+    // byte-identity proves nothing about it.
+    expect(basePlan.slot_names).toContain('param:gain')
+    const viaElab = JSON.stringify(compileViaElaborate(wiredPairWithParam()))
+    expect(viaElab).toBe(JSON.stringify(basePlan))
+  })
+})
+
 // ── Q2: compileSession is byte-deterministic across re-elaboration ───
 
 describe('Q2 — compileSession plan bytes are stable across fresh re-elaboration', () => {
   const cases: Array<[string, () => SessionState]> = [
     ...SINGLE_TYPES.map(t => [`single:${t}`, () => singleInstance(t)] as [string, () => SessionState]),
     ['wiredPair', wiredPair],
+    ['wiredPairWithParam', wiredPairWithParam],
   ]
   for (const [label, build] of cases) {
     test(label, () => {
