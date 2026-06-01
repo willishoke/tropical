@@ -1,6 +1,6 @@
 # stdlib/
 
-The 32 built-in DSP program types, written in tropical's `.trop` surface
+The 33 built-in DSP program types, written in tropical's `.trop` surface
 syntax. Loaded by `loadStdlib()` (`compiler/program.ts`); for the browser
 build the same files are inlined into `compiler/stdlib_bundled.ts` by
 `web/bundle_stdlib.ts`.
@@ -91,9 +91,10 @@ and the JIT picks up the new approximation on the next build.
 
 ### DSP primitives
 
-Foundational signal-processing blocks. Each does one job, may call
-into Math, but does *not* instantiate other DSP primitives — they're
-the leaves of any patch graph. Sub-grouped by role.
+Foundational signal-processing blocks. Each does one job and may call
+into Math. They're the leaves of any patch graph — the one shared
+sub-primitive is `Phasor`, the phase core the oscillators compose.
+Sub-grouped by role.
 
 #### Filters and shapers
 
@@ -114,10 +115,17 @@ the leaves of any patch graph. Sub-grouped by role.
 
 #### Oscillators
 
+All oscillators share a phase-accumulating core, `Phasor` — `phase` advances
+by `freq/sampleRate` each sample and wraps to `[0,1)`. This is correct under
+frequency modulation (the absolute-sample-count form `sampleIndex · freq` is
+not: modulating `freq` makes instantaneous frequency blow up by the unbounded
+`sampleIndex` multiplier and smears into broadband noise).
+
 | Type     | Ports |
 |----------|-------|
-| `SinOsc` | `(freq: freq) → sine`. Phase-correct sine via `Sin(2π · sampleIndex · freq / sampleRate)`. |
-| `BlepSaw`| `(freq: freq) → saw`. Polynomial-BLEP-corrected sawtooth (no aliasing at the discontinuity). |
+| `Phasor` | `(freq: freq) → phase: unipolar`. The shared accumulating-phase core; `reg p; next p = (p + freq/sr) % 1`. |
+| `SinOsc` | `(freq: freq) → sine`. `Sin(2π · Phasor(freq).phase)`. |
+| `BlepSaw`| `(freq: freq) → saw`. Polynomial-BLEP-corrected sawtooth (no aliasing at the discontinuity), over `Phasor`'s phase. |
 
 #### Noise
 
@@ -154,8 +162,8 @@ subgraphs into a single flat body before emit; the JIT sees no
 | Type                 | Ports | Composed of |
 |----------------------|-------|-------------|
 | `LadderFilter`       | `(input, cutoff: freq, resonance: unipolar, drive) → (lp, bp, hp, notch)` | 4× `OnePole` + `Tanh` |
-| `Phaser`             | `(input, feedback, lfo_speed) → (output, lfo)` | 4× inline `_allpassStage` + `Sin` LFO |
-| `Phaser16`           | `(input, feedback, lfo_speed) → (output, lfo)` | 16× inline `_allpassStage` + `Sin` LFO |
+| `Phaser`             | `(input, feedback, lfo_speed) → (output, lfo)` | 4× inline `_allpassStage` + `Phasor`→`Sin` LFO |
+| `Phaser16`           | `(input, feedback, lfo_speed) → (output, lfo)` | 16× inline `_allpassStage` + `Phasor`→`Sin` LFO |
 | `Bubble`             | `(trigger, radius, q, sigma, decay_scale, amp_scale, attack_g) → out` | `SampleHold` + `TriggerRamp` + `Exp` + `EnvExpDecay` + `SVF` |
 | `BubbleCloud`        | `(trigger, radius, q, sigma, decay_scale, amp_scale) → out` | 8× `Bubble`, integer round-robin |
 | `Seq4MinorTranspose` | `(trigger: unipolar) → freq: freq` | `Sequencer<N=4>` over a fixed minor-key value array |

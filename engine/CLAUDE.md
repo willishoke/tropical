@@ -42,7 +42,7 @@ Singleton LLVM ORC engine. `compile_flat_program()`:
 2. Check in-memory cache and disk cache (`~/.cache/tropical/kernels/<build-id>/`)
 3. Generate LLVM IR:
    - Kernel signature: `(inputs, registers, arrays, array_sizes, temps, sample_rate, start_sample_index, param_ptrs, output_buffer, buffer_length) → void`
-   - Outer sample loop iterates `buffer_length` times; per sample, the body is the scheduler — preamble, per-instance body+writebacks (topo order), `state_evolution` (`WriteSlot` per extracted delay), postamble (DAC stitch), output mix.
+   - Outer sample loop iterates `buffer_length` times; per sample, the body is the scheduler — preamble, then each `instance_function` recursively (preamble → per-child {pre_input, child} → body → writebacks), `state_evolution` (`WriteSlot` per extracted delay; empty on the default root-program path, where delays are root-kernel register writebacks), postamble (DAC stitch), output mix.
    - Each instruction: resolve typed operands (f64/i64/i1), emit native ops with explicit coercion at type boundaries
    - Array loops: `loop_count > 1` emits elementwise loop, `strides[i]` controls broadcast vs. iterate
 4. Add module to LLJIT, look up symbol → `NumericKernelFn`
