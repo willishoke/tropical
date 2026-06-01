@@ -910,70 +910,94 @@ const UNARY_PREFIX: Record<string, string> = { neg: '-' }
 export function prettyExpr(
   node: ExprNode,
   instanceRegistry: Map<string, Instance>,
+  /** Optional delay-slot registry. When supplied, `sessionSlot` /
+   *  `sessionArraySlot` reads (the hoisted unit-delay slots that
+   *  `extractSessionDelays` rewrites wires into during compile — e.g.
+   *  for a feedback ring) render as `delay(<source>)` by resolving the
+   *  slot back to its registered source expression. Without it they
+   *  render as `delay(slot:<i>)`. Callers that inspect a session AFTER
+   *  a compile should pass `session.delaySlotRegistry`. */
+  delaySlots?: readonly DelaySlotEntry[],
 ): string {
-  if (typeof node === 'number') return String(node)
-  if (typeof node === 'boolean') return String(node)
-  if (Array.isArray(node)) return `[${node.map(n => prettyExpr(n, instanceRegistry)).join(', ')}]`
+  const go = (node: ExprNode): string => {
+    if (typeof node === 'number') return String(node)
+    if (typeof node === 'boolean') return String(node)
+    if (Array.isArray(node)) return `[${node.map(go).join(', ')}]`
 
-  const n = node as { op: string; [k: string]: unknown }
-  const op = n.op
-  const args = (n.args as ExprNode[] | undefined) ?? []
+    const n = node as { op: string; [k: string]: unknown }
+    const op = n.op
+    const args = (n.args as ExprNode[] | undefined) ?? []
 
-  if (op === 'ref') {
-    const mod = n.instance as string
-    const out = n.output
-    const inst = instanceRegistry.get(mod)
-    const outName = inst && typeof out === 'number' ? (outputNames(inst)[out] ?? String(out)) : String(out)
-    return `${mod}.${outName}`
-  }
-  if (op === 'input')     return `input(${n.name})`
-  if (op === 'param')     return `param(${n.name})`
-  if (op === 'binding')   return `$${n.name}`
-  if (op === 'sampleRate')  return 'sampleRate'
-  if (op === 'sampleIndex') return 'sampleIndex'
-  if (op === 'float' || op === 'int')  return String(n.value)
-  if (op === 'bool')  return String(n.value)
+    if (op === 'ref') {
+      const mod = n.instance as string
+      const out = n.output
+      const inst = instanceRegistry.get(mod)
+      const outName = inst && typeof out === 'number' ? (outputNames(inst)[out] ?? String(out)) : String(out)
+      return `${mod}.${outName}`
+    }
+    if (op === 'input')     return `input(${n.name})`
+    if (op === 'param')     return `param(${n.name})`
+    if (op === 'binding')   return `$${n.name}`
+    if (op === 'sampleRate')  return 'sampleRate'
+    if (op === 'sampleIndex') return 'sampleIndex'
+    if (op === 'float' || op === 'int')  return String(n.value)
+    if (op === 'bool')  return String(n.value)
 
-  if (BINARY_OPS.has(op)) {
-    const sym = BINARY_INFIX[op]
-    const l = prettyExpr(args[0], instanceRegistry)
-    const r = prettyExpr(args[1], instanceRegistry)
-    return sym ? `(${l} ${sym} ${r})` : `${op}(${l}, ${r})`
-  }
-  if (UNARY_OPS.has(op)) {
-    const pfx = UNARY_PREFIX[op]
-    const x = prettyExpr(args[0], instanceRegistry)
-    return pfx ? `${pfx}${x}` : `${op}(${x})`
-  }
+    if (BINARY_OPS.has(op)) {
+      const sym = BINARY_INFIX[op]
+      const l = go(args[0])
+      const r = go(args[1])
+      return sym ? `(${l} ${sym} ${r})` : `${op}(${l}, ${r})`
+    }
+    if (UNARY_OPS.has(op)) {
+      const pfx = UNARY_PREFIX[op]
+      const x = go(args[0])
+      return pfx ? `${pfx}${x}` : `${op}(${x})`
+    }
 
-  if (op === 'clamp')  return `clamp(${args.map(a => prettyExpr(a, instanceRegistry)).join(', ')})`
-  if (op === 'select') return `select(${args.map(a => prettyExpr(a, instanceRegistry)).join(', ')})`
-  if (op === 'index')  return `${prettyExpr(args[0], instanceRegistry)}[${prettyExpr(args[1], instanceRegistry)}]`
-  if (op === 'arraySet') return `array_set(${args.map(a => prettyExpr(a, instanceRegistry)).join(', ')})`
-  if (op === 'array') return `[${(n.items as ExprNode[]).map(i => prettyExpr(i, instanceRegistry)).join(', ')}]`
-  if (op === 'matrix') return `matrix(${JSON.stringify(n.rows)})`
-  if (op === 'delay') return `delay(${prettyExpr(args[0], instanceRegistry)}, ${n.init ?? 0})`
-  if (op === 'delayRef') return `delay_ref(${n.id})`
-  if (op === 'nestedOut') return `${n.ref}.${n.output}`
-  if (op === 'tag') {
-    const payload = n.payload as Record<string, ExprNode> | undefined
-    const fields = payload === undefined
-      ? ''
-      : `{${Object.entries(payload).map(([k, v]) => `${k}: ${prettyExpr(v, instanceRegistry)}`).join(', ')}}`
-    return `${n.type}::${n.variant}${fields}`
-  }
-  if (op === 'match') {
-    const arms = n.arms as Record<string, { bind?: string | string[]; body: ExprNode }>
-    const armStrs = Object.entries(arms).map(([variant, arm]) => {
-      const bindStr = arm.bind === undefined
+    if (op === 'clamp')  return `clamp(${args.map(go).join(', ')})`
+    if (op === 'select') return `select(${args.map(go).join(', ')})`
+    if (op === 'index')  return `${go(args[0])}[${go(args[1])}]`
+    if (op === 'arraySet') return `array_set(${args.map(go).join(', ')})`
+    if (op === 'array') return `[${(n.items as ExprNode[]).map(go).join(', ')}]`
+    if (op === 'matrix') return `matrix(${JSON.stringify(n.rows)})`
+    if (op === 'delay') return `delay(${go(args[0])}, ${n.init ?? 0})`
+    if (op === 'delayRef') return `delay_ref(${n.id})`
+    // Hoisted unit-delay slots (post-extractSessionDelays). Resolve the
+    // backing source from the registry when available so a feedback
+    // wire reads as `delay(lfo5.out)` rather than an opaque slot index.
+    if (op === 'sessionSlot') {
+      const idx = n.index as number
+      const entry = delaySlots?.find(e => !e.isArray && e.slotIdx === idx)
+      return entry ? `delay(${go(entry.sourceExpr)}, ${entry.init ?? 0})` : `delay(slot:${idx})`
+    }
+    if (op === 'sessionArraySlot') {
+      const idx = n.index as number
+      const entry = delaySlots?.find(e => e.isArray && e.arraySlot === idx)
+      return entry ? `delay(${go(entry.sourceExpr)}, ${entry.init ?? 0})` : `delay(array_slot:${idx})`
+    }
+    if (op === 'nestedOut') return `${n.ref}.${n.output}`
+    if (op === 'tag') {
+      const payload = n.payload as Record<string, ExprNode> | undefined
+      const fields = payload === undefined
         ? ''
-        : ` bind ${typeof arm.bind === 'string' ? arm.bind : `(${arm.bind.join(', ')})`}`
-      return `${variant}${bindStr}: ${prettyExpr(arm.body, instanceRegistry)}`
-    })
-    return `match(${prettyExpr(n.scrutinee as ExprNode, instanceRegistry)}, type=${n.type}){${armStrs.join(', ')}}`
+        : `{${Object.entries(payload).map(([k, v]) => `${k}: ${go(v)}`).join(', ')}}`
+      return `${n.type}::${n.variant}${fields}`
+    }
+    if (op === 'match') {
+      const arms = n.arms as Record<string, { bind?: string | string[]; body: ExprNode }>
+      const armStrs = Object.entries(arms).map(([variant, arm]) => {
+        const bindStr = arm.bind === undefined
+          ? ''
+          : ` bind ${typeof arm.bind === 'string' ? arm.bind : `(${arm.bind.join(', ')})`}`
+        return `${variant}${bindStr}: ${go(arm.body)}`
+      })
+      return `match(${go(n.scrutinee as ExprNode)}, type=${n.type}){${armStrs.join(', ')}}`
+    }
+    // Should never reach here given the finite op set, but keep a safe fallback
+    throw new Error(`prettyExpr: unhandled op '${op}'`)
   }
-  // Should never reach here given the finite op set, but keep a safe fallback
-  throw new Error(`prettyExpr: unhandled op '${op}'`)
+  return go(node)
 }
 
 // ─────────────────────────────────────────────────────────────

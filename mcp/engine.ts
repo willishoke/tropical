@@ -802,7 +802,7 @@ function handleGetInfo(instanceName: string) {
           type: inputPortType(inst, i) ?? null,
           expr: expr ?? null,
           pretty: expr !== undefined
-            ? prettyExpr(expr, session.instanceRegistry)
+            ? prettyExpr(expr, session.instanceRegistry, session.delaySlotRegistry)
             : null,
         }
       }),
@@ -966,7 +966,7 @@ function handleListWiring(filterInstance?: string) {
     for (const [key, node] of session.inputExprNodes) {
       const { instance, port } = parseWireKey(key)
       if (filterInstance && instance !== filterInstance) continue
-      results.push({ instance, input: port, expr: prettyExpr(node, session.instanceRegistry) })
+      results.push({ instance, input: port, expr: prettyExpr(node, session.instanceRegistry, session.delaySlotRegistry) })
     }
     return results
   })
