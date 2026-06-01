@@ -1,0 +1,7 @@
+```tropical
+program Phasor(freq: freq = 440) -> (phase: unipolar) {
+  reg p = 0
+  phase = p
+  next p = (p + freq / sampleRate()) % 1
+}
+```

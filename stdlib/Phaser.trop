@@ -3,7 +3,8 @@ program Phaser<N: int = 4>(input = 0, feedback = 0.4, lfo_speed = 0.2) -> (outpu
   reg fb = 0
   reg x_prev = zeros(N)
   reg y_prev = zeros(N)
-  lfo_sin = Sin(x: 6.283185307179586 * (sampleIndex() * lfo_speed / sampleRate()))
+  lfo_ph = Phasor(freq: lfo_speed)
+  lfo_sin = Sin(x: 6.283185307179586 * lfo_ph.phase)
   output = let {
     a: 0.6 + 0.35 * lfo_sin.out,
     ys: scan(generate(N, (i) => i), input + feedback * fb, (acc, i) =>

@@ -8,7 +8,8 @@ program Phaser16(input = 0, feedback = 0.4, lfo_speed = 0.2) -> (output, lfo) {
     next x_prev = x
     next y_prev = -a * x + x_prev + a * y_prev
   }
-  lfo_sin = Sin(x: 6.283185307179586 * (sampleIndex() * lfo_speed / sampleRate()))
+  lfo_ph = Phasor(freq: lfo_speed)
+  lfo_sin = Sin(x: 6.283185307179586 * lfo_ph.phase)
   ap_0 = _allpassStage(x: input + feedback * fb, a: 0.6 + 0.35 * lfo_sin.out)
   ap_1 = _allpassStage(x: ap_0.y, a: 0.6 + 0.35 * lfo_sin.out)
   ap_2 = _allpassStage(x: ap_1.y, a: 0.6 + 0.35 * lfo_sin.out)
