@@ -26,7 +26,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
-import { makeSession, loadJSON, resolveProgramType, instantiate, inputNames, outputNames, setWireExpr } from '../../compiler/session.js'
+import { makeSession, loadJSON, resolveProgramType, instantiate, inputNames, outputNames, setWireExpr, allocateParamSlot } from '../../compiler/session.js'
 import type { ExprNode } from '../../compiler/expr.js'
 import { loadStdlib } from '../../compiler/program.js'
 import { applyFlatPlan } from '../../compiler/apply_plan.js'
@@ -162,6 +162,30 @@ describe('root-vs-flat multi-instance (auto-delayed wires)', () => {
     const flat = captureOutput(setupOscAmp(), false)
     const root = captureOutput(setupOscAmp(), true)
     assertEqual('osc→amp', flat, root)
+  })
+})
+
+describe('root-vs-flat slot-based params', () => {
+  // A `{op:'param'}` wire reads a session `param:name` module slot. The
+  // per-instance path lowers it to `opSlot(paramSlotRegistry)`; the root
+  // path threads `paramSlots` so `ParamRef` lowers to the same slot read
+  // (rather than a dead FFI handle that reads 0). Both must agree.
+  test('VCA.cv driven by a param', () => {
+    function setup() {
+      const session = makeSession(BUFFER_LENGTH)
+      loadStdlib(session)
+      const { type } = resolveProgramType(session, 'VCA', undefined, undefined)
+      session.instanceRegistry.set('amp', instantiate(type, 'amp', { baseTypeName: 'VCA' }))
+      session.paramRegistry.set('gain', { value: 0.5 } as unknown as never)
+      allocateParamSlot(session, 'gain')
+      session.inputExprNodes.set(wk('amp', 'audio'), 0.4)
+      session.inputExprNodes.set(wk('amp', 'cv'), { op: 'param', name: 'gain' })
+      session.graphOutputs.push({ instance: 'amp', output: 'out' })
+      return session
+    }
+    const flat = captureOutput(setup(), false)
+    const root = captureOutput(setup(), true)
+    assertEqual('param:gain', flat, root)
   })
 })
 

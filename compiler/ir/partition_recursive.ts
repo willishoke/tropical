@@ -208,6 +208,12 @@ export function partitionKernel(
    *  array maps are disjoint by construction — each port appears in
    *  exactly one. */
   inputArraySlots?:  Map<InputIdx, { slot: number; size: number }>,
+  /** Session param module-slot indices for THIS kernel, keyed by the
+   *  kernel program's ParamIdx. When set, `ParamRef` lowers to a slot
+   *  read (the slot-based session param model). NOT propagated to child
+   *  recursions — `ParamIdx` is per-program, so a child resolves its own
+   *  params via its own (typically empty) handle/slot maps. */
+  paramSlots?:       Map<ParamIdx, number>,
 ): PartitionedKernel {
   // ── 1. Recurse into sub-InstanceDecls.
   //    For each child:
@@ -327,6 +333,7 @@ export function partitionKernel(
   //        inputArraySlots (to session_array_reg operands).
   const plan = compileResolved(prog, {
     paramHandles,
+    paramSlots,
     nestedOutputSlots,
     nestedInputSlots,
     nestedOutputArraySlots,

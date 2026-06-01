@@ -40,7 +40,7 @@ describe('compileSession — single-instance sessions', () => {
   ] as const) {
     test(`emits well-formed tropical_plan_5: ${typeName}`, () => {
       const session = singleInstanceSession(typeName)
-      const plan = compileSession(session)
+      const plan = compileSession(session, { rootProgram: false })
 
       expect(plan.schema).toBe('tropical_plan_5')
       const totalInstrs =
@@ -74,7 +74,7 @@ describe('compileSession — two-instance refs', () => {
 
     session.graphOutputs.push({ instance: 'amp', output: 'out' })
 
-    const plan = compileSession(session)
+    const plan = compileSession(session, { rootProgram: false })
     expect(plan.scheduler_function.outputs.length).toBe(1)
     expect(plan.instance_functions.length).toBe(2)
   })

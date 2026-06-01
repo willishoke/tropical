@@ -129,9 +129,31 @@ This is a pure cache-key fix — no emitted-code or golden change. Rebuild requi
    25 pass) — a time-varying array source makes any latency/permutation bug
    visible. Motivation: polyphony and any cross-voice array feedback will hit
    this routinely.
-5. **Phase E — cutover** (after the WASM-root gap closes): flip the default and
-   delete `compileSessionSlottedPerInstance` + the `state_evolution` emission.
-   Keep `delaySlotRegistry`, `emitDacStitch`, `graphOutputs` as the bridge/DAC tap.
+5. **Phase E — cutover (default flipped): DONE.** `compileSessionSlotted` now
+   defaults to the root path; `compileSession(session)` with no options compiles
+   a root plan. `options.rootProgram === false` selects the legacy per-instance
+   path (kept as the `root_vs_flat` oracle + escape hatch); `TROPICAL_ROOT_PROGRAM=0`
+   forces it off when no explicit option is passed. Supporting fix:
+   **slot-based session params on the root path.** Session params are
+   `param:name` module slots (control plane via `setSlot`, hot-swap by name), but
+   the materializer's `paramRef` lowered to a dead FFI handle (empty map → param
+   reads returned 0). Added a `paramSlots: Map<ParamIdx, number>` threaded
+   `compileSessionSlottedRoot → partitionKernel(root only) → compileResolved →
+   emit_resolved`, so `ParamRef` lowers to `opSlot(param slot)` — mirroring the
+   per-instance `translateNode`. `paramSlots` is NOT propagated to child kernels
+   (`ParamIdx` is per-program). A handful of per-instance *structural* tests
+   (instruction/instance-function-count, param-slot-operand placement) are pinned
+   to `rootProgram: false` since they assert that lowering's emit shape; the
+   audio/behavior param tests run on the default (root) path as coverage. Full
+   suite 1039 pass with the default flipped; `TROPICAL_ROOT_PROGRAM=0` and
+   `root_vs_flat` keep the per-instance path exercised.
+
+   **Remaining (deferred, plan's "after a release"):** delete
+   `compileSessionSlottedPerInstance` + the `state_evolution` emission block and
+   rewrite/remove the pinned per-instance structural tests + the `root_vs_flat`
+   oracle. Keep `delaySlotRegistry`, `emitDacStitch`, `graphOutputs` as the
+   bridge/DAC tap. Not done here — the per-instance path is still the
+   differential oracle, so deleting it now would remove the safety net mid-soak.
 
 ## Key invariants to preserve
 

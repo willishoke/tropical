@@ -64,7 +64,7 @@ describe('array-output writeback shape', () => {
     expect(aMeta!.arraySlot).toBeDefined()
     expect(aMeta!.arraySize).toBe(3)
 
-    const plan = compileSession(session)
+    const plan = compileSession(session, { rootProgram: false })
     expect(plan.instance_functions.length).toBe(1)
     const instFn = plan.instance_functions[0]
 
@@ -109,7 +109,7 @@ describe('array-output writeback shape', () => {
       audio_outputs: [{ instance: 'a', output: 's' }],
     } as Parameters<typeof loadJSON>[0], session)
 
-    const plan = compileSession(session)
+    const plan = compileSession(session, { rootProgram: false })
     const writeSlots = plan.instance_functions[0].instructions.filter(i => i.tag === 'WriteSlot')
     // 1 for the scalar output (alive comes from scheduler preamble).
     expect(writeSlots.length).toBe(1)

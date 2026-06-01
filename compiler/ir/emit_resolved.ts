@@ -350,6 +350,15 @@ export interface EmitSlots {
   /** FFI handle metadata per param. Keyed by ParamIdx now (replacing
    *  the prior ParamDecl pointer key). */
   paramHandles: Map<ParamIdx, { ptr: string }>
+  /** Session param module-slot indices, keyed by ParamIdx. When a param
+   *  has an entry here, `ParamRef(idx)` lowers to a module-slot read
+   *  (`opSlot`) instead of an FFI-handle `opParam` — the slot-based
+   *  param model the session lowering uses (`param:name` slots driven by
+   *  the control plane via `setSlot`, transferred by name on hot-swap).
+   *  The root-program path threads this for the root kernel so a
+   *  `{op:'param', name}` wire resolves to the same slot the per-instance
+   *  path's `translateNode` reads. Checked before `paramHandles`. */
+  paramSlots?: Map<ParamIdx, number>
   /** Module slot indices for sub-instance outputs that this kernel's
    *  body references via `NestedOut`. Map shape:
    *  InstanceIdx → OutputIdx → moduleSlotIdx. When undefined
@@ -547,6 +556,13 @@ class Emitter {
         return { op: opStateReg(stateRegIdx(slot), regType), scalarType: regType }
       }
       case 'paramRef': {
+        // Slot-based session param: read the `param:name` module slot
+        // (the control plane drives it via setSlot; hot-swap transfers
+        // it by name). Checked before the FFI-handle path.
+        const slot = this.slots.paramSlots?.get(obj.idx)
+        if (slot !== undefined) {
+          return { op: opSlot(moduleSlotIdx(slot), 'float'), scalarType: 'float' }
+        }
         const handle = this.slots.paramHandles.get(obj.idx)
         if (handle === undefined) {
           // No live FFI handle — emit zero, matching the legacy fallback.
