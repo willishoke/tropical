@@ -370,6 +370,11 @@ export function mapChildren<T extends ExprOpNodeStrict>(
     case 'sampleIndex':
     case 'param':
     case 'const':
+    // Hoisted unit-delay slots (post-extractSessionDelays). Leaves: the
+    // delayed source lives in `session.delaySlotRegistry`, not in child
+    // ExprNodes, so there is nothing to recurse into.
+    case 'sessionSlot':
+    case 'sessionArraySlot':
       return node
 
     // ── Exhaustiveness check ─────────────────────────────────

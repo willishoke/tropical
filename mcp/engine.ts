@@ -11,6 +11,7 @@ import { readFileSync }        from 'node:fs'
 import {
   makeSession, nextName, loadJSON,
   prettyExpr, resolveProgramType, SessionState, ExprNode,
+  type DelaySlotEntry,
   normalizeProgramFile, v2NodeToFile,
   type Instance,
   instantiate,
@@ -713,16 +714,89 @@ function handleExportProgram(args: Record<string, unknown>) {
   })
 }
 
+/** Collect the hoisted-delay slot indices a wire reads, split by class
+ *  (scalar `sessionSlot` vs array `sessionArraySlot`). */
+function collectSlotRefs(expr: ExprNode, scalar: Set<number>, array: Set<number>): void {
+  if (typeof expr !== 'object' || expr === null) return
+  if (Array.isArray(expr)) { for (const e of expr) collectSlotRefs(e, scalar, array); return }
+  const n = expr as { op?: string; index?: unknown; [k: string]: unknown }
+  if (n.op === 'sessionSlot' && typeof n.index === 'number') { scalar.add(n.index); return }
+  if (n.op === 'sessionArraySlot' && typeof n.index === 'number') { array.add(n.index); return }
+  for (const v of Object.values(n)) {
+    if (typeof v === 'object' && v !== null) collectSlotRefs(v as ExprNode, scalar, array)
+  }
+}
+
+/** All instances a wire transitively references, resolving hoisted
+ *  `sessionSlot` / `sessionArraySlot` reads back through the delay
+ *  registry. After a compile, `extractSessionDelays` has rewritten
+ *  auto-delayed wires (e.g. a feedback ring) into slot reads whose real
+ *  source lives in `delaySlotRegistry`, so a plain `exprDependencies`
+ *  would miss the instances the delayed source touches. Cycle-safe via
+ *  the visited slot sets (feedback rings chain slot → source → slot). */
+function resolvedWireDeps(
+  expr: ExprNode,
+  registry: readonly DelaySlotEntry[],
+  acc: Set<string> = new Set(),
+  seenScalar: Set<number> = new Set(),
+  seenArray: Set<number> = new Set(),
+): Set<string> {
+  for (const d of exprDependencies(expr)) acc.add(d)
+  const scalar = new Set<number>()
+  const array = new Set<number>()
+  collectSlotRefs(expr, scalar, array)
+  for (const idx of scalar) {
+    if (seenScalar.has(idx)) continue
+    seenScalar.add(idx)
+    const e = registry.find(r => !r.isArray && r.slotIdx === idx)
+    if (e) resolvedWireDeps(e.sourceExpr, registry, acc, seenScalar, seenArray)
+  }
+  for (const idx of array) {
+    if (seenArray.has(idx)) continue
+    seenArray.add(idx)
+    const e = registry.find(r => r.isArray && r.arraySlot === idx)
+    if (e) resolvedWireDeps(e.sourceExpr, registry, acc, seenScalar, seenArray)
+  }
+  return acc
+}
+
 function handleRemoveInstance(instanceName: string) {
   return wrap(() => {
     requireInstance(instanceName, 'instance_name')
     session.instanceRegistry.delete(instanceName)
-    for (const key of [...session.inputExprNodes.keys()]) {
-      if (key.startsWith(`${instanceName}:`)) session.inputExprNodes.delete(key)
+
+    const reg = session.delaySlotRegistry
+
+    // Hoisted-delay slots whose (resolved) source touches the removed
+    // instance — e.g. a feedback ring's `lfo_i.freq = delay(… ref(lfoN) …)`
+    // that compiled to `sessionSlot` with the ref now living in the
+    // registry. Both their backing wires AND their registry entries must
+    // go, or the post-removal recompile materializes a ref to a missing
+    // instance (the dangling-wiring bug).
+    const taintedScalar = new Set<number>()
+    const taintedArray = new Set<number>()
+    for (const e of reg) {
+      if (!resolvedWireDeps(e.sourceExpr, reg).has(instanceName)) continue
+      if (e.isArray) { if (e.arraySlot !== undefined) taintedArray.add(e.arraySlot) }
+      else if (e.slotIdx !== undefined) taintedScalar.add(e.slotIdx)
     }
+
     for (const [key, expr] of [...session.inputExprNodes.entries()]) {
-      if (exprDependencies(expr).has(instanceName)) session.inputExprNodes.delete(key)
+      // A wire goes if it feeds the removed instance, or its source —
+      // resolved through any hoisted delay slots — references it.
+      if (key.startsWith(`${instanceName}:`) || resolvedWireDeps(expr, reg).has(instanceName)) {
+        session.inputExprNodes.delete(key)
+      }
     }
+
+    // Drop the tainted registry entries. `sessionSlot` reads index by the
+    // entry's `slotIdx` / `arraySlot` field (not array position), so
+    // filtering the array out is safe for the surviving slots.
+    session.delaySlotRegistry = reg.filter(e =>
+      e.isArray
+        ? !(e.arraySlot !== undefined && taintedArray.has(e.arraySlot))
+        : !(e.slotIdx !== undefined && taintedScalar.has(e.slotIdx)))
+
     session.graphOutputs = session.graphOutputs.filter(o => o.instance !== instanceName)
     return { removed: instanceName, ...wire() }
   })
@@ -802,7 +876,7 @@ function handleGetInfo(instanceName: string) {
           type: inputPortType(inst, i) ?? null,
           expr: expr ?? null,
           pretty: expr !== undefined
-            ? prettyExpr(expr, session.instanceRegistry)
+            ? prettyExpr(expr, session.instanceRegistry, session.delaySlotRegistry)
             : null,
         }
       }),
@@ -966,7 +1040,7 @@ function handleListWiring(filterInstance?: string) {
     for (const [key, node] of session.inputExprNodes) {
       const { instance, port } = parseWireKey(key)
       if (filterInstance && instance !== filterInstance) continue
-      results.push({ instance, input: port, expr: prettyExpr(node, session.instanceRegistry) })
+      results.push({ instance, input: port, expr: prettyExpr(node, session.instanceRegistry, session.delaySlotRegistry) })
     }
     return results
   })

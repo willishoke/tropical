@@ -9,7 +9,7 @@
 import type { ExprNode } from './expr.js'
 import { validateExpr } from './expr.js'
 import type { TypeDefJSON, SessionState } from './session.js'
-import { resolveProgramType, allocateParamSlot, allocateOutputSlots } from './session.js'
+import { resolveProgramType, allocateParamSlot, allocateOutputSlots, reconstructWireDelays } from './session.js'
 import { applyFlatPlan } from './apply_plan.js'
 import { Param } from './runtime/param.js'
 import {
@@ -745,7 +745,10 @@ export function saveProgramFromSession(
     for (const portName of inputNames(inst)) {
       const key = wireKey(portRef(toInstanceName(name), toPortName(portName)))
       const expr = session.inputExprNodes.get(key)
-      if (expr !== undefined) inputs[portName] = expr
+      // Reverse the compile's delay-hoisting: a post-compile wire holds
+      // `sessionSlot` reads whose source lives in delaySlotRegistry.
+      // Emit the authored `delay(<source>)` form so the patch reloads.
+      if (expr !== undefined) inputs[portName] = reconstructWireDelays(expr, session.delaySlotRegistry)
     }
     if (Object.keys(inputs).length > 0) entry.inputs = inputs
     decls.push(entry as ExprNode)
