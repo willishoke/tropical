@@ -16,7 +16,7 @@ is the fraction of the realtime budget consumed (lower = more headroom).
 
 Corpus note: the four array-input patches (`acid_noise`, `bubble_drip`,
 `odd_harmonics`, `sequencer_demo`) compile now — the root path's array
-session-slot support unblocked them (they were parked in `corpus.ts` BLOCKED).
+session-slot support unblocked them (they were previously parked as blocked).
 
 | patch                | total_ms | ts_ms   | json_kb | jit_ms | instrs | arrays | ns/sample | rt_ratio |
 |----------------------|---------:|---------|--------:|-------:|-------:|-------:|----------:|---------:|

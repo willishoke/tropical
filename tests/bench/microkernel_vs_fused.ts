@@ -22,7 +22,8 @@
  *   - 8x SinOsc            (polyphony)     — the use case microkernels
  *                                            exist for; cross-voice fusion
  *                                            never paid off anyway
- *   - compressor_harmonics (41 instances)  — worst case for dispatch
+ *   - polyphony 4x–32x SinOsc              — scaling sweep; 32× is the
+ *                                            heavy-dispatch / heavy-compile case
  *
  * Writes a structured result file to /tmp/microkernel_bench.json that
  * the Phase 8 report consumes.
