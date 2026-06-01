@@ -93,7 +93,7 @@ JS main thread:                 worklet (audio thread):           WASM kernel:
 
 The slot index is the param's handle. Wiring expressions (in
 `tropical_program_2` and through MCP) reference parameters by **name**,
-the materializer turns the name into the `WebParam._h` (slot index),
+the session compiler turns the name into the `WebParam._h` (slot index),
 and `emit_wasm.ts` stringifies that index to a `param.ptr` field in
 the plan. The WASM kernel emits `f64.load (paramTableOffset + ptr*8)`
 for `param` operands.

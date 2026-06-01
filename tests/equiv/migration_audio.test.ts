@@ -19,7 +19,7 @@
  * the old pipeline on a canonical-coverage input — the kind of
  * regression that the interpreter-equivalence tests can't catch on
  * their own because the interpreter went through this same migration
- * (gateable→alive rename, same materialize_session flatten).
+ * (gateable→alive rename, same session→root lowering).
  *
  * The capture script lives under `scripts/` in this branch as a
  * record of how the goldens were generated; rerun it from a clean
