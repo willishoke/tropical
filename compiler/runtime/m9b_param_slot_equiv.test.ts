@@ -51,7 +51,13 @@ describe('M9b: params as slot reads in per-instance path', () => {
     s.inputExprNodes.set(wk("osc", "freq"), { op: 'param', name: 'cutoff' })
     s.graphOutputs.push({ instance: 'osc', output: 'sine' })
 
-    const plan = compileSessionSlotted(s)
+    // Structural assertion about the per-instance emit shape (the param
+    // slot read lands in instance_functions[].instructions). The root
+    // path also reads params as slots but nests instance bodies under
+    // children, so pin the per-instance lowering here; root param-slot
+    // behavior is covered by the audio tests in this file (which run on
+    // the default lowering).
+    const plan = compileSessionSlotted(s, { rootProgram: false })
 
     // Find the SinOsc body's freq read and verify it's a slot operand
     // pointing at the param's slot index. Search across all instance
@@ -161,7 +167,9 @@ describe('M9b: legacy trigger refs as slot reads', () => {
     s.inputExprNodes.set(wk("osc", "freq"), { op: 'triggerParamExpr', name: 'go' })
     s.graphOutputs.push({ instance: 'osc', output: 'sine' })
 
-    const plan = compileSessionSlotted(s)
+    // Per-instance emit-shape assertion — pin the per-instance lowering
+    // (see the note on the paramRef structural test above).
+    const plan = compileSessionSlotted(s, { rootProgram: false })
     const allInstrs = [
       ...plan.scheduler_function.preamble,
       ...plan.scheduler_function.postamble,

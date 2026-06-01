@@ -24,6 +24,11 @@ import { emitResolvedProgram, type EmitSlots, type ScalarType } from './emit_res
 export interface CompileResolvedContext {
   /** Keyed by ParamIdx. */
   paramHandles?:      Map<ParamIdx, { ptr: string }>
+  /** Session param module-slot indices, keyed by ParamIdx. When set,
+   *  `ParamRef` lowers to a slot read (the session slot-based param
+   *  model) instead of an FFI handle. Threaded by the root-program
+   *  session lowering for the root kernel. */
+  paramSlots?:        Map<ParamIdx, number>
   /** Per-sub-instance, per-output-port module-slot map. Keyed by
    *  InstanceIdx (in this program) and OutputIdx (in the instance's
    *  type). Populated by `partition_recursive` for fractal compile;
@@ -128,6 +133,7 @@ export function compileResolved(prog: ResolvedProgram, ctx: CompileResolvedConte
     regs:                    slots.regs,
     regCount:                slots.regDecls.length,
     paramHandles:            ctx.paramHandles ?? new Map(),
+    paramSlots:              ctx.paramSlots,
     nestedOutputSlots:       ctx.nestedOutputSlots,
     nestedInputSlots:        ctx.nestedInputSlots,
     inputSlotOverride:       ctx.inputSlotOverride,

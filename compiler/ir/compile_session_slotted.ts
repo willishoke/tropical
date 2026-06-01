@@ -27,8 +27,8 @@ import {
   type InstanceName,
 } from './branded_names.js'
 import type { FlatPlan, InstanceFunction, SchedulerFunction, CompilationMode } from '../flat_plan.js'
-import type { ResolvedProgram, InputIdx } from './nodes.js'
-import { inputIdx } from './nodes.js'
+import type { ResolvedProgram, InputIdx, ParamIdx } from './nodes.js'
+import { inputIdx, paramIdx } from './nodes.js'
 import { getInstanceType } from './decl_tables.js'
 import type { NInstr } from './emit_resolved.js'
 import { instrWriteSlot, instrArray, opArray, opConst } from './emit_resolved.js'
@@ -60,10 +60,13 @@ export function compileSessionSlotted(
   options: CompileSessionSlottedOptions = {},
 ): FlatPlan {
   const mode = options.compilation_mode ?? 'fused'
-  const rootProgram = process.env.TROPICAL_ROOT_PROGRAM === '1' || options.rootProgram === true
-  // The root lowering handles scalar wiring, array-typed *port* wiring
-  // (delivered by aliasing + the recursive partitioner), and array
-  // session *delays* (hoisted `ioArraySlot` entries → array `RegDecl`s).
+  // Root-program lowering is the default (Option A cutover). It handles
+  // scalar wiring, array-typed port wiring, array session delays, and
+  // slot-based session params. An explicit `rootProgram: false` selects
+  // the legacy per-instance path (kept as the `root_vs_flat` oracle and
+  // an escape hatch); `TROPICAL_ROOT_PROGRAM=0` forces it off when no
+  // explicit option is passed.
+  const rootProgram = options.rootProgram ?? (process.env.TROPICAL_ROOT_PROGRAM !== '0')
   if (rootProgram) {
     return compileSessionSlottedRoot(session, mode)
   }
@@ -397,6 +400,19 @@ function compileSessionSlottedRoot(
   const root = materializeSessionToResolvedIR(session)
   const rootCompiled = makeCompiled(root, { displayName: '__session__' })
 
+  // Session params are slot-based (`param:name` module slots driven by
+  // the control plane via setSlot, transferred by name on hot-swap).
+  // The materializer turned each `{op:'param', name}` wire into a root
+  // `ParamDecl`; map each root ParamIdx to its session param slot so
+  // `compileResolved` lowers the ref to a slot read (mirroring the
+  // per-instance `translateNode`), instead of a dead FFI handle.
+  // `root.params[i]` corresponds to `paramIdx(i)` (decl-table order).
+  const paramSlots = new Map<ParamIdx, number>()
+  for (let i = 0; i < root.params.length; i++) {
+    const slot = session.paramSlotRegistry.get(root.params[i].name)
+    if (slot !== undefined) paramSlots.set(paramIdx(i), slot)
+  }
+
   const { fn } = partitionKernel(
     /* instancePath    */ ROOT_INSTANCE_PATH,
     /* prog            */ root,
@@ -406,6 +422,9 @@ function compileSessionSlottedRoot(
     /* paramHandles    */ new Map(),
     session,
     acc,
+    /* inputSlotOverride */ undefined,
+    /* inputArraySlots   */ undefined,
+    /* paramSlots        */ paramSlots,
   )
   const instanceFunctions: InstanceFunction[] = [fn]
 
