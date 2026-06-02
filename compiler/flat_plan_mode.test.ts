@@ -39,12 +39,7 @@ function makeEmptyWirePlan(): WireFlatPlan {
     array_slot_count: 0,
     array_slot_sizes: [],
     instance_functions: [],
-    scheduler_function: {
-      preamble:       [],
-      postamble:      [],
-      output_targets: [],
-      outputs:        [],
-    },
+    sinks: [],
     slot_count:    0,
     slot_names:    [],
     slot_defaults: [],

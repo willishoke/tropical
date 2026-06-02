@@ -1070,16 +1070,12 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
 
   std::lock_guard<std::mutex> lock(jit_mutex_);
 
-  // Helper: visit every FlatInstr in the plan (preamble + each
-  // instance + postamble) in a fixed order. Used for param index
-  // collection and cache-key serialization so the canonical traversal
-  // matches between the two passes.
+  // Helper: visit every FlatInstr in the plan (each instance) in a fixed
+  // order. Used for param index collection and cache-key serialization so
+  // the canonical traversal matches between the two passes.
   auto visit_all_instructions = [&](auto && fn) {
-    for (const auto & instr : program.scheduler.preamble) fn(instr);
     for (const auto & inst : program.instance_functions)
       for (const auto & instr : inst.instructions) fn(instr);
-    for (const auto & instr : program.scheduler.state_evolution) fn(instr);
-    for (const auto & instr : program.scheduler.postamble) fn(instr);
   };
 
   // Build canonical param_ptr → ordinal map (order of first appearance).
@@ -1168,16 +1164,6 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       };
 
     append(&program.register_count, sizeof(uint32_t));
-    // Scheduler: preamble + state_evolution + postamble
-    uint32_t npre = static_cast<uint32_t>(program.scheduler.preamble.size());
-    append(&npre, sizeof(uint32_t));
-    for (const auto & instr : program.scheduler.preamble) serialize_instr(instr);
-    uint32_t nstate = static_cast<uint32_t>(program.scheduler.state_evolution.size());
-    append(&nstate, sizeof(uint32_t));
-    for (const auto & instr : program.scheduler.state_evolution) serialize_instr(instr);
-    uint32_t npost = static_cast<uint32_t>(program.scheduler.postamble.size());
-    append(&npost, sizeof(uint32_t));
-    for (const auto & instr : program.scheduler.postamble) serialize_instr(instr);
     // Instance functions (recursively, including children)
     uint32_t nfns = static_cast<uint32_t>(program.instance_functions.size());
     append(&nfns, sizeof(uint32_t));
@@ -1310,38 +1296,21 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   llvm::Value * loop_cond_val = builder.CreateICmpULT(loop_counter, buffer_length_arg);
   builder.CreateCondBr(loop_cond_val, loop_body_bb, loop_end_bb);
 
-  // Loop body: scheduler.preamble + per-instance dispatch + scheduler.postamble
-  //            + writeback (per-instance, inside conditional) + output mixing
+  // Loop body: per-instance dispatch + writebacks + output sinks.
   builder.SetInsertPoint(loop_body_bb);
-
-  // ── Scheduler preamble: per-sample setup, runs before any
-  //    instance bodies. ──
-  if (auto err = ctx.emit_instrs(program.scheduler.preamble)) return std::move(err);
 
   // ── Per-instance dispatch ──
   // For each top-level instance, EmitCtx::emit_kernel_block recursively
   // emits its nested children inside the parent's body, then the
   // parent's own instructions, then writebacks. Children run BEFORE
   // the parent so it can read their freshly-written slot values.
+  // (Session-level per-wire delays are root RegDecl writebacks emitted
+  // inside the root kernel — no separate scheduler state-evolution phase.)
 
   for (const auto & inst : program.instance_functions)
   {
     if (auto err = ctx.emit_kernel_block(inst)) return std::move(err);
   }
-
-  // ── Scheduler state-evolution: delay-slot updates from MCP wire
-  //    auto-delays. Runs AFTER all instance dispatches and BEFORE
-  //    the observation postamble. Writes here become visible to the
-  //    NEXT sample's instance kernels (which read these slots at the
-  //    start of their bodies and therefore see the previous-sample
-  //    WriteSlot — one sample of latency per wire, by construction). ──
-  if (auto err = ctx.emit_instrs(program.scheduler.state_evolution)) return std::move(err);
-
-  // ── Scheduler postamble: DAC stitch reads. Runs AFTER state
-  //    evolution, so slot reads observe the current sample's
-  //    WriteSlot values from instance kernels (asleep instances
-  //    retain their previous-sample slot value). ──
-  if (auto err = ctx.emit_instrs(program.scheduler.postamble)) return std::move(err);
 
   // ── Output sinks: each sums its input slots, scales by its gain, and
   //    writes its target channel. v1 realizes target 0 → output_buffer[s].
@@ -1443,11 +1412,8 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   // mode tag prefix on the cache key. A future refactor could share
   // the serialization across both modes.
   auto visit_all_instructions = [&](auto && fn) {
-    for (const auto & instr : program.scheduler.preamble) fn(instr);
     for (const auto & inst : program.instance_functions)
       for (const auto & instr : inst.instructions) fn(instr);
-    for (const auto & instr : program.scheduler.state_evolution) fn(instr);
-    for (const auto & instr : program.scheduler.postamble) fn(instr);
   };
 
   std::unordered_map<uint64_t, uint64_t> param_index;
@@ -1527,15 +1493,6 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
       };
 
     append(&program.register_count, sizeof(uint32_t));
-    uint32_t npre = static_cast<uint32_t>(program.scheduler.preamble.size());
-    append(&npre, sizeof(uint32_t));
-    for (const auto & instr : program.scheduler.preamble) serialize_instr(instr);
-    uint32_t nstate = static_cast<uint32_t>(program.scheduler.state_evolution.size());
-    append(&nstate, sizeof(uint32_t));
-    for (const auto & instr : program.scheduler.state_evolution) serialize_instr(instr);
-    uint32_t npost = static_cast<uint32_t>(program.scheduler.postamble.size());
-    append(&npost, sizeof(uint32_t));
-    for (const auto & instr : program.scheduler.postamble) serialize_instr(instr);
     uint32_t nfns = static_cast<uint32_t>(program.instance_functions.size());
     append(&nfns, sizeof(uint32_t));
     for (const auto & inst : program.instance_functions) serialize_fn(inst);
@@ -1617,33 +1574,6 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
     slots_a->addAttr(llvm::Attribute::NoCapture);
 #endif
     slots_a->addAttr(llvm::Attribute::NoAlias);
-  };
-
-  // ── Emit one PerSampleFn from a list of instructions ──
-  auto emit_per_sample_function = [&](
-    const std::string & sym,
-    const std::vector<FlatInstr> & instrs) -> llvm::Error
-  {
-    llvm::Function * fn = llvm::Function::Create(
-      per_sample_ty, llvm::Function::ExternalLinkage, sym, module.get());
-    EmitCtx ctx;
-    emit_ctx_init_module(ctx, *context, builder, *module);
-    ctx.fn          = fn;
-    ctx.program     = &program;
-    ctx.param_index = &param_index;
-    ctx.temp_types  = &temp_types;
-    bind_per_sample_args(fn, ctx);
-
-    llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
-    builder.SetInsertPoint(entry);
-    if (auto err = ctx.emit_instrs(instrs)) return err;
-    builder.CreateRetVoid();
-
-    if (llvm::verifyFunction(*fn, &llvm::errs()))
-      return llvm::make_error<llvm::StringError>(
-        "compile_microkernel: invalid IR in " + sym,
-        llvm::inconvertibleErrorCode());
-    return llvm::Error::success();
   };
 
   // ── Pre-declare LLVM functions for deep mode ──
@@ -1745,8 +1675,6 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
     llvm::BasicBlock * entry = llvm::BasicBlock::Create(*context, "entry", fn);
     builder.SetInsertPoint(entry);
 
-    if (auto err = ctx.emit_instrs(program.scheduler.postamble)) return err;
-
     // Output sinks: same slot-mix as fused-mode tail (legacy temp-mix
     // fallback for plan_4). v1 realizes target 0 → output_buffer[output_index].
     if (!program.sinks.empty()) {
@@ -1784,10 +1712,8 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   // the C++ scheduler iterates only those. The shapes differ inside:
   // shallow inlines nested children; deep emits each nested child as
   // its own LLVM function and the parent calls them via CreateCall.
-  // Either way, preamble / state_evolution / postamble_mix are their
-  // own functions.
-  const std::string sym_preamble        = "mk_" + hash + "_preamble";
-  const std::string sym_state_evolution = "mk_" + hash + "_state_evo";
+  // The output mix (sinks) is its own `postamble_mix` function, dispatched
+  // last by the C++ scheduler.
   const std::string sym_postamble_mix   = "mk_" + hash + "_postamble_mix";
 
   // Top-level instance function names. The C++ scheduler dispatches
@@ -1811,10 +1737,6 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
     top_fns.push_back(fn);
   }
 
-  // Emit in scheduler-call order so temp_types builds up consistently
-  // with the runtime dispatch sequence.
-  if (auto err = emit_per_sample_function(sym_preamble, program.scheduler.preamble))
-    return std::move(err);
   // In deep mode, emit nested-child function bodies first (any order is
   // safe — they all call into each other via pre-declared symbols),
   // then top-levels. Bodies don't depend on emission order because
@@ -1830,8 +1752,8 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
     if (auto err = emit_instance_function(top_fns[i], program.instance_functions[i]))
       return std::move(err);
   }
-  if (auto err = emit_per_sample_function(sym_state_evolution, program.scheduler.state_evolution))
-    return std::move(err);
+  // The output mix (sinks) runs last, after every instance has written
+  // its output slots.
   if (auto err = emit_postamble_mix_function(sym_postamble_mix))
     return std::move(err);
 
@@ -1854,21 +1776,11 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
   };
 
   MicrokernelKernels result;
-  {
-    auto a = lookup_fn(sym_preamble);
-    if (!a) return a.takeError();
-    result.preamble = reinterpret_cast<PerSampleFn>(*a);
-  }
   result.instances.reserve(sym_instances.size());
   for (const auto & s : sym_instances) {
     auto a = lookup_fn(s);
     if (!a) return a.takeError();
     result.instances.push_back(reinterpret_cast<PerSampleFn>(*a));
-  }
-  {
-    auto a = lookup_fn(sym_state_evolution);
-    if (!a) return a.takeError();
-    result.state_evolution = reinterpret_cast<PerSampleFn>(*a);
   }
   {
     auto a = lookup_fn(sym_postamble_mix);

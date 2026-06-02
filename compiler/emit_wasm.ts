@@ -313,17 +313,14 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   // used for param discovery + layout sizing, so it just needs to
   // contain every instruction the kernel tree executes.
   const allInstructions: NInstr[] = []
-  for (const i of plan.scheduler_function.preamble) allInstructions.push(i)
   for (const inst of plan.instance_functions) collectKernelInstrs(inst, allInstructions)
-  for (const i of plan.scheduler_function.state_evolution) allInstructions.push(i)
-  for (const i of plan.scheduler_function.postamble) allInstructions.push(i)
 
   const flatProgram = {
     register_count: plan.register_count,
     array_slot_count: plan.array_slot_count,
     array_slot_sizes: plan.array_slot_sizes,
     instructions: allInstructions,
-    output_targets: plan.scheduler_function.output_targets,
+    output_targets: plan.output_targets ?? [],
     register_targets: [],  // unused — per-instance writebacks live in instance_functions
   } as unknown as Parameters<typeof collectParamPtrs>[0]
   const paramPtrs = collectParamPtrs(flatProgram)
@@ -350,12 +347,9 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   c.u8(OP.I64_ADD)
   c.localSet(L_SIDX)
 
-  // Scheduler preamble
-  for (const instr of plan.scheduler_function.preamble) emitInstruction(c, instr, ctx)
-
   // Per-instance body + writebacks (unconditional — every instance runs
   // every sample). `emitKernelBlock` recurses into nested children with
-  // the same four-phase order the C++ engine uses (preamble → per-child
+  // the same order the C++ engine uses (preamble → per-child
   // {pre_input, child} → body → writebacks), so the root-program plan's
   // nested instance bodies are emitted, not just the empty root body.
   const emitKernelBlock = (inst: InstanceFunction): void => {
@@ -391,17 +385,14 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
   }
   for (const inst of plan.instance_functions) emitKernelBlock(inst)
 
-  // State-evolution (per-sample WriteSlots for extracted delays)
-  for (const instr of plan.scheduler_function.state_evolution) emitInstruction(c, instr, ctx)
-
-  // Scheduler postamble (empty on the sink path; retained for the legacy
-  // per-instance lowering until Phase 2 removes the scheduler).
-  for (const instr of plan.scheduler_function.postamble) emitInstruction(c, instr, ctx)
+  // (Session-level per-wire delays are root RegDecl writebacks inside the
+  // root kernel — no separate scheduler state-evolution phase.)
 
   // Sinks: for each sink, output[target][s] = gain · Σ slots[sink.inputs].
   // v1 has one output buffer (target 0); the loop is N-sink-ready but
   // writes target 0 to `outputOffset`. Legacy/plan_4 plans (no sinks) fall
-  // back to the temp-mix ÷20, mirroring the native engine's dual path.
+  // back to the temp-mix ÷20 over top-level `output_targets`, mirroring the
+  // native engine's dual path.
   if (plan.sinks.length > 0) {
     for (const sink of plan.sinks) {
       c.f64c(0); c.localSet(L_MIX)
@@ -417,10 +408,12 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
       c.f64Store(0)
     }
   } else {
+    const outputs = plan.outputs ?? []
+    const outputTargets = plan.output_targets ?? []
     c.f64c(0); c.localSet(L_MIX)
-    for (const outIdx of plan.scheduler_function.outputs) {
-      if (outIdx >= plan.scheduler_function.output_targets.length) continue
-      const tempSlot = rawIdx(plan.scheduler_function.output_targets[outIdx]!)
+    for (const outIdx of outputs) {
+      if (outIdx >= outputTargets.length) continue
+      const tempSlot = rawIdx(outputTargets[outIdx]!)
       c.localGet(L_MIX)
       c.i32c(0); c.f64Load(layout.tempsOffset + tempSlot * 8)
       c.u8(OP.F64_ADD)

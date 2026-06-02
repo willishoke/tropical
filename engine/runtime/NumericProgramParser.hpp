@@ -304,37 +304,10 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
       prog.instance_functions.push_back(parse_instance_program(jf));
   }
 
-  // ── scheduler_function ──
-  if (plan.contains("scheduler_function"))
-  {
-    const auto & jsched = plan["scheduler_function"];
-    if (jsched.contains("preamble"))
-      for (const auto & ji : jsched["preamble"])
-        prog.scheduler.preamble.push_back(parse_instr(ji));
-    // state_evolution: optional in the wire format (legacy plans
-    // predating Phase 3 omit it; treated as empty list). Holds
-    // delay-slot updates from MCP wire auto-delays.
-    if (jsched.contains("state_evolution"))
-      for (const auto & ji : jsched["state_evolution"])
-        prog.scheduler.state_evolution.push_back(parse_instr(ji));
-    if (jsched.contains("postamble"))
-      for (const auto & ji : jsched["postamble"])
-        prog.scheduler.postamble.push_back(parse_instr(ji));
-    if (jsched.contains("output_targets"))
-      for (const auto & t : jsched["output_targets"])
-        prog.output_targets.push_back(t.get<uint32_t>());
-    if (jsched.contains("outputs"))
-      for (const auto & o : jsched["outputs"])
-        result.mix_indices.push_back(o.get<uint32_t>());
-  }
-
-  // Compute mix_output_temps: map mix_indices through output_targets.
-  // Legacy temp-mix path; plan_5 with `sinks` uses the slot-mix path below.
-  for (uint32_t idx : result.mix_indices)
-  {
-    if (idx < prog.output_targets.size())
-      prog.mix_output_temps.push_back(prog.output_targets[idx]);
-  }
+  // (The `scheduler_function` field was retired with the per-instance
+  // lowering — plan_5 outputs are `sinks`; session-level delays are root
+  // RegDecl writebacks inside the kernel. Any legacy `scheduler_function`
+  // key in an old hand fixture is simply ignored by nlohmann.)
 
   // ── sinks: device-bound outputs (slot-mix path) ──
   if (plan.contains("sinks"))
@@ -350,6 +323,18 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
       prog.sinks.push_back(sink);
     }
   }
+
+  // ── Legacy temp-mix carrier (top-level, plan_4-style) — used when a
+  //    plan has no `sinks` (hand fixtures / single-kernel plans). ──
+  if (plan.contains("output_targets"))
+    for (const auto & t : plan["output_targets"])
+      prog.output_targets.push_back(t.get<uint32_t>());
+  if (plan.contains("outputs"))
+    for (const auto & o : plan["outputs"])
+      result.mix_indices.push_back(o.get<uint32_t>());
+  for (uint32_t idx : result.mix_indices)
+    if (idx < prog.output_targets.size())
+      prog.mix_output_temps.push_back(prog.output_targets[idx]);
 
   // ── Slot array ──
   if (plan.contains("slot_count") && plan["slot_count"].is_number())

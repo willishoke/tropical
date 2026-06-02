@@ -65,18 +65,15 @@ function plan(fields: {
       register_targets:  fields.register_targets ?? [],
       alive_slot_index:  aliveSlot,
     }],
-    scheduler_function: {
-      preamble: [{
-        tag: 'WriteSlot', dst: aliveSlot,
-        args: [{ kind: 'const', val: 1, scalar_type: 'float' }],
-        loop_count: 1, strides: [], result_type: 'float',
-      }],
-      postamble:      [],
-      output_targets: fields.output_targets,
-      outputs:        fields.outputs ?? fields.output_targets.map((_, i) => i),
-    },
+    // Legacy temp-mix carrier (top-level, plan_4-style): no `sinks`, so
+    // the emitter/engine sum these output temps ÷20.
+    output_targets: fields.output_targets,
+    outputs:        fields.outputs ?? fields.output_targets.map((_, i) => i),
     slot_count:    1,
     slot_names:    ['__alive__'],
+    // __alive__ defaults to 1.0 and is never rewritten (the per-sample
+    // scheduler preamble that used to set it is gone); the alive-gate
+    // folds to "always on".
     slot_defaults: [1.0],
   }
   return parseWirePlan(wire)

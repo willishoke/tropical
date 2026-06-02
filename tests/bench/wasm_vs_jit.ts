@@ -212,9 +212,7 @@ for (const p of patches) {
 
   const samplePeriodNs = 1e9 / SAMPLE_RATE
   const instrCount =
-      plan.scheduler_function.preamble.length
-    + plan.scheduler_function.postamble.length
-    + plan.instance_functions.reduce((n, i) => n + i.instructions.length, 0)
+      plan.instance_functions.reduce((n, i) => n + i.instructions.length, 0)
 
   rows.push({
     patch: patchName,

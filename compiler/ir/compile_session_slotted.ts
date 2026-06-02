@@ -26,7 +26,7 @@ import {
   portRef, wireKey, childInstance,
   type InstanceName,
 } from './branded_names.js'
-import type { FlatPlan, InstanceFunction, SchedulerFunction, CompilationMode } from '../flat_plan.js'
+import type { FlatPlan, InstanceFunction, CompilationMode } from '../flat_plan.js'
 import type { ResolvedProgram, InputIdx, ParamIdx } from './nodes.js'
 import { inputIdx, paramIdx } from './nodes.js'
 import { getInstanceType } from './decl_tables.js'
@@ -197,19 +197,10 @@ function compileSessionSlottedRoot(
   const instanceFunctions: InstanceFunction[] = [fn]
 
   // Outputs are device-bound sinks (read graphOutput slots directly after
-  // the root kernel has run). No DAC-stitch postamble.
-  //
-  // No state-evolution phase either: the per-wire delays became root RegDecl
-  // writebacks inside the root kernel (a trailing read-old/write-new
-  // batch), preserving one-sample latency by construction.
-  const schedulerFunction: SchedulerFunction = {
-    preamble:        [],
-    state_evolution: [],
-    postamble:       [],
-    output_targets:  [],
-    outputs:         [],
-  }
-
+  // the root kernel has run). No scheduler: outputs are device-bound
+  // sinks, and the per-wire delays are root RegDecl writebacks inside the
+  // root kernel (a trailing read-old/write-new batch), preserving
+  // one-sample latency by construction.
   return {
     schema: 'tropical_plan_5',
     config: { sampleRate: 44100 },
@@ -222,7 +213,6 @@ function compileSessionSlottedRoot(
     array_slot_sizes:  acc.arraySlotSizes,
     register_count:    acc.nextRegRaw,
     instance_functions: instanceFunctions,
-    scheduler_function: schedulerFunction,
     sinks:              emitSinks(session),
     ...buildSlotMetadata(session),
   }

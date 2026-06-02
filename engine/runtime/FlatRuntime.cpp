@@ -111,8 +111,8 @@ bool FlatRuntime::load_plan(const std::string & plan_json)
   // testing); state transfer by name is mode-agnostic.
   const bool old_has_kernel =
     (old_state.mode == tropical_jit::CompilationMode::Fused          && old_state.kernel != nullptr) ||
-    (old_state.mode == tropical_jit::CompilationMode::Microkernel    && old_state.microkernels.preamble != nullptr) ||
-    (old_state.mode == tropical_jit::CompilationMode::MicrokernelDeep && old_state.microkernels.preamble != nullptr);
+    (old_state.mode == tropical_jit::CompilationMode::Microkernel    && old_state.microkernels.postamble_mix != nullptr) ||
+    (old_state.mode == tropical_jit::CompilationMode::MicrokernelDeep && old_state.microkernels.postamble_mix != nullptr);
   if (old_has_kernel)
   {
     const auto mapping       = compute_register_mapping(old_state, new_state);

@@ -167,17 +167,6 @@ struct InstanceProgram
   std::vector<InstanceProgram> children;
 };
 
-// Top-level driver: runs once per sample. Preamble fires before any
-// instance dispatch; postamble fires after. state_evolution sits
-// between instance dispatch and postamble — holds delay-slot updates
-// from MCP wire auto-delays. Empty for legacy plans.
-struct SchedulerProgram
-{
-  std::vector<FlatInstr>       preamble;
-  std::vector<FlatInstr>       state_evolution;
-  std::vector<FlatInstr>       postamble;
-};
-
 // A device-bound output sink (the DAC, neutrally named). Reads its input
 // module slots, sums them, scales by `gain`, and writes channel/device
 // `target`. A family, not a singleton — multiple output devices are normal.
@@ -201,7 +190,6 @@ struct FlatProgram
 
   // ── Multi-function layout (tropical_plan_5) ──
   std::vector<InstanceProgram> instance_functions;
-  SchedulerProgram             scheduler;
   std::vector<Sink>            sinks;  // device-bound outputs (plan_5 mix path)
 };
 
@@ -295,10 +283,8 @@ using PostambleMixFn = void (*)(
 
 struct MicrokernelKernels
 {
-  PerSampleFn               preamble        = nullptr;
   std::vector<PerSampleFn>  instances;   // one per FlatProgram::instance_functions entry
-  PerSampleFn               state_evolution = nullptr;
-  PostambleMixFn            postamble_mix   = nullptr;
+  PostambleMixFn            postamble_mix   = nullptr;  // the output sink mix
 };
 
 class KernelObjectCache;
