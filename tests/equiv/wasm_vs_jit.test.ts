@@ -63,7 +63,7 @@ function runNative(plan: FlatPlan, samples: number): Float64Array {
   }
 }
 
-function makeSinOscPlan(freqHz: number, rootProgram = false): FlatPlan {
+function makeSinOscPlan(freqHz: number): FlatPlan {
   const session = makeSession(64)
   try {
     loadStdlib(session)
@@ -76,13 +76,13 @@ function makeSinOscPlan(freqHz: number, rootProgram = false): FlatPlan {
       audio_outputs: [{ instance: 'osc', output: 'sine' }],
     }
     loadJSON(prog, session)
-    return compileSession(session, { rootProgram })
+    return compileSession(session)
   } finally {
     session.runtime.dispose()
   }
 }
 
-function makeOnePolePlan(cutoff: number, rootProgram = false): FlatPlan {
+function makeOnePolePlan(cutoff: number): FlatPlan {
   const session = makeSession(64)
   try {
     loadStdlib(session)
@@ -99,7 +99,7 @@ function makeOnePolePlan(cutoff: number, rootProgram = false): FlatPlan {
       audio_outputs: [{ instance: 'lp', output: 'out' }],
     }
     loadJSON(prog, session)
-    return compileSession(session, { rootProgram })
+    return compileSession(session)
   } finally {
     session.runtime.dispose()
   }
@@ -178,7 +178,7 @@ describe('wasm vs native JIT', () => {
 // still matches the native JIT on the nested plan.
 describe('wasm vs native JIT (root-program lowering)', () => {
   test('SinOsc 440 Hz — root plan', async () => {
-    const plan = makeSinOscPlan(440, /* rootProgram */ true)
+    const plan = makeSinOscPlan(440)
     const N = 64
     const nat = runNative(plan, N)
     const wasm = await runWasm(plan, N)
@@ -188,7 +188,7 @@ describe('wasm vs native JIT (root-program lowering)', () => {
   })
 
   test('SinOsc → OnePole(1000 Hz) — root plan (nested children)', async () => {
-    const plan = makeOnePolePlan(1000, /* rootProgram */ true)
+    const plan = makeOnePolePlan(1000)
     const N = 256
     const nat = runNative(plan, N)
     const wasm = await runWasm(plan, N)
