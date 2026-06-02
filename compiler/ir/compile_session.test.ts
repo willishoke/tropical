@@ -48,9 +48,11 @@ describe('compileSession — single-instance sessions', () => {
         + plan.scheduler_function.postamble.length
         + plan.instance_functions.reduce((n, i) => n + i.instructions.length, 0)
       expect(totalInstrs).toBeGreaterThan(0)
-      expect(plan.scheduler_function.outputs.length).toBeGreaterThan(0)
-      expect(plan.scheduler_function.outputs.length).toBe(session.graphOutputs.length)
-      expect(plan.scheduler_function.output_targets.length).toBe(plan.scheduler_function.outputs.length)
+      // Outputs are device-bound sinks; v1 emits the single audio sink
+      // whose inputs are the session's graphOutput slots.
+      expect(plan.sinks.length).toBe(1)
+      expect(plan.sinks[0]!.inputs.length).toBe(session.graphOutputs.length)
+      expect(plan.sinks[0]!.target).toBe(0)
       expect(plan.instance_functions.length).toBe(session.instanceRegistry.size)
       expect(plan.array_slot_sizes.length).toBe(plan.array_slot_count)
     })
@@ -75,7 +77,8 @@ describe('compileSession — two-instance refs', () => {
     session.graphOutputs.push({ instance: 'amp', output: 'out' })
 
     const plan = compileSession(session, { rootProgram: false })
-    expect(plan.scheduler_function.outputs.length).toBe(1)
+    expect(plan.sinks.length).toBe(1)
+    expect(plan.sinks[0]!.inputs.length).toBe(1)
     expect(plan.instance_functions.length).toBe(2)
   })
 })

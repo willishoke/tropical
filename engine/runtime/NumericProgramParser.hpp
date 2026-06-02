@@ -329,10 +329,26 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
   }
 
   // Compute mix_output_temps: map mix_indices through output_targets.
+  // Legacy temp-mix path; plan_5 with `sinks` uses the slot-mix path below.
   for (uint32_t idx : result.mix_indices)
   {
     if (idx < prog.output_targets.size())
       prog.mix_output_temps.push_back(prog.output_targets[idx]);
+  }
+
+  // ── sinks: device-bound outputs (slot-mix path) ──
+  if (plan.contains("sinks"))
+  {
+    for (const auto & js : plan["sinks"])
+    {
+      tropical_jit::Sink sink;
+      if (js.contains("inputs"))
+        for (const auto & i : js["inputs"])
+          sink.inputs.push_back(i.get<uint32_t>());
+      sink.gain   = js.value("gain", 0.05);
+      sink.target = js.value("target", 0u);
+      prog.sinks.push_back(sink);
+    }
   }
 
   // ── Slot array ──

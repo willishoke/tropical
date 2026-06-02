@@ -178,6 +178,17 @@ struct SchedulerProgram
   std::vector<FlatInstr>       postamble;
 };
 
+// A device-bound output sink (the DAC, neutrally named). Reads its input
+// module slots, sums them, scales by `gain`, and writes channel/device
+// `target`. A family, not a singleton — multiple output devices are normal.
+// v1 realizes target 0 → the single output buffer.
+struct Sink
+{
+  std::vector<uint32_t> inputs;        // output module-slot indices
+  double                gain   = 0.05; // was the hardcoded ÷20 (now data)
+  uint32_t              target = 0;    // output channel/device index
+};
+
 struct FlatProgram
 {
   // ── Plan-wide unified state (shared across all instance functions) ──
@@ -185,12 +196,13 @@ struct FlatProgram
   std::vector<uint32_t>      array_slot_sizes; // element count per array slot
   std::vector<uint32_t>      output_targets;
   std::vector<int32_t>       register_targets;
-  std::vector<uint32_t>      mix_output_temps;  // temp indices summed to audio
+  std::vector<uint32_t>      mix_output_temps;  // legacy (plan_4) temp-mix path
   std::vector<JitScalarType> register_types;
 
   // ── Multi-function layout (tropical_plan_5) ──
   std::vector<InstanceProgram> instance_functions;
   SchedulerProgram             scheduler;
+  std::vector<Sink>            sinks;  // device-bound outputs (plan_5 mix path)
 };
 
 // Engine realization strategy.

@@ -32,7 +32,7 @@
  */
 
 import type { SessionState, ExprNode } from '../session.js'
-import type { PerInstancePlan, RegTarget } from '../flat_plan.js'
+import type { PerInstancePlan, RegTarget, SinkSpec } from '../flat_plan.js'
 import { TempTarget, ArrayManagedTarget } from '../flat_plan.js'
 import type {
   NOperand, NInstr, ScalarType, DstSlot,
@@ -526,31 +526,22 @@ export function remapInstancePlan(
 // DAC stitching
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface DacStitchResult {
-  instructions:  NInstr[]
-  /** Temp indices added (one per graphOutput). Appended to the
-   *  unified plan's `output_targets`. */
-  outputTargets: TempIdx[]
-  outputs:       number[]
-  tempCount:     number
-}
+/** Default sink gain — was the engine's hardcoded `÷20` headroom scale,
+ *  now the sink's own property (data, not a magic constant). 1/20 exactly
+ *  preserves v1 audio. */
+export const DEFAULT_SINK_GAIN = 1 / 20
 
-/** Emit DAC stitching: each graphOutput's source slot is read into
- *  a fresh temp; the kernel mix bus sums those temps into the audio
- *  output buffer. Runs in the scheduler postamble so it observes
- *  the current sample's WriteSlots (alive instances have written;
- *  asleep instances retain). */
-export function emitDacStitch(
-  session: SessionState,
-  regOffsetAtDacStart: TempOffset,
-): DacStitchResult {
-  const instructions:  NInstr[]   = []
-  const outputTargets: TempIdx[]  = []
-  const outputs:       number[]   = []
-  let nextTemp = rawOffset(regOffsetAtDacStart)
-
-  for (let i = 0; i < session.graphOutputs.length; i++) {
-    const go = session.graphOutputs[i]
+/** Materialize the session's audible outputs as device-bound sinks. The
+ *  effect boundary: reads each `graphOutput`'s already-allocated output
+ *  module slot directly (the engine sums these slots × gain → the output
+ *  buffer; no DAC-stitch postamble, no intermediate temps).
+ *
+ *  v1 emits exactly one sink (the default audio output, target 0). The
+ *  representation is a list so multiple output devices/channels need no
+ *  schema change — only engine multi-buffer plumbing, deferred. */
+export function emitSinks(session: SessionState): SinkSpec[] {
+  const inputs: ModuleSlotIdx[] = []
+  for (const go of session.graphOutputs) {
     const key = slotKey(toInstanceName(go.instance), go.output)
     const slotIdxRaw = session.outputSlotRegistry.get(key)
     if (slotIdxRaw === undefined) {
@@ -558,23 +549,12 @@ export function emitDacStitch(
         `compileSessionSlotted: dac wire '${key}' has no allocated output slot.`,
       )
     }
-    const dst = tempIdx(nextTemp); nextTemp += 1
-    // Read slot → temp via `Add slot, 0` (LLVM folds the +0).
-    instructions.push(instrScalar(
-      'Add', dst,
-      [opSlot(moduleSlotIdx(slotIdxRaw), 'float'), opConst(0, 'float')],
-      'float',
-    ))
-    outputTargets.push(dst)
-    outputs.push(i)
+    inputs.push(moduleSlotIdx(slotIdxRaw))
   }
-
-  return {
-    instructions,
-    outputTargets,
-    outputs,
-    tempCount: outputTargets.length,
-  }
+  // Always emit the default audio sink (even with no inputs) so the engine
+  // unconditionally writes the output buffer — matches the old mix, which
+  // wrote sum([])·gain = 0 when there were no outputs.
+  return [{ inputs, gain: DEFAULT_SINK_GAIN, target: 0 }]
 }
 
 // Re-export utilities the session compiler also needs.

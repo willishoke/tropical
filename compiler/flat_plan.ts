@@ -223,6 +223,38 @@ export interface SchedulerFunction {
   outputs:         number[]
 }
 
+// ─── SinkSpec: a device-bound output sink (the DAC, neutrally named) ─────────
+//
+// The one effectful node — the exit from the pure signal graph to a device.
+// A sink reads a set of output module slots, sums them, scales by its own
+// `gain`, and writes the result to output channel/device `target`. Sinks are
+// a FAMILY, not a singleton: multiple output devices/channels are normal
+// (and dually, sources — Tick/Rate — are a family on the input side). v1
+// emits exactly one sink (target 0 → the single audio output buffer); the
+// representation is N-ready, the engine currently realizes target 0.
+//
+// Lives at the plan boundary, never inside the pure ResolvedProgram passes —
+// `emitSinks` materializes it at the `compileSession` boundary from
+// `session.graphOutputs`. This is the categorically-correct home for the
+// effect: a morphism in the emit IR, absent from the trace-free PROP.
+
+export interface SinkSpec {
+  /** Output module-slot indices summed into this sink (read directly via
+   *  the engine's slot load — no intermediate temps / DAC-stitch postamble). */
+  inputs: ModuleSlotIdx[]
+  /** The sink's own output scale (was the hardcoded engine `÷20`; now data).
+   *  Default 1/20 preserves v1 audio exactly. */
+  gain:   number
+  /** Output device/channel index. 0 = the default audio output buffer. */
+  target: number
+}
+
+export interface WireSinkSpec {
+  inputs: number[]
+  gain:   number
+  target: number
+}
+
 // ─── FlatPlan: the runnable plan ────────────────────────────────────────────
 
 export interface FlatPlan {
@@ -244,6 +276,9 @@ export interface FlatPlan {
   // ── Multi-function layout ─────────────────────────────────────────────
   instance_functions: InstanceFunction[]
   scheduler_function: SchedulerFunction
+  /** Device-bound output sinks. Replaces the scheduler's DAC-stitch
+   *  postamble + `output_targets`/`outputs` mix. */
+  sinks: SinkSpec[]
 
   // ── Inter-module slot array ───────────────────────────────────────────
   slot_count:    number
@@ -306,6 +341,10 @@ export interface WireFlatPlan {
   array_slot_sizes: number[]
   instance_functions: WireInstanceFunction[]
   scheduler_function: WireSchedulerFunction
+  /** Device-bound output sinks. Optional on the wire for backward
+   *  compatibility with legacy/plan_4 plans that mix via the scheduler's
+   *  `output_targets`; parsed as `[]` when missing. */
+  sinks?:        WireSinkSpec[]
   slot_count:    number
   slot_names:    string[]
   slot_defaults: number[]
@@ -436,6 +475,11 @@ export function parseWirePlan(wire: WireFlatPlan): FlatPlan {
       output_targets:  wire.scheduler_function.output_targets.map(tempIdx),
       outputs:         wire.scheduler_function.outputs,
     },
+    sinks: (wire.sinks ?? []).map(s => ({
+      inputs: s.inputs.map(moduleSlotIdx),
+      gain:   s.gain,
+      target: s.target,
+    })),
   }
 }
 
@@ -477,5 +521,11 @@ export function toWirePlan(plan: FlatPlan): WireFlatPlan {
       output_targets: plan.scheduler_function.output_targets.map(rawIdx),
       outputs:        plan.scheduler_function.outputs,
     },
+    // Omit empty sinks from the wire so legacy golden fixtures (which
+    // predate the field) don't gain a spurious key. Populated sinks emit
+    // normally.
+    ...(plan.sinks.length > 0
+      ? { sinks: plan.sinks.map(s => ({ inputs: s.inputs.map(rawIdx), gain: s.gain, target: s.target })) }
+      : {}),
   }
 }

@@ -34,7 +34,7 @@ import type { NInstr } from './emit_resolved.js'
 import { instrWriteSlot, instrArray, opArray, opConst } from './emit_resolved.js'
 import { arraySlotIdx } from './slot_indices.js'
 import {
-  computeInstanceTopoOrder, emitDacStitch,
+  computeInstanceTopoOrder, emitSinks,
   type PreambleEmitter,
   translateNode,
 } from './compile_session_slotted_helpers.js'
@@ -238,20 +238,18 @@ function compileSessionSlottedPerInstance(
     instanceFunctions.push(fn)
   }
 
-  // DAC stitching reads each graphOutput slot AFTER all instances
-  // dispatch — observes the current sample's WriteSlots.
+  // Outputs are device-bound sinks (read graphOutput slots directly);
+  // the scheduler no longer carries a DAC-stitch postamble.
   const schedulerPreamble: NInstr[] = []
-  const dac = emitDacStitch(session, tempOffset(acc.nextRegRaw))
-  const dacEndRaw = acc.nextRegRaw + dac.tempCount
 
   // ── State-evolution phase: one WriteSlot per extracted delay.
   //    Runs after instance kernels (which produce the current sample's
-  //    output slot values) and before the postamble. Reads source
+  //    output slot values) and before the sinks. Reads source
   //    instances' current-sample outputs and writes them to the delay
   //    slot; next sample, the wire's slot read returns this value —
   //    exactly one sample of latency per MCP wire.
   const stateEvolution: NInstr[] = []
-  let stateEvolutionNextTempRaw = dacEndRaw
+  let stateEvolutionNextTempRaw = acc.nextRegRaw
   const stateEvolutionEmitter: PreambleEmitter = {
     instrs: stateEvolution,
     allocTemp: () => {
@@ -328,9 +326,9 @@ function compileSessionSlottedPerInstance(
   const schedulerFunction: SchedulerFunction = {
     preamble:        schedulerPreamble,
     state_evolution: stateEvolution,
-    postamble:       dac.instructions,
-    output_targets:  dac.outputTargets,
-    outputs:         dac.outputs,
+    postamble:       [],
+    output_targets:  [],
+    outputs:         [],
   }
 
   return {
@@ -346,6 +344,7 @@ function compileSessionSlottedPerInstance(
     register_count:    stateEvolutionNextTempRaw,
     instance_functions: instanceFunctions,
     scheduler_function: schedulerFunction,
+    sinks:              emitSinks(session),
     ...buildSlotMetadata(session),
   }
 }
@@ -445,20 +444,18 @@ function compileSessionSlottedRoot(
   )
   const instanceFunctions: InstanceFunction[] = [fn]
 
-  // DAC stitch is unchanged — reads each graphOutput slot in the
-  // postamble after the root kernel has run.
-  const dac = emitDacStitch(session, tempOffset(acc.nextRegRaw))
-  const dacEndRaw = acc.nextRegRaw + dac.tempCount
-
-  // No state-evolution phase: the per-wire delays became root RegDecl
+  // Outputs are device-bound sinks (read graphOutput slots directly after
+  // the root kernel has run). No DAC-stitch postamble.
+  //
+  // No state-evolution phase either: the per-wire delays became root RegDecl
   // writebacks inside the root kernel (a trailing read-old/write-new
   // batch), preserving one-sample latency by construction.
   const schedulerFunction: SchedulerFunction = {
     preamble:        [],
     state_evolution: [],
-    postamble:       dac.instructions,
-    output_targets:  dac.outputTargets,
-    outputs:         dac.outputs,
+    postamble:       [],
+    output_targets:  [],
+    outputs:         [],
   }
 
   return {
@@ -471,9 +468,10 @@ function compileSessionSlottedRoot(
     array_slot_names:  acc.arraySlotNames,
     array_slot_count:  acc.nextArrayRaw,
     array_slot_sizes:  acc.arraySlotSizes,
-    register_count:    dacEndRaw,
+    register_count:    acc.nextRegRaw,
     instance_functions: instanceFunctions,
     scheduler_function: schedulerFunction,
+    sinks:              emitSinks(session),
     ...buildSlotMetadata(session),
   }
 }

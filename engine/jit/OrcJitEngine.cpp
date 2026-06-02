@@ -1182,11 +1182,21 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
     uint32_t nfns = static_cast<uint32_t>(program.instance_functions.size());
     append(&nfns, sizeof(uint32_t));
     for (const auto & inst : program.instance_functions) serialize_fn(inst);
-    // Mix outputs
+    // Mix outputs (legacy temp-mix path)
     uint32_t nm = static_cast<uint32_t>(program.mix_output_temps.size());
     append(&nm, sizeof(uint32_t));
     for (uint32_t mt : program.mix_output_temps)
       append(&mt, sizeof(uint32_t));
+    // Sinks (slot-mix path): inputs + gain + target all affect codegen.
+    uint32_t nsink = static_cast<uint32_t>(program.sinks.size());
+    append(&nsink, sizeof(uint32_t));
+    for (const auto & sink : program.sinks) {
+      uint32_t ni = static_cast<uint32_t>(sink.inputs.size());
+      append(&ni, sizeof(uint32_t));
+      for (uint32_t s : sink.inputs) append(&s, sizeof(uint32_t));
+      append(&sink.gain, sizeof(double));
+      append(&sink.target, sizeof(uint32_t));
+    }
     // Register writebacks
     uint32_t nrt = static_cast<uint32_t>(program.register_targets.size());
     append(&nrt, sizeof(uint32_t));
@@ -1333,7 +1343,23 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
   //    retain their previous-sample slot value). ──
   if (auto err = ctx.emit_instrs(program.scheduler.postamble)) return std::move(err);
 
-  // ── Output mixing: accumulate mix_output_temps, scale, store to output_buffer[s] ──
+  // ── Output sinks: each sums its input slots, scales by its gain, and
+  //    writes its target channel. v1 realizes target 0 → output_buffer[s].
+  //    Falls back to the legacy temp-mix for plan_4 (no sinks). ──
+  if (!program.sinks.empty())
+  {
+    for (const auto & sink : program.sinks)
+    {
+      llvm::Value * mixed = ctx.zero_f64;
+      for (uint32_t slot : sink.inputs)
+        mixed = builder.CreateFAdd(mixed, ctx.load_slot_f64(slot));
+      llvm::Value * scaled = builder.CreateFMul(mixed, llvm::ConstantFP::get(f64_ty, sink.gain));
+      // target 0 → the single output buffer (multi-device deferred).
+      llvm::Value * out_ptr = builder.CreateInBoundsGEP(f64_ty, output_buffer_arg, loop_counter);
+      builder.CreateStore(scaled, out_ptr);
+    }
+  }
+  else
   {
     llvm::Value * mixed = ctx.zero_f64;
     for (uint32_t mt : program.mix_output_temps)
@@ -1517,6 +1543,15 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
     append(&nm, sizeof(uint32_t));
     for (uint32_t mt : program.mix_output_temps)
       append(&mt, sizeof(uint32_t));
+    uint32_t nsink = static_cast<uint32_t>(program.sinks.size());
+    append(&nsink, sizeof(uint32_t));
+    for (const auto & sink : program.sinks) {
+      uint32_t ni = static_cast<uint32_t>(sink.inputs.size());
+      append(&ni, sizeof(uint32_t));
+      for (uint32_t s : sink.inputs) append(&s, sizeof(uint32_t));
+      append(&sink.gain, sizeof(double));
+      append(&sink.target, sizeof(uint32_t));
+    }
     uint32_t nrt = static_cast<uint32_t>(program.register_targets.size());
     append(&nrt, sizeof(uint32_t));
     for (int32_t rt : program.register_targets)
@@ -1712,16 +1747,28 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
 
     if (auto err = ctx.emit_instrs(program.scheduler.postamble)) return err;
 
-    // Output mix: same as fused-mode tail.
-    llvm::Value * mixed = ctx.zero_f64;
-    for (uint32_t mt : program.mix_output_temps) {
-      llvm::Value * val = ctx.load_temp_typed(mt, temp_types[mt]);
-      llvm::Value * f64_val = ctx.coerce_val(val, temp_types[mt], ST::Float);
-      mixed = builder.CreateFAdd(mixed, f64_val);
+    // Output sinks: same slot-mix as fused-mode tail (legacy temp-mix
+    // fallback for plan_4). v1 realizes target 0 → output_buffer[output_index].
+    if (!program.sinks.empty()) {
+      for (const auto & sink : program.sinks) {
+        llvm::Value * mixed = ctx.zero_f64;
+        for (uint32_t slot : sink.inputs)
+          mixed = builder.CreateFAdd(mixed, ctx.load_slot_f64(slot));
+        llvm::Value * scaled = builder.CreateFMul(mixed, llvm::ConstantFP::get(f64_ty, sink.gain));
+        llvm::Value * out_ptr = builder.CreateInBoundsGEP(f64_ty, output_buffer_arg, output_index_arg);
+        builder.CreateStore(scaled, out_ptr);
+      }
+    } else {
+      llvm::Value * mixed = ctx.zero_f64;
+      for (uint32_t mt : program.mix_output_temps) {
+        llvm::Value * val = ctx.load_temp_typed(mt, temp_types[mt]);
+        llvm::Value * f64_val = ctx.coerce_val(val, temp_types[mt], ST::Float);
+        mixed = builder.CreateFAdd(mixed, f64_val);
+      }
+      llvm::Value * scaled = builder.CreateFDiv(mixed, llvm::ConstantFP::get(f64_ty, 20.0));
+      llvm::Value * out_ptr = builder.CreateInBoundsGEP(f64_ty, output_buffer_arg, output_index_arg);
+      builder.CreateStore(scaled, out_ptr);
     }
-    llvm::Value * scaled = builder.CreateFDiv(mixed, llvm::ConstantFP::get(f64_ty, 20.0));
-    llvm::Value * out_ptr = builder.CreateInBoundsGEP(f64_ty, output_buffer_arg, output_index_arg);
-    builder.CreateStore(scaled, out_ptr);
 
     builder.CreateRetVoid();
 
