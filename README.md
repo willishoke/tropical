@@ -42,7 +42,12 @@ Three domains, one project:
   without thinking about topological order. This is the shape that
   let "build me a four-pole resonant filter with self-oscillation"
   go from a sentence to audible signal without any structural
-  intermediate step.
+  intermediate step. The MCP front door is itself a native Lean 4
+  server built on [Turnstile](https://github.com/willishoke/turnstile)
+  ([`lean/Main.lean`](lean/Main.lean)): every tool's arguments are a
+  typed Lean structure, the wire schema is derived from that type,
+  and each call is decoded and validated at the boundary before it
+  reaches the engine.
 
 The interesting bit is that these three are not independent
 subsystems with adapters between them; they share one IR. The
@@ -68,13 +73,13 @@ arrived at this lives in
 
 ## How it gets built
 
-Tropical is built through Claude Code with Opus 4.7 (1M context).
-The workflow is task-level parallelism: a fleet of agents working
-on independent pieces of the codebase in parallel, managed by one
-person who holds the architectural picture. Opus 4.7's context
-window is the leverage — it can hold a large fraction of this
-codebase at once and reason about cross-cutting changes that would
-otherwise require careful staging.
+Tropical is built through Claude Code. The workflow is task-level
+parallelism: a fleet of agents working on independent pieces of the
+codebase in parallel, managed by one person who holds the
+architectural picture. A large context window is the leverage — the
+model can hold a large fraction of this codebase at once and reason
+about cross-cutting changes that would otherwise require careful
+staging.
 
 Architectural decisions go through rigorous written specs: phased
 implementation plans, clear correctness criteria, agreement on
@@ -128,6 +133,9 @@ reading.
 - [`CLAUDE.md`](CLAUDE.md) — contributor map.
 - [`INSTALL.md`](INSTALL.md) — build prerequisites.
 - [`mcp/CLAUDE.md`](mcp/CLAUDE.md) — MCP server and tool reference.
+- [`lean/Main.lean`](lean/Main.lean) — the Lean 4 MCP front door,
+  built on [Turnstile](https://github.com/willishoke/turnstile);
+  the whole tool surface as typed, schema-derived Lean structures.
 
 ## License
 
