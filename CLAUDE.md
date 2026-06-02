@@ -124,10 +124,8 @@ SessionState  (instances + wiring + dac.out + params)
   │          already-resolved types are supplied via the elaborator's
   │          ExternalProgramResolver hook — LINK, not re-elaboration)
   │       → partitionKernel → tropical_plan_5
-  │     (legacy per-instance scheduler path retained behind
-  │      rootProgram:false as the root_vs_flat oracle.)
   ▼
-tropical_plan_5  (instance_functions[] + scheduler_function)
+tropical_plan_5  (instance_functions[] + sinks[])
 ```
 
 **The IR is acyclic by construction.** Source-level cycles that
@@ -137,10 +135,9 @@ the wire layer: every wire stored via `setWireExpr` is wrapped in a
 unit delay (`{op:'delay', args:[expr], init:0}`), and
 `extractSessionDelays` (a compileSession pre-pass) hoists every
 `delay()` op in any wire to a fresh slot recorded in
-`session.delaySlotRegistry` — which the default root-program lowering
+`session.delaySlotRegistry` — which the root-program lowering
 realizes as a root `RegDecl` (read-old/write-new register writeback)
-and the legacy per-instance lowering realizes as a `WriteSlot` in the
-scheduler's `state_evolution` phase. Hand-written
+inside the kernel. Hand-written
 JSON patches with cross-coupled instances must wrap their own
 back-edges in `delay()` to break the session-level cycle —
 `assertSessionAcyclic` (`compiler/ir/lowering/session_cycle_check.ts`)
@@ -161,27 +158,22 @@ post-strata ResolvedProgram (per-program path)  /  SessionState (session path)
         ├─→ compileSession (compiler/ir/compile_session.ts)
         │      liftWiresToInstances → extractSessionDelays →
         │      assertSessionAcyclic → compileSessionSlotted:
-        │      default = root-program (sessionToParsedProgram → elaborate → partitionKernel);
+        │      root-program (sessionToParsedProgram → elaborate → partitionKernel);
         │      instance_functions = [root] with the session instances as
-        │      nested children, delays as root RegDecl writebacks, the
-        │      scheduler reduced to the DAC-stitch postamble.
+        │      nested children, delays as root RegDecl writebacks.
         │      ──── C API boundary (engine/c_api/tropical_c.h, koffi FFI) ────
         │      NumericProgramParser → FlatProgram (multi-function)
         │      OrcJitEngine → LLVM IR — one kernel function whose body is:
         │          for each sample:
-        │            preamble (currently empty; reserved for future setup)
         │            for each instance_function (recursively: preamble,
         │              per-child {pre_input, child}, body, writebacks)
-        │            state_evolution (delay-slot WriteSlots; empty on the
-        │              root path — delays are root-kernel writebacks)
-        │            postamble (DAC stitch reads)
-        │            output mix
+        │            for each sink: output[target] = gain · Σ slots[inputs]
         │      FlatRuntime → buffer loop, double-buffered hot-swap
         │      TropicalDAC (RtAudio) → audio output
         │
         └─→ emit_wasm (compiler/emit_wasm.ts + compiler/wasm_memory_layout.ts)
                tropical_plan_5 → WebAssembly bytes + linear-memory layout.
-               Same per-sample sequencing as the C++ scheduler.
+               Same per-sample sequencing as the C++ engine.
                compilePlan (web/host/compiler.ts)
                WasmRuntime (web/worklet/runtime.ts) — same hot-swap logic as FlatRuntime,
                state transfer by name, smoothstep fade
@@ -219,7 +211,7 @@ with the per-sample semantics on the input. The cross-checking suites:
   `tests/equiv/nested_vs_inlined.test.ts`,
   `tests/equiv/microkernel_deep.test.ts` — realization-variant
   differentials *within* the JIT: fused vs. per-instance microkernel,
-  flat vs. nested. These exercise the scheduler/slot layer that the
+  flat vs. nested. These exercise the kernel/slot layer that the
   JIT↔WASM pair shares.
 - `tests/equiv/migration_audio.test.ts` — byte-for-byte audio goldens
   against frozen reference output.
@@ -238,7 +230,7 @@ Two distinct JSON schemas; do not confuse them.
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_2` | `compiler/program.ts`, `compiler/parse/raise.ts` | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in `.trop`) or by agents (over MCP). |
-| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: per-instance instruction streams plus a scheduler postamble (DAC stitch) and state-evolution phase (delay-slot updates). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel form) for hand-crafted unit tests; it's lifted into a one-instance plan_5 at parse time. |
+| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: a root instruction stream (instances nested as `children`) plus `sinks[]` (device-bound outputs: sum input slots × gain → channel). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel form, top-level `output_targets` temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 at parse time. |
 
 Going from the first to the second without losing meaning is exactly
 what the strata pipeline does.

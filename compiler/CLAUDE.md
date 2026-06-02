@@ -2,9 +2,9 @@
 
 The TypeScript layer. Every file here is a step from a high-detail
 surface IR (`.trop` source / `tropical_program_2` JSON) toward a
-low-detail emit IR (`tropical_plan_5`, per-instance instruction
-streams over typed scalar slots plus a scheduler that drives them
-per sample). Each step retires some structure the next step doesn't
+low-detail emit IR (`tropical_plan_5`, a root instruction stream over
+typed scalar slots plus device-bound output `sinks`). Each step
+retires some structure the next step doesn't
 have to handle. This file walks the pipeline in the order the
 structure is dropped.
 
@@ -35,11 +35,10 @@ a unit delay by `setWireExpr` (`session.ts`), and
 hoists every `delay()` op in any wire to a fresh slot recorded in
 `session.delaySlotRegistry`. This makes the session-level
 inter-instance dep graph acyclic by construction before
-`compileSessionSlotted` ever runs. Each lowering then consumes the
-registry: the default root-program path materializes each entry as a
-root `RegDecl` (read-old/write-new register writeback); the legacy
-per-instance path writes each as a `WriteSlot` in the scheduler's
-`state_evolution` phase. The defensive
+`compileSessionSlotted` ever runs. The root-program lowering serializes
+each registry entry to a `delay` decl that the elaborator folds into a
+root `RegDecl` (read-old/write-new register writeback inside the kernel).
+The defensive
 `assertSessionAcyclic` (`ir/lowering/session_cycle_check.ts`)
 catches any programmatic session that bypasses both auto-wrap and
 explicit `delay()`.
@@ -57,7 +56,7 @@ program_types.ts      ProgramType / ProgramInstance — thin wrappers over a pos
                       slot-derived fields cache lazily. Wrapper is metadata; IR is the value.
 session.ts            SessionState, generic-program resolution, JSON ingest
 schema.ts             Zod validation for tropical_program_2
-flat_plan.ts          tropical_plan_5 schema (the boundary type with the engine; branded indices, scheduler_function + instance_functions[])
+flat_plan.ts          tropical_plan_5 schema (the boundary type with the engine; branded indices, instance_functions[] + sinks[])
 apply_plan.ts         compileSession → JSON.stringify → runtime.loadPlan
 compiler.ts           Dependency graph utilities (Kahn's, Tarjan's SCC); structural InstanceInfo
 term.ts               PortType, ScalarKind, shape algebra
@@ -77,8 +76,8 @@ ir/                   The strata pipeline + resolved-IR emit boundary
                                    itself asserts acyclic, never breaks cycles)
   lowering/extract_session_delays.ts
                                    pre-emit pass: hoist every `delay()` in a wire
-                                   to a session module slot whose update lands in
-                                   the scheduler's `state_evolution` phase
+                                   to a slot in `delaySlotRegistry`, serialized to
+                                   a root `delay` decl (RegDecl) by the lowering
   lowering/session_cycle_check.ts  defensive `assertSessionAcyclic` invariant
                                    run at compileSession's entry after delay
                                    extraction
@@ -95,8 +94,9 @@ ir/                   The strata pipeline + resolved-IR emit boundary
                             inline_instances input substitution)
   compile_session.ts        session → plan: liftWiresToInstances →
                             extractSessionDelays → compileSessionSlotted.
-  compile_session_slotted.ts session → tropical_plan_5. Dispatches:
-                            root-program (default) vs per-instance (legacy).
+  compile_session_slotted.ts session → tropical_plan_5 (root-program
+                            lowering: buildSessionRoot → partitionKernel; outputs
+                            as sinks). emitSinks lives in the *_helpers.ts.
   session_to_parsed.ts      session → ParsedProgram serializer. The default
                             root-program lowering: buildSessionRoot feeds it
                             to `elaborate` (instances → InstanceDecls via the
@@ -130,7 +130,7 @@ runtime/
 `flatten.ts`, `interpret.ts`, `interpret_resolved.ts`, `emit_numeric.ts`,
 `ir/materialize_session.ts`, and `ir/load.ts` / `ir/program_type_builder.ts`
 are gone. The path is `elaborate → strata → compile_resolved` (or
-`emit_wasm`). For the **session** path, `compile_session` defaults to the
+`emit_wasm`). For the **session** path, `compile_session` uses the
 **root-program lowering** (`ir/session_to_parsed.ts`): the whole session
 serializes back to a `ParsedProgram` and runs through the SAME `elaborate`
 front door — instances → `InstanceDecl`s (their already-resolved types fed
@@ -138,11 +138,11 @@ in via the elaborator's `ExternalProgramResolver` hook, i.e. LINK not
 re-elaboration); per-wire unit delays → `delay` decls the elaborator folds
 into root `RegDecl`s — then lowered through the *same* `partitionKernel`
 the per-program fractal path uses. This replaced the hand-rolled
-`materialize_session.ts` (a partial re-implementation of the elaborator's
-name resolution). The legacy per-instance scheduler path (compose N plans +
-a `state_evolution` phase) is retained behind `rootProgram:false` as the
-`root_vs_flat` differential oracle and an escape hatch
-(`TROPICAL_ROOT_PROGRAM=0`).
+`materialize_session.ts`. The former per-instance scheduler lowering — its
+job was to be the `root_vs_flat` oracle validating this cutover — was
+retired once it had, along with its `SchedulerProgram` (the per-sample
+preamble/state_evolution/postamble tier is gone from the plan and the
+engine; outputs are `sinks`, session delays are root RegDecl writebacks).
 
 ## Surface in (parse + raise)
 
@@ -226,31 +226,22 @@ evaluator. The two backends below operate on this image.
   wires), `extractSessionDelays` (hoist every `delay()` op in a wire
   to a fresh slot whose source registers in `session.delaySlotRegistry`),
   and `assertSessionAcyclic` (defensive invariant on the post-extraction
-  dep graph) — then calls `compileSessionSlotted`, which dispatches on
-  the lowering:
+  dep graph) — then calls `compileSessionSlotted`:
 
-  - **root-program (default).** `compileSessionSlottedRoot`'s
-    `buildSessionRoot` serializes the session to a `ParsedProgram`
-    (`session_to_parsed.ts`) and runs it through `elaborate` to get one
-    synthetic root `ResolvedProgram`, then lowers it through
-    `partitionKernel` (`ROOT_INSTANCE_PATH`, naming-transparent so
-    children/registers keep bare names). Per-wire scalar delays become
-    root scalar `RegDecl`s (via `delay` decls the elaborator folds);
-    array session delays become array `RegDecl`s; the per-wire
-    one-sample latency is reproduced by the engine's read-old/write-new
-    register writeback. The scheduler reduces to the DAC-stitch
-    postamble — `state_evolution` is empty. Slot-based session params
-    are threaded as `paramSlots` so `ParamRef` lowers to the
-    `param:name` module-slot read the control plane drives.
-  - **per-instance (legacy, `rootProgram:false`).**
-    `compileSessionSlottedPerInstance` runs per-instance `compileResolved`
-    and emits one `WriteSlot` per delay-registry entry into the
-    scheduler's `state_evolution` phase between per-instance kernel
-    dispatches and the DAC-stitch postamble. Retained as the
-    `root_vs_flat` differential oracle and an escape hatch.
-
-  Both thread slot names + init values into `slot_defaults` so hot-swap
-  state transfer works the same way it does for output and param slots.
+  `compileSessionSlottedRoot`'s `buildSessionRoot` serializes the session
+  to a `ParsedProgram` (`session_to_parsed.ts`) and runs it through
+  `elaborate` to get one synthetic root `ResolvedProgram`, then lowers it
+  through `partitionKernel` (`ROOT_INSTANCE_PATH`, naming-transparent so
+  children/registers keep bare names). Per-wire scalar delays become
+  root scalar `RegDecl`s (via `delay` decls the elaborator folds); array
+  session delays become array `RegDecl`s; the per-wire one-sample latency
+  is reproduced by the engine's read-old/write-new register writeback.
+  Outputs are `sinks[]` (`emitSinks` reads each graphOutput slot directly);
+  slot-based session params are threaded as `paramSlots` so `ParamRef`
+  lowers to the `param:name` module-slot read the control plane drives.
+  There is no scheduler tier. Slot names + init values thread into
+  `slot_defaults` so hot-swap state transfer works the same way it does
+  for output and param slots.
 
 The per-program path uses `programTypeFromResolved(prog, typeArgs)`
 (`ir/strata.ts`): full strata pipeline, then `new ProgramType(...)`.
@@ -266,7 +257,7 @@ compiler stage — they're parallel emits.
   `tropical_plan_5` FlatPlan). Calls `buildSlotMaps` (decl identity
   → integer), then `emit_resolved.emitNumericProgram`. The result is
   packed into `instance_functions[]` by `compile_session_slotted.ts`
-  alongside the `scheduler_function`. The C++ JIT consumes the
+  alongside `sinks[]`. The C++ JIT consumes the
   packed FlatPlan. `emit_resolved.ts` keys CSE on a bottom-up
   structural id (interned via `${op}|${field=}|${child_id}` strings),
   not node identity, so duplicates introduced by clone-then-substitute

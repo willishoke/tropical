@@ -5,7 +5,7 @@
  * Two layers:
  *
  *   - **Internal**: `FlatPlan`, `PerInstancePlan`, `InstanceFunction`,
- *     `SchedulerFunction`. Uses branded `TempIdx` / `ArraySlotIdx` /
+ *     `SinkSpec`. Uses branded `TempIdx` / `ArraySlotIdx` /
  *     etc. for every slot index, and a `RegTarget` sum type instead
  *     of `-1`-sentinelled `number`. The pipeline operates on this
  *     layer; the type system rejects cross-namespace arithmetic.
@@ -19,16 +19,18 @@
  * for branded primitives is a no-op cast. Only `register_targets`
  * (the `RegTarget` sum type) needs an actual structural transform.
  *
- * ## tropical_plan_5: per-instance kernel layout
+ * ## tropical_plan_5: kernel layout
  *
- * Each session instance compiles to its own `InstanceFunction` slice;
- * the `SchedulerFunction` orchestrates them per sample:
+ * The session lowers to a single root `InstanceFunction` whose `children`
+ * are the session instances. Per sample the engine runs:
  *
- *     preamble (currently empty; reserved for future per-sample setup)
- *       for each instance: instance body + writebacks
- *     state_evolution (WriteSlot per extracted delay)
- *     postamble (DAC reads)
- *     output mix
+ *     for each instance (topo order, nested): body + writebacks
+ *       (session-level per-wire delays are root RegDecl writebacks here)
+ *     for each sink: output[target] = gain · Σ slots[sink.inputs]
+ *
+ * There is no scheduler tier and no special output tail beyond the sink
+ * op. (The legacy `output_targets`/`outputs` temp-mix is a top-level
+ * carrier used only by sink-less plan_4 / single-kernel fixtures.)
  *
  * Hot-swap stays compatible: the entire `KernelState` swaps atomically;
  * state transfer matches register/array/slot names regardless of which
