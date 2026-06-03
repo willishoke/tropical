@@ -11,8 +11,8 @@ program — and is designed around one rule: a pass never carries
 forward structure the next pass would rather not see. Surface
 syntax, names, type parameters, sum types, instance nesting, array
 shapes, combinators all get retired at the right moment. By the end
-of the chain, the IR is `tropical_plan_5`: per-instance instruction
-streams over typed scalar slots plus a scheduler that drives them
+of the chain, the IR is `tropical_plan_5`: a root instruction stream
+(instances nested as `children`) over typed scalar slots plus output sinks
 per-sample. Two backends interpret that low-detail IR — the JIT and
 WebAssembly — and equivalence test suites cross-check them
 sample-for-sample.
@@ -49,9 +49,8 @@ suggested explicit-delay fix). Session-level cycles in MCP-built
 graphs are broken at the wire layer: every wire stored via
 `setWireExpr` is wrapped in a unit delay, and a pre-emit pass hoists
 those delays out of the wires into `session.delaySlotRegistry` —
-realized by the default root-program lowering as per-wire register
-writebacks (and by the legacy per-instance lowering as
-`state_evolution` `WriteSlot`s). Hand-written JSON patches
+realized by the root-program lowering as per-wire root `RegDecl`
+read-old/write-new writebacks. Hand-written JSON patches
 with cross-coupled instances must wrap their own back-edges in
 `delay()` to break the session-level cycle —
 `assertSessionAcyclic` (`compiler/ir/lowering/session_cycle_check.ts`)
@@ -98,13 +97,13 @@ ResolvedProgram (post-strata)
     │   │       │
     │   │       │ liftWiresToInstances → extractSessionDelays
     │   │       │     → assertSessionAcyclic → compileSessionSlotted
-    │   │       │     (per-instance compileResolved into
-    │   │       │      instance_functions[] + scheduler_function)
+    │   │       │     (buildSessionRoot → partitionKernel →
+    │   │       │      instance_functions[] (root, nested children) + sinks[])
     │   │       │
     │   │       │   ──── C API boundary (engine/c_api/tropical_c.h, koffi FFI) ────
     │   │       ▼
     │   │   NumericProgramParser → FlatProgram (multi-function)
-    │   │   OrcJitEngine → LLVM IR (one kernel function whose body is the scheduler)
+    │   │   OrcJitEngine → LLVM IR (one kernel: instances, then sinks)
     │   │   FlatRuntime → buffer loop, double-buffered hot-swap
     │   │   TropicalDAC (RtAudio) → audio output
     │   │
@@ -117,11 +116,10 @@ ResolvedProgram (post-strata)
 Both backends consume the same `tropical_plan_5`: by default the
 session is serialized to a `ParsedProgram` and elaborated into a single
 synthetic root program whose
-`InstanceFunction` carries the session instances as nested `children`
-(the legacy per-instance lowering packs one `InstanceFunction` per
-instance instead — see §4.1), and the kernel is one LLVM function (or,
-in WASM, one `process` export) whose body dispatches each instance
-per sample. The equivalence tests pin the JIT and WASM outputs
+`InstanceFunction` carries the session instances as nested `children`,
+and the kernel is one LLVM function (or, in WASM, one `process` export)
+whose body dispatches each instance per sample, then writes the output
+sinks. The equivalence tests pin the JIT and WASM outputs
 sample-for-sample to each other.
 
 Every pass below is presented as input IR, output IR, and the
@@ -413,7 +411,7 @@ saved back out from one.
 
 Two paths consume a session.
 
-### 4.1 JIT path — `compileSession` (per-instance)
+### 4.1 JIT path — `compileSession`
 
 `compiler/ir/compile_session.ts` runs three pre-emit passes and
 hands the result to `compileSessionSlotted`:
@@ -430,9 +428,8 @@ hands the result to `compileSessionSlotted`:
    a `sessionSlot` / `sessionArraySlot` read; the source expression is
    recorded in `session.delaySlotRegistry`. This is the structural
    mechanism that keeps the MCP-built IR acyclic — every wire becomes
-   a slot read with one sample of latency, realized by whichever
-   lowering runs (root `RegDecl` writeback, or `state_evolution`
-   `WriteSlot`; see below).
+   a slot read with one sample of latency, realized as a root `RegDecl`
+   read-old/write-new writeback by the lowering (see below).
 
 3. **`assertSessionAcyclic`**
    (`compiler/ir/lowering/session_cycle_check.ts`) — defensive
@@ -440,43 +437,37 @@ hands the result to `compileSessionSlotted`:
    sessions that bypass both `setWireExpr`'s auto-wrap and explicit
    `delay()`.
 
-Then `compileSessionSlotted` dispatches on the lowering:
+Then `compileSessionSlotted` runs the root-program lowering:
+`buildSessionRoot` serializes the whole session back to a `ParsedProgram`
+(`session_to_parsed.ts`) and runs it through the SAME `elaborate` front
+door the surface path uses, yielding one synthetic root `ResolvedProgram`:
+instances become `InstanceDecl`s (their already-resolved types supplied
+via the elaborator's `ExternalProgramResolver` hook — LINK, not
+re-elaboration), per-wire scalar delays become root scalar `RegDecl`s (via
+`delay` decls the elaborator folds), array session delays become array
+`RegDecl`s. That root is lowered through the *same* `partitionKernel` the
+per-program fractal path uses (`ROOT_INSTANCE_PATH` naming transparency, so
+children and registers keep bare names). The result is a single
+`InstanceFunction` (the root) whose `children` are the session instances;
+the per-wire latency is the engine's read-old/write-new register
+writeback. Outputs are `sinks[]` (`emitSinks` reads each graphOutput slot
+directly); slot-based session params are threaded as `paramSlots`.
 
-- **root-program (default).** `buildSessionRoot` serializes the whole
-  session back to a `ParsedProgram` (`session_to_parsed.ts`) and runs it
-  through the SAME `elaborate` front door the surface path uses, yielding
-  one synthetic root `ResolvedProgram`: instances become `InstanceDecl`s
-  (their already-resolved types supplied via the elaborator's
-  `ExternalProgramResolver` hook — LINK, not re-elaboration), per-wire
-  scalar delays become root scalar `RegDecl`s (via `delay` decls the
-  elaborator folds), array session delays become array `RegDecl`s. That
-  root is lowered through the *same* `partitionKernel` the per-program
-  fractal path uses (with `ROOT_INSTANCE_PATH` naming transparency, so
-  children and registers keep bare names). The result is a single
-  `InstanceFunction` (the root) whose `children` are the session
-  instances; the per-wire latency is the engine's read-old/write-new
-  register writeback, so the scheduler's `state_evolution` phase is
-  empty. Slot-based session params are threaded as `paramSlots`.
-- **per-instance (legacy, `rootProgram:false`).** Compiles each
-  instance standalone through `compileResolved`, packs one
-  `InstanceFunction` per instance, and emits one `WriteSlot` per
-  delay-registry entry into `state_evolution`. Retained as the
-  `root_vs_flat` differential oracle and an escape hatch
-  (`TROPICAL_ROOT_PROGRAM=0`).
+(The former per-instance lowering — N standalone `compileResolved` plans
+stitched by a `SchedulerFunction` with a `state_evolution` `WriteSlot` per
+delay — existed only as the `root_vs_flat` differential oracle. Once it had
+validated the root path it was retired, taking the whole scheduler tier
+with it.)
 
-Both produce a `tropical_plan_5` `FlatPlan` with one
-`SchedulerFunction`. The scheduler's phases sequence the per-sample
-work (the per-instance dispatch recurses into nested `children`):
+The resulting `tropical_plan_5` `FlatPlan` sequences the per-sample work as
+(the dispatch recurses into nested `children`):
 
 ```
 for each sample:
-  preamble        (currently empty; reserved for future setup)
   for each instance_function (recursively: preamble,
-    per-child {pre_input, child}, body, writebacks)
-  state_evolution (WriteSlot per extracted delay; empty on the root
-                   path — delays are root-kernel register writebacks)
-  postamble       (DAC stitch — read graphOutput slots into mix temps)
-  output mix
+    per-child {pre_input, child}, body, writebacks;
+    session-level per-wire delays are root RegDecl writebacks here)
+  for each sink: output[target] = gain · Σ slots[sink.inputs]
 ```
 
 Branded indices throughout (`TempIdx`, `StateRegIdx`,
@@ -493,8 +484,8 @@ selected by `FlatPlan.compilation_mode`:
 - `'fused'` (default) — one monolithic LLVM function for the whole
   session per buffer. LLVM fuses across instances aggressively.
 - `'microkernel'` — one LLVM function per top-level session instance,
-  plus preamble / state_evolution / postamble_mix; the per-sample
-  outer loop runs in C++ and dispatches them via function pointers.
+  plus a `postamble_mix` (the sink mix); the per-sample outer loop runs
+  in C++ and dispatches them via function pointers.
   Trades cross-instance fusion for superlinear cold-compile speedup
   (LLVM optimizer scales worse on one huge function than on N
   smaller ones). Sample-for-sample equivalent to fused at 1e-12 per
@@ -537,11 +528,10 @@ path.
 
 `compile_session_slotted.ts` packs `PerInstancePlan`s into
 `instance_functions[]` of a `FlatPlan`, shifting indices by the
-per-instance offsets, and builds the `SchedulerFunction` with the DAC
-stitch postamble. On the default root path that's a single root
-`InstanceFunction` (instances nested as its `children`) and an empty
-`state_evolution`; on the legacy per-instance path it's N functions
-plus the `state_evolution` `WriteSlot`s.
+per-instance offsets, and builds `sinks[]` (`emitSinks`) from the
+session's graphOutputs. The result is a single root `InstanceFunction`
+(the session instances nested as its `children`); session-level delays
+are root RegDecl writebacks, so there is no scheduler tier.
 
 **Structural CSE.** `emit_resolved.ts` keys CSE on a bottom-up
 structural id (interned via `${op}|${field=}|${child_id}` strings),
@@ -564,8 +554,8 @@ The plan crosses the C API boundary as JSON. On the C++ side:
 
 ```
 NumericProgramParser::parse_plan5()    ← engine/runtime/NumericProgramParser.hpp
-  └─ thin JSON deserializer; reads per-instance plans plus the
-     scheduler into a FlatProgram (multi-function) struct. A
+  └─ thin JSON deserializer; reads the instance functions plus
+     sinks[] into a FlatProgram (multi-function) struct. A
      backcompat lift exists for single-kernel plan_4 inputs (hand-
      crafted unit tests, legacy saved plans).
 OrcJitEngine::compile_flat_program()   ← engine/jit/OrcJitEngine.{hpp,cpp}
@@ -578,13 +568,10 @@ OrcJitEngine::compile_flat_program()   ← engine/jit/OrcJitEngine.{hpp,cpp}
         auto-invalidates.
      3. Generate typed LLVM IR. One outer kernel function whose
         body, per sample, runs:
-            preamble (currently empty)
             for each instance_function (recursively: preamble,
-              per-child {pre_input, child}, body, writebacks)
-            state_evolution (delay-slot WriteSlots; empty on the
-              root path — delays are root-kernel writebacks)
-            postamble (DAC stitch reads)
-            output mix
+              per-child {pre_input, child}, body, writebacks;
+              session-level delays are root RegDecl writebacks here)
+            for each sink: output[target] = gain · Σ slots[inputs]
         Per-instruction operand resolution emits f64/i64/i1 with
         explicit coercion; array loops when loop_count > 1.
      4. LLJIT compile, look up symbol → NumericKernelFn.
@@ -647,9 +634,8 @@ output        f64[maxBlockSize]              — kernel writes mono audio out
 `web/worklet/runtime.ts` so offsets stay in sync.
 
 **WASM kernel structure** mirrors the LLVM kernel: same per-sample
-sequencing (preamble / per-instance bodies + writebacks / state
-evolution / postamble / output mix), implemented in WASM bytecode
-over the linear memory layout above.
+sequencing (per-instance bodies + writebacks, then the output sinks),
+implemented in WASM bytecode over the linear memory layout above.
 
 **Encoding.** `i64` cells store either an f64 bitcast, a signed
 int, or a zero-extended bool; the per-instruction `result_type`
@@ -677,9 +663,8 @@ suites:
 - `tests/equiv/microkernel_vs_fused.test.ts`,
   `tests/equiv/nested_vs_inlined.test.ts`,
   `tests/equiv/microkernel_deep.test.ts` — realization-variant
-  differentials within the JIT (fused vs. per-instance microkernel,
-  flat vs. nested), exercising the scheduler/slot layer the two
-  backends share.
+  differentials within the JIT (fused vs. microkernel, flat vs.
+  nested), exercising the kernel/slot layer the two backends share.
 - `tests/equiv/migration_audio.test.ts` — byte-for-byte audio goldens.
 - `tests/equiv/web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches the JIT output.
@@ -715,7 +700,7 @@ Two distinct JSON schemas; do not confuse them.
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_2` | `compiler/program.ts`, `compiler/parse/raise.ts` | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in `.trop`) or by agents (over MCP). |
-| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: per-instance instruction streams (`instance_functions[]`) plus a `scheduler_function` with preamble / state_evolution / postamble phases. The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel form) for hand-crafted unit tests; it's lifted into a one-instance plan_5 at parse time. |
+| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: a root instruction stream (`instance_functions[]`, instances nested as `children`) plus `sinks[]` (device-bound outputs). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel, top-level temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 at parse time. |
 
 Schema validation: `compiler/schema.ts` (Zod) for input;
 `compiler/flat_plan.ts` (branded TypeScript types) for output.
@@ -757,21 +742,21 @@ what the strata pipeline does.
       array_slot_sizes, instructions, output_targets, register_targets, ... },
     ...
   ],
-  scheduler_function: {
-    preamble:        NInstr[],   // currently empty
-    state_evolution: NInstr[],   // WriteSlot per extracted delay
-    postamble:       NInstr[],   // DAC stitch reads
-    outputs:         number[],   // indices into output mix
+  sinks: [
+    { inputs: number[],  // output module-slot indices to sum
+      gain:   number,    // output scale (was the engine's hardcoded ÷20)
+      target: number },  // output channel/device (0 = default audio out)
     ...
-  }
+  ]
+  // (sink-less plan_4 / single-kernel fixtures instead carry top-level
+  //  `output_targets`/`outputs` for the legacy temp-mix ÷20.)
 }
 ```
 
 The `tropical_plan_5` shape is the C-API contract. Anything the
-backends need to know about the program — instance kernels, the
-scheduler that drives them, names, types, slot counts, init state —
-is in there; everything the compiler decided to forget along the
-way is gone.
+backends need to know about the program — instance kernels, the output
+sinks, names, types, slot counts, init state — is in there; everything
+the compiler decided to forget along the way is gone.
 
 ---
 
@@ -1040,8 +1025,8 @@ every `stdlib/*.trop` and confirms post-strata invariants. Run by
 
 Cycles in source code throw `CycleViolation` at elaborate-time;
 cycles in session wiring are broken at the wire layer by
-`setWireExpr`'s auto-wrap + `extractSessionDelays`'s hoist into the
-scheduler. The compiler's strata pipeline asserts acyclic input at
+`setWireExpr`'s auto-wrap + `extractSessionDelays`'s hoist into root
+`RegDecl`s. The compiler's strata pipeline asserts acyclic input at
 its boundary and refuses to lower cyclic IR. This closes the
 asymmetry where the JIT silently tolerated cycles via slot
 back-edges while the interpreter rejected them, and makes "the

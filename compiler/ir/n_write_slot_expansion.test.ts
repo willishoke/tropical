@@ -19,8 +19,14 @@ import { makeSession } from '../session.js'
 import { loadProgramAsType } from '../program.js'
 import { compileSession } from './compile_session.js'
 import { slotKey, instanceName } from './branded_names.js'
+import type { InstanceFunction } from '../flat_plan.js'
 
 const sk = (i: string, n: string) => slotKey(instanceName(i), n)
+
+/** Flatten instructions across the root kernel and all nested children —
+ *  the session lowers to one root kernel whose children are the instances. */
+const allInstrs = (fns: InstanceFunction[]): InstanceFunction['instructions'] =>
+  fns.flatMap(f => [...f.instructions, ...allInstrs(f.children)])
 
 describe('array-output writeback shape', () => {
   test('an instance with array_out: float[3] emits 3 SetElements + 1 WriteSlot', () => {
@@ -64,12 +70,11 @@ describe('array-output writeback shape', () => {
     expect(aMeta!.arraySlot).toBeDefined()
     expect(aMeta!.arraySize).toBe(3)
 
-    const plan = compileSession(session, { rootProgram: false })
-    expect(plan.instance_functions.length).toBe(1)
-    const instFn = plan.instance_functions[0]
+    const plan = compileSession(session)
+    const instrs = allInstrs(plan.instance_functions)
 
     // Scalar output port: one WriteSlot per scalar element (= 1 here).
-    const writeSlots = instFn.instructions.filter(i => i.tag === 'WriteSlot')
+    const writeSlots = instrs.filter(i => i.tag === 'WriteSlot')
     expect(writeSlots.length).toBe(1)
 
     // Array output port: one SetElement per element of the declared
@@ -77,7 +82,7 @@ describe('array-output writeback shape', () => {
     // `[10,20,30]` produces its own SetElements too (via Pack
     // unboxing), so the count is at least 3; assert lower-bound so
     // the test isn't brittle to incidental Pack-emit shape changes.
-    const setElements = instFn.instructions.filter(i => i.tag === 'SetElement')
+    const setElements = instrs.filter(i => i.tag === 'SetElement')
     expect(setElements.length).toBeGreaterThanOrEqual(3)
 
     // The array slot allocated for `arr` should appear in the FlatPlan's
@@ -109,9 +114,8 @@ describe('array-output writeback shape', () => {
       audio_outputs: [{ instance: 'a', output: 's' }],
     } as Parameters<typeof loadJSON>[0], session)
 
-    const plan = compileSession(session, { rootProgram: false })
-    const writeSlots = plan.instance_functions[0].instructions.filter(i => i.tag === 'WriteSlot')
-    // 1 for the scalar output (alive comes from scheduler preamble).
+    const plan = compileSession(session)
+    const writeSlots = allInstrs(plan.instance_functions).filter(i => i.tag === 'WriteSlot')
     expect(writeSlots.length).toBe(1)
   })
 })

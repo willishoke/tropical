@@ -167,15 +167,15 @@ struct InstanceProgram
   std::vector<InstanceProgram> children;
 };
 
-// Top-level driver: runs once per sample. Preamble fires before any
-// instance dispatch; postamble fires after. state_evolution sits
-// between instance dispatch and postamble — holds delay-slot updates
-// from MCP wire auto-delays. Empty for legacy plans.
-struct SchedulerProgram
+// A device-bound output sink (the DAC, neutrally named). Reads its input
+// module slots, sums them, scales by `gain`, and writes channel/device
+// `target`. A family, not a singleton — multiple output devices are normal.
+// v1 realizes target 0 → the single output buffer.
+struct Sink
 {
-  std::vector<FlatInstr>       preamble;
-  std::vector<FlatInstr>       state_evolution;
-  std::vector<FlatInstr>       postamble;
+  std::vector<uint32_t> inputs;        // output module-slot indices
+  double                gain   = 0.05; // was the hardcoded ÷20 (now data)
+  uint32_t              target = 0;    // output channel/device index
 };
 
 struct FlatProgram
@@ -185,12 +185,12 @@ struct FlatProgram
   std::vector<uint32_t>      array_slot_sizes; // element count per array slot
   std::vector<uint32_t>      output_targets;
   std::vector<int32_t>       register_targets;
-  std::vector<uint32_t>      mix_output_temps;  // temp indices summed to audio
+  std::vector<uint32_t>      mix_output_temps;  // legacy (plan_4) temp-mix path
   std::vector<JitScalarType> register_types;
 
   // ── Multi-function layout (tropical_plan_5) ──
   std::vector<InstanceProgram> instance_functions;
-  SchedulerProgram             scheduler;
+  std::vector<Sink>            sinks;  // device-bound outputs (plan_5 mix path)
 };
 
 // Engine realization strategy.
@@ -283,10 +283,8 @@ using PostambleMixFn = void (*)(
 
 struct MicrokernelKernels
 {
-  PerSampleFn               preamble        = nullptr;
   std::vector<PerSampleFn>  instances;   // one per FlatProgram::instance_functions entry
-  PerSampleFn               state_evolution = nullptr;
-  PostambleMixFn            postamble_mix   = nullptr;
+  PostambleMixFn            postamble_mix   = nullptr;  // the output sink mix
 };
 
 class KernelObjectCache;

@@ -116,7 +116,7 @@ public:
     const bool mk_ready    =
       (state.mode == tropical_jit::CompilationMode::Microkernel
        || state.mode == tropical_jit::CompilationMode::MicrokernelDeep)
-      && state.microkernels.preamble != nullptr;
+      && state.microkernels.postamble_mix != nullptr;
     if (!fused_ready && !mk_ready)
     {
       std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
@@ -142,9 +142,9 @@ public:
     }
     else
     {
-      // Microkernel: outer sample loop in C++, dispatching the N+3
-      // per-sample functions in scheduler order. This is the
-      // architectural shape the scoped-lifetime / per-voice
+      // Microkernel: outer sample loop in C++, dispatching the N+1
+      // per-sample functions (N instances, then the sink mix). This is
+      // the architectural shape the scoped-lifetime / per-voice
       // microkernel roadmap needs; the spike measures whether the
       // dispatch cost is acceptable for realtime synthesis.
       const auto & mk = state.microkernels;
@@ -160,10 +160,8 @@ public:
       for (unsigned int i = 0; i < buffer_length_; ++i)
       {
         const uint64_t s = start_idx + i;
-        mk.preamble(regs, arrays, arr_sizes, temps, sr, s, params, slots);
         for (auto fn : mk.instances)
           fn(regs, arrays, arr_sizes, temps, sr, s, params, slots);
-        mk.state_evolution(regs, arrays, arr_sizes, temps, sr, s, params, slots);
         mk.postamble_mix(regs, arrays, arr_sizes, temps, sr, s, params, slots, out, i);
       }
     }

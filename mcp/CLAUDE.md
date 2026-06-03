@@ -46,8 +46,9 @@ SessionState
        → liftWiresToInstances  (anonymous-instance lift for array-literal wires)
        → extractSessionDelays  (hoist auto-wrap delays into session.delaySlotRegistry)
        → assertSessionAcyclic  (defensive invariant)
-       → compileSessionSlotted (default: materialize one root ResolvedProgram
-                                → partitionKernel → instance_functions[]+scheduler)
+       → compileSessionSlotted (buildSessionRoot → elaborate one root
+                                ResolvedProgram → partitionKernel →
+                                instance_functions[] (root, nested) + sinks[])
        → tropical_plan_5 JSON
   → JSON.stringify
   → runtime.loadPlan  (C++: NumericProgramParser → OrcJitEngine → FlatRuntime hot-swap)
@@ -57,11 +58,10 @@ The strata pipeline (now `assertAcyclic → specialize → sumLower →
 inlineInstances → arrayLower → identityElim`) runs per-instance
 inside `compileResolved`. Session-level cycle handling lives in the
 wire layer: `setWireExpr` wraps every wire in a unit delay,
-`extractSessionDelays` hoists it into `session.delaySlotRegistry`. The
-default root-program lowering realizes each entry as a root `RegDecl`
-writeback (the scheduler's `state_evolution` phase is then empty — the
-legacy per-instance path uses it for one `WriteSlot` per entry). The
-WASM backend consumes the same `tropical_plan_5` and is held to
+`extractSessionDelays` hoists it into `session.delaySlotRegistry`; the
+root-program lowering serializes each entry to a root `RegDecl`
+read-old/write-new writeback (no scheduler tier — outputs are `sinks`).
+The WASM backend consumes the same `tropical_plan_5` and is held to
 sample-for-sample equivalence with the JIT (`tests/equiv/wasm_vs_jit`).
 
 A compile error doesn't kill the session; it returns a structured

@@ -5,7 +5,7 @@
  * Two layers:
  *
  *   - **Internal**: `FlatPlan`, `PerInstancePlan`, `InstanceFunction`,
- *     `SchedulerFunction`. Uses branded `TempIdx` / `ArraySlotIdx` /
+ *     `SinkSpec`. Uses branded `TempIdx` / `ArraySlotIdx` /
  *     etc. for every slot index, and a `RegTarget` sum type instead
  *     of `-1`-sentinelled `number`. The pipeline operates on this
  *     layer; the type system rejects cross-namespace arithmetic.
@@ -19,16 +19,18 @@
  * for branded primitives is a no-op cast. Only `register_targets`
  * (the `RegTarget` sum type) needs an actual structural transform.
  *
- * ## tropical_plan_5: per-instance kernel layout
+ * ## tropical_plan_5: kernel layout
  *
- * Each session instance compiles to its own `InstanceFunction` slice;
- * the `SchedulerFunction` orchestrates them per sample:
+ * The session lowers to a single root `InstanceFunction` whose `children`
+ * are the session instances. Per sample the engine runs:
  *
- *     preamble (currently empty; reserved for future per-sample setup)
- *       for each instance: instance body + writebacks
- *     state_evolution (WriteSlot per extracted delay)
- *     postamble (DAC reads)
- *     output mix
+ *     for each instance (topo order, nested): body + writebacks
+ *       (session-level per-wire delays are root RegDecl writebacks here)
+ *     for each sink: output[target] = gain · Σ slots[sink.inputs]
+ *
+ * There is no scheduler tier and no special output tail beyond the sink
+ * op. (The legacy `output_targets`/`outputs` temp-mix is a top-level
+ * carrier used only by sink-less plan_4 / single-kernel fixtures.)
  *
  * Hot-swap stays compatible: the entire `KernelState` swaps atomically;
  * state transfer matches register/array/slot names regardless of which
@@ -197,30 +199,36 @@ export interface InstanceFunction {
   children:          InstanceFunction[]
 }
 
-// ─── SchedulerFunction: the top-level per-sample driver ─────────────────────
+// ─── SinkSpec: a device-bound output sink (the DAC, neutrally named) ─────────
+//
+// The one effectful node — the exit from the pure signal graph to a device.
+// A sink reads a set of output module slots, sums them, scales by its own
+// `gain`, and writes the result to output channel/device `target`. Sinks are
+// a FAMILY, not a singleton: multiple output devices/channels are normal
+// (and dually, sources — Tick/Rate — are a family on the input side). v1
+// emits exactly one sink (target 0 → the single audio output buffer); the
+// representation is N-ready, the engine currently realizes target 0.
+//
+// Lives at the plan boundary, never inside the pure ResolvedProgram passes —
+// `emitSinks` materializes it at the `compileSession` boundary from
+// `session.graphOutputs`. This is the categorically-correct home for the
+// effect: a morphism in the emit IR, absent from the trace-free PROP.
 
-export interface SchedulerFunction {
-  /** Per-sample setup. Currently empty; reserved for future per-sample
-   *  scheduler work. Runs before any instance bodies. */
-  preamble:        NInstr[]
-  /** Per-sample state evolution. Runs after instance dispatches and
-   *  before the observation postamble. Holds `WriteSlot` instructions
-   *  that update session-level delay slots from the current sample's
-   *  source instance outputs — the MCP wire auto-delay convention is
-   *  realized here. Reads in this phase see the current sample's
-   *  instance writebacks; writes become visible to the NEXT sample's
-   *  preamble and instance kernels (which read these slots at the
-   *  start of their bodies and therefore see the previous postamble-
-   *  era write = one sample of latency per wire). */
-  state_evolution: NInstr[]
-  /** Per-sample observation / teardown. Holds DAC mix-bus reads from
-   *  each graphOutput slot — observes the current sample's WriteSlot
-   *  values. */
-  postamble:       NInstr[]
-  /** Temps (in the unified register space) summed into the audio output. */
-  output_targets:  TempIdx[]
-  /** Indices into `output_targets` (identity mapping today). */
-  outputs:         number[]
+export interface SinkSpec {
+  /** Output module-slot indices summed into this sink (read directly via
+   *  the engine's slot load — no intermediate temps / DAC-stitch postamble). */
+  inputs: ModuleSlotIdx[]
+  /** The sink's own output scale (was the hardcoded engine `÷20`; now data).
+   *  Default 1/20 preserves v1 audio exactly. */
+  gain:   number
+  /** Output device/channel index. 0 = the default audio output buffer. */
+  target: number
+}
+
+export interface WireSinkSpec {
+  inputs: number[]
+  gain:   number
+  target: number
 }
 
 // ─── FlatPlan: the runnable plan ────────────────────────────────────────────
@@ -243,7 +251,13 @@ export interface FlatPlan {
 
   // ── Multi-function layout ─────────────────────────────────────────────
   instance_functions: InstanceFunction[]
-  scheduler_function: SchedulerFunction
+  /** Device-bound output sinks (the plan_5 output path). */
+  sinks: SinkSpec[]
+  /** Legacy temp-mix carrier — top-level output temps summed ÷20 by the
+   *  engine when `sinks` is empty (the plan_4 / single-kernel path).
+   *  Sessions never set this; they use `sinks`. */
+  output_targets?: TempIdx[]
+  outputs?:        number[]
 
   // ── Inter-module slot array ───────────────────────────────────────────
   slot_count:    number
@@ -279,18 +293,6 @@ export interface WireInstanceFunction {
   children?:         WireInstanceFunction[]
 }
 
-export interface WireSchedulerFunction {
-  preamble:        WireNInstr[]
-  /** Optional in the wire format for backward compatibility with
-   *  hand-crafted JSON fixtures and previously-captured precompiled
-   *  plans that predate the dedicated state-evolution phase. Parsed
-   *  as `[]` when missing. */
-  state_evolution?: WireNInstr[]
-  postamble:       WireNInstr[]
-  output_targets:  number[]
-  outputs:         number[]
-}
-
 export interface WireFlatPlan {
   schema:           'tropical_plan_5'
   config:           { sampleRate: number }
@@ -305,7 +307,12 @@ export interface WireFlatPlan {
   array_slot_count: number
   array_slot_sizes: number[]
   instance_functions: WireInstanceFunction[]
-  scheduler_function: WireSchedulerFunction
+  /** Device-bound output sinks (the plan_5 output path). */
+  sinks?:        WireSinkSpec[]
+  /** Legacy temp-mix carrier (top-level, plan_4-style) — engine sums
+   *  these output temps ÷20 when `sinks` is absent. */
+  output_targets?: number[]
+  outputs?:        number[]
   slot_count:    number
   slot_names:    string[]
   slot_defaults: number[]
@@ -426,16 +433,14 @@ export function parseWirePlan(wire: WireFlatPlan): FlatPlan {
     slot_names:       wire.slot_names,
     slot_defaults:    wire.slot_defaults,
     instance_functions: wire.instance_functions.map(parseInstanceFn),
-    scheduler_function: {
-      preamble:        wire.scheduler_function.preamble.map(parseInstr),
-      // Omitted from legacy wire-format plans → empty list (no
-      // state-evolution work to perform; equivalent to the pre-Phase-3
-      // pipeline).
-      state_evolution: (wire.scheduler_function.state_evolution ?? []).map(parseInstr),
-      postamble:       wire.scheduler_function.postamble.map(parseInstr),
-      output_targets:  wire.scheduler_function.output_targets.map(tempIdx),
-      outputs:         wire.scheduler_function.outputs,
-    },
+    sinks: (wire.sinks ?? []).map(s => ({
+      inputs: s.inputs.map(moduleSlotIdx),
+      gain:   s.gain,
+      target: s.target,
+    })),
+    ...(wire.output_targets !== undefined
+      ? { output_targets: wire.output_targets.map(tempIdx), outputs: wire.outputs ?? [] }
+      : {}),
   }
 }
 
@@ -464,18 +469,15 @@ export function toWirePlan(plan: FlatPlan): WireFlatPlan {
     slot_names:       plan.slot_names,
     slot_defaults:    plan.slot_defaults,
     instance_functions: plan.instance_functions.map(toWireInstanceFn),
-    scheduler_function: {
-      preamble:       plan.scheduler_function.preamble.map(toWireInstr),
-      // Omit empty state_evolution from the wire format so existing
-      // golden JSON fixtures (which predate this field) don't gain
-      // a spurious empty array. Populated state_evolution arrays
-      // emit normally.
-      ...(plan.scheduler_function.state_evolution.length > 0
-        ? { state_evolution: plan.scheduler_function.state_evolution.map(toWireInstr) }
-        : {}),
-      postamble:      plan.scheduler_function.postamble.map(toWireInstr),
-      output_targets: plan.scheduler_function.output_targets.map(rawIdx),
-      outputs:        plan.scheduler_function.outputs,
-    },
+    // Omit empty sinks from the wire so legacy golden fixtures (which
+    // predate the field) don't gain a spurious key. Populated sinks emit
+    // normally.
+    ...(plan.sinks.length > 0
+      ? { sinks: plan.sinks.map(s => ({ inputs: s.inputs.map(rawIdx), gain: s.gain, target: s.target })) }
+      : {}),
+    // Legacy temp-mix carrier (plan_4 / sink-less plans only).
+    ...(plan.output_targets !== undefined
+      ? { output_targets: plan.output_targets.map(rawIdx), outputs: plan.outputs ?? [] }
+      : {}),
   }
 }

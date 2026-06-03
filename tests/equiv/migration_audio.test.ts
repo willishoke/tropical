@@ -24,6 +24,14 @@
  * The capture script lives under `scripts/` in this branch as a
  * record of how the goldens were generated; rerun it from a clean
  * `git worktree add` at `origin/main` (pre-active-set) to refresh.
+ *
+ * NOTE (dac-as-sink): the goldens were re-baselined to the current
+ * pipeline when the DAC mix moved from a hardcoded engine `÷20` to a
+ * sink `gain` MULTIPLY (1/20). The only divergence from the original
+ * origin/main capture is that div→mul reassociation — ≤1 ULP per sample
+ * (max abs 7e-18, max rel 2e-16), zero logic change. The cross-backend /
+ * cross-lowering oracles (root_vs_flat, wasm_vs_jit) remain byte-exact
+ * green; this gate guards future drift from the re-baselined reference.
  */
 
 import { describe, test, expect } from 'bun:test'

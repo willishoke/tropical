@@ -40,18 +40,20 @@ describe('compileSession — single-instance sessions', () => {
   ] as const) {
     test(`emits well-formed tropical_plan_5: ${typeName}`, () => {
       const session = singleInstanceSession(typeName)
-      const plan = compileSession(session, { rootProgram: false })
+      const plan = compileSession(session)
 
       expect(plan.schema).toBe('tropical_plan_5')
-      const totalInstrs =
-          plan.scheduler_function.preamble.length
-        + plan.scheduler_function.postamble.length
-        + plan.instance_functions.reduce((n, i) => n + i.instructions.length, 0)
-      expect(totalInstrs).toBeGreaterThan(0)
-      expect(plan.scheduler_function.outputs.length).toBeGreaterThan(0)
-      expect(plan.scheduler_function.outputs.length).toBe(session.graphOutputs.length)
-      expect(plan.scheduler_function.output_targets.length).toBe(plan.scheduler_function.outputs.length)
-      expect(plan.instance_functions.length).toBe(session.instanceRegistry.size)
+      // The session lowers to a single root kernel whose children are the
+      // session instances (boxes closed); count instructions recursively.
+      const countInstrs = (fns: typeof plan.instance_functions): number =>
+        fns.reduce((n, f) => n + f.instructions.length + countInstrs(f.children), 0)
+      expect(countInstrs(plan.instance_functions)).toBeGreaterThan(0)
+      // Outputs are device-bound sinks; v1 emits the single audio sink
+      // whose inputs are the session's graphOutput slots.
+      expect(plan.sinks.length).toBe(1)
+      expect(plan.sinks[0]!.inputs.length).toBe(session.graphOutputs.length)
+      expect(plan.sinks[0]!.target).toBe(0)
+      expect(plan.instance_functions.length).toBe(1)  // the root kernel
       expect(plan.array_slot_sizes.length).toBe(plan.array_slot_count)
     })
   }
@@ -74,8 +76,11 @@ describe('compileSession — two-instance refs', () => {
 
     session.graphOutputs.push({ instance: 'amp', output: 'out' })
 
-    const plan = compileSession(session, { rootProgram: false })
-    expect(plan.scheduler_function.outputs.length).toBe(1)
-    expect(plan.instance_functions.length).toBe(2)
+    const plan = compileSession(session)
+    expect(plan.sinks.length).toBe(1)
+    expect(plan.sinks[0]!.inputs.length).toBe(1)
+    // Root kernel with the two session instances as children.
+    expect(plan.instance_functions.length).toBe(1)
+    expect(plan.instance_functions[0]!.children.length).toBe(2)
   })
 })
