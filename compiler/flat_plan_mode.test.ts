@@ -40,6 +40,7 @@ function makeEmptyWirePlan(): WireFlatPlan {
     array_slot_sizes: [],
     instance_functions: [],
     sinks: [],
+    sources: [{ kind: 'tick' }, { kind: 'rate' }],
     slot_count:    0,
     slot_names:    [],
     slot_defaults: [],

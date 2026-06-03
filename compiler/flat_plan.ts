@@ -231,6 +231,49 @@ export interface WireSinkSpec {
   target: number
 }
 
+// ─── SourceSpec: a runtime-bound input source (Tick/Rate, neutrally named) ───
+//
+// The dual of `SinkSpec` — the *entry* from the runtime to the pure signal
+// graph. Where sinks WRITE device outputs at the end of each sample, sources
+// PROVIDE values that the kernel reads (the sample index, the sample rate,
+// future external inputs like ADC or MIDI clock). Sources are a FAMILY: the
+// schema is N-source ready; v1 always emits the canonical pair in fixed order:
+//
+//     sources[0] = { kind: 'tick' }   // current sample index  (integer)
+//     sources[1] = { kind: 'rate' }   // current sample rate   (float)
+//
+// IR refs (`SampleIndex`, `SampleRate`) lower to `{kind:'source', index}`
+// operands at the plan boundary; the engine resolves each by switching on
+// `program.sources[index].kind` to the appropriate kernel argument. The plan
+// thus DECLARES what it consumes — symmetric with how it declares its outputs
+// in `sinks[]` — while the engine keeps the existing efficient kernel args.
+
+export type SourceKind = 'tick' | 'rate'
+
+export interface SourceSpec {
+  kind: SourceKind
+}
+
+export interface WireSourceSpec {
+  kind: SourceKind
+}
+
+/** Canonical source ordering. Sessions always emit the pair in this order
+ *  so emit-time and engine-time index agreement is mechanical. */
+export const SOURCE_TICK_INDEX = 0
+export const SOURCE_RATE_INDEX = 1
+export const DEFAULT_SOURCES: SourceSpec[] = [
+  { kind: 'tick' },
+  { kind: 'rate' },
+]
+
+/** Predicate used by `toWirePlan` to elide the `sources` field when its
+ *  value matches the canonical pair — keeps pre-sources wire goldens
+ *  byte-stable when nothing real has changed. */
+export const isDefaultSources = (s: readonly SourceSpec[]): boolean =>
+  s.length === DEFAULT_SOURCES.length
+  && s.every((sp, i) => sp.kind === DEFAULT_SOURCES[i]!.kind)
+
 // ─── FlatPlan: the runnable plan ────────────────────────────────────────────
 
 export interface FlatPlan {
@@ -253,6 +296,10 @@ export interface FlatPlan {
   instance_functions: InstanceFunction[]
   /** Device-bound output sinks (the plan_5 output path). */
   sinks: SinkSpec[]
+  /** Runtime-bound input sources. Dual of `sinks`. Canonical order:
+   *  `[{kind:'tick'}, {kind:'rate'}]`; `{op:'source', index:i}` operands
+   *  resolve via `sources[i].kind`. v1 always emits both. */
+  sources: SourceSpec[]
   /** Legacy temp-mix carrier — top-level output temps summed ÷20 by the
    *  engine when `sinks` is empty (the plan_4 / single-kernel path).
    *  Sessions never set this; they use `sinks`. */
@@ -309,6 +356,10 @@ export interface WireFlatPlan {
   instance_functions: WireInstanceFunction[]
   /** Device-bound output sinks (the plan_5 output path). */
   sinks?:        WireSinkSpec[]
+  /** Runtime-bound input sources. Optional in the wire for backcompat
+   *  with plan_4 / pre-sources fixtures; parsed as `DEFAULT_SOURCES`
+   *  (the canonical [tick, rate] pair) when missing. */
+  sources?:      WireSourceSpec[]
   /** Legacy temp-mix carrier (top-level, plan_4-style) — engine sums
    *  these output temps ÷20 when `sinks` is absent. */
   output_targets?: number[]
@@ -433,6 +484,12 @@ export function parseWirePlan(wire: WireFlatPlan): FlatPlan {
     slot_names:       wire.slot_names,
     slot_defaults:    wire.slot_defaults,
     instance_functions: wire.instance_functions.map(parseInstanceFn),
+    // Pre-sources plans get the canonical [tick, rate] pair so any `source`
+    // operands that may arrive (if a future plan layer emits them) still
+    // resolve. Plans that explicitly carry `sources` round-trip exactly.
+    sources: wire.sources !== undefined
+      ? wire.sources.map(s => ({ kind: s.kind }))
+      : [...DEFAULT_SOURCES],
     sinks: (wire.sinks ?? []).map(s => ({
       inputs: s.inputs.map(moduleSlotIdx),
       gain:   s.gain,
@@ -475,6 +532,12 @@ export function toWirePlan(plan: FlatPlan): WireFlatPlan {
     ...(plan.sinks.length > 0
       ? { sinks: plan.sinks.map(s => ({ inputs: s.inputs.map(rawIdx), gain: s.gain, target: s.target })) }
       : {}),
+    // Sources: always emit on the production path (sessions construct
+    // [tick, rate]). Omit when equal to the canonical default so existing
+    // golden JSON byte goldens (pre-sources) round-trip cleanly.
+    ...(isDefaultSources(plan.sources)
+      ? {}
+      : { sources: plan.sources.map(s => ({ kind: s.kind })) }),
     // Legacy temp-mix carrier (plan_4 / sink-less plans only).
     ...(plan.output_targets !== undefined
       ? { output_targets: plan.output_targets.map(rawIdx), outputs: plan.outputs ?? [] }
