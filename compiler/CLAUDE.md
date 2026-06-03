@@ -56,7 +56,7 @@ program_types.ts      ProgramType / ProgramInstance — thin wrappers over a pos
                       slot-derived fields cache lazily. Wrapper is metadata; IR is the value.
 session.ts            SessionState, generic-program resolution, JSON ingest
 schema.ts             Zod validation for tropical_program_2
-flat_plan.ts          tropical_plan_5 schema (the boundary type with the engine; branded indices, instance_functions[] + sinks[])
+flat_plan.ts          tropical_plan_5 schema (the boundary type with the engine; branded indices, instance_functions[] + sinks[] (outputs) + sources[] (inputs: tick/rate))
 apply_plan.ts         compileSession → JSON.stringify → runtime.loadPlan
 compiler.ts           Dependency graph utilities (Kahn's, Tarjan's SCC); structural InstanceInfo
 term.ts               PortType, ScalarKind, shape algebra
@@ -262,8 +262,12 @@ compiler stage — they're parallel emits.
   structural id (interned via `${op}|${field=}|${child_id}` strings),
   not node identity, so duplicates introduced by clone-then-substitute
   passes still collapse. Operand kinds: `const`, `input`, `reg`,
-  `array_reg`, `state_reg`, `param`, `rate`, `tick`. Array-loop ops
-  carry `loop_count > 1` plus `strides` for broadcast vs. iterate.
+  `array_reg`, `state_reg`, `param`, `source`, `slot`. `source` carries an
+  index into `plan.sources[]` (the input family, canonical `[tick, rate]`);
+  the engine resolves it by switching on `sources[i].kind`. (Legacy `rate`
+  / `tick` operand kinds survive on the wire only — plan_4 fixtures; the
+  parser upgrades them to `source:1` / `source:0`.) Array-loop ops carry
+  `loop_count > 1` plus `strides` for broadcast vs. iterate.
 
 - **`emit_wasm.ts`** + **`wasm_memory_layout.ts`** — emits a
   standalone WASM module with a single exported

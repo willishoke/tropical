@@ -69,8 +69,13 @@ export type NOperand =
   | { kind: 'session_array_reg'; slot: ArraySlotIdx }
   | { kind: 'state_reg';         slot: StateRegIdx;    scalar_type: ScalarType }
   | { kind: 'param';             ptr:  string;         scalar_type: ScalarType }
-  | { kind: 'rate';                                    scalar_type: ScalarType }
-  | { kind: 'tick';                                    scalar_type: ScalarType }
+  /** Read an input source — the dual of a sink, materialized at the runtime
+   *  boundary. `index` keys into `FlatPlan.sources[]`; the engine switches
+   *  on the source's `kind` (tick / rate / future ADC) to the appropriate
+   *  kernel argument. v1: index 0 = tick, index 1 = rate. Replaces the
+   *  former `rate` / `tick` operand kinds, which survive only on the wire
+   *  format as plan_4 backcompat (parsed as `source:rate` / `source:tick`). */
+  | { kind: 'source';            index: number;        scalar_type: ScalarType }
   | { kind: 'slot';              index: ModuleSlotIdx; scalar_type: ScalarType }
 
 /** Discriminated dst — the namespace of an instruction's writeback. */
@@ -220,8 +225,14 @@ export const opSlot     = (index: ModuleSlotIdx, scalar_type: ScalarType): NOper
   ({ kind: 'slot', index, scalar_type })
 export const opParam    = (ptr: string, scalar_type: ScalarType = 'float'): NOperand =>
   ({ kind: 'param', ptr, scalar_type })
-export const opRate: NOperand = { kind: 'rate', scalar_type: 'float' }
-export const opTick: NOperand = { kind: 'tick', scalar_type: 'int' }
+export const opSource = (index: number, scalar_type: ScalarType): NOperand =>
+  ({ kind: 'source', index, scalar_type })
+/** Canonical source indices (mirrors `flat_plan.SOURCE_*_INDEX`).
+ *  Sessions always emit `[{kind:'tick'},{kind:'rate'}]` in this order. */
+export const SOURCE_TICK = 0
+export const SOURCE_RATE = 1
+export const opTick: NOperand = opSource(SOURCE_TICK, 'int')
+export const opRate: NOperand = opSource(SOURCE_RATE, 'float')
 
 // ─── Wire format ────────────────────────────────────────────────────────────
 // The C++ engine parses this shape from JSON. Brands erase at runtime
@@ -235,8 +246,12 @@ export type WireNOperand =
   | { kind: 'array_reg'; slot: number }
   | { kind: 'state_reg'; slot: number; scalar_type: ScalarType }
   | { kind: 'param';     ptr: string;  scalar_type: ScalarType }
+  /** Legacy plan_4 sentinel — production sessions emit `source` instead.
+   *  `parseOperand` upgrades these to `source` at parse time. */
   | { kind: 'rate';      scalar_type: ScalarType }
   | { kind: 'tick';      scalar_type: ScalarType }
+  /** Read input source `sources[index]`. */
+  | { kind: 'source';    index: number; scalar_type: ScalarType }
   | { kind: 'slot';      index: number; scalar_type: ScalarType }
 
 export type WireDstKind = 'temp' | 'array' | 'moduleSlot'

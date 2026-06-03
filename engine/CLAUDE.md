@@ -28,8 +28,8 @@ All external access (TypeScript FFI, tests) goes through here. Handles are opaqu
 
 `FlatRuntime::load_plan()` receives a `tropical_plan_5` JSON string:
 
-1. `NumericProgramParser::parse_plan5()` — thin deserializer, reads the instance functions plus `sinks[]` into a `FlatProgram` (multi-function) struct. A backcompat lift exists for single-kernel `plan_4` inputs (hand-crafted unit tests, legacy saved plans) — they parse into a one-instance plan_5 with a top-level temp-mix.
-2. `OrcJitEngine::compile_flat_program()` — JIT compiles the FlatProgram to a single native kernel function (instances then sinks, per sample).
+1. `NumericProgramParser::parse_plan5()` — thin deserializer, reads the instance functions plus `sinks[]` (outputs) and `sources[]` (inputs; defaults to canonical `[tick, rate]`) into a `FlatProgram` (multi-function) struct. A backcompat lift exists for single-kernel `plan_4` inputs — they parse into a one-instance plan_5 with a top-level temp-mix and the canonical source pair. Legacy `rate`/`tick` operand tags upgrade to `Source{kind:Rate/Tick}` at parse.
+2. `OrcJitEngine::compile_flat_program()` — JIT compiles the FlatProgram to a single native kernel function (instances then sinks, per sample). Source operands resolve to `sample_rate_arg` / `current_sample_idx` via `program.sources[i].kind`.
 3. State initialization — registers and module slots are type-aware bit-cast (`int64_t[]` backing store, with float/int/bool coercion).
 4. Named state transfer — matching registers, arrays, and slots are copied from the active kernel by name for click-free hot-swap.
 5. Atomic swap — new kernel published to audio thread via `active_state_` store-release.

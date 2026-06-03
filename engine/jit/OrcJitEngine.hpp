@@ -64,8 +64,10 @@ enum class OperandKind : uint8_t
   ArrayReg, // virtual register — array result in arrays[slot]
   StateReg, // persistent module register in registers[slot]
   Param,    // ControlParam pointer (ptr field)
-  Rate,     // sample rate (runtime constant)
-  Tick,     // sample index (runtime counter)
+  Source,   // input source `sources[slot]` — resolved by kind at runtime
+            // (slot field holds the source index; sources[i].kind → tick|rate)
+  Rate,     // [legacy plan_4] sample rate (runtime constant)
+  Tick,     // [legacy plan_4] sample index (runtime counter)
   Slot,     // shared inter-module slot (slot field, indexes slots[]) — M6+
 };
 
@@ -93,6 +95,8 @@ struct Operand
   { Operand o; o.kind = OperandKind::Rate; o.scalar_type = JitScalarType::Float; return o; }
   static Operand make_tick()
   { Operand o; o.kind = OperandKind::Tick; o.scalar_type = JitScalarType::Float; return o; }
+  static Operand make_source(uint32_t index, JitScalarType t = JitScalarType::Float)
+  { Operand o; o.kind = OperandKind::Source; o.scalar_type = t; o.slot = index; return o; }
   // M6: slot operand reads from the shared slots[] arg passed to the
   // kernel. Stored as double, coerced at use site to match scalar_type.
   static Operand make_slot(uint32_t s, JitScalarType t = JitScalarType::Float)
@@ -178,6 +182,22 @@ struct Sink
   uint32_t              target = 0;    // output channel/device index
 };
 
+// A runtime-bound input source — the dual of `Sink`. The kernel reads source
+// values via `OperandKind::Source` operands carrying an index into the plan's
+// `sources` array; the engine switches on the source's `kind` to the
+// appropriate kernel argument (Tick → current_sample_idx, Rate →
+// sample_rate_arg). v1: sources[0] = Tick, sources[1] = Rate.
+enum class SourceKind : uint8_t
+{
+  Tick,  // current sample index (integer)
+  Rate,  // current sample rate (float)
+};
+
+struct Source
+{
+  SourceKind kind = SourceKind::Tick;
+};
+
 struct FlatProgram
 {
   // ── Plan-wide unified state (shared across all instance functions) ──
@@ -190,7 +210,8 @@ struct FlatProgram
 
   // ── Multi-function layout (tropical_plan_5) ──
   std::vector<InstanceProgram> instance_functions;
-  std::vector<Sink>            sinks;  // device-bound outputs (plan_5 mix path)
+  std::vector<Sink>            sinks;    // device-bound outputs (plan_5 mix path)
+  std::vector<Source>          sources;  // runtime-bound inputs (plan_5 source path)
 };
 
 // Engine realization strategy.
