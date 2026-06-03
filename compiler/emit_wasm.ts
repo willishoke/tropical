@@ -24,7 +24,7 @@
  *   - slots        → f64 cells (inter-module shared array)
  */
 
-import type { FlatPlan, InstanceFunction } from './flat_plan'
+import type { FlatPlan, InstanceFunction, SourceSpec } from './flat_plan'
 import type { NInstr, NOperand, ScalarType } from './ir/emit_resolved'
 import { dstAsTemp, dstAsArray, dstAsModuleSlot } from './ir/emit_resolved'
 import { rawIdx, rawOffset } from './ir/slot_indices'
@@ -331,7 +331,7 @@ export function emitWasm(plan: FlatPlan, opts: EmitWasmOptions = {}): EmitWasmRe
     plan: flatProgram, inputCount, paramPtrs, maxBlockSize,
     slotCount: plan.slot_count ?? 0,
   })
-  const ctx: EmitCtx = { layout, paramIndex, sampleRate }
+  const ctx: EmitCtx = { layout, paramIndex, sampleRate, sources: plan.sources }
 
   const c = new Code()
 
@@ -449,6 +449,9 @@ type EmitCtx = {
   layout: WasmLayout
   paramIndex: Map<string, number>
   sampleRate: number
+  /** The plan's declared input sources. `source:i` operands resolve via
+   *  `sources[i].kind` — symmetric with the engine's resolution. */
+  sources: readonly SourceSpec[]
 }
 
 function emitInstruction(c: Code, instr: NInstr, ctx: EmitCtx): void {
@@ -517,11 +520,20 @@ function pushOperand(c: Code, op: NOperand, ctx: EmitCtx): ScalarType {
       c.i32c(0); c.f64Load(ctx.layout.paramTableOffset + idx * 8)
       return 'float'
     }
-    case 'rate': {
-      c.f64c(ctx.sampleRate); return 'float'
-    }
-    case 'tick': {
-      c.localGet(L_SIDX); return 'int'
+    case 'source': {
+      // Read input source `sources[op.index]`. The kind lookup tells us
+      // which kernel value to materialize: tick = sample_index (i64),
+      // rate = sample rate (f64). Mirrors the engine resolution.
+      const src = ctx.sources[op.index]
+      if (src === undefined) {
+        throw new Error(
+          `emit_wasm: source operand index ${op.index} out of range ` +
+          `(plan has ${ctx.sources.length} sources)`,
+        )
+      }
+      if (src.kind === 'tick') { c.localGet(L_SIDX); return 'int' }
+      if (src.kind === 'rate') { c.f64c(ctx.sampleRate); return 'float' }
+      throw new Error(`emit_wasm: unknown source kind '${src.kind}' at index ${op.index}`)
     }
     case 'slot': {
       // Inter-module slot read. Slots are stored as f64 in the
@@ -993,8 +1005,9 @@ function operandScalarType(op: NOperand): ScalarType {
       `remapInstancePlan must convert it to 'array_reg' before WASM emission.`,
     )
   }
-  if (op.kind === 'rate') return 'float'
-  if (op.kind === 'tick') return 'int'
+  // `source` carries its own coerced scalar_type from the emit pass;
+  // the operand's intrinsic kind (tick = int, rate = float) is recovered
+  // by looking up the plan's source declaration when needed downstream.
   return op.scalar_type
 }
 

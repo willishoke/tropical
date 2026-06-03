@@ -42,6 +42,7 @@ import {
   instrScalar, instrArray, instrPack, instrSetElement, instrIndex,
   instrWriteSlot,
   opConst, opTemp, opSlot, opStateReg, opArray, opRate, opTick,
+  opSource, SOURCE_TICK, SOURCE_RATE,
 } from './emit_resolved.js'
 import {
   type TempIdx, type StateRegIdx, type ArraySlotIdx, type ModuleSlotIdx,
@@ -140,8 +141,8 @@ export function translateNode(
   }
 
   // ── builtins ──
-  if (op === 'sampleRate')  return { kind: 'rate', scalar_type: scalarType }
-  if (op === 'sampleIndex') return { kind: 'tick', scalar_type: scalarType }
+  if (op === 'sampleRate')  return opSource(SOURCE_RATE, scalarType)
+  if (op === 'sampleIndex') return opSource(SOURCE_TICK, scalarType)
 
   // ── session-internal slot read (emitted by extractSessionDelays) ──
   // The wire was a `delay()` that got hoisted to a module slot in the
@@ -364,10 +365,9 @@ export function remapInstancePlan(
 
   const remapOperand = (op: NOperand): NOperand => {
     switch (op.kind) {
-      case 'const': return op
-      case 'rate':  return op
-      case 'tick':  return op
-      case 'slot':  return op
+      case 'const':  return op
+      case 'source': return op
+      case 'slot':   return op
       case 'input': {
         const portName = ctx.inputPortNames[rawIdx(op.slot)]
         if (portName === undefined) {

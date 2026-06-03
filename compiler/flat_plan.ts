@@ -404,9 +404,13 @@ const deriveLegacyDstKind = (i: WireNInstr): 'temp' | 'array' | 'moduleSlot' => 
 const parseOperand = (o: WireNOperand): NOperand => {
   switch (o.kind) {
     case 'const':     return o
-    case 'rate':      return o
-    case 'tick':      return o
     case 'param':     return o
+    // Legacy plan_4 / pre-sources fixtures emit `rate`/`tick` directly;
+    // upgrade them to indexed source operands so the internal type
+    // is fully migrated. Engine-side parser does the dual upgrade.
+    case 'rate':      return { kind: 'source', index: SOURCE_RATE_INDEX, scalar_type: o.scalar_type }
+    case 'tick':      return { kind: 'source', index: SOURCE_TICK_INDEX, scalar_type: o.scalar_type }
+    case 'source':    return { kind: 'source', index: o.index,            scalar_type: o.scalar_type }
     case 'input':     return { kind: 'input',     slot:  inputPortIdx(o.slot),   scalar_type: o.scalar_type }
     case 'reg':       return { kind: 'reg',       slot:  tempIdx(o.slot),        scalar_type: o.scalar_type }
     case 'array_reg': return { kind: 'array_reg', slot:  arraySlotIdx(o.slot) }
