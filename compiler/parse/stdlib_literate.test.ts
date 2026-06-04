@@ -47,6 +47,15 @@ describe('stdlib literate gate — title, diagram, single code block', () => {
       const ext = extractMarkdown(text)
       expect(ext.blocks.length).toBe(1)
 
+      // Code stays within 80 columns. The grammar is layout-free —
+      // newlines are whitespace everywhere — so there is never a reason
+      // for a line to run long.
+      for (const [i, line] of ext.blocks[0].source.split('\n').entries()) {
+        if (line.length > 80) {
+          throw new Error(`${file}: code line ${i + 1} is ${line.length} chars (max 80)`)
+        }
+      }
+
       // At least one mermaid diagram.
       expect(/^```mermaid\s*$/m.test(text)).toBe(true)
 

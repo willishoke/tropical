@@ -79,6 +79,14 @@ The `let` block in the source is a local-binding form that avoids recomputing `i
 ```tropical
 program BlepSaw(freq: freq = 440) -> (saw: signal) {
   ph = Phasor(freq: freq)
-  saw = let { inc: freq / sampleRate(); pw: ph.phase; raw: 2 * pw - 1; tp: pw / inc; tpr: (pw - 1) / inc; bpost: select(pw < inc, 2 * tp - tp * tp - 1, 0); bpre: select(pw > 1 - inc, tpr * tpr + 2 * tpr + 1, 0) } in raw - bpost - bpre
+  saw = let {
+      inc: freq / sampleRate();
+      pw: ph.phase;
+      raw: 2 * pw - 1;
+      tp: pw / inc;
+      tpr: (pw - 1) / inc;
+      bpost: select(pw < inc, 2 * tp - tp * tp - 1, 0);
+      bpre: select(pw > 1 - inc, tpr * tpr + 2 * tpr + 1, 0)
+    } in raw - bpost - bpre
 }
 ```

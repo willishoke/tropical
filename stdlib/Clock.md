@@ -53,7 +53,10 @@ channel's rate; `0.5` halves it.
 ## Source
 
 ```tropical
-program Clock(freq: freq = 1, ratios_in: float[1] = [1]) -> (output: unipolar, ratios_out: float[1]) {
+program Clock(
+  freq: freq = 1,
+  ratios_in: float[1] = [1]
+) -> (output: unipolar, ratios_out: float[1]) {
   ph0 = Phasor(freq: freq)
   ph1 = Phasor(freq: freq * ratios_in[0])
   output = (ph0.phase < 0.5) * 1

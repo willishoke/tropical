@@ -60,10 +60,20 @@ The `select` primitive inside each branch is the compiler's way to merge the two
 ## Source
 
 ```tropical
-program EnvExpDecay(trigger: signal = 0, decay: float = 0.999) -> (env: signal) {
+program EnvExpDecay(
+  trigger: signal = 0,
+  decay: float = 0.999
+) -> (env: signal) {
   enum Env { Idle, Decaying(level: float) }
   delay prev_trigger = trigger init 0
-  delay state: Env = match state { Idle => select(trigger > 0.5 && prev_trigger <= 0.5, Decaying { level: 1 }, Idle { }), Decaying { level: level } => select(trigger > 0.5 && prev_trigger <= 0.5, Decaying { level: 1 }, Decaying { level: level * decay }) } init Idle { }
+  delay state: Env = match state {
+      Idle => select(trigger > 0.5 && prev_trigger <= 0.5,
+        Decaying { level: 1 }, Idle { }),
+      Decaying { level: level } => select(
+        trigger > 0.5 && prev_trigger <= 0.5,
+        Decaying { level: 1 },
+        Decaying { level: level * decay })
+    } init Idle { }
   env = match state { Idle => 0, Decaying { level: level } => level }
 }
 ```

@@ -63,7 +63,9 @@ gate signals (0/1) and bipolar triggers normalized to ±1.
 program SampleHold(trigger: signal = 0, input: signal = 0) -> (value: signal) {
   reg held = 0
   delay prev_trigger = trigger init 0
-  value = let { tick: (trigger > 0.5) * (prev_trigger <= 0.5) } in select(tick, input, held)
-  next held = let { tick: (trigger > 0.5) * (prev_trigger <= 0.5) } in select(tick, input, held)
+  value = let { tick: (trigger > 0.5) * (prev_trigger <= 0.5) } in
+    select(tick, input, held)
+  next held = let { tick: (trigger > 0.5) * (prev_trigger <= 0.5) } in
+    select(tick, input, held)
 }
 ```

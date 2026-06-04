@@ -73,7 +73,10 @@ access is statically bounded.
 ## Source
 
 ```tropical
-program Sequencer<N: int = 8>(clock: unipolar = 0, values: float[N]) -> (value: float) {
+program Sequencer<N: int = 8>(
+  clock: unipolar = 0,
+  values: float[N]
+) -> (value: float) {
   reg step: int = 0
   delay prev_clock = clock init 0
   value = values[step]

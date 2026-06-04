@@ -49,7 +49,11 @@ the intended domain.
 ## Source
 
 ```tropical
-program CrossFade(a: signal = 0, b: signal = 0, mix: unipolar = 0.5) -> (out: signal) {
+program CrossFade(
+  a: signal = 0,
+  b: signal = 0,
+  mix: unipolar = 0.5
+) -> (out: signal) {
   out = (1 - mix) * a + mix * b
 }
 ```

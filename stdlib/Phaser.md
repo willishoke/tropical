@@ -73,7 +73,11 @@ Since `lfo_sin` ∈ [−1, 1], `a` sweeps between 0.25 and 0.95. At `a = 0.25` t
 ## Source
 
 ```tropical
-program Phaser<N: int = 4>(input = 0, feedback = 0.4, lfo_speed = 0.2) -> (output, lfo) {
+program Phaser<N: int = 4>(
+  input = 0,
+  feedback = 0.4,
+  lfo_speed = 0.2
+) -> (output, lfo) {
   reg fb = 0
   reg x_prev = zeros(N)
   reg y_prev = zeros(N)

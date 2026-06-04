@@ -34,8 +34,11 @@ that wants a one-liner (MCP catalogs, UI tooltips) should derive it from
 there rather than asking authors to write it twice.
 
 The shape is enforced: `compiler/parse/stdlib_literate.test.ts` fails the
-build on a missing/mismatched title, an absent mermaid block, or anything
-other than exactly one tropical fence.
+build on a missing/mismatched title, an absent mermaid block, anything
+other than exactly one tropical fence, or a code line over 80 columns.
+(The grammar is layout-free — newlines are whitespace everywhere, including
+inside signatures and `let`/`match` chains — so long lines always have a
+clean break.)
 
 ## Compilation
 

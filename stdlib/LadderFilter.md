@@ -115,11 +115,18 @@ saturated through all four stages.
 ## Source
 
 ```tropical
-program LadderFilter(input = 0, cutoff: freq = 1000, resonance: unipolar = 0.5, drive = 1) -> (lp, bp, hp, notch) {
+program LadderFilter(
+  input = 0,
+  cutoff: freq = 1000,
+  resonance: unipolar = 0.5,
+  drive = 1
+) -> (lp, bp, hp, notch) {
   delay prev_lp = pole4.out init 0
   tanh_in = Tanh(x: drive * input)
-  sin_g = Sin(x: 3.141592653589793 * (clamp(cutoff, 20, 0.49 * sampleRate()) / sampleRate()))
-  pole1 = OnePole(input: tanh_in.out - 4 * resonance * prev_lp, g: 2 * sin_g.out)
+  sin_g = Sin(x: 3.141592653589793 *
+    (clamp(cutoff, 20, 0.49 * sampleRate()) / sampleRate()))
+  pole1 = OnePole(input: tanh_in.out - 4 * resonance * prev_lp,
+    g: 2 * sin_g.out)
   pole2 = OnePole(input: pole1.out, g: 2 * sin_g.out)
   pole3 = OnePole(input: pole2.out, g: 2 * sin_g.out)
   pole4 = OnePole(input: pole3.out, g: 2 * sin_g.out)
