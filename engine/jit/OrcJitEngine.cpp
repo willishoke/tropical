@@ -633,6 +633,24 @@ TypedVal EmitCtx::resolve_typed(const Operand & op) const
     case OperandKind::StateReg: return {load_reg_typed(op.slot, op.scalar_type), op.scalar_type};
     case OperandKind::Rate:     return {sample_rate_arg, ST::Float};
     case OperandKind::Tick:     return {current_sample_idx, ST::Int};
+    case OperandKind::Source: {
+      // Indexed source: dispatch on the declared source kind. Same kernel
+      // arg behind each case as the legacy Rate/Tick fall-through; the
+      // indirection through `sources[op.slot]` is what makes the plan
+      // genuinely N-source-ready while staying perf-equivalent.
+      if (program->sources.size() <= op.slot) {
+        // Defensive: a plan that emits source:i but didn't declare i.
+        // Treat as zero to keep the kernel valid; shouldn't reach here
+        // from production code (TS-side construction always emits the
+        // canonical pair).
+        return {llvm::ConstantFP::get(f64_ty, 0.0), ST::Float};
+      }
+      switch (program->sources[op.slot].kind) {
+        case tropical_jit::SourceKind::Tick: return {current_sample_idx, ST::Int};
+        case tropical_jit::SourceKind::Rate: return {sample_rate_arg,    ST::Float};
+      }
+      return {llvm::ConstantFP::get(f64_ty, 0.0), ST::Float};
+    }
     case OperandKind::Slot: {
       llvm::Value * v = load_slot_f64(op.slot);
       switch (op.scalar_type) {
@@ -1183,6 +1201,12 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       append(&sink.gain, sizeof(double));
       append(&sink.target, sizeof(uint32_t));
     }
+    // Sources (the kind at each index determines which kernel arg the
+    // Source operand resolves to; identity of the mapping affects codegen).
+    uint32_t nsrc = static_cast<uint32_t>(program.sources.size());
+    append(&nsrc, sizeof(uint32_t));
+    for (const auto & src : program.sources)
+      append(&src.kind, sizeof(tropical_jit::SourceKind));
     // Register writebacks
     uint32_t nrt = static_cast<uint32_t>(program.register_targets.size());
     append(&nrt, sizeof(uint32_t));
@@ -1509,6 +1533,10 @@ llvm::Expected<MicrokernelKernels> OrcJitEngine::compile_microkernel(
       append(&sink.gain, sizeof(double));
       append(&sink.target, sizeof(uint32_t));
     }
+    uint32_t nsrc = static_cast<uint32_t>(program.sources.size());
+    append(&nsrc, sizeof(uint32_t));
+    for (const auto & src : program.sources)
+      append(&src.kind, sizeof(tropical_jit::SourceKind));
     uint32_t nrt = static_cast<uint32_t>(program.register_targets.size());
     append(&nrt, sizeof(uint32_t));
     for (int32_t rt : program.register_targets)

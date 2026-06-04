@@ -125,7 +125,7 @@ SessionState  (instances + wiring + dac.out + params)
   │          ExternalProgramResolver hook — LINK, not re-elaboration)
   │       → partitionKernel → tropical_plan_5
   ▼
-tropical_plan_5  (instance_functions[] + sinks[])
+tropical_plan_5  (instance_functions[] + sinks[] + sources[])
 ```
 
 **The IR is acyclic by construction.** Source-level cycles that
@@ -230,7 +230,7 @@ Two distinct JSON schemas; do not confuse them.
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_2` | `compiler/program.ts`, `compiler/parse/raise.ts` | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in literate `.md`) or by agents (over MCP). |
-| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: a root instruction stream (instances nested as `children`) plus `sinks[]` (device-bound outputs: sum input slots × gain → channel). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel form, top-level `output_targets` temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 at parse time. |
+| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: a root instruction stream (instances nested as `children`) plus `sinks[]` (device-bound outputs: sum input slots × gain → channel) and `sources[]` (runtime-bound inputs: canonical `[tick, rate]`; the dual of sinks). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel form, top-level `output_targets` temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
 Going from the first to the second without losing meaning is exactly
 what the strata pipeline does.

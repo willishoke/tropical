@@ -103,8 +103,13 @@ inline tropical_jit::Operand parse_operand(const nlohmann::json & j)
     const uint64_t ptr = std::stoull(j.at("ptr").get<std::string>());
     return tropical_jit::Operand::make_param(ptr);
   }
-  if (kind == "rate") return tropical_jit::Operand::make_rate();
-  if (kind == "tick") return tropical_jit::Operand::make_tick();
+  if (kind == "source")
+    return tropical_jit::Operand::make_source(j.at("index").get<uint32_t>(), st);
+  // Legacy plan_4 / pre-sources fixtures emit `rate`/`tick` directly;
+  // upgrade them to indexed source operands so the engine path is
+  // fully migrated. Canonical: sources[0] = tick, sources[1] = rate.
+  if (kind == "rate") return tropical_jit::Operand::make_source(1u, st);
+  if (kind == "tick") return tropical_jit::Operand::make_source(0u, st);
   if (kind == "slot")
     return tropical_jit::Operand::make_slot(j.at("index").get<uint32_t>(), st);
   throw std::runtime_error("NumericProgramParser: unknown operand kind '" + kind + "'");
@@ -324,6 +329,27 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
     }
   }
 
+  // ── sources: runtime-bound inputs (the dual of sinks). When absent,
+  //    default to the canonical pair [tick, rate] so plan_4 / pre-sources
+  //    fixtures using legacy `tick`/`rate` operands still resolve via the
+  //    upgrade in `parse_operand`. ──
+  if (plan.contains("sources"))
+  {
+    for (const auto & js : plan["sources"])
+    {
+      tropical_jit::Source src;
+      const std::string k = js.value("kind", std::string{"tick"});
+      src.kind = (k == "rate") ? tropical_jit::SourceKind::Rate
+                               : tropical_jit::SourceKind::Tick;
+      prog.sources.push_back(src);
+    }
+  }
+  else
+  {
+    prog.sources.push_back({ tropical_jit::SourceKind::Tick });
+    prog.sources.push_back({ tropical_jit::SourceKind::Rate });
+  }
+
   // ── Legacy temp-mix carrier (top-level, plan_4-style) — used when a
   //    plan has no `sinks` (hand fixtures / single-kernel plans). ──
   if (plan.contains("output_targets"))
@@ -391,6 +417,10 @@ inline ParsedPlan5 parse_plan4(const nlohmann::json & plan)
   auto & prog = result.program;
   prog.register_types = result.register_types;
   prog.register_count = plan.value("register_count", 0u);
+  // plan_4 predates `sources`; seed the canonical pair so legacy
+  // `tick`/`rate` operands (upgraded to `source:0/1`) resolve.
+  prog.sources.push_back({ tropical_jit::SourceKind::Tick });
+  prog.sources.push_back({ tropical_jit::SourceKind::Rate });
   if (plan.contains("array_slot_sizes"))
     for (const auto & s : plan["array_slot_sizes"])
       prog.array_slot_sizes.push_back(s.get<uint32_t>());

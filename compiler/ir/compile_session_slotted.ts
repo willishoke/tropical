@@ -27,6 +27,7 @@ import {
   type InstanceName,
 } from './branded_names.js'
 import type { FlatPlan, InstanceFunction, CompilationMode } from '../flat_plan.js'
+import { DEFAULT_SOURCES } from '../flat_plan.js'
 import type { ResolvedProgram, InputIdx, ParamIdx } from './nodes.js'
 import { inputIdx, paramIdx } from './nodes.js'
 import { getInstanceType } from './decl_tables.js'
@@ -214,6 +215,7 @@ function compileSessionSlottedRoot(
     register_count:    acc.nextRegRaw,
     instance_functions: instanceFunctions,
     sinks:              emitSinks(session),
+    sources:            [...DEFAULT_SOURCES],
     ...buildSlotMetadata(session),
   }
 }

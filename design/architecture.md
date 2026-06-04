@@ -98,7 +98,8 @@ ResolvedProgram (post-strata)
     │   │       │ liftWiresToInstances → extractSessionDelays
     │   │       │     → assertSessionAcyclic → compileSessionSlotted
     │   │       │     (buildSessionRoot → partitionKernel →
-    │   │       │      instance_functions[] (root, nested children) + sinks[])
+    │   │       │      instance_functions[] (root, nested children)
+    │   │       │      + sinks[] (outputs) + sources[] (inputs))
     │   │       │
     │   │       │   ──── C API boundary (engine/c_api/tropical_c.h, koffi FFI) ────
     │   │       ▼
@@ -539,9 +540,13 @@ not node identity. This catches duplicates that strata's
 clone-then-substitute introduces.
 
 **Operand kinds.** `NOperand` discriminates: `const`, `input`, `reg`,
-`array_reg`, `state_reg`, `param`, `rate`, `tick`. Terminals
-(literals, sentinels, register reads) embed inline; non-terminal
-expressions get a temp register.
+`array_reg`, `state_reg`, `param`, `source`, `slot`. The `source` kind
+carries an index into `plan.sources[]` — the runtime-bound input family
+(canonical: `[tick, rate]`); the engine switches on `sources[i].kind` to
+the appropriate kernel arg. Terminals (literals, register reads, source
+reads) embed inline; non-terminal expressions get a temp register.
+(The former `tick` and `rate` operand kinds survive only on the wire as
+plan_4 legacy aliases; parser upgrades them to `source:0`/`source:1`.)
 
 **Array loops.** When `loop_count > 1` an instruction emits an
 elementwise loop. `strides[i]` controls whether each argument
@@ -700,7 +705,7 @@ Two distinct JSON schemas; do not confuse them.
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_2` | `compiler/program.ts`, `compiler/parse/raise.ts` | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in literate `.md`) or by agents (over MCP). |
-| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: a root instruction stream (`instance_functions[]`, instances nested as `children`) plus `sinks[]` (device-bound outputs). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel, top-level temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 at parse time. |
+| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: a root instruction stream (`instance_functions[]`, instances nested as `children`) plus `sinks[]` (device-bound outputs) and `sources[]` (runtime-bound inputs — canonical `[tick, rate]`). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel, top-level temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
 Schema validation: `compiler/schema.ts` (Zod) for input;
 `compiler/flat_plan.ts` (branded TypeScript types) for output.
@@ -747,15 +752,21 @@ what the strata pipeline does.
       gain:   number,    // output scale (was the engine's hardcoded ÷20)
       target: number },  // output channel/device (0 = default audio out)
     ...
+  ],
+  sources: [             // runtime-bound inputs — the dual of sinks.
+    { kind: "tick" },    //   index 0: current sample index (i64)
+    { kind: "rate" }     //   index 1: current sample rate (f64)
   ]
-  // (sink-less plan_4 / single-kernel fixtures instead carry top-level
+  // (omitted on the wire when equal to the canonical [tick, rate] pair;
+  //  sink-less plan_4 / single-kernel fixtures instead carry top-level
   //  `output_targets`/`outputs` for the legacy temp-mix ÷20.)
 }
 ```
 
 The `tropical_plan_5` shape is the C-API contract. Anything the
 backends need to know about the program — instance kernels, the output
-sinks, names, types, slot counts, init state — is in there; everything
+sinks, the input sources, names, types, slot counts, init state — is in
+there; everything
 the compiler decided to forget along the way is gone.
 
 ---
