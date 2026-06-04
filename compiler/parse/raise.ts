@@ -165,7 +165,7 @@ export function raiseProgram(legacy: LegacyProgramNode): ParsedProgram {
   if (legacy.breaks_cycles === true) out.breaks_cycles = true
   // Apply built-in alias bounds (signal/freq/...) and any explicit
   // `bounds` carried through the JSON shape, lowering them to clamp
-  // ops on output assigns and input defaults. Same desugaring `.trop`
+  // ops on output assigns and input defaults. Same desugaring the surface-syntax
   // ingest runs at parse time — see `compiler/parse/lower_bounds.ts`.
   return lowerBoundsToClamps(out)
 }

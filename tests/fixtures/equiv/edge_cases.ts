@@ -591,7 +591,7 @@ const arrayMutualReg: EdgeFixture = {
 // before they reach the elaborator: the Zod schema (compiler/schema.ts:
 // StructFieldSchema / VariantPayloadFieldSchema) declares only
 // `name + scalar_type` and Zod's default strip mode silently drops
-// extras; the .trop grammar (compiler/parse/declarations.ts) only
+// extras; the tropical grammar (compiler/parse/declarations.ts) only
 // accepts a scalar kind. Implementing the full path touches:
 //   - nodes.ts (extend StructField + BinderDecl with optional shape)
 //   - schema.ts + parse/declarations.ts (accept shape on the wire)

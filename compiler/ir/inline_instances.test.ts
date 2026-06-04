@@ -1,7 +1,7 @@
 /**
  * inline_instances.test.ts — Phase C5 unit tests.
  *
- * Each test starts from a parsed `.trop`-style fixture, elaborates to
+ * Each test starts from a parsed surface-syntax fixture, elaborates to
  * `ResolvedProgram`, runs `inlineInstances`, and asserts on the
  * structural outcome: instance decls dropped, register/delay decls
  * lifted with renamed prefixes, NestedOut refs replaced.

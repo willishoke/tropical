@@ -8,7 +8,7 @@
  *      `delay` insertion.
  *   3. A user-explicit `delay` between would-be-cycle members
  *      elaborates successfully (the user broke the cycle).
- *   4. The stdlib (all 31 .trop programs) elaborates cleanly — no
+ *   4. The stdlib (all 33 programs) elaborates cleanly — no
  *      inter-instance cycles in any stdlib program.
  *   5. The CycleViolation carries the SCCs as structured data.
  */
@@ -93,7 +93,7 @@ describe('Phase 4b — elaborator strict cycle policy', () => {
     }
   })
 
-  test('stdlib: every .trop program elaborates cleanly', () => {
+  test('stdlib: every program elaborates cleanly', () => {
     const session = makeSession(8)
     expect(() => loadStdlib(session)).not.toThrow()
   })

@@ -1,5 +1,5 @@
 /**
- * markdown.test.ts — coverage for the .trop markdown extractor (Phase B1).
+ * markdown.test.ts — coverage for the literate markdown extractor (Phase B1).
  */
 
 import { describe, test, expect } from 'bun:test'

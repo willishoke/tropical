@@ -16,7 +16,7 @@ web/
   build_patches.ts       Offline plan precompilation: tropical_program_2 → web/dist/patches/*.plan.json
   build.ts               Full demo bundle: regen stdlib_bundled, precompile patches,
                          bundle worklet + main app, copy index.html → web/dist/
-  bundle_stdlib.ts       Generates compiler/stdlib_bundled.ts from stdlib/*.trop
+  bundle_stdlib.ts       Generates compiler/stdlib_bundled.ts from stdlib/*.md
   dev.ts                 Static dev server with COOP/COEP headers (SAB requirement)
   host/                  Main thread (UI, plan compile, param updates)
     compiler.ts          compilePlan(FlatPlan) → LoadedPlan via emit_wasm
@@ -134,7 +134,7 @@ objects; the worklet does the `WebAssembly.instantiate` itself.
 
 ## Stdlib in the browser
 
-The browser cannot read from disk, so `stdlib/*.trop` is inlined into
+The browser cannot read from disk, so each `stdlib/*.md` code block is inlined into
 `compiler/stdlib_bundled.ts` by `web/bundle_stdlib.ts` and consumed
 by `loadStdlibFromSources()` in `compiler/stdlib_loader.ts`. The
 `build.ts` step regenerates that file before bundling so it stays in

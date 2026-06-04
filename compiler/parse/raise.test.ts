@@ -11,9 +11,9 @@
  *     type system enforces this today via `RaiseOutput = ParsedProgramNode`,
  *     but the runtime walk catches anyone reaching past types via casts.
  *
- *  2. **Drift detection (round-trip)**: every stdlib `.trop` parses, is
+ *  2. **Drift detection (round-trip)**: every stdlib program parses, is
  *     re-saved as legacy `tropical_program_2` JSON via
- *     `saveProgramFromSession` (modulo `.trop`-specific surface forms),
+ *     `saveProgramFromSession` (modulo surface-specific forms),
  *     then raised back. The raise output structurally matches the
  *     direct parser output — proves `raise.ts`'s op-coverage stays in
  *     sync with the parser's.

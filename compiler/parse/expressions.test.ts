@@ -1,5 +1,5 @@
 /**
- * expressions.test.ts — coverage for the .trop expression parser (Phase B2).
+ * expressions.test.ts — coverage for the tropical expression parser (Phase B2).
  */
 
 import { describe, test, expect } from 'bun:test'

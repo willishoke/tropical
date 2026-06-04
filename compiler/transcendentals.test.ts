@@ -6,7 +6,7 @@
  * JavaScript Math.*. Loads libtropical.dylib via makeSession (used for
  * its session shell, not its JIT — we never call process()).
  *
- * These tests pin the polynomial approximations shipped in stdlib/*.trop
+ * These tests pin the polynomial approximations shipped in stdlib/*.md
  * to documented accuracy thresholds. Changing a coefficient without
  * updating the corresponding program should trip a threshold here.
  */
