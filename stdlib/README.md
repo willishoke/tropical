@@ -2,9 +2,9 @@
 
 The 33 built-in DSP program types, written as **literate programs**:
 markdown documents whose single ```` ```tropical ```` code block holds the
-source, wrapped in YAML frontmatter, prose, and a mermaid signal-flow
-diagram. The document is the program — legible to humans, to agents, and
-to the compiler, which reads only the code fence. Loaded by `loadStdlib()`
+source, surrounded by prose and a mermaid signal-flow diagram. The
+document is the program — legible to humans, to agents, and to the
+compiler, which reads only the code fence. Loaded by `loadStdlib()`
 (`compiler/program.ts`); for the browser build the code blocks are inlined
 into `compiler/stdlib_bundled.ts` by `web/bundle_stdlib.ts`. `README.md`
 (this file) is the one non-program document in the directory.
@@ -20,27 +20,22 @@ Each document follows the same shape (see `OnePole.md` for the canonical
 example):
 
 ```
----  YAML frontmatter: the machine-checked interface
-program:  <Name>            — must equal the filename stem
-summary:  <one line>
-inputs:   [{name, type?, default?, description}, …]   — exact signature order
-outputs:  [{name, type?, description}, …]
-state:    [{name, description}, …]        — present iff the program has reg/delay decls
-uses:     [<Name>, …]                     — present iff it instantiates other stdlib programs
-type_params: [{name, type, default?, description}, …] — present iff generic
-breaks_cycles: true                       — present iff the signature carries it
----
-# <Name>           — prose: what it is, what it's for, what it sounds like
+# <Name>           — title; must equal the filename stem
+<first paragraph>  — what it is, what it's for, what it sounds like
 ## Signal flow     — one mermaid flowchart: ports in/out, internals in a subgraph
 ## Internals       — prose: registers, feedback paths, magic constants
 ## Source          — the single ```tropical code block
 ```
 
-The frontmatter is not decoration: `compiler/parse/stdlib_literate.test.ts`
-parses it (via the `yaml` package) and fails if it disagrees with the code —
-wrong program name, missing/misordered ports, absent mermaid block, or more
-than one tropical fence. If the documentation lies about the program, the
-build says so.
+There is no structured metadata layer: the signature in the code block
+*is* the interface, and the prose *is* the documentation. By convention
+the first paragraph after the title is the program's summary — tooling
+that wants a one-liner (MCP catalogs, UI tooltips) should derive it from
+there rather than asking authors to write it twice.
+
+The shape is enforced: `compiler/parse/stdlib_literate.test.ts` fails the
+build on a missing/mismatched title, an absent mermaid block, or anything
+other than exactly one tropical fence.
 
 ## Compilation
 
@@ -217,7 +212,7 @@ producing a fresh `ResolvedProgram` per `(template, args)` pair.
 Anchor points for tropical syntax:
 
 - `compiler/parse/markdown.ts` — the literate layer: extracts the
-  ```` ```tropical ```` block (and splits frontmatter) from the document.
+  ```` ```tropical ```` block from the document.
 - `compiler/parse/lexer.ts`, `expressions.ts`, `statements.ts`,
   `declarations.ts` — the four parsing layers.
 - `compiler/parse/lower_bounds.ts` — desugaring of bounds annotations
@@ -228,11 +223,11 @@ Anchor points for tropical syntax:
 
 ## Adding a program
 
-1. Create `stdlib/MyType.md` in the literate format above: frontmatter,
-   prose, a mermaid signal-flow diagram, and exactly one
+1. Create `stdlib/MyType.md` in the literate format above: an `# MyType`
+   title, prose, a mermaid signal-flow diagram, and exactly one
    ```` ```tropical ```` code block.
 2. `loadStdlib()` discovers it by filename on next session boot.
 3. Run `bun test compiler/parse/stdlib_literate.test.ts` to confirm the
-   document is honest, and `bun run scripts/validate_stdlib.ts` to
-   confirm the code parses, elaborates, and lowers cleanly.
+   document shape, and `bun run scripts/validate_stdlib.ts` to confirm
+   the code parses, elaborates, and lowers cleanly.
 4. No C++ changes unless you need a new expression op.

@@ -1,25 +1,3 @@
----
-program: CrossFade
-summary: Stateless linear crossfade between two signals — computes a·(1−mix) + b·mix per sample.
-inputs:
-  - name: a
-    type: signal
-    default: 0
-    description: First input signal. Fully present when mix = 0.
-  - name: b
-    type: signal
-    default: 0
-    description: Second input signal. Fully present when mix = 1.
-  - name: mix
-    type: unipolar
-    default: 0.5
-    description: Blend position in [0, 1]. 0 selects a entirely, 1 selects b entirely, 0.5 produces an equal-amplitude blend.
-outputs:
-  - name: out
-    type: signal
-    description: Linearly interpolated mix of a and b.
----
-
 # CrossFade
 
 A single-expression linear interpolator. Given two signals `a` and `b`

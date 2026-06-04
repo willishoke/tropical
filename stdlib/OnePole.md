@@ -1,25 +1,3 @@
----
-program: OnePole
-summary: First-order lowpass built around a tanh-saturating integrator — linear smoother at low levels, slew-limiting soft clipper when driven.
-inputs:
-  - name: input
-    type: signal
-    default: 0
-    description: Audio-rate input to be filtered.
-  - name: g
-    type: float
-    default: 0.1
-    description: Integrator gain per sample. For small g the cutoff is ≈ g·rate/2π; g → 1 tracks the input almost immediately.
-outputs:
-  - name: out
-    type: signal
-    description: Filtered output — the post-update integrator state.
-state:
-  - name: s
-    description: One-pole accumulator. Holds the running filter state; updated once per sample.
-uses: [Tanh]
----
-
 # OnePole
 
 A one-pole lowpass with a nonlinearity folded into the integrator loop.

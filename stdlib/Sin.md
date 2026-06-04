@@ -1,17 +1,3 @@
----
-program: Sin
-summary: Sine of an angle in radians via period reduction and a degree-11 Taylor polynomial evaluated by Horner's method.
-inputs:
-  - name: x
-    type: float
-    default: 0
-    description: Angle in radians. No range restriction — arbitrary real values are handled by period reduction.
-outputs:
-  - name: out
-    type: float
-    description: Sine of x, in the range [−1, 1].
----
-
 # Sin
 
 A stateless, branchless sine approximation accurate to roughly 15 decimal

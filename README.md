@@ -76,21 +76,21 @@ arrived at this lives in
 The same discipline that makes the IR legible to the compiler makes
 the source legible to everyone else. There is no `.trop` file format:
 **a tropical program is a markdown document.** Every program in
-[`stdlib/`](stdlib/) is a literate document — YAML frontmatter
-declaring the interface (ports, state, dependencies), prose explaining
-the DSP, a mermaid diagram of the signal flow, and exactly one
+[`stdlib/`](stdlib/) is a literate document — prose explaining the
+DSP, a mermaid diagram of the signal flow, and exactly one
 ```` ```tropical ```` code block holding the source. The compiler reads
 the code fence; humans and agents read the whole document; GitHub
 renders the diagrams inline.
 
-The documentation layer is load-bearing, not decorative: a test gate
-(`compiler/parse/stdlib_literate.test.ts`) parses every document's
-frontmatter and fails the build if it disagrees with the code — wrong
-ports, missing diagram, undeclared state. An agent that wants to know
-what `SVF` exposes doesn't grep the parser; it reads the same
-frontmatter a human does, and both can trust it because the build
-breaks when it lies. See [`stdlib/OnePole.md`](stdlib/OnePole.md) for
-the canonical example.
+There is deliberately no parallel metadata layer: the signature in the
+code block *is* the interface, and the prose *is* the documentation —
+nothing is written twice, so nothing can fall out of sync. What can be
+enforced structurally, is: a test gate
+(`compiler/parse/stdlib_literate.test.ts`) fails the build on a
+mismatched title, a missing diagram, or anything other than exactly
+one code block. An agent that wants to know what `SVF` exposes reads
+the same document a human does. See
+[`stdlib/OnePole.md`](stdlib/OnePole.md) for the canonical example.
 
 ## How it gets built
 
@@ -133,7 +133,8 @@ before they reach production:
 - **A stdlib audit** that parses, elaborates, and lowers every
   `stdlib/*.md` file on every change, asserting every post-strata
   invariant — plus the literate gate, which fails the build if any
-  program document's frontmatter disagrees with its code.
+  program document loses its title, diagram, or single-code-block
+  shape.
 - **CI** runs all of it (TypeScript typecheck, C++ tests, TS tests,
   YAML lint) on every PR against GitHub Actions, with LLVM 20
   pinned. Local development runs the same gates via `make validate`.

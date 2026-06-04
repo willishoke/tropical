@@ -1,18 +1,3 @@
----
-program: Seq4MinorTranspose
-summary: Four-step sequencer hard-wired to an A minor seventh chord voicing (A2 C3 E3 G3), clocked by a unipolar trigger.
-inputs:
-  - name: trigger
-    type: unipolar
-    default: 0
-    description: Clock input. A rising edge (crossing 0.5 from below) advances the sequencer to the next step.
-outputs:
-  - name: freq
-    type: freq
-    description: Output frequency in Hz for the current step — one of 110, 130.81, 164.81, or 196.
-uses: [Sequencer]
----
-
 # Seq4MinorTranspose
 
 A four-step sequencer locked to the pitches of an A minor seventh chord.

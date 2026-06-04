@@ -1,35 +1,3 @@
----
-program: Phaser
-summary: N-stage allpass phaser with LFO-swept coefficients and feedback, generic over stage count (default 4).
-inputs:
-  - name: input
-    description: Audio-rate signal to be phase-shifted.
-  - name: feedback
-    default: 0.4
-    description: Fraction of the last allpass stage's output fed back to the chain input. Positive feedback deepens notches; negative inverts phase of feedback.
-  - name: lfo_speed
-    default: 0.2
-    description: LFO frequency in Hz. Controls how fast the allpass coefficient sweeps, setting the rate of the characteristic swoosh.
-outputs:
-  - name: output
-    description: 50/50 wet/dry mix of the phase-shifted chain output and the dry input. Comb-filter notches appear where the allpass chain's phase meets 180°.
-  - name: lfo
-    description: Raw LFO sine value in [-1, 1]. Exposed for patching — useful for modulating other parameters in sync with the sweep.
-state:
-  - name: fb
-    description: Previous sample of the last allpass stage's output. Feeds back into the chain input each sample to create resonance around the notch frequencies.
-  - name: x_prev
-    description: Array of N previous inputs, one per allpass stage. Each stage needs its own one-sample delayed input to implement the allpass difference equation.
-  - name: y_prev
-    description: Array of N previous outputs, one per allpass stage. Each stage needs its own one-sample delayed output to close the allpass feedback loop.
-type_params:
-  - name: N
-    type: int
-    default: 4
-    description: Number of first-order allpass stages in series. More stages produce more notches (one notch per pair of stages) and a thicker phaser sound.
-uses: [Phasor, Sin]
----
-
 # Phaser
 
 An N-stage phaser built from a series chain of first-order allpass filters, all sharing a single LFO-swept coefficient. The allpass chain delays different frequencies by different amounts without attenuating any of them; when the phase-shifted signal is mixed back with the dry signal at 50/50, frequencies where the allpass contributes 180° of shift cancel to form deep notches. The LFO continuously sweeps those notch positions up and down in frequency, producing the characteristic "swoosh."

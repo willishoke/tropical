@@ -3,9 +3,9 @@
  *
  * A tropical program file is a markdown document (`.md`). The compiler reads
  * only the fenced code blocks tagged ```` ```tropical ````; prose, headings,
- * YAML frontmatter, and other fenced blocks (e.g. mermaid) are ignored. Each
- * extracted block carries its line offset so error spans can be mapped back
- * to the source file.
+ * and other fenced blocks (e.g. mermaid) are ignored. Each extracted block
+ * carries its line offset so error spans can be mapped back to the source
+ * file.
  *
  * Scope of recognition:
  *   - Backtick fences (3 or more backticks). Tilde fences (`~~~`) are not
@@ -98,18 +98,4 @@ export function extractMarkdown(source: string): MarkdownExtraction {
  *  for forthcoming sub-phases where the elaborator needs a unified view. */
 export function joinBlocks(extraction: MarkdownExtraction): string {
   return extraction.blocks.map(b => b.source).join('\n\n')
-}
-
-/** Split a leading YAML frontmatter block (a `---` line at the very top of
- *  the document, closed by the next `---` line) from a literate program
- *  document. Returns the raw frontmatter text without the delimiters, or
- *  null if the document has none. Parsing the YAML is the caller's
- *  concern — this layer stays dependency-free. */
-export function splitFrontmatter(source: string): string | null {
-  const lines = source.split('\n')
-  if (lines[0]?.trim() !== '---') return null
-  for (let i = 1; i < lines.length; i++) {
-    if (lines[i].trim() === '---') return lines.slice(1, i).join('\n')
-  }
-  return null
 }

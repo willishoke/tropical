@@ -1,17 +1,3 @@
----
-program: Exp
-summary: Full-range scalar exponential (e^x) computed via range reduction, Horner minimax polynomial, and integer exponent scaling — no transcendental instructions in the kernel.
-inputs:
-  - name: x
-    type: float
-    default: 0
-    description: Exponent. Clamped to [-87, 88] before evaluation; values outside this range would overflow or underflow a 32-bit float result.
-outputs:
-  - name: out
-    type: float
-    description: e^x, accurate to near single-precision limits across the full clamped domain.
----
-
 # Exp
 
 A scalar `e^x` implementation built entirely from polynomial arithmetic and

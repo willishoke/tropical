@@ -1,24 +1,3 @@
----
-program: Delay
-summary: Generic ring-buffer delay line of N samples — the primitive feedback-safe building block for echoes, reverbs, and tuned comb filters.
-type_params:
-  - name: N
-    type: int
-    default: 44100
-    description: Buffer length in samples. At 44 100 Hz the default gives exactly 1 s of delay; at 48 000 Hz it gives ~917 ms. Specialized at instance time via type_args.
-inputs:
-  - name: x
-    default: 0
-    description: Input sample written into the ring buffer each tick.
-outputs:
-  - name: y
-    description: Output sample read from the ring buffer — the value that was written exactly N samples ago.
-state:
-  - name: buf
-    description: Ring buffer of length N, zero-initialized. Each sample, the slot at sampleIndex() % N is read (output), then overwritten with the new input.
-breaks_cycles: true
----
-
 # Delay
 
 A fixed-length ring-buffer delay line, generic in its buffer length `N`.

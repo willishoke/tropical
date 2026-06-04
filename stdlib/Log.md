@@ -1,17 +1,3 @@
----
-program: Log
-summary: Natural logarithm via IEEE exponent extraction, mantissa range reduction, and a 15-term Horner-form Taylor polynomial.
-inputs:
-  - name: x
-    type: float
-    default: 1
-    description: Input value. Non-positive values are clamped to 1e-45 (smallest positive float) before evaluation.
-outputs:
-  - name: out
-    type: float
-    description: Natural logarithm of x, i.e. ln(x).
----
-
 # Log
 
 Computes `ln(x)` for positive `x` using the classic floating-point

@@ -1,20 +1,3 @@
----
-program: PoissonEvent
-summary: Poisson-process trigger generator — fires at a statistically uniform average rate using a Xorshift64 PRNG and a per-sample threshold comparison.
-inputs:
-  - name: rate
-    type: float
-    default: 4
-    description: Average number of trigger events per second. Determines the threshold; higher values make events more frequent.
-outputs:
-  - name: trigger
-    type: signal
-    description: Fires 1 on samples where the PRNG output exceeds the Poisson threshold, 0 otherwise.
-state:
-  - name: state
-    description: 64-bit Xorshift PRNG state. Advances once per sample; initialized to a non-degenerate seed (the Knuth multiplicative hash constant).
----
-
 # PoissonEvent
 
 Produces a stream of irregular trigger pulses whose long-run firing rate

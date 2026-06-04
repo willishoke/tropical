@@ -1,20 +1,3 @@
----
-program: Pulse
-summary: Rising-edge detector — outputs true for exactly one sample when the input crosses 0.5 from below.
-inputs:
-  - name: signal
-    type: signal
-    default: 0
-    description: Continuous input signal, typically a gate or LFO output in [0, 1]. The detector fires when this value crosses the 0.5 threshold upward.
-outputs:
-  - name: out
-    type: bool
-    description: True for exactly one sample at each rising edge — the moment signal first exceeds 0.5 after having been at or below it.
-state:
-  - name: prev
-    description: The input value from the previous sample, used to detect the threshold crossing direction.
----
-
 # Pulse
 
 A one-sample-wide rising-edge detector. Given a signal that sits in the

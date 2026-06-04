@@ -1,23 +1,3 @@
----
-program: NoiseLFSR
-summary: Clock-driven 16-bit Galois LFSR that outputs a sample-and-hold pseudo-random bipolar signal, advancing one step per rising clock edge.
-inputs:
-  - name: clock
-    default: 0
-    description: Clock signal. The LFSR advances on each rising edge (transition from ≤ 0.5 to > 0.5). At 0 the output holds its last value indefinitely.
-outputs:
-  - name: out
-    type: signal
-    description: Bipolar pseudo-random sample in (−1, 1), held constant between clock ticks.
-state:
-  - name: state
-    description: 16-bit Galois LFSR register, seeded at 44257 (0xACE1). Advances one step per clock tick using feedback mask 46080 (0xB400).
-  - name: value
-    description: Output hold register. Latches the normalized LFSR output on each tick and holds it until the next tick.
-  - name: prev_clock
-    description: One-sample delay of the clock input, used to detect rising edges without a dedicated edge-detector instance.
----
-
 # NoiseLFSR
 
 A clocked 16-bit Galois LFSR noise source. On each rising edge of `clock`

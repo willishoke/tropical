@@ -1,22 +1,3 @@
----
-program: Pow
-summary: Real-valued power function x^y, computed as exp(y·ln x) via the Log and Exp stdlib modules.
-inputs:
-  - name: x
-    type: float
-    default: 1
-    description: Base. Must be positive; values ≤ 0 are clamped to ~1e-45 by the Log module.
-  - name: y
-    type: float
-    default: 1
-    description: Exponent. May be any real number, including fractional or negative values.
-outputs:
-  - name: out
-    type: float
-    description: x raised to the power y.
-uses: [Log, Exp]
----
-
 # Pow
 
 Computes `x^y` for a positive base `x` and an arbitrary real exponent `y`

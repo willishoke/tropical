@@ -1,24 +1,3 @@
----
-program: CombDelay
-summary: Single-tap IIR comb filter — feeds one sample of output back into the input, building resonance at DC and its harmonics.
-inputs:
-  - name: input
-    type: signal
-    default: 0
-    description: Audio-rate signal to be filtered.
-  - name: feedback
-    type: float
-    default: 0.7
-    description: Feedback coefficient. Values in (0, 1) give stable exponential decay; negative values invert alternate echoes; |feedback| ≥ 1 is unstable.
-outputs:
-  - name: out
-    type: signal
-    description: Filtered output — input summed with the fed-back previous output.
-state:
-  - name: s
-    description: One-sample delay register. Holds the previous output value; updated once per sample.
----
-
 # CombDelay
 
 A minimal IIR comb filter with a one-sample delay tap. Each output sample

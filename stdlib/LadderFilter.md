@@ -1,36 +1,3 @@
----
-program: LadderFilter
-summary: Four-pole Moog-style ladder filter with tanh saturation and resonance feedback, providing simultaneous lowpass, bandpass, highpass, and notch outputs.
-inputs:
-  - name: input
-    default: 0
-    description: Audio-rate input signal.
-  - name: cutoff
-    type: freq
-    default: 1000
-    description: Filter cutoff frequency in Hz, clamped to [20, 0.49·rate] before use.
-  - name: resonance
-    type: unipolar
-    default: 0.5
-    description: Feedback strength from the fourth pole back to the input. Approaches self-oscillation as it nears 1.
-  - name: drive
-    default: 1
-    description: Pre-gain applied to the input before the input tanh stage. Higher values increase soft-clipping distortion entering the ladder.
-outputs:
-  - name: lp
-    description: Four-pole lowpass output (−24 dB/oct), taken from the fourth pole.
-  - name: bp
-    description: Bandpass output, approximated as the second pole minus the fourth pole.
-  - name: hp
-    description: Highpass output, approximated as the input minus the fourth pole.
-  - name: notch
-    description: Notch output — see Internals for a known issue with this expression.
-state:
-  - name: prev_lp
-    description: Unit-delay register holding the previous sample's fourth-pole output. Breaks the algebraic cycle in the resonance feedback path.
-uses: [Tanh, Sin, OnePole]
----
-
 # LadderFilter
 
 A four-pole ladder filter modelled after the Moog transistor-ladder topology.

@@ -1,18 +1,3 @@
----
-program: SinOsc
-summary: Band-limited sine oscillator — a Phasor feeding a polynomial Sin approximation, no transcendental calls in the kernel.
-inputs:
-  - name: freq
-    type: freq
-    default: 440
-    description: Oscillator frequency in Hz. The `freq` type is a clamped positive float; values above Nyquist produce aliased output.
-outputs:
-  - name: sine
-    type: float
-    description: Sine wave output, nominally in [-1, 1] for in-range inputs.
-uses: [Phasor, Sin]
----
-
 # SinOsc
 
 A sine oscillator built from two stdlib primitives: `Phasor` accumulates

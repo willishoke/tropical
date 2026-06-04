@@ -364,7 +364,7 @@ Benchmarks (in `tests/bench/`):
 
 ## Adding a program type
 
-1. Create `stdlib/MyType.md` — frontmatter, prose, a mermaid diagram, and one ```tropical code block (see any existing program for the shape).
+1. Create `stdlib/MyType.md` — an `# MyType` title, prose, a mermaid diagram, and one ```tropical code block (see any existing program for the shape).
 2. `loadStdlib()` discovers it on next session boot.
 3. Run `bun run scripts/validate_stdlib.ts` to confirm it parses,
    elaborates, and lowers cleanly.

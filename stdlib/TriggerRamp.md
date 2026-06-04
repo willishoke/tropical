@@ -1,25 +1,3 @@
----
-program: TriggerRamp
-summary: Measures the elapsed sample count since the last rising edge of a gate signal, with a one-sample edge pulse on each rising edge.
-inputs:
-  - name: trigger
-    type: signal
-    default: 0
-    description: Gate or trigger signal. A rising edge is detected when this crosses above 0.5 from at or below 0.5.
-outputs:
-  - name: frames
-    type: float
-    description: Samples elapsed since the most recent rising edge. Zero when no trigger has been seen (Quiescent state).
-  - name: edge
-    type: float
-    description: Pulse that is 1.0 on exactly the one sample of each rising edge, 0.0 otherwise.
-state:
-  - name: prev_trigger
-    description: One-sample delay of the trigger input, used to detect the 0→1 transition.
-  - name: state
-    description: Enum holding either Quiescent (no active count) or Counting { n } (n samples have elapsed since the last rising edge).
----
-
 # TriggerRamp
 
 Counts how many samples have elapsed since the most recent rising edge of a

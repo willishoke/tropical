@@ -1,27 +1,3 @@
----
-program: Phaser16
-summary: 16-stage first-order allpass phaser with LFO-modulated coefficients and global feedback.
-inputs:
-  - name: input
-    default: 0
-    description: Audio-rate signal to be phased.
-  - name: feedback
-    default: 0.4
-    description: Fraction of the final stage output fed back to the cascade input. Positive feedback thickens the notch/peak pattern; values near 1 become unstable.
-  - name: lfo_speed
-    default: 0.2
-    description: LFO rate in Hz. Controls how fast the allpass coefficients sweep, which sweeps the notch positions up and down in frequency.
-outputs:
-  - name: output
-    description: Equal dry/wet mix of the input and the 16-stage cascade output (0.5·input + 0.5·stage_15).
-  - name: lfo
-    description: Raw LFO sine value in [−1, 1], useful for modulating other parameters in sync with the phaser sweep.
-state:
-  - name: fb
-    description: Previous sample's cascade output, held one sample to break the feedback cycle around the 16-stage chain.
-uses: [Phasor, Sin]
----
-
 # Phaser16
 
 A 16-stage phaser built from first-order allpass sections. Each stage is a

@@ -1,30 +1,3 @@
----
-program: Sequencer
-summary: Step sequencer that advances through an N-element value array on each rising edge of a clock signal.
-inputs:
-  - name: clock
-    type: unipolar
-    default: 0
-    description: Clock signal in [0, 1]. A rising edge — crossing above 0.5 from below — advances the step index by one.
-  - name: values
-    type: "float[N]"
-    description: Array of N values to sequence through. Accessed by index; the current step's element is emitted each sample.
-outputs:
-  - name: value
-    type: float
-    description: The element of `values` at the current step index.
-state:
-  - name: step
-    description: Current step index, integer in [0, N−1]. Incremented on each rising clock edge and wrapped modulo N.
-  - name: prev_clock
-    description: Unit-delay copy of the clock input. Used to detect rising edges by comparing the previous sample to the current one.
-type_params:
-  - name: N
-    type: int
-    default: 8
-    description: Number of steps. Determines the length of the `values` array and the modulo wrap for the step counter.
----
-
 # Sequencer
 
 A step sequencer with edge-triggered advancement. Each time the `clock`

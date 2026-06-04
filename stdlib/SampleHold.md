@@ -1,26 +1,3 @@
----
-program: SampleHold
-summary: Rising-edge triggered sample-and-hold — latches the input on each low-to-high trigger transition and holds it until the next trigger.
-inputs:
-  - name: trigger
-    type: signal
-    default: 0
-    description: Gate or trigger source. A rising edge (crossing 0.5 upward from ≤0.5) captures the current input value. Any signal spending sustained time above 0.5 does not re-trigger — only the transition matters.
-  - name: input
-    type: signal
-    default: 0
-    description: Signal to sample. Read once per rising edge; held constant between edges.
-outputs:
-  - name: value
-    type: signal
-    description: The most recently latched input sample. Constant between trigger edges; updated on the sample that the rising edge is detected.
-state:
-  - name: held
-    description: Latched input value. Carries the last sampled input forward until the next rising edge.
-  - name: prev_trigger
-    description: Unit-delay copy of trigger from the previous sample. Used with the current trigger to detect the low-to-high crossing.
----
-
 # SampleHold
 
 A sample-and-hold that captures its input on each **rising edge** of a trigger

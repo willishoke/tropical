@@ -1,26 +1,3 @@
----
-program: BitCrusher
-summary: Combined bit-depth reducer and sample-rate crusher — independently controls quantization resolution and effective sample rate via a sample-and-hold decimator.
-inputs:
-  - name: audio
-    default: 0
-    description: Audio-rate input signal to crush.
-  - name: bit_depth
-    default: 24
-    description: Quantization resolution in bits, clamped to [1, 24]. At 24 bits the quantization error is inaudible; at 1 bit the output is a one-bit comparator.
-  - name: sample_rate_hz
-    default: 44100
-    description: Target effective sample rate in Hz, clamped to [1, sampleRate()]. The decimator holds each captured sample for ⌊sampleRate()/sample_rate_hz⌋ ticks before updating.
-outputs:
-  - name: output
-    description: Crushed output — the quantized, decimated signal held at the current effective sample rate.
-state:
-  - name: hold_sample
-    description: The most recently captured and quantized sample; held frozen between capture events.
-  - name: hold_counter
-    description: Counts ticks since the last capture. When it reaches samplesPerHold the counter resets and hold_sample is refreshed.
----
-
 # BitCrusher
 
 A classic lo-fi effect combining two independent degradations: **bit crushing**

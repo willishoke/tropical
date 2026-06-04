@@ -1,25 +1,3 @@
----
-program: Clock
-summary: Square-wave clock generator with a pass-through ratio channel for driving synchronized sub-clocks.
-inputs:
-  - name: freq
-    type: freq
-    default: 1
-    description: Master clock frequency in Hz. Drives the primary output square wave and scales the ratio channel.
-  - name: ratios_in
-    type: "float[1]"
-    default: "[1]"
-    description: Array of one ratio value. The ratio channel runs at freq × ratios_in[0]. Default 1 passes the master frequency unchanged.
-outputs:
-  - name: output
-    type: unipolar
-    description: Primary clock — 1 while the master phasor is in the first half of its cycle, 0 otherwise. 50% duty cycle square wave at freq Hz.
-  - name: ratios_out
-    type: "float[1]"
-    description: Ratio channel clock — 1 while the scaled phasor (freq × ratios_in[0]) is in the first half of its cycle, 0 otherwise.
-uses: [Phasor]
----
-
 # Clock
 
 A square-wave clock derived from two `Phasor` instances. The primary output

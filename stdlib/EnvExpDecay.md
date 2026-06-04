@@ -1,26 +1,3 @@
----
-program: EnvExpDecay
-summary: Retriggerable exponential-decay envelope — idles at zero until a rising edge fires it, then multiplies its level by a per-sample decay coefficient each sample.
-inputs:
-  - name: trigger
-    type: signal
-    default: 0
-    description: Gate or trigger input. A rising edge (crossing 0.5 upward) fires or retriggers the envelope; the signal level while held high does not affect the envelope level.
-  - name: decay
-    type: float
-    default: 0.999
-    description: Per-sample multiplicative decay coefficient (0 < decay < 1). At 48 kHz, decay = 0.999 gives a time constant of ≈ 1 s; decay = 0.9 gives ≈ 9 ms.
-outputs:
-  - name: env
-    type: signal
-    description: Envelope output. Zero while idle; exponentially decaying from 1.0 on each trigger, with per-sample factor decay.
-state:
-  - name: prev_trigger
-    description: Unit-delayed copy of the trigger input; compared against the current sample to detect rising edges.
-  - name: state
-    description: Enum register of type Env {Idle, Decaying(level)}. Holds the machine's current phase and, when Decaying, the current envelope amplitude.
----
-
 # EnvExpDecay
 
 A retriggerable exponential-decay envelope with an explicit two-state machine. In the `Idle` phase the output is zero and the envelope draws no compute cost beyond the edge-detector comparison. A rising edge on `trigger` (below 0.5 one sample, above 0.5 the next) moves the machine to `Decaying` and sets the level to 1.0. Each subsequent sample the level is multiplied by `decay`, producing a geometric series — the discrete-time equivalent of `e^(−t/τ)` — until another trigger retriggers from the top or, if `decay < 1` strictly, the level decays toward zero while the machine stays in `Decaying`.

@@ -1,22 +1,3 @@
----
-program: SoftClip
-summary: Stateless waveshaper that applies a tanh soft-clip to a drive-scaled input — smooth saturation with no aliasing artifacts from the approximation.
-inputs:
-  - name: input
-    type: signal
-    default: 0
-    description: Audio-rate signal to be shaped. Unbounded; the drive stage and tanh together limit the output to (−1, +1).
-  - name: drive
-    type: float
-    default: 1
-    description: Pre-gain applied before the nonlinearity. Values above 1 push the signal deeper into saturation; values below 1 keep it in the linear region near 0.
-outputs:
-  - name: out
-    type: signal
-    description: Soft-clipped output, bounded to (−1, +1) by the tanh curve.
-uses: [Tanh]
----
-
 # SoftClip
 
 A memoryless waveshaper: multiply the input by `drive`, pass the result

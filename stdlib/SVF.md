@@ -1,36 +1,3 @@
----
-program: SVF
-summary: Zero-delay-feedback state-variable filter with simultaneous lowpass, bandpass, and highpass outputs.
-inputs:
-  - name: input
-    type: signal
-    default: 0
-    description: Audio-rate signal to be filtered.
-  - name: cutoff
-    type: freq
-    default: 1000
-    description: Cutoff frequency in Hz. Scaled to a per-sample integrator gain via g = π·cutoff/rate.
-  - name: q
-    type: float
-    default: 0.707
-    description: Quality factor. 1/q is the damping coefficient k; 0.707 ≈ Butterworth (maximally flat), higher values give resonance.
-outputs:
-  - name: lp
-    type: signal
-    description: Lowpass output — second-order 12 dB/oct rolloff above cutoff.
-  - name: bp
-    type: signal
-    description: Bandpass output — peak at cutoff, 6 dB/oct slopes on each side.
-  - name: hp
-    type: signal
-    description: Highpass output — second-order 12 dB/oct rolloff below cutoff.
-state:
-  - name: ic1eq
-    description: Trapezoidal integrator state for the first (bandpass) integrator.
-  - name: ic2eq
-    description: Trapezoidal integrator state for the second (lowpass) integrator.
----
-
 # SVF
 
 A second-order state-variable filter using the zero-delay-feedback (ZDF)

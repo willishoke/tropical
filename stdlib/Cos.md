@@ -1,18 +1,3 @@
----
-program: Cos
-summary: Cosine of an angle in radians, evaluated via the identity cos(x) = sin(x + π/2) and a minimax polynomial.
-inputs:
-  - name: x
-    type: float
-    default: 0
-    description: Angle in radians. Full period is 2π; no range restriction — the implementation handles arbitrary values via period reduction.
-outputs:
-  - name: out
-    type: float
-    description: Cosine of x, in the range [−1, 1].
-uses: [Sin]
----
-
 # Cos
 
 Cosine evaluated by phase-shifting the argument by π/2 and delegating

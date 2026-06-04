@@ -1,24 +1,3 @@
----
-program: AllpassDelay
-summary: First-order allpass filter — flat magnitude response at all frequencies, frequency-dependent phase shift, one sample of internal state.
-inputs:
-  - name: input
-    type: signal
-    default: 0
-    description: Audio-rate input signal.
-  - name: coeff
-    type: float
-    default: 0.5
-    description: Allpass coefficient. Controls the phase response shape; must satisfy |coeff| < 1 for stability. At coeff = 0 the filter is transparent; as |coeff| → 1 the phase shift steepens toward ±π at DC or Nyquist depending on sign.
-outputs:
-  - name: out
-    type: signal
-    description: Filtered output. Magnitude equals input magnitude at every frequency; only the phase is altered.
-state:
-  - name: s
-    description: One-sample delay register. Holds the feedback state that couples successive output samples together.
----
-
 # AllpassDelay
 
 A first-order allpass filter with one sample of internal state. The

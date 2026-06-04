@@ -1,21 +1,3 @@
----
-program: VCA
-summary: Voltage-controlled amplifier — scales an audio signal by a control voltage with a single multiply.
-inputs:
-  - name: audio
-    type: float
-    default: 0
-    description: Audio-rate signal to be scaled.
-  - name: cv
-    type: float
-    default: 0
-    description: Control voltage applied as a linear gain multiplier. 0 = silence, 1 = unity, negative values invert phase.
-outputs:
-  - name: out
-    type: float
-    description: Audio signal multiplied by cv.
----
-
 # VCA
 
 A voltage-controlled amplifier in its purest form: `out = audio × cv`. There is no

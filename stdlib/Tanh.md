@@ -1,17 +1,3 @@
----
-program: Tanh
-summary: Cheap tanh approximation via a rational polynomial — no transcendental calls in the kernel.
-inputs:
-  - name: x
-    type: float
-    default: 0
-    description: Input value. Clamped to [-3, 3] before evaluation; outside that range tanh is within 0.5% of ±1 anyway.
-outputs:
-  - name: out
-    type: float
-    description: Approximation of tanh(x), ranging from -1 to 1.
----
-
 # Tanh
 
 A stateless, branchless approximation to the hyperbolic tangent. The

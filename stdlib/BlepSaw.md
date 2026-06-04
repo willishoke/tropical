@@ -1,18 +1,3 @@
----
-program: BlepSaw
-summary: Band-limited sawtooth oscillator using a two-point PolyBLEP discontinuity correction to suppress aliasing at the phase wrap.
-inputs:
-  - name: freq
-    type: freq
-    default: 440
-    description: Oscillator frequency in Hz. Clamped to the `freq` range (typically 0–22 kHz).
-outputs:
-  - name: saw
-    type: signal
-    description: Band-limited sawtooth wave ranging from −1 to +1.
-uses: [Phasor]
----
-
 # BlepSaw
 
 A sawtooth oscillator with a PolyBLEP (Polynomial Band-Limited Step) correction applied

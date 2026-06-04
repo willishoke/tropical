@@ -1,20 +1,3 @@
----
-program: Phasor
-summary: A normalized phase accumulator that advances by freq/rate per sample and wraps at 1, producing a sawtooth ramp in [0, 1).
-inputs:
-  - name: freq
-    type: freq
-    default: 440
-    description: Oscillation frequency in Hz. Divided by the sample rate to get the per-sample phase increment.
-outputs:
-  - name: phase
-    type: unipolar
-    description: Current phase, in [0, 1). Emits the pre-increment value so sample zero outputs 0.
-state:
-  - name: p
-    description: Phase accumulator. Holds the current normalized phase; wrapped to [0, 1) each sample.
----
-
 # Phasor
 
 A phase accumulator — the minimal building block for any periodic

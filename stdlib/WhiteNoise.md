@@ -1,16 +1,3 @@
----
-program: WhiteNoise
-summary: Band-full white noise source using a 64-bit xorshift PRNG, output mapped to [-1, 1].
-inputs: []
-outputs:
-  - name: out
-    type: float
-    description: One white-noise sample per tick, uniformly distributed over [-1, 1].
-state:
-  - name: state
-    description: 64-bit integer xorshift register. Holds the full PRNG state; updated once per sample via the three-shift xorshift64 recurrence.
----
-
 # WhiteNoise
 
 A stateless-looking white-noise source: every sample it advances a
