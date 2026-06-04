@@ -1,6 +1,0 @@
-```tropical
-program SoftClip(input: signal = 0, drive: float = 1) -> (out: signal) {
-  tanh = Tanh(x: drive * input)
-  out = tanh.out
-}
-```

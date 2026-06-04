@@ -1,11 +1,12 @@
 /**
- * stdlib_round_trip.test.ts — smoke test for the .trop stdlib loader.
+ * stdlib_round_trip.test.ts — smoke test for the stdlib loader.
  *
- * Loads every `stdlib/*.trop` file via the production `loadStdlib` path
- * (markdown extract → parseProgram → elaborate → strataPipeline) and
- * confirms the registry is populated with the expected program names.
+ * Loads every `stdlib/*.md` literate program document via the production
+ * `loadStdlib` path (markdown extract → parseProgram → elaborate →
+ * strataPipeline) and confirms the registry is populated with the expected
+ * program names.
  *
- * If any .trop file fails to parse or elaborate, this test fails —
+ * If any program file fails to parse or elaborate, this test fails —
  * preventing silent breakage of files not exercised by other tests.
  */
 
@@ -19,7 +20,7 @@ import type { Compiled } from '../program_types.js'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const stdlibDir = join(__dirname, '../../stdlib')
 
-describe('stdlib loader — every .trop file loads cleanly', () => {
+describe('stdlib loader — every literate program file loads cleanly', () => {
   test('session.programs covers every top-level program in stdlib/', () => {
     const session = {
       typeRegistry: new Map<string, Compiled>(),
@@ -30,8 +31,10 @@ describe('stdlib loader — every .trop file loads cleanly', () => {
     }
     loadStdlib(session as Parameters<typeof loadStdlib>[0])
 
-    const tropFiles = readdirSync(stdlibDir).filter(f => f.endsWith('.trop')).sort()
-    const expected = tropFiles.map(f => f.replace(/\.trop$/, ''))
+    const programFiles = readdirSync(stdlibDir)
+      .filter(f => f.endsWith('.md') && f !== 'README.md')
+      .sort()
+    const expected = programFiles.map(f => f.replace(/\.md$/, ''))
     // Phase 5 (issue #156): session.programs is the unified registry
     // holding both concrete (post-strata) and generic (raw template)
     // entries. typeRegistry covers only concretes; the combined
