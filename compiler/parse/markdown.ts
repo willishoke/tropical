@@ -1,10 +1,11 @@
 /**
- * markdown.ts — extract `tropical` code blocks from a literate `.trop` file.
+ * markdown.ts — extract `tropical` code blocks from a literate program file.
  *
- * A `.trop` file is a markdown document. The compiler reads only the fenced
- * code blocks tagged ```` ```tropical ````; prose, headings, and other
- * fenced blocks (e.g. mermaid) are ignored. Each extracted block carries
- * its line offset so error spans can be mapped back to the source file.
+ * A tropical program file is a markdown document (`.md`). The compiler reads
+ * only the fenced code blocks tagged ```` ```tropical ````; prose, headings,
+ * and other fenced blocks (e.g. mermaid) are ignored. Each extracted block
+ * carries its line offset so error spans can be mapped back to the source
+ * file.
  *
  * Scope of recognition:
  *   - Backtick fences (3 or more backticks). Tilde fences (`~~~`) are not
@@ -25,7 +26,7 @@
 export interface CodeBlock {
   /** Source text of the code block (between the fences, no fence lines). */
   source: string
-  /** 0-indexed line number in the original `.trop` file where the block's
+  /** 0-indexed line number in the original `.md` file where the block's
    *  first line of content sits — i.e., one line after the opening fence.
    *  Use this to translate parser errors back to file:line:col. */
   lineOffset: number
@@ -45,7 +46,7 @@ export interface MarkdownExtraction {
 const FENCE_LINE_RE = /^(`{3,})\s*([^\s]*)\s*(.*?)\s*$/
 const CLOSING_FENCE_RE = /^(`{3,})\s*$/
 
-/** Parse a `.trop` document, extracting tropical-tagged code blocks. */
+/** Parse a literate program document, extracting tropical-tagged code blocks. */
 export function extractMarkdown(source: string): MarkdownExtraction {
   const lines = source.split('\n')
   const blocks: CodeBlock[] = []

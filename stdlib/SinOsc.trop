@@ -1,7 +1,0 @@
-```tropical
-program SinOsc(freq: freq = 440) -> (sine: float) {
-  ph = Phasor(freq: freq)
-  sin = Sin(x: 6.283185307179586 * ph.phase)
-  sine = sin.out
-}
-```

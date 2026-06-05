@@ -49,7 +49,7 @@ is run by `make validate`.
 cmake --build build -j4 && ctest --test-dir build   # C++ tests (JIT + C API, no audio device)
 bun test                                              # TS tests (compiler + parse + ir + WASM equiv)
 bunx tsc --noEmit                                     # type-check the TS pipeline
-bun run scripts/validate_stdlib.ts                    # parse, elaborate, lower every stdlib/*.trop
+bun run scripts/validate_stdlib.ts                    # parse, elaborate, lower every stdlib/*.md
 ```
 
 `bun test` exercises the cross-backend equivalence gates that fix

@@ -42,7 +42,7 @@ function patchFiles(): string[] {
 }
 
 function stdlibFiles(): string[] {
-  return readdirSync(STDLIB_DIR).filter(f => f.endsWith('.trop')).sort()
+  return readdirSync(STDLIB_DIR).filter(f => f.endsWith('.md') && f !== 'README.md').sort()
 }
 
 function loadJson(path: string): Record<string, unknown> {
@@ -50,10 +50,10 @@ function loadJson(path: string): Record<string, unknown> {
 }
 
 describe('schema_audit — in-tree corpus avoids deprecated fields', () => {
-  test('stdlib `.trop` files cannot carry top-level `audio_outputs`/`params`', () => {
-    // .trop surface syntax has no concept of these top-level fields, so this
+  test('stdlib program files cannot carry top-level `audio_outputs`/`params`', () => {
+    // tropical surface syntax has no concept of these top-level fields, so this
     // is structurally true. Asserted by content scan as a future-proofing
-    // signal: if anyone hand-edits a .trop file to inline JSON-shaped
+    // signal: if anyone hand-edits a stdlib program file to inline JSON-shaped
     // metadata, this catches it.
     const offenders: string[] = []
     for (const f of stdlibFiles()) {

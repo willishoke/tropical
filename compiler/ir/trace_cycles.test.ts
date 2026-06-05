@@ -874,12 +874,12 @@ function hasNoCycle(
 interface Fixture { name: string; source: string }
 function loadStdlibFixtures(): Fixture[] {
   return readdirSync(STDLIB_DIR)
-    .filter(f => f.endsWith('.trop'))
+    .filter(f => f.endsWith('.md') && f !== 'README.md')
     .sort()
     .map(file => {
       const text = readFileSync(join(STDLIB_DIR, file), 'utf-8')
       const ext = extractMarkdown(text)
-      return { name: file.replace(/\.trop$/, ''), source: ext.blocks[0].source }
+      return { name: file.replace(/\.md$/, ''), source: ext.blocks[0].source }
     })
 }
 

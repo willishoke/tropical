@@ -5,7 +5,7 @@
  * wires them into a session's type registry. Used by the browser bundle
  * (stdlib_bundled.ts) where filesystem access is unavailable; the
  * disk-reading entry (`loadStdlib` in `program.ts`) bypasses this and
- * parses .trop sources directly.
+ * parses the literate sources directly.
  *
  * Pipeline: raw v2 JSON → raise → ParsedProgram → elaborate →
  * ResolvedProgram → strataPipeline → loadProgramDefFromResolved.
@@ -66,7 +66,7 @@ function toSession(target: StdlibTarget) {
  * tropical_program_2 schema doesn't carry them. Programs with sum-type
  * pattern matching (e.g. TriggerRamp, EnvExpDecay) therefore fail to
  * elaborate via this path. The disk-loading `loadStdlib` in `program.ts`
- * bypasses raise — it parses .trop sources directly — and is the
+ * bypasses raise — it parses the literate sources directly — and is the
  * supported entry. The bundled-stdlib path here is left in place for
  * environments without filesystem access; under sum-using bundled
  * payloads it raises an explicit error rather than silently producing
@@ -130,7 +130,7 @@ export function loadStdlibFromMap(
 }
 
 /**
- * Register stdlib types from a pre-loaded map of raw .trop source strings.
+ * Register stdlib types from a pre-loaded map of raw tropical source strings.
  * Keys are program names; values are the source text (the inside of the
  * single `tropical` code block, post-markdown extraction).
  *

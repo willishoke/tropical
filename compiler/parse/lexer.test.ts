@@ -1,5 +1,5 @@
 /**
- * lexer.test.ts — token-level coverage for the .trop lexer (Phase B1).
+ * lexer.test.ts — token-level coverage for the tropical lexer (Phase B1).
  */
 
 import { describe, test, expect } from 'bun:test'

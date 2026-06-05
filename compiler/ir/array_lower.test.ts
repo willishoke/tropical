@@ -2,7 +2,7 @@
  * array_lower.test.ts — coverage for the Phase C6 combinator unrolling
  * and array-op lowering pass on the resolved IR.
  *
- * Each test elaborates a `.trop`-style fixture, runs `arrayLower`, and
+ * Each test elaborates a surface-syntax fixture, runs `arrayLower`, and
  * checks structural properties of the output:
  *
  *   - No combinator ops survive (`let`, `fold`, `scan`, `generate`,

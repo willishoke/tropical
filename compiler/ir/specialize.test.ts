@@ -228,7 +228,7 @@ describe('specialize — sum-type variant identity preserved', () => {
 describe('specialize — InstanceDecl.typeArgs survive substitution', () => {
   test('outer-program instantiates a generic Delay; instance.typeArgs literal preserved', () => {
     // Today the parser only admits numeric literals for type-args at
-    // the call site (no `<N=N>` forwarding syntax in `.trop`). So the
+    // the call site (no `<N=N>` forwarding syntax in the surface language). So the
     // test exercises the literal pass-through case explicitly.
     const delaySrc = `
       program Delay<N: int = 44100>(x = 0) -> (y) {

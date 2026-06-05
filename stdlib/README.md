@@ -1,18 +1,49 @@
 # stdlib/
 
-The 33 built-in DSP program types, written in tropical's `.trop` surface
-syntax. Loaded by `loadStdlib()` (`compiler/program.ts`); for the browser
-build the same files are inlined into `compiler/stdlib_bundled.ts` by
-`web/bundle_stdlib.ts`.
+The 33 built-in DSP program types, written as **literate programs**:
+markdown documents whose single ```` ```tropical ```` code block holds the
+source, surrounded by prose and a mermaid signal-flow diagram. The
+document is the program — legible to humans, to agents, and to the
+compiler, which reads only the code fence. Loaded by `loadStdlib()`
+(`compiler/program.ts`); for the browser build the code blocks are inlined
+into `compiler/stdlib_bundled.ts` by `web/bundle_stdlib.ts`. `README.md`
+(this file) is the one non-program document in the directory.
 
 Every program in this directory is *just code* — no privileged primitives.
-Math functions are polynomial approximations defined in `.trop`; filters
+Math functions are polynomial approximations defined in tropical; filters
 compose from one-pole sections; effects are graphs of these. Swap a file
 to change the math.
 
+## Literate format
+
+Each document follows the same shape (see `OnePole.md` for the canonical
+example):
+
+```
+# <Name>           — title; must equal the filename stem
+<first paragraph>  — what it is, what it's for, what it sounds like
+## Signal flow     — one mermaid flowchart: ports in/out, internals in a subgraph
+## Internals       — prose: registers, feedback paths, magic constants
+## Source          — the single ```tropical code block
+```
+
+There is no structured metadata layer: the signature in the code block
+*is* the interface, and the prose *is* the documentation. By convention
+the first paragraph after the title is the program's summary — tooling
+that wants a one-liner (MCP catalogs, UI tooltips) should derive it from
+there rather than asking authors to write it twice.
+
+The shape is enforced: `compiler/parse/stdlib_literate.test.ts` fails the
+build on a missing/mismatched title, an absent mermaid block, anything
+other than exactly one tropical fence, or a code line over 80 columns.
+(The grammar is layout-free — newlines are whitespace everywhere, including
+inside signatures and `let`/`match` chains — so long lines always have a
+clean break.)
+
 ## Compilation
 
-Each `.trop` file goes through the same pipeline as a user-defined program:
+Each document's code block goes through the same pipeline as a
+user-defined program:
 
 ```
 parse  →  elaborate  →  strata  →  ResolvedProgram
@@ -52,9 +83,9 @@ direction the strata pipeline runs.
 ### Builtins
 
 The closed set of expression-IR ops the parser knows about. These are
-the only things in the system that aren't written in `.trop`. The
+the only things in the system that aren't written in tropical. The
 authoritative list is `WireFormatOp` in `compiler/expr.ts`; the
-user-facing subset (the ops a `.trop` author can write) is:
+user-facing subset (the ops a program author can write) is:
 
 | Group | Ops |
 |-------|-----|
@@ -77,7 +108,7 @@ source — the parser produces them from syntax.
 ### Math
 
 Pure scalar functions over the builtins. Polynomial / rational
-approximations live in the `.trop` source — change the coefficients
+approximations live in the tropical source — change the coefficients
 and the JIT picks up the new approximation on the next build.
 
 | Type   | Ports | Notes |
@@ -181,20 +212,25 @@ producing a fresh `ResolvedProgram` per `(template, args)` pair.
 
 ## Surface syntax
 
-Anchor points for `.trop` syntax:
+Anchor points for tropical syntax:
 
+- `compiler/parse/markdown.ts` — the literate layer: extracts the
+  ```` ```tropical ```` block from the document.
 - `compiler/parse/lexer.ts`, `expressions.ts`, `statements.ts`,
   `declarations.ts` — the four parsing layers.
 - `compiler/parse/lower_bounds.ts` — desugaring of bounds annotations
   (`signal[-1, 1]`, `unipolar`, `freq`, etc.) to `clamp` ops at parse time.
 - `compiler/parse/print.ts` — pretty-printer used by the round-trip
-  test in `compiler/parse/stdlib_round_trip.test.ts`. Every file in
+  test in `compiler/parse/stdlib_round_trip.test.ts`. Every code block in
   this directory must round-trip through the printer.
 
 ## Adding a program
 
-1. Create `stdlib/MyType.trop` in surface syntax.
+1. Create `stdlib/MyType.md` in the literate format above: an `# MyType`
+   title, prose, a mermaid signal-flow diagram, and exactly one
+   ```` ```tropical ```` code block.
 2. `loadStdlib()` discovers it by filename on next session boot.
-3. Run `bun run scripts/validate_stdlib.ts` to confirm it parses,
-   elaborates, and lowers cleanly.
+3. Run `bun test compiler/parse/stdlib_literate.test.ts` to confirm the
+   document shape, and `bun run scripts/validate_stdlib.ts` to confirm
+   the code parses, elaborates, and lowers cleanly.
 4. No C++ changes unless you need a new expression op.

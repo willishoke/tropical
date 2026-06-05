@@ -106,7 +106,7 @@ const BUILTIN_TYPE_TO_SCALAR: Record<string, ScalarKind> = {
 }
 
 /** Builtin nullary calls. Both snake_case and camelCase forms are
- *  recognized — stdlib (.trop) uses camelCase, older fixtures use
+ *  recognized — stdlib sources use camelCase, older fixtures use
  *  snake_case. The elaborator is name-agnostic; the resolved IR carries
  *  the canonical (camelCase) op tag regardless of the surface form. */
 const NULLARY_CALLS: ReadonlySet<string> = new Set([

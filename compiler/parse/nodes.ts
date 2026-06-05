@@ -1,5 +1,5 @@
 /**
- * nodes.ts — strict discriminated-union node types for the .trop parser.
+ * nodes.ts — strict discriminated-union node types for the tropical parser.
  *
  * Two kinds of strings live in the parsed tree:
  *
@@ -462,9 +462,9 @@ export interface ProgramPorts {
 }
 
 /** A program declaration: header + body. The unit produced by parsing
- *  a top-level `program ...` declaration in `.trop`. The optional
+ *  a top-level `program ...` declaration in tropical source. The optional
  *  `breaks_cycles` flag is a hint to the legacy flattener's cycle
- *  detector; in `.trop` source it appears as a contextual keyword
+ *  detector; in surface source it appears as a contextual keyword
  *  between the output list and the body brace (`program X(...) -> (...)
  *  breaks_cycles { ... }`). */
 export interface Program {

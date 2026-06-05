@@ -601,8 +601,9 @@ function asLoadSession(target: StdlibTarget): Pick<
 }
 
 /**
- * Load all stdlib program files into a type registry. Reads `../stdlib/*.trop`
- * from disk via the literate-program pipeline:
+ * Load all stdlib program files into a type registry. Reads `../stdlib/*.md`
+ * (literate program documents; `README.md` is the one non-program doc and
+ * is skipped by name) from disk via the literate-program pipeline:
  *
  *     read → extractMarkdown → parseProgram → elaborate → ResolvedProgram →
  *     strataPipeline → loadProgramDefFromResolved
@@ -618,10 +619,12 @@ function asLoadSession(target: StdlibTarget): Pick<
  */
 export function loadStdlib(target: StdlibTarget): void {
   const stdlibDir = join(__dirname, '../stdlib')
-  const tropFiles = readdirSync(stdlibDir).filter(f => f.endsWith('.trop')).sort()
+  const programFiles = readdirSync(stdlibDir)
+    .filter(f => f.endsWith('.md') && f !== 'README.md')
+    .sort()
 
   const parsedByName = new Map<string, ReturnType<typeof parseTropicalProgram>>()
-  for (const file of tropFiles) {
+  for (const file of programFiles) {
     const path = join(stdlibDir, file)
     const text = readFileSync(path, 'utf-8')
     const ext = extractMarkdown(text)

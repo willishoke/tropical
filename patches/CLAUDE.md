@@ -73,7 +73,7 @@ Available scalar ops: `add`, `sub`, `mul`, `div`, `mod`, `floor_div`,
 `lshift`, `rshift`, `bit_not`, `not`, `clamp`, `select`, `index`,
 `array_set`, `to_int`, `to_bool`, `to_float`, `round`, `floor`,
 `ceil`. Transcendentals (`sin`, `cos`, `tanh`, `exp`, `log`, `pow`)
-are stdlib programs (`stdlib/*.trop`); instantiate one and reference
+are stdlib programs (`stdlib/*.md`); instantiate one and reference
 its output via `ref`.
 
 ### Common program types and their I/O

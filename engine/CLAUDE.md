@@ -47,7 +47,7 @@ Singleton LLVM ORC engine. `compile_flat_program()`:
    - Array loops: `loop_count > 1` emits elementwise loop, `strides[i]` controls broadcast vs. iterate
 4. Add module to LLJIT, look up symbol → `NumericKernelFn`
 
-**No transcendentals in the JIT.** sin / cos / tanh / exp / log / pow are defined as `.trop` files in `stdlib/` and inlined by the `inline_instances` strata pass from arithmetic primitives plus `Ldexp` / `FloatExponent` (single-instruction IEEE-754 bit ops for 2^n range reduction). Swap `stdlib/Sin.trop` to change the approximation.
+**No transcendentals in the JIT.** sin / cos / tanh / exp / log / pow are defined as literate `.md` files in `stdlib/` and inlined by the `inline_instances` strata pass from arithmetic primitives plus `Ldexp` / `FloatExponent` (single-instruction IEEE-754 bit ops for 2^n range reduction). Swap `stdlib/Sin.md` to change the approximation.
 
 **Cache invalidation**: build-id subdirectory derived from the binary's LC_UUID (macOS) / ELF build-id. Dylib rebuild auto-invalidates.
 

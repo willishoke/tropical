@@ -71,7 +71,7 @@ not yet on the default path.
 ## Pipeline at a glance
 
 ```
-.trop / tropical_program_2 / MCP edits
+literate .md source / tropical_program_2 / MCP edits
     │
     │   parse              drops layout, sugar, bounds annotations
     ▼
@@ -130,13 +130,13 @@ structure dropped between them.
 
 ## 1. Surface and parse
 
-**Input:** `.trop` source text or `tropical_program_2` JSON.
+**Input:** literate `.md` source text or `tropical_program_2` JSON.
 **Output:** `ParsedProgram` (`compiler/parse/nodes.ts`).
 **Drops:** layout, comments, surface sugar.
 
 ### 1.1 The two front-ends
 
-`.trop` source is the human-authored surface syntax used by the
+Literate `.md` source is the human-authored surface form used by the
 stdlib and by hand-written patches. Four parsing layers produce a
 `ParsedProgram`:
 
@@ -168,7 +168,7 @@ or the strata pipeline as a distinct construct.
 
 ### 1.3 What this pass deliberately doesn't do
 
-`raise.ts` and the `.trop` parser perform **zero scope analysis**.
+`raise.ts` and the tropical parser perform **zero scope analysis**.
 Every reference (`input("freq")`, `sin1.out`, `param("cutoff")`,
 `reg("phase")`) emits a `NameRefNode` placeholder. The parser doesn't
 know which declarations are in scope, doesn't validate that the name
@@ -597,11 +597,11 @@ TropicalDAC::audio_callback            ← engine/dac/TropicalDAC.hpp
 ```
 
 **No transcendentals in the JIT.** `sin`, `cos`, `tanh`, `exp`,
-`log`, `pow` are stdlib `.trop` programs (polynomial approximations
+`log`, `pow` are stdlib programs (polynomial approximations
 using arithmetic + `Ldexp` + `FloatExponent` — single-instruction
 IEEE-754 bit ops for 2^n range reduction). They inline at strata
 time. The kernel contains no libm calls and is deterministic across
-platforms. Swap `stdlib/Sin.trop` to change the approximation.
+platforms. Swap `stdlib/Sin.md` to change the approximation.
 
 **Adding an op.** A new operation that the JIT must support requires:
 1. Add the variant to the `OpTag` enum in
@@ -704,7 +704,7 @@ Two distinct JSON schemas; do not confuse them.
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_program_2` | `compiler/program.ts`, `compiler/parse/raise.ts` | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in `.trop`) or by agents (over MCP). |
+| `tropical_program_2` | `compiler/program.ts`, `compiler/parse/raise.ts` | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in literate `.md`) or by agents (over MCP). |
 | `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: a root instruction stream (`instance_functions[]`, instances nested as `children`) plus `sinks[]` (device-bound outputs) and `sources[]` (runtime-bound inputs — canonical `[tick, rate]`). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel, top-level temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
 Schema validation: `compiler/schema.ts` (Zod) for input;
@@ -893,7 +893,7 @@ web/
   build_patches.ts    Offline plan precompile: tropical_program_2 → web/dist/patches/*.plan.json
   build.ts            Full demo bundle: regen stdlib_bundled, precompile patches,
                       bundle worklet + main app, copy index.html
-  bundle_stdlib.ts    Generates compiler/stdlib_bundled.ts from stdlib/*.trop
+  bundle_stdlib.ts    Generates compiler/stdlib_bundled.ts from stdlib/*.md
   dev.ts              Dev server with COOP/COEP headers (SAB requirement)
   host/               Main thread
     compiler.ts       compilePlan(FlatPlan) → LoadedPlan via emit_wasm
@@ -1016,7 +1016,7 @@ Run via `bun test`. The load-bearing suites:
   sum_lower, inline_instances, array_lower, identity_elim, slots,
   clone, acyclic, lowering/cycle_break, elaboration_diagnostics)
 - `parse/*.test.ts` — lexer, parser, raise, round-trip,
-  `stdlib_round_trip.test.ts` (every `.trop` print/re-parse)
+  `stdlib_round_trip.test.ts` (every stdlib program print/re-parse)
 - `apply_plan.test.ts` — plan application integration (requires
   `make build`)
 - `compiler/wasm_runtime.test.ts`, `compiler/emit_wasm.test.ts` —
@@ -1025,7 +1025,7 @@ Run via `bun test`. The load-bearing suites:
 ### 14.3 Stdlib audit
 
 `bun run scripts/validate_stdlib.ts` parses, elaborates, and lowers
-every `stdlib/*.trop` and confirms post-strata invariants. Run by
+every `stdlib/*.md` and confirms post-strata invariants. Run by
 `make validate`.
 
 ---
@@ -1099,7 +1099,7 @@ dynamic allocation on the audio thread.
 
 ### Transcendentals as programs
 
-`sin`, `cos`, `tanh`, `exp`, `log`, `pow` are `.trop` files using
+`sin`, `cos`, `tanh`, `exp`, `log`, `pow` are stdlib programs using
 arithmetic + `Ldexp` + `FloatExponent`. They inline at strata time.
 No libm dependency in the kernel; deterministic across platforms;
 swap a file to change the math. See `stdlib/README.md`.

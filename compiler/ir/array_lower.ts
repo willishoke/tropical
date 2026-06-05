@@ -16,7 +16,7 @@
  *   - Inline arrays (`ResolvedExpr[]`) — element of arrayPack-style values.
  *   - `index(arr, i)` — left as-is (never constant-folded over inline
  *     literals; the legacy `lower_arrays.ts` does the same).
- *   - `arraySet(arr, i, v)` — left as-is. The legacy `Delay.trop`'s
+ *   - `arraySet(arr, i, v)` — left as-is. The legacy `Delay` program's
  *     `next buf = arraySet(...)` survives lowering.
  *
  * Substitution discipline (the categorical win over the legacy):

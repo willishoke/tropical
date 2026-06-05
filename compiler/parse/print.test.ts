@@ -6,7 +6,7 @@
  *     parseProgram(printProgram(parseProgram(text))) === parseProgram(text)
  *
  * The printer doesn't try to preserve original whitespace, ordering of
- * synonymous separators, or comments. It produces *canonical* `.trop`.
+ * synonymous separators, or comments. It produces *canonical* tropical source.
  * Two textually-distinct sources that parse to the same tree should
  * print to the same text.
  */

@@ -1,12 +1,12 @@
 /**
- * print.ts — pretty-printer: ParsedProgram → `.trop` text.
+ * print.ts — pretty-printer: ParsedProgram → literate program text.
  *
  * Inverse of the parser. The contract is round-trip equivalence:
  *
  *     parseProgram(printProgram(parseProgram(text))) === parseProgram(text)
  *
  * The printer walks the parsed tree and emits canonically-formatted
- * `.trop` source. Output choices:
+ * tropical source. Output choices:
  *
  *  - Program declaration wrapped in a single ```tropical fenced block
  *    (markdown literate-program shell).
@@ -18,7 +18,7 @@
  *  - Number literals use shortest round-trip representation
  *    (default JS `String(n)` covers this for finite numbers).
  *  - No prose preservation. Format-preserving rewrites are a follow-up;
- *    MVP emits fresh `.trop`.
+ *    MVP emits a fresh document.
  */
 
 import type {
@@ -73,9 +73,9 @@ import type {
 // Public entry points
 // ─────────────────────────────────────────────────────────────
 
-/** Print a parsed program as a `.trop` document (markdown with a single
- *  fenced `tropical` block). Round-trip via the parser is structurally
- *  identity. */
+/** Print a parsed program as a literate program document (markdown with a
+ *  single fenced `tropical` block). Round-trip via the parser is
+ *  structurally identity. */
 export function printProgram(prog: Program): string {
   return ['```tropical', printProgramDecl(prog, 0), '```', ''].join('\n')
 }

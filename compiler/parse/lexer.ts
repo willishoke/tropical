@@ -1,5 +1,5 @@
 /**
- * lexer.ts — tokenizer for the `.trop` surface language.
+ * lexer.ts — tokenizer for the tropical surface language.
  *
  * Scope: tokens for stages 1+2+3+4 from `design/surface-syntax.md`:
  *   - Expressions (numbers, idents, infix ops, function calls, dot, indexing)

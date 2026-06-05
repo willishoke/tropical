@@ -9,7 +9,7 @@ sample-for-sample equivalence between the two is a CI gate.
 
 This README is the high-level pitch. The full architecture lives
 in [`design/architecture.md`](design/architecture.md); the IR walks
-top-to-bottom from `.trop` source through six structure-dropping
+top-to-bottom from literate `.md` source through six structure-dropping
 passes to the slot-typed instruction stream the runtime executes.
 
 ## What tropical actually is
@@ -30,7 +30,7 @@ Three domains, one project:
 - **Realtime audio.** Single-kernel fusion, double-buffered
   hot-swap with state transfer by name (so delay lines and
   oscillator phase survive a recompile without clicking), no libm
-  in the kernel (transcendentals are stdlib `.trop` files that
+  in the kernel (transcendentals are stdlib programs that
   inline at strata time, deterministic across platforms), lock-free
   atomic control parameters, sub-millisecond JIT compile budgets,
   RtAudio with device hot-swap and disconnect recovery.
@@ -71,6 +71,27 @@ rather than an ambitious one. The longer design conversation that
 arrived at this lives in
 [`design/archive/operadic_ir.md`](design/archive/operadic_ir.md).
 
+## Everything is legible
+
+The same discipline that makes the IR legible to the compiler makes
+the source legible to everyone else. There is no `.trop` file format:
+**a tropical program is a markdown document.** Every program in
+[`stdlib/`](stdlib/) is a literate document — prose explaining the
+DSP, a mermaid diagram of the signal flow, and exactly one
+```` ```tropical ```` code block holding the source. The compiler reads
+the code fence; humans and agents read the whole document; GitHub
+renders the diagrams inline.
+
+There is deliberately no parallel metadata layer: the signature in the
+code block *is* the interface, and the prose *is* the documentation —
+nothing is written twice, so nothing can fall out of sync. What can be
+enforced structurally, is: a test gate
+(`compiler/parse/stdlib_literate.test.ts`) fails the build on a
+mismatched title, a missing diagram, or anything other than exactly
+one code block. An agent that wants to know what `SVF` exposes reads
+the same document a human does. See
+[`stdlib/OnePole.md`](stdlib/OnePole.md) for the canonical example.
+
 ## How it gets built
 
 Tropical is built through Claude Code. The workflow is task-level
@@ -110,8 +131,10 @@ before they reach production:
   surfaced as silent cross-backend divergence now throw at the
   boundary with a port-detailed error message.
 - **A stdlib audit** that parses, elaborates, and lowers every
-  `stdlib/*.trop` file on every change, asserting every post-strata
-  invariant.
+  `stdlib/*.md` file on every change, asserting every post-strata
+  invariant — plus the literate gate, which fails the build if any
+  program document loses its title, diagram, or single-code-block
+  shape.
 - **CI** runs all of it (TypeScript typecheck, C++ tests, TS tests,
   YAML lint) on every PR against GitHub Actions, with LLVM 20
   pinned. Local development runs the same gates via `make validate`.

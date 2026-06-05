@@ -957,7 +957,7 @@ export function validateExpr(node: ExprNode, path = 'expr'): void {
 
   // Combinators (let, fold, scan, generate, iterate, chain, map2, zipWith)
   // and ADT ops (tag, match) are parse-time forms — they're produced by
-  // the .trop parser and lowered by `arrayLower` / `sumLower` before any
+  // the tropical parser and lowered by `arrayLower` / `sumLower` before any
   // expression reaches `validateExpr`. They don't appear on the MCP
   // wiring surface (instance inputs, gate expressions, dac.out wires).
   // Their dedicated branches were removed in Phase D D4. An MCP client
