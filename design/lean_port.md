@@ -15,6 +15,10 @@ differential oracle; two in-process test suites still import it. This
 document is the roadmap; `design/architecture.md` stays the authority
 on what the compiler *is*.
 
+Production defects surfaced by the port's gates are written up
+postmortem-style in `design/bugs/lean_port_findings.md` (append-only;
+six findings so far).
+
 Known main-branch issue surfaced by the render gate: the three
 committed golden hashes (`tests/golden/*.hash`) are stale on
 origin/main itself — both engine implementations agree with each other
