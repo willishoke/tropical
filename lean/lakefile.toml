@@ -8,6 +8,12 @@ name = "turnstile"
 git = "https://github.com/willishoke/turnstile"
 rev = "main"
 
+# The Tropical library — everything but the executable entry point. The
+# TS→Lean port lands here module by module (Json today; Errors, Session,
+# Engine, Ir/*, Strata/*, Emit/* as the phases proceed).
+[[lean_lib]]
+name = "Tropical"
+
 [[lean_exe]]
 name = "frontend"
 root = "Main"
