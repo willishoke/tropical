@@ -19,11 +19,12 @@ namespace Tropical.Json
 
 open Lean (Json JsonNumber)
 
+/- No `deriving Repr`: toolchain v4.29.1 dropped `Repr Lean.Json`, and
+   the explicit `ToString` below is the only rendering anyone uses. -/
 structure DiffEntry where
   path : String
   a : Json
   b : Json
-deriving Repr
 
 instance : ToString DiffEntry where
   toString d := s!"{d.path}\n  a: {d.a.compress}\n  b: {d.b.compress}"

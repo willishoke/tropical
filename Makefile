@@ -1,5 +1,5 @@
 .PHONY: build repl run lean mcp-lean clean validate validate-write \
-        diff diff-plan diff-audio diff-engine diff-render diff-raise \
+        diff diff-plan diff-audio diff-engine diff-render diff-raise diff-elab \
         test-lean-engine
 
 ROOT := $(shell pwd)
@@ -70,8 +70,16 @@ diff-raise: build lean
 	bun run scripts/build_parsed_stdlib.ts
 	bun run scripts/diff/diff_raise.ts --b="./lean/.lake/build/bin/diffcli"
 
+# Phase 4 gate (resolved layer): Lean elaborator + resolved codec against
+# the TS oracle, over the stdlib chain + elaborable raise fixtures + the
+# error-message fixtures under tests/fixtures/elab/.
+diff-elab: build lean
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli
+	bun run scripts/build_parsed_stdlib.ts
+	bun run scripts/diff/diff_elab.ts --b="./lean/.lake/build/bin/diffcli"
+
 # Phase 1 gate: the protocol test suites against the Lean engine.
 test-lean-engine: build lean
 	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test mcp/errors.test.ts mcp/wire_dac.test.ts
 
-diff: diff-plan diff-audio diff-engine diff-render diff-raise
+diff: diff-plan diff-audio diff-engine diff-render diff-raise diff-elab

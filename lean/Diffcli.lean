@@ -1,5 +1,7 @@
 import Tropical.Ffi
 import Tropical.Parse.Raise
+import Tropical.Ir.Elaborator
+import Tropical.Ir.Codec
 
 /-!
 The `diffcli` executable — differential-harness verbs that exercise the
@@ -27,6 +29,19 @@ Reads serialized ParsedProgram JSON (the stdlib bridge corpus under
 stdlib/parsed/), decodes it into the typed AST, re-encodes, prints.
 A decode failure prints `{error}` — which the differ reports, since
 the TS side echoes the file verbatim. Gates codec fidelity.
+
+    diffcli elab-stdlib <Name>
+    diffcli elab-file <parsed.json>
+
+Phase 4 stage 3 (the elaborator gate, scripts/diff/diff_elab.ts).
+`elab-stdlib` elaborates the pre-parsed stdlib bridge in manifest order
+up to and including <Name> — threading an external resolver over the
+raw elaborated results, mirroring scripts/diff/elab_cmd.ts — and prints
+the canonical `tropical_resolved_1` encoding of <Name>. `elab-file`
+elaborates a self-contained ParsedProgram JSON against the full stdlib
+chain as resolver. An `ElaborationError` / `CycleViolation` prints
+`{error: <byte-exact TS message>}` and exits 0 (errors are comparable
+outputs); a ParsedProgram decode failure is a harness error (exit 1).
 -/
 
 def parseNatFlag (args : List String) (flag : String) (default : Nat) : Nat :=
@@ -85,11 +100,108 @@ def parsedRoundtripVerb (args : List String) : IO UInt32 := do
   IO.println out.compress
   return 0
 
+-- ── elab-stdlib / elab-file (Phase 4 stage 3) ────────────────────────────────
+
+private def parsedDir : String := "stdlib/parsed"
+
+/-- Read + strictly decode a serialized ParsedProgram. Decode failures
+    are harness errors (the TS side has no decoder to disagree with). -/
+private def readParsed (path : String) : IO (Except String Tropical.Parse.Program) := do
+  let text ← IO.FS.readFile path
+  pure <| do
+    let jv ← Tropical.Parse.JsonV.parse text |>.mapError (s!"JSON parse error: {·}")
+    Tropical.Parse.decodeProgram jv
+
+private def manifestNames : IO (Except String (Array String)) := do
+  let text ← IO.FS.readFile s!"{parsedDir}/manifest.json"
+  pure <| do
+    let jv ← Tropical.Parse.JsonV.parse text |>.mapError (s!"manifest parse error: {·}")
+    let some (Tropical.Parse.JsonV.arr items) := jv.getField? "programs"
+      | .error "manifest missing 'programs' array"
+    items.mapM fun
+      | .str s => .ok s
+      | _ => .error "manifest 'programs' entries must be strings"
+
+/-- The raw-elaborated stdlib chain (elaborate-only — no strata), in
+    manifest order, threading an external resolver over earlier results.
+    Mirrors `elabChain` in scripts/diff/elab_cmd.ts. -/
+private def elabChain (names : Array String) :
+    IO (Except String (Except Tropical.Ir.ElabError
+      (Tropical.Ir.Arena × Array (String × Tropical.Ir.ProgramIdx)))) := do
+  let mut arena : Tropical.Ir.Arena := {}
+  let mut resolved : Array (String × Tropical.Ir.ProgramIdx) := #[]
+  for name in names do
+    match ← readParsed s!"{parsedDir}/{name}.json" with
+    | .error e => return .error s!"{name}.json: {e}"
+    | .ok prog =>
+      let r := resolved
+      match Tropical.Ir.elaborateInto arena prog
+          (some fun n => (r.find? (·.1 == n)).map (·.2)) with
+      | .error e => return .ok (.error e)
+      | .ok (arena', idx) =>
+        arena := arena'
+        resolved := resolved.push (name, idx)
+  return .ok (.ok (arena, resolved))
+
+private def printEncoded (arena : Tropical.Ir.Arena) (root : Tropical.Ir.ProgramIdx) :
+    IO UInt32 := do
+  match Tropical.Ir.Codec.encodeResolved arena root with
+  | .error e =>
+    IO.eprintln e
+    return 1
+  | .ok j =>
+    IO.println j.compress
+    return 0
+
+private def printElabError (e : Tropical.Ir.ElabError) : IO UInt32 := do
+  IO.println (errorJson e.message).compress
+  return 0
+
+def elabStdlibVerb (args : List String) : IO UInt32 := do
+  let some target := args.head?
+    | IO.eprintln "usage: diffcli elab-stdlib <Name>"
+      return 1
+  match ← manifestNames with
+  | .error e => IO.eprintln e; return 1
+  | .ok names =>
+    let some i := names.findIdx? (· == target)
+      | IO.eprintln s!"elab-stdlib: '{target}' is not in {parsedDir}/manifest.json"
+        return 1
+    match ← elabChain (names.extract 0 (i + 1)) with
+    | .error e => IO.eprintln e; return 1
+    | .ok (.error e) => printElabError e
+    | .ok (.ok (arena, resolved)) =>
+      let some (_, idx) := resolved.find? (·.1 == target)
+        | IO.eprintln s!"elab-stdlib: internal: '{target}' missing from chain"
+          return 1
+      printEncoded arena idx
+
+def elabFileVerb (args : List String) : IO UInt32 := do
+  let some path := args.head?
+    | IO.eprintln "usage: diffcli elab-file <parsed.json>"
+      return 1
+  match ← manifestNames with
+  | .error e => IO.eprintln e; return 1
+  | .ok names =>
+    match ← elabChain names with
+    | .error e => IO.eprintln e; return 1
+    | .ok (.error e) => printElabError e
+    | .ok (.ok (arena, resolved)) =>
+      match ← readParsed path with
+      | .error e => IO.eprintln s!"{path}: {e}"; return 1
+      | .ok prog =>
+        match Tropical.Ir.elaborateInto arena prog
+            (some fun n => (resolved.find? (·.1 == n)).map (·.2)) with
+        | .error e => printElabError e
+        | .ok (arena', idx) => printEncoded arena' idx
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
   | "raise" :: rest => raiseVerb rest
   | "parsed-roundtrip" :: rest => parsedRoundtripVerb rest
+  | "elab-stdlib" :: rest => elabStdlibVerb rest
+  | "elab-file" :: rest => elabFileVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>\n       diffcli elab-stdlib <Name>\n       diffcli elab-file <parsed.json>"
     return 1

@@ -1,0 +1,97 @@
+{
+  "op": "program",
+  "name": "BadPort",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "programDecl",
+        "name": "P",
+        "program": {
+          "op": "program",
+          "name": "P",
+          "body": {
+            "op": "block",
+            "decls": [],
+            "assigns": [
+              {
+                "op": "outputAssign",
+                "name": "y",
+                "expr": {
+                  "op": "nameRef",
+                  "name": "a"
+                }
+              }
+            ]
+          },
+          "ports": {
+            "inputs": [
+              {
+                "name": "a",
+                "type": {
+                  "op": "nameRef",
+                  "name": "float"
+                },
+                "default": 0
+              }
+            ],
+            "outputs": [
+              {
+                "name": "y",
+                "type": {
+                  "op": "nameRef",
+                  "name": "float"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "instanceDecl",
+        "name": "i",
+        "program": {
+          "op": "nameRef",
+          "name": "P"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "b"
+            },
+            "value": 1
+          }
+        ]
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "out",
+        "expr": {
+          "op": "nestedOut",
+          "ref": {
+            "op": "nameRef",
+            "name": "i"
+          },
+          "output": {
+            "op": "nameRef",
+            "name": "y"
+          }
+        }
+      }
+    ]
+  },
+  "ports": {
+    "outputs": [
+      {
+        "name": "out",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        }
+      }
+    ]
+  }
+}

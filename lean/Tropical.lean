@@ -3,3 +3,6 @@ import Tropical.Relay
 import Tropical.Tools
 import Tropical.Frontend
 import Tropical.Parse.Raise
+import Tropical.Ir.Nodes
+import Tropical.Ir.Codec
+import Tropical.Ir.Elaborator
