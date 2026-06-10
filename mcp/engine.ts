@@ -43,6 +43,20 @@ import { PROGRAM_FORMAT_EXAMPLE } from './program_format_example.js'
 const portTypeOrNull = (t: PortType | undefined): string | null =>
   t === undefined ? null : portTypeToString(t)
 
+/** JSON.stringify with sorted object keys — for display labels that must
+ *  not depend on the client's key order (the Lean engine's JSON layer
+ *  canonicalizes key order, so labels must too). */
+function stableStringify(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableStringify).join(',')}]`
+  if (typeof v === 'object' && v !== null) {
+    const entries = Object.entries(v as Record<string, unknown>)
+      .filter(([, val]) => val !== undefined)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    return `{${entries.map(([k, val]) => `${JSON.stringify(k)}:${stableStringify(val)}`).join(',')}}`
+  }
+  return JSON.stringify(v)
+}
+
 // ─── Session ──────────────────────────────────────────────────────────────────
 
 // Defaults for DAC configuration. Host config — describes the audio device,
@@ -366,8 +380,32 @@ function instanceSummary(name: string) {
   }
 }
 
-/** Apply wiring via FlatRuntime. */
+/** Apply wiring via FlatRuntime.
+ *
+ *  Canonicalizes wires and rebuilds the slot state before compiling, so
+ *  recompiles are idempotent (the same reset compiler_service.ts performs
+ *  per sync). Without this, re-wiring an already-compiled port left a
+ *  stale delaySlotRegistry entry behind and the next compile died with
+ *  "duplicate reg/delay '__autodelay:…'". */
 function wire(): {} {
+  const wires = [...session.inputExprNodes.entries()].map(
+    ([k, e]) => [k, reconstructWireDelays(e, session.delaySlotRegistry)] as const)
+  session.inputExprNodes.clear()
+  session.outputSlotRegistry.clear()
+  session.paramSlotRegistry.clear()
+  session.outputPortMeta.clear()
+  session.inputSlotRegistry.clear()
+  session.inputPortMeta.clear()
+  session.inputExprs.clear()
+  session.slotCount = 0
+  session.ioArraySlotCount = 0
+  session.ioArraySlotSizes.length = 0
+  session.ioArraySlotNames.length = 0
+  session.delaySlotRegistry = []
+  for (const [name, inst] of session.instanceRegistry) {
+    allocateOutputSlots(session, toInstanceName(name), inst.compiled)
+  }
+  for (const [k, e] of wires) session.inputExprNodes.set(k, e)
   applyFlatPlan(session, session.runtime)
   return {}
 }
@@ -579,7 +617,7 @@ function handleFanOut(args: Record<string, unknown>) {
       sourceLabel = `${s.instance}.${outName}`
     } else {
       sourceExpr  = rawSource as ExprNode
-      sourceLabel = JSON.stringify(sourceExpr)
+      sourceLabel = stableStringify(sourceExpr)
     }
 
     const linked = []

@@ -30,8 +30,13 @@ class Client {
   private nextId = 1
 
   constructor() {
-    const serverPath = resolve(import.meta.dir, 'ir_service.ts')
-    this.proc = spawn('bun', ['run', serverPath], {
+    // Engine under test: defaults to the TS ir_service; set
+    // TROPICAL_ENGINE_CMD to point at another implementation of the same
+    // protocol (e.g. "lean/.lake/build/bin/frontend --rpc" for the Lean
+    // engine — the Phase 1 gate runs this suite against it unmodified).
+    const cmd = process.env.TROPICAL_ENGINE_CMD?.split(' ').filter(Boolean)
+      ?? ['bun', 'run', resolve(import.meta.dir, 'ir_service.ts')]
+    this.proc = spawn(cmd[0], cmd.slice(1), {
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: resolve(import.meta.dir, '..'),
     })
