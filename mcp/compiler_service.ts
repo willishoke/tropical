@@ -5,9 +5,10 @@
  * The Lean engine owns the session, the native runtime (plan loading,
  * slot control), the DAC, and params; this service owns what hasn't
  * been ported yet — program registration (raise → elaborate → strata),
- * compilation to tropical_plan_5 JSON (Phase 3: from the Lean engine's
- * own session lowering — a ParsedProgram + slot bookkeeping; this side
- * just elaborates and partitions), wire lifting (it needs strata), and
+ * compilation to tropical_plan_5 JSON (Phase 4 stage 4a: the Lean engine
+ * runs the session lowering AND the elaboration; this side decodes the
+ * shipped `tropical_resolved_1` root and just partitions it against the
+ * shipped slot bookkeeping), wire lifting (it needs strata), and
  * save/export/load/merge (they need the compiler). It shrinks phase by
  * phase until Phase 6 deletes it.
  *
@@ -39,7 +40,8 @@ import {
   mergeProgramIntoSession, loadStdlib, instanceDecls,
 } from '../compiler/program.js'
 import { compileSession } from '../compiler/ir/compile_session.js'
-import { compileSessionSlottedFromParsed } from '../compiler/ir/compile_session_slotted.js'
+import { compileSessionSlottedFromResolved } from '../compiler/ir/compile_session_slotted.js'
+import { decodeResolved, encodeResolved } from '../compiler/ir/resolved_codec.js'
 import { liftWiresToInstances } from '../compiler/ir/lift_wires.js'
 import { assertSessionAcyclic } from '../compiler/ir/lowering/session_cycle_check.js'
 import { toWirePlan } from '../compiler/flat_plan.js'
@@ -59,17 +61,23 @@ const portTypeOrNull = (t: PortType | undefined): string | null =>
 // ─── Catalog entries ─────────────────────────────────────────────────────────
 // The port-metadata shape the Lean engine mirrors. `type` is the display
 // string (list_programs), `type_obj` the structured PortType (get_info echo
-// + wire type-checking).
+// + wire type-checking). `resolved` is the program's post-strata IR in
+// `tropical_resolved_1` encoding — the Lean engine adopts it into its typed
+// store so its own `compile` elaboration can LINK instances against it
+// (Phase 4 stage 4a). Generic templates carry `resolved: null` (the engine
+// only needs concrete specializations, which arrive via `resolve_type`).
 
 function concreteEntry(name: string, type: Instance | NonNullable<ReturnType<typeof loadProgramAsType>>) {
   const defaultsMap = rawInputDefaults(type) as Record<string, unknown>
   const ipt = inputPortTypes(type)
   const opt = outputPortTypes(type)
   const rpt = registerPortTypes(type)
+  const prog = 'compiled' in type ? type.compiled.prog : type.prog
   return {
     program_name: name,
     generic: false,
     type_params: null,
+    resolved: encodeResolved(prog),
     inputs: inputNames(type).map((n, i) => ({
       name: n, type: portTypeOrNull(ipt[i]), type_obj: ipt[i] ?? null, default: defaultsMap[n] ?? null,
     })),
@@ -86,6 +94,7 @@ function genericEntry(name: string, prog: import('../compiler/ir/nodes.js').Reso
   return {
     program_name: name,
     generic: true,
+    resolved: null,
     type_params: Object.fromEntries(prog.typeParams.map(tp => {
       const entry: { type: 'int'; default?: number } = { type: 'int' }
       if (tp.default !== undefined) entry.default = tp.default
@@ -161,9 +170,11 @@ function dumpState(beforePrograms: ReadonlySet<string>) {
 // ─── Method handlers ─────────────────────────────────────────────────────────
 
 type CompilePayload = {
-  /** The session serialized to a ParsedProgram by the Lean engine
-   *  (post-lift, post-extraction) — the Phase 3 seam payload. */
-  parsed_program: unknown
+  /** The session's synthetic root, elaborated by the Lean engine and
+   *  shipped as `tropical_resolved_1` JSON — the Phase 4 stage-4a seam
+   *  payload (the elaborate step moved engine-side; this service just
+   *  decodes and partitions). */
+  resolved_root: unknown
   instances: Array<{ name: string; program: string; type_args?: Record<string, number> | null }>
   /** Post-extraction wires — consumed by the input-alias checks and the
    *  defensive acyclicity tripwire, not re-lowered. */
@@ -230,11 +241,12 @@ function handleCompile(p: CompilePayload) {
   // Defensive tripwire (the Lean lowering already checked).
   assertSessionAcyclic(session)
 
-  const plan = compileSessionSlottedFromParsed(
-    session,
-    p.parsed_program as Parameters<typeof compileSessionSlottedFromParsed>[1],
-    'fused',
-  )
+  // Decode the Lean-elaborated root. A malformed resolved_root is an
+  // engine bug, not a user error — `decodeResolved` throws
+  // `ResolvedCodecError`, which the stdio loop's `toEnvelope` maps to
+  // `internal_error` with the decoder's message.
+  const root = decodeResolved(p.resolved_root)
+  const plan = compileSessionSlottedFromResolved(session, root, 'fused')
   const planJson = JSON.stringify(toWirePlan(plan))
   return {
     plan_json: planJson,

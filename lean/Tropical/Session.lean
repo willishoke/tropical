@@ -1,6 +1,7 @@
 import Std.Data.HashMap
 import Lean.Data.Json
 import Tropical.Expr
+import Tropical.Ir.Codec
 
 /-!
 # Session state — the authoritative graph topology
@@ -74,12 +75,18 @@ def ProgMeta.fromEntry (j : Json) : ProgMeta :=
 def ProgMeta.inputNames (m : ProgMeta) : Array String := m.inputs.map (·.name)
 def ProgMeta.outputNames (m : ProgMeta) : Array String := m.outputs.map (·.name)
 
-/-- A live instance: base type name, type args (generics), and the
-    (possibly specialized) port metadata. -/
+/-- A live instance: base type name, type args (generics), the
+    (possibly specialized) port metadata, and a snapshot of the typed
+    store's program for this instance's type — captured at
+    add/replicate/lift/load-adoption time. The snapshot is the parity
+    image of TS instances holding their `compiled.prog`: the compile
+    root resolver links against the instance's snapshot, never a late
+    name lookup (redefinition would diverge otherwise). -/
 structure InstanceInfo where
   baseTypeName : String
   typeArgs     : Option Json := none
   progMeta     : ProgMeta
+  resolvedIdx  : Option Tropical.Ir.ProgramIdx := none
 deriving Inhabited
 
 /-- A stored wire. Always the canonical authored form — MCP-set wires
@@ -105,6 +112,14 @@ structure SessionSt where
       number forms). The service owns the live Param handles. -/
   params       : Array (String × Json) := #[]
   nameCounters : Std.HashMap String Nat := {}
+  /-- The typed store (Phase 4 stage 4a): every adopted catalog entry's
+      post-strata resolved IR, appended via `decodeResolvedInto`. The
+      arena only ever grows; indices stay valid for the session's life. -/
+  arena        : Tropical.Ir.Arena := {}
+  /-- Current name → store index, keyed by the stored program's `name`
+      (the decoded `prog.name`). Redefinition overwrites; instances are
+      insulated by their `resolvedIdx` snapshots. -/
+  resolvedByName : Std.HashMap String Tropical.Ir.ProgramIdx := {}
 
 namespace SessionSt
 
@@ -155,6 +170,25 @@ def setParamValue (st : SessionSt) (name : String) (value : Json) : SessionSt :=
   match st.params.findIdx? (·.1 == name) with
   | some i => { st with params := st.params.set! i (name, value) }
   | none   => { st with params := st.params.push (name, value) }
+
+/-- Decode a catalog entry's `resolved` field (when present and
+    non-null) into the typed store, recording the program under its own
+    decoded `name`. Returns the adopted store index — `none` for
+    generic templates, which ship `resolved: null`. The bridge from
+    `Lean.Json` to the codec's ordered `JsonV` is a re-parse of the
+    compressed string (lossless: `JsonNumber` decimals survive, and the
+    resolved wire has no order-sensitive objects). -/
+def adoptResolved (st : SessionSt) (entry : Json) :
+    Except String (SessionSt × Option Tropical.Ir.ProgramIdx) :=
+  match Tropical.Expr.getField? entry "resolved" with
+  | none | some .null => .ok (st, none)
+  | some r => do
+    let jv ← (Tropical.Parse.JsonV.parse r.compress).mapError
+      (s!"entry.resolved: JSON re-parse failed: {·}")
+    let (arena, idx) ← Tropical.Ir.Codec.decodeResolvedInto st.arena jv
+    let some p := arena.program? idx
+      | .error "entry.resolved: decodeResolvedInto returned an out-of-range root"
+    .ok ({ st with arena, resolvedByName := st.resolvedByName.insert p.name idx }, some idx)
 
 end SessionSt
 

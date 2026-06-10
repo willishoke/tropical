@@ -6,6 +6,8 @@ import Tropical.Wiring
 import Tropical.Session
 import Tropical.Lowering
 import Tropical.Client
+import Tropical.Parse.Nodes
+import Tropical.Ir.Elaborator
 
 /-!
 # The tropical IR engine — tool semantics, in Lean
@@ -157,6 +159,21 @@ private def adaptInputExpr (st : SessionSt) (node : Json) (dstTypeObj : Option J
         (some s!"Type mismatch on '{instanceName}'.{inputName}: {check.error.getD ""}")
     pure (check.broadcastExpr.getD node)
 
+-- ── Typed-store adoption (Phase 4 stage 4a) ──────────────────────────────────
+
+/-- Adopt a catalog entry's `resolved` IR into the typed store (EngineM
+    shell over `SessionSt.adoptResolved`). Returns the store index, or
+    `none` for entries without resolved IR (generic templates). A decode
+    failure is an engine bug — the service encoded it — so it maps to
+    `internal_error`. -/
+def adoptResolved (env : Env) (entry : Json) : EngineM (Option Tropical.Ir.ProgramIdx) := do
+  let st ← env.state.get
+  match st.adoptResolved entry with
+  | .error msg => internalError msg
+  | .ok (st', idx?) =>
+    env.state.set st'
+    pure idx?
+
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 
 /-- If any wire needs lifting (array literals), have the compiler
@@ -180,10 +197,11 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
     let program := (getStrField? instJ "program").getD name
     let entry := (getField? instJ "entry").getD jsonNull
     let pm := ProgMeta.fromEntry entry
+    let resolvedIdx ← adoptResolved env entry
     env.state.modify fun st =>
       let st := st.addProgram pm
       if (st.findInstance? name).isSome then st
-      else st.addInstance name { baseTypeName := program, typeArgs := none, progMeta := pm }
+      else st.addInstance name { baseTypeName := program, typeArgs := none, progMeta := pm, resolvedIdx }
   -- Adopt the rewritten wire set verbatim (service map order).
   let wires : Array Wire :=
     (match getField? resp "wires" with
@@ -201,11 +219,14 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
   env.state.modify fun st =>
     { st with wires, nameCounters := st.nameCounters.insert "__wire" counter }
 
-/-- The session lowering + compile (Phase 3): lift if needed, then run
-    the Lean lowering — slot allocation, delay extraction, acyclicity,
-    serialization to a ParsedProgram — ship it with the slot bookkeeping
-    to the service for elaborate + partition, and hot-swap the returned
-    plan into the Lean-owned runtime. -/
+/-- The session lowering + compile (Phase 3 lowering, Phase 4 stage 4a
+    elaboration): lift if needed, then run the Lean lowering — slot
+    allocation, delay extraction, acyclicity, serialization to a
+    ParsedProgram — elaborate the root over the typed store (LINKing
+    each instance's `resolvedIdx` snapshot through the resolver), ship
+    the encoded `tropical_resolved_1` root with the slot bookkeeping to
+    the service for decode + partition, and hot-swap the returned plan
+    into the Lean-owned runtime. -/
 def syncCompile (env : Env) : EngineM Unit := do
   liftIfNeeded env
   let st ← env.state.get
@@ -216,10 +237,63 @@ def syncCompile (env : Env) : EngineM Unit := do
   let (wiresPost, delayEntries, alloc) :=
     Tropical.Lowering.extractSessionDelays st.wires alloc
   Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
-  let parsed ← Tropical.Lowering.sessionToParsed st.instances wiresPost delayEntries
+
+  -- TS parity (`sessionToParsedProgram` emits `inst.compiled.prog.name`):
+  -- the root references each instance's program by the *stored*
+  -- program's name — for specialized generics that is the base name
+  -- (`Delay`), not the display key the catalog entry carries
+  -- (`Delay<N=8>`). Falls back to the entry name when an instance has
+  -- no snapshot (engine bug — elaboration will report it).
+  let storedProgName (i : InstanceInfo) : Option String :=
+    (i.resolvedIdx.bind st.arena.program?).map (·.name)
+  let lowerInstances := st.instances.map fun (n, i) =>
+    match storedProgName i with
+    | some pname => (n, { i with progMeta := { i.progMeta with programName := pname } })
+    | none => (n, i)
+  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost delayEntries
+
+  -- Bridge the lowering's `Lean.Json` to the strict typed decoder's
+  -- ordered `JsonV` by re-parsing the compressed string (lossless: the
+  -- session-root shape has no order-sensitive objects, and JsonNumber
+  -- decimals survive the round trip).
+  let typed ← match Tropical.Parse.JsonV.parse parsed.compress with
+    | .error e => internalError s!"session root: ParsedProgram JSON re-parse failed: {e}"
+    | .ok jv =>
+      match Tropical.Parse.decodeProgram jv with
+      | .error e => internalError s!"session root: {e}"
+      | .ok p => pure p
+
+  -- Root resolver = `sessionTypeResolver` parity: keyed by the stored
+  -- program's name, instance order, first instance wins per name. Uses
+  -- the instances' snapshots, never a late name lookup.
+  let mut resolverTbl : Array (String × Tropical.Ir.ProgramIdx) := #[]
+  for (_, i) in st.instances do
+    if let some idx := i.resolvedIdx then
+      if let some p := st.arena.program? idx then
+        if !resolverTbl.any (·.1 == p.name) then
+          resolverTbl := resolverTbl.push (p.name, idx)
+  let tbl := resolverTbl
+
+  -- Elaborate over the store arena. The appended root is transient —
+  -- it is encoded for this compile and not retained in the store.
+  -- Failure maps onto the envelope the TS path produced when its
+  -- compile-side `elaborate` threw: ElaborationError / CycleViolation
+  -- are plain Errors there, so `toEnvelope` made them `internal_error`
+  -- with the verbatim message. The error is surfaced *after* the
+  -- mirror-sync call below, matching the TS ordering (the service
+  -- rebuilt its session before its elaborate threw, so save/export
+  -- after a failed compile see the mutated graph).
+  let (resolvedRoot, elabErr?) : Json × Option String :=
+    match Tropical.Ir.elaborateInto st.arena typed
+        (some fun n => (tbl.find? (·.1 == n)).map (·.2)) with
+    | .error e => (Json.null, some e.message)
+    | .ok (arena', rootIdx) =>
+      match Tropical.Ir.Codec.encodeResolved arena' rootIdx with
+      | .error e => (Json.null, some e)
+      | .ok json => (json, none)
 
   let payload := Json.mkObj [
-    ("parsed_program", parsed),
+    ("resolved_root", resolvedRoot),
     ("instances", Json.arr <| st.instances.map fun (n, i) =>
       Json.mkObj [("name", Json.str n), ("program", Json.str i.baseTypeName),
                   ("type_args", i.typeArgs.getD jsonNull)]),
@@ -242,6 +316,16 @@ def syncCompile (env : Env) : EngineM Unit := do
       ("names", toJson alloc.ioNames)]),
     ("delay_slots", Json.arr <| delayEntries.map (·.toJson))]
 
+  if let some msg := elabErr? then
+    -- Mirror-sync: the service rebuilds its session from this payload
+    -- before failing on the null root; its failure is discarded (the
+    -- ascription forces a lift instead of a defeq re-bind that would
+    -- re-propagate it) and the elaboration envelope is surfaced
+    -- instead. The previous kernel keeps playing — same
+    -- recoverable-failure shape as TS.
+    let _discarded : Except Failure Json ← (env.service.call "compile" payload).run
+    internalError msg
+
   let resp ← env.service.call "compile" payload
   match getField? resp "plan_json" with
   | some (.str planJson) => env.runtime.loadPlan planJson
@@ -263,6 +347,7 @@ def adoptEntries (env : Env) (entries : Json) : EngineM Unit := do
   | .arr es =>
     for e in es do
       env.state.modify (·.addProgram (ProgMeta.fromEntry e))
+      let _ ← adoptResolved env e
   | _ => pure ()
 
 -- ── Per-tool handlers ────────────────────────────────────────────────────────
@@ -277,10 +362,14 @@ private def instanceSummary (st : SessionSt) (name : String) : Json :=
       ("inputs", toJson info.progMeta.inputNames),
       ("outputs", toJson info.progMeta.outputNames)]
 
-/-- Resolve a program name (+ optional type args) to instance metadata,
-    with the TS failure shapes. -/
+/-- Resolve a program name (+ optional type args) to instance metadata
+    plus the typed-store snapshot for the resolved program, with the TS
+    failure shapes. Generic programs specialize through the service's
+    `resolve_type`, whose entry is adopted into the store; concrete
+    programs take the store's current mapping for the name. -/
 private def resolveInstanceMeta (env : Env) (programName : String)
-    (typeArgs : Option Json) (programParam : String) : EngineM (Option Json × ProgMeta) := do
+    (typeArgs : Option Json) (programParam : String) :
+    EngineM (Option Json × ProgMeta × Option Tropical.Ir.ProgramIdx) := do
   let st ← env.state.get
   match st.programs.get? programName with
   | none =>
@@ -301,7 +390,8 @@ private def resolveInstanceMeta (env : Env) (programName : String)
         let entry ← Service.field resp "entry"
         let resolved := (getField? resp "type_args").getD jsonNull
         let resolvedOpt := if resolved.compress == "null" then none else some resolved
-        pure (resolvedOpt, ProgMeta.fromEntry entry)
+        let idx? ← adoptResolved env entry
+        pure (resolvedOpt, ProgMeta.fromEntry entry, idx?)
       | .error f =>
         -- Specialization failure → invalid_type_args with the raw message.
         let msg := match f with
@@ -315,12 +405,12 @@ private def resolveInstanceMeta (env : Env) (programName : String)
         let keys := match ta with
           | .obj m => String.intercalate ", " (m.toList.map Prod.fst)
           | _ => ""
-        if keys.isEmpty then pure (none, pm)
+        if keys.isEmpty then pure (none, pm, st.resolvedByName.get? programName)
         else
           throwBare .invalidTypeArgs
             (s!"Program '{programName}' does not declare type_params; got type_args: {keys}")
             (param := some "type_args") (value := some ta)
-      | none => pure (none, pm)
+      | none => pure (none, pm, st.resolvedByName.get? programName)
 
 def handleDefineProgram (env : Env) (args : Json) : EngineM Json := do
   let def_ := (arg? args "def").getD jsonNull
@@ -339,9 +429,9 @@ def handleAddInstance (env : Env) (args : Json) : EngineM Json := do
   if (st.findInstance? instanceName).isSome then
     throwBare .instanceExists s!"Instance '{instanceName}' already exists."
       (param := some "instance_name") (value := some (Json.str instanceName))
-  let (typeArgs, pm) ← resolveInstanceMeta env programName (arg? args "type_args") "program"
+  let (typeArgs, pm, resolvedIdx) ← resolveInstanceMeta env programName (arg? args "type_args") "program"
   env.state.modify (·.addInstance instanceName
-    { baseTypeName := programName, typeArgs, progMeta := pm })
+    { baseTypeName := programName, typeArgs, progMeta := pm, resolvedIdx })
   pure (instanceSummary (← env.state.get) instanceName)
 
 def handleReplicate (env : Env) (args : Json) : EngineM Json := do
@@ -369,8 +459,8 @@ def handleReplicate (env : Env) (args : Json) : EngineM Json := do
       throwBare .instanceExists
         s!"Instance '{name}' already exists — pick a different name_prefix"
         (param := some "name_prefix") (value := namePrefix.map Json.str)
-    let (typeArgs, pm) ← resolveInstanceMeta env programName (arg? args "type_args") "program"
-    env.state.modify (·.addInstance name { baseTypeName := programName, typeArgs, progMeta := pm })
+    let (typeArgs, pm, resolvedIdx) ← resolveInstanceMeta env programName (arg? args "type_args") "program"
+    env.state.modify (·.addInstance name { baseTypeName := programName, typeArgs, progMeta := pm, resolvedIdx })
     created := created.push (instanceSummary (← env.state.get) name)
   pure <| Json.mkObj [("created", Json.arr created)]
 
@@ -782,17 +872,22 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
 /-- Adopt a service state dump (after load / merge). -/
 private def adoptState (env : Env) (state : Json) (resetCounters : Bool) : EngineM Unit := do
   adoptEntries env ((getField? state "entries").getD (.arr #[]))
-  let instances : Array (String × InstanceInfo) :=
-    (match getField? state "instances" with
-     | some (.arr is) => is
-     | _ => #[]).filterMap fun i => do
-      let name ← getStrField? i "name"
-      let program ← getStrField? i "program"
-      let typeArgs := match getField? i "type_args" with
-        | some .null | none => none
-        | some ta => some ta
-      let pm := ProgMeta.fromEntry ((getField? i "entry").getD jsonNull)
-      pure (name, { baseTypeName := program, typeArgs, progMeta := pm : InstanceInfo })
+  let mut instances : Array (String × InstanceInfo) := #[]
+  for i in (match getField? state "instances" with
+            | some (.arr is) => is
+            | _ => #[]) do
+    let some name := getStrField? i "name" | continue
+    let some program := getStrField? i "program" | continue
+    let typeArgs := match getField? i "type_args" with
+      | some .null | none => none
+      | some ta => some ta
+    let entry := (getField? i "entry").getD jsonNull
+    let pm := ProgMeta.fromEntry entry
+    -- Per-instance snapshot: each dump row carries its instance's own
+    -- resolved IR (the specialized program for generic instances).
+    let resolvedIdx ← adoptResolved env entry
+    instances := instances.push
+      (name, { baseTypeName := program, typeArgs, progMeta := pm, resolvedIdx : InstanceInfo })
   let wires : Array Wire :=
     (match getField? state "wires" with
      | some (.arr ws) => ws
@@ -1036,6 +1131,12 @@ def boot : IO (Env × IO.Process.Child ⟨.piped, .piped, .inherit⟩) := do
   | .ok (.arr entries) =>
     for e in entries do
       state.modify (·.addProgram (ProgMeta.fromEntry e))
+      -- Typed-store adoption; a stdlib entry that fails to decode is
+      -- fatal at boot (the engine cannot compile without its store).
+      let st ← state.get
+      match st.adoptResolved e with
+      | .ok (st', _) => state.set st'
+      | .error msg => throw <| IO.userError s!"compiler service boot: {msg}"
   | _ => throw <| IO.userError s!"compiler service boot failed: {catalog.compress.take 200}"
   pure (env, child)
 

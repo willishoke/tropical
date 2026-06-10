@@ -131,14 +131,33 @@ function buildSessionRoot(session: SessionState): ResolvedProgram {
 }
 
 /** The root lowering with a caller-supplied `ParsedProgram` (the
- *  Phase 3 seam: the Lean engine runs the session lowering — lift,
- *  delay extraction, acyclicity, serialization — and ships the
- *  resulting ParsedProgram plus slot bookkeeping; this elaborates and
- *  partitions it against the adopted session state). The classic
- *  in-process path is the same function fed `sessionToParsedProgram`. */
+ *  Phase 3 seam, kept for the classic in-process path — the oracle
+ *  engine's `compileSessionSlotted` feeds it `sessionToParsedProgram`).
+ *  Elaborates against the session's instances (LINK, not
+ *  re-elaboration) and hands the root to the resolved entry point. */
 export function compileSessionSlottedFromParsed(
   session: SessionState,
   parsed: ReturnType<typeof sessionToParsedProgram>,
+  compilationMode: CompilationMode,
+): FlatPlan {
+  return compileSessionSlottedFromResolved(
+    session,
+    elaborate(parsed, sessionTypeResolver(session)),
+    compilationMode,
+  )
+}
+
+/** The root lowering with a caller-supplied root `ResolvedProgram`
+ *  (the Phase 4 stage-4a seam: the Lean engine elaborates the session
+ *  root itself and ships its `tropical_resolved_1` encoding; the
+ *  service decodes it and partitions against the adopted session
+ *  state). NB: the decoded root's `programRegistry` holds decoded
+ *  *copies* of the session-canonical programs — the stage-1 codec gate
+ *  proved decoded copies compile identically through `partitionKernel`,
+ *  so no relink to the session registries is performed. */
+export function compileSessionSlottedFromResolved(
+  session: SessionState,
+  root: ResolvedProgram,
   compilationMode: CompilationMode,
 ): FlatPlan {
   // Two-phase slot pre-allocation — identical to the per-instance
@@ -165,15 +184,14 @@ export function compileSessionSlottedFromParsed(
   }
   acc.nextArrayRaw = session.ioArraySlotCount
 
-  // Build the session's synthetic root and lower it once. The root is the
-  // session serialized to a `ParsedProgram` and run through the SAME
-  // `elaborate` front door the surface path uses, with the instances'
+  // Lower the session's synthetic root once. The root is the session
+  // serialized to a `ParsedProgram` and run through the SAME `elaborate`
+  // front door the surface path uses, with the instances'
   // already-resolved types supplied via the elaborator's external-resolver
   // hook (LINK, not re-elaboration). The root is naming-transparent
   // (ROOT_INSTANCE_PATH), so child output slots / register names land under
   // bare paths exactly where the flat per-instance path puts them —
   // `emitDacStitch` and hot-swap state-transfer-by-name resolve unchanged.
-  const root = elaborate(parsed, sessionTypeResolver(session))
   const rootCompiled = makeCompiled(root, { displayName: '__session__' })
 
   // Session params are slot-based (`param:name` module slots driven by
