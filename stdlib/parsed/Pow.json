@@ -1,0 +1,111 @@
+{
+  "op": "program",
+  "name": "Pow",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instanceDecl",
+        "name": "log_x",
+        "program": {
+          "op": "nameRef",
+          "name": "Log"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "x"
+            },
+            "value": {
+              "op": "nameRef",
+              "name": "x"
+            }
+          }
+        ]
+      },
+      {
+        "op": "instanceDecl",
+        "name": "exp",
+        "program": {
+          "op": "nameRef",
+          "name": "Exp"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "x"
+            },
+            "value": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "nameRef",
+                  "name": "y"
+                },
+                {
+                  "op": "nestedOut",
+                  "ref": {
+                    "op": "nameRef",
+                    "name": "log_x"
+                  },
+                  "output": {
+                    "op": "nameRef",
+                    "name": "out"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "out",
+        "expr": {
+          "op": "nestedOut",
+          "ref": {
+            "op": "nameRef",
+            "name": "exp"
+          },
+          "output": {
+            "op": "nameRef",
+            "name": "out"
+          }
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "x",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        },
+        "default": 1
+      },
+      {
+        "name": "y",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        },
+        "default": 1
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        }
+      }
+    ]
+  }
+}

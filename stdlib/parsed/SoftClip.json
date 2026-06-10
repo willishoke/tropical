@@ -1,0 +1,106 @@
+{
+  "op": "program",
+  "name": "SoftClip",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instanceDecl",
+        "name": "tanh",
+        "program": {
+          "op": "nameRef",
+          "name": "Tanh"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "x"
+            },
+            "value": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "nameRef",
+                  "name": "drive"
+                },
+                {
+                  "op": "nameRef",
+                  "name": "input"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "out",
+        "expr": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            {
+              "op": "nestedOut",
+              "ref": {
+                "op": "nameRef",
+                "name": "tanh"
+              },
+              "output": {
+                "op": "nameRef",
+                "name": "out"
+              }
+            },
+            -1,
+            1
+          ]
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "input",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            0,
+            -1,
+            1
+          ]
+        }
+      },
+      {
+        "name": "drive",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        },
+        "default": 1
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        }
+      }
+    ]
+  }
+}

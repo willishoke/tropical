@@ -1,0 +1,1094 @@
+{
+  "op": "program",
+  "name": "SVF",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "regDecl",
+        "name": "ic1eq",
+        "init": 0
+      },
+      {
+        "op": "regDecl",
+        "name": "ic2eq",
+        "init": 0
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "lp",
+        "expr": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            {
+              "op": "let",
+              "bind": {
+                "g": {
+                  "op": "div",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        3.141592653589793,
+                        {
+                          "op": "nameRef",
+                          "name": "cutoff"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "call",
+                      "callee": {
+                        "op": "nameRef",
+                        "name": "sampleRate"
+                      },
+                      "args": []
+                    }
+                  ]
+                },
+                "k": {
+                  "op": "div",
+                  "args": [
+                    1,
+                    {
+                      "op": "nameRef",
+                      "name": "q"
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "a1": {
+                    "op": "div",
+                    "args": [
+                      1,
+                      {
+                        "op": "add",
+                        "args": [
+                          1,
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "g"
+                              },
+                              {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "g"
+                                  },
+                                  {
+                                    "op": "binding",
+                                    "name": "k"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "a2": {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "a1"
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "a3": {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "a2"
+                          }
+                        ]
+                      },
+                      "v3": {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "nameRef",
+                            "name": "input"
+                          },
+                          {
+                            "op": "nameRef",
+                            "name": "ic2eq"
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "let",
+                      "bind": {
+                        "v1": {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "a1"
+                                },
+                                {
+                                  "op": "nameRef",
+                                  "name": "ic1eq"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "a2"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "v3"
+                                }
+                              ]
+                            }
+                          ]
+                        }
+                      },
+                      "in": {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "nameRef",
+                            "name": "ic2eq"
+                          },
+                          {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "a2"
+                                  },
+                                  {
+                                    "op": "nameRef",
+                                    "name": "ic1eq"
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "a3"
+                                  },
+                                  {
+                                    "op": "binding",
+                                    "name": "v3"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            -1,
+            1
+          ]
+        }
+      },
+      {
+        "op": "outputAssign",
+        "name": "bp",
+        "expr": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            {
+              "op": "let",
+              "bind": {
+                "g": {
+                  "op": "div",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        3.141592653589793,
+                        {
+                          "op": "nameRef",
+                          "name": "cutoff"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "call",
+                      "callee": {
+                        "op": "nameRef",
+                        "name": "sampleRate"
+                      },
+                      "args": []
+                    }
+                  ]
+                },
+                "k": {
+                  "op": "div",
+                  "args": [
+                    1,
+                    {
+                      "op": "nameRef",
+                      "name": "q"
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "a1": {
+                    "op": "div",
+                    "args": [
+                      1,
+                      {
+                        "op": "add",
+                        "args": [
+                          1,
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "g"
+                              },
+                              {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "g"
+                                  },
+                                  {
+                                    "op": "binding",
+                                    "name": "k"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "a2": {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "a1"
+                        }
+                      ]
+                    },
+                    "v3": {
+                      "op": "sub",
+                      "args": [
+                        {
+                          "op": "nameRef",
+                          "name": "input"
+                        },
+                        {
+                          "op": "nameRef",
+                          "name": "ic2eq"
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "a1"
+                          },
+                          {
+                            "op": "nameRef",
+                            "name": "ic1eq"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "a2"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "v3"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              }
+            },
+            -1,
+            1
+          ]
+        }
+      },
+      {
+        "op": "outputAssign",
+        "name": "hp",
+        "expr": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            {
+              "op": "let",
+              "bind": {
+                "g": {
+                  "op": "div",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        3.141592653589793,
+                        {
+                          "op": "nameRef",
+                          "name": "cutoff"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "call",
+                      "callee": {
+                        "op": "nameRef",
+                        "name": "sampleRate"
+                      },
+                      "args": []
+                    }
+                  ]
+                },
+                "k": {
+                  "op": "div",
+                  "args": [
+                    1,
+                    {
+                      "op": "nameRef",
+                      "name": "q"
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "a1": {
+                    "op": "div",
+                    "args": [
+                      1,
+                      {
+                        "op": "add",
+                        "args": [
+                          1,
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "g"
+                              },
+                              {
+                                "op": "add",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "g"
+                                  },
+                                  {
+                                    "op": "binding",
+                                    "name": "k"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "let",
+                  "bind": {
+                    "a2": {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "a1"
+                        }
+                      ]
+                    },
+                    "a3": {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "mul",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "g"
+                            },
+                            {
+                              "op": "binding",
+                              "name": "a1"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    "v3": {
+                      "op": "sub",
+                      "args": [
+                        {
+                          "op": "nameRef",
+                          "name": "input"
+                        },
+                        {
+                          "op": "nameRef",
+                          "name": "ic2eq"
+                        }
+                      ]
+                    }
+                  },
+                  "in": {
+                    "op": "let",
+                    "bind": {
+                      "v1": {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "a1"
+                              },
+                              {
+                                "op": "nameRef",
+                                "name": "ic1eq"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "a2"
+                              },
+                              {
+                                "op": "binding",
+                                "name": "v3"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      "v2": {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "nameRef",
+                            "name": "ic2eq"
+                          },
+                          {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "a2"
+                                  },
+                                  {
+                                    "op": "nameRef",
+                                    "name": "ic1eq"
+                                  }
+                                ]
+                              },
+                              {
+                                "op": "mul",
+                                "args": [
+                                  {
+                                    "op": "binding",
+                                    "name": "a3"
+                                  },
+                                  {
+                                    "op": "binding",
+                                    "name": "v3"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    },
+                    "in": {
+                      "op": "sub",
+                      "args": [
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "nameRef",
+                              "name": "input"
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "binding",
+                                  "name": "k"
+                                },
+                                {
+                                  "op": "binding",
+                                  "name": "v1"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        {
+                          "op": "binding",
+                          "name": "v2"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            },
+            -1,
+            1
+          ]
+        }
+      },
+      {
+        "op": "nextUpdate",
+        "target": {
+          "kind": "reg",
+          "name": "ic1eq"
+        },
+        "expr": {
+          "op": "let",
+          "bind": {
+            "g": {
+              "op": "div",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    3.141592653589793,
+                    {
+                      "op": "nameRef",
+                      "name": "cutoff"
+                    }
+                  ]
+                },
+                {
+                  "op": "call",
+                  "callee": {
+                    "op": "nameRef",
+                    "name": "sampleRate"
+                  },
+                  "args": []
+                }
+              ]
+            },
+            "k": {
+              "op": "div",
+              "args": [
+                1,
+                {
+                  "op": "nameRef",
+                  "name": "q"
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "a1": {
+                "op": "div",
+                "args": [
+                  1,
+                  {
+                    "op": "add",
+                    "args": [
+                      1,
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "g"
+                              },
+                              {
+                                "op": "binding",
+                                "name": "k"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "a2": {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "g"
+                    },
+                    {
+                      "op": "binding",
+                      "name": "a1"
+                    }
+                  ]
+                },
+                "v3": {
+                  "op": "sub",
+                  "args": [
+                    {
+                      "op": "nameRef",
+                      "name": "input"
+                    },
+                    {
+                      "op": "nameRef",
+                      "name": "ic2eq"
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "v1": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "a1"
+                          },
+                          {
+                            "op": "nameRef",
+                            "name": "ic1eq"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "a2"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "v3"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "sub",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        2,
+                        {
+                          "op": "binding",
+                          "name": "v1"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "nameRef",
+                      "name": "ic1eq"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "op": "nextUpdate",
+        "target": {
+          "kind": "reg",
+          "name": "ic2eq"
+        },
+        "expr": {
+          "op": "let",
+          "bind": {
+            "g": {
+              "op": "div",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    3.141592653589793,
+                    {
+                      "op": "nameRef",
+                      "name": "cutoff"
+                    }
+                  ]
+                },
+                {
+                  "op": "call",
+                  "callee": {
+                    "op": "nameRef",
+                    "name": "sampleRate"
+                  },
+                  "args": []
+                }
+              ]
+            },
+            "k": {
+              "op": "div",
+              "args": [
+                1,
+                {
+                  "op": "nameRef",
+                  "name": "q"
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "let",
+            "bind": {
+              "a1": {
+                "op": "div",
+                "args": [
+                  1,
+                  {
+                    "op": "add",
+                    "args": [
+                      1,
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "binding",
+                            "name": "g"
+                          },
+                          {
+                            "op": "add",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "g"
+                              },
+                              {
+                                "op": "binding",
+                                "name": "k"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            },
+            "in": {
+              "op": "let",
+              "bind": {
+                "a2": {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "g"
+                    },
+                    {
+                      "op": "binding",
+                      "name": "a1"
+                    }
+                  ]
+                },
+                "a3": {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "g"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "binding",
+                          "name": "g"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "a1"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "v3": {
+                  "op": "sub",
+                  "args": [
+                    {
+                      "op": "nameRef",
+                      "name": "input"
+                    },
+                    {
+                      "op": "nameRef",
+                      "name": "ic2eq"
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "let",
+                "bind": {
+                  "v2": {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "nameRef",
+                        "name": "ic2eq"
+                      },
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "a2"
+                              },
+                              {
+                                "op": "nameRef",
+                                "name": "ic1eq"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "mul",
+                            "args": [
+                              {
+                                "op": "binding",
+                                "name": "a3"
+                              },
+                              {
+                                "op": "binding",
+                                "name": "v3"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "in": {
+                  "op": "sub",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        2,
+                        {
+                          "op": "binding",
+                          "name": "v2"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "nameRef",
+                      "name": "ic2eq"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "input",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            0,
+            -1,
+            1
+          ]
+        }
+      },
+      {
+        "name": "cutoff",
+        "type": {
+          "op": "nameRef",
+          "name": "freq"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "select"
+          },
+          "args": [
+            {
+              "op": "gt",
+              "args": [
+                1000,
+                0
+              ]
+            },
+            1000,
+            0
+          ]
+        }
+      },
+      {
+        "name": "q",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        },
+        "default": 0.707
+      }
+    ],
+    "outputs": [
+      {
+        "name": "lp",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        }
+      },
+      {
+        "name": "bp",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        }
+      },
+      {
+        "name": "hp",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "op": "program",
+  "name": "Cos",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instanceDecl",
+        "name": "sin",
+        "program": {
+          "op": "nameRef",
+          "name": "Sin"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "x"
+            },
+            "value": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "nameRef",
+                  "name": "x"
+                },
+                1.5707963267948966
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "out",
+        "expr": {
+          "op": "nestedOut",
+          "ref": {
+            "op": "nameRef",
+            "name": "sin"
+          },
+          "output": {
+            "op": "nameRef",
+            "name": "out"
+          }
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "x",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        },
+        "default": 0
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "op": "program",
+  "name": "Delay",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "regDecl",
+        "name": "buf",
+        "init": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "zeros"
+          },
+          "args": [
+            {
+              "op": "nameRef",
+              "name": "N"
+            }
+          ]
+        }
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "y",
+        "expr": {
+          "op": "index",
+          "args": [
+            {
+              "op": "nameRef",
+              "name": "buf"
+            },
+            {
+              "op": "mod",
+              "args": [
+                {
+                  "op": "call",
+                  "callee": {
+                    "op": "nameRef",
+                    "name": "sampleIndex"
+                  },
+                  "args": []
+                },
+                {
+                  "op": "nameRef",
+                  "name": "N"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "op": "nextUpdate",
+        "target": {
+          "kind": "reg",
+          "name": "buf"
+        },
+        "expr": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "arraySet"
+          },
+          "args": [
+            {
+              "op": "nameRef",
+              "name": "buf"
+            },
+            {
+              "op": "mod",
+              "args": [
+                {
+                  "op": "call",
+                  "callee": {
+                    "op": "nameRef",
+                    "name": "sampleIndex"
+                  },
+                  "args": []
+                },
+                {
+                  "op": "nameRef",
+                  "name": "N"
+                }
+              ]
+            },
+            {
+              "op": "nameRef",
+              "name": "x"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "type_params": {
+    "N": {
+      "type": "int",
+      "default": 44100
+    }
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "x",
+        "default": 0
+      }
+    ],
+    "outputs": [
+      "y"
+    ]
+  },
+  "breaks_cycles": true
+}

@@ -1,0 +1,200 @@
+{
+  "op": "program",
+  "name": "SampleHold",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "regDecl",
+        "name": "held",
+        "init": 0
+      },
+      {
+        "op": "delayDecl",
+        "name": "prev_trigger",
+        "update": {
+          "op": "nameRef",
+          "name": "trigger"
+        },
+        "init": 0
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "value",
+        "expr": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            {
+              "op": "let",
+              "bind": {
+                "tick": {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "gt",
+                      "args": [
+                        {
+                          "op": "nameRef",
+                          "name": "trigger"
+                        },
+                        0.5
+                      ]
+                    },
+                    {
+                      "op": "lte",
+                      "args": [
+                        {
+                          "op": "nameRef",
+                          "name": "prev_trigger"
+                        },
+                        0.5
+                      ]
+                    }
+                  ]
+                }
+              },
+              "in": {
+                "op": "call",
+                "callee": {
+                  "op": "nameRef",
+                  "name": "select"
+                },
+                "args": [
+                  {
+                    "op": "binding",
+                    "name": "tick"
+                  },
+                  {
+                    "op": "nameRef",
+                    "name": "input"
+                  },
+                  {
+                    "op": "nameRef",
+                    "name": "held"
+                  }
+                ]
+              }
+            },
+            -1,
+            1
+          ]
+        }
+      },
+      {
+        "op": "nextUpdate",
+        "target": {
+          "kind": "reg",
+          "name": "held"
+        },
+        "expr": {
+          "op": "let",
+          "bind": {
+            "tick": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "gt",
+                  "args": [
+                    {
+                      "op": "nameRef",
+                      "name": "trigger"
+                    },
+                    0.5
+                  ]
+                },
+                {
+                  "op": "lte",
+                  "args": [
+                    {
+                      "op": "nameRef",
+                      "name": "prev_trigger"
+                    },
+                    0.5
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "call",
+            "callee": {
+              "op": "nameRef",
+              "name": "select"
+            },
+            "args": [
+              {
+                "op": "binding",
+                "name": "tick"
+              },
+              {
+                "op": "nameRef",
+                "name": "input"
+              },
+              {
+                "op": "nameRef",
+                "name": "held"
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "trigger",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            0,
+            -1,
+            1
+          ]
+        }
+      },
+      {
+        "name": "input",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            0,
+            -1,
+            1
+          ]
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "name": "value",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        }
+      }
+    ]
+  }
+}

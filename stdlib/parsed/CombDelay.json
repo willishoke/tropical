@@ -1,0 +1,122 @@
+{
+  "op": "program",
+  "name": "CombDelay",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "regDecl",
+        "name": "s",
+        "init": 0
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "out",
+        "expr": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            {
+              "op": "add",
+              "args": [
+                {
+                  "op": "nameRef",
+                  "name": "input"
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "nameRef",
+                      "name": "feedback"
+                    },
+                    {
+                      "op": "nameRef",
+                      "name": "s"
+                    }
+                  ]
+                }
+              ]
+            },
+            -1,
+            1
+          ]
+        }
+      },
+      {
+        "op": "nextUpdate",
+        "target": {
+          "kind": "reg",
+          "name": "s"
+        },
+        "expr": {
+          "op": "add",
+          "args": [
+            {
+              "op": "nameRef",
+              "name": "input"
+            },
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "nameRef",
+                  "name": "feedback"
+                },
+                {
+                  "op": "nameRef",
+                  "name": "s"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "input",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            0,
+            -1,
+            1
+          ]
+        }
+      },
+      {
+        "name": "feedback",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        },
+        "default": 0.7
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        }
+      }
+    ]
+  }
+}

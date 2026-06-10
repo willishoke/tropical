@@ -1,0 +1,117 @@
+{
+  "op": "program",
+  "name": "SinOsc",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instanceDecl",
+        "name": "ph",
+        "program": {
+          "op": "nameRef",
+          "name": "Phasor"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "freq"
+            },
+            "value": {
+              "op": "nameRef",
+              "name": "freq"
+            }
+          }
+        ]
+      },
+      {
+        "op": "instanceDecl",
+        "name": "sin",
+        "program": {
+          "op": "nameRef",
+          "name": "Sin"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "x"
+            },
+            "value": {
+              "op": "mul",
+              "args": [
+                6.283185307179586,
+                {
+                  "op": "nestedOut",
+                  "ref": {
+                    "op": "nameRef",
+                    "name": "ph"
+                  },
+                  "output": {
+                    "op": "nameRef",
+                    "name": "phase"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "sine",
+        "expr": {
+          "op": "nestedOut",
+          "ref": {
+            "op": "nameRef",
+            "name": "sin"
+          },
+          "output": {
+            "op": "nameRef",
+            "name": "out"
+          }
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "freq",
+        "type": {
+          "op": "nameRef",
+          "name": "freq"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "select"
+          },
+          "args": [
+            {
+              "op": "gt",
+              "args": [
+                440,
+                0
+              ]
+            },
+            440,
+            0
+          ]
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "name": "sine",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        }
+      }
+    ]
+  }
+}

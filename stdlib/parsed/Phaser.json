@@ -1,0 +1,836 @@
+{
+  "op": "program",
+  "name": "Phaser",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "regDecl",
+        "name": "fb",
+        "init": 0
+      },
+      {
+        "op": "regDecl",
+        "name": "x_prev",
+        "init": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "zeros"
+          },
+          "args": [
+            {
+              "op": "nameRef",
+              "name": "N"
+            }
+          ]
+        }
+      },
+      {
+        "op": "regDecl",
+        "name": "y_prev",
+        "init": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "zeros"
+          },
+          "args": [
+            {
+              "op": "nameRef",
+              "name": "N"
+            }
+          ]
+        }
+      },
+      {
+        "op": "instanceDecl",
+        "name": "lfo_ph",
+        "program": {
+          "op": "nameRef",
+          "name": "Phasor"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "freq"
+            },
+            "value": {
+              "op": "nameRef",
+              "name": "lfo_speed"
+            }
+          }
+        ]
+      },
+      {
+        "op": "instanceDecl",
+        "name": "lfo_sin",
+        "program": {
+          "op": "nameRef",
+          "name": "Sin"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "x"
+            },
+            "value": {
+              "op": "mul",
+              "args": [
+                6.283185307179586,
+                {
+                  "op": "nestedOut",
+                  "ref": {
+                    "op": "nameRef",
+                    "name": "lfo_ph"
+                  },
+                  "output": {
+                    "op": "nameRef",
+                    "name": "phase"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "output",
+        "expr": {
+          "op": "let",
+          "bind": {
+            "a": {
+              "op": "add",
+              "args": [
+                0.6,
+                {
+                  "op": "mul",
+                  "args": [
+                    0.35,
+                    {
+                      "op": "nestedOut",
+                      "ref": {
+                        "op": "nameRef",
+                        "name": "lfo_sin"
+                      },
+                      "output": {
+                        "op": "nameRef",
+                        "name": "out"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "ys": {
+              "op": "scan",
+              "over": {
+                "op": "generate",
+                "count": {
+                  "op": "nameRef",
+                  "name": "N"
+                },
+                "var": "i",
+                "body": {
+                  "op": "binding",
+                  "name": "i"
+                }
+              },
+              "init": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "nameRef",
+                    "name": "input"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "nameRef",
+                        "name": "feedback"
+                      },
+                      {
+                        "op": "nameRef",
+                        "name": "fb"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "acc_var": "acc",
+              "elem_var": "i",
+              "body": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "neg",
+                            "args": [
+                              {
+                                "op": "nameRef",
+                                "name": "a"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "binding",
+                            "name": "acc"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "index",
+                        "args": [
+                          {
+                            "op": "nameRef",
+                            "name": "x_prev"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "i"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "nameRef",
+                        "name": "a"
+                      },
+                      {
+                        "op": "index",
+                        "args": [
+                          {
+                            "op": "nameRef",
+                            "name": "y_prev"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "i"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "in": {
+            "op": "add",
+            "args": [
+              {
+                "op": "mul",
+                "args": [
+                  0.5,
+                  {
+                    "op": "nameRef",
+                    "name": "input"
+                  }
+                ]
+              },
+              {
+                "op": "mul",
+                "args": [
+                  0.5,
+                  {
+                    "op": "index",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "ys"
+                      },
+                      {
+                        "op": "sub",
+                        "args": [
+                          {
+                            "op": "nameRef",
+                            "name": "N"
+                          },
+                          1
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "outputAssign",
+        "name": "lfo",
+        "expr": {
+          "op": "nestedOut",
+          "ref": {
+            "op": "nameRef",
+            "name": "lfo_sin"
+          },
+          "output": {
+            "op": "nameRef",
+            "name": "out"
+          }
+        }
+      },
+      {
+        "op": "nextUpdate",
+        "target": {
+          "kind": "reg",
+          "name": "fb"
+        },
+        "expr": {
+          "op": "let",
+          "bind": {
+            "a": {
+              "op": "add",
+              "args": [
+                0.6,
+                {
+                  "op": "mul",
+                  "args": [
+                    0.35,
+                    {
+                      "op": "nestedOut",
+                      "ref": {
+                        "op": "nameRef",
+                        "name": "lfo_sin"
+                      },
+                      "output": {
+                        "op": "nameRef",
+                        "name": "out"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "ys": {
+              "op": "scan",
+              "over": {
+                "op": "generate",
+                "count": {
+                  "op": "nameRef",
+                  "name": "N"
+                },
+                "var": "i",
+                "body": {
+                  "op": "binding",
+                  "name": "i"
+                }
+              },
+              "init": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "nameRef",
+                    "name": "input"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "nameRef",
+                        "name": "feedback"
+                      },
+                      {
+                        "op": "nameRef",
+                        "name": "fb"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "acc_var": "acc",
+              "elem_var": "i",
+              "body": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "neg",
+                            "args": [
+                              {
+                                "op": "nameRef",
+                                "name": "a"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "binding",
+                            "name": "acc"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "index",
+                        "args": [
+                          {
+                            "op": "nameRef",
+                            "name": "x_prev"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "i"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "nameRef",
+                        "name": "a"
+                      },
+                      {
+                        "op": "index",
+                        "args": [
+                          {
+                            "op": "nameRef",
+                            "name": "y_prev"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "i"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "in": {
+            "op": "index",
+            "args": [
+              {
+                "op": "binding",
+                "name": "ys"
+              },
+              {
+                "op": "sub",
+                "args": [
+                  {
+                    "op": "nameRef",
+                    "name": "N"
+                  },
+                  1
+                ]
+              }
+            ]
+          }
+        }
+      },
+      {
+        "op": "nextUpdate",
+        "target": {
+          "kind": "reg",
+          "name": "y_prev"
+        },
+        "expr": {
+          "op": "let",
+          "bind": {
+            "a": {
+              "op": "add",
+              "args": [
+                0.6,
+                {
+                  "op": "mul",
+                  "args": [
+                    0.35,
+                    {
+                      "op": "nestedOut",
+                      "ref": {
+                        "op": "nameRef",
+                        "name": "lfo_sin"
+                      },
+                      "output": {
+                        "op": "nameRef",
+                        "name": "out"
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "scan",
+            "over": {
+              "op": "generate",
+              "count": {
+                "op": "nameRef",
+                "name": "N"
+              },
+              "var": "i",
+              "body": {
+                "op": "binding",
+                "name": "i"
+              }
+            },
+            "init": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "nameRef",
+                  "name": "input"
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "nameRef",
+                      "name": "feedback"
+                    },
+                    {
+                      "op": "nameRef",
+                      "name": "fb"
+                    }
+                  ]
+                }
+              ]
+            },
+            "acc_var": "acc",
+            "elem_var": "i",
+            "body": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "neg",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "a"
+                            }
+                          ]
+                        },
+                        {
+                          "op": "binding",
+                          "name": "acc"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "index",
+                      "args": [
+                        {
+                          "op": "nameRef",
+                          "name": "x_prev"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "i"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "a"
+                    },
+                    {
+                      "op": "index",
+                      "args": [
+                        {
+                          "op": "nameRef",
+                          "name": "y_prev"
+                        },
+                        {
+                          "op": "binding",
+                          "name": "i"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "op": "nextUpdate",
+        "target": {
+          "kind": "reg",
+          "name": "x_prev"
+        },
+        "expr": {
+          "op": "let",
+          "bind": {
+            "a": {
+              "op": "add",
+              "args": [
+                0.6,
+                {
+                  "op": "mul",
+                  "args": [
+                    0.35,
+                    {
+                      "op": "nestedOut",
+                      "ref": {
+                        "op": "nameRef",
+                        "name": "lfo_sin"
+                      },
+                      "output": {
+                        "op": "nameRef",
+                        "name": "out"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "ys": {
+              "op": "scan",
+              "over": {
+                "op": "generate",
+                "count": {
+                  "op": "nameRef",
+                  "name": "N"
+                },
+                "var": "i",
+                "body": {
+                  "op": "binding",
+                  "name": "i"
+                }
+              },
+              "init": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "nameRef",
+                    "name": "input"
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "nameRef",
+                        "name": "feedback"
+                      },
+                      {
+                        "op": "nameRef",
+                        "name": "fb"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "acc_var": "acc",
+              "elem_var": "i",
+              "body": {
+                "op": "add",
+                "args": [
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "op": "mul",
+                        "args": [
+                          {
+                            "op": "neg",
+                            "args": [
+                              {
+                                "op": "nameRef",
+                                "name": "a"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "binding",
+                            "name": "acc"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "index",
+                        "args": [
+                          {
+                            "op": "nameRef",
+                            "name": "x_prev"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "i"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "op": "nameRef",
+                        "name": "a"
+                      },
+                      {
+                        "op": "index",
+                        "args": [
+                          {
+                            "op": "nameRef",
+                            "name": "y_prev"
+                          },
+                          {
+                            "op": "binding",
+                            "name": "i"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "in": {
+            "op": "generate",
+            "count": {
+              "op": "nameRef",
+              "name": "N"
+            },
+            "var": "i",
+            "body": {
+              "op": "call",
+              "callee": {
+                "op": "nameRef",
+                "name": "select"
+              },
+              "args": [
+                {
+                  "op": "gt",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "i"
+                    },
+                    0
+                  ]
+                },
+                {
+                  "op": "index",
+                  "args": [
+                    {
+                      "op": "binding",
+                      "name": "ys"
+                    },
+                    {
+                      "op": "call",
+                      "callee": {
+                        "op": "nameRef",
+                        "name": "clamp"
+                      },
+                      "args": [
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "binding",
+                              "name": "i"
+                            },
+                            1
+                          ]
+                        },
+                        0,
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "nameRef",
+                              "name": "N"
+                            },
+                            1
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "op": "nameRef",
+                      "name": "input"
+                    },
+                    {
+                      "op": "mul",
+                      "args": [
+                        {
+                          "op": "nameRef",
+                          "name": "feedback"
+                        },
+                        {
+                          "op": "nameRef",
+                          "name": "fb"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  },
+  "type_params": {
+    "N": {
+      "type": "int",
+      "default": 4
+    }
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "input",
+        "default": 0
+      },
+      {
+        "name": "feedback",
+        "default": 0.4
+      },
+      {
+        "name": "lfo_speed",
+        "default": 0.2
+      }
+    ],
+    "outputs": [
+      "output",
+      "lfo"
+    ]
+  }
+}
