@@ -1,4 +1,5 @@
-.PHONY: build repl run lean mcp-lean clean validate validate-write
+.PHONY: build repl run lean mcp-lean clean validate validate-write \
+        diff diff-plan diff-audio diff-engine
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -41,3 +42,18 @@ validate: build
 
 validate-write: build
 	bun run scripts/validate_stdlib.ts --write
+
+# Lean-port differential harness (scripts/diff/). Each differ compares two
+# pipelines — both default to TS, so these are green before any port work;
+# as Lean layers land, pass --b="<lean cmd>" (or edit the default here) to
+# pit Lean against the TS oracle.
+diff-plan: build
+	bun run scripts/diff/diff_plan.ts
+
+diff-audio: build
+	bun run scripts/diff/diff_audio.ts
+
+diff-engine: build
+	bun run scripts/diff/diff_engine.ts
+
+diff: diff-plan diff-audio diff-engine
