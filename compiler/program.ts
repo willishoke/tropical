@@ -376,9 +376,18 @@ export function loadProgramAsSession(
     // compile path to find each output's slot index.
     allocateOutputSlots(session, toInstanceName(instance.name), type)
 
-    // Populate wiring from instance inputs
+    // Populate wiring from instance inputs, in the program's declared
+    // input-port order (not the JSON object's key order — clients and
+    // relays may not preserve it; the canonical order is the port list).
     if (inst.inputs) {
-      for (const [input, expr] of Object.entries(inst.inputs)) {
+      const declared = inputNames(instance)
+      const orderOf = (k: string) => {
+        const i = declared.indexOf(k)
+        return i === -1 ? declared.length : i
+      }
+      const keys = Object.keys(inst.inputs).sort((a, b) => orderOf(a) - orderOf(b))
+      for (const input of keys) {
+        const expr = inst.inputs[input]
         validateExpr(expr, `${inst.name}.${input}`)
         session.inputExprNodes.set(
           wireKey(portRef(toInstanceName(inst.name), toPortName(input))),
@@ -533,9 +542,18 @@ export function mergeProgramIntoSession(
     // compile path to find each output's slot index.
     allocateOutputSlots(session, toInstanceName(instance.name), type)
 
-    // Populate wiring from instance inputs
+    // Populate wiring from instance inputs, in the program's declared
+    // input-port order (not the JSON object's key order — clients and
+    // relays may not preserve it; the canonical order is the port list).
     if (inst.inputs) {
-      for (const [input, expr] of Object.entries(inst.inputs)) {
+      const declared = inputNames(instance)
+      const orderOf = (k: string) => {
+        const i = declared.indexOf(k)
+        return i === -1 ? declared.length : i
+      }
+      const keys = Object.keys(inst.inputs).sort((a, b) => orderOf(a) - orderOf(b))
+      for (const input of keys) {
+        const expr = inst.inputs[input]
         validateExpr(expr, `${inst.name}.${input}`)
         session.inputExprNodes.set(
           wireKey(portRef(toInstanceName(inst.name), toPortName(input))),

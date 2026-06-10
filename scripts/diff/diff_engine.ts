@@ -94,6 +94,21 @@ class EngineClient {
   }
 }
 
+/** Remove volatile fields (wall-clock timings) that legitimately differ
+ *  between runs and implementations. */
+function stripVolatile(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(stripVolatile)
+  if (typeof v === 'object' && v !== null) {
+    const out: Record<string, unknown> = {}
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (k === 'timing') continue
+      out[k] = stripVolatile(val)
+    }
+    return out
+  }
+  return v
+}
+
 /** Strip the JSON-RPC frame and unwrap the MCP TextContent envelope. */
 function normalize(msg: unknown): unknown {
   if (typeof msg !== 'object' || msg === null) return msg
@@ -106,7 +121,7 @@ function normalize(msg: unknown): unknown {
       const first = content[0] as { type?: string; text?: string }
       if (first.type === 'text' && typeof first.text === 'string') {
         try {
-          return JSON.parse(first.text)
+          return stripVolatile(JSON.parse(first.text))
         } catch {
           return first.text
         }

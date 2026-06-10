@@ -1,24 +1,25 @@
 /**
  * compiler_service.ts — the TS compiler behind the Lean engine.
  *
- * Phase 1 of the Lean port: session *state* and tool semantics live in
- * Lean (lean/Tropical/Engine.lean); this service owns what hasn't been
- * ported yet — program registration (raise → elaborate → strata),
- * session compilation (compileSession → tropical_plan_5 →
- * runtime.loadPlan), the native runtime/DAC/param FFI, and
- * save/export/load/merge (they need the compiler). It shrinks phase by
- * phase until Phase 6 deletes it.
+ * Phase 2 of the Lean port: this service is **stateless pure compile**.
+ * The Lean engine owns the session, the native runtime (plan loading,
+ * slot control), the DAC, and params; this service owns what hasn't
+ * been ported yet — program registration (raise → elaborate → strata),
+ * compilation to tropical_plan_5 JSON, and save/export/load/merge
+ * (they need the compiler). It shrinks phase by phase until Phase 6
+ * deletes it.
  *
  * Protocol: newline JSON-RPC on stdio, same framing as ir_service.ts.
  * Tool-level failures return `{result: {error: <ErrorEnvelope>}}` so the
  * Lean side maps them onto its own envelope type; JSON-RPC `error` is
  * reserved for transport/internal faults.
  *
- * The one stateful contract: `sync` rebuilds this service's session from
- * the Lean engine's authoritative snapshot (instances + canonical
- * pre-extraction wires + outputs + params) and compiles it. Every other
- * graph-reading method (`save`, `export_program`) operates on the
- * session as of the last `sync`/`load`/`merge`.
+ * The one stateful contract: `compile` rebuilds this service's session
+ * from the Lean engine's authoritative snapshot (instances + canonical
+ * pre-extraction wires + outputs + params), compiles it, and returns
+ * the plan JSON string for the Lean side to load over its own FFI.
+ * Every other graph-reading method (`save`, `export_program`) operates
+ * on the session as of the last `compile`/`load`/`merge`.
  */
 
 import { readFileSync } from 'node:fs'
@@ -35,17 +36,14 @@ import {
   loadProgramAsType, exportSessionAsProgram, saveProgramFromSession,
   mergeProgramIntoSession, loadStdlib, instanceDecls,
 } from '../compiler/program.js'
-import { applyFlatPlan } from '../compiler/apply_plan.js'
-import { DAC } from '../compiler/runtime/audio.js'
+import { compileSession } from '../compiler/ir/compile_session.js'
+import { toWirePlan } from '../compiler/flat_plan.js'
 import { Param } from '../compiler/runtime/param.js'
 import { portTypeToString } from '../compiler/ir/port_type.js'
 import { parseWireKey, wireKey, portRef, instanceName as toInstanceName } from '../compiler/ir/branded_names.js'
 import type { PortType } from '../compiler/ir/nodes.js'
-import { failEnum, failBare, toEnvelope, type ErrorEnvelope } from './envelope.js'
+import { failBare, toEnvelope, type ErrorEnvelope } from './envelope.js'
 import { RESOURCES, PROMPTS, readResourceText, getPromptMessages } from './resources.js'
-
-const DEFAULT_SAMPLE_RATE = 44100
-const DEFAULT_DAC_CHANNELS = 2
 
 const session: SessionState = makeSession()
 loadStdlib(session)
@@ -157,27 +155,14 @@ function dumpState(beforePrograms: ReadonlySet<string>) {
 
 // ─── Method handlers ─────────────────────────────────────────────────────────
 
-function validatePositiveInt(value: unknown, param: string, defaultValue: number): number {
-  if (value === undefined || value === null) return defaultValue
-  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
-    failBare({
-      code:    'invalid_value',
-      message: `${param} must be a positive integer; got ${JSON.stringify(value)}`,
-      param,
-      value,
-    })
-  }
-  return value as number
-}
-
-type SyncPayload = {
+type CompilePayload = {
   instances: Array<{ name: string; program: string; type_args?: Record<string, number> | null }>
   wires: Array<{ key: string; expr: ExprNode }>
   graph_outputs: Array<{ instance: string; output: string }>
   params: Array<{ name: string; value: number }>
 }
 
-function handleSync(p: SyncPayload) {
+function handleCompile(p: CompilePayload) {
   // Reset graph state; keep type registries (programs persist across syncs)
   // and paramRegistry (live Param handles are referenced by the loaded
   // kernel — recreating them would orphan the pointers the JIT baked in).
@@ -209,11 +194,19 @@ function handleSync(p: SyncPayload) {
   }
   for (const o of p.graph_outputs) session.graphOutputs.push({ instance: o.instance, output: o.output })
   for (const pr of p.params) {
-    if (!session.paramRegistry.has(pr.name)) session.paramRegistry.set(pr.name, new Param(pr.value))
+    // The Lean engine's mirror is authoritative — adopt its values so
+    // slot_defaults (and the params echo) reflect set_param calls made
+    // since the last compile.
+    const existing = session.paramRegistry.get(pr.name)
+    if (existing) existing.value = pr.value
+    else session.paramRegistry.set(pr.name, new Param(pr.value))
   }
 
-  applyFlatPlan(session, session.runtime)
-  return { params: [...session.paramRegistry.entries()].map(([name, prm]) => ({ name, value: prm.value })) }
+  const planJson = JSON.stringify(toWirePlan(compileSession(session)))
+  return {
+    plan_json: planJson,
+    params: [...session.paramRegistry.entries()].map(([name, prm]) => ({ name, value: prm.value })),
+  }
 }
 
 function handleMethod(method: string, params: Record<string, unknown>): unknown {
@@ -244,8 +237,8 @@ function handleMethod(method: string, params: Record<string, unknown>): unknown 
       return { key, type_args: resolved ?? null, entry: concreteEntry(key, type) }
     }
 
-    case 'sync':
-      return handleSync(params as unknown as SyncPayload)
+    case 'compile':
+      return handleCompile(params as unknown as CompilePayload)
 
     case 'save': {
       const { node, topLevel } = saveProgramFromSession(session)
@@ -282,85 +275,24 @@ function handleMethod(method: string, params: Record<string, unknown>): unknown 
       } else {
         raw = params.program
       }
-      if (session.dac?.isRunning) session.dac.stop()
       const before = new Set(session.programs.keys())
       const t0 = performance.now()
       loadJSON(raw as { schema: string }, session)
       const wall_ms = performance.now() - t0
-      return { state: dumpState(before), timing: { wall_ms } }
+      // Re-emit the compiled plan for the Lean side to load over its own
+      // FFI (loadJSON compiled into this service's inert runtime; the
+      // session is post-extraction, so this recompile is idempotent).
+      const planJson = JSON.stringify(toWirePlan(compileSession(session)))
+      return { state: dumpState(before), plan_json: planJson, timing: { wall_ms } }
     }
 
     case 'merge': {
       const { node, topLevel } = normalizeProgramFile(params.program as { schema?: string; [k: string]: unknown })
       const before = new Set(session.programs.keys())
       mergeProgramIntoSession(node, topLevel, session)
-      return { state: dumpState(before) }
+      const planJson = JSON.stringify(toWirePlan(compileSession(session)))
+      return { state: dumpState(before), plan_json: planJson }
     }
-
-    // ── Audio / params (runtime ownership moves to Lean in Phase 2) ─────────
-
-    case 'start_audio': {
-      if (!session.dac) {
-        const sampleRate = validatePositiveInt(params.sample_rate, 'sample_rate', DEFAULT_SAMPLE_RATE)
-        const channels   = validatePositiveInt(params.channels,    'channels',    DEFAULT_DAC_CHANNELS)
-        session.dac = DAC.fromRuntime(session.runtime._h, sampleRate, channels)
-      }
-      const deviceName = params.device_name as string | undefined
-      if (deviceName) {
-        const devices = DAC.listDevices()
-        const match = devices.find(d => d.name.toLowerCase().includes(deviceName.toLowerCase()))
-        if (!match)
-          failEnum({
-            code:    'unknown_device',
-            param:   'device_name',
-            value:   deviceName,
-            options: devices.map(d => d.name),
-          })
-        if (session.dac.isRunning) {
-          session.dac.switchDevice(match.id)
-        } else {
-          session.dac.start()
-          session.dac.switchDevice(match.id)
-        }
-        return { is_running: session.dac.isRunning, device: match.name }
-      }
-      if (!session.dac.isRunning) session.dac.start()
-      return { is_running: session.dac.isRunning }
-    }
-
-    case 'stop_audio': {
-      if (!session.dac)
-        failBare({ code: 'invalid_state', message: 'DAC has not been created yet.' })
-      session.dac.stop()
-      return { is_running: session.dac.isRunning }
-    }
-
-    case 'audio_status': {
-      if (!session.dac) return { is_running: false }
-      return {
-        is_running:      session.dac.isRunning,
-        is_reconnecting: session.dac.isReconnecting,
-        stats:           session.dac.callbackStats(),
-      }
-    }
-
-    case 'set_param': {
-      const paramName = params.name as string
-      const value     = params.value as number
-      const p = session.paramRegistry.get(paramName)
-      if (!p)
-        failEnum({
-          code:    'unknown_param',
-          param:   'name',
-          value:   paramName,
-          options: [...session.paramRegistry.keys()],
-        })
-      p.value = value
-      return { name: paramName, value: p.value }
-    }
-
-    case 'list_params':
-      return [...session.paramRegistry.entries()].map(([name, p]) => ({ name, value: p.value }))
 
     // ── MCP non-tool surface ────────────────────────────────────────────────
 

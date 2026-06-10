@@ -1,5 +1,6 @@
 import Std.Data.HashMap
 import Tropical.Errors
+import Tropical.Ffi
 import Tropical.Expr
 import Tropical.Wiring
 import Tropical.Session
@@ -9,15 +10,17 @@ import Tropical.Client
 # The tropical IR engine — tool semantics, in Lean
 
 Port of `mcp/engine.ts`. The session (graph topology, program mirror,
-wiring) is owned here; the compiler service supplies program
-registration, compilation, runtime/audio FFI, and save/export/load/merge
-until those layers are ported in turn.
+wiring) is owned here, and as of Phase 2 so is the native runtime: plans
+load over the Lean FFI, the DAC reads from the Lean-owned runtime, and
+params drive `param:<name>` module slots directly. The compiler service
+supplies program registration, pure compilation, and
+save/export/load/merge until those layers are ported in turn.
 
 Every graph mutation ends in `syncCompile`: the session snapshot goes to
-the service, which rebuilds its TS session, compiles, and hot-swaps the
-kernel. State mutations precede the compile (matching TS: a failed
-compile leaves the mutated graph in place; the previous kernel keeps
-playing and the error envelope is `retryable`).
+the service, which rebuilds its TS session and compiles; the returned
+plan hot-swaps into the Lean runtime. State mutations precede the
+compile (matching TS: a failed compile leaves the mutated graph in
+place; the previous kernel keeps playing and the error is recoverable).
 -/
 
 namespace Tropical.Engine
@@ -29,6 +32,10 @@ open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 structure Env where
   state   : IO.Ref SessionSt
   service : Service
+  /-- The native FlatRuntime this engine owns: plans load here; the DAC
+      reads from it; param slots are driven on it. -/
+  runtime : Ffi.Runtime
+  dac     : IO.Ref (Option Ffi.Dac)
 
 -- Reserved audio-output boundary leaf.
 private def dacName : String := "dac"
@@ -151,7 +158,8 @@ private def adaptInputExpr (st : SessionSt) (node : Json) (dstTypeObj : Option J
 
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 
-/-- Serialize the session and have the service rebuild + compile + load. -/
+/-- Serialize the session, have the service rebuild + compile, then load
+    the plan into the Lean-owned runtime (hot-swap). -/
 def syncCompile (env : Env) : EngineM Unit := do
   let st ← env.state.get
   let payload := Json.mkObj [
@@ -164,7 +172,10 @@ def syncCompile (env : Env) : EngineM Unit := do
       Json.mkObj [("instance", Json.str i), ("output", Json.str o)]),
     ("params", Json.arr <| st.params.map fun (n, v) =>
       Json.mkObj [("name", Json.str n), ("value", v)])]
-  let resp ← env.service.call "sync" payload
+  let resp ← env.service.call "compile" payload
+  match getField? resp "plan_json" with
+  | some (.str planJson) => env.runtime.loadPlan planJson
+  | _ => internalError "compiler service: compile returned no plan_json"
   -- Adopt the service's param registry (compile can discover params).
   match getField? resp "params" with
   | some (.arr ps) =>
@@ -728,12 +739,21 @@ private def adoptState (env : Env) (state : Json) (resetCounters : Bool) : Engin
      | some (.arr os) => os
      | _ => #[]).filterMap fun o => do
       pure ((← getStrField? o "instance"), (← getStrField? o "output"))
-  let params : Array (String × Json) :=
+  let dumpParams : Array (String × Json) :=
     (match getField? state "params" with
      | some (.arr ps) => ps
      | _ => #[]).filterMap fun p => do
       pure ((← getStrField? p "name"), (← getField? p "value"))
   env.state.modify fun st =>
+    -- On merge (resetCounters = false) the dump's param values are the
+    -- service's stale Param handles; this mirror is authoritative for
+    -- values set since the last compile — keep ours, adopt only new
+    -- names. On load the session was rebuilt: adopt the dump wholesale.
+    let params := if resetCounters then dumpParams else
+      dumpParams.map fun (n, v) =>
+        match st.params.find? (·.1 == n) with
+        | some (_, existing) => (n, existing)
+        | none => (n, v)
     { st with instances, wires, graphOutputs, params,
               nameCounters := if resetCounters then {} else st.nameCounters }
 
@@ -745,8 +765,13 @@ def handleLoad (env : Env) (args : Json) : EngineM Json := do
   let payload := Json.mkObj <|
     (match path with | some p => [("path", p)] | none => [])
     ++ (match program with | some p => [("program", p)] | none => [])
+  -- Stop audio before replacing the session (TS handleLoad semantics).
+  if let some dac := ← env.dac.get then
+    if ← dac.isRunning then dac.stop
   let resp ← env.service.call "load" payload
   adoptState env ((getField? resp "state").getD jsonNull) (resetCounters := true)
+  if let some (.str planJson) := getField? resp "plan_json" then
+    env.runtime.loadPlan planJson
   let st ← env.state.get
   pure <| Json.mkObj [
     ("instances", toJson st.instanceNames),
@@ -767,6 +792,8 @@ def handleMerge (env : Env) (args : Json) : EngineM Json := do
     | throwBare .missingArgument "Provide a program or patch object."
   let resp ← env.service.call "merge" (Json.mkObj [("program", program)])
   adoptState env ((getField? resp "state").getD jsonNull) (resetCounters := false)
+  if let some (.str planJson) := getField? resp "plan_json" then
+    env.runtime.loadPlan planJson
   let st ← env.state.get
   pure <| Json.mkObj [
     ("instances", toJson st.instanceNames),
@@ -774,17 +801,103 @@ def handleMerge (env : Env) (args : Json) : EngineM Json := do
     ("outputs", toJson st.graphOutputs.size),
     ("params", toJson (st.params.map (·.1)))]
 
--- ── Audio / params (relayed; FFI moves to Lean in Phase 2) ───────────────────
+-- ── Audio / params (native — the engine owns the runtime and DAC) ───────────
 
-private def relayTool (env : Env) (method : String) (args : Json) : EngineM Json :=
-  env.service.call method args
+private def validatePositiveInt (v : Option Json) (param : String)
+    (default : Nat) : EngineM Nat :=
+  match v with
+  | none => pure default
+  | some j@(.num n) =>
+    let f := n.toFloat
+    if f == f.floor && f > 0 then pure f.toUInt64.toNat
+    else
+      throwBare .invalidValue
+        s!"{param} must be a positive integer; got {j.compress}"
+        (param := some param) (value := some j)
+  | some j =>
+    throwBare .invalidValue
+      s!"{param} must be a positive integer; got {j.compress}"
+      (param := some param) (value := some j)
 
+private def containsSub (hay needle : String) : Bool :=
+  needle.isEmpty || (hay.splitOn needle).length > 1
+
+private def isRunningJson (dac : Ffi.Dac) : EngineM Json := do
+  pure <| Json.mkObj [("is_running", Json.bool (← dac.isRunning))]
+
+def handleStartAudio (env : Env) (args : Json) : EngineM Json := do
+  let dac ← match ← env.dac.get with
+    | some d => pure d
+    | none =>
+      let sampleRate ← validatePositiveInt (arg? args "sample_rate") "sample_rate" 44100
+      let channels   ← validatePositiveInt (arg? args "channels") "channels" 2
+      let d ← Ffi.Dac.fromRuntime env.runtime sampleRate.toUInt32 channels.toUInt32
+      env.dac.set (some d)
+      pure d
+  match argStr? args "device_name" with
+  | some deviceName =>
+    let devices ← Ffi.listDevices
+    let lower := deviceName.toLower
+    match devices.find? (fun d => containsSub d.name.toLower lower) with
+    | none =>
+      throwEnum .unknownDevice "device_name" (Json.str deviceName)
+        (devices.map (·.name))
+    | some m =>
+      if ← dac.isRunning then
+        let _ ← dac.switchDevice m.id
+      else
+        dac.start
+        let _ ← dac.switchDevice m.id
+      pure <| Json.mkObj [("is_running", Json.bool (← dac.isRunning)),
+                          ("device", Json.str m.name)]
+  | none =>
+    if !(← dac.isRunning) then dac.start
+    isRunningJson dac
+
+def handleStopAudio (env : Env) : EngineM Json := do
+  match ← env.dac.get with
+  | none => throwBare .invalidState "DAC has not been created yet."
+  | some dac =>
+    dac.stop
+    isRunningJson dac
+
+def handleAudioStatus (env : Env) : EngineM Json := do
+  match ← env.dac.get with
+  | none => pure <| Json.mkObj [("is_running", Json.bool false)]
+  | some dac =>
+    let stats ← dac.stats
+    pure <| Json.mkObj [
+      ("is_running", Json.bool (← dac.isRunning)),
+      ("is_reconnecting", Json.bool (← dac.isReconnecting)),
+      ("stats", Json.mkObj [
+        ("callbackCount", toJson stats.callbackCount.toNat),
+        ("avgCallbackMs", toJson stats.avgCallbackMs),
+        ("maxCallbackMs", toJson stats.maxCallbackMs),
+        ("underrunCount", toJson stats.underrunCount.toNat),
+        ("overrunCount",  toJson stats.overrunCount.toNat)])]
+
+/-- `set_param`: update the mirror AND drive the live `param:<name>`
+    module slot. (The TS engine only wrote the detached Param handle,
+    which the session-path kernel never reads — set_param was audibly
+    inert until the next recompile.) -/
 def handleSetParam (env : Env) (args : Json) : EngineM Json := do
-  let resp ← relayTool env "set_param" args
-  -- Keep the param mirror current for future snapshots.
-  if let (some (.str name), some value) := (getField? resp "name", getField? resp "value") then
-    env.state.modify (·.setParamValue name value)
-  pure resp
+  let name := (argStr? args "name").getD ""
+  let valueJ := (getField? args "value").getD jsonNull
+  let st ← env.state.get
+  if (st.params.find? (·.1 == name)).isNone then
+    throwEnum .unknownParam "name" (Json.str name) (st.params.map (·.1))
+  let value ← match valueJ with
+    | .num n => pure n.toFloat
+    | _ => internalError s!"set_param: value must be a number, got {valueJ.compress}"
+  env.state.modify (·.setParamValue name valueJ)
+  if let some idx := ← env.runtime.slotIndex? s!"param:{name}" then
+    env.runtime.setSlot idx value
+  pure <| Json.mkObj [("name", Json.str name), ("value", valueJ)]
+
+def handleListParams (env : Env) : EngineM Json := do
+  let st ← env.state.get
+  pure <| Json.arr <| st.params.map fun (n, v) =>
+    Json.mkObj [("name", Json.str n), ("value", v)]
 
 -- ── Dispatcher ───────────────────────────────────────────────────────────────
 
@@ -808,11 +921,11 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "load"            => handleLoad env args
   | "save"            => handleSave env
   | "merge"           => handleMerge env args
-  | "start_audio"     => relayTool env "start_audio" args
-  | "stop_audio"      => relayTool env "stop_audio" args
-  | "audio_status"    => relayTool env "audio_status" args
+  | "start_audio"     => handleStartAudio env args
+  | "stop_audio"      => handleStopAudio env
+  | "audio_status"    => handleAudioStatus env
   | "set_param"       => handleSetParam env args
-  | "list_params"     => relayTool env "list_params" args
+  | "list_params"     => handleListParams env
   | _ => internalError s!"Unknown tool: '{name}'"
 
 -- ── Boot ─────────────────────────────────────────────────────────────────────
@@ -825,7 +938,9 @@ def boot : IO (Env × IO.Process.Child ⟨.piped, .piped, .inherit⟩) := do
   }
   let service : Service := { relay := { stdin := child.stdin, stdout := child.stdout } }
   let state ← IO.mkRef ({} : SessionSt)
-  let env : Env := { state, service }
+  let runtime ← Ffi.Runtime.new 512
+  let dac ← IO.mkRef (none : Option Ffi.Dac)
+  let env : Env := { state, service, runtime, dac }
   let catalog ← service.relay.call "boot" (Json.mkObj [])
   match catalog.getObjVal? "catalog" with
   | .ok (.arr entries) =>

@@ -1272,6 +1272,11 @@ function handleTool(name: string, args: Record<string, unknown>) {
           options: [...session.paramRegistry.keys()],
         })
       p.value = value
+      // Drive the live `param:<name>` module slot — the session-path
+      // kernel reads slots, not Param handles, so without this write
+      // set_param was audibly inert until the next recompile.
+      const slotIdx = session.runtime.slotIndex(`param:${paramName}`)
+      if (slotIdx >= 0) session.runtime.setSlot(slotIdx, value)
       return { name: paramName, value: p.value }
     })
 

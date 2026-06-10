@@ -1,0 +1,50 @@
+[
+  { "method": "load",
+    "params": { "program": {
+      "schema": "tropical_program_2",
+      "name": "patch",
+      "body": { "op": "block",
+        "decls": [
+          { "op": "paramDecl", "name": "brightness", "value": 0.4 },
+          { "op": "instanceDecl", "name": "osc1", "program": "SinOsc",
+            "inputs": { "freq": 110 } },
+          { "op": "instanceDecl", "name": "lp1", "program": "OnePole",
+            "inputs": {
+              "input": { "op": "ref", "instance": "osc1", "output": "sine" },
+              "g": { "op": "param", "name": "brightness" } } } ],
+        "assigns": [
+          { "op": "outputAssign", "name": "dac.out",
+            "expr": { "op": "ref", "instance": "lp1", "output": "out" } } ],
+        "value": null } } } },
+  { "method": "list_instances", "params": {} },
+  { "method": "list_wiring", "params": {} },
+  { "method": "list_params", "params": {} },
+  { "method": "set_param", "params": { "name": "brightness", "value": 0.8 } },
+  { "method": "get_info", "params": { "instance_name": "lp1" } },
+  { "method": "merge",
+    "params": { "program": {
+      "schema": "tropical_program_2",
+      "name": "extra",
+      "body": { "op": "block",
+        "decls": [
+          { "op": "instanceDecl", "name": "vca1", "program": "VCA",
+            "inputs": {
+              "audio": { "op": "ref", "instance": "lp1", "output": "out" },
+              "cv": 0.5 } } ],
+        "assigns": [], "value": null } } } },
+  { "method": "wire",
+    "params": { "set": [
+      { "instance": "dac", "input": "out",
+        "expr": { "op": "ref", "instance": "vca1", "output": "out" } } ] } },
+  { "method": "list_wiring", "params": {} },
+  { "method": "export_program",
+    "params": { "name": "WarmVoice",
+      "inputs": { "pitch": "osc1:freq" },
+      "outputs": { "out": { "instance": "vca1", "output": "out" } } } },
+  { "method": "add_instance",
+    "params": { "program": "WarmVoice", "instance_name": "voice2" } },
+  { "method": "list_instances", "params": {} },
+  { "method": "save", "params": {} },
+  { "method": "remove_instance", "params": { "instance_name": "voice2" } },
+  { "method": "save", "params": {} }
+]
