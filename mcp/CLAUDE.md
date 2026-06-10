@@ -1,17 +1,21 @@
 # mcp/
 
-The IR engine and its JSON-RPC service. The MCP *server* itself now lives in
-`lean/` — a native Lean front door built on Turnstile — and this directory is
-what it drives. (The old `mcp/server.ts`, an `@modelcontextprotocol/sdk` server,
-has been retired; the Lean front door replaced it, validating each tool call
-against a typed schema before relaying.)
+The TypeScript side of the MCP stack. As of Phase 1 of the Lean port
+(`design/lean_port.md`), the *engine* — session state and the 23 tool
+handlers — lives in Lean (`lean/Tropical/Engine.lean`), running
+in-process behind the Turnstile front door. What remains here is the
+**compiler service** the Lean engine drives, plus the retired-but-kept
+TS engine that serves as the differential oracle.
 
-- `engine.ts` owns a long-lived `SessionState` (`compiler/session.ts`) and the
-  23 tool handlers (`handleTool`), plus the MCP resources (program catalog,
-  program-format doc) and the build-patch prompt. Transport-agnostic.
-- `ir_service.ts` exposes that engine over plain newline JSON-RPC on stdio
-  (method = tool name; plus `resources/list`·`read` and `prompts/list`·`get`).
-  The Lean front door spawns it and relays validated calls.
+- `compiler_service.ts` — what the Lean front door spawns. Owns program
+  registration (raise → elaborate → strata), session compilation
+  (`sync`: rebuilds a TS session from Lean's snapshot, compiles, hot-swaps),
+  save/export/load/merge, and the runtime/DAC/param FFI (until Phase 2
+  moves FFI to Lean). Newline JSON-RPC; tool-level failures return
+  `{result: {error: <ErrorEnvelope>}}`.
+- `engine.ts` + `ir_service.ts` — the full TS engine and its protocol
+  surface. No longer on the production path; kept as the oracle for
+  `make diff-engine` and the in-process unit tests until Phase 2.
 
 ## Running
 
@@ -25,14 +29,24 @@ for Claude Code (it builds the front door and execs it).
 ## Layout
 
 ```
-engine.ts                  Transport-agnostic IR engine: SessionState + handleTool
-                           + resources/prompts. No transport.
-ir_service.ts              Exposes the engine over newline JSON-RPC/stdio (the
-                           Lean front door spawns this).
+compiler_service.ts        The TS compiler behind the Lean engine (spawned by
+                           the front door). Shrinks phase by phase until Phase 6.
+envelope.ts                ErrorEnvelope types + fail helpers (shared source for
+                           the service; Lean mirrors it in Tropical/Errors.lean).
+resources.ts               MCP resources/prompts surface (program catalog,
+                           program-format doc, build-patch prompt).
+engine.ts                  The retired TS engine: SessionState + handleTool.
+                           Differential oracle only.
+ir_service.ts              engine.ts over newline JSON-RPC/stdio. Oracle side A
+                           of make diff-engine; the Lean engine speaks the same
+                           protocol via `frontend --rpc`.
 program_format_example.ts  The canonical tropical_program_2 example the
                            program-format resource renders from.
 test_patch.ts              CLI smoke-tester: bun run mcp/test_patch.ts <patch.json> [n_frames]
-*.test.ts                  errors / wire_dac / program_format_example — drive ir_service
+*.test.ts                  errors / wire_dac (protocol suites — run against any
+                           engine via TROPICAL_ENGINE_CMD; `make test-lean-engine`
+                           gates the Lean engine) / program_format_example /
+                           remove_feedback (in-process TS-engine tests)
 ```
 
 ## Compile pipeline behind every mutation

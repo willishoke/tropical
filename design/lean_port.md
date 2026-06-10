@@ -1,8 +1,14 @@
 # The Lean port — top-down migration of the compiler
 
-Status: **Phase 0 landed** (differential harness + `lean/` library
-restructure). This document is the roadmap; `design/architecture.md`
-stays the authority on what the compiler *is*.
+Status: **Phase 1 landed** — the engine (session state + 23 tool
+handlers) is Lean (`lean/Tropical/Engine.lean`), gated by the protocol
+test suites running unmodified against `frontend --rpc`
+(`make test-lean-engine`) and by `make diff-engine` (TS oracle vs Lean,
+41/41 recorded steps). The TS engine (`mcp/engine.ts` + `ir_service.ts`)
+is off the production path but retained as the differential oracle;
+its deletion is deferred to Phase 2 (it also backs two in-process test
+suites). This document is the roadmap; `design/architecture.md` stays
+the authority on what the compiler *is*.
 
 ## Shape of the migration
 
@@ -64,16 +70,17 @@ Each phase has a hard exit criterion: the relayed/TS entrypoint it
 replaces is **deleted**, and the relevant differs + existing suites
 (`bun test`, `ctest`, stdlib golden hashes, `tests/equiv/*`) are green.
 
-1. **Engine + session layer in Lean** (HIGH risk). Port `mcp/engine.ts`
-   (23 handlers, error envelopes, resources/prompts) +declarative
-   `compiler/session.ts` (SessionState, `setWireExpr` auto-delay, slot
-   registries) → `Tropical/{Engine,Session,Errors,Expr}`. The Lean
-   session stores wires pre-extraction only; `extractSessionDelays`
-   runs per compile inside the compiler. TS shrinks to a *compiler
-   service* (session-snapshot JSON in → compiled+loaded plan, slot
-   bookkeeping echoed back); save/export/merge + audio/params still
-   relay. Gate: the Lean engine speaks the exact ir_service protocol
-   (`--rpc` mode) so `mcp/*.test.ts` run against it unmodified.
+1. **Engine + session layer in Lean** ✅ (landed). `mcp/engine.ts`'s 23
+   handlers + the session ported to `Tropical/{Engine,Session,Errors,
+   Expr,Wiring,Client,Rpc}`; the Lean session stores wires canonically
+   pre-extraction; TS shrank to `mcp/compiler_service.ts` (snapshot
+   `sync` in → compile + hot-swap; save/export/load/merge + audio/params
+   relay until their phases). Gates passed: protocol suites unmodified
+   against `frontend --rpc`, diff-engine 41/41, full bun suite.
+   Bonus: the differential gate exposed and fixed a production bug —
+   re-wiring an already-compiled input died with
+   "duplicate reg/delay '__autodelay:…'" (stale delaySlotRegistry);
+   `wire()` now canonicalizes + rebuilds slot state per compile.
 2. **Native FFI + plan types + plan interpreter.** `Tropical/Ffi` +
    `lean/ffi/shim.c` over all of `tropical_c.h` (external classes with
    finalizers; the DAC object holds its Runtime alive; thread-local

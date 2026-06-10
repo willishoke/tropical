@@ -1,5 +1,5 @@
 .PHONY: build repl run lean mcp-lean clean validate validate-write \
-        diff diff-plan diff-audio diff-engine
+        diff diff-plan diff-audio diff-engine test-lean-engine
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -53,7 +53,11 @@ diff-plan: build
 diff-audio: build
 	bun run scripts/diff/diff_audio.ts
 
-diff-engine: build
-	bun run scripts/diff/diff_engine.ts
+diff-engine: build lean
+	bun run scripts/diff/diff_engine.ts --b="./lean/.lake/build/bin/frontend --rpc"
+
+# Phase 1 gate: the protocol test suites against the Lean engine.
+test-lean-engine: build lean
+	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test mcp/errors.test.ts mcp/wire_dac.test.ts
 
 diff: diff-plan diff-audio diff-engine
