@@ -64,7 +64,7 @@ export function compileSessionSlotted(
   // through the shared `partitionKernel` path. (The legacy per-instance
   // scheduler lowering was retired once the `root_vs_flat` oracle had
   // validated this path — see git history.)
-  return compileSessionSlottedRoot(session, mode)
+  return compileSessionSlottedFromParsed(session, sessionToParsedProgram(session), mode)
 }
 
 /** Recursively allocate output slots for an instance and every nested
@@ -130,8 +130,15 @@ function buildSessionRoot(session: SessionState): ResolvedProgram {
   return elaborate(sessionToParsedProgram(session), sessionTypeResolver(session))
 }
 
-function compileSessionSlottedRoot(
+/** The root lowering with a caller-supplied `ParsedProgram` (the
+ *  Phase 3 seam: the Lean engine runs the session lowering — lift,
+ *  delay extraction, acyclicity, serialization — and ships the
+ *  resulting ParsedProgram plus slot bookkeeping; this elaborates and
+ *  partitions it against the adopted session state). The classic
+ *  in-process path is the same function fed `sessionToParsedProgram`. */
+export function compileSessionSlottedFromParsed(
   session: SessionState,
+  parsed: ReturnType<typeof sessionToParsedProgram>,
   compilationMode: CompilationMode,
 ): FlatPlan {
   // Two-phase slot pre-allocation — identical to the per-instance
@@ -166,7 +173,7 @@ function compileSessionSlottedRoot(
   // (ROOT_INSTANCE_PATH), so child output slots / register names land under
   // bare paths exactly where the flat per-instance path puts them —
   // `emitDacStitch` and hot-swap state-transfer-by-name resolve unchanged.
-  const root = buildSessionRoot(session)
+  const root = elaborate(parsed, sessionTypeResolver(session))
   const rootCompiled = makeCompiled(root, { displayName: '__session__' })
 
   // Session params are slot-based (`param:name` module slots driven by
@@ -264,3 +271,4 @@ export function slotModeEnabled(_session?: SessionState, _opt?: boolean): boolea
 
 // Silence unused-import warnings for re-export-style symbols.
 void rawOffset
+void buildSessionRoot

@@ -19,7 +19,7 @@ import {
   inputPortTypes, outputPortTypes, registerPortTypes,
   inputPortType, outputPortType, registerPortType,
   rawInputDefaults,
-  allocateOutputSlots,
+  allocateOutputSlots, allocateParamSlot,
   setWireExpr, unwrapDelay, reconstructWireDelays,
 } from '../compiler/session.js'
 import {
@@ -402,6 +402,12 @@ function wire(): {} {
   session.ioArraySlotSizes.length = 0
   session.ioArraySlotNames.length = 0
   session.delaySlotRegistry = []
+  // Canonical allocation order (matches loadJSON): params first, then
+  // instance outputs, then extraction-time delay slots. Without this,
+  // any rebuild dropped the `param:` slots and set_param went dead.
+  for (const name of session.paramRegistry.keys()) {
+    allocateParamSlot(session, name)
+  }
   for (const [name, inst] of session.instanceRegistry) {
     allocateOutputSlots(session, toInstanceName(name), inst.compiled)
   }
@@ -1284,6 +1290,21 @@ function handleTool(name: string, args: Record<string, unknown>) {
       return [...session.paramRegistry.entries()].map(([name, p]) => ({
         name, value: p.value,
       }))
+    })
+
+    // Differential-harness probe (rpc-only, not an MCP tool): render N
+    // buffers through the engine's runtime and return the raw samples as
+    // hex. Lets the recorded tool scripts assert AUDIO equivalence
+    // between engines, not just response equivalence.
+    case 'debug_render': return wrap(() => {
+      const frames = typeof args.frames === 'number' ? args.frames : 4
+      const parts: string[] = []
+      for (let i = 0; i < frames; i++) {
+        session.runtime.process()
+        const out = session.runtime.outputBuffer
+        parts.push(Buffer.from(out.buffer, out.byteOffset, out.byteLength).toString('hex'))
+      }
+      return { frames, hex: parts.join('') }
     })
 
     default:

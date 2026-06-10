@@ -5,9 +5,11 @@
  * The Lean engine owns the session, the native runtime (plan loading,
  * slot control), the DAC, and params; this service owns what hasn't
  * been ported yet — program registration (raise → elaborate → strata),
- * compilation to tropical_plan_5 JSON, and save/export/load/merge
- * (they need the compiler). It shrinks phase by phase until Phase 6
- * deletes it.
+ * compilation to tropical_plan_5 JSON (Phase 3: from the Lean engine's
+ * own session lowering — a ParsedProgram + slot bookkeeping; this side
+ * just elaborates and partitions), wire lifting (it needs strata), and
+ * save/export/load/merge (they need the compiler). It shrinks phase by
+ * phase until Phase 6 deletes it.
  *
  * Protocol: newline JSON-RPC on stdio, same framing as ir_service.ts.
  * Tool-level failures return `{result: {error: <ErrorEnvelope>}}` so the
@@ -37,6 +39,9 @@ import {
   mergeProgramIntoSession, loadStdlib, instanceDecls,
 } from '../compiler/program.js'
 import { compileSession } from '../compiler/ir/compile_session.js'
+import { compileSessionSlottedFromParsed } from '../compiler/ir/compile_session_slotted.js'
+import { liftWiresToInstances } from '../compiler/ir/lift_wires.js'
+import { assertSessionAcyclic } from '../compiler/ir/lowering/session_cycle_check.js'
 import { toWirePlan } from '../compiler/flat_plan.js'
 import { Param } from '../compiler/runtime/param.js'
 import { portTypeToString } from '../compiler/ir/port_type.js'
@@ -156,16 +161,28 @@ function dumpState(beforePrograms: ReadonlySet<string>) {
 // ─── Method handlers ─────────────────────────────────────────────────────────
 
 type CompilePayload = {
+  /** The session serialized to a ParsedProgram by the Lean engine
+   *  (post-lift, post-extraction) — the Phase 3 seam payload. */
+  parsed_program: unknown
   instances: Array<{ name: string; program: string; type_args?: Record<string, number> | null }>
+  /** Post-extraction wires — consumed by the input-alias checks and the
+   *  defensive acyclicity tripwire, not re-lowered. */
   wires: Array<{ key: string; expr: ExprNode }>
   graph_outputs: Array<{ instance: string; output: string }>
   params: Array<{ name: string; value: number }>
+  /** Slot bookkeeping the Lean lowering allocated (canonical order:
+   *  params, then instance outputs, then extraction delay slots). */
+  slot_count: number
+  param_slots: Array<[string, number]>
+  output_slots: Array<[string, number]>
+  output_port_meta: Array<[string, unknown]>
+  io_array: { count: number; sizes: number[]; names: string[] }
+  delay_slots: unknown[]
 }
 
 function handleCompile(p: CompilePayload) {
-  // Reset graph state; keep type registries (programs persist across syncs)
-  // and paramRegistry (live Param handles are referenced by the loaded
-  // kernel — recreating them would orphan the pointers the JIT baked in).
+  // Reset graph state; keep type registries (programs persist across
+  // compiles) and paramRegistry (live Param handles).
   session.instanceRegistry.clear()
   session.inputExprNodes.clear()
   session.graphOutputs.length = 0
@@ -175,21 +192,13 @@ function handleCompile(p: CompilePayload) {
   session.inputSlotRegistry.clear()
   session.inputPortMeta.clear()
   session.inputExprs.clear()
-  session.slotCount = 0
-  session.ioArraySlotCount = 0
-  session.ioArraySlotSizes.length = 0
-  session.ioArraySlotNames.length = 0
-  session.delaySlotRegistry = []
 
   for (const inst of p.instances) {
     const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args ?? undefined, undefined)
     const instance = instantiate(type, inst.name, { baseTypeName: inst.program, typeArgs })
     session.instanceRegistry.set(inst.name, instance)
-    allocateOutputSlots(session, toInstanceName(inst.name), type)
   }
   for (const w of p.wires) {
-    // Wires arrive in stored form (the Lean engine already applied the
-    // auto-delay wrap where it applies); set verbatim, no re-wrapping.
     session.inputExprNodes.set(wireKey(parseWireKey(w.key)), w.expr)
   }
   for (const o of p.graph_outputs) session.graphOutputs.push({ instance: o.instance, output: o.output })
@@ -202,10 +211,59 @@ function handleCompile(p: CompilePayload) {
     else session.paramRegistry.set(pr.name, new Param(pr.value))
   }
 
-  const planJson = JSON.stringify(toWirePlan(compileSession(session)))
+  // Adopt the Lean lowering's slot allocation verbatim. partitionKernel
+  // continues allocation from slot_count for anything the mirror cannot
+  // see (nested fractal ports).
+  session.slotCount = p.slot_count
+  for (const [name, idx] of p.param_slots) session.paramSlotRegistry.set(name, idx)
+  for (const [key, idx] of p.output_slots) {
+    session.outputSlotRegistry.set(key as never, idx)
+  }
+  for (const [key, meta] of p.output_port_meta) {
+    session.outputPortMeta.set(key as never, meta as never)
+  }
+  session.ioArraySlotCount = p.io_array.count
+  session.ioArraySlotSizes = [...p.io_array.sizes]
+  session.ioArraySlotNames = [...p.io_array.names]
+  session.delaySlotRegistry = p.delay_slots as never
+
+  // Defensive tripwire (the Lean lowering already checked).
+  assertSessionAcyclic(session)
+
+  const plan = compileSessionSlottedFromParsed(
+    session,
+    p.parsed_program as Parameters<typeof compileSessionSlottedFromParsed>[1],
+    'fused',
+  )
+  const planJson = JSON.stringify(toWirePlan(plan))
   return {
     plan_json: planJson,
     params: [...session.paramRegistry.entries()].map(([name, prm]) => ({ name, value: prm.value })),
+  }
+}
+
+/** Lift array-literal wires to anonymous `__wire_N` instances. The Lean
+ *  engine detects lift-needing wires (pure check), sends its canonical
+ *  wire set + its `__wire` name counter, and adopts the rewritten wires
+ *  and new instances durably — same observable behavior the TS engine's
+ *  in-session lift had. The lifted Compiled types persist in this
+ *  service's typeRegistry for later `compile` calls to instantiate. */
+function handleLiftWires(p: { wires: Array<{ key: string; expr: ExprNode }>; counter_base: number }) {
+  session.instanceRegistry.clear()
+  session.inputExprNodes.clear()
+  for (const w of p.wires) {
+    session.inputExprNodes.set(wireKey(parseWireKey(w.key)), w.expr)
+  }
+  session.nameCounters.set('__wire', p.counter_base)
+  liftWiresToInstances(session)
+  return {
+    wires: [...session.inputExprNodes.entries()].map(([key, expr]) => ({ key, expr })),
+    instances: [...session.instanceRegistry.entries()].map(([name, inst]) => ({
+      name,
+      program: inst.baseTypeName,
+      entry: concreteEntry(inst.baseTypeName, inst),
+    })),
+    counter: session.nameCounters.get('__wire') ?? p.counter_base,
   }
 }
 
@@ -239,6 +297,9 @@ function handleMethod(method: string, params: Record<string, unknown>): unknown 
 
     case 'compile':
       return handleCompile(params as unknown as CompilePayload)
+
+    case 'lift_wires':
+      return handleLiftWires(params as unknown as Parameters<typeof handleLiftWires>[0])
 
     case 'save': {
       const { node, topLevel } = saveProgramFromSession(session)

@@ -422,7 +422,12 @@ export function reconstructWireDelays(
     // than loop forever; the slot index at least survives.
     if (entry === undefined || seen.has(tag)) return expr
     const src = reconstructWireDelays(entry.sourceExpr, registry, new Set(seen).add(tag))
-    return { op: 'delay', args: [src], init: entry.init ?? 0 } as ExprNode
+    // Keep the slot name as the delay's id: it is the register's
+    // state-transfer key, and a reconstruction that drops it renames
+    // the register on the next compile — hot-swap then misses the
+    // transfer and feedback topologies can hit absorbing states
+    // (out = audio·cv with audio reset to 0 stays 0 forever).
+    return { op: 'delay', args: [src], init: entry.init ?? 0, id: entry.slotName } as ExprNode
   }
 
   // Structural recurse into every expression-valued field (args, items,
