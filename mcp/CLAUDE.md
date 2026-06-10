@@ -7,12 +7,14 @@ in-process behind the Turnstile front door. What remains here is the
 **compiler service** the Lean engine drives, plus the retired-but-kept
 TS engine that serves as the differential oracle.
 
-- `compiler_service.ts` — what the Lean front door spawns. Owns program
-  registration (raise → elaborate → strata), session compilation
-  (`sync`: rebuilds a TS session from Lean's snapshot, compiles, hot-swaps),
-  save/export/load/merge, and the runtime/DAC/param FFI (until Phase 2
-  moves FFI to Lean). Newline JSON-RPC; tool-level failures return
-  `{result: {error: <ErrorEnvelope>}}`.
+- `compiler_service.ts` — what the Lean front door spawns. Stateless
+  pure compile (Phase 2): program registration (raise → elaborate →
+  strata), `compile` (rebuilds a TS session from Lean's snapshot and
+  returns the plan JSON string), and save/export/load/merge. The Lean
+  engine owns the native runtime, the DAC, and params over its own FFI
+  (`lean/Tropical/Ffi.lean`); plans returned by `compile`/`load`/`merge`
+  hot-swap into the Lean-owned runtime. Newline JSON-RPC; tool-level
+  failures return `{result: {error: <ErrorEnvelope>}}`.
 - `engine.ts` + `ir_service.ts` — the full TS engine and its protocol
   surface. No longer on the production path; kept as the oracle for
   `make diff-engine` and the in-process unit tests until Phase 2.

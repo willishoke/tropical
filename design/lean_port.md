@@ -1,14 +1,23 @@
 # The Lean port — top-down migration of the compiler
 
-Status: **Phase 1 landed** — the engine (session state + 23 tool
-handlers) is Lean (`lean/Tropical/Engine.lean`), gated by the protocol
-test suites running unmodified against `frontend --rpc`
-(`make test-lean-engine`) and by `make diff-engine` (TS oracle vs Lean,
-41/41 recorded steps). The TS engine (`mcp/engine.ts` + `ir_service.ts`)
-is off the production path but retained as the differential oracle;
-its deletion is deferred to Phase 2 (it also backs two in-process test
-suites). This document is the roadmap; `design/architecture.md` stays
-the authority on what the compiler *is*.
+Status: **Phase 2 landed** (FFI + ownership; the plan-level reference
+interpreter is the one deferred item — see phase 2 notes). The engine
+owns the native runtime, DAC, and params over its own FFI
+(`lean/Tropical/Ffi.lean` + `lean/ffi/shim.c`); the TS compiler service
+is stateless pure compile. Gates: `make diff-engine` (4 scripts, 56
+steps, TS oracle vs Lean), `make test-lean-engine` (67 protocol tests
+unmodified), `make diff-render` (Lean FFI rendering byte-for-byte the
+koffi path on the whole corpus), live DAC smoke. The TS engine
+(`mcp/engine.ts` + `ir_service.ts`) remains the differential oracle;
+two in-process test suites still import it. This document is the
+roadmap; `design/architecture.md` stays the authority on what the
+compiler *is*.
+
+Known main-branch issue surfaced by the render gate: the three
+committed golden hashes (`tests/golden/*.hash`) are stale on
+origin/main itself — both engine implementations agree with each other
+and disagree with the goldens identically. Regenerate with
+`make validate-write` once confirmed intentional.
 
 ## Shape of the migration
 
@@ -81,16 +90,22 @@ replaces is **deleted**, and the relevant differs + existing suites
    re-wiring an already-compiled input died with
    "duplicate reg/delay '__autodelay:…'" (stale delaySlotRegistry);
    `wire()` now canonicalizes + rebuilds slot state per compile.
-2. **Native FFI + plan types + plan interpreter.** `Tropical/Ffi` +
-   `lean/ffi/shim.c` over all of `tropical_c.h` (external classes with
-   finalizers; the DAC object holds its Runtime alive; thread-local
-   `tropical_last_error` captured in the shim). `Tropical/Plan`
-   (FlatPlan/NInstr/SinkSpec/SourceSpec/RegTarget + wire codec, with
-   round-trip-safe float emission). `Tropical/Plan/Interp` — pure
-   plan-level reference interpreter (the proof-ready semantics; also a
-   bun-independent oracle). Audio/param tools + `loadPlan` move to
-   Lean; the TS service becomes stateless pure compile. Gate: stdlib
-   golden hashes reproduced exactly through the Lean-owned runtime.
+2. **Native FFI + ownership** ✅ (landed; interpreter deferred).
+   `Tropical/Ffi` + `lean/ffi/shim.c` over `tropical_c.h`; the DAC
+   holds its Runtime alive as a Lean field; plans load over Lean FFI;
+   the TS service is stateless pure compile. Two findings: set_param
+   was audibly inert on the session path (the kernel reads `param:`
+   slots, never Param handles) — both engines now drive the slot; and
+   instance input wires are canonicalized to port-declaration order
+   (JSON key order isn't preserved by clients/relays). Gate:
+   `make diff-render` — Lean FFI rendering byte-for-byte the koffi
+   path across the corpus.
+   **Deferred from this phase**: `Tropical/Plan` (typed FlatPlan/NInstr
+   + codec) and `Tropical/Plan/Interp` (the pure plan-level reference
+   interpreter — the proof-ready semantic anchor and bun-independent
+   oracle). It needs the engine's exact per-op semantics done
+   carefully, and it gates Phase 6, not Phase 3 — it lands as its own
+   focused change before then.
 3. **Session lowering; seam lands on ParsedProgram.** Port
    `lift_wires`, `extract_session_delays`, `session_cycle_check`,
    `session_to_parsed`, slot pre-allocation. Service entrypoint:
