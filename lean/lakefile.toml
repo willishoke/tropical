@@ -14,6 +14,26 @@ rev = "main"
 [[lean_lib]]
 name = "Tropical"
 
+# Native link: the FFI shim object (built by `make lean` via leanc) and
+# libtropical from the CMake build. Paths are relative to this package
+# dir; the rpath resolves @rpath/libtropical.dylib from the installed
+# binary location (lean/.lake/build/bin/ → ../../../../build).
 [[lean_exe]]
 name = "frontend"
 root = "Main"
+moreLinkArgs = [
+  "ffi/shim.o",
+  "-L../build", "-ltropical",
+  "-Wl,-rpath,@executable_path/../../../../build",
+]
+
+# Differential-harness verbs over the Lean-owned native runtime
+# (render-bytes → golden-hash gate).
+[[lean_exe]]
+name = "diffcli"
+root = "Diffcli"
+moreLinkArgs = [
+  "ffi/shim.o",
+  "-L../build", "-ltropical",
+  "-Wl,-rpath,@executable_path/../../../../build",
+]
