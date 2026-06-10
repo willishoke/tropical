@@ -1,17 +1,19 @@
 # The Lean port — top-down migration of the compiler
 
-Status: **Phase 2 landed** (FFI + ownership; the plan-level reference
-interpreter is the one deferred item — see phase 2 notes). The engine
-owns the native runtime, DAC, and params over its own FFI
-(`lean/Tropical/Ffi.lean` + `lean/ffi/shim.c`); the TS compiler service
-is stateless pure compile. Gates: `make diff-engine` (4 scripts, 56
-steps, TS oracle vs Lean), `make test-lean-engine` (67 protocol tests
-unmodified), `make diff-render` (Lean FFI rendering byte-for-byte the
-koffi path on the whole corpus), live DAC smoke. The TS engine
-(`mcp/engine.ts` + `ir_service.ts`) remains the differential oracle;
-two in-process test suites still import it. This document is the
-roadmap; `design/architecture.md` stays the authority on what the
-compiler *is*.
+Status: **Phase 3 landed** (the plan-level reference interpreter is the
+one deferred item — see phase 2 notes). The engine owns the native
+runtime, DAC, and params over its own FFI, and runs the session
+lowering itself (`Tropical/Lowering.lean`): slot allocation, delay
+extraction, acyclicity, session→ParsedProgram serialization. The TS
+compiler service receives a ParsedProgram + slot bookkeeping and just
+elaborates + partitions (plus wire lifting, which needs strata). Gates:
+`make diff-engine` (5 scripts, 71 steps incl. `debug_render` audio
+probes), `make test-lean-engine` (67 protocol tests unmodified),
+`make diff-render` (Lean FFI rendering byte-for-byte the koffi path).
+The TS engine (`mcp/engine.ts` + `ir_service.ts`) remains the
+differential oracle; two in-process test suites still import it. This
+document is the roadmap; `design/architecture.md` stays the authority
+on what the compiler *is*.
 
 Known main-branch issue surfaced by the render gate: the three
 committed golden hashes (`tests/golden/*.hash`) are stale on
@@ -106,11 +108,21 @@ replaces is **deleted**, and the relevant differs + existing suites
    oracle). It needs the engine's exact per-op semantics done
    carefully, and it gates Phase 6, not Phase 3 — it lands as its own
    focused change before then.
-3. **Session lowering; seam lands on ParsedProgram.** Port
-   `lift_wires`, `extract_session_delays`, `session_cycle_check`,
-   `session_to_parsed`, slot pre-allocation. Service entrypoint:
-   `compile_root {parsed_program} → plan`. Gate: Lean-vs-TS
-   ParsedProgram structural compare per corpus entry.
+3. **Session lowering; seam lands on ParsedProgram** ✅ (landed).
+   `Tropical/Lowering.lean` runs slot allocation (canonical order:
+   params → outputs → delay slots), delay extraction, the Tarjan
+   acyclicity tripwire, topo ordering, and session→ParsedProgram
+   serialization per compile; the service's `compile` just elaborates
+   + partitions the shipped ParsedProgram against the shipped slot
+   bookkeeping. Wire lifting stays a service method (it needs strata),
+   driven by the engine's pure `needsWireLift` detection and its
+   `__wire` counter. Gates: diff-engine with `debug_render` audio
+   probes (renders hex-compared after every mutation — this caught a
+   real bug: `reconstructWireDelays` dropped delay ids, renaming
+   registers per recompile, so hot-swap state transfer missed them and
+   feedback graphs hit absorbing zero states; reconstruction is now
+   id-preserving). Param slots also survive rebuilds now (they were
+   silently dropped after any rewire, killing set_param's slot).
 4. **Elaborator front + decl stores + Resolved codec** (HIGH risk).
    Port `raise`, `schema`, `ir/nodes` (as decl stores), `elaborator`,
    diagnostics, `recursion`, `port_type`, `branded_names`. One
