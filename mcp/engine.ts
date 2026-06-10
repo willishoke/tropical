@@ -20,7 +20,7 @@ import {
   inputPortType, outputPortType, registerPortType,
   rawInputDefaults,
   allocateOutputSlots,
-  setWireExpr, unwrapDelay,
+  setWireExpr, unwrapDelay, reconstructWireDelays,
 } from '../compiler/session.js'
 import {
   saveProgramFromSession, loadProgramAsType, mergeProgramIntoSession,
@@ -874,7 +874,10 @@ function handleGetInfo(instanceName: string) {
         return {
           name: n, index: i,
           type: inputPortType(inst, i) ?? null,
-          expr: expr ?? null,
+          // Canonical authored form, not the compile-internal `sessionSlot`
+          // rewrite a prior compile may have left in the wire map — same
+          // canonicalization `save` applies.
+          expr: expr !== undefined ? reconstructWireDelays(expr, session.delaySlotRegistry) : null,
           pretty: expr !== undefined
             ? prettyExpr(expr, session.instanceRegistry, session.delaySlotRegistry)
             : null,
@@ -1018,7 +1021,11 @@ function handleWire(args: Record<string, unknown>) {
       const existing = session.inputExprNodes.get(wireKey(ref))
       let toStore: ExprNode = expr
       if (existing !== undefined && s.combine !== undefined) {
-        toStore = { op: s.combine, args: [unwrapDelay(existing), expr] } as ExprNode
+        // Resolve the stored wire back to its authored form first: after a
+        // compile, the map holds a bare `sessionSlot` read that
+        // `unwrapDelay` cannot strip, and combining against it would give
+        // the existing source a second sample of latency.
+        toStore = { op: s.combine, args: [unwrapDelay(reconstructWireDelays(existing, session.delaySlotRegistry)), expr] } as ExprNode
       }
       setWireExpr(session, ref, toStore)
       results.push({ instance: s.instance, input: resolvedName, expr: toStore })
