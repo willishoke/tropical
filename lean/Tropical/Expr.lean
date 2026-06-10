@@ -251,22 +251,6 @@ def wrapInUnitDelay (expr : Json) (init : Json) (id : String) : Json :=
   Json.mkObj [("op", Json.str "delay"), ("args", Json.arr #[expr]),
               ("init", init), ("id", Json.str id)]
 
-/-- Drop `id` fields from every `delay` node, recursively. The TS engine
-    echoes wires through `reconstructWireDelays`, which rebuilds delays
-    without their ids; `get_info` matches that canonical echo shape. -/
-partial def stripDelayIds (j : Json) : Json :=
-  match j with
-  | .arr items => .arr (items.map stripDelayIds)
-  | .obj _ =>
-    let isDelay := opOf? j == some "delay"
-    match j with
-    | .obj m =>
-      Json.mkObj <| m.toArray.toList.filterMap fun (kv : String × Json) =>
-        if isDelay && kv.1 == "id" then none
-        else some (kv.1, stripDelayIds kv.2)
-    | _ => j
-  | _ => j
-
 -- prettyExpr ----------------------------------------------------------------------
 
 -- Op sets from compiler/session.ts (pretty-printing; narrower than the

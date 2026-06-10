@@ -4,6 +4,7 @@ import Tropical.Ffi
 import Tropical.Expr
 import Tropical.Wiring
 import Tropical.Session
+import Tropical.Lowering
 import Tropical.Client
 
 /-!
@@ -158,25 +159,94 @@ private def adaptInputExpr (st : SessionSt) (node : Json) (dstTypeObj : Option J
 
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 
-/-- Serialize the session, have the service rebuild + compile, then load
-    the plan into the Lean-owned runtime (hot-swap). -/
-def syncCompile (env : Env) : EngineM Unit := do
+/-- If any wire needs lifting (array literals), have the compiler
+    service lift them (it needs strata) and adopt the rewritten wires +
+    the new `__wire_N` instances durably — the same observable behavior
+    the TS engine's in-session lift had. -/
+def liftIfNeeded (env : Env) : EngineM Unit := do
   let st ← env.state.get
+  if !st.wires.any (fun w => Tropical.Lowering.needsWireLift w.expr) then
+    return ()
+  let counterBase := (st.nameCounters.get? "__wire").getD 0
   let payload := Json.mkObj [
+    ("wires", Json.arr <| st.wires.map fun w =>
+      Json.mkObj [("key", Json.str w.key), ("expr", w.expr)]),
+    ("counter_base", toJson counterBase)]
+  let resp ← env.service.call "lift_wires" payload
+  -- Adopt program entries + instances for the lifted wire programs.
+  for instJ in (match getField? resp "instances" with
+                | some (.arr is) => is | _ => #[]) do
+    let some name := getStrField? instJ "name" | continue
+    let program := (getStrField? instJ "program").getD name
+    let entry := (getField? instJ "entry").getD jsonNull
+    let pm := ProgMeta.fromEntry entry
+    env.state.modify fun st =>
+      let st := st.addProgram pm
+      if (st.findInstance? name).isSome then st
+      else st.addInstance name { baseTypeName := program, typeArgs := none, progMeta := pm }
+  -- Adopt the rewritten wire set verbatim (service map order).
+  let wires : Array Wire :=
+    (match getField? resp "wires" with
+     | some (.arr ws) => ws
+     | _ => #[]).filterMap fun w => do
+      let key ← getStrField? w "key"
+      let expr ← getField? w "expr"
+      match key.splitOn ":" with
+      | instName :: rest =>
+        pure { instName, portName := String.intercalate ":" rest, expr : Wire }
+      | [] => none
+  let counter := match getField? resp "counter" with
+    | some (.num n) => n.toFloat.toUInt64.toNat
+    | _ => counterBase
+  env.state.modify fun st =>
+    { st with wires, nameCounters := st.nameCounters.insert "__wire" counter }
+
+/-- The session lowering + compile (Phase 3): lift if needed, then run
+    the Lean lowering — slot allocation, delay extraction, acyclicity,
+    serialization to a ParsedProgram — ship it with the slot bookkeeping
+    to the service for elaborate + partition, and hot-swap the returned
+    plan into the Lean-owned runtime. -/
+def syncCompile (env : Env) : EngineM Unit := do
+  liftIfNeeded env
+  let st ← env.state.get
+
+  -- Lowering (pure over the mirror; the mirror itself stays canonical
+  -- pre-extraction).
+  let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
+  let (wiresPost, delayEntries, alloc) :=
+    Tropical.Lowering.extractSessionDelays st.wires alloc
+  Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
+  let parsed ← Tropical.Lowering.sessionToParsed st.instances wiresPost delayEntries
+
+  let payload := Json.mkObj [
+    ("parsed_program", parsed),
     ("instances", Json.arr <| st.instances.map fun (n, i) =>
       Json.mkObj [("name", Json.str n), ("program", Json.str i.baseTypeName),
                   ("type_args", i.typeArgs.getD jsonNull)]),
-    ("wires", Json.arr <| st.wires.map fun w =>
+    ("wires", Json.arr <| wiresPost.map fun w =>
       Json.mkObj [("key", Json.str w.key), ("expr", w.expr)]),
     ("graph_outputs", Json.arr <| st.graphOutputs.map fun (i, o) =>
       Json.mkObj [("instance", Json.str i), ("output", Json.str o)]),
     ("params", Json.arr <| st.params.map fun (n, v) =>
-      Json.mkObj [("name", Json.str n), ("value", v)])]
+      Json.mkObj [("name", Json.str n), ("value", v)]),
+    ("slot_count", toJson alloc.slotCount),
+    ("param_slots", Json.arr <| alloc.paramSlots.map fun (n, i) =>
+      Json.arr #[Json.str n, toJson i]),
+    ("output_slots", Json.arr <| alloc.outputSlots.map fun (k, i) =>
+      Json.arr #[Json.str k, toJson i]),
+    ("output_port_meta", Json.arr <| alloc.outputMeta.map fun (k, m) =>
+      Json.arr #[Json.str k, m]),
+    ("io_array", Json.mkObj [
+      ("count", toJson alloc.ioCount),
+      ("sizes", toJson alloc.ioSizes),
+      ("names", toJson alloc.ioNames)]),
+    ("delay_slots", Json.arr <| delayEntries.map (·.toJson))]
+
   let resp ← env.service.call "compile" payload
   match getField? resp "plan_json" with
   | some (.str planJson) => env.runtime.loadPlan planJson
   | _ => internalError "compiler service: compile returned no plan_json"
-  -- Adopt the service's param registry (compile can discover params).
+  -- Adopt the service's param registry echo.
   match getField? resp "params" with
   | some (.arr ps) =>
     let params := ps.filterMap fun p => do
@@ -350,9 +420,7 @@ def handleGetInfo (env : Env) (args : Json) : EngineM Json := do
     Json.mkObj [
       ("name", Json.str p.name), ("index", toJson i),
       ("type", p.typeObj.getD jsonNull),
-      ("expr", match wire with
-        | some w => Tropical.Expr.stripDelayIds w.expr
-        | none => jsonNull),
+      ("expr", match wire with | some w => w.expr | none => jsonNull),
       ("pretty", match wire with
         | some w => Json.str (prettyExpr w.expr lookupOutputs)
         | none => jsonNull)]
@@ -899,6 +967,27 @@ def handleListParams (env : Env) : EngineM Json := do
   pure <| Json.arr <| st.params.map fun (n, v) =>
     Json.mkObj [("name", Json.str n), ("value", v)]
 
+/-- Differential-harness probe (rpc-only, not an MCP tool): render N
+    buffers through the Lean-owned runtime, return the raw samples as
+    hex — lets the recorded scripts assert audio equivalence between
+    engines. -/
+def handleDebugRender (env : Env) (args : Json) : EngineM Json := do
+  let frames := match arg? args "frames" with
+    | some (.num n) => n.toFloat.toUInt64.toNat
+    | _ => 4
+  let hexDigit (n : UInt8) : Char :=
+    if n < 10 then Char.ofNat ('0'.toNat + n.toNat)
+    else Char.ofNat ('a'.toNat + n.toNat - 10)
+  let mut hex := ""
+  for _ in [0:frames] do
+    env.runtime.process
+    let bytes ← env.runtime.outputBytes
+    let mut chunk := ""
+    for b in bytes.toList do
+      chunk := chunk.push (hexDigit (b >>> 4)) |>.push (hexDigit (b &&& 0xf))
+    hex := hex ++ chunk
+  pure <| Json.mkObj [("frames", toJson frames), ("hex", Json.str hex)]
+
 -- ── Dispatcher ───────────────────────────────────────────────────────────────
 
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
@@ -926,6 +1015,7 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "audio_status"    => handleAudioStatus env
   | "set_param"       => handleSetParam env args
   | "list_params"     => handleListParams env
+  | "debug_render"    => handleDebugRender env args
   | _ => internalError s!"Unknown tool: '{name}'"
 
 -- ── Boot ─────────────────────────────────────────────────────────────────────
