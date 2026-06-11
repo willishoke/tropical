@@ -32,20 +32,6 @@ namespace Tropical.Ir.Strata.InlineInstances
 open Lean (JsonNumber)
 open Tropical.Ir
 
-/-- Port of decl_tables.ts `getInstanceType`. -/
-private def getInstanceType (arena : Arena) (enclosing : Program)
-    (instName typeKey : String) : Except Error (ProgramIdx × Program) := do
-  match enclosing.registryGet? typeKey with
-  | some pIdx =>
-    let some p := arena.program? pIdx
-      | throw ⟨s!"getInstanceType: instance '{instName}' typeKey '{typeKey}' program pool index {pIdx.idx} out of range (internal)"⟩
-    return (pIdx, p)
-  | none =>
-    let keys := ", ".intercalate (enclosing.registry.toList.map (·.1))
-    throw ⟨s!"getInstanceType: instance '{instName}' typeKey '{typeKey}' " ++
-      s!"not found in enclosing program '{enclosing.name}' registry " ++
-      s!"(keys: {keys}). This is a registry-build bug; check buildProgramRegistry call sites."⟩
-
 -- ─────────────────────────────────────────────────────────────
 -- Functional input-substitution + offset shifting
 -- ─────────────────────────────────────────────────────────────

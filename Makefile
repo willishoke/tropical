@@ -82,7 +82,7 @@ diff-elab: build lean
 # passes 1..K (STRATA_K, the stage ratchet; tracks Strata.portedPasses),
 # ships the prefix through the resolved codec, the TS suffix finishes,
 # and only final post-strata output is compared. K=5 is pure Lean-vs-TS.
-STRATA_K ?= 3
+STRATA_K ?= 4
 diff-strata: build lean
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli
 	bun run scripts/build_parsed_stdlib.ts
