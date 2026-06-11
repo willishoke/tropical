@@ -3,6 +3,7 @@ import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
 import Tropical.Ir.Codec
 import Tropical.Ir.Strata
+import Tropical.Ir.Core
 
 /-!
 The `diffcli` executable — differential-harness verbs that exercise the
@@ -251,7 +252,16 @@ private def printStrata (opts : Tropical.Ir.Strata.Options)
   | .error e =>
     IO.println (errorJson e.message).compress
     return 0
-  | .ok (arena', root') => printEncoded arena' root'
+  | .ok (arena', root') =>
+    -- Post-strata invariant assertion (inline path only — fractal
+    -- harness inputs carry raw-elaborated instance targets; the
+    -- production seam asserts those per registered program). A check
+    -- failure is a Lean-side invariant bug: harness error, loud.
+    if opts.upto == 5 && opts.inlineNested then
+      if let .error e := Tropical.Ir.Core.check arena' root' then
+        IO.eprintln e
+        return 1
+    printEncoded arena' root'
 
 def strataStdlibVerb (args : List String) : IO UInt32 := do
   let some target := args.head?
