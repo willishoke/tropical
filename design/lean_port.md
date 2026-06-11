@@ -1,12 +1,15 @@
 # The Lean port — top-down migration of the compiler
 
-Status: **Phase 4 landed** (the plan-level reference interpreter is the
-one deferred item — see phase 2 notes). Lean owns the front half of the
-compiler: raise (`Tropical/Parse/Raise.lean` over the typed AST in
-`Tropical/Parse/Nodes.lean`), the elaborator
+Status: **Phase 5 passes landed; seam cutover (stage 6b) remains**
+(the plan-level reference interpreter is the other deferred item — see
+phase 2 notes). Lean owns the front half of the compiler AND the full
+strata pipeline: raise (`Tropical/Parse/Raise.lean` over the typed AST
+in `Tropical/Parse/Nodes.lean`), the elaborator
 (`Tropical/Ir/Elaborator.lean` over the pool-shaped resolved IR in
-`Tropical/Ir/Nodes.lean`), and both sides of the `tropical_resolved_1`
-codec. The engine elaborates registered programs AND the session root
+`Tropical/Ir/Nodes.lean`), both sides of the `tropical_resolved_1`
+codec, and all six strata passes (`Tropical/Ir/Strata/*`, gated by
+`make diff-strata` at K=5: pure Lean-vs-TS over the corpus, both wire
+modes). The production seam still runs TS strata until stage 6b. The engine elaborates registered programs AND the session root
 itself; the TS compiler service performs no raise and no elaboration on
 any production path — `register_program` is typeDef-registration +
 decode + strata, `compile` is decode + `partitionKernel`. The stdlib
@@ -186,9 +189,55 @@ replaces is **deleted**, and the relevant differs + existing suites
    session-layer — none are elaborator dependencies; ported instead:
    `decl_tables` semantics, `findInstanceCycles`,
    `elaboration_diagnostics`.
-5. **Strata pipeline.** Port the six passes (keep the `inlineNested`
-   fractal path). Gate: per-pass differential over canonical resolved
-   JSON; `nested_vs_inlined` / `microkernel_*` suites stay green.
+5. **Strata pipeline.** 🟡 (passes landed, stages 0–6a; seam cutover
+   6b remains). Port of the six passes (`Tropical/Ir/Recursion.lean` +
+   `Tropical/Ir/Strata/{Basic,Specialize,SumLower,InlineInstances,
+   ArrayLower,IdentityElim}.lean`), `inlineNested` fractal path kept.
+   **Gate methodology revision** (deliberate, replacing the per-pass
+   differential): whole-strata comparison with a hybrid prefix —
+   `make diff-strata` runs Lean passes `1..K` (`STRATA_K`, ratcheted
+   per stage, = `Strata.portedPasses`), ships the prefix through the
+   resolved codec, the TS suffix (`strata_cmd.ts strata-suffix`)
+   completes `K+1..5`, and only final post-strata output is compared —
+   divergence at stage K localizes to pass K with no per-intermediate
+   diff semantics and no codec-fidelity obligation at intermediate
+   strata. At K=5 the suffix is skipped: pure Lean-vs-TS. Corpus: 86
+   outputs × both modes (stdlib manifest, generics re-run all-args=8,
+   elaborable raise fixtures incl. the new `identity_wire.json` —
+   added because identityElim was a no-op on the prior corpus —
+   specialize error probes; byte-exact error parity). TS identity
+   discipline mirrored where observable (typeArg subst keyed on
+   typeParam pool idx; sumLower slotKey lookups name-keyed; arrayLower
+   registry recursion per entry so aliased keys stay aliased only on
+   the no-op fast path); TS WeakMap memos are sharing-only (invisible
+   to the structural codec) and dropped. Stage 6a: `Tropical/Ir/
+   Core.lean` — the post-strata sub-IR as a type + `check`, the
+   executable downcast asserted in the K=5 inline gate; it is the spec
+   for any later typed-boundary refactor and the domain Phase 6
+   emit/partition consume with total matches.
+   **Stage 6b (remaining):** move the production strata call sites
+   engine-side and delete them from `compiler_service.ts`:
+   `register_program` (drop `programTypeFromResolved`; engine ships
+   post-strata resolved, service wraps via `makeCompiled`),
+   `resolve_type` + `handleCompile`'s per-instance
+   `resolveProgramType` (engine-side specialization with `Type<N=8>`
+   cache keys; compile payload ships specialized resolved per
+   instance), `lift_wires` (engine elaborates + stratas `__wire_N`
+   programs). Gates: diff-engine (all scripts incl. `debug_render`),
+   test-lean-engine, full bun suite, `make validate`, diff-strata K=5.
+   **Post-oracle restructure decision (recorded, NOT Phase 5 work):**
+   inlining is a realization/cost knob, not a lowering — both backends
+   consume nested plans; the depth-vs-flat benches show the ~25%
+   flat-path runtime win comes from slot *removal* (IR-level), which
+   LLVM legally cannot do (slots are observable hot-swap state), while
+   microkernel-vs-fused shows compile-time crossover at ~8 voices.
+   After the oracle retires, `inlineInstances` leaves the strata
+   pipeline and becomes an optional post-strata `Core → Core`
+   normalization (gated by `nested_vs_inlined` at 1e-12; audio goldens
+   re-baseline expected). That also linearizes the stratum lattice,
+   simplifying any later typed-boundary refactor of the passes —
+   which is deliberately deferred until `check` can gate it
+   Lean-internally.
 6. **Emit + partition** (HIGH risk; strictest gates). Port `slots`,
    `compile_resolved`, `emit_resolved`, `partition_recursive`,
    `compile_session_slotted*`. CSE memos key on arena `ExprId`s that
