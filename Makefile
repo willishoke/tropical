@@ -29,10 +29,10 @@ lean:
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build
 
-# Launch the Lean front-door MCP server. It spawns mcp/ir_service.ts itself, so
-# this is the single command that brings up the whole Lean → IR → C++ stack.
+# Launch the Lean MCP server. As of Phase 6 the whole stack is the one
+# binary (session, compiler, runtime FFI) — no bun subprocess.
 mcp-lean: build lean
-	bun install --silent && ./lean/.lake/build/bin/frontend
+	./lean/.lake/build/bin/frontend
 
 clean:
 	rm -rf $(BUILD_DIR)

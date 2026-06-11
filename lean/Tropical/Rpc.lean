@@ -1,4 +1,5 @@
 import Tropical.Engine
+import Tropical.Resources
 
 /-!
 # `--rpc` mode — the ir_service-compatible stdio surface
@@ -41,13 +42,26 @@ def run (env : Engine.Env) : IO Unit := do
         | _ => ""
       let params := (req.getObjVal? "params").toOption.getD (Json.mkObj [])
       try
+        let internalEnv := fun (msg : String) =>
+          Tropical.failResult (.env { code := .internalError, message := msg, retryable := false })
         let result ←
-          if method == "resources/list" || method == "resources/read"
-              || method == "prompts/list" || method == "prompts/get" then
-            -- Relay the MCP non-tool surface to the compiler service.
-            match ← (env.service.call method params).run with
-            | .ok r => pure r
-            | .error f => pure (Tropical.failResult f)
+          if method == "resources/list" then
+            pure (Json.mkObj [("resources", Resources.resourcesList)])
+          else if method == "resources/read" then
+            let uri := match req.getObjVal? "params" with
+              | .ok p => ((p.getObjValAs? String "uri").toOption).getD ""
+              | .error _ => ""
+            let st ← env.state.get
+            match Resources.readResourceText st uri with
+            | .ok text => pure (Json.mkObj [("text", Json.str text)])
+            | .error msg => pure (internalEnv msg)
+          else if method == "prompts/list" then
+            pure (Json.mkObj [("prompts", Resources.promptsList)])
+          else if method == "prompts/get" then
+            let name := ((params.getObjValAs? String "name").toOption).getD ""
+            match Resources.getPromptMessages name with
+            | .ok j => pure j
+            | .error msg => pure (internalEnv msg)
           else
             Engine.handleTool env method params
         respond id result

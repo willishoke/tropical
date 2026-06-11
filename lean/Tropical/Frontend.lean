@@ -1,24 +1,22 @@
 import Turnstile
-import Tropical.Relay
 import Tropical.Tools
 import Tropical.Engine
 import Tropical.Rpc
+import Tropical.Resources
 
 /-!
 # Tropical Lean front-door
 
-The native Lean MCP server (built on Turnstile). As of Phase 1 of the
-Lean port, tool semantics run **in-process** (`Tropical.Engine`): the
-session lives in Lean, and the spawned subprocess is the *compiler
-service* (`mcp/compiler_service.ts`) — program registration,
-compilation, and the runtime FFI — not a full TS engine.
+The native Lean MCP server (built on Turnstile). As of Phase 6 the
+whole stack is in-process (`Tropical.Engine`): session, compiler,
+runtime FFI, resources. No subprocess is spawned.
 
 Two modes:
 - default — the MCP server (stdio), launched by `make mcp-lean`
 - `--rpc` — the ir_service-compatible newline JSON-RPC surface used by
   the bun test suites and the differential harness
 
-Run from the tropical repo root (so `mcp/compiler_service.ts` resolves):
+Run from the tropical repo root (so `stdlib/parsed/` resolves):
   lean/.lake/build/bin/frontend [--rpc]
 -/
 
@@ -73,51 +71,42 @@ def tropicalEngineTools (env : Engine.Env) : List Tool := [
   inProcNoArg               env "audio_status"    "Return current audio status including callback statistics."
 ]
 
--- ── Resources & prompts ─────────────────────────────────────────────────────
--- Discovered from the compiler service at startup; read/get relay back.
+-- ── Resources & prompts (engine-side; Tropical.Resources statics) ───────────
 
-private def buildResources (r : Relay) (listResult : Json) : List Resource :=
-  match listResult.getObjVal? "resources" with
-  | .ok (.arr arr) => arr.toList.filterMap fun e =>
-      match e.getObjValAs? String "uri" with
-      | .ok uri => some {
-          uri, name := (e.getObjValAs? String "name").toOption.getD uri,
-          description := (e.getObjValAs? String "description").toOption.getD "",
-          mimeType := (e.getObjValAs? String "mimeType").toOption.getD "text/plain",
-          read := do
-            let res ← r.call "resources/read" (Json.mkObj [("uri", Json.str uri)])
-            pure ((res.getObjValAs? String "text").toOption.getD "") }
-      | .error _ => none
-  | _ => []
+private def engineResources (env : Engine.Env) : List Resource := [
+  { uri := "tropical://programs",
+    name := "Program catalog",
+    description := "Markdown catalog of all registered program types with inputs, outputs, and default values.",
+    mimeType := "text/markdown",
+    read := do
+      let st ← env.state.get
+      pure (Resources.renderProgramCatalog st) },
+  { uri := "tropical://program-format",
+    name := "Program format",
+    description := "Reference doc for the tropical_program_2 schema.",
+    mimeType := "text/markdown",
+    read := pure Resources.programFormatDoc }]
 
-private def buildPrompts (r : Relay) (listResult : Json) : List Prompt :=
-  match listResult.getObjVal? "prompts" with
-  | .ok (.arr arr) => arr.toList.filterMap fun e =>
-      match e.getObjValAs? String "name" with
-      | .ok name => some {
-          name, description := (e.getObjValAs? String "description").toOption.getD "",
-          get := r.call "prompts/get" (Json.mkObj [("name", Json.str name)]) }
-      | .error _ => none
-  | _ => []
+private def enginePrompts : List Prompt := [
+  { name := "build-patch",
+    description := "Three-tiered workflow guidance for building and editing tropical patches efficiently.",
+    get := match Resources.getPromptMessages "build-patch" with
+      | .ok j => pure j
+      | .error e => throw (IO.userError e) }]
 
 -- ── Entry points ─────────────────────────────────────────────────────────────
 
 def runFrontend : IO Unit := do
-  let (env, child) ← Engine.boot
-  let relay := env.service.relay
-  let resources := buildResources relay (← relay.call "resources/list" (Json.mkObj []))
-  let prompts   := buildPrompts   relay (← relay.call "prompts/list"   (Json.mkObj []))
+  let env ← Engine.boot
   let srv : Server := {
     name := "tropical", version := "0.1.0",
-    tools := tropicalEngineTools env, resources, prompts }
+    tools := tropicalEngineTools env,
+    resources := engineResources env,
+    prompts := enginePrompts }
   srv.run                       -- runs until the MCP client closes stdin
-  child.kill
-  let _ ← child.wait
 
 def runRpc : IO Unit := do
-  let (env, child) ← Engine.boot
+  let env ← Engine.boot
   Rpc.run env
-  child.kill
-  let _ ← child.wait
 
 end Tropical

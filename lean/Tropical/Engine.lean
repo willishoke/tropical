@@ -5,7 +5,6 @@ import Tropical.Expr
 import Tropical.Wiring
 import Tropical.Session
 import Tropical.Lowering
-import Tropical.Client
 import Tropical.Parse.Nodes
 import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
@@ -14,22 +13,22 @@ import Tropical.Ir.Core
 import Tropical.Ir.WireProgram
 import Tropical.TypeArgs
 import Tropical.Compile
+import Tropical.Entries
 
 /-!
 # The tropical IR engine — tool semantics, in Lean
 
-Port of `mcp/engine.ts`. The session (graph topology, program mirror,
-wiring) is owned here, and as of Phase 2 so is the native runtime: plans
-load over the Lean FFI, the DAC reads from the Lean-owned runtime, and
-params drive `param:<name>` module slots directly. The compiler service
-supplies program registration, pure compilation, and
-save/export/load/merge until those layers are ported in turn.
+Port of `mcp/engine.ts`. As of Phase 6 the engine is the whole stack:
+the session, the native runtime (FFI), registration (raise + elaborate
++ strata + entry rendering), the compiler (Core downcast + partition +
+plan assembly), the v2 ingest (load/merge), and save/export. There is
+no compiler-service subprocess.
 
-Every graph mutation ends in `syncCompile`: the session snapshot goes to
-the service, which rebuilds its TS session and compiles; the returned
-plan hot-swaps into the Lean runtime. State mutations precede the
-compile (matching TS: a failed compile leaves the mutated graph in
-place; the previous kernel keeps playing and the error is recoverable).
+Every graph mutation ends in `syncCompile`: the mirror lowers,
+elaborates, downcasts, partitions, and the plan hot-swaps into the
+Lean-owned runtime. State mutations precede the compile (matching TS:
+a failed compile leaves the mutated graph in place; the previous
+kernel keeps playing and the error is recoverable).
 -/
 
 namespace Tropical.Engine
@@ -40,7 +39,6 @@ open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 structure Env where
   state   : IO.Ref SessionSt
-  service : Service
   /-- The native FlatRuntime this engine owns: plans load here; the DAC
       reads from it; param slots are driven on it. -/
   runtime : Ffi.Runtime
@@ -255,9 +253,10 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
       { s with arena := arenaRaw,
                nameCounters := s.nameCounters.insert "__wire" counter,
                templateByName := s.templateByName.insert synthName rawIdx }
-    let resp ← env.service.call "register_lifted" <| Json.mkObj
-      [("name", Json.str synthName), ("raw", rawJson), ("resolved", postJson)]
-    let entry ← Service.field resp "entry"
+    let _ := rawJson  -- the raw form's only consumer was the service residue
+    let entry ← match Tropical.Entries.concreteEntry arenaPost synthName postIdx with
+      | .error e => internalError e
+      | .ok j => pure j
     let pm := ProgMeta.fromEntry entry
     let resolvedIdx ← adoptResolved env entry
     env.state.modify fun s =>
@@ -336,10 +335,7 @@ def syncCompile (env : Env) : EngineM Unit := do
   -- Failure maps onto the envelope the TS path produced when its
   -- compile-side `elaborate` threw: ElaborationError / CycleViolation
   -- are plain Errors there, so `toEnvelope` made them `internal_error`
-  -- with the verbatim message. The error is surfaced *after* the
-  -- mirror-sync call below, matching the TS ordering (the service
-  -- rebuilt its session before its elaborate threw, so save/export
-  -- after a failed compile see the mutated graph).
+  -- with the verbatim message.
   let (rootElab?, elabErr?) :
       Option (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) × Option String :=
     match Tropical.Ir.elaborateInto st.arena typed
@@ -347,60 +343,10 @@ def syncCompile (env : Env) : EngineM Unit := do
     | .error e => (none, some e.message)
     | .ok (arena', rootIdx) => (some (arena', rootIdx), none)
 
-  -- Phase 5 stage 6b: each instance ships its post-strata resolved IR
-  -- (the snapshot the engine adopted at add/replicate/load time); the
-  -- service's compile instantiates from it directly instead of
-  -- re-resolving (and possibly re-strata'ing) by name. A missing
-  -- snapshot ships null — decode fails service-side as internal_error,
-  -- the engine-bug envelope this state deserves.
-  let mut instancesJson : Array Json := #[]
-  for (n, i) in st.instances do
-    let resolvedJ ← match i.resolvedIdx with
-      | none => pure jsonNull
-      | some idx =>
-        match Tropical.Ir.Codec.encodeResolved st.arena idx with
-        | .error e => internalError s!"compile: instance '{n}' resolved encode failed: {e}"
-        | .ok j => pure j
-    instancesJson := instancesJson.push <| Json.mkObj
-      [("name", Json.str n), ("program", Json.str i.baseTypeName),
-       ("type_args", i.typeArgs.getD jsonNull),
-       ("resolved", resolvedJ)]
-
-  let payload := Json.mkObj [
-    ("instances", Json.arr instancesJson),
-    ("wires", Json.arr <| wiresPost.map fun w =>
-      Json.mkObj [("key", Json.str w.key), ("expr", w.expr)]),
-    ("graph_outputs", Json.arr <| st.graphOutputs.map fun (i, o) =>
-      Json.mkObj [("instance", Json.str i), ("output", Json.str o)]),
-    ("params", Json.arr <| st.params.map fun (n, v) =>
-      Json.mkObj [("name", Json.str n), ("value", v)]),
-    ("slot_count", toJson alloc.slotCount),
-    ("param_slots", Json.arr <| alloc.paramSlots.map fun (n, i) =>
-      Json.arr #[Json.str n, toJson i]),
-    ("output_slots", Json.arr <| alloc.outputSlots.map fun (k, i) =>
-      Json.arr #[Json.str k, toJson i]),
-    ("output_port_meta", Json.arr <| alloc.outputMeta.map fun (k, m) =>
-      Json.arr #[Json.str k, m]),
-    ("io_array", Json.mkObj [
-      ("count", toJson alloc.ioCount),
-      ("sizes", toJson alloc.ioSizes),
-      ("names", toJson alloc.ioNames)]),
-    ("delay_slots", Json.arr <| delayEntries.map (·.toJson))]
-
   if let some msg := elabErr? then
-    -- Mirror-sync: the service rebuilds its session from this payload
-    -- before the engine surfaces the elaboration envelope; its own
-    -- failure (if any) is discarded (the ascription forces a lift
-    -- instead of a defeq re-bind that would re-propagate it). The
-    -- previous kernel keeps playing — same recoverable-failure shape
-    -- as TS.
-    let _discarded : Except Failure Json ← (env.service.call "sync" payload).run
+    -- The previous kernel keeps playing — same recoverable-failure
+    -- shape as TS.
     internalError msg
-
-  -- Mirror-sync (save/export read the service session until their
-  -- phases) — then compile HERE: Core downcast, partition, plan
-  -- assembly, FFI load. The service performs no compile work.
-  let resp ← env.service.call "sync" payload
 
   let some (arena', rootIdx) := rootElab?
     | internalError "syncCompile: missing elaborated root (engine bug)"
@@ -433,16 +379,6 @@ def syncCompile (env : Env) : EngineM Unit := do
     | .error msg => internalError msg
     | .ok j => pure j.compress
   env.runtime.loadPlan planJson
-
-  -- Adopt the service's param registry echo.
-  match getField? resp "params" with
-  | some (.arr ps) =>
-    let params := ps.filterMap fun p => do
-      let name ← getStrField? p "name"
-      let value ← getField? p "value"
-      pure (name, value)
-    env.state.modify fun st => { st with params }
-  | _ => pure ()
 
 /-- Harness-only (diffcli `compile`): rebuild the plan from the current
     mirror at an arbitrary compilation mode, WITHOUT loading it or
@@ -610,13 +546,13 @@ def registerOne (env : Env) (name : String) (p : Tropical.Parse.Program)
   let (arenaShip, shipIdx) ←
     if isGeneric then pure (arena', rawIdx)
     else strataConcrete st arena' rawIdx
-  let resolved ← match Tropical.Ir.Codec.encodeResolved arenaShip shipIdx with
-    | .error e => internalError e
-    | .ok j => pure j
   env.state.modify fun st => { st with arena := arenaShip }
-  let resp ← env.service.call "register_program" <| Json.mkObj
-    [("name", Json.str name), ("parsed", p.toJson), ("resolved", resolved)]
-  let entry ← Service.field resp "entry"
+  let entry ← if isGeneric then
+      pure (Tropical.Entries.genericEntry arenaShip name shipIdx)
+    else
+      match Tropical.Entries.concreteEntry arenaShip name shipIdx with
+      | .error e => internalError e
+      | .ok j => pure j
   env.state.modify (·.addProgram (ProgMeta.fromEntry entry))
   let idx? ← adoptResolved env entry
   -- templateByName mirrors what TS `session.programs.set(name, ...)`
@@ -701,17 +637,13 @@ private def resolveInstanceMeta (env : Env) (programName : String)
             if !toolEnvelopes then internalError msg
             throwBare .invalidTypeArgs msg (param := some "type_args") (value := typeArgs)
           | .ok r => pure r
-        let resolved ← match Tropical.Ir.Codec.encodeResolved arena' specIdx with
+        -- arena' (the pre-round-trip specialization) is deliberately
+        -- NOT persisted: the store adopts the entry's codec round trip
+        -- below, exactly one arena copy — the same growth the
+        -- service-relay path had.
+        let entry ← match Tropical.Entries.concreteEntry arena' key specIdx with
           | .error e => internalError e
           | .ok j => pure j
-        -- arena' (the pre-round-trip specialization) is deliberately
-        -- NOT persisted: the store adopts the service entry's
-        -- round-tripped form below, exactly one arena copy — the same
-        -- growth the pre-6b path had.
-        let payload := Json.mkObj [
-          ("key", Json.str key), ("type_args", echo), ("resolved", resolved)]
-        let resp ← env.service.call "resolve_type" payload
-        let entry ← Service.field resp "entry"
         let pmNew := ProgMeta.fromEntry entry
         let idx? ← adoptResolved env entry
         env.state.modify fun s =>
@@ -1626,14 +1558,6 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
       if st.params.any (·.1 == name) then
         internalError s!"merge collision: param '{name}' already exists."
 
-  -- Type defs (file root): registered service-side (raise/elaborate for
-  -- export read them there); cleared on load, additive on merge.
-  let typeDefs : Json := match node.getField? "ports" |>.bind (·.getField? "type_defs") with
-    | some td => td.toJson
-    | none => Json.arr #[]
-  let _ ← env.service.call "sync_type_defs" <| Json.mkObj
-    [("clear", Json.bool !merge), ("type_defs", typeDefs)]
-
   -- Inline program definitions, each through the engine registration
   -- batch (nested programDecls depth-first, exactly loadProgramAsType's
   -- recursion).
@@ -1947,18 +1871,11 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
     before strata (its `processedByName` step) — so the registered
     catalog is byte-faithful to the old TS `loadStdlib`. Any failure
     here is fatal: the engine cannot compile without its store. -/
-def boot : IO (Env × IO.Process.Child ⟨.piped, .piped, .inherit⟩) := do
-  let child ← IO.Process.spawn {
-    cmd := "bun", args := #["run", "mcp/compiler_service.ts"],
-    stdin := .piped, stdout := .piped, stderr := .inherit
-  }
-  let service : Service := { relay := { stdin := child.stdin, stdout := child.stdout } }
+def boot : IO Env := do
   let state ← IO.mkRef ({} : SessionSt)
   let runtime ← Ffi.Runtime.new 512
   let dac ← IO.mkRef (none : Option Ffi.Dac)
-  let env : Env := { state, service, runtime, dac }
-  -- Handshake (liveness check; the method survives with an empty result).
-  let _ ← service.relay.call "boot" (Json.mkObj [])
+  let env : Env := { state, runtime, dac }
   let manifestText ← IO.FS.readFile "stdlib/parsed/manifest.json"
   let names ← match Json.parse manifestText with
     | .error e => throw <| IO.userError s!"stdlib/parsed/manifest.json: {e}"
@@ -1984,6 +1901,6 @@ def boot : IO (Env × IO.Process.Child ⟨.piped, .piped, .inherit⟩) := do
   match ← registerAll.run with
   | .ok () => pure ()
   | .error f => throw <| IO.userError s!"stdlib boot failed: {f.toJson.compress}"
-  pure (env, child)
+  pure env
 
 end Tropical.Engine

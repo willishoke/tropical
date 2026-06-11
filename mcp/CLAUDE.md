@@ -1,41 +1,25 @@
 # mcp/
 
-The TypeScript side of the MCP stack. As of Phase 1 of the Lean port
-(`design/lean_port.md`), the *engine* — session state and the 23 tool
-handlers — lives in Lean (`lean/Tropical/Engine.lean`), running
-in-process behind the Turnstile front door. What remains here is the
-**compiler service** the Lean engine drives, plus the retired-but-kept
-TS engine that serves as the differential oracle.
+The TypeScript side of the MCP stack. As of Phase 6 of the Lean port
+(`design/lean_port.md`), **nothing here is on the production path**:
+the Lean binary (`lean/.lake/build/bin/frontend`) is the whole stack —
+session, registration, compiler (raise → elaborate → strata → emit →
+partition), runtime FFI, save/export/load/merge, resources/prompts.
+There is no compiler-service subprocess; `mcp/compiler_service.ts` is
+deleted.
 
-- `compiler_service.ts` — what the Lean front door spawns. As of
-  Phase 4 the service performs **no raise and no elaboration**, and as
-  of Phase 5 stage 6b **no strata**, on any production path; Lean owns
-  the compiler front (raise + elaborate + the full strata pipeline,
-  `lean/Tropical/Parse/*` + `lean/Tropical/Ir/*`) and ships resolved
-  IR over the `tropical_resolved_1` codec
-  (`compiler/ir/resolved_codec.ts`). What's left here:
-  `register_program` (typeDef registries + `decodeResolved` +
-  `makeCompiled` — the engine ships post-strata for concrete programs,
-  raw templates for generics), `resolve_type` (decode + cache the
-  engine-specialized `Type<N=8>` Compiled + render the entry),
-  `register_lifted` (the engine's lifted `__wire_N` programs: raw form
-  into `session.programs` for export's resolver, post-strata Compiled
-  into typeRegistry), `compile` (rebuilds the session mirror from
-  Lean's snapshot, instantiates each instance from its shipped
-  per-instance resolved, decodes `resolved_root`, runs
-  `partitionKernel`, returns the plan JSON string), and
-  save/export/load/merge (they need the v2 ingest + compiler until
-  their phases). The service
-  boots empty — the engine registers the stdlib from the pre-parsed
-  bridge (`stdlib/parsed/`). The Lean engine owns the native runtime,
-  the DAC, and params over its own FFI (`lean/Tropical/Ffi.lean`);
-  plans returned by `compile`/`load`/`merge` hot-swap into the
-  Lean-owned runtime. Newline JSON-RPC; tool-level failures return
-  `{result: {error: <ErrorEnvelope>}}`.
+What remains here is the retired-but-kept TS engine that serves as the
+**differential oracle** until Phase 8:
+
 - `engine.ts` + `ir_service.ts` — the full TS engine and its protocol
-  surface. No longer on the production path; kept as the differential
-  oracle for `make diff-engine` and the in-process unit tests until
-  the TS pipeline retires (Phase 6/8).
+  surface. Oracle side A of `make diff-engine`; the Lean engine speaks
+  the same protocol via `frontend --rpc`.
+- `envelope.ts` — ErrorEnvelope types (Lean mirrors it in
+  Tropical/Errors.lean).
+- `resources.ts` — MCP resources/prompts source texts (Lean mirrors
+  them verbatim in Tropical/Resources.lean).
+- `*.test.ts` — protocol suites; `make test-lean-engine` runs
+  errors/wire_dac against the Lean engine via TROPICAL_ENGINE_CMD.
 
 ## Running
 
@@ -49,10 +33,8 @@ for Claude Code (it builds the front door and execs it).
 ## Layout
 
 ```
-compiler_service.ts        The TS compiler behind the Lean engine (spawned by
-                           the front door). Shrinks phase by phase until Phase 6.
-envelope.ts                ErrorEnvelope types + fail helpers (shared source for
-                           the service; Lean mirrors it in Tropical/Errors.lean).
+envelope.ts                ErrorEnvelope types + fail helpers (oracle-side;
+                           Lean mirrors it in Tropical/Errors.lean).
 resources.ts               MCP resources/prompts surface (program catalog,
                            program-format doc, build-patch prompt).
 engine.ts                  The retired TS engine: SessionState + handleTool.

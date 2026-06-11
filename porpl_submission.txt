@@ -1,0 +1,33 @@
+PorPL Talk Submission — Form Fields
+====================================
+
+
+TENTATIVE TITLE
+---------------
+
+Operads, Agents, and Production Discipline in a Realtime Systems Compiler
+
+
+SHORT ABSTRACT
+--------------
+
+
+
+ANYTHING ELSE
+-------------
+
+Intended length: regular talk (25-30 minutes). A condensed version (~15 minutes) is also possible if scheduling requires.
+
+If accepted, I'd like to record the talk for personal use and possible posting on a personal channel; happy to coordinate with the organizers on this if recording isn't standard at PorPL.
+
+I was encouraged to submit by [PROF NAME], who I met recently at [EVENT] and who I understand is involved with PorPL.
+
+The talk is intended for an audience comfortable with category-theoretic vocabulary at the level of "what is a functor"; deeper familiarity with operadic algebra is not assumed. Concrete examples from tropical's IR will ground the more abstract claims.
+
+
+---
+Notes / placeholders to fill in before submitting:
+- [PROF NAME] — name of professor who encouraged submission
+- [EVENT] — hackathon or conference where you met
+- Verify 25-30 min length feels right for the three-thread structure
+- Decide whether to keep recording disclosure or soften it
