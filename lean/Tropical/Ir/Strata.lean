@@ -1,4 +1,6 @@
-import Tropical.Ir.Nodes
+import Tropical.Ir.Strata.Basic
+import Tropical.Ir.Strata.Specialize
+import Tropical.Ir.Elaborator
 
 /-!
 # Strata pipeline — port of compiler/ir/strata.ts (Phase 5)
@@ -24,47 +26,38 @@ Pass numbering (K = passes completed):
   4 arrayLower
   5 identityElim
 
-Passes are `Arena → ProgramIdx → …` maps that may push fresh programs
-into the pool and abandon old ones — the codec encoder pools ids on
-first reference from the root, so unreachable entries are never
+Passes are maps over `(Arena, ProgramIdx)` that may push fresh
+programs into the pool and abandon old ones — the codec encoder pools
+ids on first reference from the root, so unreachable entries are never
 emitted.
-
-`Error` carries the byte-exact TS error message (specialize's
-validation errors, AcyclicityViolation, …); the diff harness compares
-error strings as outputs.
 -/
 
 namespace Tropical.Ir.Strata
 
-open Lean (JsonNumber)
-
 /-- Number of passes ported so far. Bumped per Phase 5 stage; the
     diffcli verbs reject `--upto` beyond this. -/
-def portedPasses : Nat := 0
+def portedPasses : Nat := 1
 
-structure Options where
-  /-- Run passes `1..upto` (0 = elaborate-only prefix). -/
-  upto : Nat := portedPasses
-  /-- `false` = the fractal session path: inlineInstances is skipped. -/
-  inlineNested : Bool := true
-  /-- Type args by NAME (raw numbers; validation — including unknown
-      names and non-integers — is specialize's job, with byte-exact
-      TS error messages). -/
-  typeArgs : Array (String × JsonNumber) := #[]
-deriving Repr, Inhabited
-
-/-- A strata error is a comparable output: the TS error message,
-    byte-exact. -/
-structure Error where
-  message : String
-deriving Repr, Inhabited
+/-- Port of acyclic.ts `assertAcyclic` — the strataPipeline-entry
+    tripwire. Cycle-breaking is the realization layer's job upstream;
+    any cycle here is a caller bug. -/
+private def assertAcyclic (arena : Arena) (root : ProgramIdx) :
+    Except Error Unit := do
+  let some prog := arena.program? root
+    | throw ⟨s!"strataPipeline: program pool index {root.idx} out of range"⟩
+  let sccs := findInstanceCycles prog
+  unless sccs.isEmpty do
+    let names := "; ".intercalate (sccs.toList.map fun scc => " → ".intercalate scc.toList)
+    throw ⟨s!"strataPipeline: input contains an unbroken inter-instance cycle: {names}"⟩
 
 /-- Run passes `1..opts.upto`. Precondition (enforced by callers):
     `opts.upto ≤ portedPasses`. -/
 def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
     Except Error (Arena × ProgramIdx) := do
-  let _ := opts
-  -- Stage 0: no passes ported; the prefix is elaborate-only.
+  if opts.upto < 1 then return (arena, root)
+  assertAcyclic arena root
+  let (arena, root) ← Specialize.run arena root opts.typeArgs
+  -- Passes 2..5 land in subsequent Phase 5 stages.
   return (arena, root)
 
 end Tropical.Ir.Strata
