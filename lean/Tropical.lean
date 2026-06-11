@@ -5,5 +5,6 @@ import Tropical.Frontend
 import Tropical.Parse.Raise
 import Tropical.Ir.Nodes
 import Tropical.Ir.Codec
+import Tropical.Plan
 import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata

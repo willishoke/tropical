@@ -37,6 +37,41 @@ namespace Tropical.Ir.Core
 open Lean (JsonNumber)
 open Tropical.Ir
 
+-- ─────────────────────────────────────────────────────────────
+-- Resolved port types (Phase 6 enrichment)
+--
+-- Emit/partition need port shapes (scalar counts, array sizes,
+-- element kinds) and reg scalar types. The TS emit reads these off
+-- the IR's PortType objects with arena-free field access (`alias.base`
+-- etc.); the downcast resolves the pool references once so Core stays
+-- a self-contained tree.
+-- ─────────────────────────────────────────────────────────────
+
+/-- Array element: scalar kind, or an alias carrying its base. The two
+    survive distinctly because TS consumers disagree on the collapse —
+    `inputPortTypes` uses `element.base`, `expandPortToSlots` uses
+    `'float'` for alias elements. -/
+inductive CoreElem where
+  | scalar (k : ScalarKind)
+  | aliased (base : ScalarKind)
+deriving Repr, Inhabited
+
+/-- A shape dimension post-strata: a literal, or an unresolved type
+    param (specialize didn't run — emit reproduces the TS error). -/
+inductive CoreShapeDim where
+  | lit (n : JsonNumber)
+  | unresolved
+deriving Repr, Inhabited
+
+inductive CorePortType where
+  | scalar (k : ScalarKind)
+  /-- Alias port. `base` is the alias's underlying scalar; slot
+      expansion treats the port as one opaque float slot, type
+      inference uses the base. -/
+  | alias (base : ScalarKind)
+  | array (element : CoreElem) (shape : Array CoreShapeDim)
+deriving Repr, Inhabited
+
 inductive CoreExpr where
   | num (n : JsonNumber)
   | bool (b : Bool)
@@ -61,8 +96,10 @@ structure CoreInstanceInput where
 deriving Repr, Inhabited
 
 inductive CoreBodyDecl where
+  /-- `scalarType` is the resolved register scalar (TS `regScalarType`:
+      untyped → float, alias → its base). -/
   | reg (name : String) (init : CoreExpr) (update? : Option CoreExpr)
-      (type? : Option ScalarOrAlias) (liftedFrom? : Option String)
+      (scalarType : ScalarKind) (liftedFrom? : Option String)
   | param (name : String) (value? : Option JsonNumber)
   /-- Fractal kernel boundary; `typeKey` resolves in the enclosing
       `CoreProgram`'s registry. typeArgs survive as inert metadata on
@@ -75,7 +112,13 @@ deriving Repr, Inhabited
 
 structure CoreInputDecl where
   name : String
+  type? : Option CorePortType := none
   default? : Option CoreExpr := none
+deriving Repr, Inhabited
+
+structure CoreOutputDecl where
+  name : String
+  type? : Option CorePortType := none
 deriving Repr, Inhabited
 
 structure CoreOutputAssign where
@@ -89,7 +132,7 @@ deriving Repr, Inhabited
 inductive CoreProgram where
   | mk (name : String)
        (inputs : Array CoreInputDecl)
-       (outputNames : Array String)
+       (outputs : Array CoreOutputDecl)
        (decls : Array CoreBodyDecl)
        (assigns : Array CoreOutputAssign)
        (registry : Array (String × CoreProgram))
@@ -97,6 +140,12 @@ deriving Inhabited
 
 def CoreProgram.name : CoreProgram → String
   | .mk n .. => n
+
+def CoreProgram.inputs : CoreProgram → Array CoreInputDecl
+  | .mk _ i .. => i
+
+def CoreProgram.outputs : CoreProgram → Array CoreOutputDecl
+  | .mk _ _ o .. => o
 
 def CoreProgram.decls : CoreProgram → Array CoreBodyDecl
   | .mk _ _ _ d .. => d
@@ -106,6 +155,22 @@ def CoreProgram.assigns : CoreProgram → Array CoreOutputAssign
 
 def CoreProgram.registry : CoreProgram → Array (String × CoreProgram)
   | .mk _ _ _ _ _ r => r
+
+/-- Instance-type lookup (TS `getInstanceType` against the registry). -/
+def CoreProgram.registryGet? (p : CoreProgram) (key : String) : Option CoreProgram :=
+  (p.registry.find? (·.1 == key)).map (·.2)
+
+/-- Projected reg table (positions are `RegIdx`). -/
+def CoreProgram.regs (p : CoreProgram) : Array CoreBodyDecl :=
+  p.decls.filter fun d => match d with | .reg .. => true | _ => false
+
+/-- Projected param table (positions are `ParamIdx`). -/
+def CoreProgram.params (p : CoreProgram) : Array CoreBodyDecl :=
+  p.decls.filter fun d => match d with | .param .. => true | _ => false
+
+/-- Projected instance table (positions are `InstanceIdx`). -/
+def CoreProgram.instances (p : CoreProgram) : Array CoreBodyDecl :=
+  p.decls.filter fun d => match d with | .inst .. => true | _ => false
 
 -- ─────────────────────────────────────────────────────────────
 -- check — the executable downcast
@@ -153,6 +218,42 @@ private def checkOptExpr (progName : String) :
   | some e => some <$> checkExpr progName e
   | none => pure none
 
+/-- Resolve a pool-referencing element type to its self-contained Core
+    form. Non-alias typeDefs in element position are unrepresentable in
+    well-formed post-strata IR; collapse to float (the TS access path
+    would read `undefined.base`-adjacent shapes as float downstream). -/
+private def resolveElem (arena : Arena) : ScalarOrAlias → CoreElem
+  | .scalar k => .scalar k
+  | .alias td =>
+    match arena.typeDef? td with
+    | some (.alias _ base) => .aliased base
+    | _ => .aliased .float
+
+private def resolvePortType (arena : Arena) : PortType → CorePortType
+  | .scalar k => .scalar k
+  | .alias td =>
+    match arena.typeDef? td with
+    | some (.alias _ base) => .alias base
+    | _ => .alias .float
+  | .array element shape =>
+    .array (resolveElem arena element) (shape.map fun
+      | .lit n => CoreShapeDim.lit n
+      | .typeParam _ => CoreShapeDim.unresolved)
+
+private def resolveOptPortType (arena : Arena) :
+    Option PortType → Option CorePortType
+  | some t => some (resolvePortType arena t)
+  | none => none
+
+/-- TS `regScalarType`: untyped → float; scalar → itself; alias → base. -/
+private def resolveRegScalar (arena : Arena) : Option ScalarOrAlias → ScalarKind
+  | none => .float
+  | some (.scalar k) => k
+  | some (.alias td) =>
+    match arena.typeDef? td with
+    | some (.alias _ base) => base
+    | _ => .float
+
 partial def check (arena : Arena) (rootIdx : ProgramIdx) :
     Except String CoreProgram := do
   let some prog := arena.program? rootIdx
@@ -168,7 +269,7 @@ partial def check (arena : Arena) (rootIdx : ProgramIdx) :
         if let some (.sum tdName _) := arena.typeDef? td then
           fail prog.name s!"reg '{name}' typed by sum '{tdName}' (sumLower)"
       pure (CoreBodyDecl.reg name (← checkExpr prog.name init)
-        (← checkOptExpr prog.name update?) type? liftedFrom?)
+        (← checkOptExpr prog.name update?) (resolveRegScalar arena type?) liftedFrom?)
     | .param name value? => pure (CoreBodyDecl.param name value?)
     | .inst name typeKey tArgs inputs =>
       pure (CoreBodyDecl.inst name typeKey tArgs
@@ -178,7 +279,10 @@ partial def check (arena : Arena) (rootIdx : ProgramIdx) :
   let assigns ← prog.assigns.mapM fun a => do
     pure { target := a.target, expr := ← checkExpr prog.name a.expr : CoreOutputAssign }
   let inputs ← prog.inputs.mapM fun i => do
-    pure { name := i.name, default? := ← checkOptExpr prog.name i.default? : CoreInputDecl }
+    pure { name := i.name, type? := resolveOptPortType arena i.type?,
+           default? := ← checkOptExpr prog.name i.default? : CoreInputDecl }
+  let outputs := prog.outputs.map fun o =>
+    { name := o.name, type? := resolveOptPortType arena o.type? : CoreOutputDecl }
   -- Registry: follow only instance-referenced entries (the
   -- evaluator-reachable graph), recursively.
   let mut registry : Array (String × CoreProgram) := #[]
@@ -188,6 +292,6 @@ partial def check (arena : Arena) (rootIdx : ProgramIdx) :
         let some tIdx := prog.registryGet? typeKey
           | Except.error s!"core check ('{prog.name}'): instance '{name}' typeKey '{typeKey}' missing from registry"
         registry := registry.push (typeKey, ← check arena tIdx)
-  return .mk prog.name inputs (prog.outputs.map (·.name)) decls assigns registry
+  return .mk prog.name inputs outputs decls assigns registry
 
 end Tropical.Ir.Core
