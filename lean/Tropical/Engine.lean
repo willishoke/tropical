@@ -7,6 +7,7 @@ import Tropical.Session
 import Tropical.Lowering
 import Tropical.Client
 import Tropical.Parse.Nodes
+import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
 
 /-!
@@ -350,6 +351,83 @@ def adoptEntries (env : Env) (entries : Json) : EngineM Unit := do
       let _ ← adoptResolved env e
   | _ => pure ()
 
+-- ── Program registration (Phase 4 stage 4b) ──────────────────────────────────
+-- The engine runs the stage-2 raise and the elaboration itself; the
+-- service's `register_program` shrinks to typeDef registration +
+-- decode + strata, one call per batch item.
+
+private def renameProgram (p : Tropical.Parse.Program) (name : String) :
+    Tropical.Parse.Program :=
+  .mk name p.typeParams p.ports p.body p.breaksCycles
+
+private def portNames (ps : Option (Array Tropical.Parse.ProgramPort)) : Array String :=
+  (ps.getD #[]).map fun
+    | .bare n => n
+    | .spec s => s.name
+
+/-- The registration batch for a def: nested programDecls depth-first
+    in post-order (children before parents, source order), each renamed
+    to its decl name; the root last. This is exactly the order
+    `loadProgramAsType` registered them (it recursed into
+    `{...sub.program, name: sub.name}` BEFORE registering the parent).
+    Items keep their nested programDecls inline — the elaborator
+    re-elaborates them in scope, as TS does. -/
+private partial def registrationBatch (name : String) (p : Tropical.Parse.Program) :
+    Array (String × Tropical.Parse.Program) := Id.run do
+  let mut out : Array (String × Tropical.Parse.Program) := #[]
+  for d in p.body.decls do
+    if let .prog subName inner := d then
+      out := out ++ registrationBatch subName inner
+  return out.push (name, renameProgram p name)
+
+/-- Register one program: elaborate it over the typed store, ship
+    `{name, parsed, resolved}` to the service (typeDef registration +
+    decode + strata + registry insert), and adopt the returned entry.
+
+    Resolver: `templateByName` — the mirror of TS `session.programs`
+    (post-strata for concrete, raw template for generics) — unless the
+    caller supplies one (boot passes the raw stdlib map, mirroring
+    `loadStdlibFromResolved`'s `localResolved`).
+
+    Store discipline: for concrete programs the store adopts ONLY the
+    service's post-strata round trip (the engine's raw elaboration is
+    transient arena growth); for generics the engine's raw template IS
+    the stored form, since the service ships `resolved: null` for
+    generic entries. Returns the entry and the raw elaborated index. -/
+def registerOne (env : Env) (name : String) (p : Tropical.Parse.Program)
+    (resolver : Option Tropical.Ir.Resolver := none) :
+    EngineM (Json × Tropical.Ir.ProgramIdx) := do
+  let st ← env.state.get
+  let res : Tropical.Ir.Resolver := match resolver with
+    | some r => r
+    | none => fun n => st.templateByName.get? n
+  -- Elaboration failure → internal_error with the verbatim message
+  -- (ElaborationError / CycleViolation are plain Errors in TS; the
+  -- service's toEnvelope made them internal_error). Items registered
+  -- before a mid-batch failure STAY registered — oracle behavior.
+  let (arena', rawIdx) ← match Tropical.Ir.elaborateInto st.arena p (some res) with
+    | .error e => internalError e.message
+    | .ok r => pure r
+  let resolved ← match Tropical.Ir.Codec.encodeResolved arena' rawIdx with
+    | .error e => internalError e
+    | .ok j => pure j
+  env.state.modify fun st => { st with arena := arena' }
+  let resp ← env.service.call "register_program" <| Json.mkObj
+    [("name", Json.str name), ("parsed", p.toJson), ("resolved", resolved)]
+  let entry ← Service.field resp "entry"
+  env.state.modify (·.addProgram (ProgMeta.fromEntry entry))
+  let idx? ← adoptResolved env entry
+  -- templateByName mirrors what TS `session.programs.set(name, ...)`
+  -- stored: the decided-by-this-item form, NOT whatever entryFor
+  -- echoed (a generic redefining a concrete name gets a STALE concrete
+  -- entry from the service's typeRegistry — TS still stores the new
+  -- generic template in session.programs).
+  let isGeneric := !(p.typeParams.getD #[]).isEmpty
+  env.state.modify fun st => { st with
+    templateByName := st.templateByName.insert name
+      (if isGeneric then rawIdx else idx?.getD rawIdx) }
+  pure (entry, rawIdx)
+
 -- ── Per-tool handlers ────────────────────────────────────────────────────────
 
 private def instanceSummary (st : SessionSt) (name : String) : Json :=
@@ -414,9 +492,45 @@ private def resolveInstanceMeta (env : Env) (programName : String)
 
 def handleDefineProgram (env : Env) (args : Json) : EngineM Json := do
   let def_ := (arg? args "def").getD jsonNull
-  let resp ← env.service.call "register_program" (Json.mkObj [("def", def_)])
-  adoptEntries env ((getField? resp "entries").getD (.arr #[]))
-  Service.field resp "result"
+  -- Bridge to the ordered decoder by re-parsing the compressed form.
+  -- Lean Json objects are key-sorted, which is exactly what the relay
+  -- shipped to the TS service before this stage — observable raise
+  -- behavior is unchanged.
+  let jv ← match Tropical.Parse.JsonV.parse def_.compress with
+    | .error e => internalError s!"define_program: def JSON re-parse failed: {e}"
+    | .ok v => pure v
+  -- Stage-2 raise: normalizeProgramFile (schema-tag check + Zod-strip)
+  -- + raiseProgram. Failures map to internal_error with the verbatim
+  -- message — the envelope the TS path produced when its
+  -- normalizeProgramFile / loadProgramAsType threw.
+  let (prog, _top) ← match Tropical.Parse.Raise.raiseFile jv with
+    | .error msg => internalError msg
+    | .ok r => pure r
+  -- One service call per batch item, adoption between items: a later
+  -- item (the parent) thereby elaborates against the earlier item's
+  -- POST-STRATA form, matching TS (the sub's registration round-trips
+  -- through strata before the parent is processed).
+  let batch := registrationBatch prog.name prog
+  let mut rootEntry := jsonNull
+  for (name, p) in batch do
+    let (entry, _) ← registerOne env name p
+    rootEntry := entry
+  -- The TS handler's two result shapes.
+  if (prog.typeParams.getD #[]).isEmpty then
+    let names := fun (k : String) => Json.arr <|
+      (match getField? rootEntry k with
+       | some (.arr ps) => ps
+       | _ => #[]).filterMap fun pj => (getStrField? pj "name").map Json.str
+    pure <| Json.mkObj [
+      ("program_name", (getField? rootEntry "program_name").getD (Json.str prog.name)),
+      ("inputs", names "inputs"),
+      ("outputs", names "outputs")]
+  else
+    pure <| Json.mkObj [
+      ("program_name", Json.str prog.name),
+      ("inputs", toJson (portNames (prog.ports.bind (·.inputs)))),
+      ("outputs", toJson (portNames (prog.ports.bind (·.outputs)))),
+      ("type_params", Tropical.Parse.Encode.typeParams (prog.typeParams.getD #[]))]
 
 def handleAddInstance (env : Env) (args : Json) : EngineM Json := do
   let programName := (argStr? args "program").getD ""
@@ -1115,7 +1229,20 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
 
 -- ── Boot ─────────────────────────────────────────────────────────────────────
 
-/-- Spawn the compiler service, fetch the stdlib catalog, build the Env. -/
+/-- Spawn the compiler service, boot the stdlib from the pre-parsed
+    bridge, build the Env.
+
+    The service no longer loads the stdlib (Phase 4 stage 4b): the
+    engine reads `stdlib/parsed/manifest.json` (the registration order
+    `loadStdlib` produced) and each `stdlib/parsed/<Name>.json` from
+    the repo root, and registers each through the SAME
+    elaborate→register→adopt flow `define_program` uses. Mirroring
+    `loadStdlibFromResolved`: stdlib elaboration resolves siblings
+    through the RAW elaborated map (TS `localResolved`), and the
+    service relinks concrete registrations to the post-strata canon
+    before strata (its `processedByName` step) — so the registered
+    catalog is byte-faithful to the old TS `loadStdlib`. Any failure
+    here is fatal: the engine cannot compile without its store. -/
 def boot : IO (Env × IO.Process.Child ⟨.piped, .piped, .inherit⟩) := do
   let child ← IO.Process.spawn {
     cmd := "bun", args := #["run", "mcp/compiler_service.ts"],
@@ -1126,18 +1253,33 @@ def boot : IO (Env × IO.Process.Child ⟨.piped, .piped, .inherit⟩) := do
   let runtime ← Ffi.Runtime.new 512
   let dac ← IO.mkRef (none : Option Ffi.Dac)
   let env : Env := { state, service, runtime, dac }
-  let catalog ← service.relay.call "boot" (Json.mkObj [])
-  match catalog.getObjVal? "catalog" with
-  | .ok (.arr entries) =>
-    for e in entries do
-      state.modify (·.addProgram (ProgMeta.fromEntry e))
-      -- Typed-store adoption; a stdlib entry that fails to decode is
-      -- fatal at boot (the engine cannot compile without its store).
-      let st ← state.get
-      match st.adoptResolved e with
-      | .ok (st', _) => state.set st'
-      | .error msg => throw <| IO.userError s!"compiler service boot: {msg}"
-  | _ => throw <| IO.userError s!"compiler service boot failed: {catalog.compress.take 200}"
+  -- Handshake (liveness check; the method survives with an empty result).
+  let _ ← service.relay.call "boot" (Json.mkObj [])
+  let manifestText ← IO.FS.readFile "stdlib/parsed/manifest.json"
+  let names ← match Json.parse manifestText with
+    | .error e => throw <| IO.userError s!"stdlib/parsed/manifest.json: {e}"
+    | .ok j =>
+      match j.getObjVal? "programs" with
+      | .ok (.arr ns) => pure <| ns.filterMap fun n =>
+          match n with | .str s => some s | _ => none
+      | _ => throw <| IO.userError "stdlib/parsed/manifest.json: missing programs[]"
+  let registerAll : EngineM Unit := do
+    let mut raw : Std.HashMap String Tropical.Ir.ProgramIdx := {}
+    for name in names do
+      let path := s!"stdlib/parsed/{name}.json"
+      let text ← IO.FS.readFile path
+      let prog ← match Tropical.Parse.JsonV.parse text with
+        | .error e => internalError s!"{path}: JSON parse failed: {e}"
+        | .ok jv =>
+          match Tropical.Parse.decodeProgram jv with
+          | .error e => internalError s!"{path}: {e}"
+          | .ok p => pure p
+      let rawMap := raw
+      let (_, rawIdx) ← registerOne env name prog (some fun n => rawMap.get? n)
+      raw := raw.insert name rawIdx
+  match ← registerAll.run with
+  | .ok () => pure ()
+  | .error f => throw <| IO.userError s!"stdlib boot failed: {f.toJson.compress}"
   pure (env, child)
 
 end Tropical.Engine

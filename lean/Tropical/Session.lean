@@ -120,6 +120,16 @@ structure SessionSt where
       (the decoded `prog.name`). Redefinition overwrites; instances are
       insulated by their `resolvedIdx` snapshots. -/
   resolvedByName : Std.HashMap String Tropical.Ir.ProgramIdx := {}
+  /-- The registration-path mirror of TS `session.programs` (Phase 4
+      stage 4b): for every *registered* program name, the arena index of
+      the form the TS map holds — post-strata for concrete programs
+      (adopted from the service entry), the engine's own raw elaborated
+      template for generics. `define_program` elaboration resolves
+      cross-program references through this map, exactly like the TS
+      elaborator's `externalResolver` over `session.programs`. Distinct
+      from `resolvedByName`, which is keyed by *decoded* prog names and
+      also collects specializations adopted via `resolve_type`. -/
+  templateByName : Std.HashMap String Tropical.Ir.ProgramIdx := {}
 
 namespace SessionSt
 

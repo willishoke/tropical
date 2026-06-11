@@ -4,13 +4,21 @@
  * Phase 2 of the Lean port: this service is **stateless pure compile**.
  * The Lean engine owns the session, the native runtime (plan loading,
  * slot control), the DAC, and params; this service owns what hasn't
- * been ported yet — program registration (raise → elaborate → strata),
- * compilation to tropical_plan_5 JSON (Phase 4 stage 4a: the Lean engine
- * runs the session lowering AND the elaboration; this side decodes the
- * shipped `tropical_resolved_1` root and just partitions it against the
- * shipped slot bookkeeping), wire lifting (it needs strata), and
- * save/export/load/merge (they need the compiler). It shrinks phase by
- * phase until Phase 6 deletes it.
+ * been ported yet — compilation to tropical_plan_5 JSON (Phase 4 stage
+ * 4a: the Lean engine runs the session lowering AND the elaboration;
+ * this side decodes the shipped `tropical_resolved_1` root and just
+ * partitions it against the shipped slot bookkeeping), wire lifting
+ * (it needs strata), and save/export/load/merge (they need the v2
+ * ingest and the compiler). It shrinks phase by phase until Phase 6
+ * deletes it.
+ *
+ * Phase 4 stage 4b: the production register path performs NO raise and
+ * NO elaboration here. The Lean engine raises + elaborates and drives
+ * registration one program at a time — `register_program` receives
+ * `{name, parsed, resolved}` (ParsedProgram JSON + encoded resolved
+ * IR) and shrinks to typeDef registration + decode + strata. The
+ * service also boots EMPTY: the engine registers the stdlib from the
+ * pre-parsed bridge (`stdlib/parsed/`) through the same method.
  *
  * Protocol: newline JSON-RPC on stdio, same framing as ir_service.ts.
  * Tool-level failures return `{result: {error: <ErrorEnvelope>}}` so the
@@ -37,23 +45,27 @@ import {
 } from '../compiler/session.js'
 import {
   loadProgramAsType, exportSessionAsProgram, saveProgramFromSession,
-  mergeProgramIntoSession, loadStdlib, instanceDecls,
+  mergeProgramIntoSession, instanceDecls,
 } from '../compiler/program.js'
 import { compileSession } from '../compiler/ir/compile_session.js'
 import { compileSessionSlottedFromResolved } from '../compiler/ir/compile_session_slotted.js'
 import { decodeResolved, encodeResolved } from '../compiler/ir/resolved_codec.js'
+import { programTypeFromResolved } from '../compiler/ir/strata.js'
+import { relinkProgramRegistry } from '../compiler/ir/decl_tables.js'
 import { liftWiresToInstances } from '../compiler/ir/lift_wires.js'
 import { assertSessionAcyclic } from '../compiler/ir/lowering/session_cycle_check.js'
 import { toWirePlan } from '../compiler/flat_plan.js'
 import { Param } from '../compiler/runtime/param.js'
 import { portTypeToString } from '../compiler/ir/port_type.js'
 import { parseWireKey, wireKey, portRef, instanceName as toInstanceName } from '../compiler/ir/branded_names.js'
-import type { PortType } from '../compiler/ir/nodes.js'
+import type { PortType, ResolvedProgram } from '../compiler/ir/nodes.js'
 import { failBare, toEnvelope, type ErrorEnvelope } from './envelope.js'
 import { RESOURCES, PROMPTS, readResourceText, getPromptMessages } from './resources.js'
 
+// Phase 4 stage 4b: the service boots EMPTY. The Lean engine drives all
+// registration — stdlib (from the pre-parsed bridge) and define_program
+// alike — through `register_program`.
 const session: SessionState = makeSession()
-loadStdlib(session)
 
 const portTypeOrNull = (t: PortType | undefined): string | null =>
   t === undefined ? null : portTypeToString(t)
@@ -90,7 +102,7 @@ function concreteEntry(name: string, type: Instance | NonNullable<ReturnType<typ
   }
 }
 
-function genericEntry(name: string, prog: import('../compiler/ir/nodes.js').ResolvedProgram) {
+function genericEntry(name: string, prog: ResolvedProgram) {
   return {
     program_name: name,
     generic: true,
@@ -116,33 +128,11 @@ function entryFor(name: string) {
   return undefined
 }
 
-/** Catalog in session.programs insertion order (= list_programs semantics:
- *  typeRegistry order for concrete is the same registration order). */
-function fullCatalog() {
-  return [...session.programs.keys()].map(entryFor).filter(e => e !== undefined)
-}
-
 /** Names registered since `before`, plus the explicitly (re)defined names. */
 function newEntries(before: ReadonlySet<string>, defined: string[]) {
   const names = [...session.programs.keys()].filter(k => !before.has(k))
   for (const d of defined) if (!names.includes(d) && session.programs.has(d)) names.push(d)
   return names.map(entryFor).filter(e => e !== undefined)
-}
-
-/** All program names declared by a def (itself + inline programDecls). */
-function declaredNames(node: unknown): string[] {
-  const names: string[] = []
-  const walk = (n: unknown): void => {
-    if (typeof n !== 'object' || n === null) return
-    if (Array.isArray(n)) { for (const e of n) walk(e); return }
-    const obj = n as Record<string, unknown>
-    if (obj.op === 'programDecl' && typeof obj.name === 'string') names.push(obj.name)
-    for (const v of Object.values(obj)) walk(v)
-  }
-  const root = node as { name?: string }
-  if (typeof root.name === 'string') names.push(root.name)
-  walk((node as { body?: unknown }).body)
-  return names
 }
 
 // ─── State dump (after load / merge) ─────────────────────────────────────────
@@ -279,25 +269,87 @@ function handleLiftWires(p: { wires: Array<{ key: string; expr: ExprNode }>; cou
   }
 }
 
+// ─── register_program (Phase 4 stage 4b) ─────────────────────────────────────
+// One registration per call, driven by the Lean engine in batch order
+// (nested programDecls depth-first, the root last). The engine already
+// raised and elaborated; this side performs exactly the residue of
+// `loadProgramAsType`: typeDef registry mutations, decode, strata for
+// concrete programs, registry inserts.
+
+/** The ParsedProgram wire shape of `ports.type_defs` (alias base is a
+ *  NameRef node there, unlike the v2 string form). */
+type ParsedTypeDefs = {
+  ports?: {
+    type_defs?: Array<
+      | { kind: 'alias'; name: string; base: { op: 'nameRef'; name: string } }
+      | { kind: 'sum'; name: string; variants: Array<{
+          name: string
+          payload: Array<{ name: string; scalar_type: 'float' | 'int' | 'bool' }>
+        }> }
+      | { kind: 'struct'; name: string; fields: Array<{
+          name: string; scalar_type: 'float' | 'int' | 'bool'
+        }> }
+    >
+  }
+}
+
+function handleRegisterProgram(p: { name: string; parsed: ParsedTypeDefs; resolved: unknown }) {
+  // TypeDef registration — the registry mutations loadProgramAsType
+  // performed, fed from the ParsedProgram wire shape.
+  for (const td of p.parsed.ports?.type_defs ?? []) {
+    if (td.kind === 'alias') {
+      session.typeAliasRegistry.set(td.name, { base: td.base.name })
+    } else if (td.kind === 'sum') {
+      session.sumTypeRegistry.set(td.name, {
+        name: td.name,
+        variants: td.variants.map(v => ({
+          name: v.name,
+          payload: v.payload.map(f => ({ name: f.name, scalar: f.scalar_type })),
+        })),
+      })
+    } else {
+      session.structTypeRegistry.set(td.name, {
+        fields: td.fields.map(f => ({ name: f.name, scalar: f.scalar_type })),
+      })
+    }
+  }
+
+  const decoded = decodeResolved(p.resolved)
+  if (decoded.typeParams.length > 0) {
+    // Generic template: stored raw, exactly as loadProgramAsType /
+    // loadStdlibFromResolved stash it (TS never relinks generics —
+    // they're skipped before the relink step).
+    session.programs.set(p.name, decoded)
+  } else {
+    // Relink sub-program registry entries to the canonical post-strata
+    // versions already registered — loadStdlibFromResolved's
+    // `processedByName` step (concrete entries of session.programs are
+    // exactly that map). On the boot path the engine ships raw-linked
+    // registries (mirroring `localResolved`), so this swap is load-
+    // bearing; on the define path the shipped registry already embeds
+    // post-strata copies and the swap is a structural no-op that just
+    // restores object sharing with the session registry.
+    const concreteByName = new Map<string, ResolvedProgram>()
+    for (const [k, prog] of session.programs) {
+      if (prog.typeParams.length === 0) concreteByName.set(k, prog)
+    }
+    const relinked = relinkProgramRegistry(decoded, concreteByName)
+    const type = programTypeFromResolved(relinked, new Map(), { inlineNested: session.inlineNested })
+    session.typeRegistry.set(p.name, type)
+    session.programs.set(p.name, type.prog)   // canonical post-strata
+  }
+  return { entry: entryFor(p.name) ?? null }
+}
+
 function handleMethod(method: string, params: Record<string, unknown>): unknown {
   switch (method) {
     case 'boot':
-      return { catalog: fullCatalog() }
+      // Handshake only — the engine boots the stdlib itself from the
+      // pre-parsed bridge, through register_program.
+      return {}
 
-    case 'register_program': {
-      const before = new Set(session.programs.keys())
-      const { node } = normalizeProgramFile(params.def as { schema?: string; [k: string]: unknown })
-      const type = loadProgramAsType(node, session)
-      const result = type
-        ? { program_name: type.displayName, inputs: inputNames(type), outputs: outputNames(type) }
-        : {
-            program_name: node.name,
-            inputs: (node.ports?.inputs ?? []).map(i => typeof i === 'string' ? i : i.name),
-            outputs: (node.ports?.outputs ?? []).map(o => typeof o === 'string' ? o : o.name),
-            type_params: node.type_params,
-          }
-      return { result, entries: newEntries(before, declaredNames(node)) }
-    }
+    case 'register_program':
+      return handleRegisterProgram(params as unknown as Parameters<typeof handleRegisterProgram>[0])
 
     case 'resolve_type': {
       const program = params.program as string
