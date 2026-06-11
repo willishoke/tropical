@@ -5,6 +5,7 @@ import Tropical.Ir.Codec
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved
+import Tropical.Engine
 
 /-!
 The `diffcli` executable — differential-harness verbs that exercise the
@@ -380,6 +381,33 @@ def emitFileVerb (args : List String) : IO UInt32 := do
         | .error e => printElabError e
         | .ok (arena', idx) => printEmit typeArgs arena' idx
 
+-- ── compile (Phase 6 stage 6d — the compile_patch.ts contract) ──────────────
+
+/-- `diffcli compile <patch.json> [--mode=<m>]` → plan JSON on stdout.
+    Boots the engine (stdlib from the pre-parsed bridge), loads the
+    patch through the engine's own ingest, and rebuilds the plan from
+    the mirror at the requested mode. The side-B command of
+    diff_plan.ts / diff_audio.ts. -/
+def compileVerb (args : List String) : IO UInt32 := do
+  let some patch := args.find? (fun a => !a.startsWith "--")
+    | IO.eprintln "usage: diffcli compile <patch.json> [--mode=fused|microkernel|microkernel-deep]"
+      return 1
+  let modeStr := (parseStrFlag args "--mode").getD "fused"
+  let some mode := Tropical.Plan.CompilationMode.ofWire? modeStr
+    | IO.eprintln s!"unknown compilation mode: {modeStr}"
+      return 1
+  let (env, _child) ← Tropical.Engine.boot
+  let act : Tropical.EngineM String := do
+    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str patch)])
+    Tropical.Engine.compileMirrorPlan env mode
+  match ← act.run with
+  | .ok planJson =>
+    IO.println planJson
+    return 0
+  | .error f =>
+    IO.eprintln f.toJson.compress
+    return 1
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
@@ -391,6 +419,7 @@ def main (args : List String) : IO UInt32 := do
   | "strata-file" :: rest => strataFileVerb rest
   | "emit-stdlib" :: rest => emitStdlibVerb rest
   | "emit-file" :: rest => emitFileVerb rest
+  | "compile" :: rest => compileVerb rest
   | _ =>
     IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>\n       diffcli elab-stdlib <Name>\n       diffcli elab-file <parsed.json>\n       diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli emit-stdlib <Name> [--type-args=J]\n       diffcli emit-file <parsed.json> [--type-args=J]"
     return 1

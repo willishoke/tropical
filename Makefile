@@ -45,15 +45,22 @@ validate: build
 validate-write: build
 	bun run scripts/validate_stdlib.ts --write
 
-# Lean-port differential harness (scripts/diff/). Each differ compares two
-# pipelines — both default to TS, so these are green before any port work;
-# as Lean layers land, pass --b="<lean cmd>" (or edit the default here) to
-# pit Lean against the TS oracle.
-diff-plan: build
-	bun run scripts/diff/diff_plan.ts
+# Lean-port differential harness (scripts/diff/). Phase 6 gate: the Lean
+# pipeline (diffcli compile — engine boot + ingest + Lean emit/partition)
+# against the TS oracle, across all three compilation modes.
+diff-plan: build lean
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli
+	bun run scripts/build_parsed_stdlib.ts
+	for m in fused microkernel microkernel-deep; do \
+		bun run scripts/diff/diff_plan.ts --b="./lean/.lake/build/bin/diffcli compile" --mode=$$m || exit 1; \
+	done
 
-diff-audio: build
-	bun run scripts/diff/diff_audio.ts
+diff-audio: build lean
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli
+	bun run scripts/build_parsed_stdlib.ts
+	for m in fused microkernel microkernel-deep; do \
+		bun run scripts/diff/diff_audio.ts --b="./lean/.lake/build/bin/diffcli compile" --mode=$$m || exit 1; \
+	done
 
 diff-engine: build lean
 	bun run scripts/diff/diff_engine.ts --b="./lean/.lake/build/bin/frontend --rpc"

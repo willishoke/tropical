@@ -444,6 +444,72 @@ def syncCompile (env : Env) : EngineM Unit := do
     env.state.modify fun st => { st with params }
   | _ => pure ()
 
+/-- Harness-only (diffcli `compile`): rebuild the plan from the current
+    mirror at an arbitrary compilation mode, WITHOUT loading it or
+    touching the service. Mirrors the `compile_patch.ts` contract's
+    final `compileSession(session, options)`: by load time the wires
+    are lifted and every type is registered, so the mode only reaches
+    the plan's `compilation_mode` field (the TS auto-flip for
+    `microkernel-deep` lands after every registration — the recorded
+    known limitation — so plan structure is mode-independent there
+    too). Collapses into `syncCompile` at 6f when the sync payload
+    retires. -/
+def compileMirrorPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
+    EngineM String := do
+  let st ← env.state.get
+  let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
+  let (wiresPost, delayEntries, alloc) :=
+    Tropical.Lowering.extractSessionDelays st.wires alloc
+  Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
+  let storedProgName (i : InstanceInfo) : Option String :=
+    (i.resolvedIdx.bind st.arena.program?).map (·.name)
+  let lowerInstances := st.instances.map fun (n, i) =>
+    match storedProgName i with
+    | some pname => (n, { i with progMeta := { i.progMeta with programName := pname } })
+    | none => (n, i)
+  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost delayEntries
+  let typed ← match Tropical.Parse.JsonV.parse parsed.compress with
+    | .error e => internalError s!"session root: ParsedProgram JSON re-parse failed: {e}"
+    | .ok jv =>
+      match Tropical.Parse.decodeProgram jv with
+      | .error e => internalError s!"session root: {e}"
+      | .ok p => pure p
+  let mut resolverTbl : Array (String × Tropical.Ir.ProgramIdx) := #[]
+  for (_, i) in st.instances do
+    if let some idx := i.resolvedIdx then
+      if let some p := st.arena.program? idx then
+        if !resolverTbl.any (·.1 == p.name) then
+          resolverTbl := resolverTbl.push (p.name, idx)
+  let tbl := resolverTbl
+  let (arena', rootIdx) ← match Tropical.Ir.elaborateInto st.arena typed
+      (some fun n => (tbl.find? (·.1 == n)).map (·.2)) with
+    | .error e => internalError e.message
+    | .ok r => pure r
+  let rootCore ← match Tropical.Ir.Core.check arena' rootIdx with
+    | .error e => internalError s!"compileMirrorPlan: post-elaboration Core check failed (engine bug): {e}"
+    | .ok core => pure core
+  let mut coreInstances : Array (String × Tropical.Ir.Core.CoreProgram) := #[]
+  for (n, i) in st.instances do
+    let some pname := storedProgName i
+      | internalError s!"compileMirrorPlan: instance '{n}' has no resolved snapshot (engine bug)"
+    let some core := rootCore.registryGet? pname
+      | internalError s!"compileMirrorPlan: instance '{n}' program '{pname}' missing from root registry (engine bug)"
+    coreInstances := coreInstances.push (n, core)
+  let plan ← match Tropical.Compile.compileSession {
+      instances := coreInstances
+      wiresPost
+      graphOutputs := st.graphOutputs
+      params := st.params
+      alloc
+      delayEntries
+      root := rootCore
+      mode } with
+    | .error msg => internalError msg
+    | .ok p => pure p
+  match plan.toWire with
+  | .error msg => internalError msg
+  | .ok j => pure j.compress
+
 -- ── Catalog adoption ─────────────────────────────────────────────────────────
 
 def adoptEntries (env : Env) (entries : Json) : EngineM Unit := do
