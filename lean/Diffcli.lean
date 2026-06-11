@@ -2,6 +2,7 @@ import Tropical.Ffi
 import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
 import Tropical.Ir.Codec
+import Tropical.Ir.Strata
 
 /-!
 The `diffcli` executable — differential-harness verbs that exercise the
@@ -42,6 +43,16 @@ elaborates a self-contained ParsedProgram JSON against the full stdlib
 chain as resolver. An `ElaborationError` / `CycleViolation` prints
 `{error: <byte-exact TS message>}` and exits 0 (errors are comparable
 outputs); a ParsedProgram decode failure is a harness error (exit 1).
+
+    diffcli strata-stdlib <Name> [--upto=K] [--mode=inline|nested] [--type-args=J]
+    diffcli strata-file <parsed.json> [same flags]
+
+Phase 5 (the strata gate, scripts/diff/diff_strata.ts). Elaborates
+exactly like the elab verbs, then runs strata passes `1..K` and prints
+the canonical `tropical_resolved_1` encoding of the result — the
+hybrid prefix the TS suffix completes. `--upto` beyond
+`Strata.portedPasses` is a harness error (exit 1); strata errors print
+`{error: <byte-exact TS message>}` and exit 0.
 -/
 
 def parseNatFlag (args : List String) (flag : String) (default : Nat) : Nat :=
@@ -195,6 +206,91 @@ def elabFileVerb (args : List String) : IO UInt32 := do
         | .error e => printElabError e
         | .ok (arena', idx) => printEncoded arena' idx
 
+-- ── strata-stdlib / strata-file (Phase 5) ────────────────────────────────────
+
+private def parseStrFlag (args : List String) (flag : String) : Option String :=
+  args.findSome? fun a =>
+    if a.startsWith (flag ++ "=") then some (a.drop (flag.length + 1)).toString else none
+
+/-- Parse `--type-args={"N":8}` into by-name (name, number) pairs.
+    Malformed JSON / non-number values are harness errors. -/
+private def parseTypeArgs (args : List String) :
+    Except String (Array (String × Lean.JsonNumber)) := do
+  let some raw := parseStrFlag args "--type-args" | return #[]
+  let jv ← Tropical.Parse.JsonV.parse raw |>.mapError (s!"--type-args parse error: {·}")
+  let Tropical.Parse.JsonV.obj fields := jv
+    | .error "--type-args must be a JSON object"
+  fields.mapM fun (name, v) => match v with
+    | .num n => .ok (name, n)
+    | _ => .error s!"--type-args['{name}'] must be a number"
+
+/-- Parse the strata flags shared by both verbs. `--upto` beyond
+    `Strata.portedPasses` is a harness error — the ratchet that keeps
+    un-ported passes out of the comparable-output path. -/
+private def parseStrataOptions (args : List String) :
+    Except String Tropical.Ir.Strata.Options := do
+  let upto := parseNatFlag args "--upto" Tropical.Ir.Strata.portedPasses
+  if upto > Tropical.Ir.Strata.portedPasses then
+    .error s!"strata: --upto={upto} exceeds ported passes ({Tropical.Ir.Strata.portedPasses})"
+  let inlineNested ← match parseStrFlag args "--mode" with
+    | none | some "inline" => .ok true
+    | some "nested" => .ok false
+    | some m => .error s!"unknown --mode={m}"
+  let typeArgs ← parseTypeArgs args
+  return { upto, inlineNested, typeArgs }
+
+private def printStrata (opts : Tropical.Ir.Strata.Options)
+    (arena : Tropical.Ir.Arena) (root : Tropical.Ir.ProgramIdx) : IO UInt32 := do
+  match Tropical.Ir.Strata.run opts arena root with
+  | .error e =>
+    IO.println (errorJson e.message).compress
+    return 0
+  | .ok (arena', root') => printEncoded arena' root'
+
+def strataStdlibVerb (args : List String) : IO UInt32 := do
+  let some target := args.head?
+    | IO.eprintln "usage: diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]"
+      return 1
+  let opts ← match parseStrataOptions args.tail with
+    | .error e => IO.eprintln e; return 1
+    | .ok o => pure o
+  match ← manifestNames with
+  | .error e => IO.eprintln e; return 1
+  | .ok names =>
+    let some i := names.findIdx? (· == target)
+      | IO.eprintln s!"strata-stdlib: '{target}' is not in {parsedDir}/manifest.json"
+        return 1
+    match ← elabChain (names.extract 0 (i + 1)) with
+    | .error e => IO.eprintln e; return 1
+    | .ok (.error e) => printElabError e
+    | .ok (.ok (arena, resolved)) =>
+      let some (_, idx) := resolved.find? (·.1 == target)
+        | IO.eprintln s!"strata-stdlib: internal: '{target}' missing from chain"
+          return 1
+      printStrata opts arena idx
+
+def strataFileVerb (args : List String) : IO UInt32 := do
+  let some path := args.head?
+    | IO.eprintln "usage: diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]"
+      return 1
+  let opts ← match parseStrataOptions args.tail with
+    | .error e => IO.eprintln e; return 1
+    | .ok o => pure o
+  match ← manifestNames with
+  | .error e => IO.eprintln e; return 1
+  | .ok names =>
+    match ← elabChain names with
+    | .error e => IO.eprintln e; return 1
+    | .ok (.error e) => printElabError e
+    | .ok (.ok (arena, resolved)) =>
+      match ← readParsed path with
+      | .error e => IO.eprintln s!"{path}: {e}"; return 1
+      | .ok prog =>
+        match Tropical.Ir.elaborateInto arena prog
+            (some fun n => (resolved.find? (·.1 == n)).map (·.2)) with
+        | .error e => printElabError e
+        | .ok (arena', idx) => printStrata opts arena' idx
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
@@ -202,6 +298,8 @@ def main (args : List String) : IO UInt32 := do
   | "parsed-roundtrip" :: rest => parsedRoundtripVerb rest
   | "elab-stdlib" :: rest => elabStdlibVerb rest
   | "elab-file" :: rest => elabFileVerb rest
+  | "strata-stdlib" :: rest => strataStdlibVerb rest
+  | "strata-file" :: rest => strataFileVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>\n       diffcli elab-stdlib <Name>\n       diffcli elab-file <parsed.json>"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>\n       diffcli elab-stdlib <Name>\n       diffcli elab-file <parsed.json>\n       diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]"
     return 1

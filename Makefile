@@ -1,6 +1,6 @@
 .PHONY: build repl run lean mcp-lean clean validate validate-write \
         diff diff-plan diff-audio diff-engine diff-render diff-raise diff-elab \
-        test-lean-engine
+        diff-strata test-lean-engine
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -78,8 +78,18 @@ diff-elab: build lean
 	bun run scripts/build_parsed_stdlib.ts
 	bun run scripts/diff/diff_elab.ts --b="./lean/.lake/build/bin/diffcli"
 
+# Phase 5 gate (strata): whole-strata hybrid differential — Lean runs
+# passes 1..K (STRATA_K, the stage ratchet; tracks Strata.portedPasses),
+# ships the prefix through the resolved codec, the TS suffix finishes,
+# and only final post-strata output is compared. K=5 is pure Lean-vs-TS.
+STRATA_K ?= 0
+diff-strata: build lean
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli
+	bun run scripts/build_parsed_stdlib.ts
+	bun run scripts/diff/diff_strata.ts --b="./lean/.lake/build/bin/diffcli" --k=$(STRATA_K)
+
 # Phase 1 gate: the protocol test suites against the Lean engine.
 test-lean-engine: build lean
 	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test mcp/errors.test.ts mcp/wire_dac.test.ts
 
-diff: diff-plan diff-audio diff-engine diff-render diff-raise diff-elab
+diff: diff-plan diff-audio diff-engine diff-render diff-raise diff-elab diff-strata
