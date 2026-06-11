@@ -4,6 +4,7 @@ import Tropical.Ir.Elaborator
 import Tropical.Ir.Codec
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
+import Tropical.Ir.CompileResolved
 
 /-!
 The `diffcli` executable — differential-harness verbs that exercise the
@@ -307,6 +308,78 @@ def strataFileVerb (args : List String) : IO UInt32 := do
         | .error e => printElabError e
         | .ok (arena', idx) => printStrata opts arena' idx
 
+-- ── emit-stdlib / emit-file (Phase 6 stage 6b) ──────────────────────────────
+
+/-- Full strata (inline) → Core downcast → compileResolved → wire
+    PerInstancePlan JSON. Strata/emit errors are comparable `{error}`
+    outputs; a Core-check failure is a Lean-side port bug (exit 1). -/
+private def printEmit (typeArgs : Array (String × Lean.JsonNumber))
+    (arena : Tropical.Ir.Arena) (root : Tropical.Ir.ProgramIdx) : IO UInt32 := do
+  let opts : Tropical.Ir.Strata.Options :=
+    { upto := Tropical.Ir.Strata.portedPasses, inlineNested := true, typeArgs }
+  match Tropical.Ir.Strata.run opts arena root with
+  | .error e =>
+    IO.println (errorJson e.message).compress
+    return 0
+  | .ok (arena', root') =>
+    match Tropical.Ir.Core.check arena' root' with
+    | .error e =>
+      IO.eprintln e
+      return 1
+    | .ok core =>
+      match Tropical.Ir.CompileResolved.compileResolved core with
+      | .error msg =>
+        IO.println (errorJson msg).compress
+        return 0
+      | .ok plan =>
+        match plan.toWire with
+        | .error e => IO.eprintln e; return 1
+        | .ok j => IO.println j.compress; return 0
+
+def emitStdlibVerb (args : List String) : IO UInt32 := do
+  let some target := args.head?
+    | IO.eprintln "usage: diffcli emit-stdlib <Name> [--type-args=J]"
+      return 1
+  let typeArgs ← match parseTypeArgs args.tail with
+    | .error e => IO.eprintln e; return 1
+    | .ok t => pure t
+  match ← manifestNames with
+  | .error e => IO.eprintln e; return 1
+  | .ok names =>
+    let some i := names.findIdx? (· == target)
+      | IO.eprintln s!"emit-stdlib: '{target}' is not in {parsedDir}/manifest.json"
+        return 1
+    match ← elabChain (names.extract 0 (i + 1)) with
+    | .error e => IO.eprintln e; return 1
+    | .ok (.error e) => printElabError e
+    | .ok (.ok (arena, resolved)) =>
+      let some (_, idx) := resolved.find? (·.1 == target)
+        | IO.eprintln s!"emit-stdlib: internal: '{target}' missing from chain"
+          return 1
+      printEmit typeArgs arena idx
+
+def emitFileVerb (args : List String) : IO UInt32 := do
+  let some path := args.head?
+    | IO.eprintln "usage: diffcli emit-file <parsed.json> [--type-args=J]"
+      return 1
+  let typeArgs ← match parseTypeArgs args.tail with
+    | .error e => IO.eprintln e; return 1
+    | .ok t => pure t
+  match ← manifestNames with
+  | .error e => IO.eprintln e; return 1
+  | .ok names =>
+    match ← elabChain names with
+    | .error e => IO.eprintln e; return 1
+    | .ok (.error e) => printElabError e
+    | .ok (.ok (arena, resolved)) =>
+      match ← readParsed path with
+      | .error e => IO.eprintln s!"{path}: {e}"; return 1
+      | .ok prog =>
+        match Tropical.Ir.elaborateInto arena prog
+            (some fun n => (resolved.find? (·.1 == n)).map (·.2)) with
+        | .error e => printElabError e
+        | .ok (arena', idx) => printEmit typeArgs arena' idx
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
@@ -316,6 +389,8 @@ def main (args : List String) : IO UInt32 := do
   | "elab-file" :: rest => elabFileVerb rest
   | "strata-stdlib" :: rest => strataStdlibVerb rest
   | "strata-file" :: rest => strataFileVerb rest
+  | "emit-stdlib" :: rest => emitStdlibVerb rest
+  | "emit-file" :: rest => emitFileVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>\n       diffcli elab-stdlib <Name>\n       diffcli elab-file <parsed.json>\n       diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>\n       diffcli elab-stdlib <Name>\n       diffcli elab-file <parsed.json>\n       diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli emit-stdlib <Name> [--type-args=J]\n       diffcli emit-file <parsed.json> [--type-args=J]"
     return 1

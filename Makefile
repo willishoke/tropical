@@ -1,6 +1,6 @@
 .PHONY: build repl run lean mcp-lean clean validate validate-write \
         diff diff-plan diff-audio diff-engine diff-render diff-raise diff-elab \
-        diff-strata test-lean-engine
+        diff-strata diff-emit test-lean-engine
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -88,8 +88,16 @@ diff-strata: build lean
 	bun run scripts/build_parsed_stdlib.ts
 	bun run scripts/diff/diff_strata.ts --b="./lean/.lake/build/bin/diffcli" --k=$(STRATA_K)
 
+# Phase 6 stage 6b gate (per-program emit): Lean strata + Core downcast +
+# compileResolved against the TS oracle; wire PerInstancePlan compared
+# structurally over the strata corpus (inline mode).
+diff-emit: build lean
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli
+	bun run scripts/build_parsed_stdlib.ts
+	bun run scripts/diff/diff_emit.ts --b="./lean/.lake/build/bin/diffcli"
+
 # Phase 1 gate: the protocol test suites against the Lean engine.
 test-lean-engine: build lean
 	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test mcp/errors.test.ts mcp/wire_dac.test.ts
 
-diff: diff-plan diff-audio diff-engine diff-render diff-raise diff-elab diff-strata
+diff: diff-plan diff-audio diff-engine diff-render diff-raise diff-elab diff-strata diff-emit
