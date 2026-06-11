@@ -229,7 +229,13 @@ private def parseTypeArgs (args : List String) :
     un-ported passes out of the comparable-output path. -/
 private def parseStrataOptions (args : List String) :
     Except String Tropical.Ir.Strata.Options := do
-  let upto := parseNatFlag args "--upto" Tropical.Ir.Strata.portedPasses
+  -- `--upto=K` (the `=` form; parseNatFlag's space form would silently
+  -- fall back to the default and un-gate the ratchet).
+  let upto ← match parseStrFlag args "--upto" with
+    | none => .ok Tropical.Ir.Strata.portedPasses
+    | some s => match s.toNat? with
+      | some n => .ok n
+      | none => .error s!"--upto={s} is not a number"
   if upto > Tropical.Ir.Strata.portedPasses then
     .error s!"strata: --upto={upto} exceeds ported passes ({Tropical.Ir.Strata.portedPasses})"
   let inlineNested ← match parseStrFlag args "--mode" with

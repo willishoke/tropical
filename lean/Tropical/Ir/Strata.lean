@@ -3,6 +3,7 @@ import Tropical.Ir.Strata.Specialize
 import Tropical.Ir.Strata.SumLower
 import Tropical.Ir.Strata.InlineInstances
 import Tropical.Ir.Strata.ArrayLower
+import Tropical.Ir.Strata.IdentityElim
 import Tropical.Ir.Elaborator
 
 /-!
@@ -39,7 +40,7 @@ namespace Tropical.Ir.Strata
 
 /-- Number of passes ported so far. Bumped per Phase 5 stage; the
     diffcli verbs reject `--upto` beyond this. -/
-def portedPasses : Nat := 4
+def portedPasses : Nat := 5
 
 /-- Port of acyclic.ts `assertAcyclic` — the strataPipeline-entry
     tripwire. Cycle-breaking is the realization layer's job upstream;
@@ -68,7 +69,7 @@ def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
     else pure (arena, root)
   if opts.upto < 4 then return (arena, root)
   let (arena, root) ← ArrayLower.run arena root
-  -- Pass 5 (identityElim) lands in the next Phase 5 stage.
-  return (arena, root)
+  if opts.upto < 5 then return (arena, root)
+  IdentityElim.run arena root
 
 end Tropical.Ir.Strata
