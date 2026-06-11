@@ -35,28 +35,37 @@ private def isIntegerValued (n : JsonNumber) : Bool :=
   let f := n.toFloat
   f == f.floor
 
+/-- One supplied type-arg, identity-resolved. `poolIdx? = none` marks a
+    name that matched no declared param (the TS harness mints a fresh
+    decl there, keeping the not-declared error reachable). -/
+structure ArgEntry where
+  poolIdx? : Option TypeParamPoolIdx
+  name : String
+  value : JsonNumber
+deriving Repr, Inhabited
+
 private def declaredNames (declared : Array (TypeParamPoolIdx × TypeParamDecl)) : String :=
   let s := ", ".intercalate (declared.toList.map (·.2.name))
   if s.isEmpty then "(none)" else s
 
-/-- Port of `buildSubst`: validate by-name args against the program's
-    declared type params and fill defaults. The result is in
+/-- Port of `buildSubst`: validate identity-keyed args against the
+    program's declared type params and fill defaults. The result is in
     `typeParams` order and total over it. -/
 private def buildSubst (prog : Program)
     (declared : Array (TypeParamPoolIdx × TypeParamDecl))
-    (typeArgs : Array (String × JsonNumber)) :
+    (typeArgs : Array ArgEntry) :
     Except Error (Array (TypeParamPoolIdx × JsonNumber)) := do
-  for (name, _) in typeArgs do
-    unless declared.any (·.2.name == name) do
-      throw ⟨s!"specializeProgram('{prog.name}'): type-arg '{name}' is not a declared " ++
+  for arg in typeArgs do
+    unless arg.poolIdx?.any (fun p => declared.any (·.1 == p)) do
+      throw ⟨s!"specializeProgram('{prog.name}'): type-arg '{arg.name}' is not a declared " ++
         s!"type-param (have: {declaredNames declared})"⟩
   let mut subst : Array (TypeParamPoolIdx × JsonNumber) := #[]
   for (poolIdx, tp) in declared do
-    match typeArgs.find? (·.1 == tp.name) with
-    | some (_, v) =>
-      unless isIntegerValued v do
-        throw ⟨s!"specializeProgram('{prog.name}'): type-arg '{tp.name}' must be an integer, got {v}"⟩
-      subst := subst.push (poolIdx, v)
+    match typeArgs.find? (·.poolIdx? == some poolIdx) with
+    | some arg =>
+      unless isIntegerValued arg.value do
+        throw ⟨s!"specializeProgram('{prog.name}'): type-arg '{tp.name}' must be an integer, got {arg.value}"⟩
+      subst := subst.push (poolIdx, arg.value)
     | none =>
       match tp.default? with
       | some d => subst := subst.push (poolIdx, d)
@@ -64,8 +73,10 @@ private def buildSubst (prog : Program)
         throw ⟨s!"specializeProgram('{prog.name}'): missing required type-arg '{tp.name}' (no default)"⟩
   return subst
 
-def run (arena : Arena) (rootIdx : ProgramIdx)
-    (typeArgs : Array (String × JsonNumber)) :
+/-- Identity-keyed entry (the TS `specializeProgram` proper). Used by
+    the CLI adapter below and by inlineInstances' `specializeInner`. -/
+def runCore (arena : Arena) (rootIdx : ProgramIdx)
+    (typeArgs : Array ArgEntry) :
     Except Error (Arena × ProgramIdx) := do
   let some prog := arena.program? rootIdx
     | throw ⟨s!"specializeProgram: program pool index {rootIdx.idx} out of range"⟩
@@ -116,5 +127,23 @@ def run (arena : Arena) (rootIdx : ProgramIdx)
     assigns := prog.assigns.map fun a => { a with expr := rw a.expr } }
   return ({ arena with programs := arena.programs.push fresh },
           ⟨arena.programs.size⟩)
+
+/-- By-name adapter (the TS harness's `argsByName` + specializeProgram):
+    each name binds the FIRST declared param with that name; unmatched
+    names stay unresolved so the not-declared error fires in
+    `buildSubst`. -/
+def run (arena : Arena) (rootIdx : ProgramIdx)
+    (typeArgs : Array (String × JsonNumber)) :
+    Except Error (Arena × ProgramIdx) := do
+  let some prog := arena.program? rootIdx
+    | throw ⟨s!"specializeProgram: program pool index {rootIdx.idx} out of range"⟩
+  let declared ← prog.typeParams.mapM fun i =>
+    match arena.typeParam? i with
+    | some tp => pure (i, tp)
+    | none => throw
+        (⟨s!"specializeProgram('{prog.name}'): typeParam pool index {i.idx} out of range"⟩ : Error)
+  let args := typeArgs.map fun (name, value) =>
+    { poolIdx? := (declared.find? (·.2.name == name)).map (·.1), name, value : ArgEntry }
+  runCore arena rootIdx args
 
 end Tropical.Ir.Strata.Specialize
