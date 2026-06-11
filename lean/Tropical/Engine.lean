@@ -11,6 +11,7 @@ import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
+import Tropical.TypeArgs
 
 /-!
 # The tropical IR engine — tool semantics, in Lean
@@ -295,11 +296,28 @@ def syncCompile (env : Env) : EngineM Unit := do
       | .error e => (Json.null, some e)
       | .ok json => (json, none)
 
+  -- Phase 5 stage 6b: each instance ships its post-strata resolved IR
+  -- (the snapshot the engine adopted at add/replicate/load time); the
+  -- service's compile instantiates from it directly instead of
+  -- re-resolving (and possibly re-strata'ing) by name. A missing
+  -- snapshot ships null — decode fails service-side as internal_error,
+  -- the engine-bug envelope this state deserves.
+  let mut instancesJson : Array Json := #[]
+  for (n, i) in st.instances do
+    let resolvedJ ← match i.resolvedIdx with
+      | none => pure jsonNull
+      | some idx =>
+        match Tropical.Ir.Codec.encodeResolved st.arena idx with
+        | .error e => internalError s!"compile: instance '{n}' resolved encode failed: {e}"
+        | .ok j => pure j
+    instancesJson := instancesJson.push <| Json.mkObj
+      [("name", Json.str n), ("program", Json.str i.baseTypeName),
+       ("type_args", i.typeArgs.getD jsonNull),
+       ("resolved", resolvedJ)]
+
   let payload := Json.mkObj [
     ("resolved_root", resolvedRoot),
-    ("instances", Json.arr <| st.instances.map fun (n, i) =>
-      Json.mkObj [("name", Json.str n), ("program", Json.str i.baseTypeName),
-                  ("type_args", i.typeArgs.getD jsonNull)]),
+    ("instances", Json.arr instancesJson),
     ("wires", Json.arr <| wiresPost.map fun w =>
       Json.mkObj [("key", Json.str w.key), ("expr", w.expr)]),
     ("graph_outputs", Json.arr <| st.graphOutputs.map fun (i, o) =>
@@ -365,17 +383,32 @@ def adoptEntries (env : Env) (entries : Json) : EngineM Unit := do
     which realization the registered catalog holds. -/
 private def sessionInlineNested : Bool := true
 
+/-- The strata pipeline + the post-strata Core downcast (inline path),
+    as a pure `Except` so call sites choose the envelope: registration
+    failures map to `internal_error` (TS strata throws were plain
+    Errors), specialization failures to `invalid_type_args` (the
+    engine mapped any service `resolve_type` failure that way before
+    the move). A Core-check failure is a port bug, surfaced loudly. -/
+def runStrataChecked (typeArgs : Array (String × Lean.JsonNumber))
+    (arena : Tropical.Ir.Arena) (rootIdx : Tropical.Ir.ProgramIdx) :
+    Except String (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) := do
+  let (arena, rootIdx) ←
+    (Tropical.Ir.Strata.run
+      { upto := Tropical.Ir.Strata.portedPasses,
+        inlineNested := sessionInlineNested, typeArgs } arena rootIdx).mapError (·.message)
+  if sessionInlineNested then
+    if let .error e := Tropical.Ir.Core.check arena rootIdx then
+      throw s!"post-strata Core check failed (port bug): {e}"
+  pure (arena, rootIdx)
+
 /-- Run the strata pipeline on an elaborated concrete program — the
-    engine-side image of the service residue this stage retired:
+    engine-side image of the service residue stage 6b retired:
     relink sub-program registry entries to the canonical post-strata
     registrations (`concreteByName` over TS `session.programs` =
     `templateByName` restricted to concrete entries; load-bearing on
     the boot path, where elaboration resolved against the raw stdlib
     map — a structural no-op on the define path), then run the full
-    pipeline. Strata failures were plain TS Errors that `toEnvelope`
-    mapped to `internal_error` with the verbatim message; same here.
-    The Core downcast is asserted post-strata on the inline path — a
-    failure is a port bug, surfaced loudly. -/
+    pipeline. -/
 def strataConcrete (st : SessionSt) (arena : Tropical.Ir.Arena)
     (rootIdx : Tropical.Ir.ProgramIdx) :
     EngineM (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) := do
@@ -388,16 +421,9 @@ def strataConcrete (st : SessionSt) (arena : Tropical.Ir.Arena)
     match Tropical.Ir.Strata.relinkProgramRegistry arena rootIdx byName with
     | .error e => internalError e.message
     | .ok r => pure r
-  let (arena, rootIdx) ←
-    match Tropical.Ir.Strata.run
-        { upto := Tropical.Ir.Strata.portedPasses,
-          inlineNested := sessionInlineNested } arena rootIdx with
-    | .error e => internalError e.message
-    | .ok r => pure r
-  if sessionInlineNested then
-    if let .error e := Tropical.Ir.Core.check arena rootIdx then
-      internalError s!"post-strata Core check failed (port bug): {e}"
-  pure (arena, rootIdx)
+  match runStrataChecked #[] arena rootIdx with
+  | .error msg => internalError msg
+  | .ok r => pure r
 
 private def renameProgram (p : Tropical.Parse.Program) (name : String) :
     Tropical.Parse.Program :=
@@ -509,24 +535,52 @@ private def resolveInstanceMeta (env : Env) (programName : String)
       (concrete ++ st.catalogOrder)
   | some pm =>
     if pm.generic then
-      let payload := Json.mkObj <|
-        [("program", Json.str programName)]
-        ++ (match typeArgs with | some ta => [("type_args", ta)] | none => [])
-      let attempt : Except Failure Json ← (env.service.call "resolve_type" payload).run
-      match attempt with
-      | .ok resp =>
+      -- Phase 5 stage 6b: type-arg resolution + the specialization
+      -- (strata over the raw template, NO relink — TS
+      -- `specializeFromResolvedTemplate` never relinked) run
+      -- engine-side. Every failure — arg validation and strata alike —
+      -- maps to invalid_type_args with the raw message, exactly how
+      -- the engine mapped any service resolve_type failure before the
+      -- move.
+      let some templateIdx := st.templateByName.get? programName
+        | internalError s!"resolve_type: generic '{programName}' has no stored template (engine bug)"
+      let some template := st.arena.program? templateIdx
+        | internalError s!"resolve_type: template pool index {templateIdx.idx} out of range (engine bug)"
+      let declared ← template.typeParams.mapM fun i =>
+        match st.arena.typeParam? i with
+        | some tp => pure (tp.name, tp.default?)
+        | none => internalError s!"resolve_type: typeParam pool index out of range (engine bug)"
+      let resolvedArgs ←
+        match Tropical.TypeArgs.resolve typeArgs declared s!"instance of '{programName}'" with
+        | .error msg =>
+          throwBare .invalidTypeArgs msg (param := some "type_args") (value := typeArgs)
+        | .ok r => pure r
+      let key := Tropical.TypeArgs.cacheKey programName resolvedArgs
+      let echo := Json.mkObj (resolvedArgs.toList.map fun (n, v) => (n, Json.num v))
+      match st.specializationCache.get? key with
+      | some (pmCached, idx?) => pure (some echo, pmCached, idx?)
+      | none =>
+        let (arena', specIdx) ←
+          match runStrataChecked resolvedArgs st.arena templateIdx with
+          | .error msg =>
+            throwBare .invalidTypeArgs msg (param := some "type_args") (value := typeArgs)
+          | .ok r => pure r
+        let resolved ← match Tropical.Ir.Codec.encodeResolved arena' specIdx with
+          | .error e => internalError e
+          | .ok j => pure j
+        -- arena' (the pre-round-trip specialization) is deliberately
+        -- NOT persisted: the store adopts the service entry's
+        -- round-tripped form below, exactly one arena copy — the same
+        -- growth the pre-6b path had.
+        let payload := Json.mkObj [
+          ("key", Json.str key), ("type_args", echo), ("resolved", resolved)]
+        let resp ← env.service.call "resolve_type" payload
         let entry ← Service.field resp "entry"
-        let resolved := (getField? resp "type_args").getD jsonNull
-        let resolvedOpt := if resolved.compress == "null" then none else some resolved
+        let pmNew := ProgMeta.fromEntry entry
         let idx? ← adoptResolved env entry
-        pure (resolvedOpt, ProgMeta.fromEntry entry, idx?)
-      | .error f =>
-        -- Specialization failure → invalid_type_args with the raw message.
-        let msg := match f with
-          | .raw j => (getStrField? j "message").getD j.compress
-          | .env e => e.message
-        throwBare .invalidTypeArgs msg (param := some "type_args")
-          (value := typeArgs)
+        env.state.modify fun s =>
+          { s with specializationCache := s.specializationCache.insert key (pmNew, idx?) }
+        pure (some echo, pmNew, idx?)
     else
       match typeArgs with
       | some ta =>

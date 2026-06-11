@@ -35,7 +35,7 @@
 
 import { readFileSync } from 'node:fs'
 import {
-  makeSession, loadJSON, resolveProgramType, instantiate,
+  makeSession, loadJSON, instantiate,
   allocateOutputSlots, setWireExpr, reconstructWireDelays,
   normalizeProgramFile, v2NodeToFile,
   inputNames, outputNames, registerNames,
@@ -164,7 +164,15 @@ type CompilePayload = {
    *  payload (the elaborate step moved engine-side; this service just
    *  decodes and partitions). */
   resolved_root: unknown
-  instances: Array<{ name: string; program: string; type_args?: Record<string, number> | null }>
+  /** Each instance carries its post-strata resolved IR (Phase 5 stage
+   *  6b) — the engine's adopted snapshot, instantiated here verbatim;
+   *  no name-based re-resolution and no strata on this path. */
+  instances: Array<{
+    name: string
+    program: string
+    type_args?: Record<string, number> | null
+    resolved: unknown
+  }>
   /** Post-extraction wires — consumed by the input-alias checks and the
    *  defensive acyclicity tripwire, not re-lowered. */
   wires: Array<{ key: string; expr: ExprNode }>
@@ -194,8 +202,11 @@ function handleCompile(p: CompilePayload) {
   session.inputExprs.clear()
 
   for (const inst of p.instances) {
-    const { type, typeArgs } = resolveProgramType(session, inst.program, inst.type_args ?? undefined, undefined)
-    const instance = instantiate(type, inst.name, { baseTypeName: inst.program, typeArgs })
+    const type = makeCompiled(decodeResolved(inst.resolved))
+    const instance = instantiate(type, inst.name, {
+      baseTypeName: inst.program,
+      typeArgs: inst.type_args ?? undefined,
+    })
     session.instanceRegistry.set(inst.name, instance)
   }
   for (const w of p.wires) {
@@ -341,11 +352,14 @@ function handleMethod(method: string, params: Record<string, unknown>): unknown 
       return handleRegisterProgram(params as unknown as Parameters<typeof handleRegisterProgram>[0])
 
     case 'resolve_type': {
-      const program = params.program as string
-      const typeArgs = params.type_args as Record<string, number> | undefined
-      const { type, typeArgs: resolved } = resolveProgramType(session, program, typeArgs, undefined)
-      const key = type.displayName
-      return { key, type_args: resolved ?? null, entry: concreteEntry(key, type) }
+      // Phase 5 stage 6b: the engine resolved the type args and ran
+      // the specialization (strata) itself; this side decodes, caches
+      // the Compiled under the engine's key, and renders the catalog
+      // entry (port metadata stays service-side until Phase 6).
+      const key = params.key as string
+      const type = makeCompiled(decodeResolved(params.resolved), { displayName: key })
+      session.specializationCache.set(key, type)
+      return { key, type_args: params.type_args ?? null, entry: concreteEntry(key, type) }
     }
 
     case 'compile':
