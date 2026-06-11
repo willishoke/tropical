@@ -272,6 +272,48 @@ replaces is **deleted**, and the relevant differs + existing suites
    the TS oracle retires. The TS compiler service is **deleted**.
    Gate: `diff-plan` + `diff-audio` across the corpus × all three
    compilation modes; goldens pass without re-baselining.
+   **Staging (recorded at phase start):**
+   - **6a** `Tropical/Plan.lean`: typed plan_5 (NOperand/DstSlot/NInstr/
+     PerInstancePlan/InstanceFunction/Sink/Source/FlatPlan) + the
+     `toWirePlan` JSON encoder with its key-omission rules. Core
+     enrichment: port types (input/output decls, reg scalar) survive
+     the downcast — emit consumes them.
+   - **6b** Emit: `slots` + `emit_resolved` + `compile_resolved` over
+     Core with total matches. CSE port note: TS interns structural key
+     strings to dense ids — only the *partition* the keys induce must
+     match, not the key text; numbers key by value-equivalence (TS keys
+     on JS number toString of the parsed double, so distinct decimal
+     texts of one double must collide in Lean too). New gate
+     `make diff-emit`: TS `emit_cmd.ts` vs `diffcli emit-*`, the
+     diff-strata corpus, inline mode, structural compare of
+     PerInstancePlan wire JSON (fractal emit paths are exercised at
+     6c/6d through partition).
+   - **6c** Partition + session compile: `partition_recursive`,
+     `compile_session_slotted*` (translateNode / remapInstancePlan /
+     emitSinks / buildSlotMetadata), and the `session.ts` slot
+     allocators incl. the array-input alias quotient. `syncCompile`
+     builds and loads its own plan; the service `compile` method dies.
+     Engine renders its own catalog entries. Gates: diff-engine (all
+     scripts, debug_render probes), test-lean-engine, bun suite.
+   - **6d** load/merge engine-side (v2 ingest → session
+     materialization; raise is already Lean) + `diffcli compile`
+     implementing the compile_patch contract. Makefile diff-plan /
+     diff-audio gain the Lean side B × all three modes. The phase
+     gate proper lands here.
+   - **6e** save/export engine-side (`v2NodeToFile`, `prettyExpr`,
+     `saveProgramFromSession`, `exportSessionAsProgram`). Gate:
+     diff-engine program_io (extend the fixture if coverage is thin).
+   - **6f** `mcp/compiler_service.ts` deleted; the frontend spawns no
+     bun process. Full battery; goldens unchanged; docs.
+   **Interpreter decision (recorded):** the Phase-2-deferred
+   `Tropical/Plan/Interp` reference interpreter is re-deferred past
+   Phase 6. While the TS oracle lives, the differential gates
+   (diff-plan structural, diff-audio byte-for-byte through the real
+   JIT) are strictly stronger than interpreter agreement; the
+   interpreter's value is as the post-oracle semantic anchor, so it
+   lands with Phase 8 (when bun/koffi leave and the equiv runners move
+   to `lake exe tropicaltest`). `Tropical/Plan.lean` (6a) is the typed
+   substrate it will attach to.
 7. **Surface parser + markdown + printer + stdlib.** Port
    `compiler/parse/*` → `Tropical/Parse/*`; dual-parse every
    `stdlib/*.md`, compare ParsedProgram JSON; parse∘print fixpoint
