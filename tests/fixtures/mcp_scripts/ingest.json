@@ -246,5 +246,101 @@
     }
   },
   { "method": "list_instances", "params": {} },
+  { "method": "save", "params": {} },
+  {
+    "method": "load",
+    "params": {
+      "program": {
+        "schema": "tropical_program_2",
+        "name": "export_base",
+        "body": {
+          "op": "block",
+          "decls": [
+            {
+              "op": "instanceDecl",
+              "name": "osc",
+              "program": "SinOsc",
+              "inputs": { "freq": 110 }
+            },
+            {
+              "op": "instanceDecl",
+              "name": "filt",
+              "program": "OnePole",
+              "inputs": {
+                "input": { "op": "ref", "instance": "osc", "output": "sine" },
+                "g": 0.3
+              }
+            },
+            {
+              "op": "instanceDecl",
+              "name": "spare",
+              "program": "WhiteNoise"
+            }
+          ],
+          "assigns": [
+            {
+              "op": "outputAssign",
+              "name": "dac.out",
+              "expr": { "op": "ref", "instance": "filt", "output": "out" }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "method": "export_program",
+    "params": {
+      "name": "WarmVoice",
+      "inputs": { "pitch": "osc:freq", "tone": "filt:g" },
+      "outputs": { "out": { "instance": "filt", "output": "out" } }
+    }
+  },
+  { "method": "list_programs", "params": {} },
+  { "method": "save", "params": {} },
+  { "method": "add_instance", "params": { "program": "WarmVoice", "instance_name": "wv1" } },
+  { "method": "wire", "params": { "set": [{ "instance": "wv1", "input": "pitch", "expr": 165 }] } },
+  { "method": "debug_render", "params": { "frames": 4 } },
+  {
+    "method": "export_program",
+    "params": {
+      "name": "BadOut",
+      "outputs": { "out": { "instance": "nope", "output": "out" } }
+    }
+  },
+  {
+    "method": "export_program",
+    "params": {
+      "name": "BadIn",
+      "inputs": { "x": "not-a-target" },
+      "outputs": { "out": { "instance": "filt", "output": "out" } }
+    }
+  },
+  {
+    "method": "export_program",
+    "params": {
+      "name": "BadPort",
+      "inputs": { "x": "osc:nothere" },
+      "outputs": { "out": { "instance": "filt", "output": "out" } }
+    }
+  },
+  {
+    "method": "export_program",
+    "params": {
+      "name": "WiredVoice",
+      "inputs": { "pitch": "osc:freq" },
+      "outputs": { "out": { "instance": "wv1", "output": "out" } }
+    }
+  },
+  {
+    "method": "export_program",
+    "params": {
+      "name": "SlimVoice",
+      "inputs": { "tone": "filt:g" },
+      "outputs": { "out": { "instance": "filt", "output": "out" } },
+      "remove_exported": true
+    }
+  },
+  { "method": "list_instances", "params": {} },
   { "method": "save", "params": {} }
 ]

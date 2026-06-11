@@ -237,6 +237,19 @@ the slot state.
 
 ## Appendix: not a code defect
 
+- **`export_program` rejects MCP-wired subgraphs (latent, behavior
+  preserved)** — exported instance inputs and exposed-port defaults are
+  baked from the session's *post-extraction* wires, so any MCP-set wire
+  (always delay-wrapped, hence extraction-rewritten) lands in the
+  exported node as `{op:'sessionSlot'}` — which `raise` rejects
+  (`raise: unknown expression op 'sessionSlot'`). Export therefore
+  works for load-built sessions (raw wires) and fails for MCP-wired
+  ones. Both engines reproduce this identically (gated by
+  `ingest.json`'s `WiredVoice` probe at stage 6e). A real fix needs
+  delay-expression support in raise/elaborate (or reconstruction before
+  baking) — deferred as feature work, not silently changed during the
+  port.
+
 - **Stale golden hashes on `origin/main`** — the three committed
   `tests/golden/*.hash` values disagree with the current pipeline's
   output, identically across both engine implementations and with the

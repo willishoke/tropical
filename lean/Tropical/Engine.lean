@@ -1178,30 +1178,340 @@ def handleListWiring (env : Env) (args : Json) : EngineM Json := do
                         ("expr", Json.str (prettyExpr w.expr lookupOutputs))])
   pure (Json.arr results)
 
--- ── Program I/O (relayed; the compiler owns these until Phases 3–4) ─────────
+-- ── Program I/O (engine-side as of Phase 6 stage 6e) ────────────────────────
+
+/-- Port of `reconstructWireDelays`: rewrite the hoisted `sessionSlot` /
+    `sessionArraySlot` reads back into `delay(<source>, init)` with the
+    extraction registry's slot name as the delay id (the register's
+    state-transfer key). Cycle-safe via the visited-slot list. -/
+private partial def reconstructWireDelays
+    (registry : Array Tropical.Lowering.DelayEntry)
+    (expr : Json) (seen : List String := []) : Json :=
+  match expr with
+  | .arr items => .arr (items.map (reconstructWireDelays registry · seen))
+  | .obj fields =>
+    let op := opOf? expr
+    let idx? : Option Nat := match getField? expr "index" with
+      | some (.num n) => some n.toFloat.toUInt64.toNat
+      | _ => none
+    if (op == some "sessionSlot" || op == some "sessionArraySlot") && idx?.isSome then
+      let isArray := op == some "sessionArraySlot"
+      let idx := idx?.getD 0
+      let tag := s!"{if isArray then "a" else "s"}{idx}"
+      let entry? := registry.find? fun e =>
+        if isArray then e.isArray && e.arraySlot == some idx
+        else !e.isArray && e.slotIdx == some idx
+      match entry? with
+      | none => expr
+      | some entry =>
+        if seen.contains tag then expr
+        else
+          let src := reconstructWireDelays registry entry.sourceExpr (tag :: seen)
+          Json.mkObj [("op", Json.str "delay"), ("args", Json.arr #[src]),
+            ("init", entry.init), ("id", Json.str entry.slotName)]
+    else Id.run do
+      -- Structural recurse into every expression-valued field.
+      let mut out : List (String × Json) := []
+      for (k, v) in fields.toArray do
+        if k == "op" then
+          out := out ++ [(k, v)]
+        else
+          match v with
+          | .arr _ | .obj _ => out := out ++ [(k, reconstructWireDelays registry v seen)]
+          | _ => out := out ++ [(k, v)]
+      return Json.mkObj out
+  | _ => expr
+
+def handleSave (env : Env) : EngineM Json := do
+  let st ← env.state.get
+  -- Mirror the TS post-compile wire forms: extraction is pure over the
+  -- canonical wires; its registry supplies the reconstruction's delay
+  -- ids (extraction-minted `__autodelay:…#N` names for un-id'd authored
+  -- delays — which is why save can't just echo the canonical wires).
+  let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
+  let (wiresPost, delayEntries, _) :=
+    Tropical.Lowering.extractSessionDelays st.wires alloc
+  let mut decls : Array Json := #[]
+  -- paramDecls first, so they're declared before referencing instances.
+  for (name, value) in st.params do
+    decls := decls.push <| Json.mkObj
+      [("op", Json.str "paramDecl"), ("name", Json.str name), ("value", value)]
+  for (name, info) in st.instances do
+    let mut inputs : Array (String × Json) := #[]
+    for portName in info.progMeta.inputNames do
+      if let some w := wiresPost.find? fun w => w.instName == name && w.portName == portName then
+        inputs := inputs.push (portName, reconstructWireDelays delayEntries w.expr)
+    decls := decls.push <| Json.mkObj <|
+      [("op", Json.str "instanceDecl"), ("name", Json.str name),
+       ("program", Json.str info.baseTypeName)]
+      ++ (match info.typeArgs with | some ta => [("type_args", ta)] | none => [])
+      ++ (if inputs.isEmpty then [] else [("inputs", Json.mkObj inputs.toList)])
+  let mut assigns : Array Json := #[]
+  for (inst, output) in st.graphOutputs do
+    if let some info := st.findInstance? inst then
+      if let some idx := info.progMeta.outputNames.idxOf? output then
+        assigns := assigns.push <| Json.mkObj
+          [("op", Json.str "outputAssign"), ("name", Json.str "dac.out"),
+           ("expr", Json.mkObj [("op", Json.str "ref"), ("instance", Json.str inst),
+             ("output", toJson idx)])]
+  let body := Json.mkObj <|
+    [("op", Json.str "block"), ("decls", Json.arr decls)]
+    ++ (if assigns.isEmpty then [] else [("assigns", Json.arr assigns)])
+  pure <| Json.mkObj [("program", Json.mkObj
+    [("schema", Json.str "tropical_program_2"), ("name", Json.str "patch"),
+     ("body", body)])]
+
+/-- Port of `rewriteRefs`: session refs to internal instances become
+    `nestedOut`; recursion follows `args` only (the TS shape). -/
+private partial def rewriteRefs (reachable : Array String) (node : Json) : Json :=
+  match node with
+  | .arr items => .arr (items.map (rewriteRefs reachable))
+  | .obj fields =>
+    let isInternalRef :=
+      opOf? node == some "ref" &&
+      (match getStrField? node "instance" with
+       | some i => reachable.contains i
+       | none => false)
+    if isInternalRef then
+      Json.mkObj [("op", Json.str "nestedOut"),
+        ("ref", Json.str ((getStrField? node "instance").getD "")),
+        ("output", (getField? node "output").getD jsonNull)]
+    else
+      match getField? node "args" with
+      | some (.arr items) => Id.run do
+        let mut out : List (String × Json) := []
+        for (k, v) in fields.toArray do
+          if k == "args" then
+            out := out ++ [(k, Json.arr (items.map (rewriteRefs reachable)))]
+          else out := out ++ [(k, v)]
+        return Json.mkObj out
+      | _ => node
+  | _ => node
+
+/-- Port of `reachableInstances` (stack-pop walk; discovery order is the
+    TS Set's insertion order). -/
+private def reachableFrom (rootExprs : Array Json) (wires : Array Wire)
+    (allInstances : Array String) : Array String := Id.run do
+  let mut reachable : Array String := #[]
+  let mut queue : Array String := #[]
+  for expr in rootExprs do
+    for dep in exprDependencies expr do
+      if allInstances.contains dep && !reachable.contains dep then
+        reachable := reachable.push dep
+        queue := queue.push dep
+  while !queue.isEmpty do
+    let name := queue.back!
+    queue := queue.pop
+    for w in wires do
+      if w.instName == name then
+        for dep in exprDependencies w.expr do
+          if allInstances.contains dep && !reachable.contains dep then
+            reachable := reachable.push dep
+            queue := queue.push dep
+  return reachable
+
+/-- The TS `portTypeToDecl` over an entry's structured `type_obj`. -/
+private def portTypeToDecl (t : Json) : EngineM Json := do
+  match getStrField? t "kind" with
+  | some "scalar" => pure ((getField? t "scalar").getD jsonNull)
+  | some "alias" =>
+    pure <| Json.str (((getField? t "alias").bind (getStrField? · "name")).getD "")
+  | some "array" =>
+    let element : Json := match getField? t "element" with
+      | some (.str s) => Json.str s
+      | some el => Json.str ((getStrField? el "name").getD "")
+      | none => jsonNull
+    let shape ← match getField? t "shape" with
+      | some (.arr dims) => dims.mapM fun d => do
+        match d with
+        | .num n => pure (Json.num n)
+        | _ => internalError s!"export: array shape carries unresolved type-param '{(getStrField? d "name").getD ""}'"
+      | _ => pure #[]
+    pure <| Json.mkObj [("kind", Json.str "array"), ("element", element),
+      ("shape", Json.arr shape)]
+  | _ => pure jsonNull
+
+private def isDefaultPortType (t? : Option Json) : Bool :=
+  match t? with
+  | none => true
+  | some t =>
+    getStrField? t "kind" == some "scalar" && getStrField? t "scalar" == some "float"
 
 def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
   let name := (argStr? args "name").getD ""
   if name.isEmpty then
     throwBare .missingArgument "name is required" (param := some "name")
-  let outputs := arg? args "outputs"
-  let outputsEmpty := match outputs with
-    | some (.obj m) => m.toList.isEmpty
-    | _ => true
-  if outputsEmpty then
+  let outputsArg := arg? args "outputs"
+  let outputPairs : Array (String × Json) := match outputsArg with
+    | some (.obj m) => m.toArray
+    | _ => #[]
+  if outputPairs.isEmpty then
     throwBare .missingArgument "outputs is required (at least one)" (param := some "outputs")
 
-  let payload := Json.mkObj [
-    ("name", Json.str name),
-    ("inputs", (arg? args "inputs").getD (Json.mkObj [])),
-    ("outputs", outputs.getD jsonNull)]
-  let resp ← env.service.call "export_program" payload
-  adoptEntries env ((getField? resp "entries").getD (.arr #[]))
+  let st ← env.state.get
+  -- The TS export reads the service session's post-compile wires —
+  -- extraction-rewritten forms. Recompute them purely over the mirror.
+  let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
+  let (wiresPost, _delayEntries, _) :=
+    Tropical.Lowering.extractSessionDelays st.wires alloc
+  let allInstances := st.instanceNames
 
-  let exportedJ := (getField? resp "exported_instances").getD (.arr #[])
-  let exported : Array String := match exportedJ with
-    | .arr es => es.filterMap fun j => match j with | .str s => some s | _ => none
+  -- Validate output mappings; build the root ref expressions.
+  let mut rootExprs : Array Json := #[]
+  for (outName, ref) in outputPairs do
+    let instName := (getStrField? ref "instance").getD ""
+    let some info := st.findInstance? instName
+      | internalError s!"export: output '{outName}' references unknown instance '{instName}'."
+    let portName := (getStrField? ref "output").getD ""
+    if !info.progMeta.outputNames.contains portName then
+      internalError s!"export: instance '{instName}' has no output '{portName}'. Available: {String.intercalate ", " info.progMeta.outputNames.toList}"
+    rootExprs := rootExprs.push <| Json.mkObj
+      [("op", Json.str "ref"), ("instance", Json.str instName),
+       ("output", Json.str portName)]
+
+  -- Validate input mappings ("instance:port" targets).
+  let inputPairs : Array (String × Json) := match arg? args "inputs" with
+    | some (.obj m) => m.toArray
     | _ => #[]
+  let mut exposed : Array (String × String × String) := #[]  -- (inputName, inst, port)
+  for (inputName, targetJ) in inputPairs do
+    let parsed? : Option (String × String) := match targetJ with
+      | .str target =>
+        match target.splitOn ":" with
+        | instPart :: rest =>
+          let portPart := String.intercalate ":" rest
+          if rest.isEmpty || instPart.isEmpty || portPart.isEmpty then none
+          else some (instPart, portPart)
+        | [] => none
+      | _ => none
+    let some (instName, portName) := parsed?
+      | internalError s!"export: input '{inputName}' target must be \"instance:port\", got '{tsInterp targetJ}'."
+    let some info := st.findInstance? instName
+      | internalError s!"export: input '{inputName}' references unknown instance '{instName}'."
+    if !info.progMeta.inputNames.contains portName then
+      internalError s!"export: instance '{instName}' has no input '{portName}'. Available: {String.intercalate ", " info.progMeta.inputNames.toList}"
+    exposed := exposed.push (inputName, instName, portName)
+  let exposedKeys := exposed.map fun (_, i, p) => s!"{i}:{p}"
+  let findWire := fun (inst port : String) =>
+    (wiresPost.find? fun w => w.instName == inst && w.portName == port).map (·.expr)
+
+  -- Reverse reachability from the outputs, extended by exposed-input
+  -- wiring defaults.
+  let mut reachable := reachableFrom rootExprs wiresPost allInstances
+  for (_, instName, portName) in exposed do
+    if let some currentExpr := findWire instName portName then
+      for dep in exprDependencies currentExpr do
+        if allInstances.contains dep && !reachable.contains dep then
+          let extra := reachableFrom #[currentExpr] wiresPost allInstances
+          for e in extra do
+            if !reachable.contains e then reachable := reachable.push e
+
+  -- Dangling-reference check.
+  for instName in reachable do
+    for w in wiresPost do
+      if w.instName == instName && !exposedKeys.contains w.key then
+        for dep in exprDependencies w.expr do
+          if !reachable.contains dep && allInstances.contains dep then
+            internalError (s!"export: instance '{instName}' wiring '{w.key}' references '{dep}' which is outside the exported subgraph. "
+              ++ s!"Either expose it as an input or include '{dep}' in the output dependency chain.")
+
+  -- Port entries (type metadata + folded wiring defaults).
+  let portInfoOf := fun (inst port : String) (isInput : Bool) =>
+    (st.findInstance? inst).bind fun info =>
+      (if isInput then info.progMeta.inputs else info.progMeta.outputs).find? (·.name == port)
+  let mut inputEntries : Array Json := #[]
+  for (inputName, instName, portName) in exposed do
+    let typeObj? := (portInfoOf instName portName true).bind (·.typeObj)
+    let default? := (findWire instName portName).map (rewriteRefs reachable)
+    let typeDecl? ← if isDefaultPortType typeObj? then pure (none : Option Json)
+      else some <$> portTypeToDecl (typeObj?.getD jsonNull)
+    inputEntries := inputEntries.push <|
+      match typeDecl?, default? with
+      | none, none => Json.str inputName
+      | t?, d? => Json.mkObj <|
+        [("name", Json.str inputName)]
+        ++ (match t? with | some t => [("type", t)] | none => [])
+        ++ (match d? with | some d => [("default", d)] | none => [])
+  let mut outputEntries : Array Json := #[]
+  for (outName, ref) in outputPairs do
+    let instName := (getStrField? ref "instance").getD ""
+    let portName := (getStrField? ref "output").getD ""
+    let typeObj? := (portInfoOf instName portName false).bind (·.typeObj)
+    if isDefaultPortType typeObj? then
+      outputEntries := outputEntries.push (Json.str outName)
+    else
+      let t ← portTypeToDecl (typeObj?.getD jsonNull)
+      outputEntries := outputEntries.push <| Json.mkObj
+        [("name", Json.str outName), ("type", t)]
+
+  -- Topological order over the exported subgraph (Kahn, sorted ready
+  -- queues; cycle members append in reachable order).
+  let topo := Tropical.Lowering.computeInstanceTopoOrder
+    (reachable.filterMap fun n => (st.findInstance? n).map (n, ·))
+    (wiresPost.filter fun w => reachable.contains w.instName)
+  let order := Id.run do
+    let mut out := topo
+    for n in reachable do
+      if !out.contains n then out := out.push n
+    return out
+
+  -- Instance decls: exposed ports become {op:'input'}, sibling refs
+  -- become nestedOut.
+  let mut decls : Array Json := #[]
+  for instName in order do
+    let some info := st.findInstance? instName
+      | internalError s!"export: internal: '{instName}' missing from registry"
+    let mut instInputs : Array (String × Json) := #[]
+    for portName in info.progMeta.inputNames do
+      let key := s!"{instName}:{portName}"
+      match exposed.find? fun (_, i, p) => s!"{i}:{p}" == key with
+      | some (inputName, _, _) =>
+        instInputs := instInputs.push (portName,
+          Json.mkObj [("op", Json.str "input"), ("name", Json.str inputName)])
+      | none =>
+        if let some expr := findWire instName portName then
+          instInputs := instInputs.push (portName, rewriteRefs reachable expr)
+    decls := decls.push <| Json.mkObj <|
+      [("op", Json.str "instanceDecl"), ("name", Json.str instName),
+       ("program", Json.str info.baseTypeName)]
+      ++ (match info.typeArgs with | some ta => [("type_args", ta)] | none => [])
+      ++ (if instInputs.isEmpty then [] else [("inputs", Json.mkObj instInputs.toList)])
+  let mut assigns : Array Json := #[]
+  for (outName, ref) in outputPairs do
+    assigns := assigns.push <| Json.mkObj
+      [("op", Json.str "outputAssign"), ("name", Json.str outName),
+       ("expr", Json.mkObj [("op", Json.str "nestedOut"),
+         ("ref", (getField? ref "instance").getD jsonNull),
+         ("output", (getField? ref "output").getD jsonNull)])]
+
+  let node := Json.mkObj [
+    ("op", Json.str "program"), ("name", Json.str name),
+    ("ports", Json.mkObj [("inputs", Json.arr inputEntries),
+      ("outputs", Json.arr outputEntries)]),
+    ("body", Json.mkObj [("op", Json.str "block"), ("decls", Json.arr decls),
+      ("assigns", Json.arr assigns)])]
+
+  -- Register the exported program through the engine batch (raise +
+  -- elaborate + strata + service registry residue + adoption) — the
+  -- loadProgramAsType image; raise/elaborate failures surface as
+  -- internal_error with the verbatim message.
+  let jv ← match Tropical.Parse.JsonV.parse node.compress with
+    | .error e => internalError s!"export_program: node JSON re-parse failed: {e}"
+    | .ok v => pure v
+  let parsed ← match Tropical.Parse.Raise.raiseProgram jv with
+    | .error msg => internalError msg
+    | .ok p => pure p
+  let mut rootEntry := jsonNull
+  for (n, p) in registrationBatch name (renameProgram parsed name) do
+    let (entry, _) ← registerOne env n p
+    rootEntry := entry
+  let entryNames := fun (k : String) => Json.arr <|
+    (match getField? rootEntry k with
+     | some (.arr ps) => ps
+     | _ => #[]).filterMap fun pj => (getStrField? pj "name").map Json.str
+
+  let exported := order
+  let exportedJ := Json.arr (order.map Json.str)
 
   let removeExported := match arg? args "remove_exported" with
     | some (.bool b) => b
@@ -1220,10 +1530,13 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
 
   pure <| Json.mkObj [
     ("program_name", Json.str name),
-    ("inputs", (getField? resp "inputs").getD (.arr #[])),
-    ("outputs", (getField? resp "outputs").getD (.arr #[])),
+    ("inputs", entryNames "inputs"),
+    ("outputs", entryNames "outputs"),
     ("instances_included", exportedJ),
-    ("program", (getField? resp "program").getD jsonNull)]
+    ("program", Json.mkObj
+      [("schema", Json.str "tropical_program_2"), ("name", Json.str name),
+       ("ports", (getField? node "ports").getD jsonNull),
+       ("body", (getField? node "body").getD jsonNull)])]
 
 -- ── v2 ingest (load/merge — Phase 6 stage 6d) ────────────────────────────────
 -- Port of `loadProgramAsSession` / `mergeProgramIntoSession` over the
@@ -1447,10 +1760,6 @@ def handleLoad (env : Env) (args : Json) : EngineM Json := do
     ("outputs", toJson st.graphOutputs.size),
     ("params", toJson (st.params.map (·.1))),
     ("timing", Json.mkObj [("wall_ms", toJson (t1 - t0))])]
-
-def handleSave (env : Env) : EngineM Json := do
-  let resp ← env.service.call "save" (Json.mkObj [])
-  pure <| Json.mkObj [("program", (getField? resp "program").getD jsonNull)]
 
 def handleMerge (env : Env) (args : Json) : EngineM Json := do
   let raw := match arg? args "program" with

@@ -40,24 +40,19 @@
 import {
   makeSession, instantiate,
   reconstructWireDelays,
-  v2NodeToFile,
   inputNames, outputNames, registerNames,
   inputPortTypes, outputPortTypes, registerPortTypes,
   rawInputDefaults,
   type SessionState, type ExprNode, type Instance,
 } from '../compiler/session.js'
-import {
-  loadProgramAsType, exportSessionAsProgram, saveProgramFromSession,
-  mergeProgramIntoSession, instanceDecls,
-} from '../compiler/program.js'
 import { decodeResolved, encodeResolved } from '../compiler/ir/resolved_codec.js'
-import { makeCompiled } from '../compiler/program_types.js'
+import { makeCompiled, type Compiled } from '../compiler/program_types.js'
 import { assertSessionAcyclic } from '../compiler/ir/lowering/session_cycle_check.js'
 import { Param } from '../compiler/runtime/param.js'
 import { portTypeToString } from '../compiler/ir/port_type.js'
 import { parseWireKey, wireKey } from '../compiler/ir/branded_names.js'
 import type { PortType, ResolvedProgram } from '../compiler/ir/nodes.js'
-import { failBare, toEnvelope, type ErrorEnvelope } from './envelope.js'
+import { toEnvelope, type ErrorEnvelope } from './envelope.js'
 import { RESOURCES, PROMPTS, readResourceText, getPromptMessages } from './resources.js'
 
 // Phase 4 stage 4b: the service boots EMPTY. The Lean engine drives all
@@ -77,7 +72,7 @@ const portTypeOrNull = (t: PortType | undefined): string | null =>
 // (Phase 4 stage 4a). Generic templates carry `resolved: null` (the engine
 // only needs concrete specializations, which arrive via `resolve_type`).
 
-function concreteEntry(name: string, type: Instance | NonNullable<ReturnType<typeof loadProgramAsType>>) {
+function concreteEntry(name: string, type: Instance | Compiled) {
   const defaultsMap = rawInputDefaults(type) as Record<string, unknown>
   const ipt = inputPortTypes(type)
   const opt = outputPortTypes(type)
@@ -356,39 +351,12 @@ function handleMethod(method: string, params: Record<string, unknown>): unknown 
     case 'register_lifted':
       return handleRegisterLifted(params as unknown as Parameters<typeof handleRegisterLifted>[0])
 
-    case 'save': {
-      const { node, topLevel } = saveProgramFromSession(session)
-      return { program: v2NodeToFile(node as unknown as ExprNode, topLevel) }
-    }
-
-    case 'export_program': {
-      const name = params.name as string
-      const exportedNode = exportSessionAsProgram(session, {
-        name,
-        inputs: (params.inputs ?? {}) as Record<string, string>,
-        outputs: params.outputs as Record<string, { instance: string; output: string }>,
-      })
-      const exportedInstanceNames = [...instanceDecls(exportedNode)].map(d => d.name)
-      const before = new Set(session.programs.keys())
-      const type = loadProgramAsType(exportedNode, session)
-      if (!type) {
-        failBare({ code: 'internal_error', message: 'export_program produced a generic program — not supported' })
-      }
-      session.typeRegistry.set(name, type)
-      return {
-        program: v2NodeToFile(exportedNode as unknown as ExprNode),
-        exported_instances: exportedInstanceNames,
-        inputs: inputNames(type),
-        outputs: outputNames(type),
-        entries: newEntries(before, [name]),
-      }
-    }
-
-    // Phase 6 stage 6d: load/merge ingest is engine-side (the engine
-    // walks the normalized v2 node, registers inline programs through
-    // register_program, and compiles its own plan); the file-root
-    // type_defs registries live here for save/export's resolvers until
-    // their phases.
+    // Phase 6 stages 6d/6e: load/merge/save/export are engine-side
+    // (the engine walks the normalized v2 node, registers inline and
+    // exported programs through register_program, serializes its own
+    // mirror, and compiles its own plan). The file-root type_defs
+    // registries remain here only because register_program's raise
+    // path may consult them.
     case 'sync_type_defs': {
       if (params.clear === true) {
         session.typeAliasRegistry.clear()
