@@ -1,0 +1,250 @@
+[
+  {
+    "method": "load",
+    "params": {
+      "program": {
+        "schema": "tropical_program_2",
+        "name": "ingest_patch",
+        "body": {
+          "op": "block",
+          "decls": [
+            {
+              "op": "programDecl",
+              "name": "Doubler",
+              "program": {
+                "name": "Doubler",
+                "ports": {
+                  "inputs": [{ "name": "x", "type": "float" }],
+                  "outputs": [{ "name": "out", "type": "float" }]
+                },
+                "body": {
+                  "op": "block",
+                  "decls": [],
+                  "assigns": [
+                    {
+                      "op": "outputAssign",
+                      "name": "out",
+                      "expr": { "op": "mul", "args": [{ "op": "input", "name": "x" }, 2] }
+                    }
+                  ]
+                }
+              }
+            },
+            { "op": "paramDecl", "name": "depth", "value": 0.25 },
+            {
+              "op": "instanceDecl",
+              "name": "clk",
+              "program": "Clock",
+              "inputs": { "freq": 2, "ratios_in": [1] }
+            },
+            {
+              "op": "instanceDecl",
+              "name": "seq",
+              "program": "Sequencer",
+              "type_args": { "N": 4 },
+              "inputs": {
+                "clock": { "op": "ref", "instance": "clk", "output": "output" },
+                "values": [110, 165, 220, 275]
+              }
+            },
+            {
+              "op": "instanceDecl",
+              "name": "osc",
+              "program": "SinOsc",
+              "inputs": { "freq": { "op": "ref", "instance": "seq", "output": "value" } }
+            },
+            {
+              "op": "instanceDecl",
+              "name": "dbl",
+              "program": "Doubler",
+              "inputs": { "x": { "op": "ref", "instance": "osc", "output": "sine" } }
+            }
+          ],
+          "assigns": [
+            {
+              "op": "outputAssign",
+              "name": "dac.out",
+              "expr": { "op": "ref", "instance": "dbl", "output": "out" }
+            }
+          ]
+        }
+      }
+    }
+  },
+  { "method": "list_instances", "params": {} },
+  { "method": "list_wiring", "params": {} },
+  { "method": "list_params", "params": {} },
+  { "method": "debug_render", "params": { "frames": 4 } },
+  {
+    "method": "merge",
+    "params": {
+      "program": {
+        "schema": "tropical_program_2",
+        "name": "extra_voice",
+        "body": {
+          "op": "block",
+          "decls": [
+            {
+              "op": "instanceDecl",
+              "name": "osc2",
+              "program": "BlepSaw",
+              "inputs": { "freq": 55.5 }
+            }
+          ],
+          "assigns": [
+            {
+              "op": "outputAssign",
+              "name": "dac.out",
+              "expr": { "op": "ref", "instance": "osc2", "output": "saw" }
+            }
+          ]
+        }
+      }
+    }
+  },
+  { "method": "list_instances", "params": {} },
+  { "method": "debug_render", "params": { "frames": 4 } },
+  {
+    "method": "merge",
+    "params": {
+      "program": {
+        "schema": "tropical_program_2",
+        "name": "collision",
+        "body": {
+          "op": "block",
+          "decls": [
+            { "op": "instanceDecl", "name": "osc2", "program": "SinOsc" }
+          ],
+          "assigns": []
+        }
+      }
+    }
+  },
+  {
+    "method": "merge",
+    "params": {
+      "program": {
+        "schema": "tropical_program_2",
+        "name": "param_collision",
+        "body": {
+          "op": "block",
+          "decls": [
+            { "op": "paramDecl", "name": "depth", "value": 0.5 }
+          ],
+          "assigns": []
+        }
+      }
+    }
+  },
+  {
+    "method": "load",
+    "params": {
+      "program": {
+        "schema": "tropical_program_2",
+        "name": "legacy_outputs",
+        "body": {
+          "op": "block",
+          "decls": [
+            {
+              "op": "instanceDecl",
+              "name": "voice",
+              "program": "SinOsc",
+              "inputs": { "freq": 330 }
+            }
+          ],
+          "assigns": []
+        },
+        "audio_outputs": [{ "instance": "voice", "output": "sine" }]
+      }
+    }
+  },
+  { "method": "list_instances", "params": {} },
+  { "method": "debug_render", "params": { "frames": 4 } },
+  {
+    "method": "load",
+    "params": {
+      "program": {
+        "schema": "tropical_program_2",
+        "name": "bad_patch",
+        "body": {
+          "op": "block",
+          "decls": [
+            { "op": "instanceDecl", "name": "x1", "program": "NoSuchProgram" }
+          ],
+          "assigns": []
+        }
+      }
+    }
+  },
+  {
+    "method": "load",
+    "params": {
+      "program": {
+        "schema": "tropical_program_2",
+        "name": "bad_args",
+        "body": {
+          "op": "block",
+          "decls": [
+            {
+              "op": "instanceDecl",
+              "name": "s1",
+              "program": "Sequencer",
+              "type_args": { "N": 4, "bogus": 1 }
+            }
+          ],
+          "assigns": []
+        }
+      }
+    }
+  },
+  {
+    "method": "load",
+    "params": {
+      "program": {
+        "schema": "tropical_program_2",
+        "name": "bad_dac",
+        "body": {
+          "op": "block",
+          "decls": [
+            {
+              "op": "instanceDecl",
+              "name": "o1",
+              "program": "SinOsc",
+              "inputs": { "freq": 220 }
+            }
+          ],
+          "assigns": [
+            {
+              "op": "outputAssign",
+              "name": "dac.out",
+              "expr": { "op": "ref", "instance": "o1", "output": "nope" }
+            }
+          ]
+        }
+      }
+    }
+  },
+  {
+    "method": "load",
+    "params": {
+      "program": {
+        "schema": "tropical_program_2",
+        "name": "bad_alias",
+        "body": {
+          "op": "block",
+          "decls": [
+            {
+              "op": "instanceDecl",
+              "name": "clk2",
+              "program": "Clock",
+              "inputs": { "freq": 2, "ratios_in": [1, 2] }
+            }
+          ],
+          "assigns": []
+        }
+      }
+    }
+  },
+  { "method": "list_instances", "params": {} },
+  { "method": "save", "params": {} }
+]

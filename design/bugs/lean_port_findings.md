@@ -203,6 +203,38 @@ a different iteration order than the oracle saw.
 
 ---
 
+## 7. A second `load` could ship a plan the engine parser rejects
+
+**Symptom.** Loading a patch after a session that had allocated input
+slots (any fractal compile — i.e., every session compile since the
+root lowering) or session array slots (array ports, lifted array
+wires) made the new session's plan unloadable:
+`runtime loadPlan failed: [json.exception.type_error.302] type must be
+string, but is null`. The previous kernel kept playing; every
+subsequent load of any patch failed the same way.
+
+**Mechanism.** `loadProgramAsSession` reset `slotCount` and cleared the
+output/param slot registries, but not `inputSlotRegistry`,
+`inputPortMeta`, the `ioArraySlot*` triple, or `delaySlotRegistry`.
+`buildSlotMetadata` then wrote stale input-slot names at indices past
+the fresh session's `slot_count`, leaving array holes that
+`JSON.stringify` serializes as `null` — which the C++ plan parser
+correctly rejects. Stale `ioArraySlot*` entries additionally inflated
+`array_slot_count` with phantom slots carrying the dead session's
+names.
+
+**Found by.** `make diff-engine` on the new `ingest.json` script
+(stage 6d corpus-discrimination pass): the Lean engine — which
+recomputes slot allocation from scratch on every compile and has no
+persistent slot registries to leak — loaded the second patch cleanly
+while the oracle returned `internal_error`.
+
+**Fix.** `loadProgramAsSession` clears the input-slot registries, the
+session array-slot space, and the delay registry alongside the rest of
+the slot state.
+
+---
+
 ## Appendix: not a code defect
 
 - **Stale golden hashes on `origin/main`** — the three committed

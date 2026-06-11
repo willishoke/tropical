@@ -333,6 +333,17 @@ export function loadProgramAsSession(
   session.outputPortMeta.clear()
   session.inputExprs.clear()
   session.slotCount = 0
+  // Lean-port finding #7: the input-slot and session-array registries
+  // (and the delay registry) also accumulate across loads. A stale
+  // `inputSlotRegistry` index past the fresh session's slotCount writes
+  // holes into slot_names (JSON nulls the engine parser rejects), and
+  // stale ioArraySlots inflate array_slot_count with phantom slots.
+  session.inputSlotRegistry.clear()
+  session.inputPortMeta.clear()
+  session.ioArraySlotCount = 0
+  session.ioArraySlotSizes.length = 0
+  session.ioArraySlotNames.length = 0
+  session.delaySlotRegistry = []
   // Note: typeRegistry, programs, and specializationCache are NOT
   // cleared — they hold the stdlib + any session-defined types that
   // the loaded program may instantiate.

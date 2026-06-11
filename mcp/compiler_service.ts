@@ -37,11 +37,10 @@
  * on the session as of the last `compile`/`load`/`merge`.
  */
 
-import { readFileSync } from 'node:fs'
 import {
-  makeSession, loadJSON, instantiate,
+  makeSession, instantiate,
   reconstructWireDelays,
-  normalizeProgramFile, v2NodeToFile,
+  v2NodeToFile,
   inputNames, outputNames, registerNames,
   inputPortTypes, outputPortTypes, registerPortTypes,
   rawInputDefaults,
@@ -51,11 +50,9 @@ import {
   loadProgramAsType, exportSessionAsProgram, saveProgramFromSession,
   mergeProgramIntoSession, instanceDecls,
 } from '../compiler/program.js'
-import { compileSession } from '../compiler/ir/compile_session.js'
 import { decodeResolved, encodeResolved } from '../compiler/ir/resolved_codec.js'
 import { makeCompiled } from '../compiler/program_types.js'
 import { assertSessionAcyclic } from '../compiler/ir/lowering/session_cycle_check.js'
-import { toWirePlan } from '../compiler/flat_plan.js'
 import { Param } from '../compiler/runtime/param.js'
 import { portTypeToString } from '../compiler/ir/port_type.js'
 import { parseWireKey, wireKey } from '../compiler/ir/branded_names.js'
@@ -215,10 +212,17 @@ function handleSync(p: SyncPayload) {
     session.inputExprNodes.set(wireKey(parseWireKey(w.key)), w.expr)
   }
   for (const o of p.graph_outputs) session.graphOutputs.push({ instance: o.instance, output: o.output })
+  // The Lean engine's mirror is authoritative — adopt its values so
+  // slot_defaults (and the params echo) reflect set_param calls made
+  // since the last compile, and DROP names absent from the payload
+  // (stage 6d: the engine owns the load/merge ingest, so a fresh load
+  // no longer clears this registry from the service side; the payload
+  // is the full param universe).
+  const payloadNames = new Set(p.params.map(pr => pr.name))
+  for (const name of [...session.paramRegistry.keys()]) {
+    if (!payloadNames.has(name)) session.paramRegistry.delete(name)
+  }
   for (const pr of p.params) {
-    // The Lean engine's mirror is authoritative — adopt its values so
-    // slot_defaults (and the params echo) reflect set_param calls made
-    // since the last compile.
     const existing = session.paramRegistry.get(pr.name)
     if (existing) existing.value = pr.value
     else session.paramRegistry.set(pr.name, new Param(pr.value))
@@ -380,30 +384,44 @@ function handleMethod(method: string, params: Record<string, unknown>): unknown 
       }
     }
 
-    case 'load': {
-      let raw: unknown
-      if (params.path) {
-        raw = JSON.parse(readFileSync(params.path as string, 'utf-8'))
-      } else {
-        raw = params.program
+    // Phase 6 stage 6d: load/merge ingest is engine-side (the engine
+    // walks the normalized v2 node, registers inline programs through
+    // register_program, and compiles its own plan); the file-root
+    // type_defs registries live here for save/export's resolvers until
+    // their phases.
+    case 'sync_type_defs': {
+      if (params.clear === true) {
+        session.typeAliasRegistry.clear()
+        session.sumTypeRegistry.clear()
+        session.structTypeRegistry.clear()
       }
-      const before = new Set(session.programs.keys())
-      const t0 = performance.now()
-      loadJSON(raw as { schema: string }, session)
-      const wall_ms = performance.now() - t0
-      // Re-emit the compiled plan for the Lean side to load over its own
-      // FFI (loadJSON compiled into this service's inert runtime; the
-      // session is post-extraction, so this recompile is idempotent).
-      const planJson = JSON.stringify(toWirePlan(compileSession(session)))
-      return { state: dumpState(before), plan_json: planJson, timing: { wall_ms } }
-    }
-
-    case 'merge': {
-      const { node, topLevel } = normalizeProgramFile(params.program as { schema?: string; [k: string]: unknown })
-      const before = new Set(session.programs.keys())
-      mergeProgramIntoSession(node, topLevel, session)
-      const planJson = JSON.stringify(toWirePlan(compileSession(session)))
-      return { state: dumpState(before), plan_json: planJson }
+      type V2TypeDef =
+        | { kind: 'alias'; name: string; base: string }
+        | { kind: 'sum'; name: string; variants: Array<{
+            name: string
+            payload: Array<{ name: string; scalar_type: 'float' | 'int' | 'bool' }>
+          }> }
+        | { kind: 'struct'; name: string; fields: Array<{
+            name: string; scalar_type: 'float' | 'int' | 'bool'
+          }> }
+      for (const td of (params.type_defs ?? []) as V2TypeDef[]) {
+        if (td.kind === 'alias') {
+          session.typeAliasRegistry.set(td.name, { base: td.base })
+        } else if (td.kind === 'sum') {
+          session.sumTypeRegistry.set(td.name, {
+            name: td.name,
+            variants: td.variants.map(v => ({
+              name: v.name,
+              payload: v.payload.map(f => ({ name: f.name, scalar: f.scalar_type })),
+            })),
+          })
+        } else {
+          session.structTypeRegistry.set(td.name, {
+            fields: td.fields.map(f => ({ name: f.name, scalar: f.scalar_type })),
+          })
+        }
+      }
+      return {}
     }
 
     // ── MCP non-tool surface ────────────────────────────────────────────────

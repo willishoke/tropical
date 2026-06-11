@@ -579,9 +579,15 @@ private def instanceSummary (st : SessionSt) (name : String) : Json :=
     plus the typed-store snapshot for the resolved program, with the TS
     failure shapes. Generic programs specialize through the service's
     `resolve_type`, whose entry is adopted into the store; concrete
-    programs take the store's current mapping for the name. -/
+    programs take the store's current mapping for the name.
+
+    `toolEnvelopes := false` selects the LOAD/MERGE ingest path's
+    failure shapes — `resolveProgramType`'s plain TS Errors
+    (`Unknown program type '…'. Known: …` etc.), which the service
+    relay surfaced as `internal_error` with the verbatim message. -/
 private def resolveInstanceMeta (env : Env) (programName : String)
-    (typeArgs : Option Json) (programParam : String) :
+    (typeArgs : Option Json) (programParam : String)
+    (toolEnvelopes : Bool := true) :
     EngineM (Option Json × ProgMeta × Option Tropical.Ir.ProgramIdx) := do
   let st ← env.state.get
   match st.programs.get? programName with
@@ -590,6 +596,9 @@ private def resolveInstanceMeta (env : Env) (programName : String)
     -- names first, then every program name (concrete ones repeat).
     let concrete := st.catalogOrder.filter fun n =>
       match st.programs.get? n with | some m => !m.generic | none => false
+    if !toolEnvelopes then
+      let known := String.intercalate ", " (concrete ++ st.catalogOrder).toList
+      internalError s!"Unknown program type '{programName}'. Known: {if known.isEmpty then "(none)" else known}"
     throwEnum .unknownProgram programParam (Json.str programName)
       (concrete ++ st.catalogOrder)
   | some pm =>
@@ -612,6 +621,7 @@ private def resolveInstanceMeta (env : Env) (programName : String)
       let resolvedArgs ←
         match Tropical.TypeArgs.resolve typeArgs declared s!"instance of '{programName}'" with
         | .error msg =>
+          if !toolEnvelopes then internalError msg
           throwBare .invalidTypeArgs msg (param := some "type_args") (value := typeArgs)
         | .ok r => pure r
       let key := Tropical.TypeArgs.cacheKey programName resolvedArgs
@@ -622,6 +632,7 @@ private def resolveInstanceMeta (env : Env) (programName : String)
         let (arena', specIdx) ←
           match runStrataChecked resolvedArgs st.arena templateIdx with
           | .error msg =>
+            if !toolEnvelopes then internalError msg
             throwBare .invalidTypeArgs msg (param := some "type_args") (value := typeArgs)
           | .ok r => pure r
         let resolved ← match Tropical.Ir.Codec.encodeResolved arena' specIdx with
@@ -647,6 +658,8 @@ private def resolveInstanceMeta (env : Env) (programName : String)
           | .obj m => String.intercalate ", " (m.toList.map Prod.fst)
           | _ => ""
         if keys.isEmpty then pure (none, pm, st.resolvedByName.get? programName)
+        else if !toolEnvelopes then
+          internalError s!"Program '{programName}' does not declare type_params; got type_args: {keys}"
         else
           throwBare .invalidTypeArgs
             (s!"Program '{programName}' does not declare type_params; got type_args: {keys}")
@@ -1146,79 +1159,228 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     ("instances_included", exportedJ),
     ("program", (getField? resp "program").getD jsonNull)]
 
-/-- Adopt a service state dump (after load / merge). -/
-private def adoptState (env : Env) (state : Json) (resetCounters : Bool) : EngineM Unit := do
-  adoptEntries env ((getField? state "entries").getD (.arr #[]))
-  let mut instances : Array (String × InstanceInfo) := #[]
-  for i in (match getField? state "instances" with
-            | some (.arr is) => is
-            | _ => #[]) do
-    let some name := getStrField? i "name" | continue
-    let some program := getStrField? i "program" | continue
-    let typeArgs := match getField? i "type_args" with
-      | some .null | none => none
-      | some ta => some ta
-    let entry := (getField? i "entry").getD jsonNull
-    let pm := ProgMeta.fromEntry entry
-    -- Per-instance snapshot: each dump row carries its instance's own
-    -- resolved IR (the specialized program for generic instances).
-    let resolvedIdx ← adoptResolved env entry
-    instances := instances.push
-      (name, { baseTypeName := program, typeArgs, progMeta := pm, resolvedIdx : InstanceInfo })
-  let wires : Array Wire :=
-    (match getField? state "wires" with
-     | some (.arr ws) => ws
-     | _ => #[]).filterMap fun w => do
-      let key ← getStrField? w "key"
-      let expr ← getField? w "expr"
-      match key.splitOn ":" with
-      | instName :: rest => pure { instName, portName := String.intercalate ":" rest, expr : Wire }
-      | [] => none
-  let graphOutputs : Array (String × String) :=
-    (match getField? state "graph_outputs" with
-     | some (.arr os) => os
-     | _ => #[]).filterMap fun o => do
-      pure ((← getStrField? o "instance"), (← getStrField? o "output"))
-  let dumpParams : Array (String × Json) :=
-    (match getField? state "params" with
-     | some (.arr ps) => ps
-     | _ => #[]).filterMap fun p => do
-      pure ((← getStrField? p "name"), (← getField? p "value"))
-  env.state.modify fun st =>
-    -- On merge (resetCounters = false) the dump's param values are the
-    -- service's stale Param handles; this mirror is authoritative for
-    -- values set since the last compile — keep ours, adopt only new
-    -- names. On load the session was rebuilt: adopt the dump wholesale.
-    let params := if resetCounters then dumpParams else
-      dumpParams.map fun (n, v) =>
-        match st.params.find? (·.1 == n) with
-        | some (_, existing) => (n, existing)
-        | none => (n, v)
-    { st with instances, wires, graphOutputs, params,
-              nameCounters := if resetCounters then {} else st.nameCounters }
+-- ── v2 ingest (load/merge — Phase 6 stage 6d) ────────────────────────────────
+-- Port of `loadProgramAsSession` / `mergeProgramIntoSession` over the
+-- engine's mirror: the normalized v2 node (Zod-stripped, key order
+-- preserved by JsonV) is walked directly; inline programDecls register
+-- through the engine's own `registerOne` batches; instances resolve
+-- through the engine specialization path with the load-path failure
+-- shapes; wires store RAW (loadProgramAsSession sets inputExprNodes
+-- directly — no auto-delay wrap). All failures are plain TS Errors on
+-- the oracle → `internal_error` with the verbatim message.
+
+open Tropical.Parse (JsonV) in
+private def jvBodyEntries (node : JsonV) (k : String) : Array JsonV :=
+  match (node.getField? "body").bind (·.getField? k) with
+  | some (.arr items) => items
+  | _ => #[]
+
+open Tropical.Parse (JsonV) in
+private def jvStr? (j : JsonV) (k : String) : Option String :=
+  match j.getField? k with
+  | some (.str s) => some s
+  | _ => none
+
+open Tropical.Parse (JsonV) in
+private def jvOp? (j : JsonV) : Option String := jvStr? j "op"
+
+/-- Resolve a body dac-wire expression (port of
+    `resolveDacWireExprToGraphOutput`; exact messages). -/
+private def resolveDacWire (st : SessionSt) (expr : Tropical.Parse.JsonV)
+    (context : String) : EngineM (String × String) := do
+  match expr with
+  | .obj _ =>
+    if jvOp? expr != some "ref" then
+      internalError s!"{context}: dac.out wire requires expr.op === 'ref'; got '{(jvOp? expr).getD "undefined"}'."
+    let some instName := jvStr? expr "instance"
+      | internalError s!"{context}: dac.out wire ref.instance must be a string"
+    let some info := st.findInstance? instName
+      | internalError s!"{context}: dac.out wire references unknown instance '{instName}'."
+    let outNames := info.progMeta.outputNames
+    match expr.getField? "output" with
+    | some (.num n) =>
+      let i := n.toFloat.toUInt64.toNat
+      if n.toFloat < 0 || i ≥ outNames.size then
+        internalError s!"{context}: dac.out wire output index {n} out of range for '{instName}' ({outNames.size} outputs)."
+      pure (instName, outNames[i]!)
+    | some (.str s) =>
+      if !outNames.contains s then
+        internalError s!"{context}: dac.out wire references unknown output '{s}' on '{instName}'. Valid: {String.intercalate ", " outNames.toList}"
+      pure (instName, s)
+    | _ => internalError s!"{context}: dac.out wire ref.output must be a number or string"
+  | _ =>
+    internalError s!"{context}: dac.out wire requires a ref-shaped expression (use \{op:'ref',instance,output}); got literal/array."
+
+/-- Walk a normalized v2 node + topLevel into the engine session
+    (additive; the caller cleared state for load). Mirrors the TS
+    ingest order: type_defs → inline programDecls → params → instances
+    (+ wires) → defaults → graph outputs. -/
+private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
+    (top : Tropical.Parse.Raise.TopLevel) (merge : Bool) : EngineM Unit := do
+  let context := if merge then "mergeProgramIntoSession" else "loadProgramAsSession"
+
+  -- Merged param specs: body paramDecls canonical, topLevel fallback
+  -- (dedup by name, body wins).
+  let bodyParams := (jvBodyEntries node "decls").filterMap fun d =>
+    if jvOp? d == some "paramDecl" then do
+      let name ← jvStr? d "name"
+      let value : Json := match d.getField? "value" with
+        | some (.num n) => Json.num n
+        | _ => Lean.toJson (0 : Nat)
+      pure (name, value)
+    else none
+  let mut paramSpecs := bodyParams
+  for p in top.params.getD #[] do
+    if !paramSpecs.any (·.1 == p.name) then
+      paramSpecs := paramSpecs.push (p.name,
+        match p.value with | some v => Json.num v | none => Lean.toJson (0 : Nat))
+
+  -- Merge collision checks (fail fast, TS order: instances then params).
+  if merge then
+    let st ← env.state.get
+    for d in jvBodyEntries node "decls" do
+      if jvOp? d == some "instanceDecl" then
+        if let some name := jvStr? d "name" then
+          if (st.findInstance? name).isSome then
+            internalError s!"merge collision: instance '{name}' already exists."
+    for (name, _) in paramSpecs do
+      if st.params.any (·.1 == name) then
+        internalError s!"merge collision: param '{name}' already exists."
+
+  -- Type defs (file root): registered service-side (raise/elaborate for
+  -- export read them there); cleared on load, additive on merge.
+  let typeDefs : Json := match node.getField? "ports" |>.bind (·.getField? "type_defs") with
+    | some td => td.toJson
+    | none => Json.arr #[]
+  let _ ← env.service.call "sync_type_defs" <| Json.mkObj
+    [("clear", Json.bool !merge), ("type_defs", typeDefs)]
+
+  -- Inline program definitions, each through the engine registration
+  -- batch (nested programDecls depth-first, exactly loadProgramAsType's
+  -- recursion).
+  for d in jvBodyEntries node "decls" do
+    if jvOp? d == some "programDecl" then
+      let some subName := jvStr? d "name"
+        | internalError s!"{context}: programDecl missing name"
+      let some subNode := d.getField? "program"
+        | internalError s!"{context}: programDecl '{subName}' missing program"
+      let parsed ← match Tropical.Parse.Raise.raiseProgram subNode with
+        | .error msg => internalError msg
+        | .ok p => pure p
+      for (n, p) in registrationBatch subName (renameProgram parsed subName) do
+        let _ ← registerOne env n p
+
+  -- Params before instances (instances may reference them). Idempotent
+  -- per name.
+  for (name, value) in paramSpecs do
+    let st ← env.state.get
+    if !st.params.any (·.1 == name) then
+      env.state.modify (·.setParamValue name value)
+
+  -- Instances + their wires (raw — no auto-delay wrap on this path).
+  for d in jvBodyEntries node "decls" do
+    if jvOp? d != some "instanceDecl" then
+      continue
+    let some instName := jvStr? d "name"
+      | internalError s!"{context}: instanceDecl missing name"
+    let some programName := jvStr? d "program"
+      | internalError s!"{context}: instanceDecl '{instName}' missing program"
+    let typeArgs : Option Json := match d.getField? "type_args" with
+      | some ta => some ta.toJson
+      | none => none
+    let (typeArgsEcho, pm, resolvedIdx) ←
+      resolveInstanceMeta env programName typeArgs "program" (toolEnvelopes := false)
+    env.state.modify (·.addInstance instName
+      { baseTypeName := programName, typeArgs := typeArgsEcho, progMeta := pm, resolvedIdx })
+    -- Wires in declared input-port order (the canonical order; JS's
+    -- stable sort leaves unknown ports trailing in JSON-key order,
+    -- which JsonV preserves).
+    if let some (.obj inputFields) := d.getField? "inputs" then
+      let declared := pm.inputNames
+      let orderOf := fun (k : String) =>
+        match declared.idxOf? k with
+        | some i => i
+        | none => declared.size
+      let sorted := inputFields.zipIdx.qsort fun p q =>
+        let oa := orderOf p.1.1
+        let ob := orderOf q.1.1
+        if oa == ob then Nat.blt p.2 q.2 else Nat.blt oa ob
+      for ((input, exprV), _) in sorted do
+        let expr := exprV.toJson
+        match validateExpr expr s!"{instName}.{input}" with
+        | .error msg => internalError msg
+        | .ok _ => pure ()
+        env.state.modify (·.setWireRaw instName input expr)
+
+  -- Input defaults — every instance in registry order (TS loops the
+  -- whole registry, pre-existing instances included on merge).
+  let st ← env.state.get
+  for (name, info) in st.instances do
+    for port in info.progMeta.inputs do
+      if let some defaultExpr := port.default then
+        let st ← env.state.get
+        if (st.findWire? name port.name).isNone then
+          env.state.modify (·.setWireRaw name port.name defaultExpr)
+
+  -- Graph outputs: body dac.out wires canonical, file-root
+  -- audio_outputs deprecated fallback (appended after).
+  let st ← env.state.get
+  let mut outs : Array (String × String) := #[]
+  for a in jvBodyEntries node "assigns" do
+    if jvOp? a == some "outputAssign" && jvStr? a "name" == some "dac.out" then
+      let some expr := a.getField? "expr"
+        | internalError s!"{context}: dac.out wire requires a ref-shaped expression (use \{op:'ref',instance,output}); got literal/array."
+      outs := outs.push (← resolveDacWire st expr context)
+  for o in top.audioOutputs.getD #[] do
+    match o with
+    | .expr _ =>
+      internalError s!"{context}: file-root audio_outputs[].expr form not supported. Use \{instance, output} or migrate to body dac.out wires."
+    | .ref instName output =>
+      if (st.findInstance? instName).isNone then
+        internalError s!"{context}: audio_outputs references unknown instance '{instName}'."
+      let outName := match output with
+        | .str s => s
+        | .num n => toString n
+        | other => other.toJson.compress
+      outs := outs.push (instName, outName)
+  env.state.modify fun st => { st with graphOutputs := st.graphOutputs ++ outs }
 
 def handleLoad (env : Env) (args : Json) : EngineM Json := do
   let path := arg? args "path"
   let program := arg? args "program"
   if path.isNone && program.isNone then
     throwBare .missingArgument "Provide either path (file) or program (inline JSON)."
-  let payload := Json.mkObj <|
-    (match path with | some p => [("path", p)] | none => [])
-    ++ (match program with | some p => [("program", p)] | none => [])
   -- Stop audio before replacing the session (TS handleLoad semantics).
   if let some dac := ← env.dac.get then
     if ← dac.isRunning then dac.stop
-  let resp ← env.service.call "load" payload
-  adoptState env ((getField? resp "state").getD jsonNull) (resetCounters := true)
-  if let some (.str planJson) := getField? resp "plan_json" then
-    env.runtime.loadPlan planJson
+  let rawText ← match path with
+    | some (.str p) =>
+      match ← (IO.FS.readFile p).toBaseIO with
+      | .ok text => pure text
+      | .error e => internalError (toString e)
+    | _ => pure (program.getD jsonNull).compress
+  let t0 ← IO.monoMsNow
+  let jv ← match Tropical.Parse.JsonV.parse rawText with
+    | .error e => internalError s!"JSON Parse error: {e}"
+    | .ok v => pure v
+  let (node, top) ← match Tropical.Parse.Raise.normalizeProgramFile jv with
+    | .error msg => internalError msg
+    | .ok r => pure r
+  -- Clear the session (typeRegistry / programs / specializationCache
+  -- survive — they hold the stdlib + session-defined types).
+  env.state.modify fun st =>
+    { st with instances := #[], wires := #[], graphOutputs := #[],
+              params := #[], nameCounters := {} }
+  ingestProgram env node top (merge := false)
+  syncCompile env
+  let t1 ← IO.monoMsNow
   let st ← env.state.get
   pure <| Json.mkObj [
     ("instances", toJson st.instanceNames),
     ("wiring", toJson st.wires.size),
     ("outputs", toJson st.graphOutputs.size),
     ("params", toJson (st.params.map (·.1))),
-    ("timing", (getField? resp "timing").getD jsonNull)]
+    ("timing", Json.mkObj [("wall_ms", toJson (t1 - t0))])]
 
 def handleSave (env : Env) : EngineM Json := do
   let resp ← env.service.call "save" (Json.mkObj [])
@@ -1230,10 +1392,14 @@ def handleMerge (env : Env) (args : Json) : EngineM Json := do
     | none => arg? args "patch"
   let some program := raw
     | throwBare .missingArgument "Provide a program or patch object."
-  let resp ← env.service.call "merge" (Json.mkObj [("program", program)])
-  adoptState env ((getField? resp "state").getD jsonNull) (resetCounters := false)
-  if let some (.str planJson) := getField? resp "plan_json" then
-    env.runtime.loadPlan planJson
+  let jv ← match Tropical.Parse.JsonV.parse program.compress with
+    | .error e => internalError s!"JSON Parse error: {e}"
+    | .ok v => pure v
+  let (node, top) ← match Tropical.Parse.Raise.normalizeProgramFile jv with
+    | .error msg => internalError msg
+    | .ok r => pure r
+  ingestProgram env node top (merge := true)
+  syncCompile env
   let st ← env.state.get
   pure <| Json.mkObj [
     ("instances", toJson st.instanceNames),
