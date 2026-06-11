@@ -50,8 +50,7 @@ import {
 import { compileSession } from '../compiler/ir/compile_session.js'
 import { compileSessionSlottedFromResolved } from '../compiler/ir/compile_session_slotted.js'
 import { decodeResolved, encodeResolved } from '../compiler/ir/resolved_codec.js'
-import { programTypeFromResolved } from '../compiler/ir/strata.js'
-import { relinkProgramRegistry } from '../compiler/ir/decl_tables.js'
+import { makeCompiled } from '../compiler/program_types.js'
 import { liftWiresToInstances } from '../compiler/ir/lift_wires.js'
 import { assertSessionAcyclic } from '../compiler/ir/lowering/session_cycle_check.js'
 import { toWirePlan } from '../compiler/flat_plan.js'
@@ -269,12 +268,12 @@ function handleLiftWires(p: { wires: Array<{ key: string; expr: ExprNode }>; cou
   }
 }
 
-// ─── register_program (Phase 4 stage 4b) ─────────────────────────────────────
+// ─── register_program (Phase 4 stage 4b; strata engine-side at 6b) ───────────
 // One registration per call, driven by the Lean engine in batch order
 // (nested programDecls depth-first, the root last). The engine already
-// raised and elaborated; this side performs exactly the residue of
-// `loadProgramAsType`: typeDef registry mutations, decode, strata for
-// concrete programs, registry inserts.
+// raised, elaborated, relinked, AND ran strata (Phase 5 stage 6b);
+// this side performs only the registry residue: typeDef registry
+// mutations, decode, `makeCompiled`, registry inserts.
 
 /** The ParsedProgram wire shape of `ports.type_defs` (alias base is a
  *  NameRef node there, unlike the v2 string form). */
@@ -317,24 +316,14 @@ function handleRegisterProgram(p: { name: string; parsed: ParsedTypeDefs; resolv
   const decoded = decodeResolved(p.resolved)
   if (decoded.typeParams.length > 0) {
     // Generic template: stored raw, exactly as loadProgramAsType /
-    // loadStdlibFromResolved stash it (TS never relinks generics —
-    // they're skipped before the relink step).
+    // loadStdlibFromResolved stash it (the engine ships generics
+    // unstrata'd and nothing ever relinks them).
     session.programs.set(p.name, decoded)
   } else {
-    // Relink sub-program registry entries to the canonical post-strata
-    // versions already registered — loadStdlibFromResolved's
-    // `processedByName` step (concrete entries of session.programs are
-    // exactly that map). On the boot path the engine ships raw-linked
-    // registries (mirroring `localResolved`), so this swap is load-
-    // bearing; on the define path the shipped registry already embeds
-    // post-strata copies and the swap is a structural no-op that just
-    // restores object sharing with the session registry.
-    const concreteByName = new Map<string, ResolvedProgram>()
-    for (const [k, prog] of session.programs) {
-      if (prog.typeParams.length === 0) concreteByName.set(k, prog)
-    }
-    const relinked = relinkProgramRegistry(decoded, concreteByName)
-    const type = programTypeFromResolved(relinked, new Map(), { inlineNested: session.inlineNested })
+    // Phase 5 stage 6b: the engine ships POST-STRATA resolved — it ran
+    // the relink (loadStdlibFromResolved's `processedByName` step) and
+    // the strata pipeline itself. Wrap verbatim.
+    const type = makeCompiled(decoded)
     session.typeRegistry.set(p.name, type)
     session.programs.set(p.name, type.prog)   // canonical post-strata
   }

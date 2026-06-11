@@ -9,6 +9,8 @@ import Tropical.Client
 import Tropical.Parse.Nodes
 import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
+import Tropical.Ir.Strata
+import Tropical.Ir.Core
 
 /-!
 # The tropical IR engine — tool semantics, in Lean
@@ -351,10 +353,51 @@ def adoptEntries (env : Env) (entries : Json) : EngineM Unit := do
       let _ ← adoptResolved env e
   | _ => pure ()
 
--- ── Program registration (Phase 4 stage 4b) ──────────────────────────────────
--- The engine runs the stage-2 raise and the elaboration itself; the
--- service's `register_program` shrinks to typeDef registration +
--- decode + strata, one call per batch item.
+-- ── Program registration (Phase 4 stage 4b; strata engine-side at 6b) ────────
+-- The engine runs the stage-2 raise, the elaboration, AND (Phase 5
+-- stage 6b) the strata pipeline itself; the service's
+-- `register_program` shrinks to typeDef registration + decode +
+-- `makeCompiled`, one call per batch item.
+
+/-- The service session's `inlineNested` (makeSession defaults it to
+    `true`; nothing on the MCP path overrides it). Threaded into every
+    engine-side strata run so the two sides can never disagree about
+    which realization the registered catalog holds. -/
+private def sessionInlineNested : Bool := true
+
+/-- Run the strata pipeline on an elaborated concrete program — the
+    engine-side image of the service residue this stage retired:
+    relink sub-program registry entries to the canonical post-strata
+    registrations (`concreteByName` over TS `session.programs` =
+    `templateByName` restricted to concrete entries; load-bearing on
+    the boot path, where elaboration resolved against the raw stdlib
+    map — a structural no-op on the define path), then run the full
+    pipeline. Strata failures were plain TS Errors that `toEnvelope`
+    mapped to `internal_error` with the verbatim message; same here.
+    The Core downcast is asserted post-strata on the inline path — a
+    failure is a port bug, surfaced loudly. -/
+def strataConcrete (st : SessionSt) (arena : Tropical.Ir.Arena)
+    (rootIdx : Tropical.Ir.ProgramIdx) :
+    EngineM (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) := do
+  let byName : String → Option Tropical.Ir.ProgramIdx := fun n =>
+    (st.templateByName.get? n).filter fun idx =>
+      match arena.program? idx with
+      | some prog => prog.typeParams.isEmpty
+      | none => false
+  let (arena, rootIdx) ←
+    match Tropical.Ir.Strata.relinkProgramRegistry arena rootIdx byName with
+    | .error e => internalError e.message
+    | .ok r => pure r
+  let (arena, rootIdx) ←
+    match Tropical.Ir.Strata.run
+        { upto := Tropical.Ir.Strata.portedPasses,
+          inlineNested := sessionInlineNested } arena rootIdx with
+    | .error e => internalError e.message
+    | .ok r => pure r
+  if sessionInlineNested then
+    if let .error e := Tropical.Ir.Core.check arena rootIdx then
+      internalError s!"post-strata Core check failed (port bug): {e}"
+  pure (arena, rootIdx)
 
 private def renameProgram (p : Tropical.Parse.Program) (name : String) :
     Tropical.Parse.Program :=
@@ -380,9 +423,12 @@ private partial def registrationBatch (name : String) (p : Tropical.Parse.Progra
       out := out ++ registrationBatch subName inner
   return out.push (name, renameProgram p name)
 
-/-- Register one program: elaborate it over the typed store, ship
-    `{name, parsed, resolved}` to the service (typeDef registration +
-    decode + strata + registry insert), and adopt the returned entry.
+/-- Register one program: elaborate it over the typed store, run the
+    strata pipeline on it (concrete programs only — generics ship the
+    raw template, which the service stores unstrata'd and never
+    relinks), ship `{name, parsed, resolved}` to the service (typeDef
+    registration + decode + `makeCompiled` + registry insert), and
+    adopt the returned entry.
 
     Resolver: `templateByName` — the mirror of TS `session.programs`
     (post-strata for concrete, raw template for generics) — unless the
@@ -408,10 +454,15 @@ def registerOne (env : Env) (name : String) (p : Tropical.Parse.Program)
   let (arena', rawIdx) ← match Tropical.Ir.elaborateInto st.arena p (some res) with
     | .error e => internalError e.message
     | .ok r => pure r
-  let resolved ← match Tropical.Ir.Codec.encodeResolved arena' rawIdx with
+  -- Phase 5 stage 6b: concrete programs ship POST-STRATA resolved.
+  let isGeneric := !(p.typeParams.getD #[]).isEmpty
+  let (arenaShip, shipIdx) ←
+    if isGeneric then pure (arena', rawIdx)
+    else strataConcrete st arena' rawIdx
+  let resolved ← match Tropical.Ir.Codec.encodeResolved arenaShip shipIdx with
     | .error e => internalError e
     | .ok j => pure j
-  env.state.modify fun st => { st with arena := arena' }
+  env.state.modify fun st => { st with arena := arenaShip }
   let resp ← env.service.call "register_program" <| Json.mkObj
     [("name", Json.str name), ("parsed", p.toJson), ("resolved", resolved)]
   let entry ← Service.field resp "entry"
@@ -422,7 +473,6 @@ def registerOne (env : Env) (name : String) (p : Tropical.Parse.Program)
   -- echoed (a generic redefining a concrete name gets a STALE concrete
   -- entry from the service's typeRegistry — TS still stores the new
   -- generic template in session.programs).
-  let isGeneric := !(p.typeParams.getD #[]).isEmpty
   env.state.modify fun st => { st with
     templateByName := st.templateByName.insert name
       (if isGeneric then rawIdx else idx?.getD rawIdx) }
