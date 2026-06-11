@@ -13,6 +13,7 @@ import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.WireProgram
 import Tropical.TypeArgs
+import Tropical.Compile
 
 /-!
 # The tropical IR engine — tool semantics, in Lean
@@ -331,7 +332,7 @@ def syncCompile (env : Env) : EngineM Unit := do
   let tbl := resolverTbl
 
   -- Elaborate over the store arena. The appended root is transient —
-  -- it is encoded for this compile and not retained in the store.
+  -- it is consumed by this compile and not retained in the store.
   -- Failure maps onto the envelope the TS path produced when its
   -- compile-side `elaborate` threw: ElaborationError / CycleViolation
   -- are plain Errors there, so `toEnvelope` made them `internal_error`
@@ -339,14 +340,12 @@ def syncCompile (env : Env) : EngineM Unit := do
   -- mirror-sync call below, matching the TS ordering (the service
   -- rebuilt its session before its elaborate threw, so save/export
   -- after a failed compile see the mutated graph).
-  let (resolvedRoot, elabErr?) : Json × Option String :=
+  let (rootElab?, elabErr?) :
+      Option (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) × Option String :=
     match Tropical.Ir.elaborateInto st.arena typed
         (some fun n => (tbl.find? (·.1 == n)).map (·.2)) with
-    | .error e => (Json.null, some e.message)
-    | .ok (arena', rootIdx) =>
-      match Tropical.Ir.Codec.encodeResolved arena' rootIdx with
-      | .error e => (Json.null, some e)
-      | .ok json => (json, none)
+    | .error e => (none, some e.message)
+    | .ok (arena', rootIdx) => (some (arena', rootIdx), none)
 
   -- Phase 5 stage 6b: each instance ships its post-strata resolved IR
   -- (the snapshot the engine adopted at add/replicate/load time); the
@@ -368,7 +367,6 @@ def syncCompile (env : Env) : EngineM Unit := do
        ("resolved", resolvedJ)]
 
   let payload := Json.mkObj [
-    ("resolved_root", resolvedRoot),
     ("instances", Json.arr instancesJson),
     ("wires", Json.arr <| wiresPost.map fun w =>
       Json.mkObj [("key", Json.str w.key), ("expr", w.expr)]),
@@ -391,18 +389,51 @@ def syncCompile (env : Env) : EngineM Unit := do
 
   if let some msg := elabErr? then
     -- Mirror-sync: the service rebuilds its session from this payload
-    -- before failing on the null root; its failure is discarded (the
-    -- ascription forces a lift instead of a defeq re-bind that would
-    -- re-propagate it) and the elaboration envelope is surfaced
-    -- instead. The previous kernel keeps playing — same
-    -- recoverable-failure shape as TS.
-    let _discarded : Except Failure Json ← (env.service.call "compile" payload).run
+    -- before the engine surfaces the elaboration envelope; its own
+    -- failure (if any) is discarded (the ascription forces a lift
+    -- instead of a defeq re-bind that would re-propagate it). The
+    -- previous kernel keeps playing — same recoverable-failure shape
+    -- as TS.
+    let _discarded : Except Failure Json ← (env.service.call "sync" payload).run
     internalError msg
 
-  let resp ← env.service.call "compile" payload
-  match getField? resp "plan_json" with
-  | some (.str planJson) => env.runtime.loadPlan planJson
-  | _ => internalError "compiler service: compile returned no plan_json"
+  -- Mirror-sync (save/export read the service session until their
+  -- phases) — then compile HERE: Core downcast, partition, plan
+  -- assembly, FFI load. The service performs no compile work.
+  let resp ← env.service.call "sync" payload
+
+  let some (arena', rootIdx) := rootElab?
+    | internalError "syncCompile: missing elaborated root (engine bug)"
+  let rootCore ← match Tropical.Ir.Core.check arena' rootIdx with
+    | .error e => internalError s!"syncCompile: post-elaboration Core check failed (engine bug): {e}"
+    | .ok core => pure core
+
+  -- Session instances in registry order, each materialized as the Core
+  -- form the root's registry linked (first-instance-wins per stored
+  -- program name — the sessionTypeResolver contract).
+  let mut coreInstances : Array (String × Tropical.Ir.Core.CoreProgram) := #[]
+  for (n, i) in st.instances do
+    let some pname := storedProgName i
+      | internalError s!"syncCompile: instance '{n}' has no resolved snapshot (engine bug)"
+    let some core := rootCore.registryGet? pname
+      | internalError s!"syncCompile: instance '{n}' program '{pname}' missing from root registry (engine bug)"
+    coreInstances := coreInstances.push (n, core)
+
+  let plan ← match Tropical.Compile.compileSession {
+      instances := coreInstances
+      wiresPost
+      graphOutputs := st.graphOutputs
+      params := st.params
+      alloc
+      delayEntries
+      root := rootCore } with
+    | .error msg => internalError msg
+    | .ok p => pure p
+  let planJson ← match plan.toWire with
+    | .error msg => internalError msg
+    | .ok j => pure j.compress
+  env.runtime.loadPlan planJson
+
   -- Adopt the service's param registry echo.
   match getField? resp "params" with
   | some (.arr ps) =>

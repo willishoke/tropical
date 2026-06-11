@@ -52,7 +52,6 @@ import {
   mergeProgramIntoSession, instanceDecls,
 } from '../compiler/program.js'
 import { compileSession } from '../compiler/ir/compile_session.js'
-import { compileSessionSlottedFromResolved } from '../compiler/ir/compile_session_slotted.js'
 import { decodeResolved, encodeResolved } from '../compiler/ir/resolved_codec.js'
 import { makeCompiled } from '../compiler/program_types.js'
 import { assertSessionAcyclic } from '../compiler/ir/lowering/session_cycle_check.js'
@@ -161,12 +160,7 @@ function dumpState(beforePrograms: ReadonlySet<string>) {
 
 // ─── Method handlers ─────────────────────────────────────────────────────────
 
-type CompilePayload = {
-  /** The session's synthetic root, elaborated by the Lean engine and
-   *  shipped as `tropical_resolved_1` JSON — the Phase 4 stage-4a seam
-   *  payload (the elaborate step moved engine-side; this service just
-   *  decodes and partitions). */
-  resolved_root: unknown
+type SyncPayload = {
   /** Each instance carries its post-strata resolved IR (Phase 5 stage
    *  6b) — the engine's adopted snapshot, instantiated here verbatim;
    *  no name-based re-resolution and no strata on this path. */
@@ -191,7 +185,12 @@ type CompilePayload = {
   delay_slots: unknown[]
 }
 
-function handleCompile(p: CompilePayload) {
+// Phase 6 stage 6c: the engine compiles its own plan (Core downcast +
+// partition + plan assembly in Lean, loaded over its own FFI). This
+// method is the session-mirror residue: save/export read the session
+// rebuilt here until their phases port. No decode of a root, no
+// partitionKernel, no plan in the response.
+function handleSync(p: SyncPayload) {
   // Reset graph state; keep type registries (programs persist across
   // compiles) and paramRegistry (live Param handles).
   session.instanceRegistry.clear()
@@ -244,15 +243,7 @@ function handleCompile(p: CompilePayload) {
   // Defensive tripwire (the Lean lowering already checked).
   assertSessionAcyclic(session)
 
-  // Decode the Lean-elaborated root. A malformed resolved_root is an
-  // engine bug, not a user error — `decodeResolved` throws
-  // `ResolvedCodecError`, which the stdio loop's `toEnvelope` maps to
-  // `internal_error` with the decoder's message.
-  const root = decodeResolved(p.resolved_root)
-  const plan = compileSessionSlottedFromResolved(session, root, 'fused')
-  const planJson = JSON.stringify(toWirePlan(plan))
   return {
-    plan_json: planJson,
     params: [...session.paramRegistry.entries()].map(([name, prm]) => ({ name, value: prm.value })),
   }
 }
@@ -355,8 +346,8 @@ function handleMethod(method: string, params: Record<string, unknown>): unknown 
       return { key, type_args: params.type_args ?? null, entry: concreteEntry(key, type) }
     }
 
-    case 'compile':
-      return handleCompile(params as unknown as CompilePayload)
+    case 'sync':
+      return handleSync(params as unknown as SyncPayload)
 
     case 'register_lifted':
       return handleRegisterLifted(params as unknown as Parameters<typeof handleRegisterLifted>[0])

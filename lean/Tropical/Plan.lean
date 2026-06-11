@@ -391,8 +391,9 @@ structure FlatPlan where
   sources : Array SourceKind := defaultSources
   slotCount : Nat
   slotNames : Array String
-  /-- Numbers in TS; delay-slot inits and param values land here. -/
-  slotDefaults : Array JsonNumber
+  /-- Numbers in TS; delay-slot inits and param values land here
+      verbatim (raw Json so lexical number forms survive). -/
+  slotDefaults : Array Json
 deriving Inhabited
 
 /-- Mirrors `toWirePlan`'s omission rules. -/
@@ -411,7 +412,7 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
       ("array_slot_sizes", toJson p.arraySlotSizes),
       ("slot_count", toJson p.slotCount),
       ("slot_names", toJson p.slotNames),
-      ("slot_defaults", Json.arr (p.slotDefaults.map Json.num)),
+      ("slot_defaults", Json.arr p.slotDefaults),
       ("instance_functions", Json.arr (← p.instanceFunctions.mapM (·.toWire)))]
   let fields := if p.sinks.isEmpty then fields
     else fields.push ("sinks", Json.arr (p.sinks.map (·.toWire)))
