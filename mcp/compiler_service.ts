@@ -4,21 +4,25 @@
  * Phase 2 of the Lean port: this service is **stateless pure compile**.
  * The Lean engine owns the session, the native runtime (plan loading,
  * slot control), the DAC, and params; this service owns what hasn't
- * been ported yet — compilation to tropical_plan_5 JSON (Phase 4 stage
- * 4a: the Lean engine runs the session lowering AND the elaboration;
- * this side decodes the shipped `tropical_resolved_1` root and just
- * partitions it against the shipped slot bookkeeping), wire lifting
- * (it needs strata), and save/export/load/merge (they need the v2
- * ingest and the compiler). It shrinks phase by phase until Phase 6
- * deletes it.
+ * been ported yet — `partitionKernel` to tropical_plan_5 JSON (the
+ * Lean engine runs the session lowering, the elaboration, AND — Phase
+ * 5 stage 6b — every production strata call; this side decodes shipped
+ * `tropical_resolved_1` payloads and partitions/registers them), and
+ * save/export/load/merge (they need the v2 ingest and the compiler).
+ * It shrinks phase by phase until Phase 6 deletes it.
  *
- * Phase 4 stage 4b: the production register path performs NO raise and
- * NO elaboration here. The Lean engine raises + elaborates and drives
- * registration one program at a time — `register_program` receives
- * `{name, parsed, resolved}` (ParsedProgram JSON + encoded resolved
- * IR) and shrinks to typeDef registration + decode + strata. The
- * service also boots EMPTY: the engine registers the stdlib from the
- * pre-parsed bridge (`stdlib/parsed/`) through the same method.
+ * Phase 4 stage 4b + Phase 5 stage 6b: the production paths perform NO
+ * raise, NO elaboration, and NO strata here. The Lean engine raises,
+ * elaborates, relinks, and stratas, driving registration one program
+ * at a time — `register_program` receives `{name, parsed, resolved}`
+ * (ParsedProgram JSON + encoded POST-STRATA resolved IR for concrete
+ * programs; raw templates for generics) and shrinks to typeDef
+ * registration + decode + makeCompiled; `resolve_type` receives
+ * engine-specialized resolved per `Type<N=8>` key; `register_lifted`
+ * receives the engine's lifted `__wire_N` programs (raw + post-strata);
+ * `compile` receives per-instance resolved and instantiates verbatim.
+ * The service also boots EMPTY: the engine registers the stdlib from
+ * the pre-parsed bridge (`stdlib/parsed/`) through register_program.
  *
  * Protocol: newline JSON-RPC on stdio, same framing as ir_service.ts.
  * Tool-level failures return `{result: {error: <ErrorEnvelope>}}` so the
