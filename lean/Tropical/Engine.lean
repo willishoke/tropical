@@ -11,6 +11,7 @@ import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
+import Tropical.Ir.WireProgram
 import Tropical.TypeArgs
 
 /-!
@@ -178,50 +179,101 @@ def adoptResolved (env : Env) (entry : Json) : EngineM (Option Tropical.Ir.Progr
     env.state.set st'
     pure idx?
 
+-- ── Engine-side strata (Phase 5 stage 6b) ────────────────────────────────────
+
+/-- The service session's `inlineNested` (makeSession defaults it to
+    `true`; nothing on the MCP path overrides it). Threaded into every
+    engine-side strata run so the two sides can never disagree about
+    which realization the registered catalog holds. -/
+private def sessionInlineNested : Bool := true
+
+/-- The strata pipeline + the post-strata Core downcast (inline path),
+    as a pure `Except` so call sites choose the envelope: registration
+    failures map to `internal_error` (TS strata throws were plain
+    Errors), specialization failures to `invalid_type_args` (the
+    engine mapped any service `resolve_type` failure that way before
+    the move). A Core-check failure is a port bug, surfaced loudly. -/
+def runStrataChecked (typeArgs : Array (String × Lean.JsonNumber))
+    (arena : Tropical.Ir.Arena) (rootIdx : Tropical.Ir.ProgramIdx) :
+    Except String (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) := do
+  let (arena, rootIdx) ←
+    (Tropical.Ir.Strata.run
+      { upto := Tropical.Ir.Strata.portedPasses,
+        inlineNested := sessionInlineNested, typeArgs } arena rootIdx).mapError (·.message)
+  if sessionInlineNested then
+    if let .error e := Tropical.Ir.Core.check arena rootIdx then
+      throw s!"post-strata Core check failed (port bug): {e}"
+  pure (arena, rootIdx)
+
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 
-/-- If any wire needs lifting (array literals), have the compiler
-    service lift them (it needs strata) and adopt the rewritten wires +
-    the new `__wire_N` instances durably — the same observable behavior
-    the TS engine's in-session lift had. -/
+/-- If any wire needs lifting (array literals), lift each to an
+    anonymous `__wire_N` program — engine-side as of Phase 5 stage 6b
+    (port of `liftWiresToInstances`): build the wire program
+    (`Tropical.Ir.WireProgram.lift`), run strata, ship the raw AND
+    post-strata forms to the service's `register_lifted` (registry
+    residue: typeRegistry Compiled + the raw form in
+    `session.programs`, which export_program's resolver reads), adopt
+    the entry, add the instance, wire each free ref back to its
+    source, and replace the original wire with a ref to the lifted
+    instance — same observable behavior the TS engine's in-session
+    lift had. Lift/strata failures were plain TS Errors → internal_error
+    with the verbatim message. -/
 def liftIfNeeded (env : Env) : EngineM Unit := do
   let st ← env.state.get
-  if !st.wires.any (fun w => Tropical.Lowering.needsWireLift w.expr) then
-    return ()
-  let counterBase := (st.nameCounters.get? "__wire").getD 0
-  let payload := Json.mkObj [
-    ("wires", Json.arr <| st.wires.map fun w =>
-      Json.mkObj [("key", Json.str w.key), ("expr", w.expr)]),
-    ("counter_base", toJson counterBase)]
-  let resp ← env.service.call "lift_wires" payload
-  -- Adopt program entries + instances for the lifted wire programs.
-  for instJ in (match getField? resp "instances" with
-                | some (.arr is) => is | _ => #[]) do
-    let some name := getStrField? instJ "name" | continue
-    let program := (getStrField? instJ "program").getD name
-    let entry := (getField? instJ "entry").getD jsonNull
+  -- Capture before mutation — never re-lift a wire just inserted.
+  let toLift := st.wires.filter (fun w => Tropical.Lowering.needsWireLift w.expr)
+  for w in toLift do
+    let st ← env.state.get
+    let counter := (st.nameCounters.get? "__wire").getD 0 + 1
+    let synthName := s!"__wire_{counter}"
+    let (prog, sortedRefs) ← match Tropical.Ir.WireProgram.lift w.expr synthName with
+      | .error msg => internalError msg
+      | .ok r => pure r
+    -- The raw lifted program joins the store: templateByName mirrors
+    -- TS `session.programs.set(name, lifted)` — the RAW form, which
+    -- is what a later registration's relink byName would see.
+    let arenaRaw := { st.arena with programs := st.arena.programs.push prog }
+    let rawIdx : Tropical.Ir.ProgramIdx := ⟨st.arena.programs.size⟩
+    let rawJson ← match Tropical.Ir.Codec.encodeResolved arenaRaw rawIdx with
+      | .error e => internalError e
+      | .ok j => pure j
+    -- Strata, no relink (lifted bodies have no InstanceDecls — the
+    -- registry is empty, exactly the TS lift's `programRegistry: new
+    -- Map()`).
+    let (arenaPost, postIdx) ← match runStrataChecked #[] arenaRaw rawIdx with
+      | .error msg => internalError msg
+      | .ok r => pure r
+    let postJson ← match Tropical.Ir.Codec.encodeResolved arenaPost postIdx with
+      | .error e => internalError e
+      | .ok j => pure j
+    -- Persist the raw program + counter; the post-strata arena growth
+    -- is transient — the store adopts the service entry's round trip,
+    -- one copy, like the registration path.
+    env.state.modify fun s =>
+      { s with arena := arenaRaw,
+               nameCounters := s.nameCounters.insert "__wire" counter,
+               templateByName := s.templateByName.insert synthName rawIdx }
+    let resp ← env.service.call "register_lifted" <| Json.mkObj
+      [("name", Json.str synthName), ("raw", rawJson), ("resolved", postJson)]
+    let entry ← Service.field resp "entry"
     let pm := ProgMeta.fromEntry entry
     let resolvedIdx ← adoptResolved env entry
-    env.state.modify fun st =>
-      let st := st.addProgram pm
-      if (st.findInstance? name).isSome then st
-      else st.addInstance name { baseTypeName := program, typeArgs := none, progMeta := pm, resolvedIdx }
-  -- Adopt the rewritten wire set verbatim (service map order).
-  let wires : Array Wire :=
-    (match getField? resp "wires" with
-     | some (.arr ws) => ws
-     | _ => #[]).filterMap fun w => do
-      let key ← getStrField? w "key"
-      let expr ← getField? w "expr"
-      match key.splitOn ":" with
-      | instName :: rest =>
-        pure { instName, portName := String.intercalate ":" rest, expr : Wire }
-      | [] => none
-  let counter := match getField? resp "counter" with
-    | some (.num n) => n.toFloat.toUInt64.toNat
-    | _ => counterBase
-  env.state.modify fun st =>
-    { st with wires, nameCounters := st.nameCounters.insert "__wire" counter }
+    env.state.modify fun s =>
+      let s := s.addProgram pm
+      if (s.findInstance? synthName).isSome then s
+      else s.addInstance synthName
+        { baseTypeName := synthName, typeArgs := none, progMeta := pm, resolvedIdx }
+    -- Wire each free ref to its corresponding input on the lifted
+    -- instance (raw refs, NO delay wrap — `liftOneWire` set
+    -- inputExprNodes directly), then replace the original wire in
+    -- place (TS-Map position semantics).
+    for (inst, port) in sortedRefs do
+      let inputName := s!"{inst.replace "." "_"}__{port}"
+      env.state.modify (·.setWireRaw synthName inputName <| Json.mkObj
+        [("op", Json.str "ref"), ("instance", Json.str inst), ("output", Json.str port)])
+    env.state.modify (·.setWireRaw w.instName w.portName <| Json.mkObj
+      [("op", Json.str "ref"), ("instance", Json.str synthName), ("output", Json.str "out")])
 
 /-- The session lowering + compile (Phase 3 lowering, Phase 4 stage 4a
     elaboration): lift if needed, then run the Lean lowering — slot
@@ -376,30 +428,6 @@ def adoptEntries (env : Env) (entries : Json) : EngineM Unit := do
 -- stage 6b) the strata pipeline itself; the service's
 -- `register_program` shrinks to typeDef registration + decode +
 -- `makeCompiled`, one call per batch item.
-
-/-- The service session's `inlineNested` (makeSession defaults it to
-    `true`; nothing on the MCP path overrides it). Threaded into every
-    engine-side strata run so the two sides can never disagree about
-    which realization the registered catalog holds. -/
-private def sessionInlineNested : Bool := true
-
-/-- The strata pipeline + the post-strata Core downcast (inline path),
-    as a pure `Except` so call sites choose the envelope: registration
-    failures map to `internal_error` (TS strata throws were plain
-    Errors), specialization failures to `invalid_type_args` (the
-    engine mapped any service `resolve_type` failure that way before
-    the move). A Core-check failure is a port bug, surfaced loudly. -/
-def runStrataChecked (typeArgs : Array (String × Lean.JsonNumber))
-    (arena : Tropical.Ir.Arena) (rootIdx : Tropical.Ir.ProgramIdx) :
-    Except String (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) := do
-  let (arena, rootIdx) ←
-    (Tropical.Ir.Strata.run
-      { upto := Tropical.Ir.Strata.portedPasses,
-        inlineNested := sessionInlineNested, typeArgs } arena rootIdx).mapError (·.message)
-  if sessionInlineNested then
-    if let .error e := Tropical.Ir.Core.check arena rootIdx then
-      throw s!"post-strata Core check failed (port bug): {e}"
-  pure (arena, rootIdx)
 
 /-- Run the strata pipeline on an elaborated concrete program — the
     engine-side image of the service residue stage 6b retired:

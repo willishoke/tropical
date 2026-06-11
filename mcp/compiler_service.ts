@@ -36,7 +36,7 @@
 import { readFileSync } from 'node:fs'
 import {
   makeSession, loadJSON, instantiate,
-  allocateOutputSlots, setWireExpr, reconstructWireDelays,
+  reconstructWireDelays,
   normalizeProgramFile, v2NodeToFile,
   inputNames, outputNames, registerNames,
   inputPortTypes, outputPortTypes, registerPortTypes,
@@ -51,12 +51,11 @@ import { compileSession } from '../compiler/ir/compile_session.js'
 import { compileSessionSlottedFromResolved } from '../compiler/ir/compile_session_slotted.js'
 import { decodeResolved, encodeResolved } from '../compiler/ir/resolved_codec.js'
 import { makeCompiled } from '../compiler/program_types.js'
-import { liftWiresToInstances } from '../compiler/ir/lift_wires.js'
 import { assertSessionAcyclic } from '../compiler/ir/lowering/session_cycle_check.js'
 import { toWirePlan } from '../compiler/flat_plan.js'
 import { Param } from '../compiler/runtime/param.js'
 import { portTypeToString } from '../compiler/ir/port_type.js'
-import { parseWireKey, wireKey, portRef, instanceName as toInstanceName } from '../compiler/ir/branded_names.js'
+import { parseWireKey, wireKey } from '../compiler/ir/branded_names.js'
 import type { PortType, ResolvedProgram } from '../compiler/ir/nodes.js'
 import { failBare, toEnvelope, type ErrorEnvelope } from './envelope.js'
 import { RESOURCES, PROMPTS, readResourceText, getPromptMessages } from './resources.js'
@@ -254,29 +253,19 @@ function handleCompile(p: CompilePayload) {
   }
 }
 
-/** Lift array-literal wires to anonymous `__wire_N` instances. The Lean
- *  engine detects lift-needing wires (pure check), sends its canonical
- *  wire set + its `__wire` name counter, and adopts the rewritten wires
- *  and new instances durably — same observable behavior the TS engine's
- *  in-session lift had. The lifted Compiled types persist in this
- *  service's typeRegistry for later `compile` calls to instantiate. */
-function handleLiftWires(p: { wires: Array<{ key: string; expr: ExprNode }>; counter_base: number }) {
-  session.instanceRegistry.clear()
-  session.inputExprNodes.clear()
-  for (const w of p.wires) {
-    session.inputExprNodes.set(wireKey(parseWireKey(w.key)), w.expr)
-  }
-  session.nameCounters.set('__wire', p.counter_base)
-  liftWiresToInstances(session)
-  return {
-    wires: [...session.inputExprNodes.entries()].map(([key, expr]) => ({ key, expr })),
-    instances: [...session.instanceRegistry.entries()].map(([name, inst]) => ({
-      name,
-      program: inst.baseTypeName,
-      entry: concreteEntry(inst.baseTypeName, inst),
-    })),
-    counter: session.nameCounters.get('__wire') ?? p.counter_base,
-  }
+/** Phase 5 stage 6b: the engine lifts array-literal wires to anonymous
+ *  `__wire_N` programs itself (build + strata + wire rewrite,
+ *  `lean/Tropical/Ir/WireProgram.lean`); this residue mirrors exactly
+ *  what `liftWiresToInstances` stored in the registries: the
+ *  post-strata Compiled in typeRegistry, and the RAW lifted resolved
+ *  in `session.programs` — the form `export_program`'s
+ *  loadProgramAsType resolver expects to elaborate against. The
+ *  instance itself arrives with the next `compile` payload. */
+function handleRegisterLifted(p: { name: string; raw: unknown; resolved: unknown }) {
+  const compiled = makeCompiled(decodeResolved(p.resolved))
+  session.typeRegistry.set(p.name, compiled)
+  session.programs.set(p.name, decodeResolved(p.raw))
+  return { entry: concreteEntry(p.name, compiled) }
 }
 
 // ─── register_program (Phase 4 stage 4b; strata engine-side at 6b) ───────────
@@ -365,8 +354,8 @@ function handleMethod(method: string, params: Record<string, unknown>): unknown 
     case 'compile':
       return handleCompile(params as unknown as CompilePayload)
 
-    case 'lift_wires':
-      return handleLiftWires(params as unknown as Parameters<typeof handleLiftWires>[0])
+    case 'register_lifted':
+      return handleRegisterLifted(params as unknown as Parameters<typeof handleRegisterLifted>[0])
 
     case 'save': {
       const { node, topLevel } = saveProgramFromSession(session)
