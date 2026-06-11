@@ -7,17 +7,27 @@ in-process behind the Turnstile front door. What remains here is the
 **compiler service** the Lean engine drives, plus the retired-but-kept
 TS engine that serves as the differential oracle.
 
-- `compiler_service.ts` — what the Lean front door spawns. Stateless
-  pure compile (Phase 2): program registration (raise → elaborate →
-  strata), `compile` (rebuilds a TS session from Lean's snapshot and
-  returns the plan JSON string), and save/export/load/merge. The Lean
-  engine owns the native runtime, the DAC, and params over its own FFI
-  (`lean/Tropical/Ffi.lean`); plans returned by `compile`/`load`/`merge`
-  hot-swap into the Lean-owned runtime. Newline JSON-RPC; tool-level
-  failures return `{result: {error: <ErrorEnvelope>}}`.
+- `compiler_service.ts` — what the Lean front door spawns. As of
+  Phase 4 the service performs **no raise and no elaboration** on any
+  production path; Lean owns the compiler front (raise + elaborate,
+  `lean/Tropical/Parse/*` + `lean/Tropical/Ir/*`) and ships resolved
+  IR over the `tropical_resolved_1` codec
+  (`compiler/ir/resolved_codec.ts`). What's left here:
+  `register_program` (typeDef registries + `decodeResolved` + strata),
+  `compile` (rebuilds the session mirror from Lean's snapshot, decodes
+  `resolved_root`, runs `partitionKernel`, returns the plan JSON
+  string), wire lifting (needs strata), and save/export/load/merge
+  (they need the v2 ingest + compiler until their phases). The service
+  boots empty — the engine registers the stdlib from the pre-parsed
+  bridge (`stdlib/parsed/`). The Lean engine owns the native runtime,
+  the DAC, and params over its own FFI (`lean/Tropical/Ffi.lean`);
+  plans returned by `compile`/`load`/`merge` hot-swap into the
+  Lean-owned runtime. Newline JSON-RPC; tool-level failures return
+  `{result: {error: <ErrorEnvelope>}}`.
 - `engine.ts` + `ir_service.ts` — the full TS engine and its protocol
-  surface. No longer on the production path; kept as the oracle for
-  `make diff-engine` and the in-process unit tests until Phase 2.
+  surface. No longer on the production path; kept as the differential
+  oracle for `make diff-engine` and the in-process unit tests until
+  the TS pipeline retires (Phase 6/8).
 
 ## Running
 
