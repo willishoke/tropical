@@ -36,7 +36,9 @@ def renderPlanBytes (planJson : String) : IO ByteArray := do
 def sha256Hex (bytes : ByteArray) : IO String := do
   let tmp := "/tmp/tropicaltest-render.bin"
   IO.FS.writeBinFile tmp bytes
-  let out ← IO.Process.run { cmd := "shasum", args := #["-a", "256", tmp] }
+  -- `shasum -a 256` on macOS, `sha256sum` on Linux; both print "<hex>  <file>".
+  let out ← (try IO.Process.run { cmd := "shasum", args := #["-a", "256", tmp] }
+             catch _ => IO.Process.run { cmd := "sha256sum", args := #[tmp] })
   pure (out.splitOn " " |>.headD "")
 
 /-- Compile a tropical_program_2 patch (by path) to a plan in `mode`. Boots a

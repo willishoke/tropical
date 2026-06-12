@@ -17,6 +17,11 @@ jobs:
   build-and-test:
     name: Build and test
     runs-on: ubuntu-latest
+    # The Lean binaries (frontend/diffcli/tropicaltest) link libtropical via an
+    # @executable_path rpath, which is macOS-only; on Linux the runtime loader
+    # finds libtropical.so through LD_LIBRARY_PATH instead.
+    env:
+      LD_LIBRARY_PATH: ${{ github.workspace }}/build
     steps:
       - uses: actions/checkout@v4
         with:
