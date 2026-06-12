@@ -1,0 +1,149 @@
+{
+  "op": "program",
+  "name": "AllpassDelay",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "regDecl",
+        "name": "s",
+        "init": 0
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "out",
+        "expr": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            {
+              "op": "add",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "nameRef",
+                      "name": "coeff"
+                    },
+                    {
+                      "op": "nameRef",
+                      "name": "input"
+                    }
+                  ]
+                },
+                {
+                  "op": "nameRef",
+                  "name": "s"
+                }
+              ]
+            },
+            -1,
+            1
+          ]
+        }
+      },
+      {
+        "op": "nextUpdate",
+        "target": {
+          "kind": "reg",
+          "name": "s"
+        },
+        "expr": {
+          "op": "let",
+          "bind": {
+            "y": {
+              "op": "add",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "nameRef",
+                      "name": "coeff"
+                    },
+                    {
+                      "op": "nameRef",
+                      "name": "input"
+                    }
+                  ]
+                },
+                {
+                  "op": "nameRef",
+                  "name": "s"
+                }
+              ]
+            }
+          },
+          "in": {
+            "op": "sub",
+            "args": [
+              {
+                "op": "nameRef",
+                "name": "input"
+              },
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "op": "nameRef",
+                    "name": "coeff"
+                  },
+                  {
+                    "op": "binding",
+                    "name": "y"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "input",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            0,
+            -1,
+            1
+          ]
+        }
+      },
+      {
+        "name": "coeff",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        },
+        "default": 0.5
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        }
+      }
+    ]
+  }
+}

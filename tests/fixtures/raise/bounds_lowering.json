@@ -1,0 +1,28 @@
+{
+  "schema": "tropical_program_2",
+  "name": "BoundsLowering",
+  "ports": {
+    "inputs": [
+      { "name": "sig", "type": "signal", "default": 0.5 },
+      { "name": "lvl", "type": "unipolar", "default": 2 },
+      { "name": "f", "type": "freq", "default": 440 },
+      { "name": "ph", "type": "phase" },
+      { "name": "pre", "type": "bipolar", "default": { "op": "clamp", "args": [{ "op": "param", "name": "depth" }, -1, 1] } },
+      { "name": "plain", "type": "float", "default": -2.75 }
+    ],
+    "outputs": [
+      { "name": "out", "type": "signal" },
+      { "name": "cv", "type": "freq" },
+      { "name": "raw", "type": "float" }
+    ]
+  },
+  "body": {
+    "op": "block",
+    "decls": [],
+    "assigns": [
+      { "op": "outputAssign", "name": "out", "expr": { "op": "mul", "args": [{ "op": "input", "name": "sig" }, { "op": "input", "name": "lvl" }] } },
+      { "op": "outputAssign", "name": "cv", "expr": { "op": "add", "args": [{ "op": "input", "name": "f" }, { "op": "input", "name": "ph" }] } },
+      { "op": "outputAssign", "name": "raw", "expr": { "op": "input", "name": "plain" } }
+    ]
+  }
+}

@@ -1,0 +1,56 @@
+{
+  "op": "program",
+  "name": "VCA",
+  "body": {
+    "op": "block",
+    "decls": [],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "out",
+        "expr": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "nameRef",
+              "name": "audio"
+            },
+            {
+              "op": "nameRef",
+              "name": "cv"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "audio",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        },
+        "default": 0
+      },
+      {
+        "name": "cv",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        },
+        "default": 0
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        }
+      }
+    ]
+  }
+}

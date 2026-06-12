@@ -1,0 +1,307 @@
+{
+  "op": "program",
+  "name": "BlepSaw",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instanceDecl",
+        "name": "ph",
+        "program": {
+          "op": "nameRef",
+          "name": "Phasor"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "freq"
+            },
+            "value": {
+              "op": "nameRef",
+              "name": "freq"
+            }
+          }
+        ]
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "saw",
+        "expr": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            {
+              "op": "let",
+              "bind": {
+                "inc": {
+                  "op": "div",
+                  "args": [
+                    {
+                      "op": "nameRef",
+                      "name": "freq"
+                    },
+                    {
+                      "op": "call",
+                      "callee": {
+                        "op": "nameRef",
+                        "name": "sampleRate"
+                      },
+                      "args": []
+                    }
+                  ]
+                },
+                "pw": {
+                  "op": "nestedOut",
+                  "ref": {
+                    "op": "nameRef",
+                    "name": "ph"
+                  },
+                  "output": {
+                    "op": "nameRef",
+                    "name": "phase"
+                  }
+                },
+                "raw": {
+                  "op": "sub",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        2,
+                        {
+                          "op": "nameRef",
+                          "name": "pw"
+                        }
+                      ]
+                    },
+                    1
+                  ]
+                },
+                "tp": {
+                  "op": "div",
+                  "args": [
+                    {
+                      "op": "nameRef",
+                      "name": "pw"
+                    },
+                    {
+                      "op": "nameRef",
+                      "name": "inc"
+                    }
+                  ]
+                },
+                "tpr": {
+                  "op": "div",
+                  "args": [
+                    {
+                      "op": "sub",
+                      "args": [
+                        {
+                          "op": "nameRef",
+                          "name": "pw"
+                        },
+                        1
+                      ]
+                    },
+                    {
+                      "op": "nameRef",
+                      "name": "inc"
+                    }
+                  ]
+                },
+                "bpost": {
+                  "op": "call",
+                  "callee": {
+                    "op": "nameRef",
+                    "name": "select"
+                  },
+                  "args": [
+                    {
+                      "op": "lt",
+                      "args": [
+                        {
+                          "op": "nameRef",
+                          "name": "pw"
+                        },
+                        {
+                          "op": "nameRef",
+                          "name": "inc"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "sub",
+                      "args": [
+                        {
+                          "op": "sub",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                2,
+                                {
+                                  "op": "nameRef",
+                                  "name": "tp"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "nameRef",
+                                  "name": "tp"
+                                },
+                                {
+                                  "op": "nameRef",
+                                  "name": "tp"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        1
+                      ]
+                    },
+                    0
+                  ]
+                },
+                "bpre": {
+                  "op": "call",
+                  "callee": {
+                    "op": "nameRef",
+                    "name": "select"
+                  },
+                  "args": [
+                    {
+                      "op": "gt",
+                      "args": [
+                        {
+                          "op": "nameRef",
+                          "name": "pw"
+                        },
+                        {
+                          "op": "sub",
+                          "args": [
+                            1,
+                            {
+                              "op": "nameRef",
+                              "name": "inc"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "op": "add",
+                      "args": [
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "op": "mul",
+                              "args": [
+                                {
+                                  "op": "nameRef",
+                                  "name": "tpr"
+                                },
+                                {
+                                  "op": "nameRef",
+                                  "name": "tpr"
+                                }
+                              ]
+                            },
+                            {
+                              "op": "mul",
+                              "args": [
+                                2,
+                                {
+                                  "op": "nameRef",
+                                  "name": "tpr"
+                                }
+                              ]
+                            }
+                          ]
+                        },
+                        1
+                      ]
+                    },
+                    0
+                  ]
+                }
+              },
+              "in": {
+                "op": "sub",
+                "args": [
+                  {
+                    "op": "sub",
+                    "args": [
+                      {
+                        "op": "binding",
+                        "name": "raw"
+                      },
+                      {
+                        "op": "binding",
+                        "name": "bpost"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "binding",
+                    "name": "bpre"
+                  }
+                ]
+              }
+            },
+            -1,
+            1
+          ]
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "freq",
+        "type": {
+          "op": "nameRef",
+          "name": "freq"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "select"
+          },
+          "args": [
+            {
+              "op": "gt",
+              "args": [
+                440,
+                0
+              ]
+            },
+            440,
+            0
+          ]
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "name": "saw",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        }
+      }
+    ]
+  }
+}

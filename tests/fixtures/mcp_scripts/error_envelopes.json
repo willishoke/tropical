@@ -1,0 +1,32 @@
+[
+  { "method": "add_instance",
+    "params": { "program": "DoesNotExist", "instance_name": "x1" } },
+  { "method": "add_instance",
+    "params": { "program": "SinOsk", "instance_name": "x1" } },
+  { "method": "add_instance",
+    "params": { "program": "OnePole", "instance_name": "dac" } },
+  { "method": "add_instance",
+    "params": { "program": "OnePole", "instance_name": "lp1" } },
+  { "method": "add_instance",
+    "params": { "program": "OnePole", "instance_name": "lp1" } },
+  { "method": "wire",
+    "params": { "set": [
+      { "instance": "lp1", "input": "inptu", "expr": 1 } ] } },
+  { "method": "wire",
+    "params": { "set": [
+      { "instance": "nope", "input": "input", "expr": 1 } ] } },
+  { "method": "wire",
+    "params": { "set": [
+      { "instance": "dac", "input": "out", "expr": 42 } ] } },
+  { "method": "get_info", "params": { "instance_name": "nope" } },
+  { "method": "remove_instance", "params": { "instance_name": "nope" } },
+  { "method": "set_param", "params": { "name": "does_not_exist", "value": 1 } },
+  { "method": "wire_chain",
+    "params": { "instances": ["lp1"], "output": "out", "input": "input" } },
+  { "method": "feedback",
+    "params": { "from": { "instance": "lp1", "output": "out" },
+                 "to": { "instance": "nope", "input": "input" } } },
+  { "method": "load", "params": {} },
+  { "method": "merge", "params": {} },
+  { "method": "export_program", "params": { "name": "x" } }
+]

@@ -1,0 +1,732 @@
+import Std.Data.HashMap
+import Lean.Data.Json
+import Tropical.Ir.Core
+import Tropical.Plan
+
+/-!
+# Emit — `CoreExpr → FlatProgram` (Phase 6 stage 6b)
+
+Line-faithful port of `compiler/ir/emit_resolved.ts`'s `Emitter` over
+the Core sub-IR (total matches — the strata-dropped constructors are
+unrepresentable here, where the TS emitter threw on them).
+
+## CSE identity discipline
+
+The TS emitter keys CSE on a bottom-up *structural id*: every node
+gets a dense integer by interning a shallow key string (`op:add|args=
+i:7`-shaped — children appear as their interned ids, not their key
+text) into a `hashTable`. Only the **partition** those keys induce is
+observable (memo hits/misses → temp allocation order), never the key
+text or the id values, so this port reproduces the equivalence
+classes, not the bytes:
+
+- numbers key by **value equivalence** (TS keys on JS number toString
+  of the parsed double): `JsonNumber`s normalize (trailing-zero
+  mantissa stripping) before rendering, so `1` and `1.0` collide here
+  exactly as they do in TS. Distinct decimal texts that round to the
+  same double (17-significant-digit pathologies) would diverge —
+  documented, out of corpus, and loud in the gate if ever hit.
+- TS's `hashCache` (WeakMap node → id) is a sharing-only memo,
+  invisible to the result; dropped (same call as the strata ports).
+- TS's `regTypes` map is written and never read; dropped.
+
+Number rendering for error messages mirrors JS toString for the
+integer/plain-decimal range (no 1e±21 exponent forms — out of corpus).
+-/
+
+namespace Tropical.Ir.Emit
+
+open Lean (Json JsonNumber)
+open Tropical.Ir
+open Tropical.Ir.Core
+open Tropical.Plan (NOperand DstSlot NInstr RegTarget StateInit)
+
+abbrev ScalarType := Tropical.Plan.ScalarType
+
+-- ─────────────────────────────────────────────────────────────
+-- JS-number helpers
+-- ─────────────────────────────────────────────────────────────
+
+/-- Strip trailing zeros from the mantissa: the canonical form under
+    which two `JsonNumber`s are equal iff their rationals are. -/
+def normNum (n : JsonNumber) : Int × Nat :=
+  go n.exponent n.mantissa n.exponent
+where
+  go : Nat → Int → Nat → Int × Nat
+    | 0, m, e => (m, e)
+    | fuel + 1, m, e =>
+      if e == 0 || m % 10 != 0 then (m, e) else go fuel (m / 10) (e - 1)
+
+/-- JS `String(n)` for the integer/plain-decimal range. -/
+def jsNumString (n : JsonNumber) : String :=
+  let (m, e) := normNum n
+  if e == 0 then toString m
+  else
+    let sign := if m < 0 then "-" else ""
+    let digits := toString m.natAbs
+    let digits := if digits.length ≤ e
+      then String.ofList (List.replicate (e + 1 - digits.length) '0') ++ digits
+      else digits
+    let point := digits.length - e
+    sign ++ digits.take point ++ "." ++ digits.drop point
+
+/-- `Number.isInteger` on the parsed value. -/
+def jsIsInteger (n : JsonNumber) : Bool :=
+  (normNum n).2 == 0
+
+/-- `val !== 0 && val !== 1` (the bool-narrowing check). -/
+def jsIsZeroOrOne (n : JsonNumber) : Bool :=
+  let (m, e) := normNum n
+  e == 0 && (m == 0 || m == 1)
+
+-- ─────────────────────────────────────────────────────────────
+-- Op-tag mappings (BINARY_TAG / UNARY_TAG / TERNARY_TAG values)
+-- ─────────────────────────────────────────────────────────────
+
+def binaryTag : BinaryOpTag → String
+  | .add => "Add" | .sub => "Sub" | .mul => "Mul" | .div => "Div" | .mod => "Mod"
+  | .floorDiv => "FloorDiv"
+  | .lt => "Less" | .lte => "LessEq" | .gt => "Greater" | .gte => "GreaterEq"
+  | .eq => "Equal" | .neq => "NotEqual"
+  | .bitAnd => "BitAnd" | .bitOr => "BitOr" | .bitXor => "BitXor"
+  | .lshift => "LShift" | .rshift => "RShift"
+  | .and => "And" | .or => "Or"
+  | .ldexp => "Ldexp"
+
+def unaryTag : UnaryOpTag → String
+  | .neg => "Neg" | .abs => "Abs" | .sqrt => "Sqrt"
+  | .floor => "Floor" | .ceil => "Ceil" | .round => "Round"
+  | .not => "Not" | .bitNot => "BitNot"
+  | .floatExponent => "FloatExponent"
+  | .toInt => "ToInt" | .toBool => "ToBool" | .toFloat => "ToFloat"
+
+def castResult? : String → Option ScalarType
+  | "ToInt" => some .int | "ToBool" => some .bool | "ToFloat" => some .float
+  | _ => none
+
+def isBitwiseTag (t : String) : Bool :=
+  t == "BitAnd" || t == "BitOr" || t == "BitXor" || t == "LShift" || t == "RShift"
+    || t == "BitNot"
+
+def isComparisonTag (t : String) : Bool :=
+  t == "Less" || t == "LessEq" || t == "Greater" || t == "GreaterEq"
+    || t == "Equal" || t == "NotEqual" || t == "Not" || t == "And" || t == "Or"
+
+def isTranscendentalTag (t : String) : Bool :=
+  t == "Sqrt" || t == "Floor" || t == "Ceil" || t == "Round" || t == "Ldexp"
+    || t == "FloatExponent"
+
+def promoteTypes (a b : ScalarType) : ScalarType :=
+  if a == .float || b == .float then .float
+  else if a == .int || b == .int then .int
+  else .bool
+
+def inferResultType (tag : String) (argTypes : Array ScalarType) : ScalarType :=
+  match castResult? tag with
+  | some t => t
+  | none =>
+    if isBitwiseTag tag then .int
+    else if isComparisonTag tag then .bool
+    else if isTranscendentalTag tag then .float
+    else if tag == "Select" then
+      promoteTypes (argTypes[1]?.getD .float) (argTypes[2]?.getD .float)
+    else if tag == "Clamp" then argTypes[0]?.getD .float
+    else if argTypes.isEmpty then .float
+    -- TS Array.reduce: head as seed, fold the tail. promoteTypes is
+    -- idempotent on equal args, so folding the whole array with the
+    -- head as seed is equivalent.
+    else argTypes.foldl promoteTypes argTypes[0]!
+
+-- ─────────────────────────────────────────────────────────────
+-- Slot tables
+-- ─────────────────────────────────────────────────────────────
+
+structure ArraySlotInfo where
+  slot : Nat
+  size : Nat
+deriving Repr, Inhabited
+
+/-- Port of `EmitSlots`. Index-keyed association arrays stand in for
+    the TS Maps (all keys are decl-table positions). `nestedOutputSlots?`
+    keeps the TS undefined/empty distinction — the two produce different
+    NestedOut error messages. -/
+structure EmitSlots where
+  paramHandles : Array (Nat × String) := #[]
+  paramSlots : Array (Nat × Nat) := #[]
+  nestedOutputSlots? : Option (Array (Nat × Array (Nat × Nat))) := none
+  nestedInputSlots : Array (Nat × Array (Nat × Nat)) := #[]
+  inputSlotOverride : Array (Nat × Nat) := #[]
+  inputArraySlots : Array (Nat × ArraySlotInfo) := #[]
+  nestedInputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
+  nestedOutputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
+deriving Inhabited
+
+private def lookup {α} (m : Array (Nat × α)) (k : Nat) : Option α :=
+  (m.find? (·.1 == k)).map (·.2)
+
+-- ─────────────────────────────────────────────────────────────
+-- Emitter state
+-- ─────────────────────────────────────────────────────────────
+
+inductive CompileResult where
+  | scalar (op : NOperand) (scalarType : ScalarType)
+  | array (op : NOperand) (size : Nat) (scalarType : ScalarType)
+deriving Repr, Inhabited
+
+def CompileResult.isArray : CompileResult → Bool
+  | .scalar .. => false | .array .. => true
+
+def CompileResult.op : CompileResult → NOperand
+  | .scalar op _ => op | .array op _ _ => op
+
+def CompileResult.scalarType : CompileResult → ScalarType
+  | .scalar _ t => t | .array _ _ t => t
+
+structure EmitSt where
+  slots : EmitSlots
+  stateRegTypes : Array ScalarType
+  inputPortTypes : Array ScalarType
+  nextReg : Nat := 0
+  nextArraySlot : Nat := 0
+  arraySizes : Array Nat := #[]
+  instrs : Array NInstr := #[]
+  hashTable : Std.HashMap String Nat := {}
+  memo : Std.HashMap String CompileResult := {}
+  /-- reg slot → backing array slot + length (array-typed regs). -/
+  arrayRegMap : Array (Nat × ArraySlotInfo) := #[]
+deriving Inhabited
+
+abbrev EmitM := StateT EmitSt (Except String)
+
+/-- The TS operand `kind` strings (error-message rendering). -/
+private def operandKind : NOperand → String
+  | .const .. => "const" | .input .. => "input" | .reg .. => "reg"
+  | .arrayReg _ => "array_reg" | .sessionArrayReg _ => "session_array_reg"
+  | .stateReg .. => "state_reg" | .param .. => "param"
+  | .source .. => "source" | .slot .. => "slot"
+
+private def allocReg : EmitM Nat :=
+  modifyGet fun s => (s.nextReg, { s with nextReg := s.nextReg + 1 })
+
+private def allocArraySlot (size : Nat) : EmitM Nat :=
+  modifyGet fun s => (s.nextArraySlot,
+    { s with nextArraySlot := s.nextArraySlot + 1, arraySizes := s.arraySizes.push size })
+
+private def emit (i : NInstr) : EmitM Unit :=
+  modify fun s => { s with instrs := s.instrs.push i }
+
+private def intern (key : String) : EmitM Nat := do
+  let st ← get
+  match st.hashTable.get? key with
+  | some id => pure id
+  | none =>
+    let id := st.hashTable.size
+    set { st with hashTable := st.hashTable.insert key id }
+    pure id
+
+-- ─────────────────────────────────────────────────────────────
+-- Structural CSE id
+-- ─────────────────────────────────────────────────────────────
+
+mutual
+
+/-- TS `structuralKey`: primitives render inline; everything else is
+    `i:<interned id>`. -/
+private partial def structuralKey (e : CoreExpr) : EmitM String :=
+  match e with
+  | .num n => pure s!"n:{jsNumString n}"
+  | .bool b => pure s!"b:{b}"
+  | e => do pure s!"i:{← structuralId e}"
+
+private partial def internArgs (args : Array CoreExpr) : EmitM Nat := do
+  let keys ← args.mapM structuralKey
+  intern ("a:" ++ String.intercalate "," keys.toList)
+
+/-- TS `structuralId`: shallow key over op + sorted fields, children as
+    interned ids. The resolved nodes reaching emit carry exactly one
+    expression field (`args`), so the sorted-field walk degenerates to
+    `op:<op>|args=i:<id>`; indexed refs key on op + idx. -/
+private partial def structuralId (e : CoreExpr) : EmitM Nat := do
+  match e with
+  | .num n => intern s!"n:{jsNumString n}"   -- unreachable at top level; safe
+  | .bool b => intern s!"b:{b}"
+  | .arr items =>
+    let keys ← items.mapM structuralKey
+    intern ("a:" ++ String.intercalate "," keys.toList)
+  | .inputRef i => intern s!"op:inputRef|idx={i.idx}"
+  | .regRef i => intern s!"op:regRef|idx={i.idx}"
+  | .paramRef i => intern s!"op:paramRef|idx={i.idx}"
+  | .nestedOut i o => intern s!"op:nestedOut|inst={i.idx}|out={o.idx}"
+  | .sampleRate => intern "op:sampleRate"
+  | .sampleIndex => intern "op:sampleIndex"
+  | .binary tag a b => do
+    let argsId ← internArgs #[a, b]
+    intern s!"op:{tag.wire}|args=i:{argsId}"
+  | .unary tag a => do
+    let argsId ← internArgs #[a]
+    intern s!"op:{tag.wire}|args=i:{argsId}"
+  | .clamp a b c => do
+    let argsId ← internArgs #[a, b, c]
+    intern s!"op:clamp|args=i:{argsId}"
+  | .select a b c => do
+    let argsId ← internArgs #[a, b, c]
+    intern s!"op:select|args=i:{argsId}"
+  | .arraySet a b c => do
+    let argsId ← internArgs #[a, b, c]
+    intern s!"op:arraySet|args=i:{argsId}"
+  | .index a b => do
+    let argsId ← internArgs #[a, b]
+    intern s!"op:index|args=i:{argsId}"
+
+end
+
+private def expectedKey : Option ScalarType → String
+  | none => ""
+  | some t => t.wire
+
+-- ─────────────────────────────────────────────────────────────
+-- Terminal check
+-- ─────────────────────────────────────────────────────────────
+
+private def resolveNumericLiteralType (n : JsonNumber) (expected : Option ScalarType) :
+    EmitM ScalarType := do
+  match expected with
+  | some .int =>
+    unless jsIsInteger n do
+      throw s!"Lossy conversion: literal {jsNumString n} cannot narrow to int. Wrap the source in to_int() to narrow explicitly."
+    pure .int
+  | some .bool =>
+    unless jsIsZeroOrOne n do
+      throw s!"Lossy conversion: literal {jsNumString n} cannot narrow to bool. Wrap the source in to_bool() to narrow explicitly."
+    pure .bool
+  | _ => pure .float
+
+private def tryTerminal (e : CoreExpr) (expected : Option ScalarType) :
+    EmitM (Option (NOperand × ScalarType)) := do
+  let st ← get
+  match e with
+  | .num n =>
+    let t ← resolveNumericLiteralType n expected
+    pure (some (.const n t, t))
+  | .bool b =>
+    pure (some (.const (if b then (1 : Nat) else 0) .bool, .bool))
+  | .inputRef i =>
+    -- Array-typed input port defers to the uncached path.
+    if (lookup st.slots.inputArraySlots i.idx).isSome then
+      pure none
+    else
+      let portT := st.inputPortTypes[i.idx]?.getD .float
+      match lookup st.slots.inputSlotOverride i.idx with
+      | some slot => pure (some (.slot slot portT, portT))
+      | none => pure (some (.input i.idx portT, portT))
+  | .regRef i =>
+    if (lookup st.arrayRegMap i.idx).isSome then
+      pure none
+    else
+      let regT := st.stateRegTypes[i.idx]?.getD .float
+      pure (some (.stateReg i.idx regT, regT))
+  | .paramRef i =>
+    match lookup st.slots.paramSlots i.idx with
+    | some slot => pure (some (.slot slot .float, .float))
+    | none =>
+      match lookup st.slots.paramHandles i.idx with
+      | some ptr => pure (some (.param ptr .float, .float))
+      | none => pure (some (.const (0 : Nat) .float, .float))
+  | .sampleRate => pure (some (Tropical.Plan.opRate, .float))
+  | .sampleIndex => pure (some (Tropical.Plan.opTick, .int))
+  | .nestedOut inst out => do
+    if let some perInstArr := lookup st.slots.nestedOutputArraySlots inst.idx then
+      if (lookup perInstArr out.idx).isSome then
+        return none
+    match st.slots.nestedOutputSlots? with
+    | none =>
+      throw s!"emit_resolved: NestedOut to instance idx={inst.idx} output idx={out.idx} requires nestedOutputSlots — pass them via EmitSlots when invoking emit on a fractal kernel."
+    | some maps =>
+      match lookup maps inst.idx with
+      | none =>
+        throw s!"emit_resolved: NestedOut to instance idx={inst.idx} — no slot map entry. partition_recursive should record every child instance before emitting the parent kernel."
+      | some perInst =>
+        match lookup perInst out.idx with
+        | none =>
+          throw s!"emit_resolved: NestedOut to instance idx={inst.idx} output idx={out.idx} — output port not in slot map."
+        | some slotRaw => pure (some (.slot slotRaw .float, .float))
+  | _ => pure none
+
+-- ─────────────────────────────────────────────────────────────
+-- Compile
+-- ─────────────────────────────────────────────────────────────
+
+mutual
+
+partial def compileNode (e : CoreExpr) (expected : Option ScalarType := none) :
+    EmitM CompileResult := do
+  if let some (op, t) ← tryTerminal e expected then
+    return .scalar op t
+  let id ← structuralId e
+  let key := s!"{id}:{expectedKey expected}"
+  if let some r := (← get).memo.get? key then
+    return r
+  let r ← compileNodeUncached e expected
+  modify fun s => { s with memo := s.memo.insert key r }
+  return r
+
+private partial def compileNodeUncached (e : CoreExpr) (expected : Option ScalarType) :
+    EmitM CompileResult := do
+  match e with
+  | .arr items => compilePack items expected
+  | .regRef i =>
+    match lookup (← get).arrayRegMap i.idx with
+    | some arr => pure (.array (.arrayReg arr.slot) arr.size .float)
+    | none =>
+      throw s!"emit_resolved: regRef to non-array slot {i.idx} reached compileNodeUncached unexpectedly"
+  | .inputRef i =>
+    match lookup (← get).slots.inputArraySlots i.idx with
+    | some info => pure (.array (.sessionArrayReg info.slot) info.size .float)
+    | none =>
+      throw s!"emit_resolved: inputRef to non-array port idx={i.idx} reached compileNodeUncached unexpectedly"
+  | .nestedOut inst out =>
+    let perInst := lookup (← get).slots.nestedOutputArraySlots inst.idx
+    match perInst.bind (lookup · out.idx) with
+    | some info => pure (.array (.sessionArrayReg info.slot) info.size .float)
+    | none =>
+      throw "emit_resolved: nestedOut to non-array sub-instance output reached compileNodeUncached unexpectedly"
+  | .binary tag a b => compileBinary (binaryTag tag) a b expected
+  | .unary tag a => compileUnary (unaryTag tag) a expected
+  | .clamp a b c => compileTernary "Clamp" a b c expected
+  | .select a b c => compileTernary "Select" a b c expected
+  | .arraySet a b c => compileSetElement a b c
+  | .index a b => compileIndex a b
+  | .num _ | .bool _ | .paramRef _ | .sampleRate | .sampleIndex =>
+    throw "emit_resolved: terminal node reached compileNodeUncached (port bug)"
+
+/-- Unbox a size-1 array to a scalar via Index[0]. -/
+private partial def unboxIfUnit (r : CompileResult) : EmitM CompileResult := do
+  match r with
+  | .array op 1 rt =>
+    let dst ← allocReg
+    emit (Tropical.Plan.instrIndex dst #[op, .const (0 : Nat) .int] rt)
+    pure (.scalar (.reg dst rt) rt)
+  | r => pure r
+
+private partial def compilePack (elements : Array CoreExpr) (expected : Option ScalarType) :
+    EmitM CompileResult := do
+  let size := elements.size
+  let slot ← allocArraySlot size
+  let args ← elements.mapM fun el => do
+    let r ← compileNode el expected
+    pure (if r.isArray then NOperand.const (0 : Nat) .float else r.op)
+  emit (Tropical.Plan.instrPack slot args)
+  pure (.array (.arrayReg slot) size .float)
+
+private partial def compileBinary (tag : String) (lhs rhs : CoreExpr)
+    (expected : Option ScalarType) : EmitM CompileResult := do
+  let propagated := if expected == some .bool then none else expected
+  let argExpected : Option ScalarType :=
+    if isBitwiseTag tag then some .int
+    else if isComparisonTag tag then none
+    else propagated
+  let l ← compileNode lhs argExpected
+  let secondExpected : Option ScalarType :=
+    if isComparisonTag tag then
+      if l.isArray then some .float
+      else if l.scalarType == .bool then none
+      else some l.scalarType
+    else argExpected
+  let r ← compileNode rhs secondExpected
+  let l ← unboxIfUnit l
+  let r ← unboxIfUnit r
+  let rt := inferResultType tag #[l.scalarType, r.scalarType]
+  match l, r with
+  | .scalar lop _, .scalar rop _ =>
+    let dst ← allocReg
+    emit (Tropical.Plan.instrScalar tag dst #[lop, rop] rt)
+    pure (.scalar (.reg dst rt) rt)
+  | _, _ =>
+    let size := match l with
+      | .array _ s _ => s
+      | _ => match r with | .array _ s _ => s | _ => 0
+    let slot ← allocArraySlot size
+    let strides := #[if l.isArray then 1 else 0, if r.isArray then 1 else 0]
+    emit (Tropical.Plan.instrArray tag slot #[l.op, r.op] size strides rt)
+    pure (.array (.arrayReg slot) size rt)
+
+private partial def compileUnary (tag : String) (arg : CoreExpr)
+    (expected : Option ScalarType) : EmitM CompileResult := do
+  let argExpected : Option ScalarType :=
+    if isTranscendentalTag tag then none
+    else if isComparisonTag tag then none
+    else if tag == "BitNot" then some .int
+    else expected
+  let a ← compileNode arg argExpected
+  let a ← unboxIfUnit a
+  let rt := inferResultType tag #[a.scalarType]
+  match a with
+  | .scalar op _ =>
+    let dst ← allocReg
+    emit (Tropical.Plan.instrScalar tag dst #[op] rt)
+    pure (.scalar (.reg dst rt) rt)
+  | .array op size _ =>
+    let slot ← allocArraySlot size
+    emit (Tropical.Plan.instrArray tag slot #[op] size #[1] rt)
+    pure (.array (.arrayReg slot) size rt)
+
+private partial def compileTernary (tag : String) (n1 n2 n3 : CoreExpr)
+    (expected : Option ScalarType) : EmitM CompileResult := do
+  let condExpected : Option ScalarType := if tag == "Select" then some .bool else expected
+  let armExpected := if expected == some .bool then none else expected
+  let a ← compileNode n1 condExpected
+  let b ← compileNode n2 armExpected
+  let c ← compileNode n3 armExpected
+  let a ← unboxIfUnit a
+  let b ← unboxIfUnit b
+  let c ← unboxIfUnit c
+  let rt := inferResultType tag #[a.scalarType, b.scalarType, c.scalarType]
+  if !a.isArray && !b.isArray && !c.isArray then
+    let dst ← allocReg
+    emit (Tropical.Plan.instrScalar tag dst #[a.op, b.op, c.op] rt)
+    pure (.scalar (.reg dst rt) rt)
+  else
+    let size := match a with
+      | .array _ s _ => s
+      | _ => match b with
+        | .array _ s _ => s
+        | _ => match c with | .array _ s _ => s | _ => 0
+    let slot ← allocArraySlot size
+    let strides := #[if a.isArray then 1 else 0, if b.isArray then 1 else 0,
+      if c.isArray then 1 else 0]
+    emit (Tropical.Plan.instrArray tag slot #[a.op, b.op, c.op] size strides rt)
+    pure (.array (.arrayReg slot) size rt)
+
+private partial def compileIndex (arrNode idxNode : CoreExpr) : EmitM CompileResult := do
+  let arr ← compileNode arrNode
+  let idx ← compileNode idxNode (some .int)
+  match arr with
+  | .scalar .. =>
+    throw ("emit_resolved: 'index' op has non-array operand. This usually means an "
+      ++ "array-typed input port (e.g. `sequence: int[N]`) is being indexed inside "
+      ++ "the program body — the per-instance compile path doesn't yet materialize "
+      ++ "array input operands.")
+  | .array arrOp _ rt =>
+    let dst ← allocReg
+    let idxOp := if idx.isArray then NOperand.const (0 : Nat) .int else idx.op
+    emit (Tropical.Plan.instrIndex dst #[arrOp, idxOp] rt)
+    pure (.scalar (.reg dst rt) rt)
+
+private partial def compileSetElement (arrNode idxNode valNode : CoreExpr) :
+    EmitM CompileResult := do
+  let arr ← compileNode arrNode
+  let idx ← compileNode idxNode
+  let val ← compileNode valNode
+  match arr with
+  | .scalar .. =>
+    let size := 1
+    let slot ← allocArraySlot size
+    pure (.array (.arrayReg slot) size .float)
+  | .array arrOp size _ =>
+    let idxOp := if idx.isArray then NOperand.const (0 : Nat) .float else idx.op
+    let valOp := if val.isArray then NOperand.const (0 : Nat) .float else val.op
+    match arrOp with
+    | .arrayReg slot =>
+      emit (Tropical.Plan.instrSetElement slot #[arrOp, idxOp, valOp])
+    | .sessionArrayReg slot =>
+      emit (Tropical.Plan.instrSessionSetElement slot #[arrOp, idxOp, valOp])
+    | _ =>
+      throw s!"emit_resolved: compileSetElement expected array_reg or session_array_reg operand, got {operandKind arrOp}"
+    pure (.array arrOp size .float)
+
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- Top-level emit driver
+-- ─────────────────────────────────────────────────────────────
+
+/-- Internal emit result (TS `FlatProgram`). -/
+structure FlatProgram where
+  registerCount : Nat
+  arraySlotCount : Nat
+  arraySlotSizes : Array Nat
+  instructions : Array NInstr
+  perChildPreInput : Array (Array NInstr)
+  outputTargets : Array Nat
+  registerTargets : Array RegTarget
+deriving Inhabited
+
+/-- Fractal context: the sub-instance decls of the program being
+    emitted, plus the enclosing program (registry lookups for the
+    children's port tables). -/
+structure NestedContext where
+  instances : Array CoreBodyDecl := #[]
+  enclosing : CoreProgram
+
+/-- TS `inputDeclScalarType`. -/
+def inputDeclScalarType (t? : Option CorePortType) : ScalarType :=
+  match t? with
+  | none => .float
+  | some (.scalar k) => k
+  | some (.alias base) => base
+  | some (.array ..) => .float
+
+private def instName : CoreBodyDecl → String
+  | .inst n .. => n
+  | .reg n .. => n
+  | .param n _ => n
+  | .progDecl n => n
+
+private def instTypeKey : CoreBodyDecl → String
+  | .inst _ k .. => k
+  | _ => ""
+
+private def instInputs : CoreBodyDecl → Array CoreInstanceInput
+  | .inst _ _ _ i => i
+  | _ => #[]
+
+def emitProgram (outputExprs : Array CoreExpr)
+    (registerExprs : Array (Option CoreExpr))
+    (outputPortScalarCounts : Array Nat)
+    (nested : NestedContext) : EmitM FlatProgram := do
+  let mut outputTargets : Array Nat := #[]
+  let mut registerTargets : Array RegTarget := #[]
+
+  -- ── Fractal: per-child pre-input blocks ──
+  let mut perChildPreInput : Array (Array NInstr) := #[]
+  let preChildBaseline := (← get).instrs.size
+  let scalarSlotMaps := (← get).slots.nestedInputSlots
+  let arraySlotMaps := (← get).slots.nestedInputArraySlots
+  for k in [0:nested.instances.size] do
+    let decl := nested.instances[k]!
+    let childStart := (← get).instrs.size
+    let childScalarMap := lookup scalarSlotMaps k
+    let childArrayMap := lookup arraySlotMaps k
+    let wiredByPort := (instInputs decl).map fun i => (i.port.idx, i.value)
+    let some childType := nested.enclosing.registryGet? (instTypeKey decl)
+      | throw s!"emit_resolved: instance '{instName decl}' typeKey '{instTypeKey decl}' missing from enclosing registry"
+    let ports := childType.inputs
+    for i in [0:ports.size] do
+      let portDecl := ports[i]!
+      let wireExpr := match lookup wiredByPort i with
+        | some v => v
+        | none => portDecl.default?.getD (.num (0 : Nat))
+      let scalarSlot := childScalarMap.bind (lookup · i)
+      let arrayInfo := childArrayMap.bind (lookup · i)
+      match scalarSlot with
+      | some slot =>
+        let portT := inputDeclScalarType portDecl.type?
+        let r ← compileNode wireExpr (some portT)
+        let valOp ← match r with
+          | .array op _ rt =>
+            let dst ← allocReg
+            emit (Tropical.Plan.instrIndex dst #[op, .const (0 : Nat) .int] rt)
+            pure (NOperand.reg dst rt)
+          | .scalar op _ => pure op
+        emit (Tropical.Plan.instrWriteSlot slot valOp portT)
+      | none =>
+        match arrayInfo with
+        | some info =>
+          let r ← compileNode wireExpr (some .float)
+          match r with
+          | .scalar .. =>
+            throw s!"emit_resolved: array-typed child input port at idx={i} of '{instName decl}' received scalar-shaped wire expression; expected array of size {info.size}"
+          | .array op size _ =>
+            if size != info.size then
+              throw s!"emit_resolved: array-typed child input port at idx={i} of '{instName decl}' has size {info.size}, wire expression evaluates to array of size {size}"
+            emit (Tropical.Plan.instrSessionArray "Add" info.slot
+              #[op, .const (0 : Nat) .float] info.size #[1, 0] .float)
+        | none => pure ()  -- no allocated parent-side slot — nothing to emit
+    let st ← get
+    perChildPreInput := perChildPreInput.push (st.instrs.extract childStart st.instrs.size)
+  -- Truncate the running list back to the pre-child boundary; the
+  -- blocks live in perChildPreInput, the temps stay reserved.
+  modify fun s => { s with instrs := s.instrs.extract 0 preChildBaseline }
+
+  -- ── Output targets: one entry per scalar slot of every port ──
+  if outputPortScalarCounts.size != outputExprs.size then
+    throw s!"emitProgram: outputPortScalarCounts.length ({outputPortScalarCounts.size}) must match outputExprs.length ({outputExprs.size})"
+  for portI in [0:outputExprs.size] do
+    let expr := outputExprs[portI]!
+    let declaredCount := outputPortScalarCounts[portI]!
+    let r ← compileNode expr (some .float)
+    if declaredCount == 1 then
+      let dst ← allocReg
+      match r with
+      | .array op _ rt =>
+        emit (Tropical.Plan.instrIndex dst #[op, .const (0 : Nat) .int] rt)
+      | .scalar op rt =>
+        emit (Tropical.Plan.instrScalar "Add" dst #[op, .const (0 : Nat) rt] rt)
+      outputTargets := outputTargets.push dst
+    else
+      match r with
+      | .scalar .. =>
+        throw s!"emitProgram: output port {portI} declared as array of scalar count {declaredCount}, but expression is scalar"
+      | .array op size rt =>
+        if size != declaredCount then
+          throw s!"emitProgram: output port {portI} declared as array of scalar count {declaredCount}, but expression has size {size}"
+        for elemI in [0:declaredCount] do
+          let dst ← allocReg
+          emit (Tropical.Plan.instrIndex dst #[op, .const elemI .int] rt)
+          outputTargets := outputTargets.push dst
+
+  -- ── Two-pass register update ──
+  let mut arrayCopies : Array (NOperand × Nat × Nat) := #[]  -- (src, dstSlot, size)
+  for ri in [0:registerExprs.size] do
+    match registerExprs[ri]! with
+    | none =>
+      registerTargets := registerTargets.push .arrayManaged
+    | some expr =>
+      let regExpected := (← get).stateRegTypes[ri]?
+      let r ← compileNode expr regExpected
+      match r with
+      | .array op _ _ =>
+        let some arrInfo := lookup (← get).arrayRegMap ri
+          | throw s!"emitProgram: array-result update on non-array reg {ri}"
+        match op with
+        | .arrayReg slot =>
+          if slot != arrInfo.slot then
+            arrayCopies := arrayCopies.push (op, arrInfo.slot, arrInfo.size)
+        | .sessionArrayReg _ =>
+          arrayCopies := arrayCopies.push (op, arrInfo.slot, arrInfo.size)
+        | _ =>
+          throw s!"emitProgram: array result has non-array operand kind {operandKind op}"
+        registerTargets := registerTargets.push .arrayManaged
+      | .scalar op rt =>
+        let dst ← allocReg
+        emit (Tropical.Plan.instrScalar "Add" dst #[op, .const (0 : Nat) rt] rt)
+        registerTargets := registerTargets.push (.temp dst)
+  for (src, dstSlot, size) in arrayCopies do
+    emit (Tropical.Plan.instrArray "Add" dstSlot #[src, .const (0 : Nat) .float]
+      size #[1, 0] .float)
+
+  let st ← get
+  return {
+    registerCount := st.nextReg
+    arraySlotCount := st.nextArraySlot
+    arraySlotSizes := st.arraySizes
+    instructions := st.instrs
+    perChildPreInput
+    outputTargets
+    registerTargets }
+
+/-- Public entry: construct the emitter state (seeding the array-reg
+    backing slots from array-shaped state inits, in reg order) and run
+    the driver. -/
+def emitResolvedProgram
+    (outputExprs : Array CoreExpr)
+    (outputPortScalarCounts : Array Nat)
+    (registerExprs : Array (Option CoreExpr))
+    (stateInit : Array StateInit)
+    (stateRegTypes : Array ScalarType)
+    (inputPortTypes : Array ScalarType)
+    (slots : EmitSlots)
+    (nested : NestedContext) : Except String FlatProgram := do
+  -- Constructor seeding: array inits allocate their backing slots first.
+  let mut st : EmitSt := { slots, stateRegTypes, inputPortTypes }
+  for i in [0:stateInit.size] do
+    if let .arr items := stateInit[i]! then
+      let slot := st.nextArraySlot
+      st := { st with
+        nextArraySlot := st.nextArraySlot + 1
+        arraySizes := st.arraySizes.push items.size
+        arrayRegMap := st.arrayRegMap.push (i, { slot, size := items.size }) }
+  let (prog, _) ← (emitProgram outputExprs registerExprs outputPortScalarCounts nested).run st
+  return prog
+
+end Tropical.Ir.Emit

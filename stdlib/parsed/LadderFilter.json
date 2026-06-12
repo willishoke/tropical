@@ -1,0 +1,515 @@
+{
+  "op": "program",
+  "name": "LadderFilter",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "delayDecl",
+        "name": "prev_lp",
+        "update": {
+          "op": "nestedOut",
+          "ref": {
+            "op": "nameRef",
+            "name": "pole4"
+          },
+          "output": {
+            "op": "nameRef",
+            "name": "out"
+          }
+        },
+        "init": 0
+      },
+      {
+        "op": "instanceDecl",
+        "name": "tanh_in",
+        "program": {
+          "op": "nameRef",
+          "name": "Tanh"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "x"
+            },
+            "value": {
+              "op": "mul",
+              "args": [
+                {
+                  "op": "nameRef",
+                  "name": "drive"
+                },
+                {
+                  "op": "nameRef",
+                  "name": "input"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "op": "instanceDecl",
+        "name": "sin_g",
+        "program": {
+          "op": "nameRef",
+          "name": "Sin"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "x"
+            },
+            "value": {
+              "op": "mul",
+              "args": [
+                3.141592653589793,
+                {
+                  "op": "div",
+                  "args": [
+                    {
+                      "op": "call",
+                      "callee": {
+                        "op": "nameRef",
+                        "name": "clamp"
+                      },
+                      "args": [
+                        {
+                          "op": "nameRef",
+                          "name": "cutoff"
+                        },
+                        20,
+                        {
+                          "op": "mul",
+                          "args": [
+                            0.49,
+                            {
+                              "op": "call",
+                              "callee": {
+                                "op": "nameRef",
+                                "name": "sampleRate"
+                              },
+                              "args": []
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "op": "call",
+                      "callee": {
+                        "op": "nameRef",
+                        "name": "sampleRate"
+                      },
+                      "args": []
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "op": "instanceDecl",
+        "name": "pole1",
+        "program": {
+          "op": "nameRef",
+          "name": "OnePole"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "input"
+            },
+            "value": {
+              "op": "sub",
+              "args": [
+                {
+                  "op": "nestedOut",
+                  "ref": {
+                    "op": "nameRef",
+                    "name": "tanh_in"
+                  },
+                  "output": {
+                    "op": "nameRef",
+                    "name": "out"
+                  }
+                },
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "op": "mul",
+                      "args": [
+                        4,
+                        {
+                          "op": "nameRef",
+                          "name": "resonance"
+                        }
+                      ]
+                    },
+                    {
+                      "op": "nameRef",
+                      "name": "prev_lp"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "g"
+            },
+            "value": {
+              "op": "mul",
+              "args": [
+                2,
+                {
+                  "op": "nestedOut",
+                  "ref": {
+                    "op": "nameRef",
+                    "name": "sin_g"
+                  },
+                  "output": {
+                    "op": "nameRef",
+                    "name": "out"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "op": "instanceDecl",
+        "name": "pole2",
+        "program": {
+          "op": "nameRef",
+          "name": "OnePole"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "input"
+            },
+            "value": {
+              "op": "nestedOut",
+              "ref": {
+                "op": "nameRef",
+                "name": "pole1"
+              },
+              "output": {
+                "op": "nameRef",
+                "name": "out"
+              }
+            }
+          },
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "g"
+            },
+            "value": {
+              "op": "mul",
+              "args": [
+                2,
+                {
+                  "op": "nestedOut",
+                  "ref": {
+                    "op": "nameRef",
+                    "name": "sin_g"
+                  },
+                  "output": {
+                    "op": "nameRef",
+                    "name": "out"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "op": "instanceDecl",
+        "name": "pole3",
+        "program": {
+          "op": "nameRef",
+          "name": "OnePole"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "input"
+            },
+            "value": {
+              "op": "nestedOut",
+              "ref": {
+                "op": "nameRef",
+                "name": "pole2"
+              },
+              "output": {
+                "op": "nameRef",
+                "name": "out"
+              }
+            }
+          },
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "g"
+            },
+            "value": {
+              "op": "mul",
+              "args": [
+                2,
+                {
+                  "op": "nestedOut",
+                  "ref": {
+                    "op": "nameRef",
+                    "name": "sin_g"
+                  },
+                  "output": {
+                    "op": "nameRef",
+                    "name": "out"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "op": "instanceDecl",
+        "name": "pole4",
+        "program": {
+          "op": "nameRef",
+          "name": "OnePole"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "input"
+            },
+            "value": {
+              "op": "nestedOut",
+              "ref": {
+                "op": "nameRef",
+                "name": "pole3"
+              },
+              "output": {
+                "op": "nameRef",
+                "name": "out"
+              }
+            }
+          },
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "g"
+            },
+            "value": {
+              "op": "mul",
+              "args": [
+                2,
+                {
+                  "op": "nestedOut",
+                  "ref": {
+                    "op": "nameRef",
+                    "name": "sin_g"
+                  },
+                  "output": {
+                    "op": "nameRef",
+                    "name": "out"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "lp",
+        "expr": {
+          "op": "nestedOut",
+          "ref": {
+            "op": "nameRef",
+            "name": "pole4"
+          },
+          "output": {
+            "op": "nameRef",
+            "name": "out"
+          }
+        }
+      },
+      {
+        "op": "outputAssign",
+        "name": "bp",
+        "expr": {
+          "op": "sub",
+          "args": [
+            {
+              "op": "nestedOut",
+              "ref": {
+                "op": "nameRef",
+                "name": "pole2"
+              },
+              "output": {
+                "op": "nameRef",
+                "name": "out"
+              }
+            },
+            {
+              "op": "nestedOut",
+              "ref": {
+                "op": "nameRef",
+                "name": "pole4"
+              },
+              "output": {
+                "op": "nameRef",
+                "name": "out"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "op": "outputAssign",
+        "name": "hp",
+        "expr": {
+          "op": "sub",
+          "args": [
+            {
+              "op": "nameRef",
+              "name": "input"
+            },
+            {
+              "op": "nestedOut",
+              "ref": {
+                "op": "nameRef",
+                "name": "pole4"
+              },
+              "output": {
+                "op": "nameRef",
+                "name": "out"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "op": "outputAssign",
+        "name": "notch",
+        "expr": {
+          "op": "add",
+          "args": [
+            {
+              "op": "sub",
+              "args": [
+                {
+                  "op": "nameRef",
+                  "name": "input"
+                },
+                {
+                  "op": "nestedOut",
+                  "ref": {
+                    "op": "nameRef",
+                    "name": "pole4"
+                  },
+                  "output": {
+                    "op": "nameRef",
+                    "name": "out"
+                  }
+                }
+              ]
+            },
+            {
+              "op": "nestedOut",
+              "ref": {
+                "op": "nameRef",
+                "name": "pole4"
+              },
+              "output": {
+                "op": "nameRef",
+                "name": "out"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "input",
+        "default": 0
+      },
+      {
+        "name": "cutoff",
+        "type": {
+          "op": "nameRef",
+          "name": "freq"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "select"
+          },
+          "args": [
+            {
+              "op": "gt",
+              "args": [
+                1000,
+                0
+              ]
+            },
+            1000,
+            0
+          ]
+        }
+      },
+      {
+        "name": "resonance",
+        "type": {
+          "op": "nameRef",
+          "name": "unipolar"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            0.5,
+            0,
+            1
+          ]
+        }
+      },
+      {
+        "name": "drive",
+        "default": 1
+      }
+    ],
+    "outputs": [
+      "lp",
+      "bp",
+      "hp",
+      "notch"
+    ]
+  }
+}

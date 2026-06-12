@@ -1,4 +1,4 @@
-.PHONY: build repl run lean mcp-lean clean validate validate-write
+.PHONY: build repl run lean mcp-lean clean validate parse-all test-lean-engine
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -21,23 +21,36 @@ repl: build
 
 run: repl
 
-# Lean front-door (Turnstile). Builds the lean/ subtree, which pulls Turnstile
-# via Lake and links against the IR service (mcp/ir_service.ts) at runtime.
+# Lean front-door. Builds the lean/ subtree (the production compiler + MCP
+# server, one binary), which pulls Turnstile via Lake.
 lean:
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build
 
-# Launch the Lean front-door MCP server. It spawns mcp/ir_service.ts itself, so
-# this is the single command that brings up the whole Lean → IR → C++ stack.
+# Launch the Lean MCP server. As of Phase 6 the whole stack is the one
+# binary (session, compiler, runtime FFI) — no bun subprocess.
 mcp-lean: build lean
-	bun install --silent && ./lean/.lake/build/bin/frontend
+	./lean/.lake/build/bin/frontend
 
 clean:
 	rm -rf $(BUILD_DIR)
 
-validate: build
-	bun test
+# Full gate: the Lean golden/equiv runner (replaces validate_stdlib + the
+# native equiv suite), the surviving behavioral bun suites (WASM≡JIT in
+# tests/web + the MCP protocol tests against the Lean engine), and ctest.
+validate: build lean
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli tropicaltest
+	./lean/.lake/build/bin/tropicaltest
+	bun web/build_patches.ts
+	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test
 	ctest --test-dir $(BUILD_DIR) --output-on-failure
-	bun run scripts/validate_stdlib.ts
 
-validate-write: build
-	bun run scripts/validate_stdlib.ts --write
+# Regenerate the committed stdlib/parsed bridge from stdlib/*.md (the Lean
+# surface parser). Replaces the former scripts/build_parsed_stdlib.ts.
+parse-all: lean
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli
+	./lean/.lake/build/bin/diffcli parse-all
+
+# Behavioral MCP protocol suites against the live Lean engine.
+test-lean-engine: build lean
+	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test mcp/errors.test.ts mcp/wire_dac.test.ts

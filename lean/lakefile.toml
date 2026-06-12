@@ -8,6 +8,44 @@ name = "turnstile"
 git = "https://github.com/willishoke/turnstile"
 rev = "main"
 
+# The Tropical library — everything but the executable entry point. The
+# TS→Lean port lands here module by module (Json today; Errors, Session,
+# Engine, Ir/*, Strata/*, Emit/* as the phases proceed).
+[[lean_lib]]
+name = "Tropical"
+
+# Native link: the FFI shim object (built by `make lean` via leanc) and
+# libtropical from the CMake build. Paths are relative to this package
+# dir; the rpath resolves @rpath/libtropical.dylib from the installed
+# binary location (lean/.lake/build/bin/ → ../../../../build).
 [[lean_exe]]
 name = "frontend"
 root = "Main"
+moreLinkArgs = [
+  "ffi/shim.o",
+  "-L../build", "-ltropical",
+  "-Wl,-rpath,@executable_path/../../../../build",
+]
+
+# Differential-harness verbs over the Lean-owned native runtime
+# (render-bytes → golden-hash gate).
+[[lean_exe]]
+name = "diffcli"
+root = "Diffcli"
+moreLinkArgs = [
+  "ffi/shim.o",
+  "-L../build", "-ltropical",
+  "-Wl,-rpath,@executable_path/../../../../build",
+]
+
+# Post-TS golden + native-equiv runner (Phase 8): renders patches via the
+# Lean FFI, hashes against the frozen goldens, and cross-checks the native
+# compilation modes. The replacement for validate_stdlib + the equiv suite.
+[[lean_exe]]
+name = "tropicaltest"
+root = "Tropicaltest"
+moreLinkArgs = [
+  "ffi/shim.o",
+  "-L../build", "-ltropical",
+  "-Wl,-rpath,@executable_path/../../../../build",
+]

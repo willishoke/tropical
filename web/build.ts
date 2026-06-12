@@ -4,12 +4,10 @@
  *   bun web/build.ts
  *
  * Steps:
- *  1. (re-)generate compiler/stdlib_bundled.ts  — unused by the current
- *     build path but kept up to date for any future in-browser compile.
- *  2. (re-)precompile patches                  — web/build_patches.ts
- *  3. Bundle the AudioWorklet processor        — single self-contained file
- *  4. Bundle the main-thread app               — app.js
- *  5. Copy index.html into dist/
+ *  1. (re-)precompile patches via the Lean engine — web/build_patches.ts
+ *  2. Bundle the AudioWorklet processor           — single self-contained file
+ *  3. Bundle the main-thread app                  — app.js
+ *  4. Copy index.html into dist/
  */
 
 import { cpSync, existsSync, mkdirSync } from 'fs'
@@ -31,8 +29,7 @@ function run(cmd: string[], desc: string): void {
 
 mkdirSync(distDir, { recursive: true })
 
-run(['bun', 'web/bundle_stdlib.ts'], 'regenerate bundled stdlib')
-run(['bun', 'web/build_patches.ts'], 'precompile patches')
+run(['bun', 'web/build_patches.ts'], 'precompile patches (Lean engine)')
 
 run(
   ['bun', 'build', 'web/worklet/processor.ts', '--target=browser', '--outfile', `${distDir}/worklet.js`, '--format', 'esm'],

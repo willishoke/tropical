@@ -17,6 +17,11 @@ jobs:
   build-and-test:
     name: Build and test
     runs-on: ubuntu-latest
+    # The Lean binaries (frontend/diffcli/tropicaltest) link libtropical via an
+    # @executable_path rpath, which is macOS-only; on Linux the runtime loader
+    # finds libtropical.so through LD_LIBRARY_PATH instead.
+    env:
+      LD_LIBRARY_PATH: ${{ github.workspace }}/build
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,11 +42,28 @@ jobs:
             -DTROPICAL_PROFILE=OFF
           cmake --build build -j$(nproc)
 
+      - name: Install elan (Lean toolchain manager)
+        run: |
+          curl https://elan.lean-lang.org/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
       - uses: oven-sh/setup-bun@v1
       - run: bun install
 
-      - name: TypeScript tests
-        run: bun test
+      - name: Build the Lean frontend + harness (production compiler/MCP server)
+        run: |
+          cd lean
+          lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
+          lake build frontend diffcli tropicaltest
+
+      - name: Golden + native-equiv runner
+        run: ./lean/.lake/build/bin/tropicaltest
+
+      - name: Precompile web demo plans (Lean-driven)
+        run: bun web/build_patches.ts
+
+      - name: Behavioral + WASM≡JIT suites (against the Lean engine)
+        run: TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test
 
       - name: C++ tests
         run: ctest --test-dir build --output-on-failure

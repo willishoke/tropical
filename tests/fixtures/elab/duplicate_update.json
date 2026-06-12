@@ -1,0 +1,59 @@
+{
+  "op": "program",
+  "name": "DupUpdate",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "delayDecl",
+        "name": "z",
+        "update": {
+          "op": "nameRef",
+          "name": "x"
+        },
+        "init": 0
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "out",
+        "expr": {
+          "op": "nameRef",
+          "name": "z"
+        }
+      },
+      {
+        "op": "nextUpdate",
+        "target": {
+          "kind": "reg",
+          "name": "z"
+        },
+        "expr": {
+          "op": "nameRef",
+          "name": "x"
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "x",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        }
+      }
+    ]
+  }
+}

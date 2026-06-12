@@ -1,148 +1,56 @@
 /**
- * build_patches.ts — precompile curated patches for the web demo.
+ * build_patches.ts — precompile the curated demo patches via the Lean engine.
  *
- * Patches are defined inline from stdlib programs (SinOsc, OnePole, etc.),
- * flattened to tropical_plan_4 JSON, and written to
- * web/dist/patches/<slug>.plan.json. Browser loads them via fetch().
+ * Reads web/patches/<slug>.json (tropical_program_2) + web/patches/manifest.json
+ * (slug/title/description), compiles each to tropical_plan_5 with the Lean
+ * `diffcli compile` CLI (the same engine that serves MCP), and writes
+ * web/dist/patches/<slug>.plan.json + index.json. The browser fetches them and
+ * runs only the WASM emitter + runtime — no TS compiler in the loop.
  *
  *   bun web/build_patches.ts
  */
 
-import { writeFileSync, mkdirSync, readdirSync, unlinkSync, existsSync } from 'fs'
+import { writeFileSync, mkdirSync, readdirSync, unlinkSync, existsSync, readFileSync } from 'fs'
 import { dirname, resolve, join } from 'path'
 import { fileURLToPath } from 'url'
-import { makeSession, loadJSON } from '../compiler/session.js'
-import { loadStdlib } from '../compiler/program.js'
-import { compileSession } from '../compiler/ir/compile_session.js'
-import { toWirePlan } from '../compiler/flat_plan.js'
+import { spawnSync } from 'bun'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
+const root = resolve(__dirname, '..')
+const patchesDir = resolve(__dirname, 'patches')
 const distDir = resolve(__dirname, 'dist/patches')
+const diffcli = resolve(root, 'lean/.lake/build/bin/diffcli')
 
-type Patch = { slug: string; title: string; description: string; program: unknown }
+type Entry = { slug: string; title: string; description: string }
 
-// Curated list. Patches that use programs with delay lines or `pow`
-// (OnePole, LadderFilter, Phaser, BitCrusher, ...) are excluded on this
-// branch because the TS flattener on origin/main emits unresolved
-// delay_value / pow ops; both native and WASM backends render them as
-// zero. See project_testing_gaps.md.
-const PATCHES: Patch[] = [
-  {
-    slug: 'pure-sine-440',
-    title: 'Pure Sine 440',
-    description: 'A plain SinOsc at 440 Hz. The smallest thing tropical does.',
-    program: {
-      schema: 'tropical_program_2',
-      name: 'pure_sine_440',
-      body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'osc', program: 'SinOsc', inputs: { freq: 440 } },
-      ], assigns: [
-        { op: 'output_assign', name: 'dac.out', expr: { op: 'ref', instance: 'osc', output: 'sine' } },
-      ]},
-    },
-  },
-  {
-    slug: 'ring-mod',
-    title: 'Ring Mod',
-    description: 'Two SinOscs (220 Hz × 331 Hz) multiplied through a VCA — dissonant partials.',
-    program: {
-      schema: 'tropical_program_2',
-      name: 'ring_mod',
-      body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'a', program: 'SinOsc', inputs: { freq: 220 } },
-        { op: 'instance_decl', name: 'b', program: 'SinOsc', inputs: { freq: 331 } },
-        { op: 'instance_decl', name: 'm', program: 'VCA', inputs: {
-          audio: { op: 'ref', instance: 'a', output: 'sine' },
-          cv:    { op: 'ref', instance: 'b', output: 'sine' },
-        }},
-      ], assigns: [
-        { op: 'output_assign', name: 'dac.out', expr: { op: 'ref', instance: 'm', output: 'out' } },
-      ]},
-    },
-  },
-  {
-    slug: 'fm-pair',
-    title: 'FM Pair',
-    description: 'Simple 2-op FM: a 73 Hz modulator shaping a ~220 Hz carrier.',
-    program: {
-      schema: 'tropical_program_2',
-      name: 'fm_pair',
-      body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'mod', program: 'SinOsc', inputs: { freq: 73 } },
-        { op: 'instance_decl', name: 'car', program: 'SinOsc', inputs: {
-          freq: { op: 'add', args: [220, { op: 'mul', args: [80, { op: 'ref', instance: 'mod', output: 'sine' }] }] },
-        }},
-      ], assigns: [
-        { op: 'output_assign', name: 'dac.out', expr: { op: 'ref', instance: 'car', output: 'sine' } },
-      ]},
-    },
-  },
-  {
-    slug: 'fm-stack',
-    title: 'FM Stack',
-    description: '3-op FM with a slow LFO on the modulator depth — evolves gently.',
-    program: {
-      schema: 'tropical_program_2',
-      name: 'fm_stack',
-      body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'm1', program: 'SinOsc', inputs: { freq: 0.5 } },
-        { op: 'instance_decl', name: 'm2', program: 'SinOsc', inputs: {
-          freq: { op: 'add', args: [11, { op: 'mul', args: [5, { op: 'ref', instance: 'm1', output: 'sine' }] }] },
-        }},
-        { op: 'instance_decl', name: 'c',  program: 'SinOsc', inputs: {
-          freq: { op: 'add', args: [220, { op: 'mul', args: [200, { op: 'ref', instance: 'm2', output: 'sine' }] }] },
-        }},
-      ], assigns: [
-        { op: 'output_assign', name: 'dac.out', expr: { op: 'ref', instance: 'c', output: 'sine' } },
-      ]},
-    },
-  },
-  {
-    slug: 'blepsaw',
-    title: 'Band-Limited Saw',
-    description: 'A 110 Hz BlepSaw — anti-aliased classic subtractive waveform.',
-    program: {
-      schema: 'tropical_program_2',
-      name: 'blepsaw',
-      body: { op: 'block', decls: [
-        { op: 'instance_decl', name: 'o', program: 'BlepSaw', inputs: { freq: 110 } },
-      ], assigns: [
-        { op: 'output_assign', name: 'dac.out', expr: { op: 'ref', instance: 'o', output: 'saw' } },
-      ]},
-    },
-  },
-]
+// Ensure the Lean compiler CLI exists (incremental; fast if already built).
+if (!existsSync(diffcli)) {
+  const b = spawnSync(['sh', '-c', `cd "${root}/lean" && PATH="$HOME/.elan/bin:$PATH" lake build diffcli`], {
+    stdout: 'inherit', stderr: 'inherit',
+  })
+  if (b.exitCode !== 0 || !existsSync(diffcli)) throw new Error('failed to build lean diffcli')
+}
+
+const manifest = JSON.parse(readFileSync(resolve(patchesDir, 'manifest.json'), 'utf-8')) as Entry[]
 
 mkdirSync(distDir, { recursive: true })
-
-// Clear any stale .plan.json from a prior build (keep index.json; we rewrite it).
-if (existsSync(distDir)) {
-  for (const f of readdirSync(distDir)) {
-    if (f.endsWith('.plan.json')) unlinkSync(join(distDir, f))
-  }
+for (const f of readdirSync(distDir)) {
+  if (f.endsWith('.plan.json')) unlinkSync(join(distDir, f))
 }
 
-const manifest: Array<{ slug: string; title: string; description: string; planPath: string }> = []
-
-for (const patch of PATCHES) {
-  try {
-    const session = makeSession(1024)
-    loadStdlib(session)
-    loadJSON(patch.program as { schema: string; [k: string]: unknown }, session)
-    const plan = compileSession(session)
-    const out = JSON.stringify(toWirePlan(plan))
-    const outPath = join(distDir, `${patch.slug}.plan.json`)
-    writeFileSync(outPath, out, 'utf-8')
-    manifest.push({ slug: patch.slug, title: patch.title, description: patch.description, planPath: `patches/${patch.slug}.plan.json` })
-    // eslint-disable-next-line no-console
-    console.log(`built ${patch.slug.padEnd(22)} ${out.length.toString().padStart(8)} bytes`)
-    session.runtime.dispose()
-  } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn(`SKIP  ${patch.slug}: ${(err as Error).message}`)
+const index: Array<Entry & { planPath: string }> = []
+for (const { slug, title, description } of manifest) {
+  const src = resolve(patchesDir, `${slug}.json`)
+  const r = spawnSync([diffcli, 'compile', src, '--mode=fused'], { cwd: root })
+  if (r.exitCode !== 0) {
+    console.warn(`SKIP  ${slug}: diffcli compile failed\n${r.stderr.toString()}`)
+    continue
   }
+  const plan = r.stdout.toString().trim()
+  writeFileSync(join(distDir, `${slug}.plan.json`), plan, 'utf-8')
+  index.push({ slug, title, description, planPath: `patches/${slug}.plan.json` })
+  console.log(`built ${slug.padEnd(22)} ${plan.length.toString().padStart(8)} bytes`)
 }
 
-writeFileSync(join(distDir, 'index.json'), JSON.stringify(manifest, null, 2), 'utf-8')
-// eslint-disable-next-line no-console
-console.log(`\nmanifest: ${manifest.length} patches -> ${join(distDir, 'index.json')}`)
+writeFileSync(join(distDir, 'index.json'), JSON.stringify(index, null, 2), 'utf-8')
+console.log(`\nmanifest: ${index.length} patches -> ${join(distDir, 'index.json')}`)

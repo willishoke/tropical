@@ -48,13 +48,13 @@ elaborator (`CycleViolation`, with port-detailed Tier-2 errors and a
 suggested explicit-delay fix). Session-level cycles in MCP-built
 graphs are broken at the wire layer: every wire stored via
 `setWireExpr` is wrapped in a unit delay, and a pre-emit pass hoists
-those delays out of the wires into `session.delaySlotRegistry` —
+those delays out of the wires into the session's delay-slot registry —
 realized by the root-program lowering as per-wire root `RegDecl`
 read-old/write-new writebacks. Hand-written JSON patches
 with cross-coupled instances must wrap their own back-edges in
 `delay()` to break the session-level cycle —
-`assertSessionAcyclic` (`compiler/ir/lowering/session_cycle_check.ts`)
-runs as a defensive invariant at `compileSession`'s entry. Every
+`assertSessionAcyclic` (`lean/Tropical/Lowering.lean`)
+runs as a defensive invariant at session-compile entry. Every
 MCP wire gains exactly one sample of latency (~21 µs at 48 kHz),
 matching VCV Rack's per-wire-delay mental model.
 
@@ -101,7 +101,7 @@ ResolvedProgram (post-strata)
     │   │       │      instance_functions[] (root, nested children)
     │   │       │      + sinks[] (outputs) + sources[] (inputs))
     │   │       │
-    │   │       │   ──── C API boundary (engine/c_api/tropical_c.h, koffi FFI) ────
+    │   │       │   ──── C API boundary (engine/c_api/tropical_c.h, Lean @[extern] FFI) ────
     │   │       ▼
     │   │   NumericProgramParser → FlatProgram (multi-function)
     │   │   OrcJitEngine → LLVM IR (one kernel: instances, then sinks)
@@ -131,31 +131,32 @@ structure dropped between them.
 ## 1. Surface and parse
 
 **Input:** literate `.md` source text or `tropical_program_2` JSON.
-**Output:** `ParsedProgram` (`compiler/parse/nodes.ts`).
+**Output:** `ParsedProgram` (`lean/Tropical/Parse/Nodes.lean`).
 **Drops:** layout, comments, surface sugar.
 
 ### 1.1 The two front-ends
 
 Literate `.md` source is the human-authored surface form used by the
-stdlib and by hand-written patches. Four parsing layers produce a
-`ParsedProgram`:
+stdlib and by hand-written patches. The surface parser
+(`lean/Tropical/Parse/Surface/*`) produces a `ParsedProgram` in layers:
 
-- `compiler/parse/lexer.ts` — token stream
-- `compiler/parse/expressions.ts` — infix precedence, unary, calls,
+- `Surface/Lexer.lean` (+ `Surface/Cursor.lean`) — token stream
+- `Surface/Expr.lean` — infix precedence, unary, calls,
   let/combinator lambdas (binders introduced on the fly via
   `BinderDecl`)
-- `compiler/parse/statements.ts` — block bodies (decls + assigns)
-- `compiler/parse/declarations.ts` — program signatures, port specs,
+- `Surface/Statements.lean` — block bodies (decls + assigns)
+- `Surface/Declarations.lean` — program signatures, port specs,
   type-param declarations, nested programs
+- `Surface/Markdown.lean` — the literate-`.md` envelope around them
 
-The legacy/MCP entry is JSON. `compiler/parse/raise.ts` walks a
+The legacy/MCP entry is JSON. `lean/Tropical/Parse/Raise.lean` walks a
 `tropical_program_2` JSON object and emits the same `ParsedProgram`
 shape. Both front-ends converge on the same input to the elaborator.
 
 ### 1.2 Parse-time desugaring: bounds
 
-`compiler/parse/lower_bounds.ts` runs immediately after parse, before
-anything else sees the program. It rewrites:
+`lean/Tropical/Parse/Surface/Bounds.lean` runs immediately after parse,
+before anything else sees the program. It rewrites:
 
 - `signal[-1, 1]`, `unipolar[0, 1]`, `bipolar[-1, 1]`, `phase[0, 1]`,
   `freq[0, ∞)` — named bound aliases — to explicit `clamp` or
@@ -168,7 +169,7 @@ or the strata pipeline as a distinct construct.
 
 ### 1.3 What this pass deliberately doesn't do
 
-`raise.ts` and the tropical parser perform **zero scope analysis**.
+`Raise.lean` and the surface parser perform **zero scope analysis**.
 Every reference (`input("freq")`, `sin1.out`, `param("cutoff")`,
 `reg("phase")`) emits a `NameRefNode` placeholder. The parser doesn't
 know which declarations are in scope, doesn't validate that the name
@@ -182,24 +183,25 @@ syntactic and semantic concerns.
 ## 2. Elaborate
 
 **Input:** `ParsedProgram`.
-**Output:** `ResolvedProgram` (`compiler/ir/nodes.ts`).
+**Output:** `ResolvedProgram` (`lean/Tropical/Ir/Nodes.lean`).
 **Drops:** names. Enforces the **acyclic-source** invariant.
 **Keeps:** every other piece of surface structure (type params, sum
 types, nesting, combinators, shapes).
 
-`compiler/ir/elaborator.ts` is the unique site of name resolution.
-A single top-down pass over the parsed program: each declaration is
-constructed once when its parsed counterpart is encountered,
-registered in the appropriate scope, and re-used by reference at
-every site that names it.
+`lean/Tropical/Ir/Elaborator.lean` is the unique site of name
+resolution. A single top-down pass over the parsed program: each
+declaration is constructed once when its parsed counterpart is
+encountered, registered in the appropriate scope, and re-used by
+reference at every site that names it.
 
 The output is a graph IR. Decls (`InputDecl`, `OutputDecl`,
 `RegDecl`, `ParamDecl`, `TypeParamDecl`, `InstanceDecl`,
 `ProgramDecl`, `BinderDecl`, plus sum/struct/alias type defs) are
 introduction sites. Refs (`InputRef`, `RegRef`, `ParamRef`,
 `TypeParamRef`, `BindingRef`, `NestedOut`) are uses. Every ref
-carries its `decl` field as a direct object pointer — `===`
-identity, not a string lookup. `RegDecl` is the single state
+carries its decl as a branded integer `idx` into a typed decl table —
+positional identity, not a string lookup (the Lean image of the TS
+elaborator's `===` pointer identity). `RegDecl` is the single state
 primitive: surface `delay name = u init v` is sugar for
 `reg name { init: v, update: u }`.
 
@@ -220,39 +222,38 @@ compiler operates on.
 
 ## 3. Strata pipeline
 
-`compiler/ir/strata.ts` orchestrates six passes:
+`lean/Tropical/Ir/Strata.lean` orchestrates six passes:
 
-```typescript
-export function strataPipeline(prog, typeArgs = new Map(), options = {}) {
-  assertAcyclic(prog)
-  const specialized = specializeProgram(prog, typeArgs)
-  const summed     = sumLower(specialized)
-  const inlined    = options.inlineNested === false ? summed : inlineInstances(summed)
-  const arrayed    = arrayLower(inlined)
-  return identityElim(arrayed)
-}
+```
+strataPipeline prog typeArgs options =
+  assertAcyclic prog
+  let specialized = specializeProgram prog typeArgs
+  let summed      = sumLower specialized
+  let inlined     = if options.inlineNested == false then summed
+                                                      else inlineInstances summed
+  let arrayed     = arrayLower inlined
+  identityElim arrayed
 ```
 
-Each pass is pure: returns a fresh `ResolvedProgram`, or — in the
-no-op fast path — the input by identity. None of them mutate decls
-on the input. **Acyclicity is the strataPipeline contract**; the
-callers (`programTypeFromResolved`)
+Each pass is a total function: returns a fresh `ResolvedProgram`, or —
+in the no-op fast path — the input unchanged. None of them mutate the
+input. **Acyclicity is the strataPipeline contract**; the callers
 guarantee it, `assertAcyclic` confirms it.
 
 ### 3.1 assertAcyclic — boundary check
 
-`compiler/ir/acyclic.ts`. Re-uses the SCC finder from
-`compiler/ir/lowering/cycle_break.ts` (the shared cycle algorithm,
-also available to future realizations that want their own
-cycle-break policy — iterative, WDF, etc.). Throws
-`AcyclicityViolation` if any non-trivial SCC survives into strata
-input. In the standard path this never fires; the elaborator and
-the session compiler have already ensured acyclicity.
+`lean/Tropical/Ir/Strata/Basic.lean`. Re-uses the SCC finder shared
+with the session-level cycle break (the shared cycle algorithm, also
+available to future realizations that want their own cycle-break
+policy — iterative, WDF, etc.). Throws `AcyclicityViolation` if any
+non-trivial SCC survives into strata input. In the standard path this
+never fires; the elaborator and the session compiler have already
+ensured acyclicity.
 
 ### 3.2 specialize — drops type parameters
 
-`compiler/ir/specialize.ts`. Takes a generic program and a map
-`Map<TypeParamDecl, number>`; produces a fresh program with the
+`lean/Tropical/Ir/Strata/Specialize.lean`. Takes a generic program and
+a map keyed on `TypeParamDecl`; produces a fresh program with the
 integers substituted in.
 
 Substitution sites:
@@ -273,7 +274,7 @@ that's the loader's job.
 
 ### 3.3 sumLower — drops sum types
 
-`compiler/ir/sum_lower.ts`. Decomposes every sum-typed `RegDecl`
+`lean/Tropical/Ir/Strata/SumLower.lean`. Decomposes every sum-typed `RegDecl`
 into N+1 scalar `RegDecl`s — a discriminator slot (int) plus one
 slot per `(variant, field)` pair across all variants — and lowers
 `MatchExpr` to scalar select-chains and `TagExpr` to tag-literal
@@ -295,8 +296,8 @@ into a tag register plus a payload register.
 
 ### 3.4 inlineInstances — drops nesting
 
-`compiler/ir/inline_instances.ts`. Splices each `InstanceDecl` into
-its parent. After this pass:
+`lean/Tropical/Ir/Strata/InlineInstances.lean`. Splices each
+`InstanceDecl` into its parent. After this pass:
 
 - `body.decls` contains no `InstanceDecl`
 - no expression contains a `NestedOut` ref
@@ -328,22 +329,24 @@ object-field check, not a string regex.
 The `inlineNested: false` option is the entry point for the
 fractal-compilation path: sub-instances survive as kernel boundaries
 and `partitionKernel` (the recursive partitioner in
-`compile_session_slotted.ts`) emits an `InstanceFunction` for every
+`lean/Tropical/Compile.lean`) emits an `InstanceFunction` for every
 `InstanceDecl` at every level. Cross-kernel input wiring is handled
 by slot-based parent→child writes: the parent's body emits
 `WriteSlot` ops into a per-child `pre_child_instructions` block
 (evaluated in the parent's scope, so every ref resolves), and the
 child reads its inputs via slot reads in its own body. Both paths
 (`inlineNested: true` flat, `inlineNested: false` fractal) are
-verified sample-for-sample at 1e-12 by
-`tests/equiv/nested_vs_inlined.test.ts`; the choice between them is
-a runtime-cost tradeoff documented in
-`tests/bench/depth_vs_flat_*.md`.
+verified sample-for-sample at 1e-12 by the native mode-equivalence
+check in `tropicaltest`; the choice between them is a runtime-cost
+tradeoff (the ~25% flat-path win comes from IR-level slot removal,
+not from anything LLVM could do — slots are observable hot-swap
+state).
 
 ### 3.5 arrayLower — drops shapes and combinators
 
-`compiler/ir/array_lower.ts`. Unrolls compile-time combinators and
-lowers array ops to scalar primitives via static shape information.
+`lean/Tropical/Ir/Strata/ArrayLower.lean`. Unrolls compile-time
+combinators and lowers array ops to scalar primitives via static shape
+information.
 
 After this pass:
 - no `let`, `fold`, `scan`, `generate`, `iterate`, `chain`, `map2`,
@@ -373,7 +376,7 @@ would conflate different `acc`/`elem` values.
 
 ### 3.6 identityElim — categorical identity-law rewrite
 
-`compiler/ir/identity_elim.ts`. Eliminates `InstanceDecl`s whose
+`lean/Tropical/Ir/Strata/IdentityElim.lean`. Eliminates `InstanceDecl`s whose
 program body is the identity morphism (each output assigns the
 corresponding input untouched). In the per-program path
 `inlineInstances` already absorbs trivial sub-instances first, so
@@ -414,33 +417,34 @@ Two paths consume a session.
 
 ### 4.1 JIT path — `compileSession`
 
-`compiler/ir/compile_session.ts` runs three pre-emit passes and
-hands the result to `compileSessionSlotted`:
+`lean/Tropical/Compile.lean` (with the slot/lift machinery in
+`lean/Tropical/Lowering.lean` and `lean/Tropical/Ir/WireProgram.lean`)
+runs three pre-emit passes and hands the result to the slotted
+session compiler:
 
-1. **`liftWiresToInstances`** (`compiler/ir/lift_wires.ts`) —
+1. **`liftWiresToInstances`** (`lean/Tropical/Ir/WireProgram.lean`) —
    anonymous-instance lift. Wires whose expressions contain array
    literals are extracted into anonymous `__wire_${i}` instances at
    session pre-compile time. The lifted programs go through the
    full strata pipeline so combinators lower correctly.
 
-2. **`extractSessionDelays`**
-   (`compiler/ir/lowering/extract_session_delays.ts`) — hoists every
-   `delay()` op in a wire into a fresh slot. The wire is rewritten to
-   a `sessionSlot` / `sessionArraySlot` read; the source expression is
-   recorded in `session.delaySlotRegistry`. This is the structural
-   mechanism that keeps the MCP-built IR acyclic — every wire becomes
-   a slot read with one sample of latency, realized as a root `RegDecl`
-   read-old/write-new writeback by the lowering (see below).
+2. **`extractSessionDelays`** (`lean/Tropical/Lowering.lean`) — hoists
+   every `delay()` op in a wire into a fresh slot. The wire is
+   rewritten to a `sessionSlot` / `sessionArraySlot` read; the source
+   expression is recorded in the session's delay-slot registry. This is
+   the structural mechanism that keeps the MCP-built IR acyclic — every
+   wire becomes a slot read with one sample of latency, realized as a
+   root `RegDecl` read-old/write-new writeback by the lowering (see
+   below).
 
-3. **`assertSessionAcyclic`**
-   (`compiler/ir/lowering/session_cycle_check.ts`) — defensive
-   invariant on the post-extraction dep graph. Catches programmatic
-   sessions that bypass both `setWireExpr`'s auto-wrap and explicit
-   `delay()`.
+3. **`assertSessionAcyclic`** (`lean/Tropical/Lowering.lean`) —
+   defensive invariant on the post-extraction dep graph (Tarjan
+   tripwire). Catches programmatic sessions that bypass both
+   `setWireExpr`'s auto-wrap and explicit `delay()`.
 
-Then `compileSessionSlotted` runs the root-program lowering:
+Then the slotted session compiler runs the root-program lowering:
 `buildSessionRoot` serializes the whole session back to a `ParsedProgram`
-(`session_to_parsed.ts`) and runs it through the SAME `elaborate` front
+and runs it through the SAME `elaborate` front
 door the surface path uses, yielding one synthetic root `ResolvedProgram`:
 instances become `InstanceDecl`s (their already-resolved types supplied
 via the elaborator's `ExternalProgramResolver` hook — LINK, not
@@ -474,7 +478,8 @@ for each sample:
 Branded indices throughout (`TempIdx`, `StateRegIdx`,
 `ArraySlotIdx`, `ModuleSlotIdx`) make cross-namespace arithmetic a
 compile error — the literal shape of a Phaser-era slot-mixing bug.
-See `compiler/ir/slot_indices.ts`.
+See `lean/Tropical/Plan.lean` (and the mirrored `web/wasm/slot_indices.ts`
+on the WASM path).
 
 ### 4.2 Fixed-topology compilation
 
@@ -490,7 +495,7 @@ selected by `FlatPlan.compilation_mode`:
   Trades cross-instance fusion for superlinear cold-compile speedup
   (LLVM optimizer scales worse on one huge function than on N
   smaller ones). Sample-for-sample equivalent to fused at 1e-12 per
-  `tests/equiv/microkernel_vs_fused.test.ts`.
+  the native mode-equivalence check in `tropicaltest`.
 
 Topology changes (adding/removing instances, rewiring) trigger
 hot-swap to a freshly compiled kernel with state transferred by
@@ -518,26 +523,27 @@ path.
 
 ### 5.1 compileResolved → tropical_plan_5 → JIT
 
-**`compiler/ir/compile_resolved.ts`** is the per-instance emit:
+**`lean/Tropical/Ir/CompileResolved.lean`** is the per-instance emit:
 
-1. `buildSlotMaps(prog)` — assign integer slots to decl objects
-   (`Map<RegDecl, number>`, etc.). Slot identity, not slot name, is
-   what the JIT consumes.
-2. `emitNumericProgram` (`compiler/ir/emit_resolved.ts`) — walk the
-   lowered IR, emit a `PerInstancePlan` whose instructions follow
-   the `tropical_plan_5` schema in `compiler/flat_plan.ts`.
+1. `buildSlotMaps(prog)` — assign integer slots to decls (keyed on
+   `RegDecl`/etc. idx). Slot identity, not slot name, is what the JIT
+   consumes. (Slot allocation lives in `lean/Tropical/Compile.lean`.)
+2. `emitNumericProgram` (`lean/Tropical/Ir/Emit.lean`) — walk the
+   lowered Core IR, emit a `PerInstancePlan` whose instructions follow
+   the `tropical_plan_5` schema in `lean/Tropical/Plan.lean`.
 
-`compile_session_slotted.ts` packs `PerInstancePlan`s into
-`instance_functions[]` of a `FlatPlan`, shifting indices by the
-per-instance offsets, and builds `sinks[]` (`emitSinks`) from the
-session's graphOutputs. The result is a single root `InstanceFunction`
-(the session instances nested as its `children`); session-level delays
-are root RegDecl writebacks, so there is no scheduler tier.
+The slotted session compiler (`lean/Tropical/Compile.lean`) packs
+`PerInstancePlan`s into `instance_functions[]` of a `FlatPlan`,
+shifting indices by the per-instance offsets, and builds `sinks[]`
+(`emitSinks`) from the session's graphOutputs. The result is a single
+root `InstanceFunction` (the session instances nested as its
+`children`); session-level delays are root RegDecl writebacks, so there
+is no scheduler tier.
 
-**Structural CSE.** `emit_resolved.ts` keys CSE on a bottom-up
-structural id (interned via `${op}|${field=}|${child_id}` strings),
-not node identity. This catches duplicates that strata's
-clone-then-substitute introduces.
+**Structural CSE.** `Emit.lean` keys CSE on a bottom-up structural id
+(arena `ExprId`s replicating the TS identity semantics), not node
+identity. This catches duplicates that strata's clone-then-substitute
+introduces.
 
 **Operand kinds.** `NOperand` discriminates: `const`, `input`, `reg`,
 `array_reg`, `state_reg`, `param`, `source`, `slot`. The `source` kind
@@ -610,20 +616,22 @@ platforms. Swap `stdlib/Sin.md` to change the approximation.
    `engine/runtime/NumericProgramParser.hpp::parse_op_tag`.
 3. Add the LLVM IR emission case in
    `engine/jit/OrcJitEngine.cpp::compile_flat_program`.
-The same op also needs to land in `WireFormatOp` (`compiler/expr.ts`),
-the strata passes that traverse it, and the other two backends
-(`emit_resolved.ts`, `emit_wasm.ts`).
+The same op also needs to land in the wire-format op set
+(`lean/Tropical/Expr.lean`), the strata passes that traverse it, and
+the other two backends (`lean/Tropical/Ir/Emit.lean`, and the WASM
+emitter `web/wasm/emit_wasm.ts`).
 
 ### 5.3 emit_wasm — the WebAssembly backend
 
-**`compiler/emit_wasm.ts`** + **`compiler/wasm_memory_layout.ts`**.
-The second interpretation of post-strata `ResolvedProgram`, consuming
-the same `tropical_plan_5` boundary type. The emitter produces a
-standalone WASM module exporting a single
-`process(buffer_length, start_sample_index)` function plus a shared
-`memory`.
+**`web/wasm/emit_wasm.ts`** + **`web/wasm/wasm_memory_layout.ts`**.
+The second interpretation of the `tropical_plan_5` boundary type — and
+the one surviving TypeScript backend. It consumes plan JSON the Lean
+engine precompiles (`diffcli compile`); the browser never runs the
+compiler front-end. The emitter produces a standalone WASM module
+exporting a single `process(buffer_length, start_sample_index)`
+function plus a shared `memory`.
 
-**Linear-memory layout** (`wasm_memory_layout.ts`):
+**Linear-memory layout** (`web/wasm/wasm_memory_layout.ts`):
 
 ```
 inputs        f64[inputCount]                — set by host, kernel reads
@@ -659,42 +667,50 @@ snapshotting — lives in `web/worklet/runtime.ts` and mirrors
 
 ### 5.5 Equivalence
 
-The pipeline is correct only if every pass and every backend agrees
-with the per-sample semantics on the input. The cross-checking
-suites:
+The pipeline is correct only if every backend and every realization
+variant agrees with the per-sample semantics on the input. The
+correctness floor is the frozen audio **goldens** (re-baselined only
+when a heard, confirmed change to the math demands it) plus the
+developer's ear; the cross-checks anchor agreement around that floor:
 
-- `tests/equiv/wasm_vs_jit.test.ts` — WASM emit and JIT agree
-  sample-for-sample (the two backends, both off `tropical_plan_5`).
-- `tests/equiv/microkernel_vs_fused.test.ts`,
-  `tests/equiv/nested_vs_inlined.test.ts`,
-  `tests/equiv/microkernel_deep.test.ts` — realization-variant
-  differentials within the JIT (fused vs. microkernel, flat vs.
-  nested), exercising the kernel/slot layer the two backends share.
-- `tests/equiv/migration_audio.test.ts` — byte-for-byte audio goldens.
-- `tests/equiv/web_plans_vs_jit.test.ts` — every precompiled plan in
+- `tests/web/wasm_vs_jit.test.ts` — WASM emit and JIT agree
+  sample-for-sample (the two backends, both off `tropical_plan_5`). Run
+  by `bun test` against the Lean engine via `TROPICAL_ENGINE_CMD`.
+- `tests/web/web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches the JIT output.
+- **native mode-equivalence** in `tropicaltest` (`lake exe
+  tropicaltest`) — fused vs. microkernel (and the deep-nesting variant)
+  at 1e-12, exercising the kernel/slot layer the two backends share.
+- **audio goldens** in `tropicaltest` — byte-for-byte against the
+  frozen `tests/golden/*.hash` reference output.
 
-Any disagreement is a strata or backend bug; the suite localises
-which.
+Any disagreement in a cross-check is a strata or backend bug, and the
+runner localises which. Note what is *not* here: there is no
+differential against a second compiler implementation. The TS oracle
+that gated the Lean port was migration scaffolding — a differential
+proves *agreement*, not correctness — and it was retired with the port
+(see `design/lean_port.md`).
 
 ---
 
 ## 6. ProgramType and Compiled
 
-`compiler/program_types.ts`. Thin wrapper over a post-strata
-`ResolvedProgram`. The wrapper is metadata; the IR is the value.
-Free-function helpers (`inputNames`, `outputNames`,
-`registerNames`, `inputPortTypes`, …) read off the resolved IR;
-slot-derived fields cache lazily via `buildSlotMaps`.
+A thin wrapper over a post-strata `ResolvedProgram` (the
+`Compiled`/`ProgMeta` shape in `lean/Tropical/Session.lean`). The
+wrapper is metadata; the IR is the value. Helpers (`inputNames`,
+`outputNames`, `registerNames`, `inputPortTypes`, …) read off the
+resolved IR; slot-derived fields are computed via `buildSlotMaps`.
 
 `Instance` holds a `Compiled` plus an instance name, `baseTypeName`,
 optional `typeArgs`, plus session-level `gateable` / `gateInput`
 fields.
 
-`session.ts:resolveProgramType` calls
-`programTypeFromResolved(template, subst)` (full strata pipeline +
-wrap), then `rename(key)` so the specialization cache key
-(`Type<N=8>`) shows up as the program's name in serialized output.
+`resolveProgramType` (`lean/Tropical/Session.lean`, with the
+specialize path in `lean/Tropical/TypeArgs.lean`) runs the full strata
+pipeline + wrap, then renames so the specialization cache key
+(`Type<N=8>`) shows up as the program's name in serialized output. The
+engine caches the result per `Type<N=8>` key so a hit skips re-running
+the pipeline.
 
 ---
 
@@ -704,11 +720,14 @@ Two distinct JSON schemas; do not confuse them.
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_program_2` | `compiler/program.ts`, `compiler/parse/raise.ts` | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in literate `.md`) or by agents (over MCP). |
-| `tropical_plan_5`    | `compiler/ir/compile_session_slotted.ts` (`compiler/flat_plan.ts` schema) | The low-detail output: a root instruction stream (`instance_functions[]`, instances nested as `children`) plus `sinks[]` (device-bound outputs) and `sources[]` (runtime-bound inputs — canonical `[tick, rate]`). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel, top-level temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
+| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (and save/export reconstruction) | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in literate `.md`) or by agents (over MCP). |
+| `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (`instance_functions[]`, instances nested as `children`) plus `sinks[]` (device-bound outputs) and `sources[]` (runtime-bound inputs — canonical `[tick, rate]`). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel, top-level temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
-Schema validation: `compiler/schema.ts` (Zod) for input;
-`compiler/flat_plan.ts` (branded TypeScript types) for output.
+Schema validation is the Lean type layer: the typed parsed/plan ASTs
+in `lean/Tropical/Parse/Nodes.lean` and `lean/Tropical/Plan.lean`, with
+order-preserving JSON codecs (`Tropical/Parse/OrderedJson.lean`,
+`Plan.lean`'s `toWirePlan` encoder). The WASM side keeps a mirrored
+TypeScript view in `web/wasm/flat_plan.ts` / `plan_types.ts`.
 
 Going from the first to the second without losing meaning is exactly
 what the strata pipeline does.
@@ -773,9 +792,10 @@ the compiler decided to forget along the way is gone.
 
 ## 8. C API (`engine/c_api/tropical_c.h`)
 
-The stable C interface between TypeScript (via koffi FFI) and C++.
-All handles are opaque `void*`. Errors are thread-local, fetched via
-`tropical_last_error()`; valid until the next call on the same thread.
+The stable C interface between the Lean engine (via `@[extern]` FFI
+over `lean/ffi/shim.c`) and C++. All handles are opaque `void*`. Errors
+are thread-local, fetched via `tropical_last_error()`; valid until the
+next call on the same thread.
 
 ### 8.1 ControlParam
 
@@ -828,72 +848,87 @@ wire, `{op:'trigger', name}` refs are still accepted and aliased to
 
 ---
 
-## 9. FFI bridge (`compiler/runtime/`)
+## 9. FFI bridge (`lean/Tropical/Ffi.lean` + `lean/ffi/shim.c`)
 
-TypeScript wrappers over the C API via koffi.
+Lean `@[extern]` bindings over the C API. `shim.c` (compiled against
+`engine/c_api/tropical_c.h`) wraps each C entry point; `Ffi.lean`
+exposes them as Lean externals returning external objects whose
+finalizers call the matching `tropical_*_free`. Loads
+`libtropical.dylib` from `build/`. This replaced the former
+koffi-based TypeScript bridge.
 
-- `bindings.ts` — raw koffi function declarations matching
-  `tropical_c.h`. Loads `libtropical.dylib` from `build/` or
-  `build-profile/`.
-- `runtime.ts` — `Runtime` class wrapping `tropical_runtime_t`.
-  FinalizationRegistry for GC-driven cleanup.
-- `audio.ts` — `DAC` class wrapping `tropical_dac_t`. Static
-  `listDevices()`.
-- `param.ts` — `Param` wrapping `tropical_param_t`. Wiring
-  references parameters by name; the session compiler resolves the name
-  to a `_h` handle and threads it into the plan via `paramHandles`.
+- `Runtime` — wraps `tropical_runtime_t`; the DAC holds its Runtime
+  alive as a Lean field so the audio thread never reads a freed handle.
+- `DAC` — wraps `tropical_dac_t`, plus device enumeration.
+- `Param` — wraps `tropical_param_t`. On the session path, wiring
+  references parameters by name and the kernel reads `param:name`
+  module slots driven via `setSlot` — no native pointer threads into
+  the plan; the standalone per-program path is where the native
+  `tropical_param_t` handle is used.
 
 ---
 
-## 10. MCP server (`lean/` front door + `mcp/`)
+## 10. MCP server (`lean/` — one binary)
 
-The primary agent interface. The MCP server is a native **Lean front door**
-(`lean/`, built on the [Turnstile](https://github.com/willishoke/turnstile)
-framework): it validates each tool call against a typed schema, then relays it
-over JSON-RPC/stdio to the IR service (`mcp/ir_service.ts`), which drives the
-engine (`mcp/engine.ts`, owner of the long-lived `SessionState`). One server,
-the full MCP surface — 23 tools plus resources (program catalog, program-format
-doc) and the build-patch prompt.
+The primary agent interface. The MCP server is the native **Lean
+frontend** (`lean/Main.lean`, built on the
+[Turnstile](https://github.com/willishoke/turnstile) framework): it
+validates each tool call against a typed schema and handles it in
+process. There is no relay and no subprocess — the same binary that
+serves MCP owns the long-lived `SessionState` (`lean/Tropical/
+Engine.lean` + `Session.lean`), compiles plans, and drives the runtime
+over FFI. One server, the full MCP surface — 23 tools plus resources
+(program catalog, program-format doc, `lean/Tropical/Resources.lean`)
+and the build-patch prompt. (The earlier `@modelcontextprotocol/sdk`
+stdio server and, after it, the Turnstile-front-door-over-TS-relay
+arrangement were both retired during the Lean port.)
 
-The old `mcp/server.ts` (an `@modelcontextprotocol/sdk` stdio server) has been
-retired: `engine.ts` holds its `SessionState` and tool handlers, and the Lean
-front door replaced its transport.
-
-Every tool that mutates the signal graph ultimately calls `wire()` →
-`applyFlatPlan(session, runtime)`, which runs the full compile pipeline:
+Every tool that mutates the signal graph ultimately runs `syncCompile`
+(`lean/Tropical/Engine.lean`), which builds and loads its own plan:
 
 ```
 SessionState
-  → compileSession (compiler/ir/compile_session.ts)
+  → compileSession (lean/Tropical/Compile.lean)
        → liftWiresToInstances → extractSessionDelays
-         → assertSessionAcyclic → compileSessionSlotted
-       → per-instance compileResolved → tropical_plan_5 JSON
-  → JSON.stringify
-  → runtime.loadPlan (NumericProgramParser → OrcJitEngine → FlatRuntime hot-swap)
+         → assertSessionAcyclic → slotted session compile
+       → compileResolved/emit → tropical_plan_5 JSON
+  → runtime.loadPlan over FFI
+       (NumericProgramParser → OrcJitEngine → FlatRuntime hot-swap)
 ```
 
-Compile errors don't kill the session: they return a structured
-error envelope (`ErrorEnvelope` in `mcp/engine.ts`) and the previous
-kernel keeps playing.
+Compile errors don't kill the session: they return a structured error
+envelope (`Except`-shaped, mapped onto the `mcp/ERRORS.md` taxonomy)
+and the previous kernel keeps playing.
 
-See [`mcp/CLAUDE.md`](../mcp/CLAUDE.md) for the engine / ir_service split,
-the full tool list, and the error envelope shape.
+See [`mcp/ERRORS.md`](../mcp/ERRORS.md) for the error envelope
+taxonomy and [`mcp/CLAUDE.md`](../mcp/CLAUDE.md) for the tool list. The
+two surviving files under `mcp/` are the behavioral test suites
+(`errors.test.ts`, `wire_dac.test.ts`), run against the live Lean
+engine via `TROPICAL_ENGINE_CMD`.
 
 ---
 
 ## 11. Web backend (`web/`)
 
-Browser co-implementation of the audio runtime. Same compiler
-front-end, same strata pipeline, same `tropical_plan_5` boundary;
+Browser co-implementation of the audio runtime, and the one surviving
+TypeScript surface. Same `tropical_plan_5` boundary as the JIT;
 different emit target (WebAssembly vs. LLVM IR) and different param
-handle representation (SAB slot index vs. native pointer).
+handle representation (SAB slot index vs. native pointer). The compiler
+front-end and strata pipeline are *not* re-implemented here — patches
+are precompiled to `tropical_plan_5` by the Lean engine and the browser
+runs only the WASM emitter + runtime.
 
 ```
 web/
-  build_patches.ts    Offline plan precompile: tropical_program_2 → web/dist/patches/*.plan.json
-  build.ts            Full demo bundle: regen stdlib_bundled, precompile patches,
-                      bundle worklet + main app, copy index.html
-  bundle_stdlib.ts    Generates compiler/stdlib_bundled.ts from stdlib/*.md
+  wasm/               The WASM emit boundary (moved here from compiler/)
+    emit_wasm.ts          tropical_plan_5 → WebAssembly bytes
+    wasm_memory_layout.ts linear-memory layout
+    flat_plan.ts / plan_types.ts / slot_indices.ts
+                          mirrored TS view of the plan_5 schema + branded slots
+  build_patches.ts    Offline plan precompile via the Lean engine
+                      (`diffcli compile`) → web/dist/patches/*.plan.json
+  build.ts            Full demo bundle: precompile patches, bundle worklet +
+                      main app, copy index.html
   dev.ts              Dev server with COOP/COEP headers (SAB requirement)
   host/               Main thread
     compiler.ts       compilePlan(FlatPlan) → LoadedPlan via emit_wasm
@@ -906,21 +941,21 @@ web/
     app.ts, index.html
 ```
 
-The full TS pipeline runs offline at build time; the browser only
-runs `emit_wasm` and the runtime. Patches in `web/dist/patches/` are
-fetched, compiled to WASM, and posted into the worklet.
+Plans in `web/dist/patches/` (precompiled offline by the Lean engine)
+are fetched, run through `emit_wasm` to WASM, and posted into the
+worklet. No TS compiler in the browser loop.
 
 `WasmRuntime` mirrors `FlatRuntime`: dual-slot hot-swap, state
 transfer by name, 2048-sample smoothstep fade. The WASM module
 exports a single `process(blockSize, sampleIdx)` function and a
-shared `memory` whose layout is fixed by `wasm_memory_layout.ts`.
+shared `memory` whose layout is fixed by `web/wasm/wasm_memory_layout.ts`.
 
 See [`web/CLAUDE.md`](../web/CLAUDE.md) for the runtime protocol,
 linear-memory layout, and equivalence gates.
 
 ---
 
-## 12. Type system (`compiler/term.ts`, `compiler/array_wiring.ts`)
+## 12. Type system (`lean/Tropical/Ir/Nodes.lean`, `lean/Tropical/Wiring.lean`)
 
 ### 12.1 Port types
 
@@ -939,7 +974,7 @@ returns the result or null. Row-major layout via `shapeStrides`,
 
 ### 12.3 Array wiring
 
-`compiler/array_wiring.ts` validates connections between typed
+`lean/Tropical/Wiring.lean` validates connections between typed
 ports. Scalar-to-array auto-broadcasts; array-to-scalar errors;
 shape mismatches inside compatible broadcast rules insert
 `broadcast_to` wrappers.
@@ -962,19 +997,29 @@ shape mismatches inside compatible broadcast rules insert
 ### Makefile
 
 - `make build` — configure + build C++ core
-- `make profile` — build with profiling instrumentation
-- `make mcp-lean` — build C++ + Lean front door, then launch the MCP server
-- `make validate` — `bun test` + `ctest` + stdlib audit
-  (`scripts/validate_stdlib.ts`)
+- `make lean` — compile the FFI shim + build the Lean subtree (the
+  production compiler + MCP server + harness, one binary)
+- `make mcp-lean` — build C++ + Lean, then launch the MCP server
+  (`lean/.lake/build/bin/frontend`)
+- `make validate` — the full gate: the Lean golden/equiv runner
+  (`tropicaltest`: frozen audio goldens + native fused≡microkernel
+  mode-equiv), the web demo-plan precompile, the surviving bun suites
+  (WASM≡JIT in `tests/web` + the MCP behavioral tests, both against
+  `frontend --rpc` via `TROPICAL_ENGINE_CMD`), and `ctest`
+- `make parse-all` — regenerate the committed `stdlib/parsed/` bridge
+  from `stdlib/*.md` via the Lean surface parser (`diffcli parse-all`)
 - `make clean` — remove build directories
 
-### Bun (`package.json`, `tsconfig.json`)
+(There are no `make diff-*` targets anymore — the differential harness
+was migration scaffolding and was removed with the TS oracle. See
+`design/lean_port.md`.)
 
-- Runtime: Bun ≥ 1.3
-- Key deps: `koffi`, `zod` (the MCP transport is the Lean front door /
-  Turnstile, not `@modelcontextprotocol/sdk`)
-- TypeScript: ES2022 / ESNext, strict, includes `compiler/` + `mcp/`,
-  excludes `*.test.ts`
+### Bun (`package.json`)
+
+Bun ≥ 1.3 survives only to run the WASM-side TypeScript and the
+behavioral test suites; there is no TS compiler service. `koffi` is
+gone (the runtime FFI is Lean `@[extern]`). The web build and the bun
+test suites talk to the Lean engine.
 
 ### MCP (`.mcp.json`)
 
@@ -985,8 +1030,12 @@ shape mismatches inside compatible broadcast rules insert
 
 ### CI (`.github/workflows/`)
 
-Three jobs: typecheck (`bunx tsc --noEmit`), build-and-test (LLVM
-20, libasound2-dev, `bun test` + `ctest`), and YAML lint.
+`ci.yml` builds `libtropical` and the Lean frontend/harness, then runs
+the `tropicaltest` golden + native-equiv runner, precompiles the web
+demo plans, runs the behavioral + WASM≡JIT bun suites against the Lean
+engine, and runs the C++ `ctest`s; a separate typecheck job runs
+`bun run tsc --noEmit` over the surviving TS. `lint.yml` is the YAML
+lint.
 
 ---
 
@@ -1002,31 +1051,34 @@ smoothed params, hot-swap state transfer, typed int/bool ops.
 
 `cmake --build build -j4 && ctest --test-dir build`.
 
-### 14.2 TS tests (`compiler/**/*.test.ts`, `tests/equiv/*.test.ts`)
+### 14.2 Lean tests (`lake exe tropicaltest`)
 
-Run via `bun test`. The load-bearing suites:
+The compiler/pipeline test surface is Lean-internal — the strata,
+elaborator, emit, and partition passes are tested in the Lean modules
+themselves. The cross-cutting runner is `tropicaltest`
+(`lean/Tropicaltest.lean`): it renders the corpus through the real
+`libtropical` JIT (over `Tropical.Ffi`), hashes 16×256 samples, and
+gates on two things — the **frozen audio goldens** (`tests/golden/*.hash`,
+the correctness floor; `tropicaltest --write` re-baselines) and the
+**native mode-equivalence** check (fused vs. microkernel at 1e-12).
 
-- `tests/equiv/wasm_vs_jit.test.ts`,
-  `tests/equiv/web_plans_vs_jit.test.ts` — WASM emission equivalence
-- `tests/equiv/microkernel_vs_fused.test.ts`,
-  `tests/equiv/nested_vs_inlined.test.ts`,
-  `tests/equiv/microkernel_deep.test.ts` — JIT realization-variant
-  differentials; `tests/equiv/migration_audio.test.ts` — audio goldens
-- `ir/*.test.ts` — strata pipeline unit tests (specialize,
-  sum_lower, inline_instances, array_lower, identity_elim, slots,
-  clone, acyclic, lowering/cycle_break, elaboration_diagnostics)
-- `parse/*.test.ts` — lexer, parser, raise, round-trip,
-  `stdlib_round_trip.test.ts` (every stdlib program print/re-parse)
-- `apply_plan.test.ts` — plan application integration (requires
-  `make build`)
-- `compiler/wasm_runtime.test.ts`, `compiler/emit_wasm.test.ts` —
-  WASM emission unit tests
+### 14.3 Surviving bun suites (`bun test`, against the Lean engine)
 
-### 14.3 Stdlib audit
+Run with `TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc"`:
 
-`bun run scripts/validate_stdlib.ts` parses, elaborates, and lowers
-every `stdlib/*.md` and confirms post-strata invariants. Run by
-`make validate`.
+- `tests/web/wasm_vs_jit.test.ts`,
+  `tests/web/web_plans_vs_jit.test.ts` — WASM emission equivalence
+  (WASM emit vs. the JIT, both off `tropical_plan_5`)
+- `mcp/errors.test.ts`, `mcp/wire_dac.test.ts` — MCP behavioral suites,
+  executable spec for the tool surface, run unmodified against the Lean
+  engine
+
+There is no longer any `compiler/**/*.test.ts` or `tests/equiv/*` — the
+TS compiler and its differential equiv suites were deleted with the
+port. The stdlib round-trip / lower-and-check audit that used to be
+`scripts/validate_stdlib.ts` is now part of `tropicaltest` and the
+Lean parse∘print fixpoint tests; `make parse-all` regenerates the
+`stdlib/parsed/` bridge it leans on.
 
 ---
 
@@ -1038,11 +1090,11 @@ Cycles in source code throw `CycleViolation` at elaborate-time;
 cycles in session wiring are broken at the wire layer by
 `setWireExpr`'s auto-wrap + `extractSessionDelays`'s hoist into root
 `RegDecl`s. The compiler's strata pipeline asserts acyclic input at
-its boundary and refuses to lower cyclic IR. This closes the
-asymmetry where the JIT silently tolerated cycles via slot
-back-edges while the interpreter rejected them, and makes "the
-trace functor" a property of the realization layer (elaborator +
-session compiler), not the compiler.
+its boundary and refuses to lower cyclic IR. Making cycle-breaking an
+explicit, single-sited realization decision (elaborator + session
+compiler) rather than something the JIT silently tolerated via slot
+back-edges makes "the trace functor" a property of the realization
+layer, not the compiler.
 
 ### Single-kernel fusion, fixed topology
 
@@ -1057,9 +1109,10 @@ belong in a different runtime.
 
 The compiler is a chain of IR-to-IR passes where each pass drops a
 specific kind of structure once it's been consumed. That shape is
-what makes the layout of `compiler/ir/` predictable, makes it clear
-where new passes belong, and makes sample-for-sample cross-backend
-agreement the right correctness criterion. The shape also matches
+what makes the layout of `lean/Tropical/Ir/` predictable, makes it
+clear where new passes belong, and makes sample-for-sample
+cross-backend agreement the right correctness criterion. The shape
+also matches
 the operadic reading sketched at the top of this document and in
 `design/archive/operadic_ir.md` — the strata pipeline is a
 composition of operad morphisms — but you can program against the
@@ -1067,9 +1120,11 @@ pipeline without that vocabulary.
 
 ### Decl identity instead of strings
 
-Past `elaborate`, every reference is a TypeScript object pointer.
-String-based scope walks would make later passes re-derive
-information the elaborator already established. `_liftedFrom`
+Past `elaborate`, every reference is a branded integer `idx` into a
+typed decl table — positional identity, not a string (the Lean
+completion of the de Bruijn move the TS elaborator had already started
+with object pointers). String-based scope walks would make later passes
+re-derive information the elaborator already established. `_liftedFrom`
 replaced what had been name-prefix string regex; this is the same
 move, applied to a different kind of provenance. Branded indices
 in the plan layer (`TempIdx`, `StateRegIdx`, `ArraySlotIdx`,
@@ -1086,10 +1141,13 @@ on both backends (FlatRuntime in C++, WasmRuntime in WASM).
 ### No interpreter fallback on the audio path
 
 JIT failures are fatal at the runtime. Compile errors are caught
-upstream (in `applyFlatPlan` / over MCP) and never reach the
-runtime. Cross-backend agreement is guaranteed instead by the
-`tests/equiv/wasm_vs_jit` equivalence gate (JIT vs. WASM), not by any
-runtime fallback.
+upstream (in `syncCompile` / over MCP) and never reach the runtime.
+Cross-backend agreement is anchored instead by the WASM≡JIT
+equivalence gate (`tests/web/wasm_vs_jit`) plus native mode-equivalence,
+not by any runtime fallback. (Note: the project deliberately ships no
+reference *interpreter* either — a differential against one proves
+agreement, not correctness; the correctness floor is frozen audio
+goldens plus the developer's ear. See `design/lean_port.md`.)
 
 ### Static shapes for arrays
 

@@ -1,0 +1,44 @@
+{
+  "op": "program",
+  "name": "UnknownProg",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instanceDecl",
+        "name": "osc",
+        "program": {
+          "op": "nameRef",
+          "name": "NotDeclared"
+        },
+        "inputs": [
+          {
+            "port": {
+              "op": "nameRef",
+              "name": "freq"
+            },
+            "value": 440
+          }
+        ]
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "out",
+        "expr": 0
+      }
+    ]
+  },
+  "ports": {
+    "outputs": [
+      {
+        "name": "out",
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        }
+      }
+    ]
+  }
+}

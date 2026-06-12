@@ -1,0 +1,92 @@
+{
+  "op": "program",
+  "name": "Pulse",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "regDecl",
+        "name": "prev",
+        "init": 0,
+        "type": {
+          "op": "nameRef",
+          "name": "float"
+        }
+      }
+    ],
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "out",
+        "expr": {
+          "op": "mul",
+          "args": [
+            {
+              "op": "gt",
+              "args": [
+                {
+                  "op": "nameRef",
+                  "name": "signal"
+                },
+                0.5
+              ]
+            },
+            {
+              "op": "lte",
+              "args": [
+                {
+                  "op": "nameRef",
+                  "name": "prev"
+                },
+                0.5
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "op": "nextUpdate",
+        "target": {
+          "kind": "reg",
+          "name": "prev"
+        },
+        "expr": {
+          "op": "nameRef",
+          "name": "signal"
+        }
+      }
+    ]
+  },
+  "ports": {
+    "inputs": [
+      {
+        "name": "signal",
+        "type": {
+          "op": "nameRef",
+          "name": "signal"
+        },
+        "default": {
+          "op": "call",
+          "callee": {
+            "op": "nameRef",
+            "name": "clamp"
+          },
+          "args": [
+            0,
+            -1,
+            1
+          ]
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "name": "out",
+        "type": {
+          "op": "nameRef",
+          "name": "bool"
+        }
+      }
+    ]
+  }
+}

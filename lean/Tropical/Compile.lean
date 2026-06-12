@@ -1,0 +1,614 @@
+import Tropical.Lowering
+import Tropical.Ir.CompileResolved
+import Tropical.Plan
+
+/-!
+# Session compile — partition + plan assembly (Phase 6 stage 6c)
+
+Port of `compiler/ir/partition_recursive.ts` and
+`compiler/ir/compile_session_slotted*.ts` over the Core sub-IR: the
+recursive box-closed lowering (one kernel per `InstanceDecl` at every
+nesting depth), the per-instance remap into the unified namespaces,
+sinks, and slot metadata. The output is a `Plan.FlatPlan`.
+
+What did NOT need porting, and why:
+
+- `translateNode` / `InputBinding`: under the root-program lowering the
+  session's wires are body expressions of the synthetic root — they
+  lower through the *emitter*, in the root kernel's scope. No session
+  ExprNode ever needs translating at partition time, every child input
+  port has a slot override, and the root has no ports — so `opInput`
+  operands cannot survive into remap, preambles are always empty, and
+  `tempsConsumed` is always 0. The remap's `input` case keeps the TS
+  fallback behavior (a literal-0 const) rather than throwing, mirroring
+  the `inputBindingFor → defaults → 0` chain it would take there.
+- the legacy per-instance scheduler tier: retired in TS already.
+
+Slot-allocation parity: the engine's `Lowering.allocate` +
+`extractSessionDelays` produce [params, top-level outputs, delay
+slots]; this module continues with [nested outputs (depth-first,
+instance order), then ALL inputs (top-level + nested, depth-first)] —
+the exact two-phase `preallocateOutputsRecursive` /
+`preallocateInputsRecursive` order, including the array-input alias
+quotient (a single-`ref` array wire binds the consumer port to the
+producer's slot; a `sessionArraySlot` wire binds to the delay's slot).
+
+Errors are `Except String` with byte-exact TS messages; the engine
+maps them to `internal_error` (the envelope every TS compile-path
+throw produced via `toEnvelope`).
+-/
+
+namespace Tropical.Compile
+
+open Lean (Json JsonNumber toJson)
+open Tropical.Ir.Core
+open Tropical.Ir.CompileResolved (compileResolved Context)
+open Tropical.Ir.Emit (ArraySlotInfo)
+open Tropical.Plan (NOperand DstSlot NInstr RegTarget StateInit InstanceFunction)
+open Tropical.Expr (getField? getStrField? opOf?)
+
+abbrev ScalarType := Tropical.Plan.ScalarType
+
+-- ─────────────────────────────────────────────────────────────
+-- Port metadata (the WirePortMeta image)
+-- ─────────────────────────────────────────────────────────────
+
+structure PortMeta where
+  scalarSlotNames : Array String := #[]
+  scalarTypes : Array ScalarType := #[]
+  arraySlot? : Option Nat := none
+  arraySize? : Option Nat := none
+deriving Repr, Inhabited
+
+/-- Parse a `Lowering.Alloc` meta Json (the shape `allocOutputPort` and
+    the delay extractor write) into the typed form. -/
+def PortMeta.ofJson (j : Json) : PortMeta :=
+  let strArr (k : String) : Array String :=
+    match getField? j k with
+    | some (.arr a) => a.filterMap fun | .str s => some s | _ => none
+    | _ => #[]
+  let natField (k : String) : Option Nat :=
+    match getField? j k with
+    | some (.num n) => some n.toFloat.toUInt64.toNat
+    | _ => none
+  { scalarSlotNames := strArr "scalarSlotNames"
+    scalarTypes := (strArr "scalarTypes").map fun s =>
+      (Tropical.Parse.ScalarKind.ofWire? s).getD .float
+    arraySlot? := natField "arraySlot"
+    arraySize? := natField "arraySize" }
+
+-- ─────────────────────────────────────────────────────────────
+-- Compile-time session allocation state
+-- ─────────────────────────────────────────────────────────────
+
+structure SessionAlloc where
+  slotCount : Nat
+  paramSlots : Array (String × Nat)
+  outputSlotRegistry : Array (String × Nat)
+  inputSlotRegistry : Array (String × Nat) := #[]
+  outputPortMeta : Array (String × PortMeta)
+  inputPortMeta : Array (String × PortMeta) := #[]
+  ioCount : Nat
+  ioSizes : Array Nat
+  ioNames : Array String
+deriving Inhabited
+
+def SessionAlloc.ofAlloc (a : Tropical.Lowering.Alloc) : SessionAlloc :=
+  { slotCount := a.slotCount
+    paramSlots := a.paramSlots
+    outputSlotRegistry := a.outputSlots
+    outputPortMeta := a.outputMeta.map fun (k, j) => (k, PortMeta.ofJson j)
+    ioCount := a.ioCount
+    ioSizes := a.ioSizes
+    ioNames := a.ioNames }
+
+private def assocGet? {α} (m : Array (String × α)) (k : String) : Option α :=
+  (m.find? (·.1 == k)).map (·.2)
+
+-- ─────────────────────────────────────────────────────────────
+-- expandPortToSlots over Core port types
+-- ─────────────────────────────────────────────────────────────
+
+structure SlotExpansion where
+  names : Array String := #[]
+  types : Array ScalarType := #[]
+  arraySize? : Option Nat := none
+deriving Inhabited
+
+/-- Port of `expandPortToSlots`: scalar → one slot of its kind; alias →
+    one opaque float slot; array → one array slot of size ∏shape. -/
+def expandPortToSlots (baseName : String) (t? : Option CorePortType) :
+    Except String SlotExpansion := do
+  match t? with
+  | none | some (.scalar _) =>
+    let k := match t? with | some (.scalar k) => k | _ => .float
+    return { names := #[baseName], types := #[k] }
+  | some (.alias _) =>
+    return { names := #[baseName], types := #[.float] }
+  | some (.array _ shape) =>
+    let mut total := 1
+    for dim in shape do
+      match dim with
+      | .lit n => total := total * n.toFloat.toUInt64.toNat
+      | .unresolved =>
+        throw (s!"expandPortToSlots: array port '{baseName}' has unresolved "
+          ++ "type-param dimension; ensure specialize ran on the owning program")
+    return { arraySize? := some total }
+
+private def slotKey (instPath portName : String) : String :=
+  s!"{instPath}.{portName}"
+
+/-- Port of `allocateOutputSlots` (IR-typed form). Idempotent. -/
+def allocateOutputSlots (s : SessionAlloc) (instPath : String) (prog : CoreProgram) :
+    Except String SessionAlloc := do
+  let mut s := s
+  for port in prog.outputs do
+    let portKey := slotKey instPath port.name
+    if (assocGet? s.outputPortMeta portKey).isSome then
+      continue
+    let exp ← expandPortToSlots portKey port.type?
+    match exp.arraySize? with
+    | some arraySize =>
+      let arraySlot := s.ioCount
+      s := { s with
+        ioCount := s.ioCount + 1
+        ioSizes := s.ioSizes.push arraySize
+        ioNames := s.ioNames.push portKey
+        outputPortMeta := s.outputPortMeta.push (portKey,
+          { arraySlot? := some arraySlot, arraySize? := some arraySize }) }
+    | none =>
+      let mut reg := s.outputSlotRegistry
+      for i in [0:exp.names.size] do
+        reg := reg.push (exp.names[i]!, s.slotCount + i)
+      s := { s with
+        outputSlotRegistry := reg
+        outputPortMeta := s.outputPortMeta.push (portKey,
+          { scalarSlotNames := exp.names, scalarTypes := exp.types })
+        slotCount := s.slotCount + exp.names.size }
+  return s
+
+/-- The array-input alias quotient (`tryAliasInputArrayWire`). -/
+private def tryAliasInputArrayWire (s : SessionAlloc) (wires : Array Tropical.Wire)
+    (instPath portName : String) : Option ArraySlotInfo := do
+  let w ← wires.find? fun w => w.instName == instPath && w.portName == portName
+  match w.expr with
+  | .obj _ =>
+    if opOf? w.expr == some "ref" then do
+      let srcInst ← getStrField? w.expr "instance"
+      let srcOut ← getStrField? w.expr "output"
+      let pmeta ← assocGet? s.outputPortMeta (slotKey srcInst srcOut)
+      let slot ← pmeta.arraySlot?
+      let size ← pmeta.arraySize?
+      pure { slot, size }
+    else if opOf? w.expr == some "sessionArraySlot" then do
+      let idx ← match getField? w.expr "index" with
+        | some (.num n) => some n.toFloat.toUInt64.toNat
+        | _ => none
+      let size ← match getField? w.expr "size" with
+        | some (.num n) => some n.toFloat.toUInt64.toNat
+        | _ => none
+      pure { slot := idx, size }
+    else none
+  | _ => none
+
+/-- Port of `allocateInputSlots`. Idempotent; the alias check binds a
+    single-`ref` (or extracted array-delay) wire's consumer port to the
+    producer slot instead of allocating + copying. -/
+def allocateInputSlots (s : SessionAlloc) (wires : Array Tropical.Wire)
+    (instPath : String) (prog : CoreProgram) : Except String SessionAlloc := do
+  let mut s := s
+  for port in prog.inputs do
+    let portKey := slotKey instPath port.name
+    if (assocGet? s.inputPortMeta portKey).isSome then
+      continue
+    let exp ← expandPortToSlots portKey port.type?
+    match exp.arraySize? with
+    | some arraySize =>
+      match tryAliasInputArrayWire s wires instPath port.name with
+      | some aliased =>
+        if aliased.size != arraySize then
+          throw (s!"allocateInputSlots: array-input alias size mismatch for '{portKey}': "
+            ++ s!"consumer expects size {arraySize}, producer slot has size {aliased.size}")
+        s := { s with inputPortMeta := s.inputPortMeta.push (portKey,
+          { arraySlot? := some aliased.slot, arraySize? := some arraySize }) }
+      | none =>
+        let arraySlot := s.ioCount
+        s := { s with
+          ioCount := s.ioCount + 1
+          ioSizes := s.ioSizes.push arraySize
+          ioNames := s.ioNames.push portKey
+          inputPortMeta := s.inputPortMeta.push (portKey,
+            { arraySlot? := some arraySlot, arraySize? := some arraySize }) }
+    | none =>
+      let mut reg := s.inputSlotRegistry
+      for i in [0:exp.names.size] do
+        reg := reg.push (exp.names[i]!, s.slotCount + i)
+      s := { s with
+        inputSlotRegistry := reg
+        inputPortMeta := s.inputPortMeta.push (portKey,
+          { scalarSlotNames := exp.names, scalarTypes := exp.types })
+        slotCount := s.slotCount + exp.names.size }
+  return s
+
+-- ─────────────────────────────────────────────────────────────
+-- Slot lookups (partition_recursive helpers)
+-- ─────────────────────────────────────────────────────────────
+
+private def lookupOutputSlot (s : SessionAlloc) (instPath portName : String) : Option Nat := do
+  let pmeta ← assocGet? s.outputPortMeta (slotKey instPath portName)
+  let first ← pmeta.scalarSlotNames[0]?
+  assocGet? s.outputSlotRegistry first
+
+private def lookupInputSlot (s : SessionAlloc) (instPath portName : String) : Option Nat := do
+  let pmeta ← assocGet? s.inputPortMeta (slotKey instPath portName)
+  let first ← pmeta.scalarSlotNames[0]?
+  assocGet? s.inputSlotRegistry first
+
+private def lookupOutputArraySlot (s : SessionAlloc) (instPath portName : String) :
+    Option ArraySlotInfo := do
+  let pmeta ← assocGet? s.outputPortMeta (slotKey instPath portName)
+  pure { slot := ← pmeta.arraySlot?, size := ← pmeta.arraySize? }
+
+private def lookupInputArraySlot (s : SessionAlloc) (instPath portName : String) :
+    Option ArraySlotInfo := do
+  let pmeta ← assocGet? s.inputPortMeta (slotKey instPath portName)
+  pure { slot := ← pmeta.arraySlot?, size := ← pmeta.arraySize? }
+
+/-- Naming-transparent synthetic session root. -/
+def rootInstancePath : String := "__root__"
+
+private def joinInstancePath (parent child : String) : String :=
+  if parent == rootInstancePath then child else s!"{parent}.{child}"
+
+-- ─────────────────────────────────────────────────────────────
+-- Accumulators
+-- ─────────────────────────────────────────────────────────────
+
+structure Accumulators where
+  nextRegRaw : Nat := 0
+  nextStateRaw : Nat := 0
+  nextArrayRaw : Nat := 0
+  registerNames : Array String := #[]
+  registerTypes : Array ScalarType := #[]
+  stateInit : Array StateInit := #[]
+  arraySlotSizes : Array Nat := #[]
+  arraySlotNames : Array String := #[]
+deriving Inhabited
+
+-- ─────────────────────────────────────────────────────────────
+-- Per-instance plan remap (compile_session_slotted_helpers.ts)
+-- ─────────────────────────────────────────────────────────────
+
+private def shiftDst (regOffset arrayOffset : Nat) : DstSlot → DstSlot
+  | .temp slot => .temp (slot + regOffset)
+  | .array slot => .array (slot + arrayOffset)
+  -- Session-absolute already; collapse the namespace tag.
+  | .sessionArray slot => .array slot
+  | .moduleSlot i => .moduleSlot i
+
+private def remapOperand (instanceName : String) (regOffset stateOffset arrayOffset : Nat) :
+    NOperand → Except String NOperand
+  | .const v t => .ok (.const v t)
+  | .source i t => .ok (.source i t)
+  | .slot i t => .ok (.slot i t)
+  -- Unreachable under the root lowering (every child input port has a
+  -- slot override); TS would resolve through inputBindingFor → the
+  -- defaults chain → literal 0. Mirror the terminal value.
+  | .input _ t => .ok (.const 0 t)
+  | .reg slot t => .ok (.reg (slot + regOffset) t)
+  | .stateReg slot t => .ok (.stateReg (slot + stateOffset) t)
+  | .arrayReg slot => .ok (.arrayReg (slot + arrayOffset))
+  | .sessionArrayReg slot => .ok (.arrayReg slot)
+  | .param _ _ =>
+    .error (s!"compileSessionSlotted: legacy 'param' operand encountered "
+      ++ s!"in '{instanceName}'. Session-level params should resolve "
+      ++ "to slot operands before this point.")
+
+private def remapInstr (instanceName : String) (regOffset stateOffset arrayOffset : Nat)
+    (i : NInstr) : Except String NInstr := do
+  return { i with
+    dst := shiftDst regOffset arrayOffset i.dst
+    args := ← i.args.mapM (remapOperand instanceName regOffset stateOffset arrayOffset) }
+
+/-- Output writebacks per declared port (the remap's `writeSlots`). -/
+private def emitWriteSlots (s : SessionAlloc) (instanceName : String)
+    (outputPortNames : Array String) (outputTargets : Array Nat) (regOffset : Nat) :
+    Except String (Array NInstr) := do
+  let mut writeSlots : Array NInstr := #[]
+  let mut targetIdx := 0
+  for portName in outputPortNames do
+    let portKey := slotKey instanceName portName
+    let some pmeta := assocGet? s.outputPortMeta portKey
+      | throw (s!"compileSessionSlotted: instance '{instanceName}' port '{portName}' "
+          ++ "missing outputPortMeta entry (allocateOutputSlots should have run).")
+    match pmeta.arraySlot?, pmeta.arraySize? with
+    | some arrSlot, some arrSize =>
+      let arrOp := NOperand.arrayReg arrSlot
+      for elemI in [0:arrSize] do
+        let some localTemp := outputTargets[targetIdx]?
+          | throw (s!"compileSessionSlotted: instance '{instanceName}' missing output_targets[{targetIdx}] "
+              ++ s!"for array port '{portName}' element {elemI}.")
+        let absTemp := localTemp + regOffset
+        writeSlots := writeSlots.push (Tropical.Plan.instrSetElement arrSlot
+          #[arrOp, .const elemI .int, .reg absTemp .float])
+        targetIdx := targetIdx + 1
+    | _, _ =>
+      for scalarI in [0:pmeta.scalarSlotNames.size] do
+        let scalarSlotName := pmeta.scalarSlotNames[scalarI]!
+        let some slotIdx := assocGet? s.outputSlotRegistry scalarSlotName
+          | throw s!"compileSessionSlotted: scalar slot '{scalarSlotName}' not in outputSlotRegistry."
+        let some localTemp := outputTargets[targetIdx]?
+          | throw (s!"compileSessionSlotted: instance '{instanceName}' missing output_targets[{targetIdx}] "
+              ++ s!"for scalar slot '{scalarSlotName}' (port '{portName}', element {scalarI}).")
+        let scalarType := pmeta.scalarTypes[scalarI]?.getD .float
+        let absTemp := localTemp + regOffset
+        writeSlots := writeSlots.push (Tropical.Plan.instrWriteSlot slotIdx
+          (.reg absTemp scalarType) scalarType)
+        targetIdx := targetIdx + 1
+  if targetIdx != outputTargets.size then
+    throw (s!"compileSessionSlotted: instance '{instanceName}' has {outputTargets.size} "
+      ++ s!"output_targets but only {targetIdx} were consumed by slot expansion. "
+      ++ "This indicates a port-shape / emit mismatch.")
+  return writeSlots
+
+-- ─────────────────────────────────────────────────────────────
+-- partitionKernel
+-- ─────────────────────────────────────────────────────────────
+
+private def instParts : CoreBodyDecl → Option (String × String)
+  | .inst name typeKey _ _ => some (name, typeKey)
+  | _ => none
+
+/-- Partition a single kernel recursively. Returns the kernel tree plus
+    the advanced allocation + accumulators. -/
+partial def partitionKernel (instancePath : String) (prog : CoreProgram)
+    (wires : Array Tropical.Wire) (s : SessionAlloc) (acc : Accumulators)
+    (inputSlotOverride : Array (Nat × Nat) := #[])
+    (inputArraySlots : Array (Nat × ArraySlotInfo) := #[])
+    (paramSlots : Array (Nat × Nat) := #[]) :
+    Except String (InstanceFunction × SessionAlloc × Accumulators) := do
+  let mut s := s
+  let mut acc := acc
+
+  -- ── 1. Recurse into sub-InstanceDecls. ──
+  let mut children : Array InstanceFunction := #[]
+  let mut nestedOutputSlots : Array (Nat × Array (Nat × Nat)) := #[]
+  let mut nestedInputSlots : Array (Nat × Array (Nat × Nat)) := #[]
+  let mut nestedOutputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
+  let mut nestedInputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
+
+  let instDecls := prog.instances
+  for k in [0:instDecls.size] do
+    let some (childName, typeKey) := instParts instDecls[k]!
+      | throw "partitionKernel: non-instance decl in instance table (port bug)"
+    let childPath := joinInstancePath instancePath childName
+    let some declType := prog.registryGet? typeKey
+      | throw s!"partitionKernel: instance '{childPath}' typeKey '{typeKey}' missing from registry"
+
+    s ← allocateOutputSlots s childPath declType
+    s ← allocateInputSlots s wires childPath declType
+
+    let mut childOutputMap : Array (Nat × Nat) := #[]
+    let mut childOutputArrayMap : Array (Nat × ArraySlotInfo) := #[]
+    for i in [0:declType.outputs.size] do
+      let outDecl := declType.outputs[i]!
+      match lookupOutputSlot s childPath outDecl.name with
+      | some slot => childOutputMap := childOutputMap.push (i, slot)
+      | none =>
+        if let some info := lookupOutputArraySlot s childPath outDecl.name then
+          childOutputArrayMap := childOutputArrayMap.push (i, info)
+    nestedOutputSlots := nestedOutputSlots.push (k, childOutputMap)
+    nestedOutputArraySlots := nestedOutputArraySlots.push (k, childOutputArrayMap)
+
+    let mut childInputMap : Array (Nat × Nat) := #[]
+    let mut childInputArrayMap : Array (Nat × ArraySlotInfo) := #[]
+    for i in [0:declType.inputs.size] do
+      let inDecl := declType.inputs[i]!
+      match lookupInputSlot s childPath inDecl.name with
+      | some slot => childInputMap := childInputMap.push (i, slot)
+      | none =>
+        if let some info := lookupInputArraySlot s childPath inDecl.name then
+          childInputArrayMap := childInputArrayMap.push (i, info)
+    nestedInputSlots := nestedInputSlots.push (k, childInputMap)
+    nestedInputArraySlots := nestedInputArraySlots.push (k, childInputArrayMap)
+
+    let (childFn, s', acc') ← partitionKernel childPath declType wires s acc
+      childInputMap childInputArrayMap #[]
+    s := s'
+    acc := acc'
+    children := children.push childFn
+
+  -- ── 2. Compile this kernel's body. ──
+  let ctx : Context := {
+    paramSlots
+    nestedOutputSlots? := some nestedOutputSlots
+    nestedInputSlots
+    inputSlotOverride
+    inputArraySlots
+    nestedInputArraySlots
+    nestedOutputArraySlots }
+  let plan ← compileResolved prog ctx
+
+  -- ── 3. Remap into the unified slot/temp space. ──
+  let regOffset := acc.nextRegRaw
+  let stateOffset := acc.nextStateRaw
+  let arrayOffset := acc.nextArrayRaw
+
+  let body ← plan.instructions.mapM (remapInstr instancePath regOffset stateOffset arrayOffset)
+  let perChildPreInput ← plan.perChildPreInput.mapM
+    (·.mapM (remapInstr instancePath regOffset stateOffset arrayOffset))
+  let writeSlots ← emitWriteSlots s instancePath (prog.outputs.map (·.name))
+    plan.outputTargets regOffset
+  let instanceInstructions := body ++ writeSlots
+
+  -- Attach each per-child pre-input block to its child.
+  if perChildPreInput.size != children.size then
+    throw (s!"partitionKernel: instance '{instancePath}': perChildPreInput length "
+      ++ s!"({perChildPreInput.size}) does not match children length "
+      ++ s!"({children.size}). emit_resolved + compileResolved must produce "
+      ++ "one block per nested InstanceDecl in body order.")
+  children := children.mapIdx fun i c => c.withPreInput perChildPreInput[i]!
+
+  let shiftedTargets := plan.registerTargets.map fun t =>
+    match t with
+    | .arrayManaged => RegTarget.arrayManaged
+    | .temp slot => .temp (slot + regOffset)
+
+  let fn : InstanceFunction := .mk
+    (s!"instance_" ++ (instancePath.replace "." "_"))
+    instancePath
+    #[]                     -- preamble (always empty under the root lowering)
+    instanceInstructions
+    #[]                     -- pre_input (parent attaches a copy on its own pass)
+    regOffset stateOffset arrayOffset
+    plan.registerCount      -- + tempsConsumed (always 0; no preamble emitter)
+    shiftedTargets
+    children
+
+  -- ── 4. Accumulator updates (this kernel's own contribution). ──
+  acc := { acc with
+    registerNames := acc.registerNames
+      ++ plan.registerNames.map (joinInstancePath instancePath ·)
+    registerTypes := acc.registerTypes ++ plan.registerTypes
+    stateInit := acc.stateInit ++ plan.stateInit
+    arraySlotSizes := acc.arraySlotSizes ++ plan.arraySlotSizes
+    arraySlotNames := acc.arraySlotNames
+      ++ plan.arraySlotNames.map (joinInstancePath instancePath ·)
+    nextRegRaw := acc.nextRegRaw + plan.registerCount
+    nextStateRaw := acc.nextStateRaw + plan.stateInit.size
+    nextArrayRaw := acc.nextArrayRaw + plan.arraySlotCount }
+
+  return (fn, s, acc)
+
+-- ─────────────────────────────────────────────────────────────
+-- Session compile (compile_session_slotted.ts)
+-- ─────────────────────────────────────────────────────────────
+
+structure SessionInput where
+  /-- Session instances in registry order: (name, the type's Core form). -/
+  instances : Array (String × CoreProgram)
+  /-- Post-extraction wires (alias checks only — not re-lowered). -/
+  wiresPost : Array Tropical.Wire
+  graphOutputs : Array (String × String)
+  /-- Param mirror: name → raw value Json (slot_defaults echo). -/
+  params : Array (String × Json)
+  /-- Post-extraction allocation (params, top-level outputs, delays). -/
+  alloc : Tropical.Lowering.Alloc
+  delayEntries : Array Tropical.Lowering.DelayEntry
+  /-- The elaborated session root, downcast to Core. -/
+  root : CoreProgram
+  mode : Tropical.Plan.CompilationMode := .fused
+
+private def rootParamName : CoreBodyDecl → Option String
+  | .param name _ => some name
+  | _ => none
+
+/-- Build slot metadata (`buildSlotMetadata`). -/
+private def slotMetadata (s : SessionAlloc) (params : Array (String × Json))
+    (delayEntries : Array Tropical.Lowering.DelayEntry) (paramSlots : Array (String × Nat)) :
+    Nat × Array String × Array Json := Id.run do
+  let slotCount := s.slotCount
+  let mut names := Array.replicate slotCount ""
+  let mut defaults : Array Json := Array.replicate slotCount (toJson (0 : Nat))
+  for (name, idx) in s.outputSlotRegistry do
+    if idx < slotCount then names := names.set! idx name
+  for (name, idx) in paramSlots do
+    if idx < slotCount then
+      names := names.set! idx s!"param:{name}"
+      if let some v := assocGet? params name then
+        defaults := defaults.set! idx v
+  for e in delayEntries do
+    if let some idx := e.slotIdx then
+      if idx < slotCount then
+        names := names.set! idx e.slotName
+        defaults := defaults.set! idx e.init
+  for (name, idx) in s.inputSlotRegistry do
+    if idx < slotCount then names := names.set! idx s!"input:{name}"
+  return (slotCount, names, defaults)
+
+/-- Materialize the audible outputs as device-bound sinks (`emitSinks`). -/
+private def emitSinks (s : SessionAlloc) (graphOutputs : Array (String × String)) :
+    Except String (Array Tropical.Plan.SinkSpec) := do
+  let mut inputs : Array Nat := #[]
+  for (inst, output) in graphOutputs do
+    let key := slotKey inst output
+    let some idx := assocGet? s.outputSlotRegistry key
+      | throw s!"compileSessionSlotted: dac wire '{key}' has no allocated output slot."
+    inputs := inputs.push idx
+  return #[{ inputs, gain := Tropical.Plan.defaultSinkGain, target := 0 }]
+
+/-- `preallocateOutputsRecursive`: parent before children, body order. -/
+private partial def preallocOutputs (s : SessionAlloc) (path : String)
+    (prog : CoreProgram) : Except String SessionAlloc := do
+  let mut s ← allocateOutputSlots s path prog
+  for d in prog.instances do
+    if let some (childName, typeKey) := instParts d then
+      let some childType := prog.registryGet? typeKey
+        | throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
+      s ← preallocOutputs s (joinInstancePath path childName) childType
+  return s
+
+/-- `preallocateInputsRecursive`: runs AFTER all outputs so the alias
+    check can see every producer's meta. -/
+private partial def preallocInputs (s : SessionAlloc) (wires : Array Tropical.Wire)
+    (path : String) (prog : CoreProgram) : Except String SessionAlloc := do
+  let mut s ← allocateInputSlots s wires path prog
+  for d in prog.instances do
+    if let some (childName, typeKey) := instParts d then
+      let some childType := prog.registryGet? typeKey
+        | throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
+      s ← preallocInputs s wires (joinInstancePath path childName) childType
+  return s
+
+/-- The session → `tropical_plan_5` lowering: two-phase slot
+    pre-allocation, accumulator seeding from the session I/O array
+    space, one `partitionKernel` over the synthetic root, sinks, and
+    slot metadata. -/
+def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan := do
+  let mut s := SessionAlloc.ofAlloc input.alloc
+
+  -- Two-phase pre-allocation: all outputs first (the input alias check
+  -- needs producers' meta), then all inputs; both walks recurse into
+  -- nested instance decls in body order.
+  for (name, prog) in input.instances do
+    s ← preallocOutputs s name prog
+  for (name, prog) in input.instances do
+    s ← preallocInputs s input.wiresPost name prog
+
+  -- Seed the array-slot accumulator with the session-level I/O slots.
+  let acc : Accumulators := {
+    arraySlotSizes := s.ioSizes
+    arraySlotNames := s.ioNames
+    nextArrayRaw := s.ioCount }
+
+  -- Root param module slots, keyed by the root program's ParamIdx.
+  let mut paramSlots : Array (Nat × Nat) := #[]
+  let rootParams := input.root.params.filterMap rootParamName
+  for i in [0:rootParams.size] do
+    if let some slot := assocGet? s.paramSlots rootParams[i]! then
+      paramSlots := paramSlots.push (i, slot)
+
+  let (fn, s', acc) ← partitionKernel rootInstancePath input.root input.wiresPost s acc
+    #[] #[] paramSlots
+  s := s'
+
+  let sinks ← emitSinks s input.graphOutputs
+  let (slotCount, slotNames, slotDefaults) :=
+    slotMetadata s input.params input.delayEntries s.paramSlots
+
+  return {
+    compilationMode := input.mode
+    stateInit := acc.stateInit
+    registerNames := acc.registerNames
+    registerTypes := acc.registerTypes
+    arraySlotNames := acc.arraySlotNames
+    registerCount := acc.nextRegRaw
+    arraySlotCount := acc.nextArrayRaw
+    arraySlotSizes := acc.arraySlotSizes
+    instanceFunctions := #[fn]
+    sinks
+    slotCount
+    slotNames
+    slotDefaults }
+
+end Tropical.Compile
