@@ -37,3 +37,15 @@ moreLinkArgs = [
   "-L../build", "-ltropical",
   "-Wl,-rpath,@executable_path/../../../../build",
 ]
+
+# Post-TS golden + native-equiv runner (Phase 8): renders patches via the
+# Lean FFI, hashes against the frozen goldens, and cross-checks the native
+# compilation modes. The replacement for validate_stdlib + the equiv suite.
+[[lean_exe]]
+name = "tropicaltest"
+root = "Tropicaltest"
+moreLinkArgs = [
+  "ffi/shim.o",
+  "-L../build", "-ltropical",
+  "-Wl,-rpath,@executable_path/../../../../build",
+]

@@ -12,8 +12,8 @@
  * bundle, no cold-start compile, deterministic.
  */
 
-import { type FlatPlan, type WireFlatPlan, parseWirePlan } from '../../compiler/flat_plan.js'
-import { emitWasm } from '../../compiler/emit_wasm.js'
+import { type FlatPlan, type WireFlatPlan, parseWirePlan } from '../wasm/flat_plan.js'
+import { emitWasm } from '../wasm/emit_wasm.js'
 import type { LoadedPlan } from '../worklet/runtime.js'
 
 /**

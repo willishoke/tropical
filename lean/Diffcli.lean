@@ -130,6 +130,58 @@ def parseMdVerb (args : List String) : IO UInt32 := do
   IO.println out.compress
   return 0
 
+/-- Regenerate the committed stdlib bridge (`stdlib/parsed/<Name>.json` +
+    `manifest.json`) from `stdlib/*.md` (Phase 8 — replaces the bun
+    `scripts/build_parsed_stdlib.ts`). Sorted readdir, parse each via the
+    Phase-7 surface parser, derive registration order by the same
+    fixed-point elaborate loop, write Lean-serialized ParsedProgram JSON.
+    Output is Lean-canonical (sorted keys) — semantically identical to the
+    prior TS-serialized bridge, and idempotent under re-runs. -/
+def parseAllVerb (_args : List String) : IO UInt32 := do
+  let entries ← (System.FilePath.mk "stdlib").readDir
+  let mdNames := entries.filterMap fun e =>
+    let n := e.fileName
+    if n.endsWith ".md" && n != "README.md" then some n else none
+  let sorted := mdNames.qsort fun a b => decide (a < b)
+  let mut parsed : Array (String × Tropical.Parse.Program) := #[]
+  for fname in sorted do
+    let text ← IO.FS.readFile s!"stdlib/{fname}"
+    match Tropical.Parse.Surface.parseMarkdownProgram text with
+    | .error e => IO.eprintln s!"{fname}: {e}"; return 1
+    | .ok prog => parsed := parsed.push (prog.name, prog)
+  -- Fixed-point elaborate loop → registration (manifest) order: each pass
+  -- elaborates the programs whose sibling refs already resolved.
+  let mut arena : Tropical.Ir.Arena := {}
+  let mut resolvedIdx : Array (String × Tropical.Ir.ProgramIdx) := #[]
+  let mut order : Array String := #[]
+  let mut remaining := parsed
+  let mut progress := true
+  while progress && !remaining.isEmpty do
+    progress := false
+    let mut still : Array (String × Tropical.Parse.Program) := #[]
+    for (name, prog) in remaining do
+      let r := resolvedIdx
+      match Tropical.Ir.elaborateInto arena prog (some fun n => (r.find? (·.1 == n)).map (·.2)) with
+      | .ok (arena', idx) =>
+        arena := arena'
+        resolvedIdx := resolvedIdx.push (name, idx)
+        order := order.push name
+        progress := true
+      | .error _ => still := still.push (name, prog)
+    remaining := still
+  if h : remaining.size > 0 then
+    let (name, prog) := remaining[0]
+    let r := resolvedIdx
+    match Tropical.Ir.elaborateInto arena prog (some fun n => (r.find? (·.1 == n)).map (·.2)) with
+    | .error e => IO.eprintln s!"parse-all: failed to elaborate '{name}': {e.message}"; return 1
+    | .ok _ => IO.eprintln s!"parse-all: '{name}' unexpectedly elaborated"; return 1
+  for (name, prog) in parsed do
+    IO.FS.writeFile s!"stdlib/parsed/{name}.json" (prog.toJson.pretty ++ "\n")
+  let manifest := Lean.Json.mkObj [("programs", Lean.Json.arr (order.map Lean.Json.str))]
+  IO.FS.writeFile "stdlib/parsed/manifest.json" (manifest.pretty ++ "\n")
+  IO.println s!"wrote {parsed.size} parsed programs + manifest to stdlib/parsed/"
+  return 0
+
 -- ── elab-stdlib / elab-file (Phase 4 stage 3) ────────────────────────────────
 
 private def parsedDir : String := "stdlib/parsed"
@@ -430,6 +482,7 @@ def main (args : List String) : IO UInt32 := do
   | "raise" :: rest => raiseVerb rest
   | "parsed-roundtrip" :: rest => parsedRoundtripVerb rest
   | "parse-md" :: rest => parseMdVerb rest
+  | "parse-all" :: rest => parseAllVerb rest
   | "elab-stdlib" :: rest => elabStdlibVerb rest
   | "elab-file" :: rest => elabFileVerb rest
   | "strata-stdlib" :: rest => strataStdlibVerb rest

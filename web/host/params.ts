@@ -1,16 +1,14 @@
 /**
  * params.ts — Browser-side smoothed-param and trigger.
  *
- * Web counterpart to compiler/runtime/param.ts. Instead of a native
+ * Web counterpart to the native param model. Instead of a native
  * ControlParam allocated on the C++ heap, each param claims a slot
  * in a SharedArrayBuffer (two f64 slots per param: value, frame_value).
  *
- * The slot index doubles as the `_handle` carried through the expression
- * tree. emit_numeric.ts stringifies it to `param.ptr`, and the worklet
- * runtime reads that string back as the SAB index when snapshotting.
+ * The slot index doubles as the param handle stringified to `param.ptr`
+ * in the plan; the worklet runtime reads that string back as the SAB
+ * index when snapshotting.
  */
-
-import { type SignalExpr, signalExpr } from '../../compiler/expr.js'
 
 export class ParamBank {
   /** SAB view, f64. Each param owns `[value, frame_value]`. */
@@ -39,38 +37,5 @@ export class ParamBank {
       throw new Error(`ParamBank: out of slots (capacity ${this.capacity})`)
     }
     return this.nextSlot++
-  }
-}
-
-export class WebParam {
-  readonly _h: number
-  constructor(private bank: ParamBank, initValue = 0, public readonly timeConst = 0.005) {
-    this._h = bank.allocSlot()
-    this.value = initValue
-  }
-
-  get value(): number { return this.bank.view[this._h * 2]! }
-  set value(v: number) { this.bank.view[this._h * 2] = v }
-
-  asExpr(): SignalExpr {
-    return signalExpr({ op: 'smoothed_param', name: '(unnamed)', _ptr: true, _handle: this._h })
-  }
-}
-
-export class WebTrigger {
-  readonly _h: number
-  constructor(private bank: ParamBank) {
-    this._h = bank.allocSlot()
-  }
-
-  fire(value = 1.0): void {
-    // Writing to frame_value fires the trigger; kernels read it per-block.
-    this.bank.view[this._h * 2 + 1] = value
-  }
-
-  get value(): number { return this.bank.view[this._h * 2 + 1]! }
-
-  asExpr(): SignalExpr {
-    return signalExpr({ op: 'trigger_param', name: '(unnamed)', _ptr: true, _handle: this._h })
   }
 }

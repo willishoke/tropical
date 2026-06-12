@@ -4,18 +4,30 @@
  *
  * If this passes, the bug in the browser is in the runtime/worklet layer.
  * If this fails, the bug is in the build_patches step or emit_wasm.
+ *
+ * Both backends come off the SAME on-disk `tropical_plan_5` wire plan:
+ *   - WASM side: emit_wasm (relocated to web/wasm/) on the parsed plan.
+ *   - Native side: `diffcli render-bytes <plan.json>` (the Lean JIT) —
+ *     the dist `.plan.json` IS the wire plan, fed straight to the CLI.
+ * No TS-compiler import and no native FFI — fully decoupled post-Phase-8.
  */
 
 import { describe, test, expect } from 'bun:test'
+import { spawnSync } from 'bun'
 import { readFileSync, readdirSync, existsSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { makeSession } from '../../compiler/session'
-import { type FlatPlan, type WireFlatPlan, toWirePlan, parseWirePlan } from '../../compiler/flat_plan'
-import { emitWasm } from '../../compiler/emit_wasm'
+import { type FlatPlan, type WireFlatPlan, parseWirePlan } from '../../web/wasm/flat_plan'
+import { emitWasm } from '../../web/wasm/emit_wasm'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const distDir = resolve(__dirname, '../../web/dist/patches')
+// tests/web/ is two levels under the repo root, like tests/equiv/ was.
+const repoRoot = resolve(__dirname, '../..')
+const distDir = resolve(repoRoot, 'web/dist/patches')
+const diffcli = resolve(repoRoot, 'lean/.lake/build/bin/diffcli')
+// diffcli reads stdlib/parsed/manifest.json relative to its cwd, so run
+// from the repo root and put elan on PATH for the Lean toolchain.
+const cliEnv = { ...process.env, PATH: `${process.env.HOME}/.elan/bin:${process.env.PATH}` }
 
 function initWasmState(memory: WebAssembly.Memory, regOffset: number, stateInit: (number | boolean)[], regTypes: string[]): void {
   const dv = new DataView(memory.buffer)
@@ -42,15 +54,16 @@ async function runWasm(plan: FlatPlan, samples: number): Promise<Float64Array> {
   return new Float64Array(memory.buffer, layout.outputOffset, samples).slice()
 }
 
-function runNative(plan: FlatPlan, samples: number): Float64Array {
-  const session = makeSession(samples)
-  try {
-    session.runtime.loadPlan(JSON.stringify(toWirePlan(plan)))
-    session.runtime.process()
-    return new Float64Array(session.runtime.outputBuffer)
-  } finally {
-    session.runtime.dispose()
+/** Native side: render the on-disk wire plan through the Lean engine's
+ *  JIT via `diffcli render-bytes`. The dist `.plan.json` file IS the
+ *  wire plan, so its path is passed straight to the CLI. */
+function runNative(planPath: string, samples: number): Float64Array {
+  const r = spawnSync([diffcli, 'render-bytes', planPath, '--frames', '1', '--buffer', String(samples)], { cwd: repoRoot, env: cliEnv })
+  if (r.exitCode !== 0) {
+    throw new Error(`diffcli render-bytes failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
   }
+  const b = r.stdout
+  return new Float64Array(b.buffer.slice(b.byteOffset, b.byteOffset + samples * 8))
 }
 
 function bufStats(buf: Float64Array): { peak: number; rms: number; nonZero: number } {
@@ -80,10 +93,11 @@ describe('web/dist precompiled plans vs native JIT', () => {
 
   for (const file of planFiles) {
     test(`${file}`, async () => {
-      const wire = JSON.parse(readFileSync(join(distDir, file), 'utf-8')) as WireFlatPlan
+      const path = join(distDir, file)
+      const wire = JSON.parse(readFileSync(path, 'utf-8')) as WireFlatPlan
       const plan: FlatPlan = parseWirePlan(wire)
 
-      const nat = runNative(plan, N)
+      const nat = runNative(path, N)
       const wasm = await runWasm(plan, N)
 
       const natStats = bufStats(nat)

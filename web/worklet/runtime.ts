@@ -13,7 +13,7 @@
  * objects cross the MessagePort into the worklet.
  */
 
-import type { WasmLayout } from '../../compiler/wasm_memory_layout.js'
+import type { WasmLayout } from '../wasm/wasm_memory_layout.js'
 
 export type LoadedPlan = {
   /** Raw WASM bytes. Compiled inside the worklet to avoid a Chrome quirk
