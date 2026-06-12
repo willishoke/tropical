@@ -19,7 +19,14 @@ available system-wide.
 |-----------|---------|-------|-------|
 | LLVM | ≥ 19 | `brew install llvm` | See [LLVM apt](https://apt.llvm.org/) or your distro's package manager |
 | CMake | ≥ 3.20 | `brew install cmake` | `apt install cmake` |
+| Lean 4 | via elan | `curl … elan … \| sh` (see [leanprover/elan](https://github.com/leanprover/elan)) | same |
 | Bun | ≥ 1.3 | `brew install oven-sh/bun/bun` | `curl -fsSL https://bun.sh/install \| bash` |
+
+The Lean toolchain (pinned in `lean/lean-toolchain`) is the production
+compiler and MCP server — installing it via [elan](https://github.com/leanprover/elan)
+is what `make lean` expects on `$HOME/.elan/bin`. Bun is only needed
+for the surviving behavioral test suites and the web demo build; there
+is no TypeScript compiler and no koffi FFI subprocess.
 
 `CMakeLists.txt` requires LLVM ≥ 19 (`getOrInsertDeclaration` API);
 CI builds against LLVM 20. On macOS the build expects LLVM at
@@ -33,49 +40,61 @@ make build LLVM_DIR=/path/to/llvm/lib/cmake/llvm
 
 ```bash
 git clone <repo> && cd tropical
-bun install
-make build
+make build          # C++ core → build/libtropical.dylib
+make lean           # Lean frontend + diffcli (the compiler + MCP server)
 ```
 
-This produces `build/libtropical.dylib` (macOS) or
-`build/libtropical.so` (Linux).
+`make build` produces `build/libtropical.dylib` (macOS) or
+`build/libtropical.so` (Linux). `make lean` builds the C shim and the
+Lean tree, producing `lean/.lake/build/bin/frontend` (the whole stack:
+compiler, session, runtime FFI, and MCP server) and
+`lean/.lake/build/bin/diffcli`. Launch the MCP server with `make
+mcp-lean`.
 
 ### Verifying the install
 
-Four checks; the first three are required, the fourth (stdlib audit)
-is run by `make validate`.
+The full gate is `make validate` (it runs everything below in one go).
+The individual checks:
 
 ```bash
-cmake --build build -j4 && ctest --test-dir build   # C++ tests (JIT + C API, no audio device)
-bun test                                              # TS tests (compiler + parse + ir + WASM equiv)
-bunx tsc --noEmit                                     # type-check the TS pipeline
-bun run scripts/validate_stdlib.ts                    # parse, elaborate, lower every stdlib/*.md
+cmake --build build -j4 && ctest --test-dir build         # C++ tests (JIT + C API, no audio device)
+./lean/.lake/build/bin/tropicaltest                       # audio goldens + native mode-equiv + stdlib audit
+TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test   # WASM≡JIT + MCP behavioral
 ```
 
-`bun test` exercises the cross-backend equivalence gates that fix
-the meaning of the strata pipeline: `tests/equiv/jit_vs_interp` (JIT
-vs. pure-TS interpreter), `tests/equiv/wasm_vs_jit` (WASM emit vs.
-JIT), and `tests/equiv/web_plans_vs_jit` (precompiled web plans vs.
-JIT). All load `build/libtropical.dylib` via koffi, so `make build`
-must come first.
+`tropicaltest` (`lake exe tropicaltest`) is the Lean golden runner: it
+parses, elaborates, and lowers every `stdlib/*.md`, asserts the
+post-strata invariants and the literate gate, checks the byte-for-byte
+audio goldens, and runs the native realization-variant equivalence
+(fused vs. per-instance microkernel; flat vs. nested) directly through
+the engine.
 
-`make validate` runs the C++ tests, the TS tests, and the stdlib
-audit in one go.
+The bun suites are the surviving cross-backend gate — `tests/web`
+(WASM emitter vs. JIT, off the same `tropical_plan_5`) and the MCP
+protocol tests in `mcp/` — both run against the live Lean engine via
+`TROPICAL_ENGINE_CMD`. There is no koffi FFI: the bun process talks to
+the `frontend` binary over RPC, so `make build` and `make lean` must
+come first.
+
+`make parse-all` regenerates the committed `stdlib/parsed/*.json`
+bridge from `stdlib/*.md` via the Lean surface parser
+(`diffcli parse-all`).
 
 ### Web demo (optional)
 
-The browser backend has no extra prerequisites — Bun is sufficient.
-The build pipeline lives in `web/`:
+The browser backend needs Bun plus the Lean `diffcli` (it precompiles
+patches through the same engine that serves MCP, so run `make lean`
+first). The build pipeline lives in `web/`:
 
 ```bash
-bun web/build_patches.ts    # precompile curated patches → web/dist/patches/*.plan.json
+bun web/build_patches.ts    # precompile curated web/patches/*.json via `diffcli compile` → web/dist/patches/
 bun web/build.ts            # full demo bundle (worklet + main app + index.html → web/dist/)
 bun web/dev.ts              # dev server with the COOP/COEP headers SAB requires
 ```
 
-The browser demo loads the precompiled plans, emits WASM at runtime
-(`compiler/emit_wasm.ts`), and runs the kernel inside an
-AudioWorklet. See `web/CLAUDE.md` for details.
+The browser demo loads the precompiled `tropical_plan_5` plans, emits
+WASM at runtime (`web/wasm/emit_wasm.ts`), and runs the kernel inside
+an AudioWorklet. See `web/CLAUDE.md` for details.
 
 ### Platform notes
 

@@ -1,8 +1,10 @@
 # patches/
 
-Example patches in `tropical_program_2` JSON format. Load via
-`make mcp-ts` → MCP `load` tool, or precompile a curated subset for
-the browser demo via `bun web/build_patches.ts`.
+Example patches in `tropical_program_2` JSON format. Loaded and
+compiled by the Lean engine: launch the MCP server (`make mcp-lean`)
+and use the `load` tool, or compile one directly with
+`diffcli compile <patch.json>`. The curated browser-demo subset lives
+under `web/patches/` and is precompiled via `bun web/build_patches.ts`.
 
 ## Schema: `tropical_program_2`
 
@@ -33,15 +35,12 @@ the browser demo via `bun web/build_patches.ts`.
   and `next_update` (a register/delay update). Empty at the top level
   of an audio-only patch.
 - **audio_outputs** — list of `{ instance, output }` mixed into the
-  mono audio bus. **Legacy.** The modern way is to wire into the
-  reserved `dac` instance via `output_assign{name: "dac.out"}` in
+  mono audio bus. **Legacy.** The Lean ingest
+  (`lean/Tropical/Parse/Raise.lean`) still accepts it as deprecated
+  top-level metadata, but the modern way is to wire into the reserved
+  `dac` instance via `output_assign{name: "dac.out"}` in
   `body.assigns` (or via the MCP `wire` tool with
-  `instance: "dac", input: "out"`). Migration is gated on the
-  snake_case → camelCase ingest normalization (Phase D5); the schema
-  audit grandfathers existing patches that still use `audio_outputs`.
-  See `compiler/schema_audit.test.ts` — adding a new patch with
-  `audio_outputs` will fail that audit until you append it to the
-  grandfathered list.
+  `instance: "dac", input: "out"`). Prefer `dac.out` for new patches.
 - **params** — *(optional, deprecated for new patches)* named control
   parameters with initial values and smoothing time constants. New
   patches register params via the MCP `set_param` tool instead.
@@ -52,7 +51,8 @@ the browser demo via `bun web/build_patches.ts`.
 
 Input expressions are MCP wire-format `ExprNode`s — the same shape
 the materializer reads when translating session wiring into resolved
-IR. The closed op set lives in `compiler/expr.ts:WireFormatOp`.
+IR. The closed op set is validated by `validateExpr` in
+`lean/Tropical/Expr.lean`.
 
 - **Literal number / boolean** — `440`, `0.5`, `true`
 - **Inline array** — `[110, 220, 330, 440]`

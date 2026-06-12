@@ -1,108 +1,96 @@
 # mcp/
 
-The TypeScript side of the MCP stack. As of Phase 6 of the Lean port
-(`design/lean_port.md`), **nothing here is on the production path**:
-the Lean binary (`lean/.lake/build/bin/frontend`) is the whole stack —
-session, registration, compiler (raise → elaborate → strata → emit →
+The MCP stack. The production server is the **Lean `frontend` binary**
+(`lean/.lake/build/bin/frontend`) — it is the whole stack: session,
+registration, compiler (raise → elaborate → strata → emit →
 partition), runtime FFI, save/export/load/merge, resources/prompts.
-There is no compiler-service subprocess; `mcp/compiler_service.ts` is
-deleted.
+There is no compiler-service subprocess and no TypeScript engine; the
+former `engine.ts` / `ir_service.ts` / `resources.ts` / `envelope.ts`
+are deleted, and Lean implements them natively
+(`Tropical/Engine.lean`, `Tropical/Resources.lean`,
+`Tropical/Errors.lean`, `Tropical/Tools.lean`, `Tropical/Rpc.lean`,
+`Tropical/Frontend.lean`).
 
-What remains here is the retired-but-kept TS engine that serves as the
-**differential oracle** until Phase 8:
+What lives in this directory now is the **behavioral protocol suite** —
+two bun tests that run against the live Lean engine over its
+JSON-RPC surface — plus this doc and `ERRORS.md`:
 
-- `engine.ts` + `ir_service.ts` — the full TS engine and its protocol
-  surface. Oracle side A of `make diff-engine`; the Lean engine speaks
-  the same protocol via `frontend --rpc`.
-- `envelope.ts` — ErrorEnvelope types (Lean mirrors it in
-  Tropical/Errors.lean).
-- `resources.ts` — MCP resources/prompts source texts (Lean mirrors
-  them verbatim in Tropical/Resources.lean).
-- `*.test.ts` — protocol suites; `make test-lean-engine` runs
-  errors/wire_dac against the Lean engine via TROPICAL_ENGINE_CMD.
+```
+errors.test.ts    Error-envelope protocol: codes, suggestions, retryability.
+wire_dac.test.ts  Wiring + dac-output protocol behavior.
+CLAUDE.md         This file.
+ERRORS.md         The error-code catalog (mirrors Tropical/Errors.lean).
+```
+
+Both suites are engine-agnostic: they speak the protocol via
+`TROPICAL_ENGINE_CMD`, which points at the Lean engine in `--rpc`
+mode. `make test-lean-engine` runs them against
+`lean/.lake/build/bin/frontend --rpc`.
 
 ## Running
 
 ```bash
 make mcp-lean   # build C++ core + Lean front door, then launch the MCP server
+make lean       # build just the lean/ front door (compiler + MCP server, one binary)
 ```
 
-`make lean` builds just the `lean/` front door. Also configured in `.mcp.json`
-for Claude Code (it builds the front door and execs it).
+The server is also configured in `.mcp.json` for Claude Code — it
+builds the front door (`make -s lean`) and execs
+`lean/.lake/build/bin/frontend`. Two modes:
 
-## Layout
-
-```
-envelope.ts                ErrorEnvelope types + fail helpers (oracle-side;
-                           Lean mirrors it in Tropical/Errors.lean).
-resources.ts               MCP resources/prompts surface (program catalog,
-                           program-format doc, build-patch prompt).
-engine.ts                  The retired TS engine: SessionState + handleTool.
-                           Differential oracle only.
-ir_service.ts              engine.ts over newline JSON-RPC/stdio. Oracle side A
-                           of make diff-engine; the Lean engine speaks the same
-                           protocol via `frontend --rpc`.
-program_format_example.ts  The canonical tropical_program_2 example the
-                           program-format resource renders from.
-test_patch.ts              CLI smoke-tester: bun run mcp/test_patch.ts <patch.json> [n_frames]
-*.test.ts                  errors / wire_dac (protocol suites — run against any
-                           engine via TROPICAL_ENGINE_CMD; `make test-lean-engine`
-                           gates the Lean engine) / program_format_example /
-                           remove_feedback (in-process TS-engine tests)
-```
+- default — the MCP server over stdio (`make mcp-lean`).
+- `--rpc` — the newline JSON-RPC surface the bun protocol suites and
+  the differential harness drive.
 
 ## Compile pipeline behind every mutation
 
-Every tool that changes the signal graph ultimately calls `wire()`,
-which runs `applyFlatPlan(session, runtime)`:
+Every tool that changes the signal graph ultimately recompiles the
+whole session to a single kernel and hot-swaps it. The shape (all
+inside the Lean engine):
 
 ```
 SessionState
-  → compileSession (compiler/ir/compile_session.ts)
+  → compileSession
        → liftWiresToInstances  (anonymous-instance lift for array-literal wires)
-       → extractSessionDelays  (hoist auto-wrap delays into session.delaySlotRegistry)
+       → extractSessionDelays  (hoist auto-wrap delays into the delay-slot registry)
        → assertSessionAcyclic  (defensive invariant)
        → compileSessionSlotted (buildSessionRoot → elaborate one root
                                 ResolvedProgram → partitionKernel →
                                 instance_functions[] (root, nested) + sinks[])
        → tropical_plan_5 JSON
-  → JSON.stringify
-  → runtime.loadPlan  (C++: NumericProgramParser → OrcJitEngine → FlatRuntime hot-swap)
+  → runtime.loadPlan  (C API: NumericProgramParser → OrcJitEngine → FlatRuntime hot-swap)
 ```
 
-The strata pipeline (now `assertAcyclic → specialize → sumLower →
-inlineInstances → arrayLower → identityElim`) runs per-instance
-inside `compileResolved`. Session-level cycle handling lives in the
-wire layer: `setWireExpr` wraps every wire in a unit delay,
-`extractSessionDelays` hoists it into `session.delaySlotRegistry`; the
+The strata pipeline (`assertAcyclic → specialize → sumLower →
+inlineInstances → arrayLower → identityElim`) runs per-instance at
+instance-type resolution. Session-level cycle handling lives in the
+wire layer: every wire is wrapped in a unit delay, and
+`extractSessionDelays` hoists it into the delay-slot registry; the
 root-program lowering serializes each entry to a root `RegDecl`
 read-old/write-new writeback (no scheduler tier — outputs are `sinks`).
 The WASM backend consumes the same `tropical_plan_5` and is held to
-sample-for-sample equivalence with the JIT (`tests/equiv/wasm_vs_jit`).
+sample-for-sample equivalence with the JIT (`tests/web/wasm_vs_jit`).
 
 A compile error doesn't kill the session; it returns a structured
 error envelope (see below) and the previous kernel keeps playing.
 
 ## SessionState
 
-`engine.ts` owns one `SessionState`. The fields tools read and mutate:
+The engine owns one `SessionState`. The fields tools read and mutate:
 
-- `typeRegistry: Map<string, ProgramType>` — registered concrete types
-  (`define_program`, stdlib loading); `ProgramType` is the
-  metadata-wrapper form
-- `programs: Map<string, ResolvedProgram>` — unified registry of
-  every registered program, both concrete (post-strata, `typeParams=[]`)
-  and generic templates (raw, `typeParams.length > 0`). Pre-Phase-5
-  this was split into `resolvedRegistry` + `genericTemplatesResolved`.
-- `specializationCache: Map<string, ProgramType>` — keyed by
-  `Type<N=8>`-style cache keys
-- `instanceRegistry: Map<string, ProgramInstance>` — live instances
-- `inputExprNodes: Map<"inst:input", ExprNode>` — wiring
-- `graphOutputs: Array<{instance, output}>` — what wires to dac
-- `paramRegistry` — control parameters by name
-  (the session compiler turns names into FFI handles at compile time)
-- `runtime: Runtime` — native `tropical_runtime_t`
-- `dac: DAC | null` — created lazily on first `start_audio`
+- `typeRegistry` — registered concrete types (`define_program`,
+  stdlib loading); the metadata-wrapper form.
+- `programs` — unified registry of every registered program, both
+  concrete (post-strata, `typeParams=[]`) and generic templates (raw,
+  `typeParams.length > 0`).
+- `specializationCache` — keyed by `Type<N=8>`-style cache keys.
+- `instanceRegistry` — live instances.
+- `inputExprNodes` — wiring (`"inst:input" → ExprNode`).
+- `graphOutputs` — what wires to dac.
+- `paramRegistry` — control parameters by name (the session compiler
+  turns names into FFI handles at compile time).
+- `runtime` — native `tropical_runtime_t`.
+- `dac` — created lazily on first `start_audio`.
 
 The instance name `dac` is reserved — it's the audio-output boundary,
 not a real instance.
@@ -127,9 +115,9 @@ not a real instance.
 
 ### Wiring
 
-All five of these compile down to the same `inputExprNodes` mutation +
-`wire()` recompile; they're shape-conveniences for the most common
-graph patterns.
+All of these compile down to the same `inputExprNodes` mutation +
+recompile; they're shape-conveniences for the most common graph
+patterns.
 
 - `wire` — set and/or remove input wires in a single recompile. The
   audio-output bus is `instance: "dac", input: "out"`; multiple wires
@@ -172,7 +160,9 @@ graph patterns.
 
 ## Error envelope
 
-`engine.ts` returns structured errors so agents can recover programmatically.
+The engine returns structured errors so agents can recover
+programmatically (the Lean source of truth is `Tropical/Errors.lean`;
+the catalog is in `ERRORS.md`).
 
 ```typescript
 type ErrorCode =
@@ -197,29 +187,18 @@ type ErrorEnvelope = {
 }
 ```
 
-Helpers in `engine.ts`:
+The four fail-shapes:
 
-- `failBare({ code, message, retryable?, param?, value? })` — plain
-  error.
-- `failEnum({ code, param, value, options })` — invalid enum-valued
-  argument; `suggestion` is the nearest valid option by Levenshtein
-  distance (≤ max(2, ⌊len/3⌋)).
-- `failRecord({ code, param, value, fields })` — invalid object
-  argument; `valid.fields` describes expected types/required-ness/bounds.
-- `failPredicate({ code, param, value, predicate, expected, got })` —
-  domain check failed (e.g. range, ordering).
+- bare — plain error (`code`, `message`, optional `param` / `value`).
+- enum — invalid enum-valued argument; `suggestion` is the nearest
+  valid option by Levenshtein distance (≤ max(2, ⌊len/3⌋)).
+- record — invalid object argument; `valid.fields` describes expected
+  types/required-ness/bounds.
+- predicate — domain check failed (e.g. range, ordering).
 
 `compile_failed` carries the strata or emit error verbatim in
 `message` and is `retryable: true` — the previous kernel keeps
 playing while the agent edits and retries.
 
-## Smoke test
-
-```bash
-bun run mcp/test_patch.ts <patch.json> [n_frames]
-```
-
-Loads the patch, runs `runtime.process()` `n_frames` times, reports
-peak output, exits non-zero on silence or NaN. No audio device
-required. Useful for proving the full TS → JIT → kernel pipeline
-without hooking up RtAudio.
+`errors.test.ts` and `wire_dac.test.ts` pin this behavior against the
+live Lean engine.

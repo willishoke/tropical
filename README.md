@@ -65,7 +65,7 @@ operadic. The IR makes this explicit and the compiler is, in the
 strict categorical sense, a functor from the source operad to the
 slot-operational operad consumed by the runtime. You don't have to
 think in those terms to read the code, but the framing is what
-makes the layout of `compiler/ir/` predictable and makes "the JIT
+makes the layout of `lean/Tropical/Ir/` predictable and makes "the JIT
 and WebAssembly must agree" the right correctness criterion
 rather than an ambitious one. The longer design conversation that
 arrived at this lives in
@@ -85,8 +85,9 @@ renders the diagrams inline.
 There is deliberately no parallel metadata layer: the signature in the
 code block *is* the interface, and the prose *is* the documentation —
 nothing is written twice, so nothing can fall out of sync. What can be
-enforced structurally, is: a test gate
-(`compiler/parse/stdlib_literate.test.ts`) fails the build on a
+enforced structurally, is: the literate gate in the Lean
+golden runner (`lake exe tropicaltest`, off
+`lean/Tropical/Parse/Surface/Markdown.lean`) fails the build on a
 mismatched title, a missing diagram, or anything other than exactly
 one code block. An agent that wants to know what `SVF` exposes reads
 the same document a human does. See
@@ -119,11 +120,14 @@ before they reach production:
 
 - **Sample-for-sample equivalence gates** between the two backends —
   the LLVM ORC JIT and the WebAssembly emitter, both consuming the
-  same `tropical_plan_5` — plus realization-variant differentials
-  inside the JIT (fused vs. per-instance microkernel; flat vs.
-  nested) and byte-for-byte audio goldens (`tests/equiv/`). A
-  regression in any pass surfaces here, not in audible artifacts a
-  week later.
+  same `tropical_plan_5` (`tests/web/`) — plus realization-variant
+  differentials inside the JIT (fused vs. per-instance microkernel;
+  flat vs. nested) and byte-for-byte audio goldens, both run by the
+  Lean golden runner (`lake exe tropicaltest`). A regression in any
+  pass surfaces here, not in audible artifacts a week later. With the
+  former TypeScript implementation deleted there is no second
+  implementation to diff against; correctness is anchored by the
+  frozen goldens, not by a differential.
 - **Round-trip and acyclicity invariants** at every IR boundary —
   the elaborator throws on cyclic source code, the strata pipeline
   asserts acyclic input, the session compiler runs a defensive
@@ -135,9 +139,10 @@ before they reach production:
   invariant — plus the literate gate, which fails the build if any
   program document loses its title, diagram, or single-code-block
   shape.
-- **CI** runs all of it (TypeScript typecheck, C++ tests, TS tests,
-  YAML lint) on every PR against GitHub Actions, with LLVM 20
-  pinned. Local development runs the same gates via `make validate`.
+- **CI** runs all of it (the Lean build, the Lean golden runner, the
+  C++ tests, and the behavioral bun suites against the live Lean
+  engine) on every PR against GitHub Actions, with LLVM 20 pinned.
+  Local development runs the same gates via `make validate`.
 
 With this surface in place, refactors that would otherwise need
 careful manual review go through cleanly. The recent removal of
@@ -151,8 +156,9 @@ reading.
 
 - [`design/architecture.md`](design/architecture.md) — the full IR
   walkthrough, top to bottom.
-- [`tests/equiv/`](tests/equiv/) — the sample-for-sample equivalence
-  suites that pin the JIT and WebAssembly backends to each other.
+- [`tests/web/`](tests/web/) — the sample-for-sample equivalence
+  suites that pin the JIT and WebAssembly backends to each other
+  (run against the live Lean engine).
 - [`CLAUDE.md`](CLAUDE.md) — contributor map.
 - [`INSTALL.md`](INSTALL.md) — build prerequisites.
 - [`mcp/CLAUDE.md`](mcp/CLAUDE.md) — MCP server and tool reference.

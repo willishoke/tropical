@@ -1,41 +1,44 @@
 # The Lean port — top-down migration of the compiler
 
-Status: **Phase 6 complete — the production compiler is Lean,
-end to end, and the TS compiler service is deleted.** The Lean engine
-is the whole stack: raise (`Tropical/Parse/Raise.lean`), the
-elaborator (`Tropical/Ir/Elaborator.lean`), the codec, all six strata
-passes (`Tropical/Ir/Strata/*`), the Core downcast
-(`Tropical/Ir/Core.lean`, now carrying resolved port types), emit
+Status: **COMPLETE — all eight phases landed. The production stack is
+Lean end to end, and the TypeScript compiler and MCP engine are
+deleted.** This document is the finished record of that port; it is no
+longer a live roadmap. `design/architecture.md` stays the authority on
+what the compiler *is*.
+
+The Lean frontend binary (`lean/.lake/build/bin/frontend`) is now the
+whole stack — compiler, MCP server, and session engine in one process.
+It owns: raise (`Tropical/Parse/Raise.lean`), the surface parser
+(`Tropical/Parse/Surface/*` + `Tropical/Parse/Nodes.lean`), the
+elaborator (`Tropical/Ir/Elaborator.lean`), the codec
+(`Tropical/Ir/Codec.lean`), all six strata passes
+(`Tropical/Ir/Strata/*` + `Tropical/Ir/Strata.lean`), the Core
+downcast (`Tropical/Ir/Core.lean`, carrying resolved port types), emit
 (`Tropical/Ir/Emit.lean` — the structural-CSE emitter over Core with
 total matches), the per-program boundary
 (`Tropical/Ir/CompileResolved.lean`), the partitioner + session
 compile (`Tropical/Compile.lean` — two-phase slot preallocation incl.
 the array-input alias quotient, recursive partitionKernel, remap,
 sinks, slot metadata), the typed plan layer + wire codec
-(`Tropical/Plan.lean`), the v2 ingest (load/merge walk the normalized
-JsonV node engine-side), save/export (extraction + reconstruction /
-the full exportSessionAsProgram port), catalog-entry rendering
-(`Tropical/Entries.lean`), and the MCP resources/prompts
-(`Tropical/Resources.lean`). `make mcp-lean` launches one binary; no
-bun subprocess exists on any production path. The stdlib boots from
-the pre-parsed bridge in manifest order.
+(`Tropical/Plan.lean`), the native runtime FFI (`Tropical/Ffi.lean`
+over `lean/ffi/shim.c` / `engine/c_api/tropical_c.h`), the v2 ingest
+(load/merge walk the normalized JsonV node engine-side), save/export
+(extraction + reconstruction / the full exportSessionAsProgram port),
+catalog-entry rendering (`Tropical/Entries.lean`), and the MCP
+resources/prompts (`Tropical/Resources.lean`). `make mcp-lean`
+launches one binary; no bun subprocess exists on any path. The stdlib
+boots from the pre-parsed bridge (`stdlib/parsed/`) in manifest order.
 
-Gates at phase exit, all green: `diff-plan` + `diff-audio` — the
-phase headline — 8/8 patches structurally equal AND byte-for-byte
-through the JIT across all three compilation modes (Lean `diffcli
-compile` vs the TS oracle); `diff-engine` 8 scripts / 146 steps incl.
-hex-compared `debug_render` audio after every mutation (`ingest.json`
-added at 6d/6e to discriminate the moved load/merge/save/export
-paths); `diff-emit` 43 outputs (per-program emit, errors byte-exact);
-`diff-strata` 86 at K=5; `test-lean-engine` 67; the full bun suite;
-`make validate` modulo the three documented stale goldens on
-origin/main. Two more production defects surfaced and fixed (findings
-#7 and the export-sessionSlot appendix note in
-`design/bugs/lean_port_findings.md`). The TS engine
-(`mcp/engine.ts` + `ir_service.ts`) and the TS compiler under
-`compiler/` remain ONLY as the differential oracle until Phase 8.
-This document is the roadmap; `design/architecture.md` stays the
-authority on what the compiler *is*.
+The port's correctness floor is the frozen audio **goldens** plus the
+developer's ear, cross-checked by native mode-equivalence (fused vs
+microkernel). The differential gates against the TS oracle
+(`diff-plan`, `diff-audio`, `diff-engine`, `diff-emit`, `diff-strata`,
+`diff-elab`, `diff-raise`, `diff-render`) did their job phase by phase
+and were retired with the oracle in Phase 8 — a differential proves
+*agreement*, not correctness, and the TS oracle was migration
+scaffolding with no forward value (see the interpreter note below).
+The production defects the gates surfaced are written up postmortem-
+style in `design/bugs/lean_port_findings.md`.
 
 Known non-gated divergences accepted at Phase 4 (documented, not
 papered over): (1) on a nested define, typeDef registries register
@@ -50,47 +53,52 @@ entries; do it when a real session hits it or at Phase 5, whichever
 comes first.
 
 Production defects surfaced by the port's gates are written up
-postmortem-style in `design/bugs/lean_port_findings.md` (append-only;
-six findings so far).
+postmortem-style in `design/bugs/lean_port_findings.md` (append-only).
 
-Known main-branch issue surfaced by the render gate: the three
-committed golden hashes (`tests/golden/*.hash`) are stale on
-origin/main itself — both engine implementations agree with each other
-and disagree with the goldens identically. Regenerate with
-`make validate-write` once confirmed intentional.
+Golden hashes (`tests/golden/*.hash`) are now owned and rewritten
+engine-side by `tropicaltest`'s write mode (`tropicaltest --write`),
+which replaced the former `make validate-write` / `scripts/
+validate_stdlib.ts` path. The goldens are the correctness floor: a
+hash is intentional iff the developer's ear confirms it.
 
 ## Shape of the migration
 
-The MCP surface is already Lean: `lean/Main.lean` (Turnstile) validates
-23 tools against typed schemas and relays them over newline JSON-RPC to
-`mcp/ir_service.ts` → `mcp/engine.ts` → `compileSession` → plan JSON →
-koffi → C++ engine. The port marches that relay boundary **top-down**:
-engine/session first, elaborator last, surface parser after that.
+The starting point: `lean/Main.lean` (Turnstile) validated 23 tools
+against typed schemas and relayed them over newline JSON-RPC to a TS
+relay (`mcp/ir_service.ts` → `mcp/engine.ts` → `compileSession` → plan
+JSON → koffi → C++ engine). The port marched that relay boundary
+**top-down** — engine/session first, elaborator next, surface parser
+after that — collapsing it one layer per phase until no relay remained.
 
-End state: TypeScript is deleted. Lean owns the engine/session, the
-whole compiler pipeline, and talks to the C++ engine through native
-`@[extern]` FFI (`engine/c_api/tropical_c.h`). The C++ engine (LLVM
-JIT, DAC) stays C++. Browser TS (`web/` host + worklet, `emit_wasm`
-consuming plan JSON) survives as the web backend.
+End state (realized): TypeScript is deleted. Lean owns the
+engine/session and the whole compiler pipeline, and talks to the C++
+engine through native `@[extern]` FFI (`Tropical/Ffi.lean` over
+`engine/c_api/tropical_c.h`). The C++ engine (LLVM JIT, DAC) stays
+C++. Browser TS survives as the web backend: `web/` host + worklet
+plus the WASM emitter and memory layout, now under `web/wasm/`
+(`emit_wasm.ts` + `wasm_memory_layout.ts`), consuming plan JSON
+precompiled by the Lean engine (`diffcli compile`).
 
-Design stance: **proof-ready, prove later.** Port unverified, but make
-the Lean IR a thing proofs can later attach to: decl stores + typed-id
+Design stance: **proof-ready, prove later.** Port unverified, but the
+Lean IR is a thing proofs can later attach to: decl stores + typed-id
 refs (the completion of the de Bruijn migration the TS elaborator
 already made — refs are branded integer `idx` values into typed decl
-tables), total functions, `Except`-shaped errors mapped onto the
-`mcp/ERRORS.md` envelope taxonomy, and a plan-level reference
-interpreter as the semantic anchor.
+tables), total functions, and `Except`-shaped errors mapped onto the
+`mcp/ERRORS.md` envelope taxonomy. The Phase-2-planned plan-level
+*reference interpreter* was **not** built — see the closing interpreter
+note: a differential proves agreement, not correctness, so the oracle
+needs no replacement; frozen audio goldens + the developer's ear are
+the semantic anchor.
 
-## Why this is tractable
+## Why this was tractable
 
-- **ParsedProgram is a free seam.** `compiler/parse/nodes.ts` is plain
-  JSON-serializable data (NameRef placeholders, no object identity),
-  and `session_to_parsed.ts` already routes sessions through the single
-  `elaborate` front door.
+- **ParsedProgram is a free seam.** The parsed program (now
+  `Tropical/Parse/Nodes.lean`) is plain JSON-serializable data (NameRef
+  placeholders, no object identity), and the session serializer routes
+  sessions through the single `elaborate` front door.
 - **No plan-JSON byte comparison anywhere.** Golden gates hash rendered
-  audio (`scripts/validate_stdlib.ts`), so float-formatting divergence
-  between TS and Lean serializers cannot break a gate; only double
-  round-trip fidelity matters.
+  audio, so float-formatting divergence between TS and Lean serializers
+  could not break a gate; only double round-trip fidelity mattered.
 - **Refs are already indices.** Post-elaboration identity is positional
   (decl tables), not pointer-based — a Resolved⇄JSON codec is
   mechanical.
@@ -98,26 +106,30 @@ interpreter as the semantic anchor.
   session-path params are slot-based (`param:name` module slots) — no
   native pointers inside plans.
 
-## The harness (Phase 0, landed)
+## The harness (Phase 0 — built to drive the migration, retired in Phase 8)
 
-Three differs under `scripts/diff/`, all green TS-vs-TS from day one.
-Each compares two *commands*; a Lean layer lands by becoming side B and
-keeping the diff empty.
+The migration was driven by command-pair *differs* (originally under
+`scripts/diff/`, all green TS-vs-TS from day one). Each compared two
+*commands*; a Lean layer landed by becoming side B and keeping the diff
+empty. The headline three, plus the per-layer differs added later
+(`diff-emit`, `diff-strata`, `diff-elab`, `diff-raise`, `diff-render`):
 
-| target | sides implement | compares |
+| target | sides implement | compared |
 |---|---|---|
-| `make diff-plan` | `<cmd> <patch> [--mode=<m>]` → plan JSON on stdout | structural: key-order-insensitive, numbers by IEEE-754 bits |
-| `make diff-audio` | same contract | byte equality of 16×256 rendered samples per side, fresh runtime each |
-| `make diff-engine` | ir_service protocol (newline JSON-RPC, method = tool) | normalized ToolResults per step of recorded scripts in `tests/fixtures/mcp_scripts/` |
+| `diff-plan` | `<cmd> <patch> [--mode=<m>]` → plan JSON on stdout | structural: key-order-insensitive, numbers by IEEE-754 bits |
+| `diff-audio` | same contract | byte equality of 16×256 rendered samples per side, fresh runtime each |
+| `diff-engine` | engine protocol (newline JSON-RPC, method = tool) | normalized ToolResults per step of recorded scripts in `tests/fixtures/mcp_scripts/` |
 
-The Lean half of the comparator is `Tropical.Json.diff`
-(`lean/Tropical/Json.lean`).
+The Lean half of the comparator was `Tropical.Json.diff`
+(`lean/Tropical/Json.lean`). The whole differ harness — every `make
+diff-*` target — was removed in Phase 8 along with the TS oracle it
+compared against; it was migration scaffolding, not a forward gate.
 
-## Phases
+## Phases (all landed)
 
-Each phase has a hard exit criterion: the relayed/TS entrypoint it
-replaces is **deleted**, and the relevant differs + existing suites
-(`bun test`, `ctest`, stdlib golden hashes, `tests/equiv/*`) are green.
+Each phase had a hard exit criterion: the relayed/TS entrypoint it
+replaced was **deleted**, and the relevant differs + existing suites
+(`bun test`, `ctest`, stdlib golden hashes) were green.
 
 1. **Engine + session layer in Lean** ✅ (landed). `mcp/engine.ts`'s 23
    handlers + the session ported to `Tropical/{Engine,Session,Errors,
@@ -315,33 +327,77 @@ replaces is **deleted**, and the relevant differs + existing suites
    6f along with `Tropical/Client.lean`. `compileMirrorPlan` (the
    diffcli harness rebuild) can collapse into `syncCompile` now that
    the sync payload is gone — deferred housekeeping.
-   **Interpreter decision (recorded):** the Phase-2-deferred
-   `Tropical/Plan/Interp` reference interpreter is re-deferred past
-   Phase 6. While the TS oracle lives, the differential gates
-   (diff-plan structural, diff-audio byte-for-byte through the real
-   JIT) are strictly stronger than interpreter agreement; the
-   interpreter's value is as the post-oracle semantic anchor, so it
-   lands with Phase 8 (when bun/koffi leave and the equiv runners move
-   to `lake exe tropicaltest`). `Tropical/Plan.lean` (6a) is the typed
-   substrate it will attach to.
-7. **Surface parser + markdown + printer + stdlib.** Port
-   `compiler/parse/*` → `Tropical/Parse/*`; dual-parse every
-   `stdlib/*.md`, compare ParsedProgram JSON; parse∘print fixpoint
-   tests in Lean.
-8. **TS deletion + CI consolidation.** `mcp/` and `compiler/` die
-   except web survivors (`emit_wasm` + memory layout move under
-   `web/`); equiv/golden runners become `lake exe tropicaltest`;
-   bun/koffi leave the server path.
+   **Interpreter decision (final, reversed at Phase 8):** the
+   Phase-2-deferred `Tropical/Plan/Interp` reference interpreter — long
+   carried as "the post-oracle semantic anchor" that would land in
+   Phase 8 when the TS oracle retired — was ultimately **not built**,
+   and is not planned. The realization: a reference interpreter is a
+   *differential* oracle, and a differential proves *agreement*, not
+   correctness. The TS oracle was migration scaffolding — it gave the
+   port a concrete moving target to converge on, which was its entire
+   value, and that value expired the moment the port completed. A Lean
+   interpreter built afterward would only re-establish agreement
+   between the Lean compiler and a second Lean artifact authored from
+   the same understanding — circular, with no independent purchase on
+   correctness. The correctness floor that actually holds is the frozen
+   audio **goldens** plus the developer's ear (re-baselined only when a
+   change to the math is heard and confirmed), cross-checked by native
+   mode-equivalence (fused vs microkernel, both shipping). So the
+   oracle needs no replacement; `Tropical/Plan.lean` (6a) remains the
+   typed substrate a *verified* semantics could one day attach to, but
+   that is proof work, not an oracle.
+7. **Surface parser + markdown + printer + stdlib.** ✅ (landed).
+   `compiler/parse/*` ported to `Tropical/Parse/Surface/*` (lexer,
+   cursor, expressions, statements, declarations, bounds, markdown) +
+   `Tropical/Parse/Nodes.lean` + `Tropical/Parse/Raise.lean` (the JSON
+   ingest adapter). Gated by dual-parsing every `stdlib/*.md` and
+   comparing ParsedProgram JSON, plus parse∘print fixpoint tests in
+   Lean. The committed `stdlib/parsed/` bridge is now regenerated
+   straight from the Lean surface parser (`make parse-all` =
+   `diffcli parse-all`), retiring `scripts/build_parsed_stdlib.ts`.
+8. **TS deletion + CI consolidation.** ✅ (landed). `compiler/` was
+   deleted entirely; the TS MCP engine (`mcp/engine.ts`,
+   `ir_service.ts`, `resources.ts`, `envelope.ts`,
+   `program_format_example*`, `test_patch.ts`, `remove_feedback.test.ts`)
+   was deleted — `mcp/` now holds only the two behavioral suites
+   (`errors.test.ts`, `wire_dac.test.ts`) plus `CLAUDE.md` / `ERRORS.md`.
+   `koffi` and the bun compiler-service subprocess left the server path.
+   The differ scaffolding went with the oracle: `scripts/diff/` and the
+   remaining one-off scripts (`build_parsed_stdlib`, `validate_stdlib`,
+   `eval_program`, `capture_old_pipeline_audio`) were removed —
+   `scripts/` is now empty — and every `make diff-*` + `make
+   validate-write` target was dropped from the Makefile.
+   The WASM survivors (`emit_wasm.ts` + `wasm_memory_layout.ts`, plus
+   the shared `flat_plan` / `plan_types` / `slot_indices`) moved under
+   `web/wasm/`; the browser fetches plans precompiled by the Lean engine
+   (`diffcli compile`) and runs only the WASM emitter + runtime.
+   The golden/equiv runners became `lake exe tropicaltest` (the native
+   `tests/bench/` and the native equiv suites — `microkernel_vs_fused`,
+   `nested_vs_inlined`, `microkernel_deep`, `hotswap_root`,
+   `migration_audio` — were absorbed or retired). The surviving bun
+   suites are the WASM≡JIT equivalence (`tests/web/`) and the MCP
+   behavioral tests, both run against the Lean engine via
+   `TROPICAL_ENGINE_CMD`. CI consolidated onto `make validate`
+   (`tropicaltest` goldens + native mode-equiv, web build, `bun test`,
+   `ctest`). **No differential gates remain** — correctness is anchored
+   by frozen audio goldens + the developer's ear, per the interpreter
+   decision above. Schemas unchanged throughout: `tropical_program_2`,
+   `tropical_plan_5`.
 
-## Top risks
+## Top risks (all retired)
+
+These were the risks that shaped the migration; each was handled by the
+strategy noted, and none drew blood post-port:
 
 1. **Emit divergence** (CSE/order → different plans/audio) — arena-id
    memos mirroring TS identity semantics; deterministic traversal; the
-   audio differ localizes divergence to a fixture and sample index.
+   audio differ localized divergence to a fixture and sample index.
 2. **Phase 1 behavioral fidelity** — `mcp/*.test.ts` as executable
-   spec, run unmodified against the Lean engine.
-3. **Resolved codec infidelity** — property-gate in TS before use.
+   spec, run unmodified against the Lean engine (still the case:
+   `errors.test.ts` + `wire_dac.test.ts` run against `frontend --rpc`).
+3. **Resolved codec infidelity** — property-gated before any consumer.
 4. **FFI lifetimes** (finalizers vs. DAC audio thread) — held
    back-references, explicit dispose, ASan smoke.
-5. **Dual-maintenance drag** — freeze feature work per layer once its
-   port phase starts; delete the replaced entrypoint at phase exit.
+5. **Dual-maintenance drag** — feature work froze per layer once its
+   port phase started; the replaced entrypoint was deleted at phase
+   exit. The dual-maintenance window is now closed: there is one stack.
