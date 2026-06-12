@@ -6,6 +6,7 @@ import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved
 import Tropical.Engine
+import Tropical.Parse.Surface.Markdown
 
 /-!
 The `diffcli` executable — differential-harness verbs that exercise the
@@ -111,6 +112,21 @@ def parsedRoundtripVerb (args : List String) : IO UInt32 := do
       match Tropical.Parse.decodeProgram jv with
       | .error msg => errorJson msg
       | .ok prog => prog.toJson
+  IO.println out.compress
+  return 0
+
+/-- Surface-parse a literate `.md` file and print the ParsedProgram JSON
+    (Phase 7). Side B of the `diff-parse` gate; side A is the committed
+    `stdlib/parsed/<Name>.json`. -/
+def parseMdVerb (args : List String) : IO UInt32 := do
+  let some path := args.head?
+    | IO.eprintln "usage: diffcli parse-md <file.md>"
+      return 1
+  let text ← IO.FS.readFile path
+  let out : Lean.Json :=
+    match Tropical.Parse.Surface.parseMarkdownProgram text with
+    | .error e => errorJson e
+    | .ok prog => prog.toJson
   IO.println out.compress
   return 0
 
@@ -413,6 +429,7 @@ def main (args : List String) : IO UInt32 := do
   | "render-bytes" :: rest => renderBytes rest
   | "raise" :: rest => raiseVerb rest
   | "parsed-roundtrip" :: rest => parsedRoundtripVerb rest
+  | "parse-md" :: rest => parseMdVerb rest
   | "elab-stdlib" :: rest => elabStdlibVerb rest
   | "elab-file" :: rest => elabFileVerb rest
   | "strata-stdlib" :: rest => strataStdlibVerb rest

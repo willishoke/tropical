@@ -1,6 +1,6 @@
 .PHONY: build repl run lean mcp-lean clean validate validate-write \
         diff diff-plan diff-audio diff-engine diff-render diff-raise diff-elab \
-        diff-strata diff-emit test-lean-engine
+        diff-strata diff-emit diff-parse test-lean-engine
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -103,8 +103,18 @@ diff-emit: build lean
 	bun run scripts/build_parsed_stdlib.ts
 	bun run scripts/diff/diff_emit.ts --b="./lean/.lake/build/bin/diffcli"
 
+# Phase 7 gate (surface parser): Lean literate-`.md` parse against the TS
+# oracle. Over the stdlib corpus (compared to the committed bridge,
+# regenerated first so a stale corpus can't pass silently) plus the
+# tests/fixtures/surface/ programs that exercise what the stdlib doesn't
+# (iterate/chain/map2/zipWith, number forms, nested programs, match/tag).
+diff-parse: build lean
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli
+	bun run scripts/build_parsed_stdlib.ts
+	bun run scripts/diff/diff_parse.ts --b="./lean/.lake/build/bin/diffcli"
+
 # Phase 1 gate: the protocol test suites against the Lean engine.
 test-lean-engine: build lean
 	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test mcp/errors.test.ts mcp/wire_dac.test.ts
 
-diff: diff-plan diff-audio diff-engine diff-render diff-raise diff-elab diff-strata diff-emit
+diff: diff-plan diff-audio diff-engine diff-render diff-raise diff-elab diff-strata diff-emit diff-parse
