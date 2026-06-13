@@ -75,8 +75,18 @@ def renderBytes (args : List String) : IO UInt32 := do
   let frames := parseNatFlag args "--frames" 16
   let buffer := parseNatFlag args "--buffer" 256
   let planJson ← IO.FS.readFile planPath
+  -- Lean owns codegen: parse the plan, emit IR, load via load_ir (planJson
+  -- doubles as the metadata manifest). There is no C++ plan compiler.
+  let plan ← match Lean.Json.parse planJson with
+    | .error e => IO.eprintln s!"render-bytes: parse: {e}"; return 1
+    | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
+      | .error e => IO.eprintln s!"render-bytes: ofWire: {e}"; return 1
+      | .ok p => pure p
+  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .ok s => pure s
+    | .error e => IO.eprintln s!"render-bytes: emitKernel: {e}"; return 1
   let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
-  rt.loadPlan planJson
+  rt.loadIr ir planJson
   let stdout ← IO.getStdout
   for _ in [0:frames] do
     rt.process

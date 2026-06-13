@@ -11,6 +11,7 @@ import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.WireProgram
+import Tropical.Ir.EmitLlvm
 import Tropical.TypeArgs
 import Tropical.Compile
 import Tropical.Entries
@@ -378,7 +379,12 @@ def syncCompile (env : Env) : EngineM Unit := do
   let planJson ← match plan.toWire with
     | .error msg => internalError msg
     | .ok j => pure j.compress
-  env.runtime.loadPlan planJson
+  -- Lean owns codegen: emit LLVM IR from the in-memory plan and hand it to
+  -- the engine (planJson is the metadata manifest). No C++ plan compiler.
+  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .error msg => internalError s!"EmitLlvm: {msg}"
+    | .ok s => pure s
+  env.runtime.loadIr ir planJson
 
 /-- Harness-only (diffcli `compile`): rebuild the plan from the current
     mirror at an arbitrary compilation mode, WITHOUT loading it or
