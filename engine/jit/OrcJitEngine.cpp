@@ -10,6 +10,8 @@
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
 #include <llvm/ExecutionEngine/Orc/IRTransformLayer.h>
 #include <llvm/ExecutionEngine/Orc/ThreadSafeModule.h>
+#include <llvm/IRReader/IRReader.h>
+#include <llvm/Support/SourceMgr.h>
 #include <llvm/Passes/OptimizationLevel.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Config/llvm-config.h>
@@ -1077,7 +1079,9 @@ llvm::Error EmitCtx::emit_instr(const FlatInstr & instr)
 // ---------------------------------------------------------------------------
 
 llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
-  const FlatProgram & program)
+  const FlatProgram & program,
+  std::string * out_ir_text,
+  bool emit_only)
 {
   if (!jit_)
   {
@@ -1218,9 +1222,15 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       append(&t, sizeof(JitScalarType));
   }
 
-  auto cache_it = kernel_cache_.find(cache_key);
-  if (cache_it != kernel_cache_.end())
-    return cache_it->second;
+  // emit_only bypasses the cache entirely: it must build the module to
+  // print it, and a cache hit would return a kernel without ever
+  // touching the module.
+  if (!emit_only)
+  {
+    auto cache_it = kernel_cache_.find(cache_key);
+    if (cache_it != kernel_cache_.end())
+      return cache_it->second;
+  }
 
   const std::string hash = md5_hex(cache_key);
   const std::string function_name = "tropical_f_" + hash;
@@ -1387,6 +1397,22 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
       llvm::inconvertibleErrorCode());
   }
 
+  // Capture seam for the Lean-emits-IR migration: hand back the verified
+  // module as textual IR before it's consumed by the JIT. The kernel is
+  // still compiled and returned normally below.
+  if (out_ir_text)
+  {
+    out_ir_text->clear();
+    llvm::raw_string_ostream os(*out_ir_text);
+    module->print(os, nullptr);
+  }
+
+  // emit_only: never publish the content-named symbol to the JIT (that
+  // would collide with a normal compile of the same plan). The text is
+  // captured above; the module is discarded.
+  if (emit_only)
+    return static_cast<NumericKernelFn>(nullptr);
+
   if (auto err = add_module(std::move(context), std::move(module)))
     return std::move(err);
 
@@ -1396,6 +1422,94 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_flat_program(
 
   auto kernel = reinterpret_cast<NumericKernelFn>(*addr_or_err);
   kernel_cache_.emplace(std::move(cache_key), kernel);
+  return kernel;
+}
+
+// ---------------------------------------------------------------------------
+// compile_ir_text — the engine's "receive IR, JIT, run" core.
+//
+// Parses textual LLVM IR into a fresh module, content-addresses its
+// single function definition so distinct IR never collides and identical
+// IR is served from ir_kernel_cache_, then add_module + lookup. This is
+// the path that survives once Lean owns IR generation (the body of
+// compile_flat_program is then deleted, and this becomes the only kernel
+// producer alongside the JIT plumbing).
+// ---------------------------------------------------------------------------
+llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
+  const std::string & ir_text)
+{
+  if (!jit_)
+  {
+    return llvm::make_error<llvm::StringError>(
+      "ORC JIT is not available: " + init_error_,
+      llvm::inconvertibleErrorCode());
+  }
+
+  std::lock_guard<std::mutex> lock(jit_mutex_);
+
+  const std::string key = md5_hex(ir_text);
+  if (auto it = ir_kernel_cache_.find(key); it != ir_kernel_cache_.end())
+    return it->second;
+
+  const std::string symbol = "tropical_k_" + key;
+
+  auto context = std::make_unique<llvm::LLVMContext>();
+  llvm::SMDiagnostic diag;
+  auto buffer = llvm::MemoryBuffer::getMemBuffer(ir_text, "tropical_ir");
+  auto module = llvm::parseIR(buffer->getMemBufferRef(), diag, *context);
+  if (!module)
+  {
+    std::string err;
+    llvm::raw_string_ostream os(err);
+    diag.print("tropical_ir", os);
+    return llvm::make_error<llvm::StringError>(
+      "compile_ir_text: failed to parse IR: " + err,
+      llvm::inconvertibleErrorCode());
+  }
+  module->setDataLayout(jit_->getDataLayout());
+
+  // Rename the single function definition to the content-addressed
+  // symbol. Declarations (e.g. intrinsics) are left alone.
+  llvm::Function * kernel_fn = nullptr;
+  for (llvm::Function & f : *module)
+  {
+    if (f.isDeclaration()) continue;
+    if (kernel_fn)
+      return llvm::make_error<llvm::StringError>(
+        "compile_ir_text: IR defines more than one function",
+        llvm::inconvertibleErrorCode());
+    kernel_fn = &f;
+  }
+  if (!kernel_fn)
+    return llvm::make_error<llvm::StringError>(
+      "compile_ir_text: IR defines no function",
+      llvm::inconvertibleErrorCode());
+  kernel_fn->setName(symbol);
+  kernel_fn->setLinkage(llvm::Function::ExternalLinkage);
+
+  // Give the module a unique identity. parseIR preserves the original
+  // `; ModuleID` from the printed text, which would make the disk
+  // KernelObjectCache serve the *plan-compiled* object (defining
+  // tropical_f_<hash>) for this renamed module — whose symbol isn't in
+  // it, so materialization fails. Key the module on the IR content hash
+  // instead, matching the renamed symbol.
+  module->setModuleIdentifier(key);
+  module->setSourceFileName(key);
+
+  if (llvm::verifyModule(*module, &llvm::errs()))
+    return llvm::make_error<llvm::StringError>(
+      "compile_ir_text: parsed IR fails verification",
+      llvm::inconvertibleErrorCode());
+
+  if (auto err = add_module(std::move(context), std::move(module)))
+    return std::move(err);
+
+  auto addr_or_err = lookup(symbol);
+  if (!addr_or_err)
+    return addr_or_err.takeError();
+
+  auto kernel = reinterpret_cast<NumericKernelFn>(*addr_or_err);
+  ir_kernel_cache_.emplace(key, kernel);
   return kernel;
 }
 

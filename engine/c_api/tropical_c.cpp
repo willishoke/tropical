@@ -1,9 +1,13 @@
 #include "c_api/tropical_c.h"
 
 #include "runtime/FlatRuntime.hpp"
+#include "runtime/NumericProgramParser.hpp"
 #include "dac/TropicalDAC.hpp"
 
+#include <llvm/Support/Error.h>
+
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <memory>
@@ -211,6 +215,56 @@ bool tropical_runtime_load_plan(tropical_runtime_t r, const char* plan_json, siz
   }
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }
+
+bool tropical_runtime_load_ir(tropical_runtime_t r, const char* ir_text, size_t ir_len,
+                              const char* manifest_json, size_t manifest_len)
+{
+  if (!r || !ir_text || !manifest_json) return false;
+  try
+  {
+    return static_cast<tropical_runtime::FlatRuntime*>(r)->load_ir(
+      std::string(ir_text, ir_len), std::string(manifest_json, manifest_len));
+  }
+  catch (const std::exception& e) { set_error(e.what()); return false; }
+}
+
+char* tropical_compile_plan_to_ir(const char* plan_json, size_t len)
+{
+  if (!plan_json) return nullptr;
+  try
+  {
+    const nlohmann::json plan = nlohmann::json::parse(std::string(plan_json, len));
+    const std::string schema = plan.value("schema", std::string{});
+    tropical_plan5::ParsedPlan5 parsed;
+    if (schema == "tropical_plan_5")
+      parsed = tropical_plan5::parse_plan5(plan);
+    else if (schema == "tropical_plan_4")
+      parsed = tropical_plan5::parse_plan4(plan);
+    else { set_error("compile_plan_to_ir: unsupported schema '" + schema + "'"); return nullptr; }
+
+    std::string ir;
+    // emit_only returns a null kernel on success (the module is printed,
+    // not JIT'd), so check the Expected's error state, not the pointer.
+    auto kernel = tropical_jit::OrcJitEngine::instance().compile_flat_program(
+      parsed.program, &ir, /*emit_only=*/true);
+    if (auto e = kernel.takeError())
+    {
+      std::string err;
+      llvm::handleAllErrors(std::move(e),
+        [&err](const llvm::ErrorInfoBase & b) { err = b.message(); });
+      set_error("compile_plan_to_ir: " + err);
+      return nullptr;
+    }
+
+    char* out = static_cast<char*>(std::malloc(ir.size() + 1));
+    if (!out) { set_error("compile_plan_to_ir: out of memory"); return nullptr; }
+    std::memcpy(out, ir.c_str(), ir.size() + 1);
+    return out;
+  }
+  catch (const std::exception& e) { set_error(e.what()); return nullptr; }
+}
+
+void tropical_free_string(char* s) { std::free(s); }
 
 void tropical_runtime_process(tropical_runtime_t r)
 {

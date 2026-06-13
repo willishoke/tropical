@@ -972,6 +972,139 @@ static void test_microkernel_deep_sawtooth()
   tropical_runtime_free(rt);
 }
 
+/**
+ * 15. load_ir ≡ load_plan (Phase 1a gate)
+ *
+ * The engine's "receive IR text → parse → JIT → run" path
+ * (tropical_runtime_load_ir) must produce bit-identical audio to the
+ * normal plan-compile path (tropical_runtime_load_plan), when fed the
+ * engine's *own* emitted IR (tropical_compile_plan_to_ir). This isolates
+ * "does textual IR round-trip through parse + JIT" from "does Lean emit
+ * correct IR" — the latter is Phase 1b. Distinct plans exercise float/
+ * int/bool types + coercions, rate/tick sources, arrays, select, bitwise,
+ * and register writeback.
+ */
+#include <vector>
+
+static bool render_via_plan(const char* plan, unsigned buf, int frames, std::vector<double>& out)
+{
+  tropical_runtime_t rt = tropical_runtime_new(buf);
+  if (!rt) return false;
+  if (!tropical_runtime_load_plan(rt, plan, strlen(plan))) { tropical_runtime_free(rt); return false; }
+  out.clear();
+  for (int f = 0; f < frames; ++f) {
+    tropical_runtime_process(rt);
+    const double* b = tropical_runtime_output_buffer(rt);
+    out.insert(out.end(), b, b + buf);
+  }
+  tropical_runtime_free(rt);
+  return true;
+}
+
+static bool render_via_ir(const char* plan, unsigned buf, int frames, std::vector<double>& out)
+{
+  char* ir = tropical_compile_plan_to_ir(plan, strlen(plan));
+  if (!ir) return false;
+  tropical_runtime_t rt = tropical_runtime_new(buf);
+  if (!rt) { tropical_free_string(ir); return false; }
+  bool ok = tropical_runtime_load_ir(rt, ir, strlen(ir), plan, strlen(plan));
+  tropical_free_string(ir);
+  if (!ok) { tropical_runtime_free(rt); return false; }
+  out.clear();
+  for (int f = 0; f < frames; ++f) {
+    tropical_runtime_process(rt);
+    const double* b = tropical_runtime_output_buffer(rt);
+    out.insert(out.end(), b, b + buf);
+  }
+  tropical_runtime_free(rt);
+  return true;
+}
+
+static void test_load_ir_matches_load_plan()
+{
+  // Representative plans covering the operand/op surface. Each is the
+  // plan body used by an earlier test, here driven through both load
+  // paths. (plan_4 strings auto-lift to one-instance plan_5.)
+  struct Case { const char* name; const char* plan; };
+  static const char* saw = R"({
+    "schema":"tropical_plan_4","config":{"sampleRate":44100.0},
+    "state_init":[0.0],"register_names":["phase"],"outputs":[0],
+    "instructions":[
+      {"tag":"Mul","dst":0,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":2.0}],"loop_count":1,"strides":[]},
+      {"tag":"Sub","dst":1,"args":[{"kind":"reg","slot":0},{"kind":"const","val":1.0}],"loop_count":1,"strides":[]},
+      {"tag":"Mul","dst":2,"args":[{"kind":"reg","slot":1},{"kind":"const","val":10.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":3,"args":[{"kind":"reg","slot":2},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Div","dst":4,"args":[{"kind":"const","val":440.0},{"kind":"rate"}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":5,"args":[{"kind":"state_reg","slot":0},{"kind":"reg","slot":4}],"loop_count":1,"strides":[]},
+      {"tag":"Mod","dst":6,"args":[{"kind":"reg","slot":5},{"kind":"const","val":1.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":7,"args":[{"kind":"reg","slot":6},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+    ],
+    "register_count":8,"array_slot_count":0,"array_slot_sizes":[],"output_targets":[3],"register_targets":[7]
+  })";
+  static const char* lfsr = R"({
+    "schema":"tropical_plan_4","config":{"sampleRate":44100.0},
+    "state_init":[1.0],"register_names":["lfsr_state"],"register_types":["int"],"outputs":[0],
+    "instructions":[
+      {"tag":"Add","dst":0,"result_type":"int","args":[{"kind":"state_reg","slot":0,"scalar_type":"int"},{"kind":"const","val":0.0,"scalar_type":"int"}],"loop_count":1,"strides":[]},
+      {"tag":"BitAnd","dst":1,"result_type":"int","args":[{"kind":"reg","slot":0,"scalar_type":"int"},{"kind":"const","val":1.0,"scalar_type":"int"}],"loop_count":1,"strides":[]},
+      {"tag":"Mul","dst":2,"result_type":"int","args":[{"kind":"reg","slot":1,"scalar_type":"int"},{"kind":"const","val":46080.0,"scalar_type":"int"}],"loop_count":1,"strides":[]},
+      {"tag":"BitAnd","dst":3,"result_type":"int","args":[{"kind":"reg","slot":2,"scalar_type":"int"},{"kind":"const","val":65535.0,"scalar_type":"int"}],"loop_count":1,"strides":[]},
+      {"tag":"RShift","dst":4,"result_type":"int","args":[{"kind":"reg","slot":0,"scalar_type":"int"},{"kind":"const","val":1.0,"scalar_type":"int"}],"loop_count":1,"strides":[]},
+      {"tag":"BitXor","dst":5,"result_type":"int","args":[{"kind":"reg","slot":4,"scalar_type":"int"},{"kind":"reg","slot":3,"scalar_type":"int"}],"loop_count":1,"strides":[]},
+      {"tag":"Mul","dst":6,"result_type":"float","args":[{"kind":"reg","slot":0,"scalar_type":"int"},{"kind":"const","val":1.0,"scalar_type":"float"}],"loop_count":1,"strides":[]}
+    ],
+    "register_count":7,"array_slot_sizes":[],"output_targets":[6],"register_targets":[5]
+  })";
+  static const char* boolsel = R"({
+    "schema":"tropical_plan_4","config":{"sampleRate":44100.0},
+    "state_init":[],"register_names":[],"outputs":[0],
+    "instructions":[
+      {"tag":"Add","dst":0,"result_type":"int","args":[{"kind":"tick","scalar_type":"int"},{"kind":"const","val":0.0,"scalar_type":"int"}],"loop_count":1,"strides":[]},
+      {"tag":"Greater","dst":1,"result_type":"bool","args":[{"kind":"reg","slot":0,"scalar_type":"int"},{"kind":"const","val":2.0,"scalar_type":"int"}],"loop_count":1,"strides":[]},
+      {"tag":"Less","dst":2,"result_type":"bool","args":[{"kind":"reg","slot":0,"scalar_type":"int"},{"kind":"const","val":6.0,"scalar_type":"int"}],"loop_count":1,"strides":[]},
+      {"tag":"BitAnd","dst":3,"result_type":"int","args":[{"kind":"reg","slot":1,"scalar_type":"bool"},{"kind":"reg","slot":2,"scalar_type":"bool"}],"loop_count":1,"strides":[]},
+      {"tag":"Select","dst":4,"result_type":"float","args":[{"kind":"reg","slot":3,"scalar_type":"int"},{"kind":"const","val":10.0,"scalar_type":"float"},{"kind":"const","val":0.0,"scalar_type":"float"}],"loop_count":1,"strides":[]}
+    ],
+    "register_count":5,"array_slot_sizes":[],"output_targets":[4],"register_targets":[]
+  })";
+  static const char* arr = R"({
+    "schema":"tropical_plan_4","config":{"sampleRate":44100.0},
+    "state_init":[0.0,1.0],"register_names":["idx","idx2"],"outputs":[0],
+    "instructions":[
+      {"tag":"Pack","dst":0,"args":[{"kind":"const","val":10.0},{"kind":"const","val":20.0},{"kind":"const","val":30.0},{"kind":"const","val":40.0}],"loop_count":1,"strides":[]},
+      {"tag":"Index","dst":0,"args":[{"kind":"array_reg","slot":0},{"kind":"state_reg","slot":0}],"loop_count":1,"strides":[]},
+      {"tag":"Pack","dst":1,"args":[{"kind":"const","val":10.0},{"kind":"const","val":20.0},{"kind":"const","val":30.0},{"kind":"const","val":40.0}],"loop_count":1,"strides":[]},
+      {"tag":"Index","dst":1,"args":[{"kind":"array_reg","slot":1},{"kind":"state_reg","slot":1}],"loop_count":1,"strides":[]},
+      {"tag":"Div","dst":2,"args":[{"kind":"reg","slot":0},{"kind":"reg","slot":1}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":3,"args":[{"kind":"reg","slot":2},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":4,"args":[{"kind":"state_reg","slot":0},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]},
+      {"tag":"Add","dst":5,"args":[{"kind":"state_reg","slot":1},{"kind":"const","val":0.0}],"loop_count":1,"strides":[]}
+    ],
+    "register_count":6,"array_slot_count":2,"array_slot_sizes":[4,4],"output_targets":[3],"register_targets":[4,5]
+  })";
+  Case cases[] = {
+    {"sawtooth",   saw},
+    {"lfsr-int",   lfsr},
+    {"bool-select",boolsel},
+    {"array-index",arr},
+  };
+
+  const unsigned buf = 256;
+  const int frames = 8;
+  for (const auto& c : cases) {
+    std::vector<double> a, b;
+    ASSERT(render_via_plan(c.plan, buf, frames, a));
+    ASSERT(render_via_ir(c.plan, buf, frames, b));
+    ASSERT(a.size() == b.size());
+    double maxdiff = 0.0;
+    for (size_t i = 0; i < a.size(); ++i)
+      maxdiff = std::fmax(maxdiff, std::fabs(a[i] - b[i]));
+    if (maxdiff != 0.0)
+      printf("\n    [%s] load_ir vs load_plan maxdiff=%g\n", c.name, maxdiff);
+    ASSERT(maxdiff == 0.0);
+  }
+}
+
 // ---- main -------------------------------------------------------------------
 
 int main()
@@ -992,6 +1125,7 @@ int main()
   run_test("cast ops (to_int/to_bool/to_float)", test_cast_ops);
   run_test("microkernel mode — sawtooth",    test_microkernel_mode_sawtooth);
   run_test("microkernel-deep — sawtooth",   test_microkernel_deep_sawtooth);
+  run_test("load_ir ≡ load_plan (own IR)",   test_load_ir_matches_load_plan);
 
   printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;

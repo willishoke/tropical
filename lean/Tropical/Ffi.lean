@@ -42,6 +42,12 @@ opaque Runtime.new (bufferLength : UInt32) : IO Runtime
 @[extern "shim_runtime_load_plan"]
 opaque Runtime.loadPlanRaw (rt : @& Runtime) (planJson : @& String) : IO Bool
 
+/-- Load a kernel from textual LLVM IR plus a metadata manifest (a
+    tropical_plan_5 JSON whose instruction graph is ignored — codegen
+    comes from the IR). The seam for the Lean-emits-IR migration. -/
+@[extern "shim_runtime_load_ir"]
+opaque Runtime.loadIrRaw (rt : @& Runtime) (irText : @& String) (manifestJson : @& String) : IO Bool
+
 @[extern "shim_runtime_process"]
 opaque Runtime.process (rt : @& Runtime) : IO Unit
 
@@ -71,6 +77,12 @@ def Runtime.slotIndex? (rt : Runtime) (name : String) : IO (Option UInt32) := do
 def Runtime.loadPlan (rt : Runtime) (planJson : String) : IO Unit := do
   if !(← rt.loadPlanRaw planJson) then
     throw <| IO.userError s!"runtime loadPlan failed: {← lastError}"
+
+/-- Load a kernel from textual LLVM IR + a metadata manifest; raise the
+    engine's error string on failure. -/
+def Runtime.loadIr (rt : Runtime) (irText : String) (manifestJson : String) : IO Unit := do
+  if !(← rt.loadIrRaw irText manifestJson) then
+    throw <| IO.userError s!"runtime loadIr failed: {← lastError}"
 
 -- ── DAC ──────────────────────────────────────────────────────────────────────
 

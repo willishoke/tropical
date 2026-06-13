@@ -324,9 +324,39 @@ class OrcJitEngine
 
     llvm::Expected<uint64_t> lookup(const std::string & symbol_name);
 
-    /** Fused-mode codegen: one LLVM function per plan. */
+    /** Fused-mode codegen: one LLVM function per plan.
+     *
+     *  When `out_ir_text` is non-null, the verified LLVM module is
+     *  printed to it as textual IR (a byproduct — the kernel is still
+     *  JIT-compiled and returned as normal). This is the capture seam
+     *  for the Lean-emits-IR migration: `compile_ir_text` below consumes
+     *  exactly this text. Capture only happens on a cache miss (a cache
+     *  hit returns the cached kernel before any module is built — so
+     *  pass `emit_only` to force a fresh build for capture).
+     *
+     *  When `emit_only` is true, the module is built and (if requested)
+     *  printed, but NOT added to the JIT: the cache is bypassed and a
+     *  null kernel is returned on success. This is the pure capture path
+     *  for the IR migration — it never publishes the content-named
+     *  symbol, so it cannot collide with a normal compile of the same
+     *  plan. `out_ir_text` must be non-null when `emit_only` is set. */
     llvm::Expected<NumericKernelFn> compile_flat_program(
-      const FlatProgram & program);
+      const FlatProgram & program,
+      std::string * out_ir_text = nullptr,
+      bool emit_only = false);
+
+    /** Receive textual LLVM IR, JIT-compile it, return the kernel.
+     *
+     *  The engine's "receive IR, JIT, run" core — the end state where
+     *  Lean owns IR generation and C++ is strictly an engine. Parses the
+     *  text into a fresh module, renames its single function definition
+     *  to a content-addressed symbol (`tropical_k_<md5(ir)>`) so distinct
+     *  IR never collides in the JIT and identical IR is served from
+     *  `ir_kernel_cache_` without a duplicate-symbol re-add, then
+     *  add_module + lookup. The text must define exactly one function
+     *  with the fused `NumericKernelFn` signature. */
+    llvm::Expected<NumericKernelFn> compile_ir_text(
+      const std::string & ir_text);
 
     /** Microkernel-mode codegen: N+3 LLVM functions in one module.
      *
@@ -352,6 +382,11 @@ class OrcJitEngine
     std::string init_error_;
     mutable std::mutex jit_mutex_;
     std::unordered_map<std::string, NumericKernelFn>      kernel_cache_;
+    /** IR-text kernels, keyed by md5(ir_text). Mirrors kernel_cache_ for
+     *  the compile_ir_text path so a reload of identical IR (e.g. a
+     *  hot-swap back to a prior plan) returns the cached kernel instead
+     *  of re-adding a duplicate symbol to the JIT. */
+    std::unordered_map<std::string, NumericKernelFn>      ir_kernel_cache_;
     /** Microkernel cache lives alongside the fused-mode cache because
      *  the return types differ. Phase 5 mode-tags the keys so the two
      *  caches never collide on a shared program hash. */
