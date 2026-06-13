@@ -390,8 +390,8 @@ def syncCompile (env : Env) : EngineM Unit := do
     known limitation — so plan structure is mode-independent there
     too). Collapses into `syncCompile` at 6f when the sync payload
     retires. -/
-def compileMirrorPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
-    EngineM String := do
+def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
+    EngineM Tropical.Plan.FlatPlan := do
   let st ← env.state.get
   let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
   let (wiresPost, delayEntries, alloc) :=
@@ -442,6 +442,11 @@ def compileMirrorPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
       mode } with
     | .error msg => internalError msg
     | .ok p => pure p
+  pure plan
+
+def compileMirrorPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
+    EngineM String := do
+  let plan ← compileMirrorFlatPlan env mode
   match plan.toWire with
   | .error msg => internalError msg
   | .ok j => pure j.compress

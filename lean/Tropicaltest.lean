@@ -1,6 +1,7 @@
 import Tropical.Ffi
 import Tropical.Engine
 import Tropical.Plan
+import Tropical.Ir.EmitLlvm
 import Lean.Data.Json
 
 /-!
@@ -53,6 +54,31 @@ def compilePatch (path : String) (mode : Tropical.Plan.CompilationMode) :
   match ← act.run with
   | .ok planJson => pure (.ok planJson)
   | .error f => pure (.error f.toJson.compress)
+
+/-- Compile a patch to an in-memory FlatPlan (for the IR-equivalence gate). -/
+def compilePatchFlat (path : String) :
+    IO (Except String Tropical.Plan.FlatPlan) := do
+  let env ← Tropical.Engine.boot
+  let act : Tropical.EngineM Tropical.Plan.FlatPlan := do
+    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
+    Tropical.Engine.compileMirrorFlatPlan env .fused
+  match ← act.run with
+  | .ok plan => pure (.ok plan)
+  | .error f => pure (.error f.toJson.compress)
+
+/-- Render a FlatPlan via the Lean-emitted-IR path (EmitLlvm → load_ir). -/
+def renderIrBytes (plan : Tropical.Plan.FlatPlan) : IO (Except String ByteArray) := do
+  match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
+  | .ok manifest, .ok ir =>
+    let rt ← Tropical.Ffi.Runtime.new BUFFER.toUInt32
+    rt.loadIr ir manifest.compress
+    let mut acc := ByteArray.empty
+    for _ in [0:FRAMES] do
+      rt.process
+      acc := acc ++ (← rt.outputBytes)
+    pure (.ok acc)
+  | .error e, _ => pure (.error s!"toWire: {e}")
+  | _, .error e => pure (.error s!"emitKernel: {e}")
 
 private def firstLine (s : String) : String := (s.splitOn "\n").headD ""
 
@@ -145,6 +171,31 @@ def main (args : List String) : IO UInt32 := do
       if allEqual then IO.println s!"  PASS  {fixture}  ({bytesPerMode.size} modes agree)"
       else IO.println s!"  FAIL  {fixture}  modes disagree"; ok := false
     if !ok then failed := failed + 1
+
+  -- ── (d) Lean-IR ≡ plan: EmitLlvm → load_ir byte-matches load_plan ──────────
+  -- The Phase 1b gate: the Lean LLVM-IR emitter produces sample-for-sample
+  -- identical audio to the C++ plan-compile path, over the full fixture
+  -- corpus (scalar arithmetic, transcendental inlining, arrays, sinks).
+  IO.println "lean-IR ≡ plan (EmitLlvm vs load_plan):"
+  for fixture in ← sortedNames "tests/fixtures/flat_plan" ".json" do
+    let fixText ← IO.FS.readFile s!"tests/fixtures/flat_plan/{fixture}.json"
+    let some input := ((Lean.Json.parse fixText).toOption.bind (·.getObjVal? "input" |>.toOption))
+      | pure ()
+    let tmpPatch := "/tmp/tropicaltest-ir.json"
+    IO.FS.writeFile tmpPatch input.compress
+    total := total + 1
+    match ← compilePatchFlat tmpPatch with
+    | .error e => IO.println s!"  FAIL  {fixture}  compile: {firstLine e}"; failed := failed + 1
+    | .ok plan =>
+      let planJson ← match plan.toWire with
+        | .ok j => pure j.compress
+        | .error e => IO.println s!"  FAIL  {fixture}  toWire: {firstLine e}"; failed := failed + 1; pure ""
+      let bytesPlan ← renderPlanBytes planJson
+      match ← renderIrBytes plan with
+      | .error e => IO.println s!"  FAIL  {fixture}  IR: {firstLine e}"; failed := failed + 1
+      | .ok bytesIr =>
+        if bytesPlan == bytesIr then IO.println s!"  PASS  {fixture}"
+        else IO.println s!"  FAIL  {fixture}  IR audio differs from plan"; failed := failed + 1
 
   IO.println ""
   IO.println s!"{total - failed}/{total} passed"

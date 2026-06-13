@@ -5,6 +5,7 @@ import Tropical.Ir.Codec
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved
+import Tropical.Ir.EmitLlvm
 import Tropical.Engine
 import Tropical.Parse.Surface.Markdown
 
@@ -476,9 +477,71 @@ def compileVerb (args : List String) : IO UInt32 := do
     IO.eprintln f.toJson.compress
     return 1
 
+/-- Compile a patch to an in-memory FlatPlan (the shape both the plan path
+    and the IR path consume). -/
+private def compileToFlatPlan (patch : String) :
+    IO (Except String Tropical.Plan.FlatPlan) := do
+  let env ← Tropical.Engine.boot
+  let act : Tropical.EngineM Tropical.Plan.FlatPlan := do
+    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str patch)])
+    Tropical.Engine.compileMirrorFlatPlan env .fused
+  match ← act.run with
+  | .ok p => pure (.ok p)
+  | .error f => pure (.error f.toJson.compress)
+
+/-- `diffcli emit-ir <patch.json>` → the Lean-emitted LLVM IR on stdout. -/
+def emitIrVerb (args : List String) : IO UInt32 := do
+  let some patch := args.find? (fun a => !a.startsWith "--")
+    | IO.eprintln "usage: diffcli emit-ir <patch.json>"; return 1
+  match ← compileToFlatPlan patch with
+  | .error e => IO.eprintln e; return 1
+  | .ok plan =>
+    match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
+    | .ok ir => IO.println ir; return 0
+
+/-- `diffcli diff-ir <patch.json> [--frames N] [--buffer N]` — render the
+    same compiled plan through both the plan path (load_plan) and the
+    Lean-emitted-IR path (load_ir) and assert byte-identical audio. The
+    Phase 1b gate. -/
+def diffIrVerb (args : List String) : IO UInt32 := do
+  let some patch := args.find? (fun a => !a.startsWith "--")
+    | IO.eprintln "usage: diffcli diff-ir <patch.json> [--frames N] [--buffer N]"; return 1
+  let frames := parseNatFlag args "--frames" 16
+  let buffer := parseNatFlag args "--buffer" 256
+  match ← compileToFlatPlan patch with
+  | .error e => IO.eprintln e; return 1
+  | .ok plan =>
+    let manifest ← match plan.toWire with
+      | .ok j => pure j.compress
+      | .error e => IO.eprintln s!"toWire: {e}"; return 1
+    let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
+      | .ok s => pure s
+      | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
+    let render (load : Tropical.Ffi.Runtime → IO Unit) : IO ByteArray := do
+      let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
+      load rt
+      let mut acc := ByteArray.empty
+      for _ in [0:frames] do
+        rt.process
+        acc := acc ++ (← rt.outputBytes)
+      pure acc
+    let bytesA ← render (fun rt => rt.loadPlan manifest)
+    let bytesB ← render (fun rt => rt.loadIr ir manifest)
+    if bytesA == bytesB then
+      IO.println s!"PASS  diff-ir  {patch}  ({bytesA.size} bytes)"
+      return 0
+    else
+      let firstDiff := (List.range (min bytesA.size bytesB.size)).find?
+        (fun i => bytesA.get! i != bytesB.get! i)
+      IO.println s!"FAIL  diff-ir  {patch}  sizeA={bytesA.size} sizeB={bytesB.size} firstDiffByte={firstDiff}"
+      return 1
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
+  | "emit-ir" :: rest => emitIrVerb rest
+  | "diff-ir" :: rest => diffIrVerb rest
   | "raise" :: rest => raiseVerb rest
   | "parsed-roundtrip" :: rest => parsedRoundtripVerb rest
   | "parse-md" :: rest => parseMdVerb rest
