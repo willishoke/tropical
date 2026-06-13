@@ -511,80 +511,10 @@ def emitIrVerb (args : List String) : IO UInt32 := do
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir => IO.println ir; return 0
 
-/-- `diffcli diff-ir <patch.json> [--frames N] [--buffer N]` — render the
-    same compiled plan through both the plan path (load_plan) and the
-    Lean-emitted-IR path (load_ir) and assert byte-identical audio. The
-    Phase 1b gate. -/
-def diffIrVerb (args : List String) : IO UInt32 := do
-  let some patch := args.find? (fun a => !a.startsWith "--")
-    | IO.eprintln "usage: diffcli diff-ir <patch.json> [--frames N] [--buffer N]"; return 1
-  let frames := parseNatFlag args "--frames" 16
-  let buffer := parseNatFlag args "--buffer" 256
-  match ← compileToFlatPlan patch with
-  | .error e => IO.eprintln e; return 1
-  | .ok plan =>
-    let manifest ← match plan.toWire with
-      | .ok j => pure j.compress
-      | .error e => IO.eprintln s!"toWire: {e}"; return 1
-    let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
-      | .ok s => pure s
-      | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
-    let render (load : Tropical.Ffi.Runtime → IO Unit) : IO ByteArray := do
-      let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
-      load rt
-      let mut acc := ByteArray.empty
-      for _ in [0:frames] do
-        rt.process
-        acc := acc ++ (← rt.outputBytes)
-      pure acc
-    let bytesA ← render (fun rt => rt.loadPlan manifest)
-    let bytesB ← render (fun rt => rt.loadIr ir manifest)
-    if bytesA == bytesB then
-      IO.println s!"PASS  diff-ir  {patch}  ({bytesA.size} bytes)"
-      return 0
-    else
-      let firstDiff := (List.range (min bytesA.size bytesB.size)).find?
-        (fun i => bytesA.get! i != bytesB.get! i)
-      IO.println s!"FAIL  diff-ir  {patch}  sizeA={bytesA.size} sizeB={bytesB.size} firstDiffByte={firstDiff}"
-      return 1
-
-/-- `diffcli diff-ir-plan <plan.json> [--frames N] [--buffer N]` — validate
-    the plan_5 parser + IR emitter: render a serialized plan via load_plan
-    and via ofWire→EmitLlvm→load_ir, assert byte-identical. The gate that
-    proves Lean can take over plan→kernel before the C++ codegen is cut. -/
-def diffIrPlanVerb (args : List String) : IO UInt32 := do
-  let some planPath := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli diff-ir-plan <plan.json> [--frames N] [--buffer N]"; return 1
-  let frames := parseNatFlag args "--frames" 16
-  let buffer := parseNatFlag args "--buffer" 256
-  let planJson ← IO.FS.readFile planPath
-  let plan ← match Lean.Json.parse planJson with
-    | .error e => IO.eprintln s!"parse: {e}"; return 1
-    | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
-      | .error e => IO.eprintln s!"ofWire: {e}"; return 1
-      | .ok p => pure p
-  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
-    | .ok s => pure s
-    | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
-  let render (load : Tropical.Ffi.Runtime → IO Unit) : IO ByteArray := do
-    let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
-    load rt
-    let mut acc := ByteArray.empty
-    for _ in [0:frames] do rt.process; acc := acc ++ (← rt.outputBytes)
-    pure acc
-  let bytesA ← render (fun rt => rt.loadPlan planJson)
-  let bytesB ← render (fun rt => rt.loadIr ir planJson)
-  if bytesA == bytesB then
-    IO.println s!"PASS  diff-ir-plan  {planPath}  ({bytesA.size} bytes)"; return 0
-  else
-    IO.println s!"FAIL  diff-ir-plan  {planPath}  sizeA={bytesA.size} sizeB={bytesB.size}"; return 1
-
 def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
   | "emit-ir" :: rest => emitIrVerb rest
-  | "diff-ir" :: rest => diffIrVerb rest
-  | "diff-ir-plan" :: rest => diffIrPlanVerb rest
   | "raise" :: rest => raiseVerb rest
   | "parsed-roundtrip" :: rest => parsedRoundtripVerb rest
   | "parse-md" :: rest => parseMdVerb rest

@@ -39,12 +39,10 @@ opaque lastError : IO String
 @[extern "shim_runtime_new"]
 opaque Runtime.new (bufferLength : UInt32) : IO Runtime
 
-@[extern "shim_runtime_load_plan"]
-opaque Runtime.loadPlanRaw (rt : @& Runtime) (planJson : @& String) : IO Bool
-
 /-- Load a kernel from textual LLVM IR plus a metadata manifest (a
     tropical_plan_5 JSON whose instruction graph is ignored — codegen
-    comes from the IR). The seam for the Lean-emits-IR migration. -/
+    comes from the IR). Since Phase 2 this is the only load path: the C++
+    plan compiler is gone, and Lean owns codegen (`EmitLlvm`). -/
 @[extern "shim_runtime_load_ir"]
 opaque Runtime.loadIrRaw (rt : @& Runtime) (irText : @& String) (manifestJson : @& String) : IO Bool
 
@@ -71,12 +69,6 @@ opaque Runtime.getSlot (rt : @& Runtime) (idx : UInt32) : IO Float
 def Runtime.slotIndex? (rt : Runtime) (name : String) : IO (Option UInt32) := do
   let idx ← rt.slotIndexRaw name
   pure <| if idx == 0xffffffff then none else some idx
-
-/-- Load a plan; raise the engine's error string on failure (same
-    message shape the TS Runtime.loadPlan threw). -/
-def Runtime.loadPlan (rt : Runtime) (planJson : String) : IO Unit := do
-  if !(← rt.loadPlanRaw planJson) then
-    throw <| IO.userError s!"runtime loadPlan failed: {← lastError}"
 
 /-- Load a kernel from textual LLVM IR + a metadata manifest; raise the
     engine's error string on failure. -/

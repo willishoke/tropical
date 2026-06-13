@@ -8,12 +8,10 @@
 namespace tropical_runtime
 {
 
-// Map a parsed plan's *metadata* into a fresh KernelState — everything
-// except the kernel handle, which the caller fills between this and
-// publish_state. Shared by load_plan (codegen via compile_flat_program /
-// compile_microkernel) and load_ir (codegen via compile_ir_text), so
-// runtime state setup, slot wiring, and hot-swap transfer behave
-// identically across both load paths.
+// Map a parsed plan's *metadata* (the manifest) into a fresh KernelState —
+// everything except the kernel handle, which load_ir fills (via
+// compile_ir_text) between this and publish_state. The plan's instruction
+// graph is metadata-only now; codegen is Lean's (EmitLlvm).
 KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed)
 {
   KernelState new_state;
@@ -102,58 +100,6 @@ bool FlatRuntime::publish_state(KernelState && new_state)
   states_[inactive] = std::move(new_state);
   active_state_.store(inactive, std::memory_order_release);
   return true;
-}
-
-bool FlatRuntime::load_plan(const std::string & plan_json)
-{
-  using json = nlohmann::json;
-
-  const json plan = json::parse(plan_json);
-
-  const std::string schema = plan.value("schema", std::string{});
-
-  tropical_plan5::ParsedPlan5 parsed;
-  if (schema == "tropical_plan_5")
-    parsed = tropical_plan5::parse_plan5(plan);
-  else if (schema == "tropical_plan_4")
-    parsed = tropical_plan5::parse_plan4(plan);
-  else
-    throw std::runtime_error("FlatRuntime: unsupported schema '" + schema + "'");
-
-  KernelState new_state = build_kernel_state(parsed);
-
-  if (parsed.compilation_mode == tropical_jit::CompilationMode::Microkernel
-      || parsed.compilation_mode == tropical_jit::CompilationMode::MicrokernelDeep)
-  {
-    const bool deep =
-      parsed.compilation_mode == tropical_jit::CompilationMode::MicrokernelDeep;
-    auto mk_result = tropical_jit::OrcJitEngine::instance().compile_microkernel(parsed.program, deep);
-    if (!mk_result)
-    {
-      std::string err;
-      llvm::handleAllErrors(mk_result.takeError(),
-        [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
-      throw std::runtime_error(
-        std::string("FlatRuntime: ") +
-        (deep ? "microkernel-deep" : "microkernel") +
-        " JIT compilation failed: " + err);
-    }
-    new_state.microkernels = *mk_result;
-  }
-  else
-  {
-    auto kernel_result = tropical_jit::OrcJitEngine::instance().compile_flat_program(parsed.program);
-    if (!kernel_result)
-    {
-      std::string err;
-      llvm::handleAllErrors(kernel_result.takeError(),
-        [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
-      throw std::runtime_error("FlatRuntime: JIT compilation failed: " + err);
-    }
-    new_state.kernel = *kernel_result;
-  }
-
-  return publish_state(std::move(new_state));
 }
 
 bool FlatRuntime::load_ir(const std::string & ir_text, const std::string & manifest_json)

@@ -68,14 +68,6 @@ LEAN_EXPORT lean_obj_res shim_runtime_new(uint32_t buffer_length, lean_obj_arg w
   return lean_io_result_mk_ok(lean_alloc_external(runtime_class(), r));
 }
 
-LEAN_EXPORT lean_obj_res shim_runtime_load_plan(b_lean_obj_arg rt, b_lean_obj_arg json,
-                                                lean_obj_arg world) {
-  (void)world;
-  const char *s = lean_string_cstr(json);
-  bool ok = tropical_runtime_load_plan(unwrap(rt), s, strlen(s));
-  return lean_io_result_mk_ok(lean_box(ok));
-}
-
 LEAN_EXPORT lean_obj_res shim_runtime_load_ir(b_lean_obj_arg rt, b_lean_obj_arg ir,
                                               b_lean_obj_arg manifest, lean_obj_arg world) {
   (void)world;

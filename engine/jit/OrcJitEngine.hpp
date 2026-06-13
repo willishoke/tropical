@@ -324,56 +324,18 @@ class OrcJitEngine
 
     llvm::Expected<uint64_t> lookup(const std::string & symbol_name);
 
-    /** Fused-mode codegen: one LLVM function per plan.
-     *
-     *  When `out_ir_text` is non-null, the verified LLVM module is
-     *  printed to it as textual IR (a byproduct — the kernel is still
-     *  JIT-compiled and returned as normal). This is the capture seam
-     *  for the Lean-emits-IR migration: `compile_ir_text` below consumes
-     *  exactly this text. Capture only happens on a cache miss (a cache
-     *  hit returns the cached kernel before any module is built — so
-     *  pass `emit_only` to force a fresh build for capture).
-     *
-     *  When `emit_only` is true, the module is built and (if requested)
-     *  printed, but NOT added to the JIT: the cache is bypassed and a
-     *  null kernel is returned on success. This is the pure capture path
-     *  for the IR migration — it never publishes the content-named
-     *  symbol, so it cannot collide with a normal compile of the same
-     *  plan. `out_ir_text` must be non-null when `emit_only` is set. */
-    llvm::Expected<NumericKernelFn> compile_flat_program(
-      const FlatProgram & program,
-      std::string * out_ir_text = nullptr,
-      bool emit_only = false);
-
     /** Receive textual LLVM IR, JIT-compile it, return the kernel.
      *
-     *  The engine's "receive IR, JIT, run" core — the end state where
-     *  Lean owns IR generation and C++ is strictly an engine. Parses the
-     *  text into a fresh module, renames its single function definition
-     *  to a content-addressed symbol (`tropical_k_<md5(ir)>`) so distinct
-     *  IR never collides in the JIT and identical IR is served from
+     *  The engine's "receive IR, JIT, run" core — Lean owns IR generation
+     *  (EmitLlvm); C++ is strictly an engine. Parses the text into a fresh
+     *  module, renames its single function definition to a content-
+     *  addressed symbol (`tropical_k_<md5(ir)>`) so distinct IR never
+     *  collides in the JIT and identical IR is served from
      *  `ir_kernel_cache_` without a duplicate-symbol re-add, then
-     *  add_module + lookup. The text must define exactly one function
-     *  with the fused `NumericKernelFn` signature. */
+     *  add_module + lookup. The text must define exactly one function with
+     *  the fused `NumericKernelFn` signature. */
     llvm::Expected<NumericKernelFn> compile_ir_text(
       const std::string & ir_text);
-
-    /** Microkernel-mode codegen: N+3 LLVM functions in one module.
-     *
-     *  `deep = false` (default): one function per top-level session
-     *  instance, with nested children inlined into the parent's
-     *  function via recursive emit_kernel_block. Cache prefix:
-     *  "flat5:mk:".
-     *
-     *  `deep = true`: one function per InstanceProgram at EVERY
-     *  nesting depth. The tree is post-order flattened so children
-     *  emit (and dispatch) before their parents — the unified
-     *  temp/slot dataflow stays intact. Cache prefix: "flat5:mkd:".
-     *  Requires the plan to carry non-empty `children` arrays
-     *  (i.e., the session was compiled with inlineNested:false). */
-    llvm::Expected<MicrokernelKernels> compile_microkernel(
-      const FlatProgram & program,
-      bool deep = false);
 
   private:
     OrcJitEngine();
@@ -381,16 +343,10 @@ class OrcJitEngine
     std::unique_ptr<llvm::orc::LLJIT> jit_;
     std::string init_error_;
     mutable std::mutex jit_mutex_;
-    std::unordered_map<std::string, NumericKernelFn>      kernel_cache_;
-    /** IR-text kernels, keyed by md5(ir_text). Mirrors kernel_cache_ for
-     *  the compile_ir_text path so a reload of identical IR (e.g. a
-     *  hot-swap back to a prior plan) returns the cached kernel instead
-     *  of re-adding a duplicate symbol to the JIT. */
+    /** IR-text kernels, keyed by md5(ir_text), so a reload of identical IR
+     *  (e.g. a hot-swap back to a prior plan) returns the cached kernel
+     *  instead of re-adding a duplicate symbol to the JIT. */
     std::unordered_map<std::string, NumericKernelFn>      ir_kernel_cache_;
-    /** Microkernel cache lives alongside the fused-mode cache because
-     *  the return types differ. Phase 5 mode-tags the keys so the two
-     *  caches never collide on a shared program hash. */
-    std::unordered_map<std::string, MicrokernelKernels>   microkernel_cache_;
     std::unique_ptr<KernelObjectCache> object_cache_;
     llvm::OptimizationLevel opt_level_ = llvm::OptimizationLevel::O2;
 };

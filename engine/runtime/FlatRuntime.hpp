@@ -79,25 +79,6 @@ public:
 
 
   /**
-   * Load a plan JSON string, compile to a single kernel, and publish atomically.
-   *
-   * Plan schema (tropical_plan_4):
-   * {
-   *   "schema": "tropical_plan_4",
-   *   "config": { "sampleRate": 44100 },
-   *   "state_init": [0.0, ...],
-   *   "register_names": ["VCO1_phase", ...],
-   *   "outputs": [0, 2, ...],
-   *   "instructions": [...],
-   *   "register_count": N,
-   *   "array_slot_sizes": [...],
-   *   "output_targets": [...],
-   *   "register_targets": [...]
-   * }
-   */
-  bool load_plan(const std::string & plan_json);
-
-  /**
    * Load a kernel from textual LLVM IR plus a metadata manifest.
    *
    * `manifest_json` is a tropical_plan_5 JSON whose instruction graph is
@@ -275,12 +256,10 @@ public:
   }
 
 private:
-  // Shared between load_plan and load_ir. build_kernel_state maps a
-  // parsed plan's *metadata* (everything except the kernel handle) into
-  // a fresh KernelState; publish_state runs the by-name hot-swap state
-  // transfer and the atomic double-buffer flip. The two load paths
-  // differ only in how they fill the kernel handle between these calls
-  // (compile_flat_program / compile_microkernel vs compile_ir_text).
+  // build_kernel_state maps a parsed plan's *metadata* (everything except
+  // the kernel handle) into a fresh KernelState; publish_state runs the
+  // by-name hot-swap state transfer and the atomic double-buffer flip.
+  // load_ir fills the kernel handle (via compile_ir_text) between them.
   KernelState build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed);
   bool publish_state(KernelState && new_state);
 

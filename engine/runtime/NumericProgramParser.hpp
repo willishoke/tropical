@@ -3,13 +3,12 @@
 /**
  * NumericProgramParser.hpp — Parse `tropical_plan_5` JSON → FlatProgram.
  *
- * Thin deserialiser. Reads the instruction stream emitted by
- * compiler/ir/compile_session_slotted.ts and produces the
- * tropical_jit::FlatProgram passed to compile_flat_program(). The
- * plan's multi-function layout (instance_functions[] +
- * scheduler_function) maps onto FlatProgram's parallel fields; the
- * C++ JIT engine emits one LLVM function per instance plus one
- * scheduler that drives them.
+ * Thin deserialiser. Since Phase 2 (Lean owns codegen) this is the
+ * *manifest reader*: load_ir consumes the plan's metadata — state_init,
+ * register / array / slot names + types + sizes, sample_rate, slot
+ * defaults — to set up runtime state and hot-swap by name. The
+ * instruction stream still parses into FlatProgram's fields but is no
+ * longer used for codegen (the kernel comes from Lean-emitted IR).
  */
 
 #include "jit/OrcJitEngine.hpp"

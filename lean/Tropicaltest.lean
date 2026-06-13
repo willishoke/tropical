@@ -2,6 +2,7 @@ import Tropical.Ffi
 import Tropical.Engine
 import Tropical.Plan
 import Tropical.Ir.EmitLlvm
+import Tropical.PlanDecode
 import Lean.Data.Json
 
 /-!
@@ -22,10 +23,20 @@ private def FRAMES : Nat := 16
 private def BUFFER : Nat := 256
 
 /-- Render a plan JSON to its raw little-endian f64 PCM bytes (16×256 = 4096
-    samples), matching `validate_stdlib`'s buffer. -/
+    samples). Lean owns codegen: parse the plan, emit IR (EmitLlvm), load via
+    load_ir. The goldens reproduce because EmitLlvm is byte-identical to the
+    retired C++ plan compiler (proven across the corpus in Phase 1b). -/
 def renderPlanBytes (planJson : String) : IO ByteArray := do
+  let plan ← match Lean.Json.parse planJson with
+    | .error e => throw (IO.userError s!"renderPlanBytes: parse: {e}")
+    | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
+      | .error e => throw (IO.userError s!"renderPlanBytes: ofWire: {e}")
+      | .ok p => pure p
+  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .error e => throw (IO.userError s!"renderPlanBytes: emitKernel: {e}")
+    | .ok s => pure s
   let rt ← Tropical.Ffi.Runtime.new BUFFER.toUInt32
-  rt.loadPlan planJson
+  rt.loadIr ir planJson
   let mut acc := ByteArray.empty
   for _ in [0:FRAMES] do
     rt.process
@@ -53,17 +64,6 @@ def compilePatch (path : String) (mode : Tropical.Plan.CompilationMode) :
     Tropical.Engine.compileMirrorPlan env mode
   match ← act.run with
   | .ok planJson => pure (.ok planJson)
-  | .error f => pure (.error f.toJson.compress)
-
-/-- Compile a patch to an in-memory FlatPlan (for the IR-equivalence gate). -/
-def compilePatchFlat (path : String) :
-    IO (Except String Tropical.Plan.FlatPlan) := do
-  let env ← Tropical.Engine.boot
-  let act : Tropical.EngineM Tropical.Plan.FlatPlan := do
-    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
-    Tropical.Engine.compileMirrorFlatPlan env .fused
-  match ← act.run with
-  | .ok plan => pure (.ok plan)
   | .error f => pure (.error f.toJson.compress)
 
 /-- Render a FlatPlan via the Lean-emitted-IR path (EmitLlvm → load_ir). -/
@@ -216,65 +216,24 @@ def main (args : List String) : IO UInt32 := do
       if !(← checkGoldenHash fixture tmpPatch expected) then failed := failed + 1
     | _, _ => IO.println s!"  SKIP  {fixture}  (missing hash/input)"
 
-  -- ── (c) Native mode-equiv: fused ≡ microkernel ≡ microkernel-deep ──────────
-  IO.println "native mode-equiv (fused vs microkernel vs deep):"
-  for fixture in ← sortedNames "tests/fixtures/flat_plan" ".json" do
-    let fixText ← IO.FS.readFile s!"tests/fixtures/flat_plan/{fixture}.json"
-    let some input := ((Lean.Json.parse fixText).toOption.bind (·.getObjVal? "input" |>.toOption))
-      | pure ()
-    let tmpPatch := "/tmp/tropicaltest-equiv.json"
-    IO.FS.writeFile tmpPatch input.compress
-    total := total + 1
-    let modes := #[Tropical.Plan.CompilationMode.fused, .microkernel, .microkernelDeep]
-    let mut bytesPerMode : Array ByteArray := #[]
-    let mut ok := true
-    for mode in modes do
-      match ← compilePatch tmpPatch mode with
-      | .error e => IO.println s!"  FAIL  {fixture}  compile {mode.wire}: {firstLine e}"; ok := false
-      | .ok planJson => bytesPerMode := bytesPerMode.push (← renderPlanBytes planJson)
-    if ok then
-      let allEqual := bytesPerMode.all (· == bytesPerMode[0]!)
-      if allEqual then IO.println s!"  PASS  {fixture}  ({bytesPerMode.size} modes agree)"
-      else IO.println s!"  FAIL  {fixture}  modes disagree"; ok := false
-    if !ok then failed := failed + 1
-
-  -- ── (d) Lean-IR ≡ plan: EmitLlvm → load_ir byte-matches load_plan ──────────
-  -- The Phase 1b gate: the Lean LLVM-IR emitter produces sample-for-sample
-  -- identical audio to the C++ plan-compile path, over the full fixture
-  -- corpus (scalar arithmetic, transcendental inlining, arrays, sinks).
-  IO.println "lean-IR ≡ plan (EmitLlvm vs load_plan):"
-  for fixture in ← sortedNames "tests/fixtures/flat_plan" ".json" do
-    let fixText ← IO.FS.readFile s!"tests/fixtures/flat_plan/{fixture}.json"
-    let some input := ((Lean.Json.parse fixText).toOption.bind (·.getObjVal? "input" |>.toOption))
-      | pure ()
-    let tmpPatch := "/tmp/tropicaltest-ir.json"
-    IO.FS.writeFile tmpPatch input.compress
-    total := total + 1
-    match ← compilePatchFlat tmpPatch with
-    | .error e => IO.println s!"  FAIL  {fixture}  compile: {firstLine e}"; failed := failed + 1
-    | .ok plan =>
-      let planJson ← match plan.toWire with
-        | .ok j => pure j.compress
-        | .error e => IO.println s!"  FAIL  {fixture}  toWire: {firstLine e}"; failed := failed + 1; pure ""
-      let bytesPlan ← renderPlanBytes planJson
-      match ← renderIrBytes plan with
-      | .error e => IO.println s!"  FAIL  {fixture}  IR: {firstLine e}"; failed := failed + 1
-      | .ok bytesIr =>
-        if bytesPlan == bytesIr then IO.println s!"  PASS  {fixture}"
-        else IO.println s!"  FAIL  {fixture}  IR audio differs from plan"; failed := failed + 1
-
-  -- ── (e) Synthetic op-coverage: load_ir ≡ load_plan over the rare ops ───────
-  IO.println "op coverage (EmitLlvm vs load_plan, synthetic):"
+  -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
+  -- The patch corpus exercises 24 of 29 ops; this funnels the rest
+  -- (GreaterEq, NotEqual, Or, BitOr, BitNot, FloorDiv, Sqrt, Floor, Ceil,
+  -- Abs, ToInt, ToBool, Not) through one sink. The expected hash was frozen
+  -- from the C++ plan compiler before it was retired (Phase 2), so this
+  -- catches any EmitLlvm regression on those ops now that the differential
+  -- oracle is gone.
+  IO.println "op coverage (EmitLlvm, golden hash):"
   total := total + 1
-  match opCoveragePlan.toWire with
-  | .error e => IO.println s!"  FAIL  op-coverage  toWire: {firstLine e}"; failed := failed + 1
-  | .ok j =>
-    let bytesPlan ← renderPlanBytes j.compress
-    match ← renderIrBytes opCoveragePlan with
-    | .error e => IO.println s!"  FAIL  op-coverage  IR: {firstLine e}"; failed := failed + 1
-    | .ok bytesIr =>
-      if bytesPlan == bytesIr then IO.println "  PASS  op-coverage"
-      else IO.println "  FAIL  op-coverage  IR audio differs from plan"; failed := failed + 1
+  match ← renderIrBytes opCoveragePlan with
+  | .error e => IO.println s!"  FAIL  op-coverage  {firstLine e}"; failed := failed + 1
+  | .ok bytes =>
+    let got ← sha256Hex bytes
+    let expected := "9d47595cec2e690076b395ca072c03fc20cb8ba838a7b8ac60c16a91da0ea1b8"
+    if got == expected then IO.println "  PASS  op-coverage"
+    else
+      IO.println s!"  FAIL  op-coverage  expected {expected.take 16} got {got.take 16}"
+      failed := failed + 1
 
   IO.println ""
   IO.println s!"{total - failed}/{total} passed"

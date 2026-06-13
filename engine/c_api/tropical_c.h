@@ -74,20 +74,11 @@ bool         tropical_dac_switch_device(tropical_dac_t, unsigned int device_id);
 
 tropical_runtime_t tropical_runtime_new(unsigned int buffer_length);
 void             tropical_runtime_free(tropical_runtime_t);
-bool             tropical_runtime_load_plan(tropical_runtime_t, const char* plan_json, size_t len);
 /* Load a kernel from textual LLVM IR plus a metadata manifest (a
-   tropical_plan_5 JSON whose instruction graph is ignored — codegen comes
-   from ir_text). The seam for the Lean-emits-IR migration. Always fused. */
+   tropical_plan_5 JSON; its instruction graph is metadata only — codegen
+   comes from ir_text, emitted by Lean's EmitLlvm). The sole load path:
+   the C++ plan compiler was retired in Phase 2. Always fused. */
 bool             tropical_runtime_load_ir(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* manifest_json, size_t manifest_len);
-
-/* TRANSITIONAL (removed in Phase 2 with the C++ codegen): compile a plan
-   to textual LLVM IR via the C++ emitter. This is the capture seam that
-   lets the engine be fed its *own* IR for differential testing before
-   Lean owns IR generation. Returns a heap-allocated C string the caller
-   frees with tropical_free_string, or NULL on error (see
-   tropical_last_error). */
-char*            tropical_compile_plan_to_ir(const char* plan_json, size_t len);
-void             tropical_free_string(char*);
 void             tropical_runtime_process(tropical_runtime_t);
 const double*    tropical_runtime_output_buffer(tropical_runtime_t);
 unsigned int     tropical_runtime_get_buffer_length(tropical_runtime_t);
