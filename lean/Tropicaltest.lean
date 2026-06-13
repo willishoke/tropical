@@ -82,6 +82,72 @@ def renderIrBytes (plan : Tropical.Plan.FlatPlan) : IO (Except String ByteArray)
 
 private def firstLine (s : String) : String := (s.splitOn "\n").headD ""
 
+-- ── Synthetic op-coverage plan ───────────────────────────────────────────────
+-- Exercises ops the patch corpus doesn't reach (GreaterEq, NotEqual, Or,
+-- BitOr, BitNot, FloorDiv, Sqrt, Floor, Ceil, Abs, ToInt/ToBool, Not), so a
+-- typo in a predicate/intrinsic string in EmitLlvm is caught before the
+-- one-way C++-codegen deletion. Built directly as a FlatPlan; compared
+-- load_plan vs load_ir like the rest of section (d).
+section OpCoverage
+open Tropical.Plan
+
+private def jn (m : Int) (e : Nat := 0) : Lean.JsonNumber := { mantissa := m, exponent := e }
+private def cF (m : Int) (e : Nat := 0) : NOperand := .const (jn m e) .float
+private def cI (m : Int) : NOperand := .const (jn m) .int
+private def rgF (slot : Nat) : NOperand := .reg slot .float
+private def rgI (slot : Nat) : NOperand := .reg slot .int
+private def rgB (slot : Nat) : NOperand := .reg slot .bool
+
+/-- Each op computes into a temp; results funnel through ToFloat and an
+    Add chain to a single slot the sink reads. -/
+def opCoverageInstrs : Array NInstr := #[
+  instrScalar "GreaterEq" 0 #[cF 5, cF 3] .bool,          -- true
+  instrScalar "ToFloat"   1 #[rgB 0] .float,              -- 1
+  instrScalar "NotEqual"  2 #[cF 5, cF 3] .bool,          -- true
+  instrScalar "ToFloat"   3 #[rgB 2] .float,              -- 1
+  instrScalar "Sqrt"      4 #[cF 16] .float,              -- 4
+  instrScalar "Floor"     5 #[cF 37 1] .float,            -- 3.7 → 3
+  instrScalar "Ceil"      6 #[cF 32 1] .float,            -- 3.2 → 4
+  instrScalar "Abs"       7 #[cF (-25) 1] .float,         -- -2.5 → 2.5
+  instrScalar "BitOr"     8 #[cI 1, cI 2] .int,           -- 3
+  instrScalar "ToFloat"   9 #[rgI 8] .float,
+  instrScalar "BitNot"   10 #[cI 0] .int,                 -- -1
+  instrScalar "ToFloat"  11 #[rgI 10] .float,
+  instrScalar "Not"      12 #[cF 0] .bool,                -- true
+  instrScalar "ToFloat"  13 #[rgB 12] .float,             -- 1
+  instrScalar "Or"       14 #[cF 0, cF 1] .bool,          -- true
+  instrScalar "ToFloat"  15 #[rgB 14] .float,             -- 1
+  instrScalar "FloorDiv" 16 #[cF 7, cF 2] .float,         -- 3
+  instrScalar "ToInt"    17 #[cF 37 1] .int,              -- 3
+  instrScalar "ToFloat"  18 #[rgI 17] .float,             -- 3
+  instrScalar "ToBool"   19 #[cF 9] .bool,                -- true
+  instrScalar "ToFloat"  20 #[rgB 19] .float,             -- 1
+  instrScalar "Add"      21 #[rgF 1, rgF 3] .float,
+  instrScalar "Add"      22 #[rgF 21, rgF 4] .float,
+  instrScalar "Add"      23 #[rgF 22, rgF 5] .float,
+  instrScalar "Add"      24 #[rgF 23, rgF 6] .float,
+  instrScalar "Add"      25 #[rgF 24, rgF 7] .float,
+  instrScalar "Add"      26 #[rgF 25, rgF 9] .float,
+  instrScalar "Add"      27 #[rgF 26, rgF 11] .float,
+  instrScalar "Add"      28 #[rgF 27, rgF 13] .float,
+  instrScalar "Add"      29 #[rgF 28, rgF 15] .float,
+  instrScalar "Add"      30 #[rgF 29, rgF 16] .float,
+  instrScalar "Add"      31 #[rgF 30, rgF 18] .float,
+  instrScalar "Add"      32 #[rgF 31, rgF 20] .float,
+  instrWriteSlot 0 (rgF 32)]
+
+def opCoveragePlan : FlatPlan :=
+  let inst := InstanceFunction.mk "root" "root" #[] opCoverageInstrs #[] 0 0 0 33 #[] #[]
+  { sampleRate := jn 44100, compilationMode := .fused,
+    stateInit := #[], registerNames := #[], registerTypes := #[],
+    arraySlotNames := #[], registerCount := 33, arraySlotCount := 0,
+    arraySlotSizes := #[], instanceFunctions := #[inst],
+    sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
+    sources := defaultSources, slotCount := 1, slotNames := #["out"],
+    slotDefaults := #[Lean.Json.num (jn 0)] }
+
+end OpCoverage
+
 private def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let entries ← (System.FilePath.mk dir).readDir
   let names := entries.filterMap fun e =>
@@ -196,6 +262,19 @@ def main (args : List String) : IO UInt32 := do
       | .ok bytesIr =>
         if bytesPlan == bytesIr then IO.println s!"  PASS  {fixture}"
         else IO.println s!"  FAIL  {fixture}  IR audio differs from plan"; failed := failed + 1
+
+  -- ── (e) Synthetic op-coverage: load_ir ≡ load_plan over the rare ops ───────
+  IO.println "op coverage (EmitLlvm vs load_plan, synthetic):"
+  total := total + 1
+  match opCoveragePlan.toWire with
+  | .error e => IO.println s!"  FAIL  op-coverage  toWire: {firstLine e}"; failed := failed + 1
+  | .ok j =>
+    let bytesPlan ← renderPlanBytes j.compress
+    match ← renderIrBytes opCoveragePlan with
+    | .error e => IO.println s!"  FAIL  op-coverage  IR: {firstLine e}"; failed := failed + 1
+    | .ok bytesIr =>
+      if bytesPlan == bytesIr then IO.println "  PASS  op-coverage"
+      else IO.println "  FAIL  op-coverage  IR audio differs from plan"; failed := failed + 1
 
   IO.println ""
   IO.println s!"{total - failed}/{total} passed"
