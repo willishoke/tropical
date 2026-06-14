@@ -98,9 +98,9 @@ if(TROPICAL_WASM_EMIT)
             OUTPUT_VARIABLE TROPICAL_LLVM_ALL_LIBS
             OUTPUT_STRIP_TRAILING_WHITESPACE)
         separate_arguments(TROPICAL_LLVM_ALL_LIBS)
-        # `lto` drags in Polly (via Passes); lld never references it and
-        # apt.llvm.org doesn't ship it as a static lib, so drop it.
-        list(FILTER TROPICAL_LLVM_ALL_LIBS EXCLUDE REGEX "Polly")
+        # `lto` → LLVMPasses references Polly (apt's LLVM is built with Polly
+        # linked into the pass pipeline), so -lPolly/-lPollyISL must resolve;
+        # CI installs libpolly-N-dev for the static archives.
         target_link_libraries(tropical_core PRIVATE
             "-L${LLVM_LIBRARY_DIRS}"
             -Wl,--start-group

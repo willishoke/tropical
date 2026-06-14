@@ -34,7 +34,9 @@ jobs:
           sudo ./llvm.sh 22
           # lld-22 = wasm-ld; liblld-22-dev = lld's static libs + headers
           # (lld::wasm::link) for the in-process IR→wasm emitter.
-          sudo apt-get install -y lld-22 liblld-22-dev libasound2-dev
+          # libpolly-22-dev: apt's LLVM links Polly into the pass pipeline, so
+          # the in-process wasm emitter's static LTO link needs Polly's archives.
+          sudo apt-get install -y lld-22 liblld-22-dev libpolly-22-dev libasound2-dev
 
       - name: Build libtropical (with in-process wasm emit)
         run: |
