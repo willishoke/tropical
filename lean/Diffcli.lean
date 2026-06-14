@@ -5,6 +5,8 @@ import Tropical.Ir.Codec
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved
+import Tropical.Ir.EmitLlvm
+import Tropical.PlanDecode
 import Tropical.Engine
 import Tropical.Parse.Surface.Markdown
 
@@ -73,8 +75,18 @@ def renderBytes (args : List String) : IO UInt32 := do
   let frames := parseNatFlag args "--frames" 16
   let buffer := parseNatFlag args "--buffer" 256
   let planJson ← IO.FS.readFile planPath
+  -- Lean owns codegen: parse the plan, emit IR, load via load_ir (planJson
+  -- doubles as the metadata manifest). There is no C++ plan compiler.
+  let plan ← match Lean.Json.parse planJson with
+    | .error e => IO.eprintln s!"render-bytes: parse: {e}"; return 1
+    | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
+      | .error e => IO.eprintln s!"render-bytes: ofWire: {e}"; return 1
+      | .ok p => pure p
+  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .ok s => pure s
+    | .error e => IO.eprintln s!"render-bytes: emitKernel: {e}"; return 1
   let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
-  rt.loadPlan planJson
+  rt.loadIr ir planJson
   let stdout ← IO.getStdout
   for _ in [0:frames] do
     rt.process
@@ -476,9 +488,53 @@ def compileVerb (args : List String) : IO UInt32 := do
     IO.eprintln f.toJson.compress
     return 1
 
+/-- Compile a patch to an in-memory FlatPlan (the shape both the plan path
+    and the IR path consume). -/
+private def compileToFlatPlan (patch : String) :
+    IO (Except String Tropical.Plan.FlatPlan) := do
+  let env ← Tropical.Engine.boot
+  let act : Tropical.EngineM Tropical.Plan.FlatPlan := do
+    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str patch)])
+    Tropical.Engine.compileMirrorFlatPlan env .fused
+  match ← act.run with
+  | .ok p => pure (.ok p)
+  | .error f => pure (.error f.toJson.compress)
+
+/-- `diffcli emit-ir <patch.json>` → the Lean-emitted LLVM IR on stdout. -/
+def emitIrVerb (args : List String) : IO UInt32 := do
+  let some patch := args.find? (fun a => !a.startsWith "--")
+    | IO.eprintln "usage: diffcli emit-ir <patch.json>"; return 1
+  match ← compileToFlatPlan patch with
+  | .error e => IO.eprintln e; return 1
+  | .ok plan =>
+    match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
+    | .ok ir => IO.println ir; return 0
+
+/-- `diffcli compile-wasm <patch.json> --out <out.wasm>` → a complete wasm32
+    module, emitted in-process (Lean IR → engine LLVM+lld, no subprocess). The
+    plan_5 JSON from `diffcli compile` serves as the browser-side manifest. -/
+def compileWasmVerb (args : List String) : IO UInt32 := do
+  let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
+    | IO.eprintln "usage: diffcli compile-wasm <patch.json> --out <out.wasm>"; return 1
+  let some outPath := parseStrFlag args "--out"
+    | IO.eprintln "compile-wasm: --out <path> required"; return 1
+  match ← compileToFlatPlan patch with
+  | .error e => IO.eprintln e; return 1
+  | .ok plan =>
+    match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
+    | .ok ir =>
+      let wasm ← Tropical.Ffi.compileIrToWasm ir
+      IO.FS.writeBinFile (System.FilePath.mk outPath) wasm
+      IO.eprintln s!"compile-wasm: wrote {wasm.size} bytes → {outPath}"
+      return 0
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
+  | "emit-ir" :: rest => emitIrVerb rest
+  | "compile-wasm" :: rest => compileWasmVerb rest
   | "raise" :: rest => raiseVerb rest
   | "parsed-roundtrip" :: rest => parsedRoundtripVerb rest
   | "parse-md" :: rest => parseMdVerb rest

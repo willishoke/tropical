@@ -1,24 +1,22 @@
 /**
  * context.ts — AudioContext + AudioWorkletNode bootstrap for the browser demo.
  *
- * Responsibilities:
- *   - Create/resume AudioContext (must be triggered by user gesture)
+ *   - Create/resume AudioContext (must be triggered by a user gesture)
  *   - Load the worklet bundle and register 'tropical-processor'
  *   - Construct the worklet node, wire it to `destination`
- *   - Share a SharedArrayBuffer for params with the worklet
- *   - Provide a high-level API to load a compiled plan (WASM Module + layout)
+ *   - Provide a high-level API to load a precompiled patch (.wasm + manifest)
  *     and trigger fade in/out.
+ *
+ * No SharedArrayBuffer / params: the demo is a player of precompiled patches,
+ * so it needs no COOP/COEP and deploys as plain static files.
  */
-
-import type { LoadedPlan } from '../worklet/runtime.js'
-import { ParamBank } from './params.js'
+import type { KernelManifest } from '../runtime/index.js'
 
 export type TropicalHost = {
   context: AudioContext
   node: AudioWorkletNode
-  bank: ParamBank
-  /** Load a plan into the worklet; plan contents will be transferred. */
-  loadPlan(plan: LoadedPlan): void
+  /** Load a precompiled patch into the worklet. */
+  loadPatch(wasm: ArrayBuffer, manifest: KernelManifest): void
   fadeIn(): void
   fadeOut(): void
   dispose(): Promise<void>
@@ -27,8 +25,6 @@ export type TropicalHost = {
 export type BootstrapOptions = {
   /** URL to the compiled worklet bundle (ESM). */
   workletUrl: string
-  /** Max control params; sizes the SharedArrayBuffer. */
-  maxParams?: number
   /** Number of output channels (mono upmixed to stereo by default). */
   outputChannels?: number
 }
@@ -39,27 +35,16 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
 
   await ctx.audioWorklet.addModule(opts.workletUrl)
 
-  const maxParams = opts.maxParams ?? 256
-  const bank = new ParamBank(maxParams)
-
   const node = new AudioWorkletNode(ctx, 'tropical-processor', {
     numberOfInputs: 0,
     numberOfOutputs: 1,
     outputChannelCount: [opts.outputChannels ?? 2],
   })
 
-  // Send initial handshake. The worklet builds its WasmRuntime on receipt.
-  node.port.postMessage({ type: 'init', paramsSab: bank.shared, maxParams })
-
   node.port.onmessage = (e) => {
     const d = e.data
-    if (d?.type === 'error') {
-      // eslint-disable-next-line no-console
-      console.error('[tropical-worklet]', d.error)
-    } else if (d?.type === 'diag') {
-      // eslint-disable-next-line no-console
-      console.log('[tropical-worklet]', d.text, d.data ?? '')
-    }
+    if (d?.type === 'error') console.error('[tropical-worklet]', d.error)
+    else if (d?.type === 'diag') console.log('[tropical-worklet]', d.text, d.data ?? '')
   }
 
   node.connect(ctx.destination)
@@ -67,19 +52,8 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
   return {
     context: ctx,
     node,
-    bank,
-    loadPlan(plan) {
-      try {
-        // eslint-disable-next-line no-console
-        console.log('[host] posting load plan — bytes=', plan.bytes.byteLength, 'layout keys=', Object.keys(plan.layout).join(','))
-        node.port.postMessage({ type: 'load', plan })
-        // eslint-disable-next-line no-console
-        console.log('[host] load postMessage returned without throwing')
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('[host] load postMessage threw:', err)
-        throw err
-      }
+    loadPatch(wasm, manifest) {
+      node.port.postMessage({ type: 'load', wasm, manifest })
     },
     fadeIn() { node.port.postMessage({ type: 'fadeIn' }) },
     fadeOut() { node.port.postMessage({ type: 'fadeOut' }) },

@@ -17,6 +17,15 @@
 
 namespace tropical_jit
 {
+#ifdef TROPICAL_WASM_EMIT
+// Lower textual LLVM IR (Lean's EmitLlvm output) to a complete wasm32 module,
+// fully in-process: a wasm32 TargetMachine emits an object, lld::wasm::link
+// assembles it into a module. No subprocess, no PATH — the same LLVM the JIT
+// uses, which makes native≡wasm bit-exactness structural. Returns the .wasm
+// bytes; on failure returns empty and sets `err`.
+std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string & err);
+#endif
+
 enum class JitScalarType : uint8_t { Float, Int, Bool };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -324,26 +333,18 @@ class OrcJitEngine
 
     llvm::Expected<uint64_t> lookup(const std::string & symbol_name);
 
-    /** Fused-mode codegen: one LLVM function per plan. */
-    llvm::Expected<NumericKernelFn> compile_flat_program(
-      const FlatProgram & program);
-
-    /** Microkernel-mode codegen: N+3 LLVM functions in one module.
+    /** Receive textual LLVM IR, JIT-compile it, return the kernel.
      *
-     *  `deep = false` (default): one function per top-level session
-     *  instance, with nested children inlined into the parent's
-     *  function via recursive emit_kernel_block. Cache prefix:
-     *  "flat5:mk:".
-     *
-     *  `deep = true`: one function per InstanceProgram at EVERY
-     *  nesting depth. The tree is post-order flattened so children
-     *  emit (and dispatch) before their parents — the unified
-     *  temp/slot dataflow stays intact. Cache prefix: "flat5:mkd:".
-     *  Requires the plan to carry non-empty `children` arrays
-     *  (i.e., the session was compiled with inlineNested:false). */
-    llvm::Expected<MicrokernelKernels> compile_microkernel(
-      const FlatProgram & program,
-      bool deep = false);
+     *  The engine's "receive IR, JIT, run" core — Lean owns IR generation
+     *  (EmitLlvm); C++ is strictly an engine. Parses the text into a fresh
+     *  module, renames its single function definition to a content-
+     *  addressed symbol (`tropical_k_<md5(ir)>`) so distinct IR never
+     *  collides in the JIT and identical IR is served from
+     *  `ir_kernel_cache_` without a duplicate-symbol re-add, then
+     *  add_module + lookup. The text must define exactly one function with
+     *  the fused `NumericKernelFn` signature. */
+    llvm::Expected<NumericKernelFn> compile_ir_text(
+      const std::string & ir_text);
 
   private:
     OrcJitEngine();
@@ -351,11 +352,10 @@ class OrcJitEngine
     std::unique_ptr<llvm::orc::LLJIT> jit_;
     std::string init_error_;
     mutable std::mutex jit_mutex_;
-    std::unordered_map<std::string, NumericKernelFn>      kernel_cache_;
-    /** Microkernel cache lives alongside the fused-mode cache because
-     *  the return types differ. Phase 5 mode-tags the keys so the two
-     *  caches never collide on a shared program hash. */
-    std::unordered_map<std::string, MicrokernelKernels>   microkernel_cache_;
+    /** IR-text kernels, keyed by md5(ir_text), so a reload of identical IR
+     *  (e.g. a hot-swap back to a prior plan) returns the cached kernel
+     *  instead of re-adding a duplicate symbol to the JIT. */
+    std::unordered_map<std::string, NumericKernelFn>      ir_kernel_cache_;
     std::unique_ptr<KernelObjectCache> object_cache_;
     llvm::OptimizationLevel opt_level_ = llvm::OptimizationLevel::O2;
 };

@@ -1,27 +1,24 @@
 /**
  * wasm_vs_jit.test.ts — compare WASM output against the native JIT.
  *
- * Runs real stdlib-based patches through both backends and asserts the
- * output buffers match within a tight tolerance. This is the forcing
- * function that keeps web/wasm/emit_wasm.ts faithful to OrcJitEngine.cpp.
+ * Runs real stdlib-based patches through both backends and asserts the output
+ * buffers match. Post-Phase-3 the WASM is the *same LLVM IR* the JIT runs, just
+ * lowered to wasm32 by the same LLVM — so agreement is structural; this gate's
+ * job is to catch any FP-target divergence (fp-contract/fast-math).
  *
- * Both sides come off the SAME `tropical_plan_5` wire plan produced by
- * the Lean compiler (`diffcli compile`):
- *   - WASM side: emit_wasm (relocated to web/wasm/) on the parsed plan.
- *   - Native side: `diffcli render-bytes` (the Lean engine's JIT).
- * No TS-compiler import and no native FFI — fully decoupled post-Phase-8.
+ * Both sides come off the SAME source compiled by the Lean engine:
+ *   - WASM side: `diffcli compile-wasm` (in-process LLVM+lld) → WasmKernel.
+ *   - Native side: `diffcli render-bytes` (the engine's ORC JIT).
  */
 
 import { describe, test, expect } from 'bun:test'
 import { spawnSync } from 'bun'
-import { writeFileSync } from 'fs'
+import { writeFileSync, readFileSync } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
-import { parseWirePlan, type FlatPlan } from '../../web/wasm/flat_plan'
-import { emitWasm } from '../../web/wasm/emit_wasm'
+import { WasmKernel, type KernelManifest } from '../../web/runtime/index'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-// tests/web/ is two levels under the repo root, like tests/equiv/ was.
 const repoRoot = resolve(__dirname, '../..')
 const diffcli = resolve(repoRoot, 'lean/.lake/build/bin/diffcli')
 // diffcli reads stdlib/parsed/manifest.json relative to its cwd, so run
@@ -36,64 +33,50 @@ interface ProgramFile {
   audio_outputs: { instance: string; output: string }[]
 }
 
-/** Compile a `ProgramFile` to a `tropical_plan_5` WIRE plan JSON string
- *  via the Lean `diffcli compile` front door. */
+const PROG_TMP = '/tmp/wvj-program.json'
+
+/** Compile a `ProgramFile` to a `tropical_plan_5` wire plan JSON string via
+ *  the Lean `diffcli compile` front door (native oracle + manifest source). */
 function compileViaLean(program: ProgramFile): string {
-  const tmp = '/tmp/wvj-program.json'
-  writeFileSync(tmp, JSON.stringify(program))
-  const r = spawnSync([diffcli, 'compile', tmp, '--mode=fused'], { cwd: repoRoot, env: cliEnv })
-  if (r.exitCode !== 0) {
-    throw new Error(`diffcli compile failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
-  }
+  writeFileSync(PROG_TMP, JSON.stringify(program))
+  const r = spawnSync([diffcli, 'compile', PROG_TMP, '--mode=fused'], { cwd: repoRoot, env: cliEnv })
+  if (r.exitCode !== 0) throw new Error(`diffcli compile failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
   return r.stdout.toString().trim()
 }
 
-// Load state_init values into the WASM module's register region.
-function initWasmState(memory: WebAssembly.Memory, regOffset: number, stateInit: (number | boolean)[], regTypes: string[]): void {
-  const dv = new DataView(memory.buffer)
-  for (let i = 0; i < stateInit.length; i++) {
-    const v = stateInit[i]
-    const t = regTypes[i] ?? 'float'
-    const off = regOffset + i * 8
-    if (typeof v === 'boolean') {
-      dv.setBigInt64(off, v ? 1n : 0n, true)
-    } else if (t === 'int') {
-      dv.setBigInt64(off, BigInt(Math.trunc(v as number)), true)
-    } else if (t === 'bool') {
-      dv.setBigInt64(off, (v as number) !== 0 ? 1n : 0n, true)
-    } else {
-      dv.setFloat64(off, v as number, true)
-    }
+/** Trim a plan_5 JSON to the KernelManifest the runtime consumes. */
+function manifestFromPlan(planJson: string): KernelManifest {
+  const p = JSON.parse(planJson)
+  return {
+    sampleRate:     p.config?.sampleRate ?? 44100,
+    registerCount:  p.register_count ?? 0,
+    registerTypes:  p.register_types ?? [],
+    stateInit:      p.state_init ?? [],
+    arraySlotSizes: p.array_slot_sizes ?? [],
+    slotCount:      p.slot_count ?? (p.slot_defaults?.length ?? 0),
+    slotDefaults:   p.slot_defaults ?? [],
   }
 }
 
-async function runWasm(plan: FlatPlan, samples: number): Promise<Float64Array> {
-  const { bytes, layout } = emitWasm(plan, { maxBlockSize: samples })
-  const mod = await WebAssembly.compile(bytes)
-  const instance = await WebAssembly.instantiate(mod, {})
-  const memory = instance.exports.memory as WebAssembly.Memory
-  const process_ = instance.exports.process as (blen: number, sidx: bigint) => void
-
-  // Initialize state_init (ignoring array-slot entries which are arrays themselves)
-  const scalarStateInit = plan.state_init.map((v) => (Array.isArray(v) ? 0 : v)) as (number | boolean)[]
-  initWasmState(memory, layout.registersOffset, scalarStateInit, plan.register_types)
-
-  process_(samples, 0n)
-  return new Float64Array(memory.buffer, layout.outputOffset, samples).slice()
-}
-
-/** Native side: render the wire plan through the Lean engine's JIT via
- *  `diffcli render-bytes`. Takes the wire-plan JSON STRING and returns
- *  the N rendered f64 samples. */
+/** Native side: render the wire plan through the engine's JIT. */
 function runNative(wirePlan: string, samples: number): Float64Array {
   const tmp = '/tmp/wvj-native.plan.json'
   writeFileSync(tmp, wirePlan)
   const r = spawnSync([diffcli, 'render-bytes', tmp, '--frames', '1', '--buffer', String(samples)], { cwd: repoRoot, env: cliEnv })
-  if (r.exitCode !== 0) {
-    throw new Error(`diffcli render-bytes failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
-  }
+  if (r.exitCode !== 0) throw new Error(`diffcli render-bytes failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
   const b = r.stdout
   return new Float64Array(b.buffer.slice(b.byteOffset, b.byteOffset + samples * 8))
+}
+
+/** WASM side: lower the same source to wasm32 in-process and drive it through
+ *  the runtime package (the artifacts the browser ships). */
+async function runWasm(program: ProgramFile, plan: string, samples: number): Promise<Float64Array> {
+  writeFileSync(PROG_TMP, JSON.stringify(program))
+  const out = '/tmp/wvj-program.wasm'
+  const r = spawnSync([diffcli, 'compile-wasm', PROG_TMP, `--out=${out}`], { cwd: repoRoot, env: cliEnv })
+  if (r.exitCode !== 0) throw new Error(`diffcli compile-wasm failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
+  const k = await WasmKernel.instantiate(new Uint8Array(readFileSync(out)), manifestFromPlan(plan), samples)
+  return k.render(samples).slice()
 }
 
 function sinOscProgram(freqHz: number): ProgramFile {
@@ -122,45 +105,102 @@ function onePoleProgram(cutoff: number): ProgramFile {
   }
 }
 
-const TOL = 1e-9 // generous; expect bit-near-identical since both use IEEE f64 arithmetic
+// A single self-contained program exercising the rare ops at *runtime* (seeded
+// from sampleIndex so LLVM can't constant-fold them away): the full
+// bitwise/shift cluster, both float↔int conversions, mod/floorDiv,
+// clamp/select, comparisons, and the rounding intrinsics. Confirms every op
+// lowers correctly on wasm32 (esp. fptosi → i64.trunc_sat, the one op with
+// target-divergent lowering), not just the arithmetic the audio patches hit.
+function opZooProgram(): ProgramFile {
+  const seed = () => ({ op: 'bitAnd', args: [{ op: 'toInt', args: [{ op: 'sampleIndex' }] }, 255] })
+  const expr = {
+    op: 'clamp',
+    args: [
+      { op: 'add', args: [
+        { op: 'to_float', args: [
+          { op: 'bitXor', args: [
+            { op: 'lshift', args: [seed(), 1] },
+            { op: 'bitAnd', args: [
+              { op: 'bitNot', args: [seed()] },
+              { op: 'rshift', args: [{ op: 'bitOr', args: [seed(), 1] }, 1] },
+            ] },
+          ] },
+        ] },
+        { op: 'add', args: [
+          { op: 'to_float', args: [
+            { op: 'mod', args: [{ op: 'floorDiv', args: [seed(), 3] }, 7] },
+          ] },
+          { op: 'add', args: [
+            { op: 'select', args: [
+              { op: 'and', args: [
+                { op: 'gt', args: [{ op: 'toFloat', args: [{ op: 'sampleIndex' }] }, 0] },
+                { op: 'or', args: [
+                  { op: 'lte', args: [{ op: 'sampleRate' }, 1000000] },
+                  { op: 'not', args: [{ op: 'eq', args: [{ op: 'toBool', args: [{ op: 'toFloat', args: [{ op: 'sampleIndex' }] }] }, 0] }] },
+                ] },
+              ] },
+              { op: 'sqrt', args: [{ op: 'abs', args: [{ op: 'neg', args: [{ op: 'sub', args: [{ op: 'ceil', args: [2.2] }, { op: 'floor', args: [3.7] }] }] }] }] },
+              { op: 'to_float', args: [{ op: 'toInt', args: [3.7] }] },
+            ] },
+            { op: 'mul', args: [
+              { op: 'round', args: [{ op: 'ldexp', args: [{ op: 'floatExponent', args: [0.1] }, 2] }] },
+              { op: 'div', args: [{ op: 'to_float', args: [{ op: 'gte', args: [{ op: 'lt', args: [1, 2] }, 0] }] }, 1000.0] },
+            ] },
+          ] },
+        ] },
+      ] },
+      -1.0, 1.0,
+    ],
+  }
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_opzoo',
+    body: { op: 'block', decls: [
+      { op: 'programDecl', name: 'OpZoo', program: {
+        op: 'program', name: 'OpZoo',
+        ports: { inputs: [], outputs: ['out'] },
+        body: { op: 'block', decls: [], assigns: [{ op: 'outputAssign', name: 'out', expr }] },
+      }},
+      { op: 'instanceDecl', name: 'inst', program: 'OpZoo', inputs: {} },
+    ]},
+    audio_outputs: [{ instance: 'inst', output: 'out' }],
+  }
+}
+
+// Same IR, two LLVM targets → bit-exact in practice; keep a tolerance for safety.
+const TOL = 1e-12
 
 describe('wasm vs native JIT', () => {
   test('SinOsc 440 Hz — first 64 samples', async () => {
-    const wire = compileViaLean(sinOscProgram(440))
+    const prog = sinOscProgram(440)
+    const wire = compileViaLean(prog)
     const N = 64
     const nat = runNative(wire, N)
-    const wasm = await runWasm(parseWirePlan(JSON.parse(wire)), N)
-    for (let i = 0; i < N; i++) {
-      expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
-    }
+    const wasm = await runWasm(prog, wire, N)
+    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
   test('SinOsc 880 Hz — 128 samples', async () => {
-    const wire = compileViaLean(sinOscProgram(880))
+    const prog = sinOscProgram(880)
+    const wire = compileViaLean(prog)
     const N = 128
     const nat = runNative(wire, N)
-    const wasm = await runWasm(parseWirePlan(JSON.parse(wire)), N)
-    for (let i = 0; i < N; i++) {
-      expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
-    }
+    const wasm = await runWasm(prog, wire, N)
+    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
   test('SinOsc → OnePole(1000 Hz) — 256 samples', async () => {
-    const wire = compileViaLean(onePoleProgram(1000))
+    const prog = onePoleProgram(1000)
+    const wire = compileViaLean(prog)
     const N = 256
     const nat = runNative(wire, N)
-    const wasm = await runWasm(parseWirePlan(JSON.parse(wire)), N)
-    for (let i = 0; i < N; i++) {
-      expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
-    }
+    const wasm = await runWasm(prog, wire, N)
+    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
-  // Phase B cross-check: bring a wholesale-array-writeback shape into
-  // the WASM equivalence loop so all three backends agree on at least
-  // one Phase B shape. This is the original `array_reg_zipwith_writeback`
-  // EDGE_FIXTURES program, re-expressed as a `programDecl` + `instanceDecl`
-  // patch so the Lean `diffcli compile` front door can ingest it.
-  test('Phase B array-zipWith wholesale writeback — WASM matches JIT', async () => {
+  // Array shape: wholesale array-register writeback via zipWith. Keeps an
+  // array op (Pack / Index / elementwise) in the wasm equivalence loop.
+  test('array-zipWith wholesale writeback — WASM matches JIT', async () => {
     const program: ProgramFile = {
       schema: 'tropical_program_2',
       name: 'eq_arrayzip',
@@ -196,38 +236,16 @@ describe('wasm vs native JIT', () => {
     const wire = compileViaLean(program)
     const N = 64
     const nat = runNative(wire, N)
-    const wasm = await runWasm(parseWirePlan(JSON.parse(wire)), N)
-    for (let i = 0; i < N; i++) {
-      expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
-    }
-  })
-})
-
-// Root-program lowering (Option A): the whole session compiles to one
-// synthetic root kernel whose `instance_functions[0]` has an empty body
-// and the real instance bodies as nested `children`. This is the shape
-// that forced emit_wasm to recurse like the C++ `emit_kernel_block`
-// (preamble → per-child {pre_input, child} → body → writebacks). Same
-// patches as above, asserting WASM still matches the native JIT on the
-// nested plan.
-describe('wasm vs native JIT (root-program lowering)', () => {
-  test('SinOsc 440 Hz — root plan', async () => {
-    const wire = compileViaLean(sinOscProgram(440))
-    const N = 64
-    const nat = runNative(wire, N)
-    const wasm = await runWasm(parseWirePlan(JSON.parse(wire)), N)
-    for (let i = 0; i < N; i++) {
-      expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
-    }
+    const wasm = await runWasm(program, wire, N)
+    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
-  test('SinOsc → OnePole(1000 Hz) — root plan (nested children)', async () => {
-    const wire = compileViaLean(onePoleProgram(1000))
+  test('op-zoo (bitwise / shifts / float↔int casts / mod / clamp / select) — WASM matches JIT', async () => {
+    const prog = opZooProgram()
+    const wire = compileViaLean(prog)
     const N = 256
     const nat = runNative(wire, N)
-    const wasm = await runWasm(parseWirePlan(JSON.parse(wire)), N)
-    for (let i = 0; i < N; i++) {
-      expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
-    }
+    const wasm = await runWasm(prog, wire, N)
+    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 })

@@ -74,7 +74,21 @@ bool         tropical_dac_switch_device(tropical_dac_t, unsigned int device_id);
 
 tropical_runtime_t tropical_runtime_new(unsigned int buffer_length);
 void             tropical_runtime_free(tropical_runtime_t);
-bool             tropical_runtime_load_plan(tropical_runtime_t, const char* plan_json, size_t len);
+/* Load a kernel from textual LLVM IR plus a metadata manifest (a
+   tropical_plan_5 JSON; its instruction graph is metadata only — codegen
+   comes from ir_text, emitted by Lean's EmitLlvm). The sole load path:
+   the C++ plan compiler was retired in Phase 2. Always fused. */
+bool             tropical_runtime_load_ir(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* manifest_json, size_t manifest_len);
+
+/* ---------- Build-time IR→wasm (TROPICAL_WASM_EMIT builds only) ----------
+   Lower Lean's LLVM IR to a complete wasm32 module, fully in-process (wasm32
+   TargetMachine + lld-as-a-library — no subprocess). Returns a malloc'd buffer
+   of length *out_len (free with tropical_free_buffer), or NULL on error (see
+   tropical_last_error()). Returns NULL if libtropical was built without
+   TROPICAL_WASM_EMIT. This is a build/CI tool — the shipped audio runtime does
+   not need it. */
+uint8_t*         tropical_compile_ir_to_wasm(const char* ir_text, size_t ir_len, size_t* out_len);
+void             tropical_free_buffer(uint8_t* buf);
 void             tropical_runtime_process(tropical_runtime_t);
 const double*    tropical_runtime_output_buffer(tropical_runtime_t);
 unsigned int     tropical_runtime_get_buffer_length(tropical_runtime_t);

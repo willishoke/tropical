@@ -1,11 +1,17 @@
 /**
- * app.ts — Demo UI: patch dropdown, start/stop, plan loading.
+ * app.ts — Demo UI: patch dropdown, start/stop, patch loading.
  */
 
 import { startHost, type TropicalHost } from '../host/context.js'
-import { compilePlanJson } from '../host/compiler.js'
+import type { KernelManifest } from '../runtime/index.js'
 
-type ManifestEntry = { slug: string; title: string; description: string; planPath: string }
+type ManifestEntry = {
+  slug: string
+  title: string
+  description: string
+  wasmPath: string
+  manifestPath: string
+}
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id)
@@ -69,22 +75,19 @@ playBtn.addEventListener('click', async () => {
       host = await startHost({ workletUrl: './worklet.js', outputChannels: 2 })
     }
 
-    setStatus(`compiling ${patch.title}…`)
-    const res = await fetch(`./${patch.planPath}`)
-    const planJson = await res.text()
-    const t0 = performance.now()
-    const loaded = await compilePlanJson(planJson, 2048)
-    const dt = performance.now() - t0
-    const crossOK = (window as unknown as { crossOriginIsolated?: boolean }).crossOriginIsolated
+    setStatus(`loading ${patch.title}…`)
+    const [wasm, manifestJson] = await Promise.all([
+      fetch(`./${patch.wasmPath}`).then((r) => r.arrayBuffer()),
+      fetch(`./${patch.manifestPath}`).then((r) => r.json() as Promise<KernelManifest>),
+    ])
     setInfo(
-      `memory: ${(loaded.layout.pageCount * 65536 / 1024).toFixed(0)} KB · ` +
-      `registers: ${loaded.layout.registerCount} · arrays: ${loaded.layout.arraySlotCount} · ` +
-      `params: ${loaded.layout.paramCount} · compile: ${dt.toFixed(1)} ms · ` +
-      `audioCtx: ${host.context.sampleRate}Hz ${host.context.state} · ` +
-      `crossOriginIsolated: ${crossOK ? 'yes' : 'NO'}`,
+      `wasm: ${(wasm.byteLength / 1024).toFixed(1)} KB · ` +
+      `registers: ${manifestJson.registerCount} · slots: ${manifestJson.slotCount} · ` +
+      `arrays: ${manifestJson.arraySlotSizes.length} · rate: ${manifestJson.sampleRate}Hz · ` +
+      `audioCtx: ${host.context.sampleRate}Hz ${host.context.state}`,
     )
 
-    host.loadPlan(loaded)
+    host.loadPatch(wasm, manifestJson)
     host.fadeIn()
     setStatus(`playing — ${patch.title}`)
     stopBtn.disabled = false
@@ -98,7 +101,7 @@ playBtn.addEventListener('click', async () => {
 stopBtn.addEventListener('click', async () => {
   if (host) {
     host.fadeOut()
-    // Give fade time before tearing down; keep context alive so restart is fast.
+    // Give the fade time before tearing down; keep context alive for fast restart.
     setTimeout(() => {
       if (host) {
         host.dispose()

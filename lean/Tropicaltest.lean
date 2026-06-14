@@ -1,6 +1,8 @@
 import Tropical.Ffi
 import Tropical.Engine
 import Tropical.Plan
+import Tropical.Ir.EmitLlvm
+import Tropical.PlanDecode
 import Lean.Data.Json
 
 /-!
@@ -21,10 +23,20 @@ private def FRAMES : Nat := 16
 private def BUFFER : Nat := 256
 
 /-- Render a plan JSON to its raw little-endian f64 PCM bytes (16×256 = 4096
-    samples), matching `validate_stdlib`'s buffer. -/
+    samples). Lean owns codegen: parse the plan, emit IR (EmitLlvm), load via
+    load_ir. The goldens reproduce because EmitLlvm is byte-identical to the
+    retired C++ plan compiler (proven across the corpus in Phase 1b). -/
 def renderPlanBytes (planJson : String) : IO ByteArray := do
+  let plan ← match Lean.Json.parse planJson with
+    | .error e => throw (IO.userError s!"renderPlanBytes: parse: {e}")
+    | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
+      | .error e => throw (IO.userError s!"renderPlanBytes: ofWire: {e}")
+      | .ok p => pure p
+  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .error e => throw (IO.userError s!"renderPlanBytes: emitKernel: {e}")
+    | .ok s => pure s
   let rt ← Tropical.Ffi.Runtime.new BUFFER.toUInt32
-  rt.loadPlan planJson
+  rt.loadIr ir planJson
   let mut acc := ByteArray.empty
   for _ in [0:FRAMES] do
     rt.process
@@ -54,7 +66,87 @@ def compilePatch (path : String) (mode : Tropical.Plan.CompilationMode) :
   | .ok planJson => pure (.ok planJson)
   | .error f => pure (.error f.toJson.compress)
 
+/-- Render a FlatPlan via the Lean-emitted-IR path (EmitLlvm → load_ir). -/
+def renderIrBytes (plan : Tropical.Plan.FlatPlan) : IO (Except String ByteArray) := do
+  match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
+  | .ok manifest, .ok ir =>
+    let rt ← Tropical.Ffi.Runtime.new BUFFER.toUInt32
+    rt.loadIr ir manifest.compress
+    let mut acc := ByteArray.empty
+    for _ in [0:FRAMES] do
+      rt.process
+      acc := acc ++ (← rt.outputBytes)
+    pure (.ok acc)
+  | .error e, _ => pure (.error s!"toWire: {e}")
+  | _, .error e => pure (.error s!"emitKernel: {e}")
+
 private def firstLine (s : String) : String := (s.splitOn "\n").headD ""
+
+-- ── Synthetic op-coverage plan ───────────────────────────────────────────────
+-- Exercises ops the patch corpus doesn't reach (GreaterEq, NotEqual, Or,
+-- BitOr, BitNot, FloorDiv, Sqrt, Floor, Ceil, Abs, ToInt/ToBool, Not), so a
+-- typo in a predicate/intrinsic string in EmitLlvm is caught before the
+-- one-way C++-codegen deletion. Built directly as a FlatPlan; compared
+-- load_plan vs load_ir like the rest of section (d).
+section OpCoverage
+open Tropical.Plan
+
+private def jn (m : Int) (e : Nat := 0) : Lean.JsonNumber := { mantissa := m, exponent := e }
+private def cF (m : Int) (e : Nat := 0) : NOperand := .const (jn m e) .float
+private def cI (m : Int) : NOperand := .const (jn m) .int
+private def rgF (slot : Nat) : NOperand := .reg slot .float
+private def rgI (slot : Nat) : NOperand := .reg slot .int
+private def rgB (slot : Nat) : NOperand := .reg slot .bool
+
+/-- Each op computes into a temp; results funnel through ToFloat and an
+    Add chain to a single slot the sink reads. -/
+def opCoverageInstrs : Array NInstr := #[
+  instrScalar "GreaterEq" 0 #[cF 5, cF 3] .bool,          -- true
+  instrScalar "ToFloat"   1 #[rgB 0] .float,              -- 1
+  instrScalar "NotEqual"  2 #[cF 5, cF 3] .bool,          -- true
+  instrScalar "ToFloat"   3 #[rgB 2] .float,              -- 1
+  instrScalar "Sqrt"      4 #[cF 16] .float,              -- 4
+  instrScalar "Floor"     5 #[cF 37 1] .float,            -- 3.7 → 3
+  instrScalar "Ceil"      6 #[cF 32 1] .float,            -- 3.2 → 4
+  instrScalar "Abs"       7 #[cF (-25) 1] .float,         -- -2.5 → 2.5
+  instrScalar "BitOr"     8 #[cI 1, cI 2] .int,           -- 3
+  instrScalar "ToFloat"   9 #[rgI 8] .float,
+  instrScalar "BitNot"   10 #[cI 0] .int,                 -- -1
+  instrScalar "ToFloat"  11 #[rgI 10] .float,
+  instrScalar "Not"      12 #[cF 0] .bool,                -- true
+  instrScalar "ToFloat"  13 #[rgB 12] .float,             -- 1
+  instrScalar "Or"       14 #[cF 0, cF 1] .bool,          -- true
+  instrScalar "ToFloat"  15 #[rgB 14] .float,             -- 1
+  instrScalar "FloorDiv" 16 #[cF 7, cF 2] .float,         -- 3
+  instrScalar "ToInt"    17 #[cF 37 1] .int,              -- 3
+  instrScalar "ToFloat"  18 #[rgI 17] .float,             -- 3
+  instrScalar "ToBool"   19 #[cF 9] .bool,                -- true
+  instrScalar "ToFloat"  20 #[rgB 19] .float,             -- 1
+  instrScalar "Add"      21 #[rgF 1, rgF 3] .float,
+  instrScalar "Add"      22 #[rgF 21, rgF 4] .float,
+  instrScalar "Add"      23 #[rgF 22, rgF 5] .float,
+  instrScalar "Add"      24 #[rgF 23, rgF 6] .float,
+  instrScalar "Add"      25 #[rgF 24, rgF 7] .float,
+  instrScalar "Add"      26 #[rgF 25, rgF 9] .float,
+  instrScalar "Add"      27 #[rgF 26, rgF 11] .float,
+  instrScalar "Add"      28 #[rgF 27, rgF 13] .float,
+  instrScalar "Add"      29 #[rgF 28, rgF 15] .float,
+  instrScalar "Add"      30 #[rgF 29, rgF 16] .float,
+  instrScalar "Add"      31 #[rgF 30, rgF 18] .float,
+  instrScalar "Add"      32 #[rgF 31, rgF 20] .float,
+  instrWriteSlot 0 (rgF 32)]
+
+def opCoveragePlan : FlatPlan :=
+  let inst := InstanceFunction.mk "root" "root" #[] opCoverageInstrs #[] 0 0 0 33 #[] #[]
+  { sampleRate := jn 44100, compilationMode := .fused,
+    stateInit := #[], registerNames := #[], registerTypes := #[],
+    arraySlotNames := #[], registerCount := 33, arraySlotCount := 0,
+    arraySlotSizes := #[], instanceFunctions := #[inst],
+    sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
+    sources := defaultSources, slotCount := 1, slotNames := #["out"],
+    slotDefaults := #[Lean.Json.num (jn 0)] }
+
+end OpCoverage
 
 private def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let entries ← (System.FilePath.mk dir).readDir
@@ -124,27 +216,24 @@ def main (args : List String) : IO UInt32 := do
       if !(← checkGoldenHash fixture tmpPatch expected) then failed := failed + 1
     | _, _ => IO.println s!"  SKIP  {fixture}  (missing hash/input)"
 
-  -- ── (c) Native mode-equiv: fused ≡ microkernel ≡ microkernel-deep ──────────
-  IO.println "native mode-equiv (fused vs microkernel vs deep):"
-  for fixture in ← sortedNames "tests/fixtures/flat_plan" ".json" do
-    let fixText ← IO.FS.readFile s!"tests/fixtures/flat_plan/{fixture}.json"
-    let some input := ((Lean.Json.parse fixText).toOption.bind (·.getObjVal? "input" |>.toOption))
-      | pure ()
-    let tmpPatch := "/tmp/tropicaltest-equiv.json"
-    IO.FS.writeFile tmpPatch input.compress
-    total := total + 1
-    let modes := #[Tropical.Plan.CompilationMode.fused, .microkernel, .microkernelDeep]
-    let mut bytesPerMode : Array ByteArray := #[]
-    let mut ok := true
-    for mode in modes do
-      match ← compilePatch tmpPatch mode with
-      | .error e => IO.println s!"  FAIL  {fixture}  compile {mode.wire}: {firstLine e}"; ok := false
-      | .ok planJson => bytesPerMode := bytesPerMode.push (← renderPlanBytes planJson)
-    if ok then
-      let allEqual := bytesPerMode.all (· == bytesPerMode[0]!)
-      if allEqual then IO.println s!"  PASS  {fixture}  ({bytesPerMode.size} modes agree)"
-      else IO.println s!"  FAIL  {fixture}  modes disagree"; ok := false
-    if !ok then failed := failed + 1
+  -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
+  -- The patch corpus exercises 24 of 29 ops; this funnels the rest
+  -- (GreaterEq, NotEqual, Or, BitOr, BitNot, FloorDiv, Sqrt, Floor, Ceil,
+  -- Abs, ToInt, ToBool, Not) through one sink. The expected hash was frozen
+  -- from the C++ plan compiler before it was retired (Phase 2), so this
+  -- catches any EmitLlvm regression on those ops now that the differential
+  -- oracle is gone.
+  IO.println "op coverage (EmitLlvm, golden hash):"
+  total := total + 1
+  match ← renderIrBytes opCoveragePlan with
+  | .error e => IO.println s!"  FAIL  op-coverage  {firstLine e}"; failed := failed + 1
+  | .ok bytes =>
+    let got ← sha256Hex bytes
+    let expected := "9d47595cec2e690076b395ca072c03fc20cb8ba838a7b8ac60c16a91da0ea1b8"
+    if got == expected then IO.println "  PASS  op-coverage"
+    else
+      IO.println s!"  FAIL  op-coverage  expected {expected.take 16} got {got.take 16}"
+      failed := failed + 1
 
   IO.println ""
   IO.println s!"{total - failed}/{total} passed"

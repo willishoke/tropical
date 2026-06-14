@@ -39,8 +39,12 @@ opaque lastError : IO String
 @[extern "shim_runtime_new"]
 opaque Runtime.new (bufferLength : UInt32) : IO Runtime
 
-@[extern "shim_runtime_load_plan"]
-opaque Runtime.loadPlanRaw (rt : @& Runtime) (planJson : @& String) : IO Bool
+/-- Load a kernel from textual LLVM IR plus a metadata manifest (a
+    tropical_plan_5 JSON whose instruction graph is ignored — codegen
+    comes from the IR). Since Phase 2 this is the only load path: the C++
+    plan compiler is gone, and Lean owns codegen (`EmitLlvm`). -/
+@[extern "shim_runtime_load_ir"]
+opaque Runtime.loadIrRaw (rt : @& Runtime) (irText : @& String) (manifestJson : @& String) : IO Bool
 
 @[extern "shim_runtime_process"]
 opaque Runtime.process (rt : @& Runtime) : IO Unit
@@ -66,11 +70,23 @@ def Runtime.slotIndex? (rt : Runtime) (name : String) : IO (Option UInt32) := do
   let idx ← rt.slotIndexRaw name
   pure <| if idx == 0xffffffff then none else some idx
 
-/-- Load a plan; raise the engine's error string on failure (same
-    message shape the TS Runtime.loadPlan threw). -/
-def Runtime.loadPlan (rt : Runtime) (planJson : String) : IO Unit := do
-  if !(← rt.loadPlanRaw planJson) then
-    throw <| IO.userError s!"runtime loadPlan failed: {← lastError}"
+/-- Load a kernel from textual LLVM IR + a metadata manifest; raise the
+    engine's error string on failure. -/
+def Runtime.loadIr (rt : Runtime) (irText : String) (manifestJson : String) : IO Unit := do
+  if !(← rt.loadIrRaw irText manifestJson) then
+    throw <| IO.userError s!"runtime loadIr failed: {← lastError}"
+
+/-- Lower textual LLVM IR (Lean's EmitLlvm output) to a complete wasm32 module,
+    in-process via the engine's LLVM + lld. Build-time only — requires
+    libtropical built with `TROPICAL_WASM_EMIT`. Empty result ⇒ throw. -/
+@[extern "shim_compile_ir_to_wasm"]
+opaque compileIrToWasmRaw (irText : @& String) : IO ByteArray
+
+def compileIrToWasm (irText : String) : IO ByteArray := do
+  let wasm ← compileIrToWasmRaw irText
+  if wasm.size == 0 then
+    throw <| IO.userError s!"compileIrToWasm failed: {← lastError}"
+  pure wasm
 
 -- ── DAC ──────────────────────────────────────────────────────────────────────
 

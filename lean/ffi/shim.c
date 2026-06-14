@@ -68,12 +68,31 @@ LEAN_EXPORT lean_obj_res shim_runtime_new(uint32_t buffer_length, lean_obj_arg w
   return lean_io_result_mk_ok(lean_alloc_external(runtime_class(), r));
 }
 
-LEAN_EXPORT lean_obj_res shim_runtime_load_plan(b_lean_obj_arg rt, b_lean_obj_arg json,
-                                                lean_obj_arg world) {
+LEAN_EXPORT lean_obj_res shim_runtime_load_ir(b_lean_obj_arg rt, b_lean_obj_arg ir,
+                                              b_lean_obj_arg manifest, lean_obj_arg world) {
   (void)world;
-  const char *s = lean_string_cstr(json);
-  bool ok = tropical_runtime_load_plan(unwrap(rt), s, strlen(s));
+  const char *i = lean_string_cstr(ir);
+  const char *m = lean_string_cstr(manifest);
+  bool ok = tropical_runtime_load_ir(unwrap(rt), i, strlen(i), m, strlen(m));
   return lean_io_result_mk_ok(lean_box(ok));
+}
+
+/* In-process IR→wasm (build-time tool). Empty ByteArray signals failure;
+   Lean reads tropical_last_error. */
+LEAN_EXPORT lean_obj_res shim_compile_ir_to_wasm(b_lean_obj_arg ir, lean_obj_arg world) {
+  (void)world;
+  const char *i = lean_string_cstr(ir);
+  size_t out_len = 0;
+  uint8_t *buf = tropical_compile_ir_to_wasm(i, strlen(i), &out_len);
+  lean_obj_res arr;
+  if (buf) {
+    arr = lean_alloc_sarray(1, out_len, out_len);
+    memcpy(lean_sarray_cptr(arr), buf, out_len);
+    tropical_free_buffer(buf);
+  } else {
+    arr = lean_alloc_sarray(1, 0, 0);
+  }
+  return lean_io_result_mk_ok(arr);
 }
 
 LEAN_EXPORT lean_obj_res shim_runtime_process(b_lean_obj_arg rt, lean_obj_arg world) {

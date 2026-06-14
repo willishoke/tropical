@@ -21,6 +21,8 @@
 #include <unordered_set>
 #include <vector>
 
+namespace tropical_plan5 { struct ParsedPlan5; }
+
 namespace tropical_runtime
 {
 
@@ -77,23 +79,18 @@ public:
 
 
   /**
-   * Load a plan JSON string, compile to a single kernel, and publish atomically.
+   * Load a kernel from textual LLVM IR plus a metadata manifest.
    *
-   * Plan schema (tropical_plan_4):
-   * {
-   *   "schema": "tropical_plan_4",
-   *   "config": { "sampleRate": 44100 },
-   *   "state_init": [0.0, ...],
-   *   "register_names": ["VCO1_phase", ...],
-   *   "outputs": [0, 2, ...],
-   *   "instructions": [...],
-   *   "register_count": N,
-   *   "array_slot_sizes": [...],
-   *   "output_targets": [...],
-   *   "register_targets": [...]
-   * }
+   * `manifest_json` is a tropical_plan_5 JSON whose instruction graph is
+   * ignored — codegen comes from `ir_text` (JIT-compiled via
+   * OrcJitEngine::compile_ir_text). The manifest's metadata (state_init,
+   * register/array/slot names + types + sizes, sample_rate, slot
+   * defaults) drives runtime state setup exactly as load_plan does, so
+   * hot-swap state transfer and slot wiring behave identically. Always
+   * fused. This is the seam for the Lean-emits-IR migration: the same
+   * metadata Lean already holds in FlatPlan, plus the IR it will emit.
    */
-  bool load_plan(const std::string & plan_json);
+  bool load_ir(const std::string & ir_text, const std::string & manifest_json);
 
   /**
    * Process one buffer of audio. Called from the audio thread.
@@ -259,6 +256,13 @@ public:
   }
 
 private:
+  // build_kernel_state maps a parsed plan's *metadata* (everything except
+  // the kernel handle) into a fresh KernelState; publish_state runs the
+  // by-name hot-swap state transfer and the atomic double-buffer flip.
+  // load_ir fills the kernel handle (via compile_ir_text) between them.
+  KernelState build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed);
+  bool publish_state(KernelState && new_state);
+
   void wait_for_state_available(uint32_t state_index) const
   {
     while (audio_processing_.load(std::memory_order_acquire) &&

@@ -17,8 +17,11 @@ make parse-all      # regenerate stdlib/parsed/*.json from stdlib/*.md (Lean sur
 make clean          # remove build directories
 ```
 
-**Requirements:** CMake 3.20+, C++20, LLVM ≥ 19 (Homebrew: `/opt/homebrew/opt/llvm`),
-Lean 4 (via elan), Bun (for the surviving behavioral suites).
+**Requirements:** CMake 3.20+, C++20, LLVM 22 (Homebrew: `/opt/homebrew/opt/llvm`;
+the JIT-only core builds on LLVM ≥ 19, but `make build`/CI and the in-process
+wasm emitter target 22), Lean 4 (via elan), Bun (for the surviving behavioral
+suites). The wasm emitter (`TROPICAL_WASM_EMIT`, on by default in `make build`)
+also needs lld (`brew install lld`) and LLVM ≥ 21 for its Triple-based codegen API.
 
 ## Test
 
@@ -32,7 +35,7 @@ The compiler is the Lean `frontend` binary — there is no TS compiler and no
 koffi FFI subprocess. `tropicaltest` (`lake exe tropicaltest`) drives the
 goldens and the native realization-variant equivalence directly through the
 engine. The bun suites are the surviving cross-backend gate (`tests/web`,
-WASM emitter vs. JIT) and the MCP protocol tests (`mcp/`), both run against
+wasm vs. JIT) and the MCP protocol tests (`mcp/`), both run against
 the live Lean engine via `TROPICAL_ENGINE_CMD`.
 
 **If equivalence tests fail unexpectedly, clear the JIT cache first.**
@@ -161,7 +164,7 @@ VCV Rack's per-wire-delay mental model.
 Two *backends* consume the post-strata IR (as `tropical_plan_5`). They
 are not further compiler stages — they are interpretations of the same
 fully-reduced plan into different targets, and the surviving equivalence
-suite (WASM emitter vs. JIT) plus the frozen audio goldens assert they
+suite (wasm vs. JIT) plus the frozen audio goldens assert they
 agree pointwise.
 
 ```
@@ -183,14 +186,15 @@ post-strata ResolvedProgram (per-program path)  /  SessionState (session path)
         │      FlatRuntime → buffer loop, double-buffered hot-swap
         │      TropicalDAC (RtAudio) → audio output
         │
-        └─→ emit_wasm (web/wasm/{emit_wasm,wasm_memory_layout}.ts)
-               tropical_plan_5 → WebAssembly bytes + linear-memory layout.
-               Same per-sample sequencing as the C++ engine. The browser
-               precompiles plans via the Lean engine (web/patches/*.json +
-               `diffcli compile` → web/dist/patches/), then emits WASM at
-               runtime and runs the kernel — same hot-swap logic as
-               FlatRuntime: state transfer by name, smoothstep fade,
-               AudioWorkletProcessor → audio output.
+        └─→ compile-wasm (engine LLVM + lld, in-process: the *same* IR the
+               JIT runs, lowered to wasm32 — there is no second emitter).
+               Per patch the build ships <slug>.wasm + a trimmed
+               <slug>.manifest.json (web/patches/*.json + `diffcli
+               compile-wasm` → web/dist/patches/). The browser is a
+               precompiled-patch player: it fetches .wasm + manifest and
+               instantiates via the runtime package (web/runtime/) — no
+               recompile, no hot-swap, no SharedArrayBuffer. Smoothstep
+               fade, AudioWorkletProcessor → audio output.
 ```
 
 **Fixed-topology compilation.** Tropical compiles a session graph to
@@ -242,7 +246,7 @@ Two distinct JSON schemas; do not confuse them.
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) and the surface parser under `lean/Tropical/Parse/Surface/` | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in literate `.md`) or by agents (over MCP). |
-| `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (instances nested as `children`) plus `sinks[]` (device-bound outputs: sum input slots × gain → channel) and `sources[]` (runtime-bound inputs: canonical `[tick, rate]`; the dual of sinks). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel form, top-level `output_targets` temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
+| `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (instances nested as `children`) plus `sinks[]` (device-bound outputs: sum input slots × gain → channel) and `sources[]` (runtime-bound inputs: canonical `[tick, rate]`; the dual of sinks). The engine consumes it as the codegen manifest; the web build derives a `.wasm` + a trimmed `KernelManifest` from it. The engine still accepts the older `tropical_plan_4` (single-kernel form, top-level `output_targets` temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
 Going from the first to the second without losing meaning is exactly
 what the strata pipeline does.
@@ -276,10 +280,10 @@ engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio o
   runtime/            FlatRuntime (plan loading, kernel execution)
   dac/                Audio output (RtAudio)
 mcp/                  MCP behavioral tests (errors.test.ts, wire_dac.test.ts) + docs (CLAUDE.md, ERRORS.md)
-web/                  WASM/browser backend
-  wasm/               emit_wasm + wasm_memory_layout + plan/slot types (the WASM emitter)
-  patches/            curated source patches; build_patches.ts precompiles them via `diffcli compile`
-  dist/patches/       precompiled tropical_plan_5 JSON
+web/                  WASM/browser backend (precompiled-patch player)
+  runtime/            extractable runtime package: KernelManifest + layout + WasmKernel
+  patches/            curated source patches; build_patches.ts → .wasm + manifest via `diffcli compile-wasm`
+  dist/patches/       precompiled <slug>.wasm + <slug>.manifest.json
 patches/              Example patches (tropical_program_2 JSON)
 stdlib/               literate .md programs (see stdlib/README.md); stdlib/parsed/ is the committed parse bridge
 tests/                Cross-cutting test surface

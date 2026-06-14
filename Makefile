@@ -12,9 +12,14 @@ EXTRA_CMAKE_ARGS ?=
 build:
 	cmake -S $(ROOT) -B $(BUILD_DIR) \
 		-DTROPICAL_BUILD_PYTHON=ON \
+		-DTROPICAL_WASM_EMIT=ON \
 		-DLLVM_DIR=$(LLVM_DIR) \
 		$(EXTRA_CMAKE_ARGS)
 	cmake --build $(BUILD_DIR) -j$(JOBS)
+# TROPICAL_WASM_EMIT=ON links the WebAssembly backend + lld so `diffcli
+# compile-wasm` (the web build) works out of the box; requires `brew install
+# lld`. The CMake default is OFF, so a slim release build (no lld) is just
+# `cmake ... -DTROPICAL_WASM_EMIT=OFF` via EXTRA_CMAKE_ARGS.
 
 repl: build
 	PYTHONPATH=$(BUILD_DIR) $(PYTHON)

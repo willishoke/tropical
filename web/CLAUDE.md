@@ -1,181 +1,124 @@
 # web/
 
-Browser backend. A complete co-implementation of the audio runtime,
-sitting alongside the C++ JIT. Same `tropical_plan_5` boundary; the
-only thing that differs is the emit target (WebAssembly vs. LLVM IR)
-and the param handle representation (SAB slot index vs. native
-pointer). The plan itself is produced by the Lean engine — the
-browser never runs a compiler front-end.
+Browser backend — a **precompiled-patch player**. The browser fetches a
+`.wasm` kernel + a small manifest and instantiates it; it runs no compiler
+and no codegen. There is one codegen in the whole project (Lean's
+`EmitLlvm`); the browser consumes the *same* LLVM IR the native JIT runs,
+lowered to wasm32 in-process by the same LLVM (`diffcli compile-wasm`).
 
-The web backend is held to sample-for-sample equivalence with the
-JIT. See the `tests/web/` suites.
+The web backend is held to sample-for-sample equivalence with the JIT. See
+the `tests/web/` suites.
+
+## The boundary: `.wasm` + manifest
+
+Per patch, the build emits two artifacts the browser fetches:
+
+- `<slug>.wasm` — a complete wasm32 module exporting `tropical_kernel` (the
+  11-argument per-block kernel) + `__heap_base`, importing `env.memory` and
+  `env.round`. Produced by `diffcli compile-wasm` (engine LLVM + lld,
+  in-process — no `wasm-ld` on PATH, no toolchain).
+- `<slug>.manifest.json` — a `KernelManifest`: the trimmed subset of
+  `tropical_plan_5` the runtime needs (sampleRate, register/array/slot sizing,
+  state_init, slot_defaults). This type IS the producer↔consumer contract.
 
 ## Layout
 
 ```
 web/
-  wasm/                  The WASM backend (no compiler/ dependency)
-    emit_wasm.ts         tropical_plan_5 → WebAssembly bytes + linear-memory layout
-    wasm_memory_layout.ts  byte regions of the WASM module's exported memory
-    flat_plan.ts         tropical_plan_5 parse (parseWirePlan → FlatPlan)
-    plan_types.ts        plan instruction / sink / source types
-    slot_indices.ts      slot-index helpers shared by emitter and layout
-  patches/               Source demo patches (tropical_program_2 JSON) + manifest.json
-  build_patches.ts       Precompile each web/patches/*.json via the Lean engine
-                         (diffcli compile --mode=fused) → web/dist/patches/*.plan.json
-  build.ts               Full demo bundle: precompile patches, bundle worklet + main app,
-                         copy index.html → web/dist/
-  dev.ts                 Static dev server with COOP/COEP headers (SAB requirement)
-  host/                  Main thread (UI, plan compile, param updates)
-    compiler.ts          compilePlan(FlatPlan) → LoadedPlan via wasm/emit_wasm
-    context.ts           AudioContext + AudioWorkletNode wiring
-    params.ts            ParamBank (SharedArrayBuffer), WebParam
-  worklet/               Audio thread (real-time render)
-    runtime.ts           WasmRuntime: dual-slot hot-swap, fade envelope, snapshotParams
-    processor.ts         AudioWorkletProcessor delegate; postMessage protocol
-  site/                  Browser UI
-    app.ts               Main-thread app: patch picker, play/stop
-    index.html           Shell that loads app.js and worklet.js
+  runtime/             The extractable runtime package (→ @tropical/runtime-wasm)
+    manifest.ts          KernelManifest — the consumption contract
+    layout.ts            computeLayout: KernelManifest → linear-memory regions
+    kernel.ts            WasmKernel: instantiate + render(f64) + process(f32+fade)
+    index.ts             public surface
+  patches/             Source demo patches (tropical_program_2 JSON) + manifest.json
+  build_patches.ts     Per patch: diffcli compile-wasm → <slug>.wasm + a trimmed
+                       <slug>.manifest.json → web/dist/patches/ + index.json
+  build.ts             Full demo bundle: build patches, bundle worklet + app, copy html
+  dev.ts               Plain static server (no COOP/COEP — there's no SharedArrayBuffer)
+  host/                Main thread
+    context.ts           startHost: AudioContext + worklet node; loadPatch / fade
+  worklet/             Audio thread
+    processor.ts         AudioWorkletProcessor → WasmKernel; postMessage protocol
+  site/                Browser UI
+    app.ts               patch picker, play/stop, fetch .wasm + manifest
+    index.html
 ```
+
+`web/runtime/` depends **only** on `KernelManifest` — nothing from the
+compiler or `tropical_plan_5`. It is a self-contained consumer of tropical's
+artifact contract, ready to extract to its own package once a second consumer
+(an Electron app, a hosted player) appears. The forcing function is the
+dependency edge, not the repo boundary.
 
 ## Where this fits in the bigger pipeline
 
-The compiler is the Lean engine — the same engine code that serves
-MCP (the `frontend` binary), here invoked through the `diffcli compile`
-CLI offline on the build host. Its output — `tropical_plan_5` JSON — is
-the boundary that crosses into the browser:
-
 ```
-build host (Lean + Bun)                 browser
-  diffcli compile <patch>    →           fetch /patches/<slug>.plan.json
-    --mode=fused                         → compilePlan(plan)
-  → tropical_plan_5 JSON                    → emitWasm → WebAssembly bytes
-  written to web/dist/patches/              → postMessage to AudioWorklet
-                                            → WebAssembly.instantiate
-                                            → WasmRuntime.process per block
+build host (Lean + LLVM + lld)              browser
+  diffcli compile-wasm <patch>   →           fetch /patches/<slug>.wasm
+    (Lean EmitLlvm → wasm32 TargetMachine     fetch /patches/<slug>.manifest.json
+     → lld::wasm::link, in-process)           → WasmKernel.instantiate(wasm, manifest)
+  → <slug>.wasm + <slug>.manifest.json        → kernel.process per 128-sample block
+  written to web/dist/patches/                → AudioWorkletNode → speakers
 ```
 
-`web/build_patches.ts` shells `diffcli compile` over the source
-patches in `web/patches/`; the browser only runs the WASM emitter and
-the runtime. The WASM emitter (`web/wasm/emit_wasm.ts`) and the WASM
-runtime (`web/worklet/runtime.ts`) are the two halves of the second
-backend off `tropical_plan_5` (the other is the C++ JIT).
+`web/build_patches.ts` shells `diffcli` over the source patches; the browser
+runs only the runtime package. Requires libtropical built with
+`TROPICAL_WASM_EMIT` (`make build` enables it; needs `brew install lld`).
+
+## Player, not instrument
+
+The demo plays precompiled patches: **no live recompile, no state-transfer
+hot-swap, no SharedArrayBuffer params.** Those belong to the native
+instrument (Electron + the ORC JIT), where topology edits trigger
+recompile→hot-swap. `WasmKernel` keeps a `setSlot` method (params are slots in
+the session lowering) for a future host with live control, but the demo never
+calls it — so the demo needs no COOP/COEP and deploys as plain static files. A
+smoothstep fade (`beginFadeIn`/`beginFadeOut`) is the only envelope, to avoid
+start/stop clicks.
 
 ## Linear-memory layout
 
-`web/wasm/wasm_memory_layout.ts` defines the byte regions of the WASM
-module's exported `memory`. Layout is shared between the emitter and
-the runtime so offsets stay in sync.
+The kernel takes its working regions as pointer arguments. The host owns one
+imported `WebAssembly.Memory` and places each region above the module's
+`__heap_base` (`runtime/layout.ts`):
 
 ```
-offset 0
-  inputs        f64[inputCount]                — set by host, kernel reads
-  registers     i64[registerCount]             — kernel state (float bitcast / int / bool)
-  temps         i64[registerCount]             — per-sample scratch (same encoding)
-  arrays        f64[arraySlotSizes...]         — array-typed register backing stores
-  param_table   f64[paramCount]                — host writes per-block snapshot of Param.value
-  param_frame   f64[paramCount]                — host writes per-block snapshot (legacy trigger.frame_value slot, retained for backcompat)
-  output        f64[maxBlockSize]              — kernel writes mono audio out
+__heap_base
+  inputs        f64[64]            — zeroed (demo patches have no external input)
+  registers     i64[registerCount] — kernel state (float bitcast / int / bool)
+  temps         i64[registerCount] — per-sample scratch
+  arrays        f64[arraySlotSizes...] — array-register backing stores
+  array_sizes   i64[arraySlotCount]    — element count per array slot
+  slots         f64[slotCount]     — inter-module slots (output wires + params)
+  output        f64[maxBlockSize]  — kernel writes mono audio out
 ```
 
-All regions are 8-byte aligned. The encoding mirrors the native
-engine: `i64` cells store either a float bitcast, a signed int, or a
-zero-extended bool; the op's `result_type` (per `tropical_plan_5`
-instruction) tells the codegen which load/store to emit.
-
-## Param flow
-
-`web/host/params.ts` maintains a `ParamBank` over a
-`SharedArrayBuffer` (or plain `ArrayBuffer` if COOP/COEP isn't
-configured). Two f64 slots per param: `[value, frame_value]`.
-
-```
-JS main thread:                 worklet (audio thread):           WASM kernel:
-  WebParam.value = 440            WasmRuntime.snapshotParams         f64.load
-  → bank.view[i*2] = 440          reads bank.view[i*2]               from param_table
-                                  writes WASM mem at                  per sample
-                                  param_table + i*8
-```
-
-The slot index is the param's handle. Wiring expressions (in
-`tropical_program_2` and through MCP) reference parameters by **name**,
-the session compiler turns the name into the `WebParam._h` (slot index),
-and `web/wasm/emit_wasm.ts` stringifies that index to a `param.ptr`
-field in the plan. The WASM kernel emits
-`f64.load (paramTableOffset + ptr*8)` for `param` operands.
-
-This is the same `param.ptr` shape the native plan uses, just
-populated with a SAB index instead of a native `tropical_param_t*`.
-The `tropical_plan_5` schema is backend-agnostic on this axis.
-
-## Hot-swap
-
-`WasmRuntime` (`worklet/runtime.ts`) holds two `Slot`s and an active
-index. `loadPlan(plan)` instantiates the new WASM module, initializes
-its `register` region from `state_init`, transfers matching state from
-the outgoing slot (by register/array name, type-checked), atomically
-flips `activeIdx`, and starts a 2048-sample smoothstep fade-in. Same
-shape as `engine/runtime/FlatRuntime.cpp`'s state transfer.
-
-Fade envelope is a Hermite smoothstep `t² · (3 − 2t)` over
-`FADE_SAMPLES = 2048`, applied per sample to the f64 output as it's
-copied into the f32 worklet output buffer.
+`WasmKernel.render(n)` returns the raw f64 output region (what the WASM≡JIT
+gate compares); `process(out, n)` applies the fade and downcasts to the f32
+worklet buffer.
 
 ## Worklet protocol
 
-`worklet/processor.ts` runs in `AudioWorkletGlobalScope` and receives
-messages:
+`worklet/processor.ts` runs in `AudioWorkletGlobalScope` and receives:
 
-| Message | Source | Effect |
-|---------|--------|--------|
-| `{type: 'init', paramsSab, maxParams}` | main thread, once at startup | Construct `WasmRuntime` with the SAB view |
-| `{type: 'load', plan: LoadedPlan}` | main thread, on patch change | `compilePlan` output crossing the port; runtime instantiates and hot-swaps |
-| `{type: 'fadeIn'}` / `{type: 'fadeOut'}` | main thread | Trigger fade envelope on the active slot |
+| Message | Effect |
+|---------|--------|
+| `{type:'load', wasm, manifest}` | queue; `process()` instantiates a `WasmKernel` and fades in |
+| `{type:'fadeIn'}` / `{type:'fadeOut'}` | envelope control |
 
-The processor's `process()` is invoked by the browser every 128
-samples; it delegates to `WasmRuntime.process()`. We post raw WASM
-*bytes* (not a `WebAssembly.Module`) because Chrome silently drops
-worklet messages containing pre-compiled `WebAssembly.Module`
-objects; the worklet does the `WebAssembly.instantiate` itself.
-
-## Stdlib in the browser
-
-The browser never sees stdlib source. Patches are compiled to
-`tropical_plan_5` ahead of time by the Lean engine (which resolves
-every stdlib program type itself, from the committed
-`stdlib/parsed/*.json` bridge), so the plan that ships already has
-every composite inlined to scalar instructions. The browser fetches
-the precompiled plan and runs only the WASM emitter + runtime — there
-is no in-browser compile path and no bundled stdlib.
+We post raw wasm *bytes* (not a `WebAssembly.Module`) because Chrome silently
+drops worklet messages containing a Module; the worklet compiles them itself.
 
 ## Equivalence gates
 
-Two test suites lock the WASM backend to the JIT (both in `tests/web/`,
-both off `tropical_plan_5`; the native side is the Lean engine's JIT
-via `diffcli render-bytes`):
+Two suites in `tests/web/` lock the wasm path to the JIT (both compare the
+kernel's f64 output, `WasmKernel.render` vs `diffcli render-bytes`):
 
-- `tests/web/wasm_vs_jit.test.ts` — a hand-built patch is compiled by
-  `diffcli compile --mode=fused`, then run through both backends (WASM
-  side = `web/wasm/emit_wasm`, native side = `diffcli render-bytes`);
-  sample-for-sample agreement required.
-- `tests/web/web_plans_vs_jit.test.ts` — every precompiled plan in
-  `web/dist/patches/` matches the JIT output. Run after
-  `bun web/build_patches.ts` and `make lean`.
-
-Any divergence is a bug in either `web/wasm/emit_wasm.ts`, the WASM
-runtime, or the Lean compiler (the latter shows up in
-`tests/web/wasm_vs_jit`).
-
-## Build / run
-
-```bash
-bun web/build_patches.ts    # → web/dist/patches/*.plan.json + index.json (via Lean diffcli)
-bun web/build.ts            # full bundle: patches + worklet + app + index.html
-bun web/dev.ts              # static server with COOP/COEP for SAB
-```
-
-`bun web/dev.ts` is required for local development because
-`SharedArrayBuffer` needs `Cross-Origin-Opener-Policy: same-origin` +
-`Cross-Origin-Embedder-Policy: require-corp`. Without those headers
-the runtime falls back to a plain `ArrayBuffer` (init-time param
-snapshot only, no live updates across the worklet boundary).
+- `wasm_vs_jit.test.ts` — inline `tropical_program_2` patches (SinOsc,
+  OnePole, an array-zipWith writeback) compiled by `diffcli compile-wasm` vs
+  the JIT. Post-Phase-3 the two are the *same IR* through two LLVM targets, so
+  agreement is structural; the gate mainly guards FP-target divergence
+  (fp-contract/fast-math).
+- `web_plans_vs_jit.test.ts` — every shipped `web/dist/patches/<slug>.wasm` +
+  manifest vs the JIT. If this passes, any browser bug is in the host/worklet
+  glue, not codegen.

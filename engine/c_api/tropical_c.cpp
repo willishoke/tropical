@@ -1,9 +1,13 @@
 #include "c_api/tropical_c.h"
 
 #include "runtime/FlatRuntime.hpp"
+#include "runtime/NumericProgramParser.hpp"
 #include "dac/TropicalDAC.hpp"
 
+#include <llvm/Support/Error.h>
+
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <memory>
@@ -20,6 +24,10 @@ extern "C" const char* tropical_last_error(void)
 {
   return tls_last_error.c_str();
 }
+
+#ifdef TROPICAL_WASM_EMIT
+namespace tropical_jit { std::vector<uint8_t> compile_ir_to_wasm(const std::string &, std::string &); }
+#endif
 
 // ---------- DAC wrapper (RuntimeDAC only) ----------
 
@@ -202,15 +210,48 @@ void tropical_runtime_free(tropical_runtime_t r)
   delete static_cast<tropical_runtime::FlatRuntime*>(r);
 }
 
-bool tropical_runtime_load_plan(tropical_runtime_t r, const char* plan_json, size_t len)
+bool tropical_runtime_load_ir(tropical_runtime_t r, const char* ir_text, size_t ir_len,
+                              const char* manifest_json, size_t manifest_len)
 {
-  if (!r || !plan_json) return false;
+  if (!r || !ir_text || !manifest_json) return false;
   try
   {
-    return static_cast<tropical_runtime::FlatRuntime*>(r)->load_plan(std::string(plan_json, len));
+    return static_cast<tropical_runtime::FlatRuntime*>(r)->load_ir(
+      std::string(ir_text, ir_len), std::string(manifest_json, manifest_len));
   }
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }
+
+uint8_t* tropical_compile_ir_to_wasm(const char* ir_text, size_t ir_len, size_t* out_len)
+{
+#ifdef TROPICAL_WASM_EMIT
+  if (!ir_text || !out_len) { set_error("compile_ir_to_wasm: null argument"); return nullptr; }
+  try
+  {
+    std::string err;
+    std::vector<uint8_t> bytes =
+      tropical_jit::compile_ir_to_wasm(std::string(ir_text, ir_len), err);
+    if (bytes.empty())
+    {
+      set_error(err.empty() ? "compile_ir_to_wasm: produced no output" : err);
+      return nullptr;
+    }
+    uint8_t* buf = static_cast<uint8_t*>(std::malloc(bytes.size()));
+    if (!buf) { set_error("compile_ir_to_wasm: out of memory"); return nullptr; }
+    std::memcpy(buf, bytes.data(), bytes.size());
+    *out_len = bytes.size();
+    return buf;
+  }
+  catch (const std::exception& e) { set_error(e.what()); return nullptr; }
+#else
+  (void)ir_text; (void)ir_len;
+  if (out_len) *out_len = 0;
+  set_error("libtropical was built without TROPICAL_WASM_EMIT");
+  return nullptr;
+#endif
+}
+
+void tropical_free_buffer(uint8_t* buf) { std::free(buf); }
 
 void tropical_runtime_process(tropical_runtime_t r)
 {
