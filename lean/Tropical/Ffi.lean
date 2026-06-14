@@ -76,6 +76,18 @@ def Runtime.loadIr (rt : Runtime) (irText : String) (manifestJson : String) : IO
   if !(← rt.loadIrRaw irText manifestJson) then
     throw <| IO.userError s!"runtime loadIr failed: {← lastError}"
 
+/-- Lower textual LLVM IR (Lean's EmitLlvm output) to a complete wasm32 module,
+    in-process via the engine's LLVM + lld. Build-time only — requires
+    libtropical built with `TROPICAL_WASM_EMIT`. Empty result ⇒ throw. -/
+@[extern "shim_compile_ir_to_wasm"]
+opaque compileIrToWasmRaw (irText : @& String) : IO ByteArray
+
+def compileIrToWasm (irText : String) : IO ByteArray := do
+  let wasm ← compileIrToWasmRaw irText
+  if wasm.size == 0 then
+    throw <| IO.userError s!"compileIrToWasm failed: {← lastError}"
+  pure wasm
+
 -- ── DAC ──────────────────────────────────────────────────────────────────────
 
 @[extern "shim_dac_new_runtime"]

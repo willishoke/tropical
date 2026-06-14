@@ -511,10 +511,30 @@ def emitIrVerb (args : List String) : IO UInt32 := do
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir => IO.println ir; return 0
 
+/-- `diffcli compile-wasm <patch.json> --out <out.wasm>` → a complete wasm32
+    module, emitted in-process (Lean IR → engine LLVM+lld, no subprocess). The
+    plan_5 JSON from `diffcli compile` serves as the browser-side manifest. -/
+def compileWasmVerb (args : List String) : IO UInt32 := do
+  let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
+    | IO.eprintln "usage: diffcli compile-wasm <patch.json> --out <out.wasm>"; return 1
+  let some outPath := parseStrFlag args "--out"
+    | IO.eprintln "compile-wasm: --out <path> required"; return 1
+  match ← compileToFlatPlan patch with
+  | .error e => IO.eprintln e; return 1
+  | .ok plan =>
+    match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
+    | .ok ir =>
+      let wasm ← Tropical.Ffi.compileIrToWasm ir
+      IO.FS.writeBinFile (System.FilePath.mk outPath) wasm
+      IO.eprintln s!"compile-wasm: wrote {wasm.size} bytes → {outPath}"
+      return 0
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
   | "emit-ir" :: rest => emitIrVerb rest
+  | "compile-wasm" :: rest => compileWasmVerb rest
   | "raise" :: rest => raiseVerb rest
   | "parsed-roundtrip" :: rest => parsedRoundtripVerb rest
   | "parse-md" :: rest => parseMdVerb rest

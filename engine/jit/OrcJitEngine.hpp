@@ -17,6 +17,15 @@
 
 namespace tropical_jit
 {
+#ifdef TROPICAL_WASM_EMIT
+// Lower textual LLVM IR (Lean's EmitLlvm output) to a complete wasm32 module,
+// fully in-process: a wasm32 TargetMachine emits an object, lld::wasm::link
+// assembles it into a module. No subprocess, no PATH — the same LLVM the JIT
+// uses, which makes native≡wasm bit-exactness structural. Returns the .wasm
+// bytes; on failure returns empty and sets `err`.
+std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string & err);
+#endif
+
 enum class JitScalarType : uint8_t { Float, Int, Bool };
 
 // ─────────────────────────────────────────────────────────────────────────────
