@@ -81,7 +81,20 @@ if(TROPICAL_WASM_EMIT)
     find_library(LLD_COMMON_LIB lldCommon
         HINTS /opt/homebrew/opt/lld/lib ${LLVM_LIBRARY_DIRS} REQUIRED)
     target_include_directories(tropical_core PRIVATE ${LLD_INCLUDE_DIR})
-    target_link_libraries(tropical_core PRIVATE ${LLD_WASM_LIB} ${LLD_COMMON_LIB})
+    if(APPLE)
+        # Homebrew's lld dylibs record their own libLLVM dependency, so linking
+        # the two lld libs is enough.
+        target_link_libraries(tropical_core PRIVATE ${LLD_WASM_LIB} ${LLD_COMMON_LIB})
+    else()
+        # apt.llvm.org ships lld as *static* archives that reference the full
+        # target-init + LTO symbol surface (99 LLVMInitialize* + 12 llvm::lto::*).
+        # Link all of LLVM (static) and wrap the lld + LLVM set in a --start-group
+        # so the archives resolve regardless of link order — the standard idiom
+        # for embedding lld against a static LLVM.
+        llvm_map_components_to_libnames(LLVM_ALL_LIBS all)
+        target_link_libraries(tropical_core PRIVATE
+            -Wl,--start-group ${LLD_WASM_LIB} ${LLD_COMMON_LIB} ${LLVM_ALL_LIBS} -Wl,--end-group)
+    endif()
     target_compile_definitions(tropical_core PRIVATE TROPICAL_WASM_EMIT)
 endif()
 
