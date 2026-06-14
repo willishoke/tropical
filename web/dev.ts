@@ -1,6 +1,8 @@
 /**
- * dev.ts — lightweight static server for web/dist with the cross-origin
- * isolation headers SharedArrayBuffer requires.
+ * dev.ts — lightweight static server for web/dist.
+ *
+ * The demo is a precompiled-patch player: no SharedArrayBuffer, so no
+ * COOP/COEP headers are needed and it deploys as plain static files anywhere.
  *
  *   bun web/dev.ts [--port 8080]
  */
@@ -28,8 +30,6 @@ const MIME: Record<string, string> = {
 function headers(ct: string): HeadersInit {
   return {
     'content-type': ct,
-    'cross-origin-opener-policy': 'same-origin',
-    'cross-origin-embedder-policy': 'require-corp',
     'cache-control': 'no-store',
   }
 }
@@ -53,4 +53,3 @@ Bun.serve({
 })
 
 console.log(`▸ serving ${distDir} on http://localhost:${port}`)
-console.log(`  COOP/COEP enabled for SharedArrayBuffer`)

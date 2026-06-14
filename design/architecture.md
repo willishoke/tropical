@@ -108,10 +108,10 @@ ResolvedProgram (post-strata)
     │   │   FlatRuntime → buffer loop, double-buffered hot-swap
     │   │   TropicalDAC (RtAudio) → audio output
     │   │
-    │   └─→ emit_wasm  → WebAssembly bytes
+    │   └─→ compile-wasm (engine LLVM + lld, in-process) → .wasm + manifest
     │           │
     │           ▼
-    │       WasmRuntime in AudioWorklet (web/worklet/runtime.ts)
+    │       WasmKernel in AudioWorklet (web/runtime/)
 ```
 
 Both backends consume the same `tropical_plan_5`: by default the
@@ -609,61 +609,44 @@ IEEE-754 bit ops for 2^n range reduction). They inline at strata
 time. The kernel contains no libm calls and is deterministic across
 platforms. Swap `stdlib/Sin.md` to change the approximation.
 
-**Adding an op.** A new operation that the JIT must support requires:
-1. Add the variant to the `OpTag` enum in
-   `engine/jit/OrcJitEngine.hpp`.
-2. Add the tag-string mapping in
-   `engine/runtime/NumericProgramParser.hpp::parse_op_tag`.
-3. Add the LLVM IR emission case in
-   `engine/jit/OrcJitEngine.cpp::compile_flat_program`.
-The same op also needs to land in the wire-format op set
-(`lean/Tropical/Expr.lean`), the strata passes that traverse it, and
-the other two backends (`lean/Tropical/Ir/Emit.lean`, and the WASM
-emitter `web/wasm/emit_wasm.ts`).
+**Adding an op.** Codegen is Lean's `EmitLlvm` (textual LLVM IR); the
+native ORC JIT and the browser's wasm32 module both consume that *same*
+IR. So a new op lands in Lean only:
+1. The wire-format op set (`lean/Tropical/Expr.lean`).
+2. The strata passes that traverse it.
+3. The IR emission case in `lean/Tropical/Ir/EmitLlvm.lean`.
+The engine receives IR text and JITs it; `diffcli compile-wasm` lowers
+the same IR to wasm32 in-process. No C++ change and no per-backend
+emitter — the C++ plan compiler was retired in Phase 2.
 
-### 5.3 emit_wasm — the WebAssembly backend
+### 5.3 The WebAssembly backend
 
-**`web/wasm/emit_wasm.ts`** + **`web/wasm/wasm_memory_layout.ts`**.
-The second interpretation of the `tropical_plan_5` boundary type — and
-the one surviving TypeScript backend. It consumes plan JSON the Lean
-engine precompiles (`diffcli compile`); the browser never runs the
-compiler front-end. The emitter produces a standalone WASM module
-exporting a single `process(buffer_length, start_sample_index)`
-function plus a shared `memory`.
+The browser is a **precompiled-patch player**, not a second codegen.
+There is one codegen (`EmitLlvm`); the wasm path lowers that *same* IR
+to wasm32 **in-process** via the engine's LLVM + lld
+(`tropical_jit::compile_ir_to_wasm`, gated by `TROPICAL_WASM_EMIT`,
+exposed as `diffcli compile-wasm`). No subprocess, no `wasm-ld` on PATH,
+no version skew — the wasm comes out of the exact LLVM the JIT uses, so
+native≡wasm bit-exactness is structural (the IR carries no
+fast-math/contract flags, so neither target forms an FMA).
 
-**Linear-memory layout** (`web/wasm/wasm_memory_layout.ts`):
+Per patch the build ships two artifacts the browser fetches:
+- `<slug>.wasm` — exports `tropical_kernel` (the 11-argument per-block
+  kernel) + `__heap_base`; imports `env.memory` + `env.round`.
+- `<slug>.manifest.json` — a `KernelManifest`: the subset of
+  `tropical_plan_5` the runtime needs (sampleRate, register/array/slot
+  sizing, state_init, slot_defaults). This type is the producer↔consumer
+  contract.
 
-```
-inputs        f64[inputCount]                — set by host, kernel reads
-registers     i64[registerCount]             — kernel state
-temps         i64[registerCount]             — per-sample scratch
-arrays        f64[arraySlotSizes...]         — array-typed register backing stores
-param_table   f64[paramCount]                — host writes per-block
-param_frame   f64[paramCount]                — host writes per-block (trigger snapshot)
-output        f64[maxBlockSize]              — kernel writes mono audio out
-```
+The browser runtime (`web/runtime/`, an extractable package depending
+only on `KernelManifest`) owns one imported linear memory, places the
+kernel's pointer-argument regions above `__heap_base`, seeds register and
+slot state, and calls the kernel per 128-sample block. No live recompile,
+no state-transfer hot-swap, no `SharedArrayBuffer` — those belong to the
+native instrument. A smoothstep fade is the only envelope.
 
-8-byte aligned, contiguous from offset 0. Layout is shared with
-`web/worklet/runtime.ts` so offsets stay in sync.
-
-**WASM kernel structure** mirrors the LLVM kernel: same per-sample
-sequencing (per-instance bodies + writebacks, then the output sinks),
-implemented in WASM bytecode over the linear memory layout above.
-
-**Encoding.** `i64` cells store either an f64 bitcast, a signed
-int, or a zero-extended bool; the per-instruction `result_type`
-tells the codegen which load/store to use. f64 cells back arrays
-and the output buffer.
-
-**Param flow.** Plan `param.ptr` strings hold SAB slot indices
-instead of native pointers (`tropical_param_t*`). The kernel emits
-`f64.load (paramTableOffset + ptr*8)` for `param` operands. The
-host populates these regions per-block from a `SharedArrayBuffer`
-shared with `web/host/params.ts:WebParam`.
-
-The runtime side — instantiation, hot-swap, fade envelope, param
-snapshotting — lives in `web/worklet/runtime.ts` and mirrors
-`FlatRuntime` in shape. See `web/CLAUDE.md` for the runtime details.
+See `web/CLAUDE.md` for the memory layout, the worklet protocol, and the
+contract.
 
 ### 5.5 Equivalence
 
@@ -673,11 +656,12 @@ correctness floor is the frozen audio **goldens** (re-baselined only
 when a heard, confirmed change to the math demands it) plus the
 developer's ear; the cross-checks anchor agreement around that floor:
 
-- `tests/web/wasm_vs_jit.test.ts` — WASM emit and JIT agree
-  sample-for-sample (the two backends, both off `tropical_plan_5`). Run
-  by `bun test` against the Lean engine via `TROPICAL_ENGINE_CMD`.
-- `tests/web/web_plans_vs_jit.test.ts` — every precompiled plan in
-  `web/dist/patches/` matches the JIT output.
+- `tests/web/wasm_vs_jit.test.ts` — the wasm module (`diffcli
+  compile-wasm` → `WasmKernel`) and the JIT (`diffcli render-bytes`) agree
+  sample-for-sample. Same IR, two LLVM targets, so this guards FP-target
+  divergence.
+- `tests/web/web_plans_vs_jit.test.ts` — every shipped
+  `web/dist/patches/<slug>.wasm` + manifest matches the JIT output.
 - **native mode-equivalence** in `tropicaltest` (`lake exe
   tropicaltest`) — fused vs. microkernel (and the deep-nesting variant)
   at 1e-12, exercising the kernel/slot layer the two backends share.
@@ -721,13 +705,13 @@ Two distinct JSON schemas; do not confuse them.
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (and save/export reconstruction) | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in literate `.md`) or by agents (over MCP). |
-| `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (`instance_functions[]`, instances nested as `children`) plus `sinks[]` (device-bound outputs) and `sources[]` (runtime-bound inputs — canonical `[tick, rate]`). The C++ JIT and the WASM emitter both consume this shape. The engine still accepts the older `tropical_plan_4` (single-kernel, top-level temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
+| `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (`instance_functions[]`, instances nested as `children`) plus `sinks[]` (device-bound outputs) and `sources[]` (runtime-bound inputs — canonical `[tick, rate]`). The engine consumes it as the codegen manifest (the kernel itself comes from Lean's IR); the web build derives a `.wasm` + a trimmed `KernelManifest` from it. The engine still accepts the older `tropical_plan_4` (single-kernel, top-level temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
 Schema validation is the Lean type layer: the typed parsed/plan ASTs
 in `lean/Tropical/Parse/Nodes.lean` and `lean/Tropical/Plan.lean`, with
 order-preserving JSON codecs (`Tropical/Parse/OrderedJson.lean`,
-`Plan.lean`'s `toWirePlan` encoder). The WASM side keeps a mirrored
-TypeScript view in `web/wasm/flat_plan.ts` / `plan_types.ts`.
+`Plan.lean`'s `toWirePlan` encoder). The web side consumes a trimmed
+`KernelManifest` (`web/runtime/manifest.ts`), not a full plan mirror.
 
 Going from the first to the second without losing meaning is exactly
 what the strata pipeline does.
@@ -910,47 +894,38 @@ engine via `TROPICAL_ENGINE_CMD`.
 
 ## 11. Web backend (`web/`)
 
-Browser co-implementation of the audio runtime, and the one surviving
-TypeScript surface. Same `tropical_plan_5` boundary as the JIT;
-different emit target (WebAssembly vs. LLVM IR) and different param
-handle representation (SAB slot index vs. native pointer). The compiler
-front-end and strata pipeline are *not* re-implemented here — patches
-are precompiled to `tropical_plan_5` by the Lean engine and the browser
-runs only the WASM emitter + runtime.
+Browser **precompiled-patch player**. Not a second codegen: there is one
+codegen (`EmitLlvm`), and the browser consumes the *same* IR the JIT runs,
+lowered to wasm32 in-process by the same LLVM (`diffcli compile-wasm`). Per
+patch the build ships a `<slug>.wasm` + a trimmed `<slug>.manifest.json`
+(a `KernelManifest`); the browser fetches both and instantiates — no
+emitter, no compiler, no plan mirror in the loop.
 
 ```
 web/
-  wasm/               The WASM emit boundary (moved here from compiler/)
-    emit_wasm.ts          tropical_plan_5 → WebAssembly bytes
-    wasm_memory_layout.ts linear-memory layout
-    flat_plan.ts / plan_types.ts / slot_indices.ts
-                          mirrored TS view of the plan_5 schema + branded slots
-  build_patches.ts    Offline plan precompile via the Lean engine
-                      (`diffcli compile`) → web/dist/patches/*.plan.json
-  build.ts            Full demo bundle: precompile patches, bundle worklet +
-                      main app, copy index.html
-  dev.ts              Dev server with COOP/COEP headers (SAB requirement)
-  host/               Main thread
-    compiler.ts       compilePlan(FlatPlan) → LoadedPlan via emit_wasm
-    context.ts        AudioContext + AudioWorkletNode wiring
-    params.ts         ParamBank (SharedArrayBuffer), WebParam
-  worklet/            Audio thread
-    runtime.ts        WasmRuntime: dual-slot hot-swap, fade envelope, snapshotParams
-    processor.ts     AudioWorkletProcessor delegate; postMessage protocol
-  site/               Browser UI
-    app.ts, index.html
+  runtime/            Extractable runtime package (→ @tropical/runtime-wasm)
+    manifest.ts         KernelManifest — the producer↔consumer contract
+    layout.ts           computeLayout: manifest → linear-memory regions
+    kernel.ts           WasmKernel: instantiate + render(f64) + process(f32+fade)
+  build_patches.ts    Per patch: diffcli compile-wasm → <slug>.wasm +
+                      <slug>.manifest.json → web/dist/patches/ + index.json
+  build.ts            Full demo bundle: build patches, bundle worklet + app
+  dev.ts              Plain static server (no COOP/COEP — no SharedArrayBuffer)
+  host/context.ts     startHost: AudioContext + worklet node; loadPatch / fade
+  worklet/processor.ts AudioWorkletProcessor → WasmKernel; postMessage protocol
+  site/               Browser UI: app.ts (patch picker, play/stop) + index.html
 ```
 
-Plans in `web/dist/patches/` (precompiled offline by the Lean engine)
-are fetched, run through `emit_wasm` to WASM, and posted into the
-worklet. No TS compiler in the browser loop.
+`web/runtime/` depends only on `KernelManifest` — nothing from the compiler
+or `tropical_plan_5` — so it is ready to extract once a second consumer (an
+Electron instrument, a hosted player) appears. The kernel imports
+`env.memory` + `env.round` and exports `tropical_kernel` + `__heap_base`;
+the host owns the linear memory and places the kernel's pointer-argument
+regions above `__heap_base`. A smoothstep fade is the only envelope —
+**player, not instrument**: no live recompile, no state-transfer hot-swap,
+no SharedArrayBuffer (those belong to the native Electron instrument).
 
-`WasmRuntime` mirrors `FlatRuntime`: dual-slot hot-swap, state
-transfer by name, 2048-sample smoothstep fade. The WASM module
-exports a single `process(blockSize, sampleIdx)` function and a
-shared `memory` whose layout is fixed by `web/wasm/wasm_memory_layout.ts`.
-
-See [`web/CLAUDE.md`](../web/CLAUDE.md) for the runtime protocol,
+See [`web/CLAUDE.md`](../web/CLAUDE.md) for the worklet protocol,
 linear-memory layout, and equivalence gates.
 
 ---
