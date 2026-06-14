@@ -105,6 +105,68 @@ function onePoleProgram(cutoff: number): ProgramFile {
   }
 }
 
+// A single self-contained program exercising the rare ops at *runtime* (seeded
+// from sampleIndex so LLVM can't constant-fold them away): the full
+// bitwise/shift cluster, both float↔int conversions, mod/floorDiv,
+// clamp/select, comparisons, and the rounding intrinsics. Confirms every op
+// lowers correctly on wasm32 (esp. fptosi → i64.trunc_sat, the one op with
+// target-divergent lowering), not just the arithmetic the audio patches hit.
+function opZooProgram(): ProgramFile {
+  const seed = () => ({ op: 'bitAnd', args: [{ op: 'toInt', args: [{ op: 'sampleIndex' }] }, 255] })
+  const expr = {
+    op: 'clamp',
+    args: [
+      { op: 'add', args: [
+        { op: 'to_float', args: [
+          { op: 'bitXor', args: [
+            { op: 'lshift', args: [seed(), 1] },
+            { op: 'bitAnd', args: [
+              { op: 'bitNot', args: [seed()] },
+              { op: 'rshift', args: [{ op: 'bitOr', args: [seed(), 1] }, 1] },
+            ] },
+          ] },
+        ] },
+        { op: 'add', args: [
+          { op: 'to_float', args: [
+            { op: 'mod', args: [{ op: 'floorDiv', args: [seed(), 3] }, 7] },
+          ] },
+          { op: 'add', args: [
+            { op: 'select', args: [
+              { op: 'and', args: [
+                { op: 'gt', args: [{ op: 'toFloat', args: [{ op: 'sampleIndex' }] }, 0] },
+                { op: 'or', args: [
+                  { op: 'lte', args: [{ op: 'sampleRate' }, 1000000] },
+                  { op: 'not', args: [{ op: 'eq', args: [{ op: 'toBool', args: [{ op: 'toFloat', args: [{ op: 'sampleIndex' }] }] }, 0] }] },
+                ] },
+              ] },
+              { op: 'sqrt', args: [{ op: 'abs', args: [{ op: 'neg', args: [{ op: 'sub', args: [{ op: 'ceil', args: [2.2] }, { op: 'floor', args: [3.7] }] }] }] }] },
+              { op: 'to_float', args: [{ op: 'toInt', args: [3.7] }] },
+            ] },
+            { op: 'mul', args: [
+              { op: 'round', args: [{ op: 'ldexp', args: [{ op: 'floatExponent', args: [0.1] }, 2] }] },
+              { op: 'div', args: [{ op: 'to_float', args: [{ op: 'gte', args: [{ op: 'lt', args: [1, 2] }, 0] }] }, 1000.0] },
+            ] },
+          ] },
+        ] },
+      ] },
+      -1.0, 1.0,
+    ],
+  }
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_opzoo',
+    body: { op: 'block', decls: [
+      { op: 'programDecl', name: 'OpZoo', program: {
+        op: 'program', name: 'OpZoo',
+        ports: { inputs: [], outputs: ['out'] },
+        body: { op: 'block', decls: [], assigns: [{ op: 'outputAssign', name: 'out', expr }] },
+      }},
+      { op: 'instanceDecl', name: 'inst', program: 'OpZoo', inputs: {} },
+    ]},
+    audio_outputs: [{ instance: 'inst', output: 'out' }],
+  }
+}
+
 // Same IR, two LLVM targets → bit-exact in practice; keep a tolerance for safety.
 const TOL = 1e-12
 
@@ -175,6 +237,15 @@ describe('wasm vs native JIT', () => {
     const N = 64
     const nat = runNative(wire, N)
     const wasm = await runWasm(program, wire, N)
+    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+  })
+
+  test('op-zoo (bitwise / shifts / float↔int casts / mod / clamp / select) — WASM matches JIT', async () => {
+    const prog = opZooProgram()
+    const wire = compileViaLean(prog)
+    const N = 256
+    const nat = runNative(wire, N)
+    const wasm = await runWasm(prog, wire, N)
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 })
