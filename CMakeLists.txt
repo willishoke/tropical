@@ -94,10 +94,13 @@ if(TROPICAL_WASM_EMIT)
         # --start-group. Wrap lld + LLVM in --start-group so the circular static
         # archives resolve regardless of order.
         execute_process(
-            COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --link-static --libs all
+            COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --link-static --libs all-targets lto
             OUTPUT_VARIABLE TROPICAL_LLVM_ALL_LIBS
             OUTPUT_STRIP_TRAILING_WHITESPACE)
         separate_arguments(TROPICAL_LLVM_ALL_LIBS)
+        # `lto` drags in Polly (via Passes); lld never references it and
+        # apt.llvm.org doesn't ship it as a static lib, so drop it.
+        list(FILTER TROPICAL_LLVM_ALL_LIBS EXCLUDE REGEX "Polly")
         target_link_libraries(tropical_core PRIVATE
             "-L${LLVM_LIBRARY_DIRS}"
             -Wl,--start-group
