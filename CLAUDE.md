@@ -17,8 +17,11 @@ make parse-all      # regenerate stdlib/parsed/*.json from stdlib/*.md (Lean sur
 make clean          # remove build directories
 ```
 
-**Requirements:** CMake 3.20+, C++20, LLVM ≥ 19 (Homebrew: `/opt/homebrew/opt/llvm`),
-Lean 4 (via elan), Bun (for the surviving behavioral suites).
+**Requirements:** CMake 3.20+, C++20, LLVM 22 (Homebrew: `/opt/homebrew/opt/llvm`;
+the JIT-only core builds on LLVM ≥ 19, but `make build`/CI and the in-process
+wasm emitter target 22), Lean 4 (via elan), Bun (for the surviving behavioral
+suites). The wasm emitter (`TROPICAL_WASM_EMIT`, on by default in `make build`)
+also needs lld (`brew install lld`) and LLVM ≥ 21 for its Triple-based codegen API.
 
 ## Test
 

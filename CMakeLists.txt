@@ -57,6 +57,11 @@ llvm_map_components_to_libnames(LLVM_ORC_JIT_LIBS
 target_link_libraries(tropical_core PRIVATE ${LLVM_ORC_JIT_LIBS})
 
 if(TROPICAL_WASM_EMIT)
+    if(LLVM_PACKAGE_VERSION VERSION_LESS 21)
+        message(FATAL_ERROR "TROPICAL_WASM_EMIT needs LLVM >= 21 (modern Triple / "
+            "createTargetMachine API); found ${LLVM_PACKAGE_VERSION}. Build with "
+            "-DTROPICAL_WASM_EMIT=OFF for the JIT-only runtime.")
+    endif()
     # In-process IR→wasm: the WebAssembly codegen backend (the same libLLVM
     # the ORC JIT already links) plus lld's wasm driver as a library. No
     # subprocess, no PATH, no version skew — the wasm comes out of the exact
@@ -67,10 +72,14 @@ if(TROPICAL_WASM_EMIT)
         WebAssemblyCodeGen WebAssemblyDesc WebAssemblyInfo)
     target_link_libraries(tropical_core PRIVATE ${LLVM_WASM_LIBS})
 
+    # lld ships in the `lld` keg on Homebrew and in llvm-N's libdir on apt.llvm.org,
+    # so hint both the Homebrew prefix and LLVM's own include/lib dirs (Linux).
     find_path(LLD_INCLUDE_DIR lld/Common/Driver.h
         HINTS /opt/homebrew/opt/lld/include ${LLVM_INCLUDE_DIRS} REQUIRED)
-    find_library(LLD_WASM_LIB lldWasm HINTS /opt/homebrew/opt/lld/lib REQUIRED)
-    find_library(LLD_COMMON_LIB lldCommon HINTS /opt/homebrew/opt/lld/lib REQUIRED)
+    find_library(LLD_WASM_LIB lldWasm
+        HINTS /opt/homebrew/opt/lld/lib ${LLVM_LIBRARY_DIRS} REQUIRED)
+    find_library(LLD_COMMON_LIB lldCommon
+        HINTS /opt/homebrew/opt/lld/lib ${LLVM_LIBRARY_DIRS} REQUIRED)
     target_include_directories(tropical_core PRIVATE ${LLD_INCLUDE_DIR})
     target_link_libraries(tropical_core PRIVATE ${LLD_WASM_LIB} ${LLD_COMMON_LIB})
     target_compile_definitions(tropical_core PRIVATE TROPICAL_WASM_EMIT)
