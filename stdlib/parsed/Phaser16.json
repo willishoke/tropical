@@ -1,1211 +1,426 @@
-{
-  "op": "program",
-  "name": "Phaser16",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "regDecl",
-        "name": "fb",
-        "init": 0
-      },
-      {
-        "op": "programDecl",
-        "name": "_allpassStage",
-        "program": {
-          "op": "program",
-          "name": "_allpassStage",
-          "body": {
-            "op": "block",
-            "decls": [
-              {
-                "op": "regDecl",
-                "name": "x_prev",
-                "init": 0
-              },
-              {
-                "op": "regDecl",
-                "name": "y_prev",
-                "init": 0
-              }
-            ],
-            "assigns": [
-              {
-                "op": "outputAssign",
-                "name": "y",
-                "expr": {
-                  "op": "add",
-                  "args": [
-                    {
-                      "op": "add",
-                      "args": [
-                        {
-                          "op": "mul",
-                          "args": [
-                            {
-                              "op": "neg",
-                              "args": [
-                                {
-                                  "op": "nameRef",
-                                  "name": "a"
-                                }
-                              ]
-                            },
-                            {
-                              "op": "nameRef",
-                              "name": "x"
-                            }
-                          ]
-                        },
-                        {
-                          "op": "nameRef",
-                          "name": "x_prev"
-                        }
-                      ]
-                    },
-                    {
-                      "op": "mul",
-                      "args": [
-                        {
-                          "op": "nameRef",
-                          "name": "a"
-                        },
-                        {
-                          "op": "nameRef",
-                          "name": "y_prev"
-                        }
-                      ]
-                    }
-                  ]
-                }
-              },
-              {
-                "op": "nextUpdate",
-                "target": {
-                  "kind": "reg",
-                  "name": "x_prev"
-                },
-                "expr": {
-                  "op": "nameRef",
-                  "name": "x"
-                }
-              },
-              {
-                "op": "nextUpdate",
-                "target": {
-                  "kind": "reg",
-                  "name": "y_prev"
-                },
-                "expr": {
-                  "op": "add",
-                  "args": [
-                    {
-                      "op": "add",
-                      "args": [
-                        {
-                          "op": "mul",
-                          "args": [
-                            {
-                              "op": "neg",
-                              "args": [
-                                {
-                                  "op": "nameRef",
-                                  "name": "a"
-                                }
-                              ]
-                            },
-                            {
-                              "op": "nameRef",
-                              "name": "x"
-                            }
-                          ]
-                        },
-                        {
-                          "op": "nameRef",
-                          "name": "x_prev"
-                        }
-                      ]
-                    },
-                    {
-                      "op": "mul",
-                      "args": [
-                        {
-                          "op": "nameRef",
-                          "name": "a"
-                        },
-                        {
-                          "op": "nameRef",
-                          "name": "y_prev"
-                        }
-                      ]
-                    }
-                  ]
-                }
-              }
-            ]
-          },
-          "ports": {
-            "inputs": [
-              "x",
-              "a"
-            ],
-            "outputs": [
-              "y"
-            ]
-          }
-        }
-      },
-      {
-        "op": "instanceDecl",
-        "name": "lfo_ph",
-        "program": {
-          "op": "nameRef",
-          "name": "Phasor"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "freq"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "lfo_speed"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "lfo_sin",
-        "program": {
-          "op": "nameRef",
-          "name": "Sin"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "mul",
-              "args": [
-                6.283185307179586,
-                {
-                  "op": "nestedOut",
-                  "ref": {
-                    "op": "nameRef",
-                    "name": "lfo_ph"
-                  },
-                  "output": {
-                    "op": "nameRef",
-                    "name": "phase"
-                  }
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_0",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "input"
-                },
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "feedback"
-                    },
-                    {
-                      "op": "nameRef",
-                      "name": "fb"
-                    }
-                  ]
-                }
-              ]
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_1",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_0"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_2",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_1"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_3",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_2"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_4",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_3"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_5",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_4"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_6",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_5"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_7",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_6"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_8",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_7"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_9",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_8"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_10",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_9"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_11",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_10"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_12",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_11"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_13",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_12"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_14",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_13"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ap_15",
-        "program": {
-          "op": "nameRef",
-          "name": "_allpassStage"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ap_14"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "y"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "a"
-            },
-            "value": {
-              "op": "add",
-              "args": [
-                0.6,
-                {
-                  "op": "mul",
-                  "args": [
-                    0.35,
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "lfo_sin"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "output",
-        "expr": {
-          "op": "add",
-          "args": [
-            {
-              "op": "mul",
-              "args": [
-                0.5,
-                {
-                  "op": "nameRef",
-                  "name": "input"
-                }
-              ]
-            },
-            {
-              "op": "mul",
-              "args": [
-                0.5,
-                {
-                  "op": "nestedOut",
-                  "ref": {
-                    "op": "nameRef",
-                    "name": "ap_15"
-                  },
-                  "output": {
-                    "op": "nameRef",
-                    "name": "y"
-                  }
-                }
-              ]
-            }
-          ]
-        }
-      },
-      {
-        "op": "outputAssign",
-        "name": "lfo",
-        "expr": {
-          "op": "nestedOut",
-          "ref": {
-            "op": "nameRef",
-            "name": "lfo_sin"
-          },
-          "output": {
-            "op": "nameRef",
-            "name": "out"
-          }
-        }
-      },
-      {
+{"ports":
+ {"outputs": ["output", "lfo"],
+  "inputs":
+  [{"name": "input", "default": 0},
+   {"name": "feedback", "default": 0.4},
+   {"name": "lfo_speed", "default": 0.2}]},
+ "op": "program",
+ "name": "Phaser16",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"op": "regDecl", "name": "fb", "init": 0},
+   {"program":
+    {"ports": {"outputs": ["y"], "inputs": ["x", "a"]},
+     "op": "program",
+     "name": "_allpassStage",
+     "body":
+     {"op": "block",
+      "decls":
+      [{"op": "regDecl", "name": "x_prev", "init": 0},
+       {"op": "regDecl", "name": "y_prev", "init": 0}],
+      "assigns":
+      [{"op": "outputAssign",
+        "name": "y",
+        "expr":
+        {"op": "add",
+         "args":
+         [{"op": "add",
+           "args":
+           [{"op": "mul",
+             "args":
+             [{"op": "neg", "args": [{"op": "nameRef", "name": "a"}]},
+              {"op": "nameRef", "name": "x"}]},
+            {"op": "nameRef", "name": "x_prev"}]},
+          {"op": "mul",
+           "args":
+           [{"op": "nameRef", "name": "a"},
+            {"op": "nameRef", "name": "y_prev"}]}]}},
+       {"target": {"name": "x_prev", "kind": "reg"},
         "op": "nextUpdate",
-        "target": {
-          "kind": "reg",
-          "name": "fb"
-        },
-        "expr": {
-          "op": "nestedOut",
-          "ref": {
-            "op": "nameRef",
-            "name": "ap_15"
-          },
-          "output": {
-            "op": "nameRef",
-            "name": "y"
-          }
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "input",
-        "default": 0
-      },
-      {
-        "name": "feedback",
-        "default": 0.4
-      },
-      {
-        "name": "lfo_speed",
-        "default": 0.2
-      }
-    ],
-    "outputs": [
-      "output",
-      "lfo"
-    ]
-  }
-}
+        "expr": {"op": "nameRef", "name": "x"}},
+       {"target": {"name": "y_prev", "kind": "reg"},
+        "op": "nextUpdate",
+        "expr":
+        {"op": "add",
+         "args":
+         [{"op": "add",
+           "args":
+           [{"op": "mul",
+             "args":
+             [{"op": "neg", "args": [{"op": "nameRef", "name": "a"}]},
+              {"op": "nameRef", "name": "x"}]},
+            {"op": "nameRef", "name": "x_prev"}]},
+          {"op": "mul",
+           "args":
+           [{"op": "nameRef", "name": "a"},
+            {"op": "nameRef", "name": "y_prev"}]}]}}]}},
+    "op": "programDecl",
+    "name": "_allpassStage"},
+   {"program": {"op": "nameRef", "name": "Phasor"},
+    "op": "instanceDecl",
+    "name": "lfo_ph",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "lfo_speed"},
+      "port": {"op": "nameRef", "name": "freq"}}]},
+   {"program": {"op": "nameRef", "name": "Sin"},
+    "op": "instanceDecl",
+    "name": "lfo_sin",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [6.283185307179586,
+        {"ref": {"op": "nameRef", "name": "lfo_ph"},
+         "output": {"op": "nameRef", "name": "phase"},
+         "op": "nestedOut"}]},
+      "port": {"op": "nameRef", "name": "x"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_0",
+    "inputs":
+    [{"value":
+      {"op": "add",
+       "args":
+       [{"op": "nameRef", "name": "input"},
+        {"op": "mul",
+         "args":
+         [{"op": "nameRef", "name": "feedback"},
+          {"op": "nameRef", "name": "fb"}]}]},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_1",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_0"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_2",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_1"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_3",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_2"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_4",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_3"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_5",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_4"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_6",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_5"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_7",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_6"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_8",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_7"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_9",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_8"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_10",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_9"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_11",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_10"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_12",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_11"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_13",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_12"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_14",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_13"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]},
+   {"program": {"op": "nameRef", "name": "_allpassStage"},
+    "op": "instanceDecl",
+    "name": "ap_15",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ap_14"},
+       "output": {"op": "nameRef", "name": "y"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "x"}},
+     {"value":
+      {"op": "add",
+       "args":
+       [0.6,
+        {"op": "mul",
+         "args":
+         [0.35,
+          {"ref": {"op": "nameRef", "name": "lfo_sin"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      "port": {"op": "nameRef", "name": "a"}}]}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "output",
+    "expr":
+    {"op": "add",
+     "args":
+     [{"op": "mul", "args": [0.5, {"op": "nameRef", "name": "input"}]},
+      {"op": "mul",
+       "args":
+       [0.5,
+        {"ref": {"op": "nameRef", "name": "ap_15"},
+         "output": {"op": "nameRef", "name": "y"},
+         "op": "nestedOut"}]}]}},
+   {"op": "outputAssign",
+    "name": "lfo",
+    "expr":
+    {"ref": {"op": "nameRef", "name": "lfo_sin"},
+     "output": {"op": "nameRef", "name": "out"},
+     "op": "nestedOut"}},
+   {"target": {"name": "fb", "kind": "reg"},
+    "op": "nextUpdate",
+    "expr":
+    {"ref": {"op": "nameRef", "name": "ap_15"},
+     "output": {"op": "nameRef", "name": "y"},
+     "op": "nestedOut"}}]}}

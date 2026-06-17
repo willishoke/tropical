@@ -1,313 +1,94 @@
-{
-  "op": "program",
-  "name": "EnvExpDecay",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "delayDecl",
-        "name": "prev_trigger",
-        "update": {
-          "op": "nameRef",
-          "name": "trigger"
-        },
-        "init": 0
-      },
-      {
-        "op": "delayDecl",
-        "name": "state",
-        "update": {
-          "op": "match",
-          "scrutinee": {
-            "op": "nameRef",
-            "name": "state"
-          },
-          "arms": [
-            {
-              "variant": {
-                "op": "nameRef",
-                "name": "Idle"
-              },
-              "binds": [],
-              "body": {
-                "op": "call",
-                "callee": {
-                  "op": "nameRef",
-                  "name": "select"
-                },
-                "args": [
-                  {
-                    "op": "and",
-                    "args": [
-                      {
-                        "op": "gt",
-                        "args": [
-                          {
-                            "op": "nameRef",
-                            "name": "trigger"
-                          },
-                          0.5
-                        ]
-                      },
-                      {
-                        "op": "lte",
-                        "args": [
-                          {
-                            "op": "nameRef",
-                            "name": "prev_trigger"
-                          },
-                          0.5
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "op": "tag",
-                    "variant": {
-                      "op": "nameRef",
-                      "name": "Decaying"
-                    },
-                    "payload": [
-                      {
-                        "field": {
-                          "op": "nameRef",
-                          "name": "level"
-                        },
-                        "value": 1
-                      }
-                    ]
-                  },
-                  {
-                    "op": "tag",
-                    "variant": {
-                      "op": "nameRef",
-                      "name": "Idle"
-                    }
-                  }
-                ]
-              }
-            },
-            {
-              "variant": {
-                "op": "nameRef",
-                "name": "Decaying"
-              },
-              "binds": [
-                {
-                  "field": {
-                    "op": "nameRef",
-                    "name": "level"
-                  },
-                  "bind": "level"
-                }
-              ],
-              "body": {
-                "op": "call",
-                "callee": {
-                  "op": "nameRef",
-                  "name": "select"
-                },
-                "args": [
-                  {
-                    "op": "and",
-                    "args": [
-                      {
-                        "op": "gt",
-                        "args": [
-                          {
-                            "op": "nameRef",
-                            "name": "trigger"
-                          },
-                          0.5
-                        ]
-                      },
-                      {
-                        "op": "lte",
-                        "args": [
-                          {
-                            "op": "nameRef",
-                            "name": "prev_trigger"
-                          },
-                          0.5
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "op": "tag",
-                    "variant": {
-                      "op": "nameRef",
-                      "name": "Decaying"
-                    },
-                    "payload": [
-                      {
-                        "field": {
-                          "op": "nameRef",
-                          "name": "level"
-                        },
-                        "value": 1
-                      }
-                    ]
-                  },
-                  {
-                    "op": "tag",
-                    "variant": {
-                      "op": "nameRef",
-                      "name": "Decaying"
-                    },
-                    "payload": [
-                      {
-                        "field": {
-                          "op": "nameRef",
-                          "name": "level"
-                        },
-                        "value": {
-                          "op": "mul",
-                          "args": [
-                            {
-                              "op": "binding",
-                              "name": "level"
-                            },
-                            {
-                              "op": "nameRef",
-                              "name": "decay"
-                            }
-                          ]
-                        }
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          ]
-        },
-        "init": {
-          "op": "tag",
-          "variant": {
-            "op": "nameRef",
-            "name": "Idle"
-          }
-        },
-        "type": {
-          "op": "nameRef",
-          "name": "Env"
-        }
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "env",
-        "expr": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            {
-              "op": "match",
-              "scrutinee": {
-                "op": "nameRef",
-                "name": "state"
-              },
-              "arms": [
-                {
-                  "variant": {
-                    "op": "nameRef",
-                    "name": "Idle"
-                  },
-                  "binds": [],
-                  "body": 0
-                },
-                {
-                  "variant": {
-                    "op": "nameRef",
-                    "name": "Decaying"
-                  },
-                  "binds": [
-                    {
-                      "field": {
-                        "op": "nameRef",
-                        "name": "level"
-                      },
-                      "bind": "level"
-                    }
-                  ],
-                  "body": {
-                    "op": "binding",
-                    "name": "level"
-                  }
-                }
-              ]
-            },
-            -1,
-            1
-          ]
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "trigger",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            0,
-            -1,
-            1
-          ]
-        }
-      },
-      {
-        "name": "decay",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0.999
-      }
-    ],
-    "outputs": [
-      {
-        "name": "env",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        }
-      }
-    ],
-    "type_defs": [
-      {
-        "kind": "sum",
-        "name": "Env",
-        "variants": [
-          {
-            "name": "Idle",
-            "payload": []
-          },
-          {
-            "name": "Decaying",
-            "payload": [
-              {
-                "name": "level",
-                "scalar_type": "float"
-              }
-            ]
-          }
-        ]
-      }
-    ]
-  }
-}
+{"ports":
+ {"type_defs":
+  [{"variants":
+    [{"payload": [], "name": "Idle"},
+     {"payload": [{"scalar_type": "float", "name": "level"}],
+      "name": "Decaying"}],
+    "name": "Env",
+    "kind": "sum"}],
+  "outputs": [{"type": {"op": "nameRef", "name": "signal"}, "name": "env"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "signal"},
+    "name": "trigger",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [0, -1, 1]}},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "decay",
+    "default": 0.999}]},
+ "op": "program",
+ "name": "EnvExpDecay",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"update": {"op": "nameRef", "name": "trigger"},
+    "op": "delayDecl",
+    "name": "prev_trigger",
+    "init": 0},
+   {"update":
+    {"scrutinee": {"op": "nameRef", "name": "state"},
+     "op": "match",
+     "arms":
+     [{"variant": {"op": "nameRef", "name": "Idle"},
+       "body":
+       {"op": "call",
+        "callee": {"op": "nameRef", "name": "select"},
+        "args":
+        [{"op": "and",
+          "args":
+          [{"op": "gt", "args": [{"op": "nameRef", "name": "trigger"}, 0.5]},
+           {"op": "lte",
+            "args": [{"op": "nameRef", "name": "prev_trigger"}, 0.5]}]},
+         {"variant": {"op": "nameRef", "name": "Decaying"},
+          "payload":
+          [{"value": 1, "field": {"op": "nameRef", "name": "level"}}],
+          "op": "tag"},
+         {"variant": {"op": "nameRef", "name": "Idle"}, "op": "tag"}]},
+       "binds": []},
+      {"variant": {"op": "nameRef", "name": "Decaying"},
+       "body":
+       {"op": "call",
+        "callee": {"op": "nameRef", "name": "select"},
+        "args":
+        [{"op": "and",
+          "args":
+          [{"op": "gt", "args": [{"op": "nameRef", "name": "trigger"}, 0.5]},
+           {"op": "lte",
+            "args": [{"op": "nameRef", "name": "prev_trigger"}, 0.5]}]},
+         {"variant": {"op": "nameRef", "name": "Decaying"},
+          "payload":
+          [{"value": 1, "field": {"op": "nameRef", "name": "level"}}],
+          "op": "tag"},
+         {"variant": {"op": "nameRef", "name": "Decaying"},
+          "payload":
+          [{"value":
+            {"op": "mul",
+             "args":
+             [{"op": "binding", "name": "level"},
+              {"op": "nameRef", "name": "decay"}]},
+            "field": {"op": "nameRef", "name": "level"}}],
+          "op": "tag"}]},
+       "binds":
+       [{"field": {"op": "nameRef", "name": "level"}, "bind": "level"}]}]},
+    "type": {"op": "nameRef", "name": "Env"},
+    "op": "delayDecl",
+    "name": "state",
+    "init": {"variant": {"op": "nameRef", "name": "Idle"}, "op": "tag"}}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "env",
+    "expr":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args":
+     [{"scrutinee": {"op": "nameRef", "name": "state"},
+       "op": "match",
+       "arms":
+       [{"variant": {"op": "nameRef", "name": "Idle"}, "body": 0, "binds": []},
+        {"variant": {"op": "nameRef", "name": "Decaying"},
+         "body": {"op": "binding", "name": "level"},
+         "binds":
+         [{"field": {"op": "nameRef", "name": "level"}, "bind": "level"}]}]},
+      -1,
+      1]}}]}}

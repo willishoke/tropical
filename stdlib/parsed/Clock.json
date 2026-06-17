@@ -1,200 +1,72 @@
-{
-  "op": "program",
-  "name": "Clock",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "instanceDecl",
-        "name": "ph0",
-        "program": {
-          "op": "nameRef",
-          "name": "Phasor"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "freq"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "freq"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ph1",
-        "program": {
-          "op": "nameRef",
-          "name": "Phasor"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "freq"
-            },
-            "value": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "freq"
-                },
-                {
-                  "op": "index",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "ratios_in"
-                    },
-                    0
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "output",
-        "expr": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "lt",
-                  "args": [
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "ph0"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "phase"
-                      }
-                    },
-                    0.5
-                  ]
-                },
-                1
-              ]
-            },
-            0,
-            1
-          ]
-        }
-      },
-      {
-        "op": "outputAssign",
-        "name": "ratios_out",
-        "expr": [
-          {
-            "op": "mul",
-            "args": [
-              {
-                "op": "lt",
-                "args": [
-                  {
-                    "op": "nestedOut",
-                    "ref": {
-                      "op": "nameRef",
-                      "name": "ph1"
-                    },
-                    "output": {
-                      "op": "nameRef",
-                      "name": "phase"
-                    }
-                  },
-                  0.5
-                ]
-              },
-              1
-            ]
-          }
-        ]
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "freq",
-        "type": {
-          "op": "nameRef",
-          "name": "freq"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "select"
-          },
-          "args": [
-            {
-              "op": "gt",
-              "args": [
-                1,
-                0
-              ]
-            },
-            1,
-            0
-          ]
-        }
-      },
-      {
-        "name": "ratios_in",
-        "type": {
-          "kind": "array",
-          "element": {
-            "op": "nameRef",
-            "name": "float"
-          },
-          "shape": [
-            1
-          ]
-        },
-        "default": [
-          1
-        ]
-      }
-    ],
-    "outputs": [
-      {
-        "name": "output",
-        "type": {
-          "op": "nameRef",
-          "name": "unipolar"
-        }
-      },
-      {
-        "name": "ratios_out",
-        "type": {
-          "kind": "array",
-          "element": {
-            "op": "nameRef",
-            "name": "float"
-          },
-          "shape": [
-            1
-          ]
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs":
+  [{"type": {"op": "nameRef", "name": "unipolar"}, "name": "output"},
+   {"type":
+    {"shape": [1],
+     "kind": "array",
+     "element": {"op": "nameRef", "name": "float"}},
+    "name": "ratios_out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "freq"},
+    "name": "freq",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "select"},
+     "args": [{"op": "gt", "args": [1, 0]}, 1, 0]}},
+   {"type":
+    {"shape": [1],
+     "kind": "array",
+     "element": {"op": "nameRef", "name": "float"}},
+    "name": "ratios_in",
+    "default": [1]}]},
+ "op": "program",
+ "name": "Clock",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"program": {"op": "nameRef", "name": "Phasor"},
+    "op": "instanceDecl",
+    "name": "ph0",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "freq"},
+      "port": {"op": "nameRef", "name": "freq"}}]},
+   {"program": {"op": "nameRef", "name": "Phasor"},
+    "op": "instanceDecl",
+    "name": "ph1",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "freq"},
+        {"op": "index", "args": [{"op": "nameRef", "name": "ratios_in"}, 0]}]},
+      "port": {"op": "nameRef", "name": "freq"}}]}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "output",
+    "expr":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args":
+     [{"op": "mul",
+       "args":
+       [{"op": "lt",
+         "args":
+         [{"ref": {"op": "nameRef", "name": "ph0"},
+           "output": {"op": "nameRef", "name": "phase"},
+           "op": "nestedOut"},
+          0.5]},
+        1]},
+      0,
+      1]}},
+   {"op": "outputAssign",
+    "name": "ratios_out",
+    "expr":
+    [{"op": "mul",
+      "args":
+      [{"op": "lt",
+        "args":
+        [{"ref": {"op": "nameRef", "name": "ph1"},
+          "output": {"op": "nameRef", "name": "phase"},
+          "op": "nestedOut"},
+         0.5]},
+       1]}]}]}}

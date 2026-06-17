@@ -1,175 +1,68 @@
-{
-  "op": "program",
-  "name": "Sin",
-  "body": {
-    "op": "block",
-    "decls": [],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "out",
-        "expr": {
-          "op": "let",
-          "bind": {
-            "n": {
-              "op": "call",
-              "callee": {
-                "op": "nameRef",
-                "name": "round"
-              },
-              "args": [
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "x"
-                    },
-                    0.3183098861837907
-                  ]
-                }
-              ]
-            },
-            "r": {
-              "op": "sub",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "x"
-                },
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "n"
-                    },
-                    3.141592653589793
-                  ]
-                }
-              ]
-            },
-            "odd_n": {
-              "op": "bitAnd",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "n"
-                },
-                1
-              ]
-            },
-            "sign": {
-              "op": "sub",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    2,
-                    {
-                      "op": "nameRef",
-                      "name": "odd_n"
-                    }
-                  ]
-                }
-              ]
-            },
-            "r2": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "r"
-                },
-                {
-                  "op": "nameRef",
-                  "name": "r"
-                }
-              ]
-            },
-            "poly": {
-              "op": "fold",
-              "over": [
-                -2.505210838544172e-8,
-                0.0000027557319223985893,
-                -0.0001984126984126984,
-                0.008333333333333333,
-                -0.16666666666666666,
-                1
-              ],
-              "init": 0,
-              "acc_var": "a",
-              "elem_var": "c",
-              "body": {
-                "op": "add",
-                "args": [
-                  {
-                    "op": "binding",
-                    "name": "c"
-                  },
-                  {
-                    "op": "mul",
-                    "args": [
-                      {
-                        "op": "binding",
-                        "name": "a"
-                      },
-                      {
-                        "op": "nameRef",
-                        "name": "r2"
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          },
-          "in": {
-            "op": "mul",
-            "args": [
-              {
-                "op": "binding",
-                "name": "sign"
-              },
-              {
-                "op": "mul",
-                "args": [
-                  {
-                    "op": "binding",
-                    "name": "r"
-                  },
-                  {
-                    "op": "binding",
-                    "name": "poly"
-                  }
-                ]
-              }
-            ]
-          }
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "x",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0
-      }
-    ],
-    "outputs": [
-      {
-        "name": "out",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "float"}, "name": "x", "default": 0}]},
+ "op": "program",
+ "name": "Sin",
+ "body":
+ {"op": "block",
+  "decls": [],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "let",
+     "in":
+     {"op": "mul",
+      "args":
+      [{"op": "binding", "name": "sign"},
+       {"op": "mul",
+        "args":
+        [{"op": "binding", "name": "r"}, {"op": "binding", "name": "poly"}]}]},
+     "bind":
+     [{"value":
+       {"op": "call",
+        "callee": {"op": "nameRef", "name": "round"},
+        "args":
+        [{"op": "mul",
+          "args": [{"op": "nameRef", "name": "x"}, 0.3183098861837907]}]},
+       "name": "n"},
+      {"value":
+       {"op": "sub",
+        "args":
+        [{"op": "nameRef", "name": "x"},
+         {"op": "mul",
+          "args": [{"op": "nameRef", "name": "n"}, 3.141592653589793]}]},
+       "name": "r"},
+      {"value": {"op": "bitAnd", "args": [{"op": "nameRef", "name": "n"}, 1]},
+       "name": "odd_n"},
+      {"value":
+       {"op": "sub",
+        "args":
+        [1, {"op": "mul", "args": [2, {"op": "nameRef", "name": "odd_n"}]}]},
+       "name": "sign"},
+      {"value":
+       {"op": "mul",
+        "args":
+        [{"op": "nameRef", "name": "r"}, {"op": "nameRef", "name": "r"}]},
+       "name": "r2"},
+      {"value":
+       {"over":
+        [-0.00000002505210838544172,
+         0.0000027557319223985893,
+         -0.0001984126984126984,
+         0.008333333333333333,
+         -0.16666666666666666,
+         1],
+        "op": "fold",
+        "init": 0,
+        "elem_var": "c",
+        "body":
+        {"op": "add",
+         "args":
+         [{"op": "binding", "name": "c"},
+          {"op": "mul",
+           "args":
+           [{"op": "binding", "name": "a"}, {"op": "nameRef", "name": "r2"}]}]},
+        "acc_var": "a"},
+       "name": "poly"}]}}]}}

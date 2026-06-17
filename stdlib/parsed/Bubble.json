@@ -1,504 +1,178 @@
-{
-  "op": "program",
-  "name": "Bubble",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "regDecl",
-        "name": "env_smooth",
-        "init": 0
-      },
-      {
-        "op": "instanceDecl",
-        "name": "hold",
-        "program": {
-          "op": "nameRef",
-          "name": "SampleHold"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "trigger"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "trigger"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "input"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "radius"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "ramp",
-        "program": {
-          "op": "nameRef",
-          "name": "TriggerRamp"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "trigger"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "trigger"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "decay_calc",
-        "program": {
-          "op": "nameRef",
-          "name": "Exp"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "div",
-              "args": [
-                -1,
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "call",
-                      "callee": {
-                        "op": "nameRef",
-                        "name": "sampleRate"
-                      },
-                      "args": []
-                    },
-                    {
-                      "op": "add",
-                      "args": [
-                        {
-                          "op": "mul",
-                          "args": [
-                            {
-                              "op": "nameRef",
-                              "name": "decay_scale"
-                            },
-                            {
-                              "op": "nestedOut",
-                              "ref": {
-                                "op": "nameRef",
-                                "name": "hold"
-                              },
-                              "output": {
-                                "op": "nameRef",
-                                "name": "value"
-                              }
-                            }
-                          ]
-                        },
-                        0.000001
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "env_gen",
-        "program": {
-          "op": "nameRef",
-          "name": "EnvExpDecay"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "trigger"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "trigger"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "decay"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "decay_calc"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "out"
-              }
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "svf",
-        "program": {
-          "op": "nameRef",
-          "name": "SVF"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "input"
-            },
-            "value": {
-              "op": "nestedOut",
-              "ref": {
-                "op": "nameRef",
-                "name": "ramp"
-              },
-              "output": {
-                "op": "nameRef",
-                "name": "edge"
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "cutoff"
-            },
-            "value": {
-              "op": "let",
-              "bind": {
-                "r_held": {
-                  "op": "nestedOut",
-                  "ref": {
-                    "op": "nameRef",
-                    "name": "hold"
-                  },
-                  "output": {
-                    "op": "nameRef",
-                    "name": "value"
-                  }
-                },
-                "t_eff": {
-                  "op": "nestedOut",
-                  "ref": {
-                    "op": "nameRef",
-                    "name": "ramp"
-                  },
-                  "output": {
-                    "op": "nameRef",
-                    "name": "frames"
-                  }
-                }
-              },
-              "in": {
-                "op": "let",
-                "bind": {
-                  "tau": {
-                    "op": "add",
-                    "args": [
-                      {
-                        "op": "mul",
-                        "args": [
-                          {
-                            "op": "nameRef",
-                            "name": "decay_scale"
-                          },
-                          {
-                            "op": "binding",
-                            "name": "r_held"
-                          }
-                        ]
-                      },
-                      0.000001
-                    ]
-                  },
-                  "f0": {
-                    "op": "div",
-                    "args": [
-                      3.26,
-                      {
-                        "op": "add",
-                        "args": [
-                          {
-                            "op": "binding",
-                            "name": "r_held"
-                          },
-                          0.000001
-                        ]
-                      }
-                    ]
-                  }
-                },
-                "in": {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "binding",
-                      "name": "f0"
-                    },
-                    {
-                      "op": "add",
-                      "args": [
-                        1,
-                        {
-                          "op": "div",
-                          "args": [
-                            {
-                              "op": "mul",
-                              "args": [
-                                {
-                                  "op": "nameRef",
-                                  "name": "sigma"
-                                },
-                                {
-                                  "op": "binding",
-                                  "name": "t_eff"
-                                }
-                              ]
-                            },
-                            {
-                              "op": "mul",
-                              "args": [
-                                {
-                                  "op": "call",
-                                  "callee": {
-                                    "op": "nameRef",
-                                    "name": "sampleRate"
-                                  },
-                                  "args": []
-                                },
-                                {
-                                  "op": "binding",
-                                  "name": "tau"
-                                }
-                              ]
-                            }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "q"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "q"
-            }
-          }
-        ]
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "out",
-        "expr": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "env_smooth"
-                },
-                {
-                  "op": "nestedOut",
-                  "ref": {
-                    "op": "nameRef",
-                    "name": "svf"
-                  },
-                  "output": {
-                    "op": "nameRef",
-                    "name": "bp"
-                  }
-                }
-              ]
-            },
-            {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "hold"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "value"
-                      }
-                    },
-                    1000
-                  ]
-                },
-                {
-                  "op": "nameRef",
-                  "name": "amp_scale"
-                }
-              ]
-            }
-          ]
-        }
-      },
-      {
-        "op": "nextUpdate",
-        "target": {
-          "kind": "reg",
-          "name": "env_smooth"
-        },
-        "expr": {
-          "op": "add",
-          "args": [
-            {
-              "op": "nameRef",
-              "name": "env_smooth"
-            },
-            {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "attack_g"
-                },
-                {
-                  "op": "sub",
-                  "args": [
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "env_gen"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "env"
-                      }
-                    },
-                    {
-                      "op": "nameRef",
-                      "name": "env_smooth"
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "trigger",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            0,
-            -1,
-            1
-          ]
-        }
-      },
-      {
-        "name": "radius",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0.001
-      },
-      {
-        "name": "q",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 30
-      },
-      {
-        "name": "sigma",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0.3
-      },
-      {
-        "name": "decay_scale",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 10
-      },
-      {
-        "name": "amp_scale",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 1
-      },
-      {
-        "name": "attack_g",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0.05
-      }
-    ],
-    "outputs": [
-      {
-        "name": "out",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "signal"},
+    "name": "trigger",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [0, -1, 1]}},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "radius",
+    "default": 0.001},
+   {"type": {"op": "nameRef", "name": "float"}, "name": "q", "default": 30},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "sigma",
+    "default": 0.3},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "decay_scale",
+    "default": 10},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "amp_scale",
+    "default": 1},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "attack_g",
+    "default": 0.05}]},
+ "op": "program",
+ "name": "Bubble",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"op": "regDecl", "name": "env_smooth", "init": 0},
+   {"program": {"op": "nameRef", "name": "SampleHold"},
+    "op": "instanceDecl",
+    "name": "hold",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "trigger"},
+      "port": {"op": "nameRef", "name": "trigger"}},
+     {"value": {"op": "nameRef", "name": "radius"},
+      "port": {"op": "nameRef", "name": "input"}}]},
+   {"program": {"op": "nameRef", "name": "TriggerRamp"},
+    "op": "instanceDecl",
+    "name": "ramp",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "trigger"},
+      "port": {"op": "nameRef", "name": "trigger"}}]},
+   {"program": {"op": "nameRef", "name": "Exp"},
+    "op": "instanceDecl",
+    "name": "decay_calc",
+    "inputs":
+    [{"value":
+      {"op": "div",
+       "args":
+       [-1,
+        {"op": "mul",
+         "args":
+         [{"op": "call",
+           "callee": {"op": "nameRef", "name": "sampleRate"},
+           "args": []},
+          {"op": "add",
+           "args":
+           [{"op": "mul",
+             "args":
+             [{"op": "nameRef", "name": "decay_scale"},
+              {"ref": {"op": "nameRef", "name": "hold"},
+               "output": {"op": "nameRef", "name": "value"},
+               "op": "nestedOut"}]},
+            0.000001]}]}]},
+      "port": {"op": "nameRef", "name": "x"}}]},
+   {"program": {"op": "nameRef", "name": "EnvExpDecay"},
+    "op": "instanceDecl",
+    "name": "env_gen",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "trigger"},
+      "port": {"op": "nameRef", "name": "trigger"}},
+     {"value":
+      {"ref": {"op": "nameRef", "name": "decay_calc"},
+       "output": {"op": "nameRef", "name": "out"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "decay"}}]},
+   {"program": {"op": "nameRef", "name": "SVF"},
+    "op": "instanceDecl",
+    "name": "svf",
+    "inputs":
+    [{"value":
+      {"ref": {"op": "nameRef", "name": "ramp"},
+       "output": {"op": "nameRef", "name": "edge"},
+       "op": "nestedOut"},
+      "port": {"op": "nameRef", "name": "input"}},
+     {"value":
+      {"op": "let",
+       "in":
+       {"op": "let",
+        "in":
+        {"op": "mul",
+         "args":
+         [{"op": "binding", "name": "f0"},
+          {"op": "add",
+           "args":
+           [1,
+            {"op": "div",
+             "args":
+             [{"op": "mul",
+               "args":
+               [{"op": "nameRef", "name": "sigma"},
+                {"op": "binding", "name": "t_eff"}]},
+              {"op": "mul",
+               "args":
+               [{"op": "call",
+                 "callee": {"op": "nameRef", "name": "sampleRate"},
+                 "args": []},
+                {"op": "binding", "name": "tau"}]}]}]}]},
+        "bind":
+        [{"value":
+          {"op": "add",
+           "args":
+           [{"op": "mul",
+             "args":
+             [{"op": "nameRef", "name": "decay_scale"},
+              {"op": "binding", "name": "r_held"}]},
+            0.000001]},
+          "name": "tau"},
+         {"value":
+          {"op": "div",
+           "args":
+           [3.26,
+            {"op": "add",
+             "args": [{"op": "binding", "name": "r_held"}, 0.000001]}]},
+          "name": "f0"}]},
+       "bind":
+       [{"value":
+         {"ref": {"op": "nameRef", "name": "hold"},
+          "output": {"op": "nameRef", "name": "value"},
+          "op": "nestedOut"},
+         "name": "r_held"},
+        {"value":
+         {"ref": {"op": "nameRef", "name": "ramp"},
+          "output": {"op": "nameRef", "name": "frames"},
+          "op": "nestedOut"},
+         "name": "t_eff"}]},
+      "port": {"op": "nameRef", "name": "cutoff"}},
+     {"value": {"op": "nameRef", "name": "q"},
+      "port": {"op": "nameRef", "name": "q"}}]}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "mul",
+     "args":
+     [{"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "env_smooth"},
+        {"ref": {"op": "nameRef", "name": "svf"},
+         "output": {"op": "nameRef", "name": "bp"},
+         "op": "nestedOut"}]},
+      {"op": "mul",
+       "args":
+       [{"op": "mul",
+         "args":
+         [{"ref": {"op": "nameRef", "name": "hold"},
+           "output": {"op": "nameRef", "name": "value"},
+           "op": "nestedOut"},
+          1000]},
+        {"op": "nameRef", "name": "amp_scale"}]}]}},
+   {"target": {"name": "env_smooth", "kind": "reg"},
+    "op": "nextUpdate",
+    "expr":
+    {"op": "add",
+     "args":
+     [{"op": "nameRef", "name": "env_smooth"},
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "attack_g"},
+        {"op": "sub",
+         "args":
+         [{"ref": {"op": "nameRef", "name": "env_gen"},
+           "output": {"op": "nameRef", "name": "env"},
+           "op": "nestedOut"},
+          {"op": "nameRef", "name": "env_smooth"}]}]}]}}]}}
