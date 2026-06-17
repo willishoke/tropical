@@ -150,16 +150,29 @@ def parseMdVerb (args : List String) : IO UInt32 := do
     Output is Lean-canonical (sorted keys) — semantically identical to the
     prior TS-serialized bridge, and idempotent under re-runs. -/
 def parseAllVerb (_args : List String) : IO UInt32 := do
-  let entries ← (System.FilePath.mk "stdlib").readDir
-  let mdNames := entries.filterMap fun e =>
-    let n := e.fileName
-    if n.endsWith ".md" && n != "README.md" then some n else none
-  let sorted := mdNames.qsort fun a b => decide (a < b)
+  -- Scan stdlib/ (top level) then stdlib/reversible/ — the subdir holds the
+  -- reversible-synthesis programs; placing it after the base stdlib keeps each
+  -- dir internally sorted, and the fixed-point loop below resolves the actual
+  -- dependency order regardless (reversible programs depend on base ones).
+  let topEntries ← (System.FilePath.mk "stdlib").readDir
+  let topPaths := (topEntries.filterMap fun e =>
+      let n := e.fileName
+      if n.endsWith ".md" && n != "README.md" then some s!"stdlib/{n}" else none)
+    |>.qsort (fun a b => decide (a < b))
+  let revDir := "stdlib/reversible"
+  let revPaths ← (if ← System.FilePath.pathExists revDir then do
+      let revEntries ← (System.FilePath.mk revDir).readDir
+      pure ((revEntries.filterMap fun e =>
+          let n := e.fileName
+          if n.endsWith ".md" && n != "README.md" then some s!"{revDir}/{n}" else none)
+        |>.qsort (fun a b => decide (a < b)))
+    else pure #[])
+  let paths := topPaths ++ revPaths
   let mut parsed : Array (String × Tropical.Parse.Program) := #[]
-  for fname in sorted do
-    let text ← IO.FS.readFile s!"stdlib/{fname}"
+  for path in paths do
+    let text ← IO.FS.readFile path
     match Tropical.Parse.Surface.parseMarkdownProgram text with
-    | .error e => IO.eprintln s!"{fname}: {e}"; return 1
+    | .error e => IO.eprintln s!"{path}: {e}"; return 1
     | .ok prog => parsed := parsed.push (prog.name, prog)
   -- Fixed-point elaborate loop → registration (manifest) order: each pass
   -- elaborates the programs whose sibling refs already resolved.

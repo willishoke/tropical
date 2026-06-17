@@ -208,6 +208,78 @@ private def runLetRoundtrip : IO Bool := do
         | .error e => IO.println s!"  FAIL  let-roundtrip  elaborate: {firstLine e.message}"; pure false
         | .ok _ => IO.println "  PASS  let-roundtrip  Sin survives encode→decode→elaborate"; pure true
 
+-- ── Reversibility: a closed-form-in-τ patch fed a palindromic τ is a palindrome ─
+-- The architectural claim made testable. `ReversibleProbe` drives a symmetric
+-- time coordinate from the sample counter (forward to `half`, then back) and
+-- feeds it to a stateless closed-form patch (comb over modal voice). Equal τ ⟹
+-- equal output, so the render must be a bit-exact palindrome about `half`. A
+-- single mismatched pair means a register leaked in — statefulness broke purity.
+
+/-- Decode little-endian float64 bytes (the runtime's mono output) to samples. -/
+private def decodeF64LE (b : ByteArray) : Array Float := Id.run do
+  let n := b.size / 8
+  let mut out : Array Float := Array.mkEmpty n
+  for i in [0:n] do
+    let mut u : UInt64 := 0
+    -- little-endian: byte (i*8+k) carries place value 256^k; read MSB→LSB
+    for j in [0:8] do
+      u := u * 256 + (b.get! (i * 8 + (7 - j))).toUInt64
+    out := out.push (Float.ofBits u)
+  pure out
+
+/-- Render a plan to exactly `n` mono samples in one process call (buffer = n,
+    so `sampleIndex()` runs 0 .. n-1 with no fade — fresh runtimes start with
+    fade disabled, `fade_in_remaining_ = 0`). -/
+private def renderSamples (planJson : String) (n : Nat) : IO (Except String (Array Float)) := do
+  match Lean.Json.parse planJson with
+  | .error e => pure (.error s!"parse: {e}")
+  | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
+    | .error e => pure (.error s!"ofWire: {e}")
+    | .ok plan => match Tropical.Ir.EmitLlvm.emitKernel plan with
+      | .error e => pure (.error s!"emitKernel: {e}")
+      | .ok ir => do
+        let rt ← Tropical.Ffi.Runtime.new (UInt32.ofNat n)
+        rt.loadIr ir planJson
+        rt.process
+        pure (.ok (decodeF64LE (← rt.outputBytes)))
+
+/-- Compile the reversible probe patch, render `2*half` samples, assert the
+    output is a bit-exact palindrome about index `half` (and non-silent). -/
+private def runReversibility : IO Bool := do
+  let half : Nat := 2048
+  let n : Nat := 2 * half
+  match ← compilePatch "patches/reversible_probe.json" .fused with
+  | .error e => IO.println s!"  FAIL  reversibility  compile: {firstLine e}"; pure false
+  | .ok planJson =>
+    match ← renderSamples planJson n with
+    | .error e => IO.println s!"  FAIL  reversibility  render: {firstLine e}"; pure false
+    | .ok samples =>
+      if samples.size < n then
+        IO.println s!"  FAIL  reversibility  got {samples.size} samples (want {n})"
+        pure false
+      else do
+        let mut mism := 0
+        let mut firstBad := 0
+        for k in [1:half] do
+          if (samples[half + k]!).toBits != (samples[half - k]!).toBits then
+            if mism == 0 then firstBad := k
+            mism := mism + 1
+        let mut energy := 0.0
+        let mut maxAbs := 0.0
+        for k in [0:n] do
+          let v := samples[k]!
+          energy := energy + v * v
+          if v.abs > maxAbs then maxAbs := v.abs
+        if mism != 0 then
+          IO.println s!"  FAIL  reversibility  {mism} mismatched pairs (first k={firstBad})"
+          pure false
+        else if energy <= 1e-6 then
+          IO.println s!"  FAIL  reversibility  signal is silent (energy {energy})"
+          pure false
+        else
+          IO.println s!"  PASS  reversibility  bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
+          pure true
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -264,6 +336,11 @@ def main (args : List String) : IO UInt32 := do
   IO.println "let serialization order:"
   total := total + 1
   if !(← runLetRoundtrip) then failed := failed + 1
+
+  -- ── (e) Reversibility: closed-form-in-τ ⇒ palindromic render ───────────────
+  IO.println "reversibility (closed-form-in-tau palindrome):"
+  total := total + 1
+  if !(← runReversibility) then failed := failed + 1
 
   IO.println ""
   IO.println s!"{total - failed}/{total} passed"

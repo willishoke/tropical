@@ -1,0 +1,74 @@
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "float"}, "name": "tau", "default": 0},
+   {"type": {"op": "nameRef", "name": "freq"},
+    "name": "f0",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "select"},
+     "args": [{"op": "gt", "args": [110, 0]}, 110, 0]}},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "delta",
+    "default": 0.0007}]},
+ "op": "program",
+ "name": "ReversibleComb",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"program": {"op": "nameRef", "name": "ModalVoice"},
+    "op": "instanceDecl",
+    "name": "dry",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "tau"},
+      "port": {"op": "nameRef", "name": "tau"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}}]},
+   {"program": {"op": "nameRef", "name": "ModalVoice"},
+    "op": "instanceDecl",
+    "name": "past",
+    "inputs":
+    [{"value":
+      {"op": "sub",
+       "args":
+       [{"op": "nameRef", "name": "tau"}, {"op": "nameRef", "name": "delta"}]},
+      "port": {"op": "nameRef", "name": "tau"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}}]},
+   {"program": {"op": "nameRef", "name": "ModalVoice"},
+    "op": "instanceDecl",
+    "name": "ahead",
+    "inputs":
+    [{"value":
+      {"op": "add",
+       "args":
+       [{"op": "nameRef", "name": "tau"}, {"op": "nameRef", "name": "delta"}]},
+      "port": {"op": "nameRef", "name": "tau"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}}]}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "add",
+     "args":
+     [{"op": "add",
+       "args":
+       [{"op": "mul",
+         "args":
+         [0.5,
+          {"ref": {"op": "nameRef", "name": "dry"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]},
+        {"op": "mul",
+         "args":
+         [0.25,
+          {"ref": {"op": "nameRef", "name": "past"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      {"op": "mul",
+       "args":
+       [0.25,
+        {"ref": {"op": "nameRef", "name": "ahead"},
+         "output": {"op": "nameRef", "name": "out"},
+         "op": "nestedOut"}]}]}}]}}
