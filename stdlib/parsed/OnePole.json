@@ -1,208 +1,68 @@
-{
-  "op": "program",
-  "name": "OnePole",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "regDecl",
-        "name": "s",
-        "init": 0
-      },
-      {
-        "op": "instanceDecl",
-        "name": "tanh_in",
-        "program": {
-          "op": "nameRef",
-          "name": "Tanh"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "input"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "tanh_s",
-        "program": {
-          "op": "nameRef",
-          "name": "Tanh"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "x"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "s"
-            }
-          }
-        ]
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "out",
-        "expr": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "s"
-                },
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "g"
-                    },
-                    {
-                      "op": "sub",
-                      "args": [
-                        {
-                          "op": "nestedOut",
-                          "ref": {
-                            "op": "nameRef",
-                            "name": "tanh_in"
-                          },
-                          "output": {
-                            "op": "nameRef",
-                            "name": "out"
-                          }
-                        },
-                        {
-                          "op": "nestedOut",
-                          "ref": {
-                            "op": "nameRef",
-                            "name": "tanh_s"
-                          },
-                          "output": {
-                            "op": "nameRef",
-                            "name": "out"
-                          }
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            },
-            -1,
-            1
-          ]
-        }
-      },
-      {
-        "op": "nextUpdate",
-        "target": {
-          "kind": "reg",
-          "name": "s"
-        },
-        "expr": {
-          "op": "add",
-          "args": [
-            {
-              "op": "nameRef",
-              "name": "s"
-            },
-            {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "g"
-                },
-                {
-                  "op": "sub",
-                  "args": [
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "tanh_in"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    },
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "tanh_s"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "input",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            0,
-            -1,
-            1
-          ]
-        }
-      },
-      {
-        "name": "g",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0.1
-      }
-    ],
-    "outputs": [
-      {
-        "name": "out",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "signal"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "signal"},
+    "name": "input",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [0, -1, 1]}},
+   {"type": {"op": "nameRef", "name": "float"}, "name": "g", "default": 0.1}]},
+ "op": "program",
+ "name": "OnePole",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"op": "regDecl", "name": "s", "init": 0},
+   {"program": {"op": "nameRef", "name": "Tanh"},
+    "op": "instanceDecl",
+    "name": "tanh_in",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "input"},
+      "port": {"op": "nameRef", "name": "x"}}]},
+   {"program": {"op": "nameRef", "name": "Tanh"},
+    "op": "instanceDecl",
+    "name": "tanh_s",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "s"},
+      "port": {"op": "nameRef", "name": "x"}}]}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args":
+     [{"op": "add",
+       "args":
+       [{"op": "nameRef", "name": "s"},
+        {"op": "mul",
+         "args":
+         [{"op": "nameRef", "name": "g"},
+          {"op": "sub",
+           "args":
+           [{"ref": {"op": "nameRef", "name": "tanh_in"},
+             "output": {"op": "nameRef", "name": "out"},
+             "op": "nestedOut"},
+            {"ref": {"op": "nameRef", "name": "tanh_s"},
+             "output": {"op": "nameRef", "name": "out"},
+             "op": "nestedOut"}]}]}]},
+      -1,
+      1]}},
+   {"target": {"name": "s", "kind": "reg"},
+    "op": "nextUpdate",
+    "expr":
+    {"op": "add",
+     "args":
+     [{"op": "nameRef", "name": "s"},
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "g"},
+        {"op": "sub",
+         "args":
+         [{"ref": {"op": "nameRef", "name": "tanh_in"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"},
+          {"ref": {"op": "nameRef", "name": "tanh_s"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]}]}}]}}

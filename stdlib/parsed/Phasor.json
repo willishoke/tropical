@@ -1,112 +1,36 @@
-{
-  "op": "program",
-  "name": "Phasor",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "regDecl",
-        "name": "p",
-        "init": 0
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "phase",
-        "expr": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            {
-              "op": "nameRef",
-              "name": "p"
-            },
-            0,
-            1
-          ]
-        }
-      },
-      {
-        "op": "nextUpdate",
-        "target": {
-          "kind": "reg",
-          "name": "p"
-        },
-        "expr": {
-          "op": "mod",
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "p"
-                },
-                {
-                  "op": "div",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "freq"
-                    },
-                    {
-                      "op": "call",
-                      "callee": {
-                        "op": "nameRef",
-                        "name": "sampleRate"
-                      },
-                      "args": []
-                    }
-                  ]
-                }
-              ]
-            },
-            1
-          ]
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "freq",
-        "type": {
-          "op": "nameRef",
-          "name": "freq"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "select"
-          },
-          "args": [
-            {
-              "op": "gt",
-              "args": [
-                440,
-                0
-              ]
-            },
-            440,
-            0
-          ]
-        }
-      }
-    ],
-    "outputs": [
-      {
-        "name": "phase",
-        "type": {
-          "op": "nameRef",
-          "name": "unipolar"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "unipolar"}, "name": "phase"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "freq"},
+    "name": "freq",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "select"},
+     "args": [{"op": "gt", "args": [440, 0]}, 440, 0]}}]},
+ "op": "program",
+ "name": "Phasor",
+ "body":
+ {"op": "block",
+  "decls": [{"op": "regDecl", "name": "p", "init": 0}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "phase",
+    "expr":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [{"op": "nameRef", "name": "p"}, 0, 1]}},
+   {"target": {"name": "p", "kind": "reg"},
+    "op": "nextUpdate",
+    "expr":
+    {"op": "mod",
+     "args":
+     [{"op": "add",
+       "args":
+       [{"op": "nameRef", "name": "p"},
+        {"op": "div",
+         "args":
+         [{"op": "nameRef", "name": "freq"},
+          {"op": "call",
+           "callee": {"op": "nameRef", "name": "sampleRate"},
+           "args": []}]}]},
+      1]}}]}}

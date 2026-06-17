@@ -333,8 +333,13 @@ partial def expr : ParsedExpr → Json
   | .index arr idx =>
     Json.mkObj [("op", jStr "index"), ("args", Json.arr #[expr arr, expr idx])]
   | .letIn bind body =>
+    -- `bind` is ordered (later bindings may reference earlier ones), so it is
+    -- encoded as an array. A JSON object would have its keys reordered on
+    -- re-encode (Lean `Json` is key-sorted), scrambling the binding order —
+    -- the same reason match-arm binds use an array.
     Json.mkObj [("op", jStr "let"),
-                ("bind", Json.mkObj (bind.toList.map fun (k, v) => (k, expr v))),
+                ("bind", Json.arr (bind.map fun (name, v) =>
+                  Json.mkObj [("name", jStr name), ("value", expr v)])),
                 ("in", expr body)]
   | .fold over init accVar elemVar body =>
     Json.mkObj [("op", jStr "fold"), ("over", expr over), ("init", expr init),
@@ -593,11 +598,24 @@ partial def expr (path : String) (j : JsonV) : Except String ParsedExpr := do
       pure (.index (← expr s!"{path}.args[0]" a) (← expr s!"{path}.args[1]" i))
     | "let" => do
       expectKeys path j ["op", "bind", "in"]
-      let .obj bindFields ← reqField path j "bind"
-        | err path "'let' bind must be an object"
+      let bindJson ← reqField path j "bind"
       let mut bind : Array (String × ParsedExpr) := #[]
-      for (k, v) in bindFields do
-        bind := bind.push (k, ← expr s!"{path}.bind.{k}" v)
+      match bindJson with
+      | .arr items =>
+        -- Canonical ordered form: [{name, value}, …]. An array preserves
+        -- binding order through re-encode; an object does not (its keys are
+        -- reordered), and `let` bindings are order-dependent.
+        for h : i in [0:items.size] do
+          let b := items[i]
+          let bPath := s!"{path}.bind[{i}]"
+          expectKeys bPath b ["name", "value"]
+          let nm ← reqStr bPath b "name"
+          bind := bind.push (nm, ← expr s!"{bPath}.value" (← reqField bPath b "value"))
+      | .obj bindFields =>
+        -- Legacy object form (older committed bridge); decoded in textual order.
+        for (k, v) in bindFields do
+          bind := bind.push (k, ← expr s!"{path}.bind.{k}" v)
+      | _ => err path "'let' bind must be an array or object"
       pure (.letIn bind (← expr s!"{path}.in" (← reqField path j "in")))
     | "fold" => do
       expectKeys path j ["op", "over", "init", "acc_var", "elem_var", "body"]

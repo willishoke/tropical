@@ -1,964 +1,257 @@
-{
-  "op": "program",
-  "name": "BubbleCloud",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "regDecl",
-        "name": "voice_idx",
-        "init": 0,
-        "type": {
-          "op": "nameRef",
-          "name": "int"
-        }
-      },
-      {
-        "op": "delayDecl",
-        "name": "prev_trigger",
-        "update": {
-          "op": "nameRef",
-          "name": "trigger"
-        },
-        "init": 0
-      },
-      {
-        "op": "instanceDecl",
-        "name": "v0",
-        "program": {
-          "op": "nameRef",
-          "name": "Bubble"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "trigger"
-            },
-            "value": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "trigger"
-                },
-                {
-                  "op": "eq",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "voice_idx"
-                    },
-                    0
-                  ]
-                }
-              ]
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "radius"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "radius"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "q"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "q"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "sigma"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "sigma"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "v1",
-        "program": {
-          "op": "nameRef",
-          "name": "Bubble"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "trigger"
-            },
-            "value": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "trigger"
-                },
-                {
-                  "op": "eq",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "voice_idx"
-                    },
-                    1
-                  ]
-                }
-              ]
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "radius"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "radius"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "q"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "q"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "sigma"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "sigma"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "v2",
-        "program": {
-          "op": "nameRef",
-          "name": "Bubble"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "trigger"
-            },
-            "value": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "trigger"
-                },
-                {
-                  "op": "eq",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "voice_idx"
-                    },
-                    2
-                  ]
-                }
-              ]
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "radius"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "radius"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "q"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "q"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "sigma"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "sigma"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "v3",
-        "program": {
-          "op": "nameRef",
-          "name": "Bubble"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "trigger"
-            },
-            "value": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "trigger"
-                },
-                {
-                  "op": "eq",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "voice_idx"
-                    },
-                    3
-                  ]
-                }
-              ]
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "radius"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "radius"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "q"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "q"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "sigma"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "sigma"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "v4",
-        "program": {
-          "op": "nameRef",
-          "name": "Bubble"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "trigger"
-            },
-            "value": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "trigger"
-                },
-                {
-                  "op": "eq",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "voice_idx"
-                    },
-                    4
-                  ]
-                }
-              ]
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "radius"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "radius"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "q"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "q"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "sigma"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "sigma"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "v5",
-        "program": {
-          "op": "nameRef",
-          "name": "Bubble"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "trigger"
-            },
-            "value": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "trigger"
-                },
-                {
-                  "op": "eq",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "voice_idx"
-                    },
-                    5
-                  ]
-                }
-              ]
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "radius"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "radius"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "q"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "q"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "sigma"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "sigma"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "v6",
-        "program": {
-          "op": "nameRef",
-          "name": "Bubble"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "trigger"
-            },
-            "value": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "trigger"
-                },
-                {
-                  "op": "eq",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "voice_idx"
-                    },
-                    6
-                  ]
-                }
-              ]
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "radius"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "radius"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "q"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "q"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "sigma"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "sigma"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            }
-          }
-        ]
-      },
-      {
-        "op": "instanceDecl",
-        "name": "v7",
-        "program": {
-          "op": "nameRef",
-          "name": "Bubble"
-        },
-        "inputs": [
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "trigger"
-            },
-            "value": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "trigger"
-                },
-                {
-                  "op": "eq",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "voice_idx"
-                    },
-                    7
-                  ]
-                }
-              ]
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "radius"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "radius"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "q"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "q"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "sigma"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "sigma"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "decay_scale"
-            }
-          },
-          {
-            "port": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            },
-            "value": {
-              "op": "nameRef",
-              "name": "amp_scale"
-            }
-          }
-        ]
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "out",
-        "expr": {
-          "op": "add",
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "add",
-                  "args": [
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "v0"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    },
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "v1"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                },
-                {
-                  "op": "add",
-                  "args": [
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "v2"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    },
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "v3"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            },
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "add",
-                  "args": [
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "v4"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    },
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "v5"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                },
-                {
-                  "op": "add",
-                  "args": [
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "v6"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    },
-                    {
-                      "op": "nestedOut",
-                      "ref": {
-                        "op": "nameRef",
-                        "name": "v7"
-                      },
-                      "output": {
-                        "op": "nameRef",
-                        "name": "out"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          ]
-        }
-      },
-      {
-        "op": "nextUpdate",
-        "target": {
-          "kind": "reg",
-          "name": "voice_idx"
-        },
-        "expr": {
-          "op": "let",
-          "bind": {
-            "tick": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "gt",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "trigger"
-                    },
-                    0.5
-                  ]
-                },
-                {
-                  "op": "lte",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "prev_trigger"
-                    },
-                    0.5
-                  ]
-                }
-              ]
-            }
-          },
-          "in": {
-            "op": "mod",
-            "args": [
-              {
-                "op": "add",
-                "args": [
-                  {
-                    "op": "nameRef",
-                    "name": "voice_idx"
-                  },
-                  {
-                    "op": "binding",
-                    "name": "tick"
-                  }
-                ]
-              },
-              8
-            ]
-          }
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "trigger",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            0,
-            -1,
-            1
-          ]
-        }
-      },
-      {
-        "name": "radius",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0.001
-      },
-      {
-        "name": "q",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 30
-      },
-      {
-        "name": "sigma",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0.3
-      },
-      {
-        "name": "decay_scale",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 10
-      },
-      {
-        "name": "amp_scale",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0.05
-      }
-    ],
-    "outputs": [
-      {
-        "name": "out",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "signal"},
+    "name": "trigger",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [0, -1, 1]}},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "radius",
+    "default": 0.001},
+   {"type": {"op": "nameRef", "name": "float"}, "name": "q", "default": 30},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "sigma",
+    "default": 0.3},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "decay_scale",
+    "default": 10},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "amp_scale",
+    "default": 0.05}]},
+ "op": "program",
+ "name": "BubbleCloud",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"type": {"op": "nameRef", "name": "int"},
+    "op": "regDecl",
+    "name": "voice_idx",
+    "init": 0},
+   {"update": {"op": "nameRef", "name": "trigger"},
+    "op": "delayDecl",
+    "name": "prev_trigger",
+    "init": 0},
+   {"program": {"op": "nameRef", "name": "Bubble"},
+    "op": "instanceDecl",
+    "name": "v0",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "trigger"},
+        {"op": "eq", "args": [{"op": "nameRef", "name": "voice_idx"}, 0]}]},
+      "port": {"op": "nameRef", "name": "trigger"}},
+     {"value": {"op": "nameRef", "name": "radius"},
+      "port": {"op": "nameRef", "name": "radius"}},
+     {"value": {"op": "nameRef", "name": "q"},
+      "port": {"op": "nameRef", "name": "q"}},
+     {"value": {"op": "nameRef", "name": "sigma"},
+      "port": {"op": "nameRef", "name": "sigma"}},
+     {"value": {"op": "nameRef", "name": "decay_scale"},
+      "port": {"op": "nameRef", "name": "decay_scale"}},
+     {"value": {"op": "nameRef", "name": "amp_scale"},
+      "port": {"op": "nameRef", "name": "amp_scale"}}]},
+   {"program": {"op": "nameRef", "name": "Bubble"},
+    "op": "instanceDecl",
+    "name": "v1",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "trigger"},
+        {"op": "eq", "args": [{"op": "nameRef", "name": "voice_idx"}, 1]}]},
+      "port": {"op": "nameRef", "name": "trigger"}},
+     {"value": {"op": "nameRef", "name": "radius"},
+      "port": {"op": "nameRef", "name": "radius"}},
+     {"value": {"op": "nameRef", "name": "q"},
+      "port": {"op": "nameRef", "name": "q"}},
+     {"value": {"op": "nameRef", "name": "sigma"},
+      "port": {"op": "nameRef", "name": "sigma"}},
+     {"value": {"op": "nameRef", "name": "decay_scale"},
+      "port": {"op": "nameRef", "name": "decay_scale"}},
+     {"value": {"op": "nameRef", "name": "amp_scale"},
+      "port": {"op": "nameRef", "name": "amp_scale"}}]},
+   {"program": {"op": "nameRef", "name": "Bubble"},
+    "op": "instanceDecl",
+    "name": "v2",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "trigger"},
+        {"op": "eq", "args": [{"op": "nameRef", "name": "voice_idx"}, 2]}]},
+      "port": {"op": "nameRef", "name": "trigger"}},
+     {"value": {"op": "nameRef", "name": "radius"},
+      "port": {"op": "nameRef", "name": "radius"}},
+     {"value": {"op": "nameRef", "name": "q"},
+      "port": {"op": "nameRef", "name": "q"}},
+     {"value": {"op": "nameRef", "name": "sigma"},
+      "port": {"op": "nameRef", "name": "sigma"}},
+     {"value": {"op": "nameRef", "name": "decay_scale"},
+      "port": {"op": "nameRef", "name": "decay_scale"}},
+     {"value": {"op": "nameRef", "name": "amp_scale"},
+      "port": {"op": "nameRef", "name": "amp_scale"}}]},
+   {"program": {"op": "nameRef", "name": "Bubble"},
+    "op": "instanceDecl",
+    "name": "v3",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "trigger"},
+        {"op": "eq", "args": [{"op": "nameRef", "name": "voice_idx"}, 3]}]},
+      "port": {"op": "nameRef", "name": "trigger"}},
+     {"value": {"op": "nameRef", "name": "radius"},
+      "port": {"op": "nameRef", "name": "radius"}},
+     {"value": {"op": "nameRef", "name": "q"},
+      "port": {"op": "nameRef", "name": "q"}},
+     {"value": {"op": "nameRef", "name": "sigma"},
+      "port": {"op": "nameRef", "name": "sigma"}},
+     {"value": {"op": "nameRef", "name": "decay_scale"},
+      "port": {"op": "nameRef", "name": "decay_scale"}},
+     {"value": {"op": "nameRef", "name": "amp_scale"},
+      "port": {"op": "nameRef", "name": "amp_scale"}}]},
+   {"program": {"op": "nameRef", "name": "Bubble"},
+    "op": "instanceDecl",
+    "name": "v4",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "trigger"},
+        {"op": "eq", "args": [{"op": "nameRef", "name": "voice_idx"}, 4]}]},
+      "port": {"op": "nameRef", "name": "trigger"}},
+     {"value": {"op": "nameRef", "name": "radius"},
+      "port": {"op": "nameRef", "name": "radius"}},
+     {"value": {"op": "nameRef", "name": "q"},
+      "port": {"op": "nameRef", "name": "q"}},
+     {"value": {"op": "nameRef", "name": "sigma"},
+      "port": {"op": "nameRef", "name": "sigma"}},
+     {"value": {"op": "nameRef", "name": "decay_scale"},
+      "port": {"op": "nameRef", "name": "decay_scale"}},
+     {"value": {"op": "nameRef", "name": "amp_scale"},
+      "port": {"op": "nameRef", "name": "amp_scale"}}]},
+   {"program": {"op": "nameRef", "name": "Bubble"},
+    "op": "instanceDecl",
+    "name": "v5",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "trigger"},
+        {"op": "eq", "args": [{"op": "nameRef", "name": "voice_idx"}, 5]}]},
+      "port": {"op": "nameRef", "name": "trigger"}},
+     {"value": {"op": "nameRef", "name": "radius"},
+      "port": {"op": "nameRef", "name": "radius"}},
+     {"value": {"op": "nameRef", "name": "q"},
+      "port": {"op": "nameRef", "name": "q"}},
+     {"value": {"op": "nameRef", "name": "sigma"},
+      "port": {"op": "nameRef", "name": "sigma"}},
+     {"value": {"op": "nameRef", "name": "decay_scale"},
+      "port": {"op": "nameRef", "name": "decay_scale"}},
+     {"value": {"op": "nameRef", "name": "amp_scale"},
+      "port": {"op": "nameRef", "name": "amp_scale"}}]},
+   {"program": {"op": "nameRef", "name": "Bubble"},
+    "op": "instanceDecl",
+    "name": "v6",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "trigger"},
+        {"op": "eq", "args": [{"op": "nameRef", "name": "voice_idx"}, 6]}]},
+      "port": {"op": "nameRef", "name": "trigger"}},
+     {"value": {"op": "nameRef", "name": "radius"},
+      "port": {"op": "nameRef", "name": "radius"}},
+     {"value": {"op": "nameRef", "name": "q"},
+      "port": {"op": "nameRef", "name": "q"}},
+     {"value": {"op": "nameRef", "name": "sigma"},
+      "port": {"op": "nameRef", "name": "sigma"}},
+     {"value": {"op": "nameRef", "name": "decay_scale"},
+      "port": {"op": "nameRef", "name": "decay_scale"}},
+     {"value": {"op": "nameRef", "name": "amp_scale"},
+      "port": {"op": "nameRef", "name": "amp_scale"}}]},
+   {"program": {"op": "nameRef", "name": "Bubble"},
+    "op": "instanceDecl",
+    "name": "v7",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "trigger"},
+        {"op": "eq", "args": [{"op": "nameRef", "name": "voice_idx"}, 7]}]},
+      "port": {"op": "nameRef", "name": "trigger"}},
+     {"value": {"op": "nameRef", "name": "radius"},
+      "port": {"op": "nameRef", "name": "radius"}},
+     {"value": {"op": "nameRef", "name": "q"},
+      "port": {"op": "nameRef", "name": "q"}},
+     {"value": {"op": "nameRef", "name": "sigma"},
+      "port": {"op": "nameRef", "name": "sigma"}},
+     {"value": {"op": "nameRef", "name": "decay_scale"},
+      "port": {"op": "nameRef", "name": "decay_scale"}},
+     {"value": {"op": "nameRef", "name": "amp_scale"},
+      "port": {"op": "nameRef", "name": "amp_scale"}}]}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "add",
+     "args":
+     [{"op": "add",
+       "args":
+       [{"op": "add",
+         "args":
+         [{"ref": {"op": "nameRef", "name": "v0"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"},
+          {"ref": {"op": "nameRef", "name": "v1"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]},
+        {"op": "add",
+         "args":
+         [{"ref": {"op": "nameRef", "name": "v2"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"},
+          {"ref": {"op": "nameRef", "name": "v3"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      {"op": "add",
+       "args":
+       [{"op": "add",
+         "args":
+         [{"ref": {"op": "nameRef", "name": "v4"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"},
+          {"ref": {"op": "nameRef", "name": "v5"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]},
+        {"op": "add",
+         "args":
+         [{"ref": {"op": "nameRef", "name": "v6"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"},
+          {"ref": {"op": "nameRef", "name": "v7"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]}]}},
+   {"target": {"name": "voice_idx", "kind": "reg"},
+    "op": "nextUpdate",
+    "expr":
+    {"op": "let",
+     "in":
+     {"op": "mod",
+      "args":
+      [{"op": "add",
+        "args":
+        [{"op": "nameRef", "name": "voice_idx"},
+         {"op": "binding", "name": "tick"}]},
+       8]},
+     "bind":
+     [{"value":
+       {"op": "mul",
+        "args":
+        [{"op": "gt", "args": [{"op": "nameRef", "name": "trigger"}, 0.5]},
+         {"op": "lte",
+          "args": [{"op": "nameRef", "name": "prev_trigger"}, 0.5]}]},
+       "name": "tick"}]}}]}}

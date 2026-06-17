@@ -1,132 +1,44 @@
-{
-  "op": "program",
-  "name": "CrossFade",
-  "body": {
-    "op": "block",
-    "decls": [],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "out",
-        "expr": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "sub",
-                      "args": [
-                        1,
-                        {
-                          "op": "nameRef",
-                          "name": "mix"
-                        }
-                      ]
-                    },
-                    {
-                      "op": "nameRef",
-                      "name": "a"
-                    }
-                  ]
-                },
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "mix"
-                    },
-                    {
-                      "op": "nameRef",
-                      "name": "b"
-                    }
-                  ]
-                }
-              ]
-            },
-            -1,
-            1
-          ]
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "a",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            0,
-            -1,
-            1
-          ]
-        }
-      },
-      {
-        "name": "b",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            0,
-            -1,
-            1
-          ]
-        }
-      },
-      {
-        "name": "mix",
-        "type": {
-          "op": "nameRef",
-          "name": "unipolar"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            0.5,
-            0,
-            1
-          ]
-        }
-      }
-    ],
-    "outputs": [
-      {
-        "name": "out",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "signal"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "signal"},
+    "name": "a",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [0, -1, 1]}},
+   {"type": {"op": "nameRef", "name": "signal"},
+    "name": "b",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [0, -1, 1]}},
+   {"type": {"op": "nameRef", "name": "unipolar"},
+    "name": "mix",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [0.5, 0, 1]}}]},
+ "op": "program",
+ "name": "CrossFade",
+ "body":
+ {"op": "block",
+  "decls": [],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args":
+     [{"op": "add",
+       "args":
+       [{"op": "mul",
+         "args":
+         [{"op": "sub", "args": [1, {"op": "nameRef", "name": "mix"}]},
+          {"op": "nameRef", "name": "a"}]},
+        {"op": "mul",
+         "args":
+         [{"op": "nameRef", "name": "mix"}, {"op": "nameRef", "name": "b"}]}]},
+      -1,
+      1]}}]}}

@@ -1,479 +1,170 @@
-{
-  "op": "program",
-  "name": "NoiseLFSR",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "regDecl",
-        "name": "state",
-        "init": 44257,
-        "type": {
-          "op": "nameRef",
-          "name": "int"
-        }
-      },
-      {
-        "op": "regDecl",
-        "name": "value",
-        "init": 0
-      },
-      {
-        "op": "delayDecl",
-        "name": "prev_clock",
-        "update": {
-          "op": "nameRef",
-          "name": "clock"
-        },
-        "init": 0
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "out",
-        "expr": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            {
-              "op": "let",
-              "bind": {
-                "tick": {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "gt",
-                      "args": [
-                        {
-                          "op": "nameRef",
-                          "name": "clock"
-                        },
-                        0.5
-                      ]
-                    },
-                    {
-                      "op": "lte",
-                      "args": [
-                        {
-                          "op": "nameRef",
-                          "name": "prev_clock"
-                        },
-                        0.5
-                      ]
-                    }
-                  ]
-                },
-                "lsb": {
-                  "op": "bitAnd",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "state"
-                    },
-                    1
-                  ]
-                },
-                "shifted": {
-                  "op": "rshift",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "state"
-                    },
-                    1
-                  ]
-                }
-              },
-              "in": {
-                "op": "let",
-                "bind": {
-                  "newState": {
-                    "op": "call",
-                    "callee": {
-                      "op": "nameRef",
-                      "name": "select"
-                    },
-                    "args": [
-                      {
-                        "op": "binding",
-                        "name": "lsb"
-                      },
-                      {
-                        "op": "bitXor",
-                        "args": [
-                          {
-                            "op": "binding",
-                            "name": "shifted"
-                          },
-                          46080
-                        ]
-                      },
-                      {
-                        "op": "binding",
-                        "name": "shifted"
-                      }
-                    ]
-                  },
-                  "normalized": {
-                    "op": "sub",
-                    "args": [
-                      {
-                        "op": "div",
-                        "args": [
-                          {
-                            "op": "mul",
-                            "args": [
-                              {
-                                "op": "call",
-                                "callee": {
-                                  "op": "nameRef",
-                                  "name": "select"
-                                },
-                                "args": [
-                                  {
-                                    "op": "binding",
-                                    "name": "lsb"
-                                  },
-                                  {
-                                    "op": "bitXor",
-                                    "args": [
-                                      {
-                                        "op": "binding",
-                                        "name": "shifted"
-                                      },
-                                      46080
-                                    ]
-                                  },
-                                  {
-                                    "op": "binding",
-                                    "name": "shifted"
-                                  }
-                                ]
-                              },
-                              2
-                            ]
-                          },
-                          65535
-                        ]
-                      },
-                      1
-                    ]
-                  }
-                },
-                "in": {
-                  "op": "call",
-                  "callee": {
-                    "op": "nameRef",
-                    "name": "select"
-                  },
-                  "args": [
-                    {
-                      "op": "binding",
-                      "name": "tick"
-                    },
-                    {
-                      "op": "binding",
-                      "name": "normalized"
-                    },
-                    {
-                      "op": "nameRef",
-                      "name": "value"
-                    }
-                  ]
-                }
-              }
-            },
-            -1,
-            1
-          ]
-        }
-      },
-      {
-        "op": "nextUpdate",
-        "target": {
-          "kind": "reg",
-          "name": "state"
-        },
-        "expr": {
-          "op": "let",
-          "bind": {
-            "tick": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "gt",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "clock"
-                    },
-                    0.5
-                  ]
-                },
-                {
-                  "op": "lte",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "prev_clock"
-                    },
-                    0.5
-                  ]
-                }
-              ]
-            },
-            "lsb": {
-              "op": "bitAnd",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "state"
-                },
-                1
-              ]
-            },
-            "shifted": {
-              "op": "rshift",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "state"
-                },
-                1
-              ]
-            }
-          },
-          "in": {
-            "op": "let",
-            "bind": {
-              "newState": {
-                "op": "call",
-                "callee": {
-                  "op": "nameRef",
-                  "name": "select"
-                },
-                "args": [
-                  {
-                    "op": "binding",
-                    "name": "lsb"
-                  },
-                  {
-                    "op": "bitXor",
-                    "args": [
-                      {
-                        "op": "binding",
-                        "name": "shifted"
-                      },
-                      46080
-                    ]
-                  },
-                  {
-                    "op": "binding",
-                    "name": "shifted"
-                  }
-                ]
-              }
-            },
-            "in": {
-              "op": "call",
-              "callee": {
-                "op": "nameRef",
-                "name": "select"
-              },
-              "args": [
-                {
-                  "op": "binding",
-                  "name": "tick"
-                },
-                {
-                  "op": "binding",
-                  "name": "newState"
-                },
-                {
-                  "op": "nameRef",
-                  "name": "state"
-                }
-              ]
-            }
-          }
-        }
-      },
-      {
-        "op": "nextUpdate",
-        "target": {
-          "kind": "reg",
-          "name": "value"
-        },
-        "expr": {
-          "op": "let",
-          "bind": {
-            "tick": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "gt",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "clock"
-                    },
-                    0.5
-                  ]
-                },
-                {
-                  "op": "lte",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "prev_clock"
-                    },
-                    0.5
-                  ]
-                }
-              ]
-            },
-            "lsb": {
-              "op": "bitAnd",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "state"
-                },
-                1
-              ]
-            },
-            "shifted": {
-              "op": "rshift",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "state"
-                },
-                1
-              ]
-            }
-          },
-          "in": {
-            "op": "let",
-            "bind": {
-              "newState": {
-                "op": "call",
-                "callee": {
-                  "op": "nameRef",
-                  "name": "select"
-                },
-                "args": [
-                  {
-                    "op": "binding",
-                    "name": "lsb"
-                  },
-                  {
-                    "op": "bitXor",
-                    "args": [
-                      {
-                        "op": "binding",
-                        "name": "shifted"
-                      },
-                      46080
-                    ]
-                  },
-                  {
-                    "op": "binding",
-                    "name": "shifted"
-                  }
-                ]
-              },
-              "normalized": {
-                "op": "sub",
-                "args": [
-                  {
-                    "op": "div",
-                    "args": [
-                      {
-                        "op": "mul",
-                        "args": [
-                          {
-                            "op": "call",
-                            "callee": {
-                              "op": "nameRef",
-                              "name": "select"
-                            },
-                            "args": [
-                              {
-                                "op": "binding",
-                                "name": "lsb"
-                              },
-                              {
-                                "op": "bitXor",
-                                "args": [
-                                  {
-                                    "op": "binding",
-                                    "name": "shifted"
-                                  },
-                                  46080
-                                ]
-                              },
-                              {
-                                "op": "binding",
-                                "name": "shifted"
-                              }
-                            ]
-                          },
-                          2
-                        ]
-                      },
-                      65535
-                    ]
-                  },
-                  1
-                ]
-              }
-            },
-            "in": {
-              "op": "call",
-              "callee": {
-                "op": "nameRef",
-                "name": "select"
-              },
-              "args": [
-                {
-                  "op": "binding",
-                  "name": "tick"
-                },
-                {
-                  "op": "binding",
-                  "name": "normalized"
-                },
-                {
-                  "op": "nameRef",
-                  "name": "value"
-                }
-              ]
-            }
-          }
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "clock",
-        "default": 0
-      }
-    ],
-    "outputs": [
-      {
-        "name": "out",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "signal"}, "name": "out"}],
+  "inputs": [{"name": "clock", "default": 0}]},
+ "op": "program",
+ "name": "NoiseLFSR",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"type": {"op": "nameRef", "name": "int"},
+    "op": "regDecl",
+    "name": "state",
+    "init": 44257},
+   {"op": "regDecl", "name": "value", "init": 0},
+   {"update": {"op": "nameRef", "name": "clock"},
+    "op": "delayDecl",
+    "name": "prev_clock",
+    "init": 0}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args":
+     [{"op": "let",
+       "in":
+       {"op": "let",
+        "in":
+        {"op": "call",
+         "callee": {"op": "nameRef", "name": "select"},
+         "args":
+         [{"op": "binding", "name": "tick"},
+          {"op": "binding", "name": "normalized"},
+          {"op": "nameRef", "name": "value"}]},
+        "bind":
+        [{"value":
+          {"op": "call",
+           "callee": {"op": "nameRef", "name": "select"},
+           "args":
+           [{"op": "binding", "name": "lsb"},
+            {"op": "bitXor",
+             "args": [{"op": "binding", "name": "shifted"}, 46080]},
+            {"op": "binding", "name": "shifted"}]},
+          "name": "newState"},
+         {"value":
+          {"op": "sub",
+           "args":
+           [{"op": "div",
+             "args":
+             [{"op": "mul",
+               "args":
+               [{"op": "call",
+                 "callee": {"op": "nameRef", "name": "select"},
+                 "args":
+                 [{"op": "binding", "name": "lsb"},
+                  {"op": "bitXor",
+                   "args": [{"op": "binding", "name": "shifted"}, 46080]},
+                  {"op": "binding", "name": "shifted"}]},
+                2]},
+              65535]},
+            1]},
+          "name": "normalized"}]},
+       "bind":
+       [{"value":
+         {"op": "mul",
+          "args":
+          [{"op": "gt", "args": [{"op": "nameRef", "name": "clock"}, 0.5]},
+           {"op": "lte",
+            "args": [{"op": "nameRef", "name": "prev_clock"}, 0.5]}]},
+         "name": "tick"},
+        {"value":
+         {"op": "bitAnd", "args": [{"op": "nameRef", "name": "state"}, 1]},
+         "name": "lsb"},
+        {"value":
+         {"op": "rshift", "args": [{"op": "nameRef", "name": "state"}, 1]},
+         "name": "shifted"}]},
+      -1,
+      1]}},
+   {"target": {"name": "state", "kind": "reg"},
+    "op": "nextUpdate",
+    "expr":
+    {"op": "let",
+     "in":
+     {"op": "let",
+      "in":
+      {"op": "call",
+       "callee": {"op": "nameRef", "name": "select"},
+       "args":
+       [{"op": "binding", "name": "tick"},
+        {"op": "binding", "name": "newState"},
+        {"op": "nameRef", "name": "state"}]},
+      "bind":
+      [{"value":
+        {"op": "call",
+         "callee": {"op": "nameRef", "name": "select"},
+         "args":
+         [{"op": "binding", "name": "lsb"},
+          {"op": "bitXor",
+           "args": [{"op": "binding", "name": "shifted"}, 46080]},
+          {"op": "binding", "name": "shifted"}]},
+        "name": "newState"}]},
+     "bind":
+     [{"value":
+       {"op": "mul",
+        "args":
+        [{"op": "gt", "args": [{"op": "nameRef", "name": "clock"}, 0.5]},
+         {"op": "lte",
+          "args": [{"op": "nameRef", "name": "prev_clock"}, 0.5]}]},
+       "name": "tick"},
+      {"value":
+       {"op": "bitAnd", "args": [{"op": "nameRef", "name": "state"}, 1]},
+       "name": "lsb"},
+      {"value":
+       {"op": "rshift", "args": [{"op": "nameRef", "name": "state"}, 1]},
+       "name": "shifted"}]}},
+   {"target": {"name": "value", "kind": "reg"},
+    "op": "nextUpdate",
+    "expr":
+    {"op": "let",
+     "in":
+     {"op": "let",
+      "in":
+      {"op": "call",
+       "callee": {"op": "nameRef", "name": "select"},
+       "args":
+       [{"op": "binding", "name": "tick"},
+        {"op": "binding", "name": "normalized"},
+        {"op": "nameRef", "name": "value"}]},
+      "bind":
+      [{"value":
+        {"op": "call",
+         "callee": {"op": "nameRef", "name": "select"},
+         "args":
+         [{"op": "binding", "name": "lsb"},
+          {"op": "bitXor",
+           "args": [{"op": "binding", "name": "shifted"}, 46080]},
+          {"op": "binding", "name": "shifted"}]},
+        "name": "newState"},
+       {"value":
+        {"op": "sub",
+         "args":
+         [{"op": "div",
+           "args":
+           [{"op": "mul",
+             "args":
+             [{"op": "call",
+               "callee": {"op": "nameRef", "name": "select"},
+               "args":
+               [{"op": "binding", "name": "lsb"},
+                {"op": "bitXor",
+                 "args": [{"op": "binding", "name": "shifted"}, 46080]},
+                {"op": "binding", "name": "shifted"}]},
+              2]},
+            65535]},
+          1]},
+        "name": "normalized"}]},
+     "bind":
+     [{"value":
+       {"op": "mul",
+        "args":
+        [{"op": "gt", "args": [{"op": "nameRef", "name": "clock"}, 0.5]},
+         {"op": "lte",
+          "args": [{"op": "nameRef", "name": "prev_clock"}, 0.5]}]},
+       "name": "tick"},
+      {"value":
+       {"op": "bitAnd", "args": [{"op": "nameRef", "name": "state"}, 1]},
+       "name": "lsb"},
+      {"value":
+       {"op": "rshift", "args": [{"op": "nameRef", "name": "state"}, 1]},
+       "name": "shifted"}]}}]}}

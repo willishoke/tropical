@@ -1,108 +1,35 @@
-{
-  "op": "program",
-  "name": "Tanh",
-  "body": {
-    "op": "block",
-    "decls": [],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "out",
-        "expr": {
-          "op": "let",
-          "bind": {
-            "c": {
-              "op": "call",
-              "callee": {
-                "op": "nameRef",
-                "name": "clamp"
-              },
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "x"
-                },
-                -3,
-                3
-              ]
-            },
-            "c2": {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "c"
-                },
-                {
-                  "op": "nameRef",
-                  "name": "c"
-                }
-              ]
-            }
-          },
-          "in": {
-            "op": "div",
-            "args": [
-              {
-                "op": "mul",
-                "args": [
-                  {
-                    "op": "binding",
-                    "name": "c"
-                  },
-                  {
-                    "op": "add",
-                    "args": [
-                      27,
-                      {
-                        "op": "binding",
-                        "name": "c2"
-                      }
-                    ]
-                  }
-                ]
-              },
-              {
-                "op": "add",
-                "args": [
-                  27,
-                  {
-                    "op": "mul",
-                    "args": [
-                      9,
-                      {
-                        "op": "binding",
-                        "name": "c2"
-                      }
-                    ]
-                  }
-                ]
-              }
-            ]
-          }
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "x",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0
-      }
-    ],
-    "outputs": [
-      {
-        "name": "out",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "float"}, "name": "x", "default": 0}]},
+ "op": "program",
+ "name": "Tanh",
+ "body":
+ {"op": "block",
+  "decls": [],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "let",
+     "in":
+     {"op": "div",
+      "args":
+      [{"op": "mul",
+        "args":
+        [{"op": "binding", "name": "c"},
+         {"op": "add", "args": [27, {"op": "binding", "name": "c2"}]}]},
+       {"op": "add",
+        "args":
+        [27, {"op": "mul", "args": [9, {"op": "binding", "name": "c2"}]}]}]},
+     "bind":
+     [{"value":
+       {"op": "call",
+        "callee": {"op": "nameRef", "name": "clamp"},
+        "args": [{"op": "nameRef", "name": "x"}, -3, 3]},
+       "name": "c"},
+      {"value":
+       {"op": "mul",
+        "args":
+        [{"op": "nameRef", "name": "c"}, {"op": "nameRef", "name": "c"}]},
+       "name": "c2"}]}}]}}

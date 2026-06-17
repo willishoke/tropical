@@ -1,327 +1,89 @@
-{
-  "op": "program",
-  "name": "TriggerRamp",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "delayDecl",
-        "name": "prev_trigger",
-        "update": {
-          "op": "nameRef",
-          "name": "trigger"
-        },
-        "init": 0
-      },
-      {
-        "op": "delayDecl",
-        "name": "state",
-        "update": {
-          "op": "match",
-          "scrutinee": {
-            "op": "nameRef",
-            "name": "state"
-          },
-          "arms": [
-            {
-              "variant": {
-                "op": "nameRef",
-                "name": "Quiescent"
-              },
-              "binds": [],
-              "body": {
-                "op": "call",
-                "callee": {
-                  "op": "nameRef",
-                  "name": "select"
-                },
-                "args": [
-                  {
-                    "op": "and",
-                    "args": [
-                      {
-                        "op": "gt",
-                        "args": [
-                          {
-                            "op": "nameRef",
-                            "name": "trigger"
-                          },
-                          0.5
-                        ]
-                      },
-                      {
-                        "op": "lte",
-                        "args": [
-                          {
-                            "op": "nameRef",
-                            "name": "prev_trigger"
-                          },
-                          0.5
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "op": "tag",
-                    "variant": {
-                      "op": "nameRef",
-                      "name": "Counting"
-                    },
-                    "payload": [
-                      {
-                        "field": {
-                          "op": "nameRef",
-                          "name": "n"
-                        },
-                        "value": 0
-                      }
-                    ]
-                  },
-                  {
-                    "op": "tag",
-                    "variant": {
-                      "op": "nameRef",
-                      "name": "Quiescent"
-                    }
-                  }
-                ]
-              }
-            },
-            {
-              "variant": {
-                "op": "nameRef",
-                "name": "Counting"
-              },
-              "binds": [
-                {
-                  "field": {
-                    "op": "nameRef",
-                    "name": "n"
-                  },
-                  "bind": "n"
-                }
-              ],
-              "body": {
-                "op": "call",
-                "callee": {
-                  "op": "nameRef",
-                  "name": "select"
-                },
-                "args": [
-                  {
-                    "op": "and",
-                    "args": [
-                      {
-                        "op": "gt",
-                        "args": [
-                          {
-                            "op": "nameRef",
-                            "name": "trigger"
-                          },
-                          0.5
-                        ]
-                      },
-                      {
-                        "op": "lte",
-                        "args": [
-                          {
-                            "op": "nameRef",
-                            "name": "prev_trigger"
-                          },
-                          0.5
-                        ]
-                      }
-                    ]
-                  },
-                  {
-                    "op": "tag",
-                    "variant": {
-                      "op": "nameRef",
-                      "name": "Counting"
-                    },
-                    "payload": [
-                      {
-                        "field": {
-                          "op": "nameRef",
-                          "name": "n"
-                        },
-                        "value": 0
-                      }
-                    ]
-                  },
-                  {
-                    "op": "tag",
-                    "variant": {
-                      "op": "nameRef",
-                      "name": "Counting"
-                    },
-                    "payload": [
-                      {
-                        "field": {
-                          "op": "nameRef",
-                          "name": "n"
-                        },
-                        "value": {
-                          "op": "add",
-                          "args": [
-                            {
-                              "op": "binding",
-                              "name": "n"
-                            },
-                            1
-                          ]
-                        }
-                      }
-                    ]
-                  }
-                ]
-              }
-            }
-          ]
-        },
-        "init": {
-          "op": "tag",
-          "variant": {
-            "op": "nameRef",
-            "name": "Quiescent"
-          }
-        },
-        "type": {
-          "op": "nameRef",
-          "name": "RampState"
-        }
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "frames",
-        "expr": {
-          "op": "match",
-          "scrutinee": {
-            "op": "nameRef",
-            "name": "state"
-          },
-          "arms": [
-            {
-              "variant": {
-                "op": "nameRef",
-                "name": "Quiescent"
-              },
-              "binds": [],
-              "body": 0
-            },
-            {
-              "variant": {
-                "op": "nameRef",
-                "name": "Counting"
-              },
-              "binds": [
-                {
-                  "field": {
-                    "op": "nameRef",
-                    "name": "n"
-                  },
-                  "bind": "n"
-                }
-              ],
-              "body": {
-                "op": "binding",
-                "name": "n"
-              }
-            }
-          ]
-        }
-      },
-      {
-        "op": "outputAssign",
-        "name": "edge",
-        "expr": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "gt",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "trigger"
-                },
-                0.5
-              ]
-            },
-            {
-              "op": "lte",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "prev_trigger"
-                },
-                0.5
-              ]
-            }
-          ]
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "trigger",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            0,
-            -1,
-            1
-          ]
-        }
-      }
-    ],
-    "outputs": [
-      {
-        "name": "frames",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        }
-      },
-      {
-        "name": "edge",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        }
-      }
-    ],
-    "type_defs": [
-      {
-        "kind": "sum",
-        "name": "RampState",
-        "variants": [
-          {
-            "name": "Quiescent",
-            "payload": []
-          },
-          {
-            "name": "Counting",
-            "payload": [
-              {
-                "name": "n",
-                "scalar_type": "int"
-              }
-            ]
-          }
-        ]
-      }
-    ]
-  }
-}
+{"ports":
+ {"type_defs":
+  [{"variants":
+    [{"payload": [], "name": "Quiescent"},
+     {"payload": [{"scalar_type": "int", "name": "n"}], "name": "Counting"}],
+    "name": "RampState",
+    "kind": "sum"}],
+  "outputs":
+  [{"type": {"op": "nameRef", "name": "float"}, "name": "frames"},
+   {"type": {"op": "nameRef", "name": "float"}, "name": "edge"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "signal"},
+    "name": "trigger",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [0, -1, 1]}}]},
+ "op": "program",
+ "name": "TriggerRamp",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"update": {"op": "nameRef", "name": "trigger"},
+    "op": "delayDecl",
+    "name": "prev_trigger",
+    "init": 0},
+   {"update":
+    {"scrutinee": {"op": "nameRef", "name": "state"},
+     "op": "match",
+     "arms":
+     [{"variant": {"op": "nameRef", "name": "Quiescent"},
+       "body":
+       {"op": "call",
+        "callee": {"op": "nameRef", "name": "select"},
+        "args":
+        [{"op": "and",
+          "args":
+          [{"op": "gt", "args": [{"op": "nameRef", "name": "trigger"}, 0.5]},
+           {"op": "lte",
+            "args": [{"op": "nameRef", "name": "prev_trigger"}, 0.5]}]},
+         {"variant": {"op": "nameRef", "name": "Counting"},
+          "payload": [{"value": 0, "field": {"op": "nameRef", "name": "n"}}],
+          "op": "tag"},
+         {"variant": {"op": "nameRef", "name": "Quiescent"}, "op": "tag"}]},
+       "binds": []},
+      {"variant": {"op": "nameRef", "name": "Counting"},
+       "body":
+       {"op": "call",
+        "callee": {"op": "nameRef", "name": "select"},
+        "args":
+        [{"op": "and",
+          "args":
+          [{"op": "gt", "args": [{"op": "nameRef", "name": "trigger"}, 0.5]},
+           {"op": "lte",
+            "args": [{"op": "nameRef", "name": "prev_trigger"}, 0.5]}]},
+         {"variant": {"op": "nameRef", "name": "Counting"},
+          "payload": [{"value": 0, "field": {"op": "nameRef", "name": "n"}}],
+          "op": "tag"},
+         {"variant": {"op": "nameRef", "name": "Counting"},
+          "payload":
+          [{"value": {"op": "add", "args": [{"op": "binding", "name": "n"}, 1]},
+            "field": {"op": "nameRef", "name": "n"}}],
+          "op": "tag"}]},
+       "binds": [{"field": {"op": "nameRef", "name": "n"}, "bind": "n"}]}]},
+    "type": {"op": "nameRef", "name": "RampState"},
+    "op": "delayDecl",
+    "name": "state",
+    "init": {"variant": {"op": "nameRef", "name": "Quiescent"}, "op": "tag"}}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "frames",
+    "expr":
+    {"scrutinee": {"op": "nameRef", "name": "state"},
+     "op": "match",
+     "arms":
+     [{"variant": {"op": "nameRef", "name": "Quiescent"},
+       "body": 0,
+       "binds": []},
+      {"variant": {"op": "nameRef", "name": "Counting"},
+       "body": {"op": "binding", "name": "n"},
+       "binds": [{"field": {"op": "nameRef", "name": "n"}, "bind": "n"}]}]}},
+   {"op": "outputAssign",
+    "name": "edge",
+    "expr":
+    {"op": "mul",
+     "args":
+     [{"op": "gt", "args": [{"op": "nameRef", "name": "trigger"}, 0.5]},
+      {"op": "lte",
+       "args": [{"op": "nameRef", "name": "prev_trigger"}, 0.5]}]}}]}}

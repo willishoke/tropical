@@ -1,195 +1,78 @@
-{
-  "op": "program",
-  "name": "Exp",
-  "body": {
-    "op": "block",
-    "decls": [],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "out",
-        "expr": {
-          "op": "let",
-          "bind": {
-            "clamped": {
-              "op": "call",
-              "callee": {
-                "op": "nameRef",
-                "name": "clamp"
-              },
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "x"
-                },
-                -87,
-                88
-              ]
-            },
-            "n": {
-              "op": "call",
-              "callee": {
-                "op": "nameRef",
-                "name": "round"
-              },
-              "args": [
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "clamped"
-                    },
-                    1.4426950408889634
-                  ]
-                }
-              ]
-            },
-            "r": {
-              "op": "sub",
-              "args": [
-                {
-                  "op": "sub",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "clamped"
-                    },
-                    {
-                      "op": "mul",
-                      "args": [
-                        {
-                          "op": "nameRef",
-                          "name": "n"
-                        },
-                        0.693145751953125
-                      ]
-                    }
-                  ]
-                },
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "n"
-                    },
-                    0.0000014286068203094173
-                  ]
-                }
-              ]
-            },
-            "p": {
-              "op": "fold",
-              "over": [
-                0.000198756915,
-                0.0013981999507,
-                0.0083334519073,
-                0.041665795894,
-                0.16666665459,
-                0.50000001201
-              ],
-              "init": 0,
-              "acc_var": "a",
-              "elem_var": "c",
-              "body": {
-                "op": "add",
-                "args": [
-                  {
-                    "op": "binding",
-                    "name": "c"
-                  },
-                  {
-                    "op": "mul",
-                    "args": [
-                      {
-                        "op": "binding",
-                        "name": "a"
-                      },
-                      {
-                        "op": "nameRef",
-                        "name": "r"
-                      }
-                    ]
-                  }
-                ]
-              }
-            },
-            "exp_r": {
-              "op": "add",
-              "args": [
-                1,
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "r"
-                    },
-                    {
-                      "op": "add",
-                      "args": [
-                        1,
-                        {
-                          "op": "mul",
-                          "args": [
-                            {
-                              "op": "nameRef",
-                              "name": "r"
-                            },
-                            {
-                              "op": "nameRef",
-                              "name": "p"
-                            }
-                          ]
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ]
-            }
-          },
-          "in": {
-            "op": "call",
-            "callee": {
-              "op": "nameRef",
-              "name": "ldexp"
-            },
-            "args": [
-              {
-                "op": "binding",
-                "name": "exp_r"
-              },
-              {
-                "op": "binding",
-                "name": "n"
-              }
-            ]
-          }
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "x",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0
-      }
-    ],
-    "outputs": [
-      {
-        "name": "out",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "float"}, "name": "x", "default": 0}]},
+ "op": "program",
+ "name": "Exp",
+ "body":
+ {"op": "block",
+  "decls": [],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "let",
+     "in":
+     {"op": "call",
+      "callee": {"op": "nameRef", "name": "ldexp"},
+      "args":
+      [{"op": "binding", "name": "exp_r"}, {"op": "binding", "name": "n"}]},
+     "bind":
+     [{"value":
+       {"op": "call",
+        "callee": {"op": "nameRef", "name": "clamp"},
+        "args": [{"op": "nameRef", "name": "x"}, -87, 88]},
+       "name": "clamped"},
+      {"value":
+       {"op": "call",
+        "callee": {"op": "nameRef", "name": "round"},
+        "args":
+        [{"op": "mul",
+          "args": [{"op": "nameRef", "name": "clamped"}, 1.4426950408889634]}]},
+       "name": "n"},
+      {"value":
+       {"op": "sub",
+        "args":
+        [{"op": "sub",
+          "args":
+          [{"op": "nameRef", "name": "clamped"},
+           {"op": "mul",
+            "args": [{"op": "nameRef", "name": "n"}, 0.693145751953125]}]},
+         {"op": "mul",
+          "args": [{"op": "nameRef", "name": "n"}, 0.0000014286068203094173]}]},
+       "name": "r"},
+      {"value":
+       {"over":
+        [0.000198756915,
+         0.0013981999507,
+         0.0083334519073,
+         0.041665795894,
+         0.16666665459,
+         0.50000001201],
+        "op": "fold",
+        "init": 0,
+        "elem_var": "c",
+        "body":
+        {"op": "add",
+         "args":
+         [{"op": "binding", "name": "c"},
+          {"op": "mul",
+           "args":
+           [{"op": "binding", "name": "a"}, {"op": "nameRef", "name": "r"}]}]},
+        "acc_var": "a"},
+       "name": "p"},
+      {"value":
+       {"op": "add",
+        "args":
+        [1,
+         {"op": "mul",
+          "args":
+          [{"op": "nameRef", "name": "r"},
+           {"op": "add",
+            "args":
+            [1,
+             {"op": "mul",
+              "args":
+              [{"op": "nameRef", "name": "r"},
+               {"op": "nameRef", "name": "p"}]}]}]}]},
+       "name": "exp_r"}]}}]}}

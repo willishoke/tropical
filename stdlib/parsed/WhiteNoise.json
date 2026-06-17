@@ -1,209 +1,77 @@
-{
-  "op": "program",
-  "name": "WhiteNoise",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "regDecl",
-        "name": "state",
-        "init": 88172645463325250,
-        "type": {
-          "op": "nameRef",
-          "name": "int"
-        }
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "out",
-        "expr": {
-          "op": "let",
-          "bind": {
-            "s1": {
-              "op": "bitXor",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "state"
-                },
-                {
-                  "op": "lshift",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "state"
-                    },
-                    13
-                  ]
-                }
-              ]
-            }
-          },
-          "in": {
-            "op": "let",
-            "bind": {
-              "s2": {
-                "op": "bitXor",
-                "args": [
-                  {
-                    "op": "binding",
-                    "name": "s1"
-                  },
-                  {
-                    "op": "rshift",
-                    "args": [
-                      {
-                        "op": "binding",
-                        "name": "s1"
-                      },
-                      7
-                    ]
-                  }
-                ]
-              }
-            },
-            "in": {
-              "op": "let",
-              "bind": {
-                "s3": {
-                  "op": "bitXor",
-                  "args": [
-                    {
-                      "op": "binding",
-                      "name": "s2"
-                    },
-                    {
-                      "op": "lshift",
-                      "args": [
-                        {
-                          "op": "binding",
-                          "name": "s2"
-                        },
-                        17
-                      ]
-                    }
-                  ]
-                }
-              },
-              "in": {
-                "op": "sub",
-                "args": [
-                  {
-                    "op": "div",
-                    "args": [
-                      {
-                        "op": "mul",
-                        "args": [
-                          {
-                            "op": "bitAnd",
-                            "args": [
-                              {
-                                "op": "binding",
-                                "name": "s3"
-                              },
-                              65535
-                            ]
-                          },
-                          2
-                        ]
-                      },
-                      65535
-                    ]
-                  },
-                  1
-                ]
-              }
-            }
-          }
-        }
-      },
-      {
-        "op": "nextUpdate",
-        "target": {
-          "kind": "reg",
-          "name": "state"
-        },
-        "expr": {
-          "op": "let",
-          "bind": {
-            "s1": {
-              "op": "bitXor",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "state"
-                },
-                {
-                  "op": "lshift",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "state"
-                    },
-                    13
-                  ]
-                }
-              ]
-            }
-          },
-          "in": {
-            "op": "let",
-            "bind": {
-              "s2": {
-                "op": "bitXor",
-                "args": [
-                  {
-                    "op": "binding",
-                    "name": "s1"
-                  },
-                  {
-                    "op": "rshift",
-                    "args": [
-                      {
-                        "op": "binding",
-                        "name": "s1"
-                      },
-                      7
-                    ]
-                  }
-                ]
-              }
-            },
-            "in": {
-              "op": "bitXor",
-              "args": [
-                {
-                  "op": "binding",
-                  "name": "s2"
-                },
-                {
-                  "op": "lshift",
-                  "args": [
-                    {
-                      "op": "binding",
-                      "name": "s2"
-                    },
-                    17
-                  ]
-                }
-              ]
-            }
-          }
-        }
-      }
-    ]
-  },
-  "ports": {
-    "outputs": [
-      {
-        "name": "out",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}]},
+ "op": "program",
+ "name": "WhiteNoise",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"type": {"op": "nameRef", "name": "int"},
+    "op": "regDecl",
+    "name": "state",
+    "init": 88172645463325250}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "let",
+     "in":
+     {"op": "let",
+      "in":
+      {"op": "let",
+       "in":
+       {"op": "sub",
+        "args":
+        [{"op": "div",
+          "args":
+          [{"op": "mul",
+            "args":
+            [{"op": "bitAnd", "args": [{"op": "binding", "name": "s3"}, 65535]},
+             2]},
+           65535]},
+         1]},
+       "bind":
+       [{"value":
+         {"op": "bitXor",
+          "args":
+          [{"op": "binding", "name": "s2"},
+           {"op": "lshift", "args": [{"op": "binding", "name": "s2"}, 17]}]},
+         "name": "s3"}]},
+      "bind":
+      [{"value":
+        {"op": "bitXor",
+         "args":
+         [{"op": "binding", "name": "s1"},
+          {"op": "rshift", "args": [{"op": "binding", "name": "s1"}, 7]}]},
+        "name": "s2"}]},
+     "bind":
+     [{"value":
+       {"op": "bitXor",
+        "args":
+        [{"op": "nameRef", "name": "state"},
+         {"op": "lshift", "args": [{"op": "nameRef", "name": "state"}, 13]}]},
+       "name": "s1"}]}},
+   {"target": {"name": "state", "kind": "reg"},
+    "op": "nextUpdate",
+    "expr":
+    {"op": "let",
+     "in":
+     {"op": "let",
+      "in":
+      {"op": "bitXor",
+       "args":
+       [{"op": "binding", "name": "s2"},
+        {"op": "lshift", "args": [{"op": "binding", "name": "s2"}, 17]}]},
+      "bind":
+      [{"value":
+        {"op": "bitXor",
+         "args":
+         [{"op": "binding", "name": "s1"},
+          {"op": "rshift", "args": [{"op": "binding", "name": "s1"}, 7]}]},
+        "name": "s2"}]},
+     "bind":
+     [{"value":
+       {"op": "bitXor",
+        "args":
+        [{"op": "nameRef", "name": "state"},
+         {"op": "lshift", "args": [{"op": "nameRef", "name": "state"}, 13]}]},
+       "name": "s1"}]}}]}}

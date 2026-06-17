@@ -1,56 +1,17 @@
-{
-  "op": "program",
-  "name": "VCA",
-  "body": {
-    "op": "block",
-    "decls": [],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "out",
-        "expr": {
-          "op": "mul",
-          "args": [
-            {
-              "op": "nameRef",
-              "name": "audio"
-            },
-            {
-              "op": "nameRef",
-              "name": "cv"
-            }
-          ]
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "audio",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0
-      },
-      {
-        "name": "cv",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0
-      }
-    ],
-    "outputs": [
-      {
-        "name": "out",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "float"}, "name": "audio", "default": 0},
+   {"type": {"op": "nameRef", "name": "float"}, "name": "cv", "default": 0}]},
+ "op": "program",
+ "name": "VCA",
+ "body":
+ {"op": "block",
+  "decls": [],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "mul",
+     "args":
+     [{"op": "nameRef", "name": "audio"}, {"op": "nameRef", "name": "cv"}]}}]}}

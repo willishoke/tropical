@@ -1,150 +1,49 @@
-{
-  "op": "program",
-  "name": "Sequencer",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "regDecl",
-        "name": "step",
-        "init": 0,
-        "type": {
-          "op": "nameRef",
-          "name": "int"
-        }
-      },
-      {
-        "op": "delayDecl",
-        "name": "prev_clock",
-        "update": {
-          "op": "nameRef",
-          "name": "clock"
-        },
-        "init": 0
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "value",
-        "expr": {
-          "op": "index",
-          "args": [
-            {
-              "op": "nameRef",
-              "name": "values"
-            },
-            {
-              "op": "nameRef",
-              "name": "step"
-            }
-          ]
-        }
-      },
-      {
-        "op": "nextUpdate",
-        "target": {
-          "kind": "reg",
-          "name": "step"
-        },
-        "expr": {
-          "op": "mod",
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "step"
-                },
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "gt",
-                      "args": [
-                        {
-                          "op": "nameRef",
-                          "name": "clock"
-                        },
-                        0.5
-                      ]
-                    },
-                    {
-                      "op": "lte",
-                      "args": [
-                        {
-                          "op": "nameRef",
-                          "name": "prev_clock"
-                        },
-                        0.5
-                      ]
-                    }
-                  ]
-                }
-              ]
-            },
-            {
-              "op": "nameRef",
-              "name": "N"
-            }
-          ]
-        }
-      }
-    ]
-  },
-  "type_params": {
-    "N": {
-      "type": "int",
-      "default": 8
-    }
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "clock",
-        "type": {
-          "op": "nameRef",
-          "name": "unipolar"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            0,
-            0,
-            1
-          ]
-        }
-      },
-      {
-        "name": "values",
-        "type": {
-          "kind": "array",
-          "element": {
-            "op": "nameRef",
-            "name": "float"
-          },
-          "shape": [
-            {
-              "op": "nameRef",
-              "name": "N"
-            }
-          ]
-        }
-      }
-    ],
-    "outputs": [
-      {
-        "name": "value",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        }
-      }
-    ]
-  }
-}
+{"type_params": {"N": {"type": "int", "default": 8}},
+ "ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "value"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "unipolar"},
+    "name": "clock",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [0, 0, 1]}},
+   {"type":
+    {"shape": [{"op": "nameRef", "name": "N"}],
+     "kind": "array",
+     "element": {"op": "nameRef", "name": "float"}},
+    "name": "values"}]},
+ "op": "program",
+ "name": "Sequencer",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"type": {"op": "nameRef", "name": "int"},
+    "op": "regDecl",
+    "name": "step",
+    "init": 0},
+   {"update": {"op": "nameRef", "name": "clock"},
+    "op": "delayDecl",
+    "name": "prev_clock",
+    "init": 0}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "value",
+    "expr":
+    {"op": "index",
+     "args":
+     [{"op": "nameRef", "name": "values"}, {"op": "nameRef", "name": "step"}]}},
+   {"target": {"name": "step", "kind": "reg"},
+    "op": "nextUpdate",
+    "expr":
+    {"op": "mod",
+     "args":
+     [{"op": "add",
+       "args":
+       [{"op": "nameRef", "name": "step"},
+        {"op": "mul",
+         "args":
+         [{"op": "gt", "args": [{"op": "nameRef", "name": "clock"}, 0.5]},
+          {"op": "lte",
+           "args": [{"op": "nameRef", "name": "prev_clock"}, 0.5]}]}]},
+      {"op": "nameRef", "name": "N"}]}}]}}

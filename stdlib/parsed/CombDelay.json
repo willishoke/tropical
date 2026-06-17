@@ -1,122 +1,43 @@
-{
-  "op": "program",
-  "name": "CombDelay",
-  "body": {
-    "op": "block",
-    "decls": [
-      {
-        "op": "regDecl",
-        "name": "s",
-        "init": 0
-      }
-    ],
-    "assigns": [
-      {
-        "op": "outputAssign",
-        "name": "out",
-        "expr": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            {
-              "op": "add",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "input"
-                },
-                {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "nameRef",
-                      "name": "feedback"
-                    },
-                    {
-                      "op": "nameRef",
-                      "name": "s"
-                    }
-                  ]
-                }
-              ]
-            },
-            -1,
-            1
-          ]
-        }
-      },
-      {
-        "op": "nextUpdate",
-        "target": {
-          "kind": "reg",
-          "name": "s"
-        },
-        "expr": {
-          "op": "add",
-          "args": [
-            {
-              "op": "nameRef",
-              "name": "input"
-            },
-            {
-              "op": "mul",
-              "args": [
-                {
-                  "op": "nameRef",
-                  "name": "feedback"
-                },
-                {
-                  "op": "nameRef",
-                  "name": "s"
-                }
-              ]
-            }
-          ]
-        }
-      }
-    ]
-  },
-  "ports": {
-    "inputs": [
-      {
-        "name": "input",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        },
-        "default": {
-          "op": "call",
-          "callee": {
-            "op": "nameRef",
-            "name": "clamp"
-          },
-          "args": [
-            0,
-            -1,
-            1
-          ]
-        }
-      },
-      {
-        "name": "feedback",
-        "type": {
-          "op": "nameRef",
-          "name": "float"
-        },
-        "default": 0.7
-      }
-    ],
-    "outputs": [
-      {
-        "name": "out",
-        "type": {
-          "op": "nameRef",
-          "name": "signal"
-        }
-      }
-    ]
-  }
-}
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "signal"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "signal"},
+    "name": "input",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [0, -1, 1]}},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "feedback",
+    "default": 0.7}]},
+ "op": "program",
+ "name": "CombDelay",
+ "body":
+ {"op": "block",
+  "decls": [{"op": "regDecl", "name": "s", "init": 0}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args":
+     [{"op": "add",
+       "args":
+       [{"op": "nameRef", "name": "input"},
+        {"op": "mul",
+         "args":
+         [{"op": "nameRef", "name": "feedback"},
+          {"op": "nameRef", "name": "s"}]}]},
+      -1,
+      1]}},
+   {"target": {"name": "s", "kind": "reg"},
+    "op": "nextUpdate",
+    "expr":
+    {"op": "add",
+     "args":
+     [{"op": "nameRef", "name": "input"},
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "feedback"},
+        {"op": "nameRef", "name": "s"}]}]}}]}}
