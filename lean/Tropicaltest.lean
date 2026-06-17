@@ -3,6 +3,9 @@ import Tropical.Engine
 import Tropical.Plan
 import Tropical.Ir.EmitLlvm
 import Tropical.PlanDecode
+import Tropical.Parse.Surface.Markdown
+import Tropical.Parse.Raise
+import Tropical.Ir.Elaborator
 import Lean.Data.Json
 
 /-!
@@ -183,6 +186,28 @@ private def checkGoldenHash (name patchPath expected : String) : IO Bool := do
     if got == expected then IO.println s!"  PASS  {name}  {got.take 16}"; pure true
     else IO.println s!"  FAIL  {name}  expected {expected.take 16} got {got.take 16}"; pure false
 
+/-- Regression for `let`-binding serialization order. `Sin`'s `let` is
+    order-dependent (`poly` uses `r2`, `sign` uses `odd_n`) and its binding
+    names do not sort in declaration order ("poly" < "r2"). Surface-parse →
+    encode (`toJson`) → re-parse → decode (`decodeProgram`) → elaborate must
+    succeed; if `let` bind were serialized as a key-reordering object, the
+    round-trip would scramble the bindings and elaboration would fail with
+    "unknown name". -/
+private def runLetRoundtrip : IO Bool := do
+  let md ← IO.FS.readFile "stdlib/Sin.md"
+  match Tropical.Parse.Surface.parseMarkdownProgram md with
+  | .error e => IO.println s!"  FAIL  let-roundtrip  parse: {firstLine e}"; pure false
+  | .ok prog =>
+    match Tropical.Parse.JsonV.parse prog.toJson.compress with
+    | .error e => IO.println s!"  FAIL  let-roundtrip  reparse: {firstLine e}"; pure false
+    | .ok jv =>
+      match Tropical.Parse.decodeProgram jv with
+      | .error e => IO.println s!"  FAIL  let-roundtrip  decode: {firstLine e}"; pure false
+      | .ok prog2 =>
+        match Tropical.Ir.elaborateInto {} prog2 (some fun _ => none) with
+        | .error e => IO.println s!"  FAIL  let-roundtrip  elaborate: {firstLine e.message}"; pure false
+        | .ok _ => IO.println "  PASS  let-roundtrip  Sin survives encode→decode→elaborate"; pure true
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -234,6 +259,11 @@ def main (args : List String) : IO UInt32 := do
     else
       IO.println s!"  FAIL  op-coverage  expected {expected.take 16} got {got.take 16}"
       failed := failed + 1
+
+  -- ── (d) let-binding serialization order (ordered-array round-trip) ─────────
+  IO.println "let serialization order:"
+  total := total + 1
+  if !(← runLetRoundtrip) then failed := failed + 1
 
   IO.println ""
   IO.println s!"{total - failed}/{total} passed"
