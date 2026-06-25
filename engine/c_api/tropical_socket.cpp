@@ -1,0 +1,314 @@
+#include "c_api/tropical_socket.hpp"
+
+#include <nlohmann/json.hpp>
+
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+namespace tropical_socket
+{
+
+using json = nlohmann::json;
+
+// Linux: suppress SIGPIPE per-send via MSG_NOSIGNAL. macOS lacks it and uses
+// the SO_NOSIGPIPE socket option instead (set on each accepted fd below).
+#ifdef MSG_NOSIGNAL
+static constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+static constexpr int kSendFlags = 0;
+#endif
+
+SocketServer::SocketServer(tropical_runtime::FlatRuntime * rt, std::string addr)
+  : runtime_(rt), addr_(std::move(addr))
+{
+}
+
+SocketServer::~SocketServer()
+{
+  stop();
+}
+
+bool SocketServer::start()
+{
+  if (addr_.empty()) { error_ = "socket: empty address"; return false; }
+  if (addr_.size() >= sizeof(((struct sockaddr_un *)nullptr)->sun_path))
+  {
+    error_ = "socket: address too long for sockaddr_un";
+    return false;
+  }
+
+  if (::pipe(wake_pipe_) != 0)
+  {
+    error_ = std::string("socket: pipe() failed: ") + std::strerror(errno);
+    return false;
+  }
+
+  listen_fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  if (listen_fd_ < 0)
+  {
+    error_ = std::string("socket: socket() failed: ") + std::strerror(errno);
+    return false;
+  }
+
+  ::unlink(addr_.c_str());  // clear a stale node from a prior run
+
+  struct sockaddr_un un;
+  std::memset(&un, 0, sizeof(un));
+  un.sun_family = AF_UNIX;
+  std::strncpy(un.sun_path, addr_.c_str(), sizeof(un.sun_path) - 1);
+
+  if (::bind(listen_fd_, reinterpret_cast<struct sockaddr *>(&un), sizeof(un)) != 0)
+  {
+    error_ = std::string("socket: bind('") + addr_ + "') failed: " + std::strerror(errno);
+    ::close(listen_fd_);
+    listen_fd_ = -1;
+    return false;
+  }
+
+  if (::listen(listen_fd_, 16) != 0)
+  {
+    error_ = std::string("socket: listen() failed: ") + std::strerror(errno);
+    ::close(listen_fd_);
+    listen_fd_ = -1;
+    return false;
+  }
+
+  accept_thread_ = std::thread([this] { accept_loop(); });
+  return true;
+}
+
+void SocketServer::stop()
+{
+  bool was = shutdown_.exchange(true);
+  if (was) return;
+
+  // Wake the accept poll and the Lean next_control wait.
+  if (wake_pipe_[1] >= 0) { const char b = 1; (void)::write(wake_pipe_[1], &b, 1); }
+  ctrl_cv_.notify_all();
+
+  if (accept_thread_.joinable()) accept_thread_.join();
+
+  // Close all client fds so their recv() returns and the loops exit.
+  {
+    std::lock_guard<std::mutex> lk(clients_mtx_);
+    for (auto & [id, fd] : client_fds_) ::close(fd);
+    client_fds_.clear();
+  }
+  for (auto & t : client_threads_) if (t.joinable()) t.join();
+  client_threads_.clear();
+
+  if (listen_fd_ >= 0) { ::close(listen_fd_); listen_fd_ = -1; }
+  if (wake_pipe_[0] >= 0) { ::close(wake_pipe_[0]); wake_pipe_[0] = -1; }
+  if (wake_pipe_[1] >= 0) { ::close(wake_pipe_[1]); wake_pipe_[1] = -1; }
+  if (!addr_.empty()) ::unlink(addr_.c_str());
+}
+
+void SocketServer::accept_loop()
+{
+  while (!shutdown_.load(std::memory_order_acquire))
+  {
+    struct pollfd fds[2];
+    fds[0].fd = listen_fd_;   fds[0].events = POLLIN; fds[0].revents = 0;
+    fds[1].fd = wake_pipe_[0]; fds[1].events = POLLIN; fds[1].revents = 0;
+    const int r = ::poll(fds, 2, -1);
+    if (r < 0) { if (errno == EINTR) continue; break; }
+    if (fds[1].revents & POLLIN) break;  // shutdown signalled
+    if (!(fds[0].revents & POLLIN)) continue;
+
+    const int cfd = ::accept(listen_fd_, nullptr, nullptr);
+    if (cfd < 0) { if (errno == EINTR || errno == EAGAIN) continue; break; }
+
+#ifdef SO_NOSIGPIPE
+    { int on = 1; ::setsockopt(cfd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on)); }
+#endif
+
+    const uint64_t id = next_client_id_.fetch_add(1, std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lk(clients_mtx_);
+      client_fds_[id] = cfd;
+      // accept_loop is the sole writer of client_threads_ (joined in stop()
+      // after this thread exits), so no extra guard is needed.
+      client_threads_.emplace_back([this, cfd, id] { client_loop(cfd, id); });
+    }
+  }
+}
+
+void SocketServer::client_loop(int fd, uint64_t id)
+{
+  std::string buf;
+  char tmp[4096];
+  while (!shutdown_.load(std::memory_order_acquire))
+  {
+    const ssize_t n = ::recv(fd, tmp, sizeof(tmp), 0);
+    if (n <= 0) break;  // peer closed or error
+    buf.append(tmp, static_cast<std::size_t>(n));
+
+    std::size_t pos;
+    while ((pos = buf.find('\n')) != std::string::npos)
+    {
+      std::string line = buf.substr(0, pos);
+      buf.erase(0, pos + 1);
+      // strip a trailing CR (\r\n clients)
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      if (!line.empty()) handle_line(fd, id, line);
+    }
+    if (buf.size() > kMaxLine) buf.clear();  // runaway: drop, don't grow unbounded
+  }
+  close_client(id);
+}
+
+void SocketServer::handle_line(int fd, uint64_t id, const std::string & line)
+{
+  // Read just enough to route by method. A control payload is forwarded as the
+  // ORIGINAL bytes (number lexical forms preserved); only data-plane methods
+  // are interpreted here.
+  std::string method;
+  bool parsed = false;
+  try
+  {
+    json j = json::parse(line);
+    parsed = true;
+    if (j.contains("method") && j["method"].is_string())
+      method = j["method"].get<std::string>();
+  }
+  catch (...)
+  {
+    parsed = false;  // malformed: hand to the control plane so Lean returns the
+                     // standard parse-error envelope, matching --rpc behavior
+  }
+
+  if (parsed && (method == "set_param" || method == "get_telemetry"))
+  {
+    const std::string resp = handle_data(line);
+    write_line(fd, resp.data(), resp.size());
+    return;
+  }
+  enqueue_control(id, line);
+}
+
+std::string SocketServer::handle_data(const std::string & line)
+{
+  json id = nullptr;
+  std::string method;
+  try
+  {
+    json j = json::parse(line);
+    if (j.contains("id")) id = j["id"];
+    method = j.value("method", std::string{});
+
+    if (method == "set_param")
+    {
+      const json & p = j.at("params");
+      const std::string name = p.at("name").get<std::string>();
+      const double value = p.at("value").get<double>();
+      if (!std::isfinite(value))
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32603}, {"message", "set_param: value must be finite"}}}}.dump();
+      if (!runtime_->set_slot_by_name_sync("param:" + name, value))
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32603}, {"message", "set_param: unknown param '" + name + "'"}}}}.dump();
+      return json{{"jsonrpc", "2.0"}, {"id", id},
+                  {"result", {{"name", name}, {"value", value}}}}.dump();
+    }
+
+    if (method == "get_telemetry")
+    {
+      return json{{"jsonrpc", "2.0"}, {"id", id},
+                  {"result", {
+                    {"recompile_version", static_cast<uint64_t>(runtime_->recompile_version())},
+                    {"buffer_length", static_cast<uint32_t>(runtime_->getBufferLength())},
+                    {"slot_count", static_cast<uint32_t>(runtime_->slot_count())}}}}.dump();
+    }
+  }
+  catch (const std::exception & e)
+  {
+    return json{{"jsonrpc", "2.0"}, {"id", id},
+                {"error", {{"code", -32603}, {"message", std::string("data-plane error: ") + e.what()}}}}.dump();
+  }
+
+  return json{{"jsonrpc", "2.0"}, {"id", id},
+              {"error", {{"code", -32601}, {"message", "unknown data-plane method"}}}}.dump();
+}
+
+void SocketServer::enqueue_control(uint64_t client_id, std::string line)
+{
+  {
+    std::lock_guard<std::mutex> lk(ctrl_mtx_);
+    ctrl_q_.push(ControlMsg{client_id, std::move(line)});
+  }
+  ctrl_cv_.notify_one();
+}
+
+bool SocketServer::next_control(uint64_t * out_client_id, char ** out_bytes, std::size_t * out_len)
+{
+  std::unique_lock<std::mutex> lk(ctrl_mtx_);
+  ctrl_cv_.wait(lk, [this] { return shutdown_.load(std::memory_order_acquire) || !ctrl_q_.empty(); });
+  if (ctrl_q_.empty()) return false;  // shutdown with nothing left to drain
+
+  ControlMsg msg = std::move(ctrl_q_.front());
+  ctrl_q_.pop();
+  lk.unlock();
+
+  const std::size_t n = msg.bytes.size();
+  char * buf = static_cast<char *>(std::malloc(n + 1));
+  if (!buf) return false;
+  std::memcpy(buf, msg.bytes.data(), n);
+  buf[n] = '\0';
+
+  if (out_client_id) *out_client_id = msg.client_id;
+  if (out_bytes) *out_bytes = buf;
+  if (out_len) *out_len = n;
+  return true;
+}
+
+void SocketServer::write_line(int fd, const char * bytes, std::size_t len)
+{
+  std::lock_guard<std::mutex> lk(clients_mtx_);
+  std::string out(bytes, len);
+  out.push_back('\n');
+  std::size_t off = 0;
+  while (off < out.size())
+  {
+    const ssize_t w = ::send(fd, out.data() + off, out.size() - off, kSendFlags);
+    if (w <= 0) break;  // closed/error: drop the rest
+    off += static_cast<std::size_t>(w);
+  }
+}
+
+void SocketServer::send_response(uint64_t client_id, const char * bytes, std::size_t len)
+{
+  int fd = -1;
+  {
+    std::lock_guard<std::mutex> lk(clients_mtx_);
+    auto it = client_fds_.find(client_id);
+    if (it == client_fds_.end()) return;  // disconnected
+    fd = it->second;
+    std::string out(bytes, len);
+    out.push_back('\n');
+    std::size_t off = 0;
+    while (off < out.size())
+    {
+      const ssize_t w = ::send(fd, out.data() + off, out.size() - off, kSendFlags);
+      if (w <= 0) break;
+      off += static_cast<std::size_t>(w);
+    }
+  }
+}
+
+void SocketServer::close_client(uint64_t client_id)
+{
+  std::lock_guard<std::mutex> lk(clients_mtx_);
+  auto it = client_fds_.find(client_id);
+  if (it == client_fds_.end()) return;
+  ::close(it->second);
+  client_fds_.erase(it);
+}
+
+}  // namespace tropical_socket

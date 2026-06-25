@@ -114,6 +114,38 @@ unsigned int     tropical_runtime_slot_index(tropical_runtime_t, const char* nam
 void             tropical_runtime_set_slot(tropical_runtime_t, unsigned int slot_index, double value);
 double           tropical_runtime_get_slot(tropical_runtime_t, unsigned int slot_index);
 
+/* ---------- Socket endpoint ----------
+ *
+ * A single Unix-domain socket serving many clients over newline-delimited
+ * JSON-RPC, with an internal control/data plane split. The socket borrows the
+ * runtime (which must outlive it). Data-plane methods (set_param, get_telemetry)
+ * are handled inside C++; control-plane requests are queued for the Lean driver
+ * thread, which pulls them with tropical_socket_next_control, dispatches them,
+ * and replies with tropical_socket_send_response. The call direction across the
+ * FFI is strictly Lean->C++ — Lean pulls and pushes; C++ never calls up. */
+
+typedef void* tropical_socket_t;
+
+/* Bind + listen on the Unix-domain socket at `addr` and spawn the accept
+   thread. Returns NULL on failure (see tropical_last_error). */
+tropical_socket_t tropical_socket_listen(tropical_runtime_t, const char* addr);
+/* Stop the server (close the socket, wake the pull, join threads, unlink the
+   socket file) and free it. */
+void             tropical_socket_free(tropical_socket_t);
+
+/* Control-plane pull, called only from the single Lean driver thread. Blocks
+   until a control message arrives or the socket shuts down. Returns false on
+   shutdown-with-empty-queue. On true, *out_client_id is set and the request
+   line is copied into a malloc'd NUL-terminated buffer (*out_bytes, *out_len);
+   free it with tropical_free_buffer. */
+bool             tropical_socket_next_control(tropical_socket_t, uint64_t* out_client_id,
+                                              char** out_bytes, size_t* out_len);
+
+/* Control-plane push: send a response line (a newline is appended) to the
+   client identified by client_id. No-op if the client has disconnected. */
+void             tropical_socket_send_response(tropical_socket_t, uint64_t client_id,
+                                               const char* bytes, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

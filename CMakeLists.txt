@@ -37,7 +37,8 @@ endif()
 # Core C++ sources shared by all targets
 set(TROPICAL_CORE_SOURCES
     engine/runtime/FlatRuntime.cpp
-    engine/c_api/tropical_c.cpp)
+    engine/c_api/tropical_c.cpp
+    engine/c_api/tropical_socket.cpp)
 
 # libtropical — stable C shared library (no Python dependency)
 add_library(tropical_core SHARED ${TROPICAL_CORE_SOURCES})
@@ -125,8 +126,9 @@ if(TROPICAL_LLVM_STATIC)
     endif()
 endif()
 
+find_package(Threads REQUIRED)
 target_compile_features(tropical_core PRIVATE cxx_std_20)
-target_link_libraries(tropical_core PRIVATE rtaudio nlohmann_json::nlohmann_json)
+target_link_libraries(tropical_core PRIVATE rtaudio nlohmann_json::nlohmann_json Threads::Threads)
 target_include_directories(tropical_core PRIVATE engine)
 set_target_properties(tropical_core PROPERTIES OUTPUT_NAME "tropical")
 
