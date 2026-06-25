@@ -255,6 +255,40 @@ public:
     return state.slots[idx];
   }
 
+  // ── Control-plane data path (socket endpoint) ──────────────────────────────
+  // Resolve a slot by name and write it atomically against the live kernel,
+  // serialized with hot-swap (publish_state) via build_mutex_. Unlike the
+  // lock-free set_slot, this is safe to call from a control thread running
+  // concurrently with load_ir: the lock excludes the inactive-state rebuild,
+  // and resolving + writing under one lock means a recompile can never land a
+  // value in a stale slot index. build_mutex_ is held by publish_state only
+  // for the cheap by-name transfer + flip (microseconds) — never the LLVM
+  // compile — so this contends only during the swap itself. Returns false if
+  // no slot of that name exists in the active plan.
+  bool set_slot_by_name_sync(const std::string & name, double value)
+  {
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+    KernelState & state = states_[state_idx];
+    for (uint32_t i = 0; i < state.slot_names.size(); ++i)
+      if (state.slot_names[i] == name) { state.slots[i] = value; return true; }
+    return false;
+  }
+
+  // Monotonic counter bumped on every successful hot-swap (publish_state).
+  // Telemetry clients poll it to detect that the session topology changed.
+  uint64_t recompile_version() const
+  {
+    return recompile_version_.load(std::memory_order_acquire);
+  }
+
+  // Slot count of the currently-active kernel (telemetry).
+  uint32_t slot_count() const
+  {
+    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+    return static_cast<uint32_t>(states_[state_idx].slots.size());
+  }
+
 private:
   // build_kernel_state maps a parsed plan's *metadata* (everything except
   // the kernel handle) into a fresh KernelState; publish_state runs the
@@ -350,6 +384,7 @@ private:
   std::atomic<uint32_t> active_state_{0};
   std::atomic<uint32_t> audio_state_index_{0};
   std::atomic<bool> audio_processing_{false};
+  std::atomic<uint64_t> recompile_version_{0};
 
   mutable std::mutex build_mutex_;
 

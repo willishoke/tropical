@@ -180,4 +180,45 @@ def listDevices : IO (Array DeviceInfo) := do
   let ids ← audioDeviceIds
   ids.mapM fun id => do pure { id, name := (← audioDeviceName id) }
 
+-- ── Socket endpoint ──────────────────────────────────────────────────────────
+
+private opaque SocketHandlePointed : NonemptyType
+/-- A raw `tropical_socket_t` handle (the C++ `SocketServer`). Use `Socket`
+    (below), which keeps the runtime alive. -/
+def SocketHandle : Type := SocketHandlePointed.type
+instance : Nonempty SocketHandle := SocketHandlePointed.property
+
+@[extern "shim_socket_listen"]
+private opaque socketListenRaw (rt : @& Runtime) (addr : @& String) : IO SocketHandle
+
+@[extern "shim_socket_next_control"]
+private opaque socketNextControlRaw (s : @& SocketHandle) : IO (Option (UInt64 × String))
+
+@[extern "shim_socket_send_response"]
+private opaque socketSendResponseRaw (s : @& SocketHandle) (clientId : UInt64) (bytes : @& String) : IO Unit
+
+/-- A socket bound to the runtime it drives — the `runtime` field keeps the
+    Lean runtime object (and its C handle) alive for the socket's lifetime,
+    since the socket's threads read the runtime's slots and telemetry. -/
+structure Socket where
+  handle  : SocketHandle
+  runtime : Runtime
+
+namespace Socket
+
+/-- Bind + listen on a Unix-domain socket at `addr`; raise the engine's error
+    string on failure. -/
+def listen (rt : Runtime) (addr : String) : IO Socket := do
+  pure { handle := (← socketListenRaw rt addr), runtime := rt }
+
+/-- Block until a control-plane request arrives (returns `(clientId, line)`)
+    or the socket shuts down (`none`). -/
+def nextControl (s : Socket) : IO (Option (UInt64 × String)) := socketNextControlRaw s.handle
+
+/-- Send a JSON-RPC response line back to one client. -/
+def sendResponse (s : Socket) (clientId : UInt64) (bytes : String) : IO Unit :=
+  socketSendResponseRaw s.handle clientId bytes
+
+end Socket
+
 end Tropical.Ffi

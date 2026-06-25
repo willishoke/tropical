@@ -2,6 +2,7 @@ import Turnstile
 import Tropical.Tools
 import Tropical.Engine
 import Tropical.Rpc
+import Tropical.Serve
 import Tropical.Resources
 
 /-!
@@ -108,5 +109,10 @@ def runFrontend : IO Unit := do
 def runRpc : IO Unit := do
   let env ← Engine.boot
   Rpc.run env
+
+/-- `--serve <addr>` — the multi-client socket endpoint (C++-owned socket,
+    control/data plane split). See `Tropical.Serve`. -/
+def runServe (addr : String) : IO Unit :=
+  Tropical.Serve.run addr
 
 end Tropical

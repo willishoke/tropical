@@ -99,6 +99,7 @@ bool FlatRuntime::publish_state(KernelState && new_state)
 
   states_[inactive] = std::move(new_state);
   active_state_.store(inactive, std::memory_order_release);
+  recompile_version_.fetch_add(1, std::memory_order_release);
   return true;
 }
 
