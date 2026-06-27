@@ -1,0 +1,39 @@
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "sine"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "freq"},
+    "name": "freq",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "select"},
+     "args": [{"op": "gt", "args": [440, 0]}, 440, 0]}}]},
+ "op": "program",
+ "name": "FixedSinOsc",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"program": {"op": "nameRef", "name": "FixedPhasor"},
+    "op": "instanceDecl",
+    "name": "ph",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "freq"},
+      "port": {"op": "nameRef", "name": "freq"}}]},
+   {"program": {"op": "nameRef", "name": "Sin"},
+    "op": "instanceDecl",
+    "name": "sin",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [6.283185307179586,
+        {"ref": {"op": "nameRef", "name": "ph"},
+         "output": {"op": "nameRef", "name": "phase"},
+         "op": "nestedOut"}]},
+      "port": {"op": "nameRef", "name": "x"}}]}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "sine",
+    "expr":
+    {"ref": {"op": "nameRef", "name": "sin"},
+     "output": {"op": "nameRef", "name": "out"},
+     "op": "nestedOut"}}]}}

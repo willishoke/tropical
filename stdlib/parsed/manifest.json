@@ -27,6 +27,7 @@
   "BubbleCloud",
   "Clock",
   "Cos",
+  "FixedSinOsc",
   "OnePole",
   "Phaser",
   "Phaser16",
