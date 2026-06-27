@@ -4,7 +4,7 @@ import Tropical.Parse.Nodes
 /-!
 # Body-item parsers (port of `compiler/parse/statements.ts`)
 
-The leaf decl/assign parsers — reg, delay, param, next, dac.out, and the
+The leaf decl/assign parsers — reg, param, next, dac.out, and the
 instance-vs-output-assign disambiguation. None of these recurse into the
 declaration layer, so they live here as plain defs; `parseBodyItem` /
 `parseProgram` (the body↔program mutual knot) live in `Declarations.lean`,
@@ -40,24 +40,6 @@ def parseRegDecl : P BodyDecl := do
   let _ ← consume .assign "reg `=` before init"
   let init ← parseTopExpr
   pure (.reg name init type?)
-
-/-- `delay name [: SumType] = update_expr init init_value` (`init` contextual). -/
-def parseDelayDecl : P BodyDecl := do
-  let _ ← consume .kdelay "delay keyword"
-  let name := (← consume .ident "delay name").sval
-  let type? ← (do
-    if (← peekKind) == .colon then
-      advance
-      pure (some (← consume .ident "delay type name").sval)
-    else pure none)
-  let _ ← consume .assign "delay `=` before update expression"
-  let update ← parseTopExpr
-  let initTok ← cur
-  if !isCtxKw initTok "init" then
-    throw "delay decl: expected 'init' after update expression"
-  advance
-  let init ← parseTopExpr
-  pure (.delay name update init type?)
 
 /-- `param name: smoothed [= default]` (default must be a number literal). -/
 def parseParamDecl : P BodyDecl := do

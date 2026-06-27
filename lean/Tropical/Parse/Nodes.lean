@@ -231,11 +231,11 @@ deriving Inhabited, Repr
 -- ─────────────────────────────────────────────────────────────
 
 inductive NextTargetKind where
-  | reg | delay
+  | reg
 deriving BEq, Inhabited, Repr
 
 def NextTargetKind.wire : NextTargetKind → String
-  | .reg => "reg" | .delay => "delay"
+  | .reg => "reg"
 
 inductive BodyAssign where
   | output (name : String) (expr : ParsedExpr)
@@ -251,7 +251,6 @@ mutual
 inductive BodyDecl where
   /-- `type?` is a NameRef on the wire. -/
   | reg (name : String) (init : ParsedExpr) (type? : Option String)
-  | delay (name : String) (update init : ParsedExpr) (type? : Option String)
   | param (name : String) (value? : Option JsonNumber)
   /-- `program` is a NameRef; `typeArgs`/`inputs` keep entry order
       (each entry's key is a NameRef on the wire). -/
@@ -445,11 +444,6 @@ partial def bodyDecl : BodyDecl → Json
   | .reg name init type? =>
     Json.mkObj <|
       [("op", jStr "regDecl"), ("name", jStr name), ("init", expr init)]
-      ++ optField "type" (type?.map jNameRef)
-  | .delay name update init type? =>
-    Json.mkObj <|
-      [("op", jStr "delayDecl"), ("name", jStr name),
-       ("update", expr update), ("init", expr init)]
       ++ optField "type" (type?.map jNameRef)
   | .param name value? =>
     Json.mkObj <|
@@ -835,8 +829,7 @@ def bodyAssign (path : String) (j : JsonV) : Except String BodyAssign := do
     expectKeys s!"{path}.target" target ["kind", "name"]
     let kind ← match target.getStr? "kind" with
       | some "reg" => pure NextTargetKind.reg
-      | some "delay" => pure NextTargetKind.delay
-      | _ => err s!"{path}.target" "kind must be 'reg' or 'delay'"
+      | _ => err s!"{path}.target" "kind must be 'reg'"
     pure (.next kind (← reqStr s!"{path}.target" target "name")
       (← expr s!"{path}.expr" (← reqField path j "expr")))
   | some other => err path s!"unknown body assign op '{other}'"
@@ -853,14 +846,6 @@ partial def bodyDecl (path : String) (j : JsonV) : Except String BodyDecl := do
       | none => pure none
       | some t => pure (some (← nameRefNode s!"{path}.type" t))
     pure (.reg (← reqStr path j "name")
-      (← expr s!"{path}.init" (← reqField path j "init")) type?)
-  | some "delayDecl" => do
-    expectKeys path j ["op", "name", "update", "init", "type"]
-    let type? ← match j.getField? "type" with
-      | none => pure none
-      | some t => pure (some (← nameRefNode s!"{path}.type" t))
-    pure (.delay (← reqStr path j "name")
-      (← expr s!"{path}.update" (← reqField path j "update"))
       (← expr s!"{path}.init" (← reqField path j "init")) type?)
   | some "paramDecl" => do
     expectKeys path j ["op", "name", "value"]

@@ -859,12 +859,6 @@ partial def raiseBodyDecl (decl : JsonV) : Except String BodyDecl := do
     let name ← fieldStr decl "name" "regDecl"
     let type? := decl.getStr? "type"   -- only a *string* type raises (TS: typeof check)
     pure (.reg name (← raiseRegInit init) type?)
-  | "delayDecl" => do
-    let name ← fieldStr decl "name" "delayDecl"
-    let update ← raiseExprOpt (decl.getField? "update")
-    let init ← raiseExprOpt (decl.getField? "init")
-    let type? := decl.getStr? "type"
-    pure (.delay name update init type?)
   | "paramDecl" => do
     let name ← fieldStr decl "name" "paramDecl"
     let value? := match decl.getField? "value" with
@@ -912,8 +906,7 @@ partial def raiseBodyAssign (a : JsonV) : Except String BodyAssign := do
       | rerr "nextUpdate missing target"
     let kind ← match target.getStr? "kind" with
       | some "reg" => pure NextTargetKind.reg
-      | some "delay" => pure NextTargetKind.delay
-      | _ => rerr s!"nextUpdate target kind must be 'reg' or 'delay', got {JsonV.stringifyOpt (target.getField? "kind")}"
+      | _ => rerr s!"nextUpdate target kind must be 'reg', got {JsonV.stringifyOpt (target.getField? "kind")}"
     let name ← fieldStr target "name" "nextUpdate target"
     pure (.next kind name (← raiseExprOpt (a.getField? "expr")))
   | other => rerr s!"unknown body assign op '{other}'"

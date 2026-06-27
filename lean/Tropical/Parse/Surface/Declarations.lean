@@ -211,7 +211,6 @@ partial def parseBodyItem : P BodyItem := do
   let t ← cur
   match t.kind with
   | .kreg => BodyItem.decl <$> parseRegDecl
-  | .kdelay => BodyItem.decl <$> parseDelayDecl
   | .kparam => BodyItem.decl <$> parseParamDecl
   | .knext => BodyItem.assign <$> parseNextUpdate
   | .kprogram => BodyItem.decl <$> parseProgramDecl

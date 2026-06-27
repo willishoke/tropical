@@ -34,7 +34,7 @@ inductive TokKind where
   -- binders + control flow
   | klet | kin | kif | kelse | kmatch
   -- declarations
-  | kprogram | kreg | kdelay | kparam | knext
+  | kprogram | kreg | kparam | knext
   -- ADTs
   | kstruct | kenum | ktype
   -- brackets
@@ -78,7 +78,7 @@ def keywordKind? : String → Option TokKind
   | "let" => some .klet | "in" => some .kin
   | "if" => some .kif | "else" => some .kelse | "match" => some .kmatch
   | "program" => some .kprogram
-  | "reg" => some .kreg | "delay" => some .kdelay | "param" => some .kparam
+  | "reg" => some .kreg | "param" => some .kparam
   | "next" => some .knext
   | "struct" => some .kstruct | "enum" => some .kenum | "type" => some .ktype
   | _ => none

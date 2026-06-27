@@ -14,9 +14,7 @@ Faithfulness notes — every observable TS behavior is replicated:
   order: resolved `body.decls` ≠ parsed order.
 - **Two-phase decl elaboration.** Shells are registered first (forward
   refs work), expressions resolved in a second pass iterating in
-  pairing-insertion order (= non-program source order). A parsed
-  `delayDecl` shell registers `update := 0` so a later `next x = e`
-  throws `duplicate update for reg '...'`.
+  pairing-insertion order (= non-program source order).
 - **Sequential let.** Each binder is minted, its value resolved in a
   scope WITHOUT it, THEN pushed — subsequent entries and the body see
   it. Restore-on-exit shadowing falls out of the persistent binder list.
@@ -768,17 +766,6 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
       regsTbl := regsTbl.push (name, regCount)
       regCells := regCells.push (name, cell)
       regCount := regCount + 1
-    | .delay name _ _ _ => do
-      if regsTbl.any (·.1 == name) then
-        throwElab s!"duplicate reg/delay '{name}'"
-      -- `update := 0` placeholder: the delay form commits to having an
-      -- update, so a later `next` on it detects the conflict.
-      let cell := decls.size
-      decls := decls.push (.reg name jnum0 (some jnum0) none none)
-      pairing := pairing.push (cell, d)
-      regsTbl := regsTbl.push (name, regCount)
-      regCells := regCells.push (name, cell)
-      regCount := regCount + 1
     | .param name value? => do
       if paramsTbl.any (·.1 == name) then
         throwElab s!"duplicate param '{name}'"
@@ -824,10 +811,6 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
     | .reg _ initParsed _, .reg name _ update? type? lf => do
       let init ← resolveExpr scope initParsed
       decls := decls.set! cell (.reg name init update? type? lf)
-    | .delay _ updateParsed initParsed _, .reg name _ _ type? lf => do
-      let update ← resolveExpr scope updateParsed
-      let init ← resolveExpr scope initParsed
-      decls := decls.set! cell (.reg name init (some update) type? lf)
     | .param .., _ => pure ()  -- no expressions on paramDecl
     | .inst _ _ typeArgs instInputs, .inst name tk _ _ => do
       let (tas, ins) ← resolveInstanceArgs scope name tk typeArgs instInputs
@@ -890,7 +873,7 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
   pure idx
 where
   parsedDeclOp : Tropical.Parse.BodyDecl → String
-    | .reg .. => "regDecl" | .delay .. => "delayDecl" | .param .. => "paramDecl"
+    | .reg .. => "regDecl" | .param .. => "paramDecl"
     | .inst .. => "instanceDecl" | .prog .. => "programDecl"
   resolvedDeclOp : BodyDecl → String
     | .reg .. => "regDecl" | .param .. => "paramDecl"
