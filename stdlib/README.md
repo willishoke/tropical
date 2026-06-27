@@ -1,6 +1,6 @@
 # stdlib/
 
-The 33 built-in DSP program types, written as **literate programs**:
+The built-in DSP program types, written as **literate programs**:
 markdown documents whose single ```` ```tropical ```` code block holds the
 source, surrounded by prose and a mermaid signal-flow diagram. The
 document is the program — legible to humans, to agents, and to the
@@ -11,20 +11,20 @@ compiler, which reads only the code fence. The surface parser is Lean
 file) is the one non-program document in the directory.
 
 Every program in this directory is *just code* — no privileged primitives.
-Math functions are polynomial approximations defined in tropical; filters
-compose from one-pole sections; effects are graphs of these. Swap a file
-to change the math.
+Math functions are polynomial approximations defined in tropical;
+resonance is a damped sinusoid (not feedback); effects are offset reads
+`x(τ±Δ)` of these closed forms. Swap a file to change the math.
 
 ## Literate format
 
-Each document follows the same shape (see `OnePole.md` for the canonical
+Each document follows the same shape (see `SoftClip.md` for the canonical
 example):
 
 ```
 # <Name>           — title; must equal the filename stem
 <first paragraph>  — what it is, what it's for, what it sounds like
 ## Signal flow     — one mermaid flowchart: ports in/out, internals in a subgraph
-## Internals       — prose: registers, feedback paths, magic constants
+## Internals       — prose: the closed form, the time coordinate, magic constants
 ## Source          — the single ```tropical code block
 ```
 
@@ -56,7 +56,9 @@ parse  →  elaborate  →  strata  →  ResolvedProgram
 The strata pipeline (`lean/Tropical/Ir/Strata.lean`) progressively
 retires structure — type parameters, sum types, cycles, instance
 nesting, shapes, combinators — until the program is a graph of scalar
-decls ready for any backend (the C++ JIT, or `web/wasm/emit_wasm.ts`).
+decls ready for either backend (the C++ JIT, or the in-process wasm
+emitter — the *same* engine LLVM lowered to wasm32, not a second
+emitter).
 
 ## Catalog
 
@@ -67,11 +69,11 @@ direction the strata pipeline runs.
 
 ```
                     ┌───────────────┐
-                    │  Composites   │   Phaser, LadderFilter, Bubble, …
+                    │  Composites   │   ModalVoice, ReverseReverb, …
                     └───────┬───────┘
                             │ instantiates
                     ┌───────▼───────┐
-                    │ DSP primitives│   OnePole, Delay<N>, SinOsc, …
+                    │ DSP primitives│   FixedPhasor, FixedSinOsc, SoftClip, …
                     └───────┬───────┘
                             │ may call
                     ┌───────▼───────┐
@@ -104,9 +106,13 @@ the user-facing subset (the ops a program author can write) is:
 | Combinators      | `let`, `fold`, `scan`, `generate`, `iterate`, `chain`, `map2`, `zipWith` (lowered by `arrayLower`) |
 | ADTs             | `tag`, `match` (lowered by `sumLower`) |
 
-Wiring/structural ops (`ref`, `param`, `delay`, the `*Decl` family,
-etc.) exist in the wire format but aren't callable as functions in
-source — the parser produces them from syntax.
+Wiring/structural ops (`ref`, `param`, the `*Decl` family, etc.) exist
+in the wire format but aren't callable as functions in source — the
+parser produces them from syntax. There is no `reg`/`next`/`delay`:
+per-sample state was removed in the CF-only migration, so the surface
+grammar has no production for them (a source cycle is rejected at the
+elaborator, with no explicit-register escape hatch). Every kernel is a
+pure `f(τ, params)` of a time coordinate.
 
 ### Math
 
@@ -126,92 +132,66 @@ and the JIT picks up the new approximation on the next build.
 ### DSP primitives
 
 Foundational signal-processing blocks. Each does one job and may call
-into Math. They're the leaves of any patch graph — the one shared
-sub-primitive is `Phasor`, the phase core the oscillators compose.
-Sub-grouped by role.
+into Math. They're the leaves of any patch graph. Every one is a closed
+form — a pure function of its inputs (a phase, a coordinate, a value),
+with no per-sample state — so each is random-access and reversible by
+construction. The one shared sub-primitive is `FixedPhasor`, the
+stateless phase core the oscillators compose. Sub-grouped by role.
 
-#### Filters and shapers
+#### Shapers and gain
 
 | Type         | Ports |
 |--------------|-------|
-| `OnePole`    | `(input: signal, g: float) → out`. One-pole IIR with `Tanh` saturation on input and state. |
-| `SoftClip`   | `(input: signal, drive: float) → out`. `Tanh(drive · input)`. |
-| `SVF`        | `(input, cutoff: freq, q: float) → (lp, bp, hp)`. ZDF state-variable filter. |
-| `BitCrusher` | `(audio, bit_depth, sample_rate_hz) → output`. Quantization + sample-rate decimation. |
-
-#### Delays
-
-| Type           | Ports |
-|----------------|-------|
-| `AllpassDelay` | `(input: signal, coeff: float) → out`. First-order allpass, transposed direct form II. |
-| `CombDelay`    | `(input: signal, feedback: float) → out`. Single-tap feedback comb. |
-| `Delay<N>`     | `<N: int = 44100>(x) → y breaks_cycles`. Generic ring buffer of length `N`; the `breaks_cycles` flag tells `traceCycles` it's a feedback-safe boundary. |
+| `SoftClip`   | `(input: signal, drive: float) → out: signal`. Memoryless waveshaper, `Tanh(drive · input)`. |
+| `VCA`        | `(audio: float, cv: float) → out: float`. Multiplicative gain. |
+| `CrossFade`  | `(a: signal, b: signal, mix: unipolar) → out: signal`. Linear two-channel mix, `(1−mix)·a + mix·b`. |
+| `BlepStep`   | `(naive: float, phase: float, inc: float, jump: float) → out: float`. Reusable polyBLEP corrector — `naive + jump·polyBLEP(phase, inc)`. The band-limiting black box; the per-waveform part is only the edge schedule fed in. |
 
 #### Oscillators
 
-All oscillators share a phase-accumulating core, `Phasor` — `phase` advances
-by `freq/sampleRate` each sample and wraps to `[0,1)`. This is correct under
-frequency modulation (the absolute-sample-count form `sampleIndex · freq` is
-not: modulating `freq` makes instantaneous frequency blow up by the unbounded
-`sampleIndex` multiplier and smears into broadband noise).
-
-| Type     | Ports |
-|----------|-------|
-| `Phasor` | `(freq: freq) → phase: unipolar`. The shared accumulating-phase core; `reg p; next p = (p + freq/sr) % 1`. |
-| `SinOsc` | `(freq: freq) → sine`. `Sin(2π · Phasor(freq).phase)`. |
-| `BlepSaw`| `(freq: freq) → saw`. Polynomial-BLEP-corrected sawtooth (no aliasing at the discontinuity), over `Phasor`'s phase. |
-
-#### Noise
+The oscillators compose a stateless phase core, `FixedPhasor` — phase is
+computed *directly* from the sample index in 32-bit fixed-point integer
+arithmetic (`phase = ((inc·sampleIndex + offset) mod 2³²) / 2³²`), not
+accumulated in a register. So the phase is a closed-form function of the
+sample index: exact (no float drift), random-access (evaluable at any
+sample, forward or backward), with a seamless integer-overflow wrap.
+This form is exact for a *constant* `freq`; audio-rate FM is done in the
+phase domain (add to `offset`), since scaling the unbounded `sampleIndex`
+by a modulated `freq` would blow up.
 
 | Type         | Ports |
 |--------------|-------|
-| `WhiteNoise` | `() → out: float`. xorshift64 noise. |
-| `NoiseLFSR`  | `(clock) → out: signal`. 16-bit LFSR clocked by an external trigger. |
+| `FixedPhasor`| `(freq: freq, offset: unipolar) → phase: unipolar`. The shared stateless fixed-point phase core. |
+| `FixedSinOsc`| `(freq: freq) → sine: float`. `Sin(2π · FixedPhasor(freq).phase)` — fully register-free end to end. |
+| `MorphOsc`   | `(freq: freq, morph: unipolar) → out: float`. Crossfades a (naive) saw and a sine off the *same* `FixedPhasor`, `(1−morph)·saw + morph·sin`. |
 
-#### Envelopes and triggers
+#### Noise and envelopes
 
-| Type           | Ports |
-|----------------|-------|
-| `EnvExpDecay`  | `(trigger: signal, decay: float) → env`. Sum-typed delay (`Idle | Decaying(level)`) — the canonical example of a sum that `sum_lower` decomposes into a tag register plus one scalar slot per (variant, field). |
-| `TriggerRamp`  | `(trigger: signal) → (frames: float, edge: float)`. Sum-typed delay (`Quiescent | Counting(n)`) that emits a frame counter from each rising edge. |
-| `SampleHold`   | `(trigger: signal, input: signal) → value`. Captures `input` on rising edge of `trigger`; holds otherwise. |
-| `PoissonEvent` | `(rate: float) → trigger: signal`. xorshift-based stochastic event generator at the requested rate. |
+All stateless — noise is a hash of the coordinate, the envelope a shape
+of a bounded phase. Both are random-access and reversible.
 
-#### Sequencing and control
-
-| Type           | Ports |
-|----------------|-------|
-| `Sequencer<N>` | `<N: int = 8>(clock: unipolar, values: float[N]) → value`. Edge-triggered step sequencer over an `N`-element array. |
-| `Clock`        | `(freq: freq, ratios_in: float[1]) → (output: unipolar, ratios_out: float[1])`. Master clock + ratio-array fan-out. |
-| `VCA`          | `(audio: float, cv: float) → out`. Multiplicative gain. |
-| `CrossFade`    | `(a: signal, b: signal, mix: unipolar) → out`. Linear two-channel mix. |
+| Type         | Ports |
+|--------------|-------|
+| `HashNoise`  | `(pos: float) → out: float`. Closed-form noise, `hash(⌊pos⌋)` — the stateless, reversible twin of a PRNG (equal `pos` ⟹ equal output). |
+| `PluckEnv`   | `(phase: float) → env: float`. Stateless pluck envelope: a bounded shape of an event-phase fraction `frac(Ψ)`, replacing the rising-edge detector + accumulator of a triggered envelope. |
 
 ### Composites
 
 Programs whose body wires together other DSP types — patches in the
 stdlib's clothing. The `inline_instances` stratum splices these
 subgraphs into a single flat body before emit; the JIT sees no
-"composite" / "primitive" distinction, only scalar instructions.
+"composite" / "primitive" distinction, only scalar instructions. These
+are the closed-form instruments: modal resonance is a *damped sinusoid*
+(not feedback), and the future-reading effects are *offset reads*
+`x(τ±Δ)` of a closed-form source — no new IR primitive, no state.
 
-| Type                 | Ports | Composed of |
-|----------------------|-------|-------------|
-| `LadderFilter`       | `(input, cutoff: freq, resonance: unipolar, drive) → (lp, bp, hp, notch)` | 4× `OnePole` + `Tanh` |
-| `Phaser`             | `(input, feedback, lfo_speed) → (output, lfo)` | 4× inline `_allpassStage` + `Phasor`→`Sin` LFO |
-| `Phaser16`           | `(input, feedback, lfo_speed) → (output, lfo)` | 16× inline `_allpassStage` + `Phasor`→`Sin` LFO |
-| `Bubble`             | `(trigger, radius, q, sigma, decay_scale, amp_scale, attack_g) → out` | `SampleHold` + `TriggerRamp` + `Exp` + `EnvExpDecay` + `SVF` |
-| `BubbleCloud`        | `(trigger, radius, q, sigma, decay_scale, amp_scale) → out` | 8× `Bubble`, integer round-robin |
-| `Seq4MinorTranspose` | `(trigger: unipolar) → freq: freq` | `Sequencer<N=4>` over a fixed minor-key value array |
-
-## Generic programs
-
-Two stdlib programs declare type parameters:
-
-- `Delay<N: int = 44100>` — array of `N` samples; specialized at instance time via `type_args: { N: 8 }` etc.
-- `Sequencer<N: int = 8>` — `N`-step value sequencer.
-
-Specialization happens in the `specialize` stratum: the concrete `N` is
-substituted into every `ShapeDim` and expression-position `TypeParamRef`,
-producing a fresh `ResolvedProgram` per `(template, args)` pair.
+| Type             | Ports | Composed of |
+|------------------|-------|-------------|
+| `ModalVoice`     | `(tau: float, f0: freq) → out: float` | sum of modes `gₖ·Sin(ωₖ·τ)` — a damped sinusoid where the decay weight `gₖ` rides the *mode index* `k` (a constant per mode), not τ, so it stays in-ring and reverses. Mild inharmonicity, cheap. |
+| `ReverseReverb`  | `(tau: float, f0: freq, spacing: float, decay: float, amount: float) → out: float` | geometric taps of `ModalVoice` at `τ+kD` (the *future*), so the reverb swells *into* a hit from before it. Decay is per-tap (spatial), so it reverses. |
+| `ReversibleComb` | `(tau: float, f0: freq, delta: float) → out: float` | symmetric offset reads `ModalVoice(τ±Δ)` — a centered comb that commutes with the involution τ ↦ −τ. |
+| `ReversibleProbe`| `(half: float, f0: freq, delta: float) → out: float` | the palindrome witness over `ReversibleComb`: `out[half+k] == out[half−k]`, bit-exact over a symmetric τ. The reversibility test reads this directly. |
+| `ScrubClock`     | `(tau_base: float, velocity: float) → tau: float` | the host-side transport made explicit: integrates a velocity knob into a render position `τ`, the coordinate the pure kernel is total over. |
 
 ## Surface syntax
 

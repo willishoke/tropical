@@ -7,10 +7,10 @@ import Tropical.Ir.Nodes
 
 Lift a wire `ExprNode` (engine Json wire form) to a raw resolved
 `Program`: one `InputDecl` per free instance-output ref (sorted by
-canonical `instance:port` key), one output `out`, inline `ParamDecl`s
-for `param`/`trigger` refs, synthetic `RegDecl`s (update populated)
-for session-level `delay()`. Shape-identical to a user-authored
-single-assign program; the strata pipeline accepts it unmodified.
+canonical `instance:port` key), one output `out`, and inline
+`ParamDecl`s for `param`/`trigger` refs. Shape-identical to a
+user-authored single-assign program; the strata pipeline accepts it
+unmodified.
 
 Pure and total over its inputs; every error string is the TS message
 byte-exact (they surface as `internal_error` envelopes, the same

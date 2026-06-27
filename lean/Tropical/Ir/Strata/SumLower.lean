@@ -4,15 +4,10 @@ import Tropical.Ir.Strata.Basic
 /-!
 # sumLower — port of compiler/ir/sum_lower.ts (Phase 5 pass 2)
 
-Decomposes every sum-typed `RegDecl` (one whose `init` is a `tag`)
-into N+1 scalar regs — a discriminator slot (int) plus one slot per
-(variant, field) pair across all variants — and lowers every
-`match`/`tag` to scalar select-chains and variant-index literals.
-
-Three pure phases, mirroring the TS structure: `buildSpecs` (assign
-the new RegIdx layout), `buildNewDecls` (construct replacements with
-init/update set), assign rewriting. Refs resolve via the spec table
-(old reg position → spec → new idx).
+Lowers every `match`/`tag` expression to scalar select-chains and
+variant-index literals. CF-only removed sum-typed registers — the only
+construct that carried variant payloads across samples — so there is no
+register decomposition left, just the expression-level sum lowering.
 
 TS identity discipline, mirrored exactly where it is observable:
   - variant/field `===` checks → (typeDef pool idx, position) equality

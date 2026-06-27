@@ -10,10 +10,8 @@ import Tropical.Ir.Strata.SumLower
 Splice each `InstanceDecl` into its parent: specialize the inner
 (identity-keyed typeArgs), sumLower it, recursively inline its own
 sub-instances (depth-first, bottom-up), substitute wired-in input
-expressions, shift surviving Reg/Param/Binding refs by the lift
-offsets, lift regs (renamed `${instance}_${inner}`, `_liftedFrom`
-OVERWRITTEN with the current instance — each lift re-stamps, so the
-post-strata tag is the outermost instance), then resolve every
+expressions, shift surviving Param/Binding refs by the lift offsets
+(CF-only: there are no reg decls to lift or rename), then resolve every
 `nestedOut` against the recorded per-instance output expressions.
 
 The TS pass memoizes the nestedOut substitution walk on node identity
