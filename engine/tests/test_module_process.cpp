@@ -153,47 +153,12 @@ static void test_ir_counter_state()
   tropical_runtime_free(rt);
 }
 
-/**
- * 3. Hot-swap state transfer via load_ir — a second kernel sharing the
- *    register name "counter" sees the accumulated value, not 0.
- */
-static void test_ir_hot_swap_state()
-{
-  const unsigned int buf = 16;
-  tropical_runtime_t rt = tropical_runtime_new(buf);
-  ASSERT(rt != nullptr);
-
-  std::string counter_ir = wrap_loop(COUNTER_BODY);
-  ASSERT_OK(tropical_runtime_load_ir(rt, counter_ir.c_str(), counter_ir.size(),
-                                     COUNTER_MANIFEST, strlen(COUNTER_MANIFEST)));
-  tropical_runtime_process(rt);  // counter advances to `buf`
-
-  // Reader kernel: outputs registers[0] without incrementing. Same
-  // register name "counter", so hot-swap transfers the state by name.
-  std::string reader_ir = wrap_loop(
-    "  %rp = getelementptr inbounds i64, ptr %registers, i64 0\n"
-    "  %raw = load i64, ptr %rp, align 8\n"
-    "  %v = bitcast i64 %raw to double\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double %v, ptr %op, align 8\n");
-  ASSERT_OK(tropical_runtime_load_ir(rt, reader_ir.c_str(), reader_ir.size(),
-                                     COUNTER_MANIFEST, strlen(COUNTER_MANIFEST)));
-  tropical_runtime_process(rt);
-  const double* out = tropical_runtime_output_buffer(rt);
-  ASSERT(out != nullptr);
-  // State transferred by name: the reader sees the counter's value.
-  ASSERT_NEAR(out[0], (double)buf, 1e-12);
-
-  tropical_runtime_free(rt);
-}
-
 int main()
 {
   printf("test_module_process (load_ir engine)\n");
 
   run_test("constant kernel via load_ir",        test_ir_constant);
   run_test("stateful counter + register encoding", test_ir_counter_state);
-  run_test("hot-swap state transfer via load_ir", test_ir_hot_swap_state);
 
   printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;

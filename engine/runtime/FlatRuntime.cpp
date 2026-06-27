@@ -18,7 +18,6 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
   new_state.mode           = parsed.compilation_mode;
   new_state.sample_rate    = parsed.sample_rate;
   new_state.output_count   = static_cast<uint32_t>(parsed.program.output_targets.size());
-  new_state.register_names = parsed.register_names;
   new_state.array_names    = parsed.array_slot_names;
 
   // Slot array
@@ -31,18 +30,10 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
     new_state.slots[i] = parsed.slot_defaults[i];
   }
 
-  // Scalar state registers (type-aware initialization)
-  new_state.registers.resize(parsed.state_init.size(), 0);
-  for (std::size_t i = 0; i < parsed.state_init.size(); ++i)
-  {
-    const auto ty = (i < parsed.register_types.size())
-      ? parsed.register_types[i]
-      : tropical_jit::JitScalarType::Float;
-    if (ty == tropical_jit::JitScalarType::Int || ty == tropical_jit::JitScalarType::Bool)
-      new_state.registers[i] = static_cast<int64_t>(parsed.state_init[i]);
-    else
-      new_state.registers[i] = std::bit_cast<int64_t>(parsed.state_init[i]);
-  }
+  // Scalar state registers: sized but zero-initialized. CF-only removed the
+  // by-name hot-swap transfer; any surviving reg (e.g. Delay.md) zero-inits
+  // on each fresh kernel.
+  new_state.registers.assign(parsed.state_init.size(), 0);
   new_state.temps.assign(parsed.program.register_count, 0);
 
   const auto & sizes = parsed.program.array_slot_sizes;
@@ -72,30 +63,8 @@ bool FlatRuntime::publish_state(KernelState && new_state)
   const auto & old_state = states_[active];
 
   new_state.sample_index = old_state.sample_index;
-  // Hot-swap state transfer runs whenever the old state has a populated
-  // kernel of EITHER mode. Mode may change between loads (e.g. control
-  // surface flips a session between fused and microkernel for A/B
-  // testing); state transfer by name is mode-agnostic.
-  const bool old_has_kernel =
-    (old_state.mode == tropical_jit::CompilationMode::Fused          && old_state.kernel != nullptr) ||
-    (old_state.mode == tropical_jit::CompilationMode::Microkernel    && old_state.microkernels.postamble_mix != nullptr) ||
-    (old_state.mode == tropical_jit::CompilationMode::MicrokernelDeep && old_state.microkernels.postamble_mix != nullptr);
-  if (old_has_kernel)
-  {
-    const auto mapping       = compute_register_mapping(old_state, new_state);
-    const auto array_mapping = compute_array_mapping(old_state, new_state);
-    const auto slot_mapping  = compute_slot_mapping(old_state, new_state);
-    for (const auto & [si, di] : mapping)
-      if (si < old_state.registers.size() && di < new_state.registers.size())
-        new_state.registers[di] = old_state.registers[si];
-    for (const auto & [si, di] : array_mapping)
-      if (si < old_state.array_storage.size() && di < new_state.array_storage.size() &&
-          old_state.array_storage[si].size() == new_state.array_storage[di].size())
-        new_state.array_storage[di] = old_state.array_storage[si];
-    for (const auto & [si, di] : slot_mapping)
-      if (si < old_state.slots.size() && di < new_state.slots.size())
-        new_state.slots[di] = old_state.slots[si];
-  }
+  // CF-only: no by-name state transfer on hot-swap. Registers/arrays/slots
+  // zero-init from the fresh kernel; only the sample index carries over.
 
   states_[inactive] = std::move(new_state);
   active_state_.store(inactive, std::memory_order_release);
