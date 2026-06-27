@@ -24,9 +24,8 @@ What did NOT need porting, and why:
   the `inputBindingFor → defaults → 0` chain it would take there.
 - the legacy per-instance scheduler tier: retired in TS already.
 
-Slot-allocation parity: the engine's `Lowering.allocate` +
-`extractSessionDelays` produce [params, top-level outputs, delay
-slots]; this module continues with [nested outputs (depth-first,
+Slot-allocation parity: the engine's `Lowering.allocate` produces
+[params, top-level outputs]; this module continues with [nested outputs (depth-first,
 instance order), then ALL inputs (top-level + nested, depth-first)] —
 the exact two-phase `preallocateOutputsRecursive` /
 `preallocateInputsRecursive` order, including the array-input alias
@@ -492,9 +491,8 @@ structure SessionInput where
   graphOutputs : Array (String × String)
   /-- Param mirror: name → raw value Json (slot_defaults echo). -/
   params : Array (String × Json)
-  /-- Post-extraction allocation (params, top-level outputs, delays). -/
+  /-- Allocation (params, top-level outputs). -/
   alloc : Tropical.Lowering.Alloc
-  delayEntries : Array Tropical.Lowering.DelayEntry
   /-- The elaborated session root, downcast to Core. -/
   root : CoreProgram
   mode : Tropical.Plan.CompilationMode := .fused
@@ -505,7 +503,7 @@ private def rootParamName : CoreBodyDecl → Option String
 
 /-- Build slot metadata (`buildSlotMetadata`). -/
 private def slotMetadata (s : SessionAlloc) (params : Array (String × Json))
-    (delayEntries : Array Tropical.Lowering.DelayEntry) (paramSlots : Array (String × Nat)) :
+    (paramSlots : Array (String × Nat)) :
     Nat × Array String × Array Json := Id.run do
   let slotCount := s.slotCount
   let mut names := Array.replicate slotCount ""
@@ -517,11 +515,6 @@ private def slotMetadata (s : SessionAlloc) (params : Array (String × Json))
       names := names.set! idx s!"param:{name}"
       if let some v := assocGet? params name then
         defaults := defaults.set! idx v
-  for e in delayEntries do
-    if let some idx := e.slotIdx then
-      if idx < slotCount then
-        names := names.set! idx e.slotName
-        defaults := defaults.set! idx e.init
   for (name, idx) in s.inputSlotRegistry do
     if idx < slotCount then names := names.set! idx s!"input:{name}"
   return (slotCount, names, defaults)
@@ -594,7 +587,7 @@ def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan
 
   let sinks ← emitSinks s input.graphOutputs
   let (slotCount, slotNames, slotDefaults) :=
-    slotMetadata s input.params input.delayEntries s.paramSlots
+    slotMetadata s input.params s.paramSlots
 
   return {
     compilationMode := input.mode

@@ -291,8 +291,7 @@ def syncCompile (env : Env) : EngineM Unit := do
   -- Lowering (pure over the mirror; the mirror itself stays canonical
   -- pre-extraction).
   let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
-  let (wiresPost, delayEntries, alloc) :=
-    Tropical.Lowering.extractSessionDelays st.wires alloc
+  let wiresPost := st.wires
   Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
 
   -- TS parity (`sessionToParsedProgram` emits `inst.compiled.prog.name`):
@@ -307,7 +306,7 @@ def syncCompile (env : Env) : EngineM Unit := do
     match storedProgName i with
     | some pname => (n, { i with progMeta := { i.progMeta with programName := pname } })
     | none => (n, i)
-  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost delayEntries
+  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost
 
   -- Bridge the lowering's `Lean.Json` to the strict typed decoder's
   -- ordered `JsonV` by re-parsing the compressed string (lossless: the
@@ -372,7 +371,6 @@ def syncCompile (env : Env) : EngineM Unit := do
       graphOutputs := st.graphOutputs
       params := st.params
       alloc
-      delayEntries
       root := rootCore } with
     | .error msg => internalError msg
     | .ok p => pure p
@@ -400,8 +398,7 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM Tropical.Plan.FlatPlan := do
   let st ← env.state.get
   let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
-  let (wiresPost, delayEntries, alloc) :=
-    Tropical.Lowering.extractSessionDelays st.wires alloc
+  let wiresPost := st.wires
   Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
   let storedProgName (i : InstanceInfo) : Option String :=
     (i.resolvedIdx.bind st.arena.program?).map (·.name)
@@ -409,7 +406,7 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     match storedProgName i with
     | some pname => (n, { i with progMeta := { i.progMeta with programName := pname } })
     | none => (n, i)
-  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost delayEntries
+  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost
   let typed ← match Tropical.Parse.JsonV.parse parsed.compress with
     | .error e => internalError s!"session root: ParsedProgram JSON re-parse failed: {e}"
     | .ok jv =>
@@ -443,7 +440,6 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
       graphOutputs := st.graphOutputs
       params := st.params
       alloc
-      delayEntries
       root := rootCore
       mode } with
     | .error msg => internalError msg
@@ -1097,57 +1093,11 @@ def handleListWiring (env : Env) (args : Json) : EngineM Json := do
 
 -- ── Program I/O (engine-side as of Phase 6 stage 6e) ────────────────────────
 
-/-- Port of `reconstructWireDelays`: rewrite the hoisted `sessionSlot` /
-    `sessionArraySlot` reads back into `delay(<source>, init)` with the
-    extraction registry's slot name as the delay id (the register's
-    state-transfer key). Cycle-safe via the visited-slot list. -/
-private partial def reconstructWireDelays
-    (registry : Array Tropical.Lowering.DelayEntry)
-    (expr : Json) (seen : List String := []) : Json :=
-  match expr with
-  | .arr items => .arr (items.map (reconstructWireDelays registry · seen))
-  | .obj fields =>
-    let op := opOf? expr
-    let idx? : Option Nat := match getField? expr "index" with
-      | some (.num n) => some n.toFloat.toUInt64.toNat
-      | _ => none
-    if (op == some "sessionSlot" || op == some "sessionArraySlot") && idx?.isSome then
-      let isArray := op == some "sessionArraySlot"
-      let idx := idx?.getD 0
-      let tag := s!"{if isArray then "a" else "s"}{idx}"
-      let entry? := registry.find? fun e =>
-        if isArray then e.isArray && e.arraySlot == some idx
-        else !e.isArray && e.slotIdx == some idx
-      match entry? with
-      | none => expr
-      | some entry =>
-        if seen.contains tag then expr
-        else
-          let src := reconstructWireDelays registry entry.sourceExpr (tag :: seen)
-          Json.mkObj [("op", Json.str "delay"), ("args", Json.arr #[src]),
-            ("init", entry.init), ("id", Json.str entry.slotName)]
-    else Id.run do
-      -- Structural recurse into every expression-valued field.
-      let mut out : List (String × Json) := []
-      for (k, v) in fields.toArray do
-        if k == "op" then
-          out := out ++ [(k, v)]
-        else
-          match v with
-          | .arr _ | .obj _ => out := out ++ [(k, reconstructWireDelays registry v seen)]
-          | _ => out := out ++ [(k, v)]
-      return Json.mkObj out
-  | _ => expr
-
 def handleSave (env : Env) : EngineM Json := do
   let st ← env.state.get
-  -- Mirror the TS post-compile wire forms: extraction is pure over the
-  -- canonical wires; its registry supplies the reconstruction's delay
-  -- ids (extraction-minted `__autodelay:…#N` names for un-id'd authored
-  -- delays — which is why save can't just echo the canonical wires).
-  let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
-  let (wiresPost, delayEntries, _) :=
-    Tropical.Lowering.extractSessionDelays st.wires alloc
+  -- CF-only: wires are stored raw (no session-level unit delay wrap), so
+  -- save echoes the canonical wires directly.
+  let wiresPost := st.wires
   let mut decls : Array Json := #[]
   -- paramDecls first, so they're declared before referencing instances.
   for (name, value) in st.params do
@@ -1157,7 +1107,7 @@ def handleSave (env : Env) : EngineM Json := do
     let mut inputs : Array (String × Json) := #[]
     for portName in info.progMeta.inputNames do
       if let some w := wiresPost.find? fun w => w.instName == name && w.portName == portName then
-        inputs := inputs.push (portName, reconstructWireDelays delayEntries w.expr)
+        inputs := inputs.push (portName, w.expr)
     decls := decls.push <| Json.mkObj <|
       [("op", Json.str "instanceDecl"), ("name", Json.str name),
        ("program", Json.str info.baseTypeName)]
@@ -1266,11 +1216,8 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     throwBare .missingArgument "outputs is required (at least one)" (param := some "outputs")
 
   let st ← env.state.get
-  -- The TS export reads the service session's post-compile wires —
-  -- extraction-rewritten forms. Recompute them purely over the mirror.
-  let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
-  let (wiresPost, _delayEntries, _) :=
-    Tropical.Lowering.extractSessionDelays st.wires alloc
+  -- CF-only: wires are stored raw; export reads the canonical wires.
+  let wiresPost := st.wires
   let allInstances := st.instanceNames
 
   -- Validate output mappings; build the root ref expressions.
