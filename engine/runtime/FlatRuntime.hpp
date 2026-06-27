@@ -342,6 +342,17 @@ public:
     return static_cast<uint32_t>(states_[state_idx].slots.size());
   }
 
+  // The current sample index of the active kernel — the count of samples the
+  // audio thread has processed (advances one buffer per process() call, paced
+  // by the device clock when the DAC is running). The master "now" a slave
+  // consumer renders a window ending at; static when audio isn't running.
+  // Benign stale-by-a-buffer race on read.
+  uint64_t current_sample_index() const
+  {
+    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+    return states_[state_idx].sample_index;
+  }
+
 private:
   // build_kernel_state maps a parsed plan's *metadata* (everything except
   // the kernel handle) into a fresh KernelState; publish_state runs the

@@ -184,7 +184,8 @@ void SocketServer::handle_line(int fd, uint64_t id, const std::string & line)
                      // standard parse-error envelope, matching --rpc behavior
   }
 
-  if (parsed && (method == "set_param" || method == "get_telemetry"))
+  if (parsed && (method == "set_param" || method == "get_telemetry"
+              || method == "render_window" || method == "playback_position"))
   {
     const std::string resp = handle_data(line);
     write_line(fd, resp.data(), resp.size());
@@ -225,6 +226,52 @@ std::string SocketServer::handle_data(const std::string & line)
                     {"recompile_version", static_cast<uint64_t>(runtime_->recompile_version())},
                     {"buffer_length", static_cast<uint32_t>(runtime_->getBufferLength())},
                     {"slot_count", static_cast<uint32_t>(runtime_->slot_count())}}}}.dump();
+    }
+
+    // Master clock: the audio thread's current sample index (advances one
+    // buffer per process(), paced by the device when playing). A slave
+    // consumer renders a window ending here for drift-free sync.
+    if (method == "playback_position")
+    {
+      return json{{"jsonrpc", "2.0"}, {"id", id},
+                  {"result", {{"position", static_cast<uint64_t>(runtime_->current_sample_index())}}}}.dump();
+    }
+
+    // Random-access waveform read: evaluate the active (stateless) kernel over
+    // [start, start+count) and return each named slot's per-sample trajectory.
+    if (method == "render_window")
+    {
+      const json & p = j.at("params");
+      const uint64_t start = p.at("start").get<uint64_t>();
+      uint32_t count = p.at("count").get<uint32_t>();
+      if (count > 16384u)
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32602}, {"message", "render_window: count too large (max 16384)"}}}}.dump();
+      const auto names = p.at("slots").get<std::vector<std::string>>();
+      std::vector<uint32_t> ids;
+      ids.reserve(names.size());
+      for (const auto & nm : names)
+      {
+        const uint32_t sid = runtime_->slot_index(nm);
+        if (sid == UINT32_MAX)
+          return json{{"jsonrpc", "2.0"}, {"id", id},
+                      {"error", {{"code", -32602}, {"message", "render_window: unknown slot '" + nm + "'"}}}}.dump();
+        ids.push_back(sid);
+      }
+      std::vector<double> out(static_cast<size_t>(count) * ids.size(), 0.0);
+      if (!runtime_->render_window(start, count, ids.data(),
+                                   static_cast<uint32_t>(ids.size()), out.data()))
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32603}, {"message", "render_window: active kernel is not fused"}}}}.dump();
+      json values = json::array();
+      for (size_t k = 0; k < ids.size(); ++k)
+      {
+        json ch = json::array();
+        for (uint32_t i = 0; i < count; ++i) ch.push_back(out[k * count + i]);
+        values.push_back(std::move(ch));
+      }
+      return json{{"jsonrpc", "2.0"}, {"id", id},
+                  {"result", {{"start", start}, {"count", count}, {"values", std::move(values)}}}}.dump();
     }
   }
   catch (const std::exception & e)
