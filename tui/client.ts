@@ -84,15 +84,31 @@ export class EngineClient {
   kill() { this.dead = true; try { this.sock?.destroy() } catch {}; if (this.ownsEngine) { try { this.proc?.kill() } catch {} } }
 }
 
-/** Build a two-voice stateless demo session and return the two slot names. */
-export async function setupTwoVoice(c: EngineClient, freqs: [number, number] = [220, 330]): Promise<string[]> {
-  await c.call('add_instance', { program: 'FixedSinOsc', instance_name: 'osc1' })
-  await c.call('add_instance', { program: 'FixedSinOsc', instance_name: 'osc2' })
+/**
+ * Build the two-voice morph demo session: two stateless `MorphOsc` voices (each
+ * crossfading saw↔sin) at `freqs`, both summed to the DAC. The morph is driven by
+ * a slow in-patch LFO — `morph = (lfo.sine + 1)/2` at `morphHz` — so the timbre
+ * sweeps saw↔sin over time entirely inside the patch (no param, fully stateless).
+ * Because morph is itself a function of the sample index, `render_window` shows
+ * the exact morphed waveform at any point in time. Returns the two output slots.
+ */
+export async function setupMorphScope(
+  c: EngineClient,
+  freqs: [number, number] = [220, 330],
+  morphHz = 0.15,
+): Promise<string[]> {
+  await c.call('add_instance', { program: 'FixedSinOsc', instance_name: 'lfo' })
+  await c.call('add_instance', { program: 'MorphOsc', instance_name: 'osc1' })
+  await c.call('add_instance', { program: 'MorphOsc', instance_name: 'osc2' })
+  const morphExpr = { op: 'mul', args: [{ op: 'add', args: [{ op: 'ref', instance: 'lfo', output: 'sine' }, 1] }, 0.5] }
   await c.call('wire', { set: [
+    { instance: 'lfo', input: 'freq', expr: morphHz },
     { instance: 'osc1', input: 'freq', expr: freqs[0] },
     { instance: 'osc2', input: 'freq', expr: freqs[1] },
+    { instance: 'osc1', input: 'morph', expr: morphExpr },
+    { instance: 'osc2', input: 'morph', expr: morphExpr },
+    { instance: 'dac', input: 'out', expr: { op: 'ref', instance: 'osc1', output: 'out' } },
+    { instance: 'dac', input: 'out', expr: { op: 'ref', instance: 'osc2', output: 'out' } },
   ] })
-  await c.call('wire', { set: [{ instance: 'dac', input: 'out', expr: { op: 'ref', instance: 'osc1', output: 'sine' } }] })
-  await c.call('wire', { set: [{ instance: 'dac', input: 'out', expr: { op: 'ref', instance: 'osc2', output: 'sine' }, combine: 'add' }] })
-  return ['osc1.sine', 'osc2.sine']
+  return ['osc1.out', 'osc2.out']
 }

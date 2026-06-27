@@ -28,6 +28,7 @@
   "Clock",
   "Cos",
   "FixedSinOsc",
+  "MorphOsc",
   "OnePole",
   "Phaser",
   "Phaser16",
