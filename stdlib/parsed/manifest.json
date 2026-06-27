@@ -13,6 +13,7 @@
   "Log",
   "NoiseLFSR",
   "Phasor",
+  "PluckEnv",
   "PoissonEvent",
   "Pow",
   "Pulse",
