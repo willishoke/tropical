@@ -280,6 +280,33 @@ private def runReversibility : IO Bool := do
           IO.println s!"  PASS  reversibility  bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
           pure true
 
+-- ── CF-only enforcement: `cfOnly` strata mode rejects per-sample state ────────
+-- The Phase-1 guarantee. With `Options.cfOnly` set, strata rejects any
+-- `BodyDecl.reg` (surface `reg`/`delay`): a stateful program (`Phasor`'s
+-- `reg p`) is rejected; a closed-form one (`Sin` — fold + temps, no reg)
+-- compiles. The `Sin` case is the landmine pin — emit-level SSA temps are not
+-- regs and must survive cfOnly. Both programs are self-contained (no instance
+-- deps), so they elaborate standalone with a no-op external resolver.
+private def runCfOnly (name : String) (expectReject : Bool) : IO Bool := do
+  let md ← IO.FS.readFile s!"stdlib/{name}.md"
+  match Tropical.Parse.Surface.parseMarkdownProgram md with
+  | .error e => IO.println s!"  FAIL  cf-only/{name}  parse: {firstLine e}"; pure false
+  | .ok prog =>
+    match Tropical.Ir.elaborateInto {} prog (some fun _ => none) with
+    | .error e => IO.println s!"  FAIL  cf-only/{name}  elaborate: {firstLine e.message}"; pure false
+    | .ok (arena, root) =>
+      match Tropical.Ir.Strata.run { upto := 5, cfOnly := true } arena root with
+      | .error e =>
+        if expectReject then
+          IO.println s!"  PASS  cf-only/{name}  rejected per-sample state"; pure true
+        else
+          IO.println s!"  FAIL  cf-only/{name}  unexpected reject: {firstLine e.message}"; pure false
+      | .ok _ =>
+        if expectReject then
+          IO.println s!"  FAIL  cf-only/{name}  compiled but should be rejected"; pure false
+        else
+          IO.println s!"  PASS  cf-only/{name}  compiles under cfOnly (temps survive)"; pure true
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -353,6 +380,13 @@ def main (args : List String) : IO UInt32 := do
     if ← System.FilePath.pathExists patchPath then
       total := total + 1
       if !(← runGolden writeMode name patchPath s!"tests/golden/cf/{name}.hash") then failed := failed + 1
+
+  -- ── (g) CF-only enforcement: cfOnly strata mode rejects per-sample state ───
+  IO.println "cf-only enforcement (cfOnly strata mode):"
+  total := total + 1
+  if !(← runCfOnly "Phasor" (expectReject := true)) then failed := failed + 1
+  total := total + 1
+  if !(← runCfOnly "Sin" (expectReject := false)) then failed := failed + 1
 
   IO.println ""
   IO.println s!"{total - failed}/{total} passed"

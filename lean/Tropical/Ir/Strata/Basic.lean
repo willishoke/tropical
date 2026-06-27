@@ -21,6 +21,11 @@ structure Options where
       names and non-integers — is specialize's job, with byte-exact
       TS error messages). -/
   typeArgs : Array (String × JsonNumber) := #[]
+  /-- Closed-form-only enforcement: reject any per-sample state primitive
+      (`BodyDecl.reg`, the surface `reg`/`delay`) anywhere in the program
+      tree. Emit-level SSA temps are not regs and are unaffected. Default
+      off — the legacy stateful path is untouched until this is set. -/
+  cfOnly : Bool := false
 deriving Repr, Inhabited
 
 /-- A strata error is a comparable output: the TS error message,

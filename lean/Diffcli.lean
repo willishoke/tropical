@@ -339,7 +339,8 @@ private def parseStrataOptions (args : List String) :
     | some "nested" => .ok false
     | some m => .error s!"unknown --mode={m}"
   let typeArgs ← parseTypeArgs args
-  return { upto, inlineNested, typeArgs }
+  let cfOnly := args.contains "--cf-only"
+  return { upto, inlineNested, typeArgs, cfOnly }
 
 private def printStrata (opts : Tropical.Ir.Strata.Options)
     (arena : Tropical.Ir.Arena) (root : Tropical.Ir.ProgramIdx) : IO UInt32 := do
@@ -360,7 +361,7 @@ private def printStrata (opts : Tropical.Ir.Strata.Options)
 
 def strataStdlibVerb (args : List String) : IO UInt32 := do
   let some target := args.head?
-    | IO.eprintln "usage: diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]"
+    | IO.eprintln "usage: diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J] [--cf-only]"
       return 1
   let opts ← match parseStrataOptions args.tail with
     | .error e => IO.eprintln e; return 1
@@ -382,7 +383,7 @@ def strataStdlibVerb (args : List String) : IO UInt32 := do
 
 def strataFileVerb (args : List String) : IO UInt32 := do
   let some path := args.head?
-    | IO.eprintln "usage: diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]"
+    | IO.eprintln "usage: diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J] [--cf-only]"
       return 1
   let opts ← match parseStrataOptions args.tail with
     | .error e => IO.eprintln e; return 1
@@ -432,7 +433,7 @@ private def printEmit (typeArgs : Array (String × Lean.JsonNumber))
 
 def emitStdlibVerb (args : List String) : IO UInt32 := do
   let some target := args.head?
-    | IO.eprintln "usage: diffcli emit-stdlib <Name> [--type-args=J]"
+    | IO.eprintln "usage: diffcli emit-stdlib <Name> [--type-args=J] [--cf-only]"
       return 1
   let typeArgs ← match parseTypeArgs args.tail with
     | .error e => IO.eprintln e; return 1
@@ -454,7 +455,7 @@ def emitStdlibVerb (args : List String) : IO UInt32 := do
 
 def emitFileVerb (args : List String) : IO UInt32 := do
   let some path := args.head?
-    | IO.eprintln "usage: diffcli emit-file <parsed.json> [--type-args=J]"
+    | IO.eprintln "usage: diffcli emit-file <parsed.json> [--type-args=J] [--cf-only]"
       return 1
   let typeArgs ← match parseTypeArgs args.tail with
     | .error e => IO.eprintln e; return 1
@@ -560,5 +561,5 @@ def main (args : List String) : IO UInt32 := do
   | "emit-file" :: rest => emitFileVerb rest
   | "compile" :: rest => compileVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>\n       diffcli elab-stdlib <Name>\n       diffcli elab-file <parsed.json>\n       diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli emit-stdlib <Name> [--type-args=J]\n       diffcli emit-file <parsed.json> [--type-args=J]"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>\n       diffcli elab-stdlib <Name>\n       diffcli elab-file <parsed.json>\n       diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli emit-stdlib <Name> [--type-args=J]\n       diffcli emit-file <parsed.json> [--type-args=J] [--cf-only]"
     return 1
