@@ -1,6 +1,8 @@
 {"programs":
  ["AllpassDelay",
+  "AnchoredPhase",
   "BitCrusher",
+  "BlepStep",
   "CombDelay",
   "CrossFade",
   "Delay",
@@ -18,6 +20,7 @@
   "Sequencer",
   "Sin",
   "SinOsc",
+  "Smooth",
   "Tanh",
   "TriggerRamp",
   "VCA",
