@@ -198,6 +198,11 @@ bool tropical_dac_switch_device(tropical_dac_t d, unsigned int device_id)
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }
 
+uint64_t tropical_dac_playback_position(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->playback_position() : 0;
+}
+
 // ---------- FlatRuntime API ----------
 
 tropical_runtime_t tropical_runtime_new(unsigned int buffer_length)
@@ -305,6 +310,16 @@ double tropical_runtime_get_slot(tropical_runtime_t r, unsigned int slot_index)
 {
   if (!r) return 0.0;
   return static_cast<tropical_runtime::FlatRuntime*>(r)->get_slot(slot_index);
+}
+
+bool tropical_runtime_render_window(tropical_runtime_t r, uint64_t start_index,
+                                    unsigned int count, const unsigned int* slot_ids,
+                                    unsigned int n_slots, double* out)
+{
+  if (!r) return false;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)->render_window(
+    start_index, count,
+    reinterpret_cast<const uint32_t*>(slot_ids), n_slots, out);
 }
 
 // ── Socket endpoint ─────────────────────────────────────────────────────────

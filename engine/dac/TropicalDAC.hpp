@@ -134,6 +134,23 @@ struct TropicalDACImpl
     overrun_count_.store(0, std::memory_order_relaxed);
   }
 
+  // ── Master clock (multi-device A/V sync) ───────────────────────────────────
+  // The authoritative "audible now" sample index a slave consumer (scope,
+  // video) renders against: seconds-of-stream-played × rate, minus the output
+  // buffering latency. Buffer-granular; returns 0 when the stream isn't
+  // running. getStreamTime/getStreamLatency are RtAudio queries — reading them
+  // off the audio thread is a benign stale-by-a-buffer race, fine for a clock.
+  uint64_t playback_position()
+  {
+    if (!running) return 0;
+    const double secs = audio.getStreamTime();
+    long lat = audio.getStreamLatency();
+    if (lat < 0) lat = 0;
+    const double audible =
+      secs * static_cast<double>(sample_rate) - static_cast<double>(lat);
+    return audible > 0.0 ? static_cast<uint64_t>(audible) : 0;
+  }
+
   // ---------- Device query ----------
 
   unsigned int active_device() const noexcept { return active_device_id_; }

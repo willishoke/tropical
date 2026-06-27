@@ -70,6 +70,11 @@ unsigned int tropical_dac_get_active_device(tropical_dac_t);
 /* Switch the running DAC to a different output device.  Returns false on failure. */
 bool         tropical_dac_switch_device(tropical_dac_t, unsigned int device_id);
 
+/* Master clock: the "audible now" sample index — seconds of stream played ×
+   rate, minus output latency. The authoritative position a slave consumer
+   (scope, video) renders against for drift-free sync. 0 if not running. */
+uint64_t     tropical_dac_playback_position(tropical_dac_t);
+
 /* ---------- FlatRuntime API ---------- */
 
 tropical_runtime_t tropical_runtime_new(unsigned int buffer_length);
@@ -113,6 +118,15 @@ bool             tropical_runtime_is_fade_out_complete(tropical_runtime_t);
 unsigned int     tropical_runtime_slot_index(tropical_runtime_t, const char* name);
 void             tropical_runtime_set_slot(tropical_runtime_t, unsigned int slot_index, double value);
 double           tropical_runtime_get_slot(tropical_runtime_t, unsigned int slot_index);
+
+/* Random-access render (scope / slave consumers): evaluate the active fused
+   kernel over [start_index, start_index+count) and write each requested slot's
+   per-sample trajectory into `out`, slot-major (out[k*count + i]). Exact and
+   concurrency-safe with the audio thread for a register-free (stateless) patch.
+   Returns false if the kernel isn't fused or a slot id is out of range. */
+bool             tropical_runtime_render_window(tropical_runtime_t, uint64_t start_index,
+                   unsigned int count, const unsigned int* slot_ids, unsigned int n_slots,
+                   double* out);
 
 /* ---------- Socket endpoint ----------
  *

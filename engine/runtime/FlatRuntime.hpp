@@ -275,6 +275,59 @@ public:
     return false;
   }
 
+  // ── Random-access render (scope / slave consumers) ─────────────────────────
+  // Render `count` samples starting at an arbitrary sample index, snapshotting
+  // the requested slots per sample. For a STATELESS (register-free) patch this
+  // is exact and safe to run concurrently with the audio thread: it renders
+  // into private scratch temps/slots so it never disturbs the live state, and
+  // holds build_mutex_ so a hot-swap can't rebuild the active state mid-render.
+  // `out` is slot-major: out[k*count + i] = value of slot_ids[k] at sample
+  // start_index+i. Fused mode only; returns false otherwise or on a bad slot id.
+  bool render_window(uint64_t start_index, uint32_t count,
+                     const uint32_t * slot_ids, uint32_t n_slots,
+                     double * out)
+  {
+    if (!out || (n_slots > 0 && !slot_ids)) return false;
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+    KernelState & active = states_[state_idx];
+    if (active.mode != tropical_jit::CompilationMode::Fused || active.kernel == nullptr)
+      return false;
+    for (uint32_t k = 0; k < n_slots; ++k)
+      if (slot_ids[k] >= active.slots.size()) return false;
+
+    // Private scratch, isolated from the audio thread. Holding build_mutex_
+    // excludes the inactive-state rebuild, so these copies can't tear
+    // structurally (no concurrent resize); a register-free patch never writes
+    // registers/arrays, so the audio thread and this render don't fight.
+    std::vector<int64_t>              registers = active.registers;
+    std::vector<int64_t>              temps     = active.temps;
+    std::vector<double>               slots     = active.slots;
+    std::vector<std::vector<int64_t>> arrays    = active.array_storage;
+    std::vector<int64_t *>            array_ptrs(arrays.size());
+    for (size_t a = 0; a < arrays.size(); ++a) array_ptrs[a] = arrays[a].data();
+
+    double scratch_out = 0.0;
+    for (uint32_t i = 0; i < count; ++i)
+    {
+      active.kernel(
+        nullptr,
+        registers.data(),
+        array_ptrs.data(),
+        active.array_sizes.data(),
+        temps.data(),
+        active.sample_rate,
+        start_index + i,
+        active.param_ptrs.data(),
+        &scratch_out,
+        1,
+        slots.data());
+      for (uint32_t k = 0; k < n_slots; ++k)
+        out[static_cast<size_t>(k) * count + i] = slots[slot_ids[k]];
+    }
+    return true;
+  }
+
   // Monotonic counter bumped on every successful hot-swap (publish_state).
   // Telemetry clients poll it to detect that the session topology changed.
   uint64_t recompile_version() const
@@ -287,6 +340,17 @@ public:
   {
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     return static_cast<uint32_t>(states_[state_idx].slots.size());
+  }
+
+  // The current sample index of the active kernel — the count of samples the
+  // audio thread has processed (advances one buffer per process() call, paced
+  // by the device clock when the DAC is running). The master "now" a slave
+  // consumer renders a window ending at; static when audio isn't running.
+  // Benign stale-by-a-buffer race on read.
+  uint64_t current_sample_index() const
+  {
+    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+    return states_[state_idx].sample_index;
   }
 
 private:
