@@ -1,0 +1,46 @@
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "float"}, "name": "x", "default": 0},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "rate",
+    "default": 0.002},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "eps",
+    "default": 0.001}]},
+ "op": "program",
+ "name": "Smooth",
+ "breaks_cycles": true,
+ "body":
+ {"op": "block",
+  "decls": [{"op": "regDecl", "name": "s", "init": 0}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr": {"op": "nameRef", "name": "s"}},
+   {"target": {"name": "s", "kind": "reg"},
+    "op": "nextUpdate",
+    "expr":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "select"},
+     "args":
+     [{"op": "lt",
+       "args":
+       [{"op": "call",
+         "callee": {"op": "nameRef", "name": "abs"},
+         "args":
+         [{"op": "sub",
+           "args":
+           [{"op": "nameRef", "name": "x"}, {"op": "nameRef", "name": "s"}]}]},
+        {"op": "nameRef", "name": "eps"}]},
+      {"op": "nameRef", "name": "x"},
+      {"op": "add",
+       "args":
+       [{"op": "nameRef", "name": "s"},
+        {"op": "mul",
+         "args":
+         [{"op": "nameRef", "name": "rate"},
+          {"op": "sub",
+           "args":
+           [{"op": "nameRef", "name": "x"},
+            {"op": "nameRef", "name": "s"}]}]}]}]}}]}}
