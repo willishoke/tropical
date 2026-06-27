@@ -84,24 +84,27 @@ function sinOscProgram(freqHz: number): ProgramFile {
     schema: 'tropical_program_2',
     name: 'eq_sinosc',
     body: { op: 'block', decls: [
-      { op: 'instanceDecl', name: 'osc', program: 'SinOsc', inputs: { freq: freqHz } },
+      { op: 'instanceDecl', name: 'osc', program: 'FixedSinOsc', inputs: { freq: freqHz } },
     ]},
     audio_outputs: [{ instance: 'osc', output: 'sine' }],
   }
 }
 
-function onePoleProgram(cutoff: number): ProgramFile {
+// Two-instance ref-wired chain (osc → shaper) across both backends. CF-only has
+// no IIR filter; SoftClip is the closed-form signal-shaper stand-in — the point
+// here is cross-backend agreement on a multi-instance graph, not the DSP itself.
+function softClipChainProgram(drive: number): ProgramFile {
   return {
     schema: 'tropical_program_2',
-    name: 'eq_onepole',
+    name: 'eq_softclip',
     body: { op: 'block', decls: [
-      { op: 'instanceDecl', name: 'osc', program: 'SinOsc', inputs: { freq: 220 } },
-      { op: 'instanceDecl', name: 'lp', program: 'OnePole', inputs: {
+      { op: 'instanceDecl', name: 'osc', program: 'FixedSinOsc', inputs: { freq: 220 } },
+      { op: 'instanceDecl', name: 'sc', program: 'SoftClip', inputs: {
         input: { op: 'ref', instance: 'osc', output: 'sine' },
-        g: cutoff,
+        drive,
       }},
     ]},
-    audio_outputs: [{ instance: 'lp', output: 'out' }],
+    audio_outputs: [{ instance: 'sc', output: 'out' }],
   }
 }
 
@@ -171,7 +174,7 @@ function opZooProgram(): ProgramFile {
 const TOL = 1e-12
 
 describe('wasm vs native JIT', () => {
-  test('SinOsc 440 Hz — first 64 samples', async () => {
+  test('FixedSinOsc 440 Hz — first 64 samples', async () => {
     const prog = sinOscProgram(440)
     const wire = compileViaLean(prog)
     const N = 64
@@ -180,7 +183,7 @@ describe('wasm vs native JIT', () => {
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
-  test('SinOsc 880 Hz — 128 samples', async () => {
+  test('FixedSinOsc 880 Hz — 128 samples', async () => {
     const prog = sinOscProgram(880)
     const wire = compileViaLean(prog)
     const N = 128
@@ -189,8 +192,8 @@ describe('wasm vs native JIT', () => {
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
-  test('SinOsc → OnePole(1000 Hz) — 256 samples', async () => {
-    const prog = onePoleProgram(1000)
+  test('FixedSinOsc → SoftClip(drive 4) — 256 samples', async () => {
+    const prog = softClipChainProgram(4)
     const wire = compileViaLean(prog)
     const N = 256
     const nat = runNative(wire, N)
@@ -198,47 +201,10 @@ describe('wasm vs native JIT', () => {
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
-  // Array shape: wholesale array-register writeback via zipWith. Keeps an
-  // array op (Pack / Index / elementwise) in the wasm equivalence loop.
-  test('array-zipWith wholesale writeback — WASM matches JIT', async () => {
-    const program: ProgramFile = {
-      schema: 'tropical_program_2',
-      name: 'eq_arrayzip',
-      body: { op: 'block', decls: [
-        { op: 'programDecl', name: 'ArrayRegZipWithWriteback', program: {
-          op: 'program',
-          name: 'ArrayRegZipWithWriteback',
-          ports: { inputs: [], outputs: ['out'] },
-          body: { op: 'block',
-            decls: [
-              { op: 'regDecl', name: 'arr', init: [0, 0, 0, 0] },
-            ],
-            assigns: [
-              { op: 'outputAssign', name: 'out',
-                expr: { op: 'index', args: [{ op: 'reg', name: 'arr' }, 2] } },
-              { op: 'nextUpdate', target: { kind: 'reg', name: 'arr' },
-                expr: { op: 'zipWith',
-                  a: [1, 2, 3, 4],
-                  b: [10, 20, 30, 40],
-                  x_var: 'x', y_var: 'y',
-                  body: { op: 'add', args: [
-                    { op: 'binding', name: 'x' },
-                    { op: 'binding', name: 'y' },
-                  ]},
-                }},
-            ],
-          },
-        }},
-        { op: 'instanceDecl', name: 'inst', program: 'ArrayRegZipWithWriteback', inputs: {} },
-      ]},
-      audio_outputs: [{ instance: 'inst', output: 'out' }],
-    }
-    const wire = compileViaLean(program)
-    const N = 64
-    const nat = runNative(wire, N)
-    const wasm = await runWasm(program, wire, N)
-    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
-  })
+  // NOTE: the array-zipWith wholesale-writeback equivalence test was removed in
+  // the CF-only migration — it exercised an array *register* (reg `arr` +
+  // nextUpdate), which no longer exists. A CF-array (generate/fold/index, no
+  // register) cross-backend test is worth adding back; tracked in the doc sweep.
 
   test('op-zoo (bitwise / shifts / float↔int casts / mod / clamp / select) — WASM matches JIT', async () => {
     const prog = opZooProgram()
