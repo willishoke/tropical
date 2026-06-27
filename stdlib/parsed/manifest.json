@@ -6,6 +6,7 @@
   "Delay",
   "EnvExpDecay",
   "Exp",
+  "FixedPhasor",
   "Log",
   "NoiseLFSR",
   "Phasor",
