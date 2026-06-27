@@ -282,13 +282,16 @@ private def runReversibility : IO Bool := do
 
 -- ── CF-only enforcement: `cfOnly` strata mode rejects per-sample state ────────
 -- The Phase-1 guarantee. With `Options.cfOnly` set, strata rejects any
--- `BodyDecl.reg` (surface `reg`/`delay`): a stateful program (`Phasor`'s
--- `reg p`) is rejected; a closed-form one (`Sin` — fold + temps, no reg)
--- compiles. The `Sin` case is the landmine pin — emit-level SSA temps are not
--- regs and must survive cfOnly. Both programs are self-contained (no instance
--- deps), so they elaborate standalone with a no-op external resolver.
-private def runCfOnly (name : String) (expectReject : Bool) : IO Bool := do
-  let md ← IO.FS.readFile s!"stdlib/{name}.md"
+-- `BodyDecl.reg` (surface `reg`): a stateful program is rejected; a closed-form
+-- one (`Sin` — fold + temps, no reg) compiles. The `Sin` case is the landmine
+-- pin — emit-level SSA temps are not regs and must survive cfOnly. The stateful
+-- probe is inlined (the stdlib no longer ships a reg-bearing program), and both
+-- are self-contained (no instance deps), so they elaborate standalone with a
+-- no-op external resolver.
+private def cfOnlyRejectSrc : String :=
+  "```tropical\nprogram CfProbe(step: float = 1) -> (acc: float) {\n  reg s = 0\n  acc = s\n  next s = s + step\n}\n```"
+
+private def runCfOnly (name md : String) (expectReject : Bool) : IO Bool := do
   match Tropical.Parse.Surface.parseMarkdownProgram md with
   | .error e => IO.println s!"  FAIL  cf-only/{name}  parse: {firstLine e}"; pure false
   | .ok prog =>
@@ -384,9 +387,10 @@ def main (args : List String) : IO UInt32 := do
   -- ── (g) CF-only enforcement: cfOnly strata mode rejects per-sample state ───
   IO.println "cf-only enforcement (cfOnly strata mode):"
   total := total + 1
-  if !(← runCfOnly "Phasor" (expectReject := true)) then failed := failed + 1
+  if !(← runCfOnly "CfProbe" cfOnlyRejectSrc (expectReject := true)) then failed := failed + 1
   total := total + 1
-  if !(← runCfOnly "Sin" (expectReject := false)) then failed := failed + 1
+  if !(← runCfOnly "Sin" (← IO.FS.readFile "stdlib/Sin.md") (expectReject := false)) then
+    failed := failed + 1
 
   IO.println ""
   IO.println s!"{total - failed}/{total} passed"
