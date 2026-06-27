@@ -96,7 +96,55 @@ constant per tap, unchanged under τ ↦ −τ, so it reverses. Decay in the
 coordinate, `e^(−ατ)`, does not. You may have resonance, decay, the
 whole filter cabinet, as long as the decay rides the mode/tap index and
 not τ. This is invisible at the value level (`gᵏ` and `e^(−ατ)` are both
-"a decaying coefficient"), so it is the first thing to make a type.
+"a decaying coefficient"), so it is the one structural discipline the
+reversibility test leans on — checked, not typed (next section).
+
+## Reversibility is tested, not typed — the hard-won negative result
+
+The first instinct is to make reversibility a *type* — forbid the
+irreversible by construction, the way statelessness is forbidden by
+deleting `reg`. Two adversarial design passes killed both routes, and the
+negative result is recorded here so it is not re-attempted:
+
+- **The growth-grade** (tag every value Reversible/Total by its τ-growth)
+  is an inlining-defeatable lint. Irreversibility is unbounded growth,
+  which is just `×` over an unbounded coordinate — constructible by hand
+  from arithmetic, so the grade only catches the *named* `Exp` program,
+  not the structure. It also rejected the actual flagship.
+- **The compact coordinate** (expose only the wrapped phase ℤ/2³² so
+  nothing can grow) removes the precondition instead of tracking it — but
+  it cedes aperiodicity and one-shot events, turns the moat's *acausal*
+  "future" into a periodic "next lap," bakes the sample rate into the
+  lattice (killing the rate-neutral v2 coordinate), and still leaks through
+  division/log poles. And decisively: the exactness it advertised never
+  came from compactness — `ReversibleProbe` already palindromes bit-exactly
+  over **raw, unbounded `sampleIndex`, no wrap, no register**. The grid, on
+  the *line*, was always what delivered exact scrub.
+
+So reversibility is a **tested property**: the palindrome test
+(`out[half+k] == out[half−k]` over a symmetric τ, bit-exact) is the
+guarantee — decidable, undefeatable by inlining, certifying the numerical
+property directly — paired with the one checkable structural discipline
+both passes agreed on, *damping is spatial, not temporal*. Everything else
+is the test's job. The priority that falls out of this is simply
+**stateless kernels**; reversibility rides along for free on any pure
+function of the coordinate.
+
+Two corrections this forces:
+
+- **Boundedness comes from `clamp`, not from forbidding division.** The
+  domain is audio; everything saturates. `clamp` bounds the range
+  regardless of div/log/poles, and because it is a pure function of its
+  input it preserves equal-coordinate ⟹ equal-output — the palindrome
+  still holds. Unboundedness does not persist; the pole objection is moot.
+- **Noise is stateless, not a reason to keep `reg`.** Today's `WhiteNoise`
+  happens to use a state register, but the sequence is not sacred:
+  `hash(sampleIndex)` is a stateless, random-access, reversible noise, and
+  the better form is a few **short-period LFSRs memoized as constant
+  tables**, indexed by `sampleIndex mod Pᵢ` and XOR'd at coprime periods —
+  combined period `∏Pᵢ`, a handful of table reads, pure in the coordinate,
+  and it reverses. The register was an implementation detail, not the
+  aperiodicity.
 
 ## The capability class: the future is computable
 
@@ -130,9 +178,9 @@ stdlib built from offset reads, not new ops.
 
 ## The three checkable disciplines
 
-These are the laws that keep the guarantees true. Each is a one-line
-property that wants to be a type or a test, not a convention maintained
-by eye.
+These keep the reversibility test honest — each is enforced by the test
+or a lightweight check, not a type (previous section), and not a
+convention maintained by eye.
 
 1. **Centered operators.** Reversible ⟺ commutes with the involution
    τ ↦ −τ. Any difference-based operator (derivative, ADAA, one-pole)
@@ -145,11 +193,18 @@ by eye.
    bandwidth-`B` signal has bandwidth exactly `d·B`. If `d·B < Nyquist`,
    aliasing is exactly zero — a closed-form inequality, not a hope. ADAA
    is the fallback when `d·B` exceeds Nyquist.
-3. **Fixed-point τ.** Bit-exact reversibility is a claim on a grid; float
-   is not symmetric under negation out where the exponent is wide. τ is
-   derived from the integer sample index via fixed-point arithmetic (the
-   `FixedPhasor` pattern), so the involution is exact on the grid for
-   arbitrarily long renders — the type's theorem and the ear agree.
+3. **Fixed-point coordinate (the grid, on the line).** Exactness lives in
+   the integer *grid*, not in wrapping: `ReversibleProbe` palindromes
+   bit-exactly over raw `sampleIndex`. Float is in fact already bit-exact
+   to ~2⁵² samples (~3000 years at 48k), so this is **low-urgency** — its
+   real payoff is *cross-backend determinism* (integer arithmetic is
+   bit-identical across JIT and wasm — the reason `FixedPhasor` is integer;
+   float can diverge under fp-contract/reordering). Keep τ **unbounded**
+   (the line) so the past, the before-zero, and the acausal future taps
+   stay real and the rate-neutral v2 coordinate survives; reserve the
+   **wrap** (`FixedPhasor`'s ℤ/2³²) for genuinely *periodic generators* —
+   oscillators, wavetables, additive — where "long gesture = low-frequency
+   phase" is correct.
 
 ## The ceded island
 
@@ -185,9 +240,14 @@ leaves.
 
 ## One-line summary
 
-Make every kernel a pure `f(τ, params)`; guarantee it rather than detect
-it; keep damping spatial so reversibility is a group action; build the
-future-reading effects from offset reads, not new primitives; cede the
-recursive/stochastic island to the stateful sister runtime; and let the
-three disciplines (centered operators, bounded-degree shapers,
-fixed-point τ) make the guarantees checkable rather than hoped for.
+Make every kernel a pure `f(τ, params)` — *that* is the guarantee, by
+deleting `reg`; stateless kernels are the priority and reversibility rides
+along for free. Keep damping spatial so the conservative scrub is a group
+action; build the future-reading effects from offset reads, not new
+primitives; keep noise stateless (hash / memoized-LFSR-XOR) and bound
+everything with `clamp`; cede the recursive/live-input island to the
+stateful sister runtime. Reversibility is the **palindrome test plus the
+spatial-damping discipline** — a tested property, not a type (both type
+routes were explored and rejected). Fixed-point is the right coordinate
+representation for cross-backend determinism but low-urgency; the wrap is
+a generator primitive, not the universe.
