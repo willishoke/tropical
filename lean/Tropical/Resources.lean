@@ -33,17 +33,19 @@ def promptsList : Json := Json.arr #[
 
 def programFormatDoc : String := r#"# tropical program format
 
-Programs are the unified representation for all DSP in tropical. A program is an
-expression with declared ports and a body that declares regs/delays/instances
-and assigns outputs and next-tick register updates.
+Programs are the unified representation for all DSP in tropical. tropical is
+closed-form-only: a program is a pure function of a time coordinate, with
+declared ports and a body that declares params/instances/nested programs and
+assigns outputs. There is no per-sample state — no `reg`, no `delay`, no
+feedback.
 
 ## tropical_program_2
 
-The body is a `block` of `decls` (reg_decl, delay_decl, instance_decl,
-program_decl) and `assigns` (output_assign, next_update). Ports, type_params,
-and breaks_cycles sit alongside the body. **Audio output is an `output_assign`
-in the body with name `"dac.out"`** — wire the signal you want heard to it.
-Session metadata — `params`, `config` — is top-level.
+The body is a `block` of `decls` (param_decl, instance_decl, program_decl) and
+`assigns` (output_assign). Ports and type_params sit alongside the body.
+**Audio output is an `output_assign` in the body with name `"dac.out"`** — wire
+the signal you want heard to it. Session metadata — `params`, `config` — is
+top-level.
 
 {
   "schema": "tropical_program_2",
@@ -53,13 +55,14 @@ Session metadata — `params`, `config` — is top-level.
     "decls": [
       {
         "op": "programDecl",
-        "name": "Saw",
+        "name": "Gain",
         "program": {
           "op": "program",
-          "name": "Saw",
+          "name": "Gain",
           "ports": {
             "inputs": [
-              "freq"
+              "input",
+              "k"
             ],
             "outputs": [
               "out"
@@ -67,65 +70,22 @@ Session metadata — `params`, `config` — is top-level.
           },
           "body": {
             "op": "block",
-            "decls": [
-              {
-                "op": "regDecl",
-                "name": "phase",
-                "init": 0
-              }
-            ],
+            "decls": [],
             "assigns": [
               {
                 "op": "outputAssign",
                 "name": "out",
                 "expr": {
-                  "op": "sub",
+                  "op": "mul",
                   "args": [
                     {
-                      "op": "mul",
-                      "args": [
-                        2,
-                        {
-                          "op": "reg",
-                          "name": "phase"
-                        }
-                      ]
+                      "op": "input",
+                      "name": "input"
                     },
-                    1
-                  ]
-                }
-              },
-              {
-                "op": "nextUpdate",
-                "target": {
-                  "kind": "reg",
-                  "name": "phase"
-                },
-                "expr": {
-                  "op": "mod",
-                  "args": [
                     {
-                      "op": "add",
-                      "args": [
-                        {
-                          "op": "reg",
-                          "name": "phase"
-                        },
-                        {
-                          "op": "div",
-                          "args": [
-                            {
-                              "op": "input",
-                              "name": "freq"
-                            },
-                            {
-                              "op": "sampleRate"
-                            }
-                          ]
-                        }
-                      ]
-                    },
-                    1
+                      "op": "input",
+                      "name": "k"
+                    }
                   ]
                 }
               }
@@ -137,22 +97,22 @@ Session metadata — `params`, `config` — is top-level.
       {
         "op": "instanceDecl",
         "name": "osc",
-        "program": "Saw",
+        "program": "FixedSinOsc",
         "inputs": {
           "freq": 440
         }
       },
       {
         "op": "instanceDecl",
-        "name": "filt",
-        "program": "LadderFilter",
+        "name": "amp",
+        "program": "Gain",
         "inputs": {
           "input": {
             "op": "ref",
             "instance": "osc",
-            "output": "out"
+            "output": "sine"
           },
-          "cutoff": 2000
+          "k": 0.5
         }
       }
     ],
@@ -162,8 +122,8 @@ Session metadata — `params`, `config` — is top-level.
         "name": "dac.out",
         "expr": {
           "op": "ref",
-          "instance": "filt",
-          "output": "lp"
+          "instance": "amp",
+          "output": "out"
         }
       }
     ],
@@ -172,19 +132,17 @@ Session metadata — `params`, `config` — is top-level.
 }
 
 Key fields: schema, name, ports (inputs/outputs/type_defs), body (block),
-type_params, sample_rate, breaks_cycles, and top-level session metadata
-(params, config). Send a signal to the speakers with a body `output_assign`
-named `"dac.out"`. (File-root `audio_outputs` is deprecated — don't use it.)
+type_params, sample_rate, and top-level session metadata (params, config). Send
+a signal to the speakers with a body `output_assign` named `"dac.out"`.
+(File-root `audio_outputs` is deprecated — don't use it.)
 
 Decl node shapes:
-- reg_decl:      { op, name, init, type? }
-- delay_decl:    { op, name, update, init? }
+- param_decl:    { op, name, value? }
 - instance_decl: { op, name, program, inputs?, type_args? }
 - program_decl:  { op, name, program: <program node> }
 
 Assign node shapes:
 - output_assign: { op, name, expr }
-- next_update:   { op, target: { kind: "reg"|"delay", name }, expr }
 
 ## Expression node format (ExprNode)
 
@@ -196,7 +154,7 @@ Used in instance input wiring and inline program process definitions.
 - **Param**: `{ "op": "param", "name": "cutoff" }`
 - **Binary**: `{ "op": "mul", "args": [<expr>, <expr>] }` — add, sub, mul, div, floor_div, mod, pow; lt, lte, gt, gte, eq, neq; bit_and, bit_or, bit_xor, lshift, rshift
 - **Unary**: `{ "op": "neg", "args": [<expr>] }` — neg, abs, not, bit_not
-- **Clamp / Select / Array / Index / Delay / Builtins**: see the program catalog and stdlib for worked examples.
+- **Clamp / Select / Array / Index / Builtins**: see the program catalog and stdlib for worked examples.
 "#
 
 def buildPatchPrompt : String := r#"# build-patch workflow

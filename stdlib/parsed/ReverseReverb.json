@@ -1,0 +1,140 @@
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "float"}, "name": "tau", "default": 0},
+   {"type": {"op": "nameRef", "name": "freq"},
+    "name": "f0",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "select"},
+     "args": [{"op": "gt", "args": [110, 0]}, 110, 0]}},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "spacing",
+    "default": 0.045},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "decay",
+    "default": 0.72},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "amount",
+    "default": 0.7}]},
+ "op": "program",
+ "name": "ReverseReverb",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"program": {"op": "nameRef", "name": "ModalVoice"},
+    "op": "instanceDecl",
+    "name": "dry",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "tau"},
+      "port": {"op": "nameRef", "name": "tau"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}}]},
+   {"program": {"op": "nameRef", "name": "ModalVoice"},
+    "op": "instanceDecl",
+    "name": "tap1",
+    "inputs":
+    [{"value":
+      {"op": "add",
+       "args":
+       [{"op": "nameRef", "name": "tau"},
+        {"op": "nameRef", "name": "spacing"}]},
+      "port": {"op": "nameRef", "name": "tau"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}}]},
+   {"program": {"op": "nameRef", "name": "ModalVoice"},
+    "op": "instanceDecl",
+    "name": "tap2",
+    "inputs":
+    [{"value":
+      {"op": "add",
+       "args":
+       [{"op": "nameRef", "name": "tau"},
+        {"op": "mul", "args": [2, {"op": "nameRef", "name": "spacing"}]}]},
+      "port": {"op": "nameRef", "name": "tau"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}}]},
+   {"program": {"op": "nameRef", "name": "ModalVoice"},
+    "op": "instanceDecl",
+    "name": "tap3",
+    "inputs":
+    [{"value":
+      {"op": "add",
+       "args":
+       [{"op": "nameRef", "name": "tau"},
+        {"op": "mul", "args": [3, {"op": "nameRef", "name": "spacing"}]}]},
+      "port": {"op": "nameRef", "name": "tau"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}}]},
+   {"program": {"op": "nameRef", "name": "ModalVoice"},
+    "op": "instanceDecl",
+    "name": "tap4",
+    "inputs":
+    [{"value":
+      {"op": "add",
+       "args":
+       [{"op": "nameRef", "name": "tau"},
+        {"op": "mul", "args": [4, {"op": "nameRef", "name": "spacing"}]}]},
+      "port": {"op": "nameRef", "name": "tau"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}}]}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "add",
+     "args":
+     [{"ref": {"op": "nameRef", "name": "dry"},
+       "output": {"op": "nameRef", "name": "out"},
+       "op": "nestedOut"},
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "amount"},
+        {"op": "add",
+         "args":
+         [{"op": "add",
+           "args":
+           [{"op": "add",
+             "args":
+             [{"op": "mul",
+               "args":
+               [{"op": "nameRef", "name": "decay"},
+                {"ref": {"op": "nameRef", "name": "tap1"},
+                 "output": {"op": "nameRef", "name": "out"},
+                 "op": "nestedOut"}]},
+              {"op": "mul",
+               "args":
+               [{"op": "mul",
+                 "args":
+                 [{"op": "nameRef", "name": "decay"},
+                  {"op": "nameRef", "name": "decay"}]},
+                {"ref": {"op": "nameRef", "name": "tap2"},
+                 "output": {"op": "nameRef", "name": "out"},
+                 "op": "nestedOut"}]}]},
+            {"op": "mul",
+             "args":
+             [{"op": "mul",
+               "args":
+               [{"op": "mul",
+                 "args":
+                 [{"op": "nameRef", "name": "decay"},
+                  {"op": "nameRef", "name": "decay"}]},
+                {"op": "nameRef", "name": "decay"}]},
+              {"ref": {"op": "nameRef", "name": "tap3"},
+               "output": {"op": "nameRef", "name": "out"},
+               "op": "nestedOut"}]}]},
+          {"op": "mul",
+           "args":
+           [{"op": "mul",
+             "args":
+             [{"op": "mul",
+               "args":
+               [{"op": "mul",
+                 "args":
+                 [{"op": "nameRef", "name": "decay"},
+                  {"op": "nameRef", "name": "decay"}]},
+                {"op": "nameRef", "name": "decay"}]},
+              {"op": "nameRef", "name": "decay"}]},
+            {"ref": {"op": "nameRef", "name": "tap4"},
+             "output": {"op": "nameRef", "name": "out"},
+             "op": "nestedOut"}]}]}]}]}}]}}

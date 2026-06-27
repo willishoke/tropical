@@ -52,8 +52,8 @@ inside the Lean engine):
 SessionState
   → compileSession
        → liftWiresToInstances  (anonymous-instance lift for array-literal wires)
-       → extractSessionDelays  (hoist auto-wrap delays into the delay-slot registry)
-       → assertSessionAcyclic  (defensive invariant)
+       → assertSessionAcyclic  (no cycles at all — a hard rule, nothing
+                                breaks cycles for you)
        → compileSessionSlotted (buildSessionRoot → elaborate one root
                                 ResolvedProgram → partitionKernel →
                                 instance_functions[] (root, nested) + sinks[])
@@ -63,13 +63,16 @@ SessionState
 
 The strata pipeline (`assertAcyclic → specialize → sumLower →
 inlineInstances → arrayLower → identityElim`) runs per-instance at
-instance-type resolution. Session-level cycle handling lives in the
-wire layer: every wire is wrapped in a unit delay, and
-`extractSessionDelays` hoists it into the delay-slot registry; the
-root-program lowering serializes each entry to a root `RegDecl`
-read-old/write-new writeback (no scheduler tier — outputs are `sinks`).
-The WASM backend consumes the same `tropical_plan_5` and is held to
-sample-for-sample equivalence with the JIT (`tests/web/wasm_vs_jit`).
+instance-type resolution. tropical is closed-form-only: every kernel is
+a pure `f(τ, params)` with no per-sample state, so there is nothing to
+break a cycle around. `assertSessionAcyclic` is therefore a plain "no
+cycles at all" rule — inter-instance cycles are rejected outright, and
+source-level cycles throw `CycleViolation` at the elaborator. (A
+recursive filter on live or broadband input has no closed form; that
+island is ceded on purpose to a future stateful sister runtime,
+"supertropical" — see `design/cf-only.md`.) The WASM backend consumes
+the same `tropical_plan_5` and is held to sample-for-sample equivalence
+with the JIT (`tests/web/wasm_vs_jit`).
 
 A compile error doesn't kill the session; it returns a structured
 error envelope (see below) and the previous kernel keeps playing.
@@ -111,7 +114,7 @@ not a real instance.
 - `list_programs` — concrete types + generic templates with ports,
   defaults, and `type_params`.
 - `list_instances` — live instances with their `type_args`.
-- `get_info` — detailed port / wiring / register info for one instance.
+- `get_info` — detailed port / wiring info for one instance.
 
 ### Wiring
 
@@ -127,9 +130,12 @@ patterns.
 - `wire_zip` — pairwise sources → targets.
 - `fan_out` — one source (literal, param, or ref) to N targets.
 - `fan_in` — N sources, optional per-source gain, summed to one target.
-- `feedback` — one-sample delay loop with a stable `delay_id` so
-  state survives hot-swap.
 - `list_wiring` — show current input expressions, optional instance filter.
+
+(There is no `feedback` tool. Feedback loops require per-sample state,
+which the closed-form-only language does not have — cycles are rejected
+outright. Recursive filtering of live input belongs to the future
+stateful sister runtime, "supertropical"; see `design/cf-only.md`.)
 
 ### Program I/O
 

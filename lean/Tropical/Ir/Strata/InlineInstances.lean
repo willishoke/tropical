@@ -10,10 +10,8 @@ import Tropical.Ir.Strata.SumLower
 Splice each `InstanceDecl` into its parent: specialize the inner
 (identity-keyed typeArgs), sumLower it, recursively inline its own
 sub-instances (depth-first, bottom-up), substitute wired-in input
-expressions, shift surviving Reg/Param/Binding refs by the lift
-offsets, lift regs (renamed `${instance}_${inner}`, `_liftedFrom`
-OVERWRITTEN with the current instance — each lift re-stamps, so the
-post-strata tag is the outermost instance), then resolve every
+expressions, shift surviving Param/Binding refs by the lift offsets
+(CF-only: there are no reg decls to lift or rename), then resolve every
 `nestedOut` against the recorded per-instance output expressions.
 
 The TS pass memoizes the nestedOut substitution walk on node identity
@@ -42,11 +40,10 @@ open Tropical.Ir
     shifted by the lift offsets. -/
 private def inlineSubstProgram (inner : Program)
     (inputSubst : Array (Nat × Expr))
-    (regOffset paramOffset binderOffset : Nat) : Program :=
+    (paramOffset binderOffset : Nat) : Program :=
   let hooks : MapHooks := {
     expr := fun e => match e with
       | .inputRef i => (inputSubst.find? (·.1 == i.idx)).map (·.2)
-      | .regRef i => some (.regRef ⟨i.idx + regOffset⟩)
       | .paramRef i => some (.paramRef ⟨i.idx + paramOffset⟩)
       | .bindingRef i => some (.bindingRef ⟨i.idx + binderOffset⟩)
       | _ => none
@@ -54,8 +51,6 @@ private def inlineSubstProgram (inner : Program)
   }
   let rw := mapExpr hooks
   let mapDecl : BodyDecl → BodyDecl := fun
-    | .reg name init update? type? liftedFrom? =>
-      .reg name (rw init) (update?.map rw) type? liftedFrom?
     | .param name value? => .param name value?   -- session-scoped; preserved
     | .inst name typeKey tArgs inputs =>
       -- Post-recurse there should be none; defensive pass-through.
@@ -68,16 +63,13 @@ private def inlineSubstProgram (inner : Program)
     assigns := inner.assigns.map fun a => { a with expr := rw a.expr }
     binderCount := inner.binderCount + binderOffset }
 
-/-- Lift the cloned inner's body decls: regs renamed
-    `${instance}_${name}` with provenance re-stamped to THIS instance;
-    params and programDecls as-is. -/
-private def liftClonedBody (instanceName : String) (cloned : Program) :
+/-- Lift the cloned inner's body decls: params and programDecls as-is.
+    CF-only — there are no reg decls to rename. -/
+private def liftClonedBody (cloned : Program) :
     Except Error (Array BodyDecl) := do
   let mut out : Array BodyDecl := #[]
   for d in cloned.decls do
     match d with
-    | .reg name init update? type? _ =>
-      out := out.push (.reg s!"{instanceName}_{name}" init update? type? (some instanceName))
     | .param .. | .prog .. => out := out.push d
     | .inst dname .. =>
       throw ⟨s!"inlineInstances: post-recurse: cloned inner '{cloned.name}' still has " ++
@@ -146,7 +138,7 @@ private partial def substExpr (table : NestedOutTable) (e : Expr) :
     -- outer-scope instances (chained stages); walk it too.
     substExpr table v
   | .num _ | .bool _
-  | .inputRef _ | .regRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
+  | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
   | .sampleRate | .sampleIndex => return e
   | .arr items => return .arr (← items.mapM (substExpr table))
   | .binary tag a b => return .binary tag (← substExpr table a) (← substExpr table b)
@@ -190,13 +182,7 @@ private partial def substExpr (table : NestedOutTable) (e : Expr) :
       (← arms.mapM fun arm => do
         pure (.mk arm.variant arm.binders (← substExpr table arm.body)))
 
-private def substDecl (table : NestedOutTable) : BodyDecl → Except Error BodyDecl
-  | .reg name init update? type? liftedFrom? => do
-    return .reg name (← substExpr table init)
-      (← match update? with
-         | some u => some <$> substExpr table u
-         | none => pure none)
-      type? liftedFrom?
+private def substDecl (_table : NestedOutTable) : BodyDecl → Except Error BodyDecl
   | .param name value? => return .param name value?
   | .prog name p => return .prog name p
   | .inst name .. =>
@@ -205,9 +191,6 @@ private def substDecl (table : NestedOutTable) : BodyDecl → Except Error BodyD
 -- ─────────────────────────────────────────────────────────────
 -- Per-instance inlining + public entry (mutually recursive)
 -- ─────────────────────────────────────────────────────────────
-
-private def isRegDecl : BodyDecl → Bool
-  | .reg .. => true | _ => false
 
 private def isParamDecl : BodyDecl → Bool
   | .param .. => true | _ => false
@@ -220,7 +203,7 @@ mutual
 private partial def inlineOne (arena : Arena) (enclosing : Program)
     (instName typeKey : String) (typeArgs : Array InstanceTypeArg)
     (inputs : Array InstanceInput)
-    (regOffset paramOffset binderOffset : Nat) :
+    (paramOffset binderOffset : Nat) :
     Except Error (Arena × Array BodyDecl × Array Expr × Nat) := do
   let (declTypeIdx, declType) ← getInstanceType arena enclosing instName typeKey
   -- 1. Specialize (identity-keyed typeArgs; no-op for concrete inners).
@@ -246,9 +229,9 @@ private partial def inlineOne (arena : Arena) (enclosing : Program)
   -- 3. Input substitution map (wired > default > unsubstituted).
   let inputSubst ← buildInputSubst instName declType flattened inputs
   -- 4. Clone with input substitution + idx shifting.
-  let cloned := inlineSubstProgram flattened inputSubst regOffset paramOffset binderOffset
+  let cloned := inlineSubstProgram flattened inputSubst paramOffset binderOffset
   -- 5. Lift body decls into the outer.
-  let lifted ← liftClonedBody instName cloned
+  let lifted ← liftClonedBody cloned
   -- 6. Record output exprs for the nestedOut substitution.
   let outputs ← recordOutputs instName declType cloned
   return (arena, lifted, outputs, flattened.binderCount)
@@ -262,7 +245,6 @@ partial def run (arena : Arena) (rootIdx : ProgramIdx) :
   unless prog.decls.any (fun d => match d with | .inst .. => true | _ => false) do
     return (arena, rootIdx)
 
-  let outerRegCount := prog.regs.size
   let outerParamCount := prog.params.size
   let mut arena := arena
   let mut survivingDecls : Array BodyDecl := #[]
@@ -272,12 +254,11 @@ partial def run (arena : Arena) (rootIdx : ProgramIdx) :
   for decl in prog.decls do
     match decl with
     | .inst name typeKey typeArgs inputs =>
-      let regOffset := outerRegCount + (liftedDecls.filter isRegDecl).size
       let paramOffset := outerParamCount + (liftedDecls.filter isParamDecl).size
       let binderOffset := prog.binderCount + liftedBinderCount
       let (arena', lifted, outputs, innerBinders) ←
         inlineOne arena prog name typeKey typeArgs inputs
-          regOffset paramOffset binderOffset
+          paramOffset binderOffset
       arena := arena'
       liftedDecls := liftedDecls ++ lifted
       nestedOutSubst := nestedOutSubst.push outputs

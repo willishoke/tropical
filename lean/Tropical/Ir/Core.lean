@@ -83,7 +83,6 @@ inductive CoreExpr where
   | arraySet (arr idx value : CoreExpr)
   | index (arr idx : CoreExpr)
   | inputRef (idx : InputIdx)
-  | regRef (idx : RegIdx)
   | paramRef (idx : ParamIdx)
   | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
   | sampleRate
@@ -96,10 +95,6 @@ structure CoreInstanceInput where
 deriving Repr, Inhabited
 
 inductive CoreBodyDecl where
-  /-- `scalarType` is the resolved register scalar (TS `regScalarType`:
-      untyped → float, alias → its base). -/
-  | reg (name : String) (init : CoreExpr) (update? : Option CoreExpr)
-      (scalarType : ScalarKind) (liftedFrom? : Option String)
   | param (name : String) (value? : Option JsonNumber)
   /-- Fractal kernel boundary; `typeKey` resolves in the enclosing
       `CoreProgram`'s registry. typeArgs survive as inert metadata on
@@ -160,10 +155,6 @@ def CoreProgram.registry : CoreProgram → Array (String × CoreProgram)
 def CoreProgram.registryGet? (p : CoreProgram) (key : String) : Option CoreProgram :=
   (p.registry.find? (·.1 == key)).map (·.2)
 
-/-- Projected reg table (positions are `RegIdx`). -/
-def CoreProgram.regs (p : CoreProgram) : Array CoreBodyDecl :=
-  p.decls.filter fun d => match d with | .reg .. => true | _ => false
-
 /-- Projected param table (positions are `ParamIdx`). -/
 def CoreProgram.params (p : CoreProgram) : Array CoreBodyDecl :=
   p.decls.filter fun d => match d with | .param .. => true | _ => false
@@ -194,7 +185,6 @@ partial def checkExpr (progName : String) : Expr → Except String CoreExpr
     return .arraySet (← checkExpr progName a) (← checkExpr progName b) (← checkExpr progName c)
   | .index a b => return .index (← checkExpr progName a) (← checkExpr progName b)
   | .inputRef i => return .inputRef i
-  | .regRef i => return .regRef i
   | .paramRef i => return .paramRef i
   | .nestedOut i o => return .nestedOut i o
   | .sampleRate => return .sampleRate
@@ -245,15 +235,6 @@ private def resolveOptPortType (arena : Arena) :
   | some t => some (resolvePortType arena t)
   | none => none
 
-/-- TS `regScalarType`: untyped → float; scalar → itself; alias → base. -/
-private def resolveRegScalar (arena : Arena) : Option ScalarOrAlias → ScalarKind
-  | none => .float
-  | some (.scalar k) => k
-  | some (.alias td) =>
-    match arena.typeDef? td with
-    | some (.alias _ base) => base
-    | _ => .float
-
 partial def check (arena : Arena) (rootIdx : ProgramIdx) :
     Except String CoreProgram := do
   let some prog := arena.program? rootIdx
@@ -262,14 +243,6 @@ partial def check (arena : Arena) (rootIdx : ProgramIdx) :
     fail prog.name s!"{prog.typeParams.size} typeParam decl(s) (specialize)"
   let decls ← prog.decls.mapM fun d => do
     match d with
-    | .reg name init update? type? liftedFrom? =>
-      -- Post-sumLower a reg's type is a scalar or an alias to one;
-      -- sum-typed regs were decomposed into scalar slots.
-      if let some (.alias td) := type? then
-        if let some (.sum tdName _) := arena.typeDef? td then
-          fail prog.name s!"reg '{name}' typed by sum '{tdName}' (sumLower)"
-      pure (CoreBodyDecl.reg name (← checkExpr prog.name init)
-        (← checkOptExpr prog.name update?) (resolveRegScalar arena type?) liftedFrom?)
     | .param name value? => pure (CoreBodyDecl.param name value?)
     | .inst name typeKey tArgs inputs =>
       pure (CoreBodyDecl.inst name typeKey tArgs

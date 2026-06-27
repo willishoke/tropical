@@ -57,7 +57,6 @@ def tropicalEngineTools (env : Engine.Env) : List Tool := [
   inProcTool WireZip        env "wire_zip"        "Wire two equal-length lists of ports pairwise. One recompile.",
   inProcTool FanOut         env "fan_out"         "Wire one source (instance output or ExprNode) to many target inputs.",
   inProcTool FanIn          env "fan_in"          "Sum N instance outputs (optional per-source gain) into one input.",
-  inProcTool Feedback       env "feedback"        "Wire an output back to an input through a 1-sample delay (no extra instance).",
   inProcTool ListWiring     env "list_wiring"     "List all wired inputs and the expression assigned to each.",
   -- program I/O
   inProcTool ExportProgram  env "export_program"  "Crystallize selected session instances into a reusable program type.",

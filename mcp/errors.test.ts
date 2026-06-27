@@ -259,7 +259,7 @@ describe('unknown_instance — helper-routed across all wiring tools', () => {
   // First create a real instance so the options list is non-empty for suggestion testing.
   const real = unique('lp')
   beforeAll(async () => {
-    await client.callOk('add_instance', { program: 'OnePole', instance_name: real })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: real })
   })
 
   const assertEnvelope = (env: Envelope, paramHint: string) => {
@@ -354,21 +354,8 @@ describe('unknown_instance — helper-routed across all wiring tools', () => {
     assertEnvelope(env, 'instance')
   })
 
-  test('feedback from.instance', async () => {
-    const env = await client.callError('feedback', {
-      from: { instance: 'nope', output: 'out' },
-      to:   { instance: real, input: 'input' },
-    })
-    assertEnvelope(env, 'instance')
-  })
-
-  test('feedback to.instance', async () => {
-    const env = await client.callError('feedback', {
-      from: { instance: real, output: 'out' },
-      to:   { instance: 'nope', input: 'input' },
-    })
-    assertEnvelope(env, 'instance')
-  })
+  // (the 'feedback' helper was removed in the CF-only migration — there is no
+  // per-wire delay subsystem — so its unknown-instance cases are gone too)
 
   test('wire to dac.out — unknown source instance in ref expression', async () => {
     const env = await client.callError('wire', {
@@ -400,7 +387,7 @@ describe('unknown_param', () => {
 describe('unknown_input / unknown_output — scoped enum', () => {
   const inst = unique('op')
   beforeAll(async () => {
-    await client.callOk('add_instance', { program: 'OnePole', instance_name: inst })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: inst })
   })
 
   test('unknown_input — valid.options is exactly this instance\'s inputs', async () => {
@@ -412,8 +399,8 @@ describe('unknown_input / unknown_output — scoped enum', () => {
     expect(env.value).toBe('freuq')
     expect(env.valid?.kind).toBe('enum')
     if (env.valid?.kind === 'enum') {
-      // OnePole has exactly two inputs: input, g
-      expect(env.valid.options.sort()).toEqual(['g', 'input'])
+      // SoftClip has exactly two inputs: input, drive
+      expect(env.valid.options.sort()).toEqual(['drive', 'input'])
     }
   })
 
@@ -452,8 +439,8 @@ describe('unknown_input / unknown_output — scoped enum', () => {
 describe('instance_exists', () => {
   test('add_instance with duplicate name', async () => {
     const name = unique('dup')
-    await client.callOk('add_instance', { program: 'OnePole', instance_name: name })
-    const env = await client.callError('add_instance', { program: 'OnePole', instance_name: name })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: name })
+    const env = await client.callError('add_instance', { program: 'SoftClip', instance_name: name })
     expect(env.code).toBe('instance_exists')
     expect(env.param).toBe('instance_name')
     expect(env.value).toBe(name)
@@ -463,7 +450,7 @@ describe('instance_exists', () => {
 
 describe('invalid_value', () => {
   test('replicate with count=0', async () => {
-    const env = await client.callError('replicate', { program: 'OnePole', count: 0 })
+    const env = await client.callError('replicate', { program: 'SoftClip', count: 0 })
     expect(env.code).toBe('invalid_value')
     expect(env.param).toBe('count')
     expect(env.value).toBe(0)
@@ -471,19 +458,19 @@ describe('invalid_value', () => {
   })
 
   test('replicate with negative count', async () => {
-    const env = await client.callError('replicate', { program: 'OnePole', count: -3 })
+    const env = await client.callError('replicate', { program: 'SoftClip', count: -3 })
     expect(env.code).toBe('invalid_value')
     expect(env.value).toBe(-3)
   })
 
   test('replicate with non-integer count', async () => {
-    const env = await client.callError('replicate', { program: 'OnePole', count: 1.5 })
+    const env = await client.callError('replicate', { program: 'SoftClip', count: 1.5 })
     expect(env.code).toBe('invalid_value')
     expect(env.value).toBe(1.5)
   })
 
   test('record field spec shape', async () => {
-    const env = await client.callError('replicate', { program: 'OnePole', count: 0 })
+    const env = await client.callError('replicate', { program: 'SoftClip', count: 0 })
     expect(env.valid?.kind).toBe('record')
     if (env.valid?.kind === 'record') {
       expect(env.valid.fields.count).toEqual({ type: 'int', required: true, min: 1 })
@@ -499,7 +486,7 @@ describe('unknown_program', () => {
     expect(env.value).toBe('NonExistent')
     expect(env.valid?.kind).toBe('enum')
     if (env.valid?.kind === 'enum') {
-      expect(env.valid.options).toContain('OnePole')
+      expect(env.valid.options).toContain('SoftClip')
     }
   })
 
@@ -509,8 +496,8 @@ describe('unknown_program', () => {
   })
 
   test('Levenshtein suggestion fires for 1-edit program typo', async () => {
-    const env = await client.callError('add_instance', { program: 'OnePoel', instance_name: unique('x') })
-    expect(env.suggestion).toBe('OnePole')
+    const env = await client.callError('add_instance', { program: 'SoftClp', instance_name: unique('x') })
+    expect(env.suggestion).toBe('SoftClip')
   })
 
   test('no suggestion for unrelated name', async () => {
@@ -519,21 +506,37 @@ describe('unknown_program', () => {
   })
 })
 
-describe('invalid_type_args', () => {
-  // The generic Delay program expects type_args: { N: int }.
-  test('generic program instantiated with unexpected type_args', async () => {
-    // Delay accepts N; passing a bogus field triggers resolveTypeArgs to throw.
-    const env = await client.callError('add_instance', {
-      program:       'Delay',
-      instance_name: unique('d'),
-      type_args:     { BogusKey: 42 },
+describe('generics (define_program with type_params)', () => {
+  // No stdlib generic survives the CF-only cut (Delay/Sequencer were retired),
+  // so exercise the generic machinery directly: define a generic inline, then
+  // resolve it with type_args and probe the invalid-type_args path.
+  const SCALE_BY = {
+    schema: 'tropical_program_2',
+    name: 'ScaleBy',
+    type_params: { K: { type: 'int' } },
+    ports: { inputs: ['x'], outputs: ['out'] },
+    body: { op: 'block', decls: [],
+      assigns: [{ op: 'outputAssign', name: 'out',
+        expr: { op: 'mul', args: [
+          { op: 'input', name: 'x' },
+          { op: 'typeParam', name: 'K' } ] } }],
+      value: null },
+  }
+  beforeAll(async () => { await client.callOk('define_program', { def: SCALE_BY }) })
+
+  test('add_instance with type_args resolves a generic', async () => {
+    const data = await client.callOk('add_instance', {
+      program: 'ScaleBy', instance_name: unique('s'), type_args: { K: 3 },
     })
-    // Either invalid_type_args (registered template) or unknown_program — both are fine,
-    // but the helper should produce invalid_type_args because Delay IS registered.
-    expect(['invalid_type_args', 'unknown_program']).toContain(env.code)
-    if (env.code === 'invalid_type_args') {
-      expect(env.param).toBe('type_args')
-    }
+    expect((data as { type_args?: Record<string, number> }).type_args?.K).toBe(3)
+  })
+
+  test('invalid_type_args: unexpected type-arg key', async () => {
+    const env = await client.callError('add_instance', {
+      program: 'ScaleBy', instance_name: unique('s'), type_args: { Bogus: 9 },
+    })
+    expect(env.code).toBe('invalid_type_args')
+    expect(env.param).toBe('type_args')
   })
 })
 
@@ -542,7 +545,7 @@ describe('invalid_type_args', () => {
 describe('type_mismatch', () => {
   const inst = unique('sc')
   beforeAll(async () => {
-    await client.callOk('add_instance', { program: 'OnePole', instance_name: inst })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: inst })
   })
 
   test('array literal → scalar input', async () => {
@@ -603,12 +606,12 @@ describe('internal_error fallback', () => {
 
 describe('suggestion field', () => {
   test('suggestion is always a value of the expected type (string for enum)', async () => {
-    const env = await client.callError('add_instance', { program: 'OnePoel', instance_name: unique('x') })
+    const env = await client.callError('add_instance', { program: 'SoftClp', instance_name: unique('x') })
     expect(typeof env.suggestion).toBe('string')
   })
 
   test('suggestion is one of the valid.options for enum errors', async () => {
-    const env = await client.callError('add_instance', { program: 'OnePoel', instance_name: unique('x') })
+    const env = await client.callError('add_instance', { program: 'SoftClp', instance_name: unique('x') })
     if (env.valid?.kind === 'enum' && typeof env.suggestion === 'string') {
       expect(env.valid.options).toContain(env.suggestion)
     }
@@ -621,8 +624,8 @@ describe('suggestion field', () => {
 
   test('suggestion is not emitted for errors without valid.enum (instance_exists)', async () => {
     const name = unique('dup')
-    await client.callOk('add_instance', { program: 'OnePole', instance_name: name })
-    const env = await client.callError('add_instance', { program: 'OnePole', instance_name: name })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: name })
+    const env = await client.callError('add_instance', { program: 'SoftClip', instance_name: name })
     expect(env.suggestion).toBeUndefined()
   })
 })
@@ -642,11 +645,11 @@ describe('list_wiring non-error path', () => {
 describe('success envelope shape', () => {
   test('add_instance → status:"ok" with summary data', async () => {
     const data = await client.callOk('add_instance', {
-      program: 'OnePole', instance_name: unique('succ'),
+      program: 'SoftClip', instance_name: unique('succ'),
     })
     const d = data as Record<string, unknown>
     expect(typeof d.name).toBe('string')
-    expect(d.type_name).toBe('OnePole')
+    expect(d.type_name).toBe('SoftClip')
     expect(Array.isArray(d.inputs)).toBe(true)
     expect(Array.isArray(d.outputs)).toBe(true)
   })

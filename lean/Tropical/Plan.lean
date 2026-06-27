@@ -55,13 +55,13 @@ private def scalarJson (t : ScalarType) : Json := Json.str t.wire
 inductive NOperand where
   | const (val : JsonNumber) (scalarType : ScalarType)
   | input (slot : Nat) (scalarType : ScalarType)
-  /-- A temp read (`kind: 'reg'` on the wire). -/
+  /-- A temp read (`kind: 'reg'` on the wire). This is the SSA temp pool,
+      not per-sample state — CF-only has no state operands. -/
   | reg (slot : Nat) (scalarType : ScalarType)
   | arrayReg (slot : Nat)
   /-- Pre-remap-only: session-absolute array slot. Remap collapses to
       `arrayReg` (passthrough slot value) before the wire. -/
   | sessionArrayReg (slot : Nat)
-  | stateReg (slot : Nat) (scalarType : ScalarType)
   | param (ptr : String) (scalarType : ScalarType)
   | source (index : Nat) (scalarType : ScalarType)
   | slot (index : Nat) (scalarType : ScalarType)
@@ -84,8 +84,6 @@ def NOperand.toWire : NOperand → Json
   | .arrayReg s => Json.mkObj [("kind", Json.str "array_reg"), ("slot", toJson s)]
   | .sessionArrayReg s => Json.mkObj [("kind", Json.str "session_array_reg"),
       ("slot", toJson s)]
-  | .stateReg s t => Json.mkObj [("kind", Json.str "state_reg"), ("slot", toJson s),
-      ("scalar_type", scalarJson t)]
   | .param p t => Json.mkObj [("kind", Json.str "param"), ("ptr", Json.str p),
       ("scalar_type", scalarJson t)]
   | .source i t => Json.mkObj [("kind", Json.str "source"), ("index", toJson i),
@@ -172,39 +170,8 @@ def instrWriteSlot (dst : Nat) (value : NOperand)
     resultType := scalarType }
 
 -- ─────────────────────────────────────────────────────────────
--- Register targets
--- ─────────────────────────────────────────────────────────────
-
-inductive RegTarget where
-  | temp (slot : Nat)
-  | arrayManaged
-deriving Repr, Inhabited
-
-/-- Wire format: `-1` for arrayManaged, raw temp index otherwise. -/
-def RegTarget.toWire : RegTarget → Json
-  | .temp s => toJson s
-  | .arrayManaged => toJson (-1 : Int)
-
--- ─────────────────────────────────────────────────────────────
 -- PerInstancePlan — output of compileResolved
 -- ─────────────────────────────────────────────────────────────
-
-/-- State-init value: scalar (number/bool) or an inline array backing
-    store for an array-typed reg. The TS type lies (`(number|boolean)[]`
-    after a cast) — arrays flow through verbatim. -/
-inductive StateInit where
-  | num (n : JsonNumber)
-  | bool (b : Bool)
-  | arr (items : Array JsonNumber)
-deriving Repr, Inhabited
-
-def StateInit.toWire : StateInit → Json
-  | .num n => Json.num n
-  | .bool b => Json.bool b
-  | .arr items => Json.arr (items.map Json.num)
-
-def StateInit.isArr : StateInit → Bool
-  | .arr _ => true | _ => false
 
 structure PerInstancePlan where
   registerCount : Nat
@@ -214,10 +181,6 @@ structure PerInstancePlan where
   perChildPreInput : Array (Array NInstr)
   /-- Per-output-port temp indices (local; the session compiler shifts). -/
   outputTargets : Array Nat
-  registerTargets : Array RegTarget
-  stateInit : Array StateInit
-  registerNames : Array String
-  registerTypes : Array ScalarType
   arraySlotNames : Array String
 deriving Repr, Inhabited
 
@@ -233,10 +196,6 @@ def PerInstancePlan.toWire (p : PerInstancePlan) : Except String Json := do
     ("instructions", ← instrsToWire p.instructions),
     ("per_child_pre_input", Json.arr (← p.perChildPreInput.mapM instrsToWire)),
     ("output_targets", toJson p.outputTargets),
-    ("register_targets", Json.arr (p.registerTargets.map (·.toWire))),
-    ("state_init", Json.arr (p.stateInit.map (·.toWire))),
-    ("register_names", toJson p.registerNames),
-    ("register_types", Json.arr (p.registerTypes.map scalarJson)),
     ("array_slot_names", toJson p.arraySlotNames)]
 
 -- ─────────────────────────────────────────────────────────────
@@ -250,10 +209,8 @@ inductive InstanceFunction where
        (instructions : Array NInstr)
        (preInputInstructions : Array NInstr)
        (registerOffset : Nat)
-       (stateRegOffset : Nat)
        (arraySlotOffset : Nat)
        (registerCount : Nat)
-       (registerTargets : Array RegTarget)
        (children : Array InstanceFunction)
 deriving Inhabited
 
@@ -277,26 +234,20 @@ def preInputInstructions : InstanceFunction → Array NInstr
 def registerOffset : InstanceFunction → Nat
   | .mk _ _ _ _ _ r .. => r
 
-def stateRegOffset : InstanceFunction → Nat
-  | .mk _ _ _ _ _ _ s .. => s
-
 def arraySlotOffset : InstanceFunction → Nat
-  | .mk _ _ _ _ _ _ _ a .. => a
+  | .mk _ _ _ _ _ _ a .. => a
 
 def registerCount : InstanceFunction → Nat
-  | .mk _ _ _ _ _ _ _ _ c .. => c
-
-def registerTargets : InstanceFunction → Array RegTarget
-  | .mk _ _ _ _ _ _ _ _ _ t _ => t
+  | .mk _ _ _ _ _ _ _ c .. => c
 
 def children : InstanceFunction → Array InstanceFunction
-  | .mk _ _ _ _ _ _ _ _ _ _ c => c
+  | .mk _ _ _ _ _ _ _ _ c => c
 
 /-- Replace the pre-input block (the parent attaches each per-child
     block after compiling its own body). -/
 def withPreInput (f : InstanceFunction) (block : Array NInstr) : InstanceFunction :=
   match f with
-  | .mk n i pre instrs _ ro so ao rc rt ch => .mk n i pre instrs block ro so ao rc rt ch
+  | .mk n i pre instrs _ ro ao rc ch => .mk n i pre instrs block ro ao rc ch
 
 /-- Mirrors `toWireInstanceFn`: preamble/pre_input/children omitted
     when empty so legacy JSON consumers see the bytes they expect. -/
@@ -306,10 +257,8 @@ partial def toWire (f : InstanceFunction) : Except String Json := do
     ("instance_name", Json.str f.instanceName),
     ("instructions", ← instrsToWire f.instructions),
     ("register_offset", toJson f.registerOffset),
-    ("state_reg_offset", toJson f.stateRegOffset),
     ("array_slot_offset", toJson f.arraySlotOffset),
-    ("register_count", toJson f.registerCount),
-    ("register_targets", Json.arr (f.registerTargets.map RegTarget.toWire))]
+    ("register_count", toJson f.registerCount)]
   let base ← if f.preambleInstructions.isEmpty then pure base
     else do pure <| base.push ("preamble_instructions", ← instrsToWire f.preambleInstructions)
   let base ← if f.preInputInstructions.isEmpty then pure base
@@ -379,9 +328,6 @@ def CompilationMode.ofWire? : String → Option CompilationMode
 structure FlatPlan where
   sampleRate : JsonNumber := (44100 : Nat)
   compilationMode : CompilationMode := .fused
-  stateInit : Array StateInit
-  registerNames : Array String
-  registerTypes : Array ScalarType
   arraySlotNames : Array String
   registerCount : Nat
   arraySlotCount : Nat
@@ -403,10 +349,7 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
   let fields := if p.compilationMode == .fused then fields
     else fields.push ("compilation_mode", Json.str p.compilationMode.wire)
   let fields := fields
-    ++ #[("state_init", Json.arr (p.stateInit.map (·.toWire))),
-      ("register_names", toJson p.registerNames),
-      ("register_types", Json.arr (p.registerTypes.map scalarJson)),
-      ("array_slot_names", toJson p.arraySlotNames),
+    ++ #[("array_slot_names", toJson p.arraySlotNames),
       ("register_count", toJson p.registerCount),
       ("array_slot_count", toJson p.arraySlotCount),
       ("array_slot_sizes", toJson p.arraySlotSizes),

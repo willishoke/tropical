@@ -4,7 +4,7 @@ import Tropical.Parse.Nodes
 /-!
 # Body-item parsers (port of `compiler/parse/statements.ts`)
 
-The leaf decl/assign parsers — reg, delay, param, next, dac.out, and the
+The leaf decl/assign parsers — reg, param, next, dac.out, and the
 instance-vs-output-assign disambiguation. None of these recurse into the
 declaration layer, so they live here as plain defs; `parseBodyItem` /
 `parseProgram` (the body↔program mutual knot) live in `Declarations.lean`,
@@ -13,7 +13,7 @@ which dispatches to these.
 
 namespace Tropical.Parse.Surface
 
-open Tropical.Parse (ParsedExpr BodyDecl BodyAssign TypeDef NextTargetKind)
+open Tropical.Parse (ParsedExpr BodyDecl BodyAssign TypeDef)
 open Lean (JsonNumber)
 
 /-- A parsed body item, sorted into the block's `decls`/`assigns` (and
@@ -29,35 +29,6 @@ private def isCapitalized (s : String) : Bool :=
   | [] => false
 
 -- ── Decls ────────────────────────────────────────────────────────────────────
-
-/-- `reg name [: type] = init` -/
-def parseRegDecl : P BodyDecl := do
-  let _ ← consume .kreg "reg keyword"
-  let name := (← consume .ident "reg name").sval
-  let type? ← (do
-    if (← eat .colon).isSome then pure (some (← consume .ident "reg type name").sval)
-    else pure none)
-  let _ ← consume .assign "reg `=` before init"
-  let init ← parseTopExpr
-  pure (.reg name init type?)
-
-/-- `delay name [: SumType] = update_expr init init_value` (`init` contextual). -/
-def parseDelayDecl : P BodyDecl := do
-  let _ ← consume .kdelay "delay keyword"
-  let name := (← consume .ident "delay name").sval
-  let type? ← (do
-    if (← peekKind) == .colon then
-      advance
-      pure (some (← consume .ident "delay type name").sval)
-    else pure none)
-  let _ ← consume .assign "delay `=` before update expression"
-  let update ← parseTopExpr
-  let initTok ← cur
-  if !isCtxKw initTok "init" then
-    throw "delay decl: expected 'init' after update expression"
-  advance
-  let init ← parseTopExpr
-  pure (.delay name update init type?)
 
 /-- `param name: smoothed [= default]` (default must be a number literal). -/
 def parseParamDecl : P BodyDecl := do
@@ -76,14 +47,6 @@ def parseParamDecl : P BodyDecl := do
   pure (.param name value?)
 
 -- ── Assigns ──────────────────────────────────────────────────────────────────
-
-/-- `next name = expr` (target kind is always `reg`). -/
-def parseNextUpdate : P BodyAssign := do
-  let _ ← consume .knext "next keyword"
-  let name := (← consume .ident "next target name").sval
-  let _ ← consume .assign "next `=` before expression"
-  let expr ← parseTopExpr
-  pure (.next .reg name expr)
 
 /-- `dac.out = expr` — the boundary-leaf wire. -/
 def parseDacOutAssign : P BodyAssign := do

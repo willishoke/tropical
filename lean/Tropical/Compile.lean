@@ -24,9 +24,8 @@ What did NOT need porting, and why:
   the `inputBindingFor → defaults → 0` chain it would take there.
 - the legacy per-instance scheduler tier: retired in TS already.
 
-Slot-allocation parity: the engine's `Lowering.allocate` +
-`extractSessionDelays` produce [params, top-level outputs, delay
-slots]; this module continues with [nested outputs (depth-first,
+Slot-allocation parity: the engine's `Lowering.allocate` produces
+[params, top-level outputs]; this module continues with [nested outputs (depth-first,
 instance order), then ALL inputs (top-level + nested, depth-first)] —
 the exact two-phase `preallocateOutputsRecursive` /
 `preallocateInputsRecursive` order, including the array-input alias
@@ -44,7 +43,7 @@ open Lean (Json JsonNumber toJson)
 open Tropical.Ir.Core
 open Tropical.Ir.CompileResolved (compileResolved Context)
 open Tropical.Ir.Emit (ArraySlotInfo)
-open Tropical.Plan (NOperand DstSlot NInstr RegTarget StateInit InstanceFunction)
+open Tropical.Plan (NOperand DstSlot NInstr InstanceFunction)
 open Tropical.Expr (getField? getStrField? opOf?)
 
 abbrev ScalarType := Tropical.Plan.ScalarType
@@ -266,11 +265,7 @@ private def joinInstancePath (parent child : String) : String :=
 
 structure Accumulators where
   nextRegRaw : Nat := 0
-  nextStateRaw : Nat := 0
   nextArrayRaw : Nat := 0
-  registerNames : Array String := #[]
-  registerTypes : Array ScalarType := #[]
-  stateInit : Array StateInit := #[]
   arraySlotSizes : Array Nat := #[]
   arraySlotNames : Array String := #[]
 deriving Inhabited
@@ -286,7 +281,7 @@ private def shiftDst (regOffset arrayOffset : Nat) : DstSlot → DstSlot
   | .sessionArray slot => .array slot
   | .moduleSlot i => .moduleSlot i
 
-private def remapOperand (instanceName : String) (regOffset stateOffset arrayOffset : Nat) :
+private def remapOperand (instanceName : String) (regOffset arrayOffset : Nat) :
     NOperand → Except String NOperand
   | .const v t => .ok (.const v t)
   | .source i t => .ok (.source i t)
@@ -296,7 +291,6 @@ private def remapOperand (instanceName : String) (regOffset stateOffset arrayOff
   -- defaults chain → literal 0. Mirror the terminal value.
   | .input _ t => .ok (.const 0 t)
   | .reg slot t => .ok (.reg (slot + regOffset) t)
-  | .stateReg slot t => .ok (.stateReg (slot + stateOffset) t)
   | .arrayReg slot => .ok (.arrayReg (slot + arrayOffset))
   | .sessionArrayReg slot => .ok (.arrayReg slot)
   | .param _ _ =>
@@ -304,11 +298,11 @@ private def remapOperand (instanceName : String) (regOffset stateOffset arrayOff
       ++ s!"in '{instanceName}'. Session-level params should resolve "
       ++ "to slot operands before this point.")
 
-private def remapInstr (instanceName : String) (regOffset stateOffset arrayOffset : Nat)
+private def remapInstr (instanceName : String) (regOffset arrayOffset : Nat)
     (i : NInstr) : Except String NInstr := do
   return { i with
     dst := shiftDst regOffset arrayOffset i.dst
-    args := ← i.args.mapM (remapOperand instanceName regOffset stateOffset arrayOffset) }
+    args := ← i.args.mapM (remapOperand instanceName regOffset arrayOffset) }
 
 /-- Output writebacks per declared port (the remap's `writeSlots`). -/
 private def emitWriteSlots (s : SessionAlloc) (instanceName : String)
@@ -431,12 +425,11 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
 
   -- ── 3. Remap into the unified slot/temp space. ──
   let regOffset := acc.nextRegRaw
-  let stateOffset := acc.nextStateRaw
   let arrayOffset := acc.nextArrayRaw
 
-  let body ← plan.instructions.mapM (remapInstr instancePath regOffset stateOffset arrayOffset)
+  let body ← plan.instructions.mapM (remapInstr instancePath regOffset arrayOffset)
   let perChildPreInput ← plan.perChildPreInput.mapM
-    (·.mapM (remapInstr instancePath regOffset stateOffset arrayOffset))
+    (·.mapM (remapInstr instancePath regOffset arrayOffset))
   let writeSlots ← emitWriteSlots s instancePath (prog.outputs.map (·.name))
     plan.outputTargets regOffset
   let instanceInstructions := body ++ writeSlots
@@ -449,33 +442,22 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
       ++ "one block per nested InstanceDecl in body order.")
   children := children.mapIdx fun i c => c.withPreInput perChildPreInput[i]!
 
-  let shiftedTargets := plan.registerTargets.map fun t =>
-    match t with
-    | .arrayManaged => RegTarget.arrayManaged
-    | .temp slot => .temp (slot + regOffset)
-
   let fn : InstanceFunction := .mk
     (s!"instance_" ++ (instancePath.replace "." "_"))
     instancePath
     #[]                     -- preamble (always empty under the root lowering)
     instanceInstructions
     #[]                     -- pre_input (parent attaches a copy on its own pass)
-    regOffset stateOffset arrayOffset
+    regOffset arrayOffset
     plan.registerCount      -- + tempsConsumed (always 0; no preamble emitter)
-    shiftedTargets
     children
 
   -- ── 4. Accumulator updates (this kernel's own contribution). ──
   acc := { acc with
-    registerNames := acc.registerNames
-      ++ plan.registerNames.map (joinInstancePath instancePath ·)
-    registerTypes := acc.registerTypes ++ plan.registerTypes
-    stateInit := acc.stateInit ++ plan.stateInit
     arraySlotSizes := acc.arraySlotSizes ++ plan.arraySlotSizes
     arraySlotNames := acc.arraySlotNames
       ++ plan.arraySlotNames.map (joinInstancePath instancePath ·)
     nextRegRaw := acc.nextRegRaw + plan.registerCount
-    nextStateRaw := acc.nextStateRaw + plan.stateInit.size
     nextArrayRaw := acc.nextArrayRaw + plan.arraySlotCount }
 
   return (fn, s, acc)
@@ -492,9 +474,8 @@ structure SessionInput where
   graphOutputs : Array (String × String)
   /-- Param mirror: name → raw value Json (slot_defaults echo). -/
   params : Array (String × Json)
-  /-- Post-extraction allocation (params, top-level outputs, delays). -/
+  /-- Allocation (params, top-level outputs). -/
   alloc : Tropical.Lowering.Alloc
-  delayEntries : Array Tropical.Lowering.DelayEntry
   /-- The elaborated session root, downcast to Core. -/
   root : CoreProgram
   mode : Tropical.Plan.CompilationMode := .fused
@@ -505,7 +486,7 @@ private def rootParamName : CoreBodyDecl → Option String
 
 /-- Build slot metadata (`buildSlotMetadata`). -/
 private def slotMetadata (s : SessionAlloc) (params : Array (String × Json))
-    (delayEntries : Array Tropical.Lowering.DelayEntry) (paramSlots : Array (String × Nat)) :
+    (paramSlots : Array (String × Nat)) :
     Nat × Array String × Array Json := Id.run do
   let slotCount := s.slotCount
   let mut names := Array.replicate slotCount ""
@@ -517,11 +498,6 @@ private def slotMetadata (s : SessionAlloc) (params : Array (String × Json))
       names := names.set! idx s!"param:{name}"
       if let some v := assocGet? params name then
         defaults := defaults.set! idx v
-  for e in delayEntries do
-    if let some idx := e.slotIdx then
-      if idx < slotCount then
-        names := names.set! idx e.slotName
-        defaults := defaults.set! idx e.init
   for (name, idx) in s.inputSlotRegistry do
     if idx < slotCount then names := names.set! idx s!"input:{name}"
   return (slotCount, names, defaults)
@@ -594,13 +570,10 @@ def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan
 
   let sinks ← emitSinks s input.graphOutputs
   let (slotCount, slotNames, slotDefaults) :=
-    slotMetadata s input.params input.delayEntries s.paramSlots
+    slotMetadata s input.params s.paramSlots
 
   return {
     compilationMode := input.mode
-    stateInit := acc.stateInit
-    registerNames := acc.registerNames
-    registerTypes := acc.registerTypes
     arraySlotNames := acc.arraySlotNames
     registerCount := acc.nextRegRaw
     arraySlotCount := acc.nextArrayRaw

@@ -150,16 +150,29 @@ def parseMdVerb (args : List String) : IO UInt32 := do
     Output is Lean-canonical (sorted keys) — semantically identical to the
     prior TS-serialized bridge, and idempotent under re-runs. -/
 def parseAllVerb (_args : List String) : IO UInt32 := do
-  let entries ← (System.FilePath.mk "stdlib").readDir
-  let mdNames := entries.filterMap fun e =>
-    let n := e.fileName
-    if n.endsWith ".md" && n != "README.md" then some n else none
-  let sorted := mdNames.qsort fun a b => decide (a < b)
+  -- Scan stdlib/ (top level) then stdlib/reversible/ — the subdir holds the
+  -- reversible-synthesis programs; placing it after the base stdlib keeps each
+  -- dir internally sorted, and the fixed-point loop below resolves the actual
+  -- dependency order regardless (reversible programs depend on base ones).
+  let topEntries ← (System.FilePath.mk "stdlib").readDir
+  let topPaths := (topEntries.filterMap fun e =>
+      let n := e.fileName
+      if n.endsWith ".md" && n != "README.md" then some s!"stdlib/{n}" else none)
+    |>.qsort (fun a b => decide (a < b))
+  let revDir := "stdlib/reversible"
+  let revPaths ← (if ← System.FilePath.pathExists revDir then do
+      let revEntries ← (System.FilePath.mk revDir).readDir
+      pure ((revEntries.filterMap fun e =>
+          let n := e.fileName
+          if n.endsWith ".md" && n != "README.md" then some s!"{revDir}/{n}" else none)
+        |>.qsort (fun a b => decide (a < b)))
+    else pure #[])
+  let paths := topPaths ++ revPaths
   let mut parsed : Array (String × Tropical.Parse.Program) := #[]
-  for fname in sorted do
-    let text ← IO.FS.readFile s!"stdlib/{fname}"
+  for path in paths do
+    let text ← IO.FS.readFile path
     match Tropical.Parse.Surface.parseMarkdownProgram text with
-    | .error e => IO.eprintln s!"{fname}: {e}"; return 1
+    | .error e => IO.eprintln s!"{path}: {e}"; return 1
     | .ok prog => parsed := parsed.push (prog.name, prog)
   -- Fixed-point elaborate loop → registration (manifest) order: each pass
   -- elaborates the programs whose sibling refs already resolved.
@@ -347,7 +360,7 @@ private def printStrata (opts : Tropical.Ir.Strata.Options)
 
 def strataStdlibVerb (args : List String) : IO UInt32 := do
   let some target := args.head?
-    | IO.eprintln "usage: diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]"
+    | IO.eprintln "usage: diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J] [--cf-only]"
       return 1
   let opts ← match parseStrataOptions args.tail with
     | .error e => IO.eprintln e; return 1
@@ -369,7 +382,7 @@ def strataStdlibVerb (args : List String) : IO UInt32 := do
 
 def strataFileVerb (args : List String) : IO UInt32 := do
   let some path := args.head?
-    | IO.eprintln "usage: diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]"
+    | IO.eprintln "usage: diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J] [--cf-only]"
       return 1
   let opts ← match parseStrataOptions args.tail with
     | .error e => IO.eprintln e; return 1
@@ -419,7 +432,7 @@ private def printEmit (typeArgs : Array (String × Lean.JsonNumber))
 
 def emitStdlibVerb (args : List String) : IO UInt32 := do
   let some target := args.head?
-    | IO.eprintln "usage: diffcli emit-stdlib <Name> [--type-args=J]"
+    | IO.eprintln "usage: diffcli emit-stdlib <Name> [--type-args=J] [--cf-only]"
       return 1
   let typeArgs ← match parseTypeArgs args.tail with
     | .error e => IO.eprintln e; return 1
@@ -441,7 +454,7 @@ def emitStdlibVerb (args : List String) : IO UInt32 := do
 
 def emitFileVerb (args : List String) : IO UInt32 := do
   let some path := args.head?
-    | IO.eprintln "usage: diffcli emit-file <parsed.json> [--type-args=J]"
+    | IO.eprintln "usage: diffcli emit-file <parsed.json> [--type-args=J] [--cf-only]"
       return 1
   let typeArgs ← match parseTypeArgs args.tail with
     | .error e => IO.eprintln e; return 1
@@ -547,5 +560,5 @@ def main (args : List String) : IO UInt32 := do
   | "emit-file" :: rest => emitFileVerb rest
   | "compile" :: rest => compileVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>\n       diffcli elab-stdlib <Name>\n       diffcli elab-file <parsed.json>\n       diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli emit-stdlib <Name> [--type-args=J]\n       diffcli emit-file <parsed.json> [--type-args=J]"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>\n       diffcli elab-stdlib <Name>\n       diffcli elab-file <parsed.json>\n       diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli emit-stdlib <Name> [--type-args=J]\n       diffcli emit-file <parsed.json> [--type-args=J] [--cf-only]"
     return 1

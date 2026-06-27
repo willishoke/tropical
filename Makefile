@@ -43,6 +43,10 @@ clean:
 # Full gate: the Lean golden/equiv runner (replaces validate_stdlib + the
 # native equiv suite), the surviving behavioral bun suites (WASM≡JIT in
 # tests/web + the MCP protocol tests against the Lean engine), and ctest.
+# NB: run the BUILT binaries directly, never `lake exe` — lake forces the Lean
+# lib dir onto DYLD_LIBRARY_PATH (for libleanshared), which shadows Homebrew's
+# libLLVM with Lean's (no AMDGPU target) and the lld wasm emitter then dies at
+# load (_LLVMInitializeAMDGPUAsmParser). See CLAUDE.md "Test".
 validate: build lean
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli tropicaltest
 	./lean/.lake/build/bin/tropicaltest

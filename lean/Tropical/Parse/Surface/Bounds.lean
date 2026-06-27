@@ -87,7 +87,6 @@ def lowerBounds (prog : Program) (inputBounds outputBounds : Array (String × Bo
         match (outBounds.find? (·.1 == nm)).map (·.2) with
         | some b => .output nm (wrapWithBound e b)
         | none => .output nm e
-      | other => other
     .mk name tp (some { ports with inputs := inputs' }) (Block.mk body.decls assigns') breaks
 
 end Tropical.Parse.Surface

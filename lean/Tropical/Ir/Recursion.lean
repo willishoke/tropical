@@ -35,7 +35,7 @@ partial def mapExpr (h : MapHooks) (e : Expr) : Expr :=
     match e with
     -- Leaves — no children to walk.
     | .num _ | .bool _
-    | .inputRef _ | .regRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
+    | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
     | .nestedOut _ _ | .sampleRate | .sampleIndex => e
     | .arr items => .arr (items.map (mapExpr h))
     -- ADT.

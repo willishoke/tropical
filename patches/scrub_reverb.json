@@ -1,0 +1,23 @@
+{
+  "schema": "tropical_program_2",
+  "name": "scrub_reverb",
+  "body": {
+    "op": "block",
+    "decls": [
+      { "op": "instanceDecl", "name": "clock", "program": "ScrubClock", "inputs": {} },
+      {
+        "op": "instanceDecl",
+        "name": "rr",
+        "program": "ReverseReverb",
+        "inputs": {
+          "tau": { "op": "ref", "instance": "clock", "output": "tau" },
+          "f0": 110
+        }
+      }
+    ],
+    "assigns": []
+  },
+  "audio_outputs": [
+    { "instance": "rr", "output": "out" }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "schema": "tropical_program_2",
+  "name": "reverse_reverb",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instanceDecl",
+        "name": "rr",
+        "program": "ReverseReverb",
+        "inputs": {
+          "tau": {
+            "op": "div",
+            "args": [
+              { "op": "toFloat", "args": [ { "op": "sampleIndex" } ] },
+              { "op": "sampleRate" }
+            ]
+          },
+          "f0": 110
+        }
+      }
+    ],
+    "assigns": []
+  },
+  "audio_outputs": [
+    { "instance": "rr", "output": "out" }
+  ]
+}

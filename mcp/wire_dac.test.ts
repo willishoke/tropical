@@ -132,7 +132,7 @@ const unique = (prefix: string) => `${prefix}_${++uniq}`
 describe('wire to dac.out — basic flow', () => {
   test('ref-shaped expression to dac.out is accepted and routed', async () => {
     const inst = unique('osc')
-    await client.callOk('add_instance', { program: 'OnePole', instance_name: inst })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: inst })
 
     const data = await client.callOk('wire', {
       set: [{
@@ -151,8 +151,8 @@ describe('wire to dac.out — basic flow', () => {
   test('multiple wires to dac.out accumulate (mix-bus)', async () => {
     const a = unique('a')
     const b = unique('b')
-    await client.callOk('add_instance', { program: 'OnePole', instance_name: a })
-    await client.callOk('add_instance', { program: 'OnePole', instance_name: b })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: a })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: b })
 
     // Clear any prior dac wires from earlier tests.
     await client.callOk('wire', {
@@ -180,7 +180,7 @@ describe('wire to dac.out — basic flow', () => {
   test('remove clears all dac wires at once', async () => {
     // Establish at least one dac wire.
     const inst = unique('rm')
-    await client.callOk('add_instance', { program: 'OnePole', instance_name: inst })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: inst })
     await client.callOk('wire', {
       set: [{ instance: 'dac', input: 'out', expr: { op: 'ref', instance: inst, output: 0 } }],
     })
@@ -208,7 +208,7 @@ describe('wire to dac.out — error envelopes', () => {
 
   test('wrong dac port name rejected', async () => {
     const inst = unique('w')
-    await client.callOk('add_instance', { program: 'OnePole', instance_name: inst })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: inst })
     const env = await client.callError('wire', {
       set: [{
         instance: 'dac',
@@ -233,7 +233,7 @@ describe('wire to dac.out — error envelopes', () => {
 
   test('ref output index out of range rejected', async () => {
     const inst = unique('oor')
-    await client.callOk('add_instance', { program: 'OnePole', instance_name: inst })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: inst })
     const env = await client.callError('wire', {
       set: [{
         instance: 'dac',
@@ -256,7 +256,7 @@ describe('wire to dac.out — error envelopes', () => {
 describe('dac is a reserved instance name', () => {
   test('add_instance with name "dac" rejected', async () => {
     const env = await client.callError('add_instance', {
-      program: 'OnePole',
+      program: 'SoftClip',
       instance_name: 'dac',
     })
     expect(env.code).toBe('invalid_value')
@@ -265,7 +265,7 @@ describe('dac is a reserved instance name', () => {
 
   test('replicate with name_prefix "dac" rejected', async () => {
     const env = await client.callError('replicate', {
-      program: 'OnePole',
+      program: 'SoftClip',
       count: 2,
       name_prefix: 'dac',
     })
@@ -308,18 +308,8 @@ describe('start_audio override validation (Phase A5)', () => {
   })
 })
 
-describe('generic stdlib types reachable from MCP session', () => {
-  // Regression test for the loadBuiltins(session.typeRegistry) bug: passing
-  // a bare Map made stdlib_loader synthesize a throwaway session, so generic
-  // templates and typeResolver landed there instead of on the real session.
-  // After the fix, generic stdlib types instantiate by name with type_args.
-  test('add_instance with type_args resolves a generic stdlib type', async () => {
-    const data = await client.callOk('add_instance', {
-      program: 'Delay',
-      instance_name: unique('d'),
-      type_args: { N: 4 },
-    })
-    expect(data).toBeDefined()
-    expect((data as { type_args?: Record<string, number> }).type_args?.N).toBe(4)
-  })
-})
+// NOTE: the 'generic stdlib types reachable' regression test was removed in the
+// CF-only migration — Delay/Sequencer were the only generic stdlib types and
+// both are retired, so there is no generic stdlib type to instantiate here. The
+// generic machinery (define_program type_params → type_args) is still live but
+// now has no stdlib example to exercise it. (doc-sweep tracked)

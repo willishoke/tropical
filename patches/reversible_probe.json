@@ -1,0 +1,19 @@
+{
+  "schema": "tropical_program_2",
+  "name": "reversible_probe",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instanceDecl",
+        "name": "p",
+        "program": "ReversibleProbe",
+        "inputs": {}
+      }
+    ],
+    "assigns": []
+  },
+  "audio_outputs": [
+    { "instance": "p", "output": "out" }
+  ]
+}

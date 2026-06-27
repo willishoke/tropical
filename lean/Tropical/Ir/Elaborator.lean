@@ -14,9 +14,7 @@ Faithfulness notes — every observable TS behavior is replicated:
   order: resolved `body.decls` ≠ parsed order.
 - **Two-phase decl elaboration.** Shells are registered first (forward
   refs work), expressions resolved in a second pass iterating in
-  pairing-insertion order (= non-program source order). A parsed
-  `delayDecl` shell registers `update := 0` so a later `next x = e`
-  throws `duplicate update for reg '...'`.
+  pairing-insertion order (= non-program source order).
 - **Sequential let.** Each binder is minted, its value resolved in a
   scope WITHOUT it, THEN pushed — subsequent entries and the body see
   it. Restore-on-exit shadowing falls out of the persistent binder list.
@@ -103,8 +101,6 @@ structure Scope where
   resolver : Option Resolver := none
   /-- Position = InputIdx. -/
   inputNames : Array String := #[]
-  /-- name → RegIdx, in registration order. -/
-  regs : Array (String × Nat) := #[]
   params : Array (String × Nat) := #[]
   /-- name → (InstanceIdx, typeKey). -/
   instances : Array (String × Nat × String) := #[]
@@ -255,9 +251,6 @@ private def resolvePortType (scope : Scope) : Tropical.Parse.PortTypeDecl → El
 private def lookupValueRef (s : Scope) (name : String) : Option Expr :=
   match s.binders.find? (·.1 == name) with
   | some (_, b) => some (.bindingRef b.idx)
-  | none =>
-  match s.regs.find? (·.1 == name) with
-  | some (_, i) => some (.regRef ⟨i⟩)
   | none =>
   match s.params.find? (·.1 == name) with
   | some (_, i) => some (.paramRef ⟨i⟩)
@@ -530,7 +523,7 @@ private partial def collectNestedOutDeps (numInstances : Nat) (acc : Array Nat) 
         (collectNestedOutDeps numInstances acc a) b) c
   | .index a b =>
     collectNestedOutDeps numInstances (collectNestedOutDeps numInstances acc a) b
-  | .inputRef _ | .regRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
+  | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
   | .sampleRate | .sampleIndex => acc
 
 private structure TarjanSt where
@@ -726,8 +719,6 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
   --    (source order) — sibling instances may reference them.
   let mut decls : Array BodyDecl := #[]
   let mut pairing : Array (Nat × Tropical.Parse.BodyDecl) := #[]
-  let mut regsTbl : Array (String × Nat) := #[]
-  let mut regCells : Array (String × Nat) := #[]
   let mut paramsTbl : Array (String × Nat) := #[]
   let mut instTbl : Array (String × Nat × String) := #[]
   let mut registry : Array (String × ProgramIdx) := #[]
@@ -746,39 +737,6 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
   for d in p.body.decls do
     match d with
     | .prog .. => pure ()  -- already handled
-    | .reg name _ type? => do
-      if regsTbl.any (·.1 == name) then
-        throwElab s!"duplicate reg '{name}'"
-      let rType? : Option ScalarOrAlias ← match type? with
-        | none => pure none
-        | some tname =>
-          match builtinTypeToScalar? tname with
-          | some k => pure (some (.scalar k))
-          | none =>
-            let scope : Scope := { frame, parents, resolver }
-            match lookupTypeDefChain scope tname with
-            | some tdIdx =>
-              match ← getTypeDef tdIdx with
-              | .alias .. => pure (some (.alias tdIdx))
-              | _ => throwElab s!"reg '{name}': unknown type '{tname}'"
-            | none => throwElab s!"reg '{name}': unknown type '{tname}'"
-      let cell := decls.size
-      decls := decls.push (.reg name jnum0 none rType? none)
-      pairing := pairing.push (cell, d)
-      regsTbl := regsTbl.push (name, regCount)
-      regCells := regCells.push (name, cell)
-      regCount := regCount + 1
-    | .delay name _ _ _ => do
-      if regsTbl.any (·.1 == name) then
-        throwElab s!"duplicate reg/delay '{name}'"
-      -- `update := 0` placeholder: the delay form commits to having an
-      -- update, so a later `next` on it detects the conflict.
-      let cell := decls.size
-      decls := decls.push (.reg name jnum0 (some jnum0) none none)
-      pairing := pairing.push (cell, d)
-      regsTbl := regsTbl.push (name, regCount)
-      regCells := regCells.push (name, cell)
-      regCount := regCount + 1
     | .param name value? => do
       if paramsTbl.any (·.1 == name) then
         throwElab s!"duplicate param '{name}'"
@@ -818,16 +776,9 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
   let scope : Scope := {
     frame, parents, resolver
     inputNames := inputs.map (·.name)
-    regs := regsTbl, params := paramsTbl, instances := instTbl, registry }
+    params := paramsTbl, instances := instTbl, registry }
   for (cell, parsed) in pairing do
     match parsed, decls[cell]! with
-    | .reg _ initParsed _, .reg name _ update? type? lf => do
-      let init ← resolveExpr scope initParsed
-      decls := decls.set! cell (.reg name init update? type? lf)
-    | .delay _ updateParsed initParsed _, .reg name _ _ type? lf => do
-      let update ← resolveExpr scope updateParsed
-      let init ← resolveExpr scope initParsed
-      decls := decls.set! cell (.reg name init (some update) type? lf)
     | .param .., _ => pure ()  -- no expressions on paramDecl
     | .inst _ _ typeArgs instInputs, .inst name tk _ _ => do
       let (tas, ins) ← resolveInstanceArgs scope name tk typeArgs instInputs
@@ -835,7 +786,7 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
     | parsedD, resolvedD =>
       throwElab s!"internal: paired {parsedDeclOp parsedD} with {resolvedDeclOp resolvedD}"
 
-  -- 6. Body assigns. `next x = e` folds into the reg's update field.
+  -- 6. Body assigns. (CF-only: the only assign is an output wire.)
   let mut assigns : Array OutputAssign := #[]
   for a in p.body.assigns do
     match a with
@@ -847,16 +798,6 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
           | some i => pure (OutputTarget.port ⟨i⟩)
           | none => throwElab s!"outputAssign references unknown output port '{name}'"
       assigns := assigns.push { target, expr := ← resolveExpr scope exprParsed }
-    | .next _ name exprParsed => do
-      let some (_, cell) := regCells.find? (·.1 == name)
-        | throwElab s!"next-update target '{name}' is not a declared reg or delay"
-      match decls[cell]! with
-      | .reg rname init update? type? lf => do
-        if update?.isSome then
-          throwElab s!"duplicate update for reg '{name}' (already set by decl-side update or earlier next-update)"
-        let update ← resolveExpr scope exprParsed
-        decls := decls.set! cell (.reg rname init (some update) type? lf)
-      | _ => throwElab s!"internal: next-update cell for '{name}' is not a reg"
 
   -- Build the program (mkProgram), validating registry coverage
   -- (validateProgramRegistry — same error text) before the cycle check.
@@ -890,10 +831,10 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
   pure idx
 where
   parsedDeclOp : Tropical.Parse.BodyDecl → String
-    | .reg .. => "regDecl" | .delay .. => "delayDecl" | .param .. => "paramDecl"
+    | .param .. => "paramDecl"
     | .inst .. => "instanceDecl" | .prog .. => "programDecl"
   resolvedDeclOp : BodyDecl → String
-    | .reg .. => "regDecl" | .param .. => "paramDecl"
+    | .param .. => "paramDecl"
     | .inst .. => "instanceDecl" | .prog .. => "programDecl"
 
 -- ─────────────────────────────────────────────────────────────

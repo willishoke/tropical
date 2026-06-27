@@ -45,8 +45,6 @@ struct KernelState
   std::vector<uint64_t> array_sizes;
   std::vector<uint64_t> param_ptrs;
 
-  // Register names for state transfer on hot-swap
-  std::vector<std::string> register_names;
   // Array slot names for array state transfer on hot-swap
   std::vector<std::string> array_names;
 
@@ -83,12 +81,12 @@ public:
    *
    * `manifest_json` is a tropical_plan_5 JSON whose instruction graph is
    * ignored — codegen comes from `ir_text` (JIT-compiled via
-   * OrcJitEngine::compile_ir_text). The manifest's metadata (state_init,
-   * register/array/slot names + types + sizes, sample_rate, slot
-   * defaults) drives runtime state setup exactly as load_plan does, so
-   * hot-swap state transfer and slot wiring behave identically. Always
-   * fused. This is the seam for the Lean-emits-IR migration: the same
-   * metadata Lean already holds in FlatPlan, plus the IR it will emit.
+   * OrcJitEngine::compile_ir_text). The manifest's metadata (temp pool
+   * size, array/slot names + sizes, sample_rate, slot defaults) drives
+   * runtime scratch + slot setup. CF-only: there is no per-sample state,
+   * so no state-register metadata or by-name transfer. Always fused. This
+   * is the seam for the Lean-emits-IR migration: the same metadata Lean
+   * already holds in FlatPlan, plus the IR it will emit.
    */
   bool load_ir(const std::string & ir_text, const std::string & manifest_json);
 
@@ -368,79 +366,6 @@ private:
     {
       std::this_thread::yield();
     }
-  }
-
-  // Compute scalar register mapping for hot-swap state transfer
-  static std::vector<std::pair<uint32_t, uint32_t>> compute_register_mapping(
-    const KernelState & old_state,
-    const KernelState & new_state)
-  {
-    std::vector<std::pair<uint32_t, uint32_t>> mapping;
-    for (uint32_t new_idx = 0; new_idx < new_state.register_names.size(); ++new_idx)
-    {
-      const auto & name = new_state.register_names[new_idx];
-      if (name.empty()) continue;
-      for (uint32_t old_idx = 0; old_idx < old_state.register_names.size(); ++old_idx)
-      {
-        if (old_state.register_names[old_idx] == name)
-        {
-          mapping.push_back({old_idx, new_idx});
-          break;
-        }
-      }
-    }
-    return mapping;
-  }
-
-  // Compute array slot mapping for hot-swap state transfer.
-  // Only transfers slots where name and size both match (size change = reset to zero).
-  static std::vector<std::pair<uint32_t, uint32_t>> compute_array_mapping(
-    const KernelState & old_state,
-    const KernelState & new_state)
-  {
-    std::vector<std::pair<uint32_t, uint32_t>> mapping;
-    for (uint32_t ni = 0; ni < new_state.array_names.size(); ++ni)
-    {
-      const auto & name = new_state.array_names[ni];
-      if (name.empty()) continue;
-      for (uint32_t oi = 0; oi < old_state.array_names.size(); ++oi)
-      {
-        if (old_state.array_names[oi] == name &&
-            oi < old_state.array_storage.size() &&
-            ni < new_state.array_storage.size() &&
-            old_state.array_storage[oi].size() == new_state.array_storage[ni].size())
-        {
-          mapping.push_back({oi, ni});
-          break;
-        }
-      }
-    }
-    return mapping;
-  }
-
-  // M5: name-based slot transfer on hot-swap. Control-plane writes via
-  // tropical_runtime_set_slot must persist across recompiles even though
-  // the slot's integer index may change in the new plan. Drops in M8
-  // once the kernel rewrites slots every sample.
-  static std::vector<std::pair<uint32_t, uint32_t>> compute_slot_mapping(
-    const KernelState & old_state,
-    const KernelState & new_state)
-  {
-    std::vector<std::pair<uint32_t, uint32_t>> mapping;
-    for (uint32_t ni = 0; ni < new_state.slot_names.size(); ++ni)
-    {
-      const auto & name = new_state.slot_names[ni];
-      if (name.empty()) continue;
-      for (uint32_t oi = 0; oi < old_state.slot_names.size(); ++oi)
-      {
-        if (old_state.slot_names[oi] == name)
-        {
-          mapping.push_back({oi, ni});
-          break;
-        }
-      }
-    }
-    return mapping;
   }
 
   unsigned int buffer_length_;

@@ -806,7 +806,6 @@ partial def lowerBounds (p : Program) : Program :=
         match outputBounds.find? (·.1 == name) with
         | some (_, b) => .output name (wrapWithBound e b)
         | none => .output name e
-      | other => other
   let ports' := ports.map fun pp => { pp with inputs := inputs' }
   .mk p.name p.typeParams ports' (.mk decls assigns) p.breaksCycles
 
@@ -820,51 +819,12 @@ private def opString (obj : JsonV) : String :=
   | some v => v.jsString
   | none => "undefined"
 
-/-- `{zeros: N}` / inner `{typeParam: n}` legacy sugar (Delay.json). -/
-private def raiseZerosArg (arg : JsonV) : Except String ParsedExpr := do
-  match arg with
-  | .obj _ =>
-    if (arg.getField? "op").isNone then
-      match arg.getStr? "typeParam" with
-      | some name => pure (.nameRef name)
-      | none => raiseExpr arg
-    else raiseExpr arg
-  | _ => raiseExpr arg
-
-private def raiseRegInit (init : JsonV) : Except String ParsedExpr := do
-  match init with
-  | .obj _ =>
-    if (init.getField? "op").isNone then
-      match init.getField? "zeros" with
-      | some n => do
-        pure (.call (.nameRef "zeros") #[← raiseZerosArg n])
-      | none => raiseExpr init
-    else raiseExpr init
-  | _ => raiseExpr init
-
 mutual
 
 partial def raiseBodyDecl (decl : JsonV) : Except String BodyDecl := do
   let .obj _ := decl
     | rerr s!"body decl must be an object, got {decl.compress}"
   match decl.opOf?.getD (opString decl) with
-  | "regDecl" => do
-    let init ← match decl.getField? "init" with
-      | some i => pure i
-      | none =>
-        let shownName := match decl.getField? "name" with
-          | some v => v.jsString
-          | none => "undefined"
-        rerr s!"regDecl '{shownName}' missing init"
-    let name ← fieldStr decl "name" "regDecl"
-    let type? := decl.getStr? "type"   -- only a *string* type raises (TS: typeof check)
-    pure (.reg name (← raiseRegInit init) type?)
-  | "delayDecl" => do
-    let name ← fieldStr decl "name" "delayDecl"
-    let update ← raiseExprOpt (decl.getField? "update")
-    let init ← raiseExprOpt (decl.getField? "init")
-    let type? := decl.getStr? "type"
-    pure (.delay name update init type?)
   | "paramDecl" => do
     let name ← fieldStr decl "name" "paramDecl"
     let value? := match decl.getField? "value" with
@@ -907,15 +867,6 @@ partial def raiseBodyAssign (a : JsonV) : Except String BodyAssign := do
   | "outputAssign" => do
     let name ← fieldStr a "name" "outputAssign"
     pure (.output name (← raiseExprOpt (a.getField? "expr")))
-  | "nextUpdate" => do
-    let some target := a.getField? "target"
-      | rerr "nextUpdate missing target"
-    let kind ← match target.getStr? "kind" with
-      | some "reg" => pure NextTargetKind.reg
-      | some "delay" => pure NextTargetKind.delay
-      | _ => rerr s!"nextUpdate target kind must be 'reg' or 'delay', got {JsonV.stringifyOpt (target.getField? "kind")}"
-    let name ← fieldStr target "name" "nextUpdate target"
-    pure (.next kind name (← raiseExprOpt (a.getField? "expr")))
   | other => rerr s!"unknown body assign op '{other}'"
 
 /-- Port of `raiseProgram`: raise body decls/assigns, lift ports and

@@ -11,17 +11,13 @@ Ports of the TS session→root lowering passes, run per compile over the
 engine's mirror (pure — the durable mirror is never mutated here):
 
 - slot allocation (`allocateParamSlot` + `allocateOutputSlots` over the
-  catalog port types, canonical order: params → instance outputs →
-  extraction delay slots)
-- `extractSessionDelays` — hoist every `delay()` in a wire to a module
-  slot (scalar) or ioArraySlot (array source), rewriting the wire to a
-  `sessionSlot` / `sessionArraySlot` read
-- `assertSessionAcyclic` — Tarjan tripwire over the post-extraction
-  instance dep graph (exact TS message)
+  catalog port types, canonical order: params → instance outputs)
+- `assertSessionAcyclic` — Tarjan tripwire over the instance dep graph
+  (CF-only: inter-instance cycles are rejected outright)
 - `computeInstanceTopoOrder` — Kahn with sorted ties
 - `sessionToParsed` — the session serialized as a `ParsedProgram`
-  (compiler/parse/nodes.ts shapes, the free JSON seam): delay decls,
-  instance decls in topo order, param decls
+  (compiler/parse/nodes.ts shapes, the free JSON seam): instance decls
+  in topo order, param decls
 
 Wire *lifting* (array literals → anonymous `__wire_N` instances) stays
 in the compiler service — it needs strata. `needsWireLift` (the pure
@@ -111,133 +107,6 @@ def allocate (params : Array String) (instances : Array (String × InstanceInfo)
     for port in info.progMeta.outputs do
       a := allocOutputPort a s!"{name}.{port.name}" port.typeObj
   return a
-
--- ── Delay extraction (ir/lowering/extract_session_delays.ts) ────────────────
-
-structure DelayEntry where
-  slotName   : String
-  init       : Json
-  sourceExpr : Json := Json.null
-  isArray    : Bool := false
-  slotIdx    : Option Nat := none
-  arraySlot  : Option Nat := none
-  arraySize  : Option Nat := none
-
-def DelayEntry.toJson (e : DelayEntry) : Json :=
-  Json.mkObj <|
-    [("slotName", Json.str e.slotName), ("init", e.init),
-     ("sourceExpr", e.sourceExpr), ("scalarType", Json.str "float")]
-    ++ (match e.slotIdx with | some i => [("slotIdx", Lean.toJson i)] | none => [])
-    ++ (if e.isArray then [("isArray", Json.bool true)] else [])
-    ++ (match e.arraySlot with | some i => [("arraySlot", Lean.toJson i)] | none => [])
-    ++ (match e.arraySize with | some i => [("arraySize", Lean.toJson i)] | none => [])
-
-structure ExtractSt where
-  alloc   : Alloc
-  entries : Array DelayEntry := #[]
-
-private def isDelayNode (j : Json) : Bool :=
-  opOf? j == some "delay" &&
-  (match getField? j "args" with
-   | some (.arr args) => args.size == 1
-   | _ => false)
-
-/-- `{op:'ref', instance, output}` against an array-typed output →
-    element count (port of `inferArraySourceShape`). -/
-private def inferArraySourceShape (alloc : Alloc) (expr : Json) : Option Nat := do
-  guard (opOf? expr == some "ref")
-  let inst ← getStrField? expr "instance"
-  let output ← getStrField? expr "output"
-  let pmeta ← alloc.metaFor? s!"{inst}.{output}"
-  let size ← getField? pmeta "arraySize"
-  match size with
-  | .num n => some n.toFloat.toUInt64.toNat
-  | _ => none
-
-/-- Walk a wire, hoisting every `delay()` to a slot. Outer-first: the
-    entry is reserved before recursing into the source so nested chains
-    accumulate one sample per level in registry order. -/
-partial def rewriteAndCollect (expr : Json) (context : String) (st : ExtractSt) : Json × ExtractSt :=
-  match expr with
-  | .arr items => Id.run do
-    let mut st := st
-    let mut out : Array Json := #[]
-    for h : i in [0:items.size] do
-      let (e', st') := rewriteAndCollect items[i] s!"{context}[{i}]" st
-      out := out.push e'
-      st := st'
-    return (.arr out, st)
-  | .obj m =>
-    if isDelayNode expr then
-      let args := match getField? expr "args" with
-        | some (.arr a) => a
-        | _ => #[]
-      let init := (getField? expr "init").getD (toJson (0 : Nat))
-      let id := (getStrField? expr "id").getD
-        s!"__autodelay:{context}#{st.entries.size}"
-      match inferArraySourceShape st.alloc args[0]! with
-      | some size =>
-        let arraySlot := st.alloc.ioCount
-        let alloc := { st.alloc with
-          ioCount := st.alloc.ioCount + 1
-          ioSizes := st.alloc.ioSizes.push size
-          ioNames := st.alloc.ioNames.push id }
-        let entryIdx := st.entries.size
-        let entry : DelayEntry :=
-          { slotName := id, init, isArray := true,
-            arraySlot := some arraySlot, arraySize := some size }
-        let st := { alloc, entries := st.entries.push entry }
-        let (src, st) := rewriteAndCollect args[0]! s!"{context}.delay" st
-        let st := { st with entries := st.entries.set! entryIdx { entry with sourceExpr := src } }
-        (Json.mkObj [("op", Json.str "sessionArraySlot"),
-                     ("index", toJson arraySlot), ("size", toJson size)], st)
-      | none =>
-        let slotIdx := st.alloc.slotCount
-        let alloc := { st.alloc with slotCount := st.alloc.slotCount + 1 }
-        let entryIdx := st.entries.size
-        let entry : DelayEntry := { slotName := id, init, slotIdx := some slotIdx }
-        let st := { alloc, entries := st.entries.push entry }
-        let (src, st) := rewriteAndCollect args[0]! s!"{context}.delay" st
-        let st := { st with entries := st.entries.set! entryIdx { entry with sourceExpr := src } }
-        (Json.mkObj [("op", Json.str "sessionSlot"), ("index", toJson slotIdx)], st)
-    else Id.run do
-      -- Generic recurse over every expression-valued field.
-      let mut st := st
-      let mut fields : List (String × Json) := []
-      for (k, v) in m.toArray do
-        if k == "op" then
-          fields := fields ++ [(k, v)]
-        else
-          match v with
-          | .arr items =>
-            let mut out : Array Json := #[]
-            for h : i in [0:items.size] do
-              match items[i] with
-              | .obj _ | .arr _ | .num _ | .bool _ =>
-                let (e', st') := rewriteAndCollect items[i] s!"{context}.{k}[{i}]" st
-                out := out.push e'
-                st := st'
-              | e => out := out.push e
-            fields := fields ++ [(k, .arr out)]
-          | .obj _ =>
-            let (v', st') := rewriteAndCollect v s!"{context}.{k}" st
-            fields := fields ++ [(k, v')]
-            st := st'
-          | _ => fields := fields ++ [(k, v)]
-      return (Json.mkObj fields, st)
-  | _ => (expr, st)
-
-/-- Extract every delay across all wires (wire-map order). Returns the
-    rewritten wires, the registry, and the advanced allocation. -/
-def extractSessionDelays (wires : Array Wire) (alloc : Alloc) :
-    Array Wire × Array DelayEntry × Alloc := Id.run do
-  let mut st : ExtractSt := { alloc }
-  let mut out : Array Wire := #[]
-  for w in wires do
-    let (e', st') := rewriteAndCollect w.expr w.key st
-    out := out.push { w with expr := e' }
-    st := st'
-  return (out, st.entries, st.alloc)
 
 -- ── Dep graph, cycle tripwire, topo order ────────────────────────────────────
 
@@ -331,7 +200,7 @@ private partial def tarjanSCC (deps : Array (String × Array String)) : Array (A
   let (_, _, _, _, out, _) := st
   return out
 
-/-- Port of `assertSessionAcyclic` — exact TS message. -/
+/-- CF-only inter-instance cycle tripwire. -/
 def assertSessionAcyclic (instances : Array (String × InstanceInfo))
     (wires : Array Wire) : EngineM Unit := do
   let deps := buildDeps instances wires (dropSelfEdges := false)
@@ -346,10 +215,8 @@ def assertSessionAcyclic (instances : Array (String × InstanceInfo))
     let lines := nontrivial.map fun c =>
       s!"  - {String.intercalate " → " c.toList} → {c[0]!}"
     let msg := String.intercalate "\n" <|
-      ["compileSession: session graph contains inter-instance cycles that don't pass through a session-level delay():"]
+      ["compileSession: CF-only — inter-instance cycles are not allowed:"]
       ++ lines.toList
-      ++ [""]
-      ++ ["MCP wire helpers auto-wrap every wire in a unit delay, which breaks cycles at the session level. If you're building a SessionState programmatically (test fixture, legacy ingest), either route wires through `setWireExpr` from compiler/session.ts or explicitly wrap each back-edge in {op:'delay', args:[...], init:0}."]
     internalError msg
 
 /-- Kahn with lexicographically sorted ready-queues (port of
@@ -477,8 +344,6 @@ private partial def wireExprToParsed (expr : Json) (slots : SlotNames)
     else if op == "param" || op == "trigger" then
       let name := (getStrField? expr "name").getD ""
       pure (nameRef name, if params.contains name then params else params.push name)
-    else if op == "delay" then
-      internalError "session_to_parsed: unextracted delay() in wire — run extractSessionDelays first"
     else if builtinNullaryOps.contains op then
       pure (Json.mkObj [("op", Json.str "call"), ("callee", nameRef op), ("args", Json.arr #[])], params)
     else if builtinCallOps.contains op then
@@ -491,32 +356,17 @@ private partial def wireExprToParsed (expr : Json) (slots : SlotNames)
       internalError s!"session_to_parsed: out-of-slice wire op '{op}'"
   | _ => internalError s!"session_to_parsed: invalid wire value {expr.compress}"
 
-/-- Port of `sessionToParsedProgram`: delay decls, instance decls in topo
-    order (inputs sorted by port name), param decls (sorted). -/
+/-- Port of `sessionToParsedProgram`: instance decls in topo order
+    (inputs sorted by port name), param decls (sorted). CF-only: no
+    delay decls — wires are stored raw. -/
 def sessionToParsed (instances : Array (String × InstanceInfo))
-    (wiresPost : Array Wire) (entries : Array DelayEntry) : EngineM Json := do
-  let slots : SlotNames := {
-    scalar := entries.filterMap fun e =>
-      if e.isArray then none else e.slotIdx.map fun i => (i, e.slotName)
-    array := entries.filterMap fun e =>
-      if e.isArray then e.arraySlot.map fun i => (i, e.slotName) else none }
+    (wiresPost : Array Wire) : EngineM Json := do
+  let slots : SlotNames := { scalar := #[], array := #[] }
 
   let mut decls : Array Json := #[]
   let mut params : Array String := #[]
 
-  -- 1. Per-wire delays → delay decls.
-  for e in entries do
-    let (update, ps) ← wireExprToParsed e.sourceExpr slots params
-    params := ps
-    let init : Json :=
-      if e.isArray then
-        .arr (Array.replicate (e.arraySize.getD 0) e.init)
-      else e.init
-    decls := decls.push <| Json.mkObj [
-      ("op", Json.str "delayDecl"), ("name", Json.str e.slotName),
-      ("update", update), ("init", init)]
-
-  -- 2. Instances in topo order, inputs sorted by port name.
+  -- Instances in topo order, inputs sorted by port name.
   let order := computeInstanceTopoOrder instances wiresPost
   for name in order do
     let some info := (instances.find? (·.1 == name)).map (·.2) | continue
@@ -532,7 +382,7 @@ def sessionToParsed (instances : Array (String × InstanceInfo))
        ("program", nameRef info.progMeta.programName)]
       ++ (if inputs.isEmpty then [] else [("inputs", Json.arr inputs)])
 
-  -- 3. Param decls (sorted names).
+  -- Param decls (sorted names).
   for pname in params.qsort (· < ·) do
     decls := decls.push <| Json.mkObj [("op", Json.str "paramDecl"), ("name", Json.str pname)]
 

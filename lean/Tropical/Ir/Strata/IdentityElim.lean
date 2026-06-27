@@ -105,8 +105,6 @@ def run (arena : Arena) (rootIdx : ProgramIdx) :
       | .survivor _ =>
         newDecls := newDecls.push (.inst name typeKey tArgs
           (inputs.map fun i => { i with value := sub i.value }))
-    | .reg name init update? type? liftedFrom? =>
-      newDecls := newDecls.push (.reg name (sub init) (update?.map sub) type? liftedFrom?)
     | .param .. | .prog .. =>
       newDecls := newDecls.push d
   let newAssigns := prog.assigns.map fun a => { a with expr := sub a.expr }

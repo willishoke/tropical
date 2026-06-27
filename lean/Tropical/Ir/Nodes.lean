@@ -40,12 +40,6 @@ abbrev ScalarKind := Tropical.Parse.ScalarKind
 -- Typed index newtypes
 -- ─────────────────────────────────────────────────────────────
 
-/-- Position in the enclosing program's reg table (regDecls of `decls`
-    in order). -/
-structure RegIdx where
-  idx : Nat
-deriving BEq, Repr, Inhabited
-
 /-- Position in `ports.inputs` (of the enclosing program, or — on
     `InstanceDecl.inputs` — of the *target* program). -/
 structure InputIdx where
@@ -248,7 +242,6 @@ inductive Expr where
   | index (arr idx : Expr)
   | zeros (count : Expr)
   | inputRef (idx : InputIdx)
-  | regRef (idx : RegIdx)
   | paramRef (idx : ParamIdx)
   | typeParamRef (idx : TypeParamIdx)
   | bindingRef (idx : BinderIdx)
@@ -331,10 +324,6 @@ structure InstanceInput where
 deriving Repr, Inhabited
 
 inductive BodyDecl where
-  /-- The single state primitive. `delay name = u init v` is folded into
-      `reg { init := v, update? := some u }` by the elaborator. -/
-  | reg (name : String) (init : Expr) (update? : Option Expr)
-      (type? : Option ScalarOrAlias) (liftedFrom? : Option String)
   | param (name : String) (value? : Option JsonNumber)
   | inst (name : String) (typeKey : String)
       (typeArgs : Array InstanceTypeArg) (inputs : Array InstanceInput)
@@ -342,7 +331,7 @@ inductive BodyDecl where
 deriving Repr, Inhabited
 
 def BodyDecl.name : BodyDecl → String
-  | .reg n .. => n | .param n _ => n | .inst n .. => n | .prog n _ => n
+  | .param n _ => n | .inst n .. => n | .prog n _ => n
 
 inductive OutputTarget where
   | port (idx : OutputIdx)
@@ -370,12 +359,6 @@ structure Program where
   binderCount : Nat := 0
   registry : Array (String × ProgramIdx) := #[]
 deriving Repr, Inhabited
-
-/-- Projected reg table: regDecls of `decls` in order. Position is the
-    decl's `RegIdx`. Computed, so the body↔table invariant of the TS
-    `withDeclTables` holds by construction. -/
-def Program.regs (p : Program) : Array BodyDecl :=
-  p.decls.filter fun d => match d with | .reg .. => true | _ => false
 
 /-- Projected param table (positions are `ParamIdx`). -/
 def Program.params (p : Program) : Array BodyDecl :=

@@ -17,21 +17,28 @@ per-sample. Two backends interpret that low-detail IR — the JIT and
 WebAssembly — and equivalence test suites cross-check them
 sample-for-sample.
 
+tropical is **closed-form-only**: every kernel is a pure function of a
+time coordinate, `f(τ, params)`, with no per-sample state. The semantic
+universe is the exp-poly ring — polynomials, exponentials, sinusoids of
+the coordinate, and their products — so oscillators, FM/PM, additive,
+modal resonance, and envelopes are all closed forms of τ rather than
+accumulating state. See `design/cf-only.md` for the contract.
+
 ## What tropical is, categorically
 
 A single sentence to hang the system off:
 
 > tropical's IR is a DAG-shaped operad — programs are typed
-> signal-flow graphs with cycles broken explicitly by a single state
-> primitive (`RegDecl`), and the compiler is a functor between this
-> operad and the slot-operational operad consumed by the runtime.
+> signal-flow graphs, acyclic by construction, and the compiler is a
+> functor between this operad and the slot-operational operad consumed
+> by the runtime.
 
 The vocabulary doesn't have to be load-bearing day to day, but the
 shape of the codebase matches it precisely:
 
 - **Colors** = post-strata port types (`float`, `int`, `bool`,
   fixed-shape arrays of these).
-- **Operations** = primitive ops (`add`, `mul`, `delay`, …) plus
+- **Operations** = primitive ops (`add`, `mul`, `clamp`, …) plus
   user-defined programs.
 - **Composition** = wiring an output to an input.
 - **Tensor (parallel composition)** = placing instances side by side
@@ -42,31 +49,25 @@ shape of the codebase matches it precisely:
   discipline: the IR types make boundary-crossing references
   inexpressible.
 
-**The IR is acyclic by construction.** Source-level cycles that
-don't pass through an explicit user register are rejected at the
-elaborator (`CycleViolation`, with port-detailed Tier-2 errors and a
-suggested explicit-delay fix). Session-level cycles in MCP-built
-graphs are broken at the wire layer: every wire stored via
-`setWireExpr` is wrapped in a unit delay, and a pre-emit pass hoists
-those delays out of the wires into the session's delay-slot registry —
-realized by the root-program lowering as per-wire root `RegDecl`
-read-old/write-new writebacks. Hand-written JSON patches
-with cross-coupled instances must wrap their own back-edges in
-`delay()` to break the session-level cycle —
-`assertSessionAcyclic` (`lean/Tropical/Lowering.lean`)
-runs as a defensive invariant at session-compile entry. Every
-MCP wire gains exactly one sample of latency (~21 µs at 48 kHz),
-matching VCV Rack's per-wire-delay mental model.
+**The IR is acyclic by construction — and there is no escape hatch.**
+Cycles are rejected outright; nothing in the system breaks a cycle for
+you. Source-level cycles throw `CycleViolation` at the elaborator, with
+port-detailed Tier-2 errors. Session-level cycles in MCP-built graphs are
+rejected too: `assertSessionAcyclic` (`lean/Tropical/Lowering.lean`) is a
+plain "no cycles at all" rule at session-compile entry — there is no
+per-wire unit delay, no delay-slot registry, and no register writeback to
+absorb a back-edge. Feedback that needs genuine state (an IIR pole on live
+or external input) is the ceded island: it belongs to a future stateful
+sister runtime (`supertropical`), not here. See `design/cf-only.md`.
 
-For the longer categorical story — the choice of trace functor (we
-sit at "implicit cycle-breaking via explicit user delays"), the
-pre-trace/post-trace operad split, multi-realization (WDF,
-iterative fixed-point, FFI), and the continuous → discrete → finite-
-precision semantic hierarchy — see the archived design conversation
-at `design/archive/operadic_ir.md`. Most of it is the framing that
-produced the current shape; some of it (multi-realization, slot
-unification, fractal compilation) is infrastructure-complete but
-not yet on the default path.
+For the longer categorical story — the pre-trace/post-trace operad split,
+multi-realization (WDF, iterative fixed-point, FFI), and the
+continuous → discrete → finite-precision semantic hierarchy — see the
+archived design conversation at `design/archive/operadic_ir.md`. That
+material predates the closed-form-only commitment: it explores
+cycle-breaking trace functors that the current language no longer offers
+(cycles are simply rejected). Read it as the framing that produced the
+acyclic-DAG shape, not as a description of current cycle handling.
 
 ## Pipeline at a glance
 
@@ -95,8 +96,8 @@ ResolvedProgram (post-strata)
     │
     │   ┌─→ compileSession → tropical_plan_5  (JIT path)
     │   │       │
-    │   │       │ liftWiresToInstances → extractSessionDelays
-    │   │       │     → assertSessionAcyclic → compileSessionSlotted
+    │   │       │ liftWiresToInstances → assertSessionAcyclic
+    │   │       │     → compileSessionSlotted
     │   │       │     (buildSessionRoot → partitionKernel →
     │   │       │      instance_functions[] (root, nested children)
     │   │       │      + sinks[] (outputs) + sources[] (inputs))
@@ -170,13 +171,12 @@ or the strata pipeline as a distinct construct.
 ### 1.3 What this pass deliberately doesn't do
 
 `Raise.lean` and the surface parser perform **zero scope analysis**.
-Every reference (`input("freq")`, `sin1.out`, `param("cutoff")`,
-`reg("phase")`) emits a `NameRefNode` placeholder. The parser doesn't
-know which declarations are in scope, doesn't validate that the name
-exists, doesn't disambiguate between (say) an instance output and a
-register read. Name resolution lives in exactly one pass: the
-elaborator. This is the cleanest separation we've found between
-syntactic and semantic concerns.
+Every reference (`input("freq")`, `sin1.out`, `param("cutoff")`) emits a
+`NameRefNode` placeholder. The parser doesn't know which declarations are
+in scope, doesn't validate that the name exists, doesn't disambiguate
+between (say) an instance output and a parameter read. Name resolution
+lives in exactly one pass: the elaborator. This is the cleanest
+separation we've found between syntactic and semantic concerns.
 
 ---
 
@@ -195,20 +195,20 @@ encountered, registered in the appropriate scope, and re-used by
 reference at every site that names it.
 
 The output is a graph IR. Decls (`InputDecl`, `OutputDecl`,
-`RegDecl`, `ParamDecl`, `TypeParamDecl`, `InstanceDecl`,
-`ProgramDecl`, `BinderDecl`, plus sum/struct/alias type defs) are
-introduction sites. Refs (`InputRef`, `RegRef`, `ParamRef`,
-`TypeParamRef`, `BindingRef`, `NestedOut`) are uses. Every ref
-carries its decl as a branded integer `idx` into a typed decl table —
-positional identity, not a string lookup (the Lean image of the TS
-elaborator's `===` pointer identity). `RegDecl` is the single state
-primitive: surface `delay name = u init v` is sugar for
-`reg name { init: v, update: u }`.
+`ParamDecl`, `TypeParamDecl`, `InstanceDecl`, `ProgramDecl`,
+`BinderDecl`, plus sum/struct/alias type defs) are introduction sites.
+Refs (`InputRef`, `ParamRef`, `TypeParamRef`, `BindingRef`,
+`NestedOut`) are uses. Every ref carries its decl as a branded integer
+`idx` into a typed decl table — positional identity, not a string lookup
+(the Lean image of the TS elaborator's `===` pointer identity). There is
+no state-register decl: tropical is closed-form-only, so there is no
+surface `reg`/`next` and no `delay` sugar to elaborate — the parser has
+no production for them and rejects them outright (see `design/cf-only.md`).
 
 The elaborator also runs **strict cycle detection** at the source
-level. Inter-instance cycles that don't pass through an explicit
-user register throw `CycleViolation` here, with a port-detailed
-Tier-2 error message and a suggested explicit-delay fix.
+level. Inter-instance cycles throw `CycleViolation` here, with a
+port-detailed Tier-2 error message — there is no explicit-register
+escape hatch that would make a cycle legal; cycles are simply rejected.
 Acyclic-by-source is what makes everything downstream straight-
 line: the strata pipeline never needs to break cycles, and
 `assertAcyclic` at strata entry catches any caller that bypassed
@@ -243,12 +243,10 @@ guarantee it, `assertAcyclic` confirms it.
 ### 3.1 assertAcyclic — boundary check
 
 `lean/Tropical/Ir/Strata/Basic.lean`. Re-uses the SCC finder shared
-with the session-level cycle break (the shared cycle algorithm, also
-available to future realizations that want their own cycle-break
-policy — iterative, WDF, etc.). Throws `AcyclicityViolation` if any
-non-trivial SCC survives into strata input. In the standard path this
-never fires; the elaborator and the session compiler have already
-ensured acyclicity.
+with the session-level acyclicity check (the shared cycle algorithm).
+Throws `AcyclicityViolation` if any non-trivial SCC survives into strata
+input. In the standard path this never fires; the elaborator and the
+session compiler have already rejected any cyclic graph.
 
 ### 3.2 specialize — drops type parameters
 
@@ -263,8 +261,8 @@ Substitution sites:
 - the root program's `typeParams` list is dropped
 
 Each `(template, args)` pair produces a structurally fresh program;
-`Delay<N=8>` and `Delay<N=44100>` give distinct `RegDecl` objects
-with shapes `[8]` and `[44100]`. Sum/struct/alias type defs are
+a generic `Voice<N=8>` and `Voice<N=44100>` give distinct programs with
+inline-array shapes `[8]` and `[44100]`. Sum/struct/alias type defs are
 shared across the clone (preserves variant identity for match arms,
 which `sum_lower` requires).
 
@@ -274,25 +272,23 @@ that's the loader's job.
 
 ### 3.3 sumLower — drops sum types
 
-`lean/Tropical/Ir/Strata/SumLower.lean`. Decomposes every sum-typed `RegDecl`
-into N+1 scalar `RegDecl`s — a discriminator slot (int) plus one
-slot per `(variant, field)` pair across all variants — and lowers
-`MatchExpr` to scalar select-chains and `TagExpr` to tag-literal
-writes.
+`lean/Tropical/Ir/Strata/SumLower.lean`. Lowers `MatchExpr` to scalar
+select-chains and `TagExpr` to tag-literal writes, collapsing every
+sum-typed value to a discriminator-plus-fields scalar bundle.
 
-Constraints:
-- a sum-typed reg's `init` MUST be a `TagExpr` (constant variant
-  constructor); anything else is a structural error
-- match-arm payload bindings are only supported when the scrutinee
-  is a `RegRef` to a sum-typed reg
+Constraint:
+- match-arm payload bindings have no slot source to bind from —
+  CF-only removed sum-typed registers (the only construct that could
+  supply payload slots), so a match arm that binds a payload is a
+  structural error.
 
-After this pass: no `tag` op, no `match` op, no sum-typed reg.
-Decl identity is preserved end-to-end; all replacements are fresh
-decls and refs are rewritten by identity.
+After this pass: no `tag` op, no `match` op, no sum-typed value.
+Decl identity is preserved end-to-end; replacements are by identity.
 
-`EnvExpDecay` and `TriggerRamp` in the stdlib are the canonical
-examples — both define a two-variant sum that this pass decomposes
-into a tag register plus a payload register.
+Sum types survive in the surface language (and in struct/alias type
+defs) but, with no per-sample state, they appear only as transient
+expression-level values that this pass folds into select-chains — there
+is no longer a sum-typed *register* to decompose.
 
 ### 3.4 inlineInstances — drops nesting
 
@@ -311,20 +307,14 @@ For each instance, depth-first bottom-up:
    whose decl is in the inner's `ports.inputs` is replaced by the
    wired-in expression from `instanceDecl.inputs[port]`. Substituted
    expressions pass through by reference, preserving DAG sharing.
-4. Lift cloned `RegDecl`s into the outer body, renamed
-   `${instance.name}_${innerName}` and tagged
-   `_liftedFrom: instance.name`. Lift cloned `next_update` assigns
-   with their `target` rewritten. Lift `ProgramDecl`s and
-   `ParamDecl`s as-is (no rename: `ParamDecl`s are session-scoped
-   by name; `ProgramDecl`s are passive type bindings).
+4. Lift `ProgramDecl`s and `ParamDecl`s as-is (no rename:
+   `ParamDecl`s are session-scoped by name; `ProgramDecl`s are passive
+   type bindings). There are no state registers to lift — the IR is
+   stateless — so nothing is renamed or provenance-tagged.
 5. Record cloned `outputAssign` expressions in a substitution table
    keyed by the *template's* `OutputDecl` (matched by position to
    the cloned program's outputs). Replace every `NestedOut {
    instance, output }` ref in the outer's surviving expressions.
-
-`_liftedFrom` is the post-strata replacement for the legacy
-name-prefix parsing pattern. Identifying a decl's lineage is now an
-object-field check, not a string regex.
 
 The `inlineNested: false` option is the entry point for the
 fractal-compilation path: sub-instances survive as kernel boundaries
@@ -361,8 +351,8 @@ Survivors (the post-arrayLower form admits these):
   values
 - `index(arr, i)` — left as-is (never constant-folded over inline
   literals)
-- `arraySet(arr, i, v)` — left as-is; backs stateful arrays like
-  `Delay`'s ring buffer
+- `arraySet(arr, i, v)` — left as-is; an immutable functional update
+  on an inline array (the array itself is a value, not a backing store)
 
 Substitution discipline: every `BindingRef.decl` is a pointer to a
 `BinderDecl`. Substitution is by `Map<BinderDecl, ResolvedExpr>`,
@@ -389,8 +379,7 @@ no-op kernel that the pass collapses cleanly.
 What you get from `strataPipeline`:
 
 - **scalar-only** — no surviving array decls; arrays survive only as
-  inline literals in expressions or as backing stores for stateful
-  arrays
+  inline literals in expressions
 - **monomorphic** — no `TypeParamDecl`, no `TypeParamRef`
 - **acyclic** — confirmed at strata entry; production code paths
   never produce cyclic IR
@@ -419,7 +408,7 @@ Two paths consume a session.
 
 `lean/Tropical/Compile.lean` (with the slot/lift machinery in
 `lean/Tropical/Lowering.lean` and `lean/Tropical/Ir/WireProgram.lean`)
-runs three pre-emit passes and hands the result to the slotted
+runs two pre-emit passes and hands the result to the slotted
 session compiler:
 
 1. **`liftWiresToInstances`** (`lean/Tropical/Ir/WireProgram.lean`) —
@@ -428,19 +417,11 @@ session compiler:
    session pre-compile time. The lifted programs go through the
    full strata pipeline so combinators lower correctly.
 
-2. **`extractSessionDelays`** (`lean/Tropical/Lowering.lean`) — hoists
-   every `delay()` op in a wire into a fresh slot. The wire is
-   rewritten to a `sessionSlot` / `sessionArraySlot` read; the source
-   expression is recorded in the session's delay-slot registry. This is
-   the structural mechanism that keeps the MCP-built IR acyclic — every
-   wire becomes a slot read with one sample of latency, realized as a
-   root `RegDecl` read-old/write-new writeback by the lowering (see
-   below).
-
-3. **`assertSessionAcyclic`** (`lean/Tropical/Lowering.lean`) —
-   defensive invariant on the post-extraction dep graph (Tarjan
-   tripwire). Catches programmatic sessions that bypass both
-   `setWireExpr`'s auto-wrap and explicit `delay()`.
+2. **`assertSessionAcyclic`** (`lean/Tropical/Lowering.lean`) —
+   the session-acyclicity rule (Tarjan over the instance dep graph). It
+   is a plain "no cycles at all" check: tropical is closed-form-only, so
+   nothing breaks a session cycle for you — a cross-coupled MCP graph or
+   hand-written JSON patch is rejected here, not silently delayed.
 
 Then the slotted session compiler runs the root-program lowering:
 `buildSessionRoot` serializes the whole session back to a `ParsedProgram`
@@ -448,21 +429,20 @@ and runs it through the SAME `elaborate` front
 door the surface path uses, yielding one synthetic root `ResolvedProgram`:
 instances become `InstanceDecl`s (their already-resolved types supplied
 via the elaborator's `ExternalProgramResolver` hook — LINK, not
-re-elaboration), per-wire scalar delays become root scalar `RegDecl`s (via
-`delay` decls the elaborator folds), array session delays become array
-`RegDecl`s. That root is lowered through the *same* `partitionKernel` the
-per-program fractal path uses (`ROOT_INSTANCE_PATH` naming transparency, so
-children and registers keep bare names). The result is a single
-`InstanceFunction` (the root) whose `children` are the session instances;
-the per-wire latency is the engine's read-old/write-new register
-writeback. Outputs are `sinks[]` (`emitSinks` reads each graphOutput slot
-directly); slot-based session params are threaded as `paramSlots`.
+re-elaboration). That root is lowered through the *same* `partitionKernel`
+the per-program fractal path uses (`ROOT_INSTANCE_PATH` naming
+transparency, so children keep bare names). The result is a single
+`InstanceFunction` (the root) whose `children` are the session instances.
+Outputs are `sinks[]` (`emitSinks` reads each graphOutput slot directly);
+slot-based session params are threaded as `paramSlots`. There are no
+per-wire delays and no register writebacks — every instance is a pure
+function of the time coordinate, so a wire is just a slot read with no
+latency.
 
 (The former per-instance lowering — N standalone `compileResolved` plans
-stitched by a `SchedulerFunction` with a `state_evolution` `WriteSlot` per
-delay — existed only as the `root_vs_flat` differential oracle. Once it had
-validated the root path it was retired, taking the whole scheduler tier
-with it.)
+stitched by a `SchedulerFunction` — existed only as the `root_vs_flat`
+differential oracle. Once it had validated the root path it was retired,
+taking the whole scheduler tier with it.)
 
 The resulting `tropical_plan_5` `FlatPlan` sequences the per-sample work as
 (the dispatch recurses into nested `children`):
@@ -470,16 +450,14 @@ The resulting `tropical_plan_5` `FlatPlan` sequences the per-sample work as
 ```
 for each sample:
   for each instance_function (recursively: preamble,
-    per-child {pre_input, child}, body, writebacks;
-    session-level per-wire delays are root RegDecl writebacks here)
+    per-child {pre_input, child}, body)
   for each sink: output[target] = gain · Σ slots[sink.inputs]
 ```
 
-Branded indices throughout (`TempIdx`, `StateRegIdx`,
-`ArraySlotIdx`, `ModuleSlotIdx`) make cross-namespace arithmetic a
-compile error — the literal shape of a Phaser-era slot-mixing bug.
-See `lean/Tropical/Plan.lean` (and the mirrored `web/wasm/slot_indices.ts`
-on the WASM path).
+Branded indices throughout (`TempIdx`, `ArraySlotIdx`, `ModuleSlotIdx`)
+make cross-namespace arithmetic a compile error — the literal shape of a
+Phaser-era slot-mixing bug. See `lean/Tropical/Plan.lean` (and the
+mirrored `web/wasm/slot_indices.ts` on the WASM path).
 
 ### 4.2 Fixed-topology compilation
 
@@ -498,9 +476,12 @@ selected by `FlatPlan.compilation_mode`:
   the native mode-equivalence check in `tropicaltest`.
 
 Topology changes (adding/removing instances, rewiring) trigger
-hot-swap to a freshly compiled kernel with state transferred by
-name; both modes use the same hot-swap mechanism. There is no
-per-instance runtime gating — every instance runs every sample.
+hot-swap to a freshly compiled kernel; both modes use the same hot-swap
+mechanism. There is no per-sample *state* to carry across the swap —
+kernels are pure functions of the time coordinate, so only the sample
+index continues; the fresh kernel zero-inits and the control plane
+re-asserts param values against the live kernel via `set_slot`. There is
+no per-instance runtime gating — every instance runs every sample.
 This is the shape of synthesis the language is good at;
 dynamic-lifecycle semantics belong in a different language with a
 different runtime.
@@ -526,7 +507,7 @@ path.
 **`lean/Tropical/Ir/CompileResolved.lean`** is the per-instance emit:
 
 1. `buildSlotMaps(prog)` — assign integer slots to decls (keyed on
-   `RegDecl`/etc. idx). Slot identity, not slot name, is what the JIT
+   decl idx). Slot identity, not slot name, is what the JIT
    consumes. (Slot allocation lives in `lean/Tropical/Compile.lean`.)
 2. `emitNumericProgram` (`lean/Tropical/Ir/Emit.lean`) — walk the
    lowered Core IR, emit a `PerInstancePlan` whose instructions follow
@@ -537,8 +518,8 @@ The slotted session compiler (`lean/Tropical/Compile.lean`) packs
 shifting indices by the per-instance offsets, and builds `sinks[]`
 (`emitSinks`) from the session's graphOutputs. The result is a single
 root `InstanceFunction` (the session instances nested as its
-`children`); session-level delays are root RegDecl writebacks, so there
-is no scheduler tier.
+`children`); there are no session-level delays and no register
+writebacks, so there is no scheduler tier.
 
 **Structural CSE.** `Emit.lean` keys CSE on a bottom-up structural id
 (arena `ExprId`s replicating the TS identity semantics), not node
@@ -546,13 +527,17 @@ identity. This catches duplicates that strata's clone-then-substitute
 introduces.
 
 **Operand kinds.** `NOperand` discriminates: `const`, `input`, `reg`,
-`array_reg`, `state_reg`, `param`, `source`, `slot`. The `source` kind
-carries an index into `plan.sources[]` — the runtime-bound input family
-(canonical: `[tick, rate]`); the engine switches on `sources[i].kind` to
-the appropriate kernel arg. Terminals (literals, register reads, source
-reads) embed inline; non-terminal expressions get a temp register.
-(The former `tick` and `rate` operand kinds survive only on the wire as
-plan_4 legacy aliases; parser upgrades them to `source:0`/`source:1`.)
+`array_reg`, `session_array_reg`, `param`, `source`, `slot`. The `reg`
+kind is the **SSA temp pool** — a computational intermediate within a
+single sample, *not* per-sample state (CF-only has no state operand; the
+shared name with the deleted state register is the codegen's one
+unfortunate overload). The `source` kind carries an index into
+`plan.sources[]` — the runtime-bound input family (canonical:
+`[tick, rate]`); the engine switches on `sources[i].kind` to the
+appropriate kernel arg. Terminals (literals, source reads) embed inline;
+non-terminal expressions get a temp (a `reg` slot). (The former `tick`
+and `rate` operand kinds survive only on the wire as plan_4 legacy
+aliases; parser upgrades them to `source:0`/`source:1`.)
 
 **Array loops.** When `loop_count > 1` an instruction emits an
 elementwise loop. `strides[i]` controls whether each argument
@@ -580,18 +565,18 @@ OrcJitEngine::compile_flat_program()   ← engine/jit/OrcJitEngine.{hpp,cpp}
      3. Generate typed LLVM IR. One outer kernel function whose
         body, per sample, runs:
             for each instance_function (recursively: preamble,
-              per-child {pre_input, child}, body, writebacks;
-              session-level delays are root RegDecl writebacks here)
+              per-child {pre_input, child}, body)
             for each sink: output[target] = gain · Σ slots[inputs]
         Per-instruction operand resolution emits f64/i64/i1 with
         explicit coercion; array loops when loop_count > 1.
      4. LLJIT compile, look up symbol → NumericKernelFn.
 FlatRuntime::load_plan()              ← engine/runtime/FlatRuntime.{hpp,cpp}
-  └─ State init: stateInit values written into i64 backing store
-     with type-aware bit-cast. Named state transfer: registers,
-     arrays, and module slots copied by name from the outgoing
-     kernel for click-free hot-swap. Atomic active-slot
-     store-release publishes the new kernel.
+  └─ Build the fresh KernelState (SSA-temp scratch sized to
+     register_count, module slots from defaults). Hot-swap carries
+     no per-sample state across the flip — CF-only kernels are
+     stateless, so `publish_state` continues only the sample index;
+     the control plane re-asserts param values against the new kernel.
+     Atomic active-slot store-release publishes it.
 FlatRuntime::process()                 (audio thread)
   └─ Acquire active state. Call kernel (single invocation processes
      the buffer). Advance sample_index. Apply 2048-sample smoothstep
@@ -634,16 +619,17 @@ Per patch the build ships two artifacts the browser fetches:
 - `<slug>.wasm` — exports `tropical_kernel` (the 11-argument per-block
   kernel) + `__heap_base`; imports `env.memory` + `env.round`.
 - `<slug>.manifest.json` — a `KernelManifest`: the subset of
-  `tropical_plan_5` the runtime needs (sampleRate, register/array/slot
-  sizing, state_init, slot_defaults). This type is the producer↔consumer
-  contract.
+  `tropical_plan_5` the runtime needs (sampleRate, SSA-temp/array/slot
+  region sizing, slot defaults — there is no per-sample state to seed).
+  This type is the producer↔consumer contract.
 
 The browser runtime (`web/runtime/`, an extractable package depending
 only on `KernelManifest`) owns one imported linear memory, places the
-kernel's pointer-argument regions above `__heap_base`, seeds register and
-slot state, and calls the kernel per 128-sample block. No live recompile,
-no state-transfer hot-swap, no `SharedArrayBuffer` — those belong to the
-native instrument. A smoothstep fade is the only envelope.
+kernel's pointer-argument regions above `__heap_base`, sizes the SSA-temp
+scratch region and seeds the module-slot / param defaults, and calls the
+kernel per 128-sample block. No live recompile, no hot-swap, no
+`SharedArrayBuffer` — those belong to the native instrument. A smoothstep
+fade is the only envelope.
 
 See `web/CLAUDE.md` for the memory layout, the worklet protocol, and the
 contract.
@@ -682,12 +668,12 @@ proves *agreement*, not correctness — and it was retired with the port
 A thin wrapper over a post-strata `ResolvedProgram` (the
 `Compiled`/`ProgMeta` shape in `lean/Tropical/Session.lean`). The
 wrapper is metadata; the IR is the value. Helpers (`inputNames`,
-`outputNames`, `registerNames`, `inputPortTypes`, …) read off the
-resolved IR; slot-derived fields are computed via `buildSlotMaps`.
+`outputNames`, …) read off the resolved IR; slot-derived fields are
+computed via `buildSlotMaps`. (There is no `registerNames` helper —
+the IR is stateless, so there are no state registers to name.)
 
-`Instance` holds a `Compiled` plus an instance name, `baseTypeName`,
-optional `typeArgs`, plus session-level `gateable` / `gateInput`
-fields.
+A session `Instance` holds a `Compiled` plus an instance name,
+`baseTypeName`, and optional `typeArgs`.
 
 `resolveProgramType` (`lean/Tropical/Session.lean`, with the
 specialize path in `lean/Tropical/TypeArgs.lean`) runs the full strata
@@ -746,8 +732,9 @@ what the strata pipeline does.
   schema: "tropical_plan_5",
   config: { sample_rate, ... },
   instance_functions: [
-    { name, register_count, state_init, register_names, register_types,
-      array_slot_sizes, instructions, output_targets, register_targets, ... },
+    { name, instance_name, register_count,  // register_count sizes the
+                                            // SSA-temp scratch (not state)
+      register_offset, array_slot_offset, instructions, children, ... },
     ...
   ],
   sinks: [
@@ -768,8 +755,8 @@ what the strata pipeline does.
 
 The `tropical_plan_5` shape is the C-API contract. Anything the
 backends need to know about the program — instance kernels, the output
-sinks, the input sources, names, types, slot counts, init state — is in
-there; everything
+sinks, the input sources, names, types, slot counts, slot/param
+defaults — is in there; everything
 the compiler decided to forget along the way is gone.
 
 ---
@@ -861,11 +848,13 @@ validates each tool call against a typed schema and handles it in
 process. There is no relay and no subprocess — the same binary that
 serves MCP owns the long-lived `SessionState` (`lean/Tropical/
 Engine.lean` + `Session.lean`), compiles plans, and drives the runtime
-over FFI. One server, the full MCP surface — 23 tools plus resources
+over FFI. One server, the full MCP surface — 22 tools plus resources
 (program catalog, program-format doc, `lean/Tropical/Resources.lean`)
 and the build-patch prompt. (The earlier `@modelcontextprotocol/sdk`
 stdio server and, after it, the Turnstile-front-door-over-TS-relay
-arrangement were both retired during the Lean port.)
+arrangement were both retired during the Lean port. The `feedback`
+tool — which used to wrap a back-edge in a unit delay — is gone with
+the rest of the per-sample-state machinery; cycles are now rejected.)
 
 Every tool that mutates the signal graph ultimately runs `syncCompile`
 (`lean/Tropical/Engine.lean`), which builds and loads its own plan:
@@ -873,8 +862,8 @@ Every tool that mutates the signal graph ultimately runs `syncCompile`
 ```
 SessionState
   → compileSession (lean/Tropical/Compile.lean)
-       → liftWiresToInstances → extractSessionDelays
-         → assertSessionAcyclic → slotted session compile
+       → liftWiresToInstances → assertSessionAcyclic
+         → slotted session compile
        → compileResolved/emit → tropical_plan_5 JSON
   → runtime.loadPlan over FFI
        (NumericProgramParser → OrcJitEngine → FlatRuntime hot-swap)
@@ -922,8 +911,8 @@ Electron instrument, a hosted player) appears. The kernel imports
 `env.memory` + `env.round` and exports `tropical_kernel` + `__heap_base`;
 the host owns the linear memory and places the kernel's pointer-argument
 regions above `__heap_base`. A smoothstep fade is the only envelope —
-**player, not instrument**: no live recompile, no state-transfer hot-swap,
-no SharedArrayBuffer (those belong to the native Electron instrument).
+**player, not instrument**: no live recompile, no hot-swap, no
+SharedArrayBuffer (those belong to the native Electron instrument).
 
 See [`web/CLAUDE.md`](../web/CLAUDE.md) for the worklet protocol,
 linear-memory layout, and equivalence gates.
@@ -1018,15 +1007,16 @@ lint.
 
 ### 14.1 C++ tests (`engine/tests/test_module_process.cpp`)
 
-Custom harness, no framework dependency. Exercises FlatRuntime C
-API and JIT without an audio device. Tests build plan JSON strings
-directly and assert on output buffer values. Covers sawtooth, clock
-with array ratios, integer sequences, multi-instance fusion,
-smoothed params, hot-swap state transfer, typed int/bool ops.
+Custom harness, no framework dependency. Exercises the FlatRuntime C
+API and the JIT without an audio device, driving the `compile_ir_text
+→ JIT → run` path directly: it feeds LLVM IR text plus a trimmed
+manifest and asserts on output buffer values (a constant kernel, a
+sample-index ramp). Stateless kernels mean there is no hot-swap state
+transfer to test — the swap carries only the sample index.
 
 `cmake --build build -j4 && ctest --test-dir build`.
 
-### 14.2 Lean tests (`lake exe tropicaltest`)
+### 14.2 Lean tests (the `tropicaltest` binary)
 
 The compiler/pipeline test surface is Lean-internal — the strata,
 elaborator, emit, and partition passes are tested in the Lean modules
@@ -1059,26 +1049,28 @@ Lean parse∘print fixpoint tests; `make parse-all` regenerates the
 
 ## 15. Key design decisions
 
-### Acyclic by construction
+### Acyclic by construction — cycles rejected, not broken
 
-Cycles in source code throw `CycleViolation` at elaborate-time;
-cycles in session wiring are broken at the wire layer by
-`setWireExpr`'s auto-wrap + `extractSessionDelays`'s hoist into root
-`RegDecl`s. The compiler's strata pipeline asserts acyclic input at
-its boundary and refuses to lower cyclic IR. Making cycle-breaking an
-explicit, single-sited realization decision (elaborator + session
-compiler) rather than something the JIT silently tolerated via slot
-back-edges makes "the trace functor" a property of the realization
-layer, not the compiler.
+Cycles in source code throw `CycleViolation` at elaborate-time; cycles
+in session wiring are rejected by `assertSessionAcyclic` (a plain "no
+cycles at all" rule). The compiler's strata pipeline asserts acyclic
+input at its boundary and refuses to lower cyclic IR. tropical is
+closed-form-only: there is no state primitive to break a cycle with, so
+nothing breaks one for you — feedback that needs genuine per-sample
+state (an IIR pole on live or external input) is the ceded island,
+delegated to a future stateful sister runtime (`supertropical`). See
+`design/cf-only.md`.
 
 ### Single-kernel fusion, fixed topology
 
 The whole session compiles to one native kernel function. No
 instance boundaries at runtime, no per-instance dispatch, no
 interpreter on the audio thread. LLVM gets to optimize across the
-full graph. Topology changes hot-swap a freshly compiled kernel
-with state transferred by name; per-instance lifecycle semantics
-belong in a different runtime.
+full graph. Topology changes hot-swap a freshly compiled kernel; since
+kernels are pure functions of the time coordinate, the swap carries no
+per-sample state (only the sample index continues, and the control
+plane re-asserts params). Per-instance lifecycle semantics belong in a
+different runtime.
 
 ### Pipeline of structure-dropping passes
 
@@ -1099,19 +1091,20 @@ Past `elaborate`, every reference is a branded integer `idx` into a
 typed decl table — positional identity, not a string (the Lean
 completion of the de Bruijn move the TS elaborator had already started
 with object pointers). String-based scope walks would make later passes
-re-derive information the elaborator already established. `_liftedFrom`
-replaced what had been name-prefix string regex; this is the same
-move, applied to a different kind of provenance. Branded indices
-in the plan layer (`TempIdx`, `StateRegIdx`, `ArraySlotIdx`,
-`ModuleSlotIdx`) extend the same discipline to integer slot
-identifiers, making cross-namespace arithmetic a compile error.
+re-derive information the elaborator already established. Branded indices
+in the plan layer (`TempIdx`, `ArraySlotIdx`, `ModuleSlotIdx`) extend
+the same discipline to integer slot identifiers, making cross-namespace
+arithmetic a compile error.
 
 ### Hot-swap via double-buffered kernels
 
 Live audio never stops for recompilation. The new kernel is built on
-a background thread; named state transfers; a single atomic store
-publishes it. At most one sample of stale state is read. Same shape
-on both backends (FlatRuntime in C++, WasmRuntime in WASM).
+a background thread and a single atomic store publishes it; only the
+sample index continues across the flip, since closed-form kernels have
+no per-sample state to carry, and the control plane re-asserts param
+values against the new kernel. Hot-swap is a native-runtime concern
+(FlatRuntime in C++); the WASM path is a precompiled-patch player and
+does not hot-swap.
 
 ### No interpreter fallback on the audio path
 

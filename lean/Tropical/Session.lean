@@ -26,7 +26,6 @@ and `wires` are ordered arrays with update-in-place to match —
 namespace Tropical
 
 open Lean (Json)
-open Tropical.Expr (wrapInUnitDelay)
 
 /-- One port's metadata from a catalog entry. -/
 structure PortInfo where
@@ -165,14 +164,6 @@ def setWireRaw (st : SessionSt) (instName portName : String) (expr : Json) : Ses
 
 def findWire? (st : SessionSt) (instName portName : String) : Option Wire :=
   st.wires.find? (fun w => w.instName == instName && w.portName == portName)
-
-/-- The MCP wire-storage convention: wrap in a session-level unit delay
-    (port of `setWireExpr` in compiler/session.ts). -/
-def setWire (st : SessionSt) (instName portName : String) (rawExpr : Json)
-    (init : Json := Lean.toJson (0 : Nat)) (id : Option String := none) : SessionSt :=
-  let key := s!"{instName}:{portName}"
-  let delayId := id.getD s!"__autodelay:{key}"
-  st.setWireRaw instName portName (wrapInUnitDelay rawExpr init delayId)
 
 def removeWire (st : SessionSt) (instName portName : String) : SessionSt :=
   { st with wires := st.wires.filter (fun w => !(w.instName == instName && w.portName == portName)) }

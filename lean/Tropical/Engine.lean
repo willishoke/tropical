@@ -35,7 +35,7 @@ kernel keeps playing and the error is recoverable).
 namespace Tropical.Engine
 
 open Lean (Json toJson)
-open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies unwrapDelay prettyExpr)
+open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies prettyExpr)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 structure Env where
@@ -291,8 +291,7 @@ def syncCompile (env : Env) : EngineM Unit := do
   -- Lowering (pure over the mirror; the mirror itself stays canonical
   -- pre-extraction).
   let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
-  let (wiresPost, delayEntries, alloc) :=
-    Tropical.Lowering.extractSessionDelays st.wires alloc
+  let wiresPost := st.wires
   Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
 
   -- TS parity (`sessionToParsedProgram` emits `inst.compiled.prog.name`):
@@ -307,7 +306,7 @@ def syncCompile (env : Env) : EngineM Unit := do
     match storedProgName i with
     | some pname => (n, { i with progMeta := { i.progMeta with programName := pname } })
     | none => (n, i)
-  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost delayEntries
+  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost
 
   -- Bridge the lowering's `Lean.Json` to the strict typed decoder's
   -- ordered `JsonV` by re-parsing the compressed string (lossless: the
@@ -372,7 +371,6 @@ def syncCompile (env : Env) : EngineM Unit := do
       graphOutputs := st.graphOutputs
       params := st.params
       alloc
-      delayEntries
       root := rootCore } with
     | .error msg => internalError msg
     | .ok p => pure p
@@ -400,8 +398,7 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM Tropical.Plan.FlatPlan := do
   let st ← env.state.get
   let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
-  let (wiresPost, delayEntries, alloc) :=
-    Tropical.Lowering.extractSessionDelays st.wires alloc
+  let wiresPost := st.wires
   Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
   let storedProgName (i : InstanceInfo) : Option String :=
     (i.resolvedIdx.bind st.arena.program?).map (·.name)
@@ -409,7 +406,7 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     match storedProgName i with
     | some pname => (n, { i with progMeta := { i.progMeta with programName := pname } })
     | none => (n, i)
-  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost delayEntries
+  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost
   let typed ← match Tropical.Parse.JsonV.parse parsed.compress with
     | .error e => internalError s!"session root: ParsedProgram JSON re-parse failed: {e}"
     | .ok jv =>
@@ -443,7 +440,6 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
       graphOutputs := st.graphOutputs
       params := st.params
       alloc
-      delayEntries
       root := rootCore
       mode } with
     | .error msg => internalError msg
@@ -920,9 +916,9 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
       let toStore := match existing, argStr? s "combine" with
         | some w, some combine =>
           Json.mkObj [("op", Json.str combine),
-                      ("args", Json.arr #[unwrapDelay w.expr, adapted])]
+                      ("args", Json.arr #[w.expr, adapted])]
         | _, _ => adapted
-      env.state.modify (·.setWire sInst resolvedName toStore)
+      env.state.modify (·.setWireRaw sInst resolvedName toStore)
       results := results.push <| Json.mkObj
         [("instance", Json.str sInst), ("input", Json.str resolvedName), ("expr", toStore)]
 
@@ -958,7 +954,7 @@ def handleWireChain (env : Env) (args : Json) : EngineM Json := do
     let inputName ← resolveInputName firstInst.progMeta inputPort
     let idx := (firstInst.progMeta.inputNames.idxOf? inputName).getD 0
     let expr ← adaptInputExpr st initial (inputTypeObj firstInst.progMeta idx) firstName inputName
-    env.state.modify (·.setWire firstName inputName expr)
+    env.state.modify (·.setWireRaw firstName inputName expr)
 
   let mut linked : Array Json := #[]
   for i in [0:instanceNames.size - 1] do
@@ -973,7 +969,7 @@ def handleWireChain (env : Env) (args : Json) : EngineM Json := do
     let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
     let st' ← env.state.get
     let expr ← adaptInputExpr st' refExpr (inputTypeObj dstInst.progMeta idx) dstName inName
-    env.state.modify (·.setWire dstName inName expr)
+    env.state.modify (·.setWireRaw dstName inName expr)
     linked := linked.push (Json.str s!"{srcName}.{outName} → {dstName}.{inName}")
 
   syncCompile env
@@ -1002,7 +998,7 @@ def handleWireZip (env : Env) (args : Json) : EngineM Json := do
       ("instance", Json.str srcName), ("output", Json.str outName)]
     let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
     let expr ← adaptInputExpr st refExpr (inputTypeObj dstInst.progMeta idx) dstName inName
-    env.state.modify (·.setWire dstName inName expr)
+    env.state.modify (·.setWireRaw dstName inName expr)
     linked := linked.push (Json.str s!"{srcName}.{outName} → {dstName}.{inName}")
   syncCompile env
   pure <| Json.mkObj [("linked", Json.arr linked)]
@@ -1043,7 +1039,7 @@ def handleFanOut (env : Env) (args : Json) : EngineM Json := do
     let inName ← resolveInputName dstInst.progMeta ((getField? dst "input").getD jsonNull)
     let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
     let expr ← adaptInputExpr st' sourceExpr (inputTypeObj dstInst.progMeta idx) dstName inName
-    env.state.modify (·.setWire dstName inName expr)
+    env.state.modify (·.setWireRaw dstName inName expr)
     linked := linked.push (Json.str s!"{sourceLabel} → {dstName}.{inName}")
   syncCompile env
   pure <| Json.mkObj [("linked", Json.arr linked)]
@@ -1076,36 +1072,10 @@ def handleFanIn (env : Env) (args : Json) : EngineM Json := do
   let inName ← resolveInputName dstInst.progMeta ((getField? target "input").getD jsonNull)
   let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
   let expr ← adaptInputExpr st sumExpr (inputTypeObj dstInst.progMeta idx) targetName inName
-  env.state.modify (·.setWire targetName inName expr)
+  env.state.modify (·.setWireRaw targetName inName expr)
   syncCompile env
   pure <| Json.mkObj [("mixed", toJson sources.size),
                       ("target", Json.str s!"{targetName}.{inName}")]
-
-def handleFeedback (env : Env) (args : Json) : EngineM Json := do
-  let from_ := (getField? args "from").getD jsonNull
-  let to := (getField? args "to").getD jsonNull
-  let init := (arg? args "init").getD (toJson (0 : Nat))
-  let delayId := argStr? args "delay_id"
-
-  let st ← env.state.get
-  let fromName := (argStr? from_ "instance").getD ""
-  let toName := (argStr? to "instance").getD ""
-  let srcInst ← requireInstance st fromName "from.instance"
-  let dstInst ← requireInstance st toName "to.instance"
-
-  let outName ← resolveOutputName srcInst.progMeta ((getField? from_ "output").getD jsonNull)
-  let inName ← resolveInputName dstInst.progMeta ((getField? to "input").getD jsonNull)
-
-  let refExpr := Json.mkObj [("op", Json.str "ref"),
-    ("instance", Json.str fromName), ("output", Json.str outName)]
-  validateOrInternal refExpr s!"{toName}.{inName}"
-  let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
-  let expr ← adaptInputExpr st refExpr (inputTypeObj dstInst.progMeta idx) toName inName
-  env.state.modify (·.setWire toName inName expr (init := init) (id := delayId))
-
-  syncCompile env
-  pure <| Json.mkObj [("feedback",
-    Json.str s!"{fromName}.{outName} →[delay init={tsInterp init}]→ {toName}.{inName}")]
 
 def handleListWiring (env : Env) (args : Json) : EngineM Json := do
   let filter := argStr? args "instance"
@@ -1123,57 +1093,11 @@ def handleListWiring (env : Env) (args : Json) : EngineM Json := do
 
 -- ── Program I/O (engine-side as of Phase 6 stage 6e) ────────────────────────
 
-/-- Port of `reconstructWireDelays`: rewrite the hoisted `sessionSlot` /
-    `sessionArraySlot` reads back into `delay(<source>, init)` with the
-    extraction registry's slot name as the delay id (the register's
-    state-transfer key). Cycle-safe via the visited-slot list. -/
-private partial def reconstructWireDelays
-    (registry : Array Tropical.Lowering.DelayEntry)
-    (expr : Json) (seen : List String := []) : Json :=
-  match expr with
-  | .arr items => .arr (items.map (reconstructWireDelays registry · seen))
-  | .obj fields =>
-    let op := opOf? expr
-    let idx? : Option Nat := match getField? expr "index" with
-      | some (.num n) => some n.toFloat.toUInt64.toNat
-      | _ => none
-    if (op == some "sessionSlot" || op == some "sessionArraySlot") && idx?.isSome then
-      let isArray := op == some "sessionArraySlot"
-      let idx := idx?.getD 0
-      let tag := s!"{if isArray then "a" else "s"}{idx}"
-      let entry? := registry.find? fun e =>
-        if isArray then e.isArray && e.arraySlot == some idx
-        else !e.isArray && e.slotIdx == some idx
-      match entry? with
-      | none => expr
-      | some entry =>
-        if seen.contains tag then expr
-        else
-          let src := reconstructWireDelays registry entry.sourceExpr (tag :: seen)
-          Json.mkObj [("op", Json.str "delay"), ("args", Json.arr #[src]),
-            ("init", entry.init), ("id", Json.str entry.slotName)]
-    else Id.run do
-      -- Structural recurse into every expression-valued field.
-      let mut out : List (String × Json) := []
-      for (k, v) in fields.toArray do
-        if k == "op" then
-          out := out ++ [(k, v)]
-        else
-          match v with
-          | .arr _ | .obj _ => out := out ++ [(k, reconstructWireDelays registry v seen)]
-          | _ => out := out ++ [(k, v)]
-      return Json.mkObj out
-  | _ => expr
-
 def handleSave (env : Env) : EngineM Json := do
   let st ← env.state.get
-  -- Mirror the TS post-compile wire forms: extraction is pure over the
-  -- canonical wires; its registry supplies the reconstruction's delay
-  -- ids (extraction-minted `__autodelay:…#N` names for un-id'd authored
-  -- delays — which is why save can't just echo the canonical wires).
-  let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
-  let (wiresPost, delayEntries, _) :=
-    Tropical.Lowering.extractSessionDelays st.wires alloc
+  -- CF-only: wires are stored raw (no session-level unit delay wrap), so
+  -- save echoes the canonical wires directly.
+  let wiresPost := st.wires
   let mut decls : Array Json := #[]
   -- paramDecls first, so they're declared before referencing instances.
   for (name, value) in st.params do
@@ -1183,7 +1107,7 @@ def handleSave (env : Env) : EngineM Json := do
     let mut inputs : Array (String × Json) := #[]
     for portName in info.progMeta.inputNames do
       if let some w := wiresPost.find? fun w => w.instName == name && w.portName == portName then
-        inputs := inputs.push (portName, reconstructWireDelays delayEntries w.expr)
+        inputs := inputs.push (portName, w.expr)
     decls := decls.push <| Json.mkObj <|
       [("op", Json.str "instanceDecl"), ("name", Json.str name),
        ("program", Json.str info.baseTypeName)]
@@ -1292,11 +1216,8 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     throwBare .missingArgument "outputs is required (at least one)" (param := some "outputs")
 
   let st ← env.state.get
-  -- The TS export reads the service session's post-compile wires —
-  -- extraction-rewritten forms. Recompute them purely over the mirror.
-  let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
-  let (wiresPost, _delayEntries, _) :=
-    Tropical.Lowering.extractSessionDelays st.wires alloc
+  -- CF-only: wires are stored raw; export reads the canonical wires.
+  let wiresPost := st.wires
   let allInstances := st.instanceNames
 
   -- Validate output mappings; build the root ref expressions.
@@ -1848,7 +1769,6 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "wire_zip"        => handleWireZip env args
   | "fan_out"         => handleFanOut env args
   | "fan_in"          => handleFanIn env args
-  | "feedback"        => handleFeedback env args
   | "export_program"  => handleExportProgram env args
   | "list_programs"   => handleListPrograms env
   | "list_instances"  => handleListInstances env

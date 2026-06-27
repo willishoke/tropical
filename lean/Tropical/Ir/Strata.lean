@@ -55,7 +55,11 @@ private def assertAcyclic (arena : Arena) (root : ProgramIdx) :
     throw ⟨s!"strataPipeline: input contains an unbroken inter-instance cycle: {names}"⟩
 
 /-- Run passes `1..opts.upto`. Precondition (enforced by callers):
-    `opts.upto ≤ portedPasses`. -/
+    `opts.upto ≤ portedPasses`.
+
+    CF-only is now structural: `BodyDecl.reg` no longer exists in the IR, so
+    no program can declare per-sample state — the elaborator rejects surface
+    `reg`/`next` outright. There is no longer a runtime `assertNoReg` gate. -/
 def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
     Except Error (Arena × ProgramIdx) := do
   if opts.upto < 1 then return (arena, root)

@@ -7,10 +7,10 @@ import Tropical.Ir.Nodes
 
 Lift a wire `ExprNode` (engine Json wire form) to a raw resolved
 `Program`: one `InputDecl` per free instance-output ref (sorted by
-canonical `instance:port` key), one output `out`, inline `ParamDecl`s
-for `param`/`trigger` refs, synthetic `RegDecl`s (update populated)
-for session-level `delay()`. Shape-identical to a user-authored
-single-assign program; the strata pipeline accepts it unmodified.
+canonical `instance:port` key), one output `out`, and inline
+`ParamDecl`s for `param`/`trigger` refs. Shape-identical to a
+user-authored single-assign program; the strata pipeline accepts it
+unmodified.
 
 Pure and total over its inputs; every error string is the TS message
 byte-exact (they surface as `internal_error` envelopes, the same
@@ -106,11 +106,9 @@ partial def inferOutputPortType (expr : Json) : Option PortType :=
   | _ => none
 
 /-- Translation state: param decls (insertion-ordered, position =
-    `ParamIdx`) and synthetic regs (position = `RegIdx`; the lifted
-    body has no other reg decls). -/
+    `ParamIdx`). CF-only — the lifted body has no reg decls. -/
 private structure Ctx where
   params : Array String := #[]
-  regs : Array BodyDecl := #[]
 
 private def wireKeyOf (inst port : String) : String := s!"{inst}:{port}"
 
@@ -183,25 +181,13 @@ private partial def translate (refToInput : Array (String × Nat))
         ctx := ctx'
       return (.arr out, ctx)
     | "delay" =>
-      -- Session-level delay → synthetic RegDecl-with-update + regRef.
-      -- Shape-polymorphic: array-shaped updates get an array init
-      -- broadcast from the scalar `init` field.
-      let argsJ := getField? e "args"
-      let some (Json.arr argsArr) := argsJ
-        | throw s!"liftWireToProgram: delay requires args: [expr], got {jsString (argsJ.getD .null)}"
-      unless argsArr.size == 1 do
-        throw s!"liftWireToProgram: delay requires args: [expr], got {(Json.arr argsArr).compress}"
-      let (update, ctx) ← translate refToInput argsArr[0]! ctx
-      let scalarInit : JsonNumber := match getField? e "init" with
-        | some (.num n) => n
-        | _ => ⟨0, 0⟩
-      let init : Expr := match update with
-        | .arr items => .arr (Array.replicate items.size (.num scalarInit))
-        | _ => .num scalarInit
-      let idx := ctx.regs.size
-      let ctx := { ctx with
-        regs := ctx.regs.push (.reg s!"__sd{idx}" init (some update) none none) }
-      return (.regRef ⟨idx⟩, ctx)
+      -- CF-only: session-level `delay()` would synthesize a per-sample
+      -- state register (the per-wire 1-sample latency). State has been
+      -- removed from the language, so `delay()` wire ops are rejected.
+      throw <|
+        "liftWireToProgram: 'delay' wire op is unsupported — tropical is " ++
+        "closed-form-only and has no per-sample state. Express the wire as a " ++
+        "closed-form function of the time coordinate instead."
     | _ =>
       match BinaryOpTag.ofWire? op with
       | some tag =>
@@ -248,7 +234,7 @@ def lift (expr : Json) (synthName : String) :
     inputs := inputDecls
     outputs := #[outputDecl]
     typeDefs := #[]
-    decls := ctx.params.map (BodyDecl.param · none) ++ ctx.regs
+    decls := ctx.params.map (BodyDecl.param · none)
     assigns := #[{ target := .port ⟨0⟩, expr := translated }]
     binderCount := 0
     registry := #[] }
