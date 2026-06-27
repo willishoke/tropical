@@ -14,7 +14,7 @@ import { render, Box, Text, useApp, useInput } from 'ink'
 import { resolve } from 'node:path'
 import { EngineClient, setupMorphScope } from './client'
 import { renderWaveform } from './braille'
-import { findTrigger, slice } from './trigger'
+import { findPhaseTrigger, slice } from './trigger'
 
 const REPO = resolve(import.meta.dir, '..')
 const FREQS: [number, number] = [220, 330]
@@ -86,11 +86,12 @@ function Scope() {
           const res = await c.call('render_window', { start: renderStart, count: lead + count, slots })
           const a = (res.values[0] as number[]).slice(lead)
           const b = (res.values[1] as number[]).slice(lead)
-          // per-channel trigger: each locks to its own rising crossing, so both
-          // sit still regardless of their frequency ratio (a shared trigger
-          // would let the un-triggered channel slide).
-          const off1 = k.trig === 1 ? Math.max(0, findTrigger(a, 0, search)) : 0
-          const off2 = k.trig === 1 ? Math.max(0, findTrigger(b, 0, search)) : 0
+          // per-channel trigger on each oscillator's PHASE (its timebase) rather
+          // than the morphing output: the phasor wraps exactly once per period
+          // regardless of waveform, so the lock holds through the whole morph —
+          // a level trigger jitters mid-morph where the blend has two crossings.
+          const off1 = k.trig === 1 ? findPhaseTrigger(FREQS[0], SR, desiredStart, search) : 0
+          const off2 = k.trig === 1 ? findPhaseTrigger(FREQS[1], SR, desiredStart, search) : 0
           setRows1(renderWaveform(slice(a, off1, display, k.offset), w, BAND_H))
           setRows2(renderWaveform(slice(b, off2, display, k.offset), w, BAND_H))
           setPos(p)

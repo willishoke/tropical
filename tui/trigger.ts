@@ -22,6 +22,28 @@ export function findTrigger(samples: number[], level: number, searchLen: number,
   return -1
 }
 
+/**
+ * Period-aligned trigger: the offset (into a window starting at absolute sample
+ * `startIndex`) of the first phasor wrap for an oscillator at `freq`. The phasor
+ * phase is the oscillator's *timebase* — a clean ramp with exactly one wrap per
+ * period regardless of the output waveform — so locking to it is rock-solid
+ * where a level trigger jitters (mid-morph a saw↔sine blend has two rising
+ * zero-crossings per period). Matches FixedPhasor exactly: inc = trunc(freq·2³²
+ * /sr), phase(n) = (inc·n mod 2³²)/2³². Returns 0 if no wrap in [0, count).
+ */
+export function findPhaseTrigger(freq: number, sr: number, startIndex: number, count: number): number {
+  const TWO32 = 4294967296n
+  const inc = BigInt(Math.trunc((freq * 4294967296) / sr))
+  const ph = (n: number) => (inc * BigInt(n)) % TWO32
+  let prev = ph(startIndex)
+  for (let i = 1; i < count; i++) {
+    const cur = ph(startIndex + i)
+    if (cur < prev) return i // wrapped → start of a new period
+    prev = cur
+  }
+  return 0
+}
+
 /** Slice `count` samples starting at `offset`, applying a vertical shift. */
 export function slice(samples: number[], offset: number, count: number, vshift = 0): number[] {
   const out = new Array<number>(count)
