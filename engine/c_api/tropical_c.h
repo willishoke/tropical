@@ -70,6 +70,11 @@ unsigned int tropical_dac_get_active_device(tropical_dac_t);
 /* Switch the running DAC to a different output device.  Returns false on failure. */
 bool         tropical_dac_switch_device(tropical_dac_t, unsigned int device_id);
 
+/* Master clock: the "audible now" sample index — seconds of stream played ×
+   rate, minus output latency. The authoritative position a slave consumer
+   (scope, video) renders against for drift-free sync. 0 if not running. */
+uint64_t     tropical_dac_playback_position(tropical_dac_t);
+
 /* ---------- FlatRuntime API ---------- */
 
 tropical_runtime_t tropical_runtime_new(unsigned int buffer_length);
@@ -113,6 +118,47 @@ bool             tropical_runtime_is_fade_out_complete(tropical_runtime_t);
 unsigned int     tropical_runtime_slot_index(tropical_runtime_t, const char* name);
 void             tropical_runtime_set_slot(tropical_runtime_t, unsigned int slot_index, double value);
 double           tropical_runtime_get_slot(tropical_runtime_t, unsigned int slot_index);
+
+/* Random-access render (scope / slave consumers): evaluate the active fused
+   kernel over [start_index, start_index+count) and write each requested slot's
+   per-sample trajectory into `out`, slot-major (out[k*count + i]). Exact and
+   concurrency-safe with the audio thread for a register-free (stateless) patch.
+   Returns false if the kernel isn't fused or a slot id is out of range. */
+bool             tropical_runtime_render_window(tropical_runtime_t, uint64_t start_index,
+                   unsigned int count, const unsigned int* slot_ids, unsigned int n_slots,
+                   double* out);
+
+/* ---------- Socket endpoint ----------
+ *
+ * A single Unix-domain socket serving many clients over newline-delimited
+ * JSON-RPC, with an internal control/data plane split. The socket borrows the
+ * runtime (which must outlive it). Data-plane methods (set_param, get_telemetry)
+ * are handled inside C++; control-plane requests are queued for the Lean driver
+ * thread, which pulls them with tropical_socket_next_control, dispatches them,
+ * and replies with tropical_socket_send_response. The call direction across the
+ * FFI is strictly Lean->C++ — Lean pulls and pushes; C++ never calls up. */
+
+typedef void* tropical_socket_t;
+
+/* Bind + listen on the Unix-domain socket at `addr` and spawn the accept
+   thread. Returns NULL on failure (see tropical_last_error). */
+tropical_socket_t tropical_socket_listen(tropical_runtime_t, const char* addr);
+/* Stop the server (close the socket, wake the pull, join threads, unlink the
+   socket file) and free it. */
+void             tropical_socket_free(tropical_socket_t);
+
+/* Control-plane pull, called only from the single Lean driver thread. Blocks
+   until a control message arrives or the socket shuts down. Returns false on
+   shutdown-with-empty-queue. On true, *out_client_id is set and the request
+   line is copied into a malloc'd NUL-terminated buffer (*out_bytes, *out_len);
+   free it with tropical_free_buffer. */
+bool             tropical_socket_next_control(tropical_socket_t, uint64_t* out_client_id,
+                                              char** out_bytes, size_t* out_len);
+
+/* Control-plane push: send a response line (a newline is appended) to the
+   client identified by client_id. No-op if the client has disconnected. */
+void             tropical_socket_send_response(tropical_socket_t, uint64_t client_id,
+                                               const char* bytes, size_t len);
 
 #ifdef __cplusplus
 }

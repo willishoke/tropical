@@ -1,5 +1,6 @@
 #include "c_api/tropical_c.h"
 
+#include "c_api/tropical_socket.hpp"
 #include "runtime/FlatRuntime.hpp"
 #include "runtime/NumericProgramParser.hpp"
 #include "dac/TropicalDAC.hpp"
@@ -197,6 +198,11 @@ bool tropical_dac_switch_device(tropical_dac_t d, unsigned int device_id)
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }
 
+uint64_t tropical_dac_playback_position(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->playback_position() : 0;
+}
+
 // ---------- FlatRuntime API ----------
 
 tropical_runtime_t tropical_runtime_new(unsigned int buffer_length)
@@ -304,6 +310,49 @@ double tropical_runtime_get_slot(tropical_runtime_t r, unsigned int slot_index)
 {
   if (!r) return 0.0;
   return static_cast<tropical_runtime::FlatRuntime*>(r)->get_slot(slot_index);
+}
+
+bool tropical_runtime_render_window(tropical_runtime_t r, uint64_t start_index,
+                                    unsigned int count, const unsigned int* slot_ids,
+                                    unsigned int n_slots, double* out)
+{
+  if (!r) return false;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)->render_window(
+    start_index, count,
+    reinterpret_cast<const uint32_t*>(slot_ids), n_slots, out);
+}
+
+// ── Socket endpoint ─────────────────────────────────────────────────────────
+
+tropical_socket_t tropical_socket_listen(tropical_runtime_t r, const char* addr)
+{
+  if (!r || !addr) { set_error("socket_listen: null argument"); return nullptr; }
+  try
+  {
+    auto * rt = static_cast<tropical_runtime::FlatRuntime*>(r);
+    auto * s = new tropical_socket::SocketServer(rt, std::string(addr));
+    if (!s->start()) { set_error(s->error()); delete s; return nullptr; }
+    return static_cast<void*>(s);
+  }
+  catch (const std::exception& e) { set_error(e.what()); return nullptr; }
+}
+
+void tropical_socket_free(tropical_socket_t s)
+{
+  delete static_cast<tropical_socket::SocketServer*>(s);
+}
+
+bool tropical_socket_next_control(tropical_socket_t s, uint64_t* out_client_id,
+                                  char** out_bytes, size_t* out_len)
+{
+  if (!s) return false;
+  return static_cast<tropical_socket::SocketServer*>(s)->next_control(out_client_id, out_bytes, out_len);
+}
+
+void tropical_socket_send_response(tropical_socket_t s, uint64_t client_id,
+                                   const char* bytes, size_t len)
+{
+  if (s) static_cast<tropical_socket::SocketServer*>(s)->send_response(client_id, bytes, len);
 }
 
 } // extern "C"

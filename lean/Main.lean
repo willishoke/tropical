@@ -8,4 +8,6 @@ library.
 -/
 
 def main (args : List String) : IO Unit :=
-  if args.contains "--rpc" then Tropical.runRpc else Tropical.runFrontend
+  match args with
+  | "--serve" :: addr :: _ => Tropical.runServe addr
+  | _ => if args.contains "--rpc" then Tropical.runRpc else Tropical.runFrontend

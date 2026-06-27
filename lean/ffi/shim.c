@@ -28,9 +28,11 @@ extern void *memset(void *, int, size_t);
 
 static lean_external_class *g_runtime_class = NULL;
 static lean_external_class *g_dac_class = NULL;
+static lean_external_class *g_socket_class = NULL;
 
 static void runtime_finalizer(void *h) { tropical_runtime_free(h); }
 static void dac_finalizer(void *h) { tropical_dac_free(h); }
+static void socket_finalizer(void *h) { tropical_socket_free(h); }
 static void noop_foreach(void *mod, b_lean_obj_arg fn) { (void)mod; (void)fn; }
 
 static lean_external_class *runtime_class(void) {
@@ -43,6 +45,12 @@ static lean_external_class *dac_class(void) {
   if (!g_dac_class)
     g_dac_class = lean_register_external_class(dac_finalizer, noop_foreach);
   return g_dac_class;
+}
+
+static lean_external_class *socket_class(void) {
+  if (!g_socket_class)
+    g_socket_class = lean_register_external_class(socket_finalizer, noop_foreach);
+  return g_socket_class;
 }
 
 static void *unwrap(b_lean_obj_arg o) { return lean_get_external_data(o); }
@@ -243,4 +251,40 @@ LEAN_EXPORT lean_obj_res shim_audio_device_name(uint32_t device_id, lean_obj_arg
 LEAN_EXPORT lean_obj_res shim_audio_default_output_device(lean_obj_arg world) {
   (void)world;
   return lean_io_result_mk_ok(lean_box_uint32(tropical_audio_default_output_device()));
+}
+
+/* ── Socket endpoint ───────────────────────────────────────────────────────── */
+
+LEAN_EXPORT lean_obj_res shim_socket_listen(b_lean_obj_arg rt, b_lean_obj_arg addr,
+                                            lean_obj_arg world) {
+  (void)world;
+  tropical_socket_t sock = tropical_socket_listen(unwrap(rt), lean_string_cstr(addr));
+  if (!sock) return io_err(tropical_last_error());
+  return lean_io_result_mk_ok(lean_alloc_external(socket_class(), sock));
+}
+
+/* Returns `Option (UInt64 × String)`: none on shutdown, else (client_id, line). */
+LEAN_EXPORT lean_obj_res shim_socket_next_control(b_lean_obj_arg s, lean_obj_arg world) {
+  (void)world;
+  uint64_t cid = 0;
+  char *buf = NULL;
+  size_t len = 0;
+  if (!tropical_socket_next_control(unwrap(s), &cid, &buf, &len)) {
+    return lean_io_result_mk_ok(lean_box(0));   /* Option.none */
+  }
+  lean_object *pair = lean_alloc_ctor(0, 2, 0); /* Prod.mk */
+  lean_ctor_set(pair, 0, lean_box_uint64(cid));
+  lean_ctor_set(pair, 1, lean_mk_string(buf ? buf : ""));
+  tropical_free_buffer((uint8_t *)buf);
+  lean_object *some = lean_alloc_ctor(1, 1, 0); /* Option.some */
+  lean_ctor_set(some, 0, pair);
+  return lean_io_result_mk_ok(some);
+}
+
+LEAN_EXPORT lean_obj_res shim_socket_send_response(b_lean_obj_arg s, uint64_t client_id,
+                                                   b_lean_obj_arg bytes, lean_obj_arg world) {
+  (void)world;
+  const char *b = lean_string_cstr(bytes);
+  tropical_socket_send_response(unwrap(s), client_id, b, strlen(b));
+  return lean_io_result_mk_ok(lean_box(0));
 }
