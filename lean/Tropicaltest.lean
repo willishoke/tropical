@@ -342,6 +342,18 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runReversibility) then failed := failed + 1
 
+  -- ── (f) CF goldens (tests/golden/cf/*.hash) — the closed-form corpus ───────
+  -- The corpus that must stay green through every phase of the CF-only
+  -- migration (it is rendered via the same path as the legacy goldens but only
+  -- ever holds register-free, closed-form-in-τ patches). Same shape as (a):
+  -- scan the dir, compile patches/<name>.json fused, freeze the render hash.
+  IO.println "cf goldens:"
+  for name in ← sortedNames "tests/golden/cf" ".hash" do
+    let patchPath := s!"patches/{name}.json"
+    if ← System.FilePath.pathExists patchPath then
+      total := total + 1
+      if !(← runGolden writeMode name patchPath s!"tests/golden/cf/{name}.hash") then failed := failed + 1
+
   IO.println ""
   IO.println s!"{total - failed}/{total} passed"
   return if failed == 0 then 0 else 1
