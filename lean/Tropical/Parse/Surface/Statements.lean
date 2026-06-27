@@ -13,7 +13,7 @@ which dispatches to these.
 
 namespace Tropical.Parse.Surface
 
-open Tropical.Parse (ParsedExpr BodyDecl BodyAssign TypeDef NextTargetKind)
+open Tropical.Parse (ParsedExpr BodyDecl BodyAssign TypeDef)
 open Lean (JsonNumber)
 
 /-- A parsed body item, sorted into the block's `decls`/`assigns` (and
@@ -29,17 +29,6 @@ private def isCapitalized (s : String) : Bool :=
   | [] => false
 
 -- ── Decls ────────────────────────────────────────────────────────────────────
-
-/-- `reg name [: type] = init` -/
-def parseRegDecl : P BodyDecl := do
-  let _ ← consume .kreg "reg keyword"
-  let name := (← consume .ident "reg name").sval
-  let type? ← (do
-    if (← eat .colon).isSome then pure (some (← consume .ident "reg type name").sval)
-    else pure none)
-  let _ ← consume .assign "reg `=` before init"
-  let init ← parseTopExpr
-  pure (.reg name init type?)
 
 /-- `param name: smoothed [= default]` (default must be a number literal). -/
 def parseParamDecl : P BodyDecl := do
@@ -58,14 +47,6 @@ def parseParamDecl : P BodyDecl := do
   pure (.param name value?)
 
 -- ── Assigns ──────────────────────────────────────────────────────────────────
-
-/-- `next name = expr` (target kind is always `reg`). -/
-def parseNextUpdate : P BodyAssign := do
-  let _ ← consume .knext "next keyword"
-  let name := (← consume .ident "next target name").sval
-  let _ ← consume .assign "next `=` before expression"
-  let expr ← parseTopExpr
-  pure (.next .reg name expr)
 
 /-- `dac.out = expr` — the boundary-leaf wire. -/
 def parseDacOutAssign : P BodyAssign := do

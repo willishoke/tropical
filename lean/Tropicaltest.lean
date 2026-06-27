@@ -279,19 +279,24 @@ private def runReversibility : IO Bool := do
           IO.println s!"  PASS  reversibility  bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
           pure true
 
--- ── CF-only enforcement: surface `reg` is rejected at elaboration ─────────────
--- The Phase-1 guarantee, now STRUCTURAL: `BodyDecl.reg` was deleted from the
--- IR, so a program declaring `reg`/`next` cannot elaborate at all. A
--- closed-form program (`Sin` — fold + temps, no reg) elaborates and
--- strata-processes normally. The `Sin` case is the landmine pin — emit-level
--- SSA temps are not regs and must survive. Both are self-contained (no instance
--- deps), so they elaborate standalone with a no-op external resolver.
+-- ── CF-only enforcement: surface `reg`/`next` is unparseable ──────────────────
+-- The Phase-1 guarantee, now STRUCTURAL: `reg`/`next` were deleted from the
+-- surface grammar and the IR, so a program declaring them does not even parse
+-- (the keywords are gone — `reg` lexes as a bare identifier and the statement
+-- fails). A closed-form program (`Sin` — fold + temps, no reg) parses,
+-- elaborates and strata-processes normally. The `Sin` case is the landmine pin
+-- — emit-level SSA temps are not regs and must survive. Both are self-contained
+-- (no instance deps), so they process standalone with a no-op external resolver.
 private def cfOnlyRejectSrc : String :=
   "```tropical\nprogram CfProbe(step: float = 1) -> (acc: float) {\n  reg s = 0\n  acc = s\n  next s = s + step\n}\n```"
 
 private def runCfOnly (name md : String) (expectReject : Bool) : IO Bool := do
   match Tropical.Parse.Surface.parseMarkdownProgram md with
-  | .error e => IO.println s!"  FAIL  cf-only/{name}  parse: {firstLine e}"; pure false
+  | .error e =>
+    if expectReject then
+      IO.println s!"  PASS  cf-only/{name}  rejected per-sample state at parse"; pure true
+    else
+      IO.println s!"  FAIL  cf-only/{name}  parse: {firstLine e}"; pure false
   | .ok prog =>
     match Tropical.Ir.elaborateInto {} prog (some fun _ => none) with
     | .error e =>
@@ -384,7 +389,7 @@ def main (args : List String) : IO UInt32 := do
       if !(← runGolden writeMode name patchPath s!"tests/golden/cf/{name}.hash") then failed := failed + 1
 
   -- ── (g) CF-only enforcement: cfOnly strata mode rejects per-sample state ───
-  IO.println "cf-only enforcement (cfOnly strata mode):"
+  IO.println "cf-only enforcement (reg/next unrepresentable):"
   total := total + 1
   if !(← runCfOnly "CfProbe" cfOnlyRejectSrc (expectReject := true)) then failed := failed + 1
   total := total + 1

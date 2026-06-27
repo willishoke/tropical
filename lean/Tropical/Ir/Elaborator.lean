@@ -737,14 +737,6 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
   for d in p.body.decls do
     match d with
     | .prog .. => pure ()  -- already handled
-    | .reg name _ _ =>
-      -- CF-only: per-sample state is structurally unrepresentable. The
-      -- resolved IR has no `reg` decl, so the surface `reg` keyword is
-      -- rejected here rather than desugared.
-      throwElab <|
-        s!"program '{p.name}' declares reg '{name}', but tropical is closed-form-only: " ++
-        "per-sample state has been removed from the language. Express it as a " ++
-        "closed-form function of the time coordinate (e.g. offset reads of `sampleIndex`)."
     | .param name value? => do
       if paramsTbl.any (·.1 == name) then
         throwElab s!"duplicate param '{name}'"
@@ -794,7 +786,7 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
     | parsedD, resolvedD =>
       throwElab s!"internal: paired {parsedDeclOp parsedD} with {resolvedDeclOp resolvedD}"
 
-  -- 6. Body assigns. (`next x = e` is rejected — CF-only has no regs.)
+  -- 6. Body assigns. (CF-only: the only assign is an output wire.)
   let mut assigns : Array OutputAssign := #[]
   for a in p.body.assigns do
     match a with
@@ -806,10 +798,6 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
           | some i => pure (OutputTarget.port ⟨i⟩)
           | none => throwElab s!"outputAssign references unknown output port '{name}'"
       assigns := assigns.push { target, expr := ← resolveExpr scope exprParsed }
-    | .next _ name _ =>
-      throwElab <|
-        s!"program '{p.name}' has a next-update for '{name}', but tropical is " ++
-        "closed-form-only: per-sample state (`reg`/`next`) has been removed."
 
   -- Build the program (mkProgram), validating registry coverage
   -- (validateProgramRegistry — same error text) before the cycle check.
@@ -843,7 +831,7 @@ partial def elaborateProgram (p : Tropical.Parse.Program) (parents : List Frame)
   pure idx
 where
   parsedDeclOp : Tropical.Parse.BodyDecl → String
-    | .reg .. => "regDecl" | .param .. => "paramDecl"
+    | .param .. => "paramDecl"
     | .inst .. => "instanceDecl" | .prog .. => "programDecl"
   resolvedDeclOp : BodyDecl → String
     | .param .. => "paramDecl"

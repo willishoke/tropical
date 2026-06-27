@@ -230,16 +230,8 @@ deriving Inhabited, Repr
 -- BodyAssign — wires pinning a value to a port
 -- ─────────────────────────────────────────────────────────────
 
-inductive NextTargetKind where
-  | reg
-deriving BEq, Inhabited, Repr
-
-def NextTargetKind.wire : NextTargetKind → String
-  | .reg => "reg"
-
 inductive BodyAssign where
   | output (name : String) (expr : ParsedExpr)
-  | next (kind : NextTargetKind) (name : String) (expr : ParsedExpr)
 deriving Inhabited, Repr
 
 -- ─────────────────────────────────────────────────────────────
@@ -249,8 +241,6 @@ deriving Inhabited, Repr
 mutual
 
 inductive BodyDecl where
-  /-- `type?` is a NameRef on the wire. -/
-  | reg (name : String) (init : ParsedExpr) (type? : Option String)
   | param (name : String) (value? : Option JsonNumber)
   /-- `program` is a NameRef; `typeArgs`/`inputs` keep entry order
       (each entry's key is a NameRef on the wire). -/
@@ -433,18 +423,10 @@ def typeParams (tps : Array (String × TypeParamSpec)) : Json :=
 def bodyAssign : BodyAssign → Json
   | .output name e =>
     Json.mkObj [("op", jStr "outputAssign"), ("name", jStr name), ("expr", expr e)]
-  | .next kind name e =>
-    Json.mkObj [("op", jStr "nextUpdate"),
-                ("target", Json.mkObj [("kind", jStr kind.wire), ("name", jStr name)]),
-                ("expr", expr e)]
 
 mutual
 
 partial def bodyDecl : BodyDecl → Json
-  | .reg name init type? =>
-    Json.mkObj <|
-      [("op", jStr "regDecl"), ("name", jStr name), ("init", expr init)]
-      ++ optField "type" (type?.map jNameRef)
   | .param name value? =>
     Json.mkObj <|
       [("op", jStr "paramDecl"), ("name", jStr name)]
@@ -823,15 +805,6 @@ def bodyAssign (path : String) (j : JsonV) : Except String BodyAssign := do
     expectKeys path j ["op", "name", "expr"]
     pure (.output (← reqStr path j "name")
       (← expr s!"{path}.expr" (← reqField path j "expr")))
-  | some "nextUpdate" => do
-    expectKeys path j ["op", "target", "expr"]
-    let target ← reqField path j "target"
-    expectKeys s!"{path}.target" target ["kind", "name"]
-    let kind ← match target.getStr? "kind" with
-      | some "reg" => pure NextTargetKind.reg
-      | _ => err s!"{path}.target" "kind must be 'reg'"
-    pure (.next kind (← reqStr s!"{path}.target" target "name")
-      (← expr s!"{path}.expr" (← reqField path j "expr")))
   | some other => err path s!"unknown body assign op '{other}'"
   | none => err path "body assign missing string 'op'"
 
@@ -840,13 +813,6 @@ mutual
 partial def bodyDecl (path : String) (j : JsonV) : Except String BodyDecl := do
   let .obj _ := j | err path "body decl must be an object"
   match j.opOf? with
-  | some "regDecl" => do
-    expectKeys path j ["op", "name", "init", "type"]
-    let type? ← match j.getField? "type" with
-      | none => pure none
-      | some t => pure (some (← nameRefNode s!"{path}.type" t))
-    pure (.reg (← reqStr path j "name")
-      (← expr s!"{path}.init" (← reqField path j "init")) type?)
   | some "paramDecl" => do
     expectKeys path j ["op", "name", "value"]
     pure (.param (← reqStr path j "name") (← optNum path j "value"))
