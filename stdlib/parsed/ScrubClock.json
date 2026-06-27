@@ -1,0 +1,35 @@
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "tau"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "float"},
+    "name": "tau_base",
+    "default": 0},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "velocity",
+    "default": 1}]},
+ "op": "program",
+ "name": "ScrubClock",
+ "body":
+ {"op": "block",
+  "decls": [],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "tau",
+    "expr":
+    {"op": "add",
+     "args":
+     [{"op": "nameRef", "name": "tau_base"},
+      {"op": "div",
+       "args":
+       [{"op": "mul",
+         "args":
+         [{"op": "nameRef", "name": "velocity"},
+          {"op": "call",
+           "callee": {"op": "nameRef", "name": "toFloat"},
+           "args":
+           [{"op": "call",
+             "callee": {"op": "nameRef", "name": "sampleIndex"},
+             "args": []}]}]},
+        {"op": "call",
+         "callee": {"op": "nameRef", "name": "sampleRate"},
+         "args": []}]}]}}]}}
