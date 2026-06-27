@@ -174,7 +174,6 @@ partial def encExpr (arena : Arena) : Expr → EncM Json
   | .zeros count => do
     pure <| Json.mkObj [("op", Json.str "zeros"), ("count", ← encExpr arena count)]
   | .inputRef i => pure <| Json.mkObj [("op", Json.str "inputRef"), ("idx", Lean.toJson i.idx)]
-  | .regRef i => pure <| Json.mkObj [("op", Json.str "regRef"), ("idx", Lean.toJson i.idx)]
   | .paramRef i => pure <| Json.mkObj [("op", Json.str "paramRef"), ("idx", Lean.toJson i.idx)]
   | .typeParamRef i => pure <| Json.mkObj [("op", Json.str "typeParamRef"), ("idx", Lean.toJson i.idx)]
   | .bindingRef i => pure <| Json.mkObj [("op", Json.str "bindingRef"), ("idx", Lean.toJson i.idx)]
@@ -306,19 +305,6 @@ partial def encProgram (arena : Arena) (p : Program) : EncM Json := do
     ("registry", Json.arr registry)]
 
 partial def encBodyDecl (arena : Arena) : BodyDecl → EncM Json
-  | .reg name init update? type? liftedFrom? => do
-    let mut fields : List (String × Json) :=
-      [("op", Json.str "regDecl"), ("name", Json.str name), ("init", ← encExpr arena init)]
-    match update? with
-    | some u => fields := fields ++ [("update", ← encExpr arena u)]
-    | none => pure ()
-    match type? with
-    | some t => fields := fields ++ [("type", ← encScalarOrAlias arena t)]
-    | none => pure ()
-    match liftedFrom? with
-    | some lf => fields := fields ++ [("liftedFrom", Json.str lf)]
-    | none => pure ()
-    pure (Json.mkObj fields)
   | .param name value? =>
     pure <| Json.mkObj <|
       [("op", Json.str "paramDecl"), ("name", Json.str name)]
@@ -504,7 +490,6 @@ private partial def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
                    (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount))
     | "zeros" => pure (.zeros (← sub "count"))
     | "inputRef" => pure (.inputRef ⟨← reqNat ctx j "idx"⟩)
-    | "regRef" => pure (.regRef ⟨← reqNat ctx j "idx"⟩)
     | "paramRef" => pure (.paramRef ⟨← reqNat ctx j "idx"⟩)
     | "typeParamRef" => pure (.typeParamRef ⟨← reqNat ctx j "idx"⟩)
     | "bindingRef" => pure (.bindingRef ⟨← reqNat ctx j "idx"⟩)
@@ -661,19 +646,6 @@ private def decodeProgram (i : Nat) (j : JsonV) (typeDefs : Array TypeDef)
     let op ← reqStr dctx d "op"
     let dname ← reqStr dctx d "name"
     match op with
-    | "regDecl" => do
-      let init ← expr s!"{dctx}.init" (← reqField dctx d "init") tdBase tdCount
-      let update? ← match d.getField? "update" with
-        | none => pure none
-        | some u => pure (some (← expr s!"{dctx}.update" u tdBase tdCount))
-      let type? ← match d.getField? "type" with
-        | none => pure none
-        | some t => pure (some (← scalarOrAlias s!"{dctx}.type" t typeDefs tdBase))
-      let liftedFrom? ← match d.getField? "liftedFrom" with
-        | none => pure none
-        | some (.str s) => pure (some s)
-        | some _ => err dctx "field 'liftedFrom' must be a string"
-      decls := decls.push (.reg dname init update? type? liftedFrom?)
     | "paramDecl" =>
       decls := decls.push (.param dname (← optNum dctx d "value"))
     | "instanceDecl" => do

@@ -140,9 +140,8 @@ def opCoverageInstrs : Array NInstr := #[
   instrWriteSlot 0 (rgF 32)]
 
 def opCoveragePlan : FlatPlan :=
-  let inst := InstanceFunction.mk "root" "root" #[] opCoverageInstrs #[] 0 0 0 33 #[] #[]
+  let inst := InstanceFunction.mk "root" "root" #[] opCoverageInstrs #[] 0 0 33 #[]
   { sampleRate := jn 44100, compilationMode := .fused,
-    stateInit := #[], registerNames := #[], registerTypes := #[],
     arraySlotNames := #[], registerCount := 33, arraySlotCount := 0,
     arraySlotSizes := #[], instanceFunctions := #[inst],
     sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
@@ -280,14 +279,13 @@ private def runReversibility : IO Bool := do
           IO.println s!"  PASS  reversibility  bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
           pure true
 
--- ── CF-only enforcement: `cfOnly` strata mode rejects per-sample state ────────
--- The Phase-1 guarantee. With `Options.cfOnly` set, strata rejects any
--- `BodyDecl.reg` (surface `reg`): a stateful program is rejected; a closed-form
--- one (`Sin` — fold + temps, no reg) compiles. The `Sin` case is the landmine
--- pin — emit-level SSA temps are not regs and must survive cfOnly. The stateful
--- probe is inlined (the stdlib no longer ships a reg-bearing program), and both
--- are self-contained (no instance deps), so they elaborate standalone with a
--- no-op external resolver.
+-- ── CF-only enforcement: surface `reg` is rejected at elaboration ─────────────
+-- The Phase-1 guarantee, now STRUCTURAL: `BodyDecl.reg` was deleted from the
+-- IR, so a program declaring `reg`/`next` cannot elaborate at all. A
+-- closed-form program (`Sin` — fold + temps, no reg) elaborates and
+-- strata-processes normally. The `Sin` case is the landmine pin — emit-level
+-- SSA temps are not regs and must survive. Both are self-contained (no instance
+-- deps), so they elaborate standalone with a no-op external resolver.
 private def cfOnlyRejectSrc : String :=
   "```tropical\nprogram CfProbe(step: float = 1) -> (acc: float) {\n  reg s = 0\n  acc = s\n  next s = s + step\n}\n```"
 
@@ -296,19 +294,20 @@ private def runCfOnly (name md : String) (expectReject : Bool) : IO Bool := do
   | .error e => IO.println s!"  FAIL  cf-only/{name}  parse: {firstLine e}"; pure false
   | .ok prog =>
     match Tropical.Ir.elaborateInto {} prog (some fun _ => none) with
-    | .error e => IO.println s!"  FAIL  cf-only/{name}  elaborate: {firstLine e.message}"; pure false
+    | .error e =>
+      if expectReject then
+        IO.println s!"  PASS  cf-only/{name}  rejected per-sample state at elaboration"; pure true
+      else
+        IO.println s!"  FAIL  cf-only/{name}  unexpected reject: {firstLine e.message}"; pure false
     | .ok (arena, root) =>
-      match Tropical.Ir.Strata.run { upto := 5, cfOnly := true } arena root with
+      match Tropical.Ir.Strata.run { upto := 5 } arena root with
       | .error e =>
-        if expectReject then
-          IO.println s!"  PASS  cf-only/{name}  rejected per-sample state"; pure true
-        else
-          IO.println s!"  FAIL  cf-only/{name}  unexpected reject: {firstLine e.message}"; pure false
+        IO.println s!"  FAIL  cf-only/{name}  strata error: {firstLine e.message}"; pure false
       | .ok _ =>
         if expectReject then
           IO.println s!"  FAIL  cf-only/{name}  compiled but should be rejected"; pure false
         else
-          IO.println s!"  PASS  cf-only/{name}  compiles under cfOnly (temps survive)"; pure true
+          IO.println s!"  PASS  cf-only/{name}  compiles (temps survive)"; pure true
 
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"

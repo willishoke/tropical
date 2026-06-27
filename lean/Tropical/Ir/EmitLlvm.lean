@@ -139,15 +139,6 @@ def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
   line s!"store i64 {asI64}, ptr {g}, align 8"
   modify fun s => { s with tempTypes := s.tempTypes.insert slot v.ty }
 
-/-- Load `registers[slot]` (i64-backed) as the given type. -/
-def loadRegTyped (slot : Nat) (ty : ScalarType) : M TVal := do
-  let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %registers, i64 {slot}"
-  let raw ← fresh; line s!"{raw} = load i64, ptr {g}, align 8"
-  match ty with
-  | .int => pure ⟨raw, .int⟩
-  | .float => let b ← fresh; line s!"{b} = bitcast i64 {raw} to double"; pure ⟨b, .float⟩
-  | .bool => let b ← fresh; line s!"{b} = trunc i64 {raw} to i1"; pure ⟨b, .bool⟩
-
 def loadSlotF64 (idx : Nat) : M String := do
   let g ← fresh; line s!"{g} = getelementptr inbounds double, ptr %slots, i64 {idx}"
   let v ← fresh; line s!"{v} = load double, ptr {g}, align 8"
@@ -195,7 +186,6 @@ def resolveOperand : NOperand → M TVal
   | .reg slot _ => do
     let ty := (← get).tempTypes.getD slot .float
     loadTempTyped slot ty
-  | .stateReg slot t => loadRegTyped slot t
   | .source idx _ => do
     let srcs := (← get).sources
     match srcs[idx]? with
@@ -491,42 +481,19 @@ def emitInstr (instr : NInstr) : M Unit := do
     fail s!"EmitLlvm: sessionArray dst for '{tag}' must be remapped before emit"
 
 -- ─────────────────────────────────────────────────────────────
--- Writebacks (mirrors EmitCtx::emit_writebacks)
--- ─────────────────────────────────────────────────────────────
-
-/-- `registerTypes` is the global state-register type array, indexed by
-    `stateRegOffset + j`. -/
-def emitWritebacks (stateRegOffset : Nat) (targets : Array RegTarget)
-    (registerTypes : Array ScalarType) : M Unit := do
-  for j in [0:targets.size] do
-    match targets[j]! with
-    | .arrayManaged => pure ()
-    | .temp ti =>
-      let stateSlot := stateRegOffset + j
-      let srcTy := (← get).tempTypes.getD ti .float
-      let dstTy := registerTypes[stateSlot]?.getD .float
-      let v ← loadTempTyped ti srcTy
-      let coerced ← coerce v dstTy
-      let asI64 ← match dstTy with
-        | .float => let b ← fresh; line s!"{b} = bitcast double {coerced.ref} to i64"; pure b
-        | .int   => pure coerced.ref  -- i64 already
-        | .bool  => let b ← fresh; line s!"{b} = zext i1 {coerced.ref} to i64"; pure b
-      let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %registers, i64 {stateSlot}"
-      line s!"store i64 {asI64}, ptr {g}, align 8"
-
--- ─────────────────────────────────────────────────────────────
 -- Fractal per-instance walk (mirrors EmitCtx::emit_kernel_block)
 -- ─────────────────────────────────────────────────────────────
 
-partial def emitKernelBlock (registerTypes : Array ScalarType)
-    (inst : InstanceFunction) : M Unit := do
-  -- preamble → per-child {pre_input, child} → body → writebacks
+-- CF-only: no register writebacks — there is no per-sample state. The
+-- `%registers` kernel argument survives in the calling convention but is
+-- never read or written.
+partial def emitKernelBlock (inst : InstanceFunction) : M Unit := do
+  -- preamble → per-child {pre_input, child} → body
   for i in inst.preambleInstructions do emitInstr i
   for child in inst.children do
     for i in child.preInputInstructions do emitInstr i
-    emitKernelBlock registerTypes child
+    emitKernelBlock child
   for i in inst.instructions do emitInstr i
-  emitWritebacks inst.stateRegOffset inst.registerTargets registerTypes
 
 -- ─────────────────────────────────────────────────────────────
 -- Sinks (mirrors the loop-body sink mix)
@@ -564,7 +531,7 @@ private def intrinsicDecls : String :=
 def emitKernel (plan : FlatPlan) : Except String String := do
   let body : M Unit := do
     for inst in plan.instanceFunctions do
-      emitKernelBlock plan.registerTypes inst
+      emitKernelBlock inst
     emitSinks plan.sinks
   let init : St := { sources := plan.sources }
   match body.run init with

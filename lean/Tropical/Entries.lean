@@ -83,7 +83,7 @@ private def wireOpName : Expr → String
   | .clamp .. => "clamp" | .select .. => "select"
   | .arraySet .. => "arraySet" | .index .. => "index"
   | .zeros _ => "zeros"
-  | .inputRef _ => "inputRef" | .regRef _ => "regRef" | .paramRef _ => "paramRef"
+  | .inputRef _ => "inputRef" | .paramRef _ => "paramRef"
   | .typeParamRef _ => "typeParamRef" | .bindingRef _ => "bindingRef"
   | .nestedOut .. => "nestedOut"
   | .sampleRate => "sampleRate" | .sampleIndex => "sampleIndex"
@@ -154,14 +154,8 @@ def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
       | some pt => (Json.str (portTypeStr arena pt), portTypeObj arena pt)
       | none => (jsonNull, jsonNull)
     Json.mkObj [("name", Json.str d.name), ("type", t), ("type_obj", tObj)]
-  let registers := prog.regs.filterMap fun d =>
-    match d with
-    | .reg name init _ type? _ =>
-      let (t, tObj) := match regPortType init type? with
-        | some pt => (Json.str (portTypeStr arena pt), portTypeObj arena pt)
-        | none => (jsonNull, jsonNull)
-      some <| Json.mkObj [("name", Json.str name), ("type", t), ("type_obj", tObj)]
-    | _ => none
+  -- CF-only: programs have no reg decls, so the registers list is empty.
+  let registers : Array Json := #[]
   .ok <| Json.mkObj [
     ("program_name", Json.str entryName),
     ("generic", Json.bool false),

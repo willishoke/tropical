@@ -30,10 +30,11 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
     new_state.slots[i] = parsed.slot_defaults[i];
   }
 
-  // Scalar state registers: sized but zero-initialized. CF-only removed the
-  // by-name hot-swap transfer; any surviving reg (e.g. Delay.md) zero-inits
-  // on each fresh kernel.
-  new_state.registers.assign(parsed.state_init.size(), 0);
+  // CF-only: there are no per-sample state registers. The kernel's
+  // `%registers` argument survives in the calling convention but is never
+  // read or written, so the backing buffer is empty. The temp pool
+  // (`register_count`) is the SSA scratch the kernel actually uses.
+  new_state.registers.clear();
   new_state.temps.assign(parsed.program.register_count, 0);
 
   const auto & sizes = parsed.program.array_slot_sizes;

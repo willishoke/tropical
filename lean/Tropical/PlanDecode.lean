@@ -32,7 +32,6 @@ private def operandOfWire (j : Json) : Except String NOperand := do
   | "reg" => pure (.reg (← (← j.getObjVal? "slot").getNat?) (← scalarOfWire j))
   | "array_reg" => pure (.arrayReg (← (← j.getObjVal? "slot").getNat?))
   | "session_array_reg" => pure (.sessionArrayReg (← (← j.getObjVal? "slot").getNat?))
-  | "state_reg" => pure (.stateReg (← (← j.getObjVal? "slot").getNat?) (← scalarOfWire j))
   | "param" => pure (.param (← (← j.getObjVal? "ptr").getStr?) (← scalarOfWire j))
   | "source" => pure (.source (← (← j.getObjVal? "index").getNat?) (← scalarOfWire j))
   | "slot" => pure (.slot (← (← j.getObjVal? "index").getNat?) (← scalarOfWire j))
@@ -55,10 +54,6 @@ private def instrOfWire (j : Json) : Except String NInstr := do
   let resultType ← scalarOfWire j "result_type"
   pure { tag, dst, args, loopCount, strides, resultType }
 
-private def regTargetOfWire (j : Json) : Except String RegTarget := do
-  let n ← j.getInt?
-  if n < 0 then pure .arrayManaged else pure (.temp n.toNat)
-
 private partial def instanceOfWire (j : Json) : Except String InstanceFunction := do
   let name ← (← j.getObjVal? "name").getStr?
   let inm ← (← j.getObjVal? "instance_name").getStr?
@@ -66,12 +61,10 @@ private partial def instanceOfWire (j : Json) : Except String InstanceFunction :
   let instrs ← (optArr j "instructions").mapM instrOfWire
   let preInput ← (optArr j "pre_input_instructions").mapM instrOfWire
   let regOff ← (← j.getObjVal? "register_offset").getNat?
-  let stateOff ← (← j.getObjVal? "state_reg_offset").getNat?
   let arrOff ← (← j.getObjVal? "array_slot_offset").getNat?
   let regCount ← (← j.getObjVal? "register_count").getNat?
-  let regTargets ← (optArr j "register_targets").mapM regTargetOfWire
   let children ← (optArr j "children").mapM instanceOfWire
-  pure (.mk name inm preamble instrs preInput regOff stateOff arrOff regCount regTargets children)
+  pure (.mk name inm preamble instrs preInput regOff arrOff regCount children)
 
 private def sinkOfWire (j : Json) : Except String SinkSpec := do
   let inputs := (optArr j "inputs").map (fun x => (x.getNat?).toOption.getD 0)
@@ -84,13 +77,6 @@ private def sourceOfWire (j : Json) : Except String SourceKind := do
   | "tick" => pure .tick
   | "rate" => pure .rate
   | s => .error s!"PlanDecode: bad source kind '{s}'"
-
-private def stateInitOfWire (j : Json) : StateInit :=
-  match j with
-  | .num n => .num n
-  | .bool b => .bool b
-  | .arr items => .arr (items.map (fun x => (x.getNum?).toOption.getD (0 : JsonNumber)))
-  | _ => .num (0 : JsonNumber)
 
 private def strArr (j : Json) (k : String) : Array String :=
   (optArr j k).map (fun x => (x.getStr?).toOption.getD "")
@@ -109,20 +95,12 @@ def FlatPlan.ofWire (j : Json) : Except String FlatPlan := do
   let sources ← if (j.getObjVal? "sources").toOption.isSome
     then (optArr j "sources").mapM sourceOfWire
     else pure defaultSources
-  let registerTypes ← (optArr j "register_types").mapM fun x => do
-    match Tropical.Parse.ScalarKind.ofWire? (← x.getStr?) with
-    | some t => pure t
-    | none => .error "PlanDecode: bad register type"
-  let stateInit := (optArr j "state_init").map stateInitOfWire
   let registerCount := ((j.getObjVal? "register_count").bind (·.getNat?)).toOption.getD 0
   let arraySlotCount := ((j.getObjVal? "array_slot_count").bind (·.getNat?)).toOption.getD 0
   let slotCount := ((j.getObjVal? "slot_count").bind (·.getNat?)).toOption.getD 0
   let slotDefaults := optArr j "slot_defaults"
   pure {
     sampleRate, compilationMode := mode,
-    stateInit,
-    registerNames := strArr j "register_names",
-    registerTypes,
     arraySlotNames := strArr j "array_slot_names",
     registerCount, arraySlotCount,
     arraySlotSizes := natArr j "array_slot_sizes",

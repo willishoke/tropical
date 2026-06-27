@@ -19,7 +19,6 @@ open Lean (JsonNumber)
 open Tropical.Ir
 open Tropical.Ir.Core
 open Tropical.Ir.Emit (EmitSlots ArraySlotInfo ScalarType inputDeclScalarType)
-open Tropical.Plan (StateInit)
 
 /-- Param-handle / slot bindings plus the nested slot maps for the
     fractal compile path (port of `CompileResolvedContext`). -/
@@ -33,21 +32,6 @@ structure Context where
   nestedInputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
   nestedOutputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
 deriving Inhabited
-
-/-- TS `regInit`: a register's init must lower to a literal value. -/
-private def regInit (progName regName : String) : CoreExpr → Except String StateInit
-  | .num n => .ok (.num n)
-  | .bool b => .ok (.bool b)
-  | .arr items => do
-    let nums ← items.mapM fun
-      | .num n => .ok n
-      | _ => .error s!"compileResolved: register init must lower to a literal value"
-    .ok (.arr nums)
-  | _ => .error s!"compileResolved: register init must lower to a literal value"
-where
-  -- progName/regName kept for symmetry with future diagnostics; the TS
-  -- message carries neither.
-  _unused := (progName, regName)
 
 /-- TS `inputPortTypes` derivation (compile_resolved.ts): scalar → it,
     alias → base, array → element kind (alias element → its base). -/
@@ -77,10 +61,6 @@ private def outputPortScalarCount (decl : CoreOutputDecl) : Except String Nat :=
           ++ "type-param dimension; ensure specialize ran first")
     .ok total
 
-private def regFields : CoreBodyDecl → Option (String × CoreExpr × Option CoreExpr × Tropical.Parse.ScalarKind)
-  | .reg name init update? scalarType _ => some (name, init, update?, scalarType)
-  | _ => none
-
 /-- Compile a post-strata `CoreProgram` to a `PerInstancePlan`. -/
 def compileResolved (prog : CoreProgram) (ctx : Context := {}) :
     Except String Tropical.Plan.PerInstancePlan := do
@@ -99,18 +79,6 @@ def compileResolved (prog : CoreProgram) (ctx : Context := {}) :
         throw s!"compileResolved: program '{prog.name}' output '{out.name}' has no outputAssign."
     pure exprs
 
-  -- ── Register tables (body-decl order — slots.ts discipline) ──
-  let mut registerNames : Array String := #[]
-  let mut registerTypes : Array ScalarType := #[]
-  let mut stateInit : Array StateInit := #[]
-  let mut registerExprs : Array (Option CoreExpr) := #[]
-  for d in prog.regs do
-    if let some (name, init, update?, scalarType) := regFields d then
-      registerNames := registerNames.push name
-      registerTypes := registerTypes.push scalarType
-      stateInit := stateInit.push (← regInit prog.name name init)
-      registerExprs := registerExprs.push update?
-
   let inputPortTypes := prog.inputs.map fun d => inputPortType d.type?
   let outputPortScalarCounts ← prog.outputs.mapM outputPortScalarCount
 
@@ -125,14 +93,9 @@ def compileResolved (prog : CoreProgram) (ctx : Context := {}) :
     nestedOutputArraySlots := ctx.nestedOutputArraySlots }
 
   let program ← Tropical.Ir.Emit.emitResolvedProgram
-    outputExprs outputPortScalarCounts registerExprs
-    stateInit registerTypes inputPortTypes emitSlots
+    outputExprs outputPortScalarCounts
+    inputPortTypes emitSlots
     { instances := prog.instances, enclosing := prog }
-
-  let mut arraySlotNames : Array String := #[]
-  for i in [0:stateInit.size] do
-    if stateInit[i]!.isArr then
-      arraySlotNames := arraySlotNames.push registerNames[i]!
 
   return {
     registerCount := program.registerCount
@@ -141,10 +104,6 @@ def compileResolved (prog : CoreProgram) (ctx : Context := {}) :
     instructions := program.instructions
     perChildPreInput := program.perChildPreInput
     outputTargets := program.outputTargets
-    registerTargets := program.registerTargets
-    stateInit
-    registerNames
-    registerTypes
-    arraySlotNames }
+    arraySlotNames := #[] }
 
 end Tropical.Ir.CompileResolved

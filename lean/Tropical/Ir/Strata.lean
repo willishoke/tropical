@@ -54,44 +54,14 @@ private def assertAcyclic (arena : Arena) (root : ProgramIdx) :
     let names := "; ".intercalate (sccs.toList.map fun scc => " → ".intercalate scc.toList)
     throw ⟨s!"strataPipeline: input contains an unbroken inter-instance cycle: {names}"⟩
 
-/-- CF-only enforcement (gated by `Options.cfOnly`): the audio path carries no
-    per-sample state. The single state primitive is `BodyDecl.reg` (surface
-    `reg`/`delay`); emit-level SSA temps are not `BodyDecl.reg` and pass
-    untouched. Scoped to the reachable cone from `root` (the arena can hold
-    unrelated sibling programs — e.g. the whole stdlib chain — that the target
-    doesn't depend on). The arena is acyclic with refs strictly decreasing in
-    index, so a single high→low pass propagates reachability through each
-    program's instance registry and nested `prog` decls. -/
-private def assertNoReg (arena : Arena) (root : ProgramIdx) : Except Error Unit := do
-  let n := arena.programs.size
-  let mut reach : Array Bool := Array.replicate n false
-  if root.idx < n then reach := reach.set! root.idx true
-  for i in [0:n] do
-    let idx := n - 1 - i
-    if reach[idx]! then
-      if let some p := arena.program? ⟨idx⟩ then
-        for (_, pidx) in p.registry do
-          if pidx.idx < n then reach := reach.set! pidx.idx true
-        for d in p.decls do
-          match d with
-          | .prog _ pidx => if pidx.idx < n then reach := reach.set! pidx.idx true
-          | _ => pure ()
-  for i in [0:n] do
-    if reach[i]! then
-      if let some p := arena.program? ⟨i⟩ then
-        let regs := p.regs
-        unless regs.isEmpty do
-          let names := ", ".intercalate (regs.toList.map (·.name))
-          throw ⟨s!"strataPipeline: cfOnly mode forbids per-sample state, but " ++
-            s!"program '{p.name}' declares reg/delay: {names}. Express it as a " ++
-            "closed-form function of the time coordinate (e.g. offset reads), or " ++
-            "compile without cfOnly."⟩
-
 /-- Run passes `1..opts.upto`. Precondition (enforced by callers):
-    `opts.upto ≤ portedPasses`. -/
+    `opts.upto ≤ portedPasses`.
+
+    CF-only is now structural: `BodyDecl.reg` no longer exists in the IR, so
+    no program can declare per-sample state — the elaborator rejects surface
+    `reg`/`next` outright. There is no longer a runtime `assertNoReg` gate. -/
 def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
     Except Error (Arena × ProgramIdx) := do
-  if opts.cfOnly then assertNoReg arena root
   if opts.upto < 1 then return (arena, root)
   assertAcyclic arena root
   let (arena, root) ← Specialize.run arena root opts.typeArgs

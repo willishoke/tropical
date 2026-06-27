@@ -109,8 +109,6 @@ def runCore (arena : Arena) (rootIdx : ProgramIdx)
   let portType := mapPortType shapeDim
 
   let mapDecl : BodyDecl → BodyDecl := fun
-    | .reg name init update? type? liftedFrom? =>
-      .reg name (rw init) (update?.map rw) type? liftedFrom?
     -- Session-scoped by name; preserved as-is.
     | .param name value? => .param name value?
     | .inst name typeKey tArgs inputs =>

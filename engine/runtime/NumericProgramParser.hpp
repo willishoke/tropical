@@ -4,11 +4,13 @@
  * NumericProgramParser.hpp — Parse `tropical_plan_5` JSON → FlatProgram.
  *
  * Thin deserialiser. Since Phase 2 (Lean owns codegen) this is the
- * *manifest reader*: load_ir consumes the plan's metadata — state_init,
- * register / array / slot names + types + sizes, sample_rate, slot
- * defaults — to set up runtime state and hot-swap by name. The
- * instruction stream still parses into FlatProgram's fields but is no
- * longer used for codegen (the kernel comes from Lean-emitted IR).
+ * *manifest reader*: load_ir consumes the plan's metadata — temp pool size
+ * (register_count), array / slot names + sizes, sample_rate, slot defaults —
+ * to set up runtime scratch and slots. CF-only removed per-sample state, so
+ * there are no state registers (state_init / register_names / register_types /
+ * register_targets / state_reg_offset / writebacks). The instruction stream
+ * still parses into FlatProgram's fields but is no longer used for codegen
+ * (the kernel comes from Lean-emitted IR).
  */
 
 #include "jit/OrcJitEngine.hpp"
@@ -95,8 +97,6 @@ inline tropical_jit::Operand parse_operand(const nlohmann::json & j)
     return tropical_jit::Operand::make_reg(j.at("slot").get<uint32_t>(), st);
   if (kind == "array_reg")
     return tropical_jit::Operand::make_array_reg(j.at("slot").get<uint32_t>());
-  if (kind == "state_reg")
-    return tropical_jit::Operand::make_state(j.at("slot").get<uint32_t>(), st);
   if (kind == "param")
   {
     const uint64_t ptr = std::stoull(j.at("ptr").get<std::string>());
@@ -171,9 +171,6 @@ inline tropical_jit::FlatInstr parse_instr(const nlohmann::json & ji)
 struct ParsedPlan5
 {
   tropical_jit::FlatProgram                program;
-  std::vector<double>                      state_init;
-  std::vector<std::string>                 register_names;
-  std::vector<tropical_jit::JitScalarType> register_types;
   std::vector<std::string>                 array_slot_names;
   std::vector<uint32_t>                    mix_indices;
   double                                   sample_rate = 44100.0;
@@ -201,9 +198,9 @@ inline tropical_jit::CompilationMode parse_compilation_mode(const nlohmann::json
 }
 
 /** Parse a single `InstanceProgram` from JSON, recursing into nested
- *  `children`. Each child kernel's writebacks resolve against its own
- *  `state_reg_offset` — nested kernels are independent in the unified
- *  state-register space, just like top-level ones. */
+ *  `children`. CF-only: no state registers, so no `register_targets` /
+ *  `state_reg_offset` / writebacks — only the temp pool (`register_count`)
+ *  and the instruction stream. */
 inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json & jf)
 {
   tropical_jit::InstanceProgram inst;
@@ -224,22 +221,6 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
   if (jf.contains("pre_input_instructions"))
     for (const auto & ji : jf["pre_input_instructions"])
       inst.pre_input_instructions.push_back(parse_instr(ji));
-  // Writebacks: each entry of register_targets[] is the (absolute,
-  // already shifted) temp slot whose value feeds the state register at
-  // position j among this instance's slots, which sits at
-  // `state_reg_offset + j` in the unified state array.
-  const uint32_t state_reg_offset = jf.value("state_reg_offset", 0u);
-  if (jf.contains("register_targets"))
-  {
-    const auto & rts = jf["register_targets"];
-    for (uint32_t j = 0; j < rts.size(); ++j)
-    {
-      inst.writebacks.push_back({
-        state_reg_offset + j,
-        rts[j].get<int32_t>()
-      });
-    }
-  }
   // Recurse into nested children (the fractal architecture: one
   // kernel per InstanceDecl at every nesting depth). Absent or
   // empty `children` array means a leaf kernel.
@@ -263,29 +244,6 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
 
   result.compilation_mode = parse_compilation_mode(plan);
 
-  if (plan.contains("state_init"))
-  {
-    for (const auto & v : plan["state_init"])
-    {
-      if (v.is_number())
-        result.state_init.push_back(v.get<double>());
-      else if (v.is_boolean())
-        result.state_init.push_back(v.get<bool>() ? 1.0 : 0.0);
-      else
-        result.state_init.push_back(0.0);
-    }
-  }
-
-  if (plan.contains("register_names"))
-    for (const auto & n : plan["register_names"])
-      result.register_names.push_back(n.get<std::string>());
-
-  if (plan.contains("register_types"))
-    for (const auto & t : plan["register_types"])
-      result.register_types.push_back(parse_scalar_type(t.get<std::string>()));
-
-  result.program.register_types = result.register_types;
-
   if (plan.contains("array_slot_names"))
     for (const auto & n : plan["array_slot_names"])
       result.array_slot_names.push_back(n.get<std::string>());
@@ -296,10 +254,6 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
   if (plan.contains("array_slot_sizes"))
     for (const auto & s : plan["array_slot_sizes"])
       prog.array_slot_sizes.push_back(s.get<uint32_t>());
-
-  if (plan.contains("register_targets"))
-    for (const auto & t : plan["register_targets"])
-      prog.register_targets.push_back(t.get<int32_t>());
 
   // ── instance_functions[] ──
   if (plan.contains("instance_functions"))
@@ -391,30 +345,11 @@ inline ParsedPlan5 parse_plan4(const nlohmann::json & plan)
 
   result.compilation_mode = parse_compilation_mode(plan);
 
-  if (plan.contains("state_init"))
-  {
-    for (const auto & v : plan["state_init"])
-    {
-      if (v.is_number())
-        result.state_init.push_back(v.get<double>());
-      else if (v.is_boolean())
-        result.state_init.push_back(v.get<bool>() ? 1.0 : 0.0);
-      else
-        result.state_init.push_back(0.0);
-    }
-  }
-  if (plan.contains("register_names"))
-    for (const auto & n : plan["register_names"])
-      result.register_names.push_back(n.get<std::string>());
-  if (plan.contains("register_types"))
-    for (const auto & t : plan["register_types"])
-      result.register_types.push_back(parse_scalar_type(t.get<std::string>()));
   if (plan.contains("array_slot_names"))
     for (const auto & n : plan["array_slot_names"])
       result.array_slot_names.push_back(n.get<std::string>());
 
   auto & prog = result.program;
-  prog.register_types = result.register_types;
   prog.register_count = plan.value("register_count", 0u);
   // plan_4 predates `sources`; seed the canonical pair so legacy
   // `tick`/`rate` operands (upgraded to `source:0/1`) resolve.
@@ -426,9 +361,6 @@ inline ParsedPlan5 parse_plan4(const nlohmann::json & plan)
   if (plan.contains("output_targets"))
     for (const auto & t : plan["output_targets"])
       prog.output_targets.push_back(t.get<uint32_t>());
-  if (plan.contains("register_targets"))
-    for (const auto & t : plan["register_targets"])
-      prog.register_targets.push_back(t.get<int32_t>());
   if (plan.contains("outputs"))
     for (const auto & o : plan["outputs"])
       result.mix_indices.push_back(o.get<uint32_t>());
@@ -447,13 +379,7 @@ inline ParsedPlan5 parse_plan4(const nlohmann::json & plan)
     for (const auto & ji : plan["instructions"])
       inst.instructions.push_back(parse_instr(ji));
 
-  // Lift the top-level register_targets[i] into writebacks. State
-  // slots are 0..register_targets.size()-1 since the plan has only
-  // one instance worth of state.
-  for (uint32_t j = 0; j < prog.register_targets.size(); ++j)
-  {
-    inst.writebacks.push_back({j, prog.register_targets[j]});
-  }
+  // CF-only: no state registers, so no writebacks to lift.
 
   // ── Slot array ──
   if (plan.contains("slot_count") && plan["slot_count"].is_number())

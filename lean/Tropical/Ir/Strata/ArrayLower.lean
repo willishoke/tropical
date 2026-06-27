@@ -51,7 +51,7 @@ private partial def exprNeedsLowering : Expr → Bool
   | .bindingRef _ => true
   | .zeros _ => true
   | .num _ | .bool _
-  | .inputRef _ | .regRef _ | .paramRef _ | .typeParamRef _
+  | .inputRef _ | .paramRef _ | .typeParamRef _
   | .nestedOut _ _ | .sampleRate | .sampleIndex => false
   | .arr items => items.any exprNeedsLowering
   | .tag _ _ payload => payload.any (fun p => exprNeedsLowering p.value)
@@ -76,8 +76,6 @@ private partial def progNeedsLowering (arena : Arena) (prog : Program) :
 
 private partial def declNeedsLowering (arena : Arena) (enclosing : Program) :
     BodyDecl → Except Error Bool
-  | .reg _ init update? _ _ =>
-    return exprNeedsLowering init || update?.any exprNeedsLowering
   | .param .. | .prog .. => return false
   | .inst name typeKey _ inputs => do
     -- Fractal: also check the sub-program for surviving combinators.
@@ -184,7 +182,7 @@ private partial def lowerExpr (subst : SubstMap) (e : Expr) : Except Error Expr 
         throw ⟨s!"arrayLower: zeros count {n} is not a valid array length"⟩
     | _ => return .zeros countL
   -- References / leaves.
-  | .inputRef _ | .regRef _ | .paramRef _ | .typeParamRef _
+  | .inputRef _ | .paramRef _ | .typeParamRef _
   | .nestedOut _ _ | .sampleRate | .sampleIndex => return e
   -- Tag / match: recurse structurally (match survivors are defensive —
   -- sum_lower runs first in the strata order).
@@ -214,12 +212,6 @@ end
 
 private def lowerDecl (decl : BodyDecl) : Except Error BodyDecl := do
   match decl with
-  | .reg name init update? type? liftedFrom? =>
-    return .reg name (← lowerExpr [] init)
-      (← match update? with
-         | some u => some <$> lowerExpr [] u
-         | none => pure none)
-      type? liftedFrom?
   | .param .. | .prog .. => return decl
   | .inst name typeKey tArgs inputs =>
     -- Fractal: typeKey stays; the lowered sub-program now lives

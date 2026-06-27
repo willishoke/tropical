@@ -339,8 +339,7 @@ private def parseStrataOptions (args : List String) :
     | some "nested" => .ok false
     | some m => .error s!"unknown --mode={m}"
   let typeArgs ← parseTypeArgs args
-  let cfOnly := args.contains "--cf-only"
-  return { upto, inlineNested, typeArgs, cfOnly }
+  return { upto, inlineNested, typeArgs }
 
 private def printStrata (opts : Tropical.Ir.Strata.Options)
     (arena : Tropical.Ir.Arena) (root : Tropical.Ir.ProgramIdx) : IO UInt32 := do

@@ -81,12 +81,12 @@ public:
    *
    * `manifest_json` is a tropical_plan_5 JSON whose instruction graph is
    * ignored — codegen comes from `ir_text` (JIT-compiled via
-   * OrcJitEngine::compile_ir_text). The manifest's metadata (state_init,
-   * register/array/slot names + types + sizes, sample_rate, slot
-   * defaults) drives runtime state setup exactly as load_plan does, so
-   * hot-swap state transfer and slot wiring behave identically. Always
-   * fused. This is the seam for the Lean-emits-IR migration: the same
-   * metadata Lean already holds in FlatPlan, plus the IR it will emit.
+   * OrcJitEngine::compile_ir_text). The manifest's metadata (temp pool
+   * size, array/slot names + sizes, sample_rate, slot defaults) drives
+   * runtime scratch + slot setup. CF-only: there is no per-sample state,
+   * so no state-register metadata or by-name transfer. Always fused. This
+   * is the seam for the Lean-emits-IR migration: the same metadata Lean
+   * already holds in FlatPlan, plus the IR it will emit.
    */
   bool load_ir(const std::string & ir_text, const std::string & manifest_json);
 

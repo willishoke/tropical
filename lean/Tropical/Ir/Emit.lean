@@ -39,7 +39,7 @@ namespace Tropical.Ir.Emit
 open Lean (Json JsonNumber)
 open Tropical.Ir
 open Tropical.Ir.Core
-open Tropical.Plan (NOperand DstSlot NInstr RegTarget StateInit)
+open Tropical.Plan (NOperand DstSlot NInstr)
 
 abbrev ScalarType := Tropical.Plan.ScalarType
 
@@ -184,7 +184,6 @@ def CompileResult.scalarType : CompileResult → ScalarType
 
 structure EmitSt where
   slots : EmitSlots
-  stateRegTypes : Array ScalarType
   inputPortTypes : Array ScalarType
   nextReg : Nat := 0
   nextArraySlot : Nat := 0
@@ -192,8 +191,6 @@ structure EmitSt where
   instrs : Array NInstr := #[]
   hashTable : Std.HashMap String Nat := {}
   memo : Std.HashMap String CompileResult := {}
-  /-- reg slot → backing array slot + length (array-typed regs). -/
-  arrayRegMap : Array (Nat × ArraySlotInfo) := #[]
 deriving Inhabited
 
 abbrev EmitM := StateT EmitSt (Except String)
@@ -202,7 +199,7 @@ abbrev EmitM := StateT EmitSt (Except String)
 private def operandKind : NOperand → String
   | .const .. => "const" | .input .. => "input" | .reg .. => "reg"
   | .arrayReg _ => "array_reg" | .sessionArrayReg _ => "session_array_reg"
-  | .stateReg .. => "state_reg" | .param .. => "param"
+  | .param .. => "param"
   | .source .. => "source" | .slot .. => "slot"
 
 private def allocReg : EmitM Nat :=
@@ -254,7 +251,6 @@ private partial def structuralId (e : CoreExpr) : EmitM Nat := do
     let keys ← items.mapM structuralKey
     intern ("a:" ++ String.intercalate "," keys.toList)
   | .inputRef i => intern s!"op:inputRef|idx={i.idx}"
-  | .regRef i => intern s!"op:regRef|idx={i.idx}"
   | .paramRef i => intern s!"op:paramRef|idx={i.idx}"
   | .nestedOut i o => intern s!"op:nestedOut|inst={i.idx}|out={o.idx}"
   | .sampleRate => intern "op:sampleRate"
@@ -319,12 +315,6 @@ private def tryTerminal (e : CoreExpr) (expected : Option ScalarType) :
       match lookup st.slots.inputSlotOverride i.idx with
       | some slot => pure (some (.slot slot portT, portT))
       | none => pure (some (.input i.idx portT, portT))
-  | .regRef i =>
-    if (lookup st.arrayRegMap i.idx).isSome then
-      pure none
-    else
-      let regT := st.stateRegTypes[i.idx]?.getD .float
-      pure (some (.stateReg i.idx regT, regT))
   | .paramRef i =>
     match lookup st.slots.paramSlots i.idx with
     | some slot => pure (some (.slot slot .float, .float))
@@ -374,11 +364,6 @@ private partial def compileNodeUncached (e : CoreExpr) (expected : Option Scalar
     EmitM CompileResult := do
   match e with
   | .arr items => compilePack items expected
-  | .regRef i =>
-    match lookup (← get).arrayRegMap i.idx with
-    | some arr => pure (.array (.arrayReg arr.slot) arr.size .float)
-    | none =>
-      throw s!"emit_resolved: regRef to non-array slot {i.idx} reached compileNodeUncached unexpectedly"
   | .inputRef i =>
     match lookup (← get).slots.inputArraySlots i.idx with
     | some info => pure (.array (.sessionArrayReg info.slot) info.size .float)
@@ -548,7 +533,6 @@ structure FlatProgram where
   instructions : Array NInstr
   perChildPreInput : Array (Array NInstr)
   outputTargets : Array Nat
-  registerTargets : Array RegTarget
 deriving Inhabited
 
 /-- Fractal context: the sub-instance decls of the program being
@@ -568,7 +552,6 @@ def inputDeclScalarType (t? : Option CorePortType) : ScalarType :=
 
 private def instName : CoreBodyDecl → String
   | .inst n .. => n
-  | .reg n .. => n
   | .param n _ => n
   | .progDecl n => n
 
@@ -581,11 +564,9 @@ private def instInputs : CoreBodyDecl → Array CoreInstanceInput
   | _ => #[]
 
 def emitProgram (outputExprs : Array CoreExpr)
-    (registerExprs : Array (Option CoreExpr))
     (outputPortScalarCounts : Array Nat)
     (nested : NestedContext) : EmitM FlatProgram := do
   let mut outputTargets : Array Nat := #[]
-  let mut registerTargets : Array RegTarget := #[]
 
   -- ── Fractal: per-child pre-input blocks ──
   let mut perChildPreInput : Array (Array NInstr) := #[]
@@ -665,36 +646,6 @@ def emitProgram (outputExprs : Array CoreExpr)
           emit (Tropical.Plan.instrIndex dst #[op, .const elemI .int] rt)
           outputTargets := outputTargets.push dst
 
-  -- ── Two-pass register update ──
-  let mut arrayCopies : Array (NOperand × Nat × Nat) := #[]  -- (src, dstSlot, size)
-  for ri in [0:registerExprs.size] do
-    match registerExprs[ri]! with
-    | none =>
-      registerTargets := registerTargets.push .arrayManaged
-    | some expr =>
-      let regExpected := (← get).stateRegTypes[ri]?
-      let r ← compileNode expr regExpected
-      match r with
-      | .array op _ _ =>
-        let some arrInfo := lookup (← get).arrayRegMap ri
-          | throw s!"emitProgram: array-result update on non-array reg {ri}"
-        match op with
-        | .arrayReg slot =>
-          if slot != arrInfo.slot then
-            arrayCopies := arrayCopies.push (op, arrInfo.slot, arrInfo.size)
-        | .sessionArrayReg _ =>
-          arrayCopies := arrayCopies.push (op, arrInfo.slot, arrInfo.size)
-        | _ =>
-          throw s!"emitProgram: array result has non-array operand kind {operandKind op}"
-        registerTargets := registerTargets.push .arrayManaged
-      | .scalar op rt =>
-        let dst ← allocReg
-        emit (Tropical.Plan.instrScalar "Add" dst #[op, .const (0 : Nat) rt] rt)
-        registerTargets := registerTargets.push (.temp dst)
-  for (src, dstSlot, size) in arrayCopies do
-    emit (Tropical.Plan.instrArray "Add" dstSlot #[src, .const (0 : Nat) .float]
-      size #[1, 0] .float)
-
   let st ← get
   return {
     registerCount := st.nextReg
@@ -702,31 +653,19 @@ def emitProgram (outputExprs : Array CoreExpr)
     arraySlotSizes := st.arraySizes
     instructions := st.instrs
     perChildPreInput
-    outputTargets
-    registerTargets }
+    outputTargets }
 
-/-- Public entry: construct the emitter state (seeding the array-reg
-    backing slots from array-shaped state inits, in reg order) and run
-    the driver. -/
+/-- Public entry: construct the emitter state and run the driver.
+    CF-only has no per-sample state, so there are no register backing
+    slots to seed. -/
 def emitResolvedProgram
     (outputExprs : Array CoreExpr)
     (outputPortScalarCounts : Array Nat)
-    (registerExprs : Array (Option CoreExpr))
-    (stateInit : Array StateInit)
-    (stateRegTypes : Array ScalarType)
     (inputPortTypes : Array ScalarType)
     (slots : EmitSlots)
     (nested : NestedContext) : Except String FlatProgram := do
-  -- Constructor seeding: array inits allocate their backing slots first.
-  let mut st : EmitSt := { slots, stateRegTypes, inputPortTypes }
-  for i in [0:stateInit.size] do
-    if let .arr items := stateInit[i]! then
-      let slot := st.nextArraySlot
-      st := { st with
-        nextArraySlot := st.nextArraySlot + 1
-        arraySizes := st.arraySizes.push items.size
-        arrayRegMap := st.arrayRegMap.push (i, { slot, size := items.size }) }
-  let (prog, _) ← (emitProgram outputExprs registerExprs outputPortScalarCounts nested).run st
+  let st : EmitSt := { slots, inputPortTypes }
+  let (prog, _) ← (emitProgram outputExprs outputPortScalarCounts nested).run st
   return prog
 
 end Tropical.Ir.Emit
