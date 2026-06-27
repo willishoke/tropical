@@ -21,6 +21,8 @@ const FREQS: [number, number] = [220, 330]
 const SR = 44100
 const FPS = 30
 const BAND_H = 5
+const WARMUP = 64 // samples rendered before the window to prime the per-wire unit
+                  // delays the MCP session inserts (otherwise the window starts cold)
 const TIMES = [256, 512, 1024, 2048, 4096]
 const TRIGS = ['off', 'rising']
 const SEARCH = Math.ceil(SR / Math.min(...FREQS)) + 8 // ≥ one period, so a rising edge always exists
@@ -73,15 +75,24 @@ function Scope() {
           const display = TIMES[k.timeIdx]
           const search = k.trig === 0 ? 0 : SEARCH
           const count = display + search
-          // render the window ending at the master position, then trigger-lock.
-          // (morph sweeps inside the patch via the LFO — it's already baked into
-          // whatever the kernel computes at these sample indices.)
+          // Render the window ending at the master position, with a warmup lead so
+          // the session's per-wire unit delays are primed (the patch is slightly
+          // stateful via those delays; a cold start gives garbage samples). Then
+          // discard the warmup and trigger-lock the rest.
           const p = (await c.call('playback_position', {})).position as number
-          const res = await c.call('render_window', { start: Math.max(0, p - count), count, slots })
-          const [a, b] = res.values as number[][]
-          const off = k.trig === 1 ? Math.max(0, findTrigger(a, 0, search)) : 0
-          setRows1(renderWaveform(slice(a, off, display, k.offset), w, BAND_H))
-          setRows2(renderWaveform(slice(b, off, display, k.offset), w, BAND_H))
+          const desiredStart = Math.max(0, p - count)
+          const renderStart = Math.max(0, desiredStart - WARMUP)
+          const lead = desiredStart - renderStart
+          const res = await c.call('render_window', { start: renderStart, count: lead + count, slots })
+          const a = (res.values[0] as number[]).slice(lead)
+          const b = (res.values[1] as number[]).slice(lead)
+          // per-channel trigger: each locks to its own rising crossing, so both
+          // sit still regardless of their frequency ratio (a shared trigger
+          // would let the un-triggered channel slide).
+          const off1 = k.trig === 1 ? Math.max(0, findTrigger(a, 0, search)) : 0
+          const off2 = k.trig === 1 ? Math.max(0, findTrigger(b, 0, search)) : 0
+          setRows1(renderWaveform(slice(a, off1, display, k.offset), w, BAND_H))
+          setRows2(renderWaveform(slice(b, off2, display, k.offset), w, BAND_H))
           setPos(p)
         } catch { /* transient (mid hot-swap) — skip frame */ }
         if (!stopped) setTimeout(tick, 1000 / FPS)
