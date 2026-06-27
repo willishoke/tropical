@@ -35,7 +35,7 @@ kernel keeps playing and the error is recoverable).
 namespace Tropical.Engine
 
 open Lean (Json toJson)
-open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies unwrapDelay prettyExpr)
+open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies prettyExpr)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 structure Env where
@@ -920,9 +920,9 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
       let toStore := match existing, argStr? s "combine" with
         | some w, some combine =>
           Json.mkObj [("op", Json.str combine),
-                      ("args", Json.arr #[unwrapDelay w.expr, adapted])]
+                      ("args", Json.arr #[w.expr, adapted])]
         | _, _ => adapted
-      env.state.modify (·.setWire sInst resolvedName toStore)
+      env.state.modify (·.setWireRaw sInst resolvedName toStore)
       results := results.push <| Json.mkObj
         [("instance", Json.str sInst), ("input", Json.str resolvedName), ("expr", toStore)]
 
@@ -958,7 +958,7 @@ def handleWireChain (env : Env) (args : Json) : EngineM Json := do
     let inputName ← resolveInputName firstInst.progMeta inputPort
     let idx := (firstInst.progMeta.inputNames.idxOf? inputName).getD 0
     let expr ← adaptInputExpr st initial (inputTypeObj firstInst.progMeta idx) firstName inputName
-    env.state.modify (·.setWire firstName inputName expr)
+    env.state.modify (·.setWireRaw firstName inputName expr)
 
   let mut linked : Array Json := #[]
   for i in [0:instanceNames.size - 1] do
@@ -973,7 +973,7 @@ def handleWireChain (env : Env) (args : Json) : EngineM Json := do
     let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
     let st' ← env.state.get
     let expr ← adaptInputExpr st' refExpr (inputTypeObj dstInst.progMeta idx) dstName inName
-    env.state.modify (·.setWire dstName inName expr)
+    env.state.modify (·.setWireRaw dstName inName expr)
     linked := linked.push (Json.str s!"{srcName}.{outName} → {dstName}.{inName}")
 
   syncCompile env
@@ -1002,7 +1002,7 @@ def handleWireZip (env : Env) (args : Json) : EngineM Json := do
       ("instance", Json.str srcName), ("output", Json.str outName)]
     let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
     let expr ← adaptInputExpr st refExpr (inputTypeObj dstInst.progMeta idx) dstName inName
-    env.state.modify (·.setWire dstName inName expr)
+    env.state.modify (·.setWireRaw dstName inName expr)
     linked := linked.push (Json.str s!"{srcName}.{outName} → {dstName}.{inName}")
   syncCompile env
   pure <| Json.mkObj [("linked", Json.arr linked)]
@@ -1043,7 +1043,7 @@ def handleFanOut (env : Env) (args : Json) : EngineM Json := do
     let inName ← resolveInputName dstInst.progMeta ((getField? dst "input").getD jsonNull)
     let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
     let expr ← adaptInputExpr st' sourceExpr (inputTypeObj dstInst.progMeta idx) dstName inName
-    env.state.modify (·.setWire dstName inName expr)
+    env.state.modify (·.setWireRaw dstName inName expr)
     linked := linked.push (Json.str s!"{sourceLabel} → {dstName}.{inName}")
   syncCompile env
   pure <| Json.mkObj [("linked", Json.arr linked)]
@@ -1076,36 +1076,10 @@ def handleFanIn (env : Env) (args : Json) : EngineM Json := do
   let inName ← resolveInputName dstInst.progMeta ((getField? target "input").getD jsonNull)
   let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
   let expr ← adaptInputExpr st sumExpr (inputTypeObj dstInst.progMeta idx) targetName inName
-  env.state.modify (·.setWire targetName inName expr)
+  env.state.modify (·.setWireRaw targetName inName expr)
   syncCompile env
   pure <| Json.mkObj [("mixed", toJson sources.size),
                       ("target", Json.str s!"{targetName}.{inName}")]
-
-def handleFeedback (env : Env) (args : Json) : EngineM Json := do
-  let from_ := (getField? args "from").getD jsonNull
-  let to := (getField? args "to").getD jsonNull
-  let init := (arg? args "init").getD (toJson (0 : Nat))
-  let delayId := argStr? args "delay_id"
-
-  let st ← env.state.get
-  let fromName := (argStr? from_ "instance").getD ""
-  let toName := (argStr? to "instance").getD ""
-  let srcInst ← requireInstance st fromName "from.instance"
-  let dstInst ← requireInstance st toName "to.instance"
-
-  let outName ← resolveOutputName srcInst.progMeta ((getField? from_ "output").getD jsonNull)
-  let inName ← resolveInputName dstInst.progMeta ((getField? to "input").getD jsonNull)
-
-  let refExpr := Json.mkObj [("op", Json.str "ref"),
-    ("instance", Json.str fromName), ("output", Json.str outName)]
-  validateOrInternal refExpr s!"{toName}.{inName}"
-  let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
-  let expr ← adaptInputExpr st refExpr (inputTypeObj dstInst.progMeta idx) toName inName
-  env.state.modify (·.setWire toName inName expr (init := init) (id := delayId))
-
-  syncCompile env
-  pure <| Json.mkObj [("feedback",
-    Json.str s!"{fromName}.{outName} →[delay init={tsInterp init}]→ {toName}.{inName}")]
 
 def handleListWiring (env : Env) (args : Json) : EngineM Json := do
   let filter := argStr? args "instance"
@@ -1848,7 +1822,6 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "wire_zip"        => handleWireZip env args
   | "fan_out"         => handleFanOut env args
   | "fan_in"          => handleFanIn env args
-  | "feedback"        => handleFeedback env args
   | "export_program"  => handleExportProgram env args
   | "list_programs"   => handleListPrograms env
   | "list_instances"  => handleListInstances env

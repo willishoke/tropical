@@ -86,16 +86,6 @@ tool_args FanIn where
   target : Json
 deriving instance ToJson for FanIn
 
-tool_args Feedback where
-  /-- Source: {instance, output}, read through a 1-sample delay. -/
-  «from» : Json
-  /-- Target: {instance, input}. -/
-  to : Json
-  /-- Initial delay register value (default 0). -/
-  init : Option Float
-  /-- Stable delay register name — preserves its state across hot-swaps. -/
-  delay_id : Option String
-deriving instance ToJson for Feedback
 
 tool_args ListWiring where
   /-- If given, filter to inputs of this instance. -/
@@ -156,7 +146,6 @@ def tropicalTools (r : Relay) : List Tool := [
   fwd WireZip        r "wire_zip"        "Wire two equal-length lists of ports pairwise. One recompile.",
   fwd FanOut         r "fan_out"         "Wire one source (instance output or ExprNode) to many target inputs.",
   fwd FanIn          r "fan_in"          "Sum N instance outputs (optional per-source gain) into one input.",
-  fwd Feedback       r "feedback"        "Wire an output back to an input through a 1-sample delay (no extra instance).",
   fwd ListWiring     r "list_wiring"     "List all wired inputs and the expression assigned to each.",
   -- program I/O
   fwd ExportProgram  r "export_program"  "Crystallize selected session instances into a reusable program type.",

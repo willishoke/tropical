@@ -7,7 +7,6 @@ Ports of the TS wire-expression helpers the engine layer needs:
 
 - `validateExpr`   — structural check of the closed op set (compiler/expr.ts)
 - `exprDependencies` — instance names referenced via `ref` ops (compiler/compiler.ts)
-- `unwrapDelay` / `wrapInUnitDelay` — the auto-delay convention (compiler/session.ts)
 - `prettyExpr`     — human-readable rendering (compiler/session.ts)
 
 Expressions stay as raw `Json` — the wire format is the type. The Lean
@@ -235,21 +234,6 @@ partial def exprDependencies (node : Json) : Array String :=
         | _ => acc
     | _ => acc
   go node #[]
-
--- Auto-delay convention ----------------------------------------------------------
-
-/-- Strip a top-level `delay()` wrapper if present. -/
-def unwrapDelay (expr : Json) : Json :=
-  if opOf? expr == some "delay" then
-    match getField? expr "args" with
-    | some (.arr #[inner]) => inner
-    | _ => expr
-  else expr
-
-/-- `{op:'delay', args:[expr], init, id}` — the session-level unit delay. -/
-def wrapInUnitDelay (expr : Json) (init : Json) (id : String) : Json :=
-  Json.mkObj [("op", Json.str "delay"), ("args", Json.arr #[expr]),
-              ("init", init), ("id", Json.str id)]
 
 -- prettyExpr ----------------------------------------------------------------------
 
