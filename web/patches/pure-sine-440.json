@@ -1,1 +1,1 @@
-{"schema":"tropical_program_2","name":"pure_sine_440","body":{"op":"block","decls":[{"op":"instanceDecl","name":"osc","program":"SinOsc","inputs":{"freq":440}}],"assigns":[]},"audio_outputs":[{"instance":"osc","output":"sine"}]}
+{"schema":"tropical_program_2","name":"pure_sine_440","body":{"op":"block","decls":[{"op":"instanceDecl","name":"osc","program":"FixedSinOsc","inputs":{"freq":440}}],"assigns":[]},"audio_outputs":[{"instance":"osc","output":"sine"}]}
