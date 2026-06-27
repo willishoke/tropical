@@ -201,10 +201,43 @@ describe('wasm vs native JIT', () => {
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
-  // NOTE: the array-zipWith wholesale-writeback equivalence test was removed in
-  // the CF-only migration — it exercised an array *register* (reg `arr` +
-  // nextUpdate), which no longer exists. A CF-array (generate/fold/index, no
-  // register) cross-backend test is worth adding back; tracked in the doc sweep.
+  // CF-array equivalence: generate + zipWith + fold, seeded from sampleIndex so
+  // LLVM can't constant-fold the array ops away. Replaces the old array-register
+  // writeback test (its `reg arr` was removed in the CF-only migration).
+  test('array (generate / zipWith / fold, sampleIndex-seeded) — WASM matches JIT', async () => {
+    const program: ProgramFile = {
+      schema: 'tropical_program_2',
+      name: 'eq_arraycf',
+      body: { op: 'block', decls: [
+        { op: 'programDecl', name: 'ArrayCF', program: {
+          op: 'program', name: 'ArrayCF',
+          ports: { inputs: [], outputs: ['out'] },
+          body: { op: 'block', decls: [],
+            assigns: [{ op: 'outputAssign', name: 'out', expr: {
+              op: 'fold',
+              over: { op: 'zipWith',
+                a: { op: 'generate', count: 4, var: 'i',
+                     body: { op: 'to_float', args: [{ op: 'binding', name: 'i' }] } },
+                b: [10, 20, 30, 40],
+                x_var: 'x', y_var: 'y',
+                body: { op: 'mul', args: [
+                  { op: 'add', args: [{ op: 'binding', name: 'x' }, { op: 'binding', name: 'y' }] },
+                  { op: 'to_float', args: [{ op: 'bitAnd', args: [
+                    { op: 'toInt', args: [{ op: 'sampleIndex' }] }, 255] }] } ] } },
+              init: 0, acc_var: 'acc', elem_var: 'e',
+              body: { op: 'add', args: [{ op: 'binding', name: 'acc' }, { op: 'binding', name: 'e' }] }
+            }}],
+            value: null } } },
+        { op: 'instanceDecl', name: 'inst', program: 'ArrayCF', inputs: {} }
+      ]},
+      audio_outputs: [{ instance: 'inst', output: 'out' }],
+    }
+    const wire = compileViaLean(program)
+    const N = 64
+    const nat = runNative(wire, N)
+    const wasm = await runWasm(program, wire, N)
+    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+  })
 
   test('op-zoo (bitwise / shifts / float↔int casts / mod / clamp / select) — WASM matches JIT', async () => {
     const prog = opZooProgram()
