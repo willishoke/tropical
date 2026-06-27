@@ -32,11 +32,26 @@ TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test   # WASM≡
 ```
 
 The compiler is the Lean `frontend` binary — there is no TS compiler and no
-koffi FFI subprocess. `tropicaltest` (`lake exe tropicaltest`) drives the
-goldens and the native realization-variant equivalence directly through the
-engine. The bun suites are the surviving cross-backend gate (`tests/web`,
-wasm vs. JIT) and the MCP protocol tests (`mcp/`), both run against
-the live Lean engine via `TROPICAL_ENGINE_CMD`.
+koffi FFI subprocess. `tropicaltest` (the built binary at
+`./lean/.lake/build/bin/tropicaltest`) drives the goldens and the native
+realization-variant equivalence directly through the engine. The bun suites
+are the surviving cross-backend gate (`tests/web`, wasm vs. JIT) and the MCP
+protocol tests (`mcp/`), both run against the live Lean engine via
+`TROPICAL_ENGINE_CMD`.
+
+**Run these binaries directly — never via `lake exe`.** `libtropical`
+hard-links Homebrew's `liblldWasm` (the wasm emitter), which in turn binds the
+absolute `/opt/homebrew/opt/llvm/lib/libLLVM.dylib` (the one with the AMDGPU
+target). `lake exe` forces the Lean toolchain's lib dir onto
+`DYLD_LIBRARY_PATH` so the process can find `libleanshared`, and that shadows
+`libLLVM.dylib` *by leaf name* with Lean's own bundled libLLVM (no AMDGPU
+target) — so the binary dies at load with
+`Symbol not found: _LLVMInitializeAMDGPUAsmParser`. The built binary instead
+resolves `libleanshared` via rpath (which only applies to `@rpath/…` refs and
+never shadows the absolute Homebrew libLLVM), so it runs clean. This is why
+`make validate` invokes `./lean/.lake/build/bin/…` directly throughout and
+never `lake exe`. (Not a version mismatch — pinning won't help; it's the
+`lake exe` DYLD environment. Run the binary, not the wrapper.)
 
 **If equivalence tests fail unexpectedly, clear the JIT cache first.**
 `rm -rf ~/.cache/tropical/kernels` — the LLVM-IR cache is keyed by an MD5
