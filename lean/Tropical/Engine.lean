@@ -48,6 +48,7 @@ structure Env where
 -- Reserved audio-output boundary leaf.
 private def dacName : String := "dac"
 private def dacOut : String := "out"
+private def scopeName : String := "scope"
 
 -- ── Json access helpers ──────────────────────────────────────────────────────
 
@@ -204,6 +205,19 @@ def runStrataChecked (typeArgs : Array (String × Lean.JsonNumber))
     if let .error e := Tropical.Ir.Core.check arena rootIdx then
       throw s!"post-strata Core check failed (port bug): {e}"
   pure (arena, rootIdx)
+
+/-- Emit the (LLVM IR text, manifest JSON) for a compiled session plan
+    without loading it. Shared by the audio compile (`syncCompile`) and the
+    lazy inspection compile (Part II): both realizations go through the same
+    `toWire`/`emitKernel` path; only the originating `FlatPlan` differs. -/
+def buildKernelIr (plan : Tropical.Plan.FlatPlan) : EngineM (String × String) := do
+  let planJson ← match plan.toWire with
+    | .error msg => internalError msg
+    | .ok j => pure j.compress
+  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .error msg => internalError s!"EmitLlvm: {msg}"
+    | .ok s => pure s
+  pure (ir, planJson)
 
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 
@@ -374,14 +388,9 @@ def syncCompile (env : Env) : EngineM Unit := do
       root := rootCore } with
     | .error msg => internalError msg
     | .ok p => pure p
-  let planJson ← match plan.toWire with
-    | .error msg => internalError msg
-    | .ok j => pure j.compress
   -- Lean owns codegen: emit LLVM IR from the in-memory plan and hand it to
   -- the engine (planJson is the metadata manifest). No C++ plan compiler.
-  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
-    | .error msg => internalError s!"EmitLlvm: {msg}"
-    | .ok s => pure s
+  let (ir, planJson) ← buildKernelIr plan
   env.runtime.loadIr ir planJson
 
 /-- Harness-only (diffcli `compile`): rebuild the plan from the current
@@ -889,6 +898,7 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
   -- Sets
   let mut results : Array Json := #[]
   let mut dacWires : Array Json := #[]
+  let mut scopeWires : Array Json := #[]
   for s in setOps do
     let sInst := (argStr? s "instance").getD ""
     let sInput := (getField? s "input").getD jsonNull
@@ -904,6 +914,19 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
       env.state.modify fun st =>
         { st with graphOutputs := st.graphOutputs.push (srcInst, srcOut) }
       dacWires := dacWires.push <| Json.mkObj
+        [("instance", Json.str sInst), ("input", sInput), ("expr", sExpr)]
+    else if sInst == scopeName then
+      let tapName := (argStr? s "input").getD ""
+      if tapName.isEmpty then
+        throwBare .invalidValue
+          s!"scope tap requires a string input name ({scopeName}.<name>)."
+          (param := some "set[].input") (value := some sInput)
+      validateOrInternal sExpr s!"{scopeName}.{tapName}"
+      let st ← env.state.get
+      let (srcInst, srcOut) ← resolveDacSource st sExpr
+      env.state.modify fun st =>
+        { st with scopeTaps := (st.scopeTaps.filter (·.1 != tapName)).push (tapName, srcInst, srcOut) }
+      scopeWires := scopeWires.push <| Json.mkObj
         [("instance", Json.str sInst), ("input", sInput), ("expr", sExpr)]
     else
       let st ← env.state.get
@@ -926,6 +949,7 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
   pure <| Json.mkObj <|
     [("set", Json.arr results)]
     ++ (if dacWires.isEmpty then [] else [("dac", Json.arr dacWires)])
+    ++ (if scopeWires.isEmpty then [] else [("scope", Json.arr scopeWires)])
     ++ [("removed", toJson removeOps.size)]
     ++ (if dacRemoved > 0 then [("dacRemoved", toJson dacRemoved)] else [])
 
