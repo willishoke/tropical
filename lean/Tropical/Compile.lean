@@ -80,13 +80,36 @@ def PortMeta.ofJson (j : Json) : PortMeta :=
 -- Compile-time session allocation state
 -- ─────────────────────────────────────────────────────────────
 
+/-- A string-keyed association with O(1) lookup *and* preserved insertion order:
+    `entries` is the ordered list (the iteration order → the plan's slot layout),
+    `index` maps a key to its first position for O(1) `get?` (vs the old linear
+    `Array.find?`). First-match semantics match the old `find?`; iterating
+    `entries` reproduces the old `Array` order, so the emitted slot layout is
+    byte-for-byte unchanged. -/
+structure OrderedAssoc (α : Type) where
+  entries : Array (String × α) := #[]
+  index : Std.HashMap String Nat := {}
+deriving Inhabited
+
+namespace OrderedAssoc
+variable {α : Type}
+def get? (m : OrderedAssoc α) (k : String) : Option α :=
+  (m.index.get? k).bind fun i => (m.entries[i]?).map (·.2)
+/-- Append, preserving first-match: a duplicate key keeps the first index. -/
+def push (m : OrderedAssoc α) (kv : String × α) : OrderedAssoc α :=
+  if m.index.contains kv.1 then { m with entries := m.entries.push kv }
+  else { entries := m.entries.push kv, index := m.index.insert kv.1 m.entries.size }
+def ofArray (a : Array (String × α)) : OrderedAssoc α :=
+  a.foldl (fun m kv => m.push kv) {}
+end OrderedAssoc
+
 structure SessionAlloc where
   slotCount : Nat
-  paramSlots : Array (String × Nat)
-  outputSlotRegistry : Array (String × Nat)
-  inputSlotRegistry : Array (String × Nat) := #[]
-  outputPortMeta : Array (String × PortMeta)
-  inputPortMeta : Array (String × PortMeta) := #[]
+  paramSlots : OrderedAssoc Nat
+  outputSlotRegistry : OrderedAssoc Nat
+  inputSlotRegistry : OrderedAssoc Nat := {}
+  outputPortMeta : OrderedAssoc PortMeta
+  inputPortMeta : OrderedAssoc PortMeta := {}
   ioCount : Nat
   ioSizes : Array Nat
   ioNames : Array String
@@ -94,9 +117,9 @@ deriving Inhabited
 
 def SessionAlloc.ofAlloc (a : Tropical.Lowering.Alloc) : SessionAlloc :=
   { slotCount := a.slotCount
-    paramSlots := a.paramSlots
-    outputSlotRegistry := a.outputSlots
-    outputPortMeta := a.outputMeta.map fun (k, j) => (k, PortMeta.ofJson j)
+    paramSlots := OrderedAssoc.ofArray a.paramSlots
+    outputSlotRegistry := OrderedAssoc.ofArray a.outputSlots
+    outputPortMeta := OrderedAssoc.ofArray (a.outputMeta.map fun (k, j) => (k, PortMeta.ofJson j))
     ioCount := a.ioCount
     ioSizes := a.ioSizes
     ioNames := a.ioNames }
@@ -143,7 +166,7 @@ def allocateOutputSlots (s : SessionAlloc) (instPath : String) (prog : CoreProgr
   let mut s := s
   for port in prog.outputs do
     let portKey := slotKey instPath port.name
-    if (assocGet? s.outputPortMeta portKey).isSome then
+    if (s.outputPortMeta.get? portKey).isSome then
       continue
     let exp ← expandPortToSlots portKey port.type?
     match exp.arraySize? with
@@ -175,7 +198,7 @@ private def tryAliasInputArrayWire (s : SessionAlloc) (wires : Array Tropical.Wi
     if opOf? w.expr == some "ref" then do
       let srcInst ← getStrField? w.expr "instance"
       let srcOut ← getStrField? w.expr "output"
-      let pmeta ← assocGet? s.outputPortMeta (slotKey srcInst srcOut)
+      let pmeta ← s.outputPortMeta.get? (slotKey srcInst srcOut)
       let slot ← pmeta.arraySlot?
       let size ← pmeta.arraySize?
       pure { slot, size }
@@ -198,7 +221,7 @@ def allocateInputSlots (s : SessionAlloc) (wires : Array Tropical.Wire)
   let mut s := s
   for port in prog.inputs do
     let portKey := slotKey instPath port.name
-    if (assocGet? s.inputPortMeta portKey).isSome then
+    if (s.inputPortMeta.get? portKey).isSome then
       continue
     let exp ← expandPortToSlots portKey port.type?
     match exp.arraySize? with
@@ -234,23 +257,23 @@ def allocateInputSlots (s : SessionAlloc) (wires : Array Tropical.Wire)
 -- ─────────────────────────────────────────────────────────────
 
 private def lookupOutputSlot (s : SessionAlloc) (instPath portName : String) : Option Nat := do
-  let pmeta ← assocGet? s.outputPortMeta (slotKey instPath portName)
+  let pmeta ← s.outputPortMeta.get? (slotKey instPath portName)
   let first ← pmeta.scalarSlotNames[0]?
-  assocGet? s.outputSlotRegistry first
+  s.outputSlotRegistry.get? first
 
 private def lookupInputSlot (s : SessionAlloc) (instPath portName : String) : Option Nat := do
-  let pmeta ← assocGet? s.inputPortMeta (slotKey instPath portName)
+  let pmeta ← s.inputPortMeta.get? (slotKey instPath portName)
   let first ← pmeta.scalarSlotNames[0]?
-  assocGet? s.inputSlotRegistry first
+  s.inputSlotRegistry.get? first
 
 private def lookupOutputArraySlot (s : SessionAlloc) (instPath portName : String) :
     Option ArraySlotInfo := do
-  let pmeta ← assocGet? s.outputPortMeta (slotKey instPath portName)
+  let pmeta ← s.outputPortMeta.get? (slotKey instPath portName)
   pure { slot := ← pmeta.arraySlot?, size := ← pmeta.arraySize? }
 
 private def lookupInputArraySlot (s : SessionAlloc) (instPath portName : String) :
     Option ArraySlotInfo := do
-  let pmeta ← assocGet? s.inputPortMeta (slotKey instPath portName)
+  let pmeta ← s.inputPortMeta.get? (slotKey instPath portName)
   pure { slot := ← pmeta.arraySlot?, size := ← pmeta.arraySize? }
 
 /-- Naming-transparent synthetic session root. -/
@@ -312,7 +335,7 @@ private def emitWriteSlots (s : SessionAlloc) (instanceName : String)
   let mut targetIdx := 0
   for portName in outputPortNames do
     let portKey := slotKey instanceName portName
-    let some pmeta := assocGet? s.outputPortMeta portKey
+    let some pmeta := s.outputPortMeta.get? portKey
       | throw (s!"compileSessionSlotted: instance '{instanceName}' port '{portName}' "
           ++ "missing outputPortMeta entry (allocateOutputSlots should have run).")
     match pmeta.arraySlot?, pmeta.arraySize? with
@@ -329,7 +352,7 @@ private def emitWriteSlots (s : SessionAlloc) (instanceName : String)
     | _, _ =>
       for scalarI in [0:pmeta.scalarSlotNames.size] do
         let scalarSlotName := pmeta.scalarSlotNames[scalarI]!
-        let some slotIdx := assocGet? s.outputSlotRegistry scalarSlotName
+        let some slotIdx := s.outputSlotRegistry.get? scalarSlotName
           | throw s!"compileSessionSlotted: scalar slot '{scalarSlotName}' not in outputSlotRegistry."
         let some localTemp := outputTargets[targetIdx]?
           | throw (s!"compileSessionSlotted: instance '{instanceName}' missing output_targets[{targetIdx}] "
@@ -486,19 +509,19 @@ private def rootParamName : CoreBodyDecl → Option String
 
 /-- Build slot metadata (`buildSlotMetadata`). -/
 private def slotMetadata (s : SessionAlloc) (params : Array (String × Json))
-    (paramSlots : Array (String × Nat)) :
+    (paramSlots : OrderedAssoc Nat) :
     Nat × Array String × Array Json := Id.run do
   let slotCount := s.slotCount
   let mut names := Array.replicate slotCount ""
   let mut defaults : Array Json := Array.replicate slotCount (toJson (0 : Nat))
-  for (name, idx) in s.outputSlotRegistry do
+  for (name, idx) in s.outputSlotRegistry.entries do
     if idx < slotCount then names := names.set! idx name
-  for (name, idx) in paramSlots do
+  for (name, idx) in paramSlots.entries do
     if idx < slotCount then
       names := names.set! idx s!"param:{name}"
       if let some v := assocGet? params name then
         defaults := defaults.set! idx v
-  for (name, idx) in s.inputSlotRegistry do
+  for (name, idx) in s.inputSlotRegistry.entries do
     if idx < slotCount then names := names.set! idx s!"input:{name}"
   return (slotCount, names, defaults)
 
@@ -508,7 +531,7 @@ private def emitSinks (s : SessionAlloc) (graphOutputs : Array (String × String
   let mut inputs : Array Nat := #[]
   for (inst, output) in graphOutputs do
     let key := slotKey inst output
-    let some idx := assocGet? s.outputSlotRegistry key
+    let some idx := s.outputSlotRegistry.get? key
       | throw s!"compileSessionSlotted: dac wire '{key}' has no allocated output slot."
     inputs := inputs.push idx
   return #[{ inputs, gain := Tropical.Plan.defaultSinkGain, target := 0 }]
@@ -561,7 +584,7 @@ def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan
   let mut paramSlots : Array (Nat × Nat) := #[]
   let rootParams := input.root.params.filterMap rootParamName
   for i in [0:rootParams.size] do
-    if let some slot := assocGet? s.paramSlots rootParams[i]! then
+    if let some slot := s.paramSlots.get? rootParams[i]! then
       paramSlots := paramSlots.push (i, slot)
 
   let (fn, s', acc) ← partitionKernel rootInstancePath input.root input.wiresPost s acc

@@ -1,0 +1,70 @@
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "clock"},
+    "name": "clk",
+    "default":
+    {"op": "call", "callee": {"op": "nameRef", "name": "clock"}, "args": []}},
+   {"type": {"op": "nameRef", "name": "freq"},
+    "name": "f0",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "select"},
+     "args": [{"op": "gt", "args": [110, 0]}, 110, 0]}},
+   {"type": {"op": "nameRef", "name": "float"},
+    "name": "depth",
+    "default": 0.0007},
+   {"type": {"op": "nameRef", "name": "freq"},
+    "name": "rate",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "select"},
+     "args": [{"op": "gt", "args": [0.3, 0]}, 0.3, 0]}}]},
+ "op": "program",
+ "name": "ThroughZeroFlanger",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"program": {"op": "nameRef", "name": "ClockPhasor"},
+    "op": "instanceDecl",
+    "name": "lfoph",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "clk"},
+      "port": {"op": "nameRef", "name": "clk"}},
+     {"value": {"op": "nameRef", "name": "rate"},
+      "port": {"op": "nameRef", "name": "freq"}}]},
+   {"program": {"op": "nameRef", "name": "Sin"},
+    "op": "instanceDecl",
+    "name": "lfo",
+    "inputs":
+    [{"value":
+      {"op": "mul",
+       "args":
+       [6.283185307179586,
+        {"ref": {"op": "nameRef", "name": "lfoph"},
+         "output": {"op": "nameRef", "name": "phase"},
+         "op": "nestedOut"}]},
+      "port": {"op": "nameRef", "name": "x"}}]},
+   {"program": {"op": "nameRef", "name": "ReversibleComb"},
+    "op": "instanceDecl",
+    "name": "comb",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "clk"},
+      "port": {"op": "nameRef", "name": "clk"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}},
+     {"value":
+      {"op": "mul",
+       "args":
+       [{"op": "nameRef", "name": "depth"},
+        {"ref": {"op": "nameRef", "name": "lfo"},
+         "output": {"op": "nameRef", "name": "out"},
+         "op": "nestedOut"}]},
+      "port": {"op": "nameRef", "name": "delta"}}]}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"ref": {"op": "nameRef", "name": "comb"},
+     "output": {"op": "nameRef", "name": "out"},
+     "op": "nestedOut"}}]}}

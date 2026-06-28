@@ -39,8 +39,8 @@ waveform.
 ## Source
 
 ```tropical
-program MorphOsc(freq: freq = 220, morph: unipolar = 0) -> (out: float) {
-  ph = FixedPhasor(freq: freq)
+program MorphOsc(freq: freq = 220, morph: unipolar = 0, clk: clock = clock()) -> (out: float) {
+  ph = ClockPhasor(clk: clk, freq: freq)
   sin = Sin(x: 6.283185307179586 * ph.phase)
   out = (1 - morph) * (2 * ph.phase - 1) + morph * sin.out
 }

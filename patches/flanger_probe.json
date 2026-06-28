@@ -1,21 +1,19 @@
 {
   "schema": "tropical_program_2",
-  "name": "reverse_reverb",
+  "name": "flanger_probe",
   "body": {
     "op": "block",
     "decls": [
       {
         "op": "instanceDecl",
-        "name": "rr",
-        "program": "ReverseReverb",
-        "inputs": {
-          "f0": 110
-        }
+        "name": "p",
+        "program": "ThroughZeroFlangerProbe",
+        "inputs": {}
       }
     ],
     "assigns": []
   },
   "audio_outputs": [
-    { "instance": "rr", "output": "out" }
+    { "instance": "p", "output": "out" }
   ]
 }

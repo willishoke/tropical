@@ -225,7 +225,7 @@ def UnaryOpTag.ofParse : Tropical.Parse.UnaryOpTag → UnaryOpTag
 structure Binder where
   name : String
   idx : BinderIdx
-deriving Repr, Inhabited
+deriving Repr, Inhabited, BEq
 
 mutual
 

@@ -64,17 +64,17 @@ same taps trail the hit instead: one program, both reverbs.
 
 ```tropical
 program ReverseReverb(
-  tau: float = 0,
+  clk: clock = clock(),
   f0: freq = 110,
   spacing: float = 0.045,
   decay: float = 0.72,
   amount: float = 0.7
 ) -> (out: float) {
-  dry  = ModalVoice(tau: tau, f0: f0)
-  tap1 = ModalVoice(tau: tau + spacing, f0: f0)
-  tap2 = ModalVoice(tau: tau + 2 * spacing, f0: f0)
-  tap3 = ModalVoice(tau: tau + 3 * spacing, f0: f0)
-  tap4 = ModalVoice(tau: tau + 4 * spacing, f0: f0)
+  dry  = ModalVoice(clk: clk, f0: f0)
+  tap1 = ModalVoice(clk: clk + toInt(spacing * sampleRate() * 4294967296), f0: f0)
+  tap2 = ModalVoice(clk: clk + toInt(2 * spacing * sampleRate() * 4294967296), f0: f0)
+  tap3 = ModalVoice(clk: clk + toInt(3 * spacing * sampleRate() * 4294967296), f0: f0)
+  tap4 = ModalVoice(clk: clk + toInt(4 * spacing * sampleRate() * 4294967296), f0: f0)
   out = dry.out + amount * (
           decay * tap1.out
         + decay * decay * tap2.out

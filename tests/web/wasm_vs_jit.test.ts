@@ -11,12 +11,19 @@
  *   - Native side: `diffcli render-bytes` (the engine's ORC JIT).
  */
 
-import { describe, test, expect } from 'bun:test'
+import { describe, test, expect, setDefaultTimeout } from 'bun:test'
 import { spawnSync } from 'bun'
 import { writeFileSync, readFileSync } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { WasmKernel, type KernelManifest } from '../../web/runtime/index'
+
+// Each case spawns three sequential heavy subprocesses — `diffcli compile`,
+// `render-bytes`, and `compile-wasm` (the last loads LLVM+lld in-process to
+// lower wasm32). That runs ~5s locally and tips over bun's 5000ms default on a
+// slower/cold CI runner. Give the file realistic headroom; it's an integration
+// gate, not a unit test.
+setDefaultTimeout(60_000)
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '../..')

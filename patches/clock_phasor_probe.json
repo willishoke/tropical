@@ -1,21 +1,19 @@
 {
   "schema": "tropical_program_2",
-  "name": "reverse_reverb",
+  "name": "clock_phasor_probe",
   "body": {
     "op": "block",
     "decls": [
       {
         "op": "instanceDecl",
-        "name": "rr",
-        "program": "ReverseReverb",
-        "inputs": {
-          "f0": 110
-        }
+        "name": "p",
+        "program": "ClockPhasorProbe",
+        "inputs": {}
       }
     ],
     "assigns": []
   },
   "audio_outputs": [
-    { "instance": "rr", "output": "out" }
+    { "instance": "p", "output": "out" }
   ]
 }

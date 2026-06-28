@@ -46,11 +46,15 @@ combinational in `tau`.
 ## Source
 
 ```tropical
-program ModalVoice(tau: float = 0, f0: freq = 110) -> (out: float) {
-  s1 = Sin(x: 6.283185307179586 * f0 * tau)
-  s2 = Sin(x: 6.283185307179586 * f0 * tau * 2.414213562373095)
-  s3 = Sin(x: 6.283185307179586 * f0 * tau * 4.23606797749979)
-  s4 = Sin(x: 6.283185307179586 * f0 * tau * 6.854101966249685)
+program ModalVoice(clk: clock = clock(), f0: freq = 110) -> (out: float) {
+  p1 = ClockPhasor(clk: clk, freq: f0)
+  p2 = ClockPhasor(clk: clk, freq: f0 * 2.414213562373095)
+  p3 = ClockPhasor(clk: clk, freq: f0 * 4.23606797749979)
+  p4 = ClockPhasor(clk: clk, freq: f0 * 6.854101966249685)
+  s1 = Sin(x: 6.283185307179586 * p1.phase)
+  s2 = Sin(x: 6.283185307179586 * p2.phase)
+  s3 = Sin(x: 6.283185307179586 * p3.phase)
+  s4 = Sin(x: 6.283185307179586 * p4.phase)
   out = 0.4 * s1.out + 0.24 * s2.out + 0.16 * s3.out + 0.1 * s4.out
 }
 ```

@@ -11,16 +11,22 @@
      "callee": {"op": "nameRef", "name": "select"},
      "args": [{"op": "gt", "args": [110, 0]}, 110, 0]}},
    {"type": {"op": "nameRef", "name": "float"},
-    "name": "delta",
-    "default": 0.0007}]},
+    "name": "depth",
+    "default": 0.0007},
+   {"type": {"op": "nameRef", "name": "freq"},
+    "name": "lfoRate",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "select"},
+     "args": [{"op": "gt", "args": [6, 0]}, 6, 0]}}]},
  "op": "program",
- "name": "ReversibleProbe",
+ "name": "ThroughZeroFlangerProbe",
  "body":
  {"op": "block",
   "decls":
-  [{"program": {"op": "nameRef", "name": "ReversibleComb"},
+  [{"program": {"op": "nameRef", "name": "ThroughZeroFlanger"},
     "op": "instanceDecl",
-    "name": "comb",
+    "name": "fl",
     "inputs":
     [{"value":
       {"op": "let",
@@ -56,12 +62,14 @@
       "port": {"op": "nameRef", "name": "clk"}},
      {"value": {"op": "nameRef", "name": "f0"},
       "port": {"op": "nameRef", "name": "f0"}},
-     {"value": {"op": "nameRef", "name": "delta"},
-      "port": {"op": "nameRef", "name": "delta"}}]}],
+     {"value": {"op": "nameRef", "name": "depth"},
+      "port": {"op": "nameRef", "name": "depth"}},
+     {"value": {"op": "nameRef", "name": "lfoRate"},
+      "port": {"op": "nameRef", "name": "rate"}}]}],
   "assigns":
   [{"op": "outputAssign",
     "name": "out",
     "expr":
-    {"ref": {"op": "nameRef", "name": "comb"},
+    {"ref": {"op": "nameRef", "name": "fl"},
      "output": {"op": "nameRef", "name": "out"},
      "op": "nestedOut"}}]}}

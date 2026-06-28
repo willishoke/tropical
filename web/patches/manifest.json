@@ -1,6 +1,8 @@
 [
   { "slug": "pure-sine-440", "title": "Pure Sine 440", "description": "A plain SinOsc at 440 Hz. The smallest thing tropical does." },
   { "slug": "ring-mod", "title": "Ring Mod", "description": "Two SinOscs (220 Hz × 331 Hz) multiplied through a VCA — dissonant partials." },
-  { "slug": "fm-pair", "title": "FM Pair", "description": "Simple 2-op FM: a 73 Hz modulator shaping a ~220 Hz carrier." },
-  { "slug": "fm-stack", "title": "FM Stack", "description": "3-op FM with a slow LFO on the modulator depth — evolves gently." }
+  { "slug": "fm-pair", "title": "FM Pair", "description": "2-op FM done the closed-form way: phase modulation. The carrier's clock is displaced by a 1:1 modulator (no freq sweep — that would blow up the inc·θ phasor into noise). Bright, harmonic." },
+  { "slug": "fm-stack", "title": "FM Bell", "description": "Inharmonic FM bell (√2 ratio) with a breathing modulation index — DX7-style FM is phase modulation, and here that is clock modulation: car(clk: θ + index·mod(θ)). Closed-form, drift-free." },
+  { "slug": "tz-flanger", "title": "Through-Zero Flanger", "description": "A stateless through-zero flanger: an LFO sweeps the two offset taps of a reversible comb through zero on a 110 Hz modal drone. The ahead tap reads the future." },
+  { "slug": "clock-chord", "title": "Clock Chord", "description": "A major triad voiced from ONE modal voice — the three notes differ only in the clock each is handed (θ, 5θ/4, 3θ/2). Scaling a clock scales pitch; the whole partial stack transposes together." }
 ]

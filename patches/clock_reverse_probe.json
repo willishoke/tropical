@@ -1,0 +1,14 @@
+{
+  "schema": "tropical_program_2",
+  "name": "clock_reverse_probe",
+  "body": {
+    "op": "block",
+    "decls": [
+      { "op": "instanceDecl", "name": "p", "program": "ClockReverseProbe", "inputs": {} }
+    ],
+    "assigns": []
+  },
+  "audio_outputs": [
+    { "instance": "p", "output": "out" }
+  ]
+}

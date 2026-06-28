@@ -1,75 +1,57 @@
 {"ports":
  {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
   "inputs":
-  [{"type": {"op": "nameRef", "name": "clock"},
-    "name": "clk",
-    "default":
-    {"op": "call", "callee": {"op": "nameRef", "name": "clock"}, "args": []}},
-   {"type": {"op": "nameRef", "name": "freq"},
+  [{"type": {"op": "nameRef", "name": "freq"},
     "name": "f0",
     "default":
     {"op": "call",
      "callee": {"op": "nameRef", "name": "select"},
-     "args": [{"op": "gt", "args": [110, 0]}, 110, 0]}},
-   {"type": {"op": "nameRef", "name": "float"},
-    "name": "delta",
-    "default": 0.0007}]},
+     "args": [{"op": "gt", "args": [110, 0]}, 110, 0]}}]},
  "op": "program",
- "name": "ReversibleComb",
+ "name": "ClockChord",
  "body":
  {"op": "block",
   "decls":
   [{"program": {"op": "nameRef", "name": "ModalVoice"},
     "op": "instanceDecl",
-    "name": "dry",
+    "name": "root",
     "inputs":
-    [{"value": {"op": "nameRef", "name": "clk"},
+    [{"value":
+      {"op": "call", "callee": {"op": "nameRef", "name": "clock"}, "args": []},
       "port": {"op": "nameRef", "name": "clk"}},
      {"value": {"op": "nameRef", "name": "f0"},
       "port": {"op": "nameRef", "name": "f0"}}]},
    {"program": {"op": "nameRef", "name": "ModalVoice"},
     "op": "instanceDecl",
-    "name": "past",
+    "name": "third",
     "inputs":
     [{"value":
-      {"op": "sub",
+      {"op": "rshift",
        "args":
-       [{"op": "nameRef", "name": "clk"},
-        {"op": "call",
-         "callee": {"op": "nameRef", "name": "toInt"},
+       [{"op": "mul",
          "args":
-         [{"op": "mul",
-           "args":
-           [{"op": "mul",
-             "args":
-             [{"op": "nameRef", "name": "delta"},
-              {"op": "call",
-               "callee": {"op": "nameRef", "name": "sampleRate"},
-               "args": []}]},
-            4294967296]}]}]},
+         [{"op": "call",
+           "callee": {"op": "nameRef", "name": "clock"},
+           "args": []},
+          5]},
+        2]},
       "port": {"op": "nameRef", "name": "clk"}},
      {"value": {"op": "nameRef", "name": "f0"},
       "port": {"op": "nameRef", "name": "f0"}}]},
    {"program": {"op": "nameRef", "name": "ModalVoice"},
     "op": "instanceDecl",
-    "name": "ahead",
+    "name": "fifth",
     "inputs":
     [{"value":
-      {"op": "add",
+      {"op": "rshift",
        "args":
-       [{"op": "nameRef", "name": "clk"},
-        {"op": "call",
-         "callee": {"op": "nameRef", "name": "toInt"},
+       [{"op": "mul",
          "args":
-         [{"op": "mul",
-           "args":
-           [{"op": "mul",
-             "args":
-             [{"op": "nameRef", "name": "delta"},
-              {"op": "call",
-               "callee": {"op": "nameRef", "name": "sampleRate"},
-               "args": []}]},
-            4294967296]}]}]},
+         [{"op": "call",
+           "callee": {"op": "nameRef", "name": "clock"},
+           "args": []},
+          3]},
+        1]},
       "port": {"op": "nameRef", "name": "clk"}},
      {"value": {"op": "nameRef", "name": "f0"},
       "port": {"op": "nameRef", "name": "f0"}}]}],
@@ -83,19 +65,19 @@
        "args":
        [{"op": "mul",
          "args":
-         [0.5,
-          {"ref": {"op": "nameRef", "name": "dry"},
+         [0.4,
+          {"ref": {"op": "nameRef", "name": "root"},
            "output": {"op": "nameRef", "name": "out"},
            "op": "nestedOut"}]},
         {"op": "mul",
          "args":
-         [0.25,
-          {"ref": {"op": "nameRef", "name": "past"},
+         [0.3,
+          {"ref": {"op": "nameRef", "name": "third"},
            "output": {"op": "nameRef", "name": "out"},
            "op": "nestedOut"}]}]},
       {"op": "mul",
        "args":
-       [0.25,
-        {"ref": {"op": "nameRef", "name": "ahead"},
+       [0.3,
+        {"ref": {"op": "nameRef", "name": "fifth"},
          "output": {"op": "nameRef", "name": "out"},
          "op": "nestedOut"}]}]}}]}}

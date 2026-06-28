@@ -1,5 +1,6 @@
 {"programs":
  ["BlepStep",
+  "ClockPhasor",
   "CrossFade",
   "Exp",
   "FixedPhasor",
@@ -15,7 +16,14 @@
   "ReversibleComb",
   "ReversibleProbe",
   "ScrubClock",
+  "ThroughZeroFlanger",
+  "ThroughZeroFlangerProbe",
+  "ClockPhasorProbe",
   "Cos",
   "FixedSinOsc",
   "MorphOsc",
-  "SoftClip"]}
+  "SoftClip",
+  "ClockChord",
+  "ClockPM",
+  "ClockReverseProbe",
+  "FMBell"]}

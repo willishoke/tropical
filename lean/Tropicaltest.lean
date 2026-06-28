@@ -279,6 +279,100 @@ private def runReversibility : IO Bool := do
           IO.println s!"  PASS  reversibility  bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
           pure true
 
+/-- Same palindrome witness pointed at `ThroughZeroFlanger`: the LFO that
+    sweeps `delta` is itself a function of `tau`, so unfreezing the comb adds
+    no state. A latched oscillator would diverge between the forward and
+    reverse halves; this stays bit-exact, sweep and all. -/
+private def runFlangerReversibility : IO Bool := do
+  let half : Nat := 2048
+  let n : Nat := 2 * half
+  match ← compilePatch "patches/flanger_probe.json" .fused with
+  | .error e => IO.println s!"  FAIL  flanger  compile: {firstLine e}"; pure false
+  | .ok planJson =>
+    match ← renderSamples planJson n with
+    | .error e => IO.println s!"  FAIL  flanger  render: {firstLine e}"; pure false
+    | .ok samples =>
+      if samples.size < n then
+        IO.println s!"  FAIL  flanger  got {samples.size} samples (want {n})"
+        pure false
+      else do
+        let mut mism := 0
+        let mut firstBad := 0
+        for k in [1:half] do
+          if (samples[half + k]!).toBits != (samples[half - k]!).toBits then
+            if mism == 0 then firstBad := k
+            mism := mism + 1
+        let mut energy := 0.0
+        let mut maxAbs := 0.0
+        for k in [0:n] do
+          let v := samples[k]!
+          energy := energy + v * v
+          if v.abs > maxAbs then maxAbs := v.abs
+        if mism != 0 then
+          IO.println s!"  FAIL  flanger  {mism} mismatched pairs (first k={firstBad})"
+          pure false
+        else if energy <= 1e-6 then
+          IO.println s!"  FAIL  flanger  signal is silent (energy {energy})"
+          pure false
+        else
+          IO.println s!"  PASS  flanger  bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
+          pure true
+
+/-- Fixed-point clock substrate witness: `ClockPhasor(clk: clock())` must be
+    bit-for-bit identical to `FixedPhasor` (the root clock `θ = sampleIndex <<
+    32` has zero fraction, so the split-multiply collapses to `inc·n + off`).
+    The probe outputs `FixedPhasor.phase − ClockPhasor.phase`; assert it is
+    exactly zero at every sample. -/
+private def runClockPhasorEquiv : IO Bool := do
+  let n : Nat := 4096
+  match ← compilePatch "patches/clock_phasor_probe.json" .fused with
+  | .error e => IO.println s!"  FAIL  clock-phasor  compile: {firstLine e}"; pure false
+  | .ok planJson =>
+    match ← renderSamples planJson n with
+    | .error e => IO.println s!"  FAIL  clock-phasor  render: {firstLine e}"; pure false
+    | .ok samples =>
+      if samples.size < n then
+        IO.println s!"  FAIL  clock-phasor  got {samples.size} samples (want {n})"
+        pure false
+      else do
+        let mut maxAbs := 0.0
+        let mut firstBad := 0
+        let mut bad := 0
+        for k in [0:n] do
+          let v := samples[k]!
+          if v.toBits != (0.0 : Float).toBits then
+            if bad == 0 then firstBad := k
+            bad := bad + 1
+          if v.abs > maxAbs then maxAbs := v.abs
+        if bad != 0 then
+          IO.println s!"  FAIL  clock-phasor  {bad} nonzero samples (first k={firstBad}, max|Δ|={maxAbs})"
+          pure false
+        else
+          IO.println "  PASS  clock-phasor  ClockPhasor(clock()) ≡ FixedPhasor bit-for-bit"
+          pure true
+
+/-- Per-oscillator reverse witness: `FixedSinOsc(clk: -θ)` is the negated
+    forward sine, so `forward + reverse` cancels. Reports the residual (≈ Sin
+    polynomial range-reduction asymmetry); asserts it is at most a small
+    epsilon. -/
+private def runClockReverseProbe : IO Bool := do
+  let n : Nat := 4096
+  match ← compilePatch "patches/clock_reverse_probe.json" .fused with
+  | .error e => IO.println s!"  FAIL  clock-reverse  compile: {firstLine e}"; pure false
+  | .ok planJson =>
+    match ← renderSamples planJson n with
+    | .error e => IO.println s!"  FAIL  clock-reverse  render: {firstLine e}"; pure false
+    | .ok samples =>
+      let mut maxAbs := 0.0
+      for k in [0:samples.size] do
+        if samples[k]!.abs > maxAbs then maxAbs := samples[k]!.abs
+      if maxAbs < 1e-6 then
+        IO.println s!"  PASS  clock-reverse  forward+reverse cancels (max|Δ|={maxAbs})"
+        pure true
+      else
+        IO.println s!"  FAIL  clock-reverse  residual too large (max|Δ|={maxAbs})"
+        pure false
+
 -- ── CF-only enforcement: surface `reg`/`next` is unparseable ──────────────────
 -- The Phase-1 guarantee, now STRUCTURAL: `reg`/`next` were deleted from the
 -- surface grammar and the IR, so a program declaring them does not even parse
@@ -375,6 +469,12 @@ def main (args : List String) : IO UInt32 := do
   IO.println "reversibility (closed-form-in-tau palindrome):"
   total := total + 1
   if !(← runReversibility) then failed := failed + 1
+  total := total + 1
+  if !(← runFlangerReversibility) then failed := failed + 1
+  total := total + 1
+  if !(← runClockPhasorEquiv) then failed := failed + 1
+  total := total + 1
+  if !(← runClockReverseProbe) then failed := failed + 1
 
   -- ── (f) CF goldens (tests/golden/cf/*.hash) — the closed-form corpus ───────
   -- The corpus that must stay green through every phase of the CF-only

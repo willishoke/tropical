@@ -1,5 +1,5 @@
 {"ports":
- {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "tau"}],
+ {"outputs": [{"type": {"op": "nameRef", "name": "clock"}, "name": "clk"}],
   "inputs":
   [{"type": {"op": "nameRef", "name": "float"},
     "name": "tau_base",
@@ -14,22 +14,29 @@
   "decls": [],
   "assigns":
   [{"op": "outputAssign",
-    "name": "tau",
+    "name": "clk",
     "expr":
     {"op": "add",
      "args":
-     [{"op": "nameRef", "name": "tau_base"},
-      {"op": "div",
+     [{"op": "call",
+       "callee": {"op": "nameRef", "name": "toInt"},
        "args":
        [{"op": "mul",
          "args":
-         [{"op": "nameRef", "name": "velocity"},
-          {"op": "call",
-           "callee": {"op": "nameRef", "name": "toFloat"},
+         [{"op": "mul",
            "args":
-           [{"op": "call",
-             "callee": {"op": "nameRef", "name": "sampleIndex"},
-             "args": []}]}]},
+           [{"op": "nameRef", "name": "tau_base"},
+            {"op": "call",
+             "callee": {"op": "nameRef", "name": "sampleRate"},
+             "args": []}]},
+          4294967296]}]},
+      {"op": "mul",
+       "args":
+       [{"op": "call",
+         "callee": {"op": "nameRef", "name": "toInt"},
+         "args":
+         [{"op": "mul",
+           "args": [{"op": "nameRef", "name": "velocity"}, 4294967296]}]},
         {"op": "call",
-         "callee": {"op": "nameRef", "name": "sampleRate"},
+         "callee": {"op": "nameRef", "name": "sampleIndex"},
          "args": []}]}]}}]}}

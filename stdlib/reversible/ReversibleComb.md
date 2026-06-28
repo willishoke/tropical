@@ -46,10 +46,10 @@ through-zero flanging.
 ## Source
 
 ```tropical
-program ReversibleComb(tau: float = 0, f0: freq = 110, delta: float = 0.0007) -> (out: float) {
-  dry = ModalVoice(tau: tau, f0: f0)
-  past = ModalVoice(tau: tau - delta, f0: f0)
-  ahead = ModalVoice(tau: tau + delta, f0: f0)
+program ReversibleComb(clk: clock = clock(), f0: freq = 110, delta: float = 0.0007) -> (out: float) {
+  dry = ModalVoice(clk: clk, f0: f0)
+  past = ModalVoice(clk: clk - toInt(delta * sampleRate() * 4294967296), f0: f0)
+  ahead = ModalVoice(clk: clk + toInt(delta * sampleRate() * 4294967296), f0: f0)
   out = 0.5 * dry.out + 0.25 * past.out + 0.25 * ahead.out
 }
 ```

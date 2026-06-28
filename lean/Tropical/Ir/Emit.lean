@@ -1,6 +1,7 @@
 import Std.Data.HashMap
 import Lean.Data.Json
 import Tropical.Ir.Core
+import Tropical.Ir.CoreArena
 import Tropical.Plan
 
 /-!
@@ -12,23 +13,16 @@ unrepresentable here, where the TS emitter threw on them).
 
 ## CSE identity discipline
 
-The TS emitter keys CSE on a bottom-up *structural id*: every node
-gets a dense integer by interning a shallow key string (`op:add|args=
-i:7`-shaped — children appear as their interned ids, not their key
-text) into a `hashTable`. Only the **partition** those keys induce is
-observable (memo hits/misses → temp allocation order), never the key
-text or the id values, so this port reproduces the equivalence
-classes, not the bytes:
-
-- numbers key by **value equivalence** (TS keys on JS number toString
-  of the parsed double): `JsonNumber`s normalize (trailing-zero
-  mantissa stripping) before rendering, so `1` and `1.0` collide here
-  exactly as they do in TS. Distinct decimal texts that round to the
-  same double (17-significant-digit pathologies) would diverge —
-  documented, out of corpus, and loud in the gate if ever hit.
-- TS's `hashCache` (WeakMap node → id) is a sharing-only memo,
-  invisible to the result; dropped (same call as the strata ports).
-- TS's `regTypes` map is written and never read; dropped.
+Expressions are lowered into a hash-consed DAG (`CoreArena`) before they
+are compiled: each node is interned to an `ExprId`, so equal subtrees are
+one node and CSE keys directly on `(ExprId, expectedKey)` — O(1) per node,
+no per-node structural-id recomputation (issue #190). Interning is sound for
+the pure ops here (merging same-structure nodes never changes a value), and
+because the goldens hash rendered audio (not plan bytes) the DAG walk's
+register relabeling is free. This replaced the TS port's recursive
+`structuralId` (`op:add|args=i:7`-shaped string keys), whose per-node
+O(subtree) recompute blew up on the duplicated subtrees that inlining a
+modulated clock produces.
 
 Number rendering for error messages mirrors JS toString for the
 integer/plain-decimal range (no 1e±21 exponent forms — out of corpus).
@@ -189,11 +183,21 @@ structure EmitSt where
   nextArraySlot : Nat := 0
   arraySizes : Array Nat := #[]
   instrs : Array NInstr := #[]
-  hashTable : Std.HashMap String Nat := {}
   memo : Std.HashMap String CompileResult := {}
+  -- Hash-consed (DAG) form of the expressions emit walks. Equal subtrees are
+  -- one `ExprId`, so CSE keys on the id (O(1)) instead of recomputing a
+  -- structural id per node (O(subtree)) — see issue #190.
+  arena : CoreArena := {}
 deriving Inhabited
 
 abbrev EmitM := StateT EmitSt (Except String)
+
+/-- Intern a tree `CoreExpr` into the emit arena, returning its (shared) id. -/
+def internExpr (e : Tropical.Ir.Core.CoreExpr) : EmitM ExprId := do
+  let st ← get
+  let (id, arena) := (toArena e).run st.arena
+  set { st with arena := arena }
+  pure id
 
 /-- The TS operand `kind` strings (error-message rendering). -/
 private def operandKind : NOperand → String
@@ -211,70 +215,6 @@ private def allocArraySlot (size : Nat) : EmitM Nat :=
 
 private def emit (i : NInstr) : EmitM Unit :=
   modify fun s => { s with instrs := s.instrs.push i }
-
-private def intern (key : String) : EmitM Nat := do
-  let st ← get
-  match st.hashTable.get? key with
-  | some id => pure id
-  | none =>
-    let id := st.hashTable.size
-    set { st with hashTable := st.hashTable.insert key id }
-    pure id
-
--- ─────────────────────────────────────────────────────────────
--- Structural CSE id
--- ─────────────────────────────────────────────────────────────
-
-mutual
-
-/-- TS `structuralKey`: primitives render inline; everything else is
-    `i:<interned id>`. -/
-private partial def structuralKey (e : CoreExpr) : EmitM String :=
-  match e with
-  | .num n => pure s!"n:{jsNumString n}"
-  | .bool b => pure s!"b:{b}"
-  | e => do pure s!"i:{← structuralId e}"
-
-private partial def internArgs (args : Array CoreExpr) : EmitM Nat := do
-  let keys ← args.mapM structuralKey
-  intern ("a:" ++ String.intercalate "," keys.toList)
-
-/-- TS `structuralId`: shallow key over op + sorted fields, children as
-    interned ids. The resolved nodes reaching emit carry exactly one
-    expression field (`args`), so the sorted-field walk degenerates to
-    `op:<op>|args=i:<id>`; indexed refs key on op + idx. -/
-private partial def structuralId (e : CoreExpr) : EmitM Nat := do
-  match e with
-  | .num n => intern s!"n:{jsNumString n}"   -- unreachable at top level; safe
-  | .bool b => intern s!"b:{b}"
-  | .arr items =>
-    let keys ← items.mapM structuralKey
-    intern ("a:" ++ String.intercalate "," keys.toList)
-  | .inputRef i => intern s!"op:inputRef|idx={i.idx}"
-  | .paramRef i => intern s!"op:paramRef|idx={i.idx}"
-  | .nestedOut i o => intern s!"op:nestedOut|inst={i.idx}|out={o.idx}"
-  | .sampleRate => intern "op:sampleRate"
-  | .sampleIndex => intern "op:sampleIndex"
-  | .binary tag a b => do
-    let argsId ← internArgs #[a, b]
-    intern s!"op:{tag.wire}|args=i:{argsId}"
-  | .unary tag a => do
-    let argsId ← internArgs #[a]
-    intern s!"op:{tag.wire}|args=i:{argsId}"
-  | .clamp a b c => do
-    let argsId ← internArgs #[a, b, c]
-    intern s!"op:clamp|args=i:{argsId}"
-  | .select a b c => do
-    let argsId ← internArgs #[a, b, c]
-    intern s!"op:select|args=i:{argsId}"
-  | .arraySet a b c => do
-    let argsId ← internArgs #[a, b, c]
-    intern s!"op:arraySet|args=i:{argsId}"
-  | .index a b => do
-    let argsId ← internArgs #[a, b]
-    intern s!"op:index|args=i:{argsId}"
-
-end
 
 private def expectedKey : Option ScalarType → String
   | none => ""
@@ -297,7 +237,7 @@ private def resolveNumericLiteralType (n : JsonNumber) (expected : Option Scalar
     pure .bool
   | _ => pure .float
 
-private def tryTerminal (e : CoreExpr) (expected : Option ScalarType) :
+private def tryTerminal (e : CNode) (expected : Option ScalarType) :
     EmitM (Option (NOperand × ScalarType)) := do
   let st ← get
   match e with
@@ -348,19 +288,20 @@ private def tryTerminal (e : CoreExpr) (expected : Option ScalarType) :
 
 mutual
 
-partial def compileNode (e : CoreExpr) (expected : Option ScalarType := none) :
+partial def compileNode (id : ExprId) (expected : Option ScalarType := none) :
     EmitM CompileResult := do
-  if let some (op, t) ← tryTerminal e expected then
+  let some node := (← get).arena.deref id
+    | throw s!"emit_resolved: dangling ExprId {id.idx}"
+  if let some (op, t) ← tryTerminal node expected then
     return .scalar op t
-  let id ← structuralId e
-  let key := s!"{id}:{expectedKey expected}"
+  let key := s!"{id.idx}:{expectedKey expected}"
   if let some r := (← get).memo.get? key then
     return r
-  let r ← compileNodeUncached e expected
+  let r ← compileNodeUncached node expected
   modify fun s => { s with memo := s.memo.insert key r }
   return r
 
-private partial def compileNodeUncached (e : CoreExpr) (expected : Option ScalarType) :
+private partial def compileNodeUncached (e : CNode) (expected : Option ScalarType) :
     EmitM CompileResult := do
   match e with
   | .arr items => compilePack items expected
@@ -393,7 +334,7 @@ private partial def unboxIfUnit (r : CompileResult) : EmitM CompileResult := do
     pure (.scalar (.reg dst rt) rt)
   | r => pure r
 
-private partial def compilePack (elements : Array CoreExpr) (expected : Option ScalarType) :
+private partial def compilePack (elements : Array ExprId) (expected : Option ScalarType) :
     EmitM CompileResult := do
   let size := elements.size
   let slot ← allocArraySlot size
@@ -403,7 +344,7 @@ private partial def compilePack (elements : Array CoreExpr) (expected : Option S
   emit (Tropical.Plan.instrPack slot args)
   pure (.array (.arrayReg slot) size .float)
 
-private partial def compileBinary (tag : String) (lhs rhs : CoreExpr)
+private partial def compileBinary (tag : String) (lhs rhs : ExprId)
     (expected : Option ScalarType) : EmitM CompileResult := do
   let propagated := if expected == some .bool then none else expected
   let argExpected : Option ScalarType :=
@@ -435,12 +376,16 @@ private partial def compileBinary (tag : String) (lhs rhs : CoreExpr)
     emit (Tropical.Plan.instrArray tag slot #[l.op, r.op] size strides rt)
     pure (.array (.arrayReg slot) size rt)
 
-private partial def compileUnary (tag : String) (arg : CoreExpr)
+private partial def compileUnary (tag : String) (arg : ExprId)
     (expected : Option ScalarType) : EmitM CompileResult := do
   let argExpected : Option ScalarType :=
     if isTranscendentalTag tag then none
     else if isComparisonTag tag then none
     else if tag == "BitNot" then some .int
+    -- `ToInt` narrows its argument *from* float; it must not propagate an
+    -- outer `int` expectation onto a float source (e.g. `toInt(f0 * 2.414…)`
+    -- where the result is used in an int context). Leave the arg unconstrained.
+    else if tag == "ToInt" then none
     else expected
   let a ← compileNode arg argExpected
   let a ← unboxIfUnit a
@@ -455,7 +400,7 @@ private partial def compileUnary (tag : String) (arg : CoreExpr)
     emit (Tropical.Plan.instrArray tag slot #[op] size #[1] rt)
     pure (.array (.arrayReg slot) size rt)
 
-private partial def compileTernary (tag : String) (n1 n2 n3 : CoreExpr)
+private partial def compileTernary (tag : String) (n1 n2 n3 : ExprId)
     (expected : Option ScalarType) : EmitM CompileResult := do
   let condExpected : Option ScalarType := if tag == "Select" then some .bool else expected
   let armExpected := if expected == some .bool then none else expected
@@ -482,7 +427,7 @@ private partial def compileTernary (tag : String) (n1 n2 n3 : CoreExpr)
     emit (Tropical.Plan.instrArray tag slot #[a.op, b.op, c.op] size strides rt)
     pure (.array (.arrayReg slot) size rt)
 
-private partial def compileIndex (arrNode idxNode : CoreExpr) : EmitM CompileResult := do
+private partial def compileIndex (arrNode idxNode : ExprId) : EmitM CompileResult := do
   let arr ← compileNode arrNode
   let idx ← compileNode idxNode (some .int)
   match arr with
@@ -497,7 +442,7 @@ private partial def compileIndex (arrNode idxNode : CoreExpr) : EmitM CompileRes
     emit (Tropical.Plan.instrIndex dst #[arrOp, idxOp] rt)
     pure (.scalar (.reg dst rt) rt)
 
-private partial def compileSetElement (arrNode idxNode valNode : CoreExpr) :
+private partial def compileSetElement (arrNode idxNode valNode : ExprId) :
     EmitM CompileResult := do
   let arr ← compileNode arrNode
   let idx ← compileNode idxNode
@@ -592,7 +537,7 @@ def emitProgram (outputExprs : Array CoreExpr)
       match scalarSlot with
       | some slot =>
         let portT := inputDeclScalarType portDecl.type?
-        let r ← compileNode wireExpr (some portT)
+        let r ← compileNode (← internExpr wireExpr) (some portT)
         let valOp ← match r with
           | .array op _ rt =>
             let dst ← allocReg
@@ -603,7 +548,7 @@ def emitProgram (outputExprs : Array CoreExpr)
       | none =>
         match arrayInfo with
         | some info =>
-          let r ← compileNode wireExpr (some .float)
+          let r ← compileNode (← internExpr wireExpr) (some .float)
           match r with
           | .scalar .. =>
             throw s!"emit_resolved: array-typed child input port at idx={i} of '{instName decl}' received scalar-shaped wire expression; expected array of size {info.size}"
@@ -625,7 +570,7 @@ def emitProgram (outputExprs : Array CoreExpr)
   for portI in [0:outputExprs.size] do
     let expr := outputExprs[portI]!
     let declaredCount := outputPortScalarCounts[portI]!
-    let r ← compileNode expr (some .float)
+    let r ← compileNode (← internExpr expr) (some .float)
     if declaredCount == 1 then
       let dst ← allocReg
       match r with
