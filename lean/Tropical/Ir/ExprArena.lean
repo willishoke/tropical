@@ -202,4 +202,69 @@ partial def ExprArena.toExpr (a : ExprArena) (id : ExprId) : Expr :=
     | .tag d v p      => .tag d v (p.map fun tp => .mk tp.field (a.toExpr tp.value))
     | .match_ d s arms => .match_ d (a.toExpr s) (arms.map fun arm => .mk arm.variant arm.binders (a.toExpr arm.body))
 
+-- ─────────────────────────────────────────────────────────────
+-- EProgram — `Program` with id-valued expressions
+-- ─────────────────────────────────────────────────────────────
+
+/-- `InputDecl` with an id-valued default. -/
+structure EInputDecl where
+  name : String
+  type? : Option PortType := none
+  default? : Option ExprId := none
+deriving Repr, Inhabited
+
+/-- `InstanceInput` with an id-valued wire. -/
+structure EInstanceInput where
+  port : InputIdx
+  value : ExprId
+deriving Repr, Inhabited
+
+/-- `BodyDecl` with id-valued instance inputs. -/
+inductive EBodyDecl where
+  | param (name : String) (value? : Option JsonNumber)
+  | inst (name : String) (typeKey : String)
+      (typeArgs : Array InstanceTypeArg) (inputs : Array EInstanceInput)
+  | prog (name : String) (program : ProgramIdx)
+deriving Repr, Inhabited
+
+/-- `OutputAssign` with an id-valued expression. -/
+structure EOutputAssign where
+  target : OutputTarget
+  expr : ExprId
+deriving Repr, Inhabited
+
+/-- `Program` with id-valued expressions: the strata pipeline's working form.
+    `registry` still references sibling programs by `ProgramIdx` into the
+    (tree) `Arena`; a pass converts each on demand with `toEProgram`. -/
+structure EProgram where
+  name : String
+  typeParams : Array TypeParamPoolIdx := #[]
+  inputs : Array EInputDecl := #[]
+  outputs : Array OutputDecl := #[]
+  typeDefs : Array TypeDefIdx := #[]
+  decls : Array EBodyDecl := #[]
+  assigns : Array EOutputAssign := #[]
+  binderCount : Nat := 0
+  registry : Array (String × ProgramIdx) := #[]
+deriving Repr, Inhabited
+
+/-- Lower a tree `Program` into id form, interning every expression. -/
+def toEProgram (p : Program) : EArenaM EProgram := do
+  let inputs ← p.inputs.mapM fun d => do
+    pure ({ name := d.name, type? := d.type?,
+            default? := ← d.default?.mapM toExprArena } : EInputDecl)
+  let decls ← p.decls.mapM fun d => do
+    match d with
+    | .param n v => pure (.param n v)
+    | .prog n pi => pure (.prog n pi)
+    | .inst n k ta ins =>
+      let ins' ← ins.mapM fun i => do
+        pure ({ port := i.port, value := ← toExprArena i.value } : EInstanceInput)
+      pure (.inst n k ta ins')
+  let assigns ← p.assigns.mapM fun a => do
+    pure ({ target := a.target, expr := ← toExprArena a.expr } : EOutputAssign)
+  pure { name := p.name, typeParams := p.typeParams, inputs, outputs := p.outputs,
+         typeDefs := p.typeDefs, decls, assigns, binderCount := p.binderCount,
+         registry := p.registry }
+
 end Tropical.Ir
