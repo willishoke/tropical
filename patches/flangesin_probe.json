@@ -1,0 +1,14 @@
+{
+  "schema": "tropical_program_2",
+  "name": "flangesin_probe",
+  "body": {
+    "op": "block",
+    "decls": [
+      { "op": "instanceDecl", "name": "f", "program": "FlangeSin", "inputs": {} }
+    ],
+    "assigns": []
+  },
+  "audio_outputs": [
+    { "instance": "f", "output": "out" }
+  ]
+}
