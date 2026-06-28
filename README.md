@@ -1,23 +1,40 @@
 # tropical
 
-A realtime audio synthesis language whose compiler treats a patch
-as one program: every oscillator, filter, envelope, and wire gets
-fused into a single per-sample kernel that the LLVM ORC JIT emits
-fresh on every topology change. The browser backend does the same
-thing in WebAssembly, off the same intermediate representation, and
-sample-for-sample equivalence between the two is a CI gate.
+Tropical is a substrate for stateless computation. Every program —
+every oscillator, filter, envelope, and wire — compiles to a single
+pure function `f(τ, params)` of a time coordinate, with no per-sample
+state anywhere in the kernel. A whole patch is one such function: the
+compiler fuses every device into one per-sample kernel that the LLVM
+ORC JIT emits fresh on each edit.
+
+Statelessness is the point, not an implementation detail. Because a
+kernel computes sample *n* directly from `τ = n` instead of stepping a
+recurrence, the language gets what a stream-of-state engine cannot:
+
+- **Random access in time.** Any sample is computable in isolation —
+  scrub, jump, or render a window with zero warm-up.
+- **Reversibility.** Negate the time coordinate and the signal runs
+  exactly backwards, sample-for-sample; there is no accumulator to unwind.
+- **Rate- and backend-agnosticism.** Nothing latches a sample rate or a
+  block size, so the same IR lowers to the LLVM JIT *and* to WebAssembly,
+  and sample-for-sample agreement between the two is a CI gate.
+- **No clicks, structurally.** Every edit hot-swaps a fresh kernel;
+  matching params transfer by name. Phase is recomputed from `τ`, never
+  latched, so there is no discontinuity to smooth — nothing clicks because
+  there is no state to carry.
+
+Audio synthesis is the first instantiation of the substrate, not its
+definition: `τ` is a time coordinate, the values are samples, the runtime
+is an audio device. None of that is load-bearing in the IR.
 
 This README is the high-level pitch. The full architecture lives
 in [`design/architecture.md`](design/architecture.md); the IR walks
-top-to-bottom from literate `.md` source through six structure-dropping
+top-to-bottom from literate `.md` source through five structure-dropping
 passes to the slot-typed instruction stream the runtime executes.
 
 ## What tropical actually is
 
-A genuinely cross-domain problem, attacked with one consistent
-discipline.
-
-Three domains, one project:
+One IR, three domains it has to satisfy at once:
 
 - **Compilers.** A real strata-style IR pipeline with name
   resolution, monomorphization, sum-type lowering, instance
@@ -28,20 +45,19 @@ Three domains, one project:
   scalar-only, monomorphic, acyclic, non-nested, combinator-free
   graph that's the smallest sub-IR any per-sample evaluator needs.
 - **Realtime audio.** Single-kernel fusion, double-buffered
-  hot-swap with state transfer by name (so delay lines and
-  oscillator phase survive a recompile without clicking), no libm
-  in the kernel (transcendentals are stdlib programs that
-  inline at strata time, deterministic across platforms), lock-free
-  atomic control parameters, sub-millisecond JIT compile budgets,
-  RtAudio with device hot-swap and disconnect recovery.
-- **Agentic interfaces.** Patches are graphs that an agent edits
-  incrementally over MCP. Cycles in MCP-built graphs are broken at
-  the wire layer (every wire is wrapped in a unit delay; the
-  compile-side extractor hoists those delays into per-wire registers)
-  so the agent can describe feedback loops
-  without thinking about topological order. This is the shape that
-  let "build me a four-pole resonant filter with self-oscillation"
-  go from a sentence to audible signal without any structural
+  hot-swap with params transferred by name (there is no per-sample
+  state to carry across a recompile — phase is recomputed from `τ`, so
+  edits never click), no libm in the kernel (transcendentals are stdlib
+  programs that inline at strata time, deterministic across platforms),
+  lock-free atomic control parameters, sub-millisecond JIT compile
+  budgets, RtAudio with device hot-swap and disconnect recovery.
+- **Agentic interfaces.** Patches are graphs an agent edits
+  incrementally over MCP. The IR is acyclic by construction: there is
+  no state primitive to break a cycle through, so feedback — in source
+  or in an MCP mutation — is a compile error with a port-detailed
+  message, not a silent one-sample loop. That constraint is what lets
+  "give me a through-zero flanger" or "an additive voice that runs
+  backwards" go from a sentence to audible signal without any structural
   intermediate step. The MCP front door is itself a native Lean 4
   server built on [Turnstile](https://github.com/willishoke/turnstile)
   ([`lean/Main.lean`](lean/Main.lean)): every tool's arguments are a
@@ -86,71 +102,49 @@ There is deliberately no parallel metadata layer: the signature in the
 code block *is* the interface, and the prose *is* the documentation —
 nothing is written twice, so nothing can fall out of sync. What can be
 enforced structurally, is: the literate gate in the Lean
-golden runner (`lake exe tropicaltest`, off
+golden runner (the built `tropicaltest` binary, off
 `lean/Tropical/Parse/Surface/Markdown.lean`) fails the build on a
 mismatched title, a missing diagram, or anything other than exactly
 one code block. An agent that wants to know what `SVF` exposes reads
 the same document a human does. See
 [`stdlib/OnePole.md`](stdlib/OnePole.md) for the canonical example.
 
-## How it gets built
+## Why you can trust the output
 
-Tropical is built through Claude Code. The workflow is task-level
-parallelism: a fleet of agents working on independent pieces of the
-codebase in parallel, managed by one person who holds the
-architectural picture. A large context window is the leverage — the
-model can hold a large fraction of this codebase at once and reason
-about cross-cutting changes that would otherwise require careful
-staging.
-
-Architectural decisions go through rigorous written specs: phased
-implementation plans, clear correctness criteria, agreement on
-what counts as "done" before code gets written. The specs are
-cross-disciplinary by default. Each decision gets viewed through
-whichever practitioner traditions are relevant to the problem
-(category theory, type theory, systems programming, DSP,
-real-time audio), and the tensions between those views get worked
-out in the spec rather than in the code. The structure of the IR,
-the runtime, and the stdlib all carry marks of that process.
-
-What makes this tractable is end-to-end validation. The codebase
-is built around the assumption that a model is going to make
-subtle structural mistakes and the test suite has to catch them
-before they reach production:
+There is no second implementation to diff against and no interpreter
+fallback on the audio path, so correctness is pinned by gates, not by
+review. Every change runs the full surface:
 
 - **Sample-for-sample equivalence gates** between the two backends —
   the LLVM ORC JIT and the WebAssembly emitter, both consuming the
   same `tropical_plan_5` (`tests/web/`) — plus realization-variant
   differentials inside the JIT (fused vs. per-instance microkernel;
   flat vs. nested) and byte-for-byte audio goldens, both run by the
-  Lean golden runner (`lake exe tropicaltest`). A regression in any
-  pass surfaces here, not in audible artifacts a week later. With the
-  former TypeScript implementation deleted there is no second
-  implementation to diff against; correctness is anchored by the
-  frozen goldens, not by a differential.
-- **Round-trip and acyclicity invariants** at every IR boundary —
-  the elaborator throws on cyclic source code, the strata pipeline
-  asserts acyclic input, the session compiler runs a defensive
-  cycle check after delay extraction. Mistakes that would once have
-  surfaced as silent cross-backend divergence now throw at the
-  boundary with a port-detailed error message.
+  built `tropicaltest` binary. A regression in any pass surfaces here,
+  not in audible artifacts a week later. Correctness is anchored by the
+  frozen goldens; the cross-backend agreement proves the two emitters
+  *agree*, the goldens prove they're *right*.
+- **Acyclicity by construction** at every IR boundary — the elaborator
+  throws on cyclic source code, the strata pipeline asserts acyclic
+  input, and the session compiler runs the same cycle check as a
+  compile-time invariant. With no state primitive to break a cycle
+  through, feedback is rejected with a port-detailed error rather than
+  silently turned into a one-sample loop.
 - **A stdlib audit** that parses, elaborates, and lowers every
   `stdlib/*.md` file on every change, asserting every post-strata
   invariant — plus the literate gate, which fails the build if any
   program document loses its title, diagram, or single-code-block
   shape.
-- **CI** runs all of it (the Lean build, the Lean golden runner, the
-  C++ tests, and the behavioral bun suites against the live Lean
-  engine) on every PR against GitHub Actions, with LLVM 20 pinned.
-  Local development runs the same gates via `make validate`.
+- **CI** runs all of it (the Lean build, the `tropicaltest` golden
+  runner, the C++ tests, and the behavioral bun suites against the live
+  Lean engine) on every PR, with LLVM pinned. Local development runs the
+  same gates via `make validate`.
 
-With this surface in place, refactors that would otherwise need
-careful manual review go through cleanly. The recent removal of
-triggers as a first-class primitive, the removal of alive-gating,
-the switch from `tropical_plan_4` to a per-instance
-`tropical_plan_5` with a scheduler — all landed as multi-commit
-branches without per-diff human inspection. The tests do the
-reading.
+With this surface in place, load-bearing refactors land as multi-commit
+branches without per-diff human inspection — most recently the move to a
+closed-form-only IR (cutting per-sample state entirely) and the
+fixed-point clock substrate underneath reversible, random-access voices.
+The tests do the reading.
 
 ## Where to read next
 
