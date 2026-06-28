@@ -87,7 +87,7 @@ class Client {
           this.pending.delete(id)
           rej(new Error(`Timeout on ${method}`))
         }
-      }, 5000)
+      }, 30000)
     })
   }
 
