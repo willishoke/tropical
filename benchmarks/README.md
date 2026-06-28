@@ -1,7 +1,15 @@
 # benchmarks
 
-Standalone microbenchmarks for the engine's hot paths. No engine dependency — each
-is a single self-contained translation unit you can `make run`.
+Standalone microbenchmarks and LLVM spikes that inform the engine's architecture.
+Nothing here depends on the engine: the microbenchmark is a single self-contained
+translation unit you can `make run`, and `llvm/` is a playground of focused
+experiments with recorded findings.
+
+- **`simd_time_partition`** (below) — the grade-aware τ-unroll vs the recurrent
+  baseline, on CPU.
+- **`llvm/`** — LLVM-level optimization spikes (active-set inlining, compile-time
+  scaling, cross-module inlining) that backed the fractal-compilation choices. See
+  `llvm/README.md` for the index.
 
 ## simd_time_partition
 

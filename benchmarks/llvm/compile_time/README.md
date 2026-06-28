@@ -156,7 +156,7 @@ experiment if (c) feels like too much custom infrastructure.
 ## Reproducing
 
 ```
-cd benchmark/llvm/compile_time
+cd benchmarks/llvm/compile_time
 python3 bench.py
 ```
 
