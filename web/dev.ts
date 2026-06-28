@@ -34,7 +34,7 @@ function headers(ct: string): HeadersInit {
   }
 }
 
-Bun.serve({
+const server = Bun.serve({
   port,
   fetch(req) {
     const url = new URL(req.url)
@@ -53,3 +53,12 @@ Bun.serve({
 })
 
 console.log(`▸ serving ${distDir} on http://localhost:${port}`)
+console.log('  press Ctrl-C to stop')
+
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => {
+    console.log(`\n▸ ${sig} — shutting down`)
+    server.stop(true) // close active connections too
+    process.exit(0)
+  })
+}
