@@ -34,7 +34,27 @@ Pieces:
 4. Strata.run: ofArena → id-passes → materialize.
 GATE: tropicaltest 12/12 + web wasm_vs_jit/web_plans_vs_jit bit-identical. Commit.
 
-## Phase B — id-form downstream, drop the exit materialize  (perf realized)
+## Phase B — DEFERRED (2026-06-28): blocked by the codec serialization seam
+
+Finding (from reading the consumers): `runStrataChecked`'s post-strata output is
+not consumed primarily by emit — it is **codec-encoded to `tropical_resolved_1`
+JSON** (`resolveProgramType → concreteEntry → adoptResolved` into the session
+store; `liftIfNeeded`'s registry residue; `export_program`). That codec is
+**tree-shaped for expressions** ("Expr-level sharing is invisible to
+`tropical_resolved_1` — only the three arena pools carry identity"). So the DAG
+cannot propagate past strata without redesigning the resolved-IR interchange
+schema *and* its consumers — and the emit perf threading-to-emit would reclaim
+was already captured by step 1's `CoreArena` intern. Large blast radius × small
+marginal payoff. The `materialize`-to-tree at strata exit is therefore the
+necessary bridge to a tree-shaped interchange, not temporary scaffolding.
+
+Banked Phase A (strata is genuinely DAG-shaped; the bloat never forms in the
+arena). The DAG-interchange redesign (carry expression identity through
+`tropical_resolved_1` + its consumers) is the real unlock for DAG-native HOPs
+end-to-end — tracked as a separate, deliberate future project.
+
+### (original Phase B sketch, retained for the future project)
+Phase B — id-form downstream, drop the exit materialize  (perf realized)
 - `Core.check` id-form: walk post-strata `EProgram`+`ExprArena`, assert core
   subset (same error strings), map `ENode→CNode` into a `CoreArena`, resolve
   port types (needs typeDef pool). Produces an id-valued CoreProgram + CoreArena.
