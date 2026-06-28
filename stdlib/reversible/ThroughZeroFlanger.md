@@ -50,9 +50,10 @@ speeds the sweep; raising `depth` widens the comb and deepens the barber-pole.
 ## Source
 
 ```tropical
-program ThroughZeroFlanger(tau: float = 0, f0: freq = 110, depth: float = 0.0007, rate: freq = 0.3) -> (out: float) {
-  lfo = Sin(x: 6.283185307179586 * rate * tau)
-  comb = ReversibleComb(tau: tau, f0: f0, delta: depth * lfo.out)
+program ThroughZeroFlanger(clk: clock = clock(), f0: freq = 110, depth: float = 0.0007, rate: freq = 0.3) -> (out: float) {
+  lfoph = ClockPhasor(clk: clk, freq: rate)
+  lfo = Sin(x: 6.283185307179586 * lfoph.phase)
+  comb = ReversibleComb(clk: clk, f0: f0, delta: depth * lfo.out)
   out = comb.out
 }
 ```

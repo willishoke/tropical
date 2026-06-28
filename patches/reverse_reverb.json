@@ -9,13 +9,6 @@
         "name": "rr",
         "program": "ReverseReverb",
         "inputs": {
-          "tau": {
-            "op": "div",
-            "args": [
-              { "op": "toFloat", "args": [ { "op": "sampleIndex" } ] },
-              { "op": "sampleRate" }
-            ]
-          },
           "f0": 110
         }
       }

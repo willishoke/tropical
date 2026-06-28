@@ -42,10 +42,10 @@ index 2048.
 ```tropical
 program ThroughZeroFlangerProbe(half: float = 2048, f0: freq = 110, depth: float = 0.0007, lfoRate: freq = 6) -> (out: float) {
   fl = ThroughZeroFlanger(
-    tau: let {
+    clk: let {
         nf: toFloat(sampleIndex());
         tri: select(nf < half, nf, 2 * half - nf)
-      } in tri / sampleRate(),
+      } in toInt(tri * 4294967296),
     f0: f0,
     depth: depth,
     rate: lfoRate)

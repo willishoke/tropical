@@ -10,7 +10,7 @@
         "name": "rr",
         "program": "ReverseReverb",
         "inputs": {
-          "tau": { "op": "ref", "instance": "clock", "output": "tau" },
+          "clk": { "op": "ref", "instance": "clock", "output": "clk" },
           "f0": 110
         }
       }

@@ -59,6 +59,7 @@ describe('web/dist shipped artifacts vs native JIT', () => {
       let maxDiff = 0
       for (let i = 0; i < N; i++) maxDiff = Math.max(maxDiff, Math.abs(wasm[i]! - nat[i]!))
       expect(maxDiff).toBeLessThan(1e-12)
-    })
+    }, 20000) // compile (JIT) + wasm instantiate + dual render; the heaviest
+              // patches (deeply-nested clocked oscillators) exceed the 5s default
   }
 })

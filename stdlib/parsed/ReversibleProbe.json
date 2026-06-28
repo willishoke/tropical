@@ -25,12 +25,11 @@
     [{"value":
       {"op": "let",
        "in":
-       {"op": "div",
+       {"op": "call",
+        "callee": {"op": "nameRef", "name": "toInt"},
         "args":
-        [{"op": "binding", "name": "tri"},
-         {"op": "call",
-          "callee": {"op": "nameRef", "name": "sampleRate"},
-          "args": []}]},
+        [{"op": "mul",
+          "args": [{"op": "binding", "name": "tri"}, 4294967296]}]},
        "bind":
        [{"value":
          {"op": "call",
@@ -54,7 +53,7 @@
             [{"op": "mul", "args": [2, {"op": "nameRef", "name": "half"}]},
              {"op": "nameRef", "name": "nf"}]}]},
          "name": "tri"}]},
-      "port": {"op": "nameRef", "name": "tau"}},
+      "port": {"op": "nameRef", "name": "clk"}},
      {"value": {"op": "nameRef", "name": "f0"},
       "port": {"op": "nameRef", "name": "f0"}},
      {"value": {"op": "nameRef", "name": "delta"},

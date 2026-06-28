@@ -441,6 +441,10 @@ private partial def compileUnary (tag : String) (arg : CoreExpr)
     if isTranscendentalTag tag then none
     else if isComparisonTag tag then none
     else if tag == "BitNot" then some .int
+    -- `ToInt` narrows its argument *from* float; it must not propagate an
+    -- outer `int` expectation onto a float source (e.g. `toInt(f0 * 2.414…)`
+    -- where the result is used in an int context). Leave the arg unconstrained.
+    else if tag == "ToInt" then none
     else expected
   let a ← compileNode arg argExpected
   let a ← unboxIfUnit a

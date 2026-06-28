@@ -1,7 +1,10 @@
 {"ports":
  {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
   "inputs":
-  [{"type": {"op": "nameRef", "name": "float"}, "name": "tau", "default": 0},
+  [{"type": {"op": "nameRef", "name": "clock"},
+    "name": "clk",
+    "default":
+    {"op": "call", "callee": {"op": "nameRef", "name": "clock"}, "args": []}},
    {"type": {"op": "nameRef", "name": "freq"},
     "name": "f0",
     "default":
@@ -13,16 +16,55 @@
  "body":
  {"op": "block",
   "decls":
-  [{"program": {"op": "nameRef", "name": "Sin"},
+  [{"program": {"op": "nameRef", "name": "ClockPhasor"},
+    "op": "instanceDecl",
+    "name": "p1",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "clk"},
+      "port": {"op": "nameRef", "name": "clk"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "freq"}}]},
+   {"program": {"op": "nameRef", "name": "ClockPhasor"},
+    "op": "instanceDecl",
+    "name": "p2",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "clk"},
+      "port": {"op": "nameRef", "name": "clk"}},
+     {"value":
+      {"op": "mul",
+       "args": [{"op": "nameRef", "name": "f0"}, 2.414213562373095]},
+      "port": {"op": "nameRef", "name": "freq"}}]},
+   {"program": {"op": "nameRef", "name": "ClockPhasor"},
+    "op": "instanceDecl",
+    "name": "p3",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "clk"},
+      "port": {"op": "nameRef", "name": "clk"}},
+     {"value":
+      {"op": "mul",
+       "args": [{"op": "nameRef", "name": "f0"}, 4.23606797749979]},
+      "port": {"op": "nameRef", "name": "freq"}}]},
+   {"program": {"op": "nameRef", "name": "ClockPhasor"},
+    "op": "instanceDecl",
+    "name": "p4",
+    "inputs":
+    [{"value": {"op": "nameRef", "name": "clk"},
+      "port": {"op": "nameRef", "name": "clk"}},
+     {"value":
+      {"op": "mul",
+       "args": [{"op": "nameRef", "name": "f0"}, 6.854101966249685]},
+      "port": {"op": "nameRef", "name": "freq"}}]},
+   {"program": {"op": "nameRef", "name": "Sin"},
     "op": "instanceDecl",
     "name": "s1",
     "inputs":
     [{"value":
       {"op": "mul",
        "args":
-       [{"op": "mul",
-         "args": [6.283185307179586, {"op": "nameRef", "name": "f0"}]},
-        {"op": "nameRef", "name": "tau"}]},
+       [6.283185307179586,
+        {"ref": {"op": "nameRef", "name": "p1"},
+         "output": {"op": "nameRef", "name": "phase"},
+         "op": "nestedOut"}]},
       "port": {"op": "nameRef", "name": "x"}}]},
    {"program": {"op": "nameRef", "name": "Sin"},
     "op": "instanceDecl",
@@ -31,12 +73,10 @@
     [{"value":
       {"op": "mul",
        "args":
-       [{"op": "mul",
-         "args":
-         [{"op": "mul",
-           "args": [6.283185307179586, {"op": "nameRef", "name": "f0"}]},
-          {"op": "nameRef", "name": "tau"}]},
-        2.414213562373095]},
+       [6.283185307179586,
+        {"ref": {"op": "nameRef", "name": "p2"},
+         "output": {"op": "nameRef", "name": "phase"},
+         "op": "nestedOut"}]},
       "port": {"op": "nameRef", "name": "x"}}]},
    {"program": {"op": "nameRef", "name": "Sin"},
     "op": "instanceDecl",
@@ -45,12 +85,10 @@
     [{"value":
       {"op": "mul",
        "args":
-       [{"op": "mul",
-         "args":
-         [{"op": "mul",
-           "args": [6.283185307179586, {"op": "nameRef", "name": "f0"}]},
-          {"op": "nameRef", "name": "tau"}]},
-        4.23606797749979]},
+       [6.283185307179586,
+        {"ref": {"op": "nameRef", "name": "p3"},
+         "output": {"op": "nameRef", "name": "phase"},
+         "op": "nestedOut"}]},
       "port": {"op": "nameRef", "name": "x"}}]},
    {"program": {"op": "nameRef", "name": "Sin"},
     "op": "instanceDecl",
@@ -59,12 +97,10 @@
     [{"value":
       {"op": "mul",
        "args":
-       [{"op": "mul",
-         "args":
-         [{"op": "mul",
-           "args": [6.283185307179586, {"op": "nameRef", "name": "f0"}]},
-          {"op": "nameRef", "name": "tau"}]},
-        6.854101966249685]},
+       [6.283185307179586,
+        {"ref": {"op": "nameRef", "name": "p4"},
+         "output": {"op": "nameRef", "name": "phase"},
+         "op": "nestedOut"}]},
       "port": {"op": "nameRef", "name": "x"}}]}],
   "assigns":
   [{"op": "outputAssign",

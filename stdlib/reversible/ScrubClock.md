@@ -40,7 +40,8 @@ kernel having state.)
 ## Source
 
 ```tropical
-program ScrubClock(tau_base: float = 0, velocity: float = 1) -> (tau: float) {
-  tau = tau_base + velocity * toFloat(sampleIndex()) / sampleRate()
+program ScrubClock(tau_base: float = 0, velocity: float = 1) -> (clk: clock) {
+  clk = toInt(tau_base * sampleRate() * 4294967296)
+      + toInt(velocity * 4294967296) * sampleIndex()
 }
 ```

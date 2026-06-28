@@ -1,7 +1,10 @@
 {"ports":
  {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
   "inputs":
-  [{"type": {"op": "nameRef", "name": "float"}, "name": "tau", "default": 0},
+  [{"type": {"op": "nameRef", "name": "clock"},
+    "name": "clk",
+    "default":
+    {"op": "call", "callee": {"op": "nameRef", "name": "clock"}, "args": []}},
    {"type": {"op": "nameRef", "name": "freq"},
     "name": "f0",
     "default":
@@ -26,8 +29,8 @@
     "op": "instanceDecl",
     "name": "dry",
     "inputs":
-    [{"value": {"op": "nameRef", "name": "tau"},
-      "port": {"op": "nameRef", "name": "tau"}},
+    [{"value": {"op": "nameRef", "name": "clk"},
+      "port": {"op": "nameRef", "name": "clk"}},
      {"value": {"op": "nameRef", "name": "f0"},
       "port": {"op": "nameRef", "name": "f0"}}]},
    {"program": {"op": "nameRef", "name": "ModalVoice"},
@@ -37,9 +40,20 @@
     [{"value":
       {"op": "add",
        "args":
-       [{"op": "nameRef", "name": "tau"},
-        {"op": "nameRef", "name": "spacing"}]},
-      "port": {"op": "nameRef", "name": "tau"}},
+       [{"op": "nameRef", "name": "clk"},
+        {"op": "call",
+         "callee": {"op": "nameRef", "name": "toInt"},
+         "args":
+         [{"op": "mul",
+           "args":
+           [{"op": "mul",
+             "args":
+             [{"op": "nameRef", "name": "spacing"},
+              {"op": "call",
+               "callee": {"op": "nameRef", "name": "sampleRate"},
+               "args": []}]},
+            4294967296]}]}]},
+      "port": {"op": "nameRef", "name": "clk"}},
      {"value": {"op": "nameRef", "name": "f0"},
       "port": {"op": "nameRef", "name": "f0"}}]},
    {"program": {"op": "nameRef", "name": "ModalVoice"},
@@ -49,9 +63,20 @@
     [{"value":
       {"op": "add",
        "args":
-       [{"op": "nameRef", "name": "tau"},
-        {"op": "mul", "args": [2, {"op": "nameRef", "name": "spacing"}]}]},
-      "port": {"op": "nameRef", "name": "tau"}},
+       [{"op": "nameRef", "name": "clk"},
+        {"op": "call",
+         "callee": {"op": "nameRef", "name": "toInt"},
+         "args":
+         [{"op": "mul",
+           "args":
+           [{"op": "mul",
+             "args":
+             [{"op": "mul", "args": [2, {"op": "nameRef", "name": "spacing"}]},
+              {"op": "call",
+               "callee": {"op": "nameRef", "name": "sampleRate"},
+               "args": []}]},
+            4294967296]}]}]},
+      "port": {"op": "nameRef", "name": "clk"}},
      {"value": {"op": "nameRef", "name": "f0"},
       "port": {"op": "nameRef", "name": "f0"}}]},
    {"program": {"op": "nameRef", "name": "ModalVoice"},
@@ -61,9 +86,20 @@
     [{"value":
       {"op": "add",
        "args":
-       [{"op": "nameRef", "name": "tau"},
-        {"op": "mul", "args": [3, {"op": "nameRef", "name": "spacing"}]}]},
-      "port": {"op": "nameRef", "name": "tau"}},
+       [{"op": "nameRef", "name": "clk"},
+        {"op": "call",
+         "callee": {"op": "nameRef", "name": "toInt"},
+         "args":
+         [{"op": "mul",
+           "args":
+           [{"op": "mul",
+             "args":
+             [{"op": "mul", "args": [3, {"op": "nameRef", "name": "spacing"}]},
+              {"op": "call",
+               "callee": {"op": "nameRef", "name": "sampleRate"},
+               "args": []}]},
+            4294967296]}]}]},
+      "port": {"op": "nameRef", "name": "clk"}},
      {"value": {"op": "nameRef", "name": "f0"},
       "port": {"op": "nameRef", "name": "f0"}}]},
    {"program": {"op": "nameRef", "name": "ModalVoice"},
@@ -73,9 +109,20 @@
     [{"value":
       {"op": "add",
        "args":
-       [{"op": "nameRef", "name": "tau"},
-        {"op": "mul", "args": [4, {"op": "nameRef", "name": "spacing"}]}]},
-      "port": {"op": "nameRef", "name": "tau"}},
+       [{"op": "nameRef", "name": "clk"},
+        {"op": "call",
+         "callee": {"op": "nameRef", "name": "toInt"},
+         "args":
+         [{"op": "mul",
+           "args":
+           [{"op": "mul",
+             "args":
+             [{"op": "mul", "args": [4, {"op": "nameRef", "name": "spacing"}]},
+              {"op": "call",
+               "callee": {"op": "nameRef", "name": "sampleRate"},
+               "args": []}]},
+            4294967296]}]}]},
+      "port": {"op": "nameRef", "name": "clk"}},
      {"value": {"op": "nameRef", "name": "f0"},
       "port": {"op": "nameRef", "name": "f0"}}]}],
   "assigns":

@@ -50,10 +50,10 @@ is a palindrome about index 2048.
 ```tropical
 program ReversibleProbe(half: float = 2048, f0: freq = 110, delta: float = 0.0007) -> (out: float) {
   comb = ReversibleComb(
-    tau: let {
+    clk: let {
         nf: toFloat(sampleIndex());
         tri: select(nf < half, nf, 2 * half - nf)
-      } in tri / sampleRate(),
+      } in toInt(tri * 4294967296),
     f0: f0,
     delta: delta)
   out = comb.out
