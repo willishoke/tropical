@@ -1,4 +1,5 @@
 import Tropical.Ir.Strata.Basic
+import Tropical.Ir.Strata.EArena
 import Tropical.Ir.Strata.Specialize
 import Tropical.Ir.Strata.SumLower
 import Tropical.Ir.Strata.InlineInstances
@@ -64,16 +65,22 @@ def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
     Except Error (Arena × ProgramIdx) := do
   if opts.upto < 1 then return (arena, root)
   assertAcyclic arena root
-  let (arena, root) ← Specialize.run arena root opts.typeArgs
-  if opts.upto < 2 then return (arena, root)
-  let (arena, root) ← SumLower.run arena root
-  if opts.upto < 3 then return (arena, root)
-  let (arena, root) ←
-    if opts.inlineNested then InlineInstances.run arena root
-    else pure (arena, root)
-  if opts.upto < 4 then return (arena, root)
-  let (arena, root) ← ArrayLower.run arena root
-  if opts.upto < 5 then return (arena, root)
-  IdentityElim.run arena root
+  -- Native-DAG (#190): convert to id form, run the passes over the shared
+  -- expression DAG (the inlining bloat never materializes), then materialize
+  -- the post-strata root back to a tree. (Phase B threads the DAG straight to
+  -- emit and drops this final materialization.)
+  let ea := EArena.ofArena arena
+  let passes : PassM ProgramIdx := do
+    let root ← Specialize.runE root opts.typeArgs
+    if opts.upto < 2 then return root
+    let root ← SumLower.runE root
+    if opts.upto < 3 then return root
+    let root ← if opts.inlineNested then InlineInstances.runE root else pure root
+    if opts.upto < 4 then return root
+    let root ← ArrayLower.runE root
+    if opts.upto < 5 then return root
+    IdentityElim.runE root
+  let (postRoot, ea) ← passes.run ea
+  ea.materialize postRoot
 
 end Tropical.Ir.Strata
