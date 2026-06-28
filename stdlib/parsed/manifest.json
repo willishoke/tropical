@@ -1,5 +1,6 @@
 {"programs":
  ["BlepStep",
+  "ClockPhasor",
   "CrossFade",
   "Exp",
   "FixedPhasor",
@@ -17,6 +18,7 @@
   "ScrubClock",
   "ThroughZeroFlanger",
   "ThroughZeroFlangerProbe",
+  "ClockPhasorProbe",
   "Cos",
   "FixedSinOsc",
   "MorphOsc",

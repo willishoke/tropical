@@ -160,10 +160,14 @@ private def builtinTypeToScalar? : String → Option ScalarKind
   | "int" => some .int
   | "bool" => some .bool
   | "signal" | "freq" | "unipolar" | "bipolar" | "phase" => some .float
+  -- `clock`/`time`: a fixed-point time coordinate (Q32.32 samples), carried as
+  -- the `int` (i64) carrier. A semantic alias — no separate runtime kind.
+  | "clock" | "time" => some .int
   | _ => none
 
 private def nullaryCalls : List String :=
-  ["sample_rate", "sample_index", "sampleRate", "sampleIndex"]
+  ["sample_rate", "sample_index", "sampleRate", "sampleIndex",
+   "clock", "sample_clock", "sampleClock"]
 
 private def unaryCall? : String → Option UnaryOpTag
   | "sqrt" => some .sqrt
@@ -350,8 +354,12 @@ partial def resolveCall (scope : Scope) (callee : ParsedExpr)
       throwElab s!"'{fname}()' takes no arguments"
     if fname == "sample_rate" || fname == "sampleRate" then
       pure .sampleRate
-    else
+    else if fname == "sample_index" || fname == "sampleIndex" then
       pure .sampleIndex
+    else
+      -- clock(): the root fixed-point time coordinate θ = sampleIndex << 32,
+      -- i.e. the current sample expressed in Q32.32 samples (zero fraction).
+      pure (.binary .lshift .sampleIndex (.num { mantissa := 32, exponent := 0 }))
   else if let some tag := unaryCall? fname then
     if args.size != 1 then
       throwElab s!"'{fname}' takes 1 argument; got {args.size}"

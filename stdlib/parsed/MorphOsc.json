@@ -12,17 +12,23 @@
     "default":
     {"op": "call",
      "callee": {"op": "nameRef", "name": "clamp"},
-     "args": [0, 0, 1]}}]},
+     "args": [0, 0, 1]}},
+   {"type": {"op": "nameRef", "name": "clock"},
+    "name": "clk",
+    "default":
+    {"op": "call", "callee": {"op": "nameRef", "name": "clock"}, "args": []}}]},
  "op": "program",
  "name": "MorphOsc",
  "body":
  {"op": "block",
   "decls":
-  [{"program": {"op": "nameRef", "name": "FixedPhasor"},
+  [{"program": {"op": "nameRef", "name": "ClockPhasor"},
     "op": "instanceDecl",
     "name": "ph",
     "inputs":
-    [{"value": {"op": "nameRef", "name": "freq"},
+    [{"value": {"op": "nameRef", "name": "clk"},
+      "port": {"op": "nameRef", "name": "clk"}},
+     {"value": {"op": "nameRef", "name": "freq"},
       "port": {"op": "nameRef", "name": "freq"}}]},
    {"program": {"op": "nameRef", "name": "Sin"},
     "op": "instanceDecl",

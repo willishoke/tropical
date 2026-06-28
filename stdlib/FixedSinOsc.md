@@ -46,8 +46,8 @@ basis of the scope / multi-rate-consumer path.
 ## Source
 
 ```tropical
-program FixedSinOsc(freq: freq = 440) -> (sine: float) {
-  ph = FixedPhasor(freq: freq)
+program FixedSinOsc(freq: freq = 440, clk: clock = clock()) -> (sine: float) {
+  ph = ClockPhasor(clk: clk, freq: freq)
   sin = Sin(x: 6.283185307179586 * ph.phase)
   sine = sin.out
 }

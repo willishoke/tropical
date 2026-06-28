@@ -318,6 +318,39 @@ private def runFlangerReversibility : IO Bool := do
           IO.println s!"  PASS  flanger  bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
           pure true
 
+/-- Fixed-point clock substrate witness: `ClockPhasor(clk: clock())` must be
+    bit-for-bit identical to `FixedPhasor` (the root clock `θ = sampleIndex <<
+    32` has zero fraction, so the split-multiply collapses to `inc·n + off`).
+    The probe outputs `FixedPhasor.phase − ClockPhasor.phase`; assert it is
+    exactly zero at every sample. -/
+private def runClockPhasorEquiv : IO Bool := do
+  let n : Nat := 4096
+  match ← compilePatch "patches/clock_phasor_probe.json" .fused with
+  | .error e => IO.println s!"  FAIL  clock-phasor  compile: {firstLine e}"; pure false
+  | .ok planJson =>
+    match ← renderSamples planJson n with
+    | .error e => IO.println s!"  FAIL  clock-phasor  render: {firstLine e}"; pure false
+    | .ok samples =>
+      if samples.size < n then
+        IO.println s!"  FAIL  clock-phasor  got {samples.size} samples (want {n})"
+        pure false
+      else do
+        let mut maxAbs := 0.0
+        let mut firstBad := 0
+        let mut bad := 0
+        for k in [0:n] do
+          let v := samples[k]!
+          if v.toBits != (0.0 : Float).toBits then
+            if bad == 0 then firstBad := k
+            bad := bad + 1
+          if v.abs > maxAbs then maxAbs := v.abs
+        if bad != 0 then
+          IO.println s!"  FAIL  clock-phasor  {bad} nonzero samples (first k={firstBad}, max|Δ|={maxAbs})"
+          pure false
+        else
+          IO.println "  PASS  clock-phasor  ClockPhasor(clock()) ≡ FixedPhasor bit-for-bit"
+          pure true
+
 -- ── CF-only enforcement: surface `reg`/`next` is unparseable ──────────────────
 -- The Phase-1 guarantee, now STRUCTURAL: `reg`/`next` were deleted from the
 -- surface grammar and the IR, so a program declaring them does not even parse
@@ -416,6 +449,8 @@ def main (args : List String) : IO UInt32 := do
   if !(← runReversibility) then failed := failed + 1
   total := total + 1
   if !(← runFlangerReversibility) then failed := failed + 1
+  total := total + 1
+  if !(← runClockPhasorEquiv) then failed := failed + 1
 
   -- ── (f) CF goldens (tests/golden/cf/*.hash) — the closed-form corpus ───────
   -- The corpus that must stay green through every phase of the CF-only
