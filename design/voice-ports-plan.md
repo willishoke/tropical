@@ -73,12 +73,36 @@ program Flanger(v: voice(out: float), depth: float = 0.0007) -> (out: float) {
 }
 ```
 
-### 2. IR + elaboration
+### 2. IR + elaboration  (REPRESENTATION LOCKED — Phase 0 confirmed)
 A voice input binds a **clock-parametric program**; each `v(clockExpr)` desugars
 to an **instance of that program clocked at clockExpr**. This reuses the instance
 + clock + native-DAG machinery wholesale — `v(clk−δ)` is "an instance of the
 bound voice, `clk: clk−δ`, take its `out`". The elaborator, knowing `v`'s bound
 program, lowers each application to an instance + `nestedOut`.
+
+**The key simplification (verified against the parser/IR):** there is **no new
+IR node, no strata change, no emit change.** The pieces all already exist:
+- Application `v(clockExpr)` parses as the existing `ParsedExpr.call (nameRef "v")
+  [clockExpr]` — no new surface production.
+- Its desugar target is `BodyDecl.inst` + `ParsedExpr.nestedOut` — both existing.
+- Lowering is the proven FlangeSin shape (Phase 0): instances of a clock-parametric
+  voice at warped clocks, summed.
+
+So the novelty is concentrated in exactly two places:
+1. **Parse** — a `voice` port *type* (`PortTypeDecl.voice` carrying the output
+   signature/bound). The application reuses `call`.
+2. **Elaborate** — when a `call`'s callee resolves to a voice-typed input, desugar
+   it to a fresh instance of the bound program (clock = the call's arg, other
+   params threaded from the binding) + a `nestedOut` to that instance's output.
+
+Plus the **binding** (§3): how the voice input acquires its bound program. Phase 1
+takes the 3a path — the voice is wired to a single clock-parametric program; the
+binding records that program + its non-clock params; each application supplies the
+clock. `v` is the morphism's *domain* (pointfree), bound by the wire — not a `<V>`.
+
+Net: voice ports are **sugar over the program-at-warped-clocks shape Phase 0 already
+renders.** The hard part is the desugar + binding plumbing in the elaborator/session,
+not the IR.
 
 ### 3. The cone-capture binding (the one genuinely new pass — DE-RISK FIRST)
 Wiring `osc → flanger.v` must bind `v` to the upstream as a **clock-parametric
