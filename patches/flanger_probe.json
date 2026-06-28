@@ -1,0 +1,19 @@
+{
+  "schema": "tropical_program_2",
+  "name": "flanger_probe",
+  "body": {
+    "op": "block",
+    "decls": [
+      {
+        "op": "instanceDecl",
+        "name": "p",
+        "program": "ThroughZeroFlangerProbe",
+        "inputs": {}
+      }
+    ],
+    "assigns": []
+  },
+  "audio_outputs": [
+    { "instance": "p", "output": "out" }
+  ]
+}

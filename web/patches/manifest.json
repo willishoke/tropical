@@ -2,5 +2,6 @@
   { "slug": "pure-sine-440", "title": "Pure Sine 440", "description": "A plain SinOsc at 440 Hz. The smallest thing tropical does." },
   { "slug": "ring-mod", "title": "Ring Mod", "description": "Two SinOscs (220 Hz × 331 Hz) multiplied through a VCA — dissonant partials." },
   { "slug": "fm-pair", "title": "FM Pair", "description": "Simple 2-op FM: a 73 Hz modulator shaping a ~220 Hz carrier." },
-  { "slug": "fm-stack", "title": "FM Stack", "description": "3-op FM with a slow LFO on the modulator depth — evolves gently." }
+  { "slug": "fm-stack", "title": "FM Stack", "description": "3-op FM with a slow LFO on the modulator depth — evolves gently." },
+  { "slug": "tz-flanger", "title": "Through-Zero Flanger", "description": "A stateless through-zero flanger: an LFO sweeps the two offset taps of a reversible comb through zero on a 110 Hz modal drone. The ahead tap reads the future." }
 ]

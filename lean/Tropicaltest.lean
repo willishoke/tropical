@@ -279,6 +279,45 @@ private def runReversibility : IO Bool := do
           IO.println s!"  PASS  reversibility  bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
           pure true
 
+/-- Same palindrome witness pointed at `ThroughZeroFlanger`: the LFO that
+    sweeps `delta` is itself a function of `tau`, so unfreezing the comb adds
+    no state. A latched oscillator would diverge between the forward and
+    reverse halves; this stays bit-exact, sweep and all. -/
+private def runFlangerReversibility : IO Bool := do
+  let half : Nat := 2048
+  let n : Nat := 2 * half
+  match ← compilePatch "patches/flanger_probe.json" .fused with
+  | .error e => IO.println s!"  FAIL  flanger  compile: {firstLine e}"; pure false
+  | .ok planJson =>
+    match ← renderSamples planJson n with
+    | .error e => IO.println s!"  FAIL  flanger  render: {firstLine e}"; pure false
+    | .ok samples =>
+      if samples.size < n then
+        IO.println s!"  FAIL  flanger  got {samples.size} samples (want {n})"
+        pure false
+      else do
+        let mut mism := 0
+        let mut firstBad := 0
+        for k in [1:half] do
+          if (samples[half + k]!).toBits != (samples[half - k]!).toBits then
+            if mism == 0 then firstBad := k
+            mism := mism + 1
+        let mut energy := 0.0
+        let mut maxAbs := 0.0
+        for k in [0:n] do
+          let v := samples[k]!
+          energy := energy + v * v
+          if v.abs > maxAbs then maxAbs := v.abs
+        if mism != 0 then
+          IO.println s!"  FAIL  flanger  {mism} mismatched pairs (first k={firstBad})"
+          pure false
+        else if energy <= 1e-6 then
+          IO.println s!"  FAIL  flanger  signal is silent (energy {energy})"
+          pure false
+        else
+          IO.println s!"  PASS  flanger  bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
+          pure true
+
 -- ── CF-only enforcement: surface `reg`/`next` is unparseable ──────────────────
 -- The Phase-1 guarantee, now STRUCTURAL: `reg`/`next` were deleted from the
 -- surface grammar and the IR, so a program declaring them does not even parse
@@ -375,6 +414,8 @@ def main (args : List String) : IO UInt32 := do
   IO.println "reversibility (closed-form-in-tau palindrome):"
   total := total + 1
   if !(← runReversibility) then failed := failed + 1
+  total := total + 1
+  if !(← runFlangerReversibility) then failed := failed + 1
 
   -- ── (f) CF goldens (tests/golden/cf/*.hash) — the closed-form corpus ───────
   -- The corpus that must stay green through every phase of the CF-only
