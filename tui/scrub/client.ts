@@ -127,4 +127,4 @@ export class EngineClient {
   }
 }
 
-export const repoRoot = resolve(import.meta.dir, '..')
+export const repoRoot = resolve(import.meta.dir, '../..')

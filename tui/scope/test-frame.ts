@@ -6,7 +6,7 @@ import { EngineClient, setupMorphScope } from './client'
 import { renderWaveform } from './braille'
 import { findPhaseTrigger } from './trigger'
 
-const repoRoot = resolve(import.meta.dir, '..')
+const repoRoot = resolve(import.meta.dir, '../..')
 const c = new EngineClient({ repoRoot, onError: (e) => { console.error('engine error:', e.message); process.exit(1) } })
 
 const FREQS = [220, 330], SR = 44100, SEARCH = 220
