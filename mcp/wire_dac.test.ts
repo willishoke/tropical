@@ -7,9 +7,14 @@
  * non-ref expressions for the dac destination.
  */
 
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
+import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from 'bun:test'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { resolve } from 'node:path'
+
+// The boot beforeAll spawns and waits for the Lean engine (frontend + stdlib);
+// that's seconds even warm, and tips over bun's 5000ms default on a loaded CI
+// runner. Give the file's tests + lifecycle hooks realistic headroom.
+setDefaultTimeout(60_000)
 
 type Envelope = {
   code: string
