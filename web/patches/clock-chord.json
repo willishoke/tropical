@@ -1,0 +1,1 @@
+{"schema":"tropical_program_2","name":"clock_chord","body":{"op":"block","decls":[{"op":"instanceDecl","name":"c","program":"ClockChord","inputs":{"f0":110}}],"assigns":[]},"audio_outputs":[{"instance":"c","output":"out"}]}

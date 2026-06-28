@@ -1,0 +1,83 @@
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "float"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "freq"},
+    "name": "f0",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "select"},
+     "args": [{"op": "gt", "args": [110, 0]}, 110, 0]}}]},
+ "op": "program",
+ "name": "ClockChord",
+ "body":
+ {"op": "block",
+  "decls":
+  [{"program": {"op": "nameRef", "name": "ModalVoice"},
+    "op": "instanceDecl",
+    "name": "root",
+    "inputs":
+    [{"value":
+      {"op": "call", "callee": {"op": "nameRef", "name": "clock"}, "args": []},
+      "port": {"op": "nameRef", "name": "clk"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}}]},
+   {"program": {"op": "nameRef", "name": "ModalVoice"},
+    "op": "instanceDecl",
+    "name": "third",
+    "inputs":
+    [{"value":
+      {"op": "rshift",
+       "args":
+       [{"op": "mul",
+         "args":
+         [{"op": "call",
+           "callee": {"op": "nameRef", "name": "clock"},
+           "args": []},
+          5]},
+        2]},
+      "port": {"op": "nameRef", "name": "clk"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}}]},
+   {"program": {"op": "nameRef", "name": "ModalVoice"},
+    "op": "instanceDecl",
+    "name": "fifth",
+    "inputs":
+    [{"value":
+      {"op": "rshift",
+       "args":
+       [{"op": "mul",
+         "args":
+         [{"op": "call",
+           "callee": {"op": "nameRef", "name": "clock"},
+           "args": []},
+          3]},
+        1]},
+      "port": {"op": "nameRef", "name": "clk"}},
+     {"value": {"op": "nameRef", "name": "f0"},
+      "port": {"op": "nameRef", "name": "f0"}}]}],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "add",
+     "args":
+     [{"op": "add",
+       "args":
+       [{"op": "mul",
+         "args":
+         [0.4,
+          {"ref": {"op": "nameRef", "name": "root"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]},
+        {"op": "mul",
+         "args":
+         [0.3,
+          {"ref": {"op": "nameRef", "name": "third"},
+           "output": {"op": "nameRef", "name": "out"},
+           "op": "nestedOut"}]}]},
+      {"op": "mul",
+       "args":
+       [0.3,
+        {"ref": {"op": "nameRef", "name": "fifth"},
+         "output": {"op": "nameRef", "name": "out"},
+         "op": "nestedOut"}]}]}}]}}

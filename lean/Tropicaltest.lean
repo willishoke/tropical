@@ -351,6 +351,28 @@ private def runClockPhasorEquiv : IO Bool := do
           IO.println "  PASS  clock-phasor  ClockPhasor(clock()) ≡ FixedPhasor bit-for-bit"
           pure true
 
+/-- Per-oscillator reverse witness: `FixedSinOsc(clk: -θ)` is the negated
+    forward sine, so `forward + reverse` cancels. Reports the residual (≈ Sin
+    polynomial range-reduction asymmetry); asserts it is at most a small
+    epsilon. -/
+private def runClockReverseProbe : IO Bool := do
+  let n : Nat := 4096
+  match ← compilePatch "patches/clock_reverse_probe.json" .fused with
+  | .error e => IO.println s!"  FAIL  clock-reverse  compile: {firstLine e}"; pure false
+  | .ok planJson =>
+    match ← renderSamples planJson n with
+    | .error e => IO.println s!"  FAIL  clock-reverse  render: {firstLine e}"; pure false
+    | .ok samples =>
+      let mut maxAbs := 0.0
+      for k in [0:samples.size] do
+        if samples[k]!.abs > maxAbs then maxAbs := samples[k]!.abs
+      if maxAbs < 1e-6 then
+        IO.println s!"  PASS  clock-reverse  forward+reverse cancels (max|Δ|={maxAbs})"
+        pure true
+      else
+        IO.println s!"  FAIL  clock-reverse  residual too large (max|Δ|={maxAbs})"
+        pure false
+
 -- ── CF-only enforcement: surface `reg`/`next` is unparseable ──────────────────
 -- The Phase-1 guarantee, now STRUCTURAL: `reg`/`next` were deleted from the
 -- surface grammar and the IR, so a program declaring them does not even parse
@@ -451,6 +473,8 @@ def main (args : List String) : IO UInt32 := do
   if !(← runFlangerReversibility) then failed := failed + 1
   total := total + 1
   if !(← runClockPhasorEquiv) then failed := failed + 1
+  total := total + 1
+  if !(← runClockReverseProbe) then failed := failed + 1
 
   -- ── (f) CF goldens (tests/golden/cf/*.hash) — the closed-form corpus ───────
   -- The corpus that must stay green through every phase of the CF-only

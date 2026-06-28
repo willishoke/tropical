@@ -22,4 +22,7 @@
   "Cos",
   "FixedSinOsc",
   "MorphOsc",
-  "SoftClip"]}
+  "SoftClip",
+  "ClockChord",
+  "ClockPM",
+  "ClockReverseProbe"]}
