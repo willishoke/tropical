@@ -725,9 +725,9 @@ def handleDefineProgram (env : Env) (args : Json) : EngineM Json := do
 def handleAddInstance (env : Env) (args : Json) : EngineM Json := do
   let programName := (argStr? args "program").getD ""
   let instanceName := (argStr? args "instance_name").getD ""
-  if instanceName == dacName then
+  if instanceName == dacName || instanceName == scopeName then
     throwBare .invalidValue
-      s!"'{dacName}' is a reserved instance name (audio output boundary). Choose a different name."
+      s!"'{instanceName}' is a reserved instance name ({dacName} = audio output, {scopeName} = inspection taps). Choose a different name."
       (param := some "instance_name") (value := some (Json.str instanceName))
   let st ← env.state.get
   if (st.findInstance? instanceName).isSome then
@@ -750,9 +750,9 @@ def handleReplicate (env : Env) (args : Json) : EngineM Json := do
         (some s!"count must be a positive integer, got {tsInterp countJ}")
   let namePrefix := argStr? args "name_prefix"
   let prefix' := namePrefix.getD programName.toLower
-  if prefix' == dacName then
+  if prefix' == dacName || prefix' == scopeName then
     throwBare .invalidValue
-      s!"'{dacName}' is a reserved instance name (audio output boundary). Choose a different name_prefix."
+      s!"'{prefix'}' is a reserved instance name ({dacName} = audio output, {scopeName} = inspection taps). Choose a different name_prefix."
       (param := some "name_prefix") (value := some (Json.str prefix'))
   let mut created : Array Json := #[]
   for _ in [0:count] do
@@ -777,7 +777,8 @@ def handleRemoveInstance (env : Env) (args : Json) : EngineM Json := do
     { st with
       wires := st.wires.filter fun w =>
         !(w.instName == instanceName || (exprDependencies w.expr).contains instanceName)
-      graphOutputs := st.graphOutputs.filter (·.1 != instanceName) }
+      graphOutputs := st.graphOutputs.filter (·.1 != instanceName)
+      scopeTaps := st.scopeTaps.filter (·.2.1 != instanceName) }
   syncCompile env
   pure <| Json.mkObj [("removed", Json.str instanceName)]
 
@@ -1783,6 +1784,13 @@ def handleDebugRender (env : Env) (args : Json) : EngineM Json := do
 
 -- ── Dispatcher ───────────────────────────────────────────────────────────────
 
+def handleListScopeTaps (env : Env) : EngineM Json := do
+  let st ← env.state.get
+  let taps := st.scopeTaps.map fun (name, inst, out) =>
+    Json.mkObj [("name", Json.str name), ("instance", Json.str inst),
+                ("output", Json.str out), ("slot", Json.str s!"{inst}.{out}")]
+  pure <| Json.mkObj [("taps", Json.arr taps)]
+
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   wrap <| match name with
   | "define_program"  => handleDefineProgram env args
@@ -1799,6 +1807,7 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "get_info"        => handleGetInfo env args
   | "wire"            => handleWire env args
   | "list_wiring"     => handleListWiring env args
+  | "list_scope_taps" => handleListScopeTaps env
   | "load"            => handleLoad env args
   | "save"            => handleSave env
   | "merge"           => handleMerge env args
