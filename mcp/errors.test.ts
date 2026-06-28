@@ -10,8 +10,13 @@
  * failX helpers in combination.
  */
 
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test'
+import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from 'bun:test'
 import { spawn, type ChildProcess } from 'node:child_process'
+
+// The boot beforeAll spawns and waits for the Lean engine (frontend + stdlib);
+// that's seconds even warm, and tips over bun's 5000ms default on a loaded CI
+// runner. Give the file's tests + lifecycle hooks realistic headroom.
+setDefaultTimeout(60_000)
 import { resolve } from 'node:path'
 
 type Envelope = {
@@ -82,7 +87,7 @@ class Client {
           this.pending.delete(id)
           rej(new Error(`Timeout on ${method}`))
         }
-      }, 5000)
+      }, 30000)
     })
   }
 
