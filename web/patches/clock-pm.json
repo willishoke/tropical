@@ -1,1 +1,0 @@
-{"schema":"tropical_program_2","name":"clock_pm","body":{"op":"block","decls":[{"op":"instanceDecl","name":"p","program":"ClockPM","inputs":{"carrier":220,"ratio":2,"depth":40}}],"assigns":[]},"audio_outputs":[{"instance":"p","output":"out"}]}
