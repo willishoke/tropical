@@ -48,6 +48,7 @@ structure Env where
 -- Reserved audio-output boundary leaf.
 private def dacName : String := "dac"
 private def dacOut : String := "out"
+private def scopeName : String := "scope"
 
 -- ── Json access helpers ──────────────────────────────────────────────────────
 
@@ -204,6 +205,19 @@ def runStrataChecked (typeArgs : Array (String × Lean.JsonNumber))
     if let .error e := Tropical.Ir.Core.check arena rootIdx then
       throw s!"post-strata Core check failed (port bug): {e}"
   pure (arena, rootIdx)
+
+/-- Emit the (LLVM IR text, manifest JSON) for a compiled session plan
+    without loading it. Shared by the audio compile (`syncCompile`) and the
+    lazy inspection compile (Part II): both realizations go through the same
+    `toWire`/`emitKernel` path; only the originating `FlatPlan` differs. -/
+def buildKernelIr (plan : Tropical.Plan.FlatPlan) : EngineM (String × String) := do
+  let planJson ← match plan.toWire with
+    | .error msg => internalError msg
+    | .ok j => pure j.compress
+  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .error msg => internalError s!"EmitLlvm: {msg}"
+    | .ok s => pure s
+  pure (ir, planJson)
 
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 
@@ -374,14 +388,9 @@ def syncCompile (env : Env) : EngineM Unit := do
       root := rootCore } with
     | .error msg => internalError msg
     | .ok p => pure p
-  let planJson ← match plan.toWire with
-    | .error msg => internalError msg
-    | .ok j => pure j.compress
   -- Lean owns codegen: emit LLVM IR from the in-memory plan and hand it to
   -- the engine (planJson is the metadata manifest). No C++ plan compiler.
-  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
-    | .error msg => internalError s!"EmitLlvm: {msg}"
-    | .ok s => pure s
+  let (ir, planJson) ← buildKernelIr plan
   env.runtime.loadIr ir planJson
 
 /-- Harness-only (diffcli `compile`): rebuild the plan from the current
@@ -716,9 +725,9 @@ def handleDefineProgram (env : Env) (args : Json) : EngineM Json := do
 def handleAddInstance (env : Env) (args : Json) : EngineM Json := do
   let programName := (argStr? args "program").getD ""
   let instanceName := (argStr? args "instance_name").getD ""
-  if instanceName == dacName then
+  if instanceName == dacName || instanceName == scopeName then
     throwBare .invalidValue
-      s!"'{dacName}' is a reserved instance name (audio output boundary). Choose a different name."
+      s!"'{instanceName}' is a reserved instance name ({dacName} = audio output, {scopeName} = inspection taps). Choose a different name."
       (param := some "instance_name") (value := some (Json.str instanceName))
   let st ← env.state.get
   if (st.findInstance? instanceName).isSome then
@@ -741,9 +750,9 @@ def handleReplicate (env : Env) (args : Json) : EngineM Json := do
         (some s!"count must be a positive integer, got {tsInterp countJ}")
   let namePrefix := argStr? args "name_prefix"
   let prefix' := namePrefix.getD programName.toLower
-  if prefix' == dacName then
+  if prefix' == dacName || prefix' == scopeName then
     throwBare .invalidValue
-      s!"'{dacName}' is a reserved instance name (audio output boundary). Choose a different name_prefix."
+      s!"'{prefix'}' is a reserved instance name ({dacName} = audio output, {scopeName} = inspection taps). Choose a different name_prefix."
       (param := some "name_prefix") (value := some (Json.str prefix'))
   let mut created : Array Json := #[]
   for _ in [0:count] do
@@ -768,7 +777,8 @@ def handleRemoveInstance (env : Env) (args : Json) : EngineM Json := do
     { st with
       wires := st.wires.filter fun w =>
         !(w.instName == instanceName || (exprDependencies w.expr).contains instanceName)
-      graphOutputs := st.graphOutputs.filter (·.1 != instanceName) }
+      graphOutputs := st.graphOutputs.filter (·.1 != instanceName)
+      scopeTaps := st.scopeTaps.filter (·.2.1 != instanceName) }
   syncCompile env
   pure <| Json.mkObj [("removed", Json.str instanceName)]
 
@@ -889,6 +899,7 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
   -- Sets
   let mut results : Array Json := #[]
   let mut dacWires : Array Json := #[]
+  let mut scopeWires : Array Json := #[]
   for s in setOps do
     let sInst := (argStr? s "instance").getD ""
     let sInput := (getField? s "input").getD jsonNull
@@ -904,6 +915,19 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
       env.state.modify fun st =>
         { st with graphOutputs := st.graphOutputs.push (srcInst, srcOut) }
       dacWires := dacWires.push <| Json.mkObj
+        [("instance", Json.str sInst), ("input", sInput), ("expr", sExpr)]
+    else if sInst == scopeName then
+      let tapName := (argStr? s "input").getD ""
+      if tapName.isEmpty then
+        throwBare .invalidValue
+          s!"scope tap requires a string input name ({scopeName}.<name>)."
+          (param := some "set[].input") (value := some sInput)
+      validateOrInternal sExpr s!"{scopeName}.{tapName}"
+      let st ← env.state.get
+      let (srcInst, srcOut) ← resolveDacSource st sExpr
+      env.state.modify fun st =>
+        { st with scopeTaps := (st.scopeTaps.filter (·.1 != tapName)).push (tapName, srcInst, srcOut) }
+      scopeWires := scopeWires.push <| Json.mkObj
         [("instance", Json.str sInst), ("input", sInput), ("expr", sExpr)]
     else
       let st ← env.state.get
@@ -926,6 +950,7 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
   pure <| Json.mkObj <|
     [("set", Json.arr results)]
     ++ (if dacWires.isEmpty then [] else [("dac", Json.arr dacWires)])
+    ++ (if scopeWires.isEmpty then [] else [("scope", Json.arr scopeWires)])
     ++ [("removed", toJson removeOps.size)]
     ++ (if dacRemoved > 0 then [("dacRemoved", toJson dacRemoved)] else [])
 
@@ -1759,6 +1784,13 @@ def handleDebugRender (env : Env) (args : Json) : EngineM Json := do
 
 -- ── Dispatcher ───────────────────────────────────────────────────────────────
 
+def handleListScopeTaps (env : Env) : EngineM Json := do
+  let st ← env.state.get
+  let taps := st.scopeTaps.map fun (name, inst, out) =>
+    Json.mkObj [("name", Json.str name), ("instance", Json.str inst),
+                ("output", Json.str out), ("slot", Json.str s!"{inst}.{out}")]
+  pure <| Json.mkObj [("taps", Json.arr taps)]
+
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   wrap <| match name with
   | "define_program"  => handleDefineProgram env args
@@ -1775,6 +1807,7 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "get_info"        => handleGetInfo env args
   | "wire"            => handleWire env args
   | "list_wiring"     => handleListWiring env args
+  | "list_scope_taps" => handleListScopeTaps env
   | "load"            => handleLoad env args
   | "save"            => handleSave env
   | "merge"           => handleMerge env args
