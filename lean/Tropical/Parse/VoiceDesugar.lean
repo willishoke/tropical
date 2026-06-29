@@ -115,6 +115,24 @@ def desugarBody (bs : Array VoiceBinding) (body : Block) : Except String Block :
   | .ok (block, _) => pure block
   | .error e => throw e
 
+private def portName : ProgramPort → String
+  | .bare n => n
+  | .spec s => s.name
+
+/-- Desugar voice applications in a program AND drop the now-consumed voice input
+    ports (each `v` is fully replaced by generated instances, so the port no
+    longer exists). The result is an ordinary program that elaborates + lowers
+    through the existing pipeline — the FlangeSin shape Phase 0 proved. -/
+def desugarProgram (bs : Array VoiceBinding) (prog : Program) : Except String Program := do
+  match prog with
+  | .mk name tps ports body bc =>
+    let body' ← desugarBody bs body
+    let voiceNames := bs.map (·.voiceName)
+    let ports' := ports.map fun pp =>
+      { pp with inputs := pp.inputs.map fun arr =>
+        arr.filter fun p => !voiceNames.contains (portName p) }
+    pure (.mk name tps ports' body' bc)
+
 end Tropical.Parse.VoiceDesugar
 
 
