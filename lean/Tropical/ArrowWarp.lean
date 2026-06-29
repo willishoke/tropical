@@ -569,4 +569,120 @@ def buildFlangerThenReverse (arena : Arena) (resolved : Array (String × Program
   let (ahead, b) := b.osc v "ahead" (tapClk (.fwd  delta1))
   buildVoiceProgram "FlangerThenReverse" b.decls (flangerSum dry past ahead) arena resolved
 
+-- ─────────────────────────────────────────────────────────────
+-- M7 (slice 6) — a FIXED-POINT VALUE carrier: the float reassociation
+-- failure (slice 5, law 3) becomes BYTE-IDENTICAL
+-- ─────────────────────────────────────────────────────────────
+
+/-! Slice 5 found that `reverse ⋙ flanger ≡ flanger ⋙ reverse` is denotationally
+    true but NOT byte-identical in FLOAT (1271/4096 samples differ): under reverse
+    the ±δ taps SWAP tree slot, so the float weighted-sum reassociates
+    `(A+B)+C` vs `(A+C)+B`, and float add is not associative. Slice 6 proves the
+    fix — the SAME warp combinators instantiated at a FIXED-POINT value carrier,
+    where the mix is INTEGER arithmetic (associative AND commutative), make that
+    same law BYTE-IDENTICAL.
+
+    The "fixed-point value" is the existing `int` carrier reinterpreted as a
+    Q-fractional saw, mixed with the existing INTEGER IR ops. No type-system /
+    `ScalarKind` change, no fixed-point `Sin`, no touching the engine's float
+    carrier or the frozen float goldens — just integer `Expr` over the same
+    Q32.32 clock the warps already speak, with a single `toFloat` scale at the
+    DAC boundary.
+
+    * SOURCE: a raw Q0.32 saw phasor INTEGER value — ClockPhasor's split-multiply
+      but stopping BEFORE the `/2³²` toFloat (`fixedPhase`). Integer-only.
+    * MIX: the SAME 0.5/0.25/0.25 weights as the float `flangerSum`, but as
+      integer right-shifts `((dry>>1)+(past>>2))+(ahead>>2)` (`fixedFlangerSum`).
+      Integer add is associative, so the past/ahead slot swap is invisible.
+    * OUTPUT: `toFloat(mix)/2³²` at the boundary (`fixedOut`) — the SAME map on
+      both law sides, so byte-identical ints render byte-identical floats. -/
+
+/-- `⌊freq·2³²/SR⌋` as a LITERAL int (freq = 220 Hz, SR = 44100):
+    `⌊220·4294967296/44100⌋ = 21426140`. Precomputed so the source needs no
+    float division — it is integer end to end. -/
+def fixedFreqInc : Expr := lit 21426140
+
+/-- A fixed-point Q0.32 saw phasor as a PURE INTEGER function of the clock —
+    ClockPhasor's split-multiply (`acc = inc·thi + (inc·tlo)>>32`, masked to
+    `[0,2³²)`) but stopping BEFORE the `/2³²` toFloat, so the value stays a raw
+    Q0.32 integer the flanger can mix with integer arithmetic. `thi = clk>>32`
+    (whole samples), `tlo = clk & (2³²−1)` (the sub-sample fraction). Integer ops
+    ONLY: `.rshift`, `.bitAnd`, `.add`, `.mul`. The `& (2³²−1)` reductions make
+    the arithmetic/logical-shift distinction irrelevant (masked away), exactly as
+    in ClockPhasor. -/
+def fixedPhase (clk : Clock) : Sig :=
+  let thi := .binary .rshift clk (lit 32)
+  let tlo := .binary .bitAnd clk (lit 4294967295)
+  let acc := add (mul fixedFreqInc thi)
+                 (.binary .rshift (mul fixedFreqInc tlo) (lit 32))
+  .binary .bitAnd acc (lit 4294967295)
+
+/-- The fixed-point flanger weighted sum: the SAME 0.5/0.25/0.25 weights as the
+    float `flangerSum`, but as INTEGER right-shifts on the Q0.32 source values —
+    `((dry>>1) + (past>>2)) + (ahead>>2)`. Integer add is associative AND
+    commutative (i64 wraparound is modular), so the past/ahead slot swap that
+    `reverse` induces leaves the sum BIT-IDENTICAL — the float reassociation
+    `(A+B)+C ≠ (A+C)+B` (slice 5, 1271/4096) cannot occur. Left-assoc to mirror
+    `flangerSum`'s tree exactly. -/
+def fixedFlangerSum (dry past ahead : Sig) : Sig :=
+  add (add (.binary .rshift dry (lit 1)) (.binary .rshift past (lit 2)))
+      (.binary .rshift ahead (lit 2))
+
+/-- Scale the final fixed-point mix to the float output at the DAC boundary — a
+    single `toFloat · /2³²` map, applied IDENTICALLY on both law sides, so
+    byte-identical integer mixes render byte-identical floats. The Q0.32 mix is
+    in `[0,2³²)`, so the float output is a unipolar saw in `[0,1)`. -/
+def fixedOut (mix : Sig) : Sig :=
+  .binary .div (.unary .toFloat mix) (lit 4294967296)
+
+/-- Push an input-free, INSTANCE-FREE expression program into `arena` (no voice,
+    no registry — the fixed-point carrier is pure integer arithmetic on
+    `sampleIndex`, referencing no stdlib program). Returns its `ProgramIdx`. -/
+def buildExprCarrier (name : String) (out : Sig) (arena : Arena) : Arena × ProgramIdx :=
+  let prog : Program := {
+    name
+    inputs := #[]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := #[]
+    assigns := #[{ target := .port ⟨0⟩, expr := out }]
+    binderCount := 0
+    registry := #[] }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  ({ arena with programs := arena.programs.push prog }, idx)
+
+/-- A single fixed-point source carrier `out = fixedOut(fixedPhase(clkE))` — the
+    fixed-point analog of `buildClockCarrier`, for the single-source warp laws
+    (involution, reverse-swaps-delay, additive) over the INTEGER source. The two
+    algebraically-equal clocks of a law feed `fixedPhase` a bit-identical int64
+    clock, so the rendered audio is byte-identical (the clock side is exact). -/
+def buildFixedSourceCarrier (name : String) (clkE : Clock) (arena : Arena) :
+    Arena × ProgramIdx :=
+  buildExprCarrier name (fixedOut (fixedPhase clkE)) arena
+
+/-- LHS `warp(neg) ⋙ fixed-point flanger` — `neg` is the OUTER warp, so tap clock
+    = `neg(tapφ(clk))`: `past = neg(clk−δ) = −clk+δ`, `ahead = neg(clk+δ) = −clk−δ`
+    — the ±δ taps land SWAPPED vs the RHS. Same `fixedFlangerSum` tree; the
+    integer mix is slot-order-invariant. -/
+def buildReverseThenFixedFlanger (arena : Arena) : Arena × ProgramIdx :=
+  let tapClk (φ : Warp) : Clock := Warp.neg.apply (φ.apply clockLit)
+  let dry   := fixedPhase (tapClk .id)
+  let past  := fixedPhase (tapClk (.back delta1))
+  let ahead := fixedPhase (tapClk (.fwd  delta1))
+  buildExprCarrier "ReverseThenFixedFlanger"
+    (fixedOut (fixedFlangerSum dry past ahead)) arena
+
+/-- RHS `fixed-point flanger ⋙ warp(neg)` — `neg` is the INNER warp, so tap clock
+    = `tapφ(neg(clk))`: `past = neg(clk)−δ = −clk−δ`, `ahead = neg(clk)+δ = −clk+δ`
+    — the ±δ taps keep the source flanger's slot order. Same `fixedFlangerSum`
+    tree; only the per-tap clock differs. The integer sum of the SAME three tap
+    values is bit-identical to the LHS. -/
+def buildFixedFlangerThenReverse (arena : Arena) : Arena × ProgramIdx :=
+  let negClk : Clock := Warp.neg.apply clockLit
+  let tapClk (φ : Warp) : Clock := φ.apply negClk
+  let dry   := fixedPhase (tapClk .id)
+  let past  := fixedPhase (tapClk (.back delta1))
+  let ahead := fixedPhase (tapClk (.fwd  delta1))
+  buildExprCarrier "FixedFlangerThenReverse"
+    (fixedOut (fixedFlangerSum dry past ahead)) arena
+
 end Tropical.ArrowWarp

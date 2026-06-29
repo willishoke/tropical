@@ -654,6 +654,82 @@ private def runReverseFlangerCommute
           IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  max|Δ|={maxAbs} ≥ ε={eps}"
           pure false
 
+-- ── (h) slice 6 — a FIXED-POINT VALUE carrier: slice-5's reassociation ────────
+-- failure becomes BYTE-IDENTICAL. The SAME warp combinators, but instantiated at
+-- an integer Q0.32 saw source (`fixedPhase`) mixed with INTEGER right-shifts
+-- (`fixedFlangerSum`) instead of a float oscillator + float weighted-sum. Integer
+-- add is associative AND commutative, so the past/ahead slot swap that reverse
+-- induces (the float reassociation `(A+B)+C ≠ (A+C)+B`, slice 5's 1271/4096) is
+-- invisible — the law is now byte-exact. No type-system / engine-float change;
+-- the carrier is integer `Expr` with one `toFloat` scale at the DAC boundary.
+
+/-- Certify one single-source fixed-point warp law: build LHS and RHS fixed-point
+    source carriers (`fixedOut(fixedPhase(clkE))`) at two algebraically-equal
+    clocks, render both, assert the audio is BYTE-IDENTICAL (SHA256). The clock
+    side is exact int64, so these hold byte-exactly — the fixed-point analog of
+    `runArrowLaw`'s float laws (which also pass) over the integer source. -/
+private def runFixedSourceLaw (name : String)
+    (lhsClk rhsClk : Tropical.ArrowWarp.Clock) (arena : Arena) : IO Bool := do
+  let (arenaL, idxL) := Tropical.ArrowWarp.buildFixedSourceCarrier s!"{name}_lhs" lhsClk arena
+  let (arenaR, idxR) := Tropical.ArrowWarp.buildFixedSourceCarrier s!"{name}_rhs" rhsClk arena
+  match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
+  | .error e, _ => IO.println s!"  FAIL  arrow-law/{name}  compile lhs: {firstLine e}"; pure false
+  | _, .error e => IO.println s!"  FAIL  arrow-law/{name}  compile rhs: {firstLine e}"; pure false
+  | .ok (_, _, planL), .ok (_, _, planR) =>
+    match ← renderIrBytes planL, ← renderIrBytes planR with
+    | .error e, _ | _, .error e =>
+      IO.println s!"  FAIL  arrow-law/{name}  render: {firstLine e}"; pure false
+    | .ok bytesL, .ok bytesR =>
+      let hashL ← sha256Hex bytesL
+      let hashR ← sha256Hex bytesR
+      if hashL == hashR then
+        IO.println s!"  PASS  arrow-law/{name}  audio ≡ {hashL.take 16} (byte-identical)"
+        pure true
+      else
+        IO.println s!"  FAIL  arrow-law/{name}  audio differs: lhs {hashL.take 16} rhs {hashR.take 16}"
+        pure false
+
+/-- THE GATE: certify reverse-equivariance of the FIXED-POINT flanger
+    `warp(neg) ⋙ flanger ≡ flanger ⋙ warp(neg)` — the exact law slice 5 found
+    byte-DIFFERENT in float (1271/4096). Builds both carriers (neg OUTER vs INNER,
+    swapping the ±δ tap slots) over the INTEGER source + integer shift-add mix,
+    renders both, and asserts the audio is BYTE-IDENTICAL (SHA256). Reports the
+    differing-sample count (must be 0/N vs slice 5's 1271/4096). PASS iff
+    byte-identical and non-silent. -/
+private def runReverseFlangerCommuteFixedpoint (arena : Arena) : IO Bool := do
+  let (arenaL, idxL) := Tropical.ArrowWarp.buildReverseThenFixedFlanger arena
+  let (arenaR, idxR) := Tropical.ArrowWarp.buildFixedFlangerThenReverse arena
+  match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
+  | .error e, _ => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  compile lhs: {firstLine e}"; pure false
+  | _, .error e => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  compile rhs: {firstLine e}"; pure false
+  | .ok (_, _, planL), .ok (_, _, planR) =>
+    match ← renderIrBytes planL, ← renderIrBytes planR with
+    | .error e, _ | _, .error e =>
+      IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  render: {firstLine e}"; pure false
+    | .ok bytesL, .ok bytesR =>
+      let hashL ← sha256Hex bytesL
+      let hashR ← sha256Hex bytesR
+      let byteIdentical := hashL == hashR
+      let samplesL := decodeF64LE bytesL
+      let samplesR := decodeF64LE bytesR
+      let n := min samplesL.size samplesR.size
+      let mut bitDiff := 0
+      let mut energy := 0.0
+      for k in [0:n] do
+        if samplesL[k]!.toBits != samplesR[k]!.toBits then bitDiff := bitDiff + 1
+        energy := energy + samplesL[k]! * samplesL[k]!
+      IO.println s!"        gate  byte-identical: {byteIdentical}  ·  bit-differing samples: {bitDiff}/{n} (slice-5 float was 1271/4096)  ·  lhs energy={energy}"
+      IO.println s!"        gate  integer add is associative — ±δ tap slot swap leaves the Q0.32 mix bit-identical; one toFloat·/2³² scale at the boundary"
+      if energy <= 1e-6 then
+        IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  signal silent (energy={energy})"
+        pure false
+      else if byteIdentical then
+        IO.println s!"  PASS  arrow-law/reverse-flanger-commute-fixedpoint  audio ≡ {hashL.take 16} ({bitDiff}/{n} differing — byte-exact)"
+        pure true
+      else
+        IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  audio differs ({bitDiff}/{n}): lhs {hashL.take 16} rhs {hashR.take 16}"
+        pure false
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -747,7 +823,7 @@ def main (args : List String) : IO UInt32 := do
   match ← arrowElabStdlib with
   | .error e =>
     IO.println s!"  FAIL  arrow-laws  elaborate stdlib: {firstLine e}"
-    total := total + 6; failed := failed + 6
+    total := total + 10; failed := failed + 10
   | .ok (arena, resolved) =>
     -- Law 1 — inverse/cancellation:  warp(back δ) ⋙ warp(fwd δ) = id
     total := total + 1
@@ -786,6 +862,32 @@ def main (args : List String) : IO UInt32 := do
     --   reassociates in float — the finding; byte-exact only with fixed-point values)
     total := total + 1
     if !(← runReverseFlangerCommute arena resolved) then
+      failed := failed + 1
+    -- ── slice 6 — a FIXED-POINT VALUE carrier: slice-5's law 6 byte-exact ────
+    -- THE GATE — Law 7: reverse commutes with the FIXED-POINT flanger,
+    --   warp(neg) ⋙ flanger ≡ flanger ⋙ warp(neg) over the integer source +
+    --   integer shift-add mix. Slice 5's float version was 1271/4096 differing;
+    --   integer add is associative so this is now BYTE-IDENTICAL (0/N).
+    total := total + 1
+    if !(← runReverseFlangerCommuteFixedpoint arena) then
+      failed := failed + 1
+    -- Laws 8-10: the single-source warp laws over the FIXED-POINT source —
+    --   involution / reverse-swaps-delay / additive — all byte-exact (the clock
+    --   side is exact int64), mirroring the float `runArrowLaw` cases.
+    total := total + 1
+    if !(← runFixedSourceLaw "reverse-involution-fixedpoint"
+          Tropical.ArrowWarp.revInvolutionLhsClock Tropical.ArrowWarp.revInvolutionRhsClock
+          arena) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runFixedSourceLaw "reverse-swaps-delay-fixedpoint"
+          Tropical.ArrowWarp.revSwapLhsClock Tropical.ArrowWarp.revSwapRhsClock
+          arena) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runFixedSourceLaw "additive-fixedpoint"
+          Tropical.ArrowWarp.addLawLhsClock Tropical.ArrowWarp.addLawRhsClock
+          arena) then
       failed := failed + 1
 
   IO.println ""
