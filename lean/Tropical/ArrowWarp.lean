@@ -1,37 +1,55 @@
 import Tropical.Ir.Nodes
 
 /-!
-# ArrowWarp — vertical slice 1 (the gated flanger)
+# ArrowWarp — vertical slice 2 (the voice-generic warp bank)
 
-The first vertebra of the strangler-fig rearchitecture (see
-`design/arrowwarp-slice-1.md`). ArrowWarp's *only* job is to **build a
-resolved `Program`** — the same pre-strata IR the elaborator hands the
-strata pipeline — from a tiny arrow-combinator API. Everything below
-(strata → `Core.check` → `compileResolved` → wire) is reused verbatim.
+Slice 1 built the `FlangeSin` flanger from a tiny arrow-combinator API and
+gated it byte-identical against `diffcli emit-file stdlib/parsed/FlangeSin.json`.
+Slice 2 proves the **pointfree-genericity** thesis: the flanger is a *combinator
+generic over its voice*. The same `warpBank` morphism, instantiated at two
+different voices, reproduces two different hand-written stdlib programs
+byte-for-byte:
 
-The slice is gated against the hand-written `FlangeSin`: the plan emitted
-from the ArrowWarp-built program must be **byte-identical** to
-`diffcli emit-file stdlib/parsed/FlangeSin.json`. Byte-identity falls out
-for free because the `osc` primitive does NOT hand-roll the phasor +
-Horner polynomial — it references the elaborated `FixedSinOsc` body and
-lets strata inline it (the M0 finding). So ArrowWarp only ever builds the
-*coarse* graph: three oscillators at three warped clocks, weighted-summed.
+* `FixedSinOsc` voice → `FlangeSin`     (the slice-1 regression gate)
+* `ModalVoice`  voice → `ReversibleComb`
 
-The combinator surface (float-only, slice 1):
+Both targets are the SAME flanger *shape* — three voice taps at
+`clk / clk−δ / clk+δ`, weighted-summed — over a different voice. What differs
+between them is captured entirely by parameters, never by a second builder:
+
+| differs            | FlangeSin (FixedSinOsc) | ReversibleComb (ModalVoice) |
+|--------------------|-------------------------|-----------------------------|
+| voice program      | `FixedSinOsc`           | `ModalVoice`                |
+| instance wiring    | `freq→0, clk→1`         | `clk→0, f0→1`               |
+| pitch input name   | `freq` (default 220)    | `f0` (default 110)          |
+| offset input name  | `depth`                 | `delta`                     |
+
+The weights `{0.5, 0.25, 0.25}`, the tap warps `{id, −δ, +δ}`, and the offset
+expression `δ = toInt(depth·sampleRate·2³²)` are identical across both — so they
+live in the *one* shared `warpBank` combinator, not in either instantiation.
+
+Byte-identity still falls out for free because `osc` does NOT hand-roll the
+voice — it references the elaborated voice body (`FixedSinOsc` / `ModalVoice`)
+and lets strata inline it (the M0 finding). ArrowWarp only ever builds the
+*coarse* graph: a bank of voice taps at warped clocks, weighted-summed.
+
+The combinator surface:
 
 * `lit` / `mul` / `add` / `sub` / `toIntE` — `arr`-level pointwise arithmetic.
 * `Warp` (`id` / `back δ` / `fwd δ`) + `Warp.apply` — clock arithmetic, the
   `warp` morphism. Modulated warp (`δ` a function of the clock/params, never
   the flowing data) is lawful — that is also the musical semantics.
-* `Builder.osc` — the primitive morphism `Clock ⇝ Sig`, realized as a
-  `FixedSinOsc` instance declaration (`freq→port0, clk→port1`) whose `sine`
-  output is the returned signal.
-* `flangerBody` — the whole flanger as one expression:
-  `(warp id &&& warp(−δ) &&& warp(+δ)) >>> oscₓ3 >>> weightedSum`. The shared
-  `clkIn` fanned three ways *is* the diagonal `&&&`.
-* `buildFlanger` — assemble the `Program` (signature `clk:int / freq:float /
-  depth:float → out:float`), merge the registry like the elaborator, and push
-  it into a supplied arena (the one `elabChain` filled with `FixedSinOsc`).
+* `Voice` — the primitive morphism `Clock ⇝ Sig`, made GENERIC over the stdlib
+  program that realizes it (its name, how its instance inputs wire from a
+  warped clock, and which output carries the signal).
+* `Builder.osc` — emit one `Voice` instance at a warped clock and read its
+  signal back.
+* `Tap` / `warpBank` — the voice-generic flanger: an array of `(name, warp,
+  weight)` taps over a single `Voice`, fanned from the shared `clkIn`
+  (the diagonal `&&&`), weighted-summed (the collapsing `arr`).
+* `WarpBankProgram` / `buildWarpBank` — wrap the body in a `Program` (signature
+  `clk:int / pitch:float / offset:float → out:float`) and push it into the arena
+  the elaborator filled, linking the voice by name like `registerInstanceDecl`.
 -/
 
 namespace Tropical.ArrowWarp
@@ -63,15 +81,17 @@ def sub (a b : Expr) : Expr := .binary .sub a b
 /-- `arr`-level truncate-to-int (the Q32.32 offset is an integer sample count). -/
 def toIntE (a : Expr) : Expr := .unary .toInt a
 
-/-! The flanger's program signature, as port references.
-    `clk : int` (input 0), `freq : float` (input 1), `depth : float` (input 2). -/
+/-! The warp-bank program signature, as port references. The signature is the
+    same shape for every voice — only the input NAMES/defaults differ (which is
+    a declaration concern, not a wiring one), so the value-level refs are shared:
+    `clk : int` (input 0), `pitch : float` (input 1), `offset : float` (input 2). -/
 
 /-- The clock input (`clk : int`), as a value. -/
 def clkIn : Clock := .inputRef ⟨0⟩
-/-- The frequency input (`freq : float`). -/
-def freqIn : Sig := .inputRef ⟨1⟩
-/-- The flange-depth input (`depth : float`). -/
-def depthIn : Sig := .inputRef ⟨2⟩
+/-- The pitch input (`freq`/`f0` : float) — input 1 regardless of its name. -/
+def pitchIn : Sig := .inputRef ⟨1⟩
+/-- The flange-offset input (`depth`/`delta` : float) — input 2. -/
+def offsetIn : Sig := .inputRef ⟨2⟩
 
 -- ─────────────────────────────────────────────────────────────
 -- M2 — `warp`: clock arithmetic
@@ -94,87 +114,149 @@ def Warp.apply : Warp → Clock → Clock
   | .back d, c => sub c d
   | .fwd d,  c => add c d
 
-/-- δ = `toInt(depth · sampleRate · 2³²)` — the flange offset, depth seconds
-    expressed in Q32.32 samples. A function of the clock/params, so warping by
-    it is a lawful arrow. -/
-def deltaSamples : Expr := toIntE (mul (mul depthIn .sampleRate) (lit 4294967296))
+/-- δ = `toInt(offset · sampleRate · 2³²)` — the flange offset, `offset` seconds
+    expressed in Q32.32 samples. A function of the clock/params (`offsetIn` is
+    input 2), so warping by it is a lawful arrow. Shared across voices: both
+    targets carry the identical offset expression (only its input *name* —
+    `depth` vs `delta` — differs, and names aren't referenced here). -/
+def deltaSamples : Expr := toIntE (mul (mul offsetIn .sampleRate) (lit 4294967296))
 
 -- ─────────────────────────────────────────────────────────────
--- The `osc` primitive — `Clock ⇝ Sig`, sourced from the stdlib closed-form
+-- The `Voice` primitive — `Clock ⇝ Sig`, generic over the stdlib closed-form
 -- ─────────────────────────────────────────────────────────────
+
+/-- A **voice** is the primitive morphism `Clock ⇝ Sig`, made generic over the
+    stdlib program that realizes it. `osc` does NOT hand-roll a phasor +
+    polynomial — it references the elaborated voice body and lets strata inline
+    it (the M0 finding), which is what buys byte-identity.
+
+    * `programName` — the stdlib program (`FixedSinOsc`, `ModalVoice`, …).
+    * `wire` — how to fill the voice instance's inputs from the (warped) clock.
+      This captures the per-voice port ORDER and which port is the clock vs the
+      pitch (`FixedSinOsc`: `freq→0, clk→1`; `ModalVoice`: `clk→0, f0→1`).
+    * `output` — which voice output carries the signal (both voices: index 0). -/
+structure Voice where
+  programName : String
+  wire : Clock → Array InstanceInput
+  output : OutputIdx := ⟨0⟩
+
+/-- The `FixedSinOsc` voice — pitch at port 0, clock at port 1 (source order). -/
+def fixedSinOscVoice : Voice :=
+  { programName := "FixedSinOsc"
+    wire := fun clkE => #[ ⟨⟨0⟩, pitchIn⟩, ⟨⟨1⟩, clkE⟩ ] }
+
+/-- The `ModalVoice` voice — clock at port 0, pitch at port 1 (source order). -/
+def modalVoice : Voice :=
+  { programName := "ModalVoice"
+    wire := fun clkE => #[ ⟨⟨0⟩, clkE⟩, ⟨⟨1⟩, pitchIn⟩ ] }
 
 /-- Accumulates the instance declarations the `osc` morphisms emit. The
-    `InstanceIdx` of a declared oscillator is its position here, which is what
-    `nestedOut` reads back. -/
+    `InstanceIdx` of a declared voice is its position here, which is what the
+    summed output reads back. -/
 structure Builder where
   decls : Array BodyDecl := #[]
 deriving Inhabited
 
-/-- `osc` — the primitive morphism `Clock ⇝ Sig`. Realized by referencing the
-    elaborated `FixedSinOsc` body (NOT a hand-rolled phasor+polynomial): emit a
-    `FixedSinOsc` instance wired `freq→port0, clk→port1` (the source-order the
-    elaborator records) and return its `sine` output (`OutputIdx 0`). Strata
-    inlines the closed form, which is what buys byte-identity. -/
-def Builder.osc (b : Builder) (name : String) (freqE : Sig) (clkE : Clock) :
+/-- `osc` — emit one `Voice` instance named `name`, wired from the warped clock
+    `clkE`, and return its signal output (`nestedOut`). Generic over the voice:
+    the program name, the input wiring, and the output index all come from `v`. -/
+def Builder.osc (b : Builder) (v : Voice) (name : String) (clkE : Clock) :
     Sig × Builder :=
-  let inst : BodyDecl := .inst name "FixedSinOsc" #[]
-    #[ { port := ⟨0⟩, value := freqE }, { port := ⟨1⟩, value := clkE } ]
+  let inst : BodyDecl := .inst name v.programName #[] (v.wire clkE)
   let i := b.decls.size
-  (.nestedOut ⟨i⟩ ⟨0⟩, { b with decls := b.decls.push inst })
+  (.nestedOut ⟨i⟩ v.output, { b with decls := b.decls.push inst })
 
-/-- The flanger as one arrow expression:
-    `(warp id &&& warp(−δ) &&& warp(+δ)) >>> oscₓ3 >>> weightedSum`.
-    The shared `clkIn` fanned three ways is the diagonal `&&&`; the three
-    `osc`s are the parallel oscillator bank; the weighted sum
-    `0.5·dry + 0.25·past + 0.25·ahead` is the collapsing `arr`. -/
-def flangerBody : Builder × Sig :=
-  let b0 : Builder := {}
-  let (dry,   b1) := b0.osc "dry"   freqIn (Warp.id.apply clkIn)
-  let (past,  b2) := b1.osc "past"  freqIn ((Warp.back deltaSamples).apply clkIn)
-  let (ahead, b3) := b2.osc "ahead" freqIn ((Warp.fwd  deltaSamples).apply clkIn)
-  let out := add (add (mul (lit 5 1) dry) (mul (lit 25 2) past)) (mul (lit 25 2) ahead)
-  (b3, out)
+-- ─────────────────────────────────────────────────────────────
+-- `warpBank` — the voice-generic flanger combinator
+-- ─────────────────────────────────────────────────────────────
+
+/-- One tap of a warp bank: a named voice instance at a warped clock, scaled by
+    `weight` in the final sum. -/
+structure Tap where
+  name : String
+  warp : Warp
+  weight : Sig
+
+/-- The voice-generic warp bank as one arrow expression:
+    `(warp φ₀ &&& warp φ₁ &&& …) >>> voiceₓn >>> weightedSum`.
+    The shared `clkIn` fanned `n` ways is the diagonal `&&&`; each tap is one
+    `voice` instance at its warped clock; the weighted sum is the collapsing
+    `arr`. Generic over the voice — the SAME combinator builds `FlangeSin` and
+    `ReversibleComb`, differing only in the `Voice` and `Tap`s supplied.
+
+    The sum is left-associated (`((w₀·t₀ + w₁·t₁) + w₂·t₂)`) to match the
+    source programs' `add(add(_, _), _)` nesting exactly. -/
+def warpBank (v : Voice) (taps : Array Tap) : Builder × Sig := Id.run do
+  let mut b : Builder := {}
+  let mut summands : Array Sig := #[]
+  for tap in taps do
+    let (sig, b') := b.osc v tap.name (tap.warp.apply clkIn)
+    b := b'
+    summands := summands.push (mul tap.weight sig)
+  let out := match summands[0]? with
+    | none => lit 0
+    | some s0 => (summands.extract 1 summands.size).foldl add s0
+  (b, out)
+
+/-- The flanger taps shared by both targets: dry (`id`, 0.5) plus the two
+    delayed taps (`−δ` / `+δ`, 0.25 each). `δ = deltaSamples` references the
+    offset input by index, so the same taps serve every voice. -/
+def flangerTaps : Array Tap := #[
+  { name := "dry",   warp := .id,                weight := lit 5 1 },
+  { name := "past",  warp := .back deltaSamples, weight := lit 25 2 },
+  { name := "ahead", warp := .fwd  deltaSamples, weight := lit 25 2 } ]
 
 -- ─────────────────────────────────────────────────────────────
 -- M3 — assemble the resolved `Program` and push it into the arena
 -- ─────────────────────────────────────────────────────────────
 
-/-- `clk : int`, default `clock() = sampleIndex << 32`. -/
+/-- `clk : int`, default `clock() = sampleIndex << 32`. Shared by every voice. -/
 def clkInputDecl : InputDecl :=
   { name := "clk", type? := some (.scalar .int),
     default? := some (.binary .lshift .sampleIndex (lit 32)) }
 
-/-- `freq : float`, default `select(220 > 0, 220, 0)` (the elaborated default). -/
-def freqInputDecl : InputDecl :=
-  { name := "freq", type? := some (.scalar .float),
-    default? := some (.select (.binary .gt (lit 220) (lit 0)) (lit 220) (lit 0)) }
+/-- A pitch input (`freq`/`f0` : float), default `select(hz > 0, hz, 0)` — the
+    elaborated form of the source's `select(220>0, 220, 0)` / `…110…`. -/
+def pitchInputDecl (name : String) (hz : Int) : InputDecl :=
+  { name, type? := some (.scalar .float),
+    default? := some (.select (.binary .gt (lit hz) (lit 0)) (lit hz) (lit 0)) }
 
-/-- `depth : float`, default `0.0007`. -/
-def depthInputDecl : InputDecl :=
-  { name := "depth", type? := some (.scalar .float),
-    default? := some (lit 7 4) }
+/-- An offset input (`depth`/`delta` : float), default `0.0007`. -/
+def offsetInputDecl (name : String) : InputDecl :=
+  { name, type? := some (.scalar .float), default? := some (lit 7 4) }
 
-/-- Build the ArrowWarp flanger `Program` into `arena`, returning its
+/-- A full warp-bank program: the program name, the voice it is generic over,
+    its three input declarations (`clk`, pitch, offset), and the taps. Two
+    instantiations of this record — `flangeSinSpec` and `reversibleCombSpec` —
+    are the whole of the per-target difference. -/
+structure WarpBankProgram where
+  name : String
+  voice : Voice
+  inputs : Array InputDecl
+  taps : Array Tap
+
+/-- Build a `WarpBankProgram`'s `Program` into `arena`, returning its
     `ProgramIdx`. `resolved` is the name→idx map `elabChain` produces; the only
-    program ArrowWarp links against is `FixedSinOsc` (its registry — and the
-    transitive `ClockPhasor`/`Sin` merge — mirrors the elaborator's
-    `registerInstanceDecl`). -/
-def buildFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) := do
-  let some fsIdx := (resolved.find? (·.1 == "FixedSinOsc")).map (·.2)
-    | .error "ArrowWarp: FixedSinOsc not found in the elaborated stdlib chain"
-  let some fsProg := arena.program? fsIdx
-    | .error "ArrowWarp: FixedSinOsc program index out of range"
-  -- Transitive registry merge (mirrors `registerInstanceDecl`): the target
-  -- under its program name, then the target's own registry entries in order,
-  -- skipping keys already present. Insertion order is codec-observable.
-  let mut registry : Array (String × ProgramIdx) := #[(fsProg.name, fsIdx)]
-  for (k, v) in fsProg.registry do
+    program linked against is `spec.voice.programName` — its registry (and the
+    transitive merge of the voice's own entries) mirrors the elaborator's
+    `registerInstanceDecl`. Insertion order is codec-observable. -/
+def buildWarpBank (spec : WarpBankProgram) (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : Except String (Arena × ProgramIdx) := do
+  let some vIdx := (resolved.find? (·.1 == spec.voice.programName)).map (·.2)
+    | .error s!"ArrowWarp: voice '{spec.voice.programName}' not found in the \
+        elaborated stdlib chain"
+  let some vProg := arena.program? vIdx
+    | .error s!"ArrowWarp: voice '{spec.voice.programName}' program index out of range"
+  -- Transitive registry merge (mirrors `registerInstanceDecl`): the voice under
+  -- its program name, then the voice's own registry entries in order, skipping
+  -- keys already present.
+  let mut registry : Array (String × ProgramIdx) := #[(vProg.name, vIdx)]
+  for (k, v) in vProg.registry do
     if !registry.any (·.1 == k) then registry := registry.push (k, v)
-  let (b, outExpr) := flangerBody
+  let (b, outExpr) := warpBank spec.voice spec.taps
   let prog : Program := {
-    name := "FlangeSin"
-    inputs := #[clkInputDecl, freqInputDecl, depthInputDecl]
+    name := spec.name
+    inputs := spec.inputs
     outputs := #[{ name := "out", type? := some (.scalar .float) }]
     decls := b.decls
     assigns := #[{ target := .port ⟨0⟩, expr := outExpr }]
@@ -182,5 +264,33 @@ def buildFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     registry }
   let idx : ProgramIdx := ⟨arena.programs.size⟩
   pure ({ arena with programs := arena.programs.push prog }, idx)
+
+-- ─────────────────────────────────────────────────────────────
+-- The two instantiations — one combinator, two voices, two programs
+-- ─────────────────────────────────────────────────────────────
+
+/-- `FlangeSin` over the `FixedSinOsc` voice (the slice-1 regression gate). -/
+def flangeSinSpec : WarpBankProgram :=
+  { name := "FlangeSin", voice := fixedSinOscVoice
+    inputs := #[clkInputDecl, pitchInputDecl "freq" 220, offsetInputDecl "depth"]
+    taps := flangerTaps }
+
+/-- `ReversibleComb` over the `ModalVoice` voice (the slice-2 gate). -/
+def reversibleCombSpec : WarpBankProgram :=
+  { name := "ReversibleComb", voice := modalVoice
+    inputs := #[clkInputDecl, pitchInputDecl "f0" 110, offsetInputDecl "delta"]
+    taps := flangerTaps }
+
+/-- Build the ArrowWarp `FlangeSin` (FixedSinOsc voice) — the slice-1 gate.
+    Byte-identical to `diffcli emit-file stdlib/parsed/FlangeSin.json`. -/
+def buildFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  buildWarpBank flangeSinSpec arena resolved
+
+/-- Build the ArrowWarp `ReversibleComb` (ModalVoice voice) — the slice-2 gate.
+    Byte-identical to `diffcli emit-file stdlib/parsed/ReversibleComb.json`. -/
+def buildReversibleComb (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  buildWarpBank reversibleCombSpec arena resolved
 
 end Tropical.ArrowWarp
