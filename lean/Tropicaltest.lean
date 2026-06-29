@@ -509,6 +509,93 @@ private def runArrowLaw (name : String)
           IO.println s!"  FAIL  arrow-law/{name}  audio differs: lhs {lhsHash.take 16} rhs {rhsHash.take 16} ({planNote})"
           pure false
 
+-- ── (h) slice 4 — the cartesian diagonal / fan-out law + its COST story ───────
+-- The diagonal `Δ = id &&& id`: one source fanned into two differently-warped
+-- flangers ≡ two independent (source+flanger) pairs. AUDIO: byte-identical (the
+-- duplicated source is the same closed form fed the same clock, so sharing is
+-- invisible to the output). COST (the real content): whether within-program
+-- strata CSE collapses the duplicated osc(clk) so both forms reach the SAME
+-- minimal DAG — i.e. "fan-out is a pure let". We report eval/register/instruction
+-- counts for both forms and whether the emitted plans are byte-identical (the
+-- program name does NOT flow into the plan — the root instance is `__root__` —
+-- so plan byte-identity is a pure structural test of the CSE collapse).
+
+/-- Count instructions across an InstanceFunction tree (body + nested children). -/
+private partial def countFnInstrs (f : Tropical.Plan.InstanceFunction) : Nat :=
+  f.instructions.size + f.children.foldl (fun acc c => acc + countFnInstrs c) 0
+
+/-- Total instruction count of a FlatPlan (all instance functions, recursive). -/
+private def planInstrCount (p : Tropical.Plan.FlatPlan) : Nat :=
+  p.instanceFunctions.foldl (fun acc f => acc + countFnInstrs f) 0
+
+/-- Strata-process an already-built carrier program, then compile it via the
+    production session path. Returns (post-strata binderCount, post-strata
+    declCount, FlatPlan) — the post-strata program is the CSE'd DAG, so its
+    binderCount is the count of distinct shared subexpressions. -/
+private def diagStrataCompile (arena : Arena) (idx : ProgramIdx) :
+    Except String (Nat × Nat × Tropical.Plan.FlatPlan) := do
+  let (arena'', root') ← (Tropical.Ir.Strata.run { upto := 5 } arena idx).mapError (·.message)
+  let some prog := arena''.program? root'
+    | .error "diagonal: post-strata root program index out of range"
+  let core ← Tropical.Ir.Core.check arena'' root'
+  let input : Tropical.Compile.SessionInput := {
+    instances := #[(Tropical.Compile.rootInstancePath, core)]
+    wiresPost := #[]
+    graphOutputs := #[(Tropical.Compile.rootInstancePath, "out")]
+    params := #[]
+    alloc := {}
+    root := core
+    mode := .fused }
+  let plan ← Tropical.Compile.compileSession input
+  pure (prog.binderCount, prog.decls.size, plan)
+
+/-- Certify the diagonal law: build SHARED (one fanned source) and INDEPENDENT
+    (two sources) carriers, assert their rendered audio is byte-identical (the
+    law), and report the cost story — per-form eval/register/instruction counts
+    and whether the emitted plans are byte-identical (CSE collapse). PASS iff the
+    audio hashes match. -/
+private def runDiagonalLaw (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match Tropical.ArrowWarp.buildSharedDiagonal arena resolved,
+        Tropical.ArrowWarp.buildIndependentDiagonal arena resolved with
+  | .error e, _ => IO.println s!"  FAIL  arrow-law/diagonal  build shared: {firstLine e}"; pure false
+  | _, .error e => IO.println s!"  FAIL  arrow-law/diagonal  build independent: {firstLine e}"; pure false
+  | .ok (arenaS, idxS), .ok (arenaI, idxI) =>
+    -- Pre-strata instance counts: the visible structural difference (5 vs 6).
+    let preShared := (arenaS.program? idxS).map (·.decls.size) |>.getD 0
+    let preIndep := (arenaI.program? idxI).map (·.decls.size) |>.getD 0
+    match diagStrataCompile arenaS idxS, diagStrataCompile arenaI idxI with
+    | .error e, _ => IO.println s!"  FAIL  arrow-law/diagonal  compile shared: {firstLine e}"; pure false
+    | _, .error e => IO.println s!"  FAIL  arrow-law/diagonal  compile independent: {firstLine e}"; pure false
+    | .ok (bcS, dcS, planS), .ok (bcI, dcI, planI) =>
+      let instrS := planInstrCount planS
+      let instrI := planInstrCount planI
+      match planS.toWire, planI.toWire with
+      | .error e, _ | _, .error e =>
+        IO.println s!"  FAIL  arrow-law/diagonal  toWire: {firstLine e}"; pure false
+      | .ok wireS, .ok wireI =>
+        let plansIdentical := wireS.compress == wireI.compress
+        match ← renderIrBytes planS, ← renderIrBytes planI with
+        | .error e, _ | _, .error e =>
+          IO.println s!"  FAIL  arrow-law/diagonal  render: {firstLine e}"; pure false
+        | .ok bytesS, .ok bytesI =>
+          let hashS ← sha256Hex bytesS
+          let hashI ← sha256Hex bytesI
+          -- The plans being byte-identical IS the definitive collapse (the
+          -- carrier program name never reaches the plan — the root instance is
+          -- `__root__`). NB the post-strata binder DAGs DIFFER (independent
+          -- carries the extra inlined osc(clk) body's binders); the duplicate
+          -- source is deduped at EMIT (compileResolved value-numbering), not in
+          -- the strata binder DAG — yet both reach the same minimal kernel.
+          IO.println s!"        cost  shared:      pre-strata insts={preShared} post-strata binders={bcS} decls={dcS} plan-instrs={instrS} regs={planS.registerCount}"
+          IO.println s!"        cost  independent: pre-strata insts={preIndep} post-strata binders={bcI} decls={dcI} plan-instrs={instrI} regs={planI.registerCount}"
+          IO.println s!"        cost  plans byte-identical: {plansIdentical}  ·  CSE collapsed both to same {instrS}-instr/{planS.registerCount}-reg DAG: {plansIdentical && instrS == instrI}  (post-strata binders {bcS} vs {bcI} differ — dedup is at emit)"
+          if hashS == hashI then
+            IO.println s!"  PASS  arrow-law/diagonal  audio ≡ {hashS.take 16} (shared ≡ independent)"
+            pure true
+          else
+            IO.println s!"  FAIL  arrow-law/diagonal  audio differs: shared {hashS.take 16} independent {hashI.take 16}"
+            pure false
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -602,7 +689,7 @@ def main (args : List String) : IO UInt32 := do
   match ← arrowElabStdlib with
   | .error e =>
     IO.println s!"  FAIL  arrow-laws  elaborate stdlib: {firstLine e}"
-    total := total + 2; failed := failed + 2
+    total := total + 3; failed := failed + 3
   | .ok (arena, resolved) =>
     -- Law 1 — inverse/cancellation:  warp(back δ) ⋙ warp(fwd δ) = id
     total := total + 1
@@ -616,6 +703,11 @@ def main (args : List String) : IO UInt32 := do
     if !(← runArrowLaw "additive"
           Tropical.ArrowWarp.addLawLhsClock Tropical.ArrowWarp.addLawRhsClock
           arena resolved) then
+      failed := failed + 1
+    -- Law 3 — the cartesian diagonal / fan-out: one source ⋙ (flanger δ₁ &&&
+    --   flanger δ₂) ≡ two independent (source+flanger) pairs (+ the COST story).
+    total := total + 1
+    if !(← runDiagonalLaw arena resolved) then
       failed := failed + 1
 
   IO.println ""

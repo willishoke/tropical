@@ -378,4 +378,107 @@ def addLawLhsClock : Clock := (Warp.back delta2).apply ((Warp.back delta1).apply
 /-- RHS clock `clk−(δ₁+δ₂)` — one delay by the summed offset. -/
 def addLawRhsClock : Clock := (Warp.back (add delta1 delta2)).apply clockLit
 
+-- ─────────────────────────────────────────────────────────────
+-- M5 (slice 4) — the cartesian diagonal / fan-out law
+-- ─────────────────────────────────────────────────────────────
+
+/-! Slice 3 certified the warp ALGEBRA (compose, cancel) in audio. Slice 4
+    certifies the **cartesian diagonal** (`Δ : A ⇝ A × A`, `Δ = id &&& id`): the
+    fan-out of one source into two differently-warped flangers is denotationally
+    a pure `let` — equal to two independent (source + flanger) pairs. Two carriers,
+    same `out`, same denotation:
+
+    * `DiagonalShared` — ONE dry oscillator at `clk`, *fanned* into two flangers
+      (offsets δ₁, δ₂); its `nestedOut` is referenced by BOTH flanger sums.
+      5 osc instances: `dry@clk · past@clk−δ₁ · ahead@clk+δ₁ · past@clk−δ₂ · ahead@clk+δ₂`.
+    * `DiagonalIndependent` — TWO dry oscillators (both at `clk`, same literal
+      pitch), each its own flanger. 6 osc instances — the dry tap is declared
+      twice.
+
+    `out = flanger(δ₁) + flanger(δ₂)` with the IDENTICAL weighted-sum tree on
+    both sides (`add(add(0.5·dry, 0.25·past), 0.25·ahead)`, the source/warpBank
+    left-assoc convention). The ONLY structural difference is the duplicated dry
+    instance — so the rendered audio is bit-identical (the two dry oscillators are
+    the same closed form fed the same clock), and the COST question is whether
+    within-program strata CSE collapses the duplicate so both forms reach the same
+    minimal DAG. Like slice 3 the carriers are input-free (literal pitch, closed-
+    form `clockLit`), so the session-root lowering binds no inputs.
+
+    NB (session boundary): this CSE is a *within-program* property. Across
+    SEPARATE top-level session instances cross-instance CSE does NOT happen (an
+    earlier spike found two identical oscs cost ~2×) — so the diagonal's
+    *efficiency* holds inside one program, not across a session graph. We do not
+    build a multi-instance session here; the within-program pair is the slice. -/
+
+/-- The flanger weighted sum, left-associated to match the source/`warpBank`
+    convention exactly: `add(add(0.5·dry, 0.25·past), 0.25·ahead)`. Shared by both
+    diagonal forms so their output expression trees are identical up to the dry
+    instance index. -/
+def flangerSum (dry past ahead : Sig) : Sig :=
+  add (add (mul (lit 5 1) dry) (mul (lit 25 2) past)) (mul (lit 25 2) ahead)
+
+/-- One INDEPENDENT flanger over voice `v` at base clock `baseClk`, offset `d`:
+    three fresh osc instances (`dry`/`past`/`ahead`, suffixed `tag`), weighted-
+    summed. The dry tap is its own instance — the duplicated source. -/
+def Builder.flanger (b : Builder) (v : Voice) (baseClk : Clock) (d : Expr)
+    (tag : String) : Builder × Sig :=
+  let (dry,   b) := b.osc v ("dry" ++ tag)   baseClk
+  let (past,  b) := b.osc v ("past" ++ tag)  ((Warp.back d).apply baseClk)
+  let (ahead, b) := b.osc v ("ahead" ++ tag) ((Warp.fwd  d).apply baseClk)
+  (b, flangerSum dry past ahead)
+
+/-- One flanger over voice `v` at `baseClk`, offset `d`, sharing a pre-built dry
+    signal `dry` (the fanned source). Only the two delayed taps are fresh — the
+    `&&&` diagonal on the shared source. Same `flangerSum` tree as `Builder.flanger`. -/
+def Builder.flangerSharedDry (b : Builder) (v : Voice) (baseClk : Clock) (d : Expr)
+    (dry : Sig) (tag : String) : Builder × Sig :=
+  let (past,  b) := b.osc v ("past" ++ tag)  ((Warp.back d).apply baseClk)
+  let (ahead, b) := b.osc v ("ahead" ++ tag) ((Warp.fwd  d).apply baseClk)
+  (b, flangerSum dry past ahead)
+
+/-- Push an input-free voice program (`decls` + one `out = expr` assign) into
+    `arena`, merging the `litPitchSinOscVoice` registry like `buildClockCarrier`.
+    Shared by every input-free ArrowWarp carrier (clock carrier + diagonals). -/
+def buildVoiceProgram (name : String) (decls : Array BodyDecl) (out : Sig)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let v := litPitchSinOscVoice
+  let some vIdx := (resolved.find? (·.1 == v.programName)).map (·.2)
+    | .error s!"ArrowWarp: voice '{v.programName}' not found in the elaborated stdlib chain"
+  let some vProg := arena.program? vIdx
+    | .error s!"ArrowWarp: voice '{v.programName}' program index out of range"
+  let mut registry : Array (String × ProgramIdx) := #[(vProg.name, vIdx)]
+  for (k, vi) in vProg.registry do
+    if !registry.any (·.1 == k) then registry := registry.push (k, vi)
+  let prog : Program := {
+    name
+    inputs := #[]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls
+    assigns := #[{ target := .port ⟨0⟩, expr := out }]
+    binderCount := 0
+    registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  pure ({ arena with programs := arena.programs.push prog }, idx)
+
+/-- SHARED diagonal: one dry source fanned into two flangers (δ₁, δ₂). 5 osc
+    instances; the dry `nestedOut` feeds both flanger sums. -/
+def buildSharedDiagonal (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let v := litPitchSinOscVoice
+  let (dry, b) := ({} : Builder).osc v "dry" clockLit
+  let (b, f1) := b.flangerSharedDry v clockLit delta1 dry "1"
+  let (b, f2) := b.flangerSharedDry v clockLit delta2 dry "2"
+  buildVoiceProgram "DiagonalShared" b.decls (add f1 f2) arena resolved
+
+/-- INDEPENDENT diagonal: two dry sources (same literal pitch + clock), each its
+    own flanger (δ₁, δ₂). 6 osc instances — the dry tap declared twice. Same
+    denotation as `buildSharedDiagonal`. -/
+def buildIndependentDiagonal (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let v := litPitchSinOscVoice
+  let (b, f1) := ({} : Builder).flanger v clockLit delta1 "1"
+  let (b, f2) := b.flanger v clockLit delta2 "2"
+  buildVoiceProgram "DiagonalIndependent" b.decls (add f1 f2) arena resolved
+
 end Tropical.ArrowWarp
