@@ -1,5 +1,6 @@
 import Tropical.Ffi
 import Tropical.Parse.Raise
+import Tropical.Parse.VoiceDesugar
 import Tropical.Ir.Elaborator
 import Tropical.Ir.Codec
 import Tropical.Ir.Strata
@@ -124,6 +125,32 @@ def parsedRoundtripVerb (args : List String) : IO UInt32 := do
       match Tropical.Parse.decodeProgram jv with
       | .error msg => errorJson msg
       | .ok prog => prog.toJson
+  IO.println out.compress
+  return 0
+
+/-- Voice-ports render proof (Phase 1): desugar a voice-bearing parsed program
+    against a hardcoded `FixedSinOsc` voice binding and print the desugared
+    ParsedProgram JSON. The chain `parse-md flanger.md | voice-desugar |
+    emit-file` lowers the result; rendered, it must match FlangeSin. -/
+def voiceDesugarVerb (args : List String) : IO UInt32 := do
+  let some path := args.head?
+    | IO.eprintln "usage: diffcli voice-desugar <parsed.json>"
+      return 1
+  let text ← IO.FS.readFile path
+  let out : Lean.Json :=
+    match Tropical.Parse.JsonV.parse text with
+    | .error e => errorJson s!"JSON parse error: {e}"
+    | .ok jv =>
+      match Tropical.Parse.decodeProgram jv with
+      | .error msg => errorJson msg
+      | .ok prog =>
+        let vb : Tropical.Parse.VoiceDesugar.VoiceBinding :=
+          { voiceName := "v", programName := "FixedSinOsc",
+            clkInput := "clk", output := "sine",
+            params := #[("freq", .nameRef "freq")] }
+        match Tropical.Parse.VoiceDesugar.desugarProgram #[vb] prog with
+        | .error msg => errorJson msg
+        | .ok desugared => desugared.toJson
   IO.println out.compress
   return 0
 
@@ -551,6 +578,7 @@ def main (args : List String) : IO UInt32 := do
   | "raise" :: rest => raiseVerb rest
   | "parsed-roundtrip" :: rest => parsedRoundtripVerb rest
   | "parse-md" :: rest => parseMdVerb rest
+  | "voice-desugar" :: rest => voiceDesugarVerb rest
   | "parse-all" :: rest => parseAllVerb rest
   | "elab-stdlib" :: rest => elabStdlibVerb rest
   | "elab-file" :: rest => elabFileVerb rest
