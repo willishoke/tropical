@@ -101,18 +101,25 @@ def offsetIn : Sig := .inputRef ⟨2⟩
     `id` leaves the clock; `back d` / `fwd d` translate it by `∓d` Q32.32
     samples (the flanger's past/ahead taps). The two directions are kept
     distinct (rather than `fwd (neg d)`) so the built IR matches the source
-    flanger's `clk − δ` / `clk + δ` exactly. -/
+    flanger's `clk − δ` / `clk + δ` exactly. `neg` REVERSES the clock
+    (`c ↦ −c`) — the moat operation: `reverse = warp(neg)`, precomposing the
+    voice's timebase with negation so it reads `s(−clk)`. The clock is signed
+    Q32.32 int64 and `−(−x) = x` exactly, so `neg` is a strict involution. -/
 inductive Warp where
   | id
   | back (d : Expr)
   | fwd (d : Expr)
+  | neg
 deriving Repr
 
-/-- Denotation `⟦warp φ⟧ s = s ∘ φ`, here on the clock-as-value. -/
+/-- Denotation `⟦warp φ⟧ s = s ∘ φ`, here on the clock-as-value. `neg` lowers to
+    the IR's unary integer negate (`.unary .neg`, emitted as `sub i64 0, c`) —
+    the same `0 − clock()` form the `ClockReverseProbe` source reverses with. -/
 def Warp.apply : Warp → Clock → Clock
   | .id,     c => c
   | .back d, c => sub c d
   | .fwd d,  c => add c d
+  | .neg,    c => .unary .neg c
 
 /-- δ = `toInt(offset · sampleRate · 2³²)` — the flange offset, `offset` seconds
     expressed in Q32.32 samples. A function of the clock/params (`offsetIn` is
@@ -480,5 +487,86 @@ def buildIndependentDiagonal (arena : Arena) (resolved : Array (String × Progra
   let (b, f1) := ({} : Builder).flanger v clockLit delta1 "1"
   let (b, f2) := b.flanger v clockLit delta2 "2"
   buildVoiceProgram "DiagonalIndependent" b.decls (add f1 f2) arena resolved
+
+-- ─────────────────────────────────────────────────────────────
+-- M6 (slice 5) — REVERSE as warp(neg): the moat operation, certified as laws
+-- ─────────────────────────────────────────────────────────────
+
+/-! Slice 5 certifies REVERSE — the moat — as warp arrow laws. Reverse precomposes
+    the voice's timebase with negation: `reverse = warp(neg)`, the voice reading
+    `s(−clk)`. Three laws, all single-literal-pitch input-free carriers:
+
+    * **Involution** `warp(neg) ⋙ warp(neg) = id`: the voice clocked at `−(−clk)`
+      vs at `clk`. Byte-IDENTICAL — `−(−x) = x` exactly on the int64 clock (the
+      combinator-level twin of the `ClockReverseProbe` golden).
+    * **Reverse-swaps-delay** `warp(neg) ⋙ warp(back δ) = warp(fwd δ) ⋙ warp(neg)`:
+      both reduce to the voice at `−clk+δ` — reversal turns a delay into an advance.
+      Byte-IDENTICAL (pure int64 clock arithmetic, exact); plans differ.
+    * **Reverse commutes with the symmetric flanger** `warp(neg) ⋙ flanger ≡
+      flanger ⋙ warp(neg)` — denotationally equal, but under reverse the ±δ taps
+      SWAP tree slot (see below), so the float value-sum REASSOCIATES. -/
+
+-- Law 1 — INVOLUTION:  warp(neg) ⋙ warp(neg) = id
+/-- LHS clock `−(−clk)` — the voice after reverse then reverse. -/
+def revInvolutionLhsClock : Clock := Warp.neg.apply (Warp.neg.apply clockLit)
+/-- RHS clock `clk` — the identity. -/
+def revInvolutionRhsClock : Clock := clockLit
+
+-- Law 2 — REVERSE-SWAPS-DELAY:  warp(neg) ⋙ warp(back δ) = warp(fwd δ) ⋙ warp(neg)
+-- Per the `⋙` convention (left operand = OUTER warp, as in slices 3-4): the LHS
+-- applies `neg` outer over `back δ`, the RHS applies `fwd δ` outer over `neg`.
+/-- LHS clock `−(clk−δ) = −clk+δ` — reverse of a delayed clock. -/
+def revSwapLhsClock : Clock := Warp.neg.apply ((Warp.back delta1).apply clockLit)
+/-- RHS clock `(−clk)+δ = −clk+δ` — advance of a reversed clock. The delay became
+    an advance; both denote `−clk+δ` in exact int64, so byte-identical. -/
+def revSwapRhsClock : Clock := (Warp.fwd delta1).apply (Warp.neg.apply clockLit)
+
+-- Law 3 — REVERSE COMMUTES WITH THE SYMMETRIC FLANGER:
+--   warp(neg) ⋙ flanger ≡ flanger ⋙ warp(neg)
+-- Both build the SAME left-assoc `flangerSum` tree `add(add(0.5·dry,0.25·past),
+-- 0.25·ahead)` over the SAME tap SET {−clk, −clk−δ, −clk+δ}. The difference is
+-- WHICH physical tap lands in the `past` vs `ahead` slot, driven by whether `neg`
+-- is the OUTER or INNER warp (the `⋙` convention again):
+--
+--   LHS = warp(neg) ⋙ flanger  (neg OUTER):  tap clock = neg(tapφ(clk))
+--     dry   = neg(clk)            = −clk
+--     past  = neg(clk−δ)          = −clk+δ      ← +δ tap in the `past` slot
+--     ahead = neg(clk+δ)          = −clk−δ      ← −δ tap in the `ahead` slot
+--   RHS = flanger ⋙ warp(neg)  (neg INNER):  tap clock = tapφ(neg(clk))
+--     dry   = neg(clk)            = −clk
+--     past  = neg(clk)−δ          = −clk−δ      ← −δ tap in the `past` slot
+--     ahead = neg(clk)+δ          = −clk+δ      ← +δ tap in the `ahead` slot
+--
+-- So the −δ and +δ summands swap tree position: `(A + B) + C` vs `(A + C) + B`.
+-- Float add is NOT associative, so the rendered audio is denotationally equal
+-- (max|Δ| at the ULP scale) but NOT byte-identical. With a FIXED-POINT value
+-- carrier (integer add is associative AND commutative) it would be byte-exact;
+-- the float value sum is the only non-exact link — the (fixed-point) clock side
+-- is exact (laws 1-2 prove it). THIS IS THE FINDING.
+
+/-- LHS `warp(neg) ⋙ flanger`: `neg` is the OUTER warp, so `neg(clk−δ)=−clk+δ`
+    and `neg(clk+δ)=−clk−δ` — the ±δ taps land swapped vs the RHS. Same
+    `flangerSum` tree, input-free literal-pitch carrier. -/
+def buildReverseThenFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let v := litPitchSinOscVoice
+  let tapClk (φ : Warp) : Clock := Warp.neg.apply (φ.apply clockLit)
+  let (dry,   b) := ({} : Builder).osc v "dry"   (tapClk .id)
+  let (past,  b) := b.osc v "past"  (tapClk (.back delta1))
+  let (ahead, b) := b.osc v "ahead" (tapClk (.fwd  delta1))
+  buildVoiceProgram "ReverseThenFlanger" b.decls (flangerSum dry past ahead) arena resolved
+
+/-- RHS `flanger ⋙ warp(neg)`: `neg` is the INNER warp, so `neg(clk)−δ=−clk−δ`
+    and `neg(clk)+δ=−clk+δ` — the ±δ taps keep the source flanger's slot order.
+    Same `flangerSum` tree as the LHS; only the per-tap clock differs. -/
+def buildFlangerThenReverse (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let v := litPitchSinOscVoice
+  let negClk : Clock := Warp.neg.apply clockLit
+  let tapClk (φ : Warp) : Clock := φ.apply negClk
+  let (dry,   b) := ({} : Builder).osc v "dry"   (tapClk .id)
+  let (past,  b) := b.osc v "past"  (tapClk (.back delta1))
+  let (ahead, b) := b.osc v "ahead" (tapClk (.fwd  delta1))
+  buildVoiceProgram "FlangerThenReverse" b.decls (flangerSum dry past ahead) arena resolved
 
 end Tropical.ArrowWarp

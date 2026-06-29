@@ -596,6 +596,64 @@ private def runDiagonalLaw (arena : Arena) (resolved : Array (String × ProgramI
             IO.println s!"  FAIL  arrow-law/diagonal  audio differs: shared {hashS.take 16} independent {hashI.take 16}"
             pure false
 
+-- ── (h) slice 5 — REVERSE (the moat) as warp(neg): involution, reverse-swaps- ──
+-- delay, and reverse-equivariance of the symmetric flanger. Laws 1-2 reuse
+-- `runArrowLaw` (byte-identical: the clock side is exact int64). Law 3 cannot be
+-- byte-identical in float — under reverse the ±δ taps swap tree slot, so the
+-- value weighted-sum reassociates `(A+B)+C` vs `(A+C)+B`, and float add is not
+-- associative — so we assert the DENOTATIONAL form (max|Δ| < ε) and REPORT the
+-- byte-identity + max|Δ| as the finding. It would be byte-exact with a fixed-
+-- point value carrier (the clock side, laws 1-2, is already exact).
+
+/-- Certify reverse-equivariance of the symmetric flanger:
+    `warp(neg) ⋙ flanger ≡ flanger ⋙ warp(neg)`. Builds both flanger carriers
+    (neg OUTER vs INNER, swapping the ±δ tap slots), renders both, asserts the
+    DENOTATIONAL law (max|Δ| < ε), and reports byte-identity + max|Δ|. PASS iff
+    max|Δ| < ε and the signal is non-silent. -/
+private def runReverseFlangerCommute
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let eps := 1e-6
+  match Tropical.ArrowWarp.buildReverseThenFlanger arena resolved,
+        Tropical.ArrowWarp.buildFlangerThenReverse arena resolved with
+  | .error e, _ => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  build lhs: {firstLine e}"; pure false
+  | _, .error e => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  build rhs: {firstLine e}"; pure false
+  | .ok (arenaL, idxL), .ok (arenaR, idxR) =>
+    match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
+    | .error e, _ => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  compile lhs: {firstLine e}"; pure false
+    | _, .error e => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  compile rhs: {firstLine e}"; pure false
+    | .ok (_, _, planL), .ok (_, _, planR) =>
+      match ← renderIrBytes planL, ← renderIrBytes planR with
+      | .error e, _ | _, .error e =>
+        IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  render: {firstLine e}"; pure false
+      | .ok bytesL, .ok bytesR =>
+        let hashL ← sha256Hex bytesL
+        let hashR ← sha256Hex bytesR
+        let byteIdentical := hashL == hashR
+        let samplesL := decodeF64LE bytesL
+        let samplesR := decodeF64LE bytesR
+        let n := min samplesL.size samplesR.size
+        let mut maxAbs := 0.0
+        let mut energy := 0.0
+        let mut bitDiff := 0
+        for k in [0:n] do
+          let d := (samplesL[k]! - samplesR[k]!).abs
+          if d > maxAbs then maxAbs := d
+          if samplesL[k]!.toBits != samplesR[k]!.toBits then bitDiff := bitDiff + 1
+          energy := energy + samplesL[k]! * samplesL[k]!
+        -- max|Δ| is sub-ULP-scale; Float.toString rounds it to 0.000000. Show the
+        -- scaled value (×10¹⁵, i.e. femto-units) so the ULP magnitude is legible.
+        IO.println s!"        finding  byte-identical: {byteIdentical}  ·  bit-differing samples: {bitDiff}/{n}  ·  max|Δ|={maxAbs} (={maxAbs * 1e15}e-15, ε={eps})  ·  lhs energy={energy}"
+        IO.println s!"        finding  ±δ taps swap slot ⇒ float value-sum reassociates ((A+B)+C vs (A+C)+B); exact on the (fixed-point) clock (laws 1-2), float-tolerance on the (float) value sum — byte-exact with a fixed-point value carrier"
+        if energy <= 1e-6 then
+          IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  signal silent (energy={energy})"
+          pure false
+        else if maxAbs < eps then
+          IO.println s!"  PASS  arrow-law/reverse-flanger-commute  denotational ≡ (max|Δ|={maxAbs} < ε; byte-identical={byteIdentical})"
+          pure true
+        else
+          IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  max|Δ|={maxAbs} ≥ ε={eps}"
+          pure false
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -689,7 +747,7 @@ def main (args : List String) : IO UInt32 := do
   match ← arrowElabStdlib with
   | .error e =>
     IO.println s!"  FAIL  arrow-laws  elaborate stdlib: {firstLine e}"
-    total := total + 3; failed := failed + 3
+    total := total + 6; failed := failed + 6
   | .ok (arena, resolved) =>
     -- Law 1 — inverse/cancellation:  warp(back δ) ⋙ warp(fwd δ) = id
     total := total + 1
@@ -708,6 +766,26 @@ def main (args : List String) : IO UInt32 := do
     --   flanger δ₂) ≡ two independent (source+flanger) pairs (+ the COST story).
     total := total + 1
     if !(← runDiagonalLaw arena resolved) then
+      failed := failed + 1
+    -- ── slice 5 — REVERSE (the moat) as warp(neg) ───────────────────────────
+    -- Law 4 — involution:  warp(neg) ⋙ warp(neg) = id  (byte-identical: −(−x)=x)
+    total := total + 1
+    if !(← runArrowLaw "reverse-involution"
+          Tropical.ArrowWarp.revInvolutionLhsClock Tropical.ArrowWarp.revInvolutionRhsClock
+          arena resolved) then
+      failed := failed + 1
+    -- Law 5 — reverse-swaps-delay:
+    --   warp(neg) ⋙ warp(back δ) = warp(fwd δ) ⋙ warp(neg)  (byte-identical: −clk+δ)
+    total := total + 1
+    if !(← runArrowLaw "reverse-swaps-delay"
+          Tropical.ArrowWarp.revSwapLhsClock Tropical.ArrowWarp.revSwapRhsClock
+          arena resolved) then
+      failed := failed + 1
+    -- Law 6 — reverse commutes with the symmetric flanger:
+    --   warp(neg) ⋙ flanger ≡ flanger ⋙ warp(neg)  (denotational ≡; ±δ tap-sum
+    --   reassociates in float — the finding; byte-exact only with fixed-point values)
+    total := total + 1
+    if !(← runReverseFlangerCommute arena resolved) then
       failed := failed + 1
 
   IO.println ""
