@@ -6,6 +6,10 @@ import Tropical.PlanDecode
 import Tropical.Parse.Surface.Markdown
 import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
+import Tropical.Ir.Strata
+import Tropical.Ir.Core
+import Tropical.Compile
+import Tropical.ArrowWarp
 import Lean.Data.Json
 
 /-!
@@ -408,6 +412,103 @@ private def runCfOnly (name md : String) (expectReject : Bool) : IO Bool := do
         else
           IO.println s!"  PASS  cf-only/{name}  compiles (temps survive)"; pure true
 
+-- ── (h) ArrowWarp arrow laws: algebraically-equal warps ⇒ bit-identical audio ─
+-- Slice 3. The warp arrow laws are certified as AUDIO goldens: build the law's
+-- LHS and RHS as two ArrowWarp carrier programs (a single FixedSinOsc clocked at
+-- two algebraically-equal clock expressions), render both, and assert the
+-- rendered audio is byte-identical (SHA256). The laws hold byte-exactly because
+-- warps are integer add/sub on the Q32.32 fixed-point clock — exact and
+-- associative — so the two sides feed the oscillator a bit-identical int64 clock
+-- and render bit-identical audio, EVEN THOUGH the emitted plans differ (no
+-- algebraic tree normalization). The render bridge reuses the production session
+-- path: buildClockCarrier (ArrowWarp) → Strata.run → Core.check → compileSession
+-- (the carrier as a one-instance root wired to the dac) → FlatPlan → renderIrBytes.
+
+open Tropical.Ir (Arena ProgramIdx)
+
+/-- Read + strictly decode a serialized ParsedProgram (mirrors Diffcli.readParsed). -/
+private def arrowReadParsed (path : String) : IO (Except String Tropical.Parse.Program) := do
+  let text ← IO.FS.readFile path
+  pure <| do
+    let jv ← Tropical.Parse.JsonV.parse text |>.mapError (s!"JSON parse error: {·}")
+    Tropical.Parse.decodeProgram jv
+
+/-- Elaborate the whole stdlib bridge chain in manifest order (mirrors
+    Diffcli.elabChain), so `FixedSinOsc` (and its transitive voice deps) are in
+    the arena for `buildClockCarrier` to link against. Done once and reused. -/
+private def arrowElabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) := do
+  let manifestText ← IO.FS.readFile "stdlib/parsed/manifest.json"
+  let names : Except String (Array String) := do
+    let jv ← Tropical.Parse.JsonV.parse manifestText |>.mapError (s!"manifest parse error: {·}")
+    let some (Tropical.Parse.JsonV.arr items) := jv.getField? "programs"
+      | .error "manifest missing 'programs' array"
+    items.mapM fun | .str s => .ok s | _ => .error "manifest 'programs' entries must be strings"
+  match names with
+  | .error e => pure (.error e)
+  | .ok names => do
+    let mut arena : Arena := {}
+    let mut resolved : Array (String × ProgramIdx) := #[]
+    for name in names do
+      match ← arrowReadParsed s!"stdlib/parsed/{name}.json" with
+      | .error e => return .error s!"{name}.json: {e}"
+      | .ok prog =>
+        let r := resolved
+        match Tropical.Ir.elaborateInto arena prog (some fun n => (r.find? (·.1 == n)).map (·.2)) with
+        | .error e => return .error s!"{name}: {e.message}"
+        | .ok (arena', idx) => arena := arena'; resolved := resolved.push (name, idx)
+    pure (.ok (arena, resolved))
+
+/-- Build one ArrowWarp clock carrier (named `name`, clocked at `clkE`) into a
+    runnable `FlatPlan` via the production session path. -/
+private def compileArrowCarrier (arena : Arena) (resolved : Array (String × ProgramIdx))
+    (name : String) (clkE : Tropical.ArrowWarp.Clock) :
+    Except String Tropical.Plan.FlatPlan := do
+  let (arena', idx) ← Tropical.ArrowWarp.buildClockCarrier name clkE arena resolved
+  let (arena'', root') ← (Tropical.Ir.Strata.run { upto := 5 } arena' idx).mapError (·.message)
+  let core ← Tropical.Ir.Core.check arena'' root'
+  -- The carrier is the synthetic session root, wired straight to the dac at its
+  -- `out` port (`__root__.out`). No session wires, no params, no inputs.
+  let input : Tropical.Compile.SessionInput := {
+    instances := #[(Tropical.Compile.rootInstancePath, core)]
+    wiresPost := #[]
+    graphOutputs := #[(Tropical.Compile.rootInstancePath, "out")]
+    params := #[]
+    alloc := {}
+    root := core
+    mode := .fused }
+  Tropical.Compile.compileSession input
+
+/-- Certify one warp law: build LHS and RHS carriers, render both, assert the
+    rendered audio is byte-identical (SHA256). Also reports whether the emitted
+    plans are byte-identical (EXPECTED NO — the algebra is exact in the clock,
+    not normalized in the tree). PASS iff the audio hashes match. -/
+private def runArrowLaw (name : String)
+    (lhsClk rhsClk : Tropical.ArrowWarp.Clock)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match compileArrowCarrier arena resolved s!"{name}_lhs" lhsClk,
+        compileArrowCarrier arena resolved s!"{name}_rhs" rhsClk with
+  | .error e, _ => IO.println s!"  FAIL  arrow-law/{name}  build lhs: {firstLine e}"; pure false
+  | _, .error e => IO.println s!"  FAIL  arrow-law/{name}  build rhs: {firstLine e}"; pure false
+  | .ok lhsPlan, .ok rhsPlan =>
+    match lhsPlan.toWire, rhsPlan.toWire with
+    | .error e, _ | _, .error e =>
+      IO.println s!"  FAIL  arrow-law/{name}  toWire: {firstLine e}"; pure false
+    | .ok lhsWire, .ok rhsWire =>
+      let plansIdentical := lhsWire.compress == rhsWire.compress
+      match ← renderIrBytes lhsPlan, ← renderIrBytes rhsPlan with
+      | .error e, _ | _, .error e =>
+        IO.println s!"  FAIL  arrow-law/{name}  render: {firstLine e}"; pure false
+      | .ok lhsBytes, .ok rhsBytes =>
+        let lhsHash ← sha256Hex lhsBytes
+        let rhsHash ← sha256Hex rhsBytes
+        let planNote := if plansIdentical then "plans identical" else "plans differ (expected)"
+        if lhsHash == rhsHash then
+          IO.println s!"  PASS  arrow-law/{name}  audio ≡ {lhsHash.take 16} ({planNote})"
+          pure true
+        else
+          IO.println s!"  FAIL  arrow-law/{name}  audio differs: lhs {lhsHash.take 16} rhs {rhsHash.take 16} ({planNote})"
+          pure false
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -495,6 +596,27 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runCfOnly "Sin" (← IO.FS.readFile "stdlib/Sin.md") (expectReject := false)) then
     failed := failed + 1
+
+  -- ── (h) ArrowWarp arrow laws (slice 3): warp algebra ≡ in rendered audio ────
+  IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
+  match ← arrowElabStdlib with
+  | .error e =>
+    IO.println s!"  FAIL  arrow-laws  elaborate stdlib: {firstLine e}"
+    total := total + 2; failed := failed + 2
+  | .ok (arena, resolved) =>
+    -- Law 1 — inverse/cancellation:  warp(back δ) ⋙ warp(fwd δ) = id
+    total := total + 1
+    if !(← runArrowLaw "inverse"
+          Tropical.ArrowWarp.invLawLhsClock Tropical.ArrowWarp.invLawRhsClock
+          arena resolved) then
+      failed := failed + 1
+    -- Law 2 — additive delay/functoriality:
+    --   warp(back δ₁) ⋙ warp(back δ₂) = warp(back (δ₁+δ₂))
+    total := total + 1
+    if !(← runArrowLaw "additive"
+          Tropical.ArrowWarp.addLawLhsClock Tropical.ArrowWarp.addLawRhsClock
+          arena resolved) then
+      failed := failed + 1
 
   IO.println ""
   IO.println s!"{total - failed}/{total} passed"

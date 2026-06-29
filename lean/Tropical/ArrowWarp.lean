@@ -293,4 +293,89 @@ def buildReversibleComb (arena : Arena) (resolved : Array (String × ProgramIdx)
     Except String (Arena × ProgramIdx) :=
   buildWarpBank reversibleCombSpec arena resolved
 
+-- ─────────────────────────────────────────────────────────────
+-- M4 (slice 3) — the warp ARROW LAWS as audio goldens
+-- ─────────────────────────────────────────────────────────────
+
+/-! Slices 1-2 certified that one `warpBank` combinator reproduces two
+    hand-written stdlib programs byte-for-byte. Slice 3 certifies the warp
+    ALGEBRA: the arrow laws of `warp` hold byte-exactly **in rendered audio**.
+    Warps are integer add/sub on the Q32.32 fixed-point clock; integer add/sub
+    is exact and associative, so the two algebraically-equal sides of a law feed
+    the oscillator a *bit-identical* int64 clock and render *bit-identical* audio
+    — even though the emitted plans differ (there is no algebraic tree
+    normalization; `(clk+δ)−δ` keeps its extra add+sub instructions).
+
+    The carrier is a single closed-form oscillator. To keep both sides of a law
+    self-contained (no input ports to bind), the clock and pitch are LITERAL
+    closed forms rather than input refs: `clk = sampleIndex << 32` inline, pitch
+    a constant. Composing warps needs no new combinator — two `Warp.apply` calls
+    nest on the clock expression. -/
+
+/-- The root clock `sampleIndex << 32` as a closed-form value — the inlined
+    `clkInputDecl` default, so the carrier needs no `clk` input port. -/
+def clockLit : Clock := .binary .lshift .sampleIndex (lit 32)
+
+/-- A δ literal: `toInt(seconds · sampleRate · 2³²)` with `seconds` a concrete
+    decimal (`mantissa · 10^(-exponent)`), no input ref — a closed-form Q32.32
+    integer sample count, identical across the two sides of every law. -/
+def deltaLit (mantissa : Int) (exponent : Nat) : Expr :=
+  toIntE (mul (mul (lit mantissa exponent) .sampleRate) (lit 4294967296))
+
+/-- δ₁ = 0.0007 s, as Q32.32 samples. -/
+def delta1 : Expr := deltaLit 7 4
+/-- δ₂ = 0.0011 s, as Q32.32 samples. -/
+def delta2 : Expr := deltaLit 11 4
+
+/-- The `FixedSinOsc` voice with a LITERAL pitch (220 Hz) in place of the
+    `pitchIn` input ref — so the warp-law carrier is fully closed-form (no input
+    ports for the session-root lowering to bind to). Clock still at port 1. -/
+def litPitchSinOscVoice : Voice :=
+  { programName := "FixedSinOsc"
+    wire := fun clkE => #[ ⟨⟨0⟩, lit 220⟩, ⟨⟨1⟩, clkE⟩ ] }
+
+/-- A single-oscillator carrier clocked at `clkE`: one `FixedSinOsc` voice
+    (literal pitch) whose clock is the closed-form expression `clkE`, output =
+    its signal. No input ports. The two algebraically-equal `clkE`s of a warp
+    law render bit-identical audio though their plans differ.
+
+    Reuses `Builder.osc` (the voice references the elaborated `FixedSinOsc` body;
+    strata inlines it) and mirrors `buildWarpBank`'s registry merge. -/
+def buildClockCarrier (name : String) (clkE : Clock) (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : Except String (Arena × ProgramIdx) := do
+  let v := litPitchSinOscVoice
+  let some vIdx := (resolved.find? (·.1 == v.programName)).map (·.2)
+    | .error s!"ArrowWarp: voice '{v.programName}' not found in the elaborated stdlib chain"
+  let some vProg := arena.program? vIdx
+    | .error s!"ArrowWarp: voice '{v.programName}' program index out of range"
+  let mut registry : Array (String × ProgramIdx) := #[(vProg.name, vIdx)]
+  for (k, vi) in vProg.registry do
+    if !registry.any (·.1 == k) then registry := registry.push (k, vi)
+  let (sig, b) := ({} : Builder).osc v "voice" clkE
+  let prog : Program := {
+    name
+    inputs := #[]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := sig }]
+    binderCount := 0
+    registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  pure ({ arena with programs := arena.programs.push prog }, idx)
+
+-- Law 1 — INVERSE / CANCELLATION:  warp(back δ) ⋙ warp(fwd δ) = id
+-- Both `(clk+δ)−δ` and `(clk−δ)+δ` cancel to `clk` in exact int64; we build
+-- the prose form `(clk+δ)−δ` (fwd inner, back outer).
+/-- LHS clock `(clk+δ)−δ` — the oscillator after a forward then inverse warp. -/
+def invLawLhsClock : Clock := (Warp.back delta1).apply ((Warp.fwd delta1).apply clockLit)
+/-- RHS clock `clk` — the identity. -/
+def invLawRhsClock : Clock := clockLit
+
+-- Law 2 — ADDITIVE DELAY / FUNCTORIALITY:
+--   warp(back δ₁) ⋙ warp(back δ₂) = warp(back (δ₁+δ₂))
+/-- LHS clock `(clk−δ₁)−δ₂` — two delays composed. -/
+def addLawLhsClock : Clock := (Warp.back delta2).apply ((Warp.back delta1).apply clockLit)
+/-- RHS clock `clk−(δ₁+δ₂)` — one delay by the summed offset. -/
+def addLawRhsClock : Clock := (Warp.back (add delta1 delta2)).apply clockLit
+
 end Tropical.ArrowWarp
