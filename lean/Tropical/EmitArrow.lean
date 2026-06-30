@@ -521,6 +521,44 @@ def buildTapCarrier (name : String) (v : Voice) (taps : Array Tap)
   let idx : ProgramIdx := ⟨arena.programs.size⟩
   pure ({ arena with programs := arena.programs.push prog }, idx)
 
+/-- Literal-pitch `FixedSinOsc` at an arbitrary `hz` (pitch at port 0, clock at
+    port 1) — closed form, no input refs. -/
+def litPitchVoice (hz : Int) : Voice :=
+  { programName := "FixedSinOsc"
+    wire := fun clkE => #[ ⟨⟨0⟩, lit hz⟩, ⟨⟨1⟩, clkE⟩ ] }
+
+/-- An FM/PM carrier: a `modHz` modulator oscillator (reading the UNwarped
+    `clockLit` — the pinning that keeps the warp a closed form in τ) drives a
+    *fractional, sub-sample* clock warp `φ(τ) = clk − ⌊depth·mod(τ)·2³²⌋`, fed to
+    a `carHz` carrier. `depth` is in samples; the `·2³²` keeps the warp in Q32.32
+    so `mod`'s fractional value lands in the clock's sub-sample bits. This is the
+    `sub clk (m clk)` modulated warp — a genuinely nonlinear reparametrization,
+    not an affine shift. Closed form, no input ports. -/
+def buildFmCarrier (name : String) (carHz modHz depthSamples : Int)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let some vIdx := (resolved.find? (·.1 == "FixedSinOsc")).map (·.2)
+    | .error "EmitArrow: voice 'FixedSinOsc' not found in the elaborated stdlib chain"
+  let some vProg := arena.program? vIdx
+    | .error "EmitArrow: voice 'FixedSinOsc' program index out of range"
+  let mut registry : Array (String × ProgramIdx) := #[(vProg.name, vIdx)]
+  for (k, vi) in vProg.registry do
+    if !registry.any (·.1 == k) then registry := registry.push (k, vi)
+  let (modSig, b0) := ({} : Builder).osc (litPitchVoice modHz) "mod" clockLit
+  let warpedClk : Clock :=
+    sub clockLit (toIntE (mul (mul (lit depthSamples) modSig) (lit 4294967296)))
+  let (carSig, b) := b0.osc (litPitchVoice carHz) "car" warpedClk
+  let prog : Program := {
+    name
+    inputs := #[]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := carSig }]
+    binderCount := 0
+    registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  pure ({ arena with programs := arena.programs.push prog }, idx)
+
 -- Law 1 — INVERSE / CANCELLATION:  warp(back δ) ⋙ warp(fwd δ) = id
 -- Both `(clk+δ)−δ` and `(clk−δ)+δ` cancel to `clk` in exact int64; we build
 -- the prose form `(clk+δ)−δ` (fwd inner, back outer).

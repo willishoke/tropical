@@ -889,6 +889,109 @@ private def runConvolutionOracle (arena : Arena)
         IO.println s!"  FAIL  convolution-oracle  max|Δ|={maxAbs} (≥ {eps}); filter-effect={filterEffect}"
         pure false
 
+-- ── (h‴) The MODULATED-CLOCK stress test — a fractional, NONLINEAR warp, to see
+-- whether the bubble is a side-effect of affineness (it should not be). The warp
+-- φ(τ) = clk − ⌊depth·mod(τ)·2³²⌋ is sub-sample and nonlinear (mod is a sine);
+-- it evaluates the carrier at clock values BETWEEN integer samples, which the
+-- array-shift oracle cannot reach. So the oracle is an INDEPENDENT closed-form
+-- reference (Lean `Float.sin` on the modulated phase), calibrated against the
+-- bare oscillator first: tropical's `Sin` is a polynomial, so this is a
+-- TOLERANCE check, not bit-exact — but the tolerance is the bare osc's own
+-- poly/quantization floor, so the test isolates the WARP's contribution. A warp
+-- that secretly needed affineness would diverge by O(1), far above that floor.
+
+private def finishCarrier (arena : Arena) (idx : ProgramIdx) :
+    Except String Tropical.Plan.FlatPlan := do
+  let (arena'', root') ← (Tropical.Ir.Strata.run { upto := 5 } arena idx).mapError (·.message)
+  let core ← Tropical.Ir.Core.check arena'' root'
+  let input : Tropical.Compile.SessionInput := {
+    instances := #[(Tropical.Compile.rootInstancePath, core)]
+    wiresPost := #[]
+    graphOutputs := #[(Tropical.Compile.rootInstancePath, "out")]
+    params := #[]
+    alloc := {}
+    root := core
+    mode := .fused }
+  Tropical.Compile.compileSession input
+
+private def buildAndFinish (built : Except String (Arena × ProgramIdx)) :
+    Except String Tropical.Plan.FlatPlan := do
+  let (a, i) ← built
+  finishCarrier a i
+
+/-- THE NONLINEAR GATE: a sine-modulated, sub-sample clock warp ≡ its closed-form
+    reference (`Float.sin` on the modulated phase), to within the bare oscillator's
+    own accuracy floor — established by calibration. -/
+private def runModulatedClock (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let n : Nat := 1024
+  let lo : Nat := 8                       -- skip the first few (keep warped clk > 0)
+  let depth : Float := 3.0                -- samples deviation per UNIT (mid-graph) mod
+  let twoPi : Float := 6.283185307179586
+  let two32 : Float := 4294967296.0
+  -- The warp reads the modulator MID-GRAPH (unit-scale); the dac sink scales
+  -- program OUTPUTS by defaultSinkGain = 1/20. So the rendered modulator output
+  -- modA = sinkGain · (mid-graph mod); recover the value the warp actually used
+  -- as modA / sinkGain. (Known constant from Plan.lean — not fitted to pass.)
+  let sinkGain : Float := 0.05
+  -- tropical's EXACT phase rate: inc = ⌊fc·2³²/SR⌋, ω = 2π·inc/2³² (no convention
+  -- guessing — this is the increment ClockPhasor actually accumulates).
+  let incC : Int := (2000 * 4294967296) / 44100
+  let omega : Float := twoPi * Float.ofInt incC / two32
+  match buildAndFinish (Tropical.EmitArrow.buildTapCarrier "BareFc"
+          (Tropical.EmitArrow.litPitchVoice 2000) bareTaps arena resolved),
+        buildAndFinish (Tropical.EmitArrow.buildTapCarrier "BareFm"
+          (Tropical.EmitArrow.litPitchVoice 200) bareTaps arena resolved),
+        buildAndFinish (Tropical.EmitArrow.buildFmCarrier "FmOsc" 2000 200 3 arena resolved) with
+  | .error e, _, _ => IO.println s!"  FAIL  modulated-clock  build bare: {firstLine e}"; pure false
+  | _, .error e, _ => IO.println s!"  FAIL  modulated-clock  build mod: {firstLine e}"; pure false
+  | _, _, .error e => IO.println s!"  FAIL  modulated-clock  build fm: {firstLine e}"; pure false
+  | .ok barePlan, .ok modPlan, .ok fmPlan =>
+    match ← renderPlanSamples barePlan n, ← renderPlanSamples modPlan n, ← renderPlanSamples fmPlan n with
+    | .error e, _, _ | _, .error e, _ | _, _, .error e =>
+      IO.println s!"  FAIL  modulated-clock  render: {firstLine e}"; pure false
+    | .ok bare, .ok modA, .ok got =>
+      -- Fit the carrier model bare[t] ≈ c1·sin(ωt) + c2·cos(ωt) (quadrature at ω),
+      -- so the reference adapts to the osc's actual amplitude/phase rather than
+      -- assuming unit amplitude. The osc IS a pure sine at ω, so the fit is exact
+      -- up to the poly/quantization residual (which becomes the calibration floor).
+      let mf : Float := Float.ofNat (n - lo)
+      let mut s1 : Float := 0.0
+      let mut s2 : Float := 0.0
+      let mut maxMod : Float := 0.0
+      for t in [lo:n] do
+        let ts := Float.ofNat t
+        s1 := s1 + bare[t]! * Float.sin (omega * ts)
+        s2 := s2 + bare[t]! * Float.cos (omega * ts)
+        if modA[t]!.abs > maxMod then maxMod := modA[t]!.abs
+      let c1 := 2.0 * s1 / mf
+      let c2 := 2.0 * s2 / mf
+      let amp := Float.sqrt (c1 * c1 + c2 * c2)
+      let mut e0 : Float := 0.0           -- calibration: bare vs fitted model
+      let mut efm : Float := 0.0          -- fm vs model warped by tropical's own mod[]
+      let mut warpEffect : Float := 0.0   -- |fm − bare| (is the warp doing anything)
+      for t in [lo:n] do
+        let ts := Float.ofNat t
+        let refBare := c1 * Float.sin (omega * ts) + c2 * Float.cos (omega * ts)
+        if (bare[t]! - refBare).abs > e0 then e0 := (bare[t]! - refBare).abs
+        let tw := ts - depth * (modA[t]! / sinkGain)   -- warped time (mid-graph mod)
+        let refFm := c1 * Float.sin (omega * tw) + c2 * Float.cos (omega * tw)
+        if (got[t]! - refFm).abs > efm then efm := (got[t]! - refFm).abs
+        if (got[t]! - bare[t]!).abs > warpEffect then warpEffect := (got[t]! - bare[t]!).abs
+      IO.println s!"        model    carrier amp={amp} (c1={c1}, c2={c2}), ω={omega}; mod amp={maxMod}, depth={depth} samp"
+      IO.println s!"        calibrate  bare vs fitted sine model:   max|Δ|={e0}  (the accuracy floor)"
+      IO.println s!"        result     fm   vs model warped by mod: max|Δ|={efm}  ·  warp effect |fm−bare| max={warpEffect}"
+      if amp < 1e-3 then
+        IO.println s!"  FAIL  modulated-clock  carrier silent (amp={amp})"; pure false
+      else if e0 > 0.05 * amp then
+        IO.println s!"  FAIL  modulated-clock  calibration off (e0={e0} vs amp {amp}) — sine model wrong, test invalid"; pure false
+      else if warpEffect < 0.2 * amp then
+        IO.println s!"  FAIL  modulated-clock  modulation negligible (warp {warpEffect} vs amp {amp}) — not stressing the warp"; pure false
+      else if efm < 3.0 * e0 + 0.02 * amp then
+        IO.println s!"  PASS  modulated-clock  fractional nonlinear warp ≡ closed form (fm err {efm} ≈ floor {e0}; warp effect {warpEffect}, amp {amp})"; pure true
+      else
+        IO.println s!"  FAIL  modulated-clock  fm err {efm} ≫ floor {e0} — nonlinear warp diverges from the closed form"; pure false
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -1073,6 +1176,13 @@ def main (args : List String) : IO UInt32 := do
     IO.println "convolution stress test (clock-warp FIR ≡ independent array-shift conv):"
     total := total + 1
     if !(← runConvolutionOracle arena resolved) then
+      failed := failed + 1
+    -- ── (h‴) modulated clock: a fractional NONLINEAR warp vs an independent
+    --   closed-form reference, calibrated against the bare osc — tests that the
+    --   bubble is not a side-effect of affineness.
+    IO.println "modulated-clock stress test (fractional nonlinear warp ≡ closed form):"
+    total := total + 1
+    if !(← runModulatedClock arena resolved) then
       failed := failed + 1
 
   IO.println ""
