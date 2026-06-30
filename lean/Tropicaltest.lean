@@ -8,8 +8,9 @@ import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
+import Tropical.Ir.CompileResolved
 import Tropical.Compile
-import Tropical.ArrowWarp
+import Tropical.EmitArrow
 import Lean.Data.Json
 
 /-!
@@ -412,16 +413,16 @@ private def runCfOnly (name md : String) (expectReject : Bool) : IO Bool := do
         else
           IO.println s!"  PASS  cf-only/{name}  compiles (temps survive)"; pure true
 
--- ── (h) ArrowWarp arrow laws: algebraically-equal warps ⇒ bit-identical audio ─
+-- ── (h) EmitArrow arrow laws: algebraically-equal warps ⇒ bit-identical audio ─
 -- Slice 3. The warp arrow laws are certified as AUDIO goldens: build the law's
--- LHS and RHS as two ArrowWarp carrier programs (a single FixedSinOsc clocked at
+-- LHS and RHS as two EmitArrow carrier programs (a single FixedSinOsc clocked at
 -- two algebraically-equal clock expressions), render both, and assert the
 -- rendered audio is byte-identical (SHA256). The laws hold byte-exactly because
 -- warps are integer add/sub on the Q32.32 fixed-point clock — exact and
 -- associative — so the two sides feed the oscillator a bit-identical int64 clock
 -- and render bit-identical audio, EVEN THOUGH the emitted plans differ (no
 -- algebraic tree normalization). The render bridge reuses the production session
--- path: buildClockCarrier (ArrowWarp) → Strata.run → Core.check → compileSession
+-- path: buildClockCarrier (EmitArrow) → Strata.run → Core.check → compileSession
 -- (the carrier as a one-instance root wired to the dac) → FlatPlan → renderIrBytes.
 
 open Tropical.Ir (Arena ProgramIdx)
@@ -458,12 +459,12 @@ private def arrowElabStdlib : IO (Except String (Arena × Array (String × Progr
         | .ok (arena', idx) => arena := arena'; resolved := resolved.push (name, idx)
     pure (.ok (arena, resolved))
 
-/-- Build one ArrowWarp clock carrier (named `name`, clocked at `clkE`) into a
+/-- Build one EmitArrow clock carrier (named `name`, clocked at `clkE`) into a
     runnable `FlatPlan` via the production session path. -/
 private def compileArrowCarrier (arena : Arena) (resolved : Array (String × ProgramIdx))
-    (name : String) (clkE : Tropical.ArrowWarp.Clock) :
+    (name : String) (clkE : Tropical.EmitArrow.Clock) :
     Except String Tropical.Plan.FlatPlan := do
-  let (arena', idx) ← Tropical.ArrowWarp.buildClockCarrier name clkE arena resolved
+  let (arena', idx) ← Tropical.EmitArrow.buildClockCarrier name clkE arena resolved
   let (arena'', root') ← (Tropical.Ir.Strata.run { upto := 5 } arena' idx).mapError (·.message)
   let core ← Tropical.Ir.Core.check arena'' root'
   -- The carrier is the synthetic session root, wired straight to the dac at its
@@ -478,12 +479,63 @@ private def compileArrowCarrier (arena : Arena) (resolved : Array (String × Pro
     mode := .fused }
   Tropical.Compile.compileSession input
 
+-- ── (h′) EmitArrow corpus gate: EmitArrow's emit ≡ strata's emit, per program ─
+-- The cutover (phase C1) reproduces the corpus one program at a time. This is
+-- the reusable instrument: given a resolved program (built by an EmitArrow
+-- constructor) and a stdlib program NAME, emit BOTH through the production
+-- per-program recipe — strata (full) → Core.check → compileResolved → wire —
+-- and compare byte-for-byte. The stdlib side is exactly what `diffcli
+-- emit-stdlib <Name>` produces (the target strata produces TODAY); the
+-- EmitArrow side is what the cutover would emit instead. Byte-identity proves
+-- EmitArrow covers strata's job for that program — the slices-1/2 byte-gate,
+-- generalized to any program, run as a tropicaltest assertion rather than an
+-- external `diff` of two diffcli verbs.
+
+/-- The production per-program emit recipe (the `diffcli emit-*` body): strata
+    (all ported passes, inline) → Core.check → compileResolved → wire JSON. The
+    canonical `tropical_plan_5`-per-instance bytes a program emits today. -/
+private def emitResolvedWire (arena : Arena) (idx : ProgramIdx) : Except String String := do
+  let (arena', root') ← (Tropical.Ir.Strata.run
+      { upto := Tropical.Ir.Strata.portedPasses, inlineNested := true } arena idx).mapError (·.message)
+  let core ← Tropical.Ir.Core.check arena' root'
+  let plan ← Tropical.Ir.CompileResolved.compileResolved core
+  let wire ← plan.toWire
+  pure wire.compress
+
+/-- THE CORPUS GATE (reusable). Build a program with `builder` (an EmitArrow
+    constructor over the elaborated stdlib arena), then assert its emit is
+    byte-identical to stdlib program `stdName`'s emit — the form strata produces
+    today (`diffcli emit-stdlib {stdName}`). `arena`/`resolved` come from
+    `arrowElabStdlib`; `stdName` is emitted from the ORIGINAL arena (the builder
+    only appends), so the comparison is EmitArrow-emit vs strata-emit of the same
+    target. This covers the corpus one program at a time. -/
+private def runEmitCorpusGate (label stdName : String)
+    (arena : Arena) (resolved : Array (String × ProgramIdx))
+    (builder : Arena → Array (String × ProgramIdx) → Except String (Arena × ProgramIdx)) :
+    IO Bool := do
+  let some (_, stdIdx) := resolved.find? (·.1 == stdName)
+    | IO.println s!"  FAIL  corpus-gate/{label}  stdlib '{stdName}' not in elaborated chain"
+      pure false
+  match builder arena resolved with
+  | .error e => IO.println s!"  FAIL  corpus-gate/{label}  build: {firstLine e}"; pure false
+  | .ok (arena', idx) =>
+    match emitResolvedWire arena' idx, emitResolvedWire arena stdIdx with
+    | .error e, _ => IO.println s!"  FAIL  corpus-gate/{label}  emit EmitArrow: {firstLine e}"; pure false
+    | _, .error e => IO.println s!"  FAIL  corpus-gate/{label}  emit stdlib {stdName}: {firstLine e}"; pure false
+    | .ok got, .ok want =>
+      if got == want then
+        IO.println s!"  PASS  corpus-gate/{label}  EmitArrow ≡ emit-stdlib {stdName} ({got.length}B)"
+        pure true
+      else
+        IO.println s!"  FAIL  corpus-gate/{label}  EmitArrow ≠ emit-stdlib {stdName} (EmitArrow {got.length}B, stdlib {want.length}B)"
+        pure false
+
 /-- Certify one warp law: build LHS and RHS carriers, render both, assert the
     rendered audio is byte-identical (SHA256). Also reports whether the emitted
     plans are byte-identical (EXPECTED NO — the algebra is exact in the clock,
     not normalized in the tree). PASS iff the audio hashes match. -/
 private def runArrowLaw (name : String)
-    (lhsClk rhsClk : Tropical.ArrowWarp.Clock)
+    (lhsClk rhsClk : Tropical.EmitArrow.Clock)
     (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
   match compileArrowCarrier arena resolved s!"{name}_lhs" lhsClk,
         compileArrowCarrier arena resolved s!"{name}_rhs" rhsClk with
@@ -555,8 +607,8 @@ private def diagStrataCompile (arena : Arena) (idx : ProgramIdx) :
     and whether the emitted plans are byte-identical (CSE collapse). PASS iff the
     audio hashes match. -/
 private def runDiagonalLaw (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
-  match Tropical.ArrowWarp.buildSharedDiagonal arena resolved,
-        Tropical.ArrowWarp.buildIndependentDiagonal arena resolved with
+  match Tropical.EmitArrow.buildSharedDiagonal arena resolved,
+        Tropical.EmitArrow.buildIndependentDiagonal arena resolved with
   | .error e, _ => IO.println s!"  FAIL  arrow-law/diagonal  build shared: {firstLine e}"; pure false
   | _, .error e => IO.println s!"  FAIL  arrow-law/diagonal  build independent: {firstLine e}"; pure false
   | .ok (arenaS, idxS), .ok (arenaI, idxI) =>
@@ -613,8 +665,8 @@ private def runDiagonalLaw (arena : Arena) (resolved : Array (String × ProgramI
 private def runReverseFlangerCommute
     (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let eps := 1e-6
-  match Tropical.ArrowWarp.buildReverseThenFlanger arena resolved,
-        Tropical.ArrowWarp.buildFlangerThenReverse arena resolved with
+  match Tropical.EmitArrow.buildReverseThenFlanger arena resolved,
+        Tropical.EmitArrow.buildFlangerThenReverse arena resolved with
   | .error e, _ => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  build lhs: {firstLine e}"; pure false
   | _, .error e => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  build rhs: {firstLine e}"; pure false
   | .ok (arenaL, idxL), .ok (arenaR, idxR) =>
@@ -669,9 +721,9 @@ private def runReverseFlangerCommute
     side is exact int64, so these hold byte-exactly — the fixed-point analog of
     `runArrowLaw`'s float laws (which also pass) over the integer source. -/
 private def runFixedSourceLaw (name : String)
-    (lhsClk rhsClk : Tropical.ArrowWarp.Clock) (arena : Arena) : IO Bool := do
-  let (arenaL, idxL) := Tropical.ArrowWarp.buildFixedSourceCarrier s!"{name}_lhs" lhsClk arena
-  let (arenaR, idxR) := Tropical.ArrowWarp.buildFixedSourceCarrier s!"{name}_rhs" rhsClk arena
+    (lhsClk rhsClk : Tropical.EmitArrow.Clock) (arena : Arena) : IO Bool := do
+  let (arenaL, idxL) := Tropical.EmitArrow.buildFixedSourceCarrier s!"{name}_lhs" lhsClk arena
+  let (arenaR, idxR) := Tropical.EmitArrow.buildFixedSourceCarrier s!"{name}_rhs" rhsClk arena
   match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
   | .error e, _ => IO.println s!"  FAIL  arrow-law/{name}  compile lhs: {firstLine e}"; pure false
   | _, .error e => IO.println s!"  FAIL  arrow-law/{name}  compile rhs: {firstLine e}"; pure false
@@ -697,8 +749,8 @@ private def runFixedSourceLaw (name : String)
     differing-sample count (must be 0/N vs slice 5's 1271/4096). PASS iff
     byte-identical and non-silent. -/
 private def runReverseFlangerCommuteFixedpoint (arena : Arena) : IO Bool := do
-  let (arenaL, idxL) := Tropical.ArrowWarp.buildReverseThenFixedFlanger arena
-  let (arenaR, idxR) := Tropical.ArrowWarp.buildFixedFlangerThenReverse arena
+  let (arenaL, idxL) := Tropical.EmitArrow.buildReverseThenFixedFlanger arena
+  let (arenaR, idxR) := Tropical.EmitArrow.buildFixedFlangerThenReverse arena
   match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
   | .error e, _ => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  compile lhs: {firstLine e}"; pure false
   | _, .error e => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  compile rhs: {firstLine e}"; pure false
@@ -818,24 +870,43 @@ def main (args : List String) : IO UInt32 := do
   if !(← runCfOnly "Sin" (← IO.FS.readFile "stdlib/Sin.md") (expectReject := false)) then
     failed := failed + 1
 
-  -- ── (h) ArrowWarp arrow laws (slice 3): warp algebra ≡ in rendered audio ────
+  -- ── (h) EmitArrow arrow laws (slice 3): warp algebra ≡ in rendered audio ────
   IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
   match ← arrowElabStdlib with
   | .error e =>
     IO.println s!"  FAIL  arrow-laws  elaborate stdlib: {firstLine e}"
-    total := total + 10; failed := failed + 10
+    total := total + 13; failed := failed + 13
   | .ok (arena, resolved) =>
+    -- ── (h′) EmitArrow corpus gate: EmitArrow's emit ≡ strata's emit byte-wise ─
+    -- The cutover instrument (phase C1). FlangeSin/ReversibleComb generalize the
+    -- slices-1/2 byte-gate (formerly an external `diff` of two diffcli verbs);
+    -- FixedSinOsc builds the foundational voice DIRECTLY (phasor + Sin poly, no
+    -- sourced instance) and is byte-identical to `emit-stdlib FixedSinOsc`.
+    IO.println "emitarrow corpus gate (EmitArrow emit ≡ strata emit, byte-identical):"
+    total := total + 1
+    if !(← runEmitCorpusGate "FlangeSin" "FlangeSin" arena resolved
+          Tropical.EmitArrow.buildFlanger) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runEmitCorpusGate "ReversibleComb" "ReversibleComb" arena resolved
+          Tropical.EmitArrow.buildReversibleComb) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runEmitCorpusGate "FixedSinOsc" "FixedSinOsc" arena resolved
+          Tropical.EmitArrow.buildFixedSinOsc) then
+      failed := failed + 1
+    IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
     -- Law 1 — inverse/cancellation:  warp(back δ) ⋙ warp(fwd δ) = id
     total := total + 1
     if !(← runArrowLaw "inverse"
-          Tropical.ArrowWarp.invLawLhsClock Tropical.ArrowWarp.invLawRhsClock
+          Tropical.EmitArrow.invLawLhsClock Tropical.EmitArrow.invLawRhsClock
           arena resolved) then
       failed := failed + 1
     -- Law 2 — additive delay/functoriality:
     --   warp(back δ₁) ⋙ warp(back δ₂) = warp(back (δ₁+δ₂))
     total := total + 1
     if !(← runArrowLaw "additive"
-          Tropical.ArrowWarp.addLawLhsClock Tropical.ArrowWarp.addLawRhsClock
+          Tropical.EmitArrow.addLawLhsClock Tropical.EmitArrow.addLawRhsClock
           arena resolved) then
       failed := failed + 1
     -- Law 3 — the cartesian diagonal / fan-out: one source ⋙ (flanger δ₁ &&&
@@ -847,14 +918,14 @@ def main (args : List String) : IO UInt32 := do
     -- Law 4 — involution:  warp(neg) ⋙ warp(neg) = id  (byte-identical: −(−x)=x)
     total := total + 1
     if !(← runArrowLaw "reverse-involution"
-          Tropical.ArrowWarp.revInvolutionLhsClock Tropical.ArrowWarp.revInvolutionRhsClock
+          Tropical.EmitArrow.revInvolutionLhsClock Tropical.EmitArrow.revInvolutionRhsClock
           arena resolved) then
       failed := failed + 1
     -- Law 5 — reverse-swaps-delay:
     --   warp(neg) ⋙ warp(back δ) = warp(fwd δ) ⋙ warp(neg)  (byte-identical: −clk+δ)
     total := total + 1
     if !(← runArrowLaw "reverse-swaps-delay"
-          Tropical.ArrowWarp.revSwapLhsClock Tropical.ArrowWarp.revSwapRhsClock
+          Tropical.EmitArrow.revSwapLhsClock Tropical.EmitArrow.revSwapRhsClock
           arena resolved) then
       failed := failed + 1
     -- Law 6 — reverse commutes with the symmetric flanger:
@@ -876,17 +947,17 @@ def main (args : List String) : IO UInt32 := do
     --   side is exact int64), mirroring the float `runArrowLaw` cases.
     total := total + 1
     if !(← runFixedSourceLaw "reverse-involution-fixedpoint"
-          Tropical.ArrowWarp.revInvolutionLhsClock Tropical.ArrowWarp.revInvolutionRhsClock
+          Tropical.EmitArrow.revInvolutionLhsClock Tropical.EmitArrow.revInvolutionRhsClock
           arena) then
       failed := failed + 1
     total := total + 1
     if !(← runFixedSourceLaw "reverse-swaps-delay-fixedpoint"
-          Tropical.ArrowWarp.revSwapLhsClock Tropical.ArrowWarp.revSwapRhsClock
+          Tropical.EmitArrow.revSwapLhsClock Tropical.EmitArrow.revSwapRhsClock
           arena) then
       failed := failed + 1
     total := total + 1
     if !(← runFixedSourceLaw "additive-fixedpoint"
-          Tropical.ArrowWarp.addLawLhsClock Tropical.ArrowWarp.addLawRhsClock
+          Tropical.EmitArrow.addLawLhsClock Tropical.EmitArrow.addLawRhsClock
           arena) then
       failed := failed + 1
 

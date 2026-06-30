@@ -10,7 +10,7 @@ import Tropical.Ir.EmitLlvm
 import Tropical.PlanDecode
 import Tropical.Engine
 import Tropical.Parse.Surface.Markdown
-import Tropical.ArrowWarp
+import Tropical.EmitArrow
 
 /-!
 The `diffcli` executable — differential-harness verbs that exercise the
@@ -502,16 +502,16 @@ def emitFileVerb (args : List String) : IO UInt32 := do
         | .error e => printElabError e
         | .ok (arena', idx) => printEmit typeArgs arena' idx
 
--- ── arrowwarp-flanger (ArrowWarp slice 1 — the gated flanger) ───────────────
+-- ── emitarrow-flanger (EmitArrow slice 1 — the gated flanger) ───────────────
 
-/-- Build the flanger with the ArrowWarp combinator library
-    (`Tropical/ArrowWarp.lean`) instead of elaborating `FlangeSin.json`, then
+/-- Build the flanger with the EmitArrow combinator library
+    (`Tropical/EmitArrow.lean`) instead of elaborating `FlangeSin.json`, then
     run the SAME emit recipe `emit-file` uses. The gate: this verb's plan JSON
     must be byte-identical to `diffcli emit-file stdlib/parsed/FlangeSin.json`.
     `elabChain` fills the arena with the elaborated stdlib (so `FixedSinOsc` is
-    available to link against); `buildFlanger` pushes the ArrowWarp-built
+    available to link against); `buildFlanger` pushes the EmitArrow-built
     `Program` and returns its `ProgramIdx`. -/
-def arrowwarpFlangerVerb (_args : List String) : IO UInt32 := do
+def emitarrowFlangerVerb (_args : List String) : IO UInt32 := do
   match ← manifestNames with
   | .error e => IO.eprintln e; return 1
   | .ok names =>
@@ -519,15 +519,15 @@ def arrowwarpFlangerVerb (_args : List String) : IO UInt32 := do
     | .error e => IO.eprintln e; return 1
     | .ok (.error e) => printElabError e
     | .ok (.ok (arena, resolved)) =>
-      match Tropical.ArrowWarp.buildFlanger arena resolved with
-      | .error e => IO.eprintln s!"arrowwarp-flanger: {e}"; return 1
+      match Tropical.EmitArrow.buildFlanger arena resolved with
+      | .error e => IO.eprintln s!"emitarrow-flanger: {e}"; return 1
       | .ok (arena', idx) => printEmit #[] arena' idx
 
 /-- The slice-2 gate (pointfree genericity): the SAME `warpBank` combinator
-    (`Tropical/ArrowWarp.lean`), instantiated at the `ModalVoice` voice instead
+    (`Tropical/EmitArrow.lean`), instantiated at the `ModalVoice` voice instead
     of `FixedSinOsc`, then run through the SAME emit recipe. Its plan JSON must
     be byte-identical to `diffcli emit-file stdlib/parsed/ReversibleComb.json`. -/
-def arrowwarpRevcombVerb (_args : List String) : IO UInt32 := do
+def emitarrowRevcombVerb (_args : List String) : IO UInt32 := do
   match ← manifestNames with
   | .error e => IO.eprintln e; return 1
   | .ok names =>
@@ -535,8 +535,25 @@ def arrowwarpRevcombVerb (_args : List String) : IO UInt32 := do
     | .error e => IO.eprintln e; return 1
     | .ok (.error e) => printElabError e
     | .ok (.ok (arena, resolved)) =>
-      match Tropical.ArrowWarp.buildReversibleComb arena resolved with
-      | .error e => IO.eprintln s!"arrowwarp-revcomb: {e}"; return 1
+      match Tropical.EmitArrow.buildReversibleComb arena resolved with
+      | .error e => IO.eprintln s!"emitarrow-revcomb: {e}"; return 1
+      | .ok (arena', idx) => printEmit #[] arena' idx
+
+/-- The C1 "build-the-primitive" gate: `FixedSinOsc` built DIRECTLY by EmitArrow
+    (`Tropical/EmitArrow.lean` `buildFixedSinOsc` — the fixed-point phasor +
+    the `Sin` polynomial, inlined from scratch, NOT sourced as an instance), then
+    run through the SAME emit recipe. Its plan JSON must be byte-identical to
+    `diffcli emit-stdlib FixedSinOsc`. -/
+def emitarrowFixedSinOscVerb (_args : List String) : IO UInt32 := do
+  match ← manifestNames with
+  | .error e => IO.eprintln e; return 1
+  | .ok names =>
+    match ← elabChain names with
+    | .error e => IO.eprintln e; return 1
+    | .ok (.error e) => printElabError e
+    | .ok (.ok (arena, resolved)) =>
+      match Tropical.EmitArrow.buildFixedSinOsc arena resolved with
+      | .error e => IO.eprintln s!"emitarrow-fixedsinosc: {e}"; return 1
       | .ok (arena', idx) => printEmit #[] arena' idx
 
 -- ── compile (Phase 6 stage 6d — the compile_patch.ts contract) ──────────────
@@ -624,8 +641,9 @@ def main (args : List String) : IO UInt32 := do
   | "strata-file" :: rest => strataFileVerb rest
   | "emit-stdlib" :: rest => emitStdlibVerb rest
   | "emit-file" :: rest => emitFileVerb rest
-  | "arrowwarp-flanger" :: rest => arrowwarpFlangerVerb rest
-  | "arrowwarp-revcomb" :: rest => arrowwarpRevcombVerb rest
+  | "emitarrow-flanger" :: rest => emitarrowFlangerVerb rest
+  | "emitarrow-revcomb" :: rest => emitarrowRevcombVerb rest
+  | "emitarrow-fixedsinosc" :: rest => emitarrowFixedSinOscVerb rest
   | "compile" :: rest => compileVerb rest
   | _ =>
     IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli raise <file.json>\n       diffcli parsed-roundtrip <file.json>\n       diffcli elab-stdlib <Name>\n       diffcli elab-file <parsed.json>\n       diffcli strata-stdlib <Name> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli strata-file <parsed.json> [--upto=K] [--mode=M] [--type-args=J]\n       diffcli emit-stdlib <Name> [--type-args=J]\n       diffcli emit-file <parsed.json> [--type-args=J] [--cf-only]"

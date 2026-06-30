@@ -1,7 +1,18 @@
 import Tropical.Ir.Nodes
 
 /-!
-# ArrowWarp — vertical slice 2 (the voice-generic warp bank)
+# EmitArrow — realization-by-emission of the post-strata (scalar) IR
+
+`EmitArrow` (formerly `ArrowWarp`) is the combinator library that **builds the
+resolved IR `Program`** directly in the post-strata, scalar shape and reuses the
+backend (`elaborate`-linked, then strata/`compileResolved`) to emit. It is named
+verb-first: it is a *realization by emission* of the existing scalar IR, not a
+new arrow — the "warp" combinators (`warpBank`, `Warp`-as-clock-expression) are
+the clock axis of that realization and keep their names.
+
+The post-strata IR is **scalar by definition** (strata's job is to lower arrays,
+sums and generics away), so `EmitArrow` stays scalar: `Sig := Expr`. It needs no
+richer types — the richness lives in the typed elaborator upstream.
 
 Slice 1 built the `FlangeSin` flanger from a tiny arrow-combinator API and
 gated it byte-identical against `diffcli emit-file stdlib/parsed/FlangeSin.json`.
@@ -30,7 +41,7 @@ live in the *one* shared `warpBank` combinator, not in either instantiation.
 
 Byte-identity still falls out for free because `osc` does NOT hand-roll the
 voice — it references the elaborated voice body (`FixedSinOsc` / `ModalVoice`)
-and lets strata inline it (the M0 finding). ArrowWarp only ever builds the
+and lets strata inline it (the M0 finding). EmitArrow only ever builds the
 *coarse* graph: a bank of voice taps at warped clocks, weighted-summed.
 
 The combinator surface:
@@ -52,7 +63,7 @@ The combinator surface:
   the elaborator filled, linking the voice by name like `registerInstanceDecl`.
 -/
 
-namespace Tropical.ArrowWarp
+namespace Tropical.EmitArrow
 
 open Lean (JsonNumber)
 open Tropical.Ir
@@ -85,6 +96,34 @@ def toIntE (a : Expr) : Expr := .unary .toInt a
     clock it IS `reverse`. There is one algebra of operations on expressions; the
     clock is one of those expressions. -/
 def neg (a : Expr) : Expr := .unary .neg a
+
+/-! More of the universal scalar op set — plain `.binary`/`.unary`/`.clamp`
+    wrappers, staying scalar (the post-strata IR is scalar by definition). These
+    are what a generator/closed-form voice (phasor arithmetic + polynomial)
+    needs beyond the flanger's add/sub/mul: division, the bit ops the fixed-point
+    phasor speaks, rounding, the int⇆float casts, and the bounded-type clamp the
+    elaborator inserts for `unipolar`/`freq` ports. -/
+
+/-- `arr`-level pointwise divide. -/
+def div (a b : Expr) : Expr := .binary .div a b
+/-- Bitwise AND on the integer (fixed-point) clock/value (`& (2³²−1)` masks). -/
+def bitAnd (a b : Expr) : Expr := .binary .bitAnd a b
+/-- Logical/arithmetic right shift (`clk >> 32` etc.; the mask makes the choice
+    irrelevant where it follows a `& (2³²−1)`). -/
+def rshift (a b : Expr) : Expr := .binary .rshift a b
+/-- Left shift (`sampleIndex << 32` — the root clock). -/
+def lshift (a b : Expr) : Expr := .binary .lshift a b
+/-- `gt` comparison (the bounded-default `select(hz > 0, …)`). -/
+def gt (a b : Expr) : Expr := .binary .gt a b
+/-- Round to nearest integer-as-float (`Sin`'s half-cycle count `n`). -/
+def roundE (a : Expr) : Expr := .unary .round a
+/-- Reinterpret int → float (`toFloat(acc & mask)` at the phasor boundary). -/
+def toFloatE (a : Expr) : Expr := .unary .toFloat a
+/-- Clamp into `[lo, hi]` — the elaborator's lowering of a bounded port type
+    (`unipolar` ⇒ `clamp _ 0 1`). -/
+def clampE (value lo hi : Expr) : Expr := .clamp value lo hi
+/-- Select (`cond ? then : else`) — the bounded-default `select(hz > 0, hz, 0)`. -/
+def selectE (cond then_ else_ : Expr) : Expr := .select cond then_ else_
 
 /-! The warp-bank program signature, as port references. The signature is the
     same shape for every voice — only the input NAMES/defaults differ (which is
@@ -247,10 +286,10 @@ structure WarpBankProgram where
 def buildWarpBank (spec : WarpBankProgram) (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : Except String (Arena × ProgramIdx) := do
   let some vIdx := (resolved.find? (·.1 == spec.voice.programName)).map (·.2)
-    | .error s!"ArrowWarp: voice '{spec.voice.programName}' not found in the \
+    | .error s!"EmitArrow: voice '{spec.voice.programName}' not found in the \
         elaborated stdlib chain"
   let some vProg := arena.program? vIdx
-    | .error s!"ArrowWarp: voice '{spec.voice.programName}' program index out of range"
+    | .error s!"EmitArrow: voice '{spec.voice.programName}' program index out of range"
   -- Transitive registry merge (mirrors `registerInstanceDecl`): the voice under
   -- its program name, then the voice's own registry entries in order, skipping
   -- keys already present.
@@ -285,17 +324,91 @@ def reversibleCombSpec : WarpBankProgram :=
     inputs := #[clkInputDecl, pitchInputDecl "f0" 110, offsetInputDecl "delta"]
     taps := flangerTaps }
 
-/-- Build the ArrowWarp `FlangeSin` (FixedSinOsc voice) — the slice-1 gate.
+/-- Build the EmitArrow `FlangeSin` (FixedSinOsc voice) — the slice-1 gate.
     Byte-identical to `diffcli emit-file stdlib/parsed/FlangeSin.json`. -/
 def buildFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
   buildWarpBank flangeSinSpec arena resolved
 
-/-- Build the ArrowWarp `ReversibleComb` (ModalVoice voice) — the slice-2 gate.
+/-- Build the EmitArrow `ReversibleComb` (ModalVoice voice) — the slice-2 gate.
     Byte-identical to `diffcli emit-file stdlib/parsed/ReversibleComb.json`. -/
 def buildReversibleComb (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
   buildWarpBank reversibleCombSpec arena resolved
+
+-- ─────────────────────────────────────────────────────────────
+-- C1 — build the FOUNDATIONAL VOICE directly: `FixedSinOsc` from scratch
+-- ─────────────────────────────────────────────────────────────
+
+/-! The flanger family above *sources* `FixedSinOsc` as a `Voice` instance and
+    leans on strata's `inlineInstances` to flatten it. The cutover wants
+    EmitArrow to build the voice ITSELF — no instance boundary, the per-program
+    path's one flat DAG. `buildFixedSinOsc` does exactly that: it reconstructs
+    the post-strata (scalar, inlined) `FixedSinOsc` body — the `FixedPhasor`
+    fixed-point phase (integer split-multiply on the Q32.32 clock) composed with
+    the `Sin` polynomial (Payne–Hanek reduction + degree-11 Horner) — entirely
+    from the smart constructors, then emits it.
+
+    Two things make this byte-identical to `diffcli emit-stdlib FixedSinOsc`:
+
+    * The post-strata form is a single inlined `Expr` tree (instances inlined,
+      the `Sin` `fold` unrolled, the `let`s flattened). EmitArrow's Lean-level
+      value reuse (`phase`, `x`, `n`, `r`, `r2` bound once and shared) yields the
+      STRUCTURALLY-identical tree — the shared subterms appear duplicated exactly
+      as the unrolled post-strata tree does — so `compileResolved`'s
+      value-numbering produces the identical instruction stream.
+    * The literals carry the same `JsonNumber` mantissa/exponent the surface
+      parser produced (e.g. `6.283185307179586 = 6283185307179586·10⁻¹⁵`,
+      `−2.505210838544172e-8 = −2505210838544172·10⁻²³`).
+
+    Notes on the op set this exercises beyond the flanger: `div`, `bitAnd`,
+    `rshift`, `lshift`, `round`, `toFloat`, and the `clamp` the elaborator emits
+    for the `unipolar` bound (`ClockPhasor.offset` ⇒ `clamp _ 0 1`, and the
+    `phase` output bound likewise). All plain scalar ops — no richer types. -/
+def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let freqIn : Sig := .inputRef ⟨0⟩
+  let clk : Clock := .inputRef ⟨1⟩
+  let twoPow32 := lit 4294967296
+  let mask := lit 4294967295
+  -- FixedPhasor (= ClockPhasor at clk): the integer split-multiply, exact on ℤ/2³².
+  let inc := toIntE (div (mul freqIn twoPow32) .sampleRate)
+  let thi := rshift clk (lit 32)
+  let tlo := bitAnd clk mask
+  let off := toIntE (mul (clampE (lit 0) (lit 0) (lit 1)) twoPow32)   -- offset:unipolar=0
+  let acc := add (add (mul inc thi) (rshift (mul inc tlo) (lit 32))) off
+  let phase := clampE (div (toFloatE (bitAnd acc mask)) twoPow32) (lit 0) (lit 1)
+  -- Phase → [0, 2π).
+  let x := mul (lit 6283185307179586 15) phase
+  -- Sin: Payne–Hanek reduction + degree-11 Horner on r² (fold unrolled).
+  let n := roundE (mul x (lit 3183098861837907 16))
+  let oddN := bitAnd n (lit 1)
+  let sign := sub (lit 1) (mul (lit 2) oddN)
+  let r := sub x (mul n (lit 3141592653589793 15))
+  let r2 := mul r r
+  let poly :=
+    add (lit 1)
+     (mul (add (lit (-16666666666666666) 17)
+       (mul (add (lit 8333333333333333 18)
+         (mul (add (lit (-1984126984126984) 19)
+           (mul (add (lit 27557319223985893 22)
+             (mul (add (lit (-2505210838544172) 23)
+               (mul (lit 0) r2)) r2)) r2)) r2)) r2)) r2)
+  let sine := mul sign (mul r poly)
+  let prog : Program := {
+    name := "FixedSinOsc"
+    inputs := #[
+      { name := "freq", type? := some (.scalar .float),
+        default? := some (selectE (gt (lit 440) (lit 0)) (lit 440) (lit 0)) },
+      { name := "clk", type? := some (.scalar .int),
+        default? := some (lshift .sampleIndex (lit 32)) } ]
+    outputs := #[{ name := "sine", type? := some (.scalar .float) }]
+    decls := #[]
+    assigns := #[{ target := .port ⟨0⟩, expr := sine }]
+    binderCount := 0
+    registry := #[] }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  .ok ({ arena with programs := arena.programs.push prog }, idx)
 
 -- ─────────────────────────────────────────────────────────────
 -- M4 (slice 3) — the warp ARROW LAWS as audio goldens
@@ -349,9 +462,9 @@ def buildClockCarrier (name : String) (clkE : Clock) (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : Except String (Arena × ProgramIdx) := do
   let v := litPitchSinOscVoice
   let some vIdx := (resolved.find? (·.1 == v.programName)).map (·.2)
-    | .error s!"ArrowWarp: voice '{v.programName}' not found in the elaborated stdlib chain"
+    | .error s!"EmitArrow: voice '{v.programName}' not found in the elaborated stdlib chain"
   let some vProg := arena.program? vIdx
-    | .error s!"ArrowWarp: voice '{v.programName}' program index out of range"
+    | .error s!"EmitArrow: voice '{v.programName}' program index out of range"
   let mut registry : Array (String × ProgramIdx) := #[(vProg.name, vIdx)]
   for (k, vi) in vProg.registry do
     if !registry.any (·.1 == k) then registry := registry.push (k, vi)
@@ -442,15 +555,15 @@ def Builder.flangerSharedDry (b : Builder) (v : Voice) (baseClk : Clock) (d : Ex
 
 /-- Push an input-free voice program (`decls` + one `out = expr` assign) into
     `arena`, merging the `litPitchSinOscVoice` registry like `buildClockCarrier`.
-    Shared by every input-free ArrowWarp carrier (clock carrier + diagonals). -/
+    Shared by every input-free EmitArrow carrier (clock carrier + diagonals). -/
 def buildVoiceProgram (name : String) (decls : Array BodyDecl) (out : Sig)
     (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) := do
   let v := litPitchSinOscVoice
   let some vIdx := (resolved.find? (·.1 == v.programName)).map (·.2)
-    | .error s!"ArrowWarp: voice '{v.programName}' not found in the elaborated stdlib chain"
+    | .error s!"EmitArrow: voice '{v.programName}' not found in the elaborated stdlib chain"
   let some vProg := arena.program? vIdx
-    | .error s!"ArrowWarp: voice '{v.programName}' program index out of range"
+    | .error s!"EmitArrow: voice '{v.programName}' program index out of range"
   let mut registry : Array (String × ProgramIdx) := #[(vProg.name, vIdx)]
   for (k, vi) in vProg.registry do
     if !registry.any (·.1 == k) then registry := registry.push (k, vi)
@@ -682,4 +795,4 @@ def buildFixedFlangerThenReverse (arena : Arena) : Arena × ProgramIdx :=
   buildExprCarrier "FixedFlangerThenReverse"
     (fixedOut (fixedFlangerSum dry past ahead)) arena
 
-end Tropical.ArrowWarp
+end Tropical.EmitArrow
