@@ -74,6 +74,19 @@ def compilePatch (path : String) (mode : Tropical.Plan.CompilationMode) :
   | .ok planJson => pure (.ok planJson)
   | .error f => pure (.error f.toJson.compress)
 
+/-- Compile a patch via the C4 DIRECT session-root path (`sessionToResolvedRoot`,
+    no `sessionToParsed → elaborate`). For the round-trip-deletion equivalence
+    gate: this plan must equal `compilePatch`'s (the elaborate path). -/
+def compilePatchArrow (path : String) (mode : Tropical.Plan.CompilationMode) :
+    IO (Except String String) := do
+  let env ← Tropical.Engine.boot
+  let act : Tropical.EngineM String := do
+    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
+    Tropical.Engine.compileMirrorPlanViaArrow env mode
+  match ← act.run with
+  | .ok planJson => pure (.ok planJson)
+  | .error f => pure (.error f.toJson.compress)
+
 /-- Render a FlatPlan via the Lean-emitted-IR path (EmitLlvm → load_ir). -/
 def renderIrBytes (plan : Tropical.Plan.FlatPlan) : IO (Except String ByteArray) := do
   match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
@@ -1272,6 +1285,35 @@ private def runLoweringFanOut (arena : Arena)
     | .error e => IO.println s!"  FAIL  lowering-fanout  finish: {firstLine e}"; pure false
   | .error e => IO.println s!"  FAIL  lowering-fanout  build: {firstLine e}"; pure false
 
+-- ── (h⁹) C4: session → resolved root DIRECTLY ≡ the elaborate round-trip ───────
+-- Every patch compiles to a session; this gate compiles each BOTH ways — the
+-- production `sessionToParsed → elaborate` path and the direct
+-- `sessionToResolvedRoot` path — and asserts the plans are byte-identical, so
+-- the round-trip deletion is provably faithful before it becomes the default.
+private def runSessionViaArrowEquiv : IO Bool := do
+  let entries ← (System.FilePath.mk "patches").readDir
+  let names := (entries.filterMap fun e =>
+    if e.fileName.endsWith ".json" then some e.fileName else none).qsort (· < ·)
+  let mut ok := true
+  let mut matched := 0
+  let mut skipped := 0
+  for fn in names do
+    let path := s!"patches/{fn}"
+    match ← compilePatch path .fused with
+    | .error _ => skipped := skipped + 1   -- not session-compilable on the baseline either
+    | .ok elabPlan =>
+      match ← compilePatchArrow path .fused with
+      | .error e =>
+        IO.println s!"  FAIL  session-via-arrow/{fn}  direct compile: {firstLine e}"; ok := false
+      | .ok arrowPlan =>
+        if elabPlan == arrowPlan then matched := matched + 1
+        else
+          IO.println s!"  FAIL  session-via-arrow/{fn}  plan differs (elab {elabPlan.length}B, direct {arrowPlan.length}B)"
+          ok := false
+  if ok then
+    IO.println s!"  PASS  session-via-arrow  direct root ≡ elaborated root, plan-identical ({matched} patches{if skipped > 0 then s!"; {skipped} non-session skipped" else ""})"
+  pure ok
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -1323,6 +1365,11 @@ def main (args : List String) : IO UInt32 := do
     else
       IO.println s!"  FAIL  op-coverage  expected {expected.take 16} got {got.take 16}"
       failed := failed + 1
+
+  -- ── (c′) C4: session → resolved root directly ≡ the elaborate round-trip ───
+  IO.println "session via direct root (sessionToResolvedRoot ≡ sessionToParsed→elaborate):"
+  total := total + 1
+  if !(← runSessionViaArrowEquiv) then failed := failed + 1
 
   -- ── (d) let-binding serialization order (ordered-array round-trip) ─────────
   IO.println "let serialization order:"
