@@ -1116,6 +1116,61 @@ private def runNegativeClock (arena : Arena)
       else
         IO.println s!"  FAIL  negative-clock  {bitDiff}/{n} bit-differing — negative-time phasor diverges"; pure false
 
+-- ── (h⁶) PRODUCTS / MIMO standard-rep differential (the DATA axis) ────────────
+-- `MorphOsc` built from the cartesian combinators (ClockPhasor ⋙ (saw &&& Sin)
+-- ⋙ crossfade) vs a straight-line reimplementation reusing the SAME integer
+-- phasor and Horner `Sin`. No warp, no sub-sample clock — so this is BIT-EXACT
+-- (like the convolution oracle, not the modulated-clock tolerance check). Three
+-- morph settings prove the diagonal feeds two GENUINELY DIFFERENT consumers and
+-- the crossfade blends them: morph=0 ≡ pure saw, morph=1 ≡ pure sine, morph=0.5
+-- ≡ the blend — each bit-exact, and saw ≢ sine (non-degenerate MIMO).
+private def runMorphOscDifferential (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let n : Nat := 1024
+  let lo : Nat := 4
+  let freqHz : Int := 2000
+  let twoPi : Float := 6.283185307179586
+  let sinkGain : Float := 0.05
+  -- the standard rep: the SAME crossfade arithmetic the engine emits, on the
+  -- SAME integer phasor + Horner Sin (`(1−m)·(2·phase−1) + m·Sin(2π·phase)`).
+  let refOut := fun (morphF : Float) (clk : Int) =>
+    let phase := phasorPhase clk freqHz
+    sinkGain * ((1.0 - morphF) * (2.0 * phase - 1.0) + morphF * sinH (twoPi * phase))
+  let render := fun (nm : String) (m : Tropical.EmitArrow.Sig) =>
+    match buildAndFinish (Tropical.EmitArrow.buildMorphOscLit nm freqHz m arena resolved) with
+    | .error e => (pure (.error e) : IO (Except String (Array Float)))
+    | .ok plan => renderPlanSamples plan n
+  match ← render "MorphSaw" (Tropical.EmitArrow.lit 0),
+        ← render "MorphSin" (Tropical.EmitArrow.lit 1),
+        ← render "MorphBlend" (Tropical.EmitArrow.lit 5 1) with
+  | .error e, _, _ | _, .error e, _ | _, _, .error e =>
+    IO.println s!"  FAIL  morphosc-mimo  build/render: {firstLine e}"; pure false
+  | .ok saw, .ok sinv, .ok blend =>
+    let mut sawDiff : Nat := 0
+    let mut sinDiff : Nat := 0
+    let mut blendDiff : Nat := 0
+    let mut maxBlend : Float := 0.0
+    let mut sawVsSin : Float := 0.0        -- the diagonal feeds two distinct shapes
+    for t in [lo:n] do
+      let clk : Int := Int.ofNat t * 4294967296
+      if saw[t]!.toBits   != (refOut 0.0 clk).toBits then sawDiff   := sawDiff   + 1
+      if sinv[t]!.toBits  != (refOut 1.0 clk).toBits then sinDiff   := sinDiff   + 1
+      if blend[t]!.toBits != (refOut 0.5 clk).toBits then blendDiff := blendDiff + 1
+      if blend[t]!.abs > maxBlend then maxBlend := blend[t]!.abs
+      if (saw[t]! - sinv[t]!).abs > sawVsSin then sawVsSin := (saw[t]! - sinv[t]!).abs
+    let samples := n - lo
+    IO.println s!"        standard rep = same integer phasor + Horner Sin, same crossfade arithmetic:"
+    IO.println s!"        result   engine MorphOsc vs std rep:  bit-differing  saw {sawDiff}/{samples} · sine {sinDiff}/{samples} · blend {blendDiff}/{samples}"
+    IO.println s!"        mimo     diagonal feeds distinct consumers: max|saw−sine|={sawVsSin}"
+    if maxBlend < 1e-3 then
+      IO.println s!"  FAIL  morphosc-mimo  carrier silent (maxBlend={maxBlend})"; pure false
+    else if sawVsSin < 1e-2 then
+      IO.println s!"  FAIL  morphosc-mimo  saw ≈ sine (max|Δ|={sawVsSin}) — diagonal degenerate"; pure false
+    else if sawDiff == 0 && sinDiff == 0 && blendDiff == 0 then
+      IO.println s!"  PASS  morphosc-mimo  ClockPhasor ⋙ (saw &&& Sin) ⋙ crossfade ≡ standard rep, bit-exact (saw/sine/blend 0/{samples}; max|saw−sine|={sawVsSin})"; pure true
+    else
+      IO.println s!"  FAIL  morphosc-mimo  bit-differing (saw {sawDiff} · sine {sinDiff} · blend {blendDiff}) — MIMO build diverges from the standard rep"; pure false
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -1229,6 +1284,12 @@ def main (args : List String) : IO UInt32 := do
     if !(← runEmitCorpusGate "FixedSinOsc" "FixedSinOsc" arena resolved
           Tropical.EmitArrow.buildFixedSinOsc) then
       failed := failed + 1
+    -- products/MIMO: MorphOsc — a real multi-port body (ClockPhasor ⋙ (saw &&&
+    -- Sin) ⋙ crossfade) built from the cartesian combinators, byte-identical.
+    total := total + 1
+    if !(← runEmitCorpusGate "MorphOsc" "MorphOsc" arena resolved
+          Tropical.EmitArrow.buildMorphOsc) then
+      failed := failed + 1
     IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
     -- Law 1 — inverse/cancellation:  warp(back δ) ⋙ warp(fwd δ) = id
     total := total + 1
@@ -1319,6 +1380,13 @@ def main (args : List String) : IO UInt32 := do
     IO.println "negative-time boundary (random access ≠ streaming zero-pad):"
     total := total + 1
     if !(← runNegativeClock arena resolved) then
+      failed := failed + 1
+    -- ── (h⁶) products / MIMO: a real multi-port body from the cartesian
+    --   combinators vs a straight-line standard rep — the DATA axis (the warp
+    --   gates above are all the CLOCK axis).
+    IO.println "products/MIMO standard-rep differential (multi-port body ≡ closed form):"
+    total := total + 1
+    if !(← runMorphOscDifferential arena resolved) then
       failed := failed + 1
 
   IO.println ""

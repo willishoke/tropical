@@ -210,6 +210,100 @@ def Builder.osc (b : Builder) (v : Voice) (name : String) (clkE : Clock) :
   (.nestedOut ⟨i⟩ v.output, { b with decls := b.decls.push inst })
 
 -- ─────────────────────────────────────────────────────────────
+-- PRODUCTS / MIMO — the cartesian combinator surface (the DATA axis)
+-- ─────────────────────────────────────────────────────────────
+
+/-! `warp` is the CLOCK axis; this is the orthogonal DATA axis. Post-strata, a
+    "value" is not one scalar but a *bundle* of scalar wires — a categorical
+    PRODUCT. A morphism `A ⇝ B` is then a function from a wire-bundle to a
+    wire-bundle that accretes the instance decls it sources along the way:
+
+      `Mor := tuple of input wires → Builder → (tuple of output wires, Builder)`
+
+    The structure is **cartesian, not closed**: it has products (concatenation
+    of bundles), the diagonal (duplication), and composition — but no
+    exponentials, no closures, no runtime higher-order programs. Every
+    combinator is a SMART CONSTRUCTOR that emits the post-strata scalar DAG at
+    build time; none survives to run time. Crucially `⋙` (composition) **is**
+    `inlineInstances`: `g ⋙ f` feeds f's output wires straight into g, building
+    one flattened DAG with no instance boundary between them — the combinator
+    layer's image of the strata pass it absorbs. (Hughes' `first` is the whole
+    of MIMO; the named-port ⟷ tuple bridge — `instMor` — is its primitive.) -/
+
+/-- A cartesian morphism in the wire category: consumes a product of input
+    wires, accretes instance decls, produces a product of output wires. Objects
+    are wire-bundle ARITIES (the splitter combinators carry them explicitly,
+    since the category is untyped-but-arity-indexed). -/
+abbrev Mor := Array Sig → Builder → (Array Sig × Builder)
+
+/-- Identity (`arr id`) — passes its whole bundle through untouched. Absorbed
+    by `identityElim` at construction: `idMor ⋙ f = f` holds definitionally. -/
+def idMor : Mor := fun xs b => (xs, b)
+
+/-- Sequential composition `g ⋙ f` (read left-to-right): the LEFT runs first and
+    its outputs feed the right. THIS is inlining — there is no instance boundary
+    between the two, just one threaded DAG (the absorbed `inlineInstances`). -/
+def seq (f g : Mor) : Mor := fun xs b => let (ys, b) := f xs b; g ys b
+
+/-- Fan-out / the cartesian diagonal `f &&& g`: run BOTH on the same input,
+    concatenating their outputs. The Builder threads f-then-g, so the sourced
+    instances get deterministic indices. The shared input bundle is the diagonal
+    `Δ` — at the Lean level it is plain value reuse, which is exactly the
+    post-strata DAG's shared sub-node. -/
+def fan (f g : Mor) : Mor := fun xs b =>
+  let (ys, b) := f xs b
+  let (zs, b) := g xs b
+  (ys ++ zs, b)
+
+/-- Parallel product `f *** g`, split at arity `m`: `f` consumes the first `m`
+    wires, `g` the rest; outputs concatenate. The bifunctor on products. -/
+def par (m : Nat) (f g : Mor) : Mor := fun xs b =>
+  let (ys, b) := f (xs.extract 0 m) b
+  let (zs, b) := g (xs.extract m xs.size) b
+  (ys ++ zs, b)
+
+/-- `first f` (Hughes): apply `f` to the first `m` wires, pass the remaining
+    bundle through unchanged. `first m f = par m f idMor`. The single primitive
+    from which all of MIMO is generated. -/
+def first (m : Nat) (f : Mor) : Mor := par m f idMor
+
+/-- `second g`: dual of `first` — pass the first `m` wires through, apply `g` to
+    the rest. -/
+def second (m : Nat) (g : Mor) : Mor := par m idMor g
+
+/-- The diagonal `Δ : A ⇝ A × A` — duplicate the whole bundle. -/
+def dup : Mor := fun xs b => (xs ++ xs, b)
+
+/-- Left projection `π₁` — keep the first `m` wires, drop the rest. -/
+def exl (m : Nat) : Mor := fun xs b => (xs.extract 0 m, b)
+
+/-- Right projection `π₂` — drop the first `m` wires, keep the rest. -/
+def exr (m : Nat) : Mor := fun xs b => (xs.extract m xs.size, b)
+
+/-- Lift a pure wire-bundle function into a morphism (`arr`, RESTRICTED): no
+    instances, just structural/arithmetic rewiring of scalar `Expr`s. This is
+    the `arr` of a cartesian (not closed) arrow — a fixed structural map, never
+    an arbitrary host closure. -/
+def arrMor (f : Array Sig → Array Sig) : Mor := fun xs b => (f xs, b)
+
+/-- THE NAMED-PORT ⟷ TUPLE BRIDGE — the MIMO primitive. Instantiate program
+    `programName` (a named multi-port morphism `A ⇝ B`) by assigning the input
+    wire bundle to ports `portOrder` positionally, reading its `numOut` outputs
+    back as a bundle. The categorical content: a named multi-port instance IS a
+    morphism between products; this bridge is the iso between its named (record)
+    presentation and the positional (tuple) one. Emits a COARSE instance — `⋙`
+    and strata's `inlineInstances` flatten it; the combinator surface is what
+    the cutover keeps. -/
+def instMor (name programName : String) (portOrder : Array InputIdx)
+    (numOut : Nat) : Mor := fun args b =>
+  let inputs : Array InstanceInput :=
+    (portOrder.zip args).map (fun (p, v) => ⟨p, v⟩)
+  let i := b.decls.size
+  let inst : BodyDecl := .inst name programName #[] inputs
+  let outs : Array Sig := (Array.range numOut).map (fun o => .nestedOut ⟨i⟩ ⟨o⟩)
+  (outs, { b with decls := b.decls.push inst })
+
+-- ─────────────────────────────────────────────────────────────
 -- `warpBank` — the voice-generic flanger combinator
 -- ─────────────────────────────────────────────────────────────
 
@@ -407,6 +501,125 @@ def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) 
     assigns := #[{ target := .port ⟨0⟩, expr := sine }]
     binderCount := 0
     registry := #[] }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  .ok ({ arena with programs := arena.programs.push prog }, idx)
+
+-- ─────────────────────────────────────────────────────────────
+-- C1 — a real MULTI-PORT program from the cartesian combinators: `MorphOsc`
+-- ─────────────────────────────────────────────────────────────
+
+/-! `buildFixedSinOsc` proved the combinators can emit a SISO generator's body
+    from scratch (absorbing `inlineInstances` for one voice). `MorphOsc` is the
+    DATA-axis step up — a genuine multi-port composition, built point-free from
+    the products surface above:
+
+      `ClockPhasor ⋙ (saw &&& Sin) ⋙ crossfade`
+
+    It exercises everything `warpBank` did not: a real multi-INPUT instance
+    (`ClockPhasor(clk, freq)` via the named-port bridge), the `ph.phase` diagonal
+    fanned into *heterogeneous* consumers (a saw shaper AND a `Sin` instance —
+    `&&&`), genuine `⋙` composition between two DIFFERENT sub-programs
+    (ClockPhasor's phase feeds Sin's `x`), and the crossfade product
+    `(1−morph)·saw + morph·sin`. The byte-gate (`runEmitCorpusGate "MorphOsc"`)
+    asserts this reproduces the hand-written `stdlib/MorphOsc.md` exactly. -/
+
+/-- Mirror the elaborator's `registerInstanceDecl` over a sequence of
+    instantiated program names: each adds `(name, idx)` then merges that
+    program's own registry (skipping keys already present), in declaration
+    order. Generalizes `buildWarpBank`'s single-voice registry merge to the
+    several distinct programs a multi-instance body references. -/
+def buildRegistry (arena : Arena) (resolved : Array (String × ProgramIdx))
+    (programNames : Array String) : Except String (Array (String × ProgramIdx)) := do
+  let mut registry : Array (String × ProgramIdx) := #[]
+  for pn in programNames do
+    let some idx := (resolved.find? (·.1 == pn)).map (·.2)
+      | .error s!"EmitArrow: program '{pn}' not found in the elaborated stdlib chain"
+    let some prog := arena.program? idx
+      | .error s!"EmitArrow: program '{pn}' index out of range"
+    if !registry.any (·.1 == prog.name) then registry := registry.push (prog.name, idx)
+    for (k, v) in prog.registry do
+      if !registry.any (·.1 == k) then registry := registry.push (k, v)
+  pure registry
+
+/-- ClockPhasor's input ports MorphOsc fills: `clk` (port 0), `freq` (port 1);
+    `offset` (port 2) defaults. -/
+def clockPhasorPorts : Array InputIdx := #[⟨0⟩, ⟨1⟩]
+
+/-- The phasor morphism `[clk, freq] ⇝ [phase]` — the named-port bridge over
+    `ClockPhasor`. -/
+def phasorMor : Mor := instMor "ph" "ClockPhasor" clockPhasorPorts 1
+
+/-- The saw shaper `[phase] ⇝ [2·phase − 1]` (a naive ramp; pure `arr`). -/
+def sawMor : Mor := arrMor (fun w => #[sub (mul (lit 2) w[0]!) (lit 1)])
+
+/-- The sine path `[phase] ⇝ [Sin(2π·phase).out]` — scale-by-2π (`arr`) ⋙ the
+    `Sin` bridge. The `⋙` here is the cross-program inline: `Sin`'s body is
+    fed `2π·phase` with no surviving instance boundary. -/
+def sinMor : Mor :=
+  seq (arrMor (fun w => #[mul (lit 6283185307179586 15) w[0]!]))
+      (instMor "sin" "Sin" #[⟨0⟩] 1)
+
+/-- The crossfade product `[a, b, mix] ⇝ [(1−mix)·a + mix·b]` (pure `arr`) —
+    `CrossFade`'s body, inlined. -/
+def crossfadeMor : Mor :=
+  arrMor (fun w => #[add (mul (sub (lit 1) w[2]!) w[0]!) (mul w[2]! w[1]!)])
+
+/-- `MorphOsc` as one cartesian pipeline over inputs `[freq, morph, clk]`:
+    route to `[clk, freq, morph]`, run the phasor on the first two while `morph`
+    rides along (`first 2`), fan the phase into saw and sine while `morph` rides
+    along (`first 1 (saw &&& sin)`), then crossfade. The whole body is
+    `ClockPhasor ⋙ (saw &&& Sin) ⋙ crossfade`; `morph` is threaded through the
+    products, never recomputed. -/
+def morphOscMor : Mor :=
+  seq (arrMor (fun w => #[w[2]!, w[0]!, w[1]!]))   -- [freq,morph,clk] → [clk,freq,morph]
+    (seq (first 2 phasorMor)                        -- → [phase, morph]
+      (seq (first 1 (fan sawMor sinMor))            -- → [saw, sin, morph]
+           crossfadeMor))                            -- → [out]
+
+/-- Build the EmitArrow `MorphOsc` (real input ports) into `arena` — the
+    products/MIMO corpus gate. Byte-identical to `diffcli emit-stdlib MorphOsc`.
+    The input decls reproduce the elaborator's lowering of the source port types
+    (`freq` ⇒ `select(hz>0, hz, 0)`, `unipolar` ⇒ `clamp _ 0 1`,
+    `clock` ⇒ `sampleIndex << 32`); the registry links `ClockPhasor` and `Sin`. -/
+def buildMorphOsc (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← buildRegistry arena resolved #["ClockPhasor", "Sin"]
+  let (outs, b) := morphOscMor #[.inputRef ⟨0⟩, .inputRef ⟨1⟩, .inputRef ⟨2⟩] {}
+  let prog : Program := {
+    name := "MorphOsc"
+    inputs := #[
+      { name := "freq", type? := some (.scalar .float),
+        default? := some (selectE (gt (lit 220) (lit 0)) (lit 220) (lit 0)) },
+      { name := "morph", type? := some (.scalar .float),
+        default? := some (clampE (lit 0) (lit 0) (lit 1)) },
+      clkInputDecl ]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := outs[0]! }]
+    binderCount := 0
+    registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  .ok ({ arena with programs := arena.programs.push prog }, idx)
+
+/-- An input-free `MorphOsc` carrier (literal `freqHz`, literal `morph`,
+    closed-form `clk = sampleIndex << 32`) for the standard-rep differential —
+    same combinator pipeline as `buildMorphOsc`, but renderable directly as a
+    session root (no input ports to bind), like the warp-law carriers. -/
+def buildMorphOscLit (name : String) (freqHz : Int) (morph : Expr)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← buildRegistry arena resolved #["ClockPhasor", "Sin"]
+  -- `clk = sampleIndex << 32` inline (the `clkInputDecl` default; `clockLit` is
+  -- defined below in the warp-law section, so spell it out here).
+  let (outs, b) := morphOscMor #[lit freqHz, morph, .binary .lshift .sampleIndex (lit 32)] {}
+  let prog : Program := {
+    name
+    inputs := #[]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := outs[0]! }]
+    binderCount := 0
+    registry }
   let idx : ProgramIdx := ⟨arena.programs.size⟩
   .ok ({ arena with programs := arena.programs.push prog }, idx)
 
