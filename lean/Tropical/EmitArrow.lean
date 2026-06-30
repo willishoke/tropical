@@ -1294,4 +1294,132 @@ def buildSlideDoubleFlanger (arena : Arena) (resolved : Array (String × Program
   let (out, b) := emitTerm (normalize (flangeEffectWith slideBack slideFwd inner)) {}
   buildVoiceProgram "SlideDoubleFlange" b.decls out arena resolved
 
+-- ─────────────────────────────────────────────────────────────
+-- M9 — the PATCHER LOWERING: a downstream-only patch graph → arrow term
+-- ─────────────────────────────────────────────────────────────
+
+/-! The MVP front end. A patch is a downstream-only DAG of modules (the "you may
+    only patch forward" UX rule — which is just the acyclicity invariant the
+    whole language rests on, made visible). Lowering reads the doc's slogan
+    literally:
+
+      * a WIRE `A.out → B.in`  ⟶  B's effect morphism APPLIED to A's term  (⋙)
+      * a FAN-OUT (one output, many inputs)  ⟶  the shared upstream term  (Δ / &&&)
+      * a FAN-IN (a mixer)  ⟶  the sum  (the product collapse)
+      * a GENERATOR  ⟶  `gen`;  an EFFECT  ⟶  a `ArrowTerm → ArrowTerm`
+
+    An EFFECT contributes `warp` nodes (a flanger fans its input into warped
+    taps; a delay/reverse is a bare warp), so it is authored and wired DOWNSTREAM
+    — and then `normalize` (the slide) pushes those warps UP to the generators.
+    That is the whole trick: the user patches forward, the compiler reads
+    backward in time. Because tropical has no state primitive, the slide is
+    always total — every module is stateless, so the warp always reaches the
+    generators. `lowerGraph` produces the UNREDUCED (downstream) term; the slide
+    is the separate pass that follows. -/
+
+/-- A patch-graph node. Generators carry their clock; effects carry the id of the
+    upstream node they consume (`⋙`); the mixer carries the ids it sums (fan-in).
+    Generators read the master clock; the flanger/`warp`/shaper are the effect
+    morphisms. -/
+inductive Node where
+  | source (v : Voice) (clk : Clock)
+  | flange (input : String) (back fwd : Clock → Clock)
+  | shaper (input : String) (f : Sig → Sig)
+  | warpFx (input : String) (φ : Clock → Clock)
+  | mix (inputs : Array String)
+
+structure PatchNode where
+  id : String
+  node : Node
+
+/-- A downstream-only patch DAG: named nodes plus the id wired to the output. -/
+structure PatchGraph where
+  nodes : Array PatchNode
+  output : String
+
+/-- Lower one node to its arrow term, recursing UP its input wires. A wire is
+    `⋙` (the effect applied to the upstream term); fan-out is the shared upstream
+    term (the diagonal); a mixer is the sum. The result is the UNREDUCED
+    downstream term — effects' warps still sit on their inputs. -/
+partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm := do
+  let some pn := g.nodes.find? (·.id == id)
+    | .error s!"lower: node '{id}' not found"
+  match pn.node with
+  | .source v clk => .ok (.gen v id clk)
+  | .flange inId back fwd => return flangeEffectWith back fwd (← lowerNode g inId)
+  | .shaper inId f => return .arrUn f (← lowerNode g inId)
+  | .warpFx inId φ => return .warp φ (← lowerNode g inId)
+  | .mix inputs => return .sum (← inputs.mapM (lowerNode g))
+
+/-- Lower a whole patch to its (downstream, unreduced) arrow term. Compose with
+    `normalize` to run the slide, then `emitTerm` to lower to IR. -/
+def lowerGraph (g : PatchGraph) : Except String ArrowTerm := lowerNode g g.output
+
+-- The demo patches ─────────────────────────────────────────────
+
+/-- `osc → flange` as a GRAPH (input-ref `FlangeSin` form): a `FixedSinOsc` source
+    and a flanger wired downstream of it, offset `δ = deltaSamples`. -/
+def flangeGraph : PatchGraph :=
+  { nodes := #[
+      { id := "osc", node := .source fixedSinOscVoice clkIn },
+      { id := "fl",  node := .flange "osc"
+          (fun c => sub c deltaSamples) (fun c => add c deltaSamples) } ],
+    output := "fl" }
+
+/-- `osc → flange → flange` as a GRAPH (closed form). -/
+def doubleFlangeGraph : PatchGraph :=
+  { nodes := #[
+      { id := "osc", node := .source litPitchSinOscVoice clockLit },
+      { id := "f1",  node := .flange "osc" slideBack slideFwd },
+      { id := "f2",  node := .flange "f1" slideBack slideFwd } ],
+    output := "f2" }
+
+/-- A FAN-OUT patch: `osc` fanned into two flangers (offsets 0.0007 / 0.0011 s),
+    summed by a mixer — the diagonal Δ through the lowering. -/
+def fanOutGraph : PatchGraph :=
+  { nodes := #[
+      { id := "osc", node := .source litPitchSinOscVoice clockLit },
+      { id := "fa",  node := .flange "osc" slideBack slideFwd },
+      { id := "fb",  node := .flange "osc"
+          (fun c => sub c (deltaLit 11 4)) (fun c => add c (deltaLit 11 4)) },
+      { id := "mix", node := .mix #["fa", "fb"] } ],
+    output := "mix" }
+
+/-- THE LOWERING GATE (L1). Lower the GRAPH `osc → flange`, run the slide, emit,
+    and wrap as `FlangeSin` — byte-identical to stdlib `FlangeSin`. The user's
+    patch graph, lowered, reaches the exact hand-written program: graph → arrow
+    → slide → emit, end to end. -/
+def buildFlangeFromGraph (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← buildRegistry arena resolved #["FixedSinOsc"]
+  let term ← lowerGraph flangeGraph
+  let (out, b) := emitTerm (normalize term) {}
+  let prog : Program := {
+    name := "FlangeSin"
+    inputs := #[clkInputDecl, pitchInputDecl "freq" 220, offsetInputDecl "depth"]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := out }]
+    binderCount := 0
+    registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  .ok ({ arena with programs := arena.programs.push prog }, idx)
+
+/-- Lower the GRAPH `osc → flange → flange` (closed form) — must byte-equal the
+    hand-built `buildSlideDoubleFlanger` (L2): the lowering of a chain composes
+    effects exactly as the hand-written nested term. -/
+def buildDoubleFlangeFromGraph (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let term ← lowerGraph doubleFlangeGraph
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram "GraphDoubleFlange" b.decls out arena resolved
+
+/-- Lower the FAN-OUT patch (closed form) — `osc` fanned into two flangers and
+    mixed (L3): the diagonal + the product collapse through the lowering. -/
+def buildFanOutFromGraph (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let term ← lowerGraph fanOutGraph
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram "GraphFanOut" b.decls out arena resolved
+
 end Tropical.EmitArrow

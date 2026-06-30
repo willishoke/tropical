@@ -1226,6 +1226,52 @@ private def runSlideCascade (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-cascade  finish: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-cascade  build: {firstLine e}"; pure false
 
+-- ── (h⁸) THE PATCHER LOWERING: a downstream-only patch graph → arrow term ──────
+-- The MVP front end. A wire is the effect applied to the upstream term (⋙), a
+-- fan-out is the shared upstream term (Δ), a mixer is the sum. L1 (byte-identity
+-- vs FlangeSin from a GRAPH) is in the corpus section; here: L2 (a chain graph ≡
+-- the hand-built term) and L3 (a fan-out graph renders, with the diagonal).
+
+/-- L2: lowering the chain graph `osc → flange → flange` must byte-equal the
+    hand-written nested term (`buildSlideDoubleFlanger`). Graph-lowering ≡
+    hand-term ⇒ the front end composes effects exactly as `⋙`. -/
+private def runLoweringChain (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match Tropical.EmitArrow.buildDoubleFlangeFromGraph arena resolved,
+        Tropical.EmitArrow.buildSlideDoubleFlanger arena resolved with
+  | .ok (aG, iG), .ok (aH, iH) =>
+    match emitResolvedWire aG iG, emitResolvedWire aH iH with
+    | .ok bytesG, .ok bytesH =>
+      if bytesG == bytesH then
+        IO.println s!"  PASS  lowering-chain  lower(osc→flange→flange) ≡ hand-built nested term ({bytesG.length}B)"; pure true
+      else
+        IO.println s!"  FAIL  lowering-chain  graph {bytesG.length}B ≠ hand-term {bytesH.length}B"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  lowering-chain  emit: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  lowering-chain  build: {firstLine e}"; pure false
+
+/-- L3: a fan-out patch — `osc` fanned into two flangers, mixed (the diagonal +
+    the product collapse through the lowering). Asserts six generator instances
+    (3 per flanger; the source re-derived per tap) and a real, non-silent mix. -/
+private def runLoweringFanOut (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match Tropical.EmitArrow.buildFanOutFromGraph arena resolved with
+  | .ok (aF, iF) =>
+    let ninst := ((aF.program? iF).map (·.decls.size)).getD 0
+    match buildAndFinish (.ok (aF, iF)) with
+    | .ok plan =>
+      match ← renderPlanSamples plan 512 with
+      | .ok got =>
+        let mut energy : Float := 0.0
+        for t in [8:512] do energy := energy + got[t]! * got[t]!
+        IO.println s!"        fan-out osc → (flange δ₁ &&& flange δ₂) → mix: {ninst} generator instances (the diagonal re-sources the osc per tap)"
+        if ninst == 6 && energy > 1e-6 then
+          IO.println s!"  PASS  lowering-fanout  diagonal + mix through the lowering ({ninst} instances, energy={energy})"; pure true
+        else
+          IO.println s!"  FAIL  lowering-fanout  ninst={ninst} (want 6) energy={energy}"; pure false
+      | .error e => IO.println s!"  FAIL  lowering-fanout  render: {firstLine e}"; pure false
+    | .error e => IO.println s!"  FAIL  lowering-fanout  finish: {firstLine e}"; pure false
+  | .error e => IO.println s!"  FAIL  lowering-fanout  build: {firstLine e}"; pure false
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -1353,6 +1399,14 @@ def main (args : List String) : IO UInt32 := do
     if !(← runEmitCorpusGate "FlangeSinSlide" "FlangeSin" arena resolved
           Tropical.EmitArrow.buildFlangerViaSlide) then
       failed := failed + 1
+    -- THE PATCHER LOWERING, L1: lower the GRAPH `osc → flange` (instances + a
+    -- downstream wire), slide, emit — byte-identical to stdlib FlangeSin. The
+    -- user's patch graph, lowered end to end, reaches the exact hand-written
+    -- program. This is the MVP front end hitting the frozen artifact.
+    total := total + 1
+    if !(← runEmitCorpusGate "FlangeFromGraph" "FlangeSin" arena resolved
+          Tropical.EmitArrow.buildFlangeFromGraph) then
+      failed := failed + 1
     IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
     -- Law 1 — inverse/cancellation:  warp(back δ) ⋙ warp(fwd δ) = id
     total := total + 1
@@ -1460,6 +1514,16 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runSlideCascade arena resolved) then
+      failed := failed + 1
+    -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
+    --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the
+    --   corpus block; here L2 (chain graph ≡ hand-term) and L3 (fan-out + mix).
+    IO.println "patcher lowering (downstream-only patch graph → arrow term):"
+    total := total + 1
+    if !(← runLoweringChain arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runLoweringFanOut arena resolved) then
       failed := failed + 1
 
   IO.println ""
