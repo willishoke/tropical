@@ -935,14 +935,16 @@ private def sinH (x : Float) : Float :=
   sign * (r * poly)
 
 /-- `ClockPhasor.phase` at a Q32.32 clock value, transcribed exactly (integer
-    math, offset = 0). inc = ⌊freqHz·2³²/SR⌋. clk ≥ 0 here, so /,% match the
-    engine's shift/mask. -/
+    math, offset = 0). inc = ⌊freqHz·2³²/SR⌋. Uses `fdiv`/`fmod` so it matches the
+    engine's arithmetic shift (`>>`, floor) and two's-complement mask (`&`) for
+    NEGATIVE clocks too — i.e. negative time / backward extrapolation. For clk ≥ 0
+    these agree with plain /,%. -/
 private def phasorPhase (clk : Int) (freqHz : Int) : Float :=
   let inc : Int := (freqHz * 4294967296) / 44100
-  let thi := clk / 4294967296
-  let tlo := clk % 4294967296
-  let acc := inc * thi + (inc * tlo) / 4294967296
-  Float.ofInt (acc % 4294967296) / 4294967296.0
+  let thi := Int.fdiv clk 4294967296
+  let tlo := Int.fmod clk 4294967296
+  let acc := inc * thi + Int.fdiv (inc * tlo) 4294967296
+  Float.ofInt (Int.fmod acc 4294967296) / 4294967296.0
 
 /-- Float → Int truncation toward zero (matches the engine's `toInt`). -/
 private def truncToInt (v : Float) : Int :=
@@ -1059,6 +1061,60 @@ private def runPmPm (arena : Arena)
         IO.println s!"  PASS  pm-of-pm  nested warp ≡ nested standard rep bit-for-bit ({bitDiff}/{samples}; nesting effect {nestEffect})"; pure true
       else
         IO.println s!"  FAIL  pm-of-pm  {bitDiff}/{samples} bit-differing (max|Δ|={e0}) — nested substitution diverges"; pure false
+
+/-- The NEGATIVE-TIME boundary — the moat. A 20-sample delay warp pulls the clock
+    negative for t < 20, so the carrier is evaluated BEFORE sample 0. Closed-form
+    random access gives the exact backward-extrapolated sine; a streaming delay
+    line could only emit zeros (no past). Asserts: (1) bit-exact vs a random-access
+    standard rep at ALL t including negative time, and (2) the output at negative
+    time is non-zero — the engine does NOT zero-pad, which is the random-access
+    capability a stream cannot have. -/
+private def runNegativeClock (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let n : Nat := 1024
+  let delta : Nat := 20
+  let twoPi : Float := 6.283185307179586
+  let sinkGain : Float := 0.05
+  let delayTap : Tropical.EmitArrow.Tap :=
+    { name := "d"
+      warp := fun c => Tropical.EmitArrow.sub c
+        (Tropical.EmitArrow.toIntE (Tropical.EmitArrow.lit (Int.ofNat delta * 4294967296)))
+      weight := Tropical.EmitArrow.lit 1 }
+  match buildAndFinish (Tropical.EmitArrow.buildTapCarrier "DelayFc"
+          (Tropical.EmitArrow.litPitchVoice 2000) #[delayTap] arena resolved) with
+  | .error e => IO.println s!"  FAIL  negative-clock  build: {firstLine e}"; pure false
+  | .ok plan =>
+    match ← renderPlanSamples plan n with
+    | .error e => IO.println s!"  FAIL  negative-clock  render: {firstLine e}"; pure false
+    | .ok got =>
+      let mut bitDiff : Nat := 0
+      let mut maxOut : Float := 0.0
+      let mut negCount : Nat := 0
+      let mut negMag : Float := 0.0      -- |output| at negative-time samples (streaming ⇒ 0)
+      let mut negBitDiff : Nat := 0
+      for t in [0:n] do
+        let clk : Int := Int.ofNat t * 4294967296
+        let phi : Int := clk - Int.ofNat delta * 4294967296   -- (t − 20)·2³²
+        let ref := sinkGain * sinH (twoPi * phasorPhase phi 2000)
+        if got[t]!.toBits != ref.toBits then bitDiff := bitDiff + 1
+        if got[t]!.abs > maxOut then maxOut := got[t]!.abs
+        if phi < 0 then
+          negCount := negCount + 1
+          if got[t]!.abs > negMag then negMag := got[t]!.abs
+          if got[t]!.toBits != ref.toBits then negBitDiff := negBitDiff + 1
+      IO.println s!"        random-access rep: osc(φ), φ=(t−{delta})·2³², INCLUDING negative time:"
+      IO.println s!"        result   engine vs random-access rep: bit-differing {bitDiff}/{n}  (neg-time samples {negCount}, differing {negBitDiff})"
+      IO.println s!"        moat     |output| at negative time max={negMag}  (a streaming delay line would emit 0 here)"
+      if maxOut < 1e-3 then
+        IO.println s!"  FAIL  negative-clock  silent (maxOut={maxOut})"; pure false
+      else if negCount == 0 then
+        IO.println s!"  FAIL  negative-clock  delay didn't pull the clock negative ({negCount} neg samples)"; pure false
+      else if negMag < 1e-3 then
+        IO.println s!"  FAIL  negative-clock  engine zero-pads at negative time (negMag={negMag}) — not random-access"; pure false
+      else if bitDiff == 0 then
+        IO.println s!"  PASS  negative-clock  random-access exact at negative time ({bitDiff}/{n}; {negCount} neg-time samples, |out|≤{negMag} where a stream emits 0)"; pure true
+      else
+        IO.println s!"  FAIL  negative-clock  {bitDiff}/{n} bit-differing — negative-time phasor diverges"; pure false
 
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
@@ -1257,6 +1313,12 @@ def main (args : List String) : IO UInt32 := do
     IO.println "pm-of-pm stress test (nested warp ≡ nested standard rep):"
     total := total + 1
     if !(← runPmPm arena resolved) then
+      failed := failed + 1
+    -- ── (h⁵) negative-time boundary (the moat): a delay pulls the clock < 0;
+    --   random access gives the exact backward sine where a stream would zero-pad.
+    IO.println "negative-time boundary (random access ≠ streaming zero-pad):"
+    total := total + 1
+    if !(← runNegativeClock arena resolved) then
       failed := failed + 1
 
   IO.println ""
