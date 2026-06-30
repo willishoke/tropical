@@ -480,6 +480,47 @@ def buildClockCarrier (name : String) (clkE : Clock) (arena : Arena)
   let idx : ProgramIdx := ⟨arena.programs.size⟩
   pure ({ arena with programs := arena.programs.push prog }, idx)
 
+/-- Literal-pitch `FixedSinOsc` at 12 kHz — a tone high enough that a small
+    lowpass FIR visibly attenuates (for the convolution stress test). -/
+def litPitch12kVoice : Voice :=
+  { programName := "FixedSinOsc"
+    wire := fun clkE => #[ ⟨⟨0⟩, lit 12000⟩, ⟨⟨1⟩, clkE⟩ ] }
+
+/-- A weighted multi-tap carrier over the closed-form `clockLit`: each `Tap` is a
+    clock-warp + weight, fanned from the one clock and summed left-assoc. With
+    integer-sample-delay warps this IS an FIR convolution. Closed-form (literal
+    pitch, no input ports), so it renders directly as a session root — same shape
+    as `buildClockCarrier`, generalized from one tap to a bank. -/
+def buildTapCarrier (name : String) (v : Voice) (taps : Array Tap)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let some vIdx := (resolved.find? (·.1 == v.programName)).map (·.2)
+    | .error s!"EmitArrow: voice '{v.programName}' not found in the elaborated stdlib chain"
+  let some vProg := arena.program? vIdx
+    | .error s!"EmitArrow: voice '{v.programName}' program index out of range"
+  let mut registry : Array (String × ProgramIdx) := #[(vProg.name, vIdx)]
+  for (k, vi) in vProg.registry do
+    if !registry.any (·.1 == k) then registry := registry.push (k, vi)
+  let mut b : Builder := {}
+  let mut summands : Array Sig := #[]
+  for tap in taps do
+    let (sig, b') := b.osc v tap.name (tap.warp clockLit)
+    b := b'
+    summands := summands.push (mul tap.weight sig)
+  let out := match summands[0]? with
+    | none => lit 0
+    | some s0 => (summands.extract 1 summands.size).foldl add s0
+  let prog : Program := {
+    name
+    inputs := #[]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := out }]
+    binderCount := 0
+    registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  pure ({ arena with programs := arena.programs.push prog }, idx)
+
 -- Law 1 — INVERSE / CANCELLATION:  warp(back δ) ⋙ warp(fwd δ) = id
 -- Both `(clk+δ)−δ` and `(clk−δ)+δ` cancel to `clk` in exact int64; we build
 -- the prose form `(clk+δ)−δ` (fwd inner, back outer).

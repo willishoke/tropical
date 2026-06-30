@@ -782,6 +782,113 @@ private def runReverseFlangerCommuteFixedpoint (arena : Arena) : IO Bool := do
         IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  audio differs ({bitDiff}/{n}): lhs {hashL.take 16} rhs {hashR.take 16}"
         pure false
 
+-- ── (h″) The convolution stress test — the bubble, EXECUTED, with a NON-FACADE
+-- oracle. An FIR filter is fan-out + clock-warps + scale + sum (a convolution IS
+-- the flanger with more taps). We compute the convolution TWO independent ways
+-- and demand they agree:
+--   tropical: each tap warps the CLOCK by j samples (j·2³² in Q32.32); the
+--     oscillator is evaluated at the warped clock, weighted, summed — the bubble
+--     doing the work inside the kernel.
+--   oracle:   render the BARE oscillator once, then shift the resulting Float
+--     array by j, scale by kⱼ, sum — ordinary Lean arithmetic that NEVER touches
+--     the warp lowering.
+-- Agreement proves "warp the clock by j samples" realizes "delay the output by j
+-- samples" IN THE ACTUAL COMPILER, checked by an oracle independent of the
+-- lowering (this is what defeats correct-by-facade — eval-walking the same term
+-- could not). The filter-effect figure confirms the FIR is non-degenerate.
+
+/-- A j-sample clock delay: subtract `j·2³²` (Q32.32) from the clock. `j = 0` is
+    identity (`sub c 0 = c`). -/
+private def firShift (j : Nat) : Tropical.EmitArrow.Clock → Tropical.EmitArrow.Clock :=
+  fun c => Tropical.EmitArrow.sub c
+    (Tropical.EmitArrow.toIntE (Tropical.EmitArrow.lit (Int.ofNat j * 4294967296)))
+
+/-- 3-tap FIR `[0.25, 0.5, 0.25]` at integer-sample delays `[0,1,2]`, as a bank
+    of CLOCK warps over the closed-form 12 kHz voice (pitch high enough that the
+    lowpass visibly attenuates). -/
+private def firTaps : Array Tropical.EmitArrow.Tap := #[
+  { name := "k0", warp := fun c => c, weight := Tropical.EmitArrow.lit 25 2 },
+  { name := "k1", warp := firShift 1, weight := Tropical.EmitArrow.lit 5 1 },
+  { name := "k2", warp := firShift 2, weight := Tropical.EmitArrow.lit 25 2 } ]
+
+/-- The bare voice: a single identity tap, weight 1 — the source samples the
+    oracle convolves by hand. -/
+private def bareTaps : Array Tropical.EmitArrow.Tap := #[
+  { name := "x", warp := fun c => c, weight := Tropical.EmitArrow.lit 1 } ]
+
+/-- Compile a closed-form tap-bank carrier (the 12 kHz voice) to a runnable
+    `FlatPlan` via the production session path — same recipe as
+    `compileArrowCarrier`. -/
+private def compileTapCarrier (arena : Arena) (resolved : Array (String × ProgramIdx))
+    (name : String) (taps : Array Tropical.EmitArrow.Tap) :
+    Except String Tropical.Plan.FlatPlan := do
+  let (arena', idx) ← Tropical.EmitArrow.buildTapCarrier name
+    Tropical.EmitArrow.litPitch12kVoice taps arena resolved
+  let (arena'', root') ← (Tropical.Ir.Strata.run { upto := 5 } arena' idx).mapError (·.message)
+  let core ← Tropical.Ir.Core.check arena'' root'
+  let input : Tropical.Compile.SessionInput := {
+    instances := #[(Tropical.Compile.rootInstancePath, core)]
+    wiresPost := #[]
+    graphOutputs := #[(Tropical.Compile.rootInstancePath, "out")]
+    params := #[]
+    alloc := {}
+    root := core
+    mode := .fused }
+  Tropical.Compile.compileSession input
+
+/-- Render a `FlatPlan` to exactly `n` contiguous mono samples (buffer = n, no
+    fade), like `renderSamples` but from an in-hand plan. -/
+private def renderPlanSamples (plan : Tropical.Plan.FlatPlan) (n : Nat) :
+    IO (Except String (Array Float)) := do
+  match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
+  | .ok manifest, .ok ir =>
+    let rt ← Tropical.Ffi.Runtime.new (UInt32.ofNat n)
+    rt.loadIr ir manifest.compress
+    rt.process
+    pure (.ok (decodeF64LE (← rt.outputBytes)))
+  | .error e, _ => pure (.error s!"toWire: {e}")
+  | _, .error e => pure (.error s!"emitKernel: {e}")
+
+/-- THE NON-FACADE GATE: tropical's clock-warped FIR ≡ an array-shift convolution
+    of the independently-rendered bare oscillator. -/
+private def runConvolutionOracle (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let n : Nat := 1024
+  let kernel : Array Float := #[0.25, 0.5, 0.25]   -- delays 0,1,2
+  let maxDelay := kernel.size - 1
+  match compileTapCarrier arena resolved "Fir3" firTaps,
+        compileTapCarrier arena resolved "Bare" bareTaps with
+  | .error e, _ => IO.println s!"  FAIL  convolution-oracle  build fir: {firstLine e}"; pure false
+  | _, .error e => IO.println s!"  FAIL  convolution-oracle  build bare: {firstLine e}"; pure false
+  | .ok firPlan, .ok barePlan =>
+    match ← renderPlanSamples firPlan n, ← renderPlanSamples barePlan n with
+    | .error e, _ | _, .error e =>
+      IO.println s!"  FAIL  convolution-oracle  render: {firstLine e}"; pure false
+    | .ok got, .ok x =>
+      let mut maxAbs : Float := 0.0
+      let mut filterEffect : Float := 0.0
+      let mut energy : Float := 0.0
+      for t in [maxDelay:n] do
+        let mut acc : Float := 0.0
+        for j in [0:kernel.size] do
+          acc := acc + kernel[j]! * x[t - j]!
+        let g := got[t]!
+        let d := (g - acc).abs
+        if d > maxAbs then maxAbs := d
+        let fe := (g - x[t]!).abs
+        if fe > filterEffect then filterEffect := fe
+        energy := energy + g * g
+      let eps : Float := 1e-9
+      if energy <= 1e-6 then
+        IO.println s!"  FAIL  convolution-oracle  signal silent (energy={energy})"
+        pure false
+      else if maxAbs < eps then
+        IO.println s!"  PASS  convolution-oracle  clock-warp FIR ≡ array-shift conv  (max|Δ|={maxAbs}, filter-effect={filterEffect}, samples={n - maxDelay})"
+        pure true
+      else
+        IO.println s!"  FAIL  convolution-oracle  max|Δ|={maxAbs} (≥ {eps}); filter-effect={filterEffect}"
+        pure false
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -959,6 +1066,13 @@ def main (args : List String) : IO UInt32 := do
     if !(← runFixedSourceLaw "additive-fixedpoint"
           Tropical.EmitArrow.addLawLhsClock Tropical.EmitArrow.addLawRhsClock
           arena) then
+      failed := failed + 1
+    -- ── (h″) convolution stress test: the bubble executed; oracle independent of
+    --   the lowering (array-shift of the bare osc), so it can catch a wrong-but-
+    --   self-consistent lowering — correct-by-facade goes red here, not green.
+    IO.println "convolution stress test (clock-warp FIR ≡ independent array-shift conv):"
+    total := total + 1
+    if !(← runConvolutionOracle arena resolved) then
       failed := failed + 1
 
   IO.println ""
