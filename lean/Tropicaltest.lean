@@ -1009,6 +1009,57 @@ private def runModulatedClock (arena : Arena)
       else
         IO.println s!"  FAIL  modulated-clock  fm err {efm} ≫ floor {e0} — warp diverges from the standard rep"; pure false
 
+/-- PM-of-PM: the modulator is ITSELF a warped oscillator (mod2 warps mod's
+    clock, mod warps the carrier's clock). Bit-exact against a THREE-level nested
+    standard rep (same Horner Sin + integer phasor at each level) ⇒ the warp /
+    substitution composes through nesting. Also asserts the second level is
+    non-trivial: PM(PM) differs from single-level PM. -/
+private def runPmPm (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let n : Nat := 1024
+  let lo : Nat := 8
+  let d1 : Float := 3.0
+  let d2 : Float := 3.0
+  let twoPi : Float := 6.283185307179586
+  let two32 : Float := 4294967296.0
+  let sinkGain : Float := 0.05
+  match buildAndFinish (Tropical.EmitArrow.buildPmPmCarrier "PmPm" 2000 200 700 3 3 arena resolved),
+        buildAndFinish (Tropical.EmitArrow.buildFmCarrier "Fm1" 2000 200 3 arena resolved) with
+  | .error e, _ => IO.println s!"  FAIL  pm-of-pm  build pmpm: {firstLine e}"; pure false
+  | _, .error e => IO.println s!"  FAIL  pm-of-pm  build fm1: {firstLine e}"; pure false
+  | .ok pmpmPlan, .ok fmPlan =>
+    match ← renderPlanSamples pmpmPlan n, ← renderPlanSamples fmPlan n with
+    | .error e, _ | _, .error e =>
+      IO.println s!"  FAIL  pm-of-pm  render: {firstLine e}"; pure false
+    | .ok got, .ok fm1 =>
+      let mut e0 : Float := 0.0           -- engine pm(pm) vs nested standard rep
+      let mut bitDiff : Nat := 0
+      let mut maxOut : Float := 0.0
+      let mut nestEffect : Float := 0.0   -- |pm(pm) − single-level pm| (does level 2 matter)
+      for t in [lo:n] do
+        let clk : Int := Int.ofNat t * 4294967296
+        let mod2 := sinH (twoPi * phasorPhase clk 700)
+        let modClk : Int := clk - truncToInt (d2 * mod2 * two32)
+        let mod := sinH (twoPi * phasorPhase modClk 200)
+        let carClk : Int := clk - truncToInt (d1 * mod * two32)
+        let ref := sinkGain * sinH (twoPi * phasorPhase carClk 2000)
+        if (got[t]! - ref).abs > e0 then e0 := (got[t]! - ref).abs
+        if got[t]!.toBits != ref.toBits then bitDiff := bitDiff + 1
+        if got[t]!.abs > maxOut then maxOut := got[t]!.abs
+        if (got[t]! - fm1[t]!).abs > nestEffect then nestEffect := (got[t]! - fm1[t]!).abs
+      let samples := n - lo
+      IO.println s!"        nested standard rep (mod2→mod→carrier, same Horner Sin + integer phasor):"
+      IO.println s!"        result   engine pm(pm) vs nested rep: max|Δ|={e0}  ·  bit-differing {bitDiff}/{samples}"
+      IO.println s!"        nesting  |pm(pm) − single-level pm| max={nestEffect}  (level-2 must be non-trivial)"
+      if maxOut < 1e-3 then
+        IO.println s!"  FAIL  pm-of-pm  carrier silent (maxOut={maxOut})"; pure false
+      else if nestEffect < 1e-3 then
+        IO.println s!"  FAIL  pm-of-pm  level-2 negligible (nesting effect {nestEffect}) — not stressing the nest"; pure false
+      else if bitDiff == 0 then
+        IO.println s!"  PASS  pm-of-pm  nested warp ≡ nested standard rep bit-for-bit ({bitDiff}/{samples}; nesting effect {nestEffect})"; pure true
+      else
+        IO.println s!"  FAIL  pm-of-pm  {bitDiff}/{samples} bit-differing (max|Δ|={e0}) — nested substitution diverges"; pure false
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -1200,6 +1251,12 @@ def main (args : List String) : IO UInt32 := do
     IO.println "modulated-clock stress test (fractional nonlinear warp ≡ closed form):"
     total := total + 1
     if !(← runModulatedClock arena resolved) then
+      failed := failed + 1
+    -- ── (h⁗) PM-of-PM: the modulator is itself a warped oscillator; bit-exact
+    --   against a 3-level nested standard rep ⇒ the substitution composes.
+    IO.println "pm-of-pm stress test (nested warp ≡ nested standard rep):"
+    total := total + 1
+    if !(← runPmPm arena resolved) then
       failed := failed + 1
 
   IO.println ""

@@ -559,6 +559,41 @@ def buildFmCarrier (name : String) (carHz modHz depthSamples : Int)
   let idx : ProgramIdx := ⟨arena.programs.size⟩
   pure ({ arena with programs := arena.programs.push prog }, idx)
 
+/-- Two-level phase modulation (operator FM, DX-style): a `mod2Hz` oscillator
+    (reading the ambient clock) warps the `modHz` modulator's clock; that
+    modulator's output in turn warps the `carHz` carrier's clock. The modulator
+    is itself a warped oscillator, so this tests whether the warp/substitution
+    composes through NESTING. Closed form, no input ports. -/
+def buildPmPmCarrier (name : String) (carHz modHz mod2Hz depth1 depth2 : Int)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let some vIdx := (resolved.find? (·.1 == "FixedSinOsc")).map (·.2)
+    | .error "EmitArrow: voice 'FixedSinOsc' not found in the elaborated stdlib chain"
+  let some vProg := arena.program? vIdx
+    | .error "EmitArrow: voice 'FixedSinOsc' program index out of range"
+  let mut registry : Array (String × ProgramIdx) := #[(vProg.name, vIdx)]
+  for (k, vi) in vProg.registry do
+    if !registry.any (·.1 == k) then registry := registry.push (k, vi)
+  -- innermost: mod2 at the ambient clock; warps the modulator's clock
+  let (mod2Sig, b0) := ({} : Builder).osc (litPitchVoice mod2Hz) "mod2" clockLit
+  let modClk : Clock :=
+    sub clockLit (toIntE (mul (mul (lit depth2) mod2Sig) (lit 4294967296)))
+  -- modulator at the mod2-warped clock; its output warps the carrier's clock
+  let (modSig, b1) := b0.osc (litPitchVoice modHz) "mod" modClk
+  let carClk : Clock :=
+    sub clockLit (toIntE (mul (mul (lit depth1) modSig) (lit 4294967296)))
+  let (carSig, b) := b1.osc (litPitchVoice carHz) "car" carClk
+  let prog : Program := {
+    name
+    inputs := #[]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := carSig }]
+    binderCount := 0
+    registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  pure ({ arena with programs := arena.programs.push prog }, idx)
+
 -- Law 1 — INVERSE / CANCELLATION:  warp(back δ) ⋙ warp(fwd δ) = id
 -- Both `(clk+δ)−δ` and `(clk−δ)+δ` cancel to `clk` in exact int64; we build
 -- the prose form `(clk+δ)−δ` (fwd inner, back outer).
