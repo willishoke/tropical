@@ -1162,6 +1162,16 @@ inductive ArrowTerm where
   | scale (w : Sig) (t : ArrowTerm)
   | arrUn (f : Sig → Sig) (t : ArrowTerm)
   | sum (ts : Array ArrowTerm)
+  /-- A MODULATED carrier (FM/PM): a generator whose clock is `modWarp baseClk
+      modSig`, where `modSig` is the SIGNAL of `modulator` (another sub-term).
+      This is the data-into-clock edge — the `osc → flange → osc.fm` case. The
+      modulation `modWarp` reads the modulator's emitted value (a function of τ,
+      so the warp stays a closed form in τ — lawful, the PM-of-PM finding). Under
+      a downstream warp `φ` the carrier base AND the modulator both warp
+      (threaded), so reverse/stretch of a modulated voice carries its modulator
+      with it. -/
+  | fmGen (carrier : Voice) (name : String) (baseClk : Clock)
+      (modWarp : Clock → Sig → Clock) (modulator : ArrowTerm)
 
 instance : Inhabited ArrowTerm := ⟨.sum #[]⟩
 
@@ -1175,16 +1185,20 @@ partial def normalize : ArrowTerm → ArrowTerm
   | .arrUn f t => .arrUn f (normalize t)
   | .sum ts => .sum (ts.map normalize)
   | .warp φ t => pushWarp φ t
+  | .fmGen c n base mw mod => .fmGen c n base mw (normalize mod)
 
 /-- Push one warp `φ` down through a term to the generators: absorb into a
     generator's clock (R4), slide past pointwise `arr`s (R1), fuse with an inner
-    warp (R2, `φ∘ψ`), and fork over `scale`/`sum` (R3). -/
+    warp (R2, `φ∘ψ`), and fork over `scale`/`sum` (R3). A modulated carrier warps
+    its base clock AND threads the warp into its modulator (the modulator rides
+    the enclosing warp). -/
 partial def pushWarp (φ : Clock → Clock) : ArrowTerm → ArrowTerm
   | .gen v name clk => .gen v name (φ clk)
   | .scale w t => .scale w (pushWarp φ t)
   | .arrUn f t => .arrUn f (pushWarp φ t)
   | .sum ts => .sum (ts.map (pushWarp φ))
   | .warp ψ t => pushWarp (fun c => φ (ψ c)) t
+  | .fmGen c n base mw mod => .fmGen c n (φ base) mw (pushWarp φ mod)
 end
 
 /-- Emit a (normalized) arrow term to its output signal. Each `gen` sources a
@@ -1197,6 +1211,11 @@ partial def emitTerm : ArrowTerm → Builder → Sig × Builder
   | .warp _ t, b => emitTerm t b            -- a normalized term has none (defensive)
   | .scale w t, b => let (s, b) := emitTerm t b; (mul w s, b)
   | .arrUn f t, b => let (s, b) := emitTerm t b; (f s, b)
+  | .fmGen carrier name base mw mod, b =>
+    -- emit the modulator first (its instances precede the carrier), read its
+    -- signal, then clock the carrier at `modWarp base modSig`.
+    let (modSig, b) := emitTerm mod b
+    b.osc carrier s!"{name}{b.decls.size}" (mw base modSig)
   | .sum ts, b =>
     match ts[0]? with
     | none => (lit 0, b)
@@ -1327,6 +1346,9 @@ inductive Node where
   | shaper (input : String) (f : Sig → Sig)
   | warpFx (input : String) (φ : Clock → Clock)
   | mix (inputs : Array String)
+  /-- A MODULATED carrier: `input`'s signal modulates this carrier's clock
+      (FM/PM). The signal-into-clock edge — patch `mod.out → carrier.fm`. -/
+  | fm (input : String) (carrier : Voice) (baseClk : Clock) (depthSamples : Int)
 
 structure PatchNode where
   id : String
@@ -1337,10 +1359,17 @@ structure PatchGraph where
   nodes : Array PatchNode
   output : String
 
+/-- The standard FM modulation law: a modulator signal `m` shifts the carrier's
+    Q32.32 clock by `depthSamples · m` samples — `clk − toInt(depth · m · 2³²)`.
+    Closed form in τ (`m` is a closed-form signal), so the warp is lawful. -/
+def fmWarp (depthSamples : Int) : Clock → Sig → Clock :=
+  fun base m => sub base (toIntE (mul (mul (lit depthSamples) m) (lit 4294967296)))
+
 /-- Lower one node to its arrow term, recursing UP its input wires. A wire is
     `⋙` (the effect applied to the upstream term); fan-out is the shared upstream
-    term (the diagonal); a mixer is the sum. The result is the UNREDUCED
-    downstream term — effects' warps still sit on their inputs. -/
+    term (the diagonal); a mixer is the sum; an `fm` node routes its input's
+    signal into the carrier's clock. The result is the UNREDUCED downstream term
+    — effects' warps still sit on their inputs. -/
 partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm := do
   let some pn := g.nodes.find? (·.id == id)
     | .error s!"lower: node '{id}' not found"
@@ -1350,6 +1379,8 @@ partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm :
   | .shaper inId f => return .arrUn f (← lowerNode g inId)
   | .warpFx inId φ => return .warp φ (← lowerNode g inId)
   | .mix inputs => return .sum (← inputs.mapM (lowerNode g))
+  | .fm inId carrier base depth =>
+    return .fmGen carrier id base (fmWarp depth) (← lowerNode g inId)
 
 /-- Lower a whole patch to its (downstream, unreduced) arrow term. Compose with
     `normalize` to run the slide, then `emitTerm` to lower to IR. -/
@@ -1421,5 +1452,40 @@ def buildFanOutFromGraph (arena : Arena) (resolved : Array (String × ProgramIdx
   let term ← lowerGraph fanOutGraph
   let (out, b) := emitTerm (normalize term) {}
   buildVoiceProgram "GraphFanOut" b.decls out arena resolved
+
+/-- `osc(mod) → osc(carrier).fm` as a GRAPH — a single FM voice. Lowers to the
+    same term as `buildFmCarrier carHz modHz depth` (the bit-exact modulated-clock
+    gate's carrier). -/
+def fmGraphOf (carHz modHz depth : Int) : PatchGraph :=
+  { nodes := #[
+      { id := "mod", node := .source (litPitchVoice modHz) clockLit },
+      { id := "car", node := .fm "mod" (litPitchVoice carHz) clockLit depth } ],
+    output := "car" }
+
+/-- Two-level PM (DX-style) as a GRAPH: `mod2 → mod.fm → car.fm`. Lowers to the
+    same term as `buildPmPmCarrier carHz modHz mod2Hz depth1 depth2` (the
+    bit-exact PM-of-PM gate's carrier). -/
+def pmPmGraphOf (carHz modHz mod2Hz depth1 depth2 : Int) : PatchGraph :=
+  { nodes := #[
+      { id := "mod2", node := .source (litPitchVoice mod2Hz) clockLit },
+      { id := "mod",  node := .fm "mod2" (litPitchVoice modHz) clockLit depth2 },
+      { id := "car",  node := .fm "mod" (litPitchVoice carHz) clockLit depth1 } ],
+    output := "car" }
+
+/-- Lower the single-FM graph (M1: ≡ `buildFmCarrier`, the modulated node). -/
+def buildFmFromGraph (carHz modHz depth : Int)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let term ← lowerGraph (fmGraphOf carHz modHz depth)
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram "GraphFm" b.decls out arena resolved
+
+/-- Lower the PM-of-PM graph (M2: ≡ `buildPmPmCarrier`, the nested modulated node). -/
+def buildPmPmFromGraph (carHz modHz mod2Hz depth1 depth2 : Int)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let term ← lowerGraph (pmPmGraphOf carHz modHz mod2Hz depth1 depth2)
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram "GraphPmPm" b.decls out arena resolved
 
 end Tropical.EmitArrow

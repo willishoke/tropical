@@ -1285,6 +1285,33 @@ private def runLoweringFanOut (arena : Arena)
     | .error e => IO.println s!"  FAIL  lowering-fanout  finish: {firstLine e}"; pure false
   | .error e => IO.println s!"  FAIL  lowering-fanout  build: {firstLine e}"; pure false
 
+/-- Modulated-effect node: a `.fm` node routes one node's signal into a carrier's
+    clock (FM/PM). Gated byte-identical against the hand-built carriers the
+    bit-exact modulated-clock / PM-of-PM differentials already render: M1 a single
+    FM node ≡ `buildFmCarrier`; M2 nested `.fm` nodes ≡ `buildPmPmCarrier`. So the
+    `osc → flange → osc.fm` edge lowers to the proven modulated warp. -/
+private def runModulatedNode (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let cmp := fun (label : String)
+      (g h : Except String (Arena × ProgramIdx)) =>
+    match g, h with
+    | .ok (aG, iG), .ok (aH, iH) =>
+      match emitResolvedWire aG iG, emitResolvedWire aH iH with
+      | .ok bg, .ok bh =>
+        if bg == bh then (true, s!"  PASS  modulated-node/{label}  graph fm node ≡ hand-built carrier ({bg.length}B)")
+        else (false, s!"  FAIL  modulated-node/{label}  graph {bg.length}B ≠ carrier {bh.length}B")
+      | .error e, _ | _, .error e => (false, s!"  FAIL  modulated-node/{label}  emit: {firstLine e}")
+    | .error e, _ | _, .error e => (false, s!"  FAIL  modulated-node/{label}  build: {firstLine e}")
+  let (ok1, msg1) := cmp "fm"
+    (Tropical.EmitArrow.buildFmFromGraph 2000 200 3 arena resolved)
+    (Tropical.EmitArrow.buildFmCarrier "FmRef" 2000 200 3 arena resolved)
+  IO.println msg1
+  let (ok2, msg2) := cmp "pm-of-pm"
+    (Tropical.EmitArrow.buildPmPmFromGraph 2000 200 50 3 2 arena resolved)
+    (Tropical.EmitArrow.buildPmPmCarrier "PmRef" 2000 200 50 3 2 arena resolved)
+  IO.println msg2
+  pure (ok1 && ok2)
+
 -- ── (h⁹) C4: session → resolved root DIRECTLY ≡ the elaborate round-trip ───────
 -- Every patch compiles to a session; this gate compiles each BOTH ways — the
 -- production `sessionToParsed → elaborate` path and the direct
@@ -1571,6 +1598,11 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runLoweringFanOut arena resolved) then
+      failed := failed + 1
+    -- modulated-effect node: signal-into-clock (FM/PM), the osc → flange →
+    -- osc.fm edge; ≡ the bit-exact-proven FM / PM-of-PM carriers.
+    total := total + 1
+    if !(← runModulatedNode arena resolved) then
       failed := failed + 1
 
   IO.println ""
