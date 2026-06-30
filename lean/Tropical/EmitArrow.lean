@@ -1122,4 +1122,176 @@ def buildFixedFlangerThenReverse (arena : Arena) : Arena × ProgramIdx :=
   buildExprCarrier "FixedFlangerThenReverse"
     (fixedOut (fixedFlangerSum dry past ahead)) arena
 
+-- ─────────────────────────────────────────────────────────────
+-- M8 — the SLIDE (WARP-PUSH): a REIFIED arrow term + the τ-push rewrite
+-- ─────────────────────────────────────────────────────────────
+
+/-! Everything above is the SMART-CONSTRUCTOR (deep-by-emission) layer: the
+    combinators build the IR directly, with nothing to inspect or rewrite. The
+    slide needs the opposite — a REIFIED arrow term it can pattern-match — because
+    WARP-PUSH is a *rewrite*: it takes an effect presented DOWNSTREAM (`warp`
+    applied to a signal) and pushes the warp UP through the stateless cone until
+    it lands as a generator's clock argument. Until now the warped clocks were
+    written by hand (`warpBank` builds the already-upstream form); this section
+    makes the COMPILER perform downstream→upstream.
+
+    `ArrowTerm` is a tiny inspectable arrow AST. The only non-trivial node is
+    `warp φ t` — `warp(φ) ⋙ t`, kept UNREDUCED. `normalize` (the slide) is three
+    law-justified rules plus the fork over products:
+
+      * `warp φ ⋙ arr f      ⟶ arr f ⋙ warp φ`     (slide past a pointwise node, R1)
+      * `warp φ ⋙ warp ψ     ⟶ warp (φ∘ψ)`          (fuse, R2)
+      * `warp φ ⋙ gen[clk:=c] ⟶ gen[clk:=φ c]`       (absorb into the clock, R4)
+      * `warp φ ⋙ (a + b)    ⟶ (warp φ ⋙ a) + (warp φ ⋙ b)`, and through `scale`
+                                                     (fork over the product, R3)
+
+    Crucially the warp/arr COMMUTATION (R1) is the first thing in this whole file
+    that the arrow LAWS make true and that plain `let`/composition does NOT give
+    you for free — this is where the EDSL stops being re-spelled `let` and starts
+    earning its keep. The denotation is `⟦warp φ t⟧ = ⟦t⟧ ∘ φ`, so the slide is
+    just ∘-associativity, exactly the static-warp lawfulness already proven. -/
+
+/-- A reified, inspectable arrow term. `gen` is a voice instance whose clock arg
+    is the warp target; `warp φ t` is `warp(φ) ⋙ t` kept unreduced; `scale`/`arrUn`
+    are pointwise (clock-agnostic) `arr`s; `sum` is the left-assoc weighted sum
+    (the cartesian product collapse). Functions are carried opaquely — the slide
+    composes/applies them, never inspects them. -/
+inductive ArrowTerm where
+  | gen (v : Voice) (name : String) (clk : Clock)
+  | warp (φ : Clock → Clock) (t : ArrowTerm)
+  | scale (w : Sig) (t : ArrowTerm)
+  | arrUn (f : Sig → Sig) (t : ArrowTerm)
+  | sum (ts : Array ArrowTerm)
+
+instance : Inhabited ArrowTerm := ⟨.sum #[]⟩
+
+mutual
+/-- The SLIDE. Push every `warp` down to the generators it eventually feeds,
+    leaving a term whose only clock-warps are the generators' (composed) clock
+    arguments — the upstream form `warpBank` writes by hand, now derived. -/
+partial def normalize : ArrowTerm → ArrowTerm
+  | .gen v name clk => .gen v name clk
+  | .scale w t => .scale w (normalize t)
+  | .arrUn f t => .arrUn f (normalize t)
+  | .sum ts => .sum (ts.map normalize)
+  | .warp φ t => pushWarp φ t
+
+/-- Push one warp `φ` down through a term to the generators: absorb into a
+    generator's clock (R4), slide past pointwise `arr`s (R1), fuse with an inner
+    warp (R2, `φ∘ψ`), and fork over `scale`/`sum` (R3). -/
+partial def pushWarp (φ : Clock → Clock) : ArrowTerm → ArrowTerm
+  | .gen v name clk => .gen v name (φ clk)
+  | .scale w t => .scale w (pushWarp φ t)
+  | .arrUn f t => .arrUn f (pushWarp φ t)
+  | .sum ts => .sum (ts.map (pushWarp φ))
+  | .warp ψ t => pushWarp (fun c => φ (ψ c)) t
+end
+
+/-- Emit a (normalized) arrow term to its output signal. Each `gen` sources a
+    voice instance in left-to-right order (matching `warpBank`'s instance order);
+    `scale`/`arrUn` are the pointwise ops; `sum` is the left-assoc fold
+    `((t₀ + t₁) + t₂)`. Instance names are uniquified by position (names are
+    inlined away post-strata, so they never reach the emitted bytes). -/
+partial def emitTerm : ArrowTerm → Builder → Sig × Builder
+  | .gen v name clk, b => b.osc v s!"{name}{b.decls.size}" clk
+  | .warp _ t, b => emitTerm t b            -- a normalized term has none (defensive)
+  | .scale w t, b => let (s, b) := emitTerm t b; (mul w s, b)
+  | .arrUn f t, b => let (s, b) := emitTerm t b; (f s, b)
+  | .sum ts, b =>
+    match ts[0]? with
+    | none => (lit 0, b)
+    | some t0 =>
+      let (s0, b) := emitTerm t0 b
+      (ts.extract 1 ts.size).foldl
+        (fun (acc : Sig × Builder) ti => let (s, b) := emitTerm ti acc.2; (add acc.1 s, b))
+        (s0, b)
+
+/-- A 3-tap flanger as a DOWNSTREAM-PRESENTED effect (a morphism on terms):
+    `s ↦ 0.5·s + 0.25·(warp(−δ) ⋙ s) + 0.25·(warp(+δ) ⋙ s)`. The warps are
+    UNREDUCED — they sit on the signal `s`, exactly as "I dropped a flanger after
+    this signal" reads. The slide is what turns this into the upstream form. -/
+def flangeEffectWith (back fwd : Clock → Clock) (s : ArrowTerm) : ArrowTerm :=
+  .sum #[ .scale (lit 5 1) s,
+          .scale (lit 25 2) (.warp back s),
+          .scale (lit 25 2) (.warp fwd s) ]
+
+/-- The flanger effect with the `FlangeSin` offset `δ = deltaSamples` (the
+    offset input), so the slid form reproduces the stdlib `FlangeSin` clocks. -/
+def flangeEffect (s : ArrowTerm) : ArrowTerm :=
+  flangeEffectWith (fun c => sub c deltaSamples) (fun c => add c deltaSamples) s
+
+/-- THE SLIDE GATE (Test 1). Build `FlangeSin` from the DOWNSTREAM-insert form —
+    `osc ⋙ flange`, warps unreduced — then `normalize` (the slide) and emit.
+    Byte-identical to stdlib `FlangeSin` ⇒ the compiler turned "flanger dropped
+    downstream of the oscillator" into "the oscillator read at warped clocks,"
+    reaching the exact hand-written upstream program. The inputs/voice/δ mirror
+    `flangeSinSpec` so the only thing under test is the slide. -/
+def buildFlangerViaSlide (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← buildRegistry arena resolved #["FixedSinOsc"]
+  let term := normalize (flangeEffect (.gen fixedSinOscVoice "osc" clkIn))
+  let (out, b) := emitTerm term {}
+  let prog : Program := {
+    name := "FlangeSin"
+    inputs := #[clkInputDecl, pitchInputDecl "freq" 220, offsetInputDecl "depth"]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := out }]
+    binderCount := 0
+    registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  .ok ({ arena with programs := arena.programs.push prog }, idx)
+
+/-! The slide tests below use closed-form (literal-pitch, no input ports)
+    carriers so they render directly as session roots, like the warp-law gates. -/
+
+/-- A literal-δ back/forward warp (`δ = 0.0007 s`, Q32.32). -/
+def slideBack : Clock → Clock := fun c => sub c (deltaLit 7 4)
+def slideFwd : Clock → Clock := fun c => add c (deltaLit 7 4)
+/-- The closed-form base oscillator term (literal pitch, `clk = sampleIndex<<32`). -/
+def litOscGen : ArrowTerm := .gen litPitchSinOscVoice "osc" clockLit
+
+/-- DOWNSTREAM `osc ⋙ shaper ⋙ flange` (Test 2): a pointwise `shaper` (square)
+    sits BETWEEN the oscillator and the flanger, so the flanger's warps must
+    COMMUTE PAST it (R1) to reach the generator's clock. Slid form. -/
+def buildSlideShaperDownstream (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let term := flangeEffectWith slideBack slideFwd (.arrUn (fun s => mul s s) litOscGen)
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram "SlideShaperDown" b.decls out arena resolved
+
+/-- The hand-written UPSTREAM reference for Test 2: the same shaper applied to the
+    oscillator read at each of the three warped clocks — what the slide MUST
+    produce if the warp commutes past the shaper. No `warp` nodes (already
+    upstream). Byte-equal to `buildSlideShaperDownstream` ⇒ R1 fired correctly. -/
+def buildSlideShaperUpstream (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let shaped (φ : Clock → Clock) : ArrowTerm :=
+    .arrUn (fun s => mul s s) (.gen litPitchSinOscVoice "osc" (φ clockLit))
+  let term : ArrowTerm := .sum #[
+    .scale (lit 5 1) (shaped (fun c => c)),
+    .scale (lit 25 2) (shaped slideBack),
+    .scale (lit 25 2) (shaped slideFwd) ]
+  let (out, b) := emitTerm term {}
+  buildVoiceProgram "SlideShaperUp" b.decls out arena resolved
+
+/-- A single closed-form flanger via the slide (Test 3 baseline). -/
+def buildSlideSingleFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let (out, b) := emitTerm (normalize (flangeEffectWith slideBack slideFwd litOscGen)) {}
+  buildVoiceProgram "SlideSingleFlange" b.decls out arena resolved
+
+/-- CASCADE `osc ⋙ flange ⋙ flange` (Test 3): two downstream flangers in series.
+    The slide pushes the outer flanger's warps through the inner flanger's sum
+    (R3) and fuses them with the inner warps (R2), producing the oscillator read
+    at the NINE convolved offsets {0, ±δ, ±2δ} automatically — the proper
+    multiplicity, derived, not hand-written. (Nine instances, not five: with no
+    coincident-offset normalization the algebraically-equal taps stay distinct —
+    the multiplicative cost discussed for cascades.) -/
+def buildSlideDoubleFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let inner := flangeEffectWith slideBack slideFwd litOscGen
+  let (out, b) := emitTerm (normalize (flangeEffectWith slideBack slideFwd inner)) {}
+  buildVoiceProgram "SlideDoubleFlange" b.decls out arena resolved
+
 end Tropical.EmitArrow

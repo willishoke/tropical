@@ -1171,6 +1171,61 @@ private def runMorphOscDifferential (arena : Arena)
     else
       IO.println s!"  FAIL  morphosc-mimo  bit-differing (saw {sawDiff} · sine {sinDiff} · blend {blendDiff}) — MIMO build diverges from the standard rep"; pure false
 
+-- ── (h⁷) THE SLIDE (WARP-PUSH): downstream insert → upstream warp, by the compiler ─
+-- The reified arrow term + `normalize` push warps up to the generators. Three
+-- gates: (1) byte-identity vs stdlib FlangeSin lives in the corpus section
+-- (slide(osc ⋙ flange) ≡ hand-written upstream FlangeSin); (2) slide-past-arr —
+-- a pointwise shaper between osc and flange, so the warp must COMMUTE PAST it
+-- (R1); (3) cascade — osc ⋙ flange ⋙ flange yields the 9-tap convolved
+-- multiplicity automatically.
+
+/-- Test 2: the warp must slide PAST a pointwise shaper to reach the generator.
+    `slide(osc ⋙ shaper ⋙ flange)` must byte-equal the hand-written upstream form
+    (shaper applied to osc at each warped clock). Byte-equal ⇒ R1 fired. -/
+private def runSlidePastArr (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match Tropical.EmitArrow.buildSlideShaperDownstream arena resolved,
+        Tropical.EmitArrow.buildSlideShaperUpstream arena resolved with
+  | .ok (aD, iD), .ok (aU, iU) =>
+    match emitResolvedWire aD iD, emitResolvedWire aU iU with
+    | .ok bytesD, .ok bytesU =>
+      if bytesD == bytesU then
+        IO.println s!"  PASS  slide-past-arr  warp commuted past the shaper: slide(osc ⋙ shaper ⋙ flange) ≡ upstream ({bytesD.length}B)"; pure true
+      else
+        IO.println s!"  FAIL  slide-past-arr  slide(downstream) ≠ upstream (down {bytesD.length}B, up {bytesU.length}B) — R1 (commute past arr) wrong"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-arr  emit: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-arr  build: {firstLine e}"; pure false
+
+/-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
+    the inner flanger's sum and fuses them, producing the oscillator read at the
+    nine convolved offsets automatically (the proper multiplicity, derived). We
+    assert the generator count (9 vs 3) and that the cascade is a real, non-silent
+    filter distinct from a single flanger. -/
+private def runSlideCascade (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match Tropical.EmitArrow.buildSlideDoubleFlanger arena resolved,
+        Tropical.EmitArrow.buildSlideSingleFlanger arena resolved with
+  | .ok (aD, iD), .ok (aS, iS) =>
+    let ninstD := ((aD.program? iD).map (·.decls.size)).getD 0
+    let ninstS := ((aS.program? iS).map (·.decls.size)).getD 0
+    match buildAndFinish (.ok (aD, iD)), buildAndFinish (.ok (aS, iS)) with
+    | .ok planD, .ok planS =>
+      match ← renderPlanSamples planD 512, ← renderPlanSamples planS 512 with
+      | .ok dbl, .ok sgl =>
+        let mut energy : Float := 0.0
+        let mut diff : Float := 0.0
+        for t in [8:512] do
+          energy := energy + dbl[t]! * dbl[t]!
+          if (dbl[t]! - sgl[t]!).abs > diff then diff := (dbl[t]! - sgl[t]!).abs
+        IO.println s!"        cascade osc ⋙ flange ⋙ flange: {ninstD} generator instances (single flange: {ninstS}); the slide convolved the kernels — 9 = 3⊛3 taps, no coincident-offset merge"
+        if ninstD == 9 && ninstS == 3 && energy > 1e-6 && diff > 1e-4 then
+          IO.println s!"  PASS  slide-cascade  9-tap multiplicity derived by the slide (energy={energy}, |double−single|max={diff})"; pure true
+        else
+          IO.println s!"  FAIL  slide-cascade  ninstD={ninstD} (want 9) ninstS={ninstS} (want 3) energy={energy} diff={diff}"; pure false
+      | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-cascade  render: {firstLine e}"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-cascade  finish: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-cascade  build: {firstLine e}"; pure false
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -1290,6 +1345,14 @@ def main (args : List String) : IO UInt32 := do
     if !(← runEmitCorpusGate "MorphOsc" "MorphOsc" arena resolved
           Tropical.EmitArrow.buildMorphOsc) then
       failed := failed + 1
+    -- THE SLIDE (WARP-PUSH), Test 1: build FlangeSin from the DOWNSTREAM-insert
+    -- form (osc ⋙ flange, warps unreduced), run the slide, emit — byte-identical
+    -- to stdlib FlangeSin. The compiler turns "flanger dropped downstream" into
+    -- "oscillator read at warped clocks." First compiler-driven downstream→upstream.
+    total := total + 1
+    if !(← runEmitCorpusGate "FlangeSinSlide" "FlangeSin" arena resolved
+          Tropical.EmitArrow.buildFlangerViaSlide) then
+      failed := failed + 1
     IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
     -- Law 1 — inverse/cancellation:  warp(back δ) ⋙ warp(fwd δ) = id
     total := total + 1
@@ -1387,6 +1450,16 @@ def main (args : List String) : IO UInt32 := do
     IO.println "products/MIMO standard-rep differential (multi-port body ≡ closed form):"
     total := total + 1
     if !(← runMorphOscDifferential arena resolved) then
+      failed := failed + 1
+    -- ── (h⁷) THE SLIDE (WARP-PUSH): the compiler pushes a downstream effect's
+    --   warps up to the generators. R1 (commute past arr) + the cascade
+    --   multiplicity; Test 1 (byte-identity vs FlangeSin) is in the corpus block.
+    IO.println "warp-push slide (downstream insert → upstream warp, by the compiler):"
+    total := total + 1
+    if !(← runSlidePastArr arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runSlideCascade arena resolved) then
       failed := failed + 1
 
   IO.println ""
