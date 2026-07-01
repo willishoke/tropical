@@ -6,12 +6,11 @@
 // onto the generators' clocks — totally composable, so effects stack freely.
 const KINDS = {
   source: {
+    // Always a MorphOsc: morph = 0 is saw, morph = 1 is sine, so the morph knob is
+    // always meaningful. `freq` is a CONTROL inlet — patch a Knob to drive pitch
+    // from a live slot (only a knob; audio-rate into the pitch port is not FM).
     title: 'Osc', accent: '#6cc7ff', summing: false,
-    // `freq` is a CONTROL inlet: patch a Knob into it to drive pitch from a live
-    // param slot (the baked `freq` knob is hidden while it's wired). Only a knob
-    // may wire here — audio-rate into the pitch port is not FM (use the FM node).
-    inlets: ['freq'], outlets: ['out'],
-    sels: [{ name: 'voice', options: ['sine', 'saw', 'morph'], def: 'sine' }],
+    inlets: ['freq'], outlets: ['out'], sels: [],
     knobs: [
       { name: 'freq', min: 20, max: 2000, def: 220, log: true, unit: 'Hz', anchor: true },
       { name: 'morph', min: 0, max: 1, def: 0, unit: '', glide: true },
@@ -51,11 +50,15 @@ const KINDS = {
       { name: 'depth', min: 1, max: 400, def: 60, log: true, unit: '', glide: true },
     ],
   },
-  warp: {
-    title: 'Warp', accent: '#86e8c0', summing: false,
-    inlets: ['in'], outlets: ['out'],
-    sels: [{ name: 'mode', options: ['delay', 'reverse'], def: 'delay' }],
+  delay: {
+    title: 'Delay', accent: '#86e8c0', summing: false,
+    inlets: ['in'], outlets: ['out'], sels: [],
     knobs: [{ name: 'amount', min: 0.0001, max: 0.02, def: 0.004, log: true, unit: 's', glide: true }],
+  },
+  reverse: {
+    // clk -> -clk : the moat op, no parameter.
+    title: 'Reverse', accent: '#7ad0aa', summing: false,
+    inlets: ['in'], outlets: ['out'], sels: [], knobs: [],
   },
   mix: {
     title: 'Mix', accent: '#c7ced9', summing: true,

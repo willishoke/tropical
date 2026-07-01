@@ -71,14 +71,11 @@ private def morphVoiceE (pitchE morphE : Expr) (phaseE : Option Expr := none) : 
       | some ph => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩, ⟨⟨2⟩, clkE⟩, ⟨⟨3⟩, ph⟩ ]
       | none    => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩, ⟨⟨2⟩, clkE⟩ ] }
 
-/-- Build a voice at an explicit pitch/morph expression. `pitchE` is either the
-    baked `freq` knob or a live slot; `phaseE` is the sine voice's phase-anchor
-    offset (a live slot when the source's freq is anchored, else `lit 0`). -/
-private def voiceOf (sel : Json) (pitchE morphE phaseE : Expr) : Voice :=
-  match jStr sel "voice" "sine" with
-  | "saw"   => morphVoiceE pitchE (lit 0) (some phaseE)
-  | "morph" => morphVoiceE pitchE morphE (some phaseE)
-  | _       => sineVoiceE pitchE (some phaseE)
+/-- The `source` node is always a `MorphOsc` (morph = 0 is saw, morph = 1 is sine),
+    so the morph knob is always meaningful. `pitchE` is the freq (baked or a live
+    slot); `phaseE` is the phase-anchor offset (a live slot when freq is anchored). -/
+private def voiceOf (pitchE morphE phaseE : Expr) : Voice :=
+  morphVoiceE pitchE morphE (some phaseE)
 
 /-- `δ = toInt(seconds · sampleRate · 2³²)` — a Q32.32 sample offset (the stdlib
     flanger's own delay form), but with the `seconds` taken from the knob. -/
@@ -109,7 +106,7 @@ private def isGlided (kind kname : String) : Bool :=
   (kind == "flange"  && kname == "depth")  ||
   (kind == "sflange" && kname == "depth")  ||
   (kind == "fm"      && kname == "depth")  ||
-  (kind == "warp"    && kname == "amount")
+  (kind == "delay"   && kname == "amount")
 
 /-- Which (kind, knob) pairs are FREQUENCIES — phase-anchored (`#phase` offset slot
     + `set_param_freq`) rather than glided, since gliding a frequency VALUE would
@@ -137,7 +134,7 @@ private def glideExpr (pidx : String → Option Nat) (base : String) (dflt : Exp
     `paramRef`; only structural selectors (`voice`, warp `mode`) and topology are
     baked, so only they trigger a relower. -/
 private def buildNode (pidx : String → Option Nat) (id kind : String)
-    (sel params inObj : Json) : Node × Array PatchNode :=
+    (_sel params inObj : Json) : Node × Array PatchNode :=
   let sig := (portSources inObj "in")[0]?.getD "__silence__"
   -- this node's own knob `kname` as a live value: a closed-form glide if glided,
   -- else a raw slot read; falling back to the baked literal if unallocated.
@@ -156,19 +153,17 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     let pitchE := match (portSources inObj "freq")[0]? with
       | some w => pref pidx s!"{w}.value" (jExpr params "freq" (lit 220))
       | none => p "freq" (jExpr params "freq" (lit 220))
-    -- the phase-anchor offset slot (present only for a sine source's own freq);
-    -- falls back to lit 0 (no offset) for saw/morph or a knob-driven freq.
+    -- the phase-anchor offset slot (present when the source's own freq is a live
+    -- slot); falls back to lit 0 (no offset) for a knob-driven freq.
     let phaseE := pref pidx s!"{id}.freq#phase" (lit 0)
-    (.source (voiceOf sel pitchE (p "morph" (jExpr params "morph" (lit 0))) phaseE) clockLit, #[])
+    (.source (voiceOf pitchE (p "morph" (jExpr params "morph" (lit 0))) phaseE) clockLit, #[])
   | "flange" =>
     let d := deltaOf (p "depth" (jExpr params "depth" (lit 7 4)))
     (.flange sig (fun c => sub c d) (fun c => add c d), #[])
-  | "warp" =>
-    if jStr sel "mode" "delay" == "reverse" then
-      (.warpFx sig (fun c => neg c), #[])
-    else
-      let d := deltaOf (p "amount" (jExpr params "amount" (lit 4 3)))
-      (.warpFx sig (fun c => sub c d), #[])
+  | "delay" =>
+    let d := deltaOf (p "amount" (jExpr params "amount" (lit 4 3)))
+    (.warpFx sig (fun c => sub c d), #[])
+  | "reverse" => (.warpFx sig (fun c => neg c), #[])
   | "fm" =>
     -- `carrier` is a frequency → phase-anchored (own #phase slot); `depth` glides.
     let carPhase := pref pidx s!"{id}.carrier#phase" (lit 0)
@@ -215,7 +210,8 @@ private def knobNamesOf : String → Array String
   | "flange"  => #["depth"]
   | "sflange" => #["depth", "rate"]
   | "fm"      => #["carrier", "depth"]
-  | "warp"    => #["amount"]
+  | "delay"   => #["amount"]
+  | "reverse" => #[]
   | "knob"    => #["value"]
   | _         => #[]
 
