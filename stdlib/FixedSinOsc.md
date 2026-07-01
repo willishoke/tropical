@@ -46,9 +46,15 @@ basis of the scope / multi-rate-consumer path.
 ## Source
 
 ```tropical
-program FixedSinOsc(freq: freq = 440, clk: clock = clock()) -> (sine: float) {
-  ph = ClockPhasor(clk: clk, freq: freq)
+program FixedSinOsc(freq: freq = 440, clk: clock = clock(), phase: unipolar = 0) -> (sine: float) {
+  ph = ClockPhasor(clk: clk, freq: freq, offset: phase)
   sin = Sin(x: 6.283185307179586 * ph.phase)
   sine = sin.out
 }
 ```
+
+`phase` exposes `ClockPhasor`'s stateless continuity-correction hook up to the
+oscillator's signature: it adds a pure phase offset (independent of `freq`), so a
+control plane can keep the phase continuous across a live `freq` change by bumping
+`phase` by `(f₀−f₁)·τ` at the change. Default `0` emits identically to the
+offset-less form.

@@ -469,7 +469,7 @@ def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) 
   let inc := toIntE (div (mul freqIn twoPow32) .sampleRate)
   let thi := rshift clk (lit 32)
   let tlo := bitAnd clk mask
-  let off := toIntE (mul (clampE (lit 0) (lit 0) (lit 1)) twoPow32)   -- offset:unipolar=0
+  let off := toIntE (mul (.inputRef ⟨2⟩) twoPow32)   -- offset = the `phase` input (port 2)
   let acc := add (add (mul inc thi) (rshift (mul inc tlo) (lit 32))) off
   let phase := clampE (div (toFloatE (bitAnd acc mask)) twoPow32) (lit 0) (lit 1)
   -- Phase → [0, 2π).
@@ -495,7 +495,9 @@ def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) 
       { name := "freq", type? := some (.scalar .float),
         default? := some (selectE (gt (lit 440) (lit 0)) (lit 440) (lit 0)) },
       { name := "clk", type? := some (.scalar .int),
-        default? := some (lshift .sampleIndex (lit 32)) } ]
+        default? := some (lshift .sampleIndex (lit 32)) },
+      { name := "phase", type? := some (.scalar .float),
+        default? := some (clampE (lit 0) (lit 0) (lit 1)) } ]
     outputs := #[{ name := "sine", type? := some (.scalar .float) }]
     decls := #[]
     assigns := #[{ target := .port ⟨0⟩, expr := sine }]
@@ -541,12 +543,12 @@ def buildRegistry (arena : Arena) (resolved : Array (String × ProgramIdx))
       if !registry.any (·.1 == k) then registry := registry.push (k, v)
   pure registry
 
-/-- ClockPhasor's input ports MorphOsc fills: `clk` (port 0), `freq` (port 1);
-    `offset` (port 2) defaults. -/
-def clockPhasorPorts : Array InputIdx := #[⟨0⟩, ⟨1⟩]
+/-- ClockPhasor's input ports MorphOsc fills: `clk` (port 0), `freq` (port 1),
+    `offset` (port 2 — the phase-anchor hook, wired from MorphOsc's `phase`). -/
+def clockPhasorPorts : Array InputIdx := #[⟨0⟩, ⟨1⟩, ⟨2⟩]
 
-/-- The phasor morphism `[clk, freq] ⇝ [phase]` — the named-port bridge over
-    `ClockPhasor`. -/
+/-- The phasor morphism `[clk, freq, offset] ⇝ [phase]` — the named-port bridge
+    over `ClockPhasor`. -/
 def phasorMor : Mor := instMor "ph" "ClockPhasor" clockPhasorPorts 1
 
 /-- The saw shaper `[phase] ⇝ [2·phase − 1]` (a naive ramp; pure `arr`). -/
@@ -564,17 +566,17 @@ def sinMor : Mor :=
 def crossfadeMor : Mor :=
   arrMor (fun w => #[add (mul (sub (lit 1) w[2]!) w[0]!) (mul w[2]! w[1]!)])
 
-/-- `MorphOsc` as one cartesian pipeline over inputs `[freq, morph, clk]`:
-    route to `[clk, freq, morph]`, run the phasor on the first two while `morph`
-    rides along (`first 2`), fan the phase into saw and sine while `morph` rides
-    along (`first 1 (saw &&& sin)`), then crossfade. The whole body is
-    `ClockPhasor ⋙ (saw &&& Sin) ⋙ crossfade`; `morph` is threaded through the
-    products, never recomputed. -/
+/-- `MorphOsc` as one cartesian pipeline over inputs `[freq, morph, clk, phase]`:
+    route to `[clk, freq, phase, morph]`, run the phasor on the first three
+    (`clk, freq, offset`) while `morph` rides along (`first 3`), fan the phase into
+    saw and sine while `morph` rides along (`first 1 (saw &&& sin)`), then
+    crossfade. The whole body is `ClockPhasor ⋙ (saw &&& Sin) ⋙ crossfade`; `morph`
+    is threaded through the products, never recomputed. -/
 def morphOscMor : Mor :=
-  seq (arrMor (fun w => #[w[2]!, w[0]!, w[1]!]))   -- [freq,morph,clk] → [clk,freq,morph]
-    (seq (first 2 phasorMor)                        -- → [phase, morph]
-      (seq (first 1 (fan sawMor sinMor))            -- → [saw, sin, morph]
-           crossfadeMor))                            -- → [out]
+  seq (arrMor (fun w => #[w[2]!, w[0]!, w[3]!, w[1]!]))   -- [freq,morph,clk,phase] → [clk,freq,phase,morph]
+    (seq (first 3 phasorMor)                              -- → [phase, morph]
+      (seq (first 1 (fan sawMor sinMor))                  -- → [saw, sin, morph]
+           crossfadeMor))                                  -- → [out]
 
 /-- Build the EmitArrow `MorphOsc` (real input ports) into `arena` — the
     products/MIMO corpus gate. Byte-identical to `diffcli emit-stdlib MorphOsc`.
@@ -584,7 +586,7 @@ def morphOscMor : Mor :=
 def buildMorphOsc (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) := do
   let registry ← buildRegistry arena resolved #["ClockPhasor", "Sin"]
-  let (outs, b) := morphOscMor #[.inputRef ⟨0⟩, .inputRef ⟨1⟩, .inputRef ⟨2⟩] {}
+  let (outs, b) := morphOscMor #[.inputRef ⟨0⟩, .inputRef ⟨1⟩, .inputRef ⟨2⟩, .inputRef ⟨3⟩] {}
   let prog : Program := {
     name := "MorphOsc"
     inputs := #[
@@ -592,7 +594,9 @@ def buildMorphOsc (arena : Arena) (resolved : Array (String × ProgramIdx)) :
         default? := some (selectE (gt (lit 220) (lit 0)) (lit 220) (lit 0)) },
       { name := "morph", type? := some (.scalar .float),
         default? := some (clampE (lit 0) (lit 0) (lit 1)) },
-      clkInputDecl ]
+      clkInputDecl,
+      { name := "phase", type? := some (.scalar .float),
+        default? := some (clampE (lit 0) (lit 0) (lit 1)) } ]
     outputs := #[{ name := "out", type? := some (.scalar .float) }]
     decls := b.decls
     assigns := #[{ target := .port ⟨0⟩, expr := outs[0]! }]
@@ -611,7 +615,7 @@ def buildMorphOscLit (name : String) (freqHz : Int) (morph : Expr)
   let registry ← buildRegistry arena resolved #["ClockPhasor", "Sin"]
   -- `clk = sampleIndex << 32` inline (the `clkInputDecl` default; `clockLit` is
   -- defined below in the warp-law section, so spell it out here).
-  let (outs, b) := morphOscMor #[lit freqHz, morph, .binary .lshift .sampleIndex (lit 32)] {}
+  let (outs, b) := morphOscMor #[lit freqHz, morph, .binary .lshift .sampleIndex (lit 32), lit 0] {}
   let prog : Program := {
     name
     inputs := #[]

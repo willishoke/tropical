@@ -39,9 +39,13 @@ waveform.
 ## Source
 
 ```tropical
-program MorphOsc(freq: freq = 220, morph: unipolar = 0, clk: clock = clock()) -> (out: float) {
-  ph = ClockPhasor(clk: clk, freq: freq)
+program MorphOsc(freq: freq = 220, morph: unipolar = 0, clk: clock = clock(), phase: unipolar = 0) -> (out: float) {
+  ph = ClockPhasor(clk: clk, freq: freq, offset: phase)
   sin = Sin(x: 6.283185307179586 * ph.phase)
   out = (1 - morph) * (2 * ph.phase - 1) + morph * sin.out
 }
 ```
+
+`phase` is the phasor's stateless continuity-correction offset (see `FixedSinOsc`):
+it lets a control plane keep the phase continuous across a live `freq` change by
+bumping it `(f₀−f₁)·τ`. Default `0` emits identically to the offset-less form.
