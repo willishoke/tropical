@@ -53,29 +53,47 @@ private def jStr (obj : Json) (key : String) (dflt : String) : String :=
   | _ => dflt
 
 -- ── Voices (literal pitch, so the knob bakes into the emitted clock) ─────────
-/-- `FixedSinOsc`: freq (port 0), clk (port 1), phase (port 2). `phaseE` drives the
-    phasor's continuity-correction offset — supplied (as a live slot) for a source
-    whose `freq` is phase-anchored, omitted (defaults to 0) otherwise. -/
-private def sineVoiceE (pitchE : Expr) (phaseE : Option Expr := none) : Voice :=
-  { programName := "FixedSinOsc",
-    wire := fun clkE => match phaseE with
-      | some ph => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, clkE⟩, ⟨⟨2⟩, ph⟩ ]
-      | none    => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, clkE⟩ ] }
+/-- The phase-anchor correction — the slide, in the phase domain. A clock `shift`
+    (Q32.32) of `shift/2³²` samples maps to a phase shift of
+    `(freq − freqInit)·(shift/2³²)/SR` cycles: the phase the oscillator advances over
+    the shift, referenced to the compile-time `freqInit` so the effect's delay is
+    preserved as a fixed phase. Added to a warped copy's phase port by `emitTermC`,
+    it keeps that copy phase-continuous across a live freq change. -/
+private def phaseCorr (pitchE freqInit : Expr) : Clock → Sig :=
+  fun shift => div (mul (sub pitchE freqInit) (toFloatE shift)) (mul (lit 4294967296) .sampleRate)
+
+/-- The anchor payload: `(phaseSlot, freqInit)`. Present when the voice's freq is a
+    live phase-anchored slot; the voice then wires the phase port and installs the
+    `phaseAnchor` so every warped copy self-corrects. -/
+abbrev Anchor := Expr × Expr
+
+/-- `FixedSinOsc`: freq (port 0), clk (port 1), phase (port 2). -/
+private def sineVoiceE (pitchE : Expr) (anchor : Option Anchor := none) : Voice :=
+  match anchor with
+  | some (phaseE, freqInit) =>
+    { programName := "FixedSinOsc",
+      wire := fun clkE => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, clkE⟩, ⟨⟨2⟩, phaseE⟩ ],
+      phaseAnchor := some (⟨2⟩, phaseCorr pitchE freqInit) }
+  | none =>
+    { programName := "FixedSinOsc",
+      wire := fun clkE => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, clkE⟩ ] }
 
 /-- `MorphOsc`: freq (port 0), morph (port 1), clk (port 2), phase (port 3).
-    `morph = 0` is saw, `morph = 1` is sine; `phaseE` drives the phase-anchor
-    offset (a live slot when the source's freq is anchored). -/
-private def morphVoiceE (pitchE morphE : Expr) (phaseE : Option Expr := none) : Voice :=
-  { programName := "MorphOsc",
-    wire := fun clkE => match phaseE with
-      | some ph => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩, ⟨⟨2⟩, clkE⟩, ⟨⟨3⟩, ph⟩ ]
-      | none    => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩, ⟨⟨2⟩, clkE⟩ ] }
+    `morph = 0` is saw, `morph = 1` is sine. -/
+private def morphVoiceE (pitchE morphE : Expr) (anchor : Option Anchor := none) : Voice :=
+  match anchor with
+  | some (phaseE, freqInit) =>
+    { programName := "MorphOsc",
+      wire := fun clkE => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩, ⟨⟨2⟩, clkE⟩, ⟨⟨3⟩, phaseE⟩ ],
+      phaseAnchor := some (⟨3⟩, phaseCorr pitchE freqInit) }
+  | none =>
+    { programName := "MorphOsc",
+      wire := fun clkE => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩, ⟨⟨2⟩, clkE⟩ ] }
 
 /-- The `source` node is always a `MorphOsc` (morph = 0 is saw, morph = 1 is sine),
-    so the morph knob is always meaningful. `pitchE` is the freq (baked or a live
-    slot); `phaseE` is the phase-anchor offset (a live slot when freq is anchored). -/
-private def voiceOf (pitchE morphE phaseE : Expr) : Voice :=
-  morphVoiceE pitchE morphE (some phaseE)
+    so the morph knob is always meaningful. -/
+private def voiceOf (pitchE morphE : Expr) (anchor : Option Anchor) : Voice :=
+  morphVoiceE pitchE morphE anchor
 
 /-- `δ = toInt(seconds · sampleRate · 2³²)` — a Q32.32 sample offset (the stdlib
     flanger's own delay form), but with the `seconds` taken from the knob. -/
@@ -153,10 +171,11 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     let pitchE := match (portSources inObj "freq")[0]? with
       | some w => pref pidx s!"{w}.value" (jExpr params "freq" (lit 220))
       | none => p "freq" (jExpr params "freq" (lit 220))
-    -- the phase-anchor offset slot (present when the source's own freq is a live
-    -- slot); falls back to lit 0 (no offset) for a knob-driven freq.
-    let phaseE := pref pidx s!"{id}.freq#phase" (lit 0)
-    (.source (voiceOf pitchE (p "morph" (jExpr params "morph" (lit 0))) phaseE) clockLit, #[])
+    -- the anchor: (phase slot, compile-time freq). Present only when the source's
+    -- own freq is a live slot; the compile-time freq is the reference the warped
+    -- copies' phase correction is measured from.
+    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Expr), jExpr params "freq" (lit 220))
+    (.source (voiceOf pitchE (p "morph" (jExpr params "morph" (lit 0))) anchor) clockLit, #[])
   | "flange" =>
     let d := deltaOf (p "depth" (jExpr params "depth" (lit 7 4)))
     (.flange sig (fun c => sub c d) (fun c => add c d), #[])
@@ -166,8 +185,8 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
   | "reverse" => (.warpFx sig (fun c => neg c), #[])
   | "fm" =>
     -- `carrier` is a frequency → phase-anchored (own #phase slot); `depth` glides.
-    let carPhase := pref pidx s!"{id}.carrier#phase" (lit 0)
-    (.fm sig (sineVoiceE (p "carrier" (jExpr params "carrier" (lit 330))) (some carPhase))
+    let carAnchor := (pidx s!"{id}.carrier#phase").map fun i => ((.paramRef ⟨i⟩ : Expr), jExpr params "carrier" (lit 330))
+    (.fm sig (sineVoiceE (p "carrier" (jExpr params "carrier" (lit 330))) carAnchor)
       clockLit (p "depth" (jExpr params "depth" (lit 8))), #[])
   | "sflange" =>
     let depthSec := p "depth" (jExpr params "depth" (lit 2 3))

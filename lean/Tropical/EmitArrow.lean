@@ -182,6 +182,15 @@ structure Voice where
   programName : String
   wire : Clock → Array InstanceInput
   output : OutputIdx := ⟨0⟩
+  /-- The phase-anchor hook (the slide in the phase domain). When set to
+      `(phasePort, corr)`, the SLIDE (`emitTermC`) adds `corr shift` to this voice's
+      `phasePort` input for each warped copy, where `shift = clk − warpedClk` is the
+      clock shift the slide pushed onto that copy. Since phase = inc·clk, a clock
+      shift maps to a phase shift via `inc`, so threading the anchor across the
+      cartesian copies keeps every warped read (delay/flange tap) phase-continuous
+      across a live freq change — not just the un-warped read. `none` = no
+      correction (byte-gated voices are untouched). -/
+  phaseAnchor : Option (InputIdx × (Clock → Sig)) := none
 
 /-- The `FixedSinOsc` voice — pitch at port 0, clock at port 1 (source order). -/
 def fixedSinOscVoice : Voice :=
@@ -1208,7 +1217,19 @@ partial def normalize : ArrowTerm → ArrowTerm
     inlined away post-strata, so they never reach the emitted bytes). -/
 partial def emitTermC (cmod : Clock → Builder → Clock × Builder) :
     ArrowTerm → Builder → Sig × Builder
-  | .gen v name clk, b => let (clk', b) := cmod clk b; b.osc v s!"{name}{b.decls.size}" clk'
+  | .gen v name clk, b =>
+    let (clk', b) := cmod clk b
+    -- Thread the phase anchor across this warped copy: the slide shifted the clock
+    -- by `clk − clk'`, so add `corr (clk − clk')` to the voice's phase port. Keeps
+    -- delay/flange taps phase-continuous under a live freq change (not just the
+    -- un-warped read). A `phaseAnchor := none` voice passes through untouched.
+    let v := match v.phaseAnchor with
+      | some (port, corr) =>
+        let c := corr (sub clk clk')
+        { v with wire := fun cc => (v.wire cc).map fun ii =>
+            if ii.port.idx == port.idx then { ii with value := add ii.value c } else ii }
+      | none => v
+    b.osc v s!"{name}{b.decls.size}" clk'
   | .scale w t, b => let (s, b) := emitTermC cmod t b; (mul w s, b)
   | .arrUn f t, b => let (s, b) := emitTermC cmod t b; (f s, b)
   -- a plain warp composes into the threaded transform (R1/R2/R4 in one line).
