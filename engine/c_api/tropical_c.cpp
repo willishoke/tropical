@@ -312,6 +312,19 @@ double tropical_runtime_get_slot(tropical_runtime_t r, unsigned int slot_index)
   return static_cast<tropical_runtime::FlatRuntime*>(r)->get_slot(slot_index);
 }
 
+double tropical_runtime_current_sample_index(tropical_runtime_t r)
+{
+  if (!r) return 0.0;
+  return static_cast<double>(
+    static_cast<tropical_runtime::FlatRuntime*>(r)->current_sample_index());
+}
+
+double tropical_runtime_sample_rate(tropical_runtime_t r)
+{
+  if (!r) return 44100.0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)->sample_rate();
+}
+
 bool tropical_runtime_render_window(tropical_runtime_t r, uint64_t start_index,
                                     unsigned int count, const unsigned int* slot_ids,
                                     unsigned int n_slots, double* out)

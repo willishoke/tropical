@@ -351,6 +351,15 @@ public:
     return states_[state_idx].sample_index;
   }
 
+  // The active kernel's sample rate — the same value the kernel reads for
+  // `sampleRate()` (opRate). The control plane needs it to reproduce the
+  // phasor's `inc = floor(freq*2^32/SR)` when phase-anchoring a freq change.
+  double sample_rate() const
+  {
+    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+    return states_[state_idx].sample_rate;
+  }
+
 private:
   // build_kernel_state maps a parsed plan's *metadata* (everything except
   // the kernel handle) into a fresh KernelState; publish_state runs the

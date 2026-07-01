@@ -65,6 +65,18 @@ opaque Runtime.setSlot (rt : @& Runtime) (idx : UInt32) (value : Float) : IO Uni
 @[extern "shim_runtime_get_slot"]
 opaque Runtime.getSlot (rt : @& Runtime) (idx : UInt32) : IO Float
 
+/-- The runtime's current sample index (τ of the next buffer), as a Float — the
+    control plane stamps a glide's start-tick with this so a closed-form param
+    ramp anchors to "now". -/
+@[extern "shim_runtime_current_sample_index"]
+opaque Runtime.currentSampleIndex (rt : @& Runtime) : IO Float
+
+/-- The active kernel's sample rate — the value the kernel reads for `sampleRate()`.
+    The control plane uses it to reproduce the phasor's quantized increment when
+    phase-anchoring a live frequency change (and for the glide's ms→sample dur). -/
+@[extern "shim_runtime_sample_rate"]
+opaque Runtime.sampleRate (rt : @& Runtime) : IO Float
+
 /-- The C `UINT32_MAX` no-such-slot sentinel, mapped to `none`. -/
 def Runtime.slotIndex? (rt : Runtime) (name : String) : IO (Option UInt32) := do
   let idx ← rt.slotIndexRaw name
