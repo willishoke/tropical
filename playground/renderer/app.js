@@ -14,7 +14,7 @@ const KINDS = {
     sels: [{ name: 'voice', options: ['sine', 'saw', 'morph'], def: 'sine' }],
     knobs: [
       { name: 'freq', min: 20, max: 2000, def: 220, log: true, unit: 'Hz', anchor: true },
-      { name: 'morph', min: 0, max: 1, def: 0, unit: '' },
+      { name: 'morph', min: 0, max: 1, def: 0, unit: '', glide: true },
     ],
   },
   knob: {
@@ -39,7 +39,7 @@ const KINDS = {
     // SIGNAL-modulated comb. Patch a signal into `mod` to sweep it; leave it open
     // and the built-in LFO at `rate` drives the sweep. The signal-warp composes.
     knobs: [
-      { name: 'depth', min: 0.0002, max: 0.02, def: 0.005, log: true, unit: 's' },
+      { name: 'depth', min: 0.0002, max: 0.02, def: 0.005, log: true, unit: 's', glide: true },
       { name: 'rate', min: 0.02, max: 12, def: 0.3, log: true, unit: 'Hz' },
     ],
   },
@@ -47,15 +47,15 @@ const KINDS = {
     title: 'FM', accent: '#ff9ec7', summing: false,
     inlets: ['in'], outlets: ['out'], sels: [],
     knobs: [
-      { name: 'carrier', min: 20, max: 2000, def: 330, log: true, unit: 'Hz' },
-      { name: 'depth', min: 1, max: 400, def: 60, log: true, unit: '' },
+      { name: 'carrier', min: 20, max: 2000, def: 330, log: true, unit: 'Hz', anchor: true },
+      { name: 'depth', min: 1, max: 400, def: 60, log: true, unit: '', glide: true },
     ],
   },
   warp: {
     title: 'Warp', accent: '#86e8c0', summing: false,
     inlets: ['in'], outlets: ['out'],
     sels: [{ name: 'mode', options: ['delay', 'reverse'], def: 'delay' }],
-    knobs: [{ name: 'amount', min: 0.0001, max: 0.02, def: 0.004, log: true, unit: 's' }],
+    knobs: [{ name: 'amount', min: 0.0001, max: 0.02, def: 0.004, log: true, unit: 's', glide: true }],
   },
   mix: {
     title: 'Mix', accent: '#c7ced9', summing: true,

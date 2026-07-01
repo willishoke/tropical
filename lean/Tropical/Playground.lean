@@ -104,7 +104,18 @@ private def pref (pidx : String → Option Nat) (name : String) (dflt : Expr) : 
     expr) instead of a raw slot. PROTOTYPE: just the flanger's `depth`, so a turn
     of it eases as a click-free smoothstep; every other knob stays a raw slot (the
     A/B). -/
-private def isGlided (kind kname : String) : Bool := kind == "flange" && kname == "depth"
+private def isGlided (kind kname : String) : Bool :=
+  (kind == "source"  && kname == "morph")  ||
+  (kind == "flange"  && kname == "depth")  ||
+  (kind == "sflange" && kname == "depth")  ||
+  (kind == "fm"      && kname == "depth")  ||
+  (kind == "warp"    && kname == "amount")
+
+/-- Which (kind, knob) pairs are FREQUENCIES — phase-anchored (`#phase` offset slot
+    + `set_param_freq`) rather than glided, since gliding a frequency VALUE would
+    reintroduce the τ·f' chirp. A phasor-based oscillator's pitch input. -/
+private def isAnchored (kind kname : String) : Bool :=
+  (kind == "source" && kname == "freq") || (kind == "fm" && kname == "carrier")
 
 /-- A closed-form smoothstep GLIDE of τ from three slots: `v0 + (v1−v0)·s²(3−2s)`,
     `s = clamp((τ − t0)/dur, 0, 1)`, `dur = 0.02·sampleRate` samples (20 ms at any
@@ -159,7 +170,9 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
       let d := deltaOf (p "amount" (jExpr params "amount" (lit 4 3)))
       (.warpFx sig (fun c => sub c d), #[])
   | "fm" =>
-    (.fm sig (sineVoiceE (p "carrier" (jExpr params "carrier" (lit 330))))
+    -- `carrier` is a frequency → phase-anchored (own #phase slot); `depth` glides.
+    let carPhase := pref pidx s!"{id}.carrier#phase" (lit 0)
+    (.fm sig (sineVoiceE (p "carrier" (jExpr params "carrier" (lit 330))) (some carPhase))
       clockLit (p "depth" (jExpr params "depth" (lit 8))), #[])
   | "sflange" =>
     let depthSec := p "depth" (jExpr params "depth" (lit 2 3))
@@ -227,10 +240,10 @@ private def collectParams (raws : Array Raw) : Array (String × JsonNumber) := I
           out := out.push (s!"{base}#t0", ⟨0, 0⟩)
         else
           out := out.push (base, dflt)
-          -- every source's own freq carries a phase-anchor offset slot (sine, saw,
-          -- morph — all phasor-based), so a live freq change bumps `#phase` and
-          -- keeps the phase continuous (click-free).
-          if r.kind == "source" && kname == "freq" then
+          -- a frequency knob (source freq, fm carrier) carries a phase-anchor
+          -- offset slot, so a live change bumps `#phase` and keeps the phase
+          -- continuous (click-free) instead of jumping by Δf·τ.
+          if isAnchored r.kind kname then
             out := out.push (s!"{base}#phase", ⟨0, 0⟩)
   return out
 
