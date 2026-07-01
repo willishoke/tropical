@@ -15,6 +15,7 @@ import Tropical.Ir.EmitLlvm
 import Tropical.TypeArgs
 import Tropical.Compile
 import Tropical.Entries
+import Tropical.Playground
 
 /-!
 # The tropical IR engine — tool semantics, in Lean
@@ -290,6 +291,178 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
     env.state.modify (·.setWireRaw w.instName w.portName <| Json.mkObj
       [("op", Json.str "ref"), ("instance", Json.str synthName), ("output", Json.str "out")])
 
+-- ─────────────────────────────────────────────────────────────
+-- Session → resolved root DIRECTLY — the C4 cutover (no parsed round-trip)
+-- ─────────────────────────────────────────────────────────────
+
+/-! `sessionToParsed → reparse → elaborate` takes the already-resolved session
+    instances, serializes them into a NAMED `__session__` ParsedProgram, and
+    re-elaborates the names back to pointers — the "resolved → named → resolved"
+    round-trip. `sessionToResolvedRoot` deletes it: the session graph is already
+    post-elaborate-shaped (instances carry resolved type snapshots; wires are
+    graph edges), so it builds the resolved root `Program` DIRECTLY, reproducing
+    the elaborator's output byte-for-byte (gated `tropical_resolved_1`-identical
+    against the elaborate path on every golden). `elaborate` stays the reifier
+    for the morphism-definition (`.trop`) language; the patcher skips it by BEING
+    a graph. The construction (verified against `Elaborator.lean`):
+    instance decls in topo order then params alphabetical; each `InstanceInput`
+    `port` = the target program's input position; wires resolved to `Ir.Expr`
+    (`nestedOut ⟨topoIdx⟩ ⟨outputIdx⟩`, `paramRef ⟨alphaIdx⟩`, builtins —
+    `clock()` ⇒ `sampleIndex << 32`, `sampleRate`/`sampleIndex` direct); registry
+    accumulated per-instance with the transitive merge. -/
+
+/-- Collect the param/trigger names a wire expression references (for the root's
+    alphabetical param table). -/
+private partial def collectWireParams (expr : Json) : Array String :=
+  match expr with
+  | .arr items => items.foldl (fun acc e => acc ++ collectWireParams e) #[]
+  | .obj _ =>
+    let op := (opOf? expr).getD ""
+    if op == "param" || op == "trigger" then #[(getStrField? expr "name").getD ""]
+    else
+      let args := match getField? expr "args" with | some (.arr a) => a | _ => #[]
+      let items := match getField? expr "items" with | some (.arr a) => a | _ => #[]
+      (args ++ items).foldl (fun acc e => acc ++ collectWireParams e) #[]
+  | _ => #[]
+
+/-- Resolution context for a session wire expression. -/
+private structure WireCtx where
+  /-- `(instanceName, outputName)` → `nestedOut ⟨instIdx⟩ ⟨outputIdx⟩`. -/
+  instOut : String → String → Except String Tropical.Ir.Expr
+  /-- param/trigger name → `ParamIdx` (alphabetical position). -/
+  paramIdx : String → Option Nat
+
+/-- Resolve a raw session wire expression directly to a resolved `Ir.Expr`,
+    mirroring the elaborator's `resolveExpr` over a session-root scope. Same op
+    set as `wireExprToParsed`; no parsed intermediate. -/
+private partial def wireExprToResolved (ctx : WireCtx) (expr : Json) :
+    Except String Tropical.Ir.Expr :=
+  match expr with
+  | .num n => .ok (.num n)
+  | .bool b => .ok (.bool b)
+  | .arr items => do pure (.arr (← items.mapM (wireExprToResolved ctx)))
+  | .obj _ => do
+    let some op := opOf? expr
+      | .error s!"session wire node missing op: {expr.compress}"
+    let rawArgs := match getField? expr "args" with | some (.arr a) => a | _ => #[]
+    let args ← rawArgs.mapM (wireExprToResolved ctx)
+    if op == "ref" then
+      ctx.instOut ((getStrField? expr "instance").getD "") ((getStrField? expr "output").getD "")
+    else if op == "param" || op == "trigger" then
+      let name := (getStrField? expr "name").getD ""
+      match ctx.paramIdx name with
+      | some i => .ok (.paramRef ⟨i⟩)
+      | none => .error s!"session wire: param '{name}' not in root param table"
+    else if op == "array" then
+      match getField? expr "items" with
+      | some (.arr items) => do pure (.arr (← items.mapM (wireExprToResolved ctx)))
+      | _ => .error "session wire: 'array' missing items"
+    else if op == "sampleRate" then .ok .sampleRate
+    else if op == "sampleIndex" then .ok .sampleIndex
+    else if op == "clock" || op == "sampleClock" || op == "sample_clock" then
+      .ok (.binary .lshift .sampleIndex (.num ⟨32, 0⟩))
+    else if op == "clamp" then
+      if args.size == 3 then .ok (.clamp args[0]! args[1]! args[2]!)
+      else .error s!"session wire: clamp expects 3 args, got {args.size}"
+    else if op == "select" then
+      if args.size == 3 then .ok (.select args[0]! args[1]! args[2]!)
+      else .error s!"session wire: select expects 3 args, got {args.size}"
+    else if op == "arraySet" || op == "array_set" then
+      if args.size == 3 then .ok (.arraySet args[0]! args[1]! args[2]!)
+      else .error s!"session wire: arraySet expects 3 args, got {args.size}"
+    else if op == "index" then
+      if args.size == 2 then .ok (.index args[0]! args[1]!)
+      else .error s!"session wire: index expects 2 args, got {args.size}"
+    else if op == "zeros" then
+      if args.size == 1 then .ok (.zeros args[0]!)
+      else .error s!"session wire: zeros expects 1 arg, got {args.size}"
+    else if let some tag := Tropical.Ir.BinaryOpTag.ofWire? op then
+      if args.size == 2 then .ok (.binary tag args[0]! args[1]!)
+      else .error s!"session wire: binary '{op}' expects 2 args, got {args.size}"
+    else if let some tag := Tropical.Ir.UnaryOpTag.ofWire? op then
+      if args.size == 1 then .ok (.unary tag args[0]!)
+      else .error s!"session wire: unary '{op}' expects 1 arg, got {args.size}"
+    else
+      .error s!"session wire: unsupported op '{op}'"
+  | _ => .error s!"session wire: invalid value {expr.compress}"
+
+/-- Build the resolved session root `Program` directly from the graph (instances
+    already carry resolved type snapshots via `resolverTbl`), deleting the
+    `sessionToParsed → reparse → elaborate` round-trip. Byte-identical to the
+    elaborated root (gated). `lowerInstances` carries each instance's STORED
+    program name (the resolver key). -/
+private def sessionToResolvedRoot (arena : Tropical.Ir.Arena)
+    (lowerInstances : Array (String × InstanceInfo)) (wiresPost : Array Tropical.Wire)
+    (resolverTbl : Array (String × Tropical.Ir.ProgramIdx)) :
+    Except String (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) := do
+  let order := Tropical.Lowering.computeInstanceTopoOrder lowerInstances wiresPost
+  -- instName → topo InstanceIdx
+  let mut instIdxOf : Array (String × Nat) := #[]
+  for k in [0:order.size] do
+    instIdxOf := instIdxOf.push (order[k]!, k)
+  -- params: every param/trigger referenced in any wire, alphabetical.
+  let mut pnames : Array String := #[]
+  for w in wiresPost do
+    for nm in collectWireParams w.expr do
+      if !pnames.contains nm then pnames := pnames.push nm
+  let sortedParams := pnames.qsort (· < ·)
+  -- the wire-resolution context (closes over the maps above).
+  let instOut := fun (rn on : String) =>
+    match (instIdxOf.find? (·.1 == rn)).map (·.2) with
+    | none => .error s!"session wire ref: instance '{rn}' not declared"
+    | some idx =>
+      match (lowerInstances.find? (·.1 == rn)).map (·.2.progMeta.programName) with
+      | none => .error s!"session wire ref: instance '{rn}' not found"
+      | some sn =>
+        match (resolverTbl.find? (·.1 == sn)).map (·.2) with
+        | none => .error s!"session wire ref: program '{sn}' not resolved"
+        | some ti =>
+          match arena.program? ti with
+          | none => .error "session wire ref: target out of range"
+          | some tgt =>
+            match tgt.outputs.findIdx? (·.name == on) with
+            | none => .error s!"session wire ref: '{rn}' ({tgt.name}) has no output '{on}'"
+            | some o => .ok (Tropical.Ir.Expr.nestedOut ⟨idx⟩ ⟨o⟩)
+  let ctx : WireCtx := { instOut, paramIdx := fun nm => sortedParams.findIdx? (· == nm) }
+  -- instance decls (topo order), then param decls (alphabetical).
+  let mut decls : Array Tropical.Ir.BodyDecl := #[]
+  for name in order do
+    let some info := (lowerInstances.find? (·.1 == name)).map (·.2)
+      | .error s!"sessionToResolvedRoot: instance '{name}' missing (topo bug)"
+    let sn := info.progMeta.programName
+    let some ti := (resolverTbl.find? (·.1 == sn)).map (·.2)
+      | .error s!"sessionToResolvedRoot: instance '{name}' program '{sn}' not resolved"
+    let some tgt := arena.program? ti
+      | .error s!"sessionToResolvedRoot: target idx out of range for '{sn}'"
+    let wires := (wiresPost.filter (·.instName == name)).qsort (fun a b => a.portName < b.portName)
+    let mut inputs : Array Tropical.Ir.InstanceInput := #[]
+    for w in wires do
+      let some pos := tgt.inputs.findIdx? (·.name == w.portName)
+        | .error s!"sessionToResolvedRoot: '{name}' ({tgt.name}) has no input '{w.portName}'"
+      let value ← wireExprToResolved ctx w.expr
+      inputs := inputs.push { port := ⟨pos⟩, value }
+    decls := decls.push (.inst name tgt.name #[] inputs)
+  for pname in sortedParams do
+    decls := decls.push (.param pname none)
+  -- registry: per-instance (topo order) target name → idx, transitive merge.
+  let mut registry : Array (String × Tropical.Ir.ProgramIdx) := #[]
+  for name in order do
+    let some info := (lowerInstances.find? (·.1 == name)).map (·.2)
+      | .error s!"sessionToResolvedRoot: instance '{name}' missing (registry)"
+    let sn := info.progMeta.programName
+    let some ti := (resolverTbl.find? (·.1 == sn)).map (·.2)
+      | .error s!"sessionToResolvedRoot: program '{sn}' not resolved (registry)"
+    let some tgt := arena.program? ti
+      | .error s!"sessionToResolvedRoot: target out of range (registry)"
+    registry := match registry.findIdx? (·.1 == tgt.name) with
+      | some i => registry.set! i (tgt.name, ti)
+      | none => registry.push (tgt.name, ti)
+    for (k, v) in tgt.registry do
+      if !registry.any (·.1 == k) then registry := registry.push (k, v)
+  let prog : Tropical.Ir.Program := { name := "__session__", decls, registry }
+  let idx : Tropical.Ir.ProgramIdx := ⟨arena.programs.size⟩
+  .ok ({ arena with programs := arena.programs.push prog }, idx)
+
 /-- The session lowering + compile (Phase 3 lowering, Phase 4 stage 4a
     elaboration): lift if needed, then run the Lean lowering — slot
     allocation, delay extraction, acyclicity, serialization to a
@@ -320,19 +493,6 @@ def syncCompile (env : Env) : EngineM Unit := do
     match storedProgName i with
     | some pname => (n, { i with progMeta := { i.progMeta with programName := pname } })
     | none => (n, i)
-  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost
-
-  -- Bridge the lowering's `Lean.Json` to the strict typed decoder's
-  -- ordered `JsonV` by re-parsing the compressed string (lossless: the
-  -- session-root shape has no order-sensitive objects, and JsonNumber
-  -- decimals survive the round trip).
-  let typed ← match Tropical.Parse.JsonV.parse parsed.compress with
-    | .error e => internalError s!"session root: ParsedProgram JSON re-parse failed: {e}"
-    | .ok jv =>
-      match Tropical.Parse.decodeProgram jv with
-      | .error e => internalError s!"session root: {e}"
-      | .ok p => pure p
-
   -- Root resolver = `sessionTypeResolver` parity: keyed by the stored
   -- program's name, instance order, first instance wins per name. Uses
   -- the instances' snapshots, never a late name lookup.
@@ -344,26 +504,32 @@ def syncCompile (env : Env) : EngineM Unit := do
           resolverTbl := resolverTbl.push (p.name, idx)
   let tbl := resolverTbl
 
-  -- Elaborate over the store arena. The appended root is transient —
-  -- it is consumed by this compile and not retained in the store.
-  -- Failure maps onto the envelope the TS path produced when its
-  -- compile-side `elaborate` threw: ElaborationError / CycleViolation
-  -- are plain Errors there, so `toEnvelope` made them `internal_error`
-  -- with the verbatim message.
-  let (rootElab?, elabErr?) :
-      Option (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) × Option String :=
+  -- EXPERIMENT (TROPICAL_ARROW, uncommitted): build the resolved session
+  -- root directly via `sessionToResolvedRoot` — the session → arrow path,
+  -- deleting the "resolved → named → resolved" parsed round-trip. Plan is
+  -- byte-identical to the elaborate path (gated by `runSessionViaArrowEquiv`
+  -- in Tropicaltest). With the var unset the legacy elaborate path runs
+  -- unchanged, so default behavior is untouched.
+  let (arena', rootIdx) ← if (← IO.getEnv "TROPICAL_ARROW").isSome then
+    match sessionToResolvedRoot st.arena lowerInstances wiresPost tbl with
+    | .error e => internalError e
+    | .ok r => pure r
+  else do
+    -- Legacy: session → parsed → reparse (Json → ordered JsonV, lossless)
+    -- → elaborate over the store arena. The appended root is transient.
+    let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost
+    let typed ← match Tropical.Parse.JsonV.parse parsed.compress with
+      | .error e => internalError s!"session root: ParsedProgram JSON re-parse failed: {e}"
+      | .ok jv =>
+        match Tropical.Parse.decodeProgram jv with
+        | .error e => internalError s!"session root: {e}"
+        | .ok p => pure p
+    -- Failure maps onto the recoverable envelope (ElaborationError /
+    -- CycleViolation): the previous kernel keeps playing.
     match Tropical.Ir.elaborateInto st.arena typed
         (some fun n => (tbl.find? (·.1 == n)).map (·.2)) with
-    | .error e => (none, some e.message)
-    | .ok (arena', rootIdx) => (some (arena', rootIdx), none)
-
-  if let some msg := elabErr? then
-    -- The previous kernel keeps playing — same recoverable-failure
-    -- shape as TS.
-    internalError msg
-
-  let some (arena', rootIdx) := rootElab?
-    | internalError "syncCompile: missing elaborated root (engine bug)"
+    | .error e => internalError e.message
+    | .ok r => pure r
   let rootCore ← match Tropical.Ir.Core.check arena' rootIdx with
     | .error e => internalError s!"syncCompile: post-elaboration Core check failed (engine bug): {e}"
     | .ok core => pure core
@@ -458,6 +624,61 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
 def compileMirrorPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM String := do
   let plan ← compileMirrorFlatPlan env mode
+  match plan.toWire with
+  | .error msg => internalError msg
+  | .ok j => pure j.compress
+
+/-- The C4 path: identical to `compileMirrorFlatPlan` but builds the session root
+    via `sessionToResolvedRoot` (direct, no `sessionToParsed → reparse →
+    elaborate`). Gated `tropical_resolved_1`/plan-identical against
+    `compileMirrorFlatPlan` on the golden corpus before it becomes the default. -/
+def compileMirrorFlatPlanViaArrow (env : Env) (mode : Tropical.Plan.CompilationMode) :
+    EngineM Tropical.Plan.FlatPlan := do
+  let st ← env.state.get
+  let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
+  let wiresPost := st.wires
+  Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
+  let storedProgName (i : InstanceInfo) : Option String :=
+    (i.resolvedIdx.bind st.arena.program?).map (·.name)
+  let lowerInstances := st.instances.map fun (n, i) =>
+    match storedProgName i with
+    | some pname => (n, { i with progMeta := { i.progMeta with programName := pname } })
+    | none => (n, i)
+  let mut resolverTbl : Array (String × Tropical.Ir.ProgramIdx) := #[]
+  for (_, i) in st.instances do
+    if let some idx := i.resolvedIdx then
+      if let some p := st.arena.program? idx then
+        if !resolverTbl.any (·.1 == p.name) then
+          resolverTbl := resolverTbl.push (p.name, idx)
+  let tbl := resolverTbl
+  -- THE DELETION: build the resolved root directly (no parsed round-trip).
+  let (arena', rootIdx) ← match sessionToResolvedRoot st.arena lowerInstances wiresPost tbl with
+    | .error e => internalError e
+    | .ok r => pure r
+  let rootCore ← match Tropical.Ir.Core.check arena' rootIdx with
+    | .error e => internalError s!"compileMirrorPlanViaArrow: post-construction Core check failed: {e}"
+    | .ok core => pure core
+  let mut coreInstances : Array (String × Tropical.Ir.Core.CoreProgram) := #[]
+  for (n, i) in st.instances do
+    let some pname := storedProgName i
+      | internalError s!"compileMirrorPlanViaArrow: instance '{n}' has no resolved snapshot (engine bug)"
+    let some core := rootCore.registryGet? pname
+      | internalError s!"compileMirrorPlanViaArrow: instance '{n}' program '{pname}' missing from root registry (engine bug)"
+    coreInstances := coreInstances.push (n, core)
+  match Tropical.Compile.compileSession {
+      instances := coreInstances
+      wiresPost
+      graphOutputs := st.graphOutputs
+      params := st.params
+      alloc
+      root := rootCore
+      mode } with
+  | .error msg => internalError msg
+  | .ok p => pure p
+
+def compileMirrorPlanViaArrow (env : Env) (mode : Tropical.Plan.CompilationMode) :
+    EngineM String := do
+  let plan ← compileMirrorFlatPlanViaArrow env mode
   match plan.toWire with
   | .error msg => internalError msg
   | .ok j => pure j.compress
@@ -1756,6 +1977,67 @@ def handleSetParam (env : Env) (args : Json) : EngineM Json := do
     env.runtime.setSlot idx value
   pure <| Json.mkObj [("name", Json.str name), ("value", valueJ)]
 
+/-- `set_param_glide`: a CLOSED-FORM parameter ramp (no per-sample state). The
+    kernel evaluates `f(τ) = v0 + (v1−v0)·smoothstep(clamp((τ−t0)/dur, 0, 1))` from
+    three slots (`param:<name>#v0/#v1/#t0`); this op RE-ANCHORS the ramp: read the
+    current sample index `now`, evaluate the ramp at `now` (so the new ramp starts
+    exactly where we are — no jump), then set `v0 = current, v1 = target, t0 = now`.
+    Stateless and click-free — the "state" is the anchor slots, navigable like τ.
+    `dur = 0.02·SR` samples (20 ms) matches the kernel's ramp, at any sample rate. -/
+def handleSetParamGlide (env : Env) (args : Json) : EngineM Json := do
+  let name := (argStr? args "name").getD ""
+  let target ← match getField? args "value" with
+    | some (.num n) => pure n.toFloat
+    | _ => internalError "set_param_glide: value must be a number"
+  let slotOf (sfx : String) : EngineM (Option UInt32) :=
+    env.runtime.slotIndex? s!"param:{name}#{sfx}"
+  let some _ := ← slotOf "v0"
+    | internalError s!"set_param_glide: no glide slots for '{name}'"
+  let read (sfx : String) : EngineM Float := do
+    match ← slotOf sfx with | some i => env.runtime.getSlot i | none => pure 0.0
+  let write (sfx : String) (v : Float) : EngineM Unit := do
+    match ← slotOf sfx with | some i => env.runtime.setSlot i v | none => pure ()
+  let now ← env.runtime.currentSampleIndex
+  let dur := (← env.runtime.sampleRate) * 0.02   -- 20 ms, matching the kernel's ramp
+  let v0 ← read "v0"; let v1 ← read "v1"; let t0 ← read "t0"
+  let raw := (now - t0) / dur
+  let s := if raw < 0.0 then 0.0 else if raw > 1.0 then 1.0 else raw
+  let curr := v0 + (v1 - v0) * (s * s * (3.0 - 2.0 * s))
+  write "v0" curr
+  write "v1" target
+  write "t0" now
+  pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
+
+/-- `set_param_freq`: a PHASE-ANCHORED frequency change. `freq = f·τ + φ_off` — so
+    changing `f` alone jumps the phase by `Δf·τ` (a click that grows with τ). If the
+    source carries a `#phase` offset slot, this bumps it by the phase the frequency
+    change would have jumped — `Δφ = ((inc₀ − inc₁)·T) / 2³²` cycles, `inc =
+    ⌊freq·2³²/SR⌋` (the phasor's own quantized increment), `T` = now — so the phase
+    stays CONTINUOUS across the change (a soft freq corner, not a hard click). This
+    is the stateless anchor: the accumulated phase lives in a param, navigable like
+    τ. No `#phase` slot (saw/morph, or knob-driven freq) ⇒ a raw freq write. -/
+def handleSetParamFreq (env : Env) (args : Json) : EngineM Json := do
+  let name := (argStr? args "name").getD ""
+  let target ← match getField? args "value" with
+    | some (.num n) => pure n.toFloat
+    | _ => internalError "set_param_freq: value must be a number"
+  let some freqIdx := ← env.runtime.slotIndex? s!"param:{name}"
+    | internalError s!"set_param_freq: no slot '{name}'"
+  match ← env.runtime.slotIndex? s!"param:{name}#phase" with
+  | some phaseIdx =>
+    let now ← env.runtime.currentSampleIndex
+    let f0 ← env.runtime.getSlot freqIdx
+    let sr ← env.runtime.sampleRate
+    let inc0 := Float.floor (f0 * 4294967296.0 / sr)
+    let inc1 := Float.floor (target * 4294967296.0 / sr)
+    let dcyc := ((inc0 - inc1) * now) / 4294967296.0
+    let off0 ← env.runtime.getSlot phaseIdx
+    let raw := off0 + dcyc
+    env.runtime.setSlot phaseIdx (raw - Float.floor raw)   -- frac → [0, 1)
+    env.runtime.setSlot freqIdx target
+  | none => env.runtime.setSlot freqIdx target
+  pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
+
 def handleListParams (env : Env) : EngineM Json := do
   let st ← env.state.get
   pure <| Json.arr <| st.params.map fun (n, v) =>
@@ -1791,8 +2073,26 @@ def handleListScopeTaps (env : Env) : EngineM Json := do
                 ("output", Json.str out), ("slot", Json.str s!"{inst}.{out}")]
   pure <| Json.mkObj [("taps", Json.arr taps)]
 
+/-- EXPERIMENT (`load_patch_graph`): compile a downstream-only patch graph (the
+    playground GUI) through the EmitArrow arrow lowering — `lowerGraph → normalize
+    (the slide) → emitTerm` — to a session root, then the production
+    `compileSession → buildKernelIr → loadIr` tail. A compile failure errors
+    BEFORE `loadIr`, so the previous kernel keeps playing. -/
+def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
+  let plan ← match ← Tropical.Playground.compilePlan args with
+    | .error e => internalError e
+    | .ok p => pure p
+  let (ir, planJson) ← buildKernelIr plan
+  env.runtime.loadIr ir planJson
+  -- Seed the session param mirror with the graph's knobs so `set_param` — which
+  -- guards on the mirror, then drives the live `param:<name>` slot — reaches them
+  -- without a relower. Replaces (not appends): the mirror tracks the current graph.
+  env.state.modify (fun st => { st with params := Tropical.Playground.knobParams args })
+  pure <| Json.mkObj [("ok", Json.bool true)]
+
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   wrap <| match name with
+  | "load_patch_graph" => handleLoadPatchGraph env args
   | "define_program"  => handleDefineProgram env args
   | "add_instance"    => handleAddInstance env args
   | "remove_instance" => handleRemoveInstance env args
@@ -1815,6 +2115,8 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "stop_audio"      => handleStopAudio env
   | "audio_status"    => handleAudioStatus env
   | "set_param"       => handleSetParam env args
+  | "set_param_glide" => handleSetParamGlide env args
+  | "set_param_freq"  => handleSetParamFreq env args
   | "list_params"     => handleListParams env
   | "debug_render"    => handleDebugRender env args
   | _ => internalError s!"Unknown tool: '{name}'"

@@ -146,6 +146,20 @@ LEAN_EXPORT lean_obj_res shim_runtime_get_slot(b_lean_obj_arg rt, uint32_t idx,
   return lean_io_result_mk_ok(lean_box_float(tropical_runtime_get_slot(unwrap(rt), idx)));
 }
 
+LEAN_EXPORT lean_obj_res shim_runtime_current_sample_index(b_lean_obj_arg rt,
+                                                           lean_obj_arg world) {
+  (void)world;
+  return lean_io_result_mk_ok(
+      lean_box_float(tropical_runtime_current_sample_index(unwrap(rt))));
+}
+
+LEAN_EXPORT lean_obj_res shim_runtime_sample_rate(b_lean_obj_arg rt,
+                                                  lean_obj_arg world) {
+  (void)world;
+  return lean_io_result_mk_ok(
+      lean_box_float(tropical_runtime_sample_rate(unwrap(rt))));
+}
+
 /* ── DAC ───────────────────────────────────────────────────────────────────── */
 
 LEAN_EXPORT lean_obj_res shim_dac_new_runtime(b_lean_obj_arg rt, uint32_t sample_rate,

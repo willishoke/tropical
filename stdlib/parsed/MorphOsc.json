@@ -16,7 +16,13 @@
    {"type": {"op": "nameRef", "name": "clock"},
     "name": "clk",
     "default":
-    {"op": "call", "callee": {"op": "nameRef", "name": "clock"}, "args": []}}]},
+    {"op": "call", "callee": {"op": "nameRef", "name": "clock"}, "args": []}},
+   {"type": {"op": "nameRef", "name": "unipolar"},
+    "name": "phase",
+    "default":
+    {"op": "call",
+     "callee": {"op": "nameRef", "name": "clamp"},
+     "args": [0, 0, 1]}}]},
  "op": "program",
  "name": "MorphOsc",
  "body":
@@ -29,7 +35,9 @@
     [{"value": {"op": "nameRef", "name": "clk"},
       "port": {"op": "nameRef", "name": "clk"}},
      {"value": {"op": "nameRef", "name": "freq"},
-      "port": {"op": "nameRef", "name": "freq"}}]},
+      "port": {"op": "nameRef", "name": "freq"}},
+     {"value": {"op": "nameRef", "name": "phase"},
+      "port": {"op": "nameRef", "name": "offset"}}]},
    {"program": {"op": "nameRef", "name": "Sin"},
     "op": "instanceDecl",
     "name": "sin",

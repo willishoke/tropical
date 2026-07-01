@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline';" />
+  <title>tropical playground</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header id="toolbar">
+    <span class="brand">tropical</span>
+    <div class="palette" id="palette"></div>
+    <div class="spacer"></div>
+    <button id="btn-audio" class="transport">▶ start audio</button>
+    <span id="status" class="status">booting engine…</span>
+  </header>
+
+  <main id="canvas">
+    <svg id="wires"></svg>
+  </main>
+
+  <footer id="hint">
+    drag from an <b>outlet</b> (right) to an <b>inlet</b> (left) to patch downstream ·
+    drag a <b>knob</b> vertically to tweak · <b>double-click</b> a node to delete ·
+    the patch lowers through the arrow slide on every edit
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -119,6 +119,17 @@ unsigned int     tropical_runtime_slot_index(tropical_runtime_t, const char* nam
 void             tropical_runtime_set_slot(tropical_runtime_t, unsigned int slot_index, double value);
 double           tropical_runtime_get_slot(tropical_runtime_t, unsigned int slot_index);
 
+/* The runtime's current sample index (τ of the next buffer to be processed) —
+   the coordinate the kernel reads as `tick`. The control plane stamps a glide's
+   start-tick with this so a closed-form parameter ramp `f(τ)` anchors to "now".
+   Returned as a double (sample indices are exact in f64 well past any session). */
+double           tropical_runtime_current_sample_index(tropical_runtime_t);
+
+/* The active kernel's sample rate (the same value the kernel reads for
+   `sampleRate()`), so the control plane can reproduce the phasor's quantized
+   increment when phase-anchoring a live frequency change. */
+double           tropical_runtime_sample_rate(tropical_runtime_t);
+
 /* Random-access render (scope / slave consumers): evaluate the active fused
    kernel over [start_index, start_index+count) and write each requested slot's
    per-sample trajectory into `out`, slot-major (out[k*count + i]). Exact and

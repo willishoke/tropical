@@ -1,0 +1,13 @@
+{
+  "name": "tropical-playground",
+  "version": "0.0.0",
+  "private": true,
+  "description": "PureData-style patch playground for tropical — downstream-only patching that flows through the session → arrow lowering.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}

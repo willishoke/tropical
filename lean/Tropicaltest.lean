@@ -74,6 +74,19 @@ def compilePatch (path : String) (mode : Tropical.Plan.CompilationMode) :
   | .ok planJson => pure (.ok planJson)
   | .error f => pure (.error f.toJson.compress)
 
+/-- Compile a patch via the C4 DIRECT session-root path (`sessionToResolvedRoot`,
+    no `sessionToParsed → elaborate`). For the round-trip-deletion equivalence
+    gate: this plan must equal `compilePatch`'s (the elaborate path). -/
+def compilePatchArrow (path : String) (mode : Tropical.Plan.CompilationMode) :
+    IO (Except String String) := do
+  let env ← Tropical.Engine.boot
+  let act : Tropical.EngineM String := do
+    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
+    Tropical.Engine.compileMirrorPlanViaArrow env mode
+  match ← act.run with
+  | .ok planJson => pure (.ok planJson)
+  | .error f => pure (.error f.toJson.compress)
+
 /-- Render a FlatPlan via the Lean-emitted-IR path (EmitLlvm → load_ir). -/
 def renderIrBytes (plan : Tropical.Plan.FlatPlan) : IO (Except String ByteArray) := do
   match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
@@ -1116,6 +1129,218 @@ private def runNegativeClock (arena : Arena)
       else
         IO.println s!"  FAIL  negative-clock  {bitDiff}/{n} bit-differing — negative-time phasor diverges"; pure false
 
+-- ── (h⁶) PRODUCTS / MIMO standard-rep differential (the DATA axis) ────────────
+-- `MorphOsc` built from the cartesian combinators (ClockPhasor ⋙ (saw &&& Sin)
+-- ⋙ crossfade) vs a straight-line reimplementation reusing the SAME integer
+-- phasor and Horner `Sin`. No warp, no sub-sample clock — so this is BIT-EXACT
+-- (like the convolution oracle, not the modulated-clock tolerance check). Three
+-- morph settings prove the diagonal feeds two GENUINELY DIFFERENT consumers and
+-- the crossfade blends them: morph=0 ≡ pure saw, morph=1 ≡ pure sine, morph=0.5
+-- ≡ the blend — each bit-exact, and saw ≢ sine (non-degenerate MIMO).
+private def runMorphOscDifferential (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let n : Nat := 1024
+  let lo : Nat := 4
+  let freqHz : Int := 2000
+  let twoPi : Float := 6.283185307179586
+  let sinkGain : Float := 0.05
+  -- the standard rep: the SAME crossfade arithmetic the engine emits, on the
+  -- SAME integer phasor + Horner Sin (`(1−m)·(2·phase−1) + m·Sin(2π·phase)`).
+  let refOut := fun (morphF : Float) (clk : Int) =>
+    let phase := phasorPhase clk freqHz
+    sinkGain * ((1.0 - morphF) * (2.0 * phase - 1.0) + morphF * sinH (twoPi * phase))
+  let render := fun (nm : String) (m : Tropical.EmitArrow.Sig) =>
+    match buildAndFinish (Tropical.EmitArrow.buildMorphOscLit nm freqHz m arena resolved) with
+    | .error e => (pure (.error e) : IO (Except String (Array Float)))
+    | .ok plan => renderPlanSamples plan n
+  match ← render "MorphSaw" (Tropical.EmitArrow.lit 0),
+        ← render "MorphSin" (Tropical.EmitArrow.lit 1),
+        ← render "MorphBlend" (Tropical.EmitArrow.lit 5 1) with
+  | .error e, _, _ | _, .error e, _ | _, _, .error e =>
+    IO.println s!"  FAIL  morphosc-mimo  build/render: {firstLine e}"; pure false
+  | .ok saw, .ok sinv, .ok blend =>
+    let mut sawDiff : Nat := 0
+    let mut sinDiff : Nat := 0
+    let mut blendDiff : Nat := 0
+    let mut maxBlend : Float := 0.0
+    let mut sawVsSin : Float := 0.0        -- the diagonal feeds two distinct shapes
+    for t in [lo:n] do
+      let clk : Int := Int.ofNat t * 4294967296
+      if saw[t]!.toBits   != (refOut 0.0 clk).toBits then sawDiff   := sawDiff   + 1
+      if sinv[t]!.toBits  != (refOut 1.0 clk).toBits then sinDiff   := sinDiff   + 1
+      if blend[t]!.toBits != (refOut 0.5 clk).toBits then blendDiff := blendDiff + 1
+      if blend[t]!.abs > maxBlend then maxBlend := blend[t]!.abs
+      if (saw[t]! - sinv[t]!).abs > sawVsSin then sawVsSin := (saw[t]! - sinv[t]!).abs
+    let samples := n - lo
+    IO.println s!"        standard rep = same integer phasor + Horner Sin, same crossfade arithmetic:"
+    IO.println s!"        result   engine MorphOsc vs std rep:  bit-differing  saw {sawDiff}/{samples} · sine {sinDiff}/{samples} · blend {blendDiff}/{samples}"
+    IO.println s!"        mimo     diagonal feeds distinct consumers: max|saw−sine|={sawVsSin}"
+    if maxBlend < 1e-3 then
+      IO.println s!"  FAIL  morphosc-mimo  carrier silent (maxBlend={maxBlend})"; pure false
+    else if sawVsSin < 1e-2 then
+      IO.println s!"  FAIL  morphosc-mimo  saw ≈ sine (max|Δ|={sawVsSin}) — diagonal degenerate"; pure false
+    else if sawDiff == 0 && sinDiff == 0 && blendDiff == 0 then
+      IO.println s!"  PASS  morphosc-mimo  ClockPhasor ⋙ (saw &&& Sin) ⋙ crossfade ≡ standard rep, bit-exact (saw/sine/blend 0/{samples}; max|saw−sine|={sawVsSin})"; pure true
+    else
+      IO.println s!"  FAIL  morphosc-mimo  bit-differing (saw {sawDiff} · sine {sinDiff} · blend {blendDiff}) — MIMO build diverges from the standard rep"; pure false
+
+-- ── (h⁷) THE SLIDE (WARP-PUSH): downstream insert → upstream warp, by the compiler ─
+-- The reified arrow term + `normalize` push warps up to the generators. Three
+-- gates: (1) byte-identity vs stdlib FlangeSin lives in the corpus section
+-- (slide(osc ⋙ flange) ≡ hand-written upstream FlangeSin); (2) slide-past-arr —
+-- a pointwise shaper between osc and flange, so the warp must COMMUTE PAST it
+-- (R1); (3) cascade — osc ⋙ flange ⋙ flange yields the 9-tap convolved
+-- multiplicity automatically.
+
+/-- Test 2: the warp must slide PAST a pointwise shaper to reach the generator.
+    `slide(osc ⋙ shaper ⋙ flange)` must byte-equal the hand-written upstream form
+    (shaper applied to osc at each warped clock). Byte-equal ⇒ R1 fired. -/
+private def runSlidePastArr (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match Tropical.EmitArrow.buildSlideShaperDownstream arena resolved,
+        Tropical.EmitArrow.buildSlideShaperUpstream arena resolved with
+  | .ok (aD, iD), .ok (aU, iU) =>
+    match emitResolvedWire aD iD, emitResolvedWire aU iU with
+    | .ok bytesD, .ok bytesU =>
+      if bytesD == bytesU then
+        IO.println s!"  PASS  slide-past-arr  warp commuted past the shaper: slide(osc ⋙ shaper ⋙ flange) ≡ upstream ({bytesD.length}B)"; pure true
+      else
+        IO.println s!"  FAIL  slide-past-arr  slide(downstream) ≠ upstream (down {bytesD.length}B, up {bytesU.length}B) — R1 (commute past arr) wrong"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-arr  emit: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-arr  build: {firstLine e}"; pure false
+
+/-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
+    the inner flanger's sum and fuses them, producing the oscillator read at the
+    nine convolved offsets automatically (the proper multiplicity, derived). We
+    assert the generator count (9 vs 3) and that the cascade is a real, non-silent
+    filter distinct from a single flanger. -/
+private def runSlideCascade (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match Tropical.EmitArrow.buildSlideDoubleFlanger arena resolved,
+        Tropical.EmitArrow.buildSlideSingleFlanger arena resolved with
+  | .ok (aD, iD), .ok (aS, iS) =>
+    let ninstD := ((aD.program? iD).map (·.decls.size)).getD 0
+    let ninstS := ((aS.program? iS).map (·.decls.size)).getD 0
+    match buildAndFinish (.ok (aD, iD)), buildAndFinish (.ok (aS, iS)) with
+    | .ok planD, .ok planS =>
+      match ← renderPlanSamples planD 512, ← renderPlanSamples planS 512 with
+      | .ok dbl, .ok sgl =>
+        let mut energy : Float := 0.0
+        let mut diff : Float := 0.0
+        for t in [8:512] do
+          energy := energy + dbl[t]! * dbl[t]!
+          if (dbl[t]! - sgl[t]!).abs > diff then diff := (dbl[t]! - sgl[t]!).abs
+        IO.println s!"        cascade osc ⋙ flange ⋙ flange: {ninstD} generator instances (single flange: {ninstS}); the slide convolved the kernels — 9 = 3⊛3 taps, no coincident-offset merge"
+        if ninstD == 9 && ninstS == 3 && energy > 1e-6 && diff > 1e-4 then
+          IO.println s!"  PASS  slide-cascade  9-tap multiplicity derived by the slide (energy={energy}, |double−single|max={diff})"; pure true
+        else
+          IO.println s!"  FAIL  slide-cascade  ninstD={ninstD} (want 9) ninstS={ninstS} (want 3) energy={energy} diff={diff}"; pure false
+      | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-cascade  render: {firstLine e}"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-cascade  finish: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-cascade  build: {firstLine e}"; pure false
+
+-- ── (h⁸) THE PATCHER LOWERING: a downstream-only patch graph → arrow term ──────
+-- The MVP front end. A wire is the effect applied to the upstream term (⋙), a
+-- fan-out is the shared upstream term (Δ), a mixer is the sum. L1 (byte-identity
+-- vs FlangeSin from a GRAPH) is in the corpus section; here: L2 (a chain graph ≡
+-- the hand-built term) and L3 (a fan-out graph renders, with the diagonal).
+
+/-- L2: lowering the chain graph `osc → flange → flange` must byte-equal the
+    hand-written nested term (`buildSlideDoubleFlanger`). Graph-lowering ≡
+    hand-term ⇒ the front end composes effects exactly as `⋙`. -/
+private def runLoweringChain (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match Tropical.EmitArrow.buildDoubleFlangeFromGraph arena resolved,
+        Tropical.EmitArrow.buildSlideDoubleFlanger arena resolved with
+  | .ok (aG, iG), .ok (aH, iH) =>
+    match emitResolvedWire aG iG, emitResolvedWire aH iH with
+    | .ok bytesG, .ok bytesH =>
+      if bytesG == bytesH then
+        IO.println s!"  PASS  lowering-chain  lower(osc→flange→flange) ≡ hand-built nested term ({bytesG.length}B)"; pure true
+      else
+        IO.println s!"  FAIL  lowering-chain  graph {bytesG.length}B ≠ hand-term {bytesH.length}B"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  lowering-chain  emit: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  lowering-chain  build: {firstLine e}"; pure false
+
+/-- L3: a fan-out patch — `osc` fanned into two flangers, mixed (the diagonal +
+    the product collapse through the lowering). Asserts six generator instances
+    (3 per flanger; the source re-derived per tap) and a real, non-silent mix. -/
+private def runLoweringFanOut (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match Tropical.EmitArrow.buildFanOutFromGraph arena resolved with
+  | .ok (aF, iF) =>
+    let ninst := ((aF.program? iF).map (·.decls.size)).getD 0
+    match buildAndFinish (.ok (aF, iF)) with
+    | .ok plan =>
+      match ← renderPlanSamples plan 512 with
+      | .ok got =>
+        let mut energy : Float := 0.0
+        for t in [8:512] do energy := energy + got[t]! * got[t]!
+        IO.println s!"        fan-out osc → (flange δ₁ &&& flange δ₂) → mix: {ninst} generator instances (the diagonal re-sources the osc per tap)"
+        if ninst == 6 && energy > 1e-6 then
+          IO.println s!"  PASS  lowering-fanout  diagonal + mix through the lowering ({ninst} instances, energy={energy})"; pure true
+        else
+          IO.println s!"  FAIL  lowering-fanout  ninst={ninst} (want 6) energy={energy}"; pure false
+      | .error e => IO.println s!"  FAIL  lowering-fanout  render: {firstLine e}"; pure false
+    | .error e => IO.println s!"  FAIL  lowering-fanout  finish: {firstLine e}"; pure false
+  | .error e => IO.println s!"  FAIL  lowering-fanout  build: {firstLine e}"; pure false
+
+/-- Modulated-effect node: a `.fm` node routes one node's signal into a carrier's
+    clock (FM/PM). Gated byte-identical against the hand-built carriers the
+    bit-exact modulated-clock / PM-of-PM differentials already render: M1 a single
+    FM node ≡ `buildFmCarrier`; M2 nested `.fm` nodes ≡ `buildPmPmCarrier`. So the
+    `osc → flange → osc.fm` edge lowers to the proven modulated warp. -/
+private def runModulatedNode (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let cmp := fun (label : String)
+      (g h : Except String (Arena × ProgramIdx)) =>
+    match g, h with
+    | .ok (aG, iG), .ok (aH, iH) =>
+      match emitResolvedWire aG iG, emitResolvedWire aH iH with
+      | .ok bg, .ok bh =>
+        if bg == bh then (true, s!"  PASS  modulated-node/{label}  graph fm node ≡ hand-built carrier ({bg.length}B)")
+        else (false, s!"  FAIL  modulated-node/{label}  graph {bg.length}B ≠ carrier {bh.length}B")
+      | .error e, _ | _, .error e => (false, s!"  FAIL  modulated-node/{label}  emit: {firstLine e}")
+    | .error e, _ | _, .error e => (false, s!"  FAIL  modulated-node/{label}  build: {firstLine e}")
+  let (ok1, msg1) := cmp "fm"
+    (Tropical.EmitArrow.buildFmFromGraph 2000 200 3 arena resolved)
+    (Tropical.EmitArrow.buildFmCarrier "FmRef" 2000 200 3 arena resolved)
+  IO.println msg1
+  let (ok2, msg2) := cmp "pm-of-pm"
+    (Tropical.EmitArrow.buildPmPmFromGraph 2000 200 50 3 2 arena resolved)
+    (Tropical.EmitArrow.buildPmPmCarrier "PmRef" 2000 200 50 3 2 arena resolved)
+  IO.println msg2
+  pure (ok1 && ok2)
+
+-- ── (h⁹) C4: session → resolved root DIRECTLY ≡ the elaborate round-trip ───────
+-- Every patch compiles to a session; this gate compiles each BOTH ways — the
+-- production `sessionToParsed → elaborate` path and the direct
+-- `sessionToResolvedRoot` path — and asserts the plans are byte-identical, so
+-- the round-trip deletion is provably faithful before it becomes the default.
+private def runSessionViaArrowEquiv : IO Bool := do
+  let entries ← (System.FilePath.mk "patches").readDir
+  let names := (entries.filterMap fun e =>
+    if e.fileName.endsWith ".json" then some e.fileName else none).qsort (· < ·)
+  let mut ok := true
+  let mut matched := 0
+  let mut skipped := 0
+  for fn in names do
+    let path := s!"patches/{fn}"
+    match ← compilePatch path .fused with
+    | .error _ => skipped := skipped + 1   -- not session-compilable on the baseline either
+    | .ok elabPlan =>
+      match ← compilePatchArrow path .fused with
+      | .error e =>
+        IO.println s!"  FAIL  session-via-arrow/{fn}  direct compile: {firstLine e}"; ok := false
+      | .ok arrowPlan =>
+        if elabPlan == arrowPlan then matched := matched + 1
+        else
+          IO.println s!"  FAIL  session-via-arrow/{fn}  plan differs (elab {elabPlan.length}B, direct {arrowPlan.length}B)"
+          ok := false
+  if ok then
+    IO.println s!"  PASS  session-via-arrow  direct root ≡ elaborated root, plan-identical ({matched} patches{if skipped > 0 then s!"; {skipped} non-session skipped" else ""})"
+  pure ok
+
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -1167,6 +1392,11 @@ def main (args : List String) : IO UInt32 := do
     else
       IO.println s!"  FAIL  op-coverage  expected {expected.take 16} got {got.take 16}"
       failed := failed + 1
+
+  -- ── (c′) C4: session → resolved root directly ≡ the elaborate round-trip ───
+  IO.println "session via direct root (sessionToResolvedRoot ≡ sessionToParsed→elaborate):"
+  total := total + 1
+  if !(← runSessionViaArrowEquiv) then failed := failed + 1
 
   -- ── (d) let-binding serialization order (ordered-array round-trip) ─────────
   IO.println "let serialization order:"
@@ -1228,6 +1458,28 @@ def main (args : List String) : IO UInt32 := do
     total := total + 1
     if !(← runEmitCorpusGate "FixedSinOsc" "FixedSinOsc" arena resolved
           Tropical.EmitArrow.buildFixedSinOsc) then
+      failed := failed + 1
+    -- products/MIMO: MorphOsc — a real multi-port body (ClockPhasor ⋙ (saw &&&
+    -- Sin) ⋙ crossfade) built from the cartesian combinators, byte-identical.
+    total := total + 1
+    if !(← runEmitCorpusGate "MorphOsc" "MorphOsc" arena resolved
+          Tropical.EmitArrow.buildMorphOsc) then
+      failed := failed + 1
+    -- THE SLIDE (WARP-PUSH), Test 1: build FlangeSin from the DOWNSTREAM-insert
+    -- form (osc ⋙ flange, warps unreduced), run the slide, emit — byte-identical
+    -- to stdlib FlangeSin. The compiler turns "flanger dropped downstream" into
+    -- "oscillator read at warped clocks." First compiler-driven downstream→upstream.
+    total := total + 1
+    if !(← runEmitCorpusGate "FlangeSinSlide" "FlangeSin" arena resolved
+          Tropical.EmitArrow.buildFlangerViaSlide) then
+      failed := failed + 1
+    -- THE PATCHER LOWERING, L1: lower the GRAPH `osc → flange` (instances + a
+    -- downstream wire), slide, emit — byte-identical to stdlib FlangeSin. The
+    -- user's patch graph, lowered end to end, reaches the exact hand-written
+    -- program. This is the MVP front end hitting the frozen artifact.
+    total := total + 1
+    if !(← runEmitCorpusGate "FlangeFromGraph" "FlangeSin" arena resolved
+          Tropical.EmitArrow.buildFlangeFromGraph) then
       failed := failed + 1
     IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
     -- Law 1 — inverse/cancellation:  warp(back δ) ⋙ warp(fwd δ) = id
@@ -1319,6 +1571,38 @@ def main (args : List String) : IO UInt32 := do
     IO.println "negative-time boundary (random access ≠ streaming zero-pad):"
     total := total + 1
     if !(← runNegativeClock arena resolved) then
+      failed := failed + 1
+    -- ── (h⁶) products / MIMO: a real multi-port body from the cartesian
+    --   combinators vs a straight-line standard rep — the DATA axis (the warp
+    --   gates above are all the CLOCK axis).
+    IO.println "products/MIMO standard-rep differential (multi-port body ≡ closed form):"
+    total := total + 1
+    if !(← runMorphOscDifferential arena resolved) then
+      failed := failed + 1
+    -- ── (h⁷) THE SLIDE (WARP-PUSH): the compiler pushes a downstream effect's
+    --   warps up to the generators. R1 (commute past arr) + the cascade
+    --   multiplicity; Test 1 (byte-identity vs FlangeSin) is in the corpus block.
+    IO.println "warp-push slide (downstream insert → upstream warp, by the compiler):"
+    total := total + 1
+    if !(← runSlidePastArr arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runSlideCascade arena resolved) then
+      failed := failed + 1
+    -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
+    --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the
+    --   corpus block; here L2 (chain graph ≡ hand-term) and L3 (fan-out + mix).
+    IO.println "patcher lowering (downstream-only patch graph → arrow term):"
+    total := total + 1
+    if !(← runLoweringChain arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runLoweringFanOut arena resolved) then
+      failed := failed + 1
+    -- modulated-effect node: signal-into-clock (FM/PM), the osc → flange →
+    -- osc.fm edge; ≡ the bit-exact-proven FM / PM-of-PM carriers.
+    total := total + 1
+    if !(← runModulatedNode arena resolved) then
       failed := failed + 1
 
   IO.println ""

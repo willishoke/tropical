@@ -182,6 +182,15 @@ structure Voice where
   programName : String
   wire : Clock → Array InstanceInput
   output : OutputIdx := ⟨0⟩
+  /-- The phase-anchor hook (the slide in the phase domain). When set to
+      `(phasePort, corr)`, the SLIDE (`emitTermC`) adds `corr shift` to this voice's
+      `phasePort` input for each warped copy, where `shift = clk − warpedClk` is the
+      clock shift the slide pushed onto that copy. Since phase = inc·clk, a clock
+      shift maps to a phase shift via `inc`, so threading the anchor across the
+      cartesian copies keeps every warped read (delay/flange tap) phase-continuous
+      across a live freq change — not just the un-warped read. `none` = no
+      correction (byte-gated voices are untouched). -/
+  phaseAnchor : Option (InputIdx × (Clock → Sig)) := none
 
 /-- The `FixedSinOsc` voice — pitch at port 0, clock at port 1 (source order). -/
 def fixedSinOscVoice : Voice :=
@@ -208,6 +217,100 @@ def Builder.osc (b : Builder) (v : Voice) (name : String) (clkE : Clock) :
   let inst : BodyDecl := .inst name v.programName #[] (v.wire clkE)
   let i := b.decls.size
   (.nestedOut ⟨i⟩ v.output, { b with decls := b.decls.push inst })
+
+-- ─────────────────────────────────────────────────────────────
+-- PRODUCTS / MIMO — the cartesian combinator surface (the DATA axis)
+-- ─────────────────────────────────────────────────────────────
+
+/-! `warp` is the CLOCK axis; this is the orthogonal DATA axis. Post-strata, a
+    "value" is not one scalar but a *bundle* of scalar wires — a categorical
+    PRODUCT. A morphism `A ⇝ B` is then a function from a wire-bundle to a
+    wire-bundle that accretes the instance decls it sources along the way:
+
+      `Mor := tuple of input wires → Builder → (tuple of output wires, Builder)`
+
+    The structure is **cartesian, not closed**: it has products (concatenation
+    of bundles), the diagonal (duplication), and composition — but no
+    exponentials, no closures, no runtime higher-order programs. Every
+    combinator is a SMART CONSTRUCTOR that emits the post-strata scalar DAG at
+    build time; none survives to run time. Crucially `⋙` (composition) **is**
+    `inlineInstances`: `g ⋙ f` feeds f's output wires straight into g, building
+    one flattened DAG with no instance boundary between them — the combinator
+    layer's image of the strata pass it absorbs. (Hughes' `first` is the whole
+    of MIMO; the named-port ⟷ tuple bridge — `instMor` — is its primitive.) -/
+
+/-- A cartesian morphism in the wire category: consumes a product of input
+    wires, accretes instance decls, produces a product of output wires. Objects
+    are wire-bundle ARITIES (the splitter combinators carry them explicitly,
+    since the category is untyped-but-arity-indexed). -/
+abbrev Mor := Array Sig → Builder → (Array Sig × Builder)
+
+/-- Identity (`arr id`) — passes its whole bundle through untouched. Absorbed
+    by `identityElim` at construction: `idMor ⋙ f = f` holds definitionally. -/
+def idMor : Mor := fun xs b => (xs, b)
+
+/-- Sequential composition `g ⋙ f` (read left-to-right): the LEFT runs first and
+    its outputs feed the right. THIS is inlining — there is no instance boundary
+    between the two, just one threaded DAG (the absorbed `inlineInstances`). -/
+def seq (f g : Mor) : Mor := fun xs b => let (ys, b) := f xs b; g ys b
+
+/-- Fan-out / the cartesian diagonal `f &&& g`: run BOTH on the same input,
+    concatenating their outputs. The Builder threads f-then-g, so the sourced
+    instances get deterministic indices. The shared input bundle is the diagonal
+    `Δ` — at the Lean level it is plain value reuse, which is exactly the
+    post-strata DAG's shared sub-node. -/
+def fan (f g : Mor) : Mor := fun xs b =>
+  let (ys, b) := f xs b
+  let (zs, b) := g xs b
+  (ys ++ zs, b)
+
+/-- Parallel product `f *** g`, split at arity `m`: `f` consumes the first `m`
+    wires, `g` the rest; outputs concatenate. The bifunctor on products. -/
+def par (m : Nat) (f g : Mor) : Mor := fun xs b =>
+  let (ys, b) := f (xs.extract 0 m) b
+  let (zs, b) := g (xs.extract m xs.size) b
+  (ys ++ zs, b)
+
+/-- `first f` (Hughes): apply `f` to the first `m` wires, pass the remaining
+    bundle through unchanged. `first m f = par m f idMor`. The single primitive
+    from which all of MIMO is generated. -/
+def first (m : Nat) (f : Mor) : Mor := par m f idMor
+
+/-- `second g`: dual of `first` — pass the first `m` wires through, apply `g` to
+    the rest. -/
+def second (m : Nat) (g : Mor) : Mor := par m idMor g
+
+/-- The diagonal `Δ : A ⇝ A × A` — duplicate the whole bundle. -/
+def dup : Mor := fun xs b => (xs ++ xs, b)
+
+/-- Left projection `π₁` — keep the first `m` wires, drop the rest. -/
+def exl (m : Nat) : Mor := fun xs b => (xs.extract 0 m, b)
+
+/-- Right projection `π₂` — drop the first `m` wires, keep the rest. -/
+def exr (m : Nat) : Mor := fun xs b => (xs.extract m xs.size, b)
+
+/-- Lift a pure wire-bundle function into a morphism (`arr`, RESTRICTED): no
+    instances, just structural/arithmetic rewiring of scalar `Expr`s. This is
+    the `arr` of a cartesian (not closed) arrow — a fixed structural map, never
+    an arbitrary host closure. -/
+def arrMor (f : Array Sig → Array Sig) : Mor := fun xs b => (f xs, b)
+
+/-- THE NAMED-PORT ⟷ TUPLE BRIDGE — the MIMO primitive. Instantiate program
+    `programName` (a named multi-port morphism `A ⇝ B`) by assigning the input
+    wire bundle to ports `portOrder` positionally, reading its `numOut` outputs
+    back as a bundle. The categorical content: a named multi-port instance IS a
+    morphism between products; this bridge is the iso between its named (record)
+    presentation and the positional (tuple) one. Emits a COARSE instance — `⋙`
+    and strata's `inlineInstances` flatten it; the combinator surface is what
+    the cutover keeps. -/
+def instMor (name programName : String) (portOrder : Array InputIdx)
+    (numOut : Nat) : Mor := fun args b =>
+  let inputs : Array InstanceInput :=
+    (portOrder.zip args).map (fun (p, v) => ⟨p, v⟩)
+  let i := b.decls.size
+  let inst : BodyDecl := .inst name programName #[] inputs
+  let outs : Array Sig := (Array.range numOut).map (fun o => .nestedOut ⟨i⟩ ⟨o⟩)
+  (outs, { b with decls := b.decls.push inst })
 
 -- ─────────────────────────────────────────────────────────────
 -- `warpBank` — the voice-generic flanger combinator
@@ -375,7 +478,7 @@ def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) 
   let inc := toIntE (div (mul freqIn twoPow32) .sampleRate)
   let thi := rshift clk (lit 32)
   let tlo := bitAnd clk mask
-  let off := toIntE (mul (clampE (lit 0) (lit 0) (lit 1)) twoPow32)   -- offset:unipolar=0
+  let off := toIntE (mul (.inputRef ⟨2⟩) twoPow32)   -- offset = the `phase` input (port 2)
   let acc := add (add (mul inc thi) (rshift (mul inc tlo) (lit 32))) off
   let phase := clampE (div (toFloatE (bitAnd acc mask)) twoPow32) (lit 0) (lit 1)
   -- Phase → [0, 2π).
@@ -401,12 +504,135 @@ def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) 
       { name := "freq", type? := some (.scalar .float),
         default? := some (selectE (gt (lit 440) (lit 0)) (lit 440) (lit 0)) },
       { name := "clk", type? := some (.scalar .int),
-        default? := some (lshift .sampleIndex (lit 32)) } ]
+        default? := some (lshift .sampleIndex (lit 32)) },
+      { name := "phase", type? := some (.scalar .float),
+        default? := some (clampE (lit 0) (lit 0) (lit 1)) } ]
     outputs := #[{ name := "sine", type? := some (.scalar .float) }]
     decls := #[]
     assigns := #[{ target := .port ⟨0⟩, expr := sine }]
     binderCount := 0
     registry := #[] }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  .ok ({ arena with programs := arena.programs.push prog }, idx)
+
+-- ─────────────────────────────────────────────────────────────
+-- C1 — a real MULTI-PORT program from the cartesian combinators: `MorphOsc`
+-- ─────────────────────────────────────────────────────────────
+
+/-! `buildFixedSinOsc` proved the combinators can emit a SISO generator's body
+    from scratch (absorbing `inlineInstances` for one voice). `MorphOsc` is the
+    DATA-axis step up — a genuine multi-port composition, built point-free from
+    the products surface above:
+
+      `ClockPhasor ⋙ (saw &&& Sin) ⋙ crossfade`
+
+    It exercises everything `warpBank` did not: a real multi-INPUT instance
+    (`ClockPhasor(clk, freq)` via the named-port bridge), the `ph.phase` diagonal
+    fanned into *heterogeneous* consumers (a saw shaper AND a `Sin` instance —
+    `&&&`), genuine `⋙` composition between two DIFFERENT sub-programs
+    (ClockPhasor's phase feeds Sin's `x`), and the crossfade product
+    `(1−morph)·saw + morph·sin`. The byte-gate (`runEmitCorpusGate "MorphOsc"`)
+    asserts this reproduces the hand-written `stdlib/MorphOsc.md` exactly. -/
+
+/-- Mirror the elaborator's `registerInstanceDecl` over a sequence of
+    instantiated program names: each adds `(name, idx)` then merges that
+    program's own registry (skipping keys already present), in declaration
+    order. Generalizes `buildWarpBank`'s single-voice registry merge to the
+    several distinct programs a multi-instance body references. -/
+def buildRegistry (arena : Arena) (resolved : Array (String × ProgramIdx))
+    (programNames : Array String) : Except String (Array (String × ProgramIdx)) := do
+  let mut registry : Array (String × ProgramIdx) := #[]
+  for pn in programNames do
+    let some idx := (resolved.find? (·.1 == pn)).map (·.2)
+      | .error s!"EmitArrow: program '{pn}' not found in the elaborated stdlib chain"
+    let some prog := arena.program? idx
+      | .error s!"EmitArrow: program '{pn}' index out of range"
+    if !registry.any (·.1 == prog.name) then registry := registry.push (prog.name, idx)
+    for (k, v) in prog.registry do
+      if !registry.any (·.1 == k) then registry := registry.push (k, v)
+  pure registry
+
+/-- ClockPhasor's input ports MorphOsc fills: `clk` (port 0), `freq` (port 1),
+    `offset` (port 2 — the phase-anchor hook, wired from MorphOsc's `phase`). -/
+def clockPhasorPorts : Array InputIdx := #[⟨0⟩, ⟨1⟩, ⟨2⟩]
+
+/-- The phasor morphism `[clk, freq, offset] ⇝ [phase]` — the named-port bridge
+    over `ClockPhasor`. -/
+def phasorMor : Mor := instMor "ph" "ClockPhasor" clockPhasorPorts 1
+
+/-- The saw shaper `[phase] ⇝ [2·phase − 1]` (a naive ramp; pure `arr`). -/
+def sawMor : Mor := arrMor (fun w => #[sub (mul (lit 2) w[0]!) (lit 1)])
+
+/-- The sine path `[phase] ⇝ [Sin(2π·phase).out]` — scale-by-2π (`arr`) ⋙ the
+    `Sin` bridge. The `⋙` here is the cross-program inline: `Sin`'s body is
+    fed `2π·phase` with no surviving instance boundary. -/
+def sinMor : Mor :=
+  seq (arrMor (fun w => #[mul (lit 6283185307179586 15) w[0]!]))
+      (instMor "sin" "Sin" #[⟨0⟩] 1)
+
+/-- The crossfade product `[a, b, mix] ⇝ [(1−mix)·a + mix·b]` (pure `arr`) —
+    `CrossFade`'s body, inlined. -/
+def crossfadeMor : Mor :=
+  arrMor (fun w => #[add (mul (sub (lit 1) w[2]!) w[0]!) (mul w[2]! w[1]!)])
+
+/-- `MorphOsc` as one cartesian pipeline over inputs `[freq, morph, clk, phase]`:
+    route to `[clk, freq, phase, morph]`, run the phasor on the first three
+    (`clk, freq, offset`) while `morph` rides along (`first 3`), fan the phase into
+    saw and sine while `morph` rides along (`first 1 (saw &&& sin)`), then
+    crossfade. The whole body is `ClockPhasor ⋙ (saw &&& Sin) ⋙ crossfade`; `morph`
+    is threaded through the products, never recomputed. -/
+def morphOscMor : Mor :=
+  seq (arrMor (fun w => #[w[2]!, w[0]!, w[3]!, w[1]!]))   -- [freq,morph,clk,phase] → [clk,freq,phase,morph]
+    (seq (first 3 phasorMor)                              -- → [phase, morph]
+      (seq (first 1 (fan sawMor sinMor))                  -- → [saw, sin, morph]
+           crossfadeMor))                                  -- → [out]
+
+/-- Build the EmitArrow `MorphOsc` (real input ports) into `arena` — the
+    products/MIMO corpus gate. Byte-identical to `diffcli emit-stdlib MorphOsc`.
+    The input decls reproduce the elaborator's lowering of the source port types
+    (`freq` ⇒ `select(hz>0, hz, 0)`, `unipolar` ⇒ `clamp _ 0 1`,
+    `clock` ⇒ `sampleIndex << 32`); the registry links `ClockPhasor` and `Sin`. -/
+def buildMorphOsc (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← buildRegistry arena resolved #["ClockPhasor", "Sin"]
+  let (outs, b) := morphOscMor #[.inputRef ⟨0⟩, .inputRef ⟨1⟩, .inputRef ⟨2⟩, .inputRef ⟨3⟩] {}
+  let prog : Program := {
+    name := "MorphOsc"
+    inputs := #[
+      { name := "freq", type? := some (.scalar .float),
+        default? := some (selectE (gt (lit 220) (lit 0)) (lit 220) (lit 0)) },
+      { name := "morph", type? := some (.scalar .float),
+        default? := some (clampE (lit 0) (lit 0) (lit 1)) },
+      clkInputDecl,
+      { name := "phase", type? := some (.scalar .float),
+        default? := some (clampE (lit 0) (lit 0) (lit 1)) } ]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := outs[0]! }]
+    binderCount := 0
+    registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  .ok ({ arena with programs := arena.programs.push prog }, idx)
+
+/-- An input-free `MorphOsc` carrier (literal `freqHz`, literal `morph`,
+    closed-form `clk = sampleIndex << 32`) for the standard-rep differential —
+    same combinator pipeline as `buildMorphOsc`, but renderable directly as a
+    session root (no input ports to bind), like the warp-law carriers. -/
+def buildMorphOscLit (name : String) (freqHz : Int) (morph : Expr)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← buildRegistry arena resolved #["ClockPhasor", "Sin"]
+  -- `clk = sampleIndex << 32` inline (the `clkInputDecl` default; `clockLit` is
+  -- defined below in the warp-law section, so spell it out here).
+  let (outs, b) := morphOscMor #[lit freqHz, morph, .binary .lshift .sampleIndex (lit 32), lit 0] {}
+  let prog : Program := {
+    name
+    inputs := #[]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := outs[0]! }]
+    binderCount := 0
+    registry }
   let idx : ProgramIdx := ⟨arena.programs.size⟩
   .ok ({ arena with programs := arena.programs.push prog }, idx)
 
@@ -908,5 +1134,424 @@ def buildFixedFlangerThenReverse (arena : Arena) : Arena × ProgramIdx :=
   let ahead := fixedPhase (tapClk (fun c => add c delta1))
   buildExprCarrier "FixedFlangerThenReverse"
     (fixedOut (fixedFlangerSum dry past ahead)) arena
+
+-- ─────────────────────────────────────────────────────────────
+-- M8 — the SLIDE (WARP-PUSH): a REIFIED arrow term + the τ-push rewrite
+-- ─────────────────────────────────────────────────────────────
+
+/-! Everything above is the SMART-CONSTRUCTOR (deep-by-emission) layer: the
+    combinators build the IR directly, with nothing to inspect or rewrite. The
+    slide needs the opposite — a REIFIED arrow term it can pattern-match — because
+    WARP-PUSH is a *rewrite*: it takes an effect presented DOWNSTREAM (`warp`
+    applied to a signal) and pushes the warp UP through the stateless cone until
+    it lands as a generator's clock argument. Until now the warped clocks were
+    written by hand (`warpBank` builds the already-upstream form); this section
+    makes the COMPILER perform downstream→upstream.
+
+    `ArrowTerm` is a tiny inspectable arrow AST. The only non-trivial node is
+    `warp φ t` — `warp(φ) ⋙ t`, kept UNREDUCED. `normalize` (the slide) is three
+    law-justified rules plus the fork over products:
+
+      * `warp φ ⋙ arr f      ⟶ arr f ⋙ warp φ`     (slide past a pointwise node, R1)
+      * `warp φ ⋙ warp ψ     ⟶ warp (φ∘ψ)`          (fuse, R2)
+      * `warp φ ⋙ gen[clk:=c] ⟶ gen[clk:=φ c]`       (absorb into the clock, R4)
+      * `warp φ ⋙ (a + b)    ⟶ (warp φ ⋙ a) + (warp φ ⋙ b)`, and through `scale`
+                                                     (fork over the product, R3)
+
+    Crucially the warp/arr COMMUTATION (R1) is the first thing in this whole file
+    that the arrow LAWS make true and that plain `let`/composition does NOT give
+    you for free — this is where the EDSL stops being re-spelled `let` and starts
+    earning its keep. The denotation is `⟦warp φ t⟧ = ⟦t⟧ ∘ φ`, so the slide is
+    just ∘-associativity, exactly the static-warp lawfulness already proven. -/
+
+/-- A reified, inspectable arrow term. `gen` is a voice instance whose clock arg
+    is the warp target; `warp φ t` is `warp(φ) ⋙ t` kept unreduced; `scale`/`arrUn`
+    are pointwise (clock-agnostic) `arr`s; `sum` is the left-assoc weighted sum
+    (the cartesian product collapse). Functions are carried opaquely — the slide
+    composes/applies them, never inspects them. -/
+inductive ArrowTerm where
+  | gen (v : Voice) (name : String) (clk : Clock)
+  | warp (φ : Clock → Clock) (t : ArrowTerm)
+  | scale (w : Sig) (t : ArrowTerm)
+  | arrUn (f : Sig → Sig) (t : ArrowTerm)
+  | sum (ts : Array ArrowTerm)
+  /-- A SIGNAL-dependent warp — the data-into-clock edge, made first-class. Bends
+      the clock of `t` by `mw baseClk modSig`, where `modSig` is the SIGNAL of
+      `modulator` (another sub-term, a function of τ, so the warp stays a closed
+      form — the PM-of-PM lawfulness). This is the TOTAL generalization of the old
+      fused `fmGen`: it is a WRAPPER (like `warp`), so signal-warps compose with
+      plain warps and with each other — `swarp ∘ swarp`, `warp ∘ swarp`, all nest.
+      `fmGen carrier base mw mod` is just `swarp mw mod (gen carrier base)`. The
+      slide (in `emitTermC`) distributes it onto the generators `t` feeds. -/
+  | swarp (mw : Clock → Sig → Clock) (modulator : ArrowTerm) (t : ArrowTerm)
+  /-- A τ-CONSTANT leaf — a bare signal `s` that does not read the clock (a param
+      slot read `paramRef`, or any literal). It has no generator, so the slide's
+      clock transform threads STRAIGHT PAST it (warping a constant is the
+      constant). This is what a "knob" node lowers to: its value is a module slot,
+      wireable into any modulator (`swarp`/`fm`) or generator-pitch position, and
+      driven live by `set_param` — no per-sample state, so no relower needed. -/
+  | konst (s : Sig)
+
+instance : Inhabited ArrowTerm := ⟨.sum #[]⟩
+
+/-- Normalize a term's sub-structure (the modulators, the branches). The SLIDE
+    itself — pushing every `warp`/`swarp` onto the generators it feeds — is
+    realized in `emitTermC`, which threads the composed clock transform down to
+    each generator. Keeping warps as WRAPPERS here (rather than eagerly fusing
+    them into generator clocks) is exactly what makes the algebra TOTAL: the slide
+    is function composition of clock transforms, so `warp ∘ warp`, `warp ∘ swarp`,
+    and `swarp ∘ swarp` all compose — there is no case it cannot reduce. -/
+partial def normalize : ArrowTerm → ArrowTerm
+  | .gen v name clk => .gen v name clk
+  | .scale w t => .scale w (normalize t)
+  | .arrUn f t => .arrUn f (normalize t)
+  | .sum ts => .sum (ts.map normalize)
+  | .warp φ t => .warp φ (normalize t)
+  | .swarp mw mod t => .swarp mw (normalize mod) (normalize t)
+  | .konst s => .konst s
+
+/-- Emit a (normalized) arrow term to its output signal. Each `gen` sources a
+    voice instance in left-to-right order (matching `warpBank`'s instance order);
+    `scale`/`arrUn` are the pointwise ops; `sum` is the left-assoc fold
+    `((t₀ + t₁) + t₂)`. Instance names are uniquified by position (names are
+    inlined away post-strata, so they never reach the emitted bytes). -/
+partial def emitTermC (cmod : Clock → Builder → Clock × Builder) :
+    ArrowTerm → Builder → Sig × Builder
+  | .gen v name clk, b =>
+    let (clk', b) := cmod clk b
+    -- Thread the phase anchor across this warped copy: the slide shifted the clock
+    -- by `clk − clk'`, so add `corr (clk − clk')` to the voice's phase port. Keeps
+    -- delay/flange taps phase-continuous under a live freq change (not just the
+    -- un-warped read). A `phaseAnchor := none` voice passes through untouched.
+    let v := match v.phaseAnchor with
+      | some (port, corr) =>
+        let c := corr (sub clk clk')
+        { v with wire := fun cc => (v.wire cc).map fun ii =>
+            if ii.port.idx == port.idx then { ii with value := add ii.value c } else ii }
+      | none => v
+    b.osc v s!"{name}{b.decls.size}" clk'
+  | .scale w t, b => let (s, b) := emitTermC cmod t b; (mul w s, b)
+  | .arrUn f t, b => let (s, b) := emitTermC cmod t b; (f s, b)
+  -- a plain warp composes into the threaded transform (R1/R2/R4 in one line).
+  | .warp φ t, b => emitTermC (fun c b => cmod (φ c) b) t b
+  -- a signal warp: source the modulator (pinned through the SAME enclosing `cmod`,
+  -- so a downstream warp reclocks it too — the lawful PM-of-PM rule), read its
+  -- signal, then bend the clock by `mw` before the enclosing transform.
+  | .swarp mw mod t, b =>
+    emitTermC (fun c b =>
+      let (mSig, b) := emitTermC cmod mod b
+      cmod (mw c mSig) b) t b
+  -- a τ-constant leaf: no generator to reclock, so the clock transform `cmod` is
+  -- discarded and the bare signal is emitted as-is.
+  | .konst s, b => (s, b)
+  | .sum ts, b =>
+    match ts[0]? with
+    | none => (lit 0, b)
+    | some t0 =>
+      let (s0, b) := emitTermC cmod t0 b
+      (ts.extract 1 ts.size).foldl
+        (fun (acc : Sig × Builder) ti => let (s, b) := emitTermC cmod ti acc.2; (add acc.1 s, b))
+        (s0, b)
+
+/-- Emit a (normalized) term at the identity clock context — the public entry. -/
+def emitTerm (t : ArrowTerm) (b : Builder) : Sig × Builder :=
+  emitTermC (fun c b => (c, b)) t b
+
+/-- A 3-tap flanger as a DOWNSTREAM-PRESENTED effect (a morphism on terms):
+    `s ↦ 0.5·s + 0.25·(warp(−δ) ⋙ s) + 0.25·(warp(+δ) ⋙ s)`. The warps are
+    UNREDUCED — they sit on the signal `s`, exactly as "I dropped a flanger after
+    this signal" reads. The slide is what turns this into the upstream form. -/
+def flangeEffectWith (back fwd : Clock → Clock) (s : ArrowTerm) : ArrowTerm :=
+  .sum #[ .scale (lit 5 1) s,
+          .scale (lit 25 2) (.warp back s),
+          .scale (lit 25 2) (.warp fwd s) ]
+
+/-- The flanger effect with the `FlangeSin` offset `δ = deltaSamples` (the
+    offset input), so the slid form reproduces the stdlib `FlangeSin` clocks. -/
+def flangeEffect (s : ArrowTerm) : ArrowTerm :=
+  flangeEffectWith (fun c => sub c deltaSamples) (fun c => add c deltaSamples) s
+
+/-- A SWEPT delay offset: `δ(τ) = toInt(seconds · m(τ) · sampleRate · 2³²)` — the
+    static flanger's δ, but the depth is scaled by a modulator signal `m ∈ [−1,1]`,
+    so the comb delay sweeps (through zero, as `m` crosses 0). -/
+def sweptDelta (secondsE : Expr) (m : Sig) : Expr :=
+  toIntE (mul (mul (mul secondsE m) .sampleRate) (lit 4294967296))
+
+def sflangeBack (secondsE : Expr) : Clock → Sig → Clock := fun c m => sub c (sweptDelta secondsE m)
+def sflangeFwd (secondsE : Expr) : Clock → Sig → Clock := fun c m => add c (sweptDelta secondsE m)
+
+/-- A SWEPT (through-zero) flanger as a DOWNSTREAM effect: like `flangeEffect`, but
+    the ±δ taps are SIGNAL-modulated (`swarp`) by `mod` — a modulator term (an LFO,
+    or any patched signal). The slide distributes the signal-warp onto the input's
+    generators (each becomes a modulated carrier); the dry tap is unwarped. Because
+    `swarp` is a wrapper, this stacks freely: a swept flange after a plain flange,
+    after another swept flange, all compose — totality, not a special case. -/
+def sweptFlangeEffect (back fwd : Clock → Sig → Clock) (mod s : ArrowTerm) : ArrowTerm :=
+  .sum #[ .scale (lit 5 1) s,
+          .scale (lit 25 2) (.swarp back mod s),
+          .scale (lit 25 2) (.swarp fwd mod s) ]
+
+/-- THE SLIDE GATE (Test 1). Build `FlangeSin` from the DOWNSTREAM-insert form —
+    `osc ⋙ flange`, warps unreduced — then `normalize` (the slide) and emit.
+    Byte-identical to stdlib `FlangeSin` ⇒ the compiler turned "flanger dropped
+    downstream of the oscillator" into "the oscillator read at warped clocks,"
+    reaching the exact hand-written upstream program. The inputs/voice/δ mirror
+    `flangeSinSpec` so the only thing under test is the slide. -/
+def buildFlangerViaSlide (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← buildRegistry arena resolved #["FixedSinOsc"]
+  let term := normalize (flangeEffect (.gen fixedSinOscVoice "osc" clkIn))
+  let (out, b) := emitTerm term {}
+  let prog : Program := {
+    name := "FlangeSin"
+    inputs := #[clkInputDecl, pitchInputDecl "freq" 220, offsetInputDecl "depth"]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := out }]
+    binderCount := 0
+    registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  .ok ({ arena with programs := arena.programs.push prog }, idx)
+
+/-! The slide tests below use closed-form (literal-pitch, no input ports)
+    carriers so they render directly as session roots, like the warp-law gates. -/
+
+/-- A literal-δ back/forward warp (`δ = 0.0007 s`, Q32.32). -/
+def slideBack : Clock → Clock := fun c => sub c (deltaLit 7 4)
+def slideFwd : Clock → Clock := fun c => add c (deltaLit 7 4)
+/-- The closed-form base oscillator term (literal pitch, `clk = sampleIndex<<32`). -/
+def litOscGen : ArrowTerm := .gen litPitchSinOscVoice "osc" clockLit
+
+/-- DOWNSTREAM `osc ⋙ shaper ⋙ flange` (Test 2): a pointwise `shaper` (square)
+    sits BETWEEN the oscillator and the flanger, so the flanger's warps must
+    COMMUTE PAST it (R1) to reach the generator's clock. Slid form. -/
+def buildSlideShaperDownstream (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let term := flangeEffectWith slideBack slideFwd (.arrUn (fun s => mul s s) litOscGen)
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram "SlideShaperDown" b.decls out arena resolved
+
+/-- The hand-written UPSTREAM reference for Test 2: the same shaper applied to the
+    oscillator read at each of the three warped clocks — what the slide MUST
+    produce if the warp commutes past the shaper. No `warp` nodes (already
+    upstream). Byte-equal to `buildSlideShaperDownstream` ⇒ R1 fired correctly. -/
+def buildSlideShaperUpstream (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let shaped (φ : Clock → Clock) : ArrowTerm :=
+    .arrUn (fun s => mul s s) (.gen litPitchSinOscVoice "osc" (φ clockLit))
+  let term : ArrowTerm := .sum #[
+    .scale (lit 5 1) (shaped (fun c => c)),
+    .scale (lit 25 2) (shaped slideBack),
+    .scale (lit 25 2) (shaped slideFwd) ]
+  let (out, b) := emitTerm term {}
+  buildVoiceProgram "SlideShaperUp" b.decls out arena resolved
+
+/-- A single closed-form flanger via the slide (Test 3 baseline). -/
+def buildSlideSingleFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let (out, b) := emitTerm (normalize (flangeEffectWith slideBack slideFwd litOscGen)) {}
+  buildVoiceProgram "SlideSingleFlange" b.decls out arena resolved
+
+/-- CASCADE `osc ⋙ flange ⋙ flange` (Test 3): two downstream flangers in series.
+    The slide pushes the outer flanger's warps through the inner flanger's sum
+    (R3) and fuses them with the inner warps (R2), producing the oscillator read
+    at the NINE convolved offsets {0, ±δ, ±2δ} automatically — the proper
+    multiplicity, derived, not hand-written. (Nine instances, not five: with no
+    coincident-offset normalization the algebraically-equal taps stay distinct —
+    the multiplicative cost discussed for cascades.) -/
+def buildSlideDoubleFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let inner := flangeEffectWith slideBack slideFwd litOscGen
+  let (out, b) := emitTerm (normalize (flangeEffectWith slideBack slideFwd inner)) {}
+  buildVoiceProgram "SlideDoubleFlange" b.decls out arena resolved
+
+-- ─────────────────────────────────────────────────────────────
+-- M9 — the PATCHER LOWERING: a downstream-only patch graph → arrow term
+-- ─────────────────────────────────────────────────────────────
+
+/-! The MVP front end. A patch is a downstream-only DAG of modules (the "you may
+    only patch forward" UX rule — which is just the acyclicity invariant the
+    whole language rests on, made visible). Lowering reads the doc's slogan
+    literally:
+
+      * a WIRE `A.out → B.in`  ⟶  B's effect morphism APPLIED to A's term  (⋙)
+      * a FAN-OUT (one output, many inputs)  ⟶  the shared upstream term  (Δ / &&&)
+      * a FAN-IN (a mixer)  ⟶  the sum  (the product collapse)
+      * a GENERATOR  ⟶  `gen`;  an EFFECT  ⟶  a `ArrowTerm → ArrowTerm`
+
+    An EFFECT contributes `warp` nodes (a flanger fans its input into warped
+    taps; a delay/reverse is a bare warp), so it is authored and wired DOWNSTREAM
+    — and then `normalize` (the slide) pushes those warps UP to the generators.
+    That is the whole trick: the user patches forward, the compiler reads
+    backward in time. Because tropical has no state primitive, the slide is
+    always total — every module is stateless, so the warp always reaches the
+    generators. `lowerGraph` produces the UNREDUCED (downstream) term; the slide
+    is the separate pass that follows. -/
+
+/-- A patch-graph node. Generators carry their clock; effects carry the id of the
+    upstream node they consume (`⋙`); the mixer carries the ids it sums (fan-in).
+    Generators read the master clock; the flanger/`warp`/shaper are the effect
+    morphisms. -/
+inductive Node where
+  | source (v : Voice) (clk : Clock)
+  | flange (input : String) (back fwd : Clock → Clock)
+  | shaper (input : String) (f : Sig → Sig)
+  | warpFx (input : String) (φ : Clock → Clock)
+  | mix (inputs : Array String)
+  /-- A MODULATED carrier: `input`'s signal modulates this carrier's clock
+      (FM/PM). The signal-into-clock edge — patch `mod.out → carrier.fm`. -/
+  | fm (input : String) (carrier : Voice) (baseClk : Clock) (depthE : Expr)
+  /-- A SWEPT flanger: `input` is the signal flanged, `modInput` the modulator that
+      sweeps the ±δ taps (an LFO, or any patched signal). `depthSec` is the sweep
+      depth in seconds. The signal-warp distributes onto `input`'s generators. -/
+  | sflange (input modInput : String) (depthSec : Expr)
+  /-- A KNOB: a program that is nothing but a param with one output. `idx` is the
+      `ParamIdx` of the root's param slot; it lowers to a τ-constant `paramRef`
+      leaf, so wiring it into a modulator/pitch position binds that parameter to a
+      live module slot (`param:<name>`), driven by `set_param` without a relower. -/
+  | knob (idx : Nat)
+
+structure PatchNode where
+  id : String
+  node : Node
+
+/-- A downstream-only patch DAG: named nodes plus the id wired to the output. -/
+structure PatchGraph where
+  nodes : Array PatchNode
+  output : String
+
+/-- The standard FM modulation law: a modulator signal `m` shifts the carrier's
+    Q32.32 clock by `depth · m` samples — `clk − toInt(depth · m · 2³²)`. `depth`
+    is an EXPRESSION (a literal, or a live `paramRef` slot), so the depth knob can
+    be a live param. Closed form in τ (`m` is a closed-form signal) either way. -/
+def fmWarp (depthE : Expr) : Clock → Sig → Clock :=
+  fun base m => sub base (toIntE (mul (mul depthE m) (lit 4294967296)))
+
+/-- Lower one node to its arrow term, recursing UP its input wires. A wire is
+    `⋙` (the effect applied to the upstream term); fan-out is the shared upstream
+    term (the diagonal); a mixer is the sum; an `fm` node routes its input's
+    signal into the carrier's clock. The result is the UNREDUCED downstream term
+    — effects' warps still sit on their inputs. -/
+partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm := do
+  let some pn := g.nodes.find? (·.id == id)
+    | .error s!"lower: node '{id}' not found"
+  match pn.node with
+  | .source v clk => .ok (.gen v id clk)
+  | .flange inId back fwd => return flangeEffectWith back fwd (← lowerNode g inId)
+  | .shaper inId f => return .arrUn f (← lowerNode g inId)
+  | .warpFx inId φ => return .warp φ (← lowerNode g inId)
+  | .mix inputs => return .sum (← inputs.mapM (lowerNode g))
+  | .fm inId carrier base depth =>
+    return .swarp (fmWarp depth) (← lowerNode g inId) (.gen carrier id base)
+  | .sflange inId modId depthSec =>
+    return sweptFlangeEffect (sflangeBack depthSec) (sflangeFwd depthSec)
+      (← lowerNode g modId) (← lowerNode g inId)
+  | .knob idx => .ok (.konst (.paramRef ⟨idx⟩))
+
+/-- Lower a whole patch to its (downstream, unreduced) arrow term. Compose with
+    `normalize` to run the slide, then `emitTerm` to lower to IR. -/
+def lowerGraph (g : PatchGraph) : Except String ArrowTerm := lowerNode g g.output
+
+-- The demo patches ─────────────────────────────────────────────
+
+/-- `osc → flange` as a GRAPH (input-ref `FlangeSin` form): a `FixedSinOsc` source
+    and a flanger wired downstream of it, offset `δ = deltaSamples`. -/
+def flangeGraph : PatchGraph :=
+  { nodes := #[
+      { id := "osc", node := .source fixedSinOscVoice clkIn },
+      { id := "fl",  node := .flange "osc"
+          (fun c => sub c deltaSamples) (fun c => add c deltaSamples) } ],
+    output := "fl" }
+
+/-- `osc → flange → flange` as a GRAPH (closed form). -/
+def doubleFlangeGraph : PatchGraph :=
+  { nodes := #[
+      { id := "osc", node := .source litPitchSinOscVoice clockLit },
+      { id := "f1",  node := .flange "osc" slideBack slideFwd },
+      { id := "f2",  node := .flange "f1" slideBack slideFwd } ],
+    output := "f2" }
+
+/-- A FAN-OUT patch: `osc` fanned into two flangers (offsets 0.0007 / 0.0011 s),
+    summed by a mixer — the diagonal Δ through the lowering. -/
+def fanOutGraph : PatchGraph :=
+  { nodes := #[
+      { id := "osc", node := .source litPitchSinOscVoice clockLit },
+      { id := "fa",  node := .flange "osc" slideBack slideFwd },
+      { id := "fb",  node := .flange "osc"
+          (fun c => sub c (deltaLit 11 4)) (fun c => add c (deltaLit 11 4)) },
+      { id := "mix", node := .mix #["fa", "fb"] } ],
+    output := "mix" }
+
+/-- THE LOWERING GATE (L1). Lower the GRAPH `osc → flange`, run the slide, emit,
+    and wrap as `FlangeSin` — byte-identical to stdlib `FlangeSin`. The user's
+    patch graph, lowered, reaches the exact hand-written program: graph → arrow
+    → slide → emit, end to end. -/
+def buildFlangeFromGraph (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← buildRegistry arena resolved #["FixedSinOsc"]
+  let term ← lowerGraph flangeGraph
+  let (out, b) := emitTerm (normalize term) {}
+  let prog : Program := {
+    name := "FlangeSin"
+    inputs := #[clkInputDecl, pitchInputDecl "freq" 220, offsetInputDecl "depth"]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    decls := b.decls
+    assigns := #[{ target := .port ⟨0⟩, expr := out }]
+    binderCount := 0
+    registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  .ok ({ arena with programs := arena.programs.push prog }, idx)
+
+/-- Lower the GRAPH `osc → flange → flange` (closed form) — must byte-equal the
+    hand-built `buildSlideDoubleFlanger` (L2): the lowering of a chain composes
+    effects exactly as the hand-written nested term. -/
+def buildDoubleFlangeFromGraph (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let term ← lowerGraph doubleFlangeGraph
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram "GraphDoubleFlange" b.decls out arena resolved
+
+/-- Lower the FAN-OUT patch (closed form) — `osc` fanned into two flangers and
+    mixed (L3): the diagonal + the product collapse through the lowering. -/
+def buildFanOutFromGraph (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let term ← lowerGraph fanOutGraph
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram "GraphFanOut" b.decls out arena resolved
+
+/-- `osc(mod) → osc(carrier).fm` as a GRAPH — a single FM voice. Lowers to the
+    same term as `buildFmCarrier carHz modHz depth` (the bit-exact modulated-clock
+    gate's carrier). -/
+def fmGraphOf (carHz modHz depth : Int) : PatchGraph :=
+  { nodes := #[
+      { id := "mod", node := .source (litPitchVoice modHz) clockLit },
+      { id := "car", node := .fm "mod" (litPitchVoice carHz) clockLit (lit depth) } ],
+    output := "car" }
+
+/-- Two-level PM (DX-style) as a GRAPH: `mod2 → mod.fm → car.fm`. Lowers to the
+    same term as `buildPmPmCarrier carHz modHz mod2Hz depth1 depth2` (the
+    bit-exact PM-of-PM gate's carrier). -/
+def pmPmGraphOf (carHz modHz mod2Hz depth1 depth2 : Int) : PatchGraph :=
+  { nodes := #[
+      { id := "mod2", node := .source (litPitchVoice mod2Hz) clockLit },
+      { id := "mod",  node := .fm "mod2" (litPitchVoice modHz) clockLit (lit depth2) },
+      { id := "car",  node := .fm "mod" (litPitchVoice carHz) clockLit (lit depth1) } ],
+    output := "car" }
+
+/-- Lower the single-FM graph (M1: ≡ `buildFmCarrier`, the modulated node). -/
+def buildFmFromGraph (carHz modHz depth : Int)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let term ← lowerGraph (fmGraphOf carHz modHz depth)
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram "GraphFm" b.decls out arena resolved
+
+/-- Lower the PM-of-PM graph (M2: ≡ `buildPmPmCarrier`, the nested modulated node). -/
+def buildPmPmFromGraph (carHz modHz mod2Hz depth1 depth2 : Int)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let term ← lowerGraph (pmPmGraphOf carHz modHz mod2Hz depth1 depth2)
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram "GraphPmPm" b.decls out arena resolved
 
 end Tropical.EmitArrow
