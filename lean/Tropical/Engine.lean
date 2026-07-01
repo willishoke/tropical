@@ -15,6 +15,7 @@ import Tropical.Ir.EmitLlvm
 import Tropical.TypeArgs
 import Tropical.Compile
 import Tropical.Entries
+import Tropical.Playground
 
 /-!
 # The tropical IR engine — tool semantics, in Lean
@@ -492,19 +493,6 @@ def syncCompile (env : Env) : EngineM Unit := do
     match storedProgName i with
     | some pname => (n, { i with progMeta := { i.progMeta with programName := pname } })
     | none => (n, i)
-  let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost
-
-  -- Bridge the lowering's `Lean.Json` to the strict typed decoder's
-  -- ordered `JsonV` by re-parsing the compressed string (lossless: the
-  -- session-root shape has no order-sensitive objects, and JsonNumber
-  -- decimals survive the round trip).
-  let typed ← match Tropical.Parse.JsonV.parse parsed.compress with
-    | .error e => internalError s!"session root: ParsedProgram JSON re-parse failed: {e}"
-    | .ok jv =>
-      match Tropical.Parse.decodeProgram jv with
-      | .error e => internalError s!"session root: {e}"
-      | .ok p => pure p
-
   -- Root resolver = `sessionTypeResolver` parity: keyed by the stored
   -- program's name, instance order, first instance wins per name. Uses
   -- the instances' snapshots, never a late name lookup.
@@ -516,26 +504,32 @@ def syncCompile (env : Env) : EngineM Unit := do
           resolverTbl := resolverTbl.push (p.name, idx)
   let tbl := resolverTbl
 
-  -- Elaborate over the store arena. The appended root is transient —
-  -- it is consumed by this compile and not retained in the store.
-  -- Failure maps onto the envelope the TS path produced when its
-  -- compile-side `elaborate` threw: ElaborationError / CycleViolation
-  -- are plain Errors there, so `toEnvelope` made them `internal_error`
-  -- with the verbatim message.
-  let (rootElab?, elabErr?) :
-      Option (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) × Option String :=
+  -- EXPERIMENT (TROPICAL_ARROW, uncommitted): build the resolved session
+  -- root directly via `sessionToResolvedRoot` — the session → arrow path,
+  -- deleting the "resolved → named → resolved" parsed round-trip. Plan is
+  -- byte-identical to the elaborate path (gated by `runSessionViaArrowEquiv`
+  -- in Tropicaltest). With the var unset the legacy elaborate path runs
+  -- unchanged, so default behavior is untouched.
+  let (arena', rootIdx) ← if (← IO.getEnv "TROPICAL_ARROW").isSome then
+    match sessionToResolvedRoot st.arena lowerInstances wiresPost tbl with
+    | .error e => internalError e
+    | .ok r => pure r
+  else do
+    -- Legacy: session → parsed → reparse (Json → ordered JsonV, lossless)
+    -- → elaborate over the store arena. The appended root is transient.
+    let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost
+    let typed ← match Tropical.Parse.JsonV.parse parsed.compress with
+      | .error e => internalError s!"session root: ParsedProgram JSON re-parse failed: {e}"
+      | .ok jv =>
+        match Tropical.Parse.decodeProgram jv with
+        | .error e => internalError s!"session root: {e}"
+        | .ok p => pure p
+    -- Failure maps onto the recoverable envelope (ElaborationError /
+    -- CycleViolation): the previous kernel keeps playing.
     match Tropical.Ir.elaborateInto st.arena typed
         (some fun n => (tbl.find? (·.1 == n)).map (·.2)) with
-    | .error e => (none, some e.message)
-    | .ok (arena', rootIdx) => (some (arena', rootIdx), none)
-
-  if let some msg := elabErr? then
-    -- The previous kernel keeps playing — same recoverable-failure
-    -- shape as TS.
-    internalError msg
-
-  let some (arena', rootIdx) := rootElab?
-    | internalError "syncCompile: missing elaborated root (engine bug)"
+    | .error e => internalError e.message
+    | .ok r => pure r
   let rootCore ← match Tropical.Ir.Core.check arena' rootIdx with
     | .error e => internalError s!"syncCompile: post-elaboration Core check failed (engine bug): {e}"
     | .ok core => pure core
@@ -1983,6 +1977,67 @@ def handleSetParam (env : Env) (args : Json) : EngineM Json := do
     env.runtime.setSlot idx value
   pure <| Json.mkObj [("name", Json.str name), ("value", valueJ)]
 
+/-- `set_param_glide`: a CLOSED-FORM parameter ramp (no per-sample state). The
+    kernel evaluates `f(τ) = v0 + (v1−v0)·smoothstep(clamp((τ−t0)/dur, 0, 1))` from
+    three slots (`param:<name>#v0/#v1/#t0`); this op RE-ANCHORS the ramp: read the
+    current sample index `now`, evaluate the ramp at `now` (so the new ramp starts
+    exactly where we are — no jump), then set `v0 = current, v1 = target, t0 = now`.
+    Stateless and click-free — the "state" is the anchor slots, navigable like τ.
+    `dur = 0.02·SR` samples (20 ms) matches the kernel's ramp, at any sample rate. -/
+def handleSetParamGlide (env : Env) (args : Json) : EngineM Json := do
+  let name := (argStr? args "name").getD ""
+  let target ← match getField? args "value" with
+    | some (.num n) => pure n.toFloat
+    | _ => internalError "set_param_glide: value must be a number"
+  let slotOf (sfx : String) : EngineM (Option UInt32) :=
+    env.runtime.slotIndex? s!"param:{name}#{sfx}"
+  let some _ := ← slotOf "v0"
+    | internalError s!"set_param_glide: no glide slots for '{name}'"
+  let read (sfx : String) : EngineM Float := do
+    match ← slotOf sfx with | some i => env.runtime.getSlot i | none => pure 0.0
+  let write (sfx : String) (v : Float) : EngineM Unit := do
+    match ← slotOf sfx with | some i => env.runtime.setSlot i v | none => pure ()
+  let now ← env.runtime.currentSampleIndex
+  let dur := (← env.runtime.sampleRate) * 0.02   -- 20 ms, matching the kernel's ramp
+  let v0 ← read "v0"; let v1 ← read "v1"; let t0 ← read "t0"
+  let raw := (now - t0) / dur
+  let s := if raw < 0.0 then 0.0 else if raw > 1.0 then 1.0 else raw
+  let curr := v0 + (v1 - v0) * (s * s * (3.0 - 2.0 * s))
+  write "v0" curr
+  write "v1" target
+  write "t0" now
+  pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
+
+/-- `set_param_freq`: a PHASE-ANCHORED frequency change. `freq = f·τ + φ_off` — so
+    changing `f` alone jumps the phase by `Δf·τ` (a click that grows with τ). If the
+    source carries a `#phase` offset slot, this bumps it by the phase the frequency
+    change would have jumped — `Δφ = ((inc₀ − inc₁)·T) / 2³²` cycles, `inc =
+    ⌊freq·2³²/SR⌋` (the phasor's own quantized increment), `T` = now — so the phase
+    stays CONTINUOUS across the change (a soft freq corner, not a hard click). This
+    is the stateless anchor: the accumulated phase lives in a param, navigable like
+    τ. No `#phase` slot (saw/morph, or knob-driven freq) ⇒ a raw freq write. -/
+def handleSetParamFreq (env : Env) (args : Json) : EngineM Json := do
+  let name := (argStr? args "name").getD ""
+  let target ← match getField? args "value" with
+    | some (.num n) => pure n.toFloat
+    | _ => internalError "set_param_freq: value must be a number"
+  let some freqIdx := ← env.runtime.slotIndex? s!"param:{name}"
+    | internalError s!"set_param_freq: no slot '{name}'"
+  match ← env.runtime.slotIndex? s!"param:{name}#phase" with
+  | some phaseIdx =>
+    let now ← env.runtime.currentSampleIndex
+    let f0 ← env.runtime.getSlot freqIdx
+    let sr ← env.runtime.sampleRate
+    let inc0 := Float.floor (f0 * 4294967296.0 / sr)
+    let inc1 := Float.floor (target * 4294967296.0 / sr)
+    let dcyc := ((inc0 - inc1) * now) / 4294967296.0
+    let off0 ← env.runtime.getSlot phaseIdx
+    let raw := off0 + dcyc
+    env.runtime.setSlot phaseIdx (raw - Float.floor raw)   -- frac → [0, 1)
+    env.runtime.setSlot freqIdx target
+  | none => env.runtime.setSlot freqIdx target
+  pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
+
 def handleListParams (env : Env) : EngineM Json := do
   let st ← env.state.get
   pure <| Json.arr <| st.params.map fun (n, v) =>
@@ -2018,8 +2073,26 @@ def handleListScopeTaps (env : Env) : EngineM Json := do
                 ("output", Json.str out), ("slot", Json.str s!"{inst}.{out}")]
   pure <| Json.mkObj [("taps", Json.arr taps)]
 
+/-- EXPERIMENT (`load_patch_graph`): compile a downstream-only patch graph (the
+    playground GUI) through the EmitArrow arrow lowering — `lowerGraph → normalize
+    (the slide) → emitTerm` — to a session root, then the production
+    `compileSession → buildKernelIr → loadIr` tail. A compile failure errors
+    BEFORE `loadIr`, so the previous kernel keeps playing. -/
+def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
+  let plan ← match ← Tropical.Playground.compilePlan args with
+    | .error e => internalError e
+    | .ok p => pure p
+  let (ir, planJson) ← buildKernelIr plan
+  env.runtime.loadIr ir planJson
+  -- Seed the session param mirror with the graph's knobs so `set_param` — which
+  -- guards on the mirror, then drives the live `param:<name>` slot — reaches them
+  -- without a relower. Replaces (not appends): the mirror tracks the current graph.
+  env.state.modify (fun st => { st with params := Tropical.Playground.knobParams args })
+  pure <| Json.mkObj [("ok", Json.bool true)]
+
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   wrap <| match name with
+  | "load_patch_graph" => handleLoadPatchGraph env args
   | "define_program"  => handleDefineProgram env args
   | "add_instance"    => handleAddInstance env args
   | "remove_instance" => handleRemoveInstance env args
@@ -2042,6 +2115,8 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "stop_audio"      => handleStopAudio env
   | "audio_status"    => handleAudioStatus env
   | "set_param"       => handleSetParam env args
+  | "set_param_glide" => handleSetParamGlide env args
+  | "set_param_freq"  => handleSetParamFreq env args
   | "list_params"     => handleListParams env
   | "debug_render"    => handleDebugRender env args
   | _ => internalError s!"Unknown tool: '{name}'"

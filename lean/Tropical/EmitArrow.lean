@@ -1166,68 +1166,75 @@ inductive ArrowTerm where
   | scale (w : Sig) (t : ArrowTerm)
   | arrUn (f : Sig → Sig) (t : ArrowTerm)
   | sum (ts : Array ArrowTerm)
-  /-- A MODULATED carrier (FM/PM): a generator whose clock is `modWarp baseClk
-      modSig`, where `modSig` is the SIGNAL of `modulator` (another sub-term).
-      This is the data-into-clock edge — the `osc → flange → osc.fm` case. The
-      modulation `modWarp` reads the modulator's emitted value (a function of τ,
-      so the warp stays a closed form in τ — lawful, the PM-of-PM finding). Under
-      a downstream warp `φ` the carrier base AND the modulator both warp
-      (threaded), so reverse/stretch of a modulated voice carries its modulator
-      with it. -/
-  | fmGen (carrier : Voice) (name : String) (baseClk : Clock)
-      (modWarp : Clock → Sig → Clock) (modulator : ArrowTerm)
+  /-- A SIGNAL-dependent warp — the data-into-clock edge, made first-class. Bends
+      the clock of `t` by `mw baseClk modSig`, where `modSig` is the SIGNAL of
+      `modulator` (another sub-term, a function of τ, so the warp stays a closed
+      form — the PM-of-PM lawfulness). This is the TOTAL generalization of the old
+      fused `fmGen`: it is a WRAPPER (like `warp`), so signal-warps compose with
+      plain warps and with each other — `swarp ∘ swarp`, `warp ∘ swarp`, all nest.
+      `fmGen carrier base mw mod` is just `swarp mw mod (gen carrier base)`. The
+      slide (in `emitTermC`) distributes it onto the generators `t` feeds. -/
+  | swarp (mw : Clock → Sig → Clock) (modulator : ArrowTerm) (t : ArrowTerm)
+  /-- A τ-CONSTANT leaf — a bare signal `s` that does not read the clock (a param
+      slot read `paramRef`, or any literal). It has no generator, so the slide's
+      clock transform threads STRAIGHT PAST it (warping a constant is the
+      constant). This is what a "knob" node lowers to: its value is a module slot,
+      wireable into any modulator (`swarp`/`fm`) or generator-pitch position, and
+      driven live by `set_param` — no per-sample state, so no relower needed. -/
+  | konst (s : Sig)
 
 instance : Inhabited ArrowTerm := ⟨.sum #[]⟩
 
-mutual
-/-- The SLIDE. Push every `warp` down to the generators it eventually feeds,
-    leaving a term whose only clock-warps are the generators' (composed) clock
-    arguments — the upstream form `warpBank` writes by hand, now derived. -/
+/-- Normalize a term's sub-structure (the modulators, the branches). The SLIDE
+    itself — pushing every `warp`/`swarp` onto the generators it feeds — is
+    realized in `emitTermC`, which threads the composed clock transform down to
+    each generator. Keeping warps as WRAPPERS here (rather than eagerly fusing
+    them into generator clocks) is exactly what makes the algebra TOTAL: the slide
+    is function composition of clock transforms, so `warp ∘ warp`, `warp ∘ swarp`,
+    and `swarp ∘ swarp` all compose — there is no case it cannot reduce. -/
 partial def normalize : ArrowTerm → ArrowTerm
   | .gen v name clk => .gen v name clk
   | .scale w t => .scale w (normalize t)
   | .arrUn f t => .arrUn f (normalize t)
   | .sum ts => .sum (ts.map normalize)
-  | .warp φ t => pushWarp φ t
-  | .fmGen c n base mw mod => .fmGen c n base mw (normalize mod)
-
-/-- Push one warp `φ` down through a term to the generators: absorb into a
-    generator's clock (R4), slide past pointwise `arr`s (R1), fuse with an inner
-    warp (R2, `φ∘ψ`), and fork over `scale`/`sum` (R3). A modulated carrier warps
-    its base clock AND threads the warp into its modulator (the modulator rides
-    the enclosing warp). -/
-partial def pushWarp (φ : Clock → Clock) : ArrowTerm → ArrowTerm
-  | .gen v name clk => .gen v name (φ clk)
-  | .scale w t => .scale w (pushWarp φ t)
-  | .arrUn f t => .arrUn f (pushWarp φ t)
-  | .sum ts => .sum (ts.map (pushWarp φ))
-  | .warp ψ t => pushWarp (fun c => φ (ψ c)) t
-  | .fmGen c n base mw mod => .fmGen c n (φ base) mw (pushWarp φ mod)
-end
+  | .warp φ t => .warp φ (normalize t)
+  | .swarp mw mod t => .swarp mw (normalize mod) (normalize t)
+  | .konst s => .konst s
 
 /-- Emit a (normalized) arrow term to its output signal. Each `gen` sources a
     voice instance in left-to-right order (matching `warpBank`'s instance order);
     `scale`/`arrUn` are the pointwise ops; `sum` is the left-assoc fold
     `((t₀ + t₁) + t₂)`. Instance names are uniquified by position (names are
     inlined away post-strata, so they never reach the emitted bytes). -/
-partial def emitTerm : ArrowTerm → Builder → Sig × Builder
-  | .gen v name clk, b => b.osc v s!"{name}{b.decls.size}" clk
-  | .warp _ t, b => emitTerm t b            -- a normalized term has none (defensive)
-  | .scale w t, b => let (s, b) := emitTerm t b; (mul w s, b)
-  | .arrUn f t, b => let (s, b) := emitTerm t b; (f s, b)
-  | .fmGen carrier name base mw mod, b =>
-    -- emit the modulator first (its instances precede the carrier), read its
-    -- signal, then clock the carrier at `modWarp base modSig`.
-    let (modSig, b) := emitTerm mod b
-    b.osc carrier s!"{name}{b.decls.size}" (mw base modSig)
+partial def emitTermC (cmod : Clock → Builder → Clock × Builder) :
+    ArrowTerm → Builder → Sig × Builder
+  | .gen v name clk, b => let (clk', b) := cmod clk b; b.osc v s!"{name}{b.decls.size}" clk'
+  | .scale w t, b => let (s, b) := emitTermC cmod t b; (mul w s, b)
+  | .arrUn f t, b => let (s, b) := emitTermC cmod t b; (f s, b)
+  -- a plain warp composes into the threaded transform (R1/R2/R4 in one line).
+  | .warp φ t, b => emitTermC (fun c b => cmod (φ c) b) t b
+  -- a signal warp: source the modulator (pinned through the SAME enclosing `cmod`,
+  -- so a downstream warp reclocks it too — the lawful PM-of-PM rule), read its
+  -- signal, then bend the clock by `mw` before the enclosing transform.
+  | .swarp mw mod t, b =>
+    emitTermC (fun c b =>
+      let (mSig, b) := emitTermC cmod mod b
+      cmod (mw c mSig) b) t b
+  -- a τ-constant leaf: no generator to reclock, so the clock transform `cmod` is
+  -- discarded and the bare signal is emitted as-is.
+  | .konst s, b => (s, b)
   | .sum ts, b =>
     match ts[0]? with
     | none => (lit 0, b)
     | some t0 =>
-      let (s0, b) := emitTerm t0 b
+      let (s0, b) := emitTermC cmod t0 b
       (ts.extract 1 ts.size).foldl
-        (fun (acc : Sig × Builder) ti => let (s, b) := emitTerm ti acc.2; (add acc.1 s, b))
+        (fun (acc : Sig × Builder) ti => let (s, b) := emitTermC cmod ti acc.2; (add acc.1 s, b))
         (s0, b)
+
+/-- Emit a (normalized) term at the identity clock context — the public entry. -/
+def emitTerm (t : ArrowTerm) (b : Builder) : Sig × Builder :=
+  emitTermC (fun c b => (c, b)) t b
 
 /-- A 3-tap flanger as a DOWNSTREAM-PRESENTED effect (a morphism on terms):
     `s ↦ 0.5·s + 0.25·(warp(−δ) ⋙ s) + 0.25·(warp(+δ) ⋙ s)`. The warps are
@@ -1242,6 +1249,26 @@ def flangeEffectWith (back fwd : Clock → Clock) (s : ArrowTerm) : ArrowTerm :=
     offset input), so the slid form reproduces the stdlib `FlangeSin` clocks. -/
 def flangeEffect (s : ArrowTerm) : ArrowTerm :=
   flangeEffectWith (fun c => sub c deltaSamples) (fun c => add c deltaSamples) s
+
+/-- A SWEPT delay offset: `δ(τ) = toInt(seconds · m(τ) · sampleRate · 2³²)` — the
+    static flanger's δ, but the depth is scaled by a modulator signal `m ∈ [−1,1]`,
+    so the comb delay sweeps (through zero, as `m` crosses 0). -/
+def sweptDelta (secondsE : Expr) (m : Sig) : Expr :=
+  toIntE (mul (mul (mul secondsE m) .sampleRate) (lit 4294967296))
+
+def sflangeBack (secondsE : Expr) : Clock → Sig → Clock := fun c m => sub c (sweptDelta secondsE m)
+def sflangeFwd (secondsE : Expr) : Clock → Sig → Clock := fun c m => add c (sweptDelta secondsE m)
+
+/-- A SWEPT (through-zero) flanger as a DOWNSTREAM effect: like `flangeEffect`, but
+    the ±δ taps are SIGNAL-modulated (`swarp`) by `mod` — a modulator term (an LFO,
+    or any patched signal). The slide distributes the signal-warp onto the input's
+    generators (each becomes a modulated carrier); the dry tap is unwarped. Because
+    `swarp` is a wrapper, this stacks freely: a swept flange after a plain flange,
+    after another swept flange, all compose — totality, not a special case. -/
+def sweptFlangeEffect (back fwd : Clock → Sig → Clock) (mod s : ArrowTerm) : ArrowTerm :=
+  .sum #[ .scale (lit 5 1) s,
+          .scale (lit 25 2) (.swarp back mod s),
+          .scale (lit 25 2) (.swarp fwd mod s) ]
 
 /-- THE SLIDE GATE (Test 1). Build `FlangeSin` from the DOWNSTREAM-insert form —
     `osc ⋙ flange`, warps unreduced — then `normalize` (the slide) and emit.
@@ -1352,7 +1379,16 @@ inductive Node where
   | mix (inputs : Array String)
   /-- A MODULATED carrier: `input`'s signal modulates this carrier's clock
       (FM/PM). The signal-into-clock edge — patch `mod.out → carrier.fm`. -/
-  | fm (input : String) (carrier : Voice) (baseClk : Clock) (depthSamples : Int)
+  | fm (input : String) (carrier : Voice) (baseClk : Clock) (depthE : Expr)
+  /-- A SWEPT flanger: `input` is the signal flanged, `modInput` the modulator that
+      sweeps the ±δ taps (an LFO, or any patched signal). `depthSec` is the sweep
+      depth in seconds. The signal-warp distributes onto `input`'s generators. -/
+  | sflange (input modInput : String) (depthSec : Expr)
+  /-- A KNOB: a program that is nothing but a param with one output. `idx` is the
+      `ParamIdx` of the root's param slot; it lowers to a τ-constant `paramRef`
+      leaf, so wiring it into a modulator/pitch position binds that parameter to a
+      live module slot (`param:<name>`), driven by `set_param` without a relower. -/
+  | knob (idx : Nat)
 
 structure PatchNode where
   id : String
@@ -1364,10 +1400,11 @@ structure PatchGraph where
   output : String
 
 /-- The standard FM modulation law: a modulator signal `m` shifts the carrier's
-    Q32.32 clock by `depthSamples · m` samples — `clk − toInt(depth · m · 2³²)`.
-    Closed form in τ (`m` is a closed-form signal), so the warp is lawful. -/
-def fmWarp (depthSamples : Int) : Clock → Sig → Clock :=
-  fun base m => sub base (toIntE (mul (mul (lit depthSamples) m) (lit 4294967296)))
+    Q32.32 clock by `depth · m` samples — `clk − toInt(depth · m · 2³²)`. `depth`
+    is an EXPRESSION (a literal, or a live `paramRef` slot), so the depth knob can
+    be a live param. Closed form in τ (`m` is a closed-form signal) either way. -/
+def fmWarp (depthE : Expr) : Clock → Sig → Clock :=
+  fun base m => sub base (toIntE (mul (mul depthE m) (lit 4294967296)))
 
 /-- Lower one node to its arrow term, recursing UP its input wires. A wire is
     `⋙` (the effect applied to the upstream term); fan-out is the shared upstream
@@ -1384,7 +1421,11 @@ partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm :
   | .warpFx inId φ => return .warp φ (← lowerNode g inId)
   | .mix inputs => return .sum (← inputs.mapM (lowerNode g))
   | .fm inId carrier base depth =>
-    return .fmGen carrier id base (fmWarp depth) (← lowerNode g inId)
+    return .swarp (fmWarp depth) (← lowerNode g inId) (.gen carrier id base)
+  | .sflange inId modId depthSec =>
+    return sweptFlangeEffect (sflangeBack depthSec) (sflangeFwd depthSec)
+      (← lowerNode g modId) (← lowerNode g inId)
+  | .knob idx => .ok (.konst (.paramRef ⟨idx⟩))
 
 /-- Lower a whole patch to its (downstream, unreduced) arrow term. Compose with
     `normalize` to run the slide, then `emitTerm` to lower to IR. -/
@@ -1463,7 +1504,7 @@ def buildFanOutFromGraph (arena : Arena) (resolved : Array (String × ProgramIdx
 def fmGraphOf (carHz modHz depth : Int) : PatchGraph :=
   { nodes := #[
       { id := "mod", node := .source (litPitchVoice modHz) clockLit },
-      { id := "car", node := .fm "mod" (litPitchVoice carHz) clockLit depth } ],
+      { id := "car", node := .fm "mod" (litPitchVoice carHz) clockLit (lit depth) } ],
     output := "car" }
 
 /-- Two-level PM (DX-style) as a GRAPH: `mod2 → mod.fm → car.fm`. Lowers to the
@@ -1472,8 +1513,8 @@ def fmGraphOf (carHz modHz depth : Int) : PatchGraph :=
 def pmPmGraphOf (carHz modHz mod2Hz depth1 depth2 : Int) : PatchGraph :=
   { nodes := #[
       { id := "mod2", node := .source (litPitchVoice mod2Hz) clockLit },
-      { id := "mod",  node := .fm "mod2" (litPitchVoice modHz) clockLit depth2 },
-      { id := "car",  node := .fm "mod" (litPitchVoice carHz) clockLit depth1 } ],
+      { id := "mod",  node := .fm "mod2" (litPitchVoice modHz) clockLit (lit depth2) },
+      { id := "car",  node := .fm "mod" (litPitchVoice carHz) clockLit (lit depth1) } ],
     output := "car" }
 
 /-- Lower the single-FM graph (M1: ≡ `buildFmCarrier`, the modulated node). -/
