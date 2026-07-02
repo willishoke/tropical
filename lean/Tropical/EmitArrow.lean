@@ -1191,6 +1191,16 @@ inductive ArrowTerm where
       wireable into any modulator (`swarp`/`fm`) or generator-pitch position, and
       driven live by `set_param` — no per-sample state, so no relower needed. -/
   | konst (s : Sig)
+  /-- The pointwise ring PRODUCT of two sub-terms — `x ⊗ y`, the multiplicative
+      dual of `sum`. `scale` multiplies a term by a fixed value `w`; `prod`
+      multiplies two TERMS, each with its own generators. The slide law holds
+      because pre-composition distributes over pointwise ×: `warp φ (x ⊗ y) =
+      (x ∘ φ)·(y ∘ φ) = (warp φ x) ⊗ (warp φ y)`, so `emitTermC` threads the SAME
+      clock transform into BOTH factors — a downstream warp reclocks both. This is
+      the VCA / amplitude-multiply that `scale` cannot express: a warp on
+      `scale w t` leaves `w` un-reclocked, but a warp on `prod x y` reclocks `x`
+      AND `y`, so an envelope factored as its own term rides every delay tap. -/
+  | prod (x y : ArrowTerm)
 
 instance : Inhabited ArrowTerm := ⟨.sum #[]⟩
 
@@ -1209,6 +1219,7 @@ partial def normalize : ArrowTerm → ArrowTerm
   | .warp φ t => .warp φ (normalize t)
   | .swarp mw mod t => .swarp mw (normalize mod) (normalize t)
   | .konst s => .konst s
+  | .prod x y => .prod (normalize x) (normalize y)
 
 /-- Emit a (normalized) arrow term to its output signal. Each `gen` sources a
     voice instance in left-to-right order (matching `warpBank`'s instance order);
@@ -1244,6 +1255,13 @@ partial def emitTermC (cmod : Clock → Builder → Clock × Builder) :
   -- a τ-constant leaf: no generator to reclock, so the clock transform `cmod` is
   -- discarded and the bare signal is emitted as-is.
   | .konst s, b => (s, b)
+  -- the ring product: thread the SAME clock transform into both factors (the slide
+  -- distributes over ×), emit both signals, multiply. A downstream warp thus
+  -- reclocks x and y together — the amplitude/VCA multiply `scale` can't give.
+  | .prod x y, b =>
+    let (sx, b) := emitTermC cmod x b
+    let (sy, b) := emitTermC cmod y b
+    (mul sx sy, b)
   | .sum ts, b =>
     match ts[0]? with
     | none => (lit 0, b)
@@ -1365,6 +1383,31 @@ def buildSlideDoubleFlanger (arena : Arena) (resolved : Array (String × Program
   let (out, b) := emitTerm (normalize (flangeEffectWith slideBack slideFwd inner)) {}
   buildVoiceProgram "SlideDoubleFlange" b.decls out arena resolved
 
+/-- The two factors of the product slide-law test: two distinct-pitch oscillators,
+    so `x ⊗ y` is a genuine ring-modulation (not `x²`) and reclocking is observable. -/
+def prodFactorX : ArrowTerm := .gen (litPitchVoice 220) "a" clockLit
+def prodFactorY : ArrowTerm := .gen (litPitchVoice 330) "b" clockLit
+
+/-- PRODUCT slide law (Test 4): `warp φ (x ⊗ y)` DOWNSTREAM — the product formed,
+    THEN warped — must byte-equal the hand-written upstream form (φ on each
+    factor). Byte-equality ⇒ the slide distributes the warp over `×`, i.e.
+    `emitTermC` threads the same clock transform into BOTH factors so each
+    generator reclocks. This is the law that makes `prod` (the VCA) lawful under
+    the slide, exactly as `slide-past-arr` is the law for a pointwise `arr`. -/
+def buildSlideProdDownstream (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let (out, b) := emitTerm (normalize (.warp slideBack (.prod prodFactorX prodFactorY))) {}
+  buildVoiceProgram "SlideProdDown" b.decls out arena resolved
+
+/-- The hand-written UPSTREAM reference for Test 4: the same warp applied to each
+    factor before the product. Byte-equal to the downstream form ⇒ the warp
+    commuted into both factors of the `prod`. -/
+def buildSlideProdUpstream (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let term : ArrowTerm := .prod (.warp slideBack prodFactorX) (.warp slideBack prodFactorY)
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram "SlideProdUp" b.decls out arena resolved
+
 -- ─────────────────────────────────────────────────────────────
 -- M9 — the PATCHER LOWERING: a downstream-only patch graph → arrow term
 -- ─────────────────────────────────────────────────────────────
@@ -1419,6 +1462,12 @@ inductive Node where
       reads AHEAD — an audible pre-echo, impossible on a stream. The slide
       distributes each tap's warp onto the generators, exactly like the flanger. -/
   | comb (input : String) (taps : Array (Sig × (Clock → Clock)))
+  /-- The multiplicative fan-in — `⊗` over its inputs, the ring-product twin of
+      `mix`'s `sum`. Two inputs is ring modulation; an input × an envelope-generator
+      is a VCA; and because the slide distributes over `prod`, a downstream warp
+      reclocks every factor, so each factor's own generators stay in step. Empty ⇒
+      silence (a graceful half-built patch), like `mix`. -/
+  | ring (inputs : Array String)
 
 structure PatchNode where
   id : String
@@ -1462,6 +1511,12 @@ partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm :
     -- tap's warp up onto the input's generators.
     let s ← lowerNode g inId
     return .sum (taps.map fun (w, φ) => .scale w (.warp φ s))
+  | .ring inputs => do
+    -- fold the inputs with `prod` (⊗); empty ⇒ silence, like an empty `mix`.
+    let terms ← inputs.mapM (lowerNode g)
+    match terms.toList with
+    | [] => return .konst (lit 0)
+    | t :: ts => return ts.foldl (fun acc u => .prod acc u) t
 
 /-- Lower a whole patch to its (downstream, unreduced) arrow term. Compose with
     `normalize` to run the slide, then `emitTerm` to lower to IR. -/

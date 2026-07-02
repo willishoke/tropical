@@ -265,6 +265,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
       (.sflange sig lfoId depthSec,
        #[ { id := lfoId, node := .source (sineVoiceE (p "rate" (jExpr params "rate" (lit 3 1)))) clk } ])
   | "mix" => (.mix (portSources inObj "in"), #[])
+  | "ring" => (.ring (portSources inObj "in"), #[])
   | _ => (.mix (portSources inObj "in"), #[])
 
 private structure Raw where

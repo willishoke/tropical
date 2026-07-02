@@ -1209,6 +1209,26 @@ private def runSlidePastArr (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-arr  emit: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-arr  build: {firstLine e}"; pure false
 
+/-- Test 4: the product slide law. `slide(warp φ (x ⊗ y))` must byte-equal the
+    hand-written upstream form (φ on each factor). Byte-equal ⇒ the warp
+    distributed over `×` — both factors of the VCA reclock. This is what makes
+    `prod` (signal×signal, the amplitude/VCA multiply that `scale` can't express)
+    lawful under the slide, so an envelope factored as its own term rides every
+    downstream delay tap. -/
+private def runSlideProd (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match Tropical.EmitArrow.buildSlideProdDownstream arena resolved,
+        Tropical.EmitArrow.buildSlideProdUpstream arena resolved with
+  | .ok (aD, iD), .ok (aU, iU) =>
+    match emitResolvedWire aD iD, emitResolvedWire aU iU with
+    | .ok bytesD, .ok bytesU =>
+      if bytesD == bytesU then
+        IO.println s!"  PASS  slide-past-prod  warp distributed over ×: slide(warp(x ⊗ y)) ≡ (warp x) ⊗ (warp y) ({bytesD.length}B)"; pure true
+      else
+        IO.println s!"  FAIL  slide-past-prod  slide(downstream) ≠ upstream (down {bytesD.length}B, up {bytesU.length}B) — warp did NOT distribute over the product"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-prod  emit: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-prod  build: {firstLine e}"; pure false
+
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
     nine convolved offsets automatically (the proper multiplicity, derived). We
@@ -1588,6 +1608,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runSlideCascade arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runSlideProd arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
     --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the

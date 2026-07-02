@@ -64,6 +64,13 @@ const KINDS = {
     title: 'Mix', accent: '#c7ced9', summing: true,
     inlets: ['in'], outlets: ['out'], sels: [], knobs: [],
   },
+  ring: {
+    // multiplicative fan-in (⊗) — the ring-product twin of Mix's sum. Two inputs
+    // is ring modulation; input × an oscillator/LFO is a VCA. A downstream warp
+    // reclocks every factor (the slide distributes over the product).
+    title: 'Ring ⊗', accent: '#d0a0e0', summing: true,
+    inlets: ['in'], outlets: ['out'], sels: [], knobs: [],
+  },
   out: {
     title: 'Out · dac', accent: '#ff8a8a', summing: true, fixed: true,
     inlets: ['in'], outlets: [], sels: [], knobs: [],
