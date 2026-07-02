@@ -27,4 +27,5 @@
   "ClockPM",
   "ClockReverseProbe",
   "FMBell",
-  "FlangeSin"]}
+  "FlangeSin",
+  "PluckedMorphOsc"]}
