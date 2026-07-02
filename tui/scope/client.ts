@@ -115,15 +115,24 @@ export async function setupMorphScope(
 
 export type Tap = { name: string; slot: string }
 
+const listTaps = async (c: EngineClient): Promise<Tap[]> => {
+  const res = await c.call('list_scope_taps', {})
+  return ((res.taps ?? []) as any[]).map((t) => ({ name: t.name as string, slot: t.slot as string }))
+}
+
 /**
  * Set up the scope's tappable sources and return them.
  *  - Standalone (own engine): build the morph demo and tap its nodes
  *    (osc1.out, osc2.out, lfo.sine) — opt-in observation points wired to the
  *    reserved `scope` sink.
- *  - Attached (TROPICAL_SOCK set): the other TUI owns the live patch; discover
- *    its instances (retrying while it loads) and tap every instance output.
- * Either way the taps lower to existing module slots `<inst>.<out>` that
- * `render_window` reads — no probe-everything, just what we opted into.
+ *  - Attached (TROPICAL_SOCK set): the other TUI owns the live patch. The arrow
+ *    (`load_patch_graph`) path publishes its own taps on load — one per graph
+ *    node, each already routed to a `render_window`-readable root output slot —
+ *    so we just poll `list_scope_taps` (the patch may still be loading). If none
+ *    appear it's a session-model patch: fall back to discovering its instances
+ *    and wiring every output to the reserved `scope` sink.
+ * Either way the taps lower to module slots that `render_window` reads — no
+ * probe-everything, just what the patch opted into.
  */
 export async function setupTapScope(c: EngineClient): Promise<Tap[]> {
   const attached = !!process.env.TROPICAL_SOCK
@@ -134,17 +143,24 @@ export async function setupTapScope(c: EngineClient): Promise<Tap[]> {
       { instance: 'scope', input: 'osc2', expr: { op: 'ref', instance: 'osc2', output: 'out' } },
       { instance: 'scope', input: 'lfo',  expr: { op: 'ref', instance: 'lfo',  output: 'sine' } },
     ] })
-  } else {
-    let insts: any[] = []
-    for (let i = 0; i < 40 && insts.length === 0; i++) {
-      insts = (await c.call('list_instances', {})) as any[]
-      if (!Array.isArray(insts) || insts.length === 0) { insts = []; await new Promise((r) => setTimeout(r, 250)) }
-    }
-    for (const inst of insts)
-      for (const out of (inst.outputs ?? []))
-        await c.call('wire', { set: [{ instance: 'scope', input: `${inst.name}.${out}`,
-          expr: { op: 'ref', instance: inst.name, output: out } }] })
+    return listTaps(c)
   }
-  const res = await c.call('list_scope_taps', {})
-  return ((res.taps ?? []) as any[]).map((t) => ({ name: t.name as string, slot: t.slot as string }))
+  // Attached: poll for the arrow path's self-published taps while the patch loads.
+  let taps: Tap[] = []
+  for (let i = 0; i < 40 && taps.length === 0; i++) {
+    taps = await listTaps(c)
+    if (taps.length === 0) await new Promise((r) => setTimeout(r, 250))
+  }
+  if (taps.length > 0) return taps
+  // Session-model fallback: discover instances and wire each output to `scope`.
+  let insts: any[] = []
+  for (let i = 0; i < 40 && insts.length === 0; i++) {
+    insts = (await c.call('list_instances', {})) as any[]
+    if (!Array.isArray(insts) || insts.length === 0) { insts = []; await new Promise((r) => setTimeout(r, 250)) }
+  }
+  for (const inst of insts)
+    for (const out of (inst.outputs ?? []))
+      await c.call('wire', { set: [{ instance: 'scope', input: `${inst.name}.${out}`,
+        expr: { op: 'ref', instance: inst.name, output: out } }] })
+  return listTaps(c)
 }
