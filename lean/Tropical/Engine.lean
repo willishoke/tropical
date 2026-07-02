@@ -2038,6 +2038,35 @@ def handleSetParamFreq (env : Env) (args : Json) : EngineM Json := do
   | none => env.runtime.setSlot freqIdx target
   pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
 
+/-- `set_param_velocity`: the GLOBAL TIME-WARP scrub. The master clock is
+    `M(n) = tau_base·SR·2³² + velocity·2³²·n`; changing `velocity` alone would jump
+    `M` by `Δv·n` (a click growing with n). This re-bases the host-held origin so
+    `M` stays value-continuous across the change: read `now`, set
+    `tau_base += (v_old − v_new)·now/SR`, then write the new velocity. Exactly the
+    stateless `ScrubClock` host-split (and the clock-domain twin of
+    `set_param_freq`): the accumulator lives in a param, navigable like τ, so the
+    kernel stays `f(τ)`. `velocity = 1` forward · `0` freeze · `−1` reverse · `>1`
+    varispeed. `name` is the velocity slot (`master.velocity`); the origin slot is
+    the sibling `master.tau_base`. -/
+def handleSetParamVelocity (env : Env) (args : Json) : EngineM Json := do
+  let name := (argStr? args "name").getD ""
+  let target ← match getField? args "value" with
+    | some (.num n) => pure n.toFloat
+    | _ => internalError "set_param_velocity: value must be a number"
+  let some velIdx := ← env.runtime.slotIndex? s!"param:{name}"
+    | internalError s!"set_param_velocity: no slot '{name}'"
+  let tauName := name.replace "velocity" "tau_base"
+  let some tauIdx := ← env.runtime.slotIndex? s!"param:{tauName}"
+    | internalError s!"set_param_velocity: no origin slot '{tauName}'"
+  let now ← env.runtime.currentSampleIndex
+  let sr ← env.runtime.sampleRate
+  let v0 ← env.runtime.getSlot velIdx
+  let tb0 ← env.runtime.getSlot tauIdx
+  env.runtime.setSlot tauIdx (tb0 + (v0 - target) * now / sr)
+  env.runtime.setSlot velIdx target
+  env.state.modify (·.setParamValue name (toJson target))
+  pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
+
 def handleListParams (env : Env) : EngineM Json := do
   let st ← env.state.get
   pure <| Json.arr <| st.params.map fun (n, v) =>
@@ -2079,7 +2108,7 @@ def handleListScopeTaps (env : Env) : EngineM Json := do
     `compileSession → buildKernelIr → loadIr` tail. A compile failure errors
     BEFORE `loadIr`, so the previous kernel keeps playing. -/
 def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
-  let plan ← match ← Tropical.Playground.compilePlan args with
+  let (plan, taps) ← match ← Tropical.Playground.compilePlan args with
     | .error e => internalError e
     | .ok p => pure p
   let (ir, planJson) ← buildKernelIr plan
@@ -2087,7 +2116,12 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   -- Seed the session param mirror with the graph's knobs so `set_param` — which
   -- guards on the mirror, then drives the live `param:<name>` slot — reaches them
   -- without a relower. Replaces (not appends): the mirror tracks the current graph.
-  env.state.modify (fun st => { st with params := Tropical.Playground.knobParams args })
+  -- Also publish the arrow taps as `scopeTaps` (each already routed to a
+  -- `render_window`-readable root output slot), so an attached scope discovers
+  -- this graph's inspection points via `list_scope_taps` with no session wiring.
+  env.state.modify (fun st => { st with
+    params := Tropical.Playground.knobParams args
+    scopeTaps := taps })
   pure <| Json.mkObj [("ok", Json.bool true)]
 
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
@@ -2117,6 +2151,7 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "set_param"       => handleSetParam env args
   | "set_param_glide" => handleSetParamGlide env args
   | "set_param_freq"  => handleSetParamFreq env args
+  | "set_param_velocity" => handleSetParamVelocity env args
   | "list_params"     => handleListParams env
   | "debug_render"    => handleDebugRender env args
   | _ => internalError s!"Unknown tool: '{name}'"

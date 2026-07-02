@@ -95,10 +95,30 @@ private def morphVoiceE (pitchE morphE : Expr) (anchor : Option Anchor := none) 
 private def voiceOf (pitchE morphE : Expr) (anchor : Option Anchor) : Voice :=
   morphVoiceE pitchE morphE anchor
 
+/-- `PluckedMorphOsc`: freq (0), morph (1), clk (2), event_rate (3), phase (4).
+    A `MorphOsc` with the closed-form pluck envelope baked in — dynamic content
+    that reverses with the master clock, so any downstream warp (a comb tap) reads
+    a delayed PLUCKED copy (an audible echo/pre-echo), not a silent bulk delay. -/
+private def pluckedVoiceE (pitchE morphE eventRateE : Expr) (anchor : Option Anchor := none) : Voice :=
+  match anchor with
+  | some (phaseE, freqInit) =>
+    { programName := "PluckedMorphOsc",
+      wire := fun clkE => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩, ⟨⟨2⟩, clkE⟩, ⟨⟨3⟩, eventRateE⟩, ⟨⟨4⟩, phaseE⟩ ],
+      phaseAnchor := some (⟨4⟩, phaseCorr pitchE freqInit) }
+  | none =>
+    { programName := "PluckedMorphOsc",
+      wire := fun clkE => #[ ⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩, ⟨⟨2⟩, clkE⟩, ⟨⟨3⟩, eventRateE⟩ ] }
+
 /-- `δ = toInt(seconds · sampleRate · 2³²)` — a Q32.32 sample offset (the stdlib
-    flanger's own delay form), but with the `seconds` taken from the knob. -/
+    flanger's own delay form), but with the `seconds` taken from the knob. Signed:
+    a negative `seconds` reads the past, a positive one the future. -/
 private def deltaOf (secondsE : Expr) : Expr :=
   toIntE (mul (mul secondsE .sampleRate) (lit 4294967296))
+
+/-- `gᵏ` as a product of `k` live-`g` reads (`g` may be a `paramRef`), so the comb's
+    decay is a live knob with no relower. `k = 0 ⇒ 1`. -/
+private def gPow (g : Expr) (k : Nat) : Expr :=
+  (Array.range k).foldl (fun acc _ => mul acc g) (lit 1)
 
 -- ── Node decode (named inlets: `in` is an object {port: [srcId,…]}) ──────────
 private def portSources (inObj : Json) (port : String) : Array String :=
@@ -121,6 +141,8 @@ private def pref (pidx : String → Option Nat) (name : String) (dflt : Expr) : 
     A/B). -/
 private def isGlided (kind kname : String) : Bool :=
   (kind == "source"  && kname == "morph")  ||
+  (kind == "pluck"   && (kname == "morph" || kname == "event_rate")) ||
+  (kind == "comb"    && (kname == "delay" || kname == "decay")) ||
   (kind == "flange"  && kname == "depth")  ||
   (kind == "sflange" && kname == "depth")  ||
   (kind == "fm"      && kname == "depth")  ||
@@ -130,7 +152,8 @@ private def isGlided (kind kname : String) : Bool :=
     + `set_param_freq`) rather than glided, since gliding a frequency VALUE would
     reintroduce the τ·f' chirp. A phasor-based oscillator's pitch input. -/
 private def isAnchored (kind kname : String) : Bool :=
-  (kind == "source" && kname == "freq") || (kind == "fm" && kname == "carrier")
+  (kind == "source" && kname == "freq") || (kind == "pluck" && kname == "freq")
+    || (kind == "fm" && kname == "carrier")
 
 /-- A closed-form smoothstep GLIDE of τ from three slots: `v0 + (v1−v0)·s²(3−2s)`,
     `s = clamp((τ − t0)/dur, 0, 1)`, `dur = 0.02·sampleRate` samples (20 ms at any
@@ -146,11 +169,34 @@ private def glideExpr (pidx : String → Option Nat) (base : String) (dflt : Exp
   let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
   add v0 (mul (sub v1 v0) ss)
 
+-- ── The live master clock (global time-warp) ────────────────────────────────
+/-- The two reserved master-clock slots. `velocity` is the live scrub (forward /
+    freeze / reverse / varispeed); `tau_base` is the host-held τ-origin the engine
+    re-bases on each velocity change (`set_param_velocity`) so the scrub stays
+    value-continuous — the stateless `ScrubClock` host-split, promoted to the
+    arrow patch's base clock. -/
+def masterVelocityParam : String := "master.velocity"
+def masterTauBaseParam  : String := "master.tau_base"
+
+/-- Every generator's base clock, so global time is a property of the whole patch
+    (not per-oscillator): `M(n) = toInt(tau_base·SR·2³²) + toInt(velocity·2³²)·n`.
+    At the defaults `velocity = 1, tau_base = 0` this is exactly `sampleIndex<<32`
+    (the old `clockLit`), so the master clock is free until you scrub it. Reading
+    it live means one `velocity` knob scrubs/reverses EVERY closed-form voice,
+    envelope, and delay tap coherently — nothing downstream holds history. -/
+private def masterClock (pidx : String → Option Nat) : Clock :=
+  let vel := pref pidx masterVelocityParam (lit 1)
+  let tb  := pref pidx masterTauBaseParam (lit 0)
+  let velQ := toIntE (mul vel (lit 4294967296))
+  let tbQ  := toIntE (mul (mul tb .sampleRate) (lit 4294967296))
+  add tbQ (mul velQ .sampleIndex)
+
 /-- Build a node, plus any synthesized helper nodes (a default LFO source for a
     swept flange with no modulator patched). `pidx` maps a live param name
     `<nodeId>.<knob>` to its `ParamIdx`. Every continuous knob reads its slot via
     `paramRef`; only structural selectors (`voice`, warp `mode`) and topology are
-    baked, so only they trigger a relower. -/
+    baked, so only they trigger a relower. Every generator reads the live
+    `masterClock` as its base, so global time-warp reaches all of them. -/
 private def buildNode (pidx : String → Option Nat) (id kind : String)
     (_sel params inObj : Json) : Node × Array PatchNode :=
   let sig := (portSources inObj "in")[0]?.getD "__silence__"
@@ -159,6 +205,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
   let p := fun (kname : String) (dflt : Expr) =>
     if isGlided kind kname then glideExpr pidx s!"{id}.{kname}" dflt
     else pref pidx s!"{id}.{kname}" dflt
+  let clk := masterClock pidx
   match kind with
   | "knob" =>
     match pidx s!"{id}.value" with
@@ -175,7 +222,27 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- own freq is a live slot; the compile-time freq is the reference the warped
     -- copies' phase correction is measured from.
     let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Expr), jExpr params "freq" (lit 220))
-    (.source (voiceOf pitchE (p "morph" (jExpr params "morph" (lit 0))) anchor) clockLit, #[])
+    (.source (voiceOf pitchE (p "morph" (jExpr params "morph" (lit 0))) anchor) clk, #[])
+  | "pluck" =>
+    -- a plucked MorphOsc source: pitch (anchored), morph (glided), and event_rate
+    -- (glided) drive the baked-in envelope. The dynamic content of the instrument.
+    let pitchE := match (portSources inObj "freq")[0]? with
+      | some w => pref pidx s!"{w}.value" (jExpr params "freq" (lit 110))
+      | none => p "freq" (jExpr params "freq" (lit 110))
+    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Expr), jExpr params "freq" (lit 110))
+    (.source (pluckedVoiceE pitchE (p "morph" (jExpr params "morph" (lit 0)))
+       (p "event_rate" (jExpr params "event_rate" (lit 2))) anchor) clk, #[])
+  | "comb" =>
+    -- a one-sided resonant comb: dry (k=0) + a decaying tap series at k·delay.
+    -- `delay` is signed (future = pre-echo, the moat), and doubles as the resonant
+    -- spacing (small ⇒ pitched comb, large ⇒ discrete echoes). `decay` = gᵏ.
+    let d := deltaOf (p "delay" (jExpr params "delay" (lit 12 3)))   -- 0.012 s, future
+    let g := p "decay" (jExpr params "decay" (lit 7 1))              -- 0.7
+    let K := 6
+    let tail : Array (Expr × (Clock → Clock)) := (Array.range K).map fun j =>
+      let k := j + 1
+      (gPow g k, fun c => add c (mul (lit (Int.ofNat k)) d))
+    (.comb sig (#[(lit 1, fun c => c)] ++ tail), #[])
   | "flange" =>
     let d := deltaOf (p "depth" (jExpr params "depth" (lit 7 4)))
     (.flange sig (fun c => sub c d) (fun c => add c d), #[])
@@ -187,7 +254,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- `carrier` is a frequency → phase-anchored (own #phase slot); `depth` glides.
     let carAnchor := (pidx s!"{id}.carrier#phase").map fun i => ((.paramRef ⟨i⟩ : Expr), jExpr params "carrier" (lit 330))
     (.fm sig (sineVoiceE (p "carrier" (jExpr params "carrier" (lit 330))) carAnchor)
-      clockLit (p "depth" (jExpr params "depth" (lit 8))), #[])
+      clk (p "depth" (jExpr params "depth" (lit 8))), #[])
   | "sflange" =>
     let depthSec := p "depth" (jExpr params "depth" (lit 2 3))
     match (portSources inObj "mod")[0]? with
@@ -196,7 +263,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
       -- no modulator patched: synthesize a built-in LFO sine at the `rate` knob.
       let lfoId := s!"__lfo_{id}"
       (.sflange sig lfoId depthSec,
-       #[ { id := lfoId, node := .source (sineVoiceE (p "rate" (jExpr params "rate" (lit 3 1)))) clockLit } ])
+       #[ { id := lfoId, node := .source (sineVoiceE (p "rate" (jExpr params "rate" (lit 3 1)))) clk } ])
   | "mix" => (.mix (portSources inObj "in"), #[])
   | _ => (.mix (portSources inObj "in"), #[])
 
@@ -226,6 +293,8 @@ private def rawsOf (j : Json) : Array Raw :=
     here: changing one alters the graph topology, so it relowers. -/
 private def knobNamesOf : String → Array String
   | "source"  => #["freq", "morph"]
+  | "pluck"   => #["freq", "morph", "event_rate"]
+  | "comb"    => #["delay", "decay"]
   | "flange"  => #["depth"]
   | "sflange" => #["depth", "rate"]
   | "fm"      => #["carrier", "depth"]
@@ -238,9 +307,12 @@ private def knobNamesOf : String → Array String
     in scan order (node order, then knob order). The position IS the `ParamIdx` the
     node's `paramRef`s carry; `compileSession` allocates each `param:<id>.<knob>`. A
     knob shadowed by a wired control inlet of the same name (a Knob patched into
-    `freq`) is skipped — the cord's own slot drives it. -/
+    `freq`) is skipped — the cord's own slot drives it. The two reserved master-clock
+    slots lead the table: `velocity` (default 1 ⇒ forward at unity) and `tau_base`
+    (default 0), so every patch has a live global time-warp. -/
 private def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
-  let mut out : Array (String × JsonNumber) := #[]
+  let mut out : Array (String × JsonNumber) :=
+    #[(masterVelocityParam, ⟨1, 0⟩), (masterTauBaseParam, ⟨0, 0⟩)]
   for r in raws do
     if r.kind == "out" then continue
     for kname in knobNamesOf r.kind do
@@ -286,24 +358,64 @@ def decodeGraph (j : Json) : Except String (PatchGraph × Array (String × JsonN
   pnodes := pnodes.push { id := "__silence__", node := .mix #[] }
   pure ({ nodes := pnodes, output := "__out__" }, params)
 
+-- ── Scope taps ──────────────────────────────────────────────────────────────
+/-- A scope tap: `(name, srcInstance, srcOutput)` — the exact `scopeTaps` triple
+    the session model uses, so `list_scope_taps` (which builds the slot as
+    `<inst>.<out>`) needs no change. For the arrow path the source instance is
+    always the synthetic root, and the output is a dedicated `tap:<id>` port. -/
+abbrev Tap := String × String × String
+
+/-- The user-facing nodes worth tapping: the raw GUI nodes, minus the reserved
+    `out`/`__silence__` and any synthesized helper (`__lfo_*`) — i.e. every node
+    that has a visible output jack. `lowerNode` gives each one's closed-form
+    output signal (the signal at its jack), which is exactly what a scope shows. -/
+private def tapNodeIds (raws : Array Raw) : Array String :=
+  raws.filterMap fun r =>
+    if r.kind == "out" || "__".isPrefixOf r.id then none else some r.id
+
 -- ── Graph → loadable FlatPlan (mirrors Tropicaltest.compileArrowCarrier) ─────
+/-- Compile the GUI graph to a loadable `FlatPlan`, plus the scope taps it
+    materializes. The final mix is always tap `out` (`__root__.out`); each user
+    node gets a `tap:<id>` output port carrying `emit(normalize(lowerNode id))`
+    — the signal at that node's jack — so the collapse keeps the slot alive and
+    `render_window` can read it. Taps cost extra kernel compute (each re-emits its
+    upstream cone), so they're for the inspection build, not a lean audio path. -/
 def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j : Json) :
-    Except String Tropical.Plan.FlatPlan := do
+    Except String (Tropical.Plan.FlatPlan × Array Tap) := do
   let (g, paramTable) ← decodeGraph j
   let term ← lowerGraph g
-  let (out, b) := emitTerm (normalize term) {}
-  let registry ← buildRegistry arena resolved #["FixedSinOsc", "MorphOsc"]
+  let (out, b0) := emitTerm (normalize term) {}
+  -- Per-node taps are opt-in (`"taps": true` in the request): they cost extra
+  -- kernel compute, so an audio-only consumer (the playground) omits them and
+  -- pays nothing. The final mix (`out`) is always tappable — its slot exists
+  -- regardless — so a scope attached to a taps-off patch still sees the output.
+  let emitTaps := match j.getObjVal? "taps" with | .ok (.bool b) => b | _ => false
+  -- Emit each user node's sub-term into the SAME builder (so instance names stay
+  -- unique by `decls.size`), collecting `(id, signal)`. A node that fails to
+  -- lower is simply not tapped.
+  let tapIds := if emitTaps then tapNodeIds (rawsOf j) else #[]
+  let (tapSigs, b) : Array (String × Sig) × Builder :=
+    tapIds.foldl (fun (acc : Array (String × Sig) × Builder) id =>
+      match lowerNode g id with
+      | .ok t => let (s, b') := emitTerm (normalize t) acc.2; (acc.1.push (id, s), b')
+      | .error _ => acc) (#[], b0)
+  let registry ← buildRegistry arena resolved #["FixedSinOsc", "MorphOsc", "PluckedMorphOsc"]
   -- One `.param` decl per live knob, appended AFTER the instance decls: declaration
   -- order = `ParamIdx` = the index each `paramRef` carries, and keeping params after
   -- instances leaves the emitted voices' `InstanceIdx` untouched. `compileSession`
   -- allocates each a `param:<id>.<knob>` module slot, driven live by `set_param`.
   let paramDecls : Array BodyDecl := paramTable.map (fun (nm, v) => .param nm (some v))
+  -- Output port 0 is the audible mix; ports 1.. are the taps (`tap:<id>`).
+  let tapOutputs := tapSigs.map fun (id, _) =>
+    ({ name := s!"tap:{id}", type? := some (.scalar .float) } : OutputDecl)
+  let tapAssigns := tapSigs.mapIdx fun i (_, s) =>
+    ({ target := .port ⟨i + 1⟩, expr := s } : OutputAssign)
   let prog : Program := {
     name := "__patch__"
     inputs := #[]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
+    outputs := #[{ name := "out", type? := some (.scalar .float) }] ++ tapOutputs
     decls := b.decls ++ paramDecls
-    assigns := #[{ target := .port ⟨0⟩, expr := out }]
+    assigns := #[{ target := .port ⟨0⟩, expr := out }] ++ tapAssigns
     binderCount := 0
     registry }
   let idx : ProgramIdx := ⟨arena.programs.size⟩
@@ -318,7 +430,13 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     alloc := Tropical.Lowering.allocate (paramTable.map (·.1)) #[]
     root := core
     mode := .fused }
-  Tropical.Compile.compileSession input
+  let plan ← Tropical.Compile.compileSession input
+  -- The final mix (`out`) plus one tap per user node, all routed to the synthetic
+  -- root's output slots (`__root__.<port>`), ready for `render_window`.
+  let root := Tropical.Compile.rootInstancePath
+  let taps : Array Tap := #[("out", root, "out")]
+    ++ tapSigs.map (fun (id, _) => (id, root, s!"tap:{id}"))
+  pure (plan, taps)
 
 -- ── Stdlib-into-arena (cached; mirrors Tropicaltest.arrowElabStdlib) ─────────
 def elabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) := do
@@ -365,8 +483,8 @@ def getStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) := do
 def knobParams (j : Json) : Array (String × Json) :=
   (collectParams (rawsOf j)).map (fun (nm, v) => (nm, Json.num v))
 
-/-- Decode + lower + compile the GUI graph to a loadable `FlatPlan`. -/
-def compilePlan (j : Json) : IO (Except String Tropical.Plan.FlatPlan) := do
+/-- Decode + lower + compile the GUI graph to a loadable `FlatPlan` + its taps. -/
+def compilePlan (j : Json) : IO (Except String (Tropical.Plan.FlatPlan × Array Tap)) := do
   match ← getStdlib with
   | .error e => pure (.error s!"stdlib elaboration: {e}")
   | .ok (arena, resolved) => pure (compilePlanPure arena resolved j)
