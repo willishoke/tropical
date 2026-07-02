@@ -1410,6 +1410,15 @@ inductive Node where
       leaf, so wiring it into a modulator/pitch position binds that parameter to a
       live module slot (`param:<name>`), driven by `set_param` without a relower. -/
   | knob (idx : Nat)
+  /-- A one-sided resonant COMB: `input` read at a bank of clock-warped offsets,
+      each weighted — `Σ wₖ·(warpₖ ⋙ input)`. `taps` is `(weight, clockShift)` per
+      tap: tap 0 is usually the dry `(1, id)`, the rest a decaying series `(gᵏ,
+      c ↦ c + k·D)`. One-sided (all shifts the same direction) makes it
+      time-ASYMMETRIC — its impulse tail rings on one side, so under a global clock
+      reverse the tail flips (echo ↔ pre-echo). A future shift (`c + kD`, `D > 0`)
+      reads AHEAD — an audible pre-echo, impossible on a stream. The slide
+      distributes each tap's warp onto the generators, exactly like the flanger. -/
+  | comb (input : String) (taps : Array (Sig × (Clock → Clock)))
 
 structure PatchNode where
   id : String
@@ -1447,6 +1456,12 @@ partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm :
     return sweptFlangeEffect (sflangeBack depthSec) (sflangeFwd depthSec)
       (← lowerNode g modId) (← lowerNode g inId)
   | .knob idx => .ok (.konst (.paramRef ⟨idx⟩))
+  | .comb inId taps => do
+    -- lower the input ONCE, share it across taps (the diagonal); each tap is a
+    -- scaled warp of that shared term, summed. `normalize` then slides every
+    -- tap's warp up onto the input's generators.
+    let s ← lowerNode g inId
+    return .sum (taps.map fun (w, φ) => .scale w (.warp φ s))
 
 /-- Lower a whole patch to its (downstream, unreduced) arrow term. Compose with
     `normalize` to run the slide, then `emitTerm` to lower to IR. -/
