@@ -1814,6 +1814,15 @@ inductive Node where
       reclocks every factor, so each factor's own generators stay in step. Empty ⇒
       silence (a graceful half-built patch), like `mix`. -/
   | ring (inputs : Array String)
+  /-- MODAL-island nodes. They carry pole banks (`Array ModalMode`), not pointwise
+      signals, and compose by the residue calculus at BUILD time. They consume only
+      modal (a Sig can't be un-realized into poles) and REALIZE to a `Sig` at their
+      boundary with the Sig mainland (a Sig consumer or the tap). `modalSource`
+      carries the master clock it will realize against; `modalReverb` composes its
+      modal input with a room (`voice ⋙ reverb`); `modalMix` is the pole union. -/
+  | modalSource (modes : Array ModalMode) (anchor : Expr) (clk : Clock)
+  | modalReverb (input : String) (room : Array ModalMode)
+  | modalMix (inputs : Array String)
 
 structure PatchNode where
   id : String
@@ -1831,42 +1840,85 @@ structure PatchGraph where
 def fmWarp (depthE : Expr) : Clock → Sig → Clock :=
   fun base m => sub base (toIntE (mul (mul depthE m) (lit 4294967296)))
 
-/-- Lower one node to its arrow term, recursing UP its input wires. A wire is
-    `⋙` (the effect applied to the upstream term); fan-out is the shared upstream
-    term (the diagonal); a mixer is the sum; an `fm` node routes its input's
-    signal into the carrier's clock. The result is the UNREDUCED downstream term
-    — effects' warps still sit on their inputs. -/
+/-- Is `id` a modal-island node? Its output wire carries poles, not a `Sig`. A
+    missing node reads as Sig (graceful — a half-built patch stays lowerable). -/
+def nodeIsModal (g : PatchGraph) (id : String) : Bool :=
+  match g.nodes.find? (·.id == id) with
+  | none => false
+  | some pn => match pn.node with
+    | .modalSource .. => true
+    | .modalReverb .. => true
+    | .modalMix .. => true
+    | _ => false
+
+/-- Lower a modal-island subgraph to its pole bank + strike anchor + the master
+    clock it realizes against. Pure pole algebra at BUILD time: a reverb is the
+    residue calculus (`residueComposeE`, pole union), a mix is the pole union of
+    its inputs. Never touches `Sig` — a modal node's inputs are modal by
+    construction, so it only recurses into `lowerModal`. -/
+partial def lowerModal (g : PatchGraph) (id : String) :
+    Except String (Array ModalMode × Expr × Clock) := do
+  let some pn := g.nodes.find? (·.id == id)
+    | .error s!"lowerModal: node '{id}' not found"
+  match pn.node with
+  | .modalSource ms a clk => .ok (ms, a, clk)
+  | .modalReverb inId room => do
+    let (v, a, clk) ← lowerModal g inId
+    .ok (residueComposeE v room, a, clk)
+  | .modalMix inputs => do
+    let parts ← inputs.mapM (lowerModal g)
+    match parts.toList with
+    | [] => .error s!"modalMix '{id}': no inputs"
+    | (ms0, a0, clk0) :: rest =>
+      .ok (rest.foldl (fun acc (p : Array ModalMode × Expr × Clock) => acc ++ p.1) ms0, a0, clk0)
+  | _ => .error s!"lowerModal: '{id}' is not a modal node"
+
+mutual
+/-- Lower one Sig node to its arrow term, recursing UP its input wires via
+    `lowerInput` (which realizes a modal input at its edge). A wire is `⋙`; fan-out
+    is the shared upstream term; a mixer is the sum; `fm` routes its input's signal
+    into the carrier's clock. Result is the UNREDUCED downstream term. -/
 partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm := do
   let some pn := g.nodes.find? (·.id == id)
     | .error s!"lower: node '{id}' not found"
   match pn.node with
   | .source v clk => .ok (.gen v id clk)
-  | .flange inId back fwd => return flangeEffectWith back fwd (← lowerNode g inId)
-  | .shaper inId f => return .arrUn f (← lowerNode g inId)
-  | .warpFx inId φ => return .warp φ (← lowerNode g inId)
-  | .mix inputs => return .sum (← inputs.mapM (lowerNode g))
+  | .flange inId back fwd => return flangeEffectWith back fwd (← lowerInput g inId)
+  | .shaper inId f => return .arrUn f (← lowerInput g inId)
+  | .warpFx inId φ => return .warp φ (← lowerInput g inId)
+  | .mix inputs => return .sum (← inputs.mapM (lowerInput g))
   | .fm inId carrier base depth =>
-    return .swarp (fmWarp depth) (← lowerNode g inId) (.gen carrier id base)
+    return .swarp (fmWarp depth) (← lowerInput g inId) (.gen carrier id base)
   | .sflange inId modId depthSec =>
     return sweptFlangeEffect (sflangeBack depthSec) (sflangeFwd depthSec)
-      (← lowerNode g modId) (← lowerNode g inId)
+      (← lowerInput g modId) (← lowerInput g inId)
   | .knob idx => .ok (.konst (.paramRef ⟨idx⟩))
   | .comb inId taps => do
-    -- lower the input ONCE, share it across taps (the diagonal); each tap is a
-    -- scaled warp of that shared term, summed. `normalize` then slides every
-    -- tap's warp up onto the input's generators.
-    let s ← lowerNode g inId
+    let s ← lowerInput g inId
     return .sum (taps.map fun (w, φ) => .scale w (.warp φ s))
   | .ring inputs => do
-    -- fold the inputs with `prod` (⊗); empty ⇒ silence, like an empty `mix`.
-    let terms ← inputs.mapM (lowerNode g)
+    let terms ← inputs.mapM (lowerInput g)
     match terms.toList with
     | [] => return .konst (lit 0)
     | t :: ts => return ts.foldl (fun acc u => .prod acc u) t
+  | _ =>
+    .error s!"lower: modal node '{id}' reached Sig lowering — realize via lowerInput"
 
-/-- Lower a whole patch to its (downstream, unreduced) arrow term. Compose with
-    `normalize` to run the slide, then `emitTerm` to lower to IR. -/
-def lowerGraph (g : PatchGraph) : Except String ArrowTerm := lowerNode g g.output
+/-- Lower an input wire: a modal node realizes its island (pole bank →
+    `modalBankTerm` at the master clock) at this edge; a Sig node lowers normally.
+    This is the one-directional seam — modal grafts into Sig here, never the
+    reverse (a Sig node has no modal input, so lowerModal is never asked for one). -/
+partial def lowerInput (g : PatchGraph) (id : String) : Except String ArrowTerm := do
+  if nodeIsModal g id then
+    let (ms, a, clk) ← lowerModal g id
+    .ok (modalBankTerm ms a clk)
+  else lowerNode g id
+end
+
+/-- Lower a whole patch to its (downstream, unreduced) arrow term. The output may
+    be a modal island (realized at the tap) or a Sig graph. Compose with
+    `normalize` (the slide), then `emitTerm`. -/
+def lowerGraph (g : PatchGraph) : Except String ArrowTerm := lowerInput g g.output
 
 -- The demo patches ─────────────────────────────────────────────
 

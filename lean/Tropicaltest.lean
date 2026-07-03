@@ -1563,6 +1563,64 @@ private def runResidueSymbolic (arena : Arena)
 
 end ResidueGates
 
+open Tropical.EmitArrow in
+/-- THE MODAL PATCH gate (the session surface). A modal-island `PatchGraph`
+    (`resonator → reverb → out`) lowered through `lowerModal` (residue in pole
+    space) and realized at its boundary must render a real, causal, decaying
+    signal — and, read through a reversing master clock, play the tail backward
+    bit-for-bit. This is the whole seam end to end: a patch graph, not a builder. -/
+private def runModalPatch (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let res : Array ModalMode := #[
+    ModalMode.hz (lit 220) (lit 30 1) (lit 6 1),
+    ModalMode.hz (lit 440) (lit 45 1) (lit 3 1),
+    ModalMode.hz (lit 660) (lit 60 1) (lit 2 1)]
+  let room : Array ModalMode := #[
+    { sigma := lit 3, omega := mul twoPiE (lit 180), cre := lit 7 1, cim := lit 2 1 },
+    { sigma := lit 4, omega := mul twoPiE (lit 300), cre := lit (-5) 1, cim := lit 4 1 },
+    { sigma := lit 5, omega := mul twoPiE (lit 520), cre := lit 3 1, cim := lit (-6) 1 }]
+  let anchor := lit 200
+  let twoC : Int := 2048 * 4294967296
+  let mkGraph := fun (clk : Clock) => ({
+    nodes := #[
+      { id := "res", node := .modalSource res anchor clk },
+      { id := "rev", node := .modalReverb "res" room }],
+    output := "rev" } : PatchGraph)
+  let carrier := fun (name : String) (clk : Clock) => (do
+    let term ← lowerGraph (mkGraph clk)
+    let (out, _) := emitTerm (normalize term) {}
+    .ok (buildExprCarrier name out arena) : Except String (Arena × ProgramIdx))
+  let revClk : Clock := sub (lit twoC) clockLit
+  match buildAndFinish (carrier "mp_fwd" clockLit),
+        buildAndFinish (carrier "mp_rev" revClk) with
+  | .ok fp, .ok rp =>
+    match ← renderPlanSamples fp 2048, ← renderPlanSamples rp 2048 with
+    | .ok fwd, .ok rev =>
+      let n := min fwd.size rev.size
+      let mut preMax : Float := 0.0
+      for i in [0:201] do
+        let a := fwd[i]!.abs
+        if a > preMax then preMax := a
+      let mut peak : Float := 0.0
+      for i in [201:n] do
+        let a := fwd[i]!.abs
+        if a > peak then peak := a
+      let mut eEarly : Float := 0.0
+      let mut eLate : Float := 0.0
+      for i in [201:900] do eEarly := eEarly + fwd[i]! * fwd[i]!
+      for i in [1349:2048] do eLate := eLate + fwd[i]! * fwd[i]!
+      let mut bitDiff := 0
+      for i in [1:n] do
+        if rev[i]! != fwd[2048 - i]! then bitDiff := bitDiff + 1
+      IO.println s!"        patch: resonator(3) → reverb(3) → out, lowered from a PatchGraph:"
+      IO.println s!"        result   pre-strike |max|={preMax} · peak={peak} · E[early]={eEarly} E[late]={eLate} · rev≡fwd-mirror bitDiff {bitDiff}/{n}"
+      if preMax == 0.0 && peak > 1e-6 && eLate < eEarly && bitDiff == 0 then
+        IO.println s!"  PASS  modal-patch  resonator→reverb→out compiles from a graph: causal, decaying, reverse-scrubs bit-exact"; pure true
+      else
+        IO.println s!"  FAIL  modal-patch  preMax={preMax} peak={peak} eEarly={eEarly} eLate={eLate} bitDiff={bitDiff}"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-patch  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-patch  build: {firstLine e}"; pure false
+
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
     nine convolved offsets automatically (the proper multiplicity, derived). We
@@ -1974,6 +2032,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runResidueSymbolic arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalPatch arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
     --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the
