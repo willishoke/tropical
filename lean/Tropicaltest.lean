@@ -1261,6 +1261,52 @@ private def runBootstrapSin (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  bootstrap-sin  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  bootstrap-sin  build: {firstLine e}"; pure false
 
+/-- THE MODAL ISLAND gate. A decaying-resonator bank (`Σ amp·e^{−σd}·cos(ωd)`,
+    gated causal at a strike time) built through the ARROW path (`arrUn`/`clk`,
+    then `emitTerm`) must render bit-for-bit identical to the same bank built
+    straight-line — the standard-rep differential for the pole/modal island's
+    emit path. We also assert the two properties that make it a MODAL signal and
+    not noise: causality (exactly silent before the strike — a streaming reverb
+    could not gate a future-anchored tail) and decay (the tail loses energy).
+    Bit-exact ⇒ the arrow layer realises the bank without corruption; silent+
+    decaying ⇒ it is a real closed-form resonator bank, random-access by clk. -/
+private def runModalBank (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let modes : Array Tropical.EmitArrow.ModalMode := #[
+    { freq := Tropical.EmitArrow.lit 220, sigma := Tropical.EmitArrow.lit 30 1,
+      amp := Tropical.EmitArrow.lit 6 1 },
+    { freq := Tropical.EmitArrow.lit 330, sigma := Tropical.EmitArrow.lit 40 1,
+      amp := Tropical.EmitArrow.lit 4 1 },
+    { freq := Tropical.EmitArrow.lit 440, sigma := Tropical.EmitArrow.lit 55 1,
+      amp := Tropical.EmitArrow.lit 3 1 }]
+  let anchor := Tropical.EmitArrow.lit 200
+  let arrowPlan := buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankArrow "modal_arrow" modes anchor arena))
+  let directPlan := buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankDirect "modal_direct" modes anchor arena))
+  match arrowPlan, directPlan with
+  | .ok ap, .ok dp =>
+    match ← renderPlanSamples ap 2048, ← renderPlanSamples dp 2048 with
+    | .ok aS, .ok dS =>
+      let n := min aS.size dS.size
+      let mut bitDiff := 0
+      for i in [0:n] do
+        if aS[i]! != dS[i]! then bitDiff := bitDiff + 1
+      let mut preMax : Float := 0.0
+      for i in [0:200] do
+        let a := aS[i]!.abs
+        if a > preMax then preMax := a
+      let mut eEarly : Float := 0.0
+      let mut eLate : Float := 0.0
+      for i in [200:600] do eEarly := eEarly + aS[i]! * aS[i]!
+      for i in [1648:2048] do eLate := eLate + aS[i]! * aS[i]!
+      IO.println s!"        bank = Σ amp·e^(−σd)·cos(2πf·d) @ 220/330/440, struck @ sample 200 (d=clk/2³²/SR−anchor):"
+      IO.println s!"        result   arrow vs straight-line:  bit-differing {bitDiff}/{n}  ·  pre-strike |max|={preMax}  ·  E[early]={eEarly}  E[late]={eLate}"
+      if bitDiff == 0 && preMax == 0.0 && eEarly > 1e-6 && eLate < eEarly then
+        IO.println s!"  PASS  modal-bank  gated decaying-sinusoid bank: arrow ≡ straight-line bit-exact, causal (silent pre-strike), decaying ({n} samples)"; pure true
+      else
+        IO.println s!"  FAIL  modal-bank  bitDiff={bitDiff} preMax={preMax} (want 0) eEarly={eEarly} (>1e-6) eLate={eLate} (<eEarly)"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  build: {firstLine e}"; pure false
+
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
     nine convolved offsets automatically (the proper multiplicity, derived). We
@@ -1646,6 +1692,10 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runBootstrapSin arena resolved) then
+      failed := failed + 1
+    IO.println "modal island (decaying-resonator bank as a term over the clock):"
+    total := total + 1
+    if !(← runModalBank arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
     --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the

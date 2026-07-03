@@ -124,6 +124,9 @@ def toFloatE (a : Expr) : Expr := .unary .toFloat a
 def clampE (value lo hi : Expr) : Expr := .clamp value lo hi
 /-- Select (`cond ? then : else`) — the bounded-default `select(hz > 0, hz, 0)`. -/
 def selectE (cond then_ else_ : Expr) : Expr := .select cond then_ else_
+/-- `ldexp(m, n) = m·2ⁿ` — the exact float-exponent bump `stdlib/Exp` uses for the
+    integer part of range reduction. `n` is an integer-valued float (`round …`). -/
+def ldexpE (m n : Expr) : Expr := .binary .ldexp m n
 
 /-! The warp-bank program signature, as port references. The signature is the
     same shape for every voice — only the input NAMES/defaults differ (which is
@@ -1146,6 +1149,56 @@ def sinSig (x : Expr) : Expr :=
         lit (-2505210838544172) 23) r2)) r2)) r2)) r2)) r2)
   mul sign (mul r poly)
 
+/-- `stdlib/Exp`: `e^x` as `e^r · 2ⁿ`, `n = round(x·log₂e)`, `r = x − n·ln2`
+    (ln2 split hi/lo for precision), `e^r ≈ 1 + r·(1 + r·p(r))` with the same
+    6-term minimax `p`, then the exact `ldexp(exp_r, n)`. Pointwise `Sig → Sig`,
+    only `{+, ×, round, clamp, ldexp}` — the decaying-envelope primitive the
+    modal island needs, the exp twin of `sinSig`. -/
+def expSig (x : Expr) : Expr :=
+  let clamped := clampE x (lit (-87)) (lit 88)
+  let n := roundE (mul clamped (lit 14426950408889634 16))
+  let r := sub (sub clamped (mul n (lit 693145751953125 15)))
+                            (mul n (lit 14286068203094173 22))
+  let p :=
+    add (lit 50000001201 11) (mul (
+    add (lit 16666665459 11) (mul (
+    add (lit 41665795894 12) (mul (
+    add (lit 83334519073 13) (mul (
+    add (lit 13981999507 13) (mul (lit 198756915 12) r)) r)) r)) r)) r)
+  let exp_r := add (lit 1) (mul r (add (lit 1) (mul r p)))
+  ldexpE exp_r n
+
+/-- 2π and π/2 as `Sig` literals; `cos x = sin(x + π/2)` reuses the gated `sinSig`. -/
+def twoPiE : Expr := lit 6283185307179586 15
+def halfPiE : Expr := lit 15707963267948966 16
+def cosSig (x : Expr) : Expr := sinSig (add x halfPiE)
+
+/-- One mode of a modal bank: `amp · e^{−σ·d} · cos(2π·f·d + φ)`, a decaying
+    complex exponential's real part. `f`, `σ`, `amp`, `φ` are `Sig` literals so
+    the residue calculus (a future pass) can bake computed coefficients in; here
+    they are authored. This is the pole `μ = −σ + i2πf` realised over a time `d`. -/
+structure ModalMode where
+  freq  : Expr
+  sigma : Expr
+  amp   : Expr
+  phase : Expr := lit 0
+
+/-- A modal bank as a pure `Sig` over the (already-warped) clock: shift each pole
+    to its time-since-strike `d = clk/2³²/SR − anchor`, sum `amp·e^{−σd}·cos(ωd+φ)`
+    over the modes, and GATE on `d > 0` (causal: silent before the strike, a
+    closed-form decaying tail after — and, read through a reversing warp, the tail
+    plays backward). Every sample is `f(clk)`: no state, random-access. The whole
+    thing rides `arrUn … (.clk c)`, so warps reach it through the clock leaf. -/
+def modalBankSig (modes : Array ModalMode) (clkInt : Expr) (anchorSamples : Expr) : Expr :=
+  let dSec := div (sub (div (toFloatE clkInt) (lit 4294967296)) anchorSamples) .sampleRate
+  let bank := modes.foldl
+    (fun acc m =>
+      add acc (mul m.amp
+        (mul (expSig (neg (mul m.sigma dSec)))
+             (cosSig (add (mul (mul twoPiE m.freq) dSec) m.phase)))))
+    (lit 0)
+  selectE (gt dSec (lit 0)) bank (lit 0)
+
 /-- LHS `warp(neg) ⋙ fixed-point flanger` — `neg` is the OUTER warp, so tap clock
     = `neg(tapφ(clk))`: `past = neg(clk−δ) = −clk+δ`, `ahead = neg(clk+δ) = −clk−δ`
     — the ±δ taps land SWAPPED vs the RHS. Same `fixedFlangerSum` tree; the
@@ -1473,6 +1526,34 @@ def fixedSinOscTerm (freqE offsetE : Expr) (c : Clock) : ArrowTerm :=
 def buildBootstrapSinOsc (name : String) (arena : Arena) : Arena × ProgramIdx :=
   let (out, _) := emitTerm (normalize (fixedSinOscTerm (lit 220) (lit 0) clockLit)) {}
   buildExprCarrier name out arena
+
+-- ── The MODAL ISLAND (v1): a decaying-resonator bank as a term over the clock ──
+-- The pole/modal island's emit path. A bank is a gated sum of decaying sinusoids
+-- (`modalBankSig`) — the real part of Σ amp·e^{μd}. It needs NO new ArrowTerm
+-- node: as a pure function of the warped clock it rides `arrUn … (.clk c)`, so
+-- warps reclock it (affine = exact pole reclocking; nonlinear = the defined
+-- varispeed case) and it is random-access by construction. The residue calculus
+-- (voice ⋙ reverb) is a BUILD-TIME pass that fills the ModalMode array; the
+-- runtime substrate is just this bank. Gated by `modal-bank`.
+
+/-- A modal bank struck at `anchor` (samples) as a term over the clock leaf: no
+    `gen`, no `.trop` instance — `{clk, +, ×, round, clamp, ldexp}` all the way
+    down, and warp-reachable like any generator. -/
+def modalBankTerm (modes : Array ModalMode) (anchor : Expr) (c : Clock) : ArrowTerm :=
+  ArrowTerm.arrUn (fun clkSig => modalBankSig modes clkSig anchor) (ArrowTerm.clk c)
+
+/-- Emit the modal bank through the ARROW path (`arrUn`/`clk`, then `emitTerm`) —
+    the term side of the `modal-bank` gate. -/
+def buildModalBankArrow (name : String) (modes : Array ModalMode) (anchor : Expr)
+    (arena : Arena) : Arena × ProgramIdx :=
+  let (out, _) := emitTerm (normalize (modalBankTerm modes anchor clockLit)) {}
+  buildExprCarrier name out arena
+
+/-- Emit the SAME bank straight-line (`modalBankSig` on the bare clock, no arrow
+    term) — the standard-rep side of the `modal-bank` gate. -/
+def buildModalBankDirect (name : String) (modes : Array ModalMode) (anchor : Expr)
+    (arena : Arena) : Arena × ProgramIdx :=
+  buildExprCarrier name (modalBankSig modes clockLit anchor) arena
 
 -- ─────────────────────────────────────────────────────────────
 -- M9 — the PATCHER LOWERING: a downstream-only patch graph → arrow term
