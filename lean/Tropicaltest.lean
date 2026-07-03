@@ -1229,6 +1229,38 @@ private def runSlideProd (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-prod  emit: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-prod  build: {firstLine e}"; pure false
 
+/-- THE BOOTSTRAP gate. A `FixedSinOsc` built as a TERM over `{clk, +, ×, round}`
+    (`fixedSinOscTerm` = `Sin(2π·phasor)`, no `gen`, no `.trop` instance) must
+    render bit-for-bit identical to the `.trop` `FixedSinOsc` at the same pitch and
+    clock. Bit-exact ⇒ the generator IS the term — the arrow layer no longer needs
+    `.trop` for its atoms; the phasor and the sine are `{clk, +, ×}` all the way
+    down. -/
+private def runBootstrapSin (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let refPlan := buildAndFinish (Tropical.EmitArrow.buildClockCarrier "boot_ref" Tropical.EmitArrow.clockLit arena resolved)
+  let termPlan := buildAndFinish (.ok (Tropical.EmitArrow.buildBootstrapSinOsc "boot_term" arena))
+  match refPlan, termPlan with
+  | .ok rp, .ok tp =>
+    match ← renderPlanSamples rp 2048, ← renderPlanSamples tp 2048 with
+    | .ok refS, .ok termS =>
+      let n := min refS.size termS.size
+      let mut bitDiff := 0
+      let mut maxAbs : Float := 0.0
+      let mut energy : Float := 0.0
+      for i in [0:n] do
+        energy := energy + refS[i]! * refS[i]!
+        if refS[i]! != termS[i]! then bitDiff := bitDiff + 1
+        let d := (refS[i]! - termS[i]!).abs
+        if d > maxAbs then maxAbs := d
+      IO.println s!"        term = Sin(2π·phasor) over the clock leaf, no gen; ref = .trop FixedSinOsc @220:"
+      IO.println s!"        result   term vs .trop:  bit-differing {bitDiff}/{n}  ·  max|Δ|={maxAbs}  ·  energy={energy}"
+      if bitDiff == 0 && energy > 1e-6 then
+        IO.println s!"  PASS  bootstrap-sin  phasor+sine as terms ≡ .trop FixedSinOsc, bit-exact ({n} samples, energy={energy})"; pure true
+      else
+        IO.println s!"  FAIL  bootstrap-sin  bit-differing {bitDiff}/{n} (max|Δ|={maxAbs}) — the term diverges from the .trop generator"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  bootstrap-sin  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  bootstrap-sin  build: {firstLine e}"; pure false
+
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
     nine convolved offsets automatically (the proper multiplicity, derived). We
@@ -1611,6 +1643,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runSlideProd arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBootstrapSin arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
     --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the

@@ -1109,6 +1109,43 @@ def buildFixedSourceCarrier (name : String) (clkE : Clock) (arena : Arena) :
     Arena × ProgramIdx :=
   buildExprCarrier name (fixedOut (fixedPhase clkE)) arena
 
+-- ── The BOOTSTRAP (part 1): the phasor + sine as pure Expr, over {+, ×, frac} ──
+-- The generators (phasor, sine) were the last thing the arrow layer borrowed from
+-- `.trop`. These pointwise pieces need no ArrowTerm; the term wrapper that lifts
+-- them onto the clock leaf lives below `emitTerm`. Gated bit-exact vs `.trop`
+-- `FixedSinOsc` by `bootstrap-sin`.
+
+/-- `ClockPhasor`'s phase as pure arithmetic over a Q32.32 clock signal: the exact
+    integer split-multiply `acc = inc·thi + (inc·tlo)>>32 + off`, masked to
+    `[0,2³²)`, then `/2³²` to a unipolar float. `inc = ⌊freq·2³²/SR⌋`,
+    `off = ⌊offset·2³²⌋`. Structurally `stdlib/ClockPhasor.md`, as a `Sig`. -/
+def phasorPhaseSig (freqE offsetE clkSig : Expr) : Expr :=
+  let inc := toIntE (div (mul freqE (lit 4294967296)) .sampleRate)
+  let off := toIntE (mul offsetE (lit 4294967296))
+  let thi := rshift clkSig (lit 32)
+  let tlo := bitAnd clkSig (lit 4294967295)
+  let acc := add (add (mul inc thi) (rshift (mul inc tlo) (lit 32))) off
+  div (toFloatE (bitAnd acc (lit 4294967295))) (lit 4294967296)
+
+/-- `stdlib/Sin`: range-reduce `r = x − round(x/π)·π`, sign from `n & 1`, a Horner
+    polynomial in `r²` with the same minimax coefficients. Pointwise `Sig → Sig` —
+    every transcendental is a polynomial, so it needs only `+`/`×` (and `round`
+    for the range reduction). The `c0` term drops the fold's leading `0·r²` (a
+    bit-exact no-op). -/
+def sinSig (x : Expr) : Expr :=
+  let n := roundE (mul x (lit 3183098861837907 16))
+  let r := sub x (mul n (lit 3141592653589793 15))
+  let sign := sub (lit 1) (mul (lit 2) (bitAnd n (lit 1)))
+  let r2 := mul r r
+  let poly :=
+    add (lit 1) (mul (
+    add (lit (-16666666666666666) 17) (mul (
+    add (lit 8333333333333333 18) (mul (
+    add (lit (-1984126984126984) 19) (mul (
+    add (lit 27557319223985893 22) (mul (
+        lit (-2505210838544172) 23) r2)) r2)) r2)) r2)) r2)
+  mul sign (mul r poly)
+
 /-- LHS `warp(neg) ⋙ fixed-point flanger` — `neg` is the OUTER warp, so tap clock
     = `neg(tapφ(clk))`: `past = neg(clk−δ) = −clk+δ`, `ahead = neg(clk+δ) = −clk−δ`
     — the ±δ taps land SWAPPED vs the RHS. Same `fixedFlangerSum` tree; the
@@ -1201,6 +1238,14 @@ inductive ArrowTerm where
       `scale w t` leaves `w` un-reclocked, but a warp on `prod x y` reclocks `x`
       AND `y`, so an envelope factored as its own term rides every delay tap. -/
   | prod (x y : ArrowTerm)
+  /-- The CLOCK LEAF — the one atom warp actually acts on. Its signal IS the
+      (warped) clock: `emitTermC` applies the ambient clock transform to `c` and
+      hands the result back as a `Sig`. Everything periodic is built on this — a
+      phasor is pointwise arithmetic over `clk`, and because the leaf is warped,
+      so is every oscillator built from it (reverse, scrub, future-tap for free).
+      This is what lets the stdlib's generators be TERMS over `{clk, +, ×, frac}`
+      instead of opaque `.trop` instances — the bootstrap's ground floor. -/
+  | clk (c : Clock)
 
 instance : Inhabited ArrowTerm := ⟨.sum #[]⟩
 
@@ -1220,6 +1265,7 @@ partial def normalize : ArrowTerm → ArrowTerm
   | .swarp mw mod t => .swarp mw (normalize mod) (normalize t)
   | .konst s => .konst s
   | .prod x y => .prod (normalize x) (normalize y)
+  | .clk c => .clk c
 
 /-- Emit a (normalized) arrow term to its output signal. Each `gen` sources a
     voice instance in left-to-right order (matching `warpBank`'s instance order);
@@ -1262,6 +1308,10 @@ partial def emitTermC (cmod : Clock → Builder → Clock × Builder) :
     let (sx, b) := emitTermC cmod x b
     let (sy, b) := emitTermC cmod y b
     (mul sx sy, b)
+  -- the clock leaf: apply the ambient clock transform and hand the warped clock
+  -- back AS the signal (Clock and Sig are both `Expr`). This is the one leaf warp
+  -- acts on; a phasor over it inherits reverse/scrub/future-tap.
+  | .clk c, b => cmod c b
   | .sum ts, b =>
     match ts[0]? with
     | none => (lit 0, b)
@@ -1407,6 +1457,22 @@ def buildSlideProdUpstream (arena : Arena) (resolved : Array (String × ProgramI
   let term : ArrowTerm := .prod (.warp slideBack prodFactorX) (.warp slideBack prodFactorY)
   let (out, b) := emitTerm (normalize term) {}
   buildVoiceProgram "SlideProdUp" b.decls out arena resolved
+
+-- ── The BOOTSTRAP (part 2): FixedSinOsc as a TERM over the clock leaf ──────────
+
+/-- A `FixedSinOsc` built ENTIRELY as a term over the clock leaf: `Sin(2π·phasor)`,
+    no `gen`, no `.trop` instance — pure `{clk, +, ×, round}`. Warps reach it
+    through the `clk` leaf, so it reverses/scrubs like any generator. -/
+def fixedSinOscTerm (freqE offsetE : Expr) (c : Clock) : ArrowTerm :=
+  ArrowTerm.arrUn
+    (fun clkSig => sinSig (mul (lit 6283185307179586 15) (phasorPhaseSig freqE offsetE clkSig)))
+    (ArrowTerm.clk c)
+
+/-- Emit the bootstrapped `FixedSinOsc` (220 Hz, phase 0, `clk = sampleIndex<<32`)
+    as an instance-free carrier — the term side of the `bootstrap-sin` gate. -/
+def buildBootstrapSinOsc (name : String) (arena : Arena) : Arena × ProgramIdx :=
+  let (out, _) := emitTerm (normalize (fixedSinOscTerm (lit 220) (lit 0) clockLit)) {}
+  buildExprCarrier name out arena
 
 -- ─────────────────────────────────────────────────────────────
 -- M9 — the PATCHER LOWERING: a downstream-only patch graph → arrow term
