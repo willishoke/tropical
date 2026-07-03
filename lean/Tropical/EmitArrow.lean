@@ -1617,6 +1617,15 @@ def buildBootstrapSinOsc (name : String) (arena : Arena) : Arena × ProgramIdx :
   let (out, _) := emitTerm (normalize (fixedSinOscTerm (lit 220) (lit 0) clockLit)) {}
   buildExprCarrier name out arena
 
+/-- `expSig` over a clock-driven ramp `x = sampleIndex·(20/2048) − 10` (so x sweeps
+    [−10, 10] across a 2048-sample buffer, exercising ~29 distinct `ldexp` octaves).
+    The reference side of the `bootstrap-exp` gate: rendered `expSig(x)` vs libm
+    `exp(x)`. -/
+def buildExpProbe (name : String) (arena : Arena) : Arena × ProgramIdx :=
+  let sIdxF := toFloatE (rshift clockLit (lit 32))
+  let x := sub (mul sIdxF (lit 9765625 9)) (lit 10)
+  buildExprCarrier name (expSig x) arena
+
 -- ── The MODAL ISLAND (v1): a decaying-resonator bank as a term over the clock ──
 -- The pole/modal island's emit path. A bank is a gated sum of decaying sinusoids
 -- (`modalBankSig`) — the real part of Σ amp·e^{μd}. It needs NO new ArrowTerm

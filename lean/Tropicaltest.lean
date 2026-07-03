@@ -1261,6 +1261,37 @@ private def runBootstrapSin (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  bootstrap-sin  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  bootstrap-sin  build: {firstLine e}"; pure false
 
+/-- THE BOOTSTRAP-EXP gate. `expSig` (the modal envelope primitive, transcribed
+    from stdlib/Exp) evaluated by the engine over a ramp `x∈[−10,10]` must match
+    libm `exp` to its minimax tolerance. An independent oracle (true exp, not a
+    second copy of the same polynomial), so a transcribed-coefficient typo shows
+    up as error ≫ 1e-5. This is the envelope's `bootstrap-sin`. -/
+private def runBootstrapExp (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match buildAndFinish (.ok (Tropical.EmitArrow.buildExpProbe "exp_probe" arena)) with
+  | .ok p =>
+    match ← renderPlanSamples p 2048 with
+    | .ok s =>
+      let n := min s.size 2048
+      let sinkGain : Float := 0.05   -- defaultSinkGain: the carrier's output sink
+      let mut maxRel : Float := 0.0
+      let mut worstX : Float := 0.0
+      for i in [0:n] do
+        let x := i.toFloat * 0.009765625 - 10.0
+        let ref := sinkGain * Float.exp x
+        let rel := (s[i]! - ref).abs / ref
+        if rel > maxRel then
+          maxRel := rel
+          worstX := x
+      IO.println s!"        expSig(x) vs libm exp, x∈[−10,10] across 2048 samples:"
+      IO.println s!"        result   max relative error = {maxRel}  (at x={worstX})"
+      if maxRel < 1e-5 then
+        IO.println s!"  PASS  bootstrap-exp  emitted polynomial exp ≡ true exp to {maxRel} (minimax) — transcription correct"; pure true
+      else
+        IO.println s!"  FAIL  bootstrap-exp  max rel err {maxRel} (want <1e-5) at x={worstX}"; pure false
+    | .error e => IO.println s!"  FAIL  bootstrap-exp  render: {firstLine e}"; pure false
+  | .error e => IO.println s!"  FAIL  bootstrap-exp  build: {firstLine e}"; pure false
+
 /-- THE MODAL ISLAND gate. A decaying-resonator bank (`Σ amp·e^{−σd}·cos(ωd)`,
     gated causal at a strike time) built through the ARROW path (`arrUn`/`clk`,
     then `emitTerm`) must render bit-for-bit identical to the same bank built
@@ -1772,6 +1803,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runBootstrapSin arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBootstrapExp arena resolved) then
       failed := failed + 1
     IO.println "modal island (decaying-resonator bank as a term over the clock):"
     total := total + 1
